@@ -268,3 +268,37 @@ func TestFenceTableReadsCounterless(t *testing.T) {
 			state, HostInboundTableAbsent)
 	}
 }
+
+// TestTableEnforcingDistinguishesShellTables10751: a fully installed table
+// reads enforcing; a shell (table + bare input chain, no rules) and an
+// absent table read non-enforcing. Needs CAP_NET_ADMIN (skips otherwise).
+func TestTableEnforcingDistinguishesShellTables10751(t *testing.T) {
+	enterPrivateNetns(t)
+	in := NewNetlinkInstaller()
+	if ok, err := in.TableEnforcing(HostInboundTableName); err != nil || ok {
+		t.Fatalf("absent table enforcing = %v, %v; want false, nil", ok, err)
+	}
+	if err := in.InstallHostInbound(hostInboundScenario()); err != nil {
+		t.Fatalf("host-inbound install: %v", err)
+	}
+	if ok, err := in.TableEnforcing(HostInboundTableName); err != nil || !ok {
+		t.Fatalf("installed table enforcing = %v, %v; want true, nil", ok, err)
+	}
+	if err := in.DeleteTable(HostInboundTableName); err != nil {
+		t.Fatalf("delete table: %v", err)
+	}
+	c, err := nftables.New()
+	if err != nil {
+		t.Fatalf("open netlink: %v", err)
+	}
+	tbl := c.AddTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: HostInboundTableName})
+	prio := nftables.ChainPriority(hostInboundPriority)
+	pol := nftables.ChainPolicyAccept
+	c.AddChain(&nftables.Chain{Name: "input", Table: tbl, Type: nftables.ChainTypeFilter, Hooknum: nftables.ChainHookInput, Priority: &prio, Policy: &pol})
+	if err := c.Flush(); err != nil {
+		t.Fatalf("create shell table: %v", err)
+	}
+	if ok, err := in.TableEnforcing(HostInboundTableName); err != nil || ok {
+		t.Fatalf("shell table enforcing = %v, %v; want false, nil", ok, err)
+	}
+}

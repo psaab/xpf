@@ -122,17 +122,19 @@ func TestInputBarrierCloseRefusesAfterHandoff10751(t *testing.T) {
 // daemon, never fail an xpfd start behind its Requires edge); pre-handoff
 // it installs fail-closed like close.
 func TestInputBarrierEnsure10751(t *testing.T) {
-	oldInstall, oldPresent, oldHost := earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent
+	oldInstall, oldPresent, oldHost, oldActive := earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing, xpfdUnitActive
 	oldMarker := daemon.EarlyInputHandoffMarkerPath
 	t.Cleanup(func() {
-		earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent = oldInstall, oldPresent, oldHost
+		earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing = oldInstall, oldPresent, oldHost
+		xpfdUnitActive = oldActive
 		daemon.EarlyInputHandoffMarkerPath = oldMarker
 	})
 	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
 	installs := 0
 	earlyInputBarrierInstall = func() error { installs++; return nil }
-	earlyInputBarrierPresent = func() (bool, error) { return false, nil }
-	hostInboundTablePresent = func() (bool, error) { return false, nil }
+	earlyInputBarrierEnforcing = func() (bool, error) { return false, nil }
+	hostInboundEnforcing = func() (bool, error) { return false, nil }
+	xpfdUnitActive = func() bool { return false }
 	var stdout, stderr bytes.Buffer
 	// Pre-handoff (no marker): install, fail-closed on error.
 	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
@@ -174,17 +176,19 @@ func TestInputBarrierEnsure10751(t *testing.T) {
 // host-inbound enforcement live — a unit start must NO-OP, never install
 // global DROP into the live handed-off daemon.
 func TestInputBarrierEnsurePreservesLiveEnforcement10751(t *testing.T) {
-	oldInstall, oldPresent, oldHost := earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent
+	oldInstall, oldPresent, oldHost, oldActive := earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing, xpfdUnitActive
 	oldMarker := daemon.EarlyInputHandoffMarkerPath
 	t.Cleanup(func() {
-		earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent = oldInstall, oldPresent, oldHost
+		earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing = oldInstall, oldPresent, oldHost
+		xpfdUnitActive = oldActive
 		daemon.EarlyInputHandoffMarkerPath = oldMarker
 	})
 	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
 	installs := 0
 	earlyInputBarrierInstall = func() error { installs++; return nil }
-	earlyInputBarrierPresent = func() (bool, error) { return false, nil }
-	hostInboundTablePresent = func() (bool, error) { return true, nil }
+	earlyInputBarrierEnforcing = func() (bool, error) { return false, nil }
+	hostInboundEnforcing = func() (bool, error) { return true, nil }
+	xpfdUnitActive = func() bool { return true }
 	var stdout, stderr bytes.Buffer
 	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("ensure with live enforcement exit = %d, want 0", code)
@@ -202,17 +206,19 @@ func TestInputBarrierEnsurePreservesLiveEnforcement10751(t *testing.T) {
 // present (a live bootstrap lifeline guard) — a reload/start must NO-OP,
 // never replace the guard with the global form.
 func TestInputBarrierEnsurePreservesStandingBarrier10751(t *testing.T) {
-	oldInstall, oldPresent, oldHost := earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent
+	oldInstall, oldPresent, oldHost, oldActive := earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing, xpfdUnitActive
 	oldMarker := daemon.EarlyInputHandoffMarkerPath
 	t.Cleanup(func() {
-		earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent = oldInstall, oldPresent, oldHost
+		earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing = oldInstall, oldPresent, oldHost
+		xpfdUnitActive = oldActive
 		daemon.EarlyInputHandoffMarkerPath = oldMarker
 	})
 	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
 	installs := 0
 	earlyInputBarrierInstall = func() error { installs++; return nil }
-	earlyInputBarrierPresent = func() (bool, error) { return true, nil }
-	hostInboundTablePresent = func() (bool, error) { return false, nil }
+	earlyInputBarrierEnforcing = func() (bool, error) { return true, nil }
+	hostInboundEnforcing = func() (bool, error) { return false, nil }
+	xpfdUnitActive = func() bool { return false }
 	var stdout, stderr bytes.Buffer
 	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("ensure with standing barrier exit = %d, want 0", code)
@@ -229,22 +235,80 @@ func TestInputBarrierEnsurePreservesStandingBarrier10751(t *testing.T) {
 // prove nothing live, so ensure falls through to the fail-closed install
 // (pre-handoff boot path preserved).
 func TestInputBarrierEnsureReadErrorFallsThrough10751(t *testing.T) {
-	oldInstall, oldPresent, oldHost := earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent
+	oldInstall, oldPresent, oldHost, oldActive := earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing, xpfdUnitActive
 	oldMarker := daemon.EarlyInputHandoffMarkerPath
 	t.Cleanup(func() {
-		earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent = oldInstall, oldPresent, oldHost
+		earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing = oldInstall, oldPresent, oldHost
+		xpfdUnitActive = oldActive
 		daemon.EarlyInputHandoffMarkerPath = oldMarker
 	})
 	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
 	installs := 0
 	earlyInputBarrierInstall = func() error { installs++; return nil }
-	earlyInputBarrierPresent = func() (bool, error) { return false, errors.New("list denied") }
-	hostInboundTablePresent = func() (bool, error) { return false, errors.New("list denied") }
+	earlyInputBarrierEnforcing = func() (bool, error) { return false, errors.New("list denied") }
+	hostInboundEnforcing = func() (bool, error) { return false, errors.New("list denied") }
+	xpfdUnitActive = func() bool { return false }
 	var stdout, stderr bytes.Buffer
 	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("ensure with unreadable state exit = %d, want 0 via fail-closed install", code)
 	}
 	if installs != 1 {
 		t.Fatalf("installs = %d, want 1: unreadable state must install fail-closed", installs)
+	}
+}
+
+// TestInputBarrierEnsureInstallsOverStaleTable10751 (#10751 R6-B service-
+// order fixture): marker absent, no xpfd unit, no barrier, but an
+// enforcing-shaped xpf_hostinbound table restored by nftables.service with
+// stale coverage. Table shape alone must NOT no-op — only a RUNNING xpfd
+// proves currentness — so ensure INSTALLS the barrier before networkd.
+// RED on revert: drop the xpfd-active check and ensure no-ops over stale.
+func TestInputBarrierEnsureInstallsOverStaleTable10751(t *testing.T) {
+	oldInstall, oldPresent, oldHost, oldActive := earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing, xpfdUnitActive
+	oldMarker := daemon.EarlyInputHandoffMarkerPath
+	t.Cleanup(func() {
+		earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing = oldInstall, oldPresent, oldHost
+		xpfdUnitActive = oldActive
+		daemon.EarlyInputHandoffMarkerPath = oldMarker
+	})
+	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	installs := 0
+	earlyInputBarrierInstall = func() error { installs++; return nil }
+	hostInboundEnforcing = func() (bool, error) { return true, nil }
+	xpfdUnitActive = func() bool { return false }
+	earlyInputBarrierEnforcing = func() (bool, error) { return false, nil }
+	var stdout, stderr bytes.Buffer
+	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("ensure over stale table exit = %d, want 0 via install", code)
+	}
+	if installs != 1 || !strings.Contains(stdout.String(), "early input barrier installed") {
+		t.Fatalf("installs=%d stdout=%q, want a barrier install over the stale table", installs, stdout.String())
+	}
+}
+
+// TestInputBarrierEnsureInstallsOverShellTable10751 (shell-table advisory):
+// a present-but-flushed host-inbound table (no input chain/rules) reads
+// non-enforcing even with xpfd live — ensure must INSTALL, not no-op over
+// an open shell. Same for a shelled barrier table.
+func TestInputBarrierEnsureInstallsOverShellTable10751(t *testing.T) {
+	oldInstall, oldPresent, oldHost, oldActive := earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing, xpfdUnitActive
+	oldMarker := daemon.EarlyInputHandoffMarkerPath
+	t.Cleanup(func() {
+		earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundEnforcing = oldInstall, oldPresent, oldHost
+		xpfdUnitActive = oldActive
+		daemon.EarlyInputHandoffMarkerPath = oldMarker
+	})
+	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	installs := 0
+	earlyInputBarrierInstall = func() error { installs++; return nil }
+	hostInboundEnforcing = func() (bool, error) { return false, nil }
+	xpfdUnitActive = func() bool { return true }
+	earlyInputBarrierEnforcing = func() (bool, error) { return false, nil }
+	var stdout, stderr bytes.Buffer
+	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("ensure over shell tables exit = %d, want 0 via install", code)
+	}
+	if installs != 1 {
+		t.Fatalf("installs = %d, want 1: shell tables must install, never no-op", installs)
 	}
 }

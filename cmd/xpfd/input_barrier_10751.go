@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os/exec"
 
 	"github.com/psaab/xpf/pkg/daemon"
 	xnft "github.com/psaab/xpf/pkg/nftables"
@@ -19,12 +20,20 @@ var earlyInputBarrierRemove = func() error {
 	return xnft.NewNetlinkInstaller().RemoveEarlyInputBarrier()
 }
 
-var earlyInputBarrierPresent = func() (bool, error) {
-	return xnft.NewNetlinkInstaller().EarlyInputBarrierPresent()
+var earlyInputBarrierEnforcing = func() (bool, error) {
+	return xnft.NewNetlinkInstaller().TableEnforcing(xnft.EarlyInputBarrierTableName)
 }
 
-var hostInboundTablePresent = func() (bool, error) {
-	return xnft.NewNetlinkInstaller().TablePresent(xnft.HostInboundTableName)
+var hostInboundEnforcing = func() (bool, error) {
+	return xnft.NewNetlinkInstaller().TableEnforcing(xnft.HostInboundTableName)
+}
+
+// xpfdUnitActive reports whether the xpfd systemd unit is active. A package
+// var so service-order tests script cold-boot (inactive) vs live (active)
+// without a systemd manager. Any error (no systemd, unit unknown/inactive)
+// reads inactive — the fail-closed direction for ensure.
+var xpfdUnitActive = func() bool {
+	return exec.Command("systemctl", "is-active", "--quiet", "xpfd").Run() == nil
 }
 
 func parseInputBarrierArgs(args []string) error {
@@ -68,16 +77,20 @@ func runInputBarrierSubcommand(args []string, stdout, stderr io.Writer) int {
 
 // runInputBarrierEnsure implements `input-barrier ensure`, the boot unit's
 // ExecStart AND ExecReload: it must never install global DROP into a live
-// daemon, and never clobber a standing lifeline guard with the global form
-// (#10751 R5-C).
+// daemon, never clobber a standing lifeline guard with the global form,
+// and never trust a stale table as live enforcement (#10751 R6-B).
 //
 //   - marker present (handed off this boot) → verified no-op success.
-//   - marker absent but host-inbound enforcement live (marker write failed
-//     or marker cleared) → no-op success: the daemon owns host input.
-//   - marker absent, no enforcement, barrier already present (global or a
-//     bootstrap lifeline guard) → no-op success: preserve, never clobber.
-//   - marker absent, nothing present → install the global barrier,
-//     fail-closed on error (pre-handoff boot path).
+//   - marker absent but host-inbound ENFORCING (input chain + rules, not
+//     a flushed shell) with xpfd ACTIVE → no-op success: the live daemon
+//     owns host input (marker write failed or marker cleared). A stale
+//     table restored by nftables.service before xpfd starts reads
+//     inactive, so it installs instead of trusting it.
+//   - marker absent with an ENFORCING barrier already present (global or
+//     a bootstrap lifeline guard) → no-op success: preserve, never
+//     clobber.
+//   - otherwise (nothing live, nothing standing) → install the global
+//     barrier, fail-closed on error (pre-handoff boot path).
 //
 // A readback error falls through to the next probe (an unreadable readback
 // cannot prove anything is live, so the fail-closed install still runs).
@@ -86,11 +99,11 @@ func runInputBarrierEnsure(stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "early input barrier already handed off to the daemon; nothing to do")
 		return 0
 	}
-	if present, err := hostInboundTablePresent(); err == nil && present {
+	if enforcing, err := hostInboundEnforcing(); err == nil && enforcing && xpfdUnitActive() {
 		fmt.Fprintln(stdout, "host-inbound enforcement is live; nothing to do")
 		return 0
 	}
-	if present, err := earlyInputBarrierPresent(); err == nil && present {
+	if enforcing, err := earlyInputBarrierEnforcing(); err == nil && enforcing {
 		fmt.Fprintln(stdout, "early input barrier already present; nothing to do")
 		return 0
 	}

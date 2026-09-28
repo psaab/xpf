@@ -77,9 +77,10 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   policy.
 - `xpfd input-barrier ensure` — the boot unit's ExecStart AND ExecReload:
   installs pre-handoff when nothing is present (fail closed), and is a
-  verified no-op success post-handoff, when host-inbound enforcement is
-  already live, or when a barrier (global or bootstrap lifeline guard) is
-  already standing — never injecting global DROP into a live daemon, never
+  verified no-op success post-handoff, when host-inbound ENFORCES (input
+  chain + rules) with xpfd active, or when an enforcing barrier already
+  stands — never injecting global DROP into a live daemon (a stale table
+  restored before xpfd starts reads inactive, so it installs), never
   clobbering a lifeline guard, never failing an xpfd start behind its
   Requires edge.
 - `xpfd input-barrier remove` — removes the host-input barrier only after the

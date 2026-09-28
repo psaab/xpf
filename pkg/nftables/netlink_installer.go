@@ -89,6 +89,13 @@ type Installer interface {
 	// just-installed enforcement through it after removing the early
 	// barrier (#10751 R4-5 micro-TOCTOU close).
 	TablePresent(name string) (bool, error)
+	// TableEnforcing reports whether the named inet-family table currently
+	// ENFORCES an input hook: the table exists with a type-filter
+	// input-hook chain carrying at least one rule. A present-but-empty
+	// (flushed shell) table is NOT enforcing — with no input hook it
+	// filters nothing. The `ensure` command proves liveness through this
+	// instead of bare presence (#10751 R6-B).
+	TableEnforcing(name string) (bool, error)
 	// InstallIpsecDivert installs the S3 fence+divert capture table in both
 	// inet and bridge families. Queue rules are fail-closed (no bypass).
 	InstallIpsecDivert(spec IpsecDivertSpec) error
@@ -361,6 +368,50 @@ func (in *netlinkInstaller) TablePresent(name string) (bool, error) {
 		return false, fmt.Errorf("nftables conn: %w", err)
 	}
 	return tableExists(c, name)
+}
+
+// TableEnforcing reports whether the named inet-family table currently
+// enforces an input hook (see the interface contract).
+func (in *netlinkInstaller) TableEnforcing(name string) (bool, error) {
+	c, err := in.newConn()
+	if err != nil {
+		return false, fmt.Errorf("nftables conn: %w", err)
+	}
+	tables, err := c.ListTablesOfFamily(nftables.TableFamilyINet)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nftables list tables: %w", err)
+	}
+	var tbl *nftables.Table
+	for _, candidate := range tables {
+		if candidate != nil && candidate.Name == name {
+			tbl = candidate
+			break
+		}
+	}
+	if tbl == nil {
+		return false, nil
+	}
+	chain, err := c.ListChain(tbl, "input")
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nftables read %s input chain: %w", name, err)
+	}
+	if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookInput || chain.Type != nftables.ChainTypeFilter {
+		return false, nil
+	}
+	rules, err := c.GetRules(tbl, chain)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
+	}
+	return len(rules) > 0, nil
 }
 
 // tableExists reports whether an inet table of the given name is installed.

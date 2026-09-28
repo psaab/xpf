@@ -63,6 +63,7 @@ func (noopNftInstaller) RemoveIpsecDivert() error                               
 func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error)              { return fakeLo0Rules(s), nil }
 func (noopNftInstaller) DeleteTable(string) error                                  { return nil }
 func (noopNftInstaller) TablePresent(string) (bool, error)                         { return true, nil }
+func (noopNftInstaller) TableEnforcing(string) (bool, error)                       { return true, nil }
 
 // fakeNftInstaller is the per-test failure-injection seam. A nil hook succeeds
 // (returns nil); a set hook decides the result and can capture the spec/name for
@@ -109,12 +110,20 @@ type fakeNftInstaller struct {
 	overlayReadback   func(xnft.HostInputFenceOverlay) error
 	tablePresent      func(string) (bool, error)
 	tablePresentCalls []string
+	tableEnforcing    func(string) (bool, error)
 }
 
 func (f *fakeNftInstaller) TablePresent(name string) (bool, error) {
 	f.tablePresentCalls = append(f.tablePresentCalls, name)
 	if f.tablePresent != nil {
 		return f.tablePresent(name)
+	}
+	return true, nil
+}
+
+func (f *fakeNftInstaller) TableEnforcing(name string) (bool, error) {
+	if f.tableEnforcing != nil {
+		return f.tableEnforcing(name)
 	}
 	return true, nil
 }
@@ -244,8 +253,9 @@ func (c countingNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error) {
 	*c.calls++
 	return fakeLo0Rules(s), nil
 }
-func (c countingNftInstaller) DeleteTable(string) error          { *c.calls++; return nil }
-func (c countingNftInstaller) TablePresent(string) (bool, error) { return true, nil }
+func (c countingNftInstaller) DeleteTable(string) error            { *c.calls++; return nil }
+func (c countingNftInstaller) TablePresent(string) (bool, error)   { return true, nil }
+func (c countingNftInstaller) TableEnforcing(string) (bool, error) { return true, nil }
 
 // hostInboundViewAddrs reports whether a HostInboundSpec view/unzoned set scopes
 // the given bare address in the requested family. Used by fence/real spec
