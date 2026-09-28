@@ -1244,7 +1244,7 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 // installs during bulk sync. A 3s backstop drops that to at most ~0.33/s per RG
 // (a 6x reduction) while leaving a >3x margin under the helper's ~10s stale-lease
 // window, so the helper's HA view never expires from lack of a refresh. The
-// kernel-visible shim map write still happens every tick — only the JSON IPC is
+// Go-owned map write still happens every tick — only the JSON IPC is
 // throttled here.
 const haWatchdogIPCBackstopSecs = 3
 
@@ -1324,7 +1324,7 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	// the fail-closed backstop is the helper's receipt-anchored 10s forwarding
 	// lease, refreshed by the throttled update_ha_state IPC below. Indirected
 	// through haWatchdogMapWrite so unit tests can exercise the IPC-throttle
-	// BPF map.
+	// path without a loaded BPF map.
 	mapWrite := m.haWatchdogMapWrite
 	if mapWrite == nil {
 		mapWrite = m.bpfShim.UpdateHAWatchdog
@@ -1375,8 +1375,8 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	if !sessionFastPath {
 		// Record the baseline BEFORE the send so a post-send applyHelperStatusLocked
 		// or transient socket error cannot trigger a per-tick resync storm: the next
-		// backstop (<= haWatchdogIPCBackstopSecs) retries, and the shim map write
-		// keeps the kernel watchdog fresh in the meantime.
+		// backstop (<= haWatchdogIPCBackstopSecs) retries, and the Go map write
+		// keeps Go's own HA refresh paths current in the meantime.
 		m.markHAWatchdogIPCSyncedLocked()
 		defer m.mu.Unlock()
 		return m.syncHAStateLocked()

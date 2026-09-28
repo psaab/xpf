@@ -516,6 +516,8 @@ func TestHAWatchdogClaimsUseTheHelperLease10791(t *testing.T) {
 		"docs/phases.md",
 	}
 	staleClaims := []string{
+		"kernel watchdog",
+		"kernel-visible shim map",
 		"BPF watchdog",
 		"BPF ~2s stale window",
 		"BPF ~2s shim window",
@@ -525,7 +527,6 @@ func TestHAWatchdogClaimsUseTheHelperLease10791(t *testing.T) {
 		"timestamp is stale (>2s)",
 		"ActiveUntil(watchdog + HA_WATCHDOG_STALE_AFTER_SECS)",
 	}
-
 	for _, rel := range paths {
 		raw, err := os.ReadFile(filepath.Join(repoRootForBoundaryCanary, rel))
 		if err != nil {

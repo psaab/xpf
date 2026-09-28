@@ -2637,7 +2637,7 @@ Secondary fix: NAT64 source pool auto-assignment. Named pools defined in source 
 - Reduces real mismatch correction from 10-12s to 2-4s
 - **Files:** `pkg/daemon/rg_state.go`
 
-### Fix #102: Legacy kernel watchdog implementation (RETIRED by #1476)
+### Fix #102: Legacy HA watchdog implementation (RETIRED by #1476)
 - Originally added the `ha_watchdog` BPF ARRAY map, with Go writes every 500ms
   and a kernel consumer in `check_egress_rg_active()`. #1476 removed that live
   shim consumer; the Go map write remains bookkeeping only.

@@ -1250,7 +1250,7 @@ func TestUpdateHAWatchdogThrottlesIPCButWritesMapEveryTick(t *testing.T) {
 	}
 
 	if mapWrites != ticks {
-		t.Fatalf("shim map write fired %d times over %d ticks, want every tick (kernel watchdog must stay fresh)", mapWrites, ticks)
+		t.Fatalf("shim map write fired %d times over %d ticks, want every tick (Go's HA map readback must stay current)", mapWrites, ticks)
 	}
 
 	ipc := drainUpdateHAStateCount(reqTypes)
