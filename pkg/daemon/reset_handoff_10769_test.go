@@ -878,6 +878,17 @@ func TestSweepHelperStateVerifiedRefusesReserved10769(t *testing.T) {
 			t.Fatalf("failed sweep must create nothing: %v", serr)
 		}
 	})
+	t.Run("missing parent non-reserved succeeds", func(t *testing.T) {
+		dir := t.TempDir()
+		parent := filepath.Join(dir, "no-such-dir")
+		canonical := filepath.Join(parent, "userspace-dp.json")
+		if err := sweepHelperStateVerified(canonical); err != nil {
+			t.Fatalf("missing parent with a non-reserved path must sweep nil, got %v", err)
+		}
+		if _, serr := os.Lstat(parent); !os.IsNotExist(serr) {
+			t.Fatalf("nil sweep must create nothing: %v", serr)
+		}
+	})
 	t.Run("symlink refused", func(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(dir, "real-state.json")
