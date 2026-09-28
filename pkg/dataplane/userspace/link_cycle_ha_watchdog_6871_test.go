@@ -27,8 +27,10 @@ import (
 // WHERE THE GATE LIVES, and why not at UpdateHAWatchdog. Only the
 // set_forwarding_state half respawns. The update_ha_state half is a LIVENESS
 // signal — Coordinator::update_ha_state is the only thing that refreshes the
-// helper's per-RG forwarding lease (ActiveUntil(watchdog +
-// HA_WATCHDOG_STALE_AFTER_SECS), 10s), and is_forwarding_active consults it per
+// helper's per-RG forwarding lease, which is receipt-anchored, not
+// value-anchored (ActiveUntil(max(watchdog, now) +
+// HA_WATCHDOG_STALE_AFTER_SECS), 10s; now is sampled at receipt, so each active
+// receipt mints a full lease — #10791), and is_forwarding_active consults it per
 // packet. Suppressing it for the length of a 60s link-cycle lease would expire
 // that lease and stop forwarding outright: an outage in place of a race.
 // Gating the emitter also covers the two callers that were already safe (the
@@ -74,9 +76,9 @@ import (
 // serve a test, and the seam itself would then be the unbound thing.
 
 // newWatchdogTestManager builds a map-free manager whose UpdateHAWatchdog can run
-// without a loaded BPF shim map: haWatchdogMapWrite is the production seam for
+// without a loaded BPF map: haWatchdogMapWrite is the production seam for
 // exactly that (see manager.go), so the socket half is reachable while the
-// kernel-visible write is stubbed.
+// Go-owned HA map write is stubbed.
 func newWatchdogTestManager(t *testing.T) (*Manager, *leaseControlServer) {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "control.sock")
@@ -234,10 +236,12 @@ func TestHAWatchdogPublishesOverTheControlSocket_6871(t *testing.T) {
 // guard for the placement decision, and the one that would catch a "gate the
 // whole socket half of UpdateHAWatchdog" fix.
 //
-// update_ha_state is the ONLY refresh of the helper's per-RG forwarding lease:
-// Coordinator::update_ha_state sets ActiveUntil(watchdog +
-// HA_WATCHDOG_STALE_AFTER_SECS) — 10s, userspace-dp/src/afxdp/mod.rs — and
-// is_forwarding_active consults it on every packet. The link-cycle lease TTL is
+// update_ha_state is the ONLY refresh of the helper's per-RG forwarding lease,
+// which is receipt-anchored: Coordinator::update_ha_state sets
+// ActiveUntil(max(watchdog, now) + HA_WATCHDOG_STALE_AFTER_SECS) — 10s,
+// userspace-dp/src/afxdp/mod.rs; now is sampled at receipt so each active receipt
+// mints a full lease (#10791) — and is_forwarding_active consults it on every packet.
+// The link-cycle lease TTL is
 // 60s. Suppressing update_ha_state for the length of a cycle would therefore
 // expire the helper's forwarding lease and stop forwarding for that RG: an
 // OUTAGE, strictly worse than the respawn race being closed. Its handler

@@ -231,8 +231,11 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 		d.markDataplaneNotArmed("shutdown", reason)
 	}
 
-	// In HA fail-closed mode, clear rg_active and watchdog immediately so
-	// BPF stops forwarding traffic even if subsequent cleanup steps hang.
+	// In HA fail-closed mode, clear rg_active and publish its inactive state to
+	// the helper immediately, so the helper stops forwarding our RGs even if
+	// subsequent cleanup steps hang. Zero the Go-owned watchdog store as well.
+	// No live userspace-XDP shim reads ha_watchdog (#10791); the fail-closed
+	// backstop for ungraceful daemon death is the receipt-anchored 10s lease.
 	// #2114: one snapshot for the whole HA-clear block (plan §5.3 rule 5).
 	if rt := d.dataplane(); !hitless && rt != nil && cfg.Chassis.Cluster != nil {
 		slog.Info("HA shutdown: clearing rg_active for all RGs")
