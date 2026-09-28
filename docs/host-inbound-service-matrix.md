@@ -764,19 +764,23 @@ succeeded, and the call site records the outcome as **retry debt**:
   retaining stale debt would make the owner re-drive a revocation whose target no
   longer exists.
 
-Operator-visible surface — both emitted even when the dataplane is not loaded,
+Operator-visible surface — all emitted even when the dataplane is not loaded,
 because the daemon rebuilds the kernel table in config-only mode too:
 
 | Series | Meaning |
 |---|---|
 | `xpf_host_inbound_conntrack_revocation_pending` | `1` while a revocation has failed and not yet been re-driven. While set, a now-denied host service may still be reachable on an established kernel connection. |
 | `xpf_host_inbound_conntrack_revocation_failures_total` | Every failed attempt, retries included. Climbing while the gauge stays `1` means the retry owner is running but not converging. |
+| `xpf_host_inbound_tcp_loose_disabled` | `1` when `nf_conntrack_tcp_loose` last verified as `0` (#10752). `0` is degraded mode: loose mid-stream pickup may be active and stale TCP replies rely on the catalog guard alone. Re-driven on every successful host-inbound apply. |
+| `xpf_host_inbound_tcp_loose_posture_failures_total` | Every loose-posture establish/verify failure. Climbing while the gauge stays `0` means reassertion is running but not converging (unloaded module, denied write, or reverted value). |
 
-Both are omitted entirely — not published as `0` — on a server that has not wired
+All are omitted entirely — not published as `0` — on a server that has not wired
 the accessors, so an unwired node cannot be mistaken for a converged one (the
 #6828 absent-vs-zero distinction). Fail-on-revert proofs:
-`pkg/daemon/host_inbound_conntrack_retry_6802_test.go` and
-`pkg/api/metrics_hostinbound_conntrack_revoke_6802_test.go`.
+`pkg/daemon/host_inbound_conntrack_retry_6802_test.go`,
+`pkg/api/metrics_hostinbound_conntrack_revoke_6802_test.go`, and for the loose
+pair `pkg/daemon/host_inbound_tcp_loose_10752_test.go` plus
+`pkg/api/metrics_hostinbound_tcp_loose_10752_test.go`.
 
 ## Fail-closed invariant for a nil / configured=false known zone (#3705)
 
