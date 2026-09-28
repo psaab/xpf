@@ -609,20 +609,40 @@ correct runtime resolution; the only remedy is correcting
   Each keyed heartbeat tenure also sends a compact HMAC-authenticated
   identity beacon (cluster-id, node-id, timestamp, random sender-instance
   id, nonce) to the control-link subnet broadcast address on UDP 4786, and
-  listens for it. Broadcast crosses the shared-shape gap that unicast
-  cannot: the duplicate peer's beacons arrive even though its heartbeats
-  never can. The receiver verifies the HMAC (against every accepted
-  control-link key, so rotation stays interoperable) and freshness BEFORE
-  comparing node IDs or warning, so an arbitrary L2/UDP sender cannot forge
-  the operator-facing `slog.Error`; a random per-process sender id excludes
-  the socket's own looped-back broadcast, and a nonce cache suppresses
-  exact replays. A verified same-cluster/same-node-id beacon from another
-  sender calls `NoteDuplicateNodeIDBeacon`, which shares the 30s
-  duplicate-node-id limiter. Like the join point, it only warns — the peer
-  stays absent and both nodes can promote independently, and the warning
-  names that outcome. Beacons never touch liveness, replay state, or
-  election. Best-effort by design: unkeyed, IPv6-only, or /31-or-narrower
-  control links skip the watcher and keep existing behavior.
+  listens for it. Broadcast is designed to cross the shared-shape gap that
+  unicast cannot: the duplicate peer's beacons should arrive even though
+  its heartbeats never can. The receiver verifies the HMAC (against every
+  accepted control-link key, so rotation stays interoperable) and freshness
+  BEFORE comparing node IDs or warning, so an arbitrary L2/UDP sender
+  cannot forge the operator-facing `slog.Error`; a random per-process
+  sender id excludes the socket's own looped-back broadcast, and a
+  manager-lifetime nonce cache (4096 entries, evict-expired-then-random,
+  5s sweep) suppresses exact replays across watcher restarts. A verified
+  same-cluster/same-node-id beacon from another sender calls
+  `NoteDuplicateNodeIDBeacon`, which shares the 30s duplicate-node-id
+  limiter. Like the join point, it only warns — the peer stays absent and
+  both nodes can promote independently, and the warning names that
+  outcome. Beacons never touch liveness, replay state, or election.
+
+  Three operating prerequisites, stated so the blast radius is honest.
+  (1) **Time sync.** Freshness is a ±30s wall-clock window validated at
+  both edges; nodes further than 30s apart silently miss genuine
+  duplicates (warn path only — never an election effect), so the pair
+  must hold wall-clock within 30s of each other (NTP/Chrony).
+  (2) **Best-effort bringup.** Unkeyed, IPv6-only, or /31-or-narrower
+  control links skip the watcher, as do broadcast-derivation and socket
+  failures — every skip is a `Debug` log and the heartbeat proceeds, so a
+  skipped detector is invisible at operator log levels by design.
+  Receiving a broadcast sourced from the local address additionally
+  depends on the best-effort `net.ipv4.conf.all.accept_local=1` posture
+  (`daemon_run_bringup.go`); if that write failed, the kernel drops the
+  duplicate's beacons before the socket sees them.
+  (3) **Wire proof pending.** Same-source-IP broadcast delivery on the
+  real control L2 (actual VRF + `accept_local` posture) is lab-unproven;
+  the in-gate live test covers authenticated warn/silence over loopback
+  sockets, not L2 delivery. A dual-PRIMARY shared-shape wire proof is a
+  tracked follow-up; until it lands this paragraph — not the mechanism
+  above — is the delivery claim.
 
 - **Election tie-break (`electRG`, `election.go`).** If a same-node-id
   peer ever does reach election (the direct API / tests, or any future

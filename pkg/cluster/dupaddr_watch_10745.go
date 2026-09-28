@@ -49,6 +49,10 @@ import (
 // unkeyed deployment has no way to authenticate a warning and keeps the
 // existing heartbeat behavior. IPv4 directed broadcast is used because the
 // shipped control link is IPv4; IPv6-only control links skip this detector.
+// Freshness is a ±30s wall-clock window, so the pair must hold wall-clock
+// within 30s (NTP/Chrony) or genuine duplicates are missed. Replay memory is
+// process-lifetime (manager cache), so only a full process restart reopens a
+// bounded capture-replay window — never a heartbeat restart.
 
 const (
 	duplicateIdentityBeaconPort    = 4786

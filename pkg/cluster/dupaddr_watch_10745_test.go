@@ -486,3 +486,45 @@ func TestDuplicateIdentityReadStepSurvivesTransientErrors_10745(t *testing.T) {
 		}
 	})
 }
+
+// TestDuplicateIdentityFreshnessBoundaries_10745 pins the ±30s wall-clock
+// window edges (review NV2): the documented time-sync prerequisite is that
+// nodes hold wall-clock within 30s of each other, and acceptance matches it
+// exactly on both sides.
+func TestDuplicateIdentityFreshnessBoundaries_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+	now := time.Now()
+	instance := beaconTestInstance(t)
+	signAt := func(t *testing.T, at time.Time) []byte {
+		t.Helper()
+		frame, err := marshalDuplicateIdentityBeacon(beaconTestCluster, beaconTestNode,
+			[]byte(beaconTestPSK), instance, at)
+		if err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		return frame
+	}
+	accept := []time.Time{
+		now.Add(-duplicateIdentityBeaconMaxAge),
+		now.Add(-duplicateIdentityBeaconMaxAge + time.Second),
+		now,
+		now.Add(duplicateIdentityBeaconMaxAge - time.Second),
+		now.Add(duplicateIdentityBeaconMaxAge),
+	}
+	for _, at := range accept {
+		if _, _, _, _, _, ok := verifyDuplicateIdentityBeacon(signAt(t, at), mgr, now); !ok {
+			t.Fatalf("beacon stamped %v from now was rejected, want accepted", at.Sub(now))
+		}
+	}
+	reject := []time.Time{
+		now.Add(-duplicateIdentityBeaconMaxAge - time.Nanosecond),
+		now.Add(-2 * duplicateIdentityBeaconMaxAge),
+		now.Add(duplicateIdentityBeaconMaxAge + time.Nanosecond),
+		now.Add(2 * duplicateIdentityBeaconMaxAge),
+	}
+	for _, at := range reject {
+		if _, _, _, _, _, ok := verifyDuplicateIdentityBeacon(signAt(t, at), mgr, now); ok {
+			t.Fatalf("beacon stamped %v from now was accepted, want rejected", at.Sub(now))
+		}
+	}
+}
