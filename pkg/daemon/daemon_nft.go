@@ -564,6 +564,26 @@ func (d *Daemon) applyHostInboundFilter(cfg *config.Config) error {
 }
 
 func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *xnft.HostInputFenceOverlay) error {
+	// #10751/B6: pre-handoff barrier attestation. Before the first handoff
+	// the barrier is EXPECTED present; a flush (nftables restart, `nft flush
+	// ruleset`) between unit install and this apply would otherwise silently
+	// reopen host input. Reinstall when missing (idempotent) and fail closed
+	// when the reinstall itself fails. Post-handoff the barrier is EXPECTED
+	// absent and is never reinstalled here.
+	if !d.earlyInputHandoffDone.Load() {
+		present, presentErr := nftInstaller.EarlyInputBarrierPresent()
+		if presentErr != nil {
+			slog.Warn("cannot attest early host-input barrier presence; proceeding to install enforcement", "err", tagNftInstallErr(presentErr))
+		} else if !present {
+			slog.Warn("early host-input barrier missing before first handoff (flushed or never installed); reinstalling")
+			if installErr := nftInstaller.InstallEarlyInputBarrier(); installErr != nil {
+				installErr = tagNftInstallErr(installErr)
+				d.noteHostInboundApplyFailed(time.Now())
+				return fmt.Errorf("reinstall missing early host-input barrier before first handoff: %w", installErr)
+			}
+		}
+	}
+
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	// zone. xpfd applies an interface's address regardless of zone membership,
 	// but the per-zone views above scope the default-deny to ZONED addresses

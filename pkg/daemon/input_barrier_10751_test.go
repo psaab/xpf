@@ -442,6 +442,111 @@ func enforcingZoneNoProgramConfig10751(t *testing.T, addrs []string, dhcp bool) 
 	return cfg
 }
 
+func TestEarlyInputBarrierAttestation10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+
+	callsOf := func(fake *fakeNftInstaller, want string) int {
+		t.Helper()
+		n := 0
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == want {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("missing barrier reinstalled before real install", func(t *testing.T) {
+		fake := &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
+		}
+		nftInstaller = fake
+		d := &Daemon{}
+		if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
+			t.Fatalf("reinstall-then-install apply: %v", err)
+		}
+		if got := callsOf(fake, "install"); got != 1 {
+			t.Fatalf("barrier install calls = %d, want 1 reinstall of the flushed barrier", got)
+		}
+		if got := callsOf(fake, "remove"); got != 1 {
+			t.Fatalf("barrier remove calls = %d, want the real-install handoff after reinstall", got)
+		}
+		if fake.earlyInputBarrierPresentCalls != 1 {
+			t.Fatalf("presence attestations = %d, want 1 pre-apply readback", fake.earlyInputBarrierPresentCalls)
+		}
+		if !d.earlyInputHandoffDone.Load() {
+			t.Fatal("reinstall-then-handoff must mark the handoff done")
+		}
+	})
+
+	t.Run("missing barrier with failing reinstall fails closed", func(t *testing.T) {
+		installErr := errors.New("barrier reinstall failed")
+		realCalled := false
+		fake := &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
+			earlyInputBarrierInstall: func() error { return installErr },
+			hostInbound: func(xnft.HostInboundSpec) error {
+				realCalled = true
+				return nil
+			},
+		}
+		nftInstaller = fake
+		d := &Daemon{}
+		err := d.applyHostInboundFilter(hostInboundTestConfig())
+		if !errors.Is(err, installErr) {
+			t.Fatalf("reinstall failure error = %v, want the reinstall error", err)
+		}
+		if realCalled {
+			t.Fatal("real install must not run when the missing barrier cannot be reinstalled")
+		}
+		if got := callsOf(fake, "remove"); got != 0 {
+			t.Fatalf("barrier remove calls = %d, want none on reinstall failure", got)
+		}
+		if st := d.HostInboundApplied(); !st.LastApplyFailed {
+			t.Fatalf("applied state = %+v, want failure recorded", st)
+		}
+	})
+
+	t.Run("flush with failed fallback stays closed", func(t *testing.T) {
+		installErr := errors.New("real host-inbound load failed")
+		fake := &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
+			hostInbound:              func(xnft.HostInboundSpec) error { return installErr },
+			coldBootFence:            func(xnft.FenceSpec) error { return errors.New("fence failed") },
+		}
+		nftInstaller = fake
+		d := &Daemon{}
+		err := d.applyHostInboundFilter(hostInboundTestConfig())
+		if !errors.Is(err, installErr) {
+			t.Fatalf("flushed failed-handoff error = %v, want the real install error", err)
+		}
+		if got := callsOf(fake, "install"); got != 1 {
+			t.Fatalf("barrier install calls = %d, want 1 reinstall before the failed handoff", got)
+		}
+		if got := callsOf(fake, "remove"); got != 0 {
+			t.Fatalf("barrier remove calls = %d, a failed handoff must not lift the reinstalled barrier", got)
+		}
+	})
+
+	t.Run("present readback error proceeds to enforcement", func(t *testing.T) {
+		fake := &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, errors.New("netlink readback failed") },
+		}
+		nftInstaller = fake
+		d := &Daemon{}
+		if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
+			t.Fatalf("readback-error apply: %v", err)
+		}
+		if got := callsOf(fake, "install"); got != 0 {
+			t.Fatalf("barrier install calls = %d, want none when presence is unreadable (warn-and-proceed)", got)
+		}
+		if got := callsOf(fake, "remove"); got != 1 {
+			t.Fatalf("barrier remove calls = %d, want the real-install handoff", got)
+		}
+	})
+}
+
 func addresslessProgramOnlyConfig10751(t *testing.T) *config.Config {
 	t.Helper()
 	unit := &config.InterfaceUnit{Number: 0, DHCP: true}

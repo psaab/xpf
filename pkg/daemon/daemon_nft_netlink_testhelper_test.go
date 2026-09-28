@@ -37,6 +37,7 @@ type noopNftInstaller struct{}
 
 func (noopNftInstaller) InstallEarlyInputBarrier() error                           { return nil }
 func (noopNftInstaller) RemoveEarlyInputBarrier() error                            { return nil }
+func (noopNftInstaller) EarlyInputBarrierPresent() (bool, error)                   { return true, nil }
 func (noopNftInstaller) InstallHostInbound(xnft.HostInboundSpec) error             { return nil }
 func (noopNftInstaller) VerifyHostInboundOverlay(xnft.HostInputFenceOverlay) error { return nil }
 func (noopNftInstaller) InstallColdBootFence(xnft.FenceSpec) error                 { return nil }
@@ -62,11 +63,13 @@ type fakeNftInstaller struct {
 	lo0              func(xnft.Lo0FilterSpec) error
 	// lo0Rules overrides the rendered rule count InstallLo0 reports (#6529).
 	// nil means "derive it from the spec" (fakeLo0Rules).
-	lo0Rules                 *int
-	earlyInputBarrierCalls   []string
-	earlyInputBarrierInstall func() error
-	earlyInputBarrierRemove  func() error
-	del                      func(string) error
+	lo0Rules                      *int
+	earlyInputBarrierCalls        []string
+	earlyInputBarrierInstall      func() error
+	earlyInputBarrierRemove       func() error
+	earlyInputBarrierPresent      func() (bool, error)
+	earlyInputBarrierPresentCalls int
+	del                           func(string) error
 	// #7191: barrier call recorder. barrierCalls appends "install"/"remove" in
 	// order so a test can assert the SEQUENCE, not just that a call happened —
 	// install-then-remove and remove-then-install have opposite meanings for a
@@ -105,6 +108,14 @@ func (f *fakeNftInstaller) RemoveEarlyInputBarrier() error {
 		return f.earlyInputBarrierRemove()
 	}
 	return nil
+}
+
+func (f *fakeNftInstaller) EarlyInputBarrierPresent() (bool, error) {
+	f.earlyInputBarrierPresentCalls++
+	if f.earlyInputBarrierPresent != nil {
+		return f.earlyInputBarrierPresent()
+	}
+	return true, nil
 }
 
 func (f *fakeNftInstaller) InstallHostInbound(s xnft.HostInboundSpec) error {
@@ -188,6 +199,7 @@ func (c countingNftInstaller) VerifyHostInboundOverlay(xnft.HostInputFenceOverla
 
 func (c countingNftInstaller) InstallEarlyInputBarrier() error               { *c.calls++; return nil }
 func (c countingNftInstaller) RemoveEarlyInputBarrier() error                { *c.calls++; return nil }
+func (c countingNftInstaller) EarlyInputBarrierPresent() (bool, error)       { return true, nil }
 func (c countingNftInstaller) InstallHostInbound(xnft.HostInboundSpec) error { *c.calls++; return nil }
 func (c countingNftInstaller) InstallColdBootFence(xnft.FenceSpec) error     { *c.calls++; return nil }
 func (c countingNftInstaller) InstallLo0ColdBootFence(xnft.FenceSpec) error  { *c.calls++; return nil }

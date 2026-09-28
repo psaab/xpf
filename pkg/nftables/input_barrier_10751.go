@@ -134,6 +134,16 @@ func (in *netlinkInstaller) RemoveEarlyInputBarrier() error {
 	return in.DeleteTable(EarlyInputBarrierTableName)
 }
 
+// EarlyInputBarrierPresent reports whether the #10751 boot input barrier
+// table is currently installed.
+func (in *netlinkInstaller) EarlyInputBarrierPresent() (bool, error) {
+	c, err := in.newConn()
+	if err != nil {
+		return false, fmt.Errorf("nftables conn: %w", err)
+	}
+	return tableExists(c, EarlyInputBarrierTableName)
+}
+
 // earlyInputBarrierChain builds the barrier base chain: filter/input at the
 // backstop priority with policy DROP.
 func earlyInputBarrierChain(tbl *nftables.Table) *nftables.Chain {

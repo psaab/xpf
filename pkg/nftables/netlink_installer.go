@@ -45,6 +45,11 @@ type Installer interface {
 	InstallEarlyInputBarrier() error
 	// RemoveEarlyInputBarrier idempotently removes that boot-only input barrier.
 	RemoveEarlyInputBarrier() error
+	// EarlyInputBarrierPresent reports whether that barrier table is currently
+	// installed (kernel readback). The daemon attests presence before the
+	// first handoff and gates link activation on it — unit state alone
+	// cannot prove the table survived.
+	EarlyInputBarrierPresent() (bool, error)
 	// InstallHostInbound installs the real host-inbound table (#3070/#3333).
 	InstallHostInbound(spec HostInboundSpec) error
 	// VerifyHostInboundOverlay reads back the exact marker and leading DROP

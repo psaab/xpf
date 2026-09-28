@@ -209,12 +209,18 @@ func TestEarlyInputBarrierNetlinkLifecycle10751(t *testing.T) {
 		t.Fatalf("install early input barrier: %v", err)
 	}
 	assertEarlyInputBarrierInstalled10751(t)
+	if present, err := in.EarlyInputBarrierPresent(); err != nil || !present {
+		t.Fatalf("barrier presence after install = %v, %v; want true, nil", present, err)
+	}
 	if err := in.InstallEarlyInputBarrier(); err != nil {
 		t.Fatalf("replace early input barrier: %v", err)
 	}
 	assertEarlyInputBarrierInstalled10751(t)
 	if err := in.RemoveEarlyInputBarrier(); err != nil {
 		t.Fatalf("remove early input barrier: %v", err)
+	}
+	if present, err := in.EarlyInputBarrierPresent(); err != nil || present {
+		t.Fatalf("barrier presence after remove = %v, %v; want false, nil", present, err)
 	}
 	if err := in.RemoveEarlyInputBarrier(); err != nil {
 		t.Fatalf("remove absent early input barrier: %v", err)
