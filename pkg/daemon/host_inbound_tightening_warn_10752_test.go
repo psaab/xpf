@@ -742,6 +742,72 @@ func TestWithTighteningWarningsTokenOnlyCustomsAdvisory10752(t *testing.T) {
 	}
 }
 
+// TestHostInboundSweepCustomTokenPorts10752 pins the customs carve-out
+// universe: exactly p:rip/p:ripng admit sweep-custom tuples today.
+// bgp (exempt), ospf (bare), traceroute (range), dns (catalogued),
+// ntp (exempt) are excluded by rule; bfd/sap are excluded by the
+// documented conformant-ephemeral behavioral call.
+func TestHostInboundSweepCustomTokenPorts10752(t *testing.T) {
+	m := hostInboundSweepCustomTokenPorts10752()
+	if got := m["p:rip"]; len(got) != 1 || got[0] != "17/520" {
+		t.Errorf(`p:rip ports = %v, want ["17/520"]`, got)
+	}
+	if got := m["p:ripng"]; len(got) != 1 || got[0] != "17/521" {
+		t.Errorf(`p:ripng ports = %v, want ["17/521"]`, got)
+	}
+	for _, tok := range []string{"p:bgp", "p:ospf", "p:bfd", "p:sap", "p:ldp", "p:msdp", "s:dns", "s:ntp", "s:ssh", "s:traceroute", "s:dhcp"} {
+		if got, ok := m[tok]; ok {
+			t.Errorf("token %s must not admit sweep-custom tuples, got %v", tok, got)
+		}
+	}
+}
+
+// TestWithTighteningWarningsRipRemovalWarnsCustoms10752 is the rip
+// carve-out RED pin: p:rip removal is token-only, but the named token
+// DID admit sweep-custom-classified flows (fixed-sport UDP 520 below
+// the ephemeral floor), so a kept box:520 flow is genuinely stranded
+// and must emit the customs evidence line — not the advisory. The
+// collector leg pins the sweep classification; the projection leg
+// pins the line. The ospf-removal/unrelated-2222 negative control
+// stays advisory (see the token-only test above).
+func TestWithTighteningWarningsRipRemovalWarnsCustoms10752(t *testing.T) {
+	cfg := hostInboundFlushTestConfig("snmp")
+	views := dpuserspace.BuildZoneHostInboundViews(cfg)
+	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
+	filter := buildHostInboundConntrackFlushFilter(views, unzonedV4, unzonedV6, nil)
+	if filter == nil {
+		t.Fatal("expected a filter for the enforcing configuration")
+	}
+	if filter.MatchConntrackFlow(boxOrientedFlow(config.HostInboundProtoUDP, "172.16.50.8", 520)) {
+		t.Fatal("denied box-oriented rip tuple must be kept (catalog miss), not flushed")
+	}
+	if got, _ := filter.keptSuspiciousReport(); got != 1 {
+		t.Fatalf("kept-suspicious count = %d, want 1 (box:520 UDP is sweep-custom)", got)
+	}
+
+	oldCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	oldCfg.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"rip"}
+	newCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		netip.MustParseAddr("172.16.50.8"): kept10752(1,
+			[]string{"udp 172.16.50.8:520→203.0.113.7:520"}, 0, nil),
+	})
+	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
+	if resp == newCfg {
+		t.Fatal("rip removal with a kept 520 flow must warn, got identity")
+	}
+	if len(resp.Warnings) != 2 {
+		t.Fatalf("warnings = %v, want [custom line, pointer]", resp.Warnings)
+	}
+	line := resp.Warnings[0]
+	if !strings.Contains(line, "(zone:wan, zone:wan|iface:reth0.50)") ||
+		!strings.Contains(line, "leaves 1 box-oriented custom-port") ||
+		!strings.Contains(line, "172.16.50.8:520") {
+		t.Errorf("custom line must name the narrowed scopes with the 520 sample: %q", line)
+	}
+}
+
 // TestWithTighteningWarningsLooseningToFullStaysSilent10752 is the
 // response-level loosening pin: named-with-exempt to any-service is no
 // transition, so even observed evidence stays projection-silent.

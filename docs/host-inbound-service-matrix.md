@@ -700,10 +700,13 @@ Properties:
   ONLY those scopes — zone:<name> or zone:<name>|iface:<unit> — with
   counts and samples drawn ONLY from the intersecting addresses of that
   class, plus a silent-class pointer sentence. The customs line
-  additionally requires a full-admit loss on the scope: a token-only
-  narrowing never admitted customs, so customs observed there are
-  unchanged-authorization flows and the transition yields the advisory
-  instead. Otherwise — zero kept flows, or evidence only outside every
+  additionally requires a full-admit loss or the loss of a token
+  admitting sweep-custom tuples (today p:rip/p:ripng — fixed-sport
+  UDP 520/521 the sweep records as customs): other token-only
+  narrowings (exempts, bare protocols, ranges, true customs) never
+  admitted customs, so customs observed there are
+  unchanged-authorization flows and yield the advisory instead.
+  Otherwise — zero kept flows, or evidence only outside every
   narrowed scope — the commit carries a transition-only advisory naming
   the narrowed scopes with honest zero-observed wording and a
   manual-procedure pointer, so silent-class narrowings (in-range UDP
@@ -878,8 +881,9 @@ any-service breadth advisory names this consequence while the stanza is
 open; the tightening commit itself warns — evidence lines naming the
 narrowed effective scopes with intersecting stranded flows of that
 class (counts and samples from those scopes' addresses only; the
-customs line needs a full-admit loss, since token-only narrowings
-never admitted customs), or a transition-only advisory naming the
+customs line needs a full-admit loss or a lost sweep-custom token
+(rip/ripng), since other token-only narrowings never admitted
+customs), or a transition-only advisory naming the
 narrowed scopes when the sweep observed nothing stranded in them —
 and the daemon warns in the journal on applies that keep
 denied non-catalog customs below the ephemeral floor (TCP also when
