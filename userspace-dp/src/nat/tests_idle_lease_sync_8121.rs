@@ -498,7 +498,7 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         "releasing the PAT owner must clear the host-scope index"
     );
 
-    let address_only_allocator = PortAllocator::new(1, 20_000, 20_001);
+    let address_only_allocator = PortAllocator::new(1, 20_000, 20_002);
     let address_only_owner = flow("10.0.61.99", 20_000);
     let owned = address_only_allocator
         .reserve_address_only(address_only_owner, rec.translated_ip, NatHolder::Untracked)
@@ -535,6 +535,12 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         NatHolder::Untracked
     ));
     rec.src_ip = "10.0.61.51".parse().unwrap();
+    rec.remote = None;
+    assert_eq!(
+        address_only_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 3_000),
+        IdleLeaseImport::Installed,
+        "releasing the address-only owner must clear the any-remote prefix index"
+    );
     rec.remote = Some(("8.8.8.8".parse().unwrap(), 0));
     assert_eq!(
         address_only_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 3_000),
@@ -624,6 +630,13 @@ fn a_pat_import_refuses_live_address_only_reverse_identity_11475() {
         NatHolder::Untracked
     ));
     rec.src_ip = "10.0.61.51".parse().unwrap();
+    rec.remote = None;
+    assert_eq!(
+        allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 3_000),
+        IdleLeaseImport::SkippedPortBusy,
+        "after owner teardown, the same tuple reaches PAT occupancy (the \
+         9.9.9.9 lease holds the bit) instead of a stale identity prefix"
+    );
     rec.remote = Some(("8.8.8.8".parse().unwrap(), 0));
     rec.translated_port = 20_001;
     assert_eq!(
