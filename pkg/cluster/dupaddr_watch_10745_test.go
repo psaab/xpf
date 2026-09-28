@@ -212,10 +212,11 @@ func TestDuplicateIdentityBroadcastAddr_10745(t *testing.T) {
 
 // TestDuplicateIdentityWatcherLiveSockets_10745 runs the real send/receive
 // loops over loopback: the watcher's own beacons (delivered back to its
-// listener, exactly like a broadcast loopback) must not warn, while a second
-// instance's signed beacon — the duplicate peer — must warn through the live
-// readLoop. This is the end-to-end proof the receive path before it cannot
-// give: frames that actually cross a socket.
+// listener) must not warn, while a second instance's signed beacon — the
+// duplicate peer — must warn through the live readLoop. This proves the
+// socket read/auth/self-exclusion path with frames that actually cross a
+// socket; subnet-broadcast delivery itself is NOT covered here (README
+// wire-proof gap) — unicast-to-self stands in for the broadcast address.
 func TestDuplicateIdentityWatcherLiveSockets_10745(t *testing.T) {
 	mgr := keyedBeaconManager(t, beaconTestPSK, "")
 	listen, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -227,11 +228,11 @@ func TestDuplicateIdentityWatcherLiveSockets_10745(t *testing.T) {
 		listen.Close()
 		t.Fatalf("sender: %v", err)
 	}
-	// Unicast-to-self stands in for the subnet broadcast: the delivery and
-	// loopback semantics through the socket are identical, without depending
-	// on the test host forwarding 127/8 broadcasts.
+	// Unicast-to-self stands in for the subnet broadcast address so the test
+	// does not depend on the host forwarding 127/8 broadcasts. That substitution
+	// is exactly why this test cannot prove L2 broadcast delivery (see README).
 	w := newDuplicateIdentityWatcher(mgr, "lo", listen, send,
-		listen.LocalAddr().(*net.UDPAddr), 10*time.Millisecond, beaconTestInstance(t))
+		listen.LocalAddr().(*net.UDPAddr), 10*time.Millisecond, mgr.beaconSenderID())
 	w.start()
 	t.Cleanup(w.stop)
 

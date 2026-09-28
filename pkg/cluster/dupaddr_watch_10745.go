@@ -174,9 +174,11 @@ const duplicateIdentityReplayCap = 4096
 // It lives on the MANAGER (process lifetime), not on the watcher — the #5086
 // precedent. A heartbeat restart replaces the watcher; a per-watcher cache
 // would forget every nonce, so a keyless L2 observer could replay a captured
-// still-fresh beacon into the new tenure (valid MAC, old instance now
-// foreign, nonce uncached) and manufacture a false duplicate warning. A
-// tenure ID inside the MAC cannot fix that — the receiver cannot know the
+// still-fresh PEER beacon into the new tenure (valid MAC, still-foreign
+// instance, nonce uncached) and manufacture a false duplicate warning after
+// the peer is gone. (Own beacons need no cache entry: the sender ID is stable
+// per manager, so an old own instance never becomes foreign.) A tenure ID
+// inside the MAC cannot fix the peer case — the receiver cannot know the
 // peer's current tenure — but replay memory that survives watcher
 // replacement can: the replayed nonce is already recorded.
 //
