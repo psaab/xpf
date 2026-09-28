@@ -391,7 +391,7 @@ reserved quarantine bit.
 |---|---|---|
 | `2ccea8434` peer-snapshot authorization (`peer_snapshot_protocol_gate_6650.go:34-120`) | Commit preflight includes plain and confirmed commits (`daemon_apply_commit.go:274-288,876-889`); `pushCommittedConfigToPeer` (`:493-527`) + revalidation; active snapshot/reservation and queue (`daemon_ha_sync.go:464-486,519-590`); reconnect/retry reconciler (`:705-820`); receive-side HA `handleConfigSyncWithAncestry` (`:880-913`). | M3's v36 shape floor must be included in every preflight and reconnect/retry decision. Compose the required floor as the maximum of ingress-prefix, multi-zone and every other concurrently-required feature floor. Preserve connection epoch + selected `SessionSync` capability authorization through the queue. |
 | Final queue/socket boundary from `2ccea8434` | `SessionSync` final peer-state/active-connection check is under `peerSnapshotProtocolWriteMu` (`pkg/cluster/sync_conn_config.go:320-335`); `QueueConfigWithPeerSnapshotProtocolAtGeneration` begins at `:346`. | The M3 prefix floor is a required operand to the atomic queue check and final socket write; an earlier daemon preflight alone is insufficient. A reconnect or capability change between auth and write withholds the text and leaves reconcile unclaimed/retryable. Do not lower the floor when multi-zone and ingress-prefix features coexist. |
-| `fd32d2df5` (#11478), plus `3be469bc3`/#10788 and `01879c222`/#10789 holder restore | `AllocatorHolderSnapshot` (`:221-224`) captures the published RuntimeView's SNAT/NAT64 holder masks (`reserve_synced_translation` `:340-437` in `session_import.rs`); `rollback_rejected_mirror_import` (`:439-573`) restores the incumbent allocator reservation, with worker loops at `:503,533` (both `0u32..128`); `restore_rejected_forward_mirror` (`:575+`) restores the forward BPF mirror. Atomic allocator capture is `CapturedLiveGuard` (`nat/allocator.rs:1827-1831`) + `capture_and_replace` (`:2017-2045`); retained allocator reseed is `reseed_retained_from` (`:4086-4223`), NAT64 prefix reseed `nat64.rs:938`. Current HA rollback interprets every bit `0..127` as a worker. | The quarantine census covers capture, refused replacement/rollback, worker-holder reconstruction, BPF mirror restoration, allocator reseed, NAT64/SNAT, worker retirement, and release/expiry. Reserve bit 127 exclusively for quarantine; worker restore covers 0–126 only; keep bit/HOLD through refused HA replacement. The §5 quarantine cell is mandatory. |
+| `fd32d2df5` (#11478), plus `3be469bc3`/#10788 and `01879c222`/#10789 holder restore | `AllocatorHolderSnapshot` (`:221-224`) holds the published RuntimeView's SNAT/NAT64 holder masks, populated by `reserve_synced_translation` (`session_import.rs:338-437`); `rollback_rejected_mirror_import` (`:439-573`) restores the incumbent allocator reservation, with worker loops at `:503,533` (both `0u32..128`); `restore_rejected_forward_mirror` (`:575+`) restores the forward BPF mirror. Atomic allocator capture is `CapturedLiveGuard` (`nat/allocator.rs:1827-1831`) + `capture_and_replace` (`:2017-2045`); retained allocator reseed is `reseed_retained_from` (`:4086-4223`), NAT64 prefix reseed `nat64.rs:938`. Current HA rollback interprets every bit `0..127` as a worker. | The quarantine census covers capture, refused replacement/rollback, worker-holder reconstruction, BPF mirror restoration, allocator reseed, NAT64/SNAT, worker retirement, and release/expiry. Reserve bit 127 exclusively for quarantine; worker restore covers 0–126 only; keep bit/HOLD through refused HA replacement. The §5 quarantine cell is mandatory. |
 | Post-pin routing/allocator/lifecycle intersection, `2ccea8434..0ab1c7d87` (11 commits; 309 paths in total) | `8413be3a5` adds `UnbindInterfaceFromVRFs`/`LinkSetNoMaster` (`pkg/routing/vrf.go:240`), a route-domain writer added to M1. In `daemon_flow.go`, `RouteReplace` is now `:608,:689` and `RouteDel` `:740`; the `8413` flow/routes diff is the claim-helper rename, not a new route writer. `5c7c57c54` adds API-auth hashing to `Store.SyncApply` (`configstore/store.go:993`) before the still-required lenient compile (`:822-845`); M3 validation must remain in that compile. `0c3d0b7a0` adds bounded idle-lease import state in `nat/allocator.rs`; `20c731bf1` adds persistent-NAT clear fences and allocator carry (`carry_persistent_nat_clear_fences_from`); both are additional quarantine-preservation/cleanup consumers. `b100d557f` changes the HA watchdog cleanup portion of `daemon_run_shutdown.go`, not the #9506 helper-stop/join/flag-writer quiescence order. `1f436241f` adds host-input warning/flush logic to `daemon_apply_commit.go`, not the peer-snapshot authorization check. | The post-pin intersections were path-checked and the cited functions re-anchored; specifically re-review M3's post-hash lenient validator and quarantine survival across idle import, persistent-clear carry, helper shutdown and allocator reseed. New q0 route-domain unbinds are refused through the same S4 pre-effective boundary. |
 
 The effective snapshot floor and authorization are a single end-to-end
@@ -1002,9 +1002,13 @@ all 35 design paths exist, as checked in §4.2.
   and permanently fence their epoch: no clean ack for that epoch ever;
   no descendant generation clears the ancestor, and OPEN/mutation stay
   refused until reboot retires the boot-bound epoch. An unreleased
-  `IoRelease` ancestor blocks OPEN/mutation until target-write release
-  or bound-writer death-proof, after which all remaining S4 gates still
-  apply. A drift `ASYNC-SUSPECT` blocks OPEN until the S4 fence proves
+  `IoRelease` ancestor blocks OPEN/mutation until a terminal target-write
+  CQE or terminal `WriteResult` proves release. If writer death, ring
+  teardown, or join occurs first without that release proof, each
+  surviving obligation transitions to `Leaked`; that ancestor blocks
+  OPEN/mutation until reboot retires its boot-bound epoch. After proved
+  release, all remaining S4 gates still apply. A drift `ASYNC-SUSPECT`
+  blocks OPEN until the S4 fence proves
   all old-epoch I/O final; only then may same-environment re-admission
   pass the ordinary S4 checks. The boot-current PERMUTATION-FREEZE
   continues to refuse step-6 mutation until reboot. A new epoch never
@@ -1883,9 +1887,10 @@ all 35 design paths exist, as checked in §4.2.
   RETRIED on every stale read until it succeeds — best-effort,
   one locked syscall per read);
   current boot + non-empty entries → mutation REFUSED.
-  Known stale-boot unlink failure → row 6: alarm; refuse mutation,
-  but OPEN iff otherwise admissible (same-environment fresh admission,
-  no unresolved ancestor). Non-ENOENT read error → row 5: treat as SET,
+  Known stale-boot file whose unlink failed (mirror clear, no
+  unresolved ancestor) → alarm; refuse mutation, but OPEN iff otherwise
+  admissible (same-environment fresh admission). Malformed/unreadable
+  current file or non-ENOENT read error → treat as SET,
   REFUSE both OPEN and mutation, and alarm. WRITE SIDE
   (R9 Host-6/7 — cumulative appends are FORBIDDEN without a
   boot check): every flag write runs read-modify-write under
@@ -1932,7 +1937,7 @@ all 35 design paths exist, as checked in §4.2.
   | Current-boot durable flag set; mirror clear; same effective routing/mode environment re-proved; zero old I/O and no unresolved ancestor | Allowed after same-environment re-admission (same or fresh generation); the flag does not itself block OPEN | REFUSED until reboot retires the flag |
   | `fenceFlagLive` sticky mirror SET, regardless of file contents or fresh predicate | REFUSED until reboot-init clears the mirror | REFUSED until reboot |
   | Unresolved `Leaked` ancestor, regardless of descendant generation or clean snapshot | REFUSED until reboot retires the boot-bound epoch | REFUSED until reboot retires the boot-bound epoch |
-  | Unreleased `IoRelease` ancestor | REFUSED until target-write release or bound-writer death-proof; then re-evaluate all remaining S4 OPEN checks | REFUSED while unproved; after proof, only the ordinary S4 close → fence ACK + zero old I/O → owned mutation → fresh admission sequence |
+  | Unreleased `IoRelease` ancestor | REFUSED until a terminal target-write CQE or terminal `WriteResult` proves release; if writer death/ring teardown leaves an unreleased survivor, transition it to `Leaked` | REFUSED while unreleased; after proved release, only the ordinary S4 close → fence ACK + zero old I/O → owned mutation → fresh admission sequence; if transitioned to `Leaked`, REFUSED until reboot retires its epoch |
   | Drift `ASYNC-SUSPECT` ancestor | REFUSED until the S4 fence proves all old-epoch I/O final; then same-environment fresh admission only, subject to the remaining rows | REFUSED while the boot-current PERMUTATION-FREEZE is set, including after fence finality; reboot is required |
   | Malformed/unreadable current file or non-ENOENT read error | REFUSED + alarm | REFUSED + alarm |
   | Known stale-boot file whose unlink failed; mirror clear; no unresolved ancestor | OPEN only if same-environment fresh admission passes | REFUSED + alarm until a locked stale-read unlink succeeds |
