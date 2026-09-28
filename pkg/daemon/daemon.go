@@ -51,11 +51,15 @@ import (
 
 // Options configures the daemon.
 type Options struct {
-	ConfigFile  string
-	NoDataplane bool   // set to true to run without a dataplane (config-only mode)
-	APIAddr     string // HTTP API listen address (empty = disabled)
-	GRPCAddr    string // gRPC API listen address (empty = disabled)
-	Version     string // software version string
+	ConfigFile string
+	// APIAuthArchiveMigrationDir explicitly opts an xpf-owned local archive
+	// root into legacy api-auth cleanup. Production supplies only its default
+	// local archive path; tests/custom users leave it empty or inject a temp dir.
+	APIAuthArchiveMigrationDir string
+	NoDataplane                bool   // set to true to run without a dataplane (config-only mode)
+	APIAddr                    string // HTTP API listen address (empty = disabled)
+	GRPCAddr                   string // gRPC API listen address
+	Version                    string // build version for the config DB compatibility envelope
 	// #1620: cold-path latency histogram sample mask. nil pointer ⇒
 	// userspace-dp uses default 0xff (1-in-256). Non-nil pointer ⇒
 	// the operator explicitly set --cold-path-sample-mask (and, if
@@ -1114,6 +1118,21 @@ type Daemon struct {
 	// the operator-visible signal the pre-#6802 code had none of; a rising value
 	// means now-denied host-inbound flows may still be authorized.
 	hostInboundConntrackFlushFailures atomic.Uint64
+	// keptSuspiciousMu guards keptSuspiciousStash: the last flush sweep's
+	// kept-suspicious evidence (#10752 round 4). The commit funnel clears it
+	// immediately before its apply; flushDeniedHostInboundConntrack stores a
+	// fresh report at the end of every sweep it runs; the funnel reads it
+	// when projecting the transition-aware commit warning. Same-goroutine
+	// under applySem on the commit path; the mutex covers background applies
+	// (DHCP/HA/retry) that also run the sweep.
+	keptSuspiciousMu    sync.Mutex
+	keptSuspiciousStash *keptSuspiciousApplyReport
+	// tcpLoosePostureFailures counts nf_conntrack_tcp_loose=0 establish/verify
+	// failures (#10752). tcpLooseDisabled latches true only when the value last
+	// verified as zero; every successful host-inbound apply re-drives both, so
+	// a manual revert converges on the next commit.
+	tcpLoosePostureFailures atomic.Uint64
+	tcpLooseDisabled        atomic.Bool
 	// hostInputFenceConntrackDebt is separate from the service-tightening
 	// reconcile above: an XFRM master overlay revokes every direct-host flow,
 	// including flows that ordinary host-inbound policy still permits.
@@ -1906,6 +1925,10 @@ func New(opts Options) (*Daemon, error) {
 	store, err := configstore.New(opts.ConfigFile)
 	if err != nil {
 		return nil, fmt.Errorf("config store: %w", err)
+	}
+
+	if opts.APIAuthArchiveMigrationDir != "" {
+		store.SetAPIAuthArchiveMigrationDir(opts.APIAuthArchiveMigrationDir)
 	}
 
 	// Stamp the build version into the config-DB compatibility envelope on

@@ -32,12 +32,11 @@
 // ambiguous uid resolves to no name at all on both surfaces since #6645, which
 // is agreement, but agreement on a denial rather than on a class.
 //
-// A configured `system services web-management api-auth` credential is the
-// second, weaker identity: it proves possession of a shared secret rather than
-// which account is calling. It is accepted as a full-power principal because
-// that is exactly what it already grants today and what #4047 requires an
-// off-loopback bind to carry; a peer UID that resolves to a configured login
-// user is MORE specific and therefore wins over it.
+// A configured `system services web-management api-auth` identity is the
+// second identity. Basic usernames and named API-key labels select configured
+// `system login class` scopes; the default is read-only, and no credential
+// becomes a superuser just by being valid. A peer UID that resolves to a
+// configured local login user is MORE specific and therefore wins over it.
 //
 // # Fail-closed, and what that costs
 //
@@ -79,8 +78,8 @@ const (
 	// SourcePeerUID means the kernel reported the UID owning the peer end of
 	// the connection. Unforgeable by the caller.
 	SourcePeerUID
-	// SourceCredential means the request carried a valid configured api-auth
-	// credential. Proves secret possession, not account identity.
+	// SourceCredential means the request proved possession of a configured
+	// api-auth secret mapped to this identity and class.
 	SourceCredential
 )
 
@@ -104,16 +103,13 @@ type Principal struct {
 	Source Source
 	// UID is the peer's numeric UID. Meaningful only for SourcePeerUID.
 	UID uint32
-	// Username is the OS account name for UID, or the api-auth user name for
-	// SourceCredential. Empty when the UID has no /etc/passwd entry.
+	// Username is the OS account name for UID, or the configured API identity
+	// name. Empty for an unnamed API key or an unresolved UID.
 	Username string
-	// Class is the `system login user <name> class` of Username, empty when
-	// Username is not a configured login user.
+	// Class is the `system login class` assigned to this principal.
 	Class string
-	// Superuser marks a principal that holds every permission WITHOUT going
-	// through a login class: UID 0, and a valid api-auth credential. It is a
-	// distinct field rather than a synthesized Class of "super-user" so a
-	// denial message never claims a class the config does not contain.
+	// Superuser marks UID 0, which is authorized without a configured login
+	// class because root owns the daemon and its on-disk config.
 	Superuser bool
 	// Detail explains an unestablished or unusable identity, for the denial
 	// message and the audit log. Never carries a secret.
@@ -137,8 +133,10 @@ func (p Principal) Resolved() bool {
 // name and class), never another principal's, and never a secret.
 func (p Principal) String() string {
 	switch {
-	case p.Superuser && p.Source == SourceCredential:
-		return "api-auth credential"
+	case p.Source == SourceCredential && p.Username != "":
+		return fmt.Sprintf("api-auth identity %q (class %q)", p.Username, p.Class)
+	case p.Source == SourceCredential:
+		return fmt.Sprintf("api-auth key (class %q)", p.Class)
 	case p.Source == SourcePeerUID && p.Username != "":
 		return fmt.Sprintf("uid %d (%s, class %q)", p.UID, p.Username, p.Class)
 	case p.Source == SourcePeerUID:
@@ -155,19 +153,12 @@ func (p Principal) String() string {
 //
 // The order of the checks is the authorization policy:
 //
-//  1. A superuser principal (UID 0, or a valid api-auth credential) is
-//     authorized for everything. Denying UID 0 would be theater — root owns
-//     the config DB on disk and the daemon process itself.
+//  1. A superuser principal (UID 0) is authorized for everything. Denying UID 0
+//     would be theater — root owns the config DB on disk and the daemon process.
 //  2. A principal carrying a login class is authorized iff that class holds
-//     `required` (config.ClassHasPermission — the same evaluator the CLI uses,
-//     so the two surfaces cannot disagree ABOUT WHAT A CLASS PERMITS). Which
-//     class a caller HOLDS is a separate question, answered by rule 1 for root
-//     and by the shared passwd resolver for everyone else; see the package
-//     comment for the one case (uid 0 with an explicit class) where the
-//     surfaces deliberately differ.
+//     `required` (config.ClassHasPermission — the same evaluator the CLI uses).
 //  3. Everything else is DENIED, including a peer UID that resolved to a real
-//     OS account which is not a configured login user. "Not in the RBAC
-//     model" is a reason to deny, not a reason to pick a default class.
+//     OS account which is not a configured `system login user`.
 func Authorize(cfg *config.Config, p Principal, required config.LoginClassPermission) error {
 	if p.Superuser {
 		return nil
@@ -180,7 +171,7 @@ func Authorize(cfg *config.Config, p Principal, required config.LoginClassPermis
 		return fmt.Errorf("permission denied: the server could not establish who is calling (%s)", detail)
 	}
 	if p.Class == "" {
-		return fmt.Errorf("permission denied: %s is not a configured `system login user`, so no login class governs it", p)
+		return fmt.Errorf("permission denied: %s has no assigned login class", p)
 	}
 	if _, known := config.ResolveClassPermissions(cfg, p.Class); !known {
 		return fmt.Errorf("permission denied: %s holds unknown login class %q", p, p.Class)
@@ -268,18 +259,12 @@ func PrincipalForUID(cfg *config.Config, uid uint32) Principal {
 	return p
 }
 
-// CredentialPrincipal builds the full-power principal for a request that
-// presented a valid `system services web-management api-auth` credential
-// (#5561). `user` is the authenticated Basic username, or "" for a Bearer /
-// X-API-Key token, which carries no user identity at all.
-//
-// The api-auth secret is a full-power credential by construction: it is the
-// ONLY thing standing between the network and the whole mutating REST surface
-// on an off-loopback bind (#4047), so it already grants everything. Narrowing
-// it to a login class would be a separate, breaking change to an existing
-// deployment posture; see pkg/api/README.md.
-func CredentialPrincipal(user string) Principal {
-	return Principal{Source: SourceCredential, Username: user, Superuser: true}
+// CredentialPrincipal builds a class-scoped principal for a valid named
+// api-auth credential. `identity` is the Basic username or named API key;
+// unnamed legacy tokens have an empty identity. Class defaults are resolved by
+// config compilation and runtime wiring, not elevated here.
+func CredentialPrincipal(identity, class string) Principal {
+	return Principal{Source: SourceCredential, Username: identity, Class: class}
 }
 
 // Unauthenticated returns the principal for a caller whose identity could not

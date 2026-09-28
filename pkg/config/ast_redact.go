@@ -163,8 +163,14 @@ func secretIndices(fp []string) []int {
 					out = append(out, j)
 				}
 			}
+		case "secret":
+			// `secret` is generic; redact it only for named API-key identities.
+			if isAPIAuthNamedKeySecretPath(fp[:i]) {
+				for j := i + 1; j < len(fp); j++ {
+					out = append(out, j)
+				}
+			}
 		case "key":
-			// Generic keyword — secret only as the OSPF hello md5 key:
 			// `authentication md5 <key-id> key <secret>`. A GRE tunnel `key`
 			// or a chassis device-map identity `key` has no such context.
 			if i >= 3 && fp[i-2] == "md5" && fp[i-3] == "authentication" && i+1 < len(fp) {

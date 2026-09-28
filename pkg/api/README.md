@@ -417,12 +417,13 @@ never reads.
 ### Authorization audit visibility (#10832)
 
 REST login-class authorization denials and failed `api-auth` credential checks
-are counted on the `rest_login_class` and `rest_api_auth_fail` surfaces of
-`xpf_authz_denials_total`, including denials whose WARN is suppressed. Each
+are counted on the `rest_login_class` and `rest_api_auth` surfaces. Each
 surface emits rate-limited WARN records at the shipped Info log level, with
 subsequent events kept at Debug; credentials and request bodies are never
-logged. Successful `PermConfig` and `PermMaint` mutations instead emit an Info
-record with the principal, identity source, route, and required permission.
+logged. Denial records include the principal, identity source, route, and
+required permission. Successful `PermConfig` and `PermMaint` mutations instead
+emit an Info audit event. These are fixed counters rather than unbounded
+identity labels, so usernames or secrets cannot grow metric cardinality.
 
 ### The read surface (#6660)
 
@@ -479,11 +480,11 @@ login user` a real shell account (`useradd -m -s /bin/bash`), and the CLI's RBAC
 check runs *in the CLI process*. A `read-only` class holder could therefore
 `curl 127.0.0.1:8080/api/v1/config/set` and commit, and the class boundary never
 ran. The pre-existing gates do not cover this: the #4047/#5127 clamp constrains
-*where* the listener binds, not *who* connects; `api-auth` is off by default on
 a loopback bind (`dynamicAuthMiddleware` passes every request through when the
-snapshot is nil) and is a shared secret rather than an identity; and the #5055
-cross-site guard is a browser-CSRF defense that a non-browser client passes by
-design.
+snapshot is nil). When configured, API credentials now resolve to their
+per-identity login class (default `read-only`, #10826), rather than acting as a
+shared full-power secret. The #5055 cross-site guard remains a browser-CSRF
+defense that a non-browser client passes by design.
 
 **How the caller is identified.** The peer's UID is read out of the kernel's
 socket table (`/proc/net/tcp` and `/proc/net/tcp6`), resolved to an account name
@@ -555,10 +556,42 @@ and the pool admits past the cap it exists to enforce.
 `PeerLookupSlotsInUseForTest()` and `PeerIdentityWaitersForTest()` are the
 accept-side and request-side gauges; a wedge pins both at once.
 
-An **`api-auth` credential** is the second identity. It authorizes as a
-full-power principal, which is what it already grants (#4047 makes it the sole
-gate on an off-loopback bind), so narrowing it would be a separate breaking
-change.
+An **`api-auth` identity** is the second identity, and it is scoped like a
+`system login user`: Basic users and named API keys carry a login class, while
+legacy repeated `api-key` tokens inherit the `api-auth` default. The default
+class is `read-only`; a class granting maintenance authority must be selected
+explicitly. Every identity needs a UTC `expires YYYY-MM-DD` date, inherited
+from `api-auth expires` when configured there. Basic passwords must be at least
+12 characters and API keys at least 16. Compiled credentials and persisted
+active, rollback, and pending-confirm config trees contain tagged salted bcrypt
+verifiers (SHA-256 prehashed for bcrypt's fixed input limit), never configured
+plaintext. Loading a legacy database migrates those trees before they can serve
+or roll back; the confirm-record hash transition preserves the auto-rollback
+window if a restart interrupts that migration.
+
+Named API-key `secret` leaves are also masked in raw-AST config displays,
+exports, searches, and control-character diagnostics. The generic keyword is
+recognized only below `api-auth key`, avoiding false redaction of unrelated
+identifiers.
+
+REST authentication failures are throttled per source/account (5 failures in
+10 minutes locks the pair for 5 minutes with exponential re-locks, capped at
+one hour) and per source (20 failures in 10 minutes) to stop username rotation.
+Failures and lockout refusals increment the fixed `rest_api_auth` audit counter.
+
+A bad `Authorization` header remains a charged failed attempt even when a valid
+`X-API-Key` fallback authorizes the request. The account lock follows the
+claimed identity; a clean key-only request remains available while the
+source-level budget is below its cap.
+
+When no credential authorizes a request, REST responds with HTTP 401; a
+throttle refusal is HTTP 429 with a `Retry-After` header. Throttle state is
+in-memory and local to one REST middleware/`Server` instance: HA peers and a
+restarted process start with fresh independent budgets, so this is not a
+cluster-wide or restart-persistent attempt quota.
+Credentials are not accepted over clear HTTP: strict compile rejects explicit
+HTTP plus api-auth, and runtime disables the HTTP leg whenever an api-auth
+identity is active; use HTTPS for credentialed REST access.
 
 **Precedence: when the caller is LOCAL, the peer identity is authoritative.** A
 credential may speak only for a caller the login model does not describe, or one
@@ -969,14 +1002,12 @@ a new hole.
 
   The correct statement of the bound is not "nobody can get here", it is **what
   governs a caller who does**: a peer this host cannot place is treated as
-  remote, and the `api-auth` credential is the authority for it. That is the
-  design #4047 mandates — on an off-loopback bind the credential is the sole
-  gate — not a leak in it. The operational consequence is concrete and worth
-  stating plainly: **a container on this host that holds the `api-auth` secret
-  has the same power over the mutation surface as a remote administrator
-  holding it.** If that is not wanted, do not give containers the secret, and
-  keep `web-management` on loopback where `couldBeLocal` short-circuits before
-  any of this applies.
+  remote, and a valid `api-auth` identity is evaluated under its configured
+  login class (default `read-only`, #10826). That remains the #4047 network
+  authentication gate, but secret possession no longer grants every permission.
+  A container holding the credential receives only that identity's configured
+  rights; use an explicitly privileged class only when that privilege is
+  intended.
 - **A brand-new local address — the direction that IS closed.** The
   host-address snapshot is refreshed at most once per second, for hits *and*
   misses, so for up to a second after an address is added to this host a caller
@@ -1247,21 +1278,18 @@ the drop fails loudly instead of going quietly vacuous.
   Read-only GET handlers do not read a body and are out of scope. Add a new
   mutation handler via `decodeJSONBody`, not a bare `json.NewDecoder(r.Body)`,
   so the cap and 413 are inherited. Pinned by `http_dos_hardening_4150_test.go`.
-- **Constant-time credential comparison (#4157).** `authMiddleware` /
-  `checkAuthorization` (`auth.go`) validate every credential in constant
-  time to avoid a network-timing side channel. API keys and Bearer tokens
-  go through `constantTimeAPIKeyMatch`, which compares the presented token
-  against EVERY configured key with `subtle.ConstantTimeCompare` and OR-s
-  the results — it never short-circuits on the first match (so *which* key
-  matched does not leak either) and never uses the old `cfg.APIKeys[token]`
-  map lookup (whose latency varied with hash-bucket collisions / presence).
-  Basic-auth passwords already used `ConstantTimeCompare`; the username path
-  no longer early-returns on `!exists` — it always runs the password compare
-  and AND-s with existence, so a known vs. unknown username is not
-  distinguishable by response timing. `ConstantTimeCompare` returns 0 on a
-  length mismatch (reveals length, not content — acceptable). Pinned by
-  `auth_consttime_4157_test.go`, including an AST regression guard that fails
-  if any auth path reverts to a bare `cfg.APIKeys[...]` lookup.
+- **Credential verification (#4157/#10826).** `authMiddleware` checks every
+  configured API-key verifier with bcrypt and does not stop at the first match;
+  duplicate key identities matching one presented secret are denied as
+  ambiguous. Basic users also use bcrypt verifiers, and unknown usernames pay
+  the same bcrypt cost through a dummy verifier before the existence result is
+  applied. A SHA-256 prehash prevents bcrypt's 72-byte truncation behavior.
+  The #10825 failure budget runs before verification to bound attacker-driven
+  bcrypt CPU. Bcrypt-backed HTTP authentication is exercised by
+  `api_auth_https_10826_test.go`; usable verifier compilation is pinned by
+  `compiler_system_multivalue_6692_test.go` and `set_repeated_leaf_3984_test.go`.
+  `auth_consttime_4157_test.go` covers the legacy plaintext embedding fallback,
+  and `auth_throttle_10825_test.go` covers admission budgets.
 - **Day-2 listener + auth reconcile (#5866).** The management server used to be
   constructed ONCE at daemon startup and never reconciled, so a committed
   web-management change (bind address / port / TLS on/off / api-auth) reported

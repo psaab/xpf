@@ -387,6 +387,17 @@ func IsSecretLeafKeyword(keyword string) bool {
 	return secretLeafKeywords[keyword]
 }
 
+// isAPIAuthNamedKeySecretPath qualifies the generic `secret` keyword only for
+// the named API-key leaf (`api-auth key <name> secret`).
+func isAPIAuthNamedKeySecretPath(path []string) bool {
+	for i := 0; i+1 < len(path); i++ {
+		if path[i] == "api-auth" && path[i+1] == "key" {
+			return true
+		}
+	}
+	return false
+}
+
 // isSecretLeaf reports whether the leaf named by keys carries a credential,
 // given the path prefix it was found under.
 func isSecretLeaf(prefix string, keys []string) bool {
@@ -395,6 +406,9 @@ func isSecretLeaf(prefix string, keys []string) bool {
 	}
 	kw := keys[0]
 	if secretLeafKeywords[kw] {
+		return true
+	}
+	if kw == "secret" && isAPIAuthNamedKeySecretPath(strings.Fields(prefix)) {
 		return true
 	}
 	roots, dualUse := secretLeafKeywordsByRoot[kw]

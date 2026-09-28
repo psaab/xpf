@@ -353,6 +353,7 @@ type pendingPeer struct {
 	deadline       time.Time
 	client, server net.Addr
 	id             authz.PeerIdentity
+	authSlot       *authSlot
 }
 
 // wait blocks until the lookup finishes, the request context is cancelled, or
@@ -598,9 +599,10 @@ func (s *Server) authorizeInputs(r *http.Request) (*config.Config, authz.Princip
 // (the peer wait, the interface enumeration) must NOT run again: repeating them
 // would re-answer questions whose inputs are fixed at accept while paying their
 // full cost on every mutating request. What it does repeat is exactly what a
-// concurrent commit can change — s.activeConfig() and s.auth — so a demotion, a
-// deletion from `system login user`, or an api-auth revocation that lands while
-// the caller is still sending its body reaches the verdict that admits the
+// concurrent commit can change — s.activeConfig() and this listener's auth slot
+// (live legs follow the current policy; retired legs only tighten) — so a
+// demotion, deletion from `system login user`, or api-auth revocation that lands
+// while the caller is still sending its body reaches the verdict that admits the
 // mutation.
 func (s *Server) reauthorizeInputs(r *http.Request, ri *requestIdentity) (*config.Config, authz.Principal) {
 	cfg := s.activeConfig()
@@ -633,9 +635,8 @@ func (s *Server) reauthorizeInputs(r *http.Request, ri *requestIdentity) (*confi
 //     Grant it a class if it needs access; that is the one place access is
 //     supposed to be written down.
 //  3. Local, not attributable — DENIED.
-//  4. Not on this host — a remote administrator, which is exactly what the
-//     api-auth credential exists to identify (#4047 requires one for any
-//     off-loopback bind).
+//  4. Not on this host — a remote caller, which api-auth identifies under its
+//     configured login class (#4047 requires credentials for off-loopback binds).
 //
 // Rows 1-3 collapse to: a caller this host CAN PLACE never reaches s.credential.
 //
@@ -665,8 +666,7 @@ func (s *Server) principalFrom(r *http.Request, cfg *config.Config, ri *requestI
 	// The listener's OWN authentication gate is evaluated exactly once, by
 	// dynamicAuthMiddleware, before this middleware is entered — which is
 	// before the caller has supplied its body. Re-evaluate it HERE so the
-	// gate's second pass answers to the LIVE snapshot (#5561 round 10,
-	// finding 1).
+	// gate's second pass answers to the same listener slot.
 	//
 	// Without this, only the credential row below re-validated, and it is the
 	// row a local caller never reaches. So an attributed LOCAL administrator
@@ -688,7 +688,7 @@ func (s *Server) principalFrom(r *http.Request, cfg *config.Config, ri *requestI
 	// The denial is a 403 rather than the middleware's 401 because it is the
 	// gate that writes it; a caller racing a credential change gets a refusal
 	// with a reason either way.
-	if a := s.auth.Load(); a != nil {
+	if a := s.authForRequest(r); a != nil {
 		if _, ok := credentialPrincipalUser(*a, r); !ok {
 			return authz.Unauthenticated(
 				"api-auth credential was revoked, rotated, or newly required while this " +
@@ -767,43 +767,47 @@ func (s *Server) principalFrom(r *http.Request, cfg *config.Config, ri *requestI
 // credential returns the principal for a valid api-auth credential on r, if the
 // listener has an auth policy and the request satisfies it.
 func (s *Server) credential(r *http.Request) (authz.Principal, bool) {
-	a := s.auth.Load()
+	a := s.authForRequest(r)
 	if a == nil {
 		return authz.Principal{}, false
 	}
-	user, ok := credentialPrincipalUser(*a, r)
+	identity, class, ok := credentialPrincipalIdentity(*a, r)
 	if !ok {
 		return authz.Principal{}, false
 	}
-	return authz.CredentialPrincipal(user), true
+	return authz.CredentialPrincipal(identity, class), true
 }
 
-// credentialPrincipalUser reports whether r presented a VALID configured
-// api-auth credential, and the Basic username it authenticated as ("" for a
-// Bearer / X-API-Key token, which names no user).
-//
-// It routes through the same checkAuthorization / constantTimeAPIKeyMatch
-// helpers the auth middleware uses, so the #4157 constant-time and #5636
-// empty-secret properties are the middleware's, not a second implementation of
-// them. The username is read back only AFTER the credential validated, so a
-// wrong password never yields a name.
-func credentialPrincipalUser(cfg AuthConfig, r *http.Request) (string, bool) {
-	if auth := r.Header.Get("Authorization"); auth != "" && checkAuthorization(auth, cfg) {
-		if !strings.HasPrefix(auth, "Basic ") {
-			return "", true // Bearer token — authenticated, names no user
+// credentialPrincipalIdentity reports the name and login class of a valid
+// credential. Basic usernames and named API keys are stable identities;
+// unlabelled legacy API keys receive the configured least-privilege class.
+func credentialPrincipalIdentity(cfg AuthConfig, r *http.Request) (identity, class string, ok bool) {
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Basic ") {
+		if !checkAuthorization(auth, cfg) {
+			goto apiKey
 		}
 		payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
 		if err != nil {
-			// Unreachable: checkAuthorization already decoded it.
-			return "", true
+			return "", "", false
 		}
 		user, _, _ := strings.Cut(string(payload), ":")
-		return user, true
+		return user, resolvedCredentialClass(cfg.UserClasses[user]), true
+	} else if strings.HasPrefix(auth, "Bearer ") {
+		if identity, class, matched := matchAPIKeyIdentity(cfg, strings.TrimPrefix(auth, "Bearer ")); matched {
+			return identity, class, true
+		}
 	}
-	if key := r.Header.Get("X-API-Key"); key != "" && constantTimeAPIKeyMatch(cfg, key) {
-		return "", true
+
+apiKey:
+	if key := r.Header.Get("X-API-Key"); key != "" {
+		return matchAPIKeyIdentity(cfg, key)
 	}
-	return "", false
+	return "", "", false
+}
+
+func credentialPrincipalUser(cfg AuthConfig, r *http.Request) (string, bool) {
+	identity, _, ok := credentialPrincipalIdentity(cfg, r)
+	return identity, ok
 }
 
 // mutationAuthzGuard rejects a state-changing request whose caller the server

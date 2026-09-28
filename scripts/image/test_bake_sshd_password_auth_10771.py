@@ -58,26 +58,26 @@ class FactorySSHDPasswordAuthTests(unittest.TestCase):
             cloudimg = config_dir / "60-cloudimg-settings.conf"
             cloudimg.write_text("PasswordAuthentication yes\n", encoding="utf-8")
 
-            def effective_password_authentication():
+            def effective_settings():
                 result = subprocess.run(
                     [sshd, "-T", "-f", str(main_config)],
                     check=True,
                     capture_output=True,
                     text=True,
                 )
-                settings = [
-                    line for line in result.stdout.splitlines()
-                    if line.startswith("passwordauthentication ")
-                ]
-                self.assertEqual(len(settings), 1, "sshd -T must report PasswordAuthentication")
-                return settings[0]
+                return dict(line.split(maxsplit=1) for line in result.stdout.splitlines() if " " in line)
 
             # Bind the fixture to the Canonical drop-in being the setting owner
             # without xpf's earlier-sorting factory pin.
-            self.assertEqual(effective_password_authentication(), "passwordauthentication yes")
+            self.assertEqual(effective_settings()["passwordauthentication"], "yes")
 
             (config_dir / "10-xpf-factory.conf").write_text(dropins[0], encoding="utf-8")
-            self.assertEqual(effective_password_authentication(), "passwordauthentication no")
+            effective = effective_settings()
+            self.assertEqual(effective["passwordauthentication"], "no")
+            self.assertEqual(effective["kbdinteractiveauthentication"], "no")
+            self.assertEqual(effective["maxauthtries"], "3")
+            self.assertEqual(effective["logingracetime"], "30")
+            self.assertEqual(effective["permitemptypasswords"], "no")
 
 
 if __name__ == "__main__":

@@ -115,6 +115,19 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"1 means the retry owner is running but not converging.",
 		nil, nil,
 	)
+	c.hostInboundTCPlooseDisabled = prometheus.NewDesc(
+		"xpf_host_inbound_tcp_loose_disabled",
+		"1 when nf_conntrack_tcp_loose last verified as 0 (#10752). 0 means "+
+			"loose mid-stream pickup may be active and stale TCP replies rely "+
+			"on the catalog guard alone. Re-driven on every successful "+
+			"host-inbound apply.",
+		nil, nil,
+	)
+	c.hostInboundTCPloosePostureFailures = prometheus.NewDesc(
+		"xpf_host_inbound_tcp_loose_posture_failures_total",
+		"Total nf_conntrack_tcp_loose=0 establish/verify failures (#10752).",
+		nil, nil,
+	)
 	// #6800: an xpf-managed service configuration file converges on disk and the
 	// applier then gates its RUNTIME reload on "did the on-disk set change".
 	// That gate erased the debt of a FAILED reload — the file was already

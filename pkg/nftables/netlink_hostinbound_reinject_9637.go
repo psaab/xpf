@@ -27,6 +27,18 @@ func hostInboundReinjectDestinations(views []HostInboundZoneView) (v4, v6 []stri
 	return v4, v6
 }
 
+// hostInboundTrustedReinject reports whether the chain will actually render
+// the reinject accept: dataplane fresh AND addressed views. The stale-reply
+// fallback excludes the TUN only then; otherwise TUN arrivals are guarded
+// like any other uncovered ingress since no exemption exists to preserve.
+func hostInboundTrustedReinject(spec HostInboundSpec) bool {
+	if !spec.DataplaneFresh {
+		return false
+	}
+	v4, v6 := hostInboundReinjectDestinations(spec.Views)
+	return len(v4) > 0 || len(v6) > 0
+}
+
 // emitHostInboundReinjectAcceptNetlink mirrors emitHostInboundReinjectAccept
 // (#9637 residual): the userspace-adjudicated reinject accept, scoped to the
 // slow-path TUN and the view addresses, carrying the named accept counter.

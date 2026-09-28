@@ -3,7 +3,10 @@ package configstore
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #8566: a boot `ReadConfirm` failure must not silently discard the pending
@@ -34,12 +37,30 @@ import (
 
 // armThenCorruptConfirm arms a window and then makes confirm.json unreadable,
 // returning the store path and the still-active (unconfirmed) set.
-func armThenCorruptConfirm(t *testing.T) (string, string) {
+func armThenCorruptConfirm(t *testing.T, withLegacyAPIAuth ...bool) (string, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config")
 	s := newTestStoreAt(t, path)
 	commitBaseline(t, s)
 	stagePendingConfirmed(t, s, "eth1", "untrust")
+	if len(withLegacyAPIAuth) > 0 && withLegacyAPIAuth[0] {
+		// Add a legacy api-auth subtree directly to the persisted pending tree,
+		// then refresh the rollback binding. This models the upgrade input while
+		// keeping the fixture's generation-bound history internally consistent.
+		active, err := s.db.ReadActive()
+		if err != nil || active == nil {
+			t.Fatalf("read pending active config: tree=%v err=%v", active, err)
+		}
+		addLegacyAPIAuthToActive10825(t, active)
+		s.active = active
+		if err := s.db.WriteActive(active); err != nil {
+			t.Fatalf("write legacy pending active config: %v", err)
+		}
+		s.saveRollbackFiles()
+		if s.rollbackPersistDegraded {
+			t.Fatal("refresh rollback binding after fixture update")
+		}
+	}
 	unconfirmed := s.ShowActiveSet()
 
 	confirmFile := filepath.Join(filepath.Dir(path), ".configdb", "confirm.json")
@@ -77,6 +98,46 @@ func TestBootReadFailureIsReported_8566(t *testing.T) {
 		t.Fatal("#8566: the box must SAY so. ConfigPersistDegraded() drives /health 503 and " +
 			"xpf_daemon_config_persist_degraded; while it reads false an operator whose " +
 			"rollback safety net has just vanished sees a healthy firewall.")
+	}
+}
+
+func TestBootReadFailureWithLegacyAPIAuthIsNonfatal_8566_10826(t *testing.T) {
+	path, _ := armThenCorruptConfirm(t, true)
+	confirmFile := filepath.Join(filepath.Dir(path), ".configdb", "confirm.json")
+
+	s2 := newTestStoreAt(t, path)
+	if err := s2.Load(); err != nil {
+		t.Fatalf("#8566: unreadable confirm plus legacy active credentials must not make Load fatal: %v", err)
+	}
+	if !s2.ConfirmRecoveryReadFailed() || !s2.ConfigPersistDegraded() {
+		t.Fatal("#8566: unreadable confirm record must remain a visible degraded boot")
+	}
+	if s2.IsConfirmPending() {
+		t.Fatal("unreadable confirm record must not arm a timer")
+	}
+	if got, err := os.ReadFile(confirmFile); err != nil || string(got) != "{not json" {
+		t.Fatalf("unreadable confirm record = %q, %v; want retained original bytes", got, err)
+	}
+	persisted, err := s2.db.ReadActive()
+	if err != nil {
+		t.Fatalf("read migrated active: %v", err)
+	}
+	formatted := persisted.Format()
+	for _, secret := range []string{
+		"correct-horse-battery",
+		"machine-generated-key-alpha",
+		"automation-key-secret-alpha",
+	} {
+		if strings.Contains(formatted, secret) {
+			t.Fatalf("legacy api-auth credential %q remains cleartext after Load", secret)
+		}
+	}
+	apiAuth := s2.ActiveConfig().System.Services.WebManagement.APIAuth
+	if apiAuth == nil || len(apiAuth.Users) != 1 || len(apiAuth.APIKeys) != 1 || len(apiAuth.Keys) != 1 ||
+		!config.VerifyAPIAuthSecret(apiAuth.Users[0].Password.Reveal(), "correct-horse-battery") ||
+		!config.VerifyAPIAuthSecret(apiAuth.APIKeys[0].Reveal(), "machine-generated-key-alpha") ||
+		!config.VerifyAPIAuthSecret(apiAuth.Keys[0].Secret.Reveal(), "automation-key-secret-alpha") {
+		t.Fatal("legacy active credentials were not migrated to usable verifiers")
 	}
 }
 

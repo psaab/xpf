@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
@@ -138,6 +139,83 @@ func TestExportConfigRefusesMissingOrEmptyActiveDB(t *testing.T) {
 	}
 }
 
+func TestOfflineExportHashesLegacyAPIAuthWithoutRewritingDB_10825(t *testing.T) {
+	root := t.TempDir()
+	dbDir := filepath.Join(root, ".configdb")
+	db, err := configstore.NewDB(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const legacy = `system {
+ services {
+  web-management {
+   api-auth {
+    expires 2099-01-01;
+    user admin { password correct-horse-battery; }
+    api-key machine-generated-key-alpha;
+    key automation { secret automation-key-secret-alpha; }
+   }
+  }
+ }
+}`
+	tree, parseErrs := config.NewParser(legacy).Parse()
+	if len(parseErrs) != 0 {
+		t.Fatalf("parse legacy fixture: %v", parseErrs)
+	}
+	if err := db.WriteActive(tree); err != nil {
+		t.Fatalf("write legacy active: %v", err)
+	}
+
+	outPath := filepath.Join(root, "export.conf")
+	if err := exportActiveConfig(dbDir, outPath); err != nil {
+		t.Fatalf("exportActiveConfig: %v", err)
+	}
+	exported, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cleartext := range []string{
+		"correct-horse-battery",
+		"machine-generated-key-alpha",
+		"automation-key-secret-alpha",
+	} {
+		if strings.Contains(string(exported), cleartext) {
+			t.Fatalf("offline export contains cleartext api-auth credential %q:\n%s", cleartext, exported)
+		}
+	}
+	if !strings.Contains(string(exported), "$xpf-bcrypt$") {
+		t.Fatalf("offline export contains no tagged api-auth verifiers:\n%s", exported)
+	}
+
+	// The portable artifact remains usable, while exporting does not mutate
+	// the live DB that a later boot will migrate.
+	exportTree, parseErrs := config.NewParser(string(exported)).Parse()
+	if len(parseErrs) != 0 {
+		t.Fatalf("parse exported config: %v", parseErrs)
+	}
+	auth := exportTree.FindChild("system").FindChild("services").
+		FindChild("web-management").FindChild("api-auth")
+	user := auth.FindChild("user")
+	apiKey := auth.FindChild("api-key")
+	key := auth.FindChild("key")
+	if user == nil || len(user.Keys) < 2 || apiKey == nil || len(apiKey.Keys) < 2 ||
+		key == nil || len(key.Keys) < 2 {
+		t.Fatalf("exported api-auth credentials are incomplete:\n%s", exported)
+	}
+	if !config.VerifyAPIAuthSecret(user.FindChild("password").Keys[1], "correct-horse-battery") ||
+		!config.VerifyAPIAuthSecret(apiKey.Keys[1], "machine-generated-key-alpha") ||
+		!config.VerifyAPIAuthSecret(key.FindChild("secret").Keys[1], "automation-key-secret-alpha") {
+		t.Fatal("exported api-auth verifiers do not accept their original secrets")
+	}
+	after, err := db.ReadActive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(after.Format(), "machine-generated-key-alpha") {
+		t.Fatal("offline export rewrote the legacy active DB instead of migrating only its copy")
+	}
+}
+
 func commitText(t *testing.T, store *configstore.Store, text string) {
 	t.Helper()
 	if err := store.EnterConfigure(); err != nil {
@@ -150,4 +228,50 @@ func commitText(t *testing.T, store *configstore.Store, text string) {
 		t.Fatalf("Commit: %v", err)
 	}
 	store.ExitConfigure()
+}
+
+func TestOfflineExportRejectsMalformedTaggedAPIAuthWithoutMutation_10825(t *testing.T) {
+	root := t.TempDir()
+	dbDir := filepath.Join(root, ".configdb")
+	db, err := configstore.NewDB(dbDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const invalid = `system {
+ services {
+  web-management {
+   api-auth {
+    expires 2099-01-01;
+    user admin { password "$xpf-bcrypt$not-a-valid-verifier"; }
+   }
+  }
+ }
+}`
+	tree, parseErrs := config.NewParser(invalid).Parse()
+	if len(parseErrs) != 0 {
+		t.Fatalf("parse malformed-tag fixture: %v", parseErrs)
+	}
+	if err := db.WriteActive(tree); err != nil {
+		t.Fatalf("write invalid-tag active: %v", err)
+	}
+	activePath := filepath.Join(dbDir, "active.json")
+	before, err := os.ReadFile(activePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outPath := filepath.Join(root, "unsafe-export.conf")
+	err = exportActiveConfig(dbDir, outPath)
+	if err == nil || !strings.Contains(err.Error(), "migrate api-auth credentials") {
+		t.Fatalf("export invalid tagged api-auth config = %v, want actionable migration error", err)
+	}
+	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+		t.Fatalf("invalid api-auth export left an unsafe output: stat error = %v", err)
+	}
+	after, err := os.ReadFile(activePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("failed offline export mutated active.json")
+	}
 }

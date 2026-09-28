@@ -130,6 +130,10 @@ const (
 	// factory-reset helper sweep, so an aliasing or traversal spelling is
 	// rejected at commit rather than resolved at reset time (#10769).
 	ValueAbsPath
+	// ValueString is an opaque single-token string whose accepted form is
+	// defined by the leaf's validator. It marks validator-backed values that
+	// are not identifiers, numbers, or another specialized type.
+	ValueString
 )
 
 // Placeholder returns the angle-bracket placeholder name shown in `?`
@@ -182,6 +186,8 @@ func (v ValueType) Placeholder() string {
 		return "<socket-path>"
 	case ValueAbsPath:
 		return "<path>"
+	case ValueString:
+		return "<value>"
 	}
 	return ""
 }

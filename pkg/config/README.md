@@ -155,10 +155,13 @@ distinction).
   the term CLOSED (#3367) — a deny sentinel, never a match-all widening;
   the out-of-range code-point entry is dropped (the pre-#2447 fail-safe).
 - `ValueType` — `value_type.go`. Classifies a typed leaf's value
-  (`ValueRate`, `ValueByteSizeOrPercent`, `ValueEnumOf`, ...) and supplies
-  the `?`-completion placeholder via `Placeholder()`. Lives here (not
-  cmdtree) so `setSchema` can carry typed-leaf metadata directly;
-  `pkg/cmdtree` re-exports it via aliases. See `docs/config-schema.md`.
+  (`ValueRate`, `ValueByteSizeOrPercent`, `ValueDate`, `ValueString`, ...)
+  and supplies the `?`-completion placeholder via `Placeholder()`.
+  `ValueString` marks opaque values whose accepted form is defined by their
+  leaf validator; its non-`ValueAny` type also makes `SchemaValidate` invoke
+  that validator. Lives here (not cmdtree) so `setSchema` can carry typed-leaf
+  metadata directly; `pkg/cmdtree` re-exports it via aliases. See
+  `docs/config-schema.md`.
 - `SchemaValidate(tree, cfg)` + the generic walker — `schema_walk.go`.
   The #1319 commit-check gate. Descends `setSchema` against the AST (the
   SAME tree the live config-mode `set ... ?` completer walks via

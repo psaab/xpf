@@ -110,14 +110,14 @@ func TestStartInstallsTheNewestSnapshotAcrossAPromotion6719(t *testing.T) {
 			"configures an api-auth user on an off-loopback bind, so this is not the " +
 			"stale-vs-fresh question — the fixture is not reaching resolveAPIBinds")
 	}
-	if live.Users["webadmin"] == oldSecret {
+	if mgmtAuthSecretMatches(t, live, oldSecret) {
 		t.Fatalf("the started listener honours the REVOKED credential. start() derived its " +
 			"snapshot before taking m.mu, so a promotion that landed while it contended for " +
 			"the lock was dropped: the reconcile that carried it found m.srv == nil and " +
 			"no-opped, and start then installed the stale snapshot over it. The credential " +
 			"stays accepted until some later reconcile or a restart (#6719)")
 	}
-	if live.Users["webadmin"] != newSecret {
+	if !mgmtAuthSecretMatches(t, live, newSecret) {
 		t.Fatalf("the started listener does not honour the newly promoted credential "+
 			"(users=%d); the newest snapshot must win", len(live.Users))
 	}

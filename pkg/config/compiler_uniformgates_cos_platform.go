@@ -131,6 +131,17 @@ func runUniformGatesCoSPlatform(tree *ConfigTree, cfg *Config, opts compileOpts)
 			return err
 		}
 	}
+	// #10826: API credentials must have a known, scoped login class and an
+	// explicit future expiry. Tolerant loads keep legacy trees bootable but
+	// warn; daemon wiring drops those unusable credentials.
+	if err := validateAPIAuthCredentialsStrict(cfg); err != nil {
+		if opts.lenientWebManagementAuth {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("web-management api-auth (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 
 	// #4047 web-management REST-auth gate. Strict on commit / commit-check
 	// (hard-reject a web-management config that binds the unauthenticated REST /

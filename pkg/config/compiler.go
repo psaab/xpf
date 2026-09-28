@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ErrDPDKDataplaneRetired is the sentinel error returned at commit
@@ -95,6 +96,14 @@ func validateWebManagementAuthStrict(cfg *Config) error {
 		return nil
 	}
 	wm := cfg.System.Services.WebManagement
+	authed := apiAuthHasUsableCredential(wm.APIAuth)
+	// An API-auth credential is never accepted over the clear HTTP leg. The
+	// runtime disables that leg when it sees api-auth; reject the explicit
+	// configuration at strict commit and downgrade it to a warning on tolerant
+	// load/peer-sync (#10826).
+	if wm.HTTP && authed {
+		return fmt.Errorf("system services web-management HTTP is cleartext and cannot serve api-auth credentials; disable HTTP and use HTTPS (#10826)")
+	}
 	var binds []string
 	if wm.HTTPInterface != "" {
 		binds = append(binds, fmt.Sprintf("http interface %q", wm.HTTPInterface))
@@ -109,11 +118,8 @@ func validateWebManagementAuthStrict(cfg *Config) error {
 	// credential — a quoted-empty secret (`password ""` / `api-key ""`) parses
 	// as a credential row but authenticates any request that presents the empty
 	// value, so it must not satisfy the off-loopback auth gate. Count only
-	// USABLE (non-empty) credentials here; the daemon runtime wiring
-	// (daemon_run.go) and the API middleware (pkg/api/auth.go) independently
-	// drop/reject empty secrets, and validateAPIAuthNoEmptySecretsStrict rejects
-	// the empty secret outright at strict commit.
-	authed := apiAuthHasUsableCredential(wm.APIAuth)
+	// USABLE credentials here; the daemon runtime independently filters empty
+	// and below-minimum secrets, and strict commit has already rejected them.
 	if authed {
 		return nil
 	}
@@ -164,6 +170,11 @@ func apiAuthHasUsableCredential(a *APIAuthConfig) bool {
 			return true
 		}
 	}
+	for _, k := range a.Keys {
+		if k != nil && k.Secret != "" {
+			return true
+		}
+	}
 	return false
 }
 
@@ -203,6 +214,74 @@ func validateAPIAuthNoEmptySecretsStrict(cfg *Config) error {
 				"system services web-management api-auth has an empty api-key — an empty api-key is not a valid credential and would authenticate any request presenting an empty Bearer / X-API-Key token (an auth bypass on an off-loopback bind); set a non-empty api-key or remove it (#5636)")
 		}
 	}
+	for _, k := range wm.APIAuth.Keys {
+		if k != nil && k.Secret == "" {
+			return fmt.Errorf("system services web-management api-auth key %q has an empty secret (#5636)", k.Name)
+		}
+	}
+	return nil
+}
+
+// validateAPIAuthCredentialsStrict requires a bounded lifetime and a known
+// login class for every REST credential. Missing class inherits the
+// least-privilege default; missing expiry never becomes an immortal credential.
+func validateAPIAuthCredentialsStrict(cfg *Config) error {
+	if cfg == nil || cfg.System.Services == nil || cfg.System.Services.WebManagement == nil {
+		return nil
+	}
+	auth := cfg.System.Services.WebManagement.APIAuth
+	if auth == nil {
+		return nil
+	}
+	defaultClass := auth.DefaultClass
+	if defaultClass == "" {
+		defaultClass = "read-only"
+	}
+	now := time.Now()
+	validate := func(kind, name, class string, expires time.Time) error {
+		if class == "" {
+			class = defaultClass
+		}
+		if _, known := ResolveClassPermissions(cfg, class); !known {
+			return fmt.Errorf("system services web-management api-auth %s %q refers to unknown login class %q", kind, name, class)
+		}
+		if expires.IsZero() {
+			return fmt.Errorf("system services web-management api-auth %s %q requires an expires date (#10826)", kind, name)
+		}
+		if !now.Before(expires) {
+			return fmt.Errorf("system services web-management api-auth %s %q has expired; choose a future expiry date (#10826)", kind, name)
+		}
+		return nil
+	}
+	for _, user := range auth.Users {
+		if user == nil {
+			continue
+		}
+		expires := user.ExpiresAt
+		if expires.IsZero() {
+			expires = auth.DefaultExpiresAt
+		}
+		if err := validate("user", user.Username, user.Class, expires); err != nil {
+			return err
+		}
+	}
+	for i := range auth.APIKeys {
+		if err := validate("api-key", fmt.Sprintf("%d", i+1), defaultClass, auth.DefaultExpiresAt); err != nil {
+			return err
+		}
+	}
+	for _, key := range auth.Keys {
+		if key == nil {
+			continue
+		}
+		expires := key.ExpiresAt
+		if expires.IsZero() {
+			expires = auth.DefaultExpiresAt
+		}
+		if err := validate("key", key.Name, key.Class, expires); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -218,6 +297,9 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// never aliases the caller's tree, so the caller retains groups/apply-groups
 	// nodes for `show configuration` and ExpandGroups below mutates only our copy.
 	tree = tree.cloneForExpansion()
+	if _, err := HashAPIAuthSecrets(tree); err != nil {
+		return nil, err
+	}
 
 	// #8662: normalize brace-elided ("compact") statements into their braced
 	// shape BEFORE group expansion and every validator, so nothing downstream
@@ -542,6 +624,9 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	// returns a fresh, freely-mutable pruned tree in a single deep copy (never
 	// aliases the caller's tree) so ExpandGroupsWithVars below mutates only our copy.
 	tree = tree.cloneForExpansion()
+	if _, err := HashAPIAuthSecrets(tree); err != nil {
+		return nil, err
+	}
 
 	// #8662: normalize brace-elided ("compact") statements into their braced
 	// shape BEFORE group expansion and every validator, so nothing downstream

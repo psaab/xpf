@@ -1202,6 +1202,13 @@ COMPARED	system services ssh protocol-version
 advisory (read, value ignored, warning says so)	system services ssh rate-limit
 COMPARED	system services ssh root-login
 COMPARED	system services web-management api-auth api-key
+COMPARED	system services web-management api-auth class
+COMPARED	system services web-management api-auth expires
+COMPARED	system services web-management api-auth key <*> class
+COMPARED	system services web-management api-auth key <*> expires
+COMPARED	system services web-management api-auth key <*> secret
+COMPARED	system services web-management api-auth user <*> class
+COMPARED	system services web-management api-auth user <*> expires
 COMPARED	system services web-management api-auth user <*> password
 COMPARED	system services web-management http interface
 COMPARED	system services web-management https certificate

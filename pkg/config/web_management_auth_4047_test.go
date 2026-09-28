@@ -59,32 +59,38 @@ func TestWebManagementHTTPSOffLoopbackNoAuthRejected(t *testing.T) {
 	}
 }
 
-// An off-loopback bind WITH a basic-auth user configured commits cleanly — the
-// gate must not over-reject an authenticated off-loopback config.
+// An off-loopback HTTPS bind WITH a scoped, expiring Basic identity commits.
 func TestWebManagementOffLoopbackWithUserAuthCommits(t *testing.T) {
 	tree := buildTreeFromSets(t,
-		"set system services web-management http interface fxp0.0",
-		"set system services web-management api-auth user admin password s3cret")
+		"set system services web-management https interface fxp0.0",
+		"set system services web-management api-auth user admin password correct-horse-battery",
+		"set system services web-management api-auth user admin class read-only",
+		"set system services web-management api-auth user admin expires 2099-01-01")
 
-	cfg, err := CompileConfig(tree)
-	if err != nil {
-		t.Fatalf("CompileConfig: off-loopback + user auth must commit, got error: %v", err)
-	}
-	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "#4047") {
-			t.Fatalf("unexpected #4047 warning on an authenticated off-loopback config: %q", w)
-		}
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("CompileConfig: off-loopback HTTPS + scoped auth must commit, got error: %v", err)
 	}
 }
 
-// An off-loopback bind WITH an api-key configured commits cleanly.
+// Legacy API keys inherit an explicit expiry and the read-only default class.
 func TestWebManagementOffLoopbackWithAPIKeyCommits(t *testing.T) {
 	tree := buildTreeFromSets(t,
-		"set system services web-management http interface fxp0.0",
-		"set system services web-management api-auth api-key tok-abc-123")
+		"set system services web-management https interface fxp0.0",
+		"set system services web-management api-auth expires 2099-01-01",
+		"set system services web-management api-auth api-key machine-generated-key-alpha")
 
 	if _, err := CompileConfig(tree); err != nil {
-		t.Fatalf("CompileConfig: off-loopback + api-key must commit, got error: %v", err)
+		t.Fatalf("CompileConfig: off-loopback + expiring API key must commit, got error: %v", err)
+	}
+}
+
+func TestWebManagementRejectsAPIAuthOnClearHTTP(t *testing.T) {
+	tree := buildTreeFromSets(t,
+		"set system services web-management http",
+		"set system services web-management api-auth expires 2099-01-01",
+		"set system services web-management api-auth api-key machine-generated-key-alpha")
+	if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "cannot serve api-auth") {
+		t.Fatalf("clear HTTP with api-auth error = %v, want explicit #10826 rejection", err)
 	}
 }
 

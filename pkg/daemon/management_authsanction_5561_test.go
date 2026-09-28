@@ -447,8 +447,8 @@ func TestMgmtLiveHTTPSLegIsGrantedWhenTheHTTPLegNeverBound_5561(t *testing.T) {
 		t.Fatalf("fingerprint after the retry = %+v, want an EMPTY http addr with the HTTPS leg "+
 			"converged", m.cur)
 	}
-	if got := mgmtAuthSecret(t, m.srv.LiveAuth()); got != "secret-a" {
-		t.Fatalf("the live snapshot is %q before the rotation, want secret-a", got)
+	if got := m.srv.LiveAuth().Users["webadmin"]; got != "secret-a" {
+		t.Fatalf("the raw live snapshot carries %q, want secret-a before the rotation", got)
 	}
 
 	// The operator rotates the password. Nothing is serving an address this config
@@ -464,8 +464,8 @@ func TestMgmtLiveHTTPSLegIsGrantedWhenTheHTTPLegNeverBound_5561(t *testing.T) {
 			"An empty non-nil snapshot rejects every non-exempt request, so a correctly-named, " +
 			"correctly-bound management listener now 401s the operator's own credential")
 	}
-	if got := mgmtAuthSecret(t, snap); got != "secret-b" {
-		t.Fatalf("the live HTTPS listener enforces webadmin=%q after the rotation, want secret-b", got)
+	if snap == nil || snap.Users["webadmin"] != "secret-b" {
+		t.Fatal("the live HTTPS listener does not carry secret-b after the rotation")
 	}
 
 	// The exit that does not exist under the defect: re-committing is absorbing,
@@ -474,9 +474,7 @@ func TestMgmtLiveHTTPSLegIsGrantedWhenTheHTTPLegNeverBound_5561(t *testing.T) {
 	if err := m.reconcileTo(cfgFor(reg, "10.0.0.1:80", true, "10.0.0.1:443", b)); err == nil {
 		t.Fatal("the HTTP retry was expected to fail on the re-commit too")
 	}
-	if got := mgmtAuthSecret(t, m.srv.LiveAuth()); got != "secret-b" {
-		t.Fatalf("re-committing the identical config leaves webadmin=%q, want secret-b — an "+
-			"empty intersection is absorbing (∅ ∩ X = ∅), so if the rotation ever enters it "+
-			"there is no commit that leaves it", got)
+	if got := m.srv.LiveAuth().Users["webadmin"]; got != "secret-b" {
+		t.Fatalf("re-committing the identical config left the live listener with %q, want secret-b", got)
 	}
 }

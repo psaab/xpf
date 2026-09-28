@@ -362,6 +362,11 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// background/sync/rollback path with no response to carry warnings.
 	// The pipeline below keeps running on the applied pointer; only the
 	// RETURN carries the response object.
+	// #10752 round 4: same funnel carries the transition-aware tightening
+	// warning. Clear this attempt's kept-suspicious evidence before the
+	// apply; the flush sweep inside repopulates it, and the projection
+	// below reads it alongside the old-vs-new full-admit comparison.
+	d.clearKeptSuspicious10752()
 	respCfg, applyErr := d.applyConfigLockedForCommit(d.applyCancelCtx(), compiled)
 	if applyErrSkipsPeerSync(applyErr) {
 		// Fatal (required-protocol-gate: dataplane disarmed / fail-closed) or a
@@ -424,6 +429,13 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	resp := compiled
 	if respCfg != nil {
 		resp = respCfg
+	}
+	// #10752 round 4: project the tightening warning (response-only copy on
+	// fire, else identity) — the dangerous any-service→named order with
+	// stranded box-oriented customs shows in commit output, not just the
+	// journal. Failed applies project nothing (respCfg nil on fatal paths).
+	if respCfg != nil {
+		resp = d.withTighteningWarningsForResponse10752(resp, oldActive, compiled)
 	}
 	return resp, joined
 }

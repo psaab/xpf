@@ -164,8 +164,9 @@ the primary compile/apply gate.
 ## Entry points
 
 - `Daemon` — `daemon.go`.
-- `Options` — `daemon.go`. `ConfigPath`, `NoDataplane`, `APIAddr`,
-  `GRPCAddr`, `Version`.
+- `Options` — `daemon.go`. `ConfigFile`, `APIAuthArchiveMigrationDir`,
+  `NoDataplane`, `APIAddr`, `GRPCAddr`, `Version`. `cmd/xpfd` supplies the
+  archive migration directory only for the production `/etc/xpf/xpf.conf` root.
 - `New(opts Options) (*Daemon, error)` — `daemon.go`. Fails when the
   config store cannot be constructed (#1893 fail-closed: unusable
   `.configdb` means no boot, not a delayed nil-deref panic).
@@ -804,19 +805,18 @@ explicit-config test seam.
     serving (which moves nothing and publishes whole).
 
     Both exits rest on the unnamed address being one a committed config CAN
-    name, and round 13's predicate quietly assumed the HTTP leg is always live
-    at `cur.addr`. It is not: a boot HTTP bind failure leaves `curSet` false and
-    `cur.addr` empty, and — since round 14 made `startTo` adopt the server so
-    the bind can be retried — a later reconcile can bind the HTTPS leg while
-    HTTP still fails. The absent HTTP leg then read as a mismatch, so a rotation
-    on the live, correctly-named HTTPS listener intersected to `∅` with NEITHER
-    exit available: the HTTP bind keeps failing, and no committed config can
-    make `next.Addr` empty because `resolveAPIBinds` always yields a concrete
-    address. `everyLiveLegNamedBy` now treats an empty `e.addr` as "that leg is
-    not serving, so it imposes no requirement", symmetric with the cleared-`tls`
-    arm. Pinned by
-    `TestMgmtLiveHTTPSLegIsGrantedWhenTheHTTPLegNeverBound_5561` (#5561 round
-    16).
+    name. Round 13's predicate quietly assumed HTTP was always live at
+    `cur.addr`; a boot HTTP bind failure leaves `curSet` false and `cur.addr`
+    empty, and a later reconcile can bind HTTPS while HTTP still fails. The
+    absent HTTP leg then read as a mismatch, so a rotation on the live,
+    correctly-named HTTPS listener intersected to `∅` with no exit available.
+    #10826 also makes an empty desired HTTP address intentional when api-auth
+    is configured: `resolveAPIBinds` disables clear HTTP rather than serving
+    credentials over it. `everyLiveLegNamedBy` treats an empty `e.addr` as "that
+    leg is not serving, so it imposes no requirement", symmetric with the
+    cleared-`tls` arm. Pinned by
+    `TestMgmtLiveHTTPSLegIsGrantedWhenTheHTTPLegNeverBound_5561` and
+    `TestMgmtHTTPAuthActivationDisablesClearLegBeforePublishing10826`.
   - **Removing ALL api-auth is a revocation too, and it lands immediately**
     (#5561 round 14). The committed policy authorizes no credential, and there
     are exactly two ways to say that to a listener:
@@ -887,7 +887,10 @@ explicit-config test seam.
     own `authSlot`: LIVE legs follow the server-wide snapshot (the #5866 live
     swap is unchanged), and a leg is PINNED at retirement to what it was already
     serving, after which `ReplaceAuth` only ever intersects it — revocations
-    still land there, grants and nils never do.
+    still land there, grants and nils never do. The mutation gate's second-pass
+    credential check reads that same request leg slot, so a request admitted by
+    clear HTTP cannot borrow a credential later published for HTTPS (#10826).
+    Pinned by `TestRetiringHTTPAuthSlotKeepsInFlightRequestRevoked10826`.
   - **Boot retry debt is real debt** (#5561 round 14). Every "over-restrict and
     let the next commit converge" argument above is only as good as the
     convergence, and two boot paths had none. An HTTP bind failure returned
@@ -923,12 +926,11 @@ explicit-config test seam.
     terminated unexpectedly left the REST/management API down for the life of
     the process on an UNCHANGED configuration, exactly as HTTPS did before round
     6. The HTTP arm now also fires when `next.Addr != "" && !m.srv.HTTPServing()`
-    — gated on a non-empty desired address so it stays strictly additive, since
-    `ReconcileHTTP` refuses an empty bind and the #6827 over-reach guard
-    `a_failed_boot_then_an_empty_bind_binds_nothing` pins that direction — and
-    `ReconcileHTTP`'s no-op now asks `s.httpLeg.serving()`, mirroring
-    `ReconcileHTTPS`. New accessor `api.Server.HTTPServing()` is the exact
-    counterpart of `HTTPSServing()`.
+    so it stays strictly additive and never binds an empty address. Separately,
+    `ReconcileHTTP("")` now disables HTTP by retiring its live leg when
+    api-auth makes clear HTTP unsafe (#10826). Its no-op still asks
+    `s.httpLeg.serving()`, mirroring `ReconcileHTTPS`. New accessor
+    `api.Server.HTTPServing()` is the exact counterpart of `HTTPSServing()`.
   - **…and nothing CALLED the reconcile** (#6803). Both gate fixes are only
     reachable from `applyConfigLocked`, the sole caller of
     `reconcileWebManagement`, so recovery still waited on an operator committing
@@ -3107,6 +3109,12 @@ never lock an operator out of a remote box it manages.
   the path and so none of them would notice a wrong production value), and one
   seam relocates file and parent together — the property `provisionedUsersDir`
   already has for the three #5841 marker roots.
+  The #10825 image-factory drop-in (`10-xpf-factory.conf`) sets
+  `MaxAuthTries 3`, `LoginGraceTime 30`, and `PermitEmptyPasswords no` for
+  images regardless of whether `system services ssh` is configured. The
+  daemon's managed `00-xpf.conf` repeats those bounds when an SSH stanza exists;
+  `daemon_ssh_test.go` covers runtime rendering and
+  `scripts/image/test_bake_sshd_password_auth_10771.py` checks the image drop-in.
 
   **Retry-owner visibility completed (#7615).** Six always-on loops in `Run`
   re-drive a failure that had no other owner. #6800 and #6802 published;

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 )
 
 // System and platform-services configuration: system stanza, userspace
@@ -535,16 +536,39 @@ type WebManagementConfig struct {
 	APIAuth             *APIAuthConfig // REST API authentication
 }
 
-// APIAuthConfig holds REST API authentication settings.
+// APIAuthConfig holds REST API authentication settings. Basic users and named
+// keys each carry a login class and an expiry. Legacy repeated api-key leaves
+// inherit these defaults so their identity is still least-privilege by default.
 type APIAuthConfig struct {
-	Users   []*APIAuthUser // basic auth users
-	APIKeys []Secret       // bearer/X-API-Key tokens; redacted on marshal (#2053)
+	Users            []*APIAuthUser // basic auth users
+	APIKeys          []Secret       // legacy bearer/X-API-Key tokens
+	Keys             []*APIAuthKey  // named bearer/X-API-Key identities
+	DefaultClass     string
+	DefaultExpiresAt time.Time
 }
 
-// APIAuthUser defines a basic auth user for the REST API.
+// APIKeyCount returns the total number of legacy and named API-key credentials.
+func (c *APIAuthConfig) APIKeyCount() int {
+	if c == nil {
+		return 0
+	}
+	return len(c.APIKeys) + len(c.Keys)
+}
+
+// APIAuthUser defines a scoped, expiring Basic-auth user for the REST API.
 type APIAuthUser struct {
-	Username string
-	Password Secret // redacted on JSON/YAML marshal (#2053)
+	Username  string
+	Password  Secret // bcrypt verifier after compilation; redacted on marshal
+	Class     string
+	ExpiresAt time.Time
+}
+
+// APIAuthKey defines a named, scoped, expiring Bearer/X-API-Key identity.
+type APIAuthKey struct {
+	Name      string
+	Secret    Secret // bcrypt verifier after compilation; redacted on marshal
+	Class     string
+	ExpiresAt time.Time
 }
 
 // SystemSyslogConfig holds traditional Junos system syslog config.
