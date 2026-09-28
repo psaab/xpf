@@ -25,8 +25,8 @@ type resetHelperStateDP struct {
 }
 
 func (d *resetHelperStateDP) Start(context.Context) error { return nil }
-func (d *resetHelperStateDP) Close() error                 { return d.writeFinal() }
-func (d *resetHelperStateDP) Teardown() error              { return d.writeFinal() }
+func (d *resetHelperStateDP) Close() error                { return d.writeFinal() }
+func (d *resetHelperStateDP) Teardown() error             { return d.writeFinal() }
 
 func (d *resetHelperStateDP) writeFinal() error {
 	if err := os.MkdirAll(filepath.Dir(d.stateFile), 0o700); err != nil {
