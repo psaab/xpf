@@ -3,8 +3,14 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 // applyCloseoutDrainTimeout bounds how long runShutdownSequence waits for an
@@ -453,6 +459,16 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 		}
 	}
 
+	// #10769 d05-F6: on a reset shutdown, the userspace helper's final state
+	// write lands AFTER the wipe erased it (the helper shuts down here, well
+	// after the wipe RPC returned), and the configured path may lie outside
+	// the /run/xpf sweep. Remove the effective state file once the helper is
+	// gone. Best-effort with loud logging: shutdown cannot fail, but residue
+	// after a reported-success reset must never be silent.
+	if d.isResetting() {
+		d.removeResetHelperStateAfterStop(cfg)
+	}
+
 	// #801 B2: restore any host-scope tunables xpfd claimed to their
 	// pre-xpfd values. No-op if `claim-host-tunables` was never set.
 	// Runs on every shutdown (hitless + fail-closed) so stopping xpfd
@@ -461,6 +477,28 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 
 	slog.Info("shutdown complete")
 	return runErr
+}
+
+// removeResetHelperStateAfterStop unlinks the userspace helper's effective
+// state file after a factory-reset shutdown stopped the helper. The helper
+// writes that file unconditionally on loop exit — after the wipe already
+// erased it — so without this sweep the shutdown recreates the just-erased
+// tenant snapshot. The path resolves exactly as at spawn (operator override
+// or default), so a configured path outside /run/xpf is covered too.
+func (d *Daemon) removeResetHelperStateAfterStop(cfg *config.Config) {
+	path := dpuserspace.StateFilePathForConfig(cfg)
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		slog.Warn("reset shutdown: cannot remove helper state file; tenant snapshot may survive",
+			"path", path, "err", err)
+		return
+	}
+	if err := fsatomic.SyncDir(filepath.Dir(path)); err != nil {
+		slog.Warn("reset shutdown: cannot sync helper state directory",
+			"dir", filepath.Dir(path), "err", err)
+	}
 }
 
 func runHAShutdownUpdate(ctx context.Context, update func(context.Context) error) error {
