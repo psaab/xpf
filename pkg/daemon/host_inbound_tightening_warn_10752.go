@@ -164,6 +164,46 @@ func hostInboundOverrideIndex10752(cfg *config.Config) map[string]*config.HostIn
 	return out
 }
 
+// hostInboundOwnedMembers10752 returns the sorted canonical units the zone
+// owns for host-inbound enforcement: members expanded through the canonical
+// bare→unit fan-down, first-sorted-owner wins, lifelines skipped. Shared by
+// scope-state construction and disappearance replacement comparison so both
+// agree on membership. name is the zone map key (ownership compares
+// against it, not the struct field).
+func hostInboundOwnedMembers10752(cfg *config.Config, name string, ifaces []string, owners map[string]string, lifelines map[string]bool) []string {
+	if cfg == nil {
+		return nil
+	}
+	members := map[string]bool{}
+	for _, ref := range ifaces {
+		if ref == "" {
+			continue
+		}
+		for _, key := range config.InterfaceUnitRefKeys(cfg, ref) {
+			// Ownership is keyed exactly as the map was built
+			// (first-writer-wins over sorted zones); identity is
+			// canonical so aliases collapse.
+			if owners[key] != name {
+				continue
+			}
+			split := cfg.SplitInterfaceUnitRef(key)
+			if !split.HasUnit {
+				continue
+			}
+			if config.HostInboundLifelineInterface(split.Literal, lifelines) {
+				continue
+			}
+			members[split.Literal] = true
+		}
+	}
+	out := make([]string, 0, len(members))
+	for unit := range members {
+		out = append(out, unit)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // hostInboundScopeStates returns every scope's effective state: "zone:<name>"
 // for the zone-level stanza plus "zone:<name>|iface:<canonical-unit>" for
 // each owned member unit, where an effective override REPLACES the zone level
@@ -195,33 +235,12 @@ func hostInboundScopeStates(cfg *config.Config) map[string]hostInboundScopeState
 		if zone == nil {
 			continue
 		}
-		members := map[string]bool{}
-		for _, ref := range zone.Interfaces {
-			if ref == "" {
-				continue
-			}
-			for _, key := range config.InterfaceUnitRefKeys(cfg, ref) {
-				// Ownership is keyed exactly as the map was built
-				// (first-writer-wins over sorted zones); identity is
-				// canonical so aliases collapse.
-				if owners[key] != name {
-					continue
-				}
-				split := cfg.SplitInterfaceUnitRef(key)
-				if !split.HasUnit {
-					continue
-				}
-				if config.HostInboundLifelineInterface(split.Literal, lifelines) {
-					continue
-				}
-				members[split.Literal] = true
-			}
-		}
+		members := hostInboundOwnedMembers10752(cfg, name, zone.Interfaces, owners, lifelines)
 		if len(members) == 0 {
 			continue
 		}
 		zoneCovers := false
-		for unit := range members {
+		for _, unit := range members {
 			if _, ok := overrides[unit]; !ok {
 				zoneCovers = true
 				break
@@ -230,7 +249,7 @@ func hostInboundScopeStates(cfg *config.Config) map[string]hostInboundScopeState
 		if zoneCovers {
 			out["zone:"+name] = hostInboundScopeTokens(zone.HostInboundTraffic)
 		}
-		for unit := range members {
+		for _, unit := range members {
 			effective := zone.HostInboundTraffic
 			if override, ok := overrides[unit]; ok {
 				effective = override
@@ -441,38 +460,117 @@ func hostInboundTightenedScopes(oldCfg, newCfg *config.Config) ([]string, map[st
 	unguarded := hostInboundUnguardedTokens10752()
 	var out []string
 	customFire := map[string]bool{}
-	for key, old := range oldStates {
-		neu := newStates[key]
-		if old.full && !neu.full {
+	mark := func(key string, old, neu hostInboundScopeState) {
+		if tight, custom := hostInboundScopeNarrowed10752(old, neu, unguarded); tight {
 			out = append(out, key)
-			customFire[key] = true
-			continue
-		}
-		if old.full {
-			continue
-		}
-		if neu.full {
-			// New full-admit covers every old token: a loosening,
-			// never a narrowing. A full new state carries an empty
-			// token set, so without this guard every old unguarded
-			// token would read as removed.
-			continue
-		}
-		for tok := range old.tokens {
-			if unguarded[tok] && !neu.tokens[tok] {
-				out = append(out, key)
-				break
-			}
-		}
-		for pp := range old.customPorts {
-			if !neu.customPorts[pp] {
+			if custom {
 				customFire[key] = true
-				break
 			}
 		}
 	}
+	for key, old := range oldStates {
+		if neu, ok := newStates[key]; ok {
+			mark(key, old, neu)
+			continue
+		}
+		if zone, ok := hostInboundZoneScopeName10752(key); ok {
+			// Disappearing zone scope: compare against the
+			// replacement members' new effective admission
+			// rather than treating absence as denial — a zone
+			// shadowed by a full override loosened, it did not
+			// narrow. Any narrowed replacement fires once.
+			var fired, custom bool
+			for _, eff := range hostInboundZoneReplacementStates10752(oldCfg, newCfg, zone, newStates) {
+				if tight, cust := hostInboundScopeNarrowed10752(old, eff, unguarded); tight {
+					fired = true
+					if cust {
+						custom = true
+					}
+				}
+			}
+			if fired {
+				out = append(out, key)
+				if custom {
+					customFire[key] = true
+				}
+			}
+			continue
+		}
+		// Disappearing interface scope (member removed or moved
+		// away): absence is denial.
+		mark(key, old, hostInboundScopeState{})
+	}
 	sort.Strings(out)
 	return out, customFire
+}
+
+// hostInboundScopeNarrowed10752 compares one scope's old vs new effective
+// state: tightened reports a genuine narrowing, custom reports whether
+// customs evidence fires there (full-admit loss or removed sweep-custom
+// ports). New full-admit covers everything (loosening); old full-admit
+// staying full is silence.
+func hostInboundScopeNarrowed10752(old, neu hostInboundScopeState, unguarded map[string]bool) (tightened, custom bool) {
+	if old.full && !neu.full {
+		return true, true
+	}
+	if old.full || neu.full {
+		return false, false
+	}
+	for tok := range old.tokens {
+		if unguarded[tok] && !neu.tokens[tok] {
+			tightened = true
+			break
+		}
+	}
+	if !tightened {
+		return false, false
+	}
+	for pp := range old.customPorts {
+		if !neu.customPorts[pp] {
+			return true, true
+		}
+	}
+	return true, false
+}
+
+// hostInboundZoneScopeName10752 splits a "zone:<name>" scope key, reporting
+// false for interface scopes.
+func hostInboundZoneScopeName10752(key string) (string, bool) {
+	if !strings.HasPrefix(key, "zone:") || strings.Contains(key, "|iface:") {
+		return "", false
+	}
+	return strings.TrimPrefix(key, "zone:"), true
+}
+
+// hostInboundZoneReplacementStates10752 returns the new effective states to
+// compare a disappeared zone scope against: one per member that enforced
+// the OLD zone stanza and is still owned by the zone in NEW (its
+// zone:<name>|iface:<unit> state, or zero when the member has no new
+// state). Empty when nothing replaces the old enforcement (zone/member
+// deleted or moved away) — the caller then compares against zero denial.
+func hostInboundZoneReplacementStates10752(oldCfg, newCfg *config.Config, zone string, newStates map[string]hostInboundScopeState) []hostInboundScopeState {
+	oldZone := oldCfg.Security.Zones[zone]
+	if oldZone == nil {
+		return nil
+	}
+	oldOwners := config.InterfaceZoneMap(oldCfg)
+	oldOverrides := hostInboundOverrideIndex10752(oldCfg)
+	oldLifelines := config.HostInboundLifelineSet(oldCfg)
+	newOwners := config.InterfaceZoneMap(newCfg)
+	var out []hostInboundScopeState
+	for _, unit := range hostInboundOwnedMembers10752(oldCfg, zone, oldZone.Interfaces, oldOwners, oldLifelines) {
+		if _, overridden := oldOverrides[unit]; overridden {
+			continue
+		}
+		if newOwners[unit] != zone {
+			continue
+		}
+		out = append(out, newStates["zone:"+zone+"|iface:"+unit])
+	}
+	if len(out) == 0 {
+		out = append(out, hostInboundScopeState{})
+	}
+	return out
 }
 
 // hostInboundScopesForAddrs10752 maps kept box addresses to the OLD effective

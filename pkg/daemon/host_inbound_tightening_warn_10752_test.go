@@ -85,6 +85,31 @@ func TestHostInboundTightenedScopes10752(t *testing.T) {
 			},
 		},
 		{
+			name: "zone-inherit loosening to override-full stays silent",
+			oldW: named, oldL: named, newW: named, newL: named,
+			mutate: func(old, new *config.Config) {
+				old.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"bgp"}
+				new.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
+					"reth0.50": {SystemServices: full},
+				}
+			},
+			// The zone scope disappears (sole member now
+			// override-covered), but the replacement member's
+			// new effective state is full-admit — a loosening,
+			// not a bgp-removal tightening.
+		},
+		{
+			name: "full-to-full zone replacement stays silent",
+			oldW: full, oldL: named, newW: full, newL: named,
+			mutate: func(old, new *config.Config) {
+				new.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
+					"reth0.50": {SystemServices: full},
+				}
+			},
+			// The zone scope disappears into a full-admit
+			// replacement: no full-admit loss anywhere.
+		},
+		{
 			name: "staying open stays silent",
 			oldW: full, oldL: full, newW: full, newL: full,
 		},
@@ -823,6 +848,28 @@ func TestWithTighteningWarningsLooseningToFullStaysSilent10752(t *testing.T) {
 	})
 	if resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg); resp != newCfg {
 		t.Fatalf("loosening to full-admit must stay silent, got %v", resp.Warnings)
+	}
+}
+
+// TestWithTighteningWarningsShadowReplacementStaysSilent10752 pins the
+// user-visible symptom: zone-inherit ssh+bgp loosened by adding a
+// full-admit override must stay fully silent (no spurious advisory),
+// even with observed evidence on the member address.
+func TestWithTighteningWarningsShadowReplacementStaysSilent10752(t *testing.T) {
+	oldCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	oldCfg.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"bgp"}
+	newCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	newCfg.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
+		"reth0.50": {SystemServices: []string{"any-service"}},
+	}
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		netip.MustParseAddr("172.16.50.8"): kept10752(1,
+			[]string{"tcp 172.16.50.8:2222→203.0.113.7:40000"}, 1,
+			[]string{"tcp 172.16.50.8:179→203.0.113.7:40001"}),
+	})
+	if resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg); resp != newCfg {
+		t.Fatalf("shadow-replacement loosening must stay silent, got %v", resp.Warnings)
 	}
 }
 
