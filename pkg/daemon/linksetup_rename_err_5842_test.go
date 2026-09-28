@@ -135,8 +135,8 @@ func TestConfigArrivalNamingKeepsRetryMarkerOnPositionalFailure_5842(t *testing.
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{"ge-0/0/0": {Name: "ge-0/0/0"}}
 
-	if d.maybeReapplyConfigArrivalNaming(cfg) {
-		t.Error("maybeReapplyConfigArrivalNaming reported success on a boot where every rename failed")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(cfg); err != nil || ran {
+		t.Errorf("maybeReapplyConfigArrivalNaming reported success on a boot where every rename failed: ran=%v err=%v", ran, err)
 	}
 	if !d.emptyHANamingPending.Load() {
 		t.Error("the standalone config-arrival retry marker was consumed even though naming did not converge")
@@ -156,8 +156,8 @@ func TestConfigArrivalNamingConsumesRetryMarkerOnSuccess_5842(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{"ge-0/0/0": {Name: "ge-0/0/0"}}
 
-	if !d.maybeReapplyConfigArrivalNaming(cfg) {
-		t.Fatal("a clean naming pass must report success")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(cfg); err != nil || !ran {
+		t.Fatalf("a clean naming pass must report success: ran=%v err=%v", ran, err)
 	}
 	if d.emptyHANamingPending.Load() {
 		t.Error("the one-shot marker survived a SUCCESSFUL naming pass; the re-naming pass will " +

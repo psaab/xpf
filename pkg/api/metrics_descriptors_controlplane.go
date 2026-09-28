@@ -432,6 +432,14 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"flags a degraded recovery aid, not a forwarding outage.",
 		nil, nil,
 	)
+	c.earlyInputGuardSwapFailed = prometheus.NewDesc(
+		"xpf_early_input_guard_swap_failed",
+		"1 while the latest bootstrap lifeline-guard swap failed and the "+
+			"global input barrier was retained instead (remote recovery "+
+			"may be blocked, #10751); 0 when the guard installed. Alert "+
+			"on == 1.",
+		nil, nil,
+	)
 	c.journalPermsDegraded = prometheus.NewDesc(
 		"xpf_config_journal_perms_degraded",
 		"1 while journal permission repair is degraded: a pre-existing "+

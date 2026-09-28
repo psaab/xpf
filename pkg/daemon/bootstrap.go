@@ -20,6 +20,7 @@ import (
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/vishvananda/netlink"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -1096,6 +1097,16 @@ func protectedInterfacesWith(mgmtLeaf, lifeline string) map[string]bool {
 // enumerated NIC is selected instead of refusing. Steps 2-4 are unchanged and
 // run identically for either provenance.
 func (d *Daemon) setupBootstrapLifeline() {
+	// #10751/B4: attest (and best-effort reinstall) the early input barrier,
+	// but proceed regardless — bootstrap is explicit recovery and the
+	// management lifeline takes precedence over the barrier (the #1960 order).
+	// A failed reinstall is already loud inside the ensure call.
+	var bootstrapCfg *config.Config
+	if d.store != nil {
+		bootstrapCfg = d.store.ActiveConfig()
+	}
+	_ = ensureEarlyInputProtectionForNaming(bootstrapCfg)
+
 	routeIface, _, routeErr := detectLifelineInterfaceFn()
 	if routeIface == "" && routeErr != nil {
 		// #6789: the route observation FAILED, so "which NIC carries the

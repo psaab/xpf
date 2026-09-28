@@ -69,6 +69,10 @@ override_dh_auto_build:
 	@# enabled below so networkd cannot create bridge forwarding if the
 	@# barrier install fails.
 	cp scripts/image/xpf-transit-closed.service debian/xpf.xpf-transit-closed.service
+	@# #10751: stage the separate pre-networkd input barrier. Its RequiredBy=
+	@# dependency prevents networkd from adding host addresses if nft install
+	@# fails; package upgrades do not start the DROP chain on a live daemon.
+	cp scripts/image/xpf-input-closed.service debian/xpf.xpf-input-closed.service
 	@# #1930 LANE-1 kernel channel: stage the two oneshot units under the
 	@# package-canonical names so dh_installsystemd enables them. These ship in
 	@# the .deb (not only the bake) so foreign-host / manual installs get the
@@ -159,6 +163,7 @@ override_dh_installsystemd:
 	@# essential: a package upgrade must not inject a DROP barrier into an
 	@# already armed live daemon; the next boot runs it before networkd.
 	dh_installsystemd --no-start --no-stop-on-upgrade --name=xpf-transit-closed
+	dh_installsystemd --no-start --no-stop-on-upgrade --name=xpf-input-closed
 	@# #1930: enable the two LANE-1 oneshots. They are best-effort + non-fatal
 	@# (degrade to "LANE 1 unavailable" on non-UEFI / read-only NVRAM) and are
 	@# NOT ordered Before=xpfd, so enabling them cannot block the daemon.
@@ -173,7 +178,8 @@ override_dh_installsystemd:
 
 override_dh_clean:
 	rm -f debian/xpf.xpfd.service debian/xpf.xpf-day0-config.service \
-	      debian/xpf.xpf-transit-closed.service debian/xpf.xpf-uefi-slots.service \
+	      debian/xpf.xpf-transit-closed.service debian/xpf.xpf-input-closed.service \
+	      debian/xpf.xpf-uefi-slots.service \
 	      debian/xpf.xpf-kernel-promote.service \
 	      debian/xpf.xpf-kernel-promote-failed.service
 	dh_clean

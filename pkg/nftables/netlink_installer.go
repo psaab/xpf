@@ -39,6 +39,22 @@ const (
 )
 
 type Installer interface {
+	// InstallEarlyInputBarrier installs the #10751 pre-networkd host-input
+	// barrier, a separate config-free DROP chain removed on daemon apply
+	// handoff.
+	InstallEarlyInputBarrier() error
+	// RemoveEarlyInputBarrier idempotently removes that boot-only input barrier.
+	RemoveEarlyInputBarrier() error
+	// EarlyInputBarrierPresent reports whether that barrier table is currently
+	// installed (kernel readback). The daemon attests presence before the
+	// first handoff and gates link activation on it — unit state alone
+	// cannot prove the table survived.
+	EarlyInputBarrierPresent() (bool, error)
+	// InstallEarlyInputBarrierWithLifelineAdmit installs the same barrier
+	// table with a leading `iifname {lifelines} accept` (bootstrap recovery:
+	// data stays closed, the management lifeline stays reachable). The
+	// ordinary handoff removes the table unchanged.
+	InstallEarlyInputBarrierWithLifelineAdmit(lifelines []string) error
 	// InstallHostInbound installs the real host-inbound table (#3070/#3333).
 	InstallHostInbound(spec HostInboundSpec) error
 	// VerifyHostInboundOverlay reads back the exact marker and leading DROP
@@ -68,7 +84,24 @@ type Installer interface {
 	// kernel/permission failure -> error, preserving the fail-closed teardown
 	// contract #5790).
 	DeleteTable(name string) error
-	// InstallIpsecDivert installs the S3 fence+divert capture table in both
+	// TableEnforcing reports whether the named inet-family table currently
+	// ENFORCES an input hook: the table exists with a type-filter
+	// input-hook chain carrying at least one rule. A present-but-empty
+	// (flushed shell) table is NOT enforcing — with no input hook it
+	// filters nothing. The `ensure` command and the handoff tripwire
+	// prove liveness through this instead of bare presence (#10751
+	// R6-B/R7-D).
+	TableEnforcing(name string) (bool, error)
+	// TableDropsInput reports whether the named inet-family table
+	// currently DROPS on its input hook: enforcing shape (see above)
+	// PLUS at least one rule carrying a DROP verdict. An admits-only
+	// table (mandatory accepts, zero DROP — e.g. a zero-drop fence
+	// shell, or a stale restore that lost its drops) under the
+	// tables' `policy accept` admits everything it does not
+	// explicitly match, so presence/shape alone must not attest
+	// protection. The `ensure` command proves liveness through this
+	// (#10751 R7-A).
+	TableDropsInput(name string) (bool, error)
 	// inet and bridge families. Queue rules are fail-closed (no bypass).
 	InstallIpsecDivert(spec IpsecDivertSpec) error
 	// RemoveIpsecDivert removes the S3 capture table from both families.
@@ -84,7 +117,6 @@ type Installer interface {
 	// exact equality; all other calls retain replace-on-call behavior.
 	InstallArmedTransitFence(spec ForwardFenceSpec) error
 	// RemoveTransitBarrier removes the barrier from both families.
-
 	// Idempotent; a genuine failure is returned because a table that survives
 	// teardown leaves the box transit-closed while armed — the black hole this
 	// design exists to avoid.
@@ -330,7 +362,104 @@ func (in *netlinkInstaller) DeleteTable(name string) error {
 	return nil
 }
 
-// tableExists reports whether an inet table of the given name is installed.
+// TableEnforcing reports whether the named inet-family table currently
+// enforces an input hook (see the interface contract).
+func (in *netlinkInstaller) TableEnforcing(name string) (bool, error) {
+	c, err := in.newConn()
+	if err != nil {
+		return false, fmt.Errorf("nftables conn: %w", err)
+	}
+	tables, err := c.ListTablesOfFamily(nftables.TableFamilyINet)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nftables list tables: %w", err)
+	}
+	var tbl *nftables.Table
+	for _, candidate := range tables {
+		if candidate != nil && candidate.Name == name {
+			tbl = candidate
+			break
+		}
+	}
+	if tbl == nil {
+		return false, nil
+	}
+	chain, err := c.ListChain(tbl, "input")
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nftables read %s input chain: %w", name, err)
+	}
+	if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookInput || chain.Type != nftables.ChainTypeFilter {
+		return false, nil
+	}
+	rules, err := c.GetRules(tbl, chain)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
+	}
+	return len(rules) > 0, nil
+}
+
+// TableDropsInput reports whether the named inet-family table currently
+// carries a DROP verdict on its input hook (see the interface contract).
+// Residual: only the base input chain is scanned — a program-only table
+// (DROPs solely inside junos-host subchains) reads false, so a manual
+// `ensure` over-installs the barrier fail-closed and the next apply heals
+// it. Accepted: subchain-aware verdict proof is out of scope.
+func (in *netlinkInstaller) TableDropsInput(name string) (bool, error) {
+	c, err := in.newConn()
+	if err != nil {
+		return false, fmt.Errorf("nftables conn: %w", err)
+	}
+	tables, err := c.ListTablesOfFamily(nftables.TableFamilyINet)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nftables list tables: %w", err)
+	}
+	var tbl *nftables.Table
+	for _, candidate := range tables {
+		if candidate != nil && candidate.Name == name {
+			tbl = candidate
+			break
+		}
+	}
+	if tbl == nil {
+		return false, nil
+	}
+	chain, err := c.ListChain(tbl, "input")
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nftables read %s input chain: %w", name, err)
+	}
+	if chain.Hooknum == nil || *chain.Hooknum != *nftables.ChainHookInput || chain.Type != nftables.ChainTypeFilter {
+		return false, nil
+	}
+	rules, err := c.GetRules(tbl, chain)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nftables read %s input rules: %w", name, err)
+	}
+	for _, rule := range rules {
+		for _, anyExpr := range rule.Exprs {
+			if verdict, ok := anyExpr.(*expr.Verdict); ok && verdict.Kind == expr.VerdictDrop {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
 func tableExists(c *nftables.Conn, name string) (bool, error) {
 	tables, err := c.ListTablesOfFamily(nftables.TableFamilyINet)
 	if err != nil {

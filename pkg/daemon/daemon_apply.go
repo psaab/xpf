@@ -416,6 +416,17 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 			"err", err)
 	}
 
+	// #10751/B2: converge the pre-handoff guard before ANY link-affecting
+	// mutation in this apply (bootstrap-exit/config-arrival renames, VRF,
+	// interface/bond reconcile, dataplane arm, tail). A refusal aborts the
+	// apply here so no data link activates without protection. Placed after
+	// the SNMP/management reconciles (credential revocation must run even
+	// on early-abort applies) and before everything that touches links.
+	// Post-handoff this is a no-op atomic check.
+	if err := d.requireEarlyInputProtectionPreApply(cfg); err != nil {
+		return err
+	}
+
 	// #1922 Item 2 bootstrap exit: the FIRST apply of a non-empty config
 	// (an interface-claiming confirmed commit, or a cluster SyncApply from
 	// the primary) leaves bootstrap mode and runs the one-time startup
@@ -424,9 +435,8 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// config onto them. Exit is one-way for the daemon's lifetime. An empty
 	// config (no interfaces) does NOT exit bootstrap (a confirmed-but-empty
 	// commit is not a takeover). Runs under d.applySem (the caller holds it).
-	if d.inBootstrap() && cfg != nil && len(cfg.Interfaces.Interfaces) > 0 {
-		d.exitBootstrapMode("first non-empty config applied")
-		d.runBootstrapExitStartup(cfg)
+	if err := d.maybeExitBootstrapOnFirstConfig(cfg); err != nil {
+		return err
 	}
 
 	// #4179 config-arrival re-naming: a config-less HA node (node-id present,
@@ -436,7 +446,12 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// wires the config onto the interfaces. A clustered config cannot arrive via
 	// local commit or peer sync: the topology preflight rejects it when d.cluster
 	// is nil, and the naming hook also refuses cluster-mode candidates. One-shot.
-	d.maybeReapplyConfigArrivalNaming(cfg)
+	// #10751 R4-3: a barrier-gate refusal aborts the apply before reconcile
+	// wires the config onto links/VRF/dataplane (transient naming failures
+	// still warn-and-continue inside the helper with a nil error).
+	if _, err := d.maybeReapplyConfigArrivalNaming(cfg); err != nil {
+		return err
+	}
 
 	// Log config validation warnings
 	for _, w := range cfg.Warnings {

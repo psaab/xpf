@@ -71,6 +71,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// dp.HA()), so it is deliberately kept SEPARATE from — and never replaced by
 	// — the shutdown-signal context below (#5807).
 	d.daemonCtx = ctx
+	// #10751 R7-A: a new process has installed nothing yet — drop any
+	// first-apply marker from a dead predecessor so `ensure` cannot
+	// mistake its frozen tables for current ownership of this process.
+	clearHostInboundFirstApplyMarker()
 
 	// #5807: capture the shutdown signals BEFORE the mutating startup phases
 	// (config load / interface naming / manager init / dataplane setup). A
@@ -175,8 +179,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return e
 		}},
 		{"interface-naming", func(context.Context) error {
-			d.setupInterfaceNaming()
-			return nil
+			// #10751/B2: a barrier-gate refusal aborts startup before any
+			// link activation; systemd backoff retries until protection
+			// is available. Bootstrap lifeline naming never refuses.
+			return d.setupInterfaceNaming()
 		}},
 		{"manager-init", func(context.Context) error {
 			return d.initManagers(configFailClosed)

@@ -101,7 +101,7 @@ func TestColdBootFenceIsLifelineSafe(t *testing.T) {
 	cfg := hostInboundTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
-	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil)
+	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil)
 
 	// em0's cluster-control address must never be fenced (lifeline).
 	if strings.Contains(fence, "10.99.0.1") {
@@ -120,7 +120,7 @@ func TestColdBootFenceAdmitsMandatoryL3(t *testing.T) {
 	cfg := hostInboundTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
-	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil)
+	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil)
 
 	for _, want := range []string{
 		"ct state established,related accept",
@@ -140,7 +140,7 @@ func TestColdBootFenceAdmitsMandatoryL3(t *testing.T) {
 func TestColdBootFenceAdmitsWireGuardPort(t *testing.T) {
 	cfg := hostInboundTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
-	fence := buildHostInboundFencePayload(views, nil, nil, []uint16{51820})
+	fence := buildHostInboundFencePayload(views, nil, nil, []uint16{51820}, nil, nil)
 	if !strings.Contains(fence, "udp dport 51820 accept") {
 		t.Errorf("fence must admit the configured WG listen port:\n%s", fence)
 	}

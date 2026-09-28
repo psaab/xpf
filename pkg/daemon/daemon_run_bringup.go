@@ -79,7 +79,8 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		// fences never see the retained addresses that networkd brought up.
 		// Fence their live destinations now, preserving the management
 		// lifeline, before the daemon starts its control surfaces.
-		d.installFailClosedBootHostFences(failClosed)
+		d.installBootstrapInputProtection(failClosed)
+
 		d.ipsec = ipsec.New()
 		d.ra = ra.New()
 		d.networkd = networkd.New()

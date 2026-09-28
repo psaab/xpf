@@ -27,6 +27,7 @@ patched_postinst() {
     sed \
       -e "s#^STAGED=.*#STAGED=$ROOT/usr/local/share/xpf/staged#" \
       -e "s#^SBIN=.*#SBIN=$ROOT/usr/local/sbin#" \
+      -e "s#^XPF_RUN_DIR=.*#XPF_RUN_DIR=$ROOT/run/xpf#" \
       -e "s#^\([[:space:]]*\)CURRENT_DIR=.*#\1CURRENT_DIR=$ROOT/var/lib/xpf/versions/current#" \
       -e "s#/etc/xpf/node-id#$ROOT/etc/xpf/node-id#g" \
       -e "s#\\[ -d /run/systemd/system \\]#false#g" \
@@ -36,6 +37,8 @@ patched_postinst() {
         echo "FAIL: patched postinst missing rewritten STAGED assignment"; exit 1; }
     [ "$(grep -E '^SBIN=' "$ROOT/postinst" || true)" = "SBIN=$ROOT/usr/local/sbin" ] || {
         echo "FAIL: patched postinst missing rewritten SBIN assignment"; exit 1; }
+    [ "$(grep -E '^XPF_RUN_DIR=' "$ROOT/postinst" || true)" = "XPF_RUN_DIR=$ROOT/run/xpf" ] || {
+        echo "FAIL: patched postinst missing rewritten XPF_RUN_DIR assignment"; exit 1; }
     current_line=$(grep -E '^[[:space:]]*CURRENT_DIR=' "$ROOT/postinst" || true)
     case "$current_line" in
         *"CURRENT_DIR=$ROOT/var/lib/xpf/versions/current") ;;
@@ -387,9 +390,302 @@ scenario_oldbug_repairs_to_staged_proves_nontautology() {
         echo "FAIL(non-tautology): old-bug postinst recovered cli to '$tgt', expected '$STAGED/cli' — the core test would not discriminate the fix"; exit 1; }
 }
 
+# #10751 fresh-install barrier: with no live daemon and booted systemd, the
+# first-install branch must start the barrier live (dh_installsystemd
+# --no-start only stages it for next boot).
+patched_postinst_barrier_live() {
+    # Standard rewrites neutralize every systemd gate; re-arm ONLY the
+    # barrier gate (unique: it tests $SBIN/xpfd executability).
+    sed -i 's|if false && \[ -x "\$SBIN/xpfd" \]; then # 10751-BARRIER-GATE|if true; then # 10751-BARRIER-GATE|' "$ROOT/postinst"
+    grep -Fq 'if true; then # 10751-BARRIER-GATE' "$ROOT/postinst" || {
+        echo "FAIL: barrier gate re-arm did not match (postinst drift?)"; exit 1; }
+    NFT_TABLE_PRESENT=no
+    export NFT_TABLE_PRESENT
+    stub_nft
+}
+
+stub_systemctl() {
+    # $1: is-active exit status (0 = live daemon, 1 = none).
+    mkdir -p "$ROOT/bin"
+    SYSTEMCTL_LOG="$ROOT/systemctl.log"
+    export SYSTEMCTL_LOG
+    cat > "$ROOT/bin/systemctl" <<EOF
+#!/bin/sh
+echo "systemctl \$*" >> "$SYSTEMCTL_LOG"
+if [ "\$1" = is-active ]; then exit $1; fi
+exit 0
+EOF
+    chmod +x "$ROOT/bin/systemctl"
+}
+
+scenario_first_install_starts_barrier_without_daemon() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst did not probe kernel barrier state"; exit 1; }
+    grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: postinst did not probe for a live daemon"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: fresh install without a daemon did not start the input barrier live"; exit 1; }
+}
+
+scenario_first_install_injects_barrier_with_active_unhanded_daemon() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 0
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst did not consult kernel truth before the daemon probe"; exit 1; }
+    grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: postinst did not probe for a live daemon"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: active-but-unhanded daemon did not get a barrier injection"; exit 1; }
+}
+
+stub_nft() {
+    # NFT_TABLE_PRESENT=yes simulates a live barrier table (exit 0 plus a
+    # DROP-bearing dump); NFT_TABLE_SHELL=yes simulates a present-but-open
+    # shell (exit 0, table header with no DROP verdict).
+    mkdir -p "$ROOT/bin"
+    NFT_LOG="$ROOT/nft.log"
+    export NFT_LOG NFT_TABLE_PRESENT NFT_TABLE_SHELL
+    cat > "$ROOT/bin/nft" <<EOF
+#!/bin/sh
+echo "nft \$*" >> "$NFT_LOG"
+if [ "\$1 \$2 \$3 \$4" = "list table inet xpf_input_barrier" ]; then
+    if [ "\$NFT_TABLE_SHELL" = yes ]; then
+        echo 'table inet xpf_input_barrier {'
+        echo '  chain input {'
+        echo '    type filter hook input priority 12; policy accept;'
+        echo '  }'
+        echo '}'
+        exit 0
+    elif [ "\$NFT_TABLE_PRESENT" = yes ]; then
+        echo 'table inet xpf_input_barrier {'
+        echo '  chain input {'
+        echo '    type filter hook input priority 12; policy accept;'
+        echo '    ct state established,related accept'
+        echo '    iifname != { "fxp0" } drop'
+        echo '  }'
+        echo '}'
+        exit 0
+    else
+        exit 1
+    fi
+fi
+exit 1
+EOF
+    chmod +x "$ROOT/bin/nft"
+}
+stub_flock() {
+    # FLOCK_HELD=yes simulates a live owner holding the marker (flock
+    # fails, exit 1); FLOCK_ERROR=yes simulates an operational/internal
+    # flock error (exit 2 — a distinct code the shell gate maps to live
+    # like any nonzero); unset simulates stale/orphaned (flock succeeds).
+    # Every invocation is logged so scenarios prove which mode fired.
+    mkdir -p "$ROOT/bin"
+    FLOCK_LOG="$ROOT/flock.log"
+    export FLOCK_HELD FLOCK_ERROR FLOCK_LOG
+    cat > "$ROOT/bin/flock" <<EOF
+#!/bin/sh
+if [ "\$FLOCK_ERROR" = yes ]; then echo "flock exit=2" >> "$FLOCK_LOG"; exit 2; fi
+if [ "\$FLOCK_HELD" = yes ]; then echo "flock exit=1" >> "$FLOCK_LOG"; exit 1; fi
+echo "flock exit=0" >> "$FLOCK_LOG"
+exit 0
+EOF
+    chmod +x "$ROOT/bin/flock"
+}
+
+stub_flock_toctou() {
+    # Deterministic -e/flock TOCTOU: the marker exists at the postinst's
+    # -e check, then this stub unlinks it and execs the REAL flock(1),
+    # which recreates the file (missing-path exit 0). Proves the probe's
+    # umask 077 lands the recreated file at 0600 (not umask-derived).
+    command -v flock >/dev/null 2>&1 || { echo "FAIL: test host lacks a real flock(1) for the TOCTOU fixture"; exit 1; }
+    mkdir -p "$ROOT/bin"
+    REAL_FLOCK=$(command -v flock)
+    export REAL_FLOCK
+    cat > "$ROOT/bin/flock" <<EOF
+#!/bin/sh
+rm -f "\$2"
+exec "$REAL_FLOCK" "\$@"
+EOF
+    chmod +x "$ROOT/bin/flock"
+}
+
+scenario_first_install_skips_barrier_when_table_live() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 0
+    NFT_TABLE_PRESENT=yes
+    export NFT_TABLE_PRESENT
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst did not probe kernel barrier state"; exit 1; }
+    if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst injected the barrier despite a live table"; exit 1
+    fi
+    if [ -e "$SYSTEMCTL_LOG" ] && grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst probed the daemon despite a live table (table must win first)"; exit 1
+    fi
+}
+
+scenario_first_install_injects_barrier_when_table_shell() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 0
+    NFT_TABLE_PRESENT=yes
+    NFT_TABLE_SHELL=yes
+    export NFT_TABLE_PRESENT NFT_TABLE_SHELL
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst did not probe kernel barrier state"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: present-but-open shell table did not trigger a barrier injection"; exit 1; }
+}
+
+scenario_first_install_skips_barrier_with_live_handoff_marker() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 0
+    stub_flock
+    FLOCK_HELD=yes
+    export FLOCK_HELD
+    mkdir -p "$ROOT/run/xpf"
+    : > "$ROOT/run/xpf/early-input-handoff.done"
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst injected the barrier despite a handoff marker (raw-binary daemon?)"; exit 1
+    fi
+    if [ -e "$NFT_LOG" ] && grep -Fq 'nft list table' "$NFT_LOG"; then
+        echo "FAIL: postinst probed kernel despite a handoff marker (marker must win first)"; exit 1
+    fi
+    if [ -e "$SYSTEMCTL_LOG" ] && grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst probed the daemon despite a handoff marker"; exit 1
+    fi
+}
+
+scenario_first_install_injects_barrier_with_stale_handoff_marker() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    stub_flock
+    unset FLOCK_HELD
+    export FLOCK_HELD
+    mkdir -p "$ROOT/run/xpf"
+    : > "$ROOT/run/xpf/early-input-handoff.done"
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst skipped kernel truth on a stale unlocked marker"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: stale unlocked marker plus absent table did not trigger a barrier injection"; exit 1; }
+}
+
+scenario_first_install_proceeds_without_flock_binary() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    # NOTE: no stub_flock — and the system PATH is withheld so flock(1)
+    # is genuinely unresolvable; every OTHER external the fresh-install
+    # path needs is symlinked in (only flock stays absent).
+    for u in grep mkdir cp ln id cat chmod rm sed; do
+        command -v "$u" >/dev/null 2>&1 || { echo "FAIL: test host lacks $u for the no-flock sandbox"; exit 1; }
+        ln -s "$(command -v "$u")" "$ROOT/bin/$u"
+    done
+    mkdir -p "$ROOT/run/xpf"
+    : > "$ROOT/run/xpf/early-input-handoff.done"
+    # Preconditions (non-vacuity): flock unresolvable, grep usable — a
+    # missing grep would inject via pipeline-false for the wrong reason.
+    if PATH="$ROOT/bin" command -v flock >/dev/null 2>&1; then
+        echo "FAIL: flock resolvable in the no-flock sandbox"; exit 1
+    fi
+    PATH="$ROOT/bin" command -v grep >/dev/null 2>&1 || {
+        echo "FAIL: grep unresolvable in the no-flock sandbox (inject would be vacuous)"; exit 1; }
+    PATH="$ROOT/bin" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst skipped kernel truth with flock missing (must fail closed via kernel truth)"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: missing flock plus absent table did not trigger a barrier injection"; exit 1; }
+}
+
+scenario_first_install_skips_barrier_on_flock_error() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 0
+    stub_flock
+    FLOCK_ERROR=yes
+    export FLOCK_ERROR
+    mkdir -p "$ROOT/run/xpf"
+    : > "$ROOT/run/xpf/early-input-handoff.done"
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    # Exit 2 is an ARBITRARY distinct nonzero — it proves the stub took
+    # the error path (not held/stale), NOT that real flock(1) uses 2 for
+    # operational errors. The gate maps ANY nonzero to live, so this pins
+    # the generic-nonzero branch (residual contract), not a util-linux code.
+    grep -Fq 'flock exit=2' "$FLOCK_LOG" || {
+        echo "FAIL: flock stub did not take the error path (fixture vacuous)"; exit 1; }
+    if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst injected despite a flock error (residual contract: errors read live)"; exit 1
+    fi
+    if [ -e "$NFT_LOG" ] && grep -Fq 'nft list table' "$NFT_LOG"; then
+        echo "FAIL: postinst probed kernel despite a flock error (marker must win first)"; exit 1
+    fi
+}
+
+scenario_first_install_toctou_recreated_marker_is_0600() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    stub_flock_toctou
+    command -v stat >/dev/null 2>&1 || { echo "FAIL: test host lacks stat for the mode assert"; exit 1; }
+    mkdir -p "$ROOT/run/xpf"
+    : > "$ROOT/run/xpf/early-input-handoff.done"
+    # Precondition (non-vacuity): the staged file must NOT already be 600
+    # (ambient umask 077 would make the mode assert vacuous).
+    if [ "$(stat -c %a "$ROOT/run/xpf/early-input-handoff.done")" = 600 ]; then
+        echo "FAIL: staged marker already 600 (ambient umask 077 makes the TOCTOU mode assert vacuous)"; exit 1
+    fi
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    # Branch expectations UNweakened: lockable (recreated) → kernel truth → inject.
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst skipped kernel truth on a TOCTOU-recreated marker"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: TOCTOU-recreated marker plus absent table did not trigger a barrier injection"; exit 1; }
+    # The probe recreated the file (missing-path exit 0) — under umask 077.
+    [ -e "$ROOT/run/xpf/early-input-handoff.done" ] || {
+        echo "FAIL: TOCTOU did not recreate the marker (stub did not unlink?)"; exit 1; }
+    mode=$(stat -c %a "$ROOT/run/xpf/early-input-handoff.done")
+    [ "$mode" = 600 ] || {
+        echo "FAIL: TOCTOU-recreated marker mode = $mode, want 600 (probe must run under umask 077)"; exit 1; }
+}
+
+scenario_upgrade_never_starts_barrier() {
+    build_hardened "1.0.0"
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    grep -Fq '10751-BARRIER-GATE' "$ROOT/postinst" || {
+        echo "FAIL: barrier block missing from patched postinst; absence pin would be vacuous"; exit 1; }
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure "0.9.0"
+    if [ -e "$SYSTEMCTL_LOG" ] && grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: upgrade injected the barrier into a possibly armed daemon"; exit 1
+    fi
+}
+
 run_scenario first_install_configure_empty_seeds_layout
 run_scenario first_install_seed_failure_falls_back_to_staged
 run_scenario first_install_killed_during_seed_keeps_launch_links
+run_scenario first_install_starts_barrier_without_daemon
+run_scenario first_install_injects_barrier_with_active_unhanded_daemon
+run_scenario first_install_skips_barrier_when_table_live
+run_scenario first_install_injects_barrier_when_table_shell
+run_scenario first_install_skips_barrier_with_live_handoff_marker
+run_scenario first_install_injects_barrier_with_stale_handoff_marker
+run_scenario first_install_proceeds_without_flock_binary
+run_scenario first_install_skips_barrier_on_flock_error
+run_scenario first_install_toctou_recreated_marker_is_0600
+run_scenario upgrade_never_starts_barrier
 run_scenario recovers_cli_through_current
 run_scenario recovers_helper_through_current
 run_scenario leaves_existing_and_dangling_links

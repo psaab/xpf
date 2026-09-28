@@ -111,7 +111,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 	})
 
 	t.Run("cold_boot_fence", func(t *testing.T) {
-		oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg)
+		oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, nil, nil)
 		spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg}
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallColdBootFence(spec) })
 	})
@@ -130,8 +130,52 @@ func runNftNetlinkParityInner(t *testing.T) {
 	t.Run("gap_fence", func(t *testing.T) {
 		uncoveredV4 := []string{"10.0.1.1", "10.0.9.1"}
 		uncoveredV6 := []string{"2001:db8:1::1"}
-		oracle := buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6, wg)
+		oracle := buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6, wg, nil, nil, nil, nil, nil)
 		spec := xnft.GapFenceSpec{UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wg}
+		parityCheck(t, xnft.HostInboundGapTableName, oracle, func() error { return inst.InstallGapFence(spec) })
+	})
+
+	t.Run("unleased_backstop", func(t *testing.T) {
+		// #10751 R7-B/F8-A: the per-family LAST `iifname <dev> drop`
+		// plus the TOP `iifname <dev> udp dport <68|546> accept` for
+		// unzoned DHCP units with no lease must render identically on
+		// both surfaces in all three host tables. Distinct per-family
+		// lists pin the split (v4 set form + v6 singleton over a
+		// shared netdev); the per-rule iifname check pins each rule's
+		// scope.
+		unleasedV4 := []string{"ge-0-0-8", "ge-0-0-9"}
+		unleasedV6 := []string{"ge-0-0-9"}
+		oracle := buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wg, true, nil, unleasedV4, unleasedV6)
+		if !strings.Contains(oracle, "udp dport 68 accept") || !strings.Contains(oracle, "udp dport 546 accept") {
+			t.Fatal("real oracle emitted no unleased DHCP admits; the diff below would be vacuous")
+		}
+		spec := toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wg, true, nil)
+		spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
+		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
+
+		foracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, unleasedV4, unleasedV6)
+		fspec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
+		parityCheck(t, xnft.HostInboundTableName, foracle, func() error { return inst.InstallColdBootFence(fspec) })
+
+		gapOracle := buildHostInboundGapFencePayload([]string{"10.0.1.1"}, nil, wg, unleasedV4, unleasedV6, nil, nil, nil)
+		gspec := xnft.GapFenceSpec{UncoveredV4: []string{"10.0.1.1"}, WGListenPorts: wg, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
+		parityCheck(t, xnft.HostInboundGapTableName, gapOracle, func() error { return inst.InstallGapFence(gspec) })
+	})
+
+	t.Run("gap_shared_exception", func(t *testing.T) {
+		// #10751 M1: the lifeline-ingress exception ACCEPT for shared
+		// values plus the bare DROP covering them must render
+		// identically on both surfaces. Shared is a strict subset of
+		// uncovered (X stays bare-only); two lifelines pin the set
+		// form and the per-rule iifname check pins the scope.
+		uncovered := []string{"10.0.0.5", "10.0.0.9"}
+		shared := []string{"10.0.0.5"}
+		lifelines := []string{"fxp0", "em0"}
+		oracle := buildHostInboundGapFencePayload(uncovered, nil, wg, nil, nil, shared, nil, lifelines)
+		if !strings.Contains(oracle, "iifname") || !strings.Contains(oracle, "accept") {
+			t.Fatal("gap oracle emitted no exception rule; the diff below would be vacuous")
+		}
+		spec := xnft.GapFenceSpec{UncoveredV4: uncovered, WGListenPorts: wg, SharedV4: shared, LifelineNetdevs: lifelines}
 		parityCheck(t, xnft.HostInboundGapTableName, oracle, func() error { return inst.InstallGapFence(spec) })
 	})
 
@@ -540,6 +584,18 @@ var iifnameSetRe = regexp.MustCompile(`iifname \{[^{}]*\}`)
 // fail-open/closed verdict change and must stay visible to the text diff.
 var iifnameNeSetRe = regexp.MustCompile(`iifname != \{[^{}]*\}`)
 
+// sdifnameSetRe canonicalizes a `meta sdifname { ... }` set away from the
+// text diff (both sides): same empty-element rendering caveat as iifname
+// sets. The actual slave scope is asserted per-rule via the extended
+// ruleIifnameScope below. Single-name `meta sdifname "x"` lines byte
+// compare directly (inline Cmp data renders intact).
+var sdifnameSetRe = regexp.MustCompile(`meta sdifname \{[^{}]*\}`)
+
+// testMetaKeySDIFNAME is NFT_META_SDIFNAME (slave device name, UAPI value
+// 34 — include/uapi/linux/netfilter/nf_tables.h), mirroring the
+// renderer's pinned constant for per-rule scope decoding.
+const testMetaKeySDIFNAME = expr.MetaKey(34)
+
 // normalizeNftDump canonicalizes an `nft list table` dump for comparison: it
 // strips rule handles, collapses whitespace, and SORTS the elements inside each
 // inline `{ a, b }` set (the kernel may reorder set elements) — but it NEVER
@@ -556,6 +612,7 @@ func normalizeNftDump(s string) string {
 		}
 		ln = iifnameNeSetRe.ReplaceAllString(ln, "iifname != { IFSET }")
 		ln = iifnameSetRe.ReplaceAllString(ln, "iifname { IFSET }")
+		ln = sdifnameSetRe.ReplaceAllString(ln, "meta sdifname { IFSET }")
 		ln = braceSetRe.ReplaceAllStringFunc(ln, sortBraceSet)
 		out = append(out, ln)
 	}
@@ -622,33 +679,54 @@ func iifnameScopeByRule(t *testing.T, table string) []string {
 // after a `meta iifname` load, whether a single Cmp or an anonymous set Lookup.
 // Negation is part of the scope: `iifname != ...` (CmpOpNeq or Lookup Invert)
 // returns "!"+names so a negation flip between oracle and netlink is a per-rule
-// diff, not a silent match.
+// diff, not a silent match. Slave scope (`meta sdifname`, Opus9 gap
+// exception) is decoded identically and appended as ";sdif:<names>" when
+// present; iif-only rules keep the historical bare format.
 func ruleIifnameScope(r *gnft.Rule, setNames map[string][]string) string {
-	var names []string
-	negated := false
-	pending := false
+	var names, sdifNames []string
+	negated, sdifNegated := false, false
+	pending, pendingSDIF := false, false
 	var reg uint32
 	for _, e := range r.Exprs {
 		switch x := e.(type) {
 		case *expr.Meta:
 			if x.Key == expr.MetaKeyIIFNAME {
-				pending, reg = true, x.Register
+				pending, pendingSDIF, reg = true, false, x.Register
+				continue
+			}
+			if x.Key == testMetaKeySDIFNAME {
+				pending, pendingSDIF, reg = true, true, x.Register
 				continue
 			}
 			pending = false
 		case *expr.Cmp:
 			if pending && x.Register == reg {
-				names = append(names, string(bytesTrimRightZero(x.Data)))
-				if x.Op == expr.CmpOpNeq {
-					negated = true
+				name := string(bytesTrimRightZero(x.Data))
+				if pendingSDIF {
+					sdifNames = append(sdifNames, name)
+					if x.Op == expr.CmpOpNeq {
+						sdifNegated = true
+					}
+				} else {
+					names = append(names, name)
+					if x.Op == expr.CmpOpNeq {
+						negated = true
+					}
 				}
 			}
 			pending = false
 		case *expr.Lookup:
 			if pending && x.SourceRegister == reg {
-				names = append(names, setNames[x.SetName]...)
-				if x.Invert {
-					negated = true
+				if pendingSDIF {
+					sdifNames = append(sdifNames, setNames[x.SetName]...)
+					if x.Invert {
+						sdifNegated = true
+					}
+				} else {
+					names = append(names, setNames[x.SetName]...)
+					if x.Invert {
+						negated = true
+					}
 				}
 			}
 			pending = false
@@ -657,11 +735,19 @@ func ruleIifnameScope(r *gnft.Rule, setNames map[string][]string) string {
 		}
 	}
 	sort.Strings(names)
+	sort.Strings(sdifNames)
 	scope := strings.Join(names, ",")
 	if negated && scope != "" {
 		scope = "!" + scope
 	}
-	return scope
+	if len(sdifNames) == 0 {
+		return scope
+	}
+	sdifScope := strings.Join(sdifNames, ",")
+	if sdifNegated && sdifScope != "" {
+		sdifScope = "!" + sdifScope
+	}
+	return scope + ";sdif:" + sdifScope
 }
 
 // iifScopesEqual compares two per-rule iifname-scope lists index-by-index (NOT

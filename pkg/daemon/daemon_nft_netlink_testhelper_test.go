@@ -13,11 +13,14 @@ package daemon
 // nf_tables subsystem; a test that asserts a specific fail-closed behavior
 // overrides nftInstaller with a fakeNftInstaller and restores it. It also forces
 // nftProbeAvailable to "available" so the nf_tables-unavailable classification
-// (tagNftInstallErr) is deterministic and never opens a real netlink socket during
-// unit tests.
+// unit tests. And it redirects the #10751 handoff + first-apply markers
+// into a temp dir: marker writes are durable (a failed first handoff write
+// blocks the commit), and the sandbox cannot write /run/xpf.
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
@@ -29,26 +32,39 @@ func init() {
 	// Classification defaults to "subsystem available" so tagNftInstallErr does not
 	// probe a real socket and does not tag an injected non-nf_tables failure.
 	nftProbeAvailable = func() error { return nil }
+	// #10751 R5-C/F8-C: handoff + first-apply marker writes must not
+	// touch /run/xpf — the sandbox cannot write there, and root runs
+	// would plant host state. Redirect both package-wide into a temp
+	// dir. Marker-durability tests save/restore these vars with their
+	// own paths.
+	if dir, err := os.MkdirTemp("", "xpf-handoff-test-"); err == nil {
+		EarlyInputHandoffMarkerPath = filepath.Join(dir, "early-input-handoff.done")
+		HostInboundFirstApplyMarkerPath = filepath.Join(dir, "host-inbound-applied.done")
+	}
 }
 
 // noopNftInstaller is the default test Installer: every op succeeds and touches
 // no kernel state.
 type noopNftInstaller struct{}
 
+func (noopNftInstaller) InstallEarlyInputBarrier() error                           { return nil }
+func (noopNftInstaller) RemoveEarlyInputBarrier() error                            { return nil }
+func (noopNftInstaller) EarlyInputBarrierPresent() (bool, error)                   { return true, nil }
+func (noopNftInstaller) InstallEarlyInputBarrierWithLifelineAdmit([]string) error  { return nil }
 func (noopNftInstaller) InstallHostInbound(xnft.HostInboundSpec) error             { return nil }
 func (noopNftInstaller) VerifyHostInboundOverlay(xnft.HostInputFenceOverlay) error { return nil }
 func (noopNftInstaller) InstallColdBootFence(xnft.FenceSpec) error                 { return nil }
 func (noopNftInstaller) InstallLo0ColdBootFence(xnft.FenceSpec) error              { return nil }
 func (noopNftInstaller) InstallGapFence(xnft.GapFenceSpec) error                   { return nil }
 func (noopNftInstaller) InstallTransitBarrier() error                              { return nil }
-func (noopNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) error {
-	return nil
-}
-func (noopNftInstaller) RemoveTransitBarrier() error                   { return nil }
-func (noopNftInstaller) InstallIpsecDivert(xnft.IpsecDivertSpec) error { return nil }
-func (noopNftInstaller) RemoveIpsecDivert() error                      { return nil }
-func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error)  { return fakeLo0Rules(s), nil }
-func (noopNftInstaller) DeleteTable(string) error                      { return nil }
+func (noopNftInstaller) InstallArmedTransitFence(xnft.ForwardFenceSpec) error      { return nil }
+func (noopNftInstaller) RemoveTransitBarrier() error                               { return nil }
+func (noopNftInstaller) InstallIpsecDivert(xnft.IpsecDivertSpec) error             { return nil }
+func (noopNftInstaller) RemoveIpsecDivert() error                                  { return nil }
+func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error)              { return fakeLo0Rules(s), nil }
+func (noopNftInstaller) DeleteTable(string) error                                  { return nil }
+func (noopNftInstaller) TableEnforcing(string) (bool, error)                       { return true, nil }
+func (noopNftInstaller) TableDropsInput(string) (bool, error)                      { return true, nil }
 
 // fakeNftInstaller is the per-test failure-injection seam. A nil hook succeeds
 // (returns nil); a set hook decides the result and can capture the spec/name for
@@ -62,8 +78,15 @@ type fakeNftInstaller struct {
 	lo0              func(xnft.Lo0FilterSpec) error
 	// lo0Rules overrides the rendered rule count InstallLo0 reports (#6529).
 	// nil means "derive it from the spec" (fakeLo0Rules).
-	lo0Rules *int
-	del      func(string) error
+	lo0Rules                         *int
+	earlyInputBarrierCalls           []string
+	earlyInputBarrierInstall         func() error
+	earlyInputBarrierRemove          func() error
+	earlyInputBarrierPresent         func() (bool, error)
+	earlyInputBarrierPresentCalls    int
+	earlyInputBarrierLifelineInstall func([]string) error
+	earlyInputBarrierLifelineSpecs   [][]string
+	del                              func(string) error
 	// #7191: barrier call recorder. barrierCalls appends "install"/"remove" in
 	// order so a test can assert the SEQUENCE, not just that a call happened —
 	// install-then-remove and remove-then-install have opposite meanings for a
@@ -83,9 +106,59 @@ type fakeNftInstaller struct {
 	// #9506 F1 ambiguity fallback: this hook succeeds only after the fake has
 	// observed the guard candidate, mirroring the production installer’s
 	// install+readback contract.
-	quarantineGuard func(xnft.IpsecDivertSpec) error
-	quarantineCalls []string
-	overlayReadback func(xnft.HostInputFenceOverlay) error
+	quarantineGuard     func(xnft.IpsecDivertSpec) error
+	quarantineCalls     []string
+	overlayReadback     func(xnft.HostInputFenceOverlay) error
+	tableEnforcing      func(string) (bool, error)
+	tableEnforcingCalls []string
+	tableDropsInput     func(string) (bool, error)
+}
+
+func (f *fakeNftInstaller) TableEnforcing(name string) (bool, error) {
+	f.tableEnforcingCalls = append(f.tableEnforcingCalls, name)
+	if f.tableEnforcing != nil {
+		return f.tableEnforcing(name)
+	}
+	return true, nil
+}
+
+func (f *fakeNftInstaller) TableDropsInput(name string) (bool, error) {
+	if f.tableDropsInput != nil {
+		return f.tableDropsInput(name)
+	}
+	return true, nil
+}
+
+func (f *fakeNftInstaller) InstallEarlyInputBarrier() error {
+	f.earlyInputBarrierCalls = append(f.earlyInputBarrierCalls, "install")
+	if f.earlyInputBarrierInstall != nil {
+		return f.earlyInputBarrierInstall()
+	}
+	return nil
+}
+
+func (f *fakeNftInstaller) RemoveEarlyInputBarrier() error {
+	f.earlyInputBarrierCalls = append(f.earlyInputBarrierCalls, "remove")
+	if f.earlyInputBarrierRemove != nil {
+		return f.earlyInputBarrierRemove()
+	}
+	return nil
+}
+
+func (f *fakeNftInstaller) EarlyInputBarrierPresent() (bool, error) {
+	f.earlyInputBarrierPresentCalls++
+	if f.earlyInputBarrierPresent != nil {
+		return f.earlyInputBarrierPresent()
+	}
+	return true, nil
+}
+func (f *fakeNftInstaller) InstallEarlyInputBarrierWithLifelineAdmit(lifelines []string) error {
+	f.earlyInputBarrierCalls = append(f.earlyInputBarrierCalls, "install-lifeline")
+	f.earlyInputBarrierLifelineSpecs = append(f.earlyInputBarrierLifelineSpecs, append([]string(nil), lifelines...))
+	if f.earlyInputBarrierLifelineInstall != nil {
+		return f.earlyInputBarrierLifelineInstall(lifelines)
+	}
+	return nil
 }
 
 func (f *fakeNftInstaller) InstallHostInbound(s xnft.HostInboundSpec) error {
@@ -167,6 +240,12 @@ func (c countingNftInstaller) VerifyHostInboundOverlay(xnft.HostInputFenceOverla
 	return nil
 }
 
+func (c countingNftInstaller) InstallEarlyInputBarrier() error         { *c.calls++; return nil }
+func (c countingNftInstaller) RemoveEarlyInputBarrier() error          { *c.calls++; return nil }
+func (c countingNftInstaller) EarlyInputBarrierPresent() (bool, error) { return true, nil }
+func (c countingNftInstaller) InstallEarlyInputBarrierWithLifelineAdmit([]string) error {
+	return nil
+}
 func (c countingNftInstaller) InstallHostInbound(xnft.HostInboundSpec) error { *c.calls++; return nil }
 func (c countingNftInstaller) InstallColdBootFence(xnft.FenceSpec) error     { *c.calls++; return nil }
 func (c countingNftInstaller) InstallLo0ColdBootFence(xnft.FenceSpec) error  { *c.calls++; return nil }
@@ -175,7 +254,9 @@ func (c countingNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error) {
 	*c.calls++
 	return fakeLo0Rules(s), nil
 }
-func (c countingNftInstaller) DeleteTable(string) error { *c.calls++; return nil }
+func (c countingNftInstaller) DeleteTable(string) error             { *c.calls++; return nil }
+func (c countingNftInstaller) TableEnforcing(string) (bool, error)  { return true, nil }
+func (c countingNftInstaller) TableDropsInput(string) (bool, error) { return true, nil }
 
 // hostInboundViewAddrs reports whether a HostInboundSpec view/unzoned set scopes
 // the given bare address in the requested family. Used by fence/real spec

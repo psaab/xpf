@@ -282,6 +282,14 @@ type HostInboundSpec struct {
 	// reinject accept is omitted (byte-identical to the pre-#9637 ruleset).
 	DataplaneFresh bool
 	Overlay        *HostInputFenceOverlay
+	// UnleasedV4/V6 are LOCAL_IN netdevs of unzoned DHCP units with no
+	// resolved address in that family (#10751 R7-B/F8-A): per-family
+	// LAST `iifname <dev> drop` rules so a first lease lands already
+	// denied, plus per-family TOP DHCP-client admits (udp dport 68/546
+	// scoped to the same netdevs) so the lease can still arrive. Empty
+	// omits the rules.
+	UnleasedV4 []string
+	UnleasedV6 []string
 }
 
 // FenceSpec is the cold-boot fail-closed fence render request (#5644): the
@@ -291,12 +299,33 @@ type FenceSpec struct {
 	UnzonedV4     []string
 	UnzonedV6     []string
 	WGListenPorts []uint16
+	// UnleasedV4/V6, as in HostInboundSpec (fence stands pre-handoff).
+	UnleasedV4 []string
+	UnleasedV6 []string
 }
 
 // GapFenceSpec is the additive coverage-gap fence render request (#5789): the
-// uncovered addresses to DROP plus the mandatory-admit WG ports.
+// uncovered addresses to DROP plus the mandatory-admit WG ports. Uncovered
+// addresses shared with a lifeline are ALSO listed in SharedV4/V6: the gap
+// denies them on data ingress (bare DROP) while a preceding exception
+// admits them on lifeline ingress (M1 ingress-aware scope — a global
+// withhold would leave them fail-open post-handoff, when no barrier
+// stands behind the gap).
 type GapFenceSpec struct {
 	UncoveredV4   []string
 	UncoveredV6   []string
 	WGListenPorts []uint16
+	// UnleasedV4/V6, as in HostInboundSpec (uniform backstop).
+	UnleasedV4 []string
+	UnleasedV6 []string
+	// SharedV4/V6 are the Uncovered subset shared with a lifeline,
+	// admitted on lifeline ingress ahead of the bare DROP. Empty
+	// omits the exception.
+	SharedV4 []string
+	SharedV6 []string
+	// LifelineNetdevs is the exception's iifname set: linux LOCAL_IN
+	// names of lifeline interfaces (HostInboundLifelineIngressNetdevs).
+	// Empty with non-empty Shared omits the exception (fail-closed:
+	// shared stays bare-DROPped on every ingress).
+	LifelineNetdevs []string
 }

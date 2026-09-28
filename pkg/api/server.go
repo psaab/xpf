@@ -246,6 +246,13 @@ type Config struct {
 	// confirm record succeeds. /health returns 503 while degraded.
 	// Optional; if nil, the check and gauge are omitted.
 	ConfigPersistDegradedFn func() bool
+	// EarlyInputGuardSwapFailedFn surfaces a failed bootstrap lifeline-guard
+	// swap via /health (non-fatal field) and the
+	// xpf_early_input_guard_swap_failed gauge (#10751, mirrors the
+	// RollbackHistoryDegradedFn pattern). Returning true means bootstrap
+	// retained the global input barrier; remote recovery may be blocked.
+	// Optional; if nil, the field and gauge are omitted.
+	EarlyInputGuardSwapFailedFn func() bool
 	// VRRPLocalPrioritiesFn returns this node's per-redundancy-group VRRP
 	// priorities (cluster.Manager.LocalPriorities), so the /vrrp handler can
 	// build the RETH instances the same way every other surface does (#8321
@@ -632,6 +639,7 @@ type Server struct {
 	// #7181: applied state of the host-inbound nft surface; nil = unwired.
 	hostInboundAppliedFn                 func() HostInboundAppliedSnapshot
 	configPersistDegradedFn              func() bool
+	earlyInputGuardSwapFailedFn          func() bool
 	configApplyDebtFn                    func() (bool, uint64, string)
 	rollbackHistoryDegradedFn            func() bool
 	journalPermsDegradedFn               func() bool
@@ -760,6 +768,7 @@ func NewServer(cfg Config) *Server {
 		bootstrapImportFn:                    cfg.BootstrapImportFn,
 		hostInboundAppliedFn:                 cfg.HostInboundAppliedFn,
 		configPersistDegradedFn:              cfg.ConfigPersistDegradedFn,
+		earlyInputGuardSwapFailedFn:          cfg.EarlyInputGuardSwapFailedFn,
 		rollbackHistoryDegradedFn:            cfg.RollbackHistoryDegradedFn,
 		journalPermsDegradedFn:               cfg.JournalPermsDegradedFn,
 		configApplyDebtFn:                    cfg.ConfigApplyDebtFn,

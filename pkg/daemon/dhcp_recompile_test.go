@@ -189,3 +189,34 @@ func TestDHCPLeaseChangeRequiresRecompile_ZonedDataInterfaceUnchanged(t *testing
 		t.Fatal("zoned data-interface DHCP lease change must require the full recompile")
 	}
 }
+
+// TestDHCPLeaseChangeRequiresRecompile_VRFEnslavedNonLifeline10751 pins the
+// convergence the #10751 R7-B backstop relies on for VRF-enslaved units:
+// the backstop SKIPS them (their LOCAL_IN identity is the shared master,
+// where an iifname DROP would shadow addressed siblings), so a VRF-enslaved
+// lease MUST force the full recompile that installs destination DROPs. A
+// future VRF-membership fast-path skip would strand VRF leases unprotected
+// with no backstop to catch them — this test makes that RED.
+func TestDHCPLeaseChangeRequiresRecompile_VRFEnslavedNonLifeline10751(t *testing.T) {
+	d := &Daemon{}
+	d.publishMgmtVRFIfaces(map[string]bool{"fxp0": true})
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{
+			Interfaces: map[string]*config.InterfaceConfig{
+				"ge-0/0/9": {
+					Name: "ge-0/0/9",
+					Units: map[int]*config.InterfaceUnit{
+						0: {DHCP: true, DHCPv6: true},
+					},
+				},
+			},
+		},
+		RoutingInstances: []*config.RoutingInstanceConfig{
+			{Name: "vrf-data", Interfaces: []string{"ge-0/0/9.0"}},
+		},
+	}
+
+	if !d.dhcpLeaseChangeRequiresRecompile(cfg, false) {
+		t.Fatal("VRF-enslaved non-lifeline DHCP lease change must require the full recompile (no backstop covers it)")
+	}
+}

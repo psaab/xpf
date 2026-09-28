@@ -101,6 +101,14 @@ func deviceMapNamingActive(cfg *config.Config) bool {
 func applyStartupNamingPolicy(cfg *config.Config, nodeID int, clusterMode bool,
 	userspaceWorkers int, rssEnabled bool, rssAllowed []string,
 	protected map[string]bool) error {
+	// #10751/B4: refuse link activation when early input protection is
+	// known-absent. Renames bring links up (LinkSetUp), making v6
+	// link-locals reachable before the first host-inbound apply; the unit
+	// Requires edge covers systemd boots, this gate covers direct starts.
+	if !ensureEarlyInputProtectionForNaming(cfg) {
+		return fmt.Errorf("refusing interface naming: %w", errEarlyInputProtectionRefused)
+	}
+
 	if deviceMapNamingActive(cfg) {
 		return enumerateAndRenameMappedFn(cfg.Chassis.DeviceMap, cfg, protected)
 	}
