@@ -617,8 +617,11 @@ correct runtime resolution; the only remedy is correcting
   cannot forge the operator-facing `slog.Error`; a stable per-process
   sender id excludes the socket's own looped-back broadcast (including
   beacons sent just before a heartbeat restart), and a manager-lifetime
-  nonce cache (4096 entries, evict-expired-then-random,
-  5s sweep) suppresses exact replays across watcher restarts. A verified
+  nonce cache (4096 entries, evict-expired-then-oldest, 5s sweep)
+  suppresses exact replays across watcher restarts. Beacon transmits are
+  capped at 10/s regardless of heartbeat cadence (which the schema allows
+  down to 1ms), so honest traffic holds at most ~600 live entries
+  against the 4096 cap. A verified
   same-cluster/same-node-id beacon from another sender calls
   `NoteDuplicateNodeIDBeacon`, which shares the 30s duplicate-node-id
   limiter. Like the join point, it only warns — the peer stays absent and

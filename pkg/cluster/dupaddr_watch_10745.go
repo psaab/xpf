@@ -162,10 +162,11 @@ func verifyDuplicateIdentityBeacon(frame []byte, mgr *Manager, now time.Time) (c
 	return int(binary.LittleEndian.Uint16(frame[8:10])), int(frame[10]), instanceID, nonce, stamp, true
 }
 
-// duplicateIdentityReplayCap bounds the beacon nonce cache. A genuine
-// duplicate peer emits ~10 beacons/s, so ~300 entries cover the 30s window
-// with clock skew; 4096 is a decade of headroom that keeps worst-case memory
-// under half a megabyte while a PSK-holder flood cannot grow it further.
+// duplicateIdentityReplayCap bounds the beacon nonce cache. Beacon sends are
+// capped at 10/s regardless of heartbeat cadence (see sendInterval), and an
+// entry lives at most 60s (30s window plus 30s future skew), so honest peer
+// traffic holds at most ~600 live entries; 4096 is ~7x headroom while a
+// PSK-holder flood cannot grow memory past the cap.
 const duplicateIdentityReplayCap = 4096
 
 // duplicateIdentityReplayCache records observed beacon nonces with the
@@ -195,8 +196,10 @@ type duplicateIdentityReplayCache struct {
 // it when it was not. deadline is when the entry stops suppressing replays
 // (BEACON-02: max(receipt, stamp)+MaxAge, so a skewed-future beacon's nonce
 // always outlives its timestamp's validity). At capacity, expired entries go
-// first and one arbitrary survivor is evicted only when nothing had expired —
-// memory stays bounded under a PSK-holder flood.
+// first and the single oldest survivor
+// (earliest deadline) is evicted only when nothing had expired — eviction
+// order is by age, never arbitrary, so a flood displaces the entries
+// closest to natural expiry first.
 func (c *duplicateIdentityReplayCache) checkAndRecord(nonce [16]byte, deadline time.Time, now time.Time) (replay bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -213,10 +216,15 @@ func (c *duplicateIdentityReplayCache) checkAndRecord(nonce [16]byte, deadline t
 			}
 		}
 		if len(c.entries) >= duplicateIdentityReplayCap {
-			for seen := range c.entries {
-				delete(c.entries, seen)
-				break // Go map order is random: evict-random on overflow
+			var oldest [16]byte
+			var oldestAt time.Time
+			first := true
+			for seen, at := range c.entries {
+				if first || at.Before(oldestAt) {
+					oldest, oldestAt, first = seen, at, false
+				}
 			}
+			delete(c.entries, oldest)
 		}
 	}
 	c.entries[nonce] = deadline
@@ -390,10 +398,29 @@ func (w *duplicateIdentityWatcher) stop() {
 	w.wg.Wait()
 }
 
+// duplicateIdentityBeaconMinSendInterval caps the beacon wire rate at 10/s
+// regardless of heartbeat cadence. The schema allows 1ms heartbeat intervals
+// and the watcher inherits that cadence; without this clamp an honest peer
+// pair at 1ms would hold 1000/s x 60s = 60000 live nonces and overflow any
+// sane cap with no attacker present. Day-0 duplicate detection needs no
+// finer grain — 10/s still warns within a second — while the receive cache
+// cap can then be sized for a bounded honest rate. The read deadline keeps
+// the raw interval: only sends are decoupled.
+const duplicateIdentityBeaconMinSendInterval = 100 * time.Millisecond
+
+// sendInterval is the beacon transmit cadence: the heartbeat interval floored
+// at the 10/s maximum rate.
+func (w *duplicateIdentityWatcher) sendInterval() time.Duration {
+	if w.interval < duplicateIdentityBeaconMinSendInterval {
+		return duplicateIdentityBeaconMinSendInterval
+	}
+	return w.interval
+}
+
 func (w *duplicateIdentityWatcher) sendLoop() {
 	defer w.wg.Done()
 	w.sendBeacon()
-	ticker := time.NewTicker(w.interval)
+	ticker := time.NewTicker(w.sendInterval())
 	defer ticker.Stop()
 	for {
 		select {

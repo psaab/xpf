@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"net"
 	"strings"
 	"testing"
@@ -586,5 +587,63 @@ func TestPrepareAssignsStableSenderID_10745(t *testing.T) {
 	t.Cleanup(second.stop)
 	if first.instance != mgr.beaconSenderID() || second.instance != mgr.beaconSenderID() {
 		t.Fatal("prepared watchers do not carry the manager's stable sender ID")
+	}
+}
+
+// beaconTestNonce returns a deterministic nonce for index i (direct cache
+// tests need addressable nonces; production nonces are crypto-random).
+func beaconTestNonce(i int) [16]byte {
+	var n [16]byte
+	binary.BigEndian.PutUint64(n[:8], uint64(i))
+	return n
+}
+
+// TestDuplicateIdentityReplayEvictsOldest_10745 pins oldest-first eviction
+// (R2-2): at capacity the entry with the earliest deadline goes, newer
+// entries keep suppressing, and the evicted nonce — still freshness-valid —
+// reads as new again. Random-victim eviction reds the survivor assertions.
+func TestDuplicateIdentityReplayEvictsOldest_10745(t *testing.T) {
+	var c duplicateIdentityReplayCache
+	base := time.Unix(1700000000, 0)
+	for i := range duplicateIdentityReplayCap {
+		if c.checkAndRecord(beaconTestNonce(i), base.Add(time.Duration(i+1)*time.Millisecond), base) {
+			t.Fatalf("insert %d reported replay on first sight", i)
+		}
+	}
+	if got := c.len(); got != duplicateIdentityReplayCap {
+		t.Fatalf("cache holds %d entries, want a full cap of %d", got, duplicateIdentityReplayCap)
+	}
+	// One more insert overflows: only the earliest deadline (index 0) may go.
+	if c.checkAndRecord(beaconTestNonce(duplicateIdentityReplayCap), base.Add(time.Hour), base) {
+		t.Fatal("overflow insert reported replay for a fresh nonce")
+	}
+	if got := c.len(); got != duplicateIdentityReplayCap {
+		t.Fatalf("cache holds %d entries after overflow, want capped %d", got, duplicateIdentityReplayCap)
+	}
+	// Survivors first (replay checks mutate nothing on a hit).
+	for _, i := range []int{1, duplicateIdentityReplayCap / 2, duplicateIdentityReplayCap - 1, duplicateIdentityReplayCap} {
+		if !c.checkAndRecord(beaconTestNonce(i), base.Add(time.Hour), base) {
+			t.Fatalf("nonce %d no longer suppresses — eviction did not take the oldest", i)
+		}
+	}
+	// The evicted oldest reads as new even though its deadline is unexpired.
+	if c.checkAndRecord(beaconTestNonce(0), base.Add(time.Hour), base) {
+		t.Fatal("evicted oldest nonce still suppresses — nothing was evicted at capacity")
+	}
+}
+
+// TestDuplicateIdentitySendIntervalFloorsAt10PerSecond_10745 pins the R2-2
+// rate decoupling: sub-100ms heartbeat cadences (schema allows 1ms) must
+// not drive beacon transmits — the cache cap is sized for 10/s x 60s.
+func TestDuplicateIdentitySendIntervalFloorsAt10PerSecond_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+	fast := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Millisecond, beaconTestInstance(t))
+	if got := fast.sendInterval(); got != duplicateIdentityBeaconMinSendInterval {
+		t.Fatalf("1ms heartbeat yields beacon interval %v, want floored %v",
+			got, duplicateIdentityBeaconMinSendInterval)
+	}
+	slow := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, 5*time.Second, beaconTestInstance(t))
+	if got := slow.sendInterval(); got != 5*time.Second {
+		t.Fatalf("5s heartbeat yields beacon interval %v, want unchanged 5s", got)
 	}
 }
