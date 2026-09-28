@@ -31,6 +31,13 @@
 # first install when no xpfd owns enforcement; if that fails (or on manual
 # installs), reboot — or run `systemctl enable --now xpf-input-closed`
 # BEFORE the network comes up — or host input stays unenforced until reboot.
+#
+# Bootstrap boots swap this table for a lifeline-admitting variant (same
+# table, leading iifname admit): NON-lifeline data and link-local ingress
+# stay DROP-closed, but whole lifeline NICs — including their link-local
+# addresses — are open, and a default-route fallback NIC is admitted whole
+# when no verified management identity exists. The first commit converges
+# to configured policy.
 [Unit]
 DefaultDependencies=no
 After=nftables.service

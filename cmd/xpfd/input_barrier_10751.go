@@ -42,6 +42,6 @@ func runInputBarrierSubcommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "input-barrier: install early input barrier: %v\n", err)
 		return 1
 	}
-	fmt.Fprintln(stdout, "early input barrier installed (inet input DROP with loopback, L3, FRR and HA admits)")
+	fmt.Fprintln(stdout, "early input barrier installed (inet input DROP with loopback, L3, DHCP-client admits)")
 	return 0
 }

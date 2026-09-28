@@ -27,8 +27,8 @@ func TestEarlyInputBarrierPlanClosesHostServicesAndPreservesControl10751(t *test
 	if p.err != nil {
 		t.Fatalf("build early input barrier: %v", p.err)
 	}
-	if len(p.rules) != 7 {
-		t.Fatalf("early input barrier rule count = %d, want loopback + five mandatory L3 + DHCP-client admits", len(p.rules))
+	if len(p.rules) != 8 {
+		t.Fatalf("early input barrier rule count = %d, want loopback + five mandatory L3 + two family-split DHCP-client admits", len(p.rules))
 	}
 
 	loopback := p.rules[0]
@@ -57,13 +57,16 @@ func TestEarlyInputBarrierPlanClosesHostServicesAndPreservesControl10751(t *test
 		}
 	}
 
-	// B5: pin the complete admit surface. The only transport dports in the
-	// chain are DHCP-client 68/546 over UDP; no TCP dport rule exists at
-	// all; the only l4proto set is ESP/AH {50,51}; every exposed service
-	// port stays blocked.
+	// B11: pin the complete admit surface. Transport dports exist only as
+	// family-split DHCP-client rules (inet/68, inet6/546); no TCP dport
+	// rule exists at all; the only l4proto set is ESP/AH {50,51}; every
+	// exposed service port stays blocked.
 	protosSeen := map[uint8]int{}
-	var udpDports []uint16
-	udpDportRules := 0
+	type dportRule struct {
+		nfproto uint8
+		ports   []uint16
+	}
+	var dports []dportRule
 	for i, rule := range p.rules {
 		// l4proto values: scalar guards and set lookups following Meta L4PROTO.
 		for j, e := range rule {
@@ -90,15 +93,15 @@ func TestEarlyInputBarrierPlanClosesHostServicesAndPreservesControl10751(t *test
 				}
 			}
 		}
-		// Transport dport matches: allowed only as a single UDP {68,546} rule.
+		// Transport dport matches: allowed only as family-split UDP rules.
 		if hasTransportDportMatch10751(rule) {
 			proto := scalarL4Proto10751(t, rule, i)
+			nfproto := scalarNFProto10751(t, rule, i)
 			ports := inputBarrierLookupPorts10751(t, p, rule)
 			if proto != 17 {
 				t.Errorf("rule %d is an l4proto %d dport %v rule; the barrier must admit no TCP ports", i, proto, ports)
 			} else {
-				udpDportRules++
-				udpDports = append(udpDports, ports...)
+				dports = append(dports, dportRule{nfproto: nfproto, ports: ports})
 			}
 		}
 	}
@@ -112,11 +115,16 @@ func TestEarlyInputBarrierPlanClosesHostServicesAndPreservesControl10751(t *test
 			t.Errorf("barrier admits l4proto %d (%d reference(s)); TCP and FRR/HA protocols must stay deferred", banned, protosSeen[banned])
 		}
 	}
-	if udpDportRules != 1 || !reflect.DeepEqual(udpDports, []uint16{68, 546}) {
-		t.Fatalf("UDP dport admits = %v across %d rule(s), want exactly one {68 546} DHCP-client rule", udpDports, udpDportRules)
+	wantDports := []dportRule{{famV4.nfproto, []uint16{68}}, {famV6.nfproto, []uint16{546}}}
+	if !reflect.DeepEqual(dports, wantDports) {
+		t.Fatalf("UDP dport rules = %+v, want exactly inet/68 + inet6/546 DHCP-client rules", dports)
+	}
+	flat := []uint16{}
+	for _, r := range dports {
+		flat = append(flat, r.ports...)
 	}
 	for _, blocked := range []uint16{22, 179, 500, 4500, 4785, 4784, 520, 521, 3784, 3785, 67, 547} {
-		for _, admitted := range udpDports {
+		for _, admitted := range flat {
 			if admitted == blocked {
 				t.Errorf("early UDP barrier admits blocked port %d", blocked)
 			}
@@ -269,8 +277,8 @@ func assertEarlyInputBarrierInstalled10751(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read early input barrier rules: %v", err)
 	}
-	if len(rules) != 7 {
-		t.Fatalf("installed early input barrier has %d rules, want 7 (loopback + five mandatory L3 + DHCP-client)", len(rules))
+	if len(rules) != 8 {
+		t.Fatalf("installed early input barrier has %d rules, want 8 (loopback + five mandatory L3 + two DHCP-client)", len(rules))
 	}
 }
 
@@ -281,9 +289,9 @@ func TestEarlyInputBarrierLifelineAdmit10751(t *testing.T) {
 	if p.err != nil {
 		t.Fatalf("build lifeline guard: %v", p.err)
 	}
-	// Base 7 rules plus the leading lifeline admit.
-	if len(p.rules) != 8 {
-		t.Fatalf("lifeline guard rule count = %d, want 8", len(p.rules))
+	// Base 8 rules plus the leading lifeline admit.
+	if len(p.rules) != 9 {
+		t.Fatalf("lifeline guard rule count = %d, want 9", len(p.rules))
 	}
 	first := p.rules[0]
 	meta, ok := first[0].(*expr.Meta)
@@ -310,4 +318,22 @@ func TestEarlyInputBarrierLifelineAdmit10751(t *testing.T) {
 	if m, ok := second[0].(*expr.Meta); !ok || m.Key != expr.MetaKeyIIFNAME {
 		t.Fatalf("second rule head = %#v, want base loopback iifname", second[0])
 	}
+}
+
+func scalarNFProto10751(t *testing.T, rule []expr.Any, i int) uint8 {
+	t.Helper()
+	for j, e := range rule {
+		meta, ok := e.(*expr.Meta)
+		if !ok || meta.Key != expr.MetaKeyNFPROTO || j+1 >= len(rule) {
+			continue
+		}
+		if cmp, ok := rule[j+1].(*expr.Cmp); ok {
+			if len(cmp.Data) != 1 {
+				t.Fatalf("rule %d nfproto compare has %d bytes, want 1", i, len(cmp.Data))
+			}
+			return cmp.Data[0]
+		}
+	}
+	t.Fatalf("rule %d has a dport match but no nfproto guard", i)
+	return 0
 }

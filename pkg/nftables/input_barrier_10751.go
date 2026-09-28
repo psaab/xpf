@@ -23,29 +23,41 @@
 //  2. ct state established,related accept.
 //  3. meta l4proto { 50, 51 } accept (host-terminated ESP/AH).
 //  4. ICMPv6 errors/PMTUD and ND; ICMPv4 errors/PMTUD.
-//  5. UDP dport { 68, 546 } accept (DHCP/DHCPv6 client replies — without
-//     these a DHCP-pending boot could never acquire the lease that ends
-//     barrier retention).
+//  5. UDP dport 68 in inet, UDP dport 546 in inet6 (DHCP/DHCPv6 client
+//     replies, family-split — without these a DHCP-pending boot could never
+//     acquire the lease that ends barrier retention).
 //
 // Rules 2-4 are hostInboundFenceMandatoryAdmitsNetlink(p, nil): the SAME shared
 // admits as the #5644 cold-boot fence and #5789 gap fence, minus configured
 // WireGuard ports (unknown before config loads). Rule 5 admits only DHCP
-// CLIENT ports: no firewall service listens on 68/546, so this exposes no
-// listener (the DHCP server ports 67/547 stay blocked).
+// CLIENT ports, family-split to match steady state (dhcp→ip, dhcpv6→ip6):
+// from-any dport-only, reaching dhclient parsing which validates transaction
+// IDs (the DHCP server ports 67/547 stay blocked).
 //
 // WAN-REACHABILITY DURING THE WINDOW (pre-networkd install → first handoff).
 // Loopback is local-only; established/related admits return traffic only;
-// ESP/AH without an SA is dropped by XFRM; ICMP errors/PMTUD/ND are
-// listener-less mandatory L3; DHCP client ports reach only dhclient. Every
-// other protocol is CLOSED until handoff: SSH 22, BGP 179, IKE 500/4500,
-// OSPF 89, VRRP 112, RIP 520/521, BFD 3784/3785, HA heartbeat 4784 and
-// session sync 4785, DHCP server, web/API, monitoring. FRR routing protocols
-// and HA control converge after the first host-inbound handoff (HA listeners
-// start after the first apply, so nothing is lost; FRR daemons retry). No
-// config is read to authorize anything; no named counters, no address
-// scoping — at Before-networkd install time NO addresses exist yet, so a
-// daddr-scoped fence is unexpressable and policy DROP is the fail-closed
-// shape. Only return traffic, loopback, core L3, and DHCP-client replies pass.
+// ESP/AH without an SA is dropped by XFRM; ICMP errors/PMTUD/ND/RA are
+// kernel-processed mandatory L3 with no userspace listener; DHCP-client
+// replies are from-any dport-only (daddr breadth is forced — no addresses
+// exist pre-networkd to scope to — and sport pairing would exceed the
+// steady-state dport-only shape). Every other protocol is CLOSED until
+// handoff: SSH 22, BGP 179, IKE 500/4500, OSPF 89, VRRP 112, RIP 520/521,
+// BFD 3784/3785, HA heartbeat 4784 and session sync 4785, DHCP server,
+// web/API, monitoring. FRR routing protocols and HA control converge after
+// the first host-inbound handoff (HA listeners start after the first apply,
+// so nothing is lost; FRR daemons retry). No config is read to authorize
+// anything; no named counters. Only return traffic, loopback, core L3, and
+// DHCP-client replies pass.
+//
+// BOOTSTRAP VARIANT. Bootstrap swaps this table for a lifeline-admitting
+// form (leading `iifname {lifelines} accept`): NON-lifeline data and
+// link-local ingress stay DROP-closed, but whole lifeline NICs — including
+// their link-local addresses — are open, and a default-route fallback NIC
+// is admitted whole when no verified management identity (record/leaf)
+// exists. The admit set prefers verified identity (persisted record,
+// explicit leaf, OQ-D fxp0 narrowing) over name guesses; the zero-identity
+// fallback is recovery necessity, logged. The first commit converges to
+// configured policy.
 //
 // PRIORITY. 12 evaluates STRICTLY AFTER the whole local-delivery cluster
 // (lo0 0 < host-inbound 10 < gap 11). Before the first apply the barrier stands
@@ -91,11 +103,14 @@ const EarlyInputBarrierTableName = "xpf_input_barrier"
 // enforcement during the handoff overlap. See the file doc comment.
 const earlyInputBarrierPriority = hostInboundGapPriority + 1
 
-// earlyInputBarrierDHCPClientPorts are the DHCP (68) and DHCPv6 (546) client
-// ports. Offers arrive here; without this admit a DHCP-pending boot deadlocks
-// (no lease → barrier retained → offers dropped → no lease). No service the
-// firewall runs listens on these ports.
-var earlyInputBarrierDHCPClientPorts = []uint16{68, 546}
+// earlyInputBarrierDHCPv4ClientPort and earlyInputBarrierDHCPv6ClientPort are
+// the DHCP (68) and DHCPv6 (546) client ports, admitted family-split
+// (v4/68, v6/546). Offers arrive here; without this admit a DHCP-pending
+// boot deadlocks (no lease → barrier retained → offers dropped → no lease).
+const (
+	earlyInputBarrierDHCPv4ClientPort = 68
+	earlyInputBarrierDHCPv6ClientPort = 546
+)
 
 const earlyInputBarrierLoopback = "lo"
 
@@ -193,5 +208,21 @@ func emitEarlyInputBarrierAdmitsWithLifeline(p *nlPlan, lifelines []string) {
 	}
 	p.rule().iifname([]string{earlyInputBarrierLoopback}).emit(verdictAccept()...)
 	hostInboundFenceMandatoryAdmitsNetlink(p, nil)
-	p.rule().l4Port(protoUDP, "dport", portsFromUint16(earlyInputBarrierDHCPClientPorts), false).emit(verdictAccept()...)
+	emitEarlyInputBarrierDHCPClient(p)
+}
+
+// emitEarlyInputBarrierDHCPClient admits DHCP-client replies, family-split:
+// UDP dport 68 in inet, UDP dport 546 in inet6. A single dport-only rule in
+// the inet table would admit 68-on-v6 and 546-on-v4 too; steady state gates
+// dhcp→ip and dhcpv6→ip6 and the barrier matches it (family is knowable
+// config-free). dport-only (no sport/iifname/daddr): daddr breadth is forced
+// pre-networkd and sport pairing would exceed steady state; dhclient
+// validates transaction IDs.
+func emitEarlyInputBarrierDHCPClient(p *nlPlan) {
+	r4 := p.rule()
+	r4.needNfproto(famV4)
+	r4.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv4ClientPort}), false).emit(verdictAccept()...)
+	r6 := p.rule()
+	r6.needNfproto(famV6)
+	r6.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv6ClientPort}), false).emit(verdictAccept()...)
 }

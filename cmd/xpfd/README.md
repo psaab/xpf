@@ -66,9 +66,11 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
 - `xpfd transit-barrier remove` — removes both transit-barrier tables so package
   removal can release the boot/shutdown fence.
 - `xpfd input-barrier close` — installs the config-free host-input DROP barrier
-  before networkd. It admits loopback, mandatory L3, DHCP-client replies, and
-  established flows; all host services (SSH, BGP, IKE, FRR/HA control) remain
-  blocked until host-inbound handoff.
+  before networkd. It admits loopback, mandatory L3, family-split DHCP-client
+  replies, and established flows; all host services remain blocked until
+  host-inbound handoff. Bootstrap swaps in a lifeline-admitting variant
+  (whole lifeline NICs, including their link-locals); the first commit
+  converges to configured policy.
 - `xpfd input-barrier remove` — removes the host-input barrier only after the
   real firewall/fallback is installed or a no-enforcement teardown completes.
 - A kernel without bridge nf_tables reports degraded success with a warning
