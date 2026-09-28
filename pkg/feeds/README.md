@@ -14,6 +14,107 @@ feed servers and triggers config recompile when the resolved set changes
 - `GetPrefixes(name)` — `feeds.go`. Returns the current enforced (last-good) snapshot.
 - `StopAll()`, `FeedInfo`, `AllFeeds()` — surfaced to `show security dynamic-address`. `StopAll` is the shutdown path (cancels every producer, empties the map); `Apply` no longer routes through it (#5282).
 
+## Drastic-shrink protection (#11059)
+
+`installSnapshot` compares each non-empty fetched set with that feed's
+currently installed last-good snapshot. By default, it refuses the candidate
+when the old snapshot has at least 32 prefixes, the decrease is at least 16
+prefixes, and fewer than 50% of the old prefixes remain. Thus 100→49 is
+refused, while exactly 100→50 is not below the ratio floor and installs.
+Bootstrap feeds with no last-good snapshot are exempt. Refusal does not replace
+the installed set, stamp success, or publish to the dataplane. `LastError`,
+`StaleSince`, `show security dynamic-address`, and the per-feed refusal metrics
+identify the held candidate. The zero-prefix, truncation, and whole-address-
+space guards remain independent and unchanged. Repeated sub-threshold shrinkage
+that cumulatively bleeds scope, and equal-count content swaps, are outside this
+per-fetch guard and tracked in follow-up #11489.
+
+Thresholds are runtime `feed-server` configuration, not build-time variables:
+
+```
+set security dynamic-address feed-server <server> shrink-guard-min-old-count <count>
+set security dynamic-address feed-server <server> shrink-guard-min-retain-percent <percent>
+set security dynamic-address feed-server <server> shrink-guard-min-drop <count>
+```
+
+Omitted values use defaults: minimum old count 32, retained ratio 50%, minimum
+drop 16. Commits reject out-of-range values; lenient persisted/peer config also
+falls back to those defaults at runtime. A committed tuning change restarts the
+feed producer with the new policy; no daemon rebuild is required.
+
+Tuning guidance:
+
+- `shrink-guard-min-old-count` defines the small-feed exemption. Lower it to
+  protect smaller high-impact feeds; raising it exempts more small feeds and
+  therefore increases the number of decreases that can install without this
+  guard.
+- `shrink-guard-min-retain-percent` controls relative strictness. Raise it to
+  refuse more decreases; 100 means any decrease meeting the absolute-drop
+  threshold is refused. Lower it only when documented provider churn requires
+  allowing a larger single-step reduction.
+- `shrink-guard-min-drop` filters small absolute changes. Lower it to flag
+  smaller missing-prefix counts; raise it only when that amount of provider
+  churn is known to be routine.
+
+An operator can review the refused candidate ID, candidate SHA-256, and
+last-good baseline SHA-256 in `show security dynamic-address`, alongside the
+installed snapshot hash. A pending acknowledgement also displays its bound
+candidate and baseline hashes, authenticated actor, and reason. Then run from
+the authenticated local console or remote CLI:
+
+```
+request security dynamic-address acknowledge-shrink <feed> candidate-id <id> candidate-hash <sha256> baseline-hash <sha256> old-count <count> new-count <count> reason "<why this exact candidate is legitimate>"
+```
+
+This requires configuration privilege on either CLI surface. The remote
+daemon derives the actor from the authenticated gRPC principal; the local
+console records its kernel-resolved UID/account and RBAC login class. Both
+require a non-empty bounded reason and record the full candidate and baseline
+tuple, actor, and reason in the audit journal. The acknowledgement is bound to
+the currently refused candidate's ID, content hash, last-good baseline hash,
+and old/new counts; another candidate or baseline requires a new review. A
+normal successful install clears a pending acknowledgement; `Manager.Apply`
+drops it when producer config is replaced. An explicit positive
+`hold-interval` also applies to shrink refusal: once that interval expires, the
+shared hold policy drops the last-good set and publishes the configured
+hold-expiry result. With no retained baseline after that drop, a later valid
+fetch is handled as a bootstrap install.
+
+The guard logs an initial Warn and re-Warns at most hourly for a persistent
+refusal. Prometheus exposes an active gauge and a per-feed refusal counter.
+Alert on the active refusal and on any refusal observed during the last hour,
+so a later install or hold expiry cannot erase evidence before it is scraped:
+
+```yaml
+groups:
+  - name: xpf-dynamic-address
+    rules:
+      - alert: DynamicAddressFeedShrinkRefused
+        expr: xpf_feed_shrink_refused == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dynamic-address feed {{ $labels.feed }} shrink is held"
+          description: "Review the refused candidate ID/hash and acknowledge only this candidate."
+      - alert: DynamicAddressFeedShrinkObserved
+        expr: increase(xpf_feed_shrink_refusals_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dynamic-address feed {{ $labels.feed }} had a refused shrink"
+          description: "Inspect feed status and audit logs for the candidate and outcome."
+```
+
+Scope limitation: this single-step guard compares each candidate only with the
+latest last-good snapshot. Three separate risks remain tracked in #11489: a
+series of individually-under-floor decreases can cumulatively bleed the set
+(cumulative-baseline bypass); equal-count content swaps are not detected by a
+count guard (content-swap bypass); and the recreate shadow bypass: delete/re-add
+re-enters through the unguarded bootstrap path without audit. These cases are
+**not** claimed safe by this protection. Keep the source feed's own
+integrity/monitoring controls in place.
+
 ## Day-2 reconcile (#5036)
 
 `Manager.Apply` is driven by the daemon, not called once at boot. The daemon
