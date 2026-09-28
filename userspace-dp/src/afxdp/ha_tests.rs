@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::test_zone_ids::*;
+use std::time::{Duration, Instant};
 
 fn active_ha_runtime(now_secs: u64) -> HAGroupRuntime {
     HAGroupRuntime {
@@ -122,6 +123,103 @@ fn update_ha_state_seeds_lease_for_active_group_without_watchdog() {
             if until >= before + HA_WATCHDOG_STALE_AFTER_SECS
                 && until <= after + HA_WATCHDOG_STALE_AFTER_SECS));
     assert!(group.is_forwarding_active(after));
+}
+
+#[test]
+fn update_ha_state_uses_receipt_anchored_ten_second_helper_lease_10791() {
+    const EXPECTED_LEASE_SECS: u64 = 10;
+
+    let coordinator = Coordinator::new();
+    let before = monotonic_nanos() / 1_000_000_000;
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }])
+        .expect("apply active HA update");
+    let after = monotonic_nanos() / 1_000_000_000;
+    let first_state = coordinator.ha.rg_runtime.load();
+    let first = *first_state.get(&1).expect("first active group");
+    let first_until = match first.lease {
+        HAForwardingLease::ActiveUntil(until) => until,
+        HAForwardingLease::Inactive => panic!("active receipt must seed a forwarding lease"),
+    };
+    assert!(first_until >= before + EXPECTED_LEASE_SECS);
+    assert!(first_until <= after + EXPECTED_LEASE_SECS);
+    drop(first_state);
+
+    let wait_deadline = Instant::now() + Duration::from_secs(2);
+    while monotonic_nanos() / 1_000_000_000 <= after {
+        assert!(
+            Instant::now() < wait_deadline,
+            "monotonic receipt clock did not advance"
+        );
+        std::thread::yield_now();
+    }
+    let second_before = monotonic_nanos() / 1_000_000_000;
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }])
+        .expect("apply second active HA update");
+    let second_after = monotonic_nanos() / 1_000_000_000;
+    let second_state = coordinator.ha.rg_runtime.load();
+    let second = *second_state.get(&1).expect("second active group");
+    let second_until = match second.lease {
+        HAForwardingLease::ActiveUntil(until) => until,
+        HAForwardingLease::Inactive => panic!("second active receipt must refresh its lease"),
+    };
+    assert!(second_until >= second_before + EXPECTED_LEASE_SECS);
+    assert!(second_until <= second_after + EXPECTED_LEASE_SECS);
+    assert!(
+        second_until > first_until,
+        "later receipt must renew the lease from helper receipt time"
+    );
+    assert!(
+        second.is_forwarding_active(second_until),
+        "lease expiry boundary must be inclusive"
+    );
+    assert!(
+        !second.is_forwarding_active(second_until + 1),
+        "forwarding must stop after lease expiry"
+    );
+    drop(second_state);
+
+    let future_watchdog = second_after + 20;
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            watchdog_timestamp: future_watchdog,
+            ..HAGroupStatus::default()
+        }])
+        .expect("apply future-watchdog HA update");
+    let future_state = coordinator.ha.rg_runtime.load();
+    let future = *future_state.get(&1).expect("future-watchdog group");
+    assert_eq!(
+        future.lease,
+        HAForwardingLease::ActiveUntil(future_watchdog + EXPECTED_LEASE_SECS)
+    );
+    drop(future_state);
+
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: false,
+            watchdog_timestamp: 0,
+            ..HAGroupStatus::default()
+        }])
+        .expect("apply inactive HA update");
+    let inactive_state = coordinator.ha.rg_runtime.load();
+    let inactive = *inactive_state.get(&1).expect("inactive group");
+    assert!(!inactive.active);
+    assert_eq!(inactive.lease, HAForwardingLease::Inactive);
+    assert!(!inactive.is_forwarding_active(monotonic_nanos() / 1_000_000_000));
 }
 
 #[test]

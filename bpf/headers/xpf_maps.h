@@ -883,11 +883,10 @@ struct {
 } policer_states SEC(".maps");
 
 /* ============================================================
- * HA userspace liveness watchdog (per-RG monotonic timestamp)
- * Go daemon writes current CLOCK_MONOTONIC seconds every 500ms.
- * BPF checks freshness in check_egress_rg_active(); if userspace
- * hasn't written in >2s, treat the RG as inactive (fail-closed).
- * Value of 0 means "not initialized" (standalone) — skip check.
+ * RETIRED (#1476/#10791): the ha_watchdog BPF liveness consumer.
+ * The array remains for Go-owned HA bookkeeping, but no live BPF caller
+ * uses it to check per-RG freshness. The current daemon-loss backstop is
+ * the helper's receipt-anchored 10s update_ha_state lease.
  * ============================================================ */
 
 struct {
