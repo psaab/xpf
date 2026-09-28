@@ -387,9 +387,59 @@ scenario_oldbug_repairs_to_staged_proves_nontautology() {
         echo "FAIL(non-tautology): old-bug postinst recovered cli to '$tgt', expected '$STAGED/cli' — the core test would not discriminate the fix"; exit 1; }
 }
 
+# #10751 fresh-install barrier: with no live daemon and booted systemd, the
+# first-install branch must start the barrier live (dh_installsystemd
+# --no-start only stages it for next boot).
+patched_postinst_barrier_live() {
+    # Standard rewrites neutralize every systemd gate; re-arm ONLY the
+    # barrier gate (unique: it tests $SBIN/xpfd executability).
+    sed -i 's|if false && \[ -x "\$SBIN/xpfd" \]; then # 10751-BARRIER-GATE|if true; then # 10751-BARRIER-GATE|' "$ROOT/postinst"
+    grep -Fq 'if true; then # 10751-BARRIER-GATE' "$ROOT/postinst" || {
+        echo "FAIL: barrier gate re-arm did not match (postinst drift?)"; exit 1; }
+}
+
+stub_systemctl() {
+    # $1: is-active exit status (0 = live daemon, 1 = none).
+    mkdir -p "$ROOT/bin"
+    SYSTEMCTL_LOG="$ROOT/systemctl.log"
+    export SYSTEMCTL_LOG
+    cat > "$ROOT/bin/systemctl" <<EOF
+#!/bin/sh
+echo "systemctl \$*" >> "$SYSTEMCTL_LOG"
+if [ "\$1" = is-active ]; then exit $1; fi
+exit 0
+EOF
+    chmod +x "$ROOT/bin/systemctl"
+}
+
+scenario_first_install_starts_barrier_without_daemon() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: postinst did not probe for a live daemon"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: fresh install without a daemon did not start the input barrier live"; exit 1; }
+}
+
+scenario_first_install_skips_barrier_with_live_daemon() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 0
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: postinst did not probe for a live daemon"; exit 1; }
+    if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst injected the barrier despite a live daemon"; exit 1
+    fi
+}
+
 run_scenario first_install_configure_empty_seeds_layout
 run_scenario first_install_seed_failure_falls_back_to_staged
 run_scenario first_install_killed_during_seed_keeps_launch_links
+run_scenario first_install_starts_barrier_without_daemon
+run_scenario first_install_skips_barrier_with_live_daemon
 run_scenario recovers_cli_through_current
 run_scenario recovers_helper_through_current
 run_scenario leaves_existing_and_dangling_links

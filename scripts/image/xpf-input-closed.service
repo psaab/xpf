@@ -25,6 +25,12 @@
 # real tables — treat any post-handoff flush as an operator action (same as
 # flushing host-inbound itself) and re-apply to converge. ExecReload below
 # reinstalls the barrier manually while it is still expected (pre-handoff).
+#
+# Fresh installs: this unit is enabled --no-start (upgrades must never inject
+# a DROP chain into a live armed daemon). The postinst starts it live on
+# first install when no xpfd owns enforcement; if that fails (or on manual
+# installs), reboot — or run `systemctl enable --now xpf-input-closed`
+# BEFORE the network comes up — or host input stays unenforced until reboot.
 [Unit]
 DefaultDependencies=no
 After=nftables.service

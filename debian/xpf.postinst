@@ -83,6 +83,26 @@ case "$1" in
                     ln -sfnT "$STAGED/$b" "$SBIN/$b"
                 done
             fi
+            # === #10751 fresh-install barrier (fail-closed until first apply) ===
+            #
+            # dh_installsystemd --no-start stages xpf-input-closed.service for the
+            # next boot but never starts it live. On a fresh install with the
+            # network already up and no daemon enforcing, host listeners would
+            # stay unenforced until reboot. Close that window now when booted
+            # under systemd and no live xpfd owns enforcement (its first apply
+            # hands the barrier off). Upgrades never reach this branch, and a
+            # live daemon skips the injection — no DROP is ever injected into
+            # an armed daemon. Never fail the install.
+            if [ -d /run/systemd/system ] && [ -x "$SBIN/xpfd" ]; then # 10751-BARRIER-GATE
+                if systemctl is-active --quiet xpfd 2>/dev/null; then
+                    : # live daemon owns enforcement; its first apply hands off
+                elif systemctl enable --now xpf-input-closed.service 2>/dev/null; then
+                    :
+                else
+                    echo "xpf: WARNING could not start xpf-input-closed on fresh install;" \
+                         "reboot before exposing host services (or run: systemctl enable --now xpf-input-closed)" >&2
+                fi
+            fi
         else
             # Upgrade: do NOT touch the live symlinks. Only recover one that
             # is COMPLETELY absent (not even a broken symlink); never repoint
