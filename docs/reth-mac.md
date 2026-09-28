@@ -398,21 +398,24 @@ It is consulted in exactly four places:
   guarantees that within a second of `NotifyLinkCycle`. Returning `nil` is what
   keeps it a deferral — callers log or propagate an error, and nothing failed.
 
-  **The watchdog's other half is deliberately NOT gated.** `update_ha_state` is
+  **The helper-lease refresh is deliberately NOT gated.** `update_ha_state` is
   the only refresh of the helper's per-RG forwarding lease
   (`Coordinator::update_ha_state` → `HAGroupRuntime::active_lease_until` →
-  `ActiveUntil(watchdog + HA_WATCHDOG_STALE_AFTER_SECS)`, **10s**, in
-  `userspace-dp/src/afxdp/mod.rs`), and `is_forwarding_active` consults it per
-  packet. Suppressing it for the length of a 60s link-cycle lease would expire
-  that lease and stop forwarding for the RG — an **outage**, strictly worse than
-  the respawn race being closed. Its handler (`server/handlers/ha.rs`) does call
-  `refresh_status`, which can repair the WG and GRE auxiliary threads — round 6
-  of this document said it "reaches no worker spawn", which is too absolute —
+  `ActiveUntil(max(watchdog, receipt_time) + HA_WATCHDOG_STALE_AFTER_SECS)`,
+  a receipt-anchored **10s** lease in `userspace-dp/src/afxdp/mod.rs`), where the
+  helper samples monotonic `receipt_time` when it handles the update, so every
+  active receipt mints a fresh full lease. `is_forwarding_active` consults it
+  per packet. Suppressing it for a 60s link-cycle lease would expire the
+  helper's forwarding lease and stop the RG — an **outage**, strictly worse
+  than the respawn race being closed. Its handler (`server/handlers/ha.rs`)
+  calls `refresh_status`, which can repair the WG and GRE auxiliary threads
+  — round 6 of this document said it "reaches no worker spawn", which is too absolute —
   but it does **not** reach `reconcile_status_bindings` or any other spawn of the
   AF_XDP **packet** workers, the only threads whose UMEM the cycle's unmap can
   race, and after a successful `stop_workers` the helper has cleared its
   worker/WG/GRE records anyway. So there is nothing to gain by suppressing it
-  either. The kernel-visible shim watchdog map write is likewise never gated.
+  either. The Go-owned `ha_watchdog` map write is likewise never gated; no live
+  userspace-XDP shim BPF program reads that map (#10791).
 
 **Acquire point:** before the ctrl disable, not after a successful join. The
 window that needs covering opens at the first mutation of dataplane state, and a

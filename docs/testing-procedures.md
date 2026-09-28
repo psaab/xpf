@@ -119,7 +119,10 @@ Tests crash recovery scenarios beyond clean reboot.
 
 Scenarios:
 - Force-stop VM (`incus stop --force`) — simulates power failure
-- Daemon stop (`systemctl stop xpfd`) — tests BPF watchdog fail-closed
+- Daemon stop (`systemctl stop xpfd`) — exercises graceful shutdown's inactive
+  RG publication and dataplane teardown, not lease expiry. If `update_ha_state`
+  receipts stop, the helper's receipt-anchored 10s lease is the fail-closed
+  forwarding backstop.
 - Multi-cycle crash recovery — repeated crashes verify no state leak
 
 ### 5. Private RG Election Test (`./test/incus/test-private-rg.sh`)

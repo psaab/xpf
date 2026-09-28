@@ -2637,10 +2637,15 @@ Secondary fix: NAT64 source pool auto-assignment. Named pools defined in source 
 - Reduces real mismatch correction from 10-12s to 2-4s
 - **Files:** `pkg/daemon/rg_state.go`
 
-### Fix #102: BPF watchdog fail-closed (FIXED `00de701`)
-- `ha_watchdog` BPF ARRAY map, Go writes every 500ms, BPF checks freshness in `check_egress_rg_active()` — >2s stale = inactive
-- Ensures forwarding stops within bounded window after SIGKILL/panic
-- **Files:** `bpf/headers/xpf_maps.h`, `bpf/headers/xpf_helpers.h`, `pkg/dataplane/maps.go`, `pkg/daemon/daemon.go`
+### Fix #102: Legacy HA watchdog implementation (RETIRED by #1476)
+- Originally added the `ha_watchdog` BPF ARRAY map, with Go writes every 500ms
+  and a kernel consumer in `check_egress_rg_active()`. #1476 removed that live
+  shim consumer; the Go map write remains bookkeeping only.
+- The current fail-closed forwarding backstop is the helper's receipt-anchored
+  10s `update_ha_state` lease `ActiveUntil(max(watchdog, now) + 10s)`, not a
+  kernel freshness check.
+- **Historical files:** `bpf/headers/xpf_maps.h`, `bpf/headers/xpf_helpers.h`,
+  `pkg/dataplane/maps.go`, `pkg/daemon/daemon.go`
 
 ### Fix #103: Per-RG readiness gate for startup takeover (FIXED `91a57cf`)
 - Per-RG readiness contract: interfaces exist+up AND VRRP instances running

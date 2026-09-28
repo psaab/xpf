@@ -625,16 +625,21 @@ Steps 1-6 above are now the actual flow. Remaining differences from target:
 
 ### Watchdog heartbeat: map write every tick vs IPC on change/backstop (#2549)
 
-The daemon runs a per-RG watchdog heartbeat (`pkg/daemon/daemon_ha_sync.go`)
-on a 500ms ticker, writing a monotonic-seconds timestamp so a SIGKILL'd daemon
-goes stale and the peer takes over. That timestamp lands in two places with
-**different cadence requirements**, and `UpdateHAWatchdog`
+The daemon runs a per-RG watchdog timestamp refresh (`pkg/daemon/daemon_ha_sync.go`)
+on a 500ms ticker. The `ha_watchdog` map is Go-owned bookkeeping: no live
+userspace-XDP shim BPF program references or reads it (#10791). If the daemon is
+SIGKILL'd while the helper remains alive, missing `update_ha_state` receipts
+let the helper's receipt-anchored **10s forwarding lease**
+(`ActiveUntil(max(watchdog, now) + 10s)`) expire; the peer separately takes
+over after its heartbeat timeout. The lease is stored in helper memory and does
+not survive helper death; process loss/ctrl-disable and fresh-helper republish
+are separate from lease expiry. The HA timestamp has two distinct write paths
+with **different cadence requirements**, and `UpdateHAWatchdog`
 (`pkg/dataplane/userspace/manager_ha.go`) decouples them:
 
-- **Shim BPF `ha_watchdog` map write — EVERY tick (500ms), never throttled.**
-  This is the kernel-visible liveness signal the BPF ~2s stale window compares
-  against; it must stay fresh every tick. It is a cheap local map update, not a
-  socket round-trip.
+- **Go-owned `ha_watchdog` map write — EVERY tick (500ms), never throttled.**
+  This keeps Go's own map-readback refresh paths current. It is a cheap local
+  map update, not a socket round-trip or helper-health input.
 - **`update_ha_state` socket IPC — throttled.** The full HA-state JSON IPC over
   the shared Rust-helper control socket is the expensive part. Issuing it every
   tick is a 2/s-per-RG control-socket caller — exactly what the CLAUDE.md
@@ -647,7 +652,7 @@ goes stale and the peer takes over. That timestamp lands in two places with
      detected per-RG `Active` delta as defense in depth.)
   2. **As a periodic BACKSTOP** — once the watchdog timestamp has advanced by
      `haWatchdogIPCBackstopSecs` (3s) since the last IPC for that RG, so the
-     helper's view is refreshed well within its ~10s stale-lease window.
+     helper's receipt-anchored 10s lease is refreshed well before expiry.
 
   Per-RG throttle state (`haWatchdogIPCSynced`, under `m.mu`) records the last
   timestamp/`Active` published per RG; the first heartbeat after startup/seed
@@ -658,16 +663,16 @@ goes stale and the peer takes over. That timestamp lands in two places with
 
 **Pending demotions while the manager lock is held (#10781):** `UpdateRGActive(false)`
 announces a pending demotion before waiting for `m.mu`. While one is pending,
-watchdog ticks keep writing the BPF map but do not refresh the helper over the
-session socket; queued session sends recheck before dialing. Once the inactive
-snapshot is published, refreshes resume from that state. This preserves helper
-lease expiry as the fail-closed behavior while a demotion is waiting on manager
-work.
+watchdog ticks keep writing the Go-owned timestamp map but do not refresh the
+helper over the session socket; queued session sends recheck before dialing. Once
+the inactive snapshot is published, refreshes resume from that state. This
+preserves helper lease expiry as the fail-closed behavior while a demotion is
+waiting on manager work.
 
-**Threshold rationale:** 3s gives a >3x margin under the helper's ~10s
-stale-lease and drops the heartbeat's control-socket load from 2/s per RG to at
-most ~0.33/s per RG (≈6x reduction), while the kernel-level liveness (the map
-write) stays at the full 500ms cadence. Failover/failback timing is unchanged
+**Threshold rationale:** 3s gives a >3x margin under the helper's 10s
+receipt-anchored lease and drops the heartbeat's control-socket load from 2/s
+per RG to at most ~0.33/s per RG (≈6x reduction), while Go continues writing its
+bookkeeping map at the full 500ms cadence. Failover/failback timing is unchanged
 because state changes bypass the throttle entirely.
 
 **Live-config read every tick (#3917):** the heartbeat loop re-reads the
