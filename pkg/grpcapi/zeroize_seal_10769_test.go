@@ -24,7 +24,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	oldPasswdBackups, oldHostKeys := zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath
 	oldDropins, oldVarLog := zeroizeManagedDropins, zeroizeVarLogDir
 	oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec := zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath
-	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient, oldTmp, oldShm, oldEtc := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir
+	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir
 	t.Cleanup(func() {
 		zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory = oldMachine, oldSSH, oldRootSSH, oldHistory
 		zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
@@ -34,7 +34,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 		zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath = oldPasswdBackups, oldHostKeys
 		zeroizeManagedDropins, zeroizeVarLogDir = oldDropins, oldVarLog
 		zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath = oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec
-		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient, oldTmp, oldShm, oldEtc
+		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal
 	})
 
 	zeroizeMachineIDPath = filepath.Join(root, "etc", "machine-id")
@@ -81,6 +81,8 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	zeroizeTmpDirs = []string{filepath.Join(root, "tmp"), filepath.Join(root, "var", "tmp")}
 	zeroizeShmDir = filepath.Join(root, "dev", "shm")
 	zeroizeEtcDir = filepath.Join(root, "etc")
+	zeroizeRunXPFDir = filepath.Join(root, "run", "xpf")
+	zeroizeRunJournalDir = filepath.Join(root, "run", "log", "journal")
 	zeroizeVarLogDir = filepath.Join(root, "var", "log")
 }
 
@@ -759,5 +761,34 @@ func TestPerformZeroizeSweepsEditorBackups10769(t *testing.T) {
 		if _, err := os.Lstat(path); err != nil {
 			t.Errorf("unowned backup %s must survive: %v", path, err)
 		}
+	}
+}
+
+func TestPerformZeroizeClearsRunState10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	helperState := filepath.Join(zeroizeRunXPFDir, "userspace-dp.json")
+	mustWriteFile(t, helperState, []byte("tenant flow state"))
+	helperSock := filepath.Join(zeroizeRunXPFDir, "userspace-dp.sock")
+	mustWriteFile(t, helperSock, []byte("socket name stand-in"))
+	lock := filepath.Join(zeroizeRunXPFDir, "upgrade.lock")
+	mustWriteFile(t, lock, []byte("held by nobody in this test"))
+	journal := filepath.Join(zeroizeRunJournalDir, "machine-id", "system.journal")
+	mustWriteFile(t, journal, []byte("volatile tenant logs"))
+
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	for _, path := range []string{helperState, helperSock, journal} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("volatile run state %s survived: %v", path, err)
+		}
+	}
+	if _, err := os.Lstat(lock); err != nil {
+		t.Errorf("upgrade lock must survive the run clear (later leg needs it): %v", err)
 	}
 }

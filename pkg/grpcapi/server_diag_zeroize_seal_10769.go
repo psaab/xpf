@@ -60,6 +60,8 @@ var (
 	zeroizeTmpDirs         = []string{"/tmp", "/var/tmp"}
 	zeroizeShmDir          = "/dev/shm"
 	zeroizeEtcDir          = "/etc"
+	zeroizeRunXPFDir       = "/run/xpf"
+	zeroizeRunJournalDir   = "/run/log/journal"
 )
 
 var (
@@ -175,8 +177,14 @@ func zeroizeImageSealResidue() error {
 	// `logfiles` is part of SYSPREP_ENABLE_OPS. Empty /var/log while retaining
 	// the directory for the still-running reset action; post-reset log entries
 	// may be written before xpfd stops, but prior-tenant persisted entries are
-	// unlinked. Volatile /run logs disappear at reboot.
+	// unlinked.
 	fail(zeroizeClearDir(zeroizeVarLogDir))
+	// Volatile tenant state (#10769 d05-F6): reset is wipe-then-stop with no
+	// reboot, so /run/xpf helper state and the volatile journal are cleared
+	// in-wipe (services that need them are already stopped) rather than
+	// left for a reboot that may never come.
+	fail(zeroizeClearRunXPFDir(zeroizeRunXPFDir))
+	fail(zeroizeClearDir(zeroizeRunJournalDir))
 	if len(errs) == 0 {
 		// Do not change the running device name until every earlier cleanup
 		// leg has succeeded; reset is recoverable when residue remains.
@@ -494,6 +502,47 @@ func zeroizeServiceBackupSweepDirs() []string {
 		out = append(out, dir)
 	}
 	return out
+}
+
+// zeroizeRunXPFPreserved is the one /run/xpf entry the wipe must not
+// unlink: the host-wide upgrade lock a later wipe leg acquires for mutual
+// exclusion with a concurrent upgrade. Unlinking it would let the wipe
+// lock a fresh inode while an upgrade holds the old one.
+const zeroizeRunXPFPreserved = "upgrade.lock"
+
+// zeroizeClearRunXPFDir removes xpf runtime state (#10769 d05-F6): helper
+// sockets and state files carrying tenant flow/session data. Reset is
+// wipe-then-stop with no reboot, so volatile state left here would be
+// observable pre-reboot. Unlinking a live socket's name does not disturb
+// its established connections; the upgrade lock is preserved.
+func zeroizeClearRunXPFDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("zeroize: read run directory %s: %w", dir, err)
+	}
+	var errs []error
+	removed := false
+	for _, entry := range entries {
+		if entry.Name() == zeroizeRunXPFPreserved {
+			continue
+		}
+		// Names only: RemoveAll on a symlink removes the link, and live
+		// socket fds survive their name's unlink.
+		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+			errs = append(errs, fmt.Errorf("zeroize: remove run entry %s: %w", filepath.Join(dir, entry.Name()), err))
+			continue
+		}
+		removed = true
+	}
+	if removed {
+		if err := zeroizeSyncDir(dir); err != nil {
+			errs = append(errs, fmt.Errorf("zeroize: sync run directory %s: %w", dir, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // zeroizeCheckDDNSStateEmpty is the preflight used before beginZeroize writes
