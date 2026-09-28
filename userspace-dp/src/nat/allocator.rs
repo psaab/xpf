@@ -1877,7 +1877,10 @@ impl PortAllocator {
                 };
                 live.revoked_persistent.insert(key, revoked_until_ns);
                 if lease.active_flows != 0 {
-                    live.persistent_by_source.insert(key, lease);
+                    // The key already exists; revoke the shell in place.
+                    if let Some(stored_lease) = live.persistent_by_source.get_mut(&key) {
+                        stored_lease.revoked = true;
+                    }
                     continue;
                 }
                 live.persistent_by_source.remove(&key);
