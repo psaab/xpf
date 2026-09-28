@@ -2228,6 +2228,29 @@ func TestClearHostInboundFirstApplyMarker10751(t *testing.T) {
 	}
 }
 
+// TestFirstApplyMarkerRedirectedInTests10751: the package init redirect
+// (daemon_nft_netlink_testhelper_test.go) must cover the first-apply
+// marker too — without it, root test runs plant
+// /run/xpf/host-inbound-applied.done on the host. RED if the var still
+// points at the production path; a successful install must then write
+// the marker under temp.
+func TestFirstApplyMarkerRedirectedInTests10751(t *testing.T) {
+	if HostInboundFirstApplyMarkerPath == "/run/xpf/host-inbound-applied.done" {
+		t.Fatal("first-apply marker not redirected into temp: root runs would plant host state")
+	}
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	nftInstaller = &fakeNftInstaller{}
+	_ = os.Remove(HostInboundFirstApplyMarkerPath)
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
+		t.Fatalf("apply err = %v, want nil", err)
+	}
+	if _, err := os.Stat(HostInboundFirstApplyMarkerPath); err != nil {
+		t.Fatalf("marker missing at redirected path %q: %v", HostInboundFirstApplyMarkerPath, err)
+	}
+}
+
 // --- #10751 R7-B: unzoned DHCP interface backstop ---
 //
 // An unzoned DHCP unit with no lease has no destination for any catch-all,
