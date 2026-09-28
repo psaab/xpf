@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -62,7 +63,8 @@ func TestLocalDynamicAddressShrinkAckRequiresConfigPermissionAndInstallsCurrentC
 	mu.Unlock()
 	refused := waitForFeed(t, func(info feeds.FeedInfo) bool { return info.ShrinkRefused })
 
-	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	configPath := filepath.Join(t.TempDir(), "xpf.conf")
+	store := newConfigStore(t, configPath)
 	cli := &CLI{
 		store:      store,
 		uid:        4242,
@@ -71,7 +73,7 @@ func TestLocalDynamicAddressShrinkAckRequiresConfigPermissionAndInstallsCurrentC
 		feedsFn:    manager.AllFeeds,
 		feedsAckFn: manager.AcknowledgeFeedShrink,
 	}
-	command := fmt.Sprintf("request security dynamic-address acknowledge-shrink ack-feed candidate-id %d reason provider confirmed intended scope", refused.ShrinkRefusalID)
+	command := fmt.Sprintf("request security dynamic-address acknowledge-shrink ack-feed candidate-id %d candidate-hash %s old-count %d new-count %d reason provider confirmed intended scope", refused.ShrinkRefusalID, refused.ShrinkCandidateHash, refused.ShrinkCandidateOldCount, refused.ShrinkCandidateNewCount)
 	if err := cli.dispatchOperational(command); err == nil || !strings.Contains(err.Error(), "requires a higher login class") {
 		t.Fatalf("operator class did not require configure permission: %v", err)
 	}
@@ -89,6 +91,16 @@ func TestLocalDynamicAddressShrinkAckRequiresConfigPermissionAndInstallsCurrentC
 	wantActor := "source=local-shell;uid=4242;user=operator;class=super-user;session=none"
 	if !armed.ShrinkAckPending || armed.ShrinkAckActor != wantActor || armed.ShrinkAckReason != "provider confirmed intended scope" {
 		t.Fatalf("local command did not arm the current candidate with its authenticated actor: %+v", armed)
+	}
+
+	rawJournal, err := os.ReadFile(filepath.Join(filepath.Dir(configPath), ".config.journal"))
+	if err != nil {
+		t.Fatalf("read local acknowledgement journal: %v", err)
+	}
+	wantDetail := fmt.Sprintf(`dynamic-address-shrink-ack feed=\"ack-feed\" candidate_id=%d candidate_sha256=\"%s\" old_count=%d new_count=%d reason=\"provider confirmed intended scope\"`,
+		refused.ShrinkRefusalID, refused.ShrinkCandidateHash, refused.ShrinkCandidateOldCount, refused.ShrinkCandidateNewCount)
+	if !strings.Contains(string(rawJournal), wantDetail) {
+		t.Fatalf("local acknowledgement journal omitted candidate tuple %q: %s", wantDetail, rawJournal)
 	}
 	installed := waitForFeed(t, func(info feeds.FeedInfo) bool {
 		return info.Prefixes == 5 && !info.ShrinkRefused && !info.ShrinkAckPending

@@ -41,7 +41,9 @@ func TestRequestVerbTiersMatchTheRemoteSurface_8597(t *testing.T) {
 func TestDynamicAddressShrinkAcknowledgementRequiresConfigurePermission(t *testing.T) {
 	command := []string{
 		"request", "security", "dynamic-address", "acknowledge-shrink",
-		"threats", "candidate-id", "41", "reason", "upstream", "change", "reviewed",
+		"threats", "candidate-id", "41", "candidate-hash",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"old-count", "100", "new-count", "5", "reason", "upstream", "change", "reviewed",
 	}
 	if got := requiredPermission(command); got != config.PermConfig {
 		t.Fatalf("dynamic-address shrink acknowledgement costs %v, want %v", got, config.PermConfig)

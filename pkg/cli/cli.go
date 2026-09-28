@@ -71,7 +71,7 @@ type CLI struct {
 	clockSkewAlarmsFn           func() []clockskew.ActiveAlarm
 	peerSnapshotProtocolAlarmFn func() string
 	feedsFn                     func() map[string]feeds.FeedInfo
-	feedsAckFn                  func(feed string, candidateID uint64, actor, reason string) error
+	feedsAckFn                  func(feed string, candidateID uint64, candidateHash string, oldCount, newCount int, actor, reason string) error
 	// feedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#3105): an address-name -> union-of-live-feed-CIDR-strings map, the same
 	// source the REST/gRPC simulators consume (daemon SnapshotForBindings). The
@@ -298,7 +298,7 @@ func (c *CLI) SetFeedsFn(fn func() map[string]feeds.FeedInfo) {
 }
 
 // SetFeedsAckFn wires the in-process dynamic-address shrink acknowledgement.
-func (c *CLI) SetFeedsAckFn(fn func(feed string, candidateID uint64, actor, reason string) error) {
+func (c *CLI) SetFeedsAckFn(fn func(feed string, candidateID uint64, candidateHash string, oldCount, newCount int, actor, reason string) error) {
 	c.feedsAckFn = fn
 }
 

@@ -19,25 +19,30 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+var shrinkAckCandidateHash11059 = strings.Repeat("a", 64)
+
 func shrinkAckRequest11059(feed string, candidateID uint64, reason string) *pb.SystemActionRequest {
 	return &pb.SystemActionRequest{
-		Action:      "dynamic-address-shrink-ack",
-		Target:      feed,
-		CandidateId: candidateID,
-		Reason:      reason,
+		Action:            "dynamic-address-shrink-ack",
+		Target:            feed,
+		CandidateId:       candidateID,
+		CandidateHash:     shrinkAckCandidateHash11059,
+		CandidateOldCount: 100,
+		CandidateNewCount: 5,
+		Reason:            reason,
 	}
 }
 
 func TestDynamicAddressShrinkAckRequiresAdmissionPrincipal11059(t *testing.T) {
 	var calls int
 	s := &Server{
-		feedsAckFn: func(string, uint64, string, string) error {
+		feedsAckFn: func(string, uint64, string, int, int, string, string) error {
 			calls++
 			return nil
 		},
 		feedsFn: func() map[string]feeds.FeedInfo {
 			return map[string]feeds.FeedInfo{
-				"threats": {ShrinkRefused: true, ShrinkRefusalID: 41},
+				"threats": {ShrinkRefused: true, ShrinkRefusalID: 41, ShrinkCandidateHash: shrinkAckCandidateHash11059, ShrinkCandidateOldCount: 100, ShrinkCandidateNewCount: 5},
 			}
 		},
 	}
@@ -72,21 +77,36 @@ func TestDynamicAddressShrinkAckRejectsMalformedAndStaleRequests11059(t *testing
 		store: store,
 		feedsFn: func() map[string]feeds.FeedInfo {
 			return map[string]feeds.FeedInfo{
-				"threats": {ShrinkRefused: true, ShrinkRefusalID: 41},
+				"threats": {ShrinkRefused: true, ShrinkRefusalID: 41, ShrinkCandidateHash: shrinkAckCandidateHash11059, ShrinkCandidateOldCount: 100, ShrinkCandidateNewCount: 5},
 				"current": {ShrinkRefusalID: 41},
 			}
 		},
-		feedsAckFn: func(string, uint64, string, string) error {
+		feedsAckFn: func(string, uint64, string, int, int, string, string) error {
 			calls++
 			return callbackErr
 		},
 	}
+	staleHash := shrinkAckRequest11059("threats", 41, "reviewed")
+	staleHash.CandidateHash = strings.Repeat("b", 64)
+	staleOldCount := shrinkAckRequest11059("threats", 41, "reviewed")
+	staleOldCount.CandidateOldCount--
+	staleNewCount := shrinkAckRequest11059("threats", 41, "reviewed")
+	staleNewCount.CandidateNewCount++
+	missingTuple := shrinkAckRequest11059("threats", 41, "reviewed")
+	missingTuple.CandidateHash = ""
+	zeroOldCount := shrinkAckRequest11059("threats", 41, "reviewed")
+	zeroOldCount.CandidateOldCount = 0
 	cases := []struct {
 		name       string
 		request    *pb.SystemActionRequest
 		noCallback bool
 		want       codes.Code
 	}{
+		{name: "missing candidate hash", request: missingTuple, noCallback: true, want: codes.InvalidArgument},
+		{name: "zero old count", request: zeroOldCount, noCallback: true, want: codes.InvalidArgument},
+		{name: "stale candidate hash", request: staleHash, noCallback: true, want: codes.FailedPrecondition},
+		{name: "stale old count", request: staleOldCount, noCallback: true, want: codes.FailedPrecondition},
+		{name: "stale new count", request: staleNewCount, noCallback: true, want: codes.FailedPrecondition},
 		{name: "empty feed", request: shrinkAckRequest11059("", 41, "reviewed"), noCallback: true, want: codes.InvalidArgument},
 		{name: "whitespace feed", request: shrinkAckRequest11059(" threats", 41, "reviewed"), noCallback: true, want: codes.InvalidArgument},
 		{name: "zero candidate ID", request: shrinkAckRequest11059("threats", 0, "reviewed"), noCallback: true, want: codes.InvalidArgument},
@@ -122,24 +142,25 @@ func TestDynamicAddressShrinkAckRejectsMalformedAndStaleRequests11059(t *testing
 	}
 }
 
-func TestDynamicAddressShrinkAckUsesAdmittedActorAndJournalsReason11059(t *testing.T) {
+func TestDynamicAddressShrinkAckUsesAdmittedActorAndJournalsCandidateTuple11059(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "xpf.conf")
 	store := newConfigStore(t, configPath)
 	principal := authz.Principal{
 		Source: authz.SourcePeerUID, UID: 4243, Username: "opuser", Class: "config-operator",
 	}
 	ctx := context.WithValue(context.Background(), authorizedPrincipalKey{}, principal)
-	var gotName, gotActor, gotReason string
+	var gotName, gotActor, gotReason, gotHash string
 	var gotID uint64
+	var gotOldCount, gotNewCount int
 	s := &Server{
 		store: store,
 		feedsFn: func() map[string]feeds.FeedInfo {
 			return map[string]feeds.FeedInfo{
-				"threats": {ShrinkRefused: true, ShrinkRefusalID: 41},
+				"threats": {ShrinkRefused: true, ShrinkRefusalID: 41, ShrinkCandidateHash: shrinkAckCandidateHash11059, ShrinkCandidateOldCount: 100, ShrinkCandidateNewCount: 5},
 			}
 		},
-		feedsAckFn: func(name string, refusalID uint64, actor, reason string) error {
-			gotName, gotID, gotActor, gotReason = name, refusalID, actor, reason
+		feedsAckFn: func(name string, refusalID uint64, candidateHash string, oldCount, newCount int, actor, reason string) error {
+			gotName, gotID, gotHash, gotOldCount, gotNewCount, gotActor, gotReason = name, refusalID, candidateHash, oldCount, newCount, actor, reason
 			return nil
 		},
 	}
@@ -151,9 +172,12 @@ func TestDynamicAddressShrinkAckUsesAdmittedActorAndJournalsReason11059(t *testi
 		t.Fatalf("response %q does not identify the acknowledged feed and candidate", resp.GetMessage())
 	}
 	wantActor := configstore.FormatJournalPrincipal("peer-uid", principal.UID, principal.Username, principal.Class, "")
-	if gotName != "threats" || gotID != 41 || gotActor != wantActor || gotReason != "reviewed upstream correction" {
-		t.Fatalf("manager callback got (%q, %d, %q, %q), want (%q, 41, %q, %q)",
-			gotName, gotID, gotActor, gotReason, "threats", wantActor, "reviewed upstream correction")
+	if gotName != "threats" || gotID != 41 || gotHash != shrinkAckCandidateHash11059 ||
+		gotOldCount != 100 || gotNewCount != 5 || gotActor != wantActor ||
+		gotReason != "reviewed upstream correction" {
+		t.Fatalf("manager callback got (%q, %d, %q, %d, %d, %q, %q), want (%q, 41, %q, 100, 5, %q, %q)",
+			gotName, gotID, gotHash, gotOldCount, gotNewCount, gotActor, gotReason,
+			"threats", shrinkAckCandidateHash11059, wantActor, "reviewed upstream correction")
 	}
 
 	raw, err := os.ReadFile(filepath.Join(filepath.Dir(configPath), ".config.journal"))
@@ -176,6 +200,9 @@ func TestDynamicAddressShrinkAckUsesAdmittedActorAndJournalsReason11059(t *testi
 		if entry.Action == "system_action" && entry.Principal == wantActor &&
 			strings.Contains(entry.Detail, `feed="threats"`) &&
 			strings.Contains(entry.Detail, "candidate_id=41") &&
+			strings.Contains(entry.Detail, `candidate_sha256="`+shrinkAckCandidateHash11059+`"`) &&
+			strings.Contains(entry.Detail, "old_count=100") &&
+			strings.Contains(entry.Detail, "new_count=5") &&
 			strings.Contains(entry.Detail, `reason="reviewed upstream correction"`) {
 			found = true
 			break

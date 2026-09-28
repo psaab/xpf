@@ -384,8 +384,9 @@ func (c *ctl) handleRequestSecurityDynamicAddress(args []string) error {
 		printRemoteTreeHelp("request security dynamic-address:", "request", "security", "dynamic-address")
 		return nil
 	}
-	const usage = "usage: request security dynamic-address acknowledge-shrink <feed> candidate-id <id> reason <reason...>"
-	if len(args) < 6 || args[2] != "candidate-id" || args[4] != "reason" {
+	const usage = "usage: request security dynamic-address acknowledge-shrink <feed> candidate-id <id> candidate-hash <sha256> old-count <count> new-count <count> reason <reason...>"
+	if len(args) < 12 || args[2] != "candidate-id" || args[4] != "candidate-hash" ||
+		args[6] != "old-count" || args[8] != "new-count" || args[10] != "reason" {
 		return fmt.Errorf("%s", usage)
 	}
 	feed := args[1]
@@ -402,7 +403,19 @@ func (c *ctl) handleRequestSecurityDynamicAddress(args []string) error {
 	if err != nil || candidateID == 0 {
 		return fmt.Errorf("%s: candidate ID must be a positive uint64", usage)
 	}
-	reason := strings.TrimSpace(strings.Join(args[5:], " "))
+	candidateHash := args[5]
+	if !validDynamicAddressShrinkCandidateHash(candidateHash) {
+		return fmt.Errorf("%s: candidate hash must be a 64-character lowercase SHA-256 hex value", usage)
+	}
+	oldCount, err := strconv.ParseUint(args[7], 10, 32)
+	if err != nil || oldCount == 0 {
+		return fmt.Errorf("%s: old count must be a positive uint32", usage)
+	}
+	newCount, err := strconv.ParseUint(args[9], 10, 32)
+	if err != nil {
+		return fmt.Errorf("%s: new count must be a uint32", usage)
+	}
+	reason := strings.TrimSpace(strings.Join(args[11:], " "))
 	if reason == "" {
 		return fmt.Errorf("%s: reason is required", usage)
 	}
@@ -415,16 +428,32 @@ func (c *ctl) handleRequestSecurityDynamicAddress(args []string) error {
 		}
 	}
 	resp, err := c.client.SystemAction(c.ctx(), &pb.SystemActionRequest{
-		Action:      "dynamic-address-shrink-ack",
-		Target:      feed,
-		CandidateId: candidateID,
-		Reason:      reason,
+		Action:            "dynamic-address-shrink-ack",
+		Target:            feed,
+		CandidateId:       candidateID,
+		CandidateHash:     candidateHash,
+		CandidateOldCount: uint32(oldCount),
+		CandidateNewCount: uint32(newCount),
+		Reason:            reason,
 	})
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
 	fmt.Println(resp.Message)
 	return nil
+}
+
+func validDynamicAddressShrinkCandidateHash(candidateHash string) bool {
+	if len(candidateHash) != 64 {
+		return false
+	}
+	for i := range candidateHash {
+		if !((candidateHash[i] >= '0' && candidateHash[i] <= '9') ||
+			(candidateHash[i] >= 'a' && candidateHash[i] <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // handleRequestSecurityPolicies implements `request security policies check`

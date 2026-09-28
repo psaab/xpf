@@ -1529,13 +1529,16 @@ func hashPrefixes(canon []string) [32]byte {
 }
 
 // AcknowledgeFeedShrink arms a one-shot bypass for the exact refusal shown by
-// AllFeeds. The candidate ID is stable across repeated copies of the same
-// content, but advances when its hash or old/new count tuple changes.
-func (m *Manager) AcknowledgeFeedShrink(name string, refusalID uint64, actor, reason string) error {
+// AllFeeds. Every tuple field is matched because refusal IDs can be reused
+// after a feed is removed, recreated, or the manager restarts.
+func (m *Manager) AcknowledgeFeedShrink(name string, refusalID uint64, candidateHash string, oldCount, newCount int, actor, reason string) error {
 	actor = strings.TrimSpace(actor)
 	reason = strings.TrimSpace(reason)
 	if strings.TrimSpace(name) == "" || refusalID == 0 {
 		return fmt.Errorf("feed name and nonzero refusal ID are required")
+	}
+	if len(candidateHash) != sha256.Size*2 || oldCount <= 0 || oldCount > maxFeedPrefixes || newCount < 0 || newCount > maxFeedPrefixes {
+		return fmt.Errorf("acknowledgement requires a valid candidate hash and old/new counts")
 	}
 	if actor == "" || len(actor) > 1024 {
 		return fmt.Errorf("authenticated actor is required")
@@ -1560,8 +1563,11 @@ func (m *Manager) AcknowledgeFeedShrink(name string, refusalID uint64, actor, re
 	if !fs.shrinkRefused {
 		return fmt.Errorf("dynamic-address feed %q has no current refused shrink", name)
 	}
-	if fs.shrinkRefusalID != refusalID {
-		return fmt.Errorf("dynamic-address feed %q refusal ID is stale; current ID is %d", name, fs.shrinkRefusalID)
+	if fs.shrinkRefusalID != refusalID ||
+		candidateHash != fmt.Sprintf("%x", fs.shrinkCandidateHash) ||
+		oldCount != fs.shrinkCandidateOldCount ||
+		newCount != fs.shrinkCandidateNewCount {
+		return fmt.Errorf("dynamic-address feed %q refusal candidate tuple is stale", name)
 	}
 	fs.shrinkAckPending = true
 	fs.shrinkAckRefusalID = refusalID

@@ -1125,7 +1125,19 @@ var OperationalTree = map[string]*Node{
 					"<feed>": {Desc: "Dynamic-address feed name", Children: map[string]*Node{
 						"candidate-id": {Desc: "Current refusal candidate ID", Children: map[string]*Node{
 							"<id>": {Desc: "Positive refusal candidate ID", Children: map[string]*Node{
-								"reason": {Desc: "Reason for acknowledging this shrink", AcceptsArgs: true},
+								"candidate-hash": {Desc: "Current candidate SHA-256 hash", Children: map[string]*Node{
+									"<sha256>": {Desc: "Lowercase candidate SHA-256 hex value", Children: map[string]*Node{
+										"old-count": {Desc: "Current candidate old prefix count", Children: map[string]*Node{
+											"<count>": {Desc: "Positive old prefix count", Children: map[string]*Node{
+												"new-count": {Desc: "Current candidate new prefix count", Children: map[string]*Node{
+													"<count>": {Desc: "Candidate new prefix count", Children: map[string]*Node{
+														"reason": {Desc: "Reason for acknowledging this shrink", AcceptsArgs: true},
+													}},
+												}},
+											}},
+										}},
+									}},
+								}},
 							}},
 						}},
 					}},

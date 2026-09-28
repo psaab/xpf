@@ -1315,9 +1315,13 @@ message SystemActionRequest {
   string action = 1;  // "reboot", "halt", "zeroize", "dhcp-renew"
   string target = 2;  // optional target (e.g. interface name for dhcp-renew)
   // #11059: dynamic-address-shrink-ack carries the exact refusal candidate to
-  // acknowledge (target is the feed name) plus the mandatory operator reason.
+  // acknowledge (target is the feed name), its content hash and old/new prefix
+  // counts, plus the mandatory operator reason.
   uint64 candidate_id = 3;
   string reason = 4;
+  string candidate_hash = 5;
+  uint32 candidate_old_count = 6;
+  uint32 candidate_new_count = 7;
 }
 message SystemActionResponse { string message = 1; }
 
