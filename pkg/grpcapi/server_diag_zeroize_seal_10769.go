@@ -16,6 +16,7 @@ import (
 	"github.com/psaab/xpf/pkg/dhcpserver"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/ipsec"
+	"github.com/psaab/xpf/pkg/termsafe"
 )
 
 // The system-path seams mirror the image's SYSPREP_ENABLE_OPS and
@@ -1076,7 +1077,7 @@ func keaUnitActive(unit string) (bool, error) {
 	if errors.As(err, &exitErr) && (exitErr.ExitCode() == 3 || exitErr.ExitCode() == 4) {
 		return false, nil
 	}
-	return false, fmt.Errorf("query %s state: %w: %s", unit, err, strings.TrimSpace(string(out)))
+	return false, fmt.Errorf("query %s state: %w: %s", unit, err, termsafe.SanitizeForDisplay(strings.TrimSpace(string(out))))
 }
 
 func stopKeaUnits() error {
@@ -1092,7 +1093,7 @@ func stopKeaUnits() error {
 		}
 		out, err := combinedOutputTimeoutUnlimited(context.Background(), "systemctl", "stop", unit)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("stop %s: %w: %s", unit, err, strings.TrimSpace(string(out))))
+			errs = append(errs, fmt.Errorf("stop %s: %w: %s", unit, err, termsafe.SanitizeForDisplay(strings.TrimSpace(string(out)))))
 		}
 	}
 	return errors.Join(errs...)

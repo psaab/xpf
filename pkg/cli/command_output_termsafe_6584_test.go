@@ -56,6 +56,8 @@ var declaredUnsanitizedForks = []forkExemption{
 		"systemctl reboot/halt/poweroff — no output is read"},
 	{"../cli", "cli_request_system.go", "<package-scope>",
 		"deferred power-action goroutine — no output is read"},
+	{"../grpcapi", "server_diag_system_action.go", "<package-scope>",
+		"reset stop/unit probes (systemctl stop xpfd; is-active --quiet) — exit status only, no output is read"},
 
 	// ---- output is consumed but never reaches a terminal as raw text ----
 	{"../ipsec", "manager.go", "runSwanctl",
