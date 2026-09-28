@@ -856,11 +856,16 @@ func zeroizeEraseIPsecState() error {
 // systemd v261.2 acquire_machine_id() regenerates an empty id from the
 // stable SMBIOS firmware UUID on KVM/AMAZON/QEMU/XEN/BHYVE, which would
 // reproduce the prior default vendor DUID-EN (EN 43793 + hashed
-// machine-id). A present valid id is used as-is, so installing fresh
-// random bytes rotates the DUID on every target (VM, bare metal,
-// container). The ssh host keys do not depend on first-boot detection:
-// xpf-day0-config regenerates on key absence, gate-stamped. Format per
-// machine-id(5): 32 lowercase hex + newline, world-readable.
+// machine-id). A present valid id is instead used verbatim by PID 1
+// before any unit starts (machine_id_setup reads first, acquires only
+// when invalid), so installing fresh random bytes means regeneration —
+// firmware-derived or otherwise — never happens: the stable-UUID case
+// needs no fixture because there is no regeneration input left to vary.
+// networkd then reads the installed id at its post-reboot startup; the
+// reboot gate holds N+1 until that reboot. The ssh host keys do not
+// depend on first-boot detection: xpf-day0-config regenerates on key
+// absence, gate-stamped. Format per machine-id(5): 32 lowercase hex +
+// newline, world-readable.
 func zeroizeRotateMachineID(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

@@ -1810,3 +1810,60 @@ func TestZeroizeClearRunXPFDirRefusesHardlinkedEntry10769(t *testing.T) {
 		}
 	}
 }
+
+// Proves the load-bearing boot-ordering claim against the real
+// systemd-machine-id-setup binary (same generation as the image):
+// a VALID installed id is used verbatim at boot init, so the
+// wipe-installed fresh id never consults firmware state and a
+// stable-UUID fixture would be moot. There is no unit edge to pin:
+// PID 1 runs machine-id setup before any unit starts. An empty id
+// still regenerates (control leg). Hermetic via --root; skipped
+// where systemd is absent.
+func TestSystemdUsesInstalledMachineIDVerbatim10769(t *testing.T) {
+	bin, err := exec.LookPath("systemd-machine-id-setup")
+	if err != nil {
+		t.Skip("systemd-machine-id-setup unavailable")
+	}
+	run := func(t *testing.T, root string) string {
+		t.Helper()
+		cmd := exec.Command(bin, "--root="+root, "--print")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("systemd-machine-id-setup --root: %v", err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	t.Run("valid installed id used verbatim", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		const installed = "f0e1d2c3b4a5968778695a4b3c2d1e0f"
+		idPath := filepath.Join(root, "etc", "machine-id")
+		if err := os.WriteFile(idPath, []byte(installed+"\n"), 0o444); err != nil {
+			t.Fatal(err)
+		}
+		if got := run(t, root); got != installed {
+			t.Fatalf("boot init must use the installed id verbatim, got %q want %q", got, installed)
+		}
+		if body, err := os.ReadFile(idPath); err != nil || strings.TrimSpace(string(body)) != installed {
+			t.Fatalf("boot init must leave the installed id untouched, body=%q err=%v", body, err)
+		}
+	})
+	t.Run("empty id regenerates", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "etc"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		idPath := filepath.Join(root, "etc", "machine-id")
+		// 0644, not the production 0444: the tool must write the
+		// regenerated id and the test does not run as root.
+		if err := os.WriteFile(idPath, []byte{}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := run(t, root)
+		if len(got) != 32 || strings.Trim(got, "0123456789abcdef") != "" {
+			t.Fatalf("empty id must regenerate to valid 32-hex, got %q", got)
+		}
+	})
+}
