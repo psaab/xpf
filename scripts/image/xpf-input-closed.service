@@ -44,7 +44,12 @@
 # MANUAL ensure/reload in the pre-handoff window trusts a stale
 # enforcing-shaped table until the daemon's next pre-apply guard install
 # (operator action, like a post-handoff flush; the boot-unit path is
-# unaffected — inactive installs).
+# unaffected — inactive installs). Likewise a manual reload racing a
+# concurrent lifeline-guard install is last-writer-wins (check-then-
+# install has no flock): if the global form wins, new permitted
+# sessions block until the daemon's next pre-apply re-converges the
+# guard. Manual-only, fail-closed, established sessions survive — the
+# service never-clobbers holds except that micro-window.
 #
 # Fresh installs: this unit is enabled --no-start (upgrades must never inject
 # a DROP chain into a live armed daemon). The postinst starts it live on

@@ -112,6 +112,12 @@ case "$1" in
             # hands off; the window is milliseconds and the first apply
             # converges by removing the table.
             if [ -d /run/systemd/system ] && [ -x "$SBIN/xpfd" ]; then # 10751-BARRIER-GATE
+                # NOTE: this probe is presence-based (`nft list table`
+                # succeeds for a flushed shell) while ensure is
+                # enforcing-aware. The narrow pre-state (shell present
+                # here, skipped) self-heals: the daemon's first pre-apply
+                # converges (reinstalls) the guard before any link
+                # activation.
                 if [ -e "$XPF_RUN_DIR/early-input-handoff.done" ]; then
                     : # handed off (covers raw binaries invisible to systemctl)
                 elif command -v nft >/dev/null 2>&1 && nft list table inet xpf_input_barrier >/dev/null 2>&1; then

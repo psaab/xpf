@@ -258,12 +258,15 @@ func hostInboundCoverageNewcomers(cfg *config.Config, installed map[string]struc
 // list round-trip).
 //
 // installedCovered is the destination set the standing enforcement was
-// rendered from (S1 real desired scope; nil for teardown). After the
-// presence re-read, the helper samples once more and proves that coverage
-// still includes every fresh desired destination (#10751 R5-B) — an
-// address landing after the last pre-removal sample is otherwise absent
-// from both the installed ruleset and the finished newcomer comparison
-// when the barrier is removed. Drift reinstalls the guard and refuses.
+// rendered from: S1 real desired scope on the real path, the
+// actually-installed fence coverage on cold-boot fallback, joint
+// retained∪gap coverage on the gap branch, nil for teardown. After the
+// enforcement-shape re-read, the helper samples once more and proves that
+// coverage still includes every fresh desired destination (#10751 R5-B)
+// — an address landing after the last pre-removal sample is otherwise
+// absent from both the installed ruleset and the finished newcomer
+// comparison when the barrier is removed. Drift reinstalls the guard and
+// refuses.
 //
 // Post-handoff calls remove idempotently (barrier expected absent — e.g.
 // ExecReload residue cleanup); no attestation there. Install success implies
