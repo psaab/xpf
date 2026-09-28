@@ -27,15 +27,17 @@
 #
 # ExecStart and ExecReload both use `input-barrier ensure`, which never
 # installs global DROP into a live daemon and never clobbers a standing
-# lifeline guard with the global form (R5-C/R6-B): post-handoff (marker)
-# it is a verified no-op success — the daemon owns enforcement and a
-# restart converges it on first apply. Failing the start post-handoff
-# would strand xpfd behind its own Requires edge (R4-4). With the marker
-# absent it still no-ops only when host-inbound ENFORCES (input chain +
-# rules, not a flushed shell) with xpfd ACTIVE — a stale table restored
-# by nftables.service before xpfd starts reads inactive, so it installs
-# instead of trusting it — or when an enforcing barrier already stands.
-# Only a truly absent barrier installs (fail closed).
+# lifeline guard with the global form (R5-C/R6-B/R7-A): post-handoff
+# (marker) it is a verified no-op success — the daemon owns enforcement
+# and a restart converges it on first apply. Failing the start
+# post-handoff would strand xpfd behind its own Requires edge (R4-4).
+# With the marker absent it still no-ops only when host-inbound DROPS
+# (input chain + a DROP verdict — admits-only shells don't count) with
+# first-apply ownership recorded by this boot's daemon and xpfd active:
+# a stale table restored by nftables.service before xpfd starts (or an
+# active-but-not-yet-applied xpfd — Type=simple is active-at-fork)
+# installs instead of trusting it — or when an enforcing barrier
+# already stands. Only a truly absent barrier installs (fail closed).
 # A manual `input-barrier close` still force-installs the global form
 # pre-handoff (post-handoff it refuses; override with --force explicitly).
 #

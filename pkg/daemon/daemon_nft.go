@@ -902,6 +902,9 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		d.noteHostInboundApplyFailed(time.Now())
 		return errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), barrierHandoffErr)
 	}
+	// The real table just loaded (this boot, this process): record first-apply
+	// ownership for `ensure` (best-effort; absence only makes it install).
+	noteHostInboundInstalled()
 	if overlay != nil {
 		if verifyErr := nftInstaller.VerifyHostInboundOverlay(*overlay); verifyErr != nil {
 			verifyErr = tagNftInstallErr(verifyErr)
@@ -1153,6 +1156,8 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 			"err", err)
 		return fmt.Errorf("install host-inbound cold-boot fail-closed fence: %w", err)
 	}
+	// Table live (scoped or shell): record first-apply ownership for `ensure`.
+	noteHostInboundInstalled()
 	if fenceHasScopedDrop {
 		d.hostInboundEnforced.Store(true)
 		// #5789: the address-scoped fence is now the retained enforcement; record

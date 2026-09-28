@@ -400,6 +400,44 @@ func clearEarlyInputHandoffMarker() {
 	_ = os.Remove(EarlyInputHandoffMarkerPath)
 }
 
+// HostInboundFirstApplyMarkerPath records that THIS boot's daemon installed
+// host-inbound enforcement (real table or cold-boot fence) at least once.
+// The `ensure` command combines it with DROP-proof table shape plus xpfd
+// active state to prove a live table is current daemon ownership — not a
+// stale restore from before xpfd started (#10751 R7-A). /run is tmpfs and
+// the daemon clears it at startup plus on every pre-handoff apply entry,
+// so it can only exist after this process installed. A package var so
+// tests redirect it to a temp dir.
+var HostInboundFirstApplyMarkerPath = "/run/xpf/host-inbound-applied.done"
+
+// HostInboundFirstApplyMarked reports whether this boot's daemon installed
+// host-inbound enforcement at least once.
+func HostInboundFirstApplyMarked() bool {
+	_, err := os.Stat(HostInboundFirstApplyMarkerPath)
+	return err == nil
+}
+
+// clearHostInboundFirstApplyMarker removes a stale first-apply marker.
+// Best-effort and silent: absence only makes `ensure` install fail-closed.
+func clearHostInboundFirstApplyMarker() {
+	_ = os.Remove(HostInboundFirstApplyMarkerPath)
+}
+
+// noteHostInboundInstalled records a successful host-inbound enforcement
+// install (real table or cold-boot fence). Best-effort by design: a failed
+// write merely leaves `ensure` conservative (it installs the barrier,
+// which the next apply hands off), so it must never fail the commit.
+// Retried on every successful install, healing any earlier failure.
+func noteHostInboundInstalled() {
+	if err := os.MkdirAll(filepath.Dir(HostInboundFirstApplyMarkerPath), 0755); err != nil {
+		slog.Warn("cannot record host-inbound first-apply marker", "err", err)
+		return
+	}
+	if err := os.WriteFile(HostInboundFirstApplyMarkerPath, []byte("applied\n"), 0644); err != nil {
+		slog.Warn("cannot record host-inbound first-apply marker", "err", err)
+	}
+}
+
 // EarlyInputGuardSwapFailed reports whether the latest bootstrap
 // lifeline-guard swap failed (global barrier retained instead). Feeds the
 // xpf_early_input_guard_swap_failed gauge and /health.

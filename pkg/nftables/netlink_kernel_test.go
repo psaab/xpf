@@ -302,3 +302,33 @@ func TestTableEnforcingDistinguishesShellTables10751(t *testing.T) {
 		t.Fatalf("shell table enforcing = %v, %v; want false, nil", ok, err)
 	}
 }
+
+// TestTableDropsInputRequiresDropVerdict10751: a real install (catch-all
+// DROPs) reads dropping; an admits-only zero-drop fence shell (mandatory
+// admits, policy accept, zero DROP — still "enforcing" by shape) reads
+// non-dropping, as do bare shells and absent tables. Needs CAP_NET_ADMIN
+// (skips otherwise).
+func TestTableDropsInputRequiresDropVerdict10751(t *testing.T) {
+	enterPrivateNetns(t)
+	in := NewNetlinkInstaller()
+	if ok, err := in.TableDropsInput(HostInboundTableName); err != nil || ok {
+		t.Fatalf("absent table drops = %v, %v; want false, nil", ok, err)
+	}
+	if err := in.InstallHostInbound(hostInboundScenario()); err != nil {
+		t.Fatalf("host-inbound install: %v", err)
+	}
+	if ok, err := in.TableDropsInput(HostInboundTableName); err != nil || !ok {
+		t.Fatalf("real table drops = %v, %v; want true, nil", ok, err)
+	}
+	// Zero-drop fence shell: admits-only, policy accept — enforcing shape
+	// without any DROP verdict.
+	if err := in.InstallColdBootFence(FenceSpec{}); err != nil {
+		t.Fatalf("zero-drop fence install: %v", err)
+	}
+	if ok, err := in.TableEnforcing(HostInboundTableName); err != nil || !ok {
+		t.Fatalf("admits-only shell enforcing = %v, %v; want true, nil (shape holds rules)", ok, err)
+	}
+	if ok, err := in.TableDropsInput(HostInboundTableName); err != nil || ok {
+		t.Fatalf("admits-only shell drops = %v, %v; want false, nil", ok, err)
+	}
+}

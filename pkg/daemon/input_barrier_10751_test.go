@@ -2170,3 +2170,60 @@ func TestGateRefusalLogsInstallError10751(t *testing.T) {
 		t.Fatalf("refusal log = %q, want the install error, not nil", out)
 	}
 }
+
+// --- #10751 R7-A: first-apply ownership marker ---
+
+// TestHostInboundInstallRecordsFirstApplyMarker10751: a successful
+// host-inbound install records first-apply ownership for `ensure`.
+func TestHostInboundInstallRecordsFirstApplyMarker10751(t *testing.T) {
+	orig := nftInstaller
+	origMarker := HostInboundFirstApplyMarkerPath
+	t.Cleanup(func() { nftInstaller = orig; HostInboundFirstApplyMarkerPath = origMarker })
+	nftInstaller = &fakeNftInstaller{}
+	HostInboundFirstApplyMarkerPath = filepath.Join(t.TempDir(), "host-inbound-applied.done")
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
+		t.Fatalf("apply err = %v, want nil", err)
+	}
+	if _, err := os.Stat(HostInboundFirstApplyMarkerPath); err != nil {
+		t.Fatalf("first-apply marker missing after successful install: %v", err)
+	}
+}
+
+// TestHostInboundInstallMarkerBestEffort10751: an unwritable first-apply
+// path must NOT fail the commit — absence only makes `ensure` install
+// fail-closed (the opposite direction from the handoff marker, which
+// blocks because memory-true + marker-absent would inject).
+func TestHostInboundInstallMarkerBestEffort10751(t *testing.T) {
+	orig := nftInstaller
+	origMarker := HostInboundFirstApplyMarkerPath
+	t.Cleanup(func() { nftInstaller = orig; HostInboundFirstApplyMarkerPath = origMarker })
+	nftInstaller = &fakeNftInstaller{}
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0644); err != nil {
+		t.Fatalf("stage blocker: %v", err)
+	}
+	HostInboundFirstApplyMarkerPath = filepath.Join(blocker, "host-inbound-applied.done")
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
+		t.Fatalf("apply err = %v, want nil (first-apply marker is best-effort)", err)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("handoff must complete despite the first-apply marker failure")
+	}
+}
+
+// TestClearHostInboundFirstApplyMarker10751 pins the startup-clear helper
+// Run uses so a new process never inherits a dead predecessor's marker.
+func TestClearHostInboundFirstApplyMarker10751(t *testing.T) {
+	origMarker := HostInboundFirstApplyMarkerPath
+	t.Cleanup(func() { HostInboundFirstApplyMarkerPath = origMarker })
+	HostInboundFirstApplyMarkerPath = filepath.Join(t.TempDir(), "host-inbound-applied.done")
+	if err := os.WriteFile(HostInboundFirstApplyMarkerPath, []byte("applied\n"), 0644); err != nil {
+		t.Fatalf("stage marker: %v", err)
+	}
+	clearHostInboundFirstApplyMarker()
+	if _, err := os.Stat(HostInboundFirstApplyMarkerPath); !os.IsNotExist(err) {
+		t.Fatalf("marker still present after clear: %v", err)
+	}
+}
