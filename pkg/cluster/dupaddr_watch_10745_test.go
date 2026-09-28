@@ -369,6 +369,12 @@ func TestDuplicateIdentityReplayDoesNotSurviveWatcherReplacement_10745(t *testin
 
 	// Simulate a heartbeat restart: same manager, key and stable sender ID;
 	// only the watcher (and, under the old design, its cache) is replaced.
+	// Re-arm the shared 30s limiter first: without this the replay half is
+	// void — suppression by the still-closed limiter is indistinguishable
+	// from suppression by surviving replay memory.
+	mgr.mu.Lock()
+	mgr.lastDupNodeIDWarn = time.Time{}
+	mgr.mu.Unlock()
 	second := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, mgr.beaconSenderID())
 	second.handleBeacon(frame, now.Add(time.Second))
 	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
