@@ -136,14 +136,15 @@ type hostInboundConntrackFlushFilter struct {
 	ephemHi          uint16
 	// keptSuspicious counts box-oriented covered flows the sweep deliberately
 	// kept that look like tightening-with-service-running staleness: TCP/UDP,
-	// denied by owner+ingress, outside the ephemeral range and the
-	// client-role exempt sets, and outside the catalog (so also unguarded).
-	// keptSamples holds the first few tuple descriptions for the WARN.
-	// MatchConntrackFlow may run on the sweeper's goroutine(s), hence atomic
-	// + mutex rather than plain fields.
+	// denied by owner+ingress, outside the catalog and the client-role exempt
+	// sets, and either outside the ephemeral range or (TCP only) backed by a
+	// local LISTEN socket. keptSamples holds the first few tuple descriptions
+	// for the WARN. MatchConntrackFlow may run on the sweeper's goroutine(s),
+	// hence atomic + mutex rather than plain fields.
 	keptSuspicious atomic.Uint64
 	keptMu         sync.Mutex
 	keptSamples    []string
+	tcpListeners   map[uint16]bool
 }
 
 // readEphemeralPortRange returns the kernel's ephemeral source-port range for
@@ -163,6 +164,37 @@ var readEphemeralPortRange = func() (uint16, uint16) {
 		}
 	}
 	return 32768, 60999
+}
+
+// readLocalTCPListenerPorts returns the set of local TCP ports with a LISTEN
+// socket (state 0A in /proc/net/tcp{,6}), for distinguishing a bound TCP
+// service sport inside the ephemeral range from ordinary egress (egress
+// sockets never LISTEN). Unreadable proc files yield an empty set (fail-quiet
+// for the WARN heuristic). A package var so tests pin deterministically.
+var readLocalTCPListenerPorts = func() map[uint16]bool {
+	out := map[uint16]bool{}
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n")[1:] {
+			fields := strings.Fields(line)
+			if len(fields) < 4 || fields[3] != "0A" {
+				continue
+			}
+			parts := strings.Split(fields[1], ":")
+			if len(parts) != 2 {
+				continue
+			}
+			port, err := strconv.ParseUint(parts[1], 16, 16)
+			if err != nil {
+				continue
+			}
+			out[uint16(port)] = true
+		}
+	}
+	return out
 }
 
 func (f *hostInboundConntrackFlushFilter) boxOrientedDenied(addr netip.Addr, flow *netlink.ConntrackFlow) bool {
@@ -213,16 +245,21 @@ func (f *hostInboundConntrackFlushFilter) boxOrientedDenied(addr netip.Addr, flo
 
 // noteKeptSuspicious records a box-oriented covered flow the sweep kept on a
 // catalog miss that is NOT convincingly legitimate egress: TCP/UDP, denied by
-// owner+ingress, outside the ephemeral range and the client-role exempt sets
-// (custom/non-catalog service-like sports such as 2222). Ephemeral egress,
-// exempt control-plane/client ports, and WireGuard (filtered by the caller)
-// are never recorded. Bare-protocol and ranged flows are likewise excluded:
-// live-vs-stale is indistinguishable there too, so they stay matrix-only and
-// this WARN keeps a tight false-positive budget (explicit-bind low-sport
-// clients, verified with ss).
+// owner+ingress, outside the client-role exempt sets, and either outside the
+// ephemeral range or (TCP only) backed by a local LISTEN socket — a listener
+// distinguishes a bound custom service sport inside the range from ordinary
+// egress, which never LISTENs. UDP has no listen state (bound ephemeral
+// clients are indistinguishable from bound services), so in-range UDP stays
+// silent by design; see the matrix residual. Exempt control-plane/client
+// ports and WireGuard (filtered by the caller) are never recorded.
+// Bare-protocol and ranged flows are likewise excluded: live-vs-stale is
+// indistinguishable there too, so they stay matrix-only and this WARN keeps a
+// tight false-positive budget (explicit-bind low-sport clients and bound-UDP
+// customs, verified with ss).
 func (f *hostInboundConntrackFlushFilter) noteKeptSuspicious(addr netip.Addr, flow *netlink.ConntrackFlow) {
 	port := flow.Forward.SrcPort
-	if port >= f.ephemLo && port <= f.ephemHi {
+	inEphem := port >= f.ephemLo && port <= f.ephemHi
+	if inEphem && (flow.Forward.Protocol != config.HostInboundProtoTCP || !f.tcpListeners[port]) {
 		return
 	}
 	if xnft.HostInboundStaleReplyIsExempt(flow.Forward.Protocol, port) {
@@ -470,7 +507,7 @@ func buildHostInboundConntrackFlushFilter(views []dpuserspace.ZoneHostInboundVie
 	return &hostInboundConntrackFlushFilter{
 		admit: admit, wgPorts: wgListenPorts, guardTCP: guardTCP, guardUDP: guardUDP,
 		ingressTCP: ingressTCP, ingressUDP: ingressUDP, ingressAllowsAll: ingressAllowsAll,
-		ephemLo: ephemLo, ephemHi: ephemHi,
+		ephemLo: ephemLo, ephemHi: ephemHi, tcpListeners: readLocalTCPListenerPorts(),
 	}
 }
 
@@ -535,7 +572,13 @@ func (d *Daemon) flushDeniedHostInboundConntrack(views []dpuserspace.ZoneHostInb
 	// error; but unlike a clean sweep it leaves authorization the new rules
 	// no longer grant, so it must not pass silently either. Journal WARN with
 	// count + samples + the procedure pointer, only when such flows exist.
-	if kept, samples := filter.keptSuspiciousReport(); kept > 0 {
+	// The same report is stashed for the commit funnel's transition-aware
+	// warning (which additionally requires a lost full-admit scope).
+	kept, samples := filter.keptSuspiciousReport()
+	if d != nil {
+		d.recordKeptSuspicious10752(kept, samples)
+	}
+	if kept > 0 {
 		slog.Warn("host-inbound conntrack reconcile kept box-oriented non-catalog flows to covered addresses; with active traffic they ride the broad reply accept indefinitely — delete per the non-catalog TCP HIGH-residual procedure in docs/host-inbound-service-matrix.md, or verify with ss that each is a legitimate explicit-bind client",
 			"kept", kept, "samples", samples)
 	}

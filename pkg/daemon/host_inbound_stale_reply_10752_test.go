@@ -155,13 +155,19 @@ func TestHostInboundNonCatalogTCPStatusQuo10752(t *testing.T) {
 }
 func TestHostInboundKeptSuspiciousWarnScope10752(t *testing.T) {
 	// The evidence-based tightening WARN must fire exactly for kept
-	// box-oriented non-catalog service-like flows (custom 2222 TCP+UDP),
-	// and stay silent for ephemeral egress, exempt control-plane/client
-	// ports, flushed catalogued tuples, admitted tuples, peer-oriented
-	// flows, and uncovered sources.
+	// box-oriented non-catalog service-like flows: custom sports below the
+	// ephemeral floor (TCP+UDP 2222), plus TCP sports inside the range that
+	// back a local LISTEN socket (bound custom service). It stays silent
+	// for plain ephemeral egress, exempt control-plane/client ports,
+	// in-range UDP (no listen state to distinguish bound services),
+	// flushed catalogued tuples, admitted tuples, peer-oriented flows, and
+	// uncovered sources.
 	origRange := readEphemeralPortRange
 	readEphemeralPortRange = func() (uint16, uint16) { return 32768, 60999 }
 	defer func() { readEphemeralPortRange = origRange }()
+	origListeners := readLocalTCPListenerPorts
+	readLocalTCPListenerPorts = func() map[uint16]bool { return map[uint16]bool{45000: true} }
+	defer func() { readLocalTCPListenerPorts = origListeners }()
 
 	cfg := hostInboundFlushTestConfig("snmp")
 	cfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"snmp"}}
@@ -179,10 +185,16 @@ func TestHostInboundKeptSuspiciousWarnScope10752(t *testing.T) {
 	feed(boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 2222))
 	feed(boxOrientedFlow(config.HostInboundProtoUDP, "172.16.50.8", 2222))
 	feed(boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 32767))
-	// Silent: ephemeral floor and above.
+	// Suspicious: TCP sport inside the range backed by a LISTEN socket (a
+	// bound custom service on 45000 is not ordinary egress).
+	feed(boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 45000))
+	// Silent: ephemeral floor and above without a listener.
 	feed(boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 32768))
 	feed(boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 41000))
 	feed(boxOrientedFlow(config.HostInboundProtoUDP, "172.16.50.8", 60999))
+	// Silent: in-range UDP even with the same numeric port "listening" — UDP
+	// has no listen state, so bound services are indistinguishable there.
+	feed(boxOrientedFlow(config.HostInboundProtoUDP, "172.16.50.8", 45000))
 	// Silent: exempt control-plane/client ports.
 	feed(boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 179))
 	feed(boxOrientedFlow(config.HostInboundProtoUDP, "172.16.50.8", 123))
@@ -194,19 +206,19 @@ func TestHostInboundKeptSuspiciousWarnScope10752(t *testing.T) {
 	feed(ctFlow(config.HostInboundProtoTCP, "172.16.50.8", 2222))
 	feed(boxOrientedFlow(config.HostInboundProtoUDP, "203.0.113.7", 2222))
 	got, samples := filter.keptSuspiciousReport()
-	if got != 3 {
-		t.Fatalf("kept-suspicious count = %d, want 3 (TCP/UDP 2222 + TCP 32767); samples=%v", got, samples)
+	if got != 4 {
+		t.Fatalf("kept-suspicious count = %d, want 4 (TCP/UDP 2222 + TCP 32767 + TCP 45000-listener); samples=%v", got, samples)
 	}
-	if len(samples) != 3 {
-		t.Fatalf("samples = %v, want 3 tuples", samples)
+	if len(samples) != 4 {
+		t.Fatalf("samples = %v, want 4 tuples", samples)
 	}
 	// Sample cap: flood more suspicious flows; count grows, samples stop at 5.
 	for range 10 {
 		feed(boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 3000))
 	}
 	got, samples = filter.keptSuspiciousReport()
-	if got != 13 || len(samples) != 5 {
-		t.Fatalf("after flood: count=%d samples=%d, want 13 and 5", got, len(samples))
+	if got != 14 || len(samples) != 5 {
+		t.Fatalf("after flood: count=%d samples=%d, want 14 and 5", got, len(samples))
 	}
 }
 
