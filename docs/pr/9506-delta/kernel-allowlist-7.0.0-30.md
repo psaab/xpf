@@ -1,6 +1,6 @@
 # Kernel allowlist member review: 7.0.0-30-generic (#9506 P-MECH receive proof)
 
-Review base: research/9506-delta at v12 (plan `docs/pr/9506-delta/plan.md`; recipes `docs/pr/9506-delta/f0f9-recipes.md`).
+Review base: research/9506-delta at v13 (plan `docs/pr/9506-delta/plan.md`; recipes `docs/pr/9506-delta/f0f9-recipes.md`).
 Purpose: this record is the completed per-member evidence the M1
 ENFORCED RECEIVE MODE invariant requires. It binds the exact guest
 kernel identity to its source revision, Kconfig posture, and the
@@ -322,7 +322,8 @@ per gate.
   Status: RECIPE-EXECUTED.
 - Package inventory: `publish.py` `gate_provenance` requires
   manifest `guest_kernel`==pin AND `kernel-allowlist`==pin AND
-  manifest revision-rows==pins AND inventory `guest_kernel`==pin AND
+  manifest `kernel-source-revision` parsed per §2 grammar with all
+  three rows==pins AND inventory `guest_kernel`==pin AND
   inventory image+modules+headers rows==pins AND `xpf`==ver AND base
   pins (replacing manifest↔inventory agreement alone — EACH record
   vs PIN; cross-agreement retained as tamper-evidence).
@@ -356,9 +357,16 @@ per gate.
 - LANE-1: Arm compares the FULL candidate tuple (candidate
   `uname -r` + 3 rows from the candidate inventory vs pins) after
   `ValidateKernelSegment` (charset/path only, `version.go:124`);
-  Gate 2 (`kernel_run.go:551-558`) compares running `uname -r` +
-  running dpkg rows vs candidate rows vs pins (`running==candidate`
-  on full rows, then `running ∈ reviewed tuple`)
+  Kconfig unobservable at Arm ONLY (candidate not booted;
+  dependency: exact-version pins + bake F8 — same bits ⇒ same
+  config). Gate 2 (`kernel_run.go:551-558`) compares running
+  `uname -r` + running dpkg rows + RUNNING Kconfig
+  (`/boot/config-$(uname -r)`, `_CONFIG_ASSERT` shape) vs
+  candidate rows vs pins (`running==candidate` on full rows,
+  then `running ∈ reviewed tuple` + Kconfig), checked on the
+  verifyAndPromote path so it covers BOTH the normal Gate-2
+  entry AND the BootCurrent-unreadable recovery entry
+  (`:524-531`)
   (current: candidate-equality only — gap by code read);
   `xpf-kernel-promote` outer gate refuses no-infer AND non-member;
   `promotionMarkerPath`/`lastRollPath`/`ReadChannelStatus`
@@ -516,7 +524,7 @@ Scope honesty: this transcript is archive/tree/code evidence +
  execution (P2) and NOT member-kernel execution (kprobe/readbacks) —
  those remain the P2-entry bar, now with exact expected values.
 
- ## 8. Artifact retention ledger (v12 — answers the gate artifact question)
+ ## 8. Artifact retention ledger (v13 — answers the gate artifact question)
 
  Lane rule permits only `docs/pr/9506-delta/*.md` writes, so durable
  retention is git-pinned .md + content hashes; `/tmp` bytes are
@@ -562,16 +570,19 @@ Scope honesty: this transcript is archive/tree/code evidence +
   verdicts; `MATRIX: ALL-HERE-OK`, exit 0, 2026-09-27; v12
   supersedes the v11 matrix). The v10 aggregate probe outputs
   remain TRANSCRIPT-ONLY (§7 v10 block).
- - ENOTSOCK probe script: RETAINED (`enotsock_probe.py` v12
-  corrected procedure in recipes file); fd/device identity
-  RETAINED (matrix: `/dev/net/tun` 10:200 + TUNSETIFF-bound temp
-  device `v12en*` flags `0x1001` + sysfs node, build host
+ - ENOTSOCK probe script: RETAINED (`enotsock_probe.py` v13
+  procedure in recipes file); fd/device identity RETAINED
+  (matrix: `/dev/net/tun` 10:200 + TUNSETIFF-bound temp device
+  `v13en*` flags `0x1001` + sysfs node, build host
   `7.0.13+deb14-amd64` euid=0 via `sudo -n`, char fd
   O_RDWR|O_CLOEXEC); raw output RETAINED in the matrix
   (SETUP-bind + SEND raw-syscall errno=88 on the BOUND fd +
   WRAPPER-fromfd errno=88 distinguished + NULLCTL + PAIRECTL +
-  CLEANUP-removed — no separate raw-output file exists,
-  TRANSCRIPT-ONLY beyond the matrix paste). Member-kernel /
+  CLEANUP-removed + `ENOTSOCK-STATUS: COMPLETE` — no separate
+  raw-output file exists, TRANSCRIPT-ONLY beyond the matrix
+  paste). SKIPPED bind propagates: no-sudo run exits 4 with
+  `MATRIX: INCOMPLETE` (retained tail) — the aggregate line,
+  not exit code alone, is the evidence. Member-kernel /
   member-USP-device positive control: NOT executed (P2, same
   script, no `USE_SUDO` needed as root).
  - rx_batched drift / kprobe sync-proof / PTP cells: scripts
@@ -590,6 +601,10 @@ Scope honesty: this transcript is archive/tree/code evidence +
   xpf-shape write); (iv) every per-tick readback in §4
   executing against the member (RPS/RFS/GRO/XDP/TC/coalesce/
   phydev). ANY missing path, observation, or readback keeps
-  permits CLOSED — no partial-credit OPEN. The B8 gates above
+  permits CLOSED — no partial-credit OPEN. The v13 aggregate
+  rule is the machine form of this contract: `ENOTSOCK-STATUS:
+  COMPLETE` + `MATRIX: ALL-HERE-OK` iff the bound-fd leg with
+  controls + cleanup succeeded; any SKIPPED leg forces
+  `INCOMPLETE` (exit 4), never ALL-HERE-OK. The B8 gates above
   are RECIPE-EXECUTED (i–iv specified + retained); LANDED is
   P2's entry bar.

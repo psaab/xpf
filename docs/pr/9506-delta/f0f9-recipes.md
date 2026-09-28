@@ -223,61 +223,94 @@ sys.exit(rc)
 ## F4 publish membership (`gate_provenance`)
 
 P2 site: `scripts/dist/publish.py` (extends the `:711-756` kernel leg).
-Observes: verified sidecar fields + verified `.pkgs` (inv_kern + full
-rows incl `xpf=<ver>`). Unobservable here: Kconfig (F5/F8 live
-dependency), running state (F5b/boot dependency).
+Observes: verified sidecar fields (guest_kernel, kernel-source-revision
+string, kernel-allowlist, validated, base pins — `publish.py:663-667`)
++ verified `.pkgs` (inv_kern + full rows incl `xpf=<ver>` —
+`:728-734`). Manifest KSRC and inventory rows are consumed as TWO
+INDEPENDENT collections, each parsed and compared vs PIN (v13
+Fix-1a). Unobservable here: Kconfig (F5/F8 live dependency),
+running state (F5b/boot dependency).
 
 ```python f4_publish_check.py
 #!/usr/bin/env python3
-"""F4: current agreement-only (gap demo) vs specified both-records-vs-PIN."""
+"""F4: current agreement-only (gap demo) vs specified both-records-vs-PIN.
+
+Consumes the manifest kernel-source-revision (canonical §2 serialization,
+parsed per-package) AND the inventory rows INDEPENDENTLY — a manifest-only
+skew with inventory-A unchanged must die (v13 Fix-1a)."""
 import sys
 UNAME = "7.0.0-30-generic"
 VER = "7.0.0-30.30"
 BASE_SHA256 = "9dc7c5363c0146a08ba0c9aa834d82c2c6dfbb1c471ad9a2f0aba1189e21be05"
 PKGS = ("linux-image-7.0.0-30-generic", "linux-modules-7.0.0-30-generic", "linux-headers-7.0.0-30-generic")
+def parse_ksrc(value):
+    """Canonical kernel-source-revision grammar: sorted comma-joined pkg=ver, exact set."""
+    try:
+        rows = dict(part.split("=", 1) for part in value.split(",") if part)
+    except ValueError:
+        return None
+    if set(rows) != set(PKGS):
+        return None
+    return rows
+def ksrc(image="7.0.0-30.30", modules="7.0.0-30.30", headers="7.0.0-30.30", abi="7.0.0-30"):
+    return ",".join(sorted([
+        f"linux-headers-{abi}-generic={headers}",
+        f"linux-image-{abi}-generic={image}",
+        f"linux-modules-{abi}-generic={modules}",
+    ]))
 def current(gkern, inv_kern):
     if not gkern:
         return "die(no guest_kernel)"
     if inv_kern != gkern:
         return "die(disagree)"
     return "PUBLISH"
-def rows_ok(rows):
-    got = dict(r.split("=", 1) for r in rows if "=" in r)
-    return all(got.get(p) == VER for p in PKGS)
-def specified(gkern, inv_kern, rows, allow, base, xpfrow, ver):
+def specified(gkern, manif_ksrc, inv_kern, inv_rows, allow, base, ver):
     if gkern != UNAME or inv_kern != UNAME:
         return "die(member-mismatch)"
     if allow != UNAME:
         return "die(allowlist-mismatch)"
     if base != BASE_SHA256:
         return "die(base-digest-mismatch)"
-    got = dict(r.split("=", 1) for r in rows if "=" in r)
+    mrows = parse_ksrc(manif_ksrc)
+    if mrows is None:
+        return "die(manifest-revision-unparseable)"
+    for p in PKGS:
+        if mrows.get(p) != VER:
+            return f"die(manifest-skew:{p})"
+    got = dict(r.split("=", 1) for r in inv_rows if "=" in r)
     for p in PKGS:
         if got.get(p) != VER:
             return f"die(pin-mismatch:{p})"
-    if [e.partition("=")[2] for e in rows if e.partition("=")[0] == "xpf"] != [ver]:
+    if [e.partition("=")[2] for e in inv_rows if e.partition("=")[0] == "xpf"] != [ver]:
         return "die(xpf-identity-mismatch)"
     if gkern != inv_kern:
         return "die(tamper-disagree)"
     return "PUBLISH"
 M = [f"{p}={VER}" for p in PKGS] + ["xpf=0.0.test"]
-def skewm(i, v="7.0.0-30.31"):
-    r = list(M); r[i] = r[i].rsplit("=", 1)[0] + "=" + v; return r
+def skewm(rows, i, v="7.0.0-30.31"):
+    r = list(rows); r[i] = r[i].rsplit("=", 1)[0] + "=" + v; return r
 B = [f"{p.replace('7.0.0-30', '7.0.0-31')}=7.0.0-31.31" for p in PKGS] + ["xpf=0.0.test"]
 SAMEU = [f"{p}=7.0.0-30.31" for p in PKGS] + ["xpf=0.0.test"]
+KSRC_B = ksrc("7.0.0-31.31", "7.0.0-31.31", "7.0.0-31.31", "7.0.0-31")
+KSRC_SAMEU = ksrc("7.0.0-30.31", "7.0.0-30.31", "7.0.0-30.31")
 CASES = {
-    "member-A": (("7.0.0-30-generic", "7.0.0-30-generic", M, "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "PUBLISH"),
-    "coherent-B-31": (("7.0.0-31-generic", "7.0.0-31-generic", B, "7.0.0-31-generic", BASE_SHA256), "PUBLISH", "die"),
-    "coherent-same-uname-B": (("7.0.0-30-generic", "7.0.0-30-generic", SAMEU, "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
-    "image-only-skew": (("7.0.0-30-generic", "7.0.0-30-generic", skewm(0), "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
-    "modules-only-skew": (("7.0.0-30-generic", "7.0.0-30-generic", skewm(1), "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
-    "headers-only-skew": (("7.0.0-30-generic", "7.0.0-30-generic", skewm(2), "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
-    "allowlist-skew": (("7.0.0-30-generic", "7.0.0-30-generic", M, "7.0.0-31-generic", BASE_SHA256), "PUBLISH", "die"),
-    "manifest-inventory-disagree": (("7.0.0-30-generic", "7.0.0-31-generic", M, "7.0.0-30-generic", BASE_SHA256), "die", "die"),
+    "member-A": (("7.0.0-30-generic", ksrc(), "7.0.0-30-generic", M, "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "PUBLISH"),
+    "coherent-B-31": (("7.0.0-31-generic", KSRC_B, "7.0.0-31-generic", B, "7.0.0-31-generic", BASE_SHA256), "PUBLISH", "die"),
+    "coherent-same-uname-B": (("7.0.0-30-generic", KSRC_SAMEU, "7.0.0-30-generic", SAMEU, "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
+    "inv-image-only-skew": (("7.0.0-30-generic", ksrc(), "7.0.0-30-generic", skewm(M, 0), "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
+    "inv-modules-only-skew": (("7.0.0-30-generic", ksrc(), "7.0.0-30-generic", skewm(M, 1), "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
+    "inv-headers-only-skew": (("7.0.0-30-generic", ksrc(), "7.0.0-30-generic", skewm(M, 2), "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
+    "manifest-image-only-skew": (("7.0.0-30-generic", ksrc("7.0.0-30.31"), "7.0.0-30-generic", M, "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
+    "manifest-modules-only-skew": (("7.0.0-30-generic", ksrc(modules="7.0.0-30.31"), "7.0.0-30-generic", M, "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
+    "manifest-headers-only-skew": (("7.0.0-30-generic", ksrc(headers="7.0.0-30.31"), "7.0.0-30-generic", M, "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
+    "manifest-unparseable": (("7.0.0-30-generic", "linux-image-7.0.0-30-generic", "7.0.0-30-generic", M, "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
+    "manifest-inv-rows-disagree": (("7.0.0-30-generic", ksrc(), "7.0.0-30-generic", SAMEU, "7.0.0-30-generic", BASE_SHA256), "PUBLISH", "die"),
+    "allowlist-skew": (("7.0.0-30-generic", ksrc(), "7.0.0-30-generic", M, "7.0.0-31-generic", BASE_SHA256), "PUBLISH", "die"),
+    "manifest-inventory-uname-disagree": (("7.0.0-30-generic", ksrc(), "7.0.0-31-generic", M, "7.0.0-30-generic", BASE_SHA256), "die", "die"),
 }
 rc = 0
-for name, ((g, i, r, a, b), want_cur, want_spec) in CASES.items():
-    c, s = current(g, i), specified(g, i, r, a, b, r, "0.0.test")
+for name, ((g, k, i, r, a, b), want_cur, want_spec) in CASES.items():
+    c, s = current(g, i), specified(g, k, i, r, a, b, "0.0.test")
     ok = c.startswith(want_cur) and s.startswith(want_spec)
     rc |= not ok
     print(f"F4 {name}: current={c} specified={s} [{'OK' if ok else 'SURPRISE'}]")
@@ -411,36 +444,52 @@ P2 sites: Arm after `ValidateKernelSegment` (`version.go:124` —
 charset/path only, not membership); Gate 2
 (`kernel_run.go:551-558`); promote outer gate. Arm observes the
 candidate (`uname -r` + dpkg rows from the candidate inventory +
-journal fields); Gate 2 observes running `uname -r` + running dpkg
-rows + journal candidate. Unobservable at Arm/Gate 2: Kconfig of a
-non-booted candidate (dependency: exact-version pins + bake F8 +
-boot F5 — same bits ⇒ same config) and base digest (publish-chain
+journal fields); Kconfig of the NON-BOOTED candidate is genuinely
+unobservable at Arm (dependency: exact-version pins + bake F8 —
+same bits ⇒ same config). Gate 2 runs AFTER boot and observes
+running `uname -r` + running dpkg rows + RUNNING Kconfig
+(`/boot/config-$(uname -r)`, `_CONFIG_ASSERT` shape) + journal
+candidate — Kconfig is IN the Gate-2 predicate (v13 Fix-1b),
+checked on the verifyAndPromote path so it covers BOTH the normal
+Gate-2 entry (`:551-558`) AND the BootCurrent-unreadable recovery
+entry (`:524-531`). Base digest unobservable at both (publish-chain
 dependency). Current behavior cited from code reads (gap noted);
 Go LANDED test at P2 executes the same truth table.
 
 ```python f6f7_lane1.py
 #!/usr/bin/env python3
-"""F6/F7: candidate full-tuple at Arm; running full-tuple vs candidate vs pins at Gate 2."""
-import sys
+"""F6/F7: candidate full-tuple at Arm; running full-tuple + running Kconfig at Gate 2."""
+import re, sys
 UNAME = "7.0.0-30-generic"
 VER = "7.0.0-30.30"
 PKGS = ("linux-image-7.0.0-30-generic", "linux-modules-7.0.0-30-generic", "linux-headers-7.0.0-30-generic")
 def rows_ok(rows):
     got = dict(r.split("=", 1) for r in rows if "=" in r)
     return all(got.get(p) == VER for p in PKGS)
+def kconfig_ok(config):
+    if re.search(r"^[ \t]*CONFIG_4KSTACKS=(m|y)$", config, re.M):
+        return False
+    for sym in ("CONFIG_BRIDGE", "CONFIG_NF_TABLES_BRIDGE"):
+        if not re.search(rf"^[ \t]*{sym}=(m|y)$", config, re.M):
+            return False
+    return True
 def arm(cand_u, cand_rows):
     if cand_u != UNAME:
         return "REFUSE(candidate-uname)"
     if not rows_ok(cand_rows):
         return "REFUSE(candidate-rows)"
     return "ACCEPT"
-def gate2(run_u, run_rows, cand_u, cand_rows):
+def gate2(run_u, run_rows, run_kconfig, cand_u, cand_rows):
     if run_u != cand_u or dict(r.split("=", 1) for r in run_rows) != dict(r.split("=", 1) for r in cand_rows):
         return "REVERT(running!=candidate)"
     if run_u != UNAME or not rows_ok(run_rows):
         return "REVERT(non-member)"
+    if not kconfig_ok(run_kconfig):
+        return "REVERT(kconfig)"
     return "PROMOTE-PATH"
 M = [f"{p}={VER}" for p in PKGS]
+MEMBER_CFG = "CONFIG_VERSION_SIGNATURE=\"Ubuntu 7.0.0-30.30-generic 7.0.12\"\nCONFIG_BRIDGE=m\nCONFIG_NF_TABLES_BRIDGE=m\nCONFIG_TUN=y\n"
+BAD_CFG = MEMBER_CFG + "CONFIG_4KSTACKS=y\n"
 def rows31():
     return [f"{p.replace('7.0.0-30', '7.0.0-31')}=7.0.0-31.31" for p in PKGS]
 def rows22():
@@ -449,18 +498,19 @@ def skew(rows, i, v="7.0.0-30.31"):
     r = list(rows); r[i] = r[i].rsplit("=", 1)[0] + "=" + v; return r
 SAMEU = [f"{p}=7.0.0-30.31" for p in PKGS]
 CASES = {
-    "member-A": (("7.0.0-30-generic", M, "7.0.0-30-generic", M), "ACCEPT", "PROMOTE-PATH"),
-    "coherent-B-31": (("7.0.0-31-generic", rows31(), "7.0.0-31-generic", rows31()), "REFUSE", "REVERT"),
-    "coherent-same-uname-B": (("7.0.0-30-generic", SAMEU, "7.0.0-30-generic", SAMEU), "REFUSE", "REVERT"),
-    "F6-candidate-31-running-30": (("7.0.0-31-generic", rows31(), "7.0.0-30-generic", M), "REFUSE", "REVERT"),
-    "F7-running-31": (("7.0.0-31-generic", rows31(), "7.0.0-31-generic", rows31()), "REFUSE", "REVERT"),
-    "candidate-modules-only-skew": (("7.0.0-30-generic", skew(M, 1), "7.0.0-30-generic", M), "REFUSE", "REVERT"),
-    "running-headers-only-skew": (("7.0.0-30-generic", M, "7.0.0-30-generic", skew(M, 2)), "ACCEPT", "REVERT"),
-    "running-22-candidate-30": (("7.0.0-30-generic", M, "7.0.0-22-generic", rows22()), "ACCEPT", "REVERT"),
+    "member-A": (("7.0.0-30-generic", M, MEMBER_CFG, "7.0.0-30-generic", M), "ACCEPT", "PROMOTE-PATH"),
+    "coherent-B-31": (("7.0.0-31-generic", rows31(), MEMBER_CFG, "7.0.0-31-generic", rows31()), "REFUSE", "REVERT"),
+    "coherent-same-uname-B": (("7.0.0-30-generic", SAMEU, MEMBER_CFG, "7.0.0-30-generic", SAMEU), "REFUSE", "REVERT"),
+    "F6-candidate-31-running-30": (("7.0.0-31-generic", rows31(), MEMBER_CFG, "7.0.0-30-generic", M), "REFUSE", "REVERT"),
+    "F7-running-31": (("7.0.0-31-generic", rows31(), MEMBER_CFG, "7.0.0-31-generic", rows31()), "REFUSE", "REVERT"),
+    "candidate-modules-only-skew": (("7.0.0-30-generic", skew(M, 1), MEMBER_CFG, "7.0.0-30-generic", M), "REFUSE", "REVERT"),
+    "running-headers-only-skew": (("7.0.0-30-generic", M, MEMBER_CFG, "7.0.0-30-generic", skew(M, 2)), "ACCEPT", "REVERT"),
+    "running-kconfig-bad": (("7.0.0-30-generic", M, BAD_CFG, "7.0.0-30-generic", M), "ACCEPT", "REVERT"),
+    "running-22-candidate-30": (("7.0.0-30-generic", M, MEMBER_CFG, "7.0.0-22-generic", rows22()), "ACCEPT", "REVERT"),
 }
 rc = 0
-for name, ((cu, cr, ru, rr), want_arm, want_g2) in CASES.items():
-    a, g = arm(cu, cr), gate2(ru, rr, cu, cr)
+for name, ((cu, cr, rk, ru, rr), want_arm, want_g2) in CASES.items():
+    a, g = arm(cu, cr), gate2(ru, rr, rk, cu, cr)
     ok = a.startswith(want_arm) and g.startswith(want_g2)
     rc |= not ok
     print(f"F6F7 {name}: arm={a} gate2={g} [{'OK' if ok else 'SURPRISE'}]")
@@ -549,13 +599,13 @@ BASE=9dc7c5363c0146a08ba0c9aa834d82c2c6dfbb1c471ad9a2f0aba1189e21be05
 need f0_pin_check.py "$U" "$V"
 need f1_bake_check.py "$U" "$V"
 need f2f3_sign_check.py "$U" "$V" "$BASE" kernel-source-revision kernel-allowlist
-need f4_publish_check.py "$U" "$V" "$BASE"
+need f4_publish_check.py "$U" "$V" "$BASE" kernel-source-revision
 need f5_validate_check.py "$U" "$V" CONFIG_4KSTACKS
 need f5b_admission.py "$U" "$V"
-need f6f7_lane1.py "$U" "$V"
+need f6f7_lane1.py "$U" "$V" CONFIG_4KSTACKS
 need f8_kconfig.sh CONFIG_4KSTACKS CONFIG_BRIDGE 7.0.0-30.30
 need f9_linkage.sh 7.0.0-30-generic 7.0.0-30.30 Ubuntu-7.0.0-30.30 d974a4063
-need enotsock_probe.py TUNSETIFF ENOTSOCK
+need enotsock_probe.py TUNSETIFF ENOTSOCK INCOMPLETE
 [ "$grade" = 0 ] && echo "pins: per-script pin map holds [OK]"
 exit $grade
 ```
@@ -618,16 +668,17 @@ print(f"host: {platform.uname().release} euid={os.geteuid()}")
 fd = os.open(dev, os.O_RDWR | os.O_CLOEXEC)
 print(f"fd: char fd opened O_RDWR|O_CLOEXEC (fd={fd})")
 bound_name = None
+bound_ok = False
 try:
-    name = ("v12en%d" % (os.getpid() % 100000)).encode()[:15]
+    name = ("v13en%d" % (os.getpid() % 100000)).encode()[:15]
     flags = IFF_TUN | IFF_NO_PI
     ifr = struct.pack("16sH22s", name, flags, b"\x00" * 22)
     try:
         fcntl.ioctl(fd, TUNSETIFF, ifr)
         bound_name = name.decode()
         node = f"/sys/class/net/{bound_name}"
-        ok = os.path.isdir(node)
-        rc |= check("SETUP-bind", ok, f"TUNSETIFF {bound_name} flags=0x{flags:04x} sysfs={ok}")
+        bound_ok = os.path.isdir(node)
+        rc |= check("SETUP-bind", bound_ok, f"TUNSETIFF {bound_name} flags=0x{flags:04x} sysfs={bound_ok}")
     except OSError as e:
         print(f"SETUP-bind: SKIPPED errno={e.errno} ({e.strerror}) — P2-only leg (needs CAP_NET_ADMIN)")
     ret, err = raw_sendmsg(fd)
@@ -662,7 +713,14 @@ finally:
 if bound_name:
     gone = not glob.glob(f"/sys/class/net/{bound_name}")
     rc |= check("CLEANUP-device-removed", gone, f"{bound_name} removed={gone}")
-sys.exit(rc)
+if rc:
+    print("ENOTSOCK-STATUS: FAILED")
+    sys.exit(1)
+if not bound_ok:
+    print("ENOTSOCK-STATUS: INCOMPLETE (bound-fd leg missing — not P2 evidence)")
+    sys.exit(4)
+print("ENOTSOCK-STATUS: COMPLETE (bound member-USP-shape fd + controls + cleanup)")
+sys.exit(0)
 ```
 
 ## rx_batched drift fixture (SPECIFIED for P2 — NOT executed here)
@@ -728,23 +786,26 @@ done
 REPO="${REPO:-.}" sh f8_kconfig.sh || grade=1
 RECORD="${RECORD:-$REPO/docs/pr/9506-delta/kernel-allowlist-7.0.0-30.md}" sh f9_linkage.sh || grade=1
 sh pins_consistency.sh . || grade=1
-python3 enotsock_probe.py || grade=1
+python3 enotsock_probe.py; eno=$?
 echo "--- P2-only (retained, not executed here) ---"
 echo "rxbatched_drift.sh kprobe_sync_proof.sh ptp_nodefer_cell.sh: SPECIFIED (exit 3 = not-run-here)"
-[ "$grade" = 0 ] && echo "MATRIX: ALL-HERE-OK" || echo "MATRIX: SURPRISES-PRESENT"
-exit $grade
+if [ "$grade" != 0 ] || { [ "$eno" != 0 ] && [ "$eno" != 4 ]; }; then
+  echo "MATRIX: SURPRISES-PRESENT"; exit 1
+elif [ "$eno" = 4 ]; then
+  echo "MATRIX: INCOMPLETE (bound-fd leg missing — not P2 evidence)"; exit 4
+else
+  echo "MATRIX: ALL-HERE-OK"; exit 0
+fi
 ```
 
-## Per-boundary output matrix (v12 — extracted + executed)
+## Per-boundary output matrix (v13 — extracted + executed)
 
 Executed 2026-09-27 on the build host (`7.0.13+deb14-amd64`, read-only;
 ENOTSOCK bind leg under `sudo -n`, device removed on close) via the extraction
 command at the top (`REPO=/var/tmp/worktrees/9506-research USE_SUDO=1`).
 Exit 0. (Host is NOT the member — member-kernel positive controls are P2.)
-No-sudo variant also executed (`./run_all.sh` without `USE_SUDO`):
-identical matrix except `SETUP-bind: SKIPPED errno=1 (Operation not
-permitted)` + `SEND … on unbound fd [OK]` + no CLEANUP line — the
-bind leg reports SKIPPED explicitly, never OK-by-absence.
+No-sudo variant: exit 4 with `MATRIX: INCOMPLETE (bound-fd leg missing —
+not P2 evidence)` and zero surprises (bound leg SKIPPED explicitly).
 
 ```text
 F0 member-A: PASS [OK]
@@ -773,12 +834,17 @@ F2F3 malformed-revision: current=SIGN specified=SignError(revision-unparseable) 
 F2F3 missing-keys: current=SIGN specified=SignError(allowlist-mismatch) [OK]
 F4 member-A: current=PUBLISH specified=PUBLISH [OK]
 F4 coherent-B-31: current=PUBLISH specified=die(member-mismatch) [OK]
-F4 coherent-same-uname-B: current=PUBLISH specified=die(pin-mismatch:linux-image-7.0.0-30-generic) [OK]
-F4 image-only-skew: current=PUBLISH specified=die(pin-mismatch:linux-image-7.0.0-30-generic) [OK]
-F4 modules-only-skew: current=PUBLISH specified=die(pin-mismatch:linux-modules-7.0.0-30-generic) [OK]
-F4 headers-only-skew: current=PUBLISH specified=die(pin-mismatch:linux-headers-7.0.0-30-generic) [OK]
+F4 coherent-same-uname-B: current=PUBLISH specified=die(manifest-skew:linux-image-7.0.0-30-generic) [OK]
+F4 inv-image-only-skew: current=PUBLISH specified=die(pin-mismatch:linux-image-7.0.0-30-generic) [OK]
+F4 inv-modules-only-skew: current=PUBLISH specified=die(pin-mismatch:linux-modules-7.0.0-30-generic) [OK]
+F4 inv-headers-only-skew: current=PUBLISH specified=die(pin-mismatch:linux-headers-7.0.0-30-generic) [OK]
+F4 manifest-image-only-skew: current=PUBLISH specified=die(manifest-skew:linux-image-7.0.0-30-generic) [OK]
+F4 manifest-modules-only-skew: current=PUBLISH specified=die(manifest-skew:linux-modules-7.0.0-30-generic) [OK]
+F4 manifest-headers-only-skew: current=PUBLISH specified=die(manifest-skew:linux-headers-7.0.0-30-generic) [OK]
+F4 manifest-unparseable: current=PUBLISH specified=die(manifest-revision-unparseable) [OK]
+F4 manifest-inv-rows-disagree: current=PUBLISH specified=die(pin-mismatch:linux-image-7.0.0-30-generic) [OK]
 F4 allowlist-skew: current=PUBLISH specified=die(allowlist-mismatch) [OK]
-F4 manifest-inventory-disagree: current=die(disagree) specified=die(member-mismatch) [OK]
+F4 manifest-inventory-uname-disagree: current=die(disagree) specified=die(member-mismatch) [OK]
 F5 member-A: current=PASS specified=PASS [OK]
 F5 coherent-B-31: current=PASS specified=fail(member-mismatch) [OK]
 F5 coherent-same-uname-B: current=PASS specified=fail(pin-mismatch:linux-image-7.0.0-30-generic) [OK]
@@ -804,6 +870,7 @@ F6F7 F6-candidate-31-running-30: arm=REFUSE(candidate-uname) gate2=REVERT(runnin
 F6F7 F7-running-31: arm=REFUSE(candidate-uname) gate2=REVERT(non-member) [OK]
 F6F7 candidate-modules-only-skew: arm=REFUSE(candidate-rows) gate2=REVERT(running!=candidate) [OK]
 F6F7 running-headers-only-skew: arm=ACCEPT gate2=REVERT(running!=candidate) [OK]
+F6F7 running-kconfig-bad: arm=ACCEPT gate2=REVERT(kconfig) [OK]
 F6F7 running-22-candidate-30: arm=ACCEPT gate2=REVERT(running!=candidate) [OK]
 F8 offline-member: PASS [OK]
 F8 live-4kstacks-set: FATAL [OK]
@@ -818,33 +885,42 @@ pins: per-script pin map holds [OK]
 device: /dev/net/tun mode=0o666 rdev=10:200
 host: 7.0.13+deb14-amd64 euid=0
 fd: char fd opened O_RDWR|O_CLOEXEC (fd=3)
-SETUP-bind: TUNSETIFF v12en56822 flags=0x1001 sysfs=True [OK]
+SETUP-bind: TUNSETIFF v13en85618 flags=0x1001 sysfs=True [OK]
 SEND-raw-sendmsg: syscall ret=-1 errno=88 (Socket operation on non-socket) on bound fd [OK]
 NULLCTL-send: errno=88 [OK]
 WRAPPER-fromfd: constructor errno=88 (expected wrapper failure, distinct from SEND) [OK]
 PAIRECTL-success: socketpair sendmsg sent 10 bytes [OK]
-CLEANUP-device-removed: v12en56822 removed=True [OK]
+CLEANUP-device-removed: v13en85618 removed=True [OK]
+ENOTSOCK-STATUS: COMPLETE (bound member-USP-shape fd + controls + cleanup)
 --- P2-only (retained, not executed here) ---
 rxbatched_drift.sh kprobe_sync_proof.sh ptp_nodefer_cell.sh: SPECIFIED (exit 3 = not-run-here)
 MATRIX: ALL-HERE-OK
 ```
 
-Content hashes (sha256sum of the extracted files, same run):
+No-sudo variant tail (same run without `USE_SUDO`, exit 4):
 
 ```text
-df0a6936725bdbc022aa70aa5ed76867cde8f79cbe9c0c5cd958f110dbce04f4 enotsock_probe.py
+SETUP-bind: SKIPPED errno=1 (Operation not permitted) — P2-only leg (needs CAP_NET_ADMIN)
+ENOTSOCK-STATUS: INCOMPLETE (bound-fd leg missing — not P2 evidence)
+MATRIX: INCOMPLETE (bound-fd leg missing — not P2 evidence)
+```
+
+Content hashes (sha256sum of the extracted files, sudo run):
+
+```text
+10a118af1e6e49204fc2373712d3027229be6c6c78cf17565be492bce1181cc1 enotsock_probe.py
 5ec3d635fe13caced31486a33916f036c36d02a5a1f5a801a161c5b1d3249784 f0_pin_check.py
 959e423192dbbd0e52115be452e5f68440327d86d4f02ceb0a2e4e334b765cee f1_bake_check.py
 6c8574ed24bf7cbcd21e45e4a76d0d00fa069de46cb027a72e64afc0d3ee287e f2f3_sign_check.py
-d41506f333136411af99c82a0382340c43c197a12e34d79679eb27efd6aa414f f4_publish_check.py
+00b4c8c1cf72800db65c743b68293094b3a1741de3b5b97b22a55b0d2dd72142 f4_publish_check.py
 d47615f9bfdf64ec58520af8f3c7273783e3ad37c0fa3190c30820939f958461 f5_validate_check.py
 77b5c4daa0b834599f28ea21a2a3288dd6ba40dd3d1180be2d992d935a9c7cbc f5b_admission.py
-dae547c607d304a22ff6c6e9374b907cd815098bfc82d49fb24fb61d59670d13 f6f7_lane1.py
+a198e9d33dcb7cecc9d0c0d771aee2dec1d798d9bed9f9650a587b7ef2eebd9c f6f7_lane1.py
 f67b3bd34dbc25e559b2c0d444b1be128f54aef2879c2eed9531ea5c6f849a02 f8_kconfig.sh
 d585c50db9ed489f7367ab254429305912d46dd10bdc7982c63f8dbabb766d93 f9_linkage.sh
 12f74807917db7470a06e8d0fae168a3ea002e13e2868d4bc7e86c39dd607dc5 kprobe_sync_proof.sh
-b800eafdc3e304716368f8b4e45862cc60d7d656fddc8ae7159df5d62ecc9a5c pins_consistency.sh
+26131b929c97b7fba9b895356ee12e6a28c760df1d83ba641ab3fed70bef1ca9 pins_consistency.sh
 464042e3e840746390f993b5d82bdd2a57b3d18e5693ee91db3106fb3f60f6c8 ptp_nodefer_cell.sh
-0614a1f2920ac3eb1aae67f2c85bbd98d43bdf459131365741b2a50899b75cb5 run_all.sh
+17110272fdb27256859b36435163861516be5d9bed780623a36d831b4511d641 run_all.sh
 e454636fc804e043b6f95843b39c19d8f37e3ecf7553bc725271c3af3690f3f6 rxbatched_drift.sh
 ```

@@ -1,24 +1,24 @@
 # 9506 delta plan: ship P-MECH permits on the current master (research/9506-delta)
 
- - Review state: **v12 revision; parent re-dispatch pending; this worker assigns
-  no verdict.** Round eleven at `acbeb5e28` returned NEEDS-MAJOR
-  2-of-3 (Sec READY, held; Opus 2 MATERIAL + Host 3 P2 open).
-  This revision closes all five, no slice-time deferrals:
-  full-tuple retained recipes (EVERY observable field per
-  boundary — member A + coherent `-31` B + coherent same-uname B
-  + INDEPENDENT per-field mismatches, ALL-HERE-OK matrix +
-  content hashes) with canonical `kernel-source-revision`
-  serialization reconciled + per-boundary unobservables named;
-  CORRECTED ENOTSOCK positive-control procedure (TUNSETIFF-bound
-  fd + raw-syscall errno attribution + wrapper/negative controls,
-  executed with bind); sick-disk-plus-reboot STILL-FROZEN
-  disambiguation; flag flock on stale/hygiene unlinks with
-  re-read-if-stale; clean-shutdown marker barred while the daemon
-  freeze mirror is set (case-(4), never case-(3)). All credited
-  designs held. The parent will re-dispatch the blinded gate
-  against this committed revision.
+ - Review state: **v13 revision; parent re-dispatch pending; this worker assigns
+  no verdict.** Round twelve at `15ebd6ce1` returned NEEDS-MAJOR
+  2-of-3 (Sec READY, held; TUN-BATCHING FIXED, held; Opus 1
+  MATERIAL + aggregate loophole + Host 1 P2 open — v12's
+  full-tuple claim exceeded F4/F6F7, ENOTSOCK never reached
+  sendmsg, helper handoff escaped quiesce). This revision closes
+  all three, no slice-time deferrals: F4 consumes manifest KSRC
+  + inventory rows INDEPENDENTLY (manifest-skew cells);
+  Gate-2 recipe consumes RUNNING Kconfig on the verifyAndPromote
+  path (both entries; Arm-only exclusion retained);
+  ENOTSOCK-STATUS COMPLETE/INCOMPLETE/FAILED propagates to the
+  aggregate (no ALL-HERE-OK without the bound-fd leg);
+  shutdown JOINS helper reaped + handoff durable +
+  `flagWriters.Wait()` then RE-VERIFIES mirror-clear pre-marker
+  (racing-crash fixture → case-(4)). All credited designs held.
+  The parent will re-dispatch the blinded gate against this
+  committed revision.
 - Date: 2026-09-27. Worktree `/var/tmp/worktrees/9506-research`, branch `research/9506-delta`.
- - Pins: `origin/master = 2ccea8434` (v12; verified at `3be469bc3` +
+ - Pins: `origin/master = 2ccea8434` (v13; verified at `3be469bc3` +
   deltas `fd32d2df5` (NAT-only) + `2ccea8434` (peer-snapshot) audited:
   neither touches any cited file; §4 drift
   base stays `028c4e4e2`); Sep-20 code tip `b71c52d60`
@@ -1043,9 +1043,24 @@ all 35 design paths exist, as checked in §4.2.
   restart takes case-(4) (no marker + authority present) → freeze;
   the mirror clears ONLY at reboot-init, so no clean shutdown is
   possible while a freeze is file-unrecorded. QUIESCE ORDER (no
-  post-marker flag write): event/audit loops halt BEFORE
+  post-marker flag write — event/audit loops AND the helper
+  handoff, Hostile-3): (i) event/audit loops halt BEFORE
   `shutdownIpsecCapture` runs, so no drift/readback can land a flag
-  write after the marker write — the mirror is stable across it.
+  write after the marker write; (ii) the helper is STOPPED (no
+  respawn — shutdown bars the restart timer outright) and JOINED
+  reaped with its exit hook + handoff record DURABLE before the
+  mirror check (a helper crash/teardown-unclean exit in the
+  marker-to-process-exit window with a sick-disk RMW failure
+  would otherwise SET the mirror post-marker — file absent,
+  memory cleared on restart → case-(3) false CLEAN); (iii) EVERY
+  in-flight flag writer is JOINED, not merely signalled — a new
+  `flagWriters` WaitGroup held across each flag RMW critical
+  section (Add before flock, Done after), `Wait()` returns before
+  the check; (iv) RE-VERIFY mirror-clear AFTER the helper join +
+  `flagWriters.Wait()`, immediately before the marker write — any
+  SET ⇒ NO marker (verdict-not-ok-equivalent). Post-(ii)–(iii)
+  the writer set is EMPTY (loops halted, helper reaped, respawn
+  barred), so re-verified-clear stays clear through the write.
   The shutdown proving
   fence runs UNCONDITIONALLY — even with a nil overlay (nil ≠ no
   in-flight I/O; the fence proves the negative) — so every marker write
@@ -1147,7 +1162,12 @@ all 35 design paths exist, as checked in §4.2.
   shutdown (verdict-not-ok → no marker → must freeze) AND
   mirror-set clean-stop (flag write failed → mirror SET → shutdown
   fence+removal OK but NO marker → same-boot restart takes case-(4),
-  NEVER case-(3)) AND
+  NEVER case-(3)) AND helper-crash-racing-shutdown (helper crash
+  after loops-halt with sick-disk RMW failure → mirror SET →
+  mirror re-check after helper join observes SET → NO marker →
+  same-boot restart case-(4); plus post-marker-window assertion:
+  helper provably reaped + respawn barred + `flagWriters` empty
+  before the check, so no writer can land after it) AND
   crash-after-nil-invalidation (retire nil AND ambiguous nil, each: nil
   → tombstone present → crash, no later fence, no marker → must freeze;
   authority file EXISTS — absent+absent is unreachable here) AND
@@ -1271,7 +1291,12 @@ all 35 design paths exist, as checked in §4.2.
   under the new generation. DAEMON RESTART ignores the
   handoff file (total owner death per (g): sweep + HA import
   only) but HONORS freeze entries (re-admit allowed,
-  mutation barred). Clean-restart exceptions bind old+new
+  mutation barred). SHUTDOWN-JOIN (Hostile-3): daemon shutdown
+  stops the helper (no respawn), JOINS it reaped with its exit
+  hook + handoff record durable, then joins `flagWriters` — all
+  BEFORE the mirror check+marker write per QUIESCE ORDER (the
+  marker-to-exit window provably contains no live helper and no
+  in-flight flag writer). Clean-restart exceptions bind old+new
   helper identities (file `old{gen,pid}` + current procGen),
   NEVER the Go run alone. (The task-exit-finality alternative
   — proving dead-helper kernel I/O final without durable
@@ -1689,7 +1714,8 @@ all 35 design paths exist, as checked in §4.2.
   rows==pins AND `validated`/`base_image_pinned`/`base_image_sha256`
   ==pins (current: nonempty `guest_kernel` only — SIGNS `-31`,
   demonstrated); `publish.py` `gate_provenance` requires manifest
-  AND inventory EACH vs PIN (both `guest_kernel`==pin, both row
+  AND inventory EACH vs PIN (both `guest_kernel`==pin, manifest
+  `kernel-source-revision` parsed per §2 grammar + inventory row
   sets image+modules+headers==pins, `kernel-allowlist`==pin, base
   pins, `xpf`==ver; current: manifest↔inventory agreement only —
   PUBLISHES coherent `-31`, demonstrated; cross-agreement retained
@@ -1701,9 +1727,12 @@ all 35 design paths exist, as checked in §4.2.
   the candidate inventory vs pins) after `ValidateKernelSegment`
   (new check — the function itself is charset/path validation,
   `version.go:124`); Gate 2 (`kernel_run.go:551-558`) compares
-  running uname + running dpkg rows vs candidate rows vs pins
-  (current: `running==CandidateVersion` strings only — promotes
-  unreviewed `-31` by code read);
+  running uname + running dpkg rows + RUNNING Kconfig
+  (`/boot/config-$(uname -r)`) vs candidate rows vs pins —
+  checked on the verifyAndPromote path so the
+  BootCurrent-unreadable recovery entry (`:524-531`) is covered
+  too (current: `running==CandidateVersion` strings only —
+  promotes unreviewed `-31` by code read);
   `xpf-kernel-promote` outer gate refuses no-infer (current:
   authenticates the xpfd binary path,
   `kernel_arm_record.go:39` — gap by code read) AND non-member;
@@ -2282,6 +2311,8 @@ slice commit's Validation section):
   crash-between-unlink-and-OPEN freezes AND failed/partial shutdown
   (verdict-not-ok → no marker) freezes AND mirror-set-clean-stop
   (no marker despite ok fence → restart case-(4)) freezes AND
+  helper-crash-racing-shutdown (RMW-fail → re-check SET → no
+  marker → case-(4); reaped+barred+empty-writers asserted) AND
   first-install
   (absent+absent → fresh init + OPEN) AND crash→reboot→re-admit
   (fresh admissible) AND clean-shutdown→reboot (stale marker
@@ -2558,6 +2589,10 @@ docs/log/9506-observe.md tail                       # 30/30 VOID (G2 consumer un
  sha256sum -c <v12 pins>  # 15/15 OK (extraction stability)
  sudo -n TUNSETIFF bind + ctypes sendmsg  # bound fd errno 88; wrapper/NULLCTL/PAIRCTL;CLEANUP
  grep -rn callers setHostInputFenceOverlay/clear*  # conntrack :274/:280, reconcile :290 (census shut)
+ # v13 additions (F4 manifest rows + Gate-2 Kconfig + aggregate + quiesce)
+ awk-extract f0f9-recipes.md; USE_SUDO=1 ./run_all.sh  # ALL-HERE-OK exit 0 (bound leg)
+ ./run_all.sh (no sudo)  # INCOMPLETE exit 4, zero surprises (SKIPPED propagates)
+ sed -n '505,560p' pkg/upgrade/kernel_run.go  # Gate 2 :551-558 + recovery :524-531
  git diff --name-only fd32d2df5..2ccea8434  # 34 files, zero cited paths (audit list in §9 text)
  # v11 additions (retained recipes + member-tree deltas + lifecycle cites)
  curl -O linux-headers/linux-modules 7.0.0-30.30 debs; sha256sum  # f3be8e8d/d61aa07f MATCH
@@ -2573,6 +2608,6 @@ docs/log/9506-observe.md tail                       # 30/30 VOID (G2 consumer un
 
  Prior-review note: the Sep-25 delta assessment comment (issue #9506) and its
  D11-clarification comment were used as the starting inventory and every load-bearing
- claim in them was re-verified; v10/v11/v12 re-verified all load-bearing cites at
+ claim in them was re-verified; v10/v11/v12/v13 re-verified all load-bearing cites at
  `3be469bc3` above (nil/epoch sites, helper lifecycle, spawn sites, image gates);
  the two corrections versus Sep-25 stand: (a) F1 landed (#11107), (b) v35.
