@@ -41,6 +41,7 @@ func (d *resetHelperStateDP) writeFinal() error {
 // gone. Without the sweep the shutdown recreates tenant state behind a
 // reported-success reset. The non-reset control keeps the file.
 func TestRunShutdownSequenceRemovesHelperStateAfterReset(t *testing.T) {
+	isolateHandoffFlag(t)
 	for _, resetting := range []bool{true, false} {
 		name := "reset sweeps helper state"
 		if !resetting {

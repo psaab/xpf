@@ -18,6 +18,7 @@ import (
 // applySem-bypassing rescue save during the wipe and leaves the fence latched
 // through the post-wipe stop grace. A failed wipe must instead resume saves.
 func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
+	isolateHandoffFlag(t)
 	t.Run("successful wipe remains fenced", func(t *testing.T) {
 		isolateFactoryResetOwnershipPaths(t)
 		isolateFactoryResetIdentityPaths(t)

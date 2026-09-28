@@ -65,6 +65,7 @@ func isolateFactoryResetIdentityPaths(t *testing.T) {
 func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 
 	// (1) Gate-first: hold applySem externally with a tight deadline. factoryReset
@@ -135,6 +136,7 @@ func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
 func TestFactoryResetFailClosedClearsResetGeneration(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 
 	wantErr := errors.New("wipe boom")

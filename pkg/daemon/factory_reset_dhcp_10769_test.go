@@ -30,6 +30,7 @@ func (r *resetDHCPRecorder10769) SetLeaseSyncEnabled(enabled bool) {
 func TestFactoryResetQuiescesAndRestoresDHCPAfterFailure10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	dhcp := &resetDHCPRecorder10769{recordingDHCPApplier9349: &recordingDHCPApplier9349{}}
 	d := &Daemon{applySem: semaphore.NewWeighted(1), dhcpServer: dhcp}
 	wantErr := errors.New("wipe failed")
@@ -61,6 +62,7 @@ func TestFactoryResetFencesDHCPEnqueueDuringGeneration10769(t *testing.T) {
 func TestFactoryResetHoldsFenceAcrossWipe10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 	pending := fakePendingWipe(t)
 	started := make(chan struct{})

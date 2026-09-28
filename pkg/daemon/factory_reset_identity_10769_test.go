@@ -26,6 +26,7 @@ import (
 func TestFactoryResetRestoresIdentityAfterFailedWipe10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	dir := t.TempDir()
 	store, err := configstore.New(filepath.Join(dir, "xpf.conf"))
 	if err != nil {
@@ -85,6 +86,7 @@ func TestFactoryResetRestoresIdentityAfterFailedWipe10769(t *testing.T) {
 func TestFactoryResetSurfacesIdentityRestoreFailure10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	if err := os.MkdirAll(filepath.Dir(resetHostsPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +123,7 @@ func TestFactoryResetSurfacesIdentityRestoreFailure10769(t *testing.T) {
 func TestFactoryResetFailsWhenKeaLeasesReappear10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	if err := os.MkdirAll(filepath.Dir(hostnamePath), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -259,6 +262,7 @@ func TestReconcileDNSFromDHCPFencedDuringReset10769(t *testing.T) {
 func TestFactoryResetRestoresIdentitySymlinkAfterFailedWipe10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	target := filepath.Join(t.TempDir(), "stub-resolv.conf")
 	if err := os.WriteFile(target, []byte("nameserver 127.0.0.53\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -295,6 +299,7 @@ func TestFactoryResetRestoresIdentitySymlinkAfterFailedWipe10769(t *testing.T) {
 func TestFactoryResetRestoresKernelHostnameAfterFailedWipe10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	var renamed []string
 	sethostname = func(name []byte) error {
 		renamed = append(renamed, string(name))
@@ -313,6 +318,7 @@ func TestFactoryResetRestoresKernelHostnameAfterFailedWipe10769(t *testing.T) {
 func TestFactoryResetSkipsKernelRestoreWhenSnapshotFails10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	osHostname = func() (string, error) { return "", errors.New("uname unavailable") }
 	renamed := false
 	sethostname = func([]byte) error {
@@ -338,6 +344,7 @@ func TestFactoryResetSkipsKernelRestoreWhenSnapshotFails10769(t *testing.T) {
 func TestFactoryResetFailsWhenStateTempsReappear10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	temps := []string{
 		filepath.Join(filepath.Dir(resetDDNSLeaseStatePath), "."+filepath.Base(resetDDNSLeaseStatePath)+".tmp-1"),
 		filepath.Join(filepath.Dir(resetIPsecStatePath), "."+filepath.Base(resetIPsecStatePath)+".tmp-1"),
