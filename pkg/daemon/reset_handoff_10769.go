@@ -20,19 +20,40 @@ import (
 // orphans), syncs the parent, and verifies absence. Live writers' temps,
 // removal/durability failures, or anything still present afterwards is an
 // error: the caller marks the reset handoff dirty rather than reporting
-// clean. Hardlink residual (F2): no nlink census — a hardlinked canonical
-// or temp is unlinked by name while sibling links retain the bytes
-// silently, and absence verification passes. Same blind shape as the
-// DDNS/IPsec erasers and the Kea re-erase below.
+// clean. A canonical aliasing reserved reset-gate/identity state is never
+// unlinked: the sweep skips it with a loud warning (it holds correct
+// post-wipe contents) while still sweeping exact-shape temps beside it.
+// Symlinked canonicals fail closed before unlinking.
 func sweepHelperStateVerified(path string) error {
 	// A missing state directory means no helper state was ever written
 	// here: nothing to remove, verify, or sync.
 	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	// Reserved alias: a smuggled config named a gate or identity file.
+	// Never unlink it; the exact-shape temps beside it are still swept
+	// below, and absence verification skips the expected-present file.
+	skipCanonical := config.HelperStatePathTouchesReserved(path)
+	if skipCanonical {
+		slog.Warn("reset handoff: helper path aliases reserved state; skipping canonical removal, sweeping temps only", "path", path)
+	}
 	var errs []error
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("remove helper state file %s: %w", path, err))
+	var canonicalErr error
+	if !skipCanonical {
+		info, lerr := os.Lstat(path)
+		switch {
+		case lerr == nil && info.Mode()&os.ModeSymlink != 0:
+			canonicalErr = fmt.Errorf("refusing to sweep symlinked helper state %s: link target is out of erase scope", path)
+		case lerr != nil && !os.IsNotExist(lerr):
+			canonicalErr = fmt.Errorf("inspect helper state %s: %w", path, lerr)
+		case lerr == nil:
+			if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
+				canonicalErr = fmt.Errorf("remove helper state file %s: %w", path, rerr)
+			}
+		}
+		if canonicalErr != nil {
+			errs = append(errs, canonicalErr)
+		}
 	}
 	live, serr := dpuserspace.SweepStaleStateTempsIncludingLegacy(path)
 	if serr != nil {
@@ -44,10 +65,12 @@ func sweepHelperStateVerified(path string) error {
 	if err := fsatomic.SyncDir(filepath.Dir(path)); err != nil {
 		errs = append(errs, fmt.Errorf("sync helper state directory %s: %w", filepath.Dir(path), err))
 	}
-	if _, err := os.Lstat(path); err == nil {
-		errs = append(errs, fmt.Errorf("helper state %s still present after sweep", path))
-	} else if !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("inspect helper state %s: %w", path, err))
+	if !skipCanonical && canonicalErr == nil {
+		if _, err := os.Lstat(path); err == nil {
+			errs = append(errs, fmt.Errorf("helper state %s still present after sweep", path))
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("inspect helper state %s: %w", path, err))
+		}
 	}
 	if dead, live, verr := dpuserspace.ListStaleStateTempsIncludingLegacy(path); verr != nil {
 		errs = append(errs, verr)
@@ -71,12 +94,16 @@ func effectiveHelperStatePath(recorded string, cfg *config.Config) string {
 
 // verifyHelperStateErased checks the helper residue class without removing
 // anything: the state file plus dead/live temp siblings (legacy included).
+// A reserved canonical is expected present (the sweep never unlinks gates
+// or identity), so only its temp siblings are checked then.
 func verifyHelperStateErased(path string) error {
 	var errs []error
-	if _, err := os.Lstat(path); err == nil {
-		errs = append(errs, fmt.Errorf("helper state %s present", path))
-	} else if !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("inspect helper state %s: %w", path, err))
+	if !config.HelperStatePathTouchesReserved(path) {
+		if _, err := os.Lstat(path); err == nil {
+			errs = append(errs, fmt.Errorf("helper state %s present", path))
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("inspect helper state %s: %w", path, err))
+		}
 	}
 	if dead, live, verr := dpuserspace.ListStaleStateTempsIncludingLegacy(path); verr != nil {
 		errs = append(errs, verr)

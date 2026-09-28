@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/ddns"
@@ -314,14 +315,35 @@ var zeroizeStopKeaAndEraseLeases = func() error {
 // grpcapi): no daemon post-verify follows on this path, and the helper is
 // not running in the offline contexts that take it. Live writers' temps,
 // removal/durability failures, or anything still present afterwards is an
-// error. Callers pass a non-empty path only.
+// error. A canonical aliasing reserved reset-gate/identity state is never
+// unlinked (skipped with a loud warning; exact-shape temps beside it are
+// still swept). Symlinked canonicals fail closed before unlinking.
+// Callers pass a non-empty path only.
 func zeroizeEraseHelperState(path string) error {
 	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	skipCanonical := config.HelperStatePathTouchesReserved(path)
+	if skipCanonical {
+		slog.Warn("zeroize: helper path aliases reserved state; skipping canonical removal, sweeping temps only", "path", path)
+	}
 	var errs []error
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("zeroize: remove helper state file %s: %w", path, err))
+	var canonicalErr error
+	if !skipCanonical {
+		info, lerr := os.Lstat(path)
+		switch {
+		case lerr == nil && info.Mode()&os.ModeSymlink != 0:
+			canonicalErr = fmt.Errorf("zeroize: refusing to sweep symlinked helper state %s: link target is out of erase scope", path)
+		case lerr != nil && !os.IsNotExist(lerr):
+			canonicalErr = fmt.Errorf("zeroize: inspect helper state %s: %w", path, lerr)
+		case lerr == nil:
+			if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
+				canonicalErr = fmt.Errorf("zeroize: remove helper state file %s: %w", path, rerr)
+			}
+		}
+		if canonicalErr != nil {
+			errs = append(errs, canonicalErr)
+		}
 	}
 	live, serr := dpuserspace.SweepStaleStateTempsIncludingLegacy(path)
 	if serr != nil {
@@ -333,10 +355,12 @@ func zeroizeEraseHelperState(path string) error {
 	if err := zeroizeSyncDir(filepath.Dir(path)); err != nil {
 		errs = append(errs, fmt.Errorf("zeroize: sync helper state directory %s: %w", filepath.Dir(path), err))
 	}
-	if _, err := os.Lstat(path); err == nil {
-		errs = append(errs, fmt.Errorf("zeroize: helper state %s still present after sweep", path))
-	} else if !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", path, err))
+	if !skipCanonical && canonicalErr == nil {
+		if _, err := os.Lstat(path); err == nil {
+			errs = append(errs, fmt.Errorf("zeroize: helper state %s still present after sweep", path))
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", path, err))
+		}
 	}
 	if dead, live, verr := dpuserspace.ListStaleStateTempsIncludingLegacy(path); verr != nil {
 		errs = append(errs, verr)
@@ -355,9 +379,10 @@ func zeroizeEraseHelperState(path string) error {
 // writer that completed a full save leaves a canonical with no temp
 // behind. The helper class is covered only for ungated completions with
 // a known path: gated wipes skip it (the helper is live until the daemon
-// stops it post-wipe, and the daemon sweep owns the path), and legacy
-// direct wipes name no path to check. The daemon post-verify remains as
-// defense-in-depth behind it.
+// stops it post-wipe, and the daemon sweep owns the path), legacy
+// direct wipes name no path to check, and a reserved canonical is
+// expected present (temps still checked). The daemon post-verify remains
+// as defense-in-depth behind it.
 func zeroizeFinalEraseVerification(completion zeroizeCompletion) error {
 	var errs []error
 	for _, current := range zeroizeKeaLeasePaths {
@@ -392,10 +417,15 @@ func zeroizeFinalEraseVerification(completion zeroizeCompletion) error {
 	}
 	if !completion.pending && completion.helperPath != "" {
 		helperPath := completion.helperPath
-		if _, err := os.Lstat(helperPath); err == nil {
-			errs = append(errs, fmt.Errorf("zeroize: helper state %s present at final verification", helperPath))
-		} else if !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", helperPath, err))
+		// A reserved canonical is expected present (the sweep never
+		// unlinks gates or identity); only its temp siblings are
+		// checked then.
+		if !config.HelperStatePathTouchesReserved(helperPath) {
+			if _, err := os.Lstat(helperPath); err == nil {
+				errs = append(errs, fmt.Errorf("zeroize: helper state %s present at final verification", helperPath))
+			} else if !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", helperPath, err))
+			}
 		}
 		if dead, live, err := dpuserspace.ListStaleStateTempsIncludingLegacy(helperPath); err != nil {
 			errs = append(errs, err)

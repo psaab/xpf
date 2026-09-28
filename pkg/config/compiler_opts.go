@@ -1625,6 +1625,14 @@ type compileOpts struct {
 	// IsPolicyAddressWildcardKeyword before it looks the token up as a name.
 	// Same doctrine as lenientReservedZoneNames.
 	lenientReservedAddressNames bool
+	// lenientHelperStateFile (#10769 d05-F6) downgrades the helper
+	// state-file gate (validateHelperStateFileStrict) from a hard compile
+	// error to a cfg.Warnings entry. The strict commit / commit-check path
+	// rejects reserved reset-gate/identity aliases and control-socket
+	// equality. The tolerant load / peer-sync paths keep the value with a
+	// warning (#1960 no-brick); the runtime reset sweeps refuse reserved
+	// targets regardless. Same doctrine as lenientAddressBookNames.
+	lenientHelperStateFile bool
 	// lenientAddressBookNameCollision (#5676) downgrades the same-name
 	// `address` + `address-set` collision gate
 	// (validateAddressBookNameCollisionStrict) from a hard compile error to a
@@ -3047,6 +3055,7 @@ func lenientCompileOpts() compileOpts {
 		lenientReservedRoutingInstanceName:     true,
 		lenientAddressBookNames:                true,
 		lenientReservedAddressNames:            true,
+		lenientHelperStateFile:                 true,
 		lenientAddressBookNameCollision:        true,
 		lenientRIDualClaim11060:                true,
 		lenientZoneInterfaceMembership:         true,

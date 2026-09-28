@@ -810,3 +810,54 @@ func TestStartupRepairsBeforeBootstrap10769(t *testing.T) {
 		}
 	})
 }
+
+// RED on revert: a helper sweep that unlinks a reserved alias deletes a
+// reset gate or identity file instead of helper state. The canonical must
+// survive byte-identical while exact-shape temps beside it are still
+// swept. Gate basenames exercise the predicate hermetically (exact
+// literals are pinned in the config validator table); the skip path is
+// shared for every reserved shape.
+func TestSweepHelperStateVerifiedSkipsReserved10769(t *testing.T) {
+	for _, base := range []string{".reset-handoff", ".day0-config-applied"} {
+		t.Run(base, func(t *testing.T) {
+			dir := t.TempDir()
+			canonical := filepath.Join(dir, base)
+			body := []byte("gate bytes must survive")
+			if err := os.WriteFile(canonical, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			temp := canonical + ".4250000000.1.tmp"
+			if err := os.WriteFile(temp, []byte(`{"orphan":true}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := sweepHelperStateVerified(canonical); err != nil {
+				t.Fatalf("reserved skip must succeed: %v", err)
+			}
+			if got, err := os.ReadFile(canonical); err != nil || string(got) != string(body) {
+				t.Fatalf("reserved canonical must survive byte-identical: %q err=%v", got, err)
+			}
+			if _, err := os.Lstat(temp); !os.IsNotExist(err) {
+				t.Fatalf("temps beside reserved canonical must still be swept: %v", err)
+			}
+		})
+	}
+	t.Run("symlink refused", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real-state.json")
+		if err := os.WriteFile(target, []byte(`{"flows":[]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, "state-link.json")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if err := sweepHelperStateVerified(link); err == nil {
+			t.Fatal("symlinked helper state must fail closed")
+		}
+		for _, path := range []string{link, target} {
+			if _, err := os.Lstat(path); err != nil {
+				t.Fatalf("refusal must remove nothing, %s stat err=%v", path, err)
+			}
+		}
+	})
+}

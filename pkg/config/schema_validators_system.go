@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -720,6 +721,120 @@ func ValidateUnixSocketPath(raw string, _ *Config) error {
 		if strings.IndexFunc(seg, func(r rune) bool { return r < 0x20 }) >= 0 {
 			return fmt.Errorf("socket path %q must not contain control characters (including NUL)", raw)
 		}
+	}
+	return nil
+}
+
+// Reserved helper-state paths (#10769 d05-F6). The factory-reset helper
+// sweep unlinks the configured state-file path; a value aliasing one of
+// these would delete a reset gate or OS identity file instead of helper
+// state. Literals (not configstore/daemon vars): pkg/config cannot import
+// those packages; TestReservedHelperStatePathsMatchOwners pins them equal.
+var (
+	// reservedHelperStateExact are files that must never be named as
+	// helper state: reset gates/identity the sweep would otherwise delete.
+	reservedHelperStateExact = []string{
+		"/etc/machine-id",
+		"/var/lib/dbus/machine-id",
+		"/etc/hostname",
+		"/etc/hosts",
+		"/etc/resolv.conf",
+		"/etc/passwd",
+		"/etc/shadow",
+		"/etc/group",
+		"/etc/gshadow",
+		"/etc/xpf/.day0-config-applied",
+		"/etc/xpf/.reset-handoff",
+	}
+	// reservedHelperStateDir is the subtree holding xpf control-plane
+	// state (config roots, markers, handoff flag, DB): no helper state
+	// belongs inside it.
+	reservedHelperStateDir = "/etc/xpf"
+	// reservedHelperStateBases are gate basenames rejected anywhere:
+	// custom -config roots relocate the markers outside /etc/xpf, but
+	// the names stay reserved.
+	reservedHelperStateBases = []string{".day0-config-applied", ".reset-handoff"}
+)
+
+// IsReservedHelperStatePath reports whether path aliases reset-gate or OS
+// identity state a helper sweep must never unlink: the exact reserved
+// files, anything under the xpf control subtree, or a gate basename in
+// any directory. Used by commit validation and by the runtime sweeps
+// (fail-closed for smuggled values).
+func IsReservedHelperStatePath(path string) bool {
+	clean := filepath.Clean(path)
+	for _, reserved := range reservedHelperStateExact {
+		if clean == reserved {
+			return true
+		}
+	}
+	if clean == reservedHelperStateDir || strings.HasPrefix(clean, reservedHelperStateDir+"/") {
+		return true
+	}
+	base := filepath.Base(clean)
+	for _, reserved := range reservedHelperStateBases {
+		if base == reserved {
+			return true
+		}
+	}
+	return false
+}
+
+// HelperStatePathTouchesReserved reports whether path or its
+// symlink-resolved form aliases reserved helper-state targets: a smuggled
+// value can hide behind a symlinked parent (e.g. /var/lib/xpf -> /etc).
+// Unresolvable parents (usually: missing directory) fall back to the
+// lexical check. TOCTOU-accepted like every path-based guard: a link
+// swapped between this check and the unlink is the #9013 class.
+func HelperStatePathTouchesReserved(path string) bool {
+	if IsReservedHelperStatePath(path) {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	return IsReservedHelperStatePath(filepath.Join(resolved, filepath.Base(path)))
+}
+
+const maxStateFilePathLen = 4096
+
+// ValidateStateFilePath accepts a `system dataplane state-file` value: an
+// absolute path with no traversal, naming a file the reset helper sweep
+// may manage (unlink). Reserved reset-gate/identity paths are rejected:
+// the sweep deletes exactly what this names, so an alias would delete a
+// gate or identity file instead of helper state (#10769 d05-F6).
+func ValidateStateFilePath(raw string, _ *Config) error {
+	if raw == "" {
+		return fmt.Errorf("missing value (expected an absolute state-file path, e.g. /var/lib/xpf/userspace-dp.json)")
+	}
+	if !strings.HasPrefix(raw, "/") {
+		return fmt.Errorf("state-file path %q must be absolute (start with '/'): the daemon and the "+
+			"dataplane helper are separate processes and resolve a relative path against "+
+			"their own working directories", raw)
+	}
+	if len(raw) > maxStateFilePathLen {
+		return fmt.Errorf("state-file path %q is %d octets, over the %d-octet path limit",
+			raw, len(raw), maxStateFilePathLen)
+	}
+	if strings.HasSuffix(raw, "/") {
+		return fmt.Errorf("state-file path %q must name a state file, not a directory (no trailing '/')", raw)
+	}
+	for _, seg := range strings.Split(raw, "/")[1:] {
+		switch seg {
+		case "":
+			return fmt.Errorf("state-file path %q must not contain an empty component (doubled '/')", raw)
+		case ".", "..":
+			return fmt.Errorf("state-file path %q must not contain a %q component: the path is unlinked "+
+				"by the factory-reset helper sweep and must not be able to leave the directory it names", raw, seg)
+		}
+		if strings.IndexFunc(seg, func(r rune) bool { return r < 0x20 }) >= 0 {
+			return fmt.Errorf("state-file path %q must not contain control characters (including NUL)", raw)
+		}
+	}
+	if IsReservedHelperStatePath(raw) {
+		return fmt.Errorf("state-file path %q aliases reserved reset-gate or system-identity state; "+
+			"the factory-reset helper sweep unlinks this path and must never delete gates or identity files", raw)
 	}
 	return nil
 }

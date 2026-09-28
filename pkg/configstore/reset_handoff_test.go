@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 func isolateHandoff(t *testing.T) string {
@@ -169,5 +171,16 @@ func TestFlipResetHandoffClean(t *testing.T) {
 	gotBoot, gotDirty, gotPath, present, err := ReadResetHandoff()
 	if err != nil || !present || gotBoot != "other-boot" || gotDirty != "" || gotPath != custom {
 		t.Fatalf("flipped = %q %q %q %v %v", gotBoot, gotDirty, gotPath, present, err)
+	}
+}
+
+// The config-package reserved denylist carries literals (pkg/config cannot
+// import pkg/configstore); a drifted literal would reopen the alias the
+// validator claims to close. Pin them equal here.
+func TestReservedHelperStatePathsMatchOwners(t *testing.T) {
+	for _, path := range []string{FactoryResetPendingPath, ResetHandoffPath} {
+		if !config.IsReservedHelperStatePath(path) {
+			t.Errorf("reserved denylist must cover %q", path)
+		}
 	}
 }
