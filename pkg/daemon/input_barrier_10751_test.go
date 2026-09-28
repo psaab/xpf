@@ -1171,21 +1171,25 @@ func TestEarlyInputHandoffReattestation10751(t *testing.T) {
 		}
 	})
 
-	t.Run("handoff readback error reinstalls then proceeds", func(t *testing.T) {
+	t.Run("handoff readback error reinstalls and refuses", func(t *testing.T) {
 		fake := &fakeNftInstaller{
 			earlyInputBarrierPresent: func() (bool, error) { return false, errors.New("unreadable") },
 		}
 		nftInstaller = fake
 		d := &Daemon{}
-		if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
-			t.Fatalf("reinstall-first handoff: %v", err)
+		err := d.applyHostInboundFilter(hostInboundTestConfig())
+		if err == nil || !strings.Contains(err.Error(), "handoff refused") {
+			t.Fatalf("tripwire error = %v, want handoff refusal on unreadable state", err)
 		}
 		installs, removes := counts(fake)
-		if installs != 2 || removes != 1 {
-			t.Fatalf("barrier calls = %v, want entry converge plus tripwire reinstall-first then removal", fake.earlyInputBarrierCalls)
+		if installs != 2 || removes != 0 {
+			t.Fatalf("barrier calls = %v, want entry converge plus tripwire reinstall and no removal", fake.earlyInputBarrierCalls)
 		}
-		if !d.earlyInputHandoffDone.Load() {
-			t.Fatal("successful handoff must mark the handoff done")
+		if st := d.HostInboundApplied(); !st.Established || !st.LastApplyFailed || st.Current() {
+			t.Fatalf("applied state = %+v, want established-but-stale", st)
+		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("refused handoff must not mark the handoff done")
 		}
 	})
 

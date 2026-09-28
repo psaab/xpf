@@ -211,8 +211,10 @@ func hostInboundHasPendingEnforcingIntent(cfg *config.Config) bool {
 //   - barrier missing → reinstall the guard and FAIL WITHOUT removing (the
 //     just-installed enforcement is suspect; the restored guard keeps the
 //     box closed and the next apply retries the whole handoff).
-//   - readback error → reinstall, then remove on success (reinstall-first;
-//     observability failure alone must not brick handoff), else fail.
+//   - readback error → reinstall, then REFUSE as well: an unreadable
+//     readback cannot prove the just-installed enforcement survived, so a
+//     concurrent flush plus broken list would otherwise record a handoff
+//     over wiped tables. Retry the entire apply before any removal.
 //
 // Post-handoff calls remove idempotently (barrier expected absent — e.g.
 // ExecReload residue cleanup); no attestation there. Install success implies
@@ -227,7 +229,7 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config) error {
 		return nftInstaller.RemoveEarlyInputBarrier()
 	}
 	if err != nil {
-		slog.Warn("cannot re-attest early barrier at handoff; reinstalling guard before removal",
+		slog.Warn("cannot re-attest early barrier at handoff; reinstalling guard and refusing handoff",
 			"err", tagNftInstallErr(err))
 	} else {
 		slog.Warn("early barrier missing at handoff (concurrent flush wiped enforcement?); guard reinstalled, handoff refused")
@@ -236,7 +238,7 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config) error {
 		return fmt.Errorf("reinstall early guard at handoff: %w", tagNftInstallErr(installErr))
 	}
 	if err != nil {
-		return nftInstaller.RemoveEarlyInputBarrier()
+		return errors.New("early barrier state unreadable at handoff; guard reinstalled, handoff refused")
 	}
 	return errors.New("early barrier missing at handoff; guard reinstalled, handoff refused")
 }
