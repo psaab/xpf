@@ -490,6 +490,9 @@ var zeroizeTmpPreservedPrefixes = []string{"systemd-private-", "snap-private-tmp
 // the FHS tmp contract nothing here is persistent service state, factory
 // reset is a decommissioning operation, and live file descriptors survive
 // an unlink. Only the preserved service-infrastructure prefixes are kept.
+// No hardlink census is needed: every name in the directory is removed,
+// so intra-directory links die with their names (a sibling outside the
+// directory is an out-of-scope file that survives as itself).
 func zeroizeClearTmpDir(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -715,7 +718,9 @@ const zeroizeRunXPFPreserved = "upgrade.lock"
 // sockets and state files carrying tenant flow/session data. Reset is
 // wipe-then-stop with no reboot, so volatile state left here would be
 // observable pre-reboot. Unlinking a live socket's name does not disturb
-// its established connections; the upgrade lock is preserved.
+// its established connections; the upgrade lock is preserved. No hardlink
+// census is needed: every name but the lock is removed, so
+// intra-directory links die with their names.
 func zeroizeClearRunXPFDir(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -880,7 +885,10 @@ func zeroizeClearDir(dir string) error {
 // have unlinked it (or its parent) but failed the barrier, and skipping the
 // sync on retry would let a later attempt complete the marker with that
 // unlink undurable. A sync failure is surfaced fail-closed so the reset is
-// never reported clean on unpersisted unlinks.
+// never reported clean on unpersisted unlinks. A path with surviving hard
+// links is refused BEFORE unlinking (FactoryResetHardlinkError with the
+// inode scan): removing first would destroy the census evidence and let a
+// retry succeed over bytes a sibling still holds.
 func zeroizeRemovePath(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -905,13 +913,18 @@ func zeroizeRemovePath(path string) error {
 	if herr != nil {
 		return fmt.Errorf("zeroize: inspect hard links for %s: %w", path, herr)
 	}
+	if len(hardlinks) != 0 {
+		// Fail BEFORE unlinking: removing first would destroy the census
+		// evidence (nlink on the managed name), letting a retry report
+		// success while sibling links retain the bytes. Refusing keeps
+		// the failure retry-persistent until the operator removes every
+		// name (see the inode scan in the error).
+		return fmt.Errorf("zeroize: refusing to erase hard-linked %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
+	}
 	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return fmt.Errorf("zeroize: remove %s: %w", path, removeErr)
 	}
 	var errs []error
-	if len(hardlinks) != 0 {
-		errs = append(errs, fmt.Errorf("zeroize: removed %s but hard-linked bytes survive at %v", path, hardlinks))
-	}
 	if err := zeroizeSyncDurable(filepath.Dir(path)); err != nil {
 		errs = append(errs, fmt.Errorf("zeroize: sync parent of %s: %w", path, err))
 	}

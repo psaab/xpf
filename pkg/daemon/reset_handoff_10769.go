@@ -20,7 +20,10 @@ import (
 // orphans), syncs the parent, and verifies absence. Live writers' temps,
 // removal/durability failures, or anything still present afterwards is an
 // error: the caller marks the reset handoff dirty rather than reporting
-// clean.
+// clean. Hardlink residual (F2): no nlink census — a hardlinked canonical
+// or temp is unlinked by name while sibling links retain the bytes
+// silently, and absence verification passes. Same blind shape as the
+// DDNS/IPsec erasers and the Kea re-erase below.
 func sweepHelperStateVerified(path string) error {
 	// A missing state directory means no helper state was ever written
 	// here: nothing to remove, verify, or sync.

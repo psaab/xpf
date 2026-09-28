@@ -1678,3 +1678,32 @@ func TestZeroizeRotateMachineIDCreatesAndRefusesLink10769(t *testing.T) {
 		}
 	})
 }
+
+// RED on revert: unlinking before the census destroys the nlink evidence,
+// so a retry reports success while the sibling retains the bytes. The
+// refusal must precede any removal and persist across retries, with the
+// established inode-scan operator action.
+func TestZeroizeRemovePathRefusesHardlinkBeforeUnlink10769(t *testing.T) {
+	dir := t.TempDir()
+	managed := filepath.Join(dir, "secret")
+	mustWriteFile(t, managed, []byte("secret bytes"))
+	sibling := filepath.Join(dir, "sibling")
+	if err := os.Link(managed, sibling); err != nil {
+		t.Fatalf("hardlink plant: %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		err := zeroizeRemovePath(managed)
+		var linkErr *configstore.FactoryResetHardlinkError
+		if !errors.As(err, &linkErr) {
+			t.Fatalf("attempt %d: expected FactoryResetHardlinkError, got %v", attempt, err)
+		}
+		if len(linkErr.Paths) != 1 || linkErr.Paths[0].Path != managed {
+			t.Fatalf("attempt %d: error must name the managed path, got %+v", attempt, linkErr.Paths)
+		}
+		for _, path := range []string{managed, sibling} {
+			if _, serr := os.Lstat(path); serr != nil {
+				t.Fatalf("attempt %d: refusal must remove nothing, %s stat err=%v", attempt, path, serr)
+			}
+		}
+	}
+}

@@ -331,7 +331,10 @@ func eraseStateTempsForReset() error {
 // parents. It runs only to repair a post-wipe reappearance before the reset
 // reports failure: with the pending markers already cleared and the config
 // wiped, leaving the rows would hand prior leases to the next tenant's Kea
-// with no boot gate left to force another pass.
+// with no boot gate left to force another pass. Hardlink residual (F2): no
+// nlink census — a hardlinked lease file is unlinked by name while a
+// sibling retains the rows silently. Same blind shape as the helper and
+// DDNS/IPsec sweeps.
 func eraseKeaLeasesForReset() error {
 	var errs []error
 	synced := make(map[string]bool)

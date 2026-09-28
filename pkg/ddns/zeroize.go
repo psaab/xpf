@@ -47,7 +47,9 @@ func CheckStateEmpty(path string) error {
 // Crash-leaked fsatomic write temps for the store are removed with it: every
 // durable save stages full state JSON in a .<base>.tmp-* file first, so a
 // temp orphaned by a crash during reconcile holds tenant FQDNs/addresses a
-// canonical-only erase would hand to the next tenant.
+// canonical-only erase would hand to the next tenant. Hardlink residual
+// (F2): no nlink census on the canonical or its temps — a hardlinked
+// store is unlinked by name while a sibling retains the bytes silently.
 func EraseStateIfEmpty(path string) error {
 	if err := CheckStateEmpty(path); err != nil {
 		return err
