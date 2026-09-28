@@ -203,6 +203,10 @@ func requiredPermission(parts []string) config.LoginClassPermission {
 		return config.PermMaint
 	}
 
+	if action == "request" && requestSubcommandIsConfig(parts[1:]) {
+		return config.PermConfig
+	}
+
 	switch action {
 	case "show", "ping", "traceroute", "monitor":
 		return config.PermView
@@ -215,6 +219,27 @@ func requiredPermission(parts []string) config.LoginClassPermission {
 	default:
 		return config.PermAll
 	}
+}
+
+// requestSubcommandIsConfig recognizes the one `request` action that requires
+// configure permission: acknowledging a refused dynamic-address feed shrink.
+func requestSubcommandIsConfig(args []string) bool {
+	if len(args) < 3 {
+		return false
+	}
+	reqNode := operationalTree["request"]
+	target, err := resolveCommand(args[0], keysFromTree(reqNode.Children))
+	if err != nil || target != "security" {
+		return false
+	}
+	security := reqNode.Children[target]
+	dynamicAddress, err := resolveCommand(args[1], keysFromTree(security.Children))
+	if err != nil || dynamicAddress != "dynamic-address" {
+		return false
+	}
+	feedNode := security.Children[dynamicAddress]
+	verb, err := resolveCommand(args[2], keysFromTree(feedNode.Children))
+	return err == nil && verb == "acknowledge-shrink"
 }
 
 // requestSubcommandIsMaintenance reports whether the `request` arguments

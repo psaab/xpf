@@ -8841,9 +8841,13 @@ func (x *GetSystemInfoResponse) GetOutput() string {
 }
 
 type SystemActionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Action        string                 `protobuf:"bytes,1,opt,name=action,proto3" json:"action,omitempty"` // "reboot", "halt", "zeroize", "dhcp-renew"
-	Target        string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"` // optional target (e.g. interface name for dhcp-renew)
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Action string                 `protobuf:"bytes,1,opt,name=action,proto3" json:"action,omitempty"` // "reboot", "halt", "zeroize", "dhcp-renew"
+	Target string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"` // optional target (e.g. interface name for dhcp-renew)
+	// #11059: dynamic-address-shrink-ack carries the exact refusal candidate to
+	// acknowledge (target is the feed name) plus the mandatory operator reason.
+	CandidateId   uint64 `protobuf:"varint,3,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
+	Reason        string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8888,6 +8892,20 @@ func (x *SystemActionRequest) GetAction() string {
 func (x *SystemActionRequest) GetTarget() string {
 	if x != nil {
 		return x.Target
+	}
+	return ""
+}
+
+func (x *SystemActionRequest) GetCandidateId() uint64 {
+	if x != nil {
+		return x.CandidateId
+	}
+	return 0
+}
+
+func (x *SystemActionRequest) GetReason() string {
+	if x != nil {
+		return x.Reason
 	}
 	return ""
 }
@@ -10063,10 +10081,12 @@ const file_xpf_proto_rawDesc = "" +
 	"\x14GetSystemInfoRequest\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\"/\n" +
 	"\x15GetSystemInfoResponse\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\tR\x06output\"E\n" +
+	"\x06output\x18\x01 \x01(\tR\x06output\"\x80\x01\n" +
 	"\x13SystemActionRequest\x12\x16\n" +
 	"\x06action\x18\x01 \x01(\tR\x06action\x12\x16\n" +
-	"\x06target\x18\x02 \x01(\tR\x06target\"0\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\x12!\n" +
+	"\fcandidate_id\x18\x03 \x01(\x04R\vcandidateId\x12\x16\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"0\n" +
 	"\x14SystemActionResponse\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\"\xbb\x02\n" +
 	"\x18MonitorPacketDropRequest\x12#\n" +

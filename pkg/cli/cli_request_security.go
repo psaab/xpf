@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/psaab/xpf/pkg/policymatch"
 	"github.com/psaab/xpf/pkg/wgkey"
@@ -38,6 +40,8 @@ func (c *CLI) handleRequestSecurity(args []string) error {
 		}
 		fmt.Printf("Cleared %d IPsec SA(s)\n", count)
 		return nil
+	case "dynamic-address":
+		return c.handleRequestSecurityDynamicAddress(args[1:])
 	case "wireguard":
 		return c.handleRequestSecurityWireguard(args[1:])
 	case "policies":
@@ -45,6 +49,61 @@ func (c *CLI) handleRequestSecurity(args []string) error {
 	default:
 		return fmt.Errorf("unknown request security target: %s", args[0])
 	}
+}
+
+func (c *CLI) handleRequestSecurityDynamicAddress(args []string) error {
+	const usage = "usage: request security dynamic-address acknowledge-shrink <feed> candidate-id <id> reason <reason...>"
+	if len(args) == 0 || args[0] != "acknowledge-shrink" {
+		fmt.Println("request security dynamic-address:")
+		writeCompletionHelp(os.Stdout, treeHelpCandidates(operationalTree["request"].Children["security"].Children["dynamic-address"].Children))
+		return nil
+	}
+	if len(args) < 6 || args[2] != "candidate-id" || args[4] != "reason" {
+		return fmt.Errorf("%s", usage)
+	}
+	feed := args[1]
+	if feed == "" || strings.TrimSpace(feed) != feed {
+		return fmt.Errorf("%s: feed name is required", usage)
+	}
+	for i := range args[3] {
+		if args[3][i] < '0' || args[3][i] > '9' {
+			return fmt.Errorf("%s: candidate ID must be a positive uint64", usage)
+		}
+	}
+	candidateID, err := strconv.ParseUint(args[3], 10, 64)
+	if err != nil || candidateID == 0 {
+		return fmt.Errorf("%s: candidate ID must be a positive uint64", usage)
+	}
+	reason := strings.TrimSpace(strings.Join(args[5:], " "))
+	if reason == "" {
+		return fmt.Errorf("%s: reason is required", usage)
+	}
+	if len(reason) > 512 {
+		return fmt.Errorf("%s: reason exceeds 512 bytes", usage)
+	}
+	if c.feedsFn == nil || c.feedsAckFn == nil || c.store == nil {
+		return fmt.Errorf("dynamic-address feed acknowledgement unavailable")
+	}
+	info, exists := c.feedsFn()[feed]
+	if !exists {
+		return fmt.Errorf("dynamic-address feed %q not found", feed)
+	}
+	if !info.ShrinkRefused {
+		return fmt.Errorf("dynamic-address feed %q has no current refused shrink", feed)
+	}
+	if info.ShrinkRefusalID != candidateID {
+		return fmt.Errorf("dynamic-address feed %q refusal candidate %d is stale", feed, candidateID)
+	}
+	actor := c.journalPrincipal()
+	if err := c.feedsAckFn(feed, candidateID, actor, reason); err != nil {
+		return fmt.Errorf("dynamic-address feed %q shrink acknowledgement rejected: %w", feed, err)
+	}
+	c.store.LogSystemActionAs(
+		fmt.Sprintf("dynamic-address-shrink-ack feed=%q candidate_id=%d reason=%q", feed, candidateID, reason),
+		actor,
+	)
+	fmt.Printf("Acknowledged refused shrink candidate %d for dynamic-address feed %q\n", candidateID, feed)
+	return nil
 }
 
 // handleRequestSecurityPolicies implements `request security policies check`

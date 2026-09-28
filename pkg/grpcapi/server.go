@@ -121,6 +121,9 @@ type Config struct {
 	// config-sync deferral alarm for `show system alarms`.
 	PeerSnapshotProtocolAlarmFn func() string
 	FeedsFn                     func() map[string]feeds.FeedInfo // returns live feed status
+	// FeedsAckFn acknowledges the exact currently refused dynamic-address feed
+	// candidate. Nil when the live feeds manager is unavailable.
+	FeedsAckFn func(name string, refusalID uint64, actor, reason string) error
 	// FeedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#2049) — an address-name -> union-of-feed-CIDRs map for the active
 	// config — consulted by the `match-policies` simulator (#3042) so a
@@ -249,6 +252,7 @@ type Server struct {
 	clockSkewAlarmsFn           func() []clockskew.ActiveAlarm
 	peerSnapshotProtocolAlarmFn func() string
 	feedsFn                     func() map[string]feeds.FeedInfo
+	feedsAckFn                  func(name string, refusalID uint64, actor, reason string) error
 	feedOverlayFn               func() map[string][]string
 	lldpNeighborsFn             func() []*lldp.Neighbor
 	ddnsStatsFn                 func() *dhcpserver.DDNSStats
@@ -407,6 +411,7 @@ func NewServer(addr string, cfg Config) *Server {
 		clockSkewAlarmsFn:           cfg.ClockSkewAlarmsFn,
 		peerSnapshotProtocolAlarmFn: cfg.PeerSnapshotProtocolAlarmFn,
 		feedsFn:                     cfg.FeedsFn,
+		feedsAckFn:                  cfg.FeedsAckFn,
 		feedOverlayFn:               cfg.FeedOverlayFn,
 		lldpNeighborsFn:             cfg.LLDPNeighborsFn,
 		ddnsStatsFn:                 cfg.DDNSStatsFn,

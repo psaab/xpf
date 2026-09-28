@@ -1120,6 +1120,17 @@ var OperationalTree = map[string]*Node{
 					"clear": {Desc: "Clear all IPsec SAs"},
 				}},
 			}},
+			"dynamic-address": {Desc: "Dynamic-address feed operations", Children: map[string]*Node{
+				"acknowledge-shrink": {Desc: "Acknowledge a specific refused feed shrink", Children: map[string]*Node{
+					"<feed>": {Desc: "Dynamic-address feed name", Children: map[string]*Node{
+						"candidate-id": {Desc: "Current refusal candidate ID", Children: map[string]*Node{
+							"<id>": {Desc: "Positive refusal candidate ID", Children: map[string]*Node{
+								"reason": {Desc: "Reason for acknowledging this shrink", AcceptsArgs: true},
+							}},
+						}},
+					}},
+				}},
+			}},
 			"policies": {Desc: "Security policy operations", Children: map[string]*Node{
 				"check": {Desc: "Check the configured policy set for shadowed / redundant rules"},
 			}},

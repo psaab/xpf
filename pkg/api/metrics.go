@@ -395,6 +395,8 @@ type xpfCollector struct {
 	// gauge is 1 while a retained snapshot is being served as stale.
 	feedSecondsSinceSuccess *prometheus.Desc
 	feedStale               *prometheus.Desc
+	feedShrinkRefusalsTotal *prometheus.Desc
+	feedShrinkRefused       *prometheus.Desc
 	// #9165: per-collector remote-syslog drop counters. Control-plane —
 	// emitted before the dataplane gate.
 	syslogMessagesDropped *prometheus.Desc
@@ -609,10 +611,10 @@ type xpfCollector struct {
 	userspaceSessionInstallStaleIgnored       *prometheus.Desc
 	userspaceSessionDeleteStaleIgnored        *prometheus.Desc
 	userspaceSyncedImportReserveRefused       *prometheus.Desc
-	userspaceSyncedImportMirrorRefused  *prometheus.Desc
-	userspaceMirrorRestoreRepublished   *prometheus.Desc
-	userspaceMirrorRestoreDeleted       *prometheus.Desc
-	userspaceMirrorRestoreFailed        *prometheus.Desc
+	userspaceSyncedImportMirrorRefused        *prometheus.Desc
+	userspaceMirrorRestoreRepublished         *prometheus.Desc
+	userspaceMirrorRestoreDeleted             *prometheus.Desc
+	userspaceMirrorRestoreFailed              *prometheus.Desc
 	userspaceSyncedImportUnknownRoutingDomain *prometheus.Desc
 	userspaceSyncedImportIncompleteKey        *prometheus.Desc
 	// #10512: policy-delete micro-batch gate-lease holds (count, total and
@@ -1088,6 +1090,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.eventStreamSubscriberRefusals
 	ch <- c.feedSecondsSinceSuccess
 	ch <- c.feedStale
+	ch <- c.feedShrinkRefusalsTotal
+	ch <- c.feedShrinkRefused
 	ch <- c.syslogMessagesDropped
 	ch <- c.cosDrainLatencyBucket
 	ch <- c.cosDrainInvocationsTotal
@@ -1705,6 +1709,14 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 			ch <- prometheus.MustNewConstMetric(c.feedStale,
 				prometheus.GaugeValue, stale, name)
+			ch <- prometheus.MustNewConstMetric(c.feedShrinkRefusalsTotal,
+				prometheus.CounterValue, float64(info.ShrinkRefusalCount), name)
+			shrinkRefused := 0.0
+			if info.ShrinkRefused {
+				shrinkRefused = 1
+			}
+			ch <- prometheus.MustNewConstMetric(c.feedShrinkRefused,
+				prometheus.GaugeValue, shrinkRefused, name)
 		}
 	}
 

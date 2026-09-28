@@ -814,7 +814,21 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 
 		// #9792: a packed one-line run reaches this reader on the lenient path
 		// (Store.Load / Store.SyncApply); expand it as #9235 does. Lenient path only.
-		for _, prop := range expandResolvingRuns9792(inst.node.Children, feedServerSchema9792()) {
+		feedServerSchema := feedServerSchema9792()
+		var inlineProps []*Node
+		if tail := instanceValueTail(inst.node, inst.name); len(tail) > 0 {
+			// The new runtime shrink knobs must survive compact named-instance
+			// configuration. Keep legacy feed-server tail handling unchanged;
+			// only these new leaves are read from that shape (#11059).
+			for _, prop := range expandFlatRun([]*Node{{Keys: tail, IsLeaf: true}}, feedServerSchema) {
+				switch prop.Name() {
+				case "shrink-guard-min-old-count", "shrink-guard-min-retain-percent", "shrink-guard-min-drop":
+					inlineProps = append(inlineProps, prop)
+				}
+			}
+		}
+		props := append(inlineProps, expandResolvingRuns9792(inst.node.Children, feedServerSchema)...)
+		for _, prop := range props {
 			switch prop.Name() {
 			case "url":
 				fs.URL = nodeVal(prop)
@@ -830,6 +844,24 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 				if v := nodeVal(prop); v != "" {
 					if n, err := strconv.Atoi(v); err == nil {
 						fs.HoldInterval = n
+					}
+				}
+			case "shrink-guard-min-old-count":
+				if v := nodeVal(prop); v != "" {
+					if n, err := strconv.Atoi(v); err == nil {
+						fs.ShrinkGuardMinOldCount = n
+					}
+				}
+			case "shrink-guard-min-retain-percent":
+				if v := nodeVal(prop); v != "" {
+					if n, err := strconv.Atoi(v); err == nil {
+						fs.ShrinkGuardMinRetainPercent = n
+					}
+				}
+			case "shrink-guard-min-drop":
+				if v := nodeVal(prop); v != "" {
+					if n, err := strconv.Atoi(v); err == nil {
+						fs.ShrinkGuardMinDrop = n
 					}
 				}
 			case "feed-name":

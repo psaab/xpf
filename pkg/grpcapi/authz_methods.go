@@ -207,7 +207,10 @@ var systemActionPermissions = map[string]config.LoginClassPermission{
 	"ipsec-sa-clear":     config.PermControl,
 	"dhcp-renew":         config.PermControl,
 	"dynamic-dns-update": config.PermControl,
-	"dynamic-dns-check":  config.PermControl,
+	// Confirming a refused feed shrink is a configuration decision, not a
+	// routine control request.
+	"dynamic-address-shrink-ack": config.PermConfig,
+	"dynamic-dns-check":          config.PermControl,
 	// #8597 K47: `request system configuration rescue save|delete`. Explicit
 	// rather than left to the PermMaint default, because pkg/cli charges
 	// PermControl — an absent entry would make the remote surface STRICTER
