@@ -770,6 +770,15 @@ interface assigned yet resolves no address; zones that are scoped, whose only
 interfaces are management/cluster-control lifelines (fxp0 / em0 / fab<N>), or that
 have no interfaces are deliberately NOT reported (low-noise).
 
+Kernel scope-link addresses (the self-assigned IPv6 link-local present from
+link-up, IPv4 169.254 fallbacks) do NOT close the window (#10751 R4-1): they
+are automatic, not the intended global/ULA/lease addresses, so a zone with
+only link-locals stays reported and the daemon retains the early input
+barrier until a routable address resolves. Explicitly configured link-locals
+(a static fe80::/64, the stable RETH LL) still scope. The installed deny
+keeps covering link-local destinations — the chain is `policy accept`, so
+pending-intent is deliberately stricter than enforceability.
+
 Two observability surfaces consume it:
 
 - **State-transition log** (`daemon_nft.go`, `logHostInboundAddresslessTransitions`).

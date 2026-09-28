@@ -28,31 +28,25 @@ type AddresslessEnforcingZone struct {
 	Interfaces []string
 }
 
-// AddresslessEnforcingZones returns, in sorted zone order, the configured
-// host-inbound-enforcing zones currently in the transient fail-open admit window
-// (#3698): a zone that has at least one non-lifeline interface assigned yet
-// resolves NO firewall-local address (no static config address, no live kernel
-// address, no VRRP VIP). The "is this zone scoped by any address" decision is
-// read back from BuildZoneHostInboundViews itself — the exact same builder that
-// drives the nft emission — so this observability signal can never disagree with
-// what applyHostInboundFilter actually enforces (a zone is reported iff the
-// daemon emits no host-inbound deny for it).
-//
-// Excluded (NOT reported), so the signal stays low-noise and precise:
-//   - zones that resolve any address (static / DHCP-learned / VRRP VIP) — scoped;
-//   - zones whose only interfaces are lifelines (fxp0 / em0 / fab*) — lifeline
-//     traffic is never denied, so there is no fail-open to surface;
-//   - zones with no interfaces assigned — nothing to protect.
-func AddresslessEnforcingZones(cfg *config.Config) []AddresslessEnforcingZone {
+// addresslessEnforcingZonesFromSnapshots is the AddresslessEnforcingZones
+// core over ONE caller-supplied snapshot. Scoping reads the zone views
+// rendered from that snapshot with kernel scope-link rows EXCLUDED (#10751
+// R4-1): a zone whose only addresses are self-assigned link-locals is still
+// awaiting its intended (global/ULA/lease) addresses, so it stays reported.
+// Explicitly configured link-locals (static fe80::/64, stable RETH LL) still
+// scope — only kernel scope-link rows are excluded.
+func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot) []AddresslessEnforcingZone {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
 	}
-	// A zone is "scoped" iff at least one of its views carries an address — the
-	// same condition applyHostInboundFilter uses (hostInboundHasEnforceableView)
-	// to decide whether it emits a deny. Reusing the builder guarantees the
-	// observability signal matches enforcement exactly.
+	// A zone is "scoped" iff at least one of its scope-aware views carries
+	// an address. This is DELIBERATELY stricter than the install path's
+	// hostInboundHasEnforceableView (any view address, link-locals
+	// included): a link-local-only zone gets a real deny installed for
+	// those addresses AND stays reported here, so the daemon installs
+	// enforcement without handing the early barrier off early.
 	scoped := make(map[string]bool)
-	for _, v := range BuildZoneHostInboundViews(cfg) {
+	for _, v := range buildZoneHostInboundViewsFromSnaps(cfg, snaps, true) {
 		if len(v.V4Addrs) > 0 || len(v.V6Addrs) > 0 {
 			scoped[v.Zone] = true
 		}
@@ -92,6 +86,33 @@ func AddresslessEnforcingZones(cfg *config.Config) []AddresslessEnforcingZone {
 	return out
 }
 
+// AddresslessEnforcingZones returns, in sorted zone order, the configured
+// host-inbound-enforcing zones currently in the transient fail-open admit window
+// (#3698): a zone that has at least one non-lifeline interface assigned yet
+// resolves NO firewall-local address (no static config address, no live kernel
+// address, no VRRP VIP). The "is this zone scoped by any address" decision is
+// read back from the zone-view builder itself — the same core that drives the
+// nft emission — so this observability signal tracks what
+// applyHostInboundFilter enforces. Kernel scope-link addresses (self-assigned
+// IPv6 link-locals, IPv4 169.254 fallbacks) do NOT scope a zone (#10751 R4-1):
+// they are automatic at link-up, not the intended global/ULA/lease addresses,
+// so a zone with only link-locals is still awaiting enforcement scope and
+// stays reported (the daemon installs a deny for the link-locals AND retains
+// the early barrier until a routable address resolves).
+//
+// Excluded (NOT reported), so the signal stays low-noise and precise:
+//   - zones that resolve any non-link-local address (static / DHCP-learned /
+//     VRRP VIP / configured link-local) — scoped;
+//   - zones whose only interfaces are lifelines (fxp0 / em0 / fab*) — lifeline
+//     traffic is never denied, so there is no fail-open to surface;
+//   - zones with no interfaces assigned — nothing to protect.
+func AddresslessEnforcingZones(cfg *config.Config) []AddresslessEnforcingZone {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
+		return nil
+	}
+	return addresslessEnforcingZonesFromSnapshots(cfg, buildInterfaceSnapshots(cfg))
+}
+
 // AddresslessDHCPPending is the only fail-open reason the per-interface reporter
 // emits (#3710). Static and VRRP-VIP addresses are injected into the enforced
 // deny set from config regardless of link/lease state (see
@@ -129,42 +150,24 @@ type AddresslessEnforcingInterface struct {
 	Reason string
 }
 
-// AddresslessEnforcingInterfaces returns, in sorted (zone, interface, family)
-// order, the per-interface/per-family host-inbound fail-open windows (#3710) that
-// the zone-level AddresslessEnforcingZones (#3698) collapses away. An entry is
-// reported for a non-lifeline logical unit assigned to a configured
-// host-inbound-enforcing zone when, for a family, the unit has a DHCP / DHCPv6
-// client configured (`family inet { dhcp; }` / `family inet6 { dhcpv6; }` /
-// dhcpv6-client) but currently resolves NO address in that family across the same
-// resolution BuildZoneHostInboundViews scopes the kernel deny with: static /
-// live-kernel addresses (interface snapshots) plus configured VRRP VIPs.
-//
-// Only DHCP-pending is reported (see AddresslessDHCPPending): a static address or
-// a VRRP VIP is scoped into the enforced deny from config regardless of link or
-// lease state, so it never opens a per-interface window. Gating on a configured
-// DHCP client (rather than "any family with no address") is what keeps the signal
-// low-noise: an IPv4-only interface is NOT reported as addressless in inet6,
-// because it never intends to acquire a v6 address, so there is no window to
-// surface. The window self-heals the moment the lease lands (the resolved family
-// set gains the address and the entry disappears), exactly like the zone-level
-// signal.
-//
-// The zone-level xpf_host_inbound_addressless_zones remains a coarser
-// compatibility aggregate (a zone with ANY address in ANY family is silent
-// there); this per-interface signal is strictly more sensitive by design and is
-// exported alongside it, not in place of it.
-func AddresslessEnforcingInterfaces(cfg *config.Config) []AddresslessEnforcingInterface {
+// addresslessEnforcingInterfacesFromSnapshots is the
+// AddresslessEnforcingInterfaces core over ONE caller-supplied snapshot. A
+// DHCP/DHCPv6 family is resolved only by a NON-scope-link address (#10751
+// R4-1): the kernel's automatic fe80::/64 never satisfies a DHCPv6 client's
+// lease intent, and a 169.254 fallback never satisfies DHCP.
+func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot) []AddresslessEnforcingInterface {
 	if cfg == nil || len(cfg.Security.Zones) == 0 || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil
 	}
 	lifelines := hostInboundLifelineSet(cfg)
 	zoneByIface := buildInterfaceZoneMap(cfg)
 
-	// Per-unit resolved-family presence, from the SAME sources
-	// BuildZoneHostInboundViews scopes the kernel deny with: the interface
-	// snapshots (static config addresses merged with live kernel addresses) and
-	// the configured VRRP VIPs. A family present here is already covered by the
-	// deny, so it is NOT a fail-open window.
+	// Per-unit resolved-family presence, from the SAME sources the views
+	// core scopes the kernel deny with: the interface snapshots (static
+	// config addresses merged with live kernel addresses) and the
+	// configured VRRP VIPs — MINUS kernel scope-link rows, which never
+	// satisfy lease intent (#10751 R4-1). A family present here is already
+	// covered by the deny, so it is NOT a fail-open window.
 	hasFam := make(map[string]map[string]bool)
 	mark := func(name, family string) {
 		m := hasFam[name]
@@ -174,8 +177,11 @@ func AddresslessEnforcingInterfaces(cfg *config.Config) []AddresslessEnforcingIn
 		}
 		m[family] = true
 	}
-	for _, snap := range buildInterfaceSnapshots(cfg) {
+	for _, snap := range snaps {
 		for _, a := range snap.Addresses {
+			if hostInboundScopeLinkAddr(a) {
+				continue
+			}
 			if hostIPFromCIDR(a.Address) != "" {
 				mark(snap.Name, a.Family)
 			}
@@ -271,6 +277,38 @@ func AddresslessEnforcingInterfaces(cfg *config.Config) []AddresslessEnforcingIn
 		return out[i].Family < out[j].Family
 	})
 	return out
+}
+
+// AddresslessEnforcingInterfaces returns, in sorted (zone, interface, family)
+// order, the per-interface/per-family host-inbound fail-open windows (#3710) that
+// the zone-level AddresslessEnforcingZones (#3698) collapses away. An entry is
+// reported for a non-lifeline logical unit assigned to a configured
+// host-inbound-enforcing zone when, for a family, the unit has a DHCP / DHCPv6
+// client configured (`family inet { dhcp; }` / `family inet6 { dhcpv6; }` /
+// dhcpv6-client) but currently resolves NO address in that family across the same
+// resolution the views core scopes the kernel deny with: static /
+// live-kernel addresses (interface snapshots) plus configured VRRP VIPs —
+// excluding kernel scope-link rows, which never satisfy lease intent (#10751
+// R4-1: a DHCPv6 client beside only its automatic fe80::/64 is still pending).
+//
+// Only DHCP-pending is reported (see AddresslessDHCPPending): a static address or
+// a VRRP VIP is scoped into the enforced deny from config regardless of link or
+// lease state, so it never opens a per-interface window. Gating on a configured
+// DHCP client (rather than "any family with no address") is what keeps the signal
+// low-noise: an IPv4-only interface is NOT reported as addressless in inet6,
+// because it never intends to acquire a v6 address, so there is no window to
+// surface. The window self-heals the moment the lease lands (the resolved family
+// set gains the address and the entry disappears), exactly like the zone-level
+// signal.
+//
+// The zone-level xpf_host_inbound_addressless_zones remains a coarser
+// compatibility aggregate; this per-interface signal is strictly more sensitive
+// by design and is exported alongside it, not in place of it.
+func AddresslessEnforcingInterfaces(cfg *config.Config) []AddresslessEnforcingInterface {
+	if cfg == nil || len(cfg.Security.Zones) == 0 || len(cfg.Interfaces.Interfaces) == 0 {
+		return nil
+	}
+	return addresslessEnforcingInterfacesFromSnapshots(cfg, buildInterfaceSnapshots(cfg))
 }
 
 // AmbiguousHostInboundAddress names a firewall-local address that is

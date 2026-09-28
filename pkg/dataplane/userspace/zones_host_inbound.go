@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/vishvananda/netlink"
 )
 
 // ZoneHostInboundView is the per-zone host-inbound-traffic enforcement view for
@@ -168,16 +169,57 @@ func stableRethUnitHasIPv6(unit *config.InterfaceUnit) bool {
 	return unit.DHCPv6
 }
 
-// BuildZoneHostInboundViews returns one ZoneHostInboundView per configured
-// security zone (#3070; #3405 default-deny parity — every zone enforces, see
-// below), resolving each zone's firewall-local
-// host addresses via the canonical interface-snapshot builder (the same
-// resolution that populates the dataplane) PLUS each zone's RETH VRRP virtual
-// addresses (#3172, resolved from config so they scope the deny on the backup
-// node too, where the VIP is not yet live on the kernel interface), and the
-// deterministic stable RETH router link-local (#10303), with
-// management/cluster-control lifeline interfaces (fxp0 / em0 / fab*) excluded
-// from the address set.
+// hostInboundScopeLinkAddr reports whether a snapshot address row is kernel
+// scope-link: a self-assigned IPv6 link-local (or an IPv4 169.254 fallback)
+// the kernel owns without any lease or config. Such an address never
+// satisfies host-inbound RESOLUTION intent (#10751 R4-1): a DHCPv6 client
+// awaiting its first lease sits beside the fe80::/64 the kernel assigned at
+// link-up, and counting it as "resolved" would hand the early input barrier
+// off while the lease's global address is still uncovered. Explicitly
+// configured link-locals (a static fe80::/64, the deterministic stable RETH
+// LL) carry scope-universe / config provenance and still resolve — only
+// kernel scope-link rows are excluded. Follows the routes.go lens (skip
+// non-routable scopes), narrowed to exactly SCOPE_LINK.
+func hostInboundScopeLinkAddr(a InterfaceAddressSnapshot) bool {
+	return a.Scope == int(netlink.SCOPE_LINK)
+}
+
+// BuildZoneHostInboundViewsFromSnapshots renders zone views from ONE caller-
+// supplied address snapshot instead of sampling the kernel itself (#10751
+// R4-2). The daemon's apply path samples once and threads that snapshot
+// through the install inputs AND the handoff decision, so a lease landing
+// mid-apply cannot skew the installed ruleset against the retention verdict.
+// Installed semantics are include-all (identical to BuildZoneHostInboundViews):
+// kernel link-locals stay in the deny set — the chain is `policy accept`, so
+// dropping them from the destinations would leave link-local host input
+// admitted post-handoff.
+func BuildZoneHostInboundViewsFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot) []ZoneHostInboundView {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
+		return nil
+	}
+	return buildZoneHostInboundViewsFromSnaps(cfg, snaps, false)
+}
+
+// BuildZoneHostInboundViews renders zone views from a FRESH kernel snapshot.
+// See buildZoneHostInboundViewsFromSnaps for the shared core.
+func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
+		return nil
+	}
+	return buildZoneHostInboundViewsFromSnaps(cfg, buildInterfaceSnapshots(cfg), false)
+}
+
+// buildZoneHostInboundViewsFromSnaps is the shared zone-view core: one
+// ZoneHostInboundView per configured security zone (#3070; #3405 default-deny
+// parity — every zone enforces, see below), resolving each zone's
+// firewall-local host addresses via the caller-supplied interface snapshot
+// PLUS each zone's RETH VRRP virtual addresses (#3172, resolved from config
+// so they scope the deny on the backup node too, where the VIP is not yet
+// live on the kernel interface), and the deterministic stable RETH router
+// link-local (#10303), with management/cluster-control lifeline interfaces
+// (fxp0 / em0 / fab*) excluded from the address set. excludeScopeLink drops
+// kernel scope-link rows from the snapshot walk (pending-intent scoping,
+// #10751 R4-1); installed views pass false so link-locals stay denied.
 //
 // Address completeness (#3224 — non-reproducing): the snapshot builder resolves
 // each interface's addresses through buildLinkSnapshot -> AddrList(FAMILY_ALL),
@@ -211,17 +253,17 @@ func stableRethUnitHasIPv6(unit *config.InterfaceUnit) bool {
 // AddresslessEnforcingZones (#3698) — the daemon logs a state-transition warning
 // and exports xpf_host_inbound_addressless_zones while the window is open, so it
 // is no longer silent.
-func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
+func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, excludeScopeLink bool) []ZoneHostInboundView {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
 	}
-	ifaceSnaps := buildInterfaceSnapshots(cfg)
+	ifaceSnaps := snaps
 	// Lifeline interfaces (fxp0 + the configured chassis-cluster
 	// control-interface / fabric interfaces, plus the em0/fab* defaults) are
 	// excluded from host-inbound deny scoping so management / cluster-control
 	// traffic is never denied (#3277).
 	lifelines := hostInboundLifelineSet(cfg)
-	lifelineShared := hostInboundLifelineSharedAddrs(cfg)
+	lifelineShared := hostInboundLifelineSharedAddrsFromSnaps(cfg, snaps)
 	// #9637: netdevs that can never be an ingress scope.
 	vrfEnslaved := config.HostInboundVRFEnslavedNetdevs(cfg)
 	vrfMasters := hostInboundVRFMasterNetdevs(cfg, ifaceSnaps)
@@ -429,6 +471,9 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 		}
 		var g *group
 		for _, a := range snap.Addresses {
+			if excludeScopeLink && hostInboundScopeLinkAddr(a) {
+				continue
+			}
 			host := hostIPFromCIDR(a.Address)
 			if host == "" {
 				continue
@@ -803,17 +848,17 @@ const UnzonedHostInboundZoneLabel = "junos-host"
 //     get the shim), so their host-bound traffic is delivered entirely through
 //     the kernel; the kernel nft deny is the sole and sufficient enforcement
 //     point and no userspace-dp (AF_XDP) change is required.
-func BuildUnzonedHostInboundAddrs(cfg *config.Config) (v4, v6 []string) {
+func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot) (v4, v6 []string) {
 	if cfg == nil || len(cfg.Security.Zones) == 0 || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil, nil
 	}
 	lifelines := hostInboundLifelineSet(cfg)
-	lifelineShared := hostInboundLifelineSharedAddrs(cfg)
+	lifelineShared := hostInboundLifelineSharedAddrsFromSnaps(cfg, snaps)
 	quarantined := quarantinedZoneNames(cfg)
 	// Addresses already covered by a zone deny — exclude so the unzoned catch-all
 	// never duplicates or conflicts with a zone rule for the same daddr.
 	zoned := map[string]bool{}
-	for _, view := range BuildZoneHostInboundViews(cfg) {
+	for _, view := range buildZoneHostInboundViewsFromSnaps(cfg, snaps, false) {
 		for _, a := range view.V4Addrs {
 			zoned[a] = true
 		}
@@ -837,7 +882,7 @@ func BuildUnzonedHostInboundAddrs(cfg *config.Config) (v4, v6 []string) {
 			v4 = append(v4, host)
 		}
 	}
-	for _, snap := range buildInterfaceSnapshots(cfg) {
+	for _, snap := range snaps {
 		if hostInboundLifelineInterface(snap.Name, lifelines) {
 			continue
 		}
@@ -917,6 +962,26 @@ func BuildUnzonedHostInboundAddrs(cfg *config.Config) (v4, v6 []string) {
 	return v4, v6
 }
 
+// BuildUnzonedHostInboundAddrs renders the unzoned catch-all from a FRESH
+// kernel snapshot. See buildUnzonedHostInboundAddrsFromSnaps.
+func BuildUnzonedHostInboundAddrs(cfg *config.Config) (v4, v6 []string) {
+	if cfg == nil || len(cfg.Security.Zones) == 0 || len(cfg.Interfaces.Interfaces) == 0 {
+		return nil, nil
+	}
+	return buildUnzonedHostInboundAddrsFromSnaps(cfg, buildInterfaceSnapshots(cfg))
+}
+
+// BuildUnzonedHostInboundAddrsFromSnapshots renders the unzoned catch-all
+// from ONE caller-supplied snapshot (#10751 R4-2); the zone views it
+// subtracts are rendered from the SAME snapshot so install inputs cannot
+// skew mid-apply. Include-all, like the views core it shares.
+func BuildUnzonedHostInboundAddrsFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot) (v4, v6 []string) {
+	if cfg == nil || len(cfg.Security.Zones) == 0 || len(cfg.Interfaces.Interfaces) == 0 {
+		return nil, nil
+	}
+	return buildUnzonedHostInboundAddrsFromSnaps(cfg, snaps)
+}
+
 // forEachFirewallLocalAddr visits every (interface ref, address) pair that makes
 // an address firewall-local: the live/configured interface addresses from the
 // canonical snapshot builder, configured VRRP virtual addresses, and the
@@ -931,14 +996,14 @@ func BuildUnzonedHostInboundAddrs(cfg *config.Config) (v4, v6 []string) {
 //
 // Ordering is deterministic (interface names then unit numbers then VRRP group
 // keys) because the fence's residual set is emitted in iteration order.
-func forEachFirewallLocalAddr(cfg *config.Config, visit func(ifName, cidr string)) {
+func forEachFirewallLocalAddrFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, visit func(ifName, cidr string)) {
 	if cfg == nil {
 		return
 	}
 	// Live + configured interface addresses, via the same snapshot builder that
 	// populates the dataplane (so DHCP/DHCPv6-learned addresses are included
 	// exactly like static ones — the #3224 argument).
-	for _, snap := range buildInterfaceSnapshots(cfg) {
+	for _, snap := range snaps {
 		for _, a := range snap.Addresses {
 			visit(snap.Name, a.Address)
 		}
@@ -994,6 +1059,15 @@ func forEachFirewallLocalAddr(cfg *config.Config, visit func(ifName, cidr string
 
 }
 
+// forEachFirewallLocalAddr visits every firewall-local (interface, address)
+// pair from a FRESH kernel snapshot. See forEachFirewallLocalAddrFromSnaps.
+func forEachFirewallLocalAddr(cfg *config.Config, visit func(ifName, cidr string)) {
+	if cfg == nil {
+		return
+	}
+	forEachFirewallLocalAddrFromSnaps(cfg, buildInterfaceSnapshots(cfg), visit)
+}
+
 // hostInboundLifelineSharedAddrs returns the bare host address VALUES that live
 // on at least one lifeline interface (#7284).
 //
@@ -1003,10 +1077,10 @@ func forEachFirewallLocalAddr(cfg *config.Config, visit func(ifName, cidr string
 // address", which is the question a destination-only drop rule actually poses.
 // Host-inbound drops carry no iifname (#3718), so arriving on the lifeline does
 // not exempt an address the real table denies by destination.
-func hostInboundLifelineSharedAddrs(cfg *config.Config) map[string]bool {
+func hostInboundLifelineSharedAddrsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot) map[string]bool {
 	lifelines := hostInboundLifelineSet(cfg)
 	shared := map[string]bool{}
-	forEachFirewallLocalAddr(cfg, func(ifName, cidr string) {
+	forEachFirewallLocalAddrFromSnaps(cfg, snaps, func(ifName, cidr string) {
 		if !hostInboundLifelineInterface(ifName, lifelines) {
 			return
 		}
@@ -1015,6 +1089,12 @@ func hostInboundLifelineSharedAddrs(cfg *config.Config) map[string]bool {
 		}
 	})
 	return shared
+}
+
+// hostInboundLifelineSharedAddrs returns lifeline address values from a FRESH
+// kernel snapshot. See hostInboundLifelineSharedAddrsFromSnaps.
+func hostInboundLifelineSharedAddrs(cfg *config.Config) map[string]bool {
+	return hostInboundLifelineSharedAddrsFromSnaps(cfg, buildInterfaceSnapshots(cfg))
 }
 
 // FenceAddrSets is the FENCE-ONLY drop scope of the cold-boot fail-closed fence
@@ -1067,7 +1147,7 @@ type FenceAddrSets struct {
 //
 // The returned Views are COPIES: the caller's views still carry the shared
 // lifeline addresses, because the REAL table must keep denying them.
-func BuildFenceAddrSets(cfg *config.Config, views []ZoneHostInboundView) FenceAddrSets {
+func buildFenceAddrSetsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, views []ZoneHostInboundView) FenceAddrSets {
 	out := FenceAddrSets{Views: views}
 	if cfg == nil {
 		return out
@@ -1086,7 +1166,7 @@ func BuildFenceAddrSets(cfg *config.Config, views []ZoneHostInboundView) FenceAd
 		}
 		local[host] = true
 	}
-	forEachFirewallLocalAddr(cfg, note)
+	forEachFirewallLocalAddrFromSnaps(cfg, snaps, note)
 
 	// Finding A: withhold every address that ALSO lives on a lifeline
 	// interface, both from the per-zone views and from the residual set.
@@ -1144,4 +1224,21 @@ func BuildFenceAddrSets(cfg *config.Config, views []ZoneHostInboundView) FenceAd
 	out.UnzonedV4, out.UnzonedV6 = splitFams(rest)
 	out.WithheldV4, out.WithheldV6 = splitFams(withheld)
 	return out
+}
+
+// BuildFenceAddrSets derives the cold-boot fence's drop scope from cfg, a
+// FRESH kernel snapshot, and the zone views the real ruleset would use
+// (#6492). See FenceAddrSets and buildFenceAddrSetsFromSnaps.
+//
+// The returned Views are COPIES: the caller's views still carry the shared
+// lifeline addresses, because the REAL table must keep denying them.
+func BuildFenceAddrSets(cfg *config.Config, views []ZoneHostInboundView) FenceAddrSets {
+	return buildFenceAddrSetsFromSnaps(cfg, buildInterfaceSnapshots(cfg), views)
+}
+
+// BuildFenceAddrSetsFromSnapshots derives the fence's drop scope from ONE
+// caller-supplied snapshot (#10751 R4-2); the caller renders views from the
+// SAME snapshot so install inputs cannot skew mid-apply.
+func BuildFenceAddrSetsFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot, views []ZoneHostInboundView) FenceAddrSets {
+	return buildFenceAddrSetsFromSnaps(cfg, snaps, views)
 }
