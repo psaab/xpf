@@ -250,6 +250,11 @@ type Manager struct {
 	// duplicateIdentityWatcher sends/receives authenticated identity beacons
 	// on the control-link broadcast address (#10745). It shares the heartbeat
 	// tenure and is stopped/replaced with the receiver.
+	// beaconReplay is the process-lifetime record of observed duplicate-
+	// identity beacon nonces (#10745). It deliberately OUTLIVES the watcher:
+	// a heartbeat restart must not forget replays. By value so the zero
+	// Manager is ready; guarded by its own mutex, never m.mu.
+	beaconReplay duplicateIdentityReplayCache
 	duplicateIdentityWatcher *duplicateIdentityWatcher
 	// hbStartInWindowHook, when non-nil, is invoked by StartHeartbeat INSIDE the
 	// window the #7257 epoch guard covers — after the tenure is captured, before

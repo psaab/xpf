@@ -341,3 +341,47 @@ func TestHeartbeatTenureOwnsDuplicateIdentityWatcher_10745(t *testing.T) {
 		t.Fatal("unkeyed heartbeat installed an identity watcher it cannot authenticate")
 	}
 }
+
+// TestDuplicateIdentityReplayDoesNotSurviveWatcherReplacement_10745 is the
+// cross-tenure regression (review M1): replay memory lives on the Manager, so
+// a captured still-fresh beacon replayed after a heartbeat restart cannot
+// warn without the PSK. A per-watcher cache reds the replay half.
+func TestDuplicateIdentityReplayDoesNotSurviveWatcherReplacement_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+	now := time.Now()
+	foreign := beaconTestInstance(t)
+	frame, err := marshalDuplicateIdentityBeacon(beaconTestCluster, beaconTestNode,
+		[]byte(beaconTestPSK), foreign, now)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	first := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, beaconTestInstance(t))
+	first.handleBeacon(frame, now)
+	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
+		t.Fatalf("first-tenure delivery produced %d warnings, want 1", got)
+	}
+
+	// Simulate a heartbeat restart: same manager and key, fresh watcher with
+	// a fresh instance ID and (under the old design) an empty cache.
+	second := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, beaconTestInstance(t))
+	second.handleBeacon(frame, now.Add(time.Second))
+	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
+		t.Fatalf("replay into the replacement watcher produced %d warnings, want 1 — "+
+			"replay memory did not survive the restart", got)
+	}
+
+	// Positive control: a live duplicate in the current tenure still warns.
+	mgr.mu.Lock()
+	mgr.lastDupNodeIDWarn = time.Time{}
+	mgr.mu.Unlock()
+	live, err := marshalDuplicateIdentityBeacon(beaconTestCluster, beaconTestNode,
+		[]byte(beaconTestPSK), beaconTestInstance(t), now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("sign live beacon: %v", err)
+	}
+	second.handleBeacon(live, now.Add(time.Second))
+	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 2 {
+		t.Fatalf("live duplicate in the current tenure produced %d warnings, want 2", got)
+	}
+}

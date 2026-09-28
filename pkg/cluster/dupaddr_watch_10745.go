@@ -121,22 +121,22 @@ func marshalDuplicateIdentityBeacon(clusterID, nodeID int, key []byte, instanceI
 }
 
 // verifyDuplicateIdentityBeacon authenticates and freshness-checks a beacon
-// using every currently accepted PSK. It returns identity, sender instance and
-// nonce only after all checks pass; callers MUST NOT warn based on the unsigned
-// header.
-func verifyDuplicateIdentityBeacon(frame []byte, mgr *Manager, now time.Time) (clusterID, nodeID int, instanceID, nonce [16]byte, ok bool) {
+// using every currently accepted PSK. It returns identity, sender instance,
+// nonce and the signed timestamp, but ONLY after all checks pass; callers
+// MUST NOT warn based on the unsigned header.
+func verifyDuplicateIdentityBeacon(frame []byte, mgr *Manager, now time.Time) (clusterID, nodeID int, instanceID, nonce [16]byte, stamp time.Time, ok bool) {
 	if mgr == nil || len(frame) != duplicateIdentityBeaconLen ||
 		string(frame[:8]) != duplicateIdentityBeaconMagic {
-		return 0, 0, instanceID, nonce, false
+		return 0, 0, instanceID, nonce, stamp, false
 	}
-	stamp := int64(binary.LittleEndian.Uint64(frame[11:19]))
-	delta := now.Sub(time.Unix(0, stamp))
+	stamp = time.Unix(0, int64(binary.LittleEndian.Uint64(frame[11:19])))
+	delta := now.Sub(stamp)
 	if delta < -duplicateIdentityBeaconMaxAge || delta > duplicateIdentityBeaconMaxAge {
-		return 0, 0, instanceID, nonce, false
+		return 0, 0, instanceID, nonce, time.Time{}, false
 	}
 	keys := mgr.controlLinkAcceptedKeys()
 	if len(keys) == 0 {
-		return 0, 0, instanceID, nonce, false
+		return 0, 0, instanceID, nonce, time.Time{}, false
 	}
 	validMAC := false
 	for _, key := range keys {
@@ -149,11 +149,90 @@ func verifyDuplicateIdentityBeacon(frame []byte, mgr *Manager, now time.Time) (c
 		}
 	}
 	if !validMAC {
-		return 0, 0, instanceID, nonce, false
+		return 0, 0, instanceID, nonce, time.Time{}, false
 	}
 	copy(instanceID[:], frame[19:35])
 	copy(nonce[:], frame[35:51])
-	return int(binary.LittleEndian.Uint16(frame[8:10])), int(frame[10]), instanceID, nonce, true
+	return int(binary.LittleEndian.Uint16(frame[8:10])), int(frame[10]), instanceID, nonce, stamp, true
+}
+
+// duplicateIdentityReplayCap bounds the beacon nonce cache. A genuine
+// duplicate peer emits ~10 beacons/s, so ~300 entries cover the 30s window
+// with clock skew; 4096 is a decade of headroom that keeps worst-case memory
+// under half a megabyte while a PSK-holder flood cannot grow it further.
+const duplicateIdentityReplayCap = 4096
+
+// duplicateIdentityReplayCache records observed beacon nonces with the
+// instant each entry stops suppressing replays.
+//
+// It lives on the MANAGER (process lifetime), not on the watcher — the #5086
+// precedent. A heartbeat restart replaces the watcher; a per-watcher cache
+// would forget every nonce, so a keyless L2 observer could replay a captured
+// still-fresh beacon into the new tenure (valid MAC, old instance now
+// foreign, nonce uncached) and manufacture a false duplicate warning. A
+// tenure ID inside the MAC cannot fix that — the receiver cannot know the
+// peer's current tenure — but replay memory that survives watcher
+// replacement can: the replayed nonce is already recorded.
+//
+// Lock order is cache mu THEN m.mu (handleBeacon records here before the
+// warning takes m.mu); no path takes them in the reverse order. The zero
+// value is ready: the map is allocated lazily under the mutex, so Managers
+// built as struct literals need no constructor change.
+type duplicateIdentityReplayCache struct {
+	mu      sync.Mutex
+	entries map[[16]byte]time.Time // nonce -> suppression deadline
+}
+
+// checkAndRecord reports whether nonce was already recorded live, and records
+// it when it was not. deadline is when the entry stops suppressing replays
+// (BEACON-02: max(receipt, stamp)+MaxAge, so a skewed-future beacon's nonce
+// always outlives its timestamp's validity). At capacity, expired entries go
+// first and one arbitrary survivor is evicted only when nothing had expired —
+// memory stays bounded under a PSK-holder flood.
+func (c *duplicateIdentityReplayCache) checkAndRecord(nonce [16]byte, deadline time.Time, now time.Time) (replay bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[[16]byte]time.Time)
+	}
+	if at, seen := c.entries[nonce]; seen && now.Before(at) {
+		return true
+	}
+	if len(c.entries) >= duplicateIdentityReplayCap {
+		for seen, at := range c.entries {
+			if !now.Before(at) {
+				delete(c.entries, seen)
+			}
+		}
+		if len(c.entries) >= duplicateIdentityReplayCap {
+			for seen := range c.entries {
+				delete(c.entries, seen)
+				break // Go map order is random: evict-random on overflow
+			}
+		}
+	}
+	c.entries[nonce] = deadline
+	return false
+}
+
+// sweep drops entries whose suppression deadline has passed. Called by the
+// watcher's periodic sweep loop, so expiry never depends on further matching
+// traffic arriving.
+func (c *duplicateIdentityReplayCache) sweep(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for seen, at := range c.entries {
+		if !now.Before(at) {
+			delete(c.entries, seen)
+		}
+	}
+}
+
+// len reports the entry count for tests.
+func (c *duplicateIdentityReplayCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
 }
 
 // duplicateIdentityWatcher owns the authenticated broadcast sender and
@@ -168,7 +247,6 @@ type duplicateIdentityWatcher struct {
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
 	instance  [16]byte
-	seen      map[[16]byte]time.Time // reader-goroutine confined replay cache
 	sendErr   sync.Once
 }
 
@@ -179,7 +257,6 @@ func newDuplicateIdentityWatcher(mgr *Manager, iface string, listen, send *net.U
 	return &duplicateIdentityWatcher{
 		mgr: mgr, iface: iface, listen: listen, send: send, broadcast: broadcast,
 		interval: interval, stopCh: make(chan struct{}), instance: instance,
-		seen: make(map[[16]byte]time.Time),
 	}
 }
 
@@ -344,21 +421,20 @@ func (w *duplicateIdentityWatcher) readLoop() {
 
 // handleBeacon authenticates before any duplicate-identity decision or warning.
 // Sender-instance IDs exclude the local socket's own broadcast loopback; the
-// nonce cache suppresses exact packet replays during the freshness window.
+// manager-lifetime nonce cache suppresses exact packet replays, including
+// replays delivered after this watcher replaced an older one.
 func (w *duplicateIdentityWatcher) handleBeacon(frame []byte, now time.Time) {
-	clusterID, nodeID, instance, nonce, ok := verifyDuplicateIdentityBeacon(frame, w.mgr, now)
+	clusterID, nodeID, instance, nonce, stamp, ok := verifyDuplicateIdentityBeacon(frame, w.mgr, now)
 	if !ok || clusterID != w.mgr.ClusterID() || nodeID != w.mgr.NodeID() || instance == w.instance {
 		return
 	}
-	for seen, at := range w.seen {
-		if now.Sub(at) > duplicateIdentityBeaconMaxAge {
-			delete(w.seen, seen)
-		}
+	deadline := now
+	if stamp.After(deadline) {
+		deadline = stamp
 	}
-	if _, replay := w.seen[nonce]; replay {
+	if w.mgr.beaconReplay.checkAndRecord(nonce, deadline.Add(duplicateIdentityBeaconMaxAge), now) {
 		return
 	}
-	w.seen[nonce] = now
 	w.mgr.NoteDuplicateNodeIDBeacon(w.iface)
 }
 
