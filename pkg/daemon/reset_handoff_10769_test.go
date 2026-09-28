@@ -14,6 +14,7 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/dhcpserver"
+	"github.com/psaab/xpf/pkg/vrrp"
 )
 
 func isolateHandoffFlag(t *testing.T) {
@@ -1420,7 +1421,13 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	if freshStore.ActiveConfig() != nil || freshStore.EverCommitted() {
 		t.Fatal("restarted store must have no active config and no history")
 	}
-	d2 := &Daemon{store: freshStore, applySem: semaphore.NewWeighted(1), opts: Options{ConfigFile: dbPath}}
+	// Production-shaped apply fixture (applyMarkerDaemon9175's seams):
+	// the authoring commit must drive a REAL successful apply, so a
+	// green run cannot mean promotion over a failed apply.
+	installFakeNetworkctl(t)
+	installSSHDSeam(t, &sshdSeamRecorder{})
+	d2 := &Daemon{store: freshStore, applySem: semaphore.NewWeighted(1), opts: Options{ConfigFile: dbPath, NoDataplane: true}, vrrpMgr: vrrp.NewManager()}
+	d2.setDataplane(&runtimeOnlyApplyTestDP{})
 	failClosed, err := d2.loadAndBootstrapConfig()
 	if err != nil || failClosed {
 		t.Fatalf("startup path must take fresh boot, failClosed=%v err=%v", failClosed, err)
@@ -1440,8 +1447,8 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	if _, err := d2.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); err == nil || !strings.Contains(err.Error(), "bootstrap") {
 		t.Fatalf("plain commit in bootstrap = %v, want bootstrap-mode refusal", err)
 	}
-	if _, err := d2.commitConfirmedAndApply(context.Background(), configstore.InternalCommitter(), 5, peerSyncNever); err != nil && (errors.Is(err, configstore.ErrResetHandoffDirty) || errors.Is(err, configstore.ErrResetHandoffRebootRequired) || strings.Contains(err.Error(), "bootstrap")) {
-		t.Fatalf("commit-confirmed authoring must pass gate+bootstrap, got %v", err)
+	if _, err := d2.commitConfirmedAndApply(context.Background(), configstore.InternalCommitter(), 5, peerSyncNever); err != nil {
+		t.Fatalf("commit-confirmed authoring must succeed (apply included): %v", err)
 	}
 	if got := freshStore.ActiveConfig().System.UserspaceDataplane.StateFile; got != fixed {
 		t.Fatalf("authored StateFile = %q, want the fixed path %q", got, fixed)
