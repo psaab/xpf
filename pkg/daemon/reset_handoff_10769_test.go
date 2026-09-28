@@ -842,8 +842,8 @@ func TestSweepHelperStateVerifiedRefusesReserved10769(t *testing.T) {
 			if !strings.Contains(err.Error(), "aliases reserved") || !strings.Contains(err.Error(), canonical) {
 				t.Fatalf("sweep error must name the reserved alias, got %v", err)
 			}
-			if !strings.Contains(err.Error(), "delete /etc/xpf/.reset-handoff") || !strings.Contains(err.Error(), "rerun the reset") {
-				t.Fatalf("sweep error must document the verify/delete-flag/commit/rerun recovery, got %v", err)
+			if !strings.Contains(err.Error(), "delete /etc/xpf/.reset-handoff") || !strings.Contains(err.Error(), "restart xpfd") || !strings.Contains(err.Error(), "commit-confirmed") {
+				t.Fatalf("sweep error must document the verify/delete/restart/commit-confirmed/rerun recovery, got %v", err)
 			}
 			if got, err := os.ReadFile(canonical); err != nil || string(got) != string(body) {
 				t.Fatalf("reserved canonical must survive byte-identical: %q err=%v", got, err)
@@ -932,8 +932,9 @@ func TestVerifyHelperStateErasedRefusesReserved10769(t *testing.T) {
 // RED on revert: reconcile over a flag recording a reserved helper path
 // must keep the handoff dirty — a dirty flag stays dirty and a clean
 // flag re-marks dirty — until the operator completes the manual
-// recovery (verify, delete the flag, commit a non-reserved state-file)
-// and reruns. The reserved file itself is never unlinked by the repair.
+// recovery (verify, delete the flag, restart xpfd, author clean via
+// commit-confirmed) and reruns. The reserved file itself is never
+// unlinked by the repair.
 func TestReconcileKeepsReservedHelperPathDirty10769(t *testing.T) {
 	setup := func(t *testing.T, dirty string) (string, string) {
 		t.Helper()
@@ -1258,35 +1259,32 @@ func TestShutdownRacePathlessFlagStaysGated10769(t *testing.T) {
 	})
 }
 
-// End-to-end proof for the SUPPORTED reserved-alias recovery (round-8):
-// in-band commit of the fix is structurally refused while dirty, and no
-// lineage-based path (rescue/rollback/confirm-rollback) can converge
-// since every one carries the same smuggled value - so the operator
-// verifies the reserved file, removes temp residue, deletes the flag
-// file, commits the fix in-band (gate open), and reruns the reset.
-// Phases: legacy-reserved ingress via tolerant SyncApply (real HA-sync
-// provenance) -> first wipe fails recording reserved -> in-band fix
-// refused (dead-end proof) -> manual verify/remove/delete -> in-band
-// commit promotes the fix -> rerun converges clean -> reboot sim clears
-// the gate. The fake wipes preserve the DB (production's real wipe
-// erases it, in which case the fix commit authors the same leaf onto
-// the empty candidate - the gate/delete/rerun mechanics pinned here
-// are identical).
+// End-to-end proof for the SUPPORTED reserved-alias recovery (round-8,
+// corrected round-9): the wipe is DESTRUCTIVE (.configdb + live config
+// removed) and the failed daemon keeps serving its stale in-memory
+// Store, so no commit on the still-running daemon can converge -
+// in-band paths are gate-refused, and a direct store commit fails
+// persistence (ENOENT: NewDB is the sole .configdb creator) or would
+// resurrect the whole stale tree. The supported sequence is: verify the
+// reserved file + remove temp residue, delete the flag file, RESTART
+// xpfd (fresh Store/DB), author a clean non-reserved config via the
+// bootstrap-supported commit-confirmed path (plain commit refuses in
+// bootstrap), rerun the reset. Phases below model a real wipe and drive
+// the actual startup path + rerun (no synthetic flag ops except the
+// standard reboot-id simulation).
 func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	isolateHandoffFlag(t)
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
 	root := t.TempDir()
-	gateDir := filepath.Join(root, "gates")
-	if err := os.MkdirAll(gateDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	reserved := filepath.Join(gateDir, ".reset-handoff")
+	gateRoot := t.TempDir()
+	fixedRoot := t.TempDir()
+	reserved := filepath.Join(gateRoot, ".reset-handoff")
 	gateBytes := []byte("gate bytes must survive")
 	if err := os.WriteFile(reserved, gateBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fixed := filepath.Join(root, "run", "xpf", "userspace-dp.json")
+	fixed := filepath.Join(fixedRoot, "run", "xpf", "userspace-dp.json")
 	dbPath := filepath.Join(root, "xpf.conf")
 	store, err := configstore.New(dbPath)
 	if err != nil {
@@ -1319,13 +1317,27 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	if joined := strings.Join(synced.Warnings, "\n"); !strings.Contains(joined, "state-file") {
 		t.Fatalf("tolerant ingress must warn about the state-file, got %q", joined)
 	}
-	// Phase 1: the first wipe fails recording the reserved path.
+	// Phase 1: the first wipe is destructive and fails recording reserved.
 	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1)}
 	straggler := reserved + ".4250000000.1.tmp"
 	if err := os.WriteFile(straggler, []byte(`{"orphan":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	firstWipe := func() error {
+		// Model production's destructive wipe: every entry under the
+		// config root goes (.configdb SSOT, live config, rollback
+		// slots, journal). Helper paths live outside the config root
+		// in production, so they are untouched here; PENDING is
+		// recorded after.
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+				return err
+			}
+		}
 		boot, err := configstore.CurrentBootID()
 		if err != nil {
 			return err
@@ -1337,6 +1349,12 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "aliases reserved") {
 		t.Fatalf("wipe error must name the reserved alias, got %v", err)
 	}
+	if _, err := os.Lstat(filepath.Join(root, ".configdb")); !os.IsNotExist(err) {
+		t.Fatalf("real wipe must remove the config DB: %v", err)
+	}
+	if got := store.ActiveConfig().System.UserspaceDataplane.StateFile; got != reserved {
+		t.Fatalf("failed daemon keeps its stale in-memory Store, active = %q", got)
+	}
 	if _, dirty, gotPath, present, err := configstore.ReadResetHandoff(); err != nil || !present || dirty == "" || gotPath != reserved {
 		t.Fatalf("failed wipe must leave dirty recording reserved: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
 	}
@@ -1346,7 +1364,10 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	if _, err := os.Lstat(straggler); !os.IsNotExist(err) {
 		t.Fatalf("failed wipe must still sweep temps beside the alias: %v", err)
 	}
-	// Phase 2: in-band fix refused while dirty (the dead end).
+	// Phase 2: no commit on the still-running daemon can converge. The
+	// in-band fix is gate-refused; a direct store commit fails
+	// persistence against the wiped DB (and would resurrect the whole
+	// stale tree if it could persist).
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}
@@ -1356,9 +1377,15 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	if _, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); !errors.Is(err, configstore.ErrResetHandoffDirty) {
 		t.Fatalf("in-band fix while dirty = %v, want incomplete", err)
 	}
-	if got := store.ActiveConfig().System.UserspaceDataplane.StateFile; got != reserved {
-		t.Fatalf("refused fix must promote nothing, active StateFile = %q", got)
+	if _, err := store.Commit(); err == nil {
+		t.Fatal("direct commit against the wiped DB must fail, got nil")
+	} else if !strings.Contains(err.Error(), "persist") {
+		t.Fatalf("direct commit must fail at persistence (ENOENT), got %v", err)
 	}
+	if got := store.ActiveConfig().System.UserspaceDataplane.StateFile; got != reserved {
+		t.Fatalf("failed fix attempts must promote nothing, active = %q", got)
+	}
+	store.ExitConfigure()
 	// Phase 3: manual recovery - verify, remove residue, delete the flag.
 	if got, err := os.ReadFile(reserved); err != nil || string(got) != string(gateBytes) {
 		t.Fatalf("operator must verify correct reserved contents first: %q err=%v", got, err)
@@ -1379,14 +1406,62 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	if err := configstore.CheckResetHandoff(); err != nil {
 		t.Fatalf("gate after manual flag deletion = %v, want open", err)
 	}
-	// Phase 4: the same in-band commit now promotes the fix.
-	if _, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); errors.Is(err, configstore.ErrResetHandoffDirty) || errors.Is(err, configstore.ErrResetHandoffRebootRequired) {
-		t.Fatalf("fix commit with the gate open must pass the handoff gate, got %v", err)
+	// Phase 4: restart into a fresh Store via the actual startup path.
+	// NewDB recreates the wiped .configdb; Load must take the genuine
+	// fresh branch (any surviving marker would fail loudly here, not
+	// silently import stale state).
+	freshStore, err := configstore.New(dbPath)
+	if err != nil {
+		t.Fatalf("restart must reconstruct the DB: %v", err)
 	}
-	if got := store.ActiveConfig().System.UserspaceDataplane.StateFile; got != fixed {
-		t.Fatalf("fix commit must promote the fixed path, active = %q", got)
+	if err := freshStore.Load(); err != nil {
+		t.Fatalf("restart must load fresh (no surviving markers): %v", err)
 	}
-	// Phase 5: rerun converges clean recording the fixed path.
+	if freshStore.ActiveConfig() != nil || freshStore.EverCommitted() {
+		t.Fatal("restarted store must have no active config and no history")
+	}
+	d2 := &Daemon{store: freshStore, applySem: semaphore.NewWeighted(1), opts: Options{ConfigFile: dbPath}}
+	failClosed, err := d2.loadAndBootstrapConfig()
+	if err != nil || failClosed {
+		t.Fatalf("startup path must take fresh boot, failClosed=%v err=%v", failClosed, err)
+	}
+	if !d2.inBootstrap() {
+		t.Fatal("restarted daemon with no config must enter bootstrap mode")
+	}
+	// Phase 5: author the clean config via commit-confirmed (plain
+	// commit refuses in bootstrap).
+	if err := freshStore.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	clean := "set system host-name recovered\nset system dataplane-type userspace\nset system dataplane state-file " + fixed + "\n"
+	if _, err := freshStore.LoadSet(clean); err != nil {
+		t.Fatalf("LoadSet clean: %v", err)
+	}
+	if _, err := d2.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); err == nil || !strings.Contains(err.Error(), "bootstrap") {
+		t.Fatalf("plain commit in bootstrap = %v, want bootstrap-mode refusal", err)
+	}
+	if _, err := d2.commitConfirmedAndApply(context.Background(), configstore.InternalCommitter(), 5, peerSyncNever); err != nil && (errors.Is(err, configstore.ErrResetHandoffDirty) || errors.Is(err, configstore.ErrResetHandoffRebootRequired) || strings.Contains(err.Error(), "bootstrap")) {
+		t.Fatalf("commit-confirmed authoring must pass gate+bootstrap, got %v", err)
+	}
+	if got := freshStore.ActiveConfig().System.UserspaceDataplane.StateFile; got != fixed {
+		t.Fatalf("authored StateFile = %q, want the fixed path %q", got, fixed)
+	}
+	if err := freshStore.ConfirmCommit(); err != nil {
+		t.Fatalf("confirm the authored window: %v", err)
+	}
+	// The authored config must be durable, not just in-memory: a fresh
+	// handle loads it back before the rerun wipes the root again.
+	durableStore, err := configstore.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := durableStore.Load(); err != nil {
+		t.Fatalf("authored config must load back: %v", err)
+	}
+	if got := durableStore.ActiveConfig().System.UserspaceDataplane.StateFile; got != fixed {
+		t.Fatalf("authored StateFile durable = %q, want %q", got, fixed)
+	}
+	// Phase 6: rerun converges clean recording the fixed path.
 	if err := os.MkdirAll(filepath.Dir(fixed), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -1394,13 +1469,27 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 		t.Fatal(err)
 	}
 	rerunWipe := func() error {
+		// Like production, the rerun wipes the config root again
+		// (including the freshly authored DB): a successful reset
+		// leaves no config behind. The fixed helper residue sits
+		// outside the config root, so only the post-verify sweep
+		// removes it.
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+				return err
+			}
+		}
 		boot, err := configstore.CurrentBootID()
 		if err != nil {
 			return err
 		}
-		return configstore.WriteResetHandoff(boot, configstore.ResetHandoffPending, dpuserspace.StateFilePathForConfig(store.ActiveConfig()))
+		return configstore.WriteResetHandoff(boot, configstore.ResetHandoffPending, dpuserspace.StateFilePathForConfig(freshStore.ActiveConfig()))
 	}
-	if err := d.factoryReset(context.Background(), rerunWipe); err != nil {
+	if err := d2.factoryReset(context.Background(), rerunWipe); err != nil {
 		t.Fatalf("rerun after the fix must converge: %v", err)
 	}
 	if _, dirty, gotPath, present, err := configstore.ReadResetHandoff(); err != nil || !present || dirty != "" || gotPath != fixed {
@@ -1412,22 +1501,25 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	if got, err := os.ReadFile(reserved); err != nil || string(got) != string(gateBytes) {
 		t.Fatalf("reserved file must survive the rerun byte-identical: %q err=%v", got, err)
 	}
-	// Phase 6: reboot simulation converges the gate on a fresh handle.
+	// Phase 7: reboot simulation converges the gate on a third handle.
+	// The successful reset left no config: the box is fresh, awaiting
+	// N+1 provisioning. Reconcile verifies the recorded fixed path is
+	// clean (residue would re-mark dirty) and clears the flag.
 	if err := configstore.WriteResetHandoff("other-boot", "", fixed); err != nil {
 		t.Fatal(err)
 	}
-	freshStore, err := configstore.New(dbPath)
+	thirdStore, err := configstore.New(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := freshStore.Load(); err != nil {
-		t.Fatalf("fresh handle must load the fixed DB: %v", err)
+	if err := thirdStore.Load(); err != nil {
+		t.Fatalf("third handle must load: %v", err)
 	}
-	if got := freshStore.ActiveConfig().System.UserspaceDataplane.StateFile; got != fixed {
-		t.Fatalf("fix must be durable across restart, active = %q", got)
+	if thirdStore.ActiveConfig() != nil || thirdStore.EverCommitted() {
+		t.Fatal("post-reset box must be fresh (no active, no history)")
 	}
-	d2 := &Daemon{store: freshStore, applySem: semaphore.NewWeighted(1)}
-	d2.reconcileResetHandoffAtBoot()
+	d3 := &Daemon{store: thirdStore, applySem: semaphore.NewWeighted(1)}
+	d3.reconcileResetHandoffAtBoot()
 	if _, err := os.Lstat(configstore.ResetHandoffPath); !os.IsNotExist(err) {
 		t.Fatalf("converged flag must be cleared: %v", err)
 	}

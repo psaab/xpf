@@ -24,12 +24,15 @@ import (
 // unlinked (unlinking it would delete a gate or identity file, the
 // original bypass), but the sweep FAILS CLOSED: exact-shape temps beside
 // it are still swept, then an error naming the reserved alias fails the
-// wipe and keeps the handoff dirty. Recovery is operator-side (in-band
-// commit is refused while dirty): verify the reserved file holds its
-// correct contents with no helper temps beside it, delete
-// /etc/xpf/.reset-handoff, commit a non-reserved system dataplane
-// state-file, and rerun the reset (the rerun records the fixed path);
-// then reboot as the clean flag requires.
+// wipe and keeps the handoff dirty. Recovery is operator-side: no commit
+// on the still-running daemon can converge (in-band paths are refused
+// while dirty; the wipe removed .configdb and the stale Store cannot
+// persist). Verify the reserved file holds its correct contents with no
+// helper temps beside it, delete /etc/xpf/.reset-handoff, restart xpfd
+// (fresh Store/DB), author a clean non-reserved system dataplane
+// state-file via commit-confirmed (plain commit refuses in bootstrap),
+// and rerun the reset (the rerun records the fixed path); then reboot
+// as the clean flag requires.
 // Symlinked or hardlinked canonicals fail closed before unlinking
 // (FactoryResetHardlinkError with the inode scan), retry-persistent.
 func sweepHelperStateVerified(path string) error {
@@ -46,7 +49,7 @@ func sweepHelperStateVerified(path string) error {
 	}
 	var errs []error
 	if skipCanonical {
-		errs = append(errs, fmt.Errorf("reset handoff: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); recovery: verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, commit a non-reserved system dataplane state-file, and rerun the reset", path))
+		errs = append(errs, fmt.Errorf("reset handoff: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); recovery: verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, restart xpfd, author a clean non-reserved system dataplane state-file via commit-confirmed, and rerun the reset", path))
 	}
 	// A missing state directory means no helper state was ever written
 	// here: nothing to remove, verify, or sync. A reserved alias still
@@ -124,13 +127,13 @@ const legacyHelperPathRecovery = "reset handoff flag records no helper path (nor
 // A reserved canonical FAILS verification: the sweep never unlinks gates
 // or identity, so erasure of that class is unprovable and the handoff
 // must stay dirty until the operator verifies the reserved file, deletes
-// the flag file, commits a non-reserved state-file, and reruns the
-// reset (in-band commit is refused while dirty). Temp siblings are
+// the flag file, restarts xpfd, authors a clean non-reserved state-file
+// via commit-confirmed, and reruns the reset. Temp siblings are
 // still checked and joined below.
 func verifyHelperStateErased(path string) error {
 	var errs []error
 	if config.HelperStatePathTouchesReserved(path) {
-		errs = append(errs, fmt.Errorf("helper state path %s aliases reserved reset-gate/identity state: helper-state erasure cannot be verified (the reserved file is never unlinked); recovery: verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, commit a non-reserved system dataplane state-file, and rerun the reset", path))
+		errs = append(errs, fmt.Errorf("helper state path %s aliases reserved reset-gate/identity state: helper-state erasure cannot be verified (the reserved file is never unlinked); recovery: verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, restart xpfd, author a clean non-reserved system dataplane state-file via commit-confirmed, and rerun the reset", path))
 	} else if _, err := os.Lstat(path); err == nil {
 		errs = append(errs, fmt.Errorf("helper state %s present", path))
 	} else if !os.IsNotExist(err) {
