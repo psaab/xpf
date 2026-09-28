@@ -814,12 +814,15 @@ func TestStartupRepairsBeforeBootstrap10769(t *testing.T) {
 }
 
 // RED on revert: a helper sweep that unlinks a reserved alias deletes a
-// reset gate or identity file instead of helper state. The canonical must
-// survive byte-identical while exact-shape temps beside it are still
-// swept. Gate basenames exercise the predicate hermetically (exact
-// literals are pinned in the config validator table); the skip path is
-// shared for every reserved shape.
-func TestSweepHelperStateVerifiedSkipsReserved10769(t *testing.T) {
+// reset gate or identity file instead of helper state — but a sweep that
+// skips the unlink AND reports clean lets the handoff clear with helper
+// residue unproven (fail-open). The canonical must survive byte-identical
+// while exact-shape temps beside it are still swept, AND the sweep must
+// fail naming the reserved alias, even with temps already clean. Gate
+// basenames exercise the predicate hermetically (exact literals are
+// pinned in the config validator table); the skip path is shared for
+// every reserved shape.
+func TestSweepHelperStateVerifiedRefusesReserved10769(t *testing.T) {
 	for _, base := range []string{".reset-handoff", ".day0-config-applied"} {
 		t.Run(base, func(t *testing.T) {
 			dir := t.TempDir()
@@ -832,8 +835,15 @@ func TestSweepHelperStateVerifiedSkipsReserved10769(t *testing.T) {
 			if err := os.WriteFile(temp, []byte(`{"orphan":true}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := sweepHelperStateVerified(canonical); err != nil {
-				t.Fatalf("reserved skip must succeed: %v", err)
+			err := sweepHelperStateVerified(canonical)
+			if err == nil {
+				t.Fatal("reserved-alias sweep must fail closed, got nil")
+			}
+			if !strings.Contains(err.Error(), "aliases reserved") || !strings.Contains(err.Error(), canonical) {
+				t.Fatalf("sweep error must name the reserved alias, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "rerun the reset") {
+				t.Fatalf("sweep error must document the fix-and-rerun recovery, got %v", err)
 			}
 			if got, err := os.ReadFile(canonical); err != nil || string(got) != string(body) {
 				t.Fatalf("reserved canonical must survive byte-identical: %q err=%v", got, err)
@@ -843,6 +853,18 @@ func TestSweepHelperStateVerifiedSkipsReserved10769(t *testing.T) {
 			}
 		})
 	}
+	t.Run("clean temps still fail", func(t *testing.T) {
+		dir := t.TempDir()
+		canonical := filepath.Join(dir, ".reset-handoff")
+		if err := os.WriteFile(canonical, []byte("gate bytes must survive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := sweepHelperStateVerified(canonical); err == nil {
+			t.Fatal("reserved alias with clean temps must fail the sweep, got nil")
+		} else if !strings.Contains(err.Error(), "aliases reserved") {
+			t.Fatalf("sweep error must name the reserved alias, got %v", err)
+		}
+	})
 	t.Run("symlink refused", func(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(dir, "real-state.json")
@@ -861,6 +883,75 @@ func TestSweepHelperStateVerifiedSkipsReserved10769(t *testing.T) {
 				t.Fatalf("refusal must remove nothing, %s stat err=%v", path, err)
 			}
 		}
+	})
+}
+
+// RED on revert: a boot-repair verifier that treats a reserved canonical
+// as expected-present clears the handoff with helper residue unproven.
+// Verification must fail naming the alias, even with temps clean.
+func TestVerifyHelperStateErasedRefusesReserved10769(t *testing.T) {
+	dir := t.TempDir()
+	canonical := filepath.Join(dir, ".reset-handoff")
+	if err := os.WriteFile(canonical, []byte("gate bytes must survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyHelperStateErased(canonical); err == nil {
+		t.Fatal("reserved alias with clean temps must fail boot-repair verification, got nil")
+	} else if !strings.Contains(err.Error(), "cannot be verified") || !strings.Contains(err.Error(), canonical) {
+		t.Fatalf("verify error must name the unverifiable alias, got %v", err)
+	}
+	if got, err := os.ReadFile(canonical); err != nil || string(got) != "gate bytes must survive" {
+		t.Fatalf("verification must remove nothing: %q err=%v", got, err)
+	}
+}
+
+// RED on revert: reconcile over a flag recording a reserved helper path
+// must keep the handoff dirty — a dirty flag stays dirty and a clean
+// flag re-marks dirty — until the operator fixes state-file and reruns.
+// The reserved file itself is never unlinked by the repair.
+func TestReconcileKeepsReservedHelperPathDirty10769(t *testing.T) {
+	setup := func(t *testing.T, dirty string) (string, string) {
+		t.Helper()
+		isolateHandoffFlag(t)
+		isolateFactoryResetOwnershipPaths(t)
+		isolateFactoryResetIdentityPaths(t)
+		dir := t.TempDir()
+		canonical := filepath.Join(dir, ".reset-handoff")
+		if err := os.WriteFile(canonical, []byte("gate bytes must survive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := configstore.WriteResetHandoff("other-boot", dirty, canonical); err != nil {
+			t.Fatal(err)
+		}
+		return canonical, dir
+	}
+	assertStillGated := func(t *testing.T, canonical string) {
+		t.Helper()
+		_, dirty, gotPath, present, err := configstore.ReadResetHandoff()
+		if err != nil || !present || dirty == "" || gotPath != canonical {
+			t.Fatalf("flag must stay dirty recording the reserved path: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+		}
+		if !strings.Contains(dirty, "aliases reserved") && !strings.Contains(dirty, "cannot be verified") {
+			t.Fatalf("re-marked reason must name the reserved alias failure, got %q", dirty)
+		}
+		if got, err := os.ReadFile(canonical); err != nil || string(got) != "gate bytes must survive" {
+			t.Fatalf("repair must never unlink the reserved file: %q err=%v", got, err)
+		}
+		if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+			t.Fatalf("gate = %v, want incomplete", err)
+		}
+	}
+	t.Run("dirty stays dirty", func(t *testing.T) {
+		canonical, _ := setup(t, configstore.ResetHandoffReasonHelper+": residue")
+		d := &Daemon{store: handoffTestStore(t)}
+		d.reconcileResetHandoffAtBoot()
+		assertStillGated(t, canonical)
+	})
+	t.Run("clean re-marks dirty", func(t *testing.T) {
+		canonical, _ := setup(t, "")
+		d := &Daemon{store: handoffTestStore(t)}
+		d.reconcileResetHandoffAtBoot()
+		assertStillGated(t, canonical)
 	})
 }
 

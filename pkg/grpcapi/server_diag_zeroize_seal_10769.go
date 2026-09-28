@@ -316,8 +316,12 @@ var zeroizeStopKeaAndEraseLeases = func() error {
 // not running in the offline contexts that take it. Live writers' temps,
 // removal/durability failures, or anything still present afterwards is an
 // error. A canonical aliasing reserved reset-gate/identity state is never
-// unlinked (skipped with a loud warning; exact-shape temps beside it are
-// still swept). Symlinked or hardlinked canonicals fail closed before
+// unlinked (unlinking it would delete a gate or identity file, the
+// original bypass), but the sweep FAILS CLOSED: exact-shape temps beside
+// it are still swept, then an error naming the reserved alias fails the
+// wipe. Recovery is operator-side: fix `system dataplane state-file` to a
+// non-reserved path, commit, and rerun the reset (the rerun records the
+// fixed path). Symlinked or hardlinked canonicals fail closed before
 // unlinking, retry-persistent. Callers pass a non-empty path only.
 func zeroizeEraseHelperState(path string) error {
 	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
@@ -328,6 +332,9 @@ func zeroizeEraseHelperState(path string) error {
 		slog.Warn("zeroize: helper path aliases reserved state; skipping canonical removal, sweeping temps only", "path", path)
 	}
 	var errs []error
+	if skipCanonical {
+		errs = append(errs, fmt.Errorf("zeroize: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); fix system dataplane state-file to a non-reserved path, commit, and rerun the reset", path))
+	}
 	var canonicalErr error
 	if !skipCanonical {
 		info, lerr := os.Lstat(path)
@@ -388,8 +395,9 @@ func zeroizeEraseHelperState(path string) error {
 // behind. The helper class is covered only for ungated completions with
 // a known path: gated wipes skip it (the helper is live until the daemon
 // stops it post-wipe, and the daemon sweep owns the path), legacy
-// direct wipes name no path to check, and a reserved canonical is
-// expected present (temps still checked). The daemon post-verify remains
+// direct wipes name no path to check, and a reserved canonical FAILS
+// (the sweep never unlinks gates or identity, so erasure is unprovable;
+// temps still checked). The daemon post-verify remains
 // as defense-in-depth behind it.
 func zeroizeFinalEraseVerification(completion zeroizeCompletion) error {
 	var errs []error
@@ -425,15 +433,15 @@ func zeroizeFinalEraseVerification(completion zeroizeCompletion) error {
 	}
 	if !completion.pending && completion.helperPath != "" {
 		helperPath := completion.helperPath
-		// A reserved canonical is expected present (the sweep never
-		// unlinks gates or identity); only its temp siblings are
-		// checked then.
-		if !config.HelperStatePathTouchesReserved(helperPath) {
-			if _, err := os.Lstat(helperPath); err == nil {
-				errs = append(errs, fmt.Errorf("zeroize: helper state %s present at final verification", helperPath))
-			} else if !os.IsNotExist(err) {
-				errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", helperPath, err))
-			}
+		// A reserved canonical FAILS: the sweep never unlinks gates or
+		// identity, so helper-state erasure is unprovable from this
+		// path. Temp siblings are still checked below.
+		if config.HelperStatePathTouchesReserved(helperPath) {
+			errs = append(errs, fmt.Errorf("zeroize: helper state path %s aliases reserved reset-gate/identity state: helper-state erasure cannot be verified (the reserved file is never unlinked); fix system dataplane state-file to a non-reserved path, commit, and rerun the reset", helperPath))
+		} else if _, err := os.Lstat(helperPath); err == nil {
+			errs = append(errs, fmt.Errorf("zeroize: helper state %s present at final verification", helperPath))
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", helperPath, err))
 		}
 		if dead, live, err := dpuserspace.ListStaleStateTempsIncludingLegacy(helperPath); err != nil {
 			errs = append(errs, err)

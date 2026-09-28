@@ -1574,6 +1574,24 @@ func TestFinalEraseVerificationCoversHelperOnUngated10769(t *testing.T) {
 	}
 }
 
+// RED on revert: final verification that treats a reserved helper
+// canonical as expected-present completes the wipe with helper residue
+// unproven. A reserved alias with clean temps must fail.
+func TestFinalEraseVerificationRefusesReservedHelper10769(t *testing.T) {
+	root := t.TempDir()
+	isolateZeroizeSealPaths(t, root)
+	helperFile := filepath.Join(root, "custom", ".reset-handoff")
+	mustWriteFile(t, helperFile, []byte("gate bytes must survive"))
+	if err := zeroizeFinalEraseVerification(zeroizeCompletion{pending: false, helperPath: helperFile}); err == nil {
+		t.Fatal("reserved helper alias with clean temps must fail final verification, got nil")
+	} else if !strings.Contains(err.Error(), "cannot be verified") || !strings.Contains(err.Error(), helperFile) {
+		t.Fatalf("final verification error must name the unverifiable alias, got %v", err)
+	}
+	if got, err := os.ReadFile(helperFile); err != nil || string(got) != "gate bytes must survive" {
+		t.Fatalf("verification must remove nothing: %q err=%v", got, err)
+	}
+}
+
 // ownProcStartTuple reads this test process's pid + start time (field 22
 // of /proc/self/stat) so a temp can be staged as a LIVE writer's
 // in-flight file. ok is false without /proc.
@@ -1727,9 +1745,10 @@ func TestZeroizeRemovePathRefusesHardlinkBeforeUnlink10769(t *testing.T) {
 }
 
 // The ungated helper sweep must never unlink a reserved alias (the wipe
-// would delete its own gates/identity); symlinks fail closed. Mirrors
-// the daemon sweep contract.
-func TestZeroizeEraseHelperStateSkipsReserved10769(t *testing.T) {
+// would delete its own gates/identity), but it must FAIL naming the
+// alias: a skip that reports clean lets the wipe complete with helper
+// residue unproven. Mirrors the daemon sweep contract.
+func TestZeroizeEraseHelperStateRefusesReserved10769(t *testing.T) {
 	for _, base := range []string{".reset-handoff", ".day0-config-applied"} {
 		t.Run(base, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1738,8 +1757,15 @@ func TestZeroizeEraseHelperStateSkipsReserved10769(t *testing.T) {
 			mustWriteFile(t, canonical, body)
 			temp := canonical + ".4250000000.1.tmp"
 			mustWriteFile(t, temp, []byte(`{"orphan":true}`))
-			if err := zeroizeEraseHelperState(canonical); err != nil {
-				t.Fatalf("reserved skip must succeed: %v", err)
+			err := zeroizeEraseHelperState(canonical)
+			if err == nil {
+				t.Fatal("reserved-alias sweep must fail closed, got nil")
+			}
+			if !strings.Contains(err.Error(), "aliases reserved") || !strings.Contains(err.Error(), canonical) {
+				t.Fatalf("sweep error must name the reserved alias, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "rerun the reset") {
+				t.Fatalf("sweep error must document the fix-and-rerun recovery, got %v", err)
 			}
 			if got, err := os.ReadFile(canonical); err != nil || string(got) != string(body) {
 				t.Fatalf("reserved canonical must survive byte-identical: %q err=%v", got, err)
@@ -1749,6 +1775,16 @@ func TestZeroizeEraseHelperStateSkipsReserved10769(t *testing.T) {
 			}
 		})
 	}
+	t.Run("clean temps still fail", func(t *testing.T) {
+		dir := t.TempDir()
+		canonical := filepath.Join(dir, ".reset-handoff")
+		mustWriteFile(t, canonical, []byte("gate bytes must survive"))
+		if err := zeroizeEraseHelperState(canonical); err == nil {
+			t.Fatal("reserved alias with clean temps must fail the sweep, got nil")
+		} else if !strings.Contains(err.Error(), "aliases reserved") {
+			t.Fatalf("sweep error must name the reserved alias, got %v", err)
+		}
+	})
 	t.Run("symlink refused", func(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(dir, "real-state.json")
