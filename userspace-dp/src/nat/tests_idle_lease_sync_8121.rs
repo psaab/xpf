@@ -1711,6 +1711,76 @@ fn clear_fence_survives_expired_same_key_replacement_10784() {
     assert!(allocator.debug_live().persistent_by_source.is_empty());
 }
 
+/// Address-only local replacement expiry must preserve the same pre-clear
+/// import fence as PAT replacement expiry (#10784).
+#[test]
+fn clear_fence_survives_expired_address_only_replacement_10784() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(addrs.len(), 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
+    let original = allocator
+        .reserve_address_only_persistent(
+            client,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            PersistentNatPermit::AnyRemoteHost,
+            min_timeout_ns,
+            1_000_000_000,
+            NatHolder::Untracked,
+        )
+        .expect("a fresh address-only lease must succeed");
+    assert!(allocator.release_flow(
+        client,
+        original,
+        2_000_000_000,
+        NatHolder::Untracked
+    ));
+    let stale = allocator
+        .export_idle_leases(2_500_000_000)
+        .into_iter()
+        .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
+        .expect("control: pre-clear address-only lease must be captured");
+    assert!(stale.address_only);
+
+    assert_eq!(allocator.clear_persistent_leases(3_000_000_000), 1);
+    let key = client.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let replacement = allocator
+        .reserve_address_only_persistent(
+            client,
+            PoolAddressFamily::V4(&addrs),
+            0,
+            false,
+            PersistentNatPermit::AnyRemoteHost,
+            min_timeout_ns,
+            3_100_000_000,
+            NatHolder::Untracked,
+        )
+        .expect("fresh local address-only replacement must succeed");
+    assert!(allocator.release_flow(
+        client,
+        replacement,
+        3_200_000_000,
+        NatHolder::Untracked
+    ));
+    assert_eq!(allocator.debug_gc_expired_chunked(5_000_000_000, 8), 1);
+
+    let live = allocator.debug_live();
+    assert!(!live.persistent_by_source.contains_key(&key));
+    assert_eq!(
+        live.revoked_persistent.get(&key).copied(),
+        Some(63_000_000_000),
+        "address-only replacement must preserve the original clear deadline"
+    );
+    drop(live);
+    assert_eq!(
+        allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), min_timeout_ns, 5_100_000_000),
+        IdleLeaseImport::SkippedExisting
+    );
+    assert!(allocator.debug_live().persistent_by_source.is_empty());
+}
+
 /// A clear on an empty receiver still fences a pre-clear batch for an unknown
 /// key; per-key tombstones alone cannot cover import ordering (#10784).
 #[test]
