@@ -200,8 +200,8 @@ func TestInputBarrierEnsurePreservesLiveEnforcement10751(t *testing.T) {
 	if installs != 0 {
 		t.Fatal("ensure must not install when enforcement is live despite the missing marker")
 	}
-	if !strings.Contains(stdout.String(), "enforcement is live") || stderr.Len() != 0 {
-		t.Fatalf("stdout=%q stderr=%q, want live-enforcement no-op note on stdout only", stdout.String(), stderr.String())
+	if !strings.Contains(stdout.String(), "enforcement is live") || !strings.Contains(stdout.String(), "next pre-apply") || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q, want live-enforcement no-op note with stale caveat on stdout only", stdout.String(), stderr.String())
 	}
 }
 

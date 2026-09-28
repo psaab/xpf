@@ -40,6 +40,11 @@
 # already stands. Only a truly absent barrier installs (fail closed).
 # A manual `input-barrier close` still force-installs the global form
 # pre-handoff (post-handoff it refuses; override with --force explicitly).
+# Residual (accepted): an operator nftables.service restart/flush plus a
+# MANUAL ensure/reload in the pre-handoff window trusts a stale
+# enforcing-shaped table until the daemon's next pre-apply guard install
+# (operator action, like a post-handoff flush; the boot-unit path is
+# unaffected — inactive installs).
 #
 # Fresh installs: this unit is enabled --no-start (upgrades must never inject
 # a DROP chain into a live armed daemon). The postinst starts it live on

@@ -110,7 +110,7 @@ func runInputBarrierEnsure(stdout, stderr io.Writer) int {
 		return 0
 	}
 	if drops, err := hostInboundDropsInput(); err == nil && drops && hostInboundFirstApplied() && xpfdUnitActive() {
-		fmt.Fprintln(stdout, "host-inbound enforcement is live; nothing to do")
+		fmt.Fprintln(stdout, "host-inbound enforcement is live; nothing to do (if stale, the daemon's next pre-apply converges the guard)")
 		return 0
 	}
 	if enforcing, err := earlyInputBarrierEnforcing(); err == nil && enforcing {
