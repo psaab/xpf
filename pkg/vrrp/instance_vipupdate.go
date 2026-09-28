@@ -127,7 +127,8 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	if len(added) == 0 && len(removed) == 0 {
 		// Equivalent-address spelling or order-only change: adopt the
 		// requested representation without netlink churn or a new epoch.
-		// Preserve pending first-frame work across a raw spelling change.
+		// Keep canonical pending identities bounded to current membership;
+		// a spelling-only change does not strand in-flight completions.
 		vi.pendingGARPForSetLocked(want, nil, false)
 		vi.mu.Lock()
 		if !vipsEqual(old, want) {

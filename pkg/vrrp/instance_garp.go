@@ -166,8 +166,9 @@ func (vi *vrrpInstance) sendGARP(force bool) {
 	}
 }
 
-// addPendingGARPVIPsLocked records VIPs whose synchronous initial frame has not
-// yet been confirmed. The caller holds vipMu.
+// addPendingGARPVIPsLocked records canonical VIP identities whose synchronous
+// initial frame has not yet been confirmed. Canonical keys let an in-flight
+// sender clear its entry after a spelling-only update. The caller holds vipMu.
 func (vi *vrrpInstance) addPendingGARPVIPsLocked(vips []string) {
 	if len(vips) == 0 {
 		return
@@ -176,41 +177,39 @@ func (vi *vrrpInstance) addPendingGARPVIPsLocked(vips []string) {
 		vi.pendingGARPVIPs = make(map[string]struct{}, len(vips))
 	}
 	for _, vip := range vips {
-		vi.pendingGARPVIPs[vip] = struct{}{}
+		vi.pendingGARPVIPs[canonicalVIPIdentity(vip)] = struct{}{}
 	}
 }
 
-// markGARPAnnouncedLocked clears one VIP after its synchronous first frame
-// succeeds while its captured ownership and membership token is still current.
-// The caller holds vipMu.
+// markGARPAnnouncedLocked clears one canonical VIP identity after its
+// synchronous first frame succeeds while its captured ownership and membership
+// token is still current. The caller holds vipMu.
 func (vi *vrrpInstance) markGARPAnnouncedLocked(vip string) {
-	delete(vi.pendingGARPVIPs, vip)
+	delete(vi.pendingGARPVIPs, canonicalVIPIdentity(vip))
 	if len(vi.pendingGARPVIPs) == 0 {
 		vi.pendingGARPVIPs = nil
 	}
 }
 
-// pendingGARPForSetLocked drops no-longer-current VIPs, retains current
-// unannounced VIPs, and optionally adds successful new VIPs. The result follows
-// current-set order for the next bounded send pass. The caller holds vipMu.
+// pendingGARPForSetLocked drops no-longer-current canonical identities,
+// retains current unannounced ones, and optionally adds successful new VIPs.
+// The result renders current-set spellings in order for the next bounded send
+// pass. The caller holds vipMu.
 func (vi *vrrpInstance) pendingGARPForSetLocked(current, added []string, includeAdded bool) []string {
 	if len(vi.pendingGARPVIPs) == 0 && (!includeAdded || len(added) == 0) {
 		vi.pendingGARPVIPs = nil
 		return nil
 	}
-	pendingIDs := make(map[string]struct{}, len(vi.pendingGARPVIPs))
-	for vip := range vi.pendingGARPVIPs {
-		pendingIDs[canonicalVIPIdentity(vip)] = struct{}{}
-	}
 	next := make(map[string]struct{}, len(vi.pendingGARPVIPs)+len(added))
 	for _, vip := range current {
-		if _, pending := pendingIDs[canonicalVIPIdentity(vip)]; pending {
-			next[vip] = struct{}{}
+		id := canonicalVIPIdentity(vip)
+		if _, pending := vi.pendingGARPVIPs[id]; pending {
+			next[id] = struct{}{}
 		}
 	}
 	if includeAdded {
 		for _, vip := range added {
-			next[vip] = struct{}{}
+			next[canonicalVIPIdentity(vip)] = struct{}{}
 		}
 	}
 	if len(next) == 0 {
@@ -220,7 +219,7 @@ func (vi *vrrpInstance) pendingGARPForSetLocked(current, added []string, include
 	vi.pendingGARPVIPs = next
 	announcements := make([]string, 0, len(next))
 	for _, vip := range current {
-		if _, pending := next[vip]; pending {
+		if _, pending := next[canonicalVIPIdentity(vip)]; pending {
 			announcements = append(announcements, vip)
 		}
 	}

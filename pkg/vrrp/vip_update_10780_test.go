@@ -994,6 +994,189 @@ func TestVIPSpellingAliasKeepsKernelAddressAndMasterReady(t *testing.T) {
 	}
 }
 
+// TestVIPSpellingAliasDuringReservedBurstDoesNotStrandPending pins the race
+// where an old raw snapshot finishes after a spelling-only adoption. Pending
+// state must use parsed identity so the old snapshot's successful completion
+// cannot strand work under the new spelling.
+func TestVIPSpellingAliasDuringReservedBurstDoesNotStrandPending(t *testing.T) {
+	const iface = "reth10780-pending-alias"
+	const vipCount = 16
+	vips := make([]string, vipCount)
+	for i := range vips {
+		vips[i] = fmt.Sprintf("2001:db8:1078::%x/64", i+1)
+	}
+	aliasVips := append([]string(nil), vips...)
+	aliasVips[vipCount-1] = "2001:0DB8:1078:0:0:0:0:10/64"
+	if canonicalVIPIdentity(aliasVips[vipCount-1]) != canonicalVIPIdentity(vips[vipCount-1]) {
+		t.Fatalf("test alias does not identify the final VIP: %s vs %s",
+			aliasVips[vipCount-1], vips[vipCount-1])
+	}
+	addedVIP := "2001:db8:1078::11/64"
+
+	vi := newInstance(Instance{
+		Interface: iface, GroupID: 101, Priority: 200, GARPCount: 1,
+		VirtualAddresses: vips,
+	}, &net.Interface{Name: iface, Index: 10786}, make(chan VRRPEvent, 32), nil)
+	vi.setState(StateMaster)
+	vi.garpEpoch.Store(1)
+	installFakeVIPNetlink(vi)
+	vi.addrsFn = func() ([]net.Addr, error) { return nil, nil }
+
+	oldSend, oldGARP, oldNA, oldProbe := sendPacketFn, garpBurstFn, naBurstFn, arpProbeFn
+	t.Cleanup(func() {
+		sendPacketFn = oldSend
+		garpBurstFn, naBurstFn, arpProbeFn = oldGARP, oldNA, oldProbe
+	})
+	sendPacketFn = func(*vrrpInstance, *VRRPPacket, bool) error { return nil }
+	var sentMu sync.Mutex
+	var sent []string
+	var burstCalls atomic.Int32
+	fifteenEntered, releaseFifteen := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFifteen) }) }
+	burst := func(_ string, ip net.IP, _ int, _ cluster.BurstStillValid) error {
+		call := burstCalls.Add(1)
+		sentMu.Lock()
+		sent = append(sent, ip.String())
+		sentMu.Unlock()
+		if call == 15 {
+			close(fifteenEntered)
+			<-releaseFifteen
+		}
+		return nil
+	}
+	garpBurstFn, naBurstFn = burst, burst
+	arpProbeFn = func(string, net.IP, net.IP) error { return nil }
+
+	sendDone := make(chan struct{})
+	aliasDone := make(chan error, 1)
+	addDone := make(chan error, 1)
+	sendStarted, aliasStarted, addStarted := false, false, false
+	sendFinished, aliasFinished, addFinished := false, false, false
+	defer func() {
+		release()
+		if sendStarted && !sendFinished {
+			select {
+			case <-sendDone:
+			case <-time.After(time.Second):
+				t.Error("old-snapshot sender did not stop during cleanup")
+			}
+		}
+		if aliasStarted && !aliasFinished {
+			select {
+			case <-aliasDone:
+			case <-time.After(time.Second):
+				t.Error("spelling update did not stop during cleanup")
+			}
+		}
+		if addStarted && !addFinished {
+			select {
+			case <-addDone:
+			case <-time.After(time.Second):
+				t.Error("addition update did not stop during cleanup")
+			}
+		}
+	}()
+
+	sendStarted = true
+	go func() {
+		vi.sendGARP(false)
+		close(sendDone)
+	}()
+	select {
+	case <-fifteenEntered:
+	case <-time.After(time.Second):
+		t.Fatal("old snapshot did not reach VIP 15")
+	}
+	sentMu.Lock()
+	beforeAlias := append([]string(nil), sent...)
+	sentMu.Unlock()
+	if len(beforeAlias) != 15 {
+		t.Fatalf("frames before alias update = %d, want 15: %v", len(beforeAlias), beforeAlias)
+	}
+
+	aliasStarted = true
+	go func() { aliasDone <- vi.updateVIPs(aliasVips) }()
+	stack := make([]byte, 1<<20)
+	parkDeadline := time.Now().Add(time.Second)
+	for !goroutineWaitingOnVIPMu(vi, "updateVIPs", stack) &&
+		time.Now().Before(parkDeadline) {
+		runtime.Gosched()
+	}
+	if !goroutineWaitingOnVIPMu(vi, "updateVIPs", stack) {
+		release()
+		t.Fatalf("spelling update did not park on vipMu during frame 15:\n%s",
+			stack[:runtime.Stack(stack, true)])
+	}
+	time.Sleep(10 * time.Millisecond)
+	if !goroutineWaitingOnVIPMu(vi, "updateVIPs", stack) {
+		release()
+		t.Fatal("spelling update stopped waiting before frame 15 was released")
+	}
+	release()
+	select {
+	case err := <-aliasDone:
+		aliasFinished = true
+		if err != nil {
+			t.Fatalf("spelling-only update: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("spelling-only update did not finish")
+	}
+	select {
+	case <-sendDone:
+		sendFinished = true
+	case <-time.After(time.Second):
+		t.Fatal("old-snapshot sender did not finish after spelling adoption")
+	}
+
+	vi.vipMu.Lock()
+	pendingAfterOldBurst := len(vi.pendingGARPVIPs)
+	vi.vipMu.Unlock()
+	if pendingAfterOldBurst != 0 {
+		t.Errorf("pending VIP identities after successful old snapshot = %d, want 0",
+			pendingAfterOldBurst)
+	}
+
+	wantAfterAdd := append(append([]string(nil), aliasVips...), addedVIP)
+	addStarted = true
+	go func() { addDone <- vi.updateVIPs(wantAfterAdd) }()
+	select {
+	case err := <-addDone:
+		addFinished = true
+		if err != nil {
+			t.Fatalf("unrelated VIP addition after alias completion: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unrelated VIP addition did not finish")
+	}
+
+	lastIP, _, _ := net.ParseCIDR(aliasVips[vipCount-1])
+	addedIP, _, _ := net.ParseCIDR(addedVIP)
+	sentMu.Lock()
+	gotSent := append([]string(nil), sent...)
+	sentMu.Unlock()
+	counts := make(map[string]int, len(gotSent))
+	for _, ip := range gotSent {
+		counts[ip]++
+	}
+	if counts[lastIP.String()] != 1 {
+		t.Fatalf("aliased survivor first-frame count = %d, want 1; sent=%v",
+			counts[lastIP.String()], gotSent)
+	}
+	if counts[addedIP.String()] != 1 || len(gotSent) != vipCount+1 {
+		t.Fatalf("addition announcement was not bounded: new=%d total=%d sent=%v",
+			counts[addedIP.String()], len(gotSent), gotSent)
+	}
+	vi.vipMu.Lock()
+	pendingAfterAdd := len(vi.pendingGARPVIPs)
+	vi.vipMu.Unlock()
+	if pendingAfterAdd != 0 {
+		t.Fatalf("pending VIP identities after successful add announcement = %d, want 0",
+			pendingAfterAdd)
+	}
+}
+
 func TestVIPMembershipRemovalPreservesUnsentSurvivorAnnouncement(t *testing.T) {
 	for _, isIPv6 := range []bool{false, true} {
 		family := "ipv4"
