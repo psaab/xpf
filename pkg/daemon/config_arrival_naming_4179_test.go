@@ -93,8 +93,8 @@ func TestConfigArrivalRenamingHANode(t *testing.T) {
 	d.emptyHANamingPending.Store(true)
 
 	cfg := standaloneConfig()
-	if !d.maybeReapplyConfigArrivalNaming(cfg) {
-		t.Fatal("expected config-arrival re-naming for the first accepted standalone config")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(cfg); err != nil || !ran {
+		t.Fatalf("expected config-arrival re-naming for the first accepted standalone config: ran=%v err=%v", ran, err)
 	}
 	if len(st.calls) != 1 {
 		t.Fatalf("expected exactly one naming re-run, got %d", len(st.calls))
@@ -105,8 +105,8 @@ func TestConfigArrivalRenamingHANode(t *testing.T) {
 	}
 
 	// One-shot: a second apply of the same config must NOT re-name.
-	if d.maybeReapplyConfigArrivalNaming(cfg) {
-		t.Fatal("config-arrival re-naming must be one-shot; second apply re-ran it")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(cfg); err != nil || ran {
+		t.Fatalf("config-arrival re-naming must be one-shot; second apply re-ran it: ran=%v err=%v", ran, err)
 	}
 	if len(st.calls) != 1 {
 		t.Fatalf("second apply re-ran naming (%d calls); must be one-shot", len(st.calls))
@@ -121,8 +121,8 @@ func TestConfigArrivalRenamingRejectsClusterConfig(t *testing.T) {
 	d := newStoreDaemon(t)
 	d.emptyHANamingPending.Store(true)
 
-	if d.maybeReapplyConfigArrivalNaming(clusterConfigNode1()) {
-		t.Fatal("cluster config cannot trigger config-arrival naming on a node without an HA runtime")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(clusterConfigNode1()); err != nil || ran {
+		t.Fatalf("cluster config cannot trigger config-arrival naming on a node without an HA runtime: ran=%v err=%v", ran, err)
 	}
 	if len(st.calls) != 0 {
 		t.Fatalf("cluster config must not re-run naming, got %d calls", len(st.calls))
@@ -150,8 +150,8 @@ func TestConfigArrivalRenamingRetriesOnFailure(t *testing.T) {
 	cfg := standaloneConfig()
 
 	// First apply: naming is attempted but errors → returns false, flag STAYS.
-	if d.maybeReapplyConfigArrivalNaming(cfg) {
-		t.Fatal("a failed naming attempt must not report success")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(cfg); err != nil || ran {
+		t.Fatalf("a failed naming attempt must not report success: ran=%v err=%v", ran, err)
 	}
 	if len(st.calls) != 1 {
 		t.Fatalf("first apply should have attempted naming once, got %d", len(st.calls))
@@ -162,8 +162,8 @@ func TestConfigArrivalRenamingRetriesOnFailure(t *testing.T) {
 
 	// Second apply: the stub now succeeds → naming re-runs and the flag is
 	// consumed.
-	if !d.maybeReapplyConfigArrivalNaming(cfg) {
-		t.Fatal("the second apply must retry naming after the first failed")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(cfg); err != nil || !ran {
+		t.Fatalf("the second apply must retry naming after the first failed: ran=%v err=%v", ran, err)
 	}
 	if len(st.calls) != 2 {
 		t.Fatalf("second apply should have retried naming, got %d total calls", len(st.calls))
@@ -173,8 +173,8 @@ func TestConfigArrivalRenamingRetriesOnFailure(t *testing.T) {
 	}
 
 	// Third apply: one-shot — no further re-naming.
-	if d.maybeReapplyConfigArrivalNaming(cfg) {
-		t.Fatal("naming must not re-run after a successful retry consumed the flag")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(cfg); err != nil || ran {
+		t.Fatalf("naming must not re-run after a successful retry consumed the flag: ran=%v err=%v", ran, err)
 	}
 	if len(st.calls) != 2 {
 		t.Fatalf("no further naming expected after success, got %d calls", len(st.calls))
@@ -191,16 +191,16 @@ func TestConfigArrivalRenamingEmptyConfigDoesNotConsumeFlag(t *testing.T) {
 	d.emptyHANamingPending.Store(true)
 
 	empty := &config.Config{}
-	if d.maybeReapplyConfigArrivalNaming(empty) {
-		t.Fatal("an empty config must not trigger config-arrival re-naming")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(empty); err != nil || ran {
+		t.Fatalf("an empty config must not trigger config-arrival re-naming: ran=%v err=%v", ran, err)
 	}
 	if len(st.calls) != 0 {
 		t.Fatalf("empty config must not re-run naming, got %d calls", len(st.calls))
 	}
 
 	// The flag survived: a non-empty accepted standalone config still triggers naming.
-	if !d.maybeReapplyConfigArrivalNaming(standaloneConfig()) {
-		t.Fatal("the flag must survive an empty config so a later standalone config re-runs naming")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(standaloneConfig()); err != nil || !ran {
+		t.Fatalf("the flag must survive an empty config so a later standalone config re-runs naming: ran=%v err=%v", ran, err)
 	}
 	if len(st.calls) != 1 {
 		t.Fatalf("standalone config must re-run naming after the empty one, got %d calls", len(st.calls))
@@ -213,10 +213,104 @@ func TestConfigArrivalRenamingSkippedWhenNotPending(t *testing.T) {
 	st := withNamingStub(t)
 	d := newStoreDaemon(t) // emptyHANamingPending defaults false
 
-	if d.maybeReapplyConfigArrivalNaming(standaloneConfig()) {
-		t.Fatal("a node that did not boot config-less must not re-run naming")
+	if ran, err := d.maybeReapplyConfigArrivalNaming(standaloneConfig()); err != nil || ran {
+		t.Fatalf("a node that did not boot config-less must not re-run naming: ran=%v err=%v", ran, err)
 	}
 	if len(st.calls) != 0 {
 		t.Fatalf("no naming re-run expected on a normal node, got %d calls", len(st.calls))
+	}
+}
+
+// refuseBarrierForNamingTest10751 scripts a REAL barrier-gate refusal through
+// applyStartupNamingPolicy: the barrier reads absent and the guard reinstall
+// fails while nftables is usable, so the policy returns
+// errEarlyInputProtectionRefused before any rename is attempted.
+func refuseBarrierForNamingTest10751(t *testing.T) {
+	t.Helper()
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	nftInstaller = &fakeNftInstaller{
+		earlyInputBarrierPresent:         func() (bool, error) { return false, nil },
+		earlyInputBarrierLifelineInstall: func([]string) error { return errors.New("guard reinstall failed") },
+	}
+}
+
+// TestConfigArrivalNamingPropagatesBarrierRefusal10751: a barrier-gate
+// refusal (concurrent flush between the pre-apply check and this
+// re-attestation) returns the sentinel so the caller aborts the apply —
+// while the one-shot flag STAYS SET for retry and no rename runs.
+// RED on revert: swallowing the refusal returns (false, nil).
+func TestConfigArrivalNamingPropagatesBarrierRefusal10751(t *testing.T) {
+	st := withNamingStub(t)
+	refuseBarrierForNamingTest10751(t)
+	d := newStoreDaemon(t)
+	d.emptyHANamingPending.Store(true)
+
+	ran, err := d.maybeReapplyConfigArrivalNaming(standaloneConfig())
+	if ran {
+		t.Fatal("refused naming must not report success")
+	}
+	if !errors.Is(err, errEarlyInputProtectionRefused) {
+		t.Fatalf("refused naming err = %v, want errEarlyInputProtectionRefused", err)
+	}
+	if !d.emptyHANamingPending.Load() {
+		t.Fatal("the flag must STAY SET after a refusal so the next apply retries")
+	}
+	if len(st.calls) != 0 {
+		t.Fatalf("refusal must fire pre-mutation, got %d rename calls", len(st.calls))
+	}
+}
+
+// TestBootstrapExitAbortsTakeoverOnBarrierRefusal10751: the first-apply
+// bootstrap exit aborts with bootstrap mode RE-SUPPRESSED (nothing
+// mutated), so a retry re-attempts takeover instead of reconciling onto
+// untaken interfaces. Healing the barrier then lets the retry converge.
+func TestBootstrapExitAbortsTakeoverOnBarrierRefusal10751(t *testing.T) {
+	st := withNamingStub(t)
+	refuseBarrierForNamingTest10751(t)
+	d := newStoreDaemon(t)
+	d.bootstrapMode.Store(true)
+
+	if err := d.maybeExitBootstrapOnFirstConfig(standaloneConfig()); !errors.Is(err, errEarlyInputProtectionRefused) {
+		t.Fatalf("bootstrap exit err = %v, want errEarlyInputProtectionRefused", err)
+	}
+	if !d.inBootstrap() {
+		t.Fatal("a refused bootstrap exit must stay in bootstrap mode for retry")
+	}
+	if len(st.calls) != 0 {
+		t.Fatalf("refusal must fire before any rename, got %d rename calls", len(st.calls))
+	}
+
+	// Heal: the barrier is present again, so the retry takes over.
+	nftInstaller = &fakeNftInstaller{}
+	if err := d.maybeExitBootstrapOnFirstConfig(standaloneConfig()); err != nil {
+		t.Fatalf("retry after healing err = %v, want nil", err)
+	}
+	if d.inBootstrap() {
+		t.Fatal("the retry must exit bootstrap mode")
+	}
+	if len(st.calls) != 1 {
+		t.Fatalf("retry should have run naming once, got %d calls", len(st.calls))
+	}
+}
+
+// TestBootstrapExitContinuesOnTransientNamingError10751 pins that ONLY the
+// barrier refusal aborts: a transient rename failure keeps the historical
+// warn-and-continue (exit proceeds, nil error).
+func TestBootstrapExitContinuesOnTransientNamingError10751(t *testing.T) {
+	st := withNamingStub(t)
+	st.failNext = 1
+	st.failErr = errors.New("transient NIC enumeration failure")
+	d := newStoreDaemon(t)
+	d.bootstrapMode.Store(true)
+
+	if err := d.maybeExitBootstrapOnFirstConfig(standaloneConfig()); err != nil {
+		t.Fatalf("transient naming failure err = %v, want nil (historical warn-and-continue)", err)
+	}
+	if d.inBootstrap() {
+		t.Fatal("a transient naming failure must not hold the daemon in bootstrap")
+	}
+	if len(st.calls) != 1 {
+		t.Fatalf("expected one attempted rename, got %d calls", len(st.calls))
 	}
 }

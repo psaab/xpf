@@ -173,30 +173,59 @@ func (d *Daemon) applyStartupNamingForConfig(cfg *config.Config) error {
 // next accepted config apply retries. Otherwise a single transient error would
 // strand the node on its boot-time names. The retry is bounded to once per
 // config apply, not a hot loop. Both caller paths run under d.applySem, so
-// applies are serialized and the success path cannot double-run.
-func (d *Daemon) maybeReapplyConfigArrivalNaming(cfg *config.Config) bool {
+// applies are serialized and the success path cannot double-run. A barrier-
+// gate refusal (errEarlyInputProtectionRefused) additionally RETURNS the
+// error so the caller aborts the apply (#10751 R4-3); all other failures
+// keep the historical warn-and-continue with a nil error.
+func (d *Daemon) maybeReapplyConfigArrivalNaming(cfg *config.Config) (bool, error) {
 	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
-		return false
+		return false, nil
 	}
 	if cfg.Chassis.Cluster != nil {
-		return false
+		return false, nil
 	}
 	if !d.emptyHANamingPending.Load() {
-		return false
+		return false, nil
 	}
 	slog.Info("config-arrival interface naming: a config-less HA node received its first " +
 		"non-empty standalone config; re-running startup naming with the config's settings")
 	if err := d.applyStartupNamingForConfig(cfg); err != nil {
+		if errors.Is(err, errEarlyInputProtectionRefused) {
+			// #10751 R4-3: the barrier gate refused link activation (a
+			// concurrent flush between the pre-apply check and this
+			// re-attestation). The flag STAYS SET for retry AND the
+			// refusal propagates: the caller aborts the apply before
+			// any link/VRF/dataplane mutation.
+			return false, err
+		}
 		// Leave the flag SET so the next accepted config apply retries — a
 		// transient enumeration/netlink error must not permanently strand this
 		// node on its boot-time names.
 		slog.Warn("config-arrival interface naming failed; will retry on the next config apply",
 			"err", err)
-		return false
+		return false, nil
 	}
 	// Consume the one-shot flag only now that naming succeeded.
 	d.emptyHANamingPending.Store(false)
-	return true
+	return true, nil
+}
+
+// maybeExitBootstrapOnFirstConfig leaves bootstrap mode and runs the one-time
+// startup takeover on the first non-empty config apply (#1922 Item 2). A
+// barrier-gate refusal re-suppresses bootstrap (nothing mutated: the refusal
+// fires pre-mutation inside the naming policy, and the flag flip is the only
+// prior mutation) and aborts the apply with the refusal, so the retry
+// re-attempts takeover instead of reconciling onto untaken interfaces.
+func (d *Daemon) maybeExitBootstrapOnFirstConfig(cfg *config.Config) error {
+	if !d.inBootstrap() || cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
+		return nil
+	}
+	d.exitBootstrapMode("first non-empty config applied")
+	if err := d.runBootstrapExitStartup(cfg); err != nil {
+		d.bootstrapMode.Store(true)
+		return err
+	}
+	return nil
 }
 
 // runBootstrapExitStartup performs the one-time startup TAKEOVER steps that
@@ -206,9 +235,9 @@ func (d *Daemon) maybeReapplyConfigArrivalNaming(cfg *config.Config) bool {
 // holds it) and strictly BEFORE the reconcile that wires the config onto
 // these subsystems. It mirrors the boot block in Run; bootstrap exit is
 // one-way, so this runs at most once.
-func (d *Daemon) runBootstrapExitStartup(cfg *config.Config) {
+func (d *Daemon) runBootstrapExitStartup(cfg *config.Config) error {
 	if d.opts.NoDataplane {
-		return
+		return nil
 	}
 
 	nodeID, _, _, _, _ := namingParamsFromConfig(cfg)
@@ -221,6 +250,12 @@ func (d *Daemon) runBootstrapExitStartup(cfg *config.Config) {
 	// day-0 bare metal claims every NIC positionally before the map ever
 	// applies.
 	if err := d.applyStartupNamingForConfig(cfg); err != nil {
+		// #10751 R4-3: a barrier-gate refusal aborts the takeover BEFORE
+		// forwarding/dataplane/VRF/link mutations. Anything else keeps its
+		// historical warn-and-continue.
+		if errors.Is(err, errEarlyInputProtectionRefused) {
+			return err
+		}
 		slog.Warn("bootstrap exit: interface naming failed", "err", err)
 	}
 
@@ -232,6 +267,7 @@ func (d *Daemon) runBootstrapExitStartup(cfg *config.Config) {
 	// constructed at boot (C1) but never started in bootstrap mode.
 	d.armBootstrapExitDataplane(nodeID)
 	slog.Info("bootstrap exit: startup takeover complete; applying first config")
+	return nil
 }
 
 // armBootstrapExitDataplane arms the runtime dataplane on bootstrap exit:
