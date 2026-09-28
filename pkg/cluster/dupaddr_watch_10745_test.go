@@ -385,3 +385,59 @@ func TestDuplicateIdentityReplayDoesNotSurviveWatcherReplacement_10745(t *testin
 		t.Fatalf("live duplicate in the current tenure produced %d warnings, want 2", got)
 	}
 }
+
+// TestDuplicateIdentityReplayCacheIsBounded_10745 pins the BEACON-01 fix: a
+// deterministic burst of unique correctly-signed matching beacons cannot grow
+// the cache past its cap, and entries expire without any further traffic.
+func TestDuplicateIdentityReplayCacheIsBounded_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+	w := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, beaconTestInstance(t))
+	now := time.Now()
+	foreign := beaconTestInstance(t)
+	const burst = duplicateIdentityReplayCap + 1000
+	for i := range burst {
+		frame, err := marshalDuplicateIdentityBeacon(beaconTestCluster, beaconTestNode,
+			[]byte(beaconTestPSK), foreign, now)
+		if err != nil {
+			t.Fatalf("sign beacon %d: %v", i, err)
+		}
+		w.handleBeacon(frame, now)
+	}
+	if got := mgr.beaconReplay.len(); got > duplicateIdentityReplayCap {
+		t.Fatalf("cache holds %d entries after a %d-burst, want at most %d",
+			got, burst, duplicateIdentityReplayCap)
+	}
+	// Traffic-independent expiry: sweep with no further packets reclaims all.
+	mgr.beaconReplay.sweep(now.Add(10 * time.Minute))
+	if got := mgr.beaconReplay.len(); got != 0 {
+		t.Fatalf("cache holds %d entries after an idle sweep, want 0", got)
+	}
+}
+
+// TestDuplicateIdentitySkewedFutureNonceOutlivesReceipt_10745 pins the
+// BEACON-02 fix: a beacon stamped near the +30s future edge stays replayable
+// by timestamp long after receipt+30s, so its nonce must suppress replays
+// until the stamp itself expires — not until receipt+30s.
+func TestDuplicateIdentitySkewedFutureNonceOutlivesReceipt_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+	w := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, beaconTestInstance(t))
+	now := time.Now()
+	frame, err := marshalDuplicateIdentityBeacon(beaconTestCluster, beaconTestNode,
+		[]byte(beaconTestPSK), beaconTestInstance(t), now.Add(29*time.Second))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	w.handleBeacon(frame, now)
+	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
+		t.Fatalf("first delivery produced %d warnings, want 1", got)
+	}
+	// Past receipt+30s, the stamp is still fresh (delta ~2s) — the exact
+	// packet must still be recognised as a replay, not a new duplicate.
+	mgr.mu.Lock()
+	mgr.lastDupNodeIDWarn = time.Time{}
+	mgr.mu.Unlock()
+	w.handleBeacon(frame, now.Add(31*time.Second))
+	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
+		t.Fatalf("replay of a still-fresh skewed beacon produced %d warnings, want 1", got)
+	}
+}

@@ -336,7 +336,13 @@ func prepareDuplicateIdentityWatcher(mgr *Manager, iface, localAddr, vrfDevice s
 	return newDuplicateIdentityWatcher(mgr, iface, listen, send, broadcast, interval, instance)
 }
 
-// start launches both loops after a watcher has been published in Manager.
+// duplicateIdentityReplaySweepInterval paces the watcher's replay-cache sweep
+// loop. Entries live at most MaxAge past the later of receipt and stamp (60s
+// worst case under full future skew), so a 5s sweep keeps dead entries' memory
+// negligible without per-packet prune work.
+const duplicateIdentityReplaySweepInterval = 5 * time.Second
+
+// start launches every loop after a watcher has been published in Manager.
 func (w *duplicateIdentityWatcher) start() {
 	if w.listen != nil {
 		w.wg.Add(1)
@@ -346,8 +352,26 @@ func (w *duplicateIdentityWatcher) start() {
 		w.wg.Add(1)
 		go w.sendLoop()
 	}
+	w.wg.Add(1)
+	go w.sweepLoop()
 	slog.Debug("cluster: authenticated duplicate-identity watcher started",
 		"iface", w.iface, "broadcast", w.broadcast)
+}
+
+// sweepLoop expires replay-cache entries on a timer, so dead entries are
+// reclaimed even when no further beacons arrive (traffic-independent expiry).
+func (w *duplicateIdentityWatcher) sweepLoop() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(duplicateIdentityReplaySweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-w.stopCh:
+			return
+		case now := <-ticker.C:
+			w.mgr.beaconReplay.sweep(now)
+		}
+	}
 }
 
 // stop tears down both sockets before joining, unblocking a read parked in the
