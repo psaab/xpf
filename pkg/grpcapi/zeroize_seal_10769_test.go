@@ -1785,6 +1785,19 @@ func TestZeroizeEraseHelperStateRefusesReserved10769(t *testing.T) {
 			t.Fatalf("sweep error must name the reserved alias, got %v", err)
 		}
 	})
+	t.Run("missing parent still fails", func(t *testing.T) {
+		dir := t.TempDir()
+		parent := filepath.Join(dir, "no-such-dir")
+		canonical := filepath.Join(parent, ".reset-handoff")
+		if err := zeroizeEraseHelperState(canonical); err == nil {
+			t.Fatal("reserved alias with a missing parent must fail the sweep, got nil")
+		} else if !strings.Contains(err.Error(), "aliases reserved") {
+			t.Fatalf("sweep error must name the reserved alias, got %v", err)
+		}
+		if _, serr := os.Lstat(parent); !os.IsNotExist(serr) {
+			t.Fatalf("failed sweep must create nothing: %v", serr)
+		}
+	})
 	t.Run("symlink refused", func(t *testing.T) {
 		dir := t.TempDir()
 		target := filepath.Join(dir, "real-state.json")

@@ -31,16 +31,13 @@ import (
 // Symlinked or hardlinked canonicals fail closed before unlinking
 // (FactoryResetHardlinkError with the inode scan), retry-persistent.
 func sweepHelperStateVerified(path string) error {
-	// A missing state directory means no helper state was ever written
-	// here: nothing to remove, verify, or sync.
-	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	// Reserved alias: a smuggled config named a gate or identity file.
-	// Never unlink it; the exact-shape temps beside it are still swept
-	// below. The sweep still FAILS (fail-closed error appended next, no
-	// early return): reporting clean over an unswept canonical would
-	// let the handoff clear with helper residue unproven.
+	// Reserved alias FIRST: a smuggled config named a gate or identity
+	// file. The missing-parent fast path below must not report clean
+	// over it — the daemon post-verify flips the handoff clean on a
+	// nil sweep alone, so the reserved failure surfaces here even
+	// when there is no directory to sweep beside it. Never unlink the
+	// reserved file; the exact-shape temps beside it are still swept
+	// below when the parent exists.
 	skipCanonical := config.HelperStatePathTouchesReserved(path)
 	if skipCanonical {
 		slog.Warn("reset handoff: helper path aliases reserved state; skipping canonical removal, sweeping temps only", "path", path)
@@ -48,6 +45,12 @@ func sweepHelperStateVerified(path string) error {
 	var errs []error
 	if skipCanonical {
 		errs = append(errs, fmt.Errorf("reset handoff: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); fix system dataplane state-file to a non-reserved path, commit, and rerun the reset", path))
+	}
+	// A missing state directory means no helper state was ever written
+	// here: nothing to remove, verify, or sync. A reserved alias still
+	// fails via the error above (joined, not nil).
+	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
+		return errors.Join(errs...)
 	}
 	var canonicalErr error
 	if !skipCanonical {

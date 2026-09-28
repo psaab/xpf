@@ -324,9 +324,10 @@ var zeroizeStopKeaAndEraseLeases = func() error {
 // fixed path). Symlinked or hardlinked canonicals fail closed before
 // unlinking, retry-persistent. Callers pass a non-empty path only.
 func zeroizeEraseHelperState(path string) error {
-	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+	// Reserved alias FIRST (mirrors the daemon sweep): the
+	// missing-parent fast path below must not report clean over a
+	// smuggled gate/identity alias, even when there is no directory
+	// to sweep beside it. Never unlink the reserved file.
 	skipCanonical := config.HelperStatePathTouchesReserved(path)
 	if skipCanonical {
 		slog.Warn("zeroize: helper path aliases reserved state; skipping canonical removal, sweeping temps only", "path", path)
@@ -334,6 +335,9 @@ func zeroizeEraseHelperState(path string) error {
 	var errs []error
 	if skipCanonical {
 		errs = append(errs, fmt.Errorf("zeroize: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); fix system dataplane state-file to a non-reserved path, commit, and rerun the reset", path))
+	}
+	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
+		return errors.Join(errs...)
 	}
 	var canonicalErr error
 	if !skipCanonical {
