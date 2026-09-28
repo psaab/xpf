@@ -33,6 +33,7 @@ patched_postrm() {
       -e "s#^INPUT_CLOSED_REQUIRES_LINK=.*#INPUT_CLOSED_REQUIRES_LINK=$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-input-closed.service#" \
       -e "s#^INPUT_CLOSED_XPFD_REQUIRES_LINK=.*#INPUT_CLOSED_XPFD_REQUIRES_LINK=$ROOT/etc/systemd/system/xpfd.service.requires/xpf-input-closed.service#" \
       -e "s#^TRANSIT_IPV4_SYSCTL=.*#TRANSIT_IPV4_SYSCTL=$ROOT/proc/sys/net/ipv4/ip_forward#" \
+      -e "s#^EARLY_INPUT_HANDOFF_MARKER=.*#EARLY_INPUT_HANDOFF_MARKER=$ROOT/run/xpf/early-input-handoff.done#" \
       -e "s#^TRANSIT_IPV6_SYSCTL=.*#TRANSIT_IPV6_SYSCTL=$ROOT/proc/sys/net/ipv6/conf/all/forwarding#" \
       -e "s#\\[ -d /run/systemd/system \\]#false#" \
       "$POSTRM" > "$ROOT/postrm"
@@ -573,6 +574,21 @@ scenario_oldbug_leaves_orphan_proves_nontautology() {
     [ -e "$DROPIN" ] || { echo "FAIL(non-tautology): old-bug postrm UNEXPECTEDLY removed the orphan drop-in — the rerun test would not discriminate the fix"; exit 1; }
 }
 
+# #10751: remove and purge must clear a stale handoff marker — per-boot
+# runtime state that would otherwise make a same-boot reinstall skip the
+# fresh-install barrier injection.
+scenario_remove_and_purge_clear_handoff_marker() {
+    build_hardened "1.0.0"
+    MARKER="$ROOT/run/xpf/early-input-handoff.done"
+    mkdir -p "$(dirname "$MARKER")"
+    : > "$MARKER"
+    "$ROOT/postrm" remove
+    [ ! -e "$MARKER" ] || { echo "FAIL: remove left a stale handoff marker"; exit 1; }
+    : > "$MARKER"
+    "$ROOT/postrm" purge
+    [ ! -e "$MARKER" ] || { echo "FAIL: purge left a stale handoff marker"; exit 1; }
+}
+
 run_scenario remove_keeps_versions
 run_scenario remove_barrier_failure_keeps_sysctls_closed
 run_scenario transit_failure_still_removes_input_barrier
@@ -582,6 +598,7 @@ run_scenario remove_keeps_foreign_dropin
 run_scenario remove_no_dropin_ok
 run_scenario prerm_scrubs_legacy_requires_before_stop
 run_scenario postrm_scrubs_legacy_requires_link
+run_scenario remove_and_purge_clear_handoff_marker
 run_scenario downgrade_to_prehardened
 run_scenario downgrade_skips_foreign_link
 run_scenario upgrade_to_hardened_noop

@@ -423,22 +423,25 @@ scenario_first_install_starts_barrier_without_daemon() {
     patched_postinst_barrier_live
     stub_systemctl 1
     PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst did not probe kernel barrier state"; exit 1; }
     grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG" || {
         echo "FAIL: postinst did not probe for a live daemon"; exit 1; }
     grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
         echo "FAIL: fresh install without a daemon did not start the input barrier live"; exit 1; }
 }
 
-scenario_first_install_skips_barrier_with_live_daemon() {
+scenario_first_install_injects_barrier_with_active_unhanded_daemon() {
     build_first_install_success
     patched_postinst_barrier_live
     stub_systemctl 0
     PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst did not consult kernel truth before the daemon probe"; exit 1; }
     grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG" || {
         echo "FAIL: postinst did not probe for a live daemon"; exit 1; }
-    if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
-        echo "FAIL: postinst injected the barrier despite a live daemon"; exit 1
-    fi
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: active-but-unhanded daemon did not get a barrier injection"; exit 1; }
 }
 
 stub_nft() {
@@ -457,7 +460,7 @@ EOF
 scenario_first_install_skips_barrier_when_table_live() {
     build_first_install_success
     patched_postinst_barrier_live
-    stub_systemctl 1
+    stub_systemctl 0
     NFT_TABLE_PRESENT=yes
     export NFT_TABLE_PRESENT
     PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
@@ -466,17 +469,26 @@ scenario_first_install_skips_barrier_when_table_live() {
     if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
         echo "FAIL: postinst injected the barrier despite a live table"; exit 1
     fi
+    if [ -e "$SYSTEMCTL_LOG" ] && grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst probed the daemon despite a live table (table must win first)"; exit 1
+    fi
 }
 
 scenario_first_install_skips_barrier_with_handoff_marker() {
     build_first_install_success
     patched_postinst_barrier_live
-    stub_systemctl 1
+    stub_systemctl 0
     mkdir -p "$ROOT/run/xpf"
     : > "$ROOT/run/xpf/early-input-handoff.done"
     PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
     if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
         echo "FAIL: postinst injected the barrier despite a handoff marker (raw-binary daemon?)"; exit 1
+    fi
+    if [ -e "$NFT_LOG" ] && grep -Fq 'nft list table' "$NFT_LOG"; then
+        echo "FAIL: postinst probed kernel despite a handoff marker (marker must win first)"; exit 1
+    fi
+    if [ -e "$SYSTEMCTL_LOG" ] && grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst probed the daemon despite a handoff marker"; exit 1
     fi
 }
 
@@ -496,7 +508,7 @@ run_scenario first_install_configure_empty_seeds_layout
 run_scenario first_install_seed_failure_falls_back_to_staged
 run_scenario first_install_killed_during_seed_keeps_launch_links
 run_scenario first_install_starts_barrier_without_daemon
-run_scenario first_install_skips_barrier_with_live_daemon
+run_scenario first_install_injects_barrier_with_active_unhanded_daemon
 run_scenario first_install_skips_barrier_when_table_live
 run_scenario first_install_skips_barrier_with_handoff_marker
 run_scenario upgrade_never_starts_barrier

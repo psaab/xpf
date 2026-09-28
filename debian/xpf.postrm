@@ -79,6 +79,11 @@ DROPIN=/etc/systemd/system/xpfd.service.d/10-xpf-version.conf
 TRANSIT_CLOSED_REQUIRES_LINK=/etc/systemd/system/systemd-networkd.service.requires/xpf-transit-closed.service
 INPUT_CLOSED_REQUIRES_LINK=/etc/systemd/system/systemd-networkd.service.requires/xpf-input-closed.service
 INPUT_CLOSED_XPFD_REQUIRES_LINK=/etc/systemd/system/xpfd.service.requires/xpf-input-closed.service
+# #10751 early-input handoff marker: per-boot runtime state recording a
+# completed first handoff (daemon/input_barrier_gate_10751.go). A
+# purge+reinstall in one boot would otherwise see a previous daemon's marker
+# and skip the fresh-install barrier injection.
+EARLY_INPUT_HANDOFF_MARKER=/run/xpf/early-input-handoff.done
 # apt source that the Tailscale-style install.sh writes (#1924, H-16). It is
 # NOT a dpkg payload file (install.sh writes it, not the package), so dpkg
 # never removes it — but its Signed-By keyring IS package payload
@@ -302,6 +307,10 @@ case "$1" in
         # removes them before the generated stop hook; this is an idempotent
         # postrm fallback so remove-without-purge cannot leave any dangling.
         remove_legacy_barrier_requires_links
+        # Clear a stale handoff marker (#10751): per-boot runtime state that
+        # must not survive package removal into a reinstall in the same boot.
+        # Best-effort (safe if absent).
+        rm -f "$EARLY_INPUT_HANDOFF_MARKER"
         # Purge the install.sh-written apt source (#1924, H-16): the keyring it
         # references is package payload dpkg is deleting now, so leaving the
         # source would break `apt update`. Marker-gated so operator sources are
