@@ -3776,21 +3776,19 @@ impl PortAllocator {
         if index_map.is_empty() {
             return out;
         }
-        // Snapshot the previous live set and RELEASE its lock before touching
-        // this allocator's, so the two mutexes are never held at once.
-        let carried: Vec<(SourceNatFlowKey, LiveAllocation)> = {
+        // Snapshot the previous live set and its clear fence, then RELEASE
+        // that lock before touching this allocator's. The per-key map is
+        // bounded by this allocator's flow capacity; expired entries are
+        // pruned, and omitted live entries are covered by a widened batch
+        // barrier below.
+        let fence_capacity = self.shared.max_tracked_flows;
+        let (carried, clear_fences, previous_clear_ns, overflow_fence_until_ns) = {
             let prev_live = prev.lock_live();
             // #7560: count the persistent leases this pass is about to drop,
             // split by whether their address survived the pool change. Done
             // under the SAME lock acquisition as the live-set snapshot so the
             // two counts describe one consistent instant, and so no second
             // lock/release is added to a config-apply path.
-            //
-            // This pass does not carry `persistent_by_source` (see the comment
-            // in the loop below). Before #7560 it did not count it either, so
-            // the operator-facing line reported carried translations and
-            // skipped address-only tokens while every lease vanished in a
-            // column that did not exist.
             for lease in prev_live.persistent_by_source.values() {
                 if index_map.contains_key(&lease.addr_index) {
                     out.dropped_persistent_on_retained += 1;
@@ -3798,13 +3796,90 @@ impl PortAllocator {
                     out.dropped_persistent_on_removed += 1;
                 }
             }
-            prev_live
-                .live_by_flow
-                .iter()
-                .filter(|(_, a)| index_map.contains_key(&a.addr_index))
-                .map(|(f, a)| (*f, *a))
-                .collect()
+            let mut fences =
+                Vec::with_capacity(prev_live.revoked_persistent.len().min(fence_capacity));
+            let mut overflow_until_ns = None;
+            for (key, raw_until_ns) in &prev_live.revoked_persistent {
+                // Active shells are not carried with the persistent lease map.
+                // Their permanent marker therefore becomes one finite replay
+                // horizon from this reseed; otherwise a missing shell could
+                // leave the key fenced forever.
+                let until_ns = if *raw_until_ns == ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS {
+                    now_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
+                } else {
+                    *raw_until_ns
+                };
+                if until_ns <= now_ns {
+                    continue;
+                }
+                if fences.len() < fence_capacity {
+                    fences.push((*key, until_ns));
+                } else {
+                    overflow_until_ns = Some(
+                        overflow_until_ns.map_or(until_ns, |old: u64| old.max(until_ns)),
+                    );
+                }
+            }
+            (
+                prev_live
+                    .live_by_flow
+                    .iter()
+                    .filter(|(_, a)| index_map.contains_key(&a.addr_index))
+                    .map(|(f, a)| (*f, *a))
+                    .collect::<Vec<_>>(),
+                fences,
+                prev_live.last_persistent_nat_clear_ns,
+                overflow_until_ns,
+            )
         };
+        let mut clear_ns = previous_clear_ns.filter(|clear_ns| {
+            now_ns < clear_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
+        });
+        if let Some(until_ns) = overflow_fence_until_ns {
+            let widened_clear_ns =
+                until_ns.saturating_sub(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
+            clear_ns = Some(clear_ns.map_or(widened_clear_ns, |old| old.max(widened_clear_ns)));
+        }
+        {
+            let mut live = self.lock_live();
+            live.revoked_persistent
+                .retain(|_, until_ns| *until_ns > now_ns);
+            for (key, until_ns) in clear_fences {
+                live.revoked_persistent
+                    .entry(key)
+                    .and_modify(|old| *old = (*old).max(until_ns))
+                    .or_insert(until_ns);
+            }
+            let existing_clear_ns = live.last_persistent_nat_clear_ns.filter(|clear_ns| {
+                now_ns < clear_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
+            });
+            let mut carried_clear_ns = match (existing_clear_ns, clear_ns) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (Some(clear_ns), None) | (None, Some(clear_ns)) => Some(clear_ns),
+                (None, None) => None,
+            };
+            let mut retained = 0;
+            let mut overflow_until_ns = None;
+            live.revoked_persistent.retain(|_, until_ns| {
+                if retained < fence_capacity {
+                    retained += 1;
+                    true
+                } else {
+                    overflow_until_ns = Some(
+                        overflow_until_ns.map_or(*until_ns, |old: u64| old.max(*until_ns)),
+                    );
+                    false
+                }
+            });
+            if let Some(until_ns) = overflow_until_ns {
+                let widened_clear_ns =
+                    until_ns.saturating_sub(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
+                carried_clear_ns = Some(
+                    carried_clear_ns.map_or(widened_clear_ns, |old| old.max(widened_clear_ns)),
+                );
+            }
+            live.last_persistent_nat_clear_ns = carried_clear_ns;
+        }
         for (flow, alloc) in carried {
             let Some(&new_index) = index_map.get(&alloc.addr_index) else {
                 continue;
@@ -3863,11 +3938,10 @@ impl PortAllocator {
                 continue;
             }
             // #7360: this pass calls the NON-persistent `reserve_flow`, which
-            // preserves today's behaviour bit-for-bit. It does not carry
-            // `persistent_by_source` either — the doc above records that as the
-            // same class of question as the address-only tokens, tracked
-            // separately (#6765) — so re-seeding a lease association would point
-            // the new allocation at a lease the NEW allocator does not hold.
+            // preserves today's allocation behaviour. It still does not carry
+            // `persistent_by_source` or attach this flow to a lease the NEW
+            // allocator does not hold. The independent clear-replay fence is
+            // carried above, so a stale import cannot restore the dropped pin.
             // #7360 rebuilds leases on the HA IMPORT path; it does not change
             // what a config-apply re-seed carries.
             //

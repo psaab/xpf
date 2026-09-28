@@ -10038,6 +10038,303 @@ fn persistent_pool_snapshot_7560(pool_addresses: Vec<&str>) -> SourceNATRuleSnap
     }
 }
 
+/// A pre-clear lease record generated from one-address state for config-reseed
+/// fence regressions (#10784 round 2).
+fn stale_persistent_record_10784() -> IdleLeaseRecord {
+    let addresses = ["203.0.113.10".parse().expect("pool address")];
+    let allocator = PortAllocator::new(1, 40000, 40009);
+    let flow = flow_key_8132("8.8.8.8", 53);
+    let translated = allocator
+        .allocate_translation(
+            flow,
+            PoolAddressFamily::V4(&addresses),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            300 * NS_PER_SEC,
+            NS_PER_SEC,
+            NatHolder::Untracked,
+        )
+        .expect("fixture: source allocator must mint a lease");
+    assert!(allocator.release_flow(
+        flow,
+        translated,
+        2 * NS_PER_SEC,
+        NatHolder::Untracked
+    ));
+    allocator
+        .export_idle_leases(3 * NS_PER_SEC)
+        .into_iter()
+        .next()
+        .expect("fixture: source allocator must export its idle lease")
+}
+
+/// An empty clear has no per-key tombstones. Its batch fence must survive the
+/// same-name retained-address rebuild, or a peer's unknown pre-clear key can
+/// be installed into the new allocator.
+#[test]
+fn empty_clear_batch_fence_survives_retained_pool_key_change_10784() {
+    let stale = stale_persistent_record_10784();
+    let before = persistent_pool_snapshot_7560(vec!["203.0.113.10", "203.0.113.11"]);
+    let rules = parse_source_nat_rules(&[before]);
+    assert_eq!(
+        rules[0]
+            .pool_allocator
+            .clear_persistent_leases(3 * NS_PER_SEC),
+        0,
+        "the target allocator is deliberately empty at clear time"
+    );
+
+    let mut changed = persistent_pool_snapshot_7560(vec!["203.0.113.10", "203.0.113.12"]);
+    changed.port_high = 40019;
+    let refreshed = parse_source_nat_rules_with_previous(
+        &[changed],
+        Some(&rules),
+        &crate::nat::NatCounterStore::default(),
+        4 * NS_PER_SEC,
+    );
+    let addresses: Vec<IpAddr> = refreshed[0]
+        .pool_addresses_v4
+        .iter()
+        .copied()
+        .map(IpAddr::V4)
+        .collect();
+    let key = flow_key_8132("8.8.8.8", 53)
+        .persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    assert_eq!(
+        refreshed[0].pool_allocator.import_idle_lease(
+            &stale,
+            &addresses,
+            refreshed[0].persistent_nat_timeout_ns,
+            5 * NS_PER_SEC,
+        ),
+        IdleLeaseImport::SkippedExisting,
+        "a peer record with an unknown key is still behind the carried batch fence"
+    );
+    assert!(
+        !refreshed[0]
+            .pool_allocator
+            .debug_live()
+            .persistent_by_source
+            .contains_key(&key)
+    );
+}
+
+/// A revoked active shell can outlive the batch horizon: completing the flow
+/// extends its per-key marker. That marker must survive allocator-key change
+/// after the original batch fence has expired.
+#[test]
+fn extended_per_key_clear_fence_survives_retained_pool_key_change_10784() {
+    let before = persistent_pool_snapshot_7560(vec!["203.0.113.10", "203.0.113.11"]);
+    let rules = parse_source_nat_rules(&[before]);
+    let rule = &rules[0];
+    let flow = flow_key_8132("8.8.8.8", 53);
+    let addresses = &rule.pool_addresses_v4;
+    let translated = rule
+        .pool_allocator
+        .allocate_translation(
+            flow,
+            PoolAddressFamily::V4(addresses),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            rule.persistent_nat_timeout_ns,
+            NS_PER_SEC,
+            NatHolder::Untracked,
+        )
+        .expect("fixture: rule allocator must mint a persistent flow");
+    assert!(rule.pool_allocator.release_flow(
+        flow,
+        translated,
+        2 * NS_PER_SEC,
+        NatHolder::Untracked
+    ));
+    let stale = rule.pool_allocator.export_idle_leases(3 * NS_PER_SEC);
+    assert_eq!(stale.len(), 1);
+    let reactivated = rule
+        .pool_allocator
+        .allocate_translation(
+            flow,
+            PoolAddressFamily::V4(addresses),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            rule.persistent_nat_timeout_ns,
+            4 * NS_PER_SEC,
+            NatHolder::Untracked,
+        )
+        .expect("fixture: the pre-clear lease must be active again");
+    assert_eq!(reactivated, translated);
+    assert_eq!(
+        rule.pool_allocator.clear_persistent_leases(5 * NS_PER_SEC),
+        1
+    );
+
+    // The active shell's release converts its permanent draining marker into a
+    // fresh 60-second per-key deadline at 66s. The batch fence from 5s expired
+    // at 65s, so only preserving the per-key deadline can reject this replay.
+    assert!(rule.pool_allocator.release_flow(
+        flow,
+        reactivated,
+        66 * NS_PER_SEC,
+        NatHolder::Untracked
+    ));
+    let mut changed = persistent_pool_snapshot_7560(vec!["203.0.113.10", "203.0.113.12"]);
+    changed.port_high = 40019;
+    let refreshed = parse_source_nat_rules_with_previous(
+        &[changed],
+        Some(&rules),
+        &crate::nat::NatCounterStore::default(),
+        67 * NS_PER_SEC,
+    );
+    let addresses: Vec<IpAddr> = refreshed[0]
+        .pool_addresses_v4
+        .iter()
+        .copied()
+        .map(IpAddr::V4)
+        .collect();
+    let key = flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    assert_eq!(
+        refreshed[0].pool_allocator.import_idle_lease(
+            &stale[0],
+            &addresses,
+            refreshed[0].persistent_nat_timeout_ns,
+            68 * NS_PER_SEC,
+        ),
+        IdleLeaseImport::SkippedExisting,
+        "the extended per-key fence must outlive the expired batch fence"
+    );
+    assert!(
+        !refreshed[0]
+            .pool_allocator
+            .debug_live()
+            .persistent_by_source
+            .contains_key(&key)
+    );
+}
+
+/// Fence transfer stays bounded by the rebuilt allocator's tracked-flow
+/// capacity even when several distinct keys were cleared in one horizon.
+#[test]
+fn retained_pool_reseed_bounds_clear_fence_map_10784() {
+    let before = persistent_pool_snapshot_7560(vec!["203.0.113.10", "203.0.113.11"]);
+    let rules = parse_source_nat_rules(&[before]);
+    let rule = &rules[0];
+    for index in 0..3u64 {
+        let mut flow = flow_key_8132("8.8.8.8", 53);
+        flow.src_port += index as u16;
+        let now_ns = (1 + index * 2) * NS_PER_SEC;
+        let translated = rule
+            .pool_allocator
+            .allocate_translation(
+                flow,
+                PoolAddressFamily::V4(&rule.pool_addresses_v4),
+                0,
+                false,
+                true,
+                PersistentNatPermit::AnyRemoteHost,
+                rule.persistent_nat_timeout_ns,
+                now_ns,
+                NatHolder::Untracked,
+            )
+            .expect("fixture: each distinct source must mint a persistent lease");
+        assert!(rule.pool_allocator.release_flow(
+            flow,
+            translated,
+            now_ns + NS_PER_SEC,
+            NatHolder::Untracked
+        ));
+        assert_eq!(
+            rule.pool_allocator
+                .clear_persistent_leases(now_ns + 2 * NS_PER_SEC),
+            1
+        );
+    }
+    assert_eq!(rule.pool_allocator.debug_live().revoked_persistent.len(), 3);
+
+    let mut changed = persistent_pool_snapshot_7560(vec!["203.0.113.10"]);
+    changed.port_high = 40000;
+    let refreshed = parse_source_nat_rules_with_previous(
+        &[changed],
+        Some(&rules),
+        &crate::nat::NatCounterStore::default(),
+        8 * NS_PER_SEC,
+    );
+    assert_eq!(
+        refreshed[0].pool_allocator.debug_live().revoked_persistent.len(),
+        1,
+        "a one-address, one-port allocator can retain only one per-key fence"
+    );
+}
+
+/// Fence transfer prunes markers that have already reached the replay-horizon
+/// deadline; records become admissible once the stated window has elapsed.
+#[test]
+fn retained_pool_reseed_prunes_expired_clear_fences_10784() {
+    let before = persistent_pool_snapshot_7560(vec!["203.0.113.10", "203.0.113.11"]);
+    let rules = parse_source_nat_rules(&[before]);
+    let rule = &rules[0];
+    let flow = flow_key_8132("8.8.8.8", 53);
+    let translated = rule
+        .pool_allocator
+        .allocate_translation(
+            flow,
+            PoolAddressFamily::V4(&rule.pool_addresses_v4),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            rule.persistent_nat_timeout_ns,
+            NS_PER_SEC,
+            NatHolder::Untracked,
+        )
+        .expect("fixture: rule allocator must mint a persistent lease");
+    assert!(rule.pool_allocator.release_flow(
+        flow,
+        translated,
+        2 * NS_PER_SEC,
+        NatHolder::Untracked
+    ));
+    let stale = rule.pool_allocator.export_idle_leases(2 * NS_PER_SEC);
+    assert_eq!(stale.len(), 1);
+    assert_eq!(
+        rule.pool_allocator.clear_persistent_leases(3 * NS_PER_SEC),
+        1
+    );
+
+    let mut changed = persistent_pool_snapshot_7560(vec!["203.0.113.10", "203.0.113.12"]);
+    changed.port_high = 40019;
+    let refreshed = parse_source_nat_rules_with_previous(
+        &[changed],
+        Some(&rules),
+        &crate::nat::NatCounterStore::default(),
+        64 * NS_PER_SEC,
+    );
+    assert!(refreshed[0]
+        .pool_allocator
+        .debug_live()
+        .revoked_persistent
+        .is_empty());
+    let addresses: Vec<IpAddr> = refreshed[0]
+        .pool_addresses_v4
+        .iter()
+        .copied()
+        .map(IpAddr::V4)
+        .collect();
+    assert_eq!(
+        refreshed[0].pool_allocator.import_idle_lease(
+            &stale[0],
+            &addresses,
+            refreshed[0].persistent_nat_timeout_ns,
+            64 * NS_PER_SEC,
+        ),
+        IdleLeaseImport::Installed
+    );
+}
+
 /// THE BINDER. Two leases, one on the address the pool RETAINS and one on the
 /// address it REMOVES, are both counted — in their own buckets.
 ///
