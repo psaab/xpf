@@ -247,6 +247,10 @@ type Manager struct {
 	// Heartbeat goroutines (nil when not started).
 	hbSender   *heartbeatSender
 	hbReceiver *heartbeatReceiver
+	// duplicateIdentityWatcher sends/receives authenticated identity beacons
+	// on the control-link broadcast address (#10745). It shares the heartbeat
+	// tenure and is stopped/replaced with the receiver.
+	duplicateIdentityWatcher *duplicateIdentityWatcher
 	// hbStartInWindowHook, when non-nil, is invoked by StartHeartbeat INSIDE the
 	// window the #7257 epoch guard covers — after the tenure is captured, before
 	// the sockets are created. Production leaves it nil; a test sets it to land a

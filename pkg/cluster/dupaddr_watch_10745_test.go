@@ -1,0 +1,343 @@
+package cluster
+
+import (
+	"crypto/rand"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/psaab/xpf/pkg/config"
+)
+
+const (
+	beaconTestCluster = 42
+	beaconTestNode    = 1
+	beaconTestPSK     = "a-test-control-link-psk-10745"
+	beaconTestPSKAlt  = "a-rotated-control-link-psk-10745"
+)
+
+func keyedBeaconManager(t *testing.T, signing, additional string) *Manager {
+	t.Helper()
+	m := NewManager(beaconTestNode, beaconTestCluster)
+	m.UpdateConfig(&config.ClusterConfig{
+		ControlLinkAuthKey:    config.Secret(signing),
+		ControlLinkAuthKeyAlt: config.Secret(additional),
+	})
+	if len(m.controlLinkAcceptedKeys()) == 0 {
+		t.Fatal("fixture broken: keyed manager accepted no keys")
+	}
+	return m
+}
+
+func beaconTestInstance(t *testing.T) [16]byte {
+	t.Helper()
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		t.Fatalf("instance id: %v", err)
+	}
+	return id
+}
+
+func beaconManagerWarned(m *Manager) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return !m.lastDupNodeIDWarn.IsZero()
+}
+
+func beaconHistoryCount(m *Manager, substr string) int {
+	n := 0
+	for _, ev := range m.history.Events(EventRG) {
+		if strings.Contains(ev.Message, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestDuplicateIdentityBeaconWarnsOnlyAfterAuth_10745 is the core #10745 cell:
+// a live duplicate peer's signed beacon warns, while every unauthenticated or
+// mismatched shape stays silent. The peer must remain absent throughout — the
+// beacon is a warning, never liveness.
+func TestDuplicateIdentityBeaconWarnsOnlyAfterAuth_10745(t *testing.T) {
+	foreign := beaconTestInstance(t)
+	now := time.Now()
+
+	sign := func(t *testing.T, cluster, node int, key string, instance [16]byte, at time.Time) []byte {
+		t.Helper()
+		frame, err := marshalDuplicateIdentityBeacon(cluster, node, []byte(key), instance, at)
+		if err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		return frame
+	}
+
+	t.Run("signed_duplicate_warns_without_touching_peer_state", func(t *testing.T) {
+		mgr := keyedBeaconManager(t, beaconTestPSK, "")
+		w := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, beaconTestInstance(t))
+		w.handleBeacon(sign(t, beaconTestCluster, beaconTestNode, beaconTestPSK, foreign, now), now)
+		if !beaconManagerWarned(mgr) {
+			t.Fatal("a signed same-cluster/same-node beacon from a foreign sender did not warn")
+		}
+		mgr.mu.RLock()
+		peerAlive, peerSeen := mgr.peerAlive, mgr.peerEverSeen
+		peerNodeID := mgr.peerNodeID
+		mgr.mu.RUnlock()
+		if peerAlive || peerSeen || peerNodeID != 0 {
+			t.Fatalf("beacon moved peer state: alive=%v everSeen=%v nodeID=%d — it must only warn",
+				peerAlive, peerSeen, peerNodeID)
+		}
+		if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
+			t.Fatalf("history entries = %d, want 1", got)
+		}
+	})
+
+	t.Run("forged_unsigned_and_mismatched_shapes_stay_silent", func(t *testing.T) {
+		mgr := keyedBeaconManager(t, beaconTestPSK, "")
+		w := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, beaconTestInstance(t))
+		valid := sign(t, beaconTestCluster, beaconTestNode, beaconTestPSK, foreign, now)
+
+		tampered := append([]byte(nil), valid...)
+		tampered[10] ^= 0xff // node-id byte: breaks the MAC, not just the value
+
+		cases := map[string][]byte{
+			"wrong_psk":      sign(t, beaconTestCluster, beaconTestNode, "another-psk-entirely", foreign, now),
+			"tampered":       tampered,
+			"stale":          sign(t, beaconTestCluster, beaconTestNode, beaconTestPSK, foreign, now.Add(-time.Minute)),
+			"far_future":     sign(t, beaconTestCluster, beaconTestNode, beaconTestPSK, foreign, now.Add(time.Hour)),
+			"other_node":     sign(t, beaconTestCluster, beaconTestNode+1, beaconTestPSK, foreign, now),
+			"other_cluster":  sign(t, beaconTestCluster+1, beaconTestNode, beaconTestPSK, foreign, now),
+			"truncated":      valid[:duplicateIdentityBeaconLen-1],
+			"garbage":        []byte("not a beacon at all, just udp payload"),
+			"empty":          nil,
+			"unsigned_shape": append([]byte(nil), valid[:51]...), // header+ids+nonce, MAC stripped
+		}
+		for name, frame := range cases {
+			w.handleBeacon(frame, now)
+			if beaconManagerWarned(mgr) {
+				t.Fatalf("%s produced the duplicate warning without a valid fresh MAC", name)
+			}
+		}
+		if got := beaconHistoryCount(mgr, "duplicate node-id"); got != 0 {
+			t.Fatalf("history entries = %d, want 0 after all-silent shapes", got)
+		}
+	})
+
+	t.Run("own_broadcast_loopback_does_not_warn", func(t *testing.T) {
+		mgr := keyedBeaconManager(t, beaconTestPSK, "")
+		self := beaconTestInstance(t)
+		w := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, self)
+		// Linux delivers our own broadcast back to the wildcard listener; the
+		// frame is VALID (we signed it) and must still not warn.
+		w.handleBeacon(sign(t, beaconTestCluster, beaconTestNode, beaconTestPSK, self, now), now)
+		if beaconManagerWarned(mgr) {
+			t.Fatal("the watcher's own looped-back beacon warned as a duplicate — " +
+				"every keyed heartbeat would self-report")
+		}
+	})
+
+	t.Run("rotation_key_beacon_still_warns", func(t *testing.T) {
+		mgr := keyedBeaconManager(t, beaconTestPSK, beaconTestPSKAlt)
+		w := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, beaconTestInstance(t))
+		w.handleBeacon(sign(t, beaconTestCluster, beaconTestNode, beaconTestPSKAlt, foreign, now), now)
+		if !beaconManagerWarned(mgr) {
+			t.Fatal("a beacon signed with the accepted rotation key did not warn — " +
+				"verifying against the signing key only reopens the #6630 outage window for this detector")
+		}
+	})
+
+	t.Run("exact_replay_warns_once", func(t *testing.T) {
+		mgr := keyedBeaconManager(t, beaconTestPSK, "")
+		w := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, beaconTestInstance(t))
+		frame := sign(t, beaconTestCluster, beaconTestNode, beaconTestPSK, foreign, now)
+		w.handleBeacon(frame, now)
+		if !beaconManagerWarned(mgr) {
+			t.Fatal("first delivery did not warn")
+		}
+		// Re-arm the limiter so a second warning COULD fire; the nonce cache
+		// must still suppress this exact packet.
+		mgr.mu.Lock()
+		mgr.lastDupNodeIDWarn = time.Time{}
+		mgr.mu.Unlock()
+		w.handleBeacon(frame, now.Add(time.Second))
+		if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
+			t.Fatalf("replayed packet produced %d history entries, want 1 — the nonce cache is not suppressing replays", got)
+		}
+	})
+}
+
+// TestDuplicateIdentityBeaconSharesWarningBudget_10745 pins that the beacon and
+// the heartbeat join point share one 30s duplicate-node-id budget: one
+// misconfiguration, one warning stream.
+func TestDuplicateIdentityBeaconSharesWarningBudget_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+	mgr.NoteDuplicateNodeIDHeartbeat()
+	mgr.NoteDuplicateNodeIDBeacon("em0")
+	if got := beaconHistoryCount(mgr, "duplicate node-id"); got != 1 {
+		t.Fatalf("history entries = %d after heartbeat+beacon warnings, want 1 (shared limiter)", got)
+	}
+
+	fresh := keyedBeaconManager(t, beaconTestPSK, "")
+	fresh.NoteDuplicateNodeIDBeacon("em0")
+	fresh.NoteDuplicateNodeIDHeartbeat()
+	if got := beaconHistoryCount(fresh, "duplicate node-id"); got != 1 {
+		t.Fatalf("history entries = %d after beacon+heartbeat warnings, want 1 (shared limiter)", got)
+	}
+}
+
+// TestDuplicateIdentityBroadcastAddr_10745 pins the broadcast derivation,
+// including the shapes that must skip the detector.
+func TestDuplicateIdentityBroadcastAddr_10745(t *testing.T) {
+	got, err := duplicateIdentityBroadcastAddr("lo", net.ParseIP("127.0.0.1"))
+	if err != nil {
+		t.Fatalf("lo/127.0.0.1: %v", err)
+	}
+	if want := "127.255.255.255:4786"; got.String() != want {
+		t.Fatalf("broadcast = %s, want %s", got, want)
+	}
+	for name, tc := range map[string]struct {
+		iface string
+		ip    string
+	}{
+		"unknown_interface": {"xpf-no-such-iface-10745", "127.0.0.1"},
+		"ipv6":              {"lo", "::1"},
+		"unparsable":        {"lo", "not-an-ip"},
+		"not_on_iface":      {"lo", "192.0.2.1"},
+	} {
+		if _, err := duplicateIdentityBroadcastAddr(tc.iface, net.ParseIP(tc.ip)); err == nil {
+			t.Fatalf("%s: expected an error, got a broadcast address", name)
+		}
+	}
+}
+
+// TestDuplicateIdentityWatcherLiveSockets_10745 runs the real send/receive
+// loops over loopback: the watcher's own beacons (delivered back to its
+// listener, exactly like a broadcast loopback) must not warn, while a second
+// instance's signed beacon — the duplicate peer — must warn through the live
+// readLoop. This is the end-to-end proof the receive path before it cannot
+// give: frames that actually cross a socket.
+func TestDuplicateIdentityWatcherLiveSockets_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+	listen, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listener: %v", err)
+	}
+	send, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		listen.Close()
+		t.Fatalf("sender: %v", err)
+	}
+	// Unicast-to-self stands in for the subnet broadcast: the delivery and
+	// loopback semantics through the socket are identical, without depending
+	// on the test host forwarding 127/8 broadcasts.
+	w := newDuplicateIdentityWatcher(mgr, "lo", listen, send,
+		listen.LocalAddr().(*net.UDPAddr), 10*time.Millisecond, beaconTestInstance(t))
+	w.start()
+	t.Cleanup(w.stop)
+
+	// Phase 1: our own beacons arrive continuously and must stay silent.
+	time.Sleep(150 * time.Millisecond)
+	if beaconManagerWarned(mgr) {
+		t.Fatal("live watcher warned on its own beacons within 150ms — self-exclusion is broken")
+	}
+
+	// Phase 2: a second instance with the same identity warns through the
+	// live readLoop.
+	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("peer socket: %v", err)
+	}
+	t.Cleanup(func() { peer.Close() })
+	frame, err := marshalDuplicateIdentityBeacon(beaconTestCluster, beaconTestNode,
+		[]byte(beaconTestPSK), beaconTestInstance(t), time.Now())
+	if err != nil {
+		t.Fatalf("sign peer beacon: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !beaconManagerWarned(mgr) && time.Now().Before(deadline) {
+		if _, err := peer.WriteToUDP(frame, listen.LocalAddr().(*net.UDPAddr)); err != nil {
+			t.Fatalf("send peer beacon: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+		// Fresh timestamp each attempt so the frame never ages out mid-loop.
+		frame, err = marshalDuplicateIdentityBeacon(beaconTestCluster, beaconTestNode,
+			[]byte(beaconTestPSK), beaconTestInstance(t), time.Now())
+		if err != nil {
+			t.Fatalf("re-sign peer beacon: %v", err)
+		}
+	}
+	if !beaconManagerWarned(mgr) {
+		t.Fatal("live watcher did not warn for a duplicate peer's signed beacon within 5s")
+	}
+	mgr.mu.RLock()
+	peerAlive, peerSeen := mgr.peerAlive, mgr.peerEverSeen
+	mgr.mu.RUnlock()
+	if peerAlive || peerSeen {
+		t.Fatalf("live beacon moved peer state: alive=%v everSeen=%v", peerAlive, peerSeen)
+	}
+}
+
+// TestPrepareDuplicateIdentityWatcherIsBestEffort_10745 pins the skip matrix:
+// anything the detector cannot use must yield a nil watcher, never an error,
+// so heartbeat startup cannot fail because of it.
+func TestPrepareDuplicateIdentityWatcherIsBestEffort_10745(t *testing.T) {
+	if w := prepareDuplicateIdentityWatcher(nil, "lo", "127.0.0.1", "", time.Second); w != nil {
+		w.stop()
+		t.Fatal("nil manager produced a watcher")
+	}
+	unkeyed := NewManager(beaconTestNode, beaconTestCluster)
+	if w := prepareDuplicateIdentityWatcher(unkeyed, "lo", "127.0.0.1", "", time.Second); w != nil {
+		w.stop()
+		t.Fatal("unkeyed manager produced a watcher — beacons cannot authenticate without the PSK")
+	}
+	keyed := keyedBeaconManager(t, beaconTestPSK, "")
+	if w := prepareDuplicateIdentityWatcher(keyed, "", "127.0.0.1", "", time.Second); w != nil {
+		w.stop()
+		t.Fatal("empty interface produced a watcher")
+	}
+	if w := prepareDuplicateIdentityWatcher(keyed, "xpf-no-such-iface-10745", "127.0.0.1", "", time.Second); w != nil {
+		w.stop()
+		t.Fatal("unknown interface produced a watcher")
+	}
+	if w := prepareDuplicateIdentityWatcher(keyed, "lo", "::1", "", time.Second); w != nil {
+		w.stop()
+		t.Fatal("IPv6 control link produced an ARP-era IPv4 broadcast watcher")
+	}
+}
+
+// TestHeartbeatTenureOwnsDuplicateIdentityWatcher_10745 pins the wiring: a
+// keyed heartbeat owns a beacon watcher for exactly its tenure, and an
+// unkeyed heartbeat starts fine without one. Deleting the startHeartbeat
+// hookup reds the first half; making preparation fatal reds the second.
+func TestHeartbeatTenureOwnsDuplicateIdentityWatcher_10745(t *testing.T) {
+	keyed := keyedBeaconManager(t, beaconTestPSK, "")
+	if err := keyed.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "lo"); err != nil {
+		t.Fatalf("keyed StartHeartbeat: %v", err)
+	}
+	keyed.mu.RLock()
+	watcher := keyed.duplicateIdentityWatcher
+	keyed.mu.RUnlock()
+	if watcher == nil {
+		keyed.StopHeartbeat()
+		t.Fatal("keyed heartbeat owns no identity watcher — the #10745 hookup is missing")
+	}
+	keyed.StopHeartbeat()
+	keyed.mu.RLock()
+	still := keyed.duplicateIdentityWatcher
+	keyed.mu.RUnlock()
+	if still != nil {
+		t.Fatal("StopHeartbeat left the identity watcher installed")
+	}
+
+	unkeyed := NewManager(beaconTestNode, beaconTestCluster)
+	if err := unkeyed.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "lo"); err != nil {
+		t.Fatalf("unkeyed StartHeartbeat: %v", err)
+	}
+	t.Cleanup(unkeyed.StopHeartbeat)
+	unkeyed.mu.RLock()
+	bare := unkeyed.duplicateIdentityWatcher
+	unkeyed.mu.RUnlock()
+	if bare != nil {
+		t.Fatal("unkeyed heartbeat installed an identity watcher it cannot authenticate")
+	}
+}
