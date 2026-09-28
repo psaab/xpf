@@ -38,6 +38,10 @@ import (
 // ignores the frame, the new node receives nothing, and idle leases are simply
 // not rebuilt — which is the state before this landed, not a broken one.
 const (
+	// The config schema permits persistent NAT inactivity timeouts up to 24h.
+	// Refuse larger peer lifetimes before handing the record to the dataplane.
+	maxPersistentNatLeaseLifetimeNS uint64 = 86_400_000_000_000
+	minPersistentNatLeaseTimeoutNS uint64 = 1_000_000_000
 	// syncMsgPersistentNatLease is the RETIRED pre-#10018 lease set. It stays
 	// reserved so a new receiver can explicitly ignore an old sender's
 	// unscoped records rather than decoding them as domain 0.
@@ -48,7 +52,9 @@ const (
 	syncMsgPersistentNatLeaseScoped = 39
 )
 
-// encodePersistentNatLeasePayload serializes a full set of v25 idle leases.
+// encodePersistentNatLeasePayload serializes a batch of v25 idle-lease
+// advertisements. Imports are additive; records not present in a later batch
+// are not retracted from the receiver.
 //
 // Records are encoded FIRST so an unencodable one drops individually while the
 // count prefix stays consistent with what was actually emitted — the #4892
@@ -108,10 +114,10 @@ func encodeOnePersistentNatLease(l userspace.IdleLeaseWire) ([]byte, error) {
 	return b, nil
 }
 
-// decodePersistentNatLeasePayload parses a full-set push. The bool reports
-// whether the payload decoded COMPLETELY: a full-set push REPLACES the peer set,
-// so a truncated prefix must not be installed as if it were the whole thing —
-// the #7175 discipline. The caller retains its previous set when this is false.
+// decodePersistentNatLeasePayload parses one lease advertisement batch. The
+// bool reports whether the payload decoded COMPLETELY: callers reject a
+// malformed batch rather than installing a prefix; absent records never
+// retract state already installed on the peer.
 func decodePersistentNatLeasePayload(buf []byte) ([]userspace.IdleLeaseWire, bool) {
 	if len(buf) < 4 {
 		return nil, false
@@ -129,9 +135,9 @@ func decodePersistentNatLeasePayload(buf []byte) ([]userspace.IdleLeaseWire, boo
 	// Every record costs at least its own 4-byte length prefix, so the body
 	// after the count can hold at most (len(buf)-4)/4 of them. A count above
 	// that cannot describe THIS frame under any encoding, so it is refused
-	// rather than clamped: a full-set push REPLACES the peer set, and this
-	// decoder's bool means "decoded COMPLETELY". Installing whatever fit would
-	// delete every lease past the point the sender's count went wrong.
+	// rather than clamped. The decoder's bool means "decoded COMPLETELY", and
+	// installing a partial batch would admit an incomplete message rather than
+	// the sender's intended advertisement.
 	//
 	// The DHCP sibling in sync_protocol.go CLAMPS and continues on the same
 	// input, and that divergence is deliberate: #7175 fixed it under a contract
@@ -233,14 +239,28 @@ func decodeOnePersistentNatLease(buf []byte) (userspace.IdleLeaseWire, bool) {
 	l.RemainingNs = binary.LittleEndian.Uint64(buf[off:])
 	l.TimeoutNs = binary.LittleEndian.Uint64(buf[off+8:])
 	off += 16
+	// Clamp peer lifetimes to the schema maximum and advertised timeout.
+	// Export samples its clock before taking the allocator lock, so a release
+	// can legitimately re-arm expiry between the remaining/timeout snapshots.
+	if l.RemainingNs == 0 || l.TimeoutNs < minPersistentNatLeaseTimeoutNS {
+		return l, false
+	}
+	if l.TimeoutNs > maxPersistentNatLeaseLifetimeNS {
+		l.TimeoutNs = maxPersistentNatLeaseLifetimeNS
+	}
+	if l.RemainingNs > l.TimeoutNs {
+		l.RemainingNs = l.TimeoutNs
+	}
 	// A v25 record is self-contained: trailing bytes are not an append-only
 	// extension because they could be a legacy sender's unscoped payload.
 	return l, off == len(buf)
 }
 
-// QueuePersistentNatLeases pushes this node's full idle-lease set to the peer.
-// Fail-open, mirroring QueueDHCPLeases: a write error is logged and disconnects
-// the conn (the next reconnect re-pushes) and NEVER blocks NAT allocation.
+// QueuePersistentNatLeases sends this node's additive idle-lease advertisements
+// to the peer. Missing records never retract receiver state. A write error
+// disconnects the conn and NEVER blocks NAT allocation; unlike DHCP/IPsec, NAT
+// re-advertisement has no reconnect-edge nudge and waits for the next 30s tick,
+// so reconnect can leave a gap of up to 30 seconds.
 func (s *SessionSync) QueuePersistentNatLeases(leases []userspace.IdleLeaseWire) {
 	conn := s.getActiveConn()
 	if conn == nil {
