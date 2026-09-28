@@ -1823,6 +1823,30 @@ fn drained_clear_shell_overwrite_releases_pat_port_after_gc_budget_10784() {
         ));
     }
     assert!(allocator.release_flow(client, original, 4_000_000_000, NatHolder::Untracked));
+    let expired = allocator.debug_live();
+    assert_eq!(
+        expired.lease_expirations.len(),
+        9,
+        "control: eight earlier decoys and the target shell must await allocation GC"
+    );
+    assert!(
+        expired
+            .lease_expirations
+            .iter()
+            .take(8)
+            .all(|(expires_at_ns, _)| *expires_at_ns == 3_200_000_000),
+        "control: the eight decoys must precede the target in expiry order"
+    );
+    assert_eq!(
+        expired
+            .lease_expirations
+            .iter()
+            .last()
+            .map(|(expires_at_ns, _)| *expires_at_ns),
+        Some(4_000_000_000),
+        "control: the drained target shell must be the ninth expired entry"
+    );
+    drop(expired);
 
     let replacement =
         mint_persistent_with_timeout(&allocator, &addrs, client, min_timeout_ns, 4_000_000_000);
