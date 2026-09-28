@@ -700,7 +700,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			d.noteHostInboundApplyFailed(time.Now())
 			return fmt.Errorf("remove early host-input barrier after host-inbound teardown: %w", err)
 		}
-		d.earlyInputHandoffDone.Store(true)
+		d.setEarlyInputHandoffDone()
 		return nil
 	}
 	// #5582: the configured WireGuard listen port(s). The XDP shim steers
@@ -835,7 +835,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				slog.Warn("failed to remove early host-input barrier after fenced fallback", "err", barrierErr)
 				barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", barrierErr)
 			} else {
-				d.earlyInputHandoffDone.Store(true)
+				d.setEarlyInputHandoffDone()
 			}
 		}
 		// #7181: the retained generation is unchanged and may still be
@@ -949,7 +949,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// apply removes it. The host-inbound scope itself installed cleanly,
 	// so applied-success is still recorded.
 	if !lo0RetainsBarrier && !pendingRetainsBarrier {
-		d.earlyInputHandoffDone.Store(true)
+		d.setEarlyInputHandoffDone()
 	}
 	slog.Info("host-inbound filter applied", "zones", len(views),
 		"unzoned_deny_v4", len(unzonedV4), "unzoned_deny_v6", len(unzonedV6),

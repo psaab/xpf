@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -140,6 +142,10 @@ func (d *Daemon) requireEarlyInputProtectionPreApply(cfg *config.Config) error {
 	if d.earlyInputHandoffDone.Load() {
 		return nil
 	}
+	// Doing pre-handoff work proves this process has not handed off; drop a
+	// stale marker from a previous process so the CLI guard stays accurate.
+	clearEarlyInputHandoffMarker()
+
 	if err := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(resolveEarlyInputGuardLifelines(cfg)); err != nil {
 		err = tagNftInstallErr(err)
 		d.noteHostInboundApplyFailed(time.Now())
@@ -167,6 +173,10 @@ func (d *Daemon) ensureEarlyInputBootstrapGuard() {
 		cfg = d.store.ActiveConfig()
 	}
 	lifelines := resolveEarlyInputGuardLifelines(cfg)
+	// Bootstrap runs once per process start, always pre-handoff: drop any
+	// stale marker for the same invariant as above.
+	clearEarlyInputHandoffMarker()
+
 	if err := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(lifelines); err != nil {
 		slog.Error("bootstrap cannot install lifeline-admitting input guard; global barrier retained — use the console if management is unreachable",
 			"lifelines", lifelines, "err", tagNftInstallErr(err))
@@ -236,3 +246,39 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config) error {
 // usable. Callers match it with errors.Is to abort link activation while
 // letting unrelated naming failures keep their historical handling.
 var errEarlyInputProtectionRefused = errors.New("early host-input barrier missing and reinstall failed")
+
+// EarlyInputHandoffMarkerPath records a completed first handoff on disk so
+// the `xpfd input-barrier` command (which cannot see the daemon's in-memory
+// latch) refuses a post-handoff reinstall. /run is tmpfs: the marker starts
+// absent on every boot. A package var so tests redirect it to a temp dir.
+var EarlyInputHandoffMarkerPath = "/run/xpf/early-input-handoff.done"
+
+// setEarlyInputHandoffDone records a completed first handoff in memory and
+// on disk (best-effort marker write; a write failure only weakens the CLI
+// guard, never the commit). All handoff-completion sites funnel through
+// here so the two records cannot diverge.
+func (d *Daemon) setEarlyInputHandoffDone() {
+	d.earlyInputHandoffDone.Store(true)
+	if err := os.MkdirAll(filepath.Dir(EarlyInputHandoffMarkerPath), 0755); err != nil {
+		slog.Warn("cannot record early-input handoff marker; CLI reload guard degraded", "err", err)
+		return
+	}
+	if err := os.WriteFile(EarlyInputHandoffMarkerPath, []byte("handed-off\n"), 0644); err != nil {
+		slog.Warn("cannot record early-input handoff marker; CLI reload guard degraded", "err", err)
+	}
+}
+
+// EarlyInputHandoffMarked reports whether the handoff marker file exists
+// (a previous handoff completed in this boot).
+func EarlyInputHandoffMarked() bool {
+	_, err := os.Stat(EarlyInputHandoffMarkerPath)
+	return err == nil
+}
+
+// clearEarlyInputHandoffMarker removes a stale marker when a new process
+// starts pre-handoff work, restoring the "marker ⟺ current process handed
+// off" invariant after a restart. Best-effort; failures are silent (a stale
+// marker only makes the CLI conservative until the next handoff).
+func clearEarlyInputHandoffMarker() {
+	_ = os.Remove(EarlyInputHandoffMarkerPath)
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/psaab/xpf/pkg/daemon"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
@@ -19,10 +20,13 @@ var earlyInputBarrierRemove = func() error {
 }
 
 func parseInputBarrierArgs(args []string) error {
-	if len(args) != 1 || (args[0] != "close" && args[0] != "remove") {
-		return fmt.Errorf("usage: xpfd input-barrier {close|remove}")
+	if len(args) == 1 && (args[0] == "close" || args[0] == "remove") {
+		return nil
 	}
-	return nil
+	if len(args) == 2 && args[0] == "close" && args[1] == "--force" {
+		return nil
+	}
+	return fmt.Errorf("usage: xpfd input-barrier {close [--force]|remove}")
 }
 
 func runInputBarrierSubcommand(args []string, stdout, stderr io.Writer) int {
@@ -37,6 +41,11 @@ func runInputBarrierSubcommand(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout, "early input barrier removed")
 		return 0
+	}
+	force := len(args) == 2
+	if !force && daemon.EarlyInputHandoffMarked() {
+		fmt.Fprintf(stderr, "input-barrier: host input already handed off to the daemon; refusing reinstall (use --force to override)\n")
+		return 1
 	}
 	if err := earlyInputBarrierInstall(); err != nil {
 		fmt.Fprintf(stderr, "input-barrier: install early input barrier: %v\n", err)

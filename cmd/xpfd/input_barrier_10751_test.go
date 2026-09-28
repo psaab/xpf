@@ -3,8 +3,12 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/daemon"
 )
 
 func TestInputBarrierCommand10751(t *testing.T) {
@@ -16,7 +20,7 @@ func TestInputBarrierCommand10751(t *testing.T) {
 			t.Errorf("parseInputBarrierArgs(%q) unexpectedly succeeded", args)
 		}
 	}
-	for _, args := range [][]string{{"close"}, {"remove"}} {
+	for _, args := range [][]string{{"close"}, {"remove"}, {"close", "--force"}} {
 		if err := parseInputBarrierArgs(args); err != nil {
 			t.Errorf("parseInputBarrierArgs(%q): %v", args, err)
 		}
@@ -69,5 +73,46 @@ func TestInputBarrierCommandReportsInstallAndRemoveResults10751(t *testing.T) {
 	}
 	if removes != 2 || !strings.Contains(stderr.String(), removeErr.Error()) || stdout.Len() != 0 {
 		t.Fatalf("failed remove: calls=%d stdout=%q stderr=%q", removes, stdout.String(), stderr.String())
+	}
+}
+
+func TestInputBarrierCloseRefusesAfterHandoff10751(t *testing.T) {
+	oldInstall := earlyInputBarrierInstall
+	oldMarker := daemon.EarlyInputHandoffMarkerPath
+	t.Cleanup(func() {
+		earlyInputBarrierInstall = oldInstall
+		daemon.EarlyInputHandoffMarkerPath = oldMarker
+	})
+	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	installs := 0
+	earlyInputBarrierInstall = func() error { installs++; return nil }
+	var stdout, stderr bytes.Buffer
+	if code := runInputBarrierSubcommand([]string{"close"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("close without marker exit = %d, want 0", code)
+	}
+	if installs != 1 {
+		t.Fatalf("installs = %d, want 1 pre-handoff install", installs)
+	}
+	if err := os.WriteFile(daemon.EarlyInputHandoffMarkerPath, []byte("handed-off\n"), 0644); err != nil {
+		t.Fatalf("stage marker: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runInputBarrierSubcommand([]string{"close"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("close with marker exit = %d, want 1", code)
+	}
+	if installs != 1 {
+		t.Fatal("refused close must not install")
+	}
+	if !strings.Contains(stderr.String(), "already handed off") {
+		t.Fatalf("refusal stderr = %q, want handoff explanation", stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runInputBarrierSubcommand([]string{"close", "--force"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("close --force exit = %d, want 0", code)
+	}
+	if installs != 2 {
+		t.Fatalf("installs = %d, want forced reinstall to proceed", installs)
 	}
 }

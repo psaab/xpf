@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1291,6 +1292,37 @@ func TestEarlyInputRefusalAbortsActivationBoundary10751(t *testing.T) {
 		}
 		if dp.applyCalls != 0 {
 			t.Fatalf("dataplane apply ran %d times after refusal, want 0", dp.applyCalls)
+		}
+	})
+}
+
+func TestEarlyInputHandoffMarker10751(t *testing.T) {
+	origInstaller := nftInstaller
+	origMarker := EarlyInputHandoffMarkerPath
+	t.Cleanup(func() { nftInstaller = origInstaller; EarlyInputHandoffMarkerPath = origMarker })
+	EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	nftInstaller = &fakeNftInstaller{}
+
+	t.Run("successful handoff writes marker", func(t *testing.T) {
+		d := &Daemon{}
+		if err := d.applyHostInboundFilter(&config.Config{}); err != nil {
+			t.Fatalf("teardown handoff: %v", err)
+		}
+		if !EarlyInputHandoffMarked() {
+			t.Fatal("successful handoff did not write the marker file")
+		}
+	})
+
+	t.Run("pre-handoff work clears stale marker", func(t *testing.T) {
+		if err := os.WriteFile(EarlyInputHandoffMarkerPath, []byte("stale\n"), 0644); err != nil {
+			t.Fatalf("stage stale marker: %v", err)
+		}
+		d := &Daemon{}
+		if err := d.requireEarlyInputProtectionPreApply(&config.Config{}); err != nil {
+			t.Fatalf("pre-apply converge: %v", err)
+		}
+		if EarlyInputHandoffMarked() {
+			t.Fatal("pre-handoff work left a stale marker behind")
 		}
 	})
 }

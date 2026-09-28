@@ -24,7 +24,8 @@
 # re-attests and reinstalls pre-handoff. Post-handoff a flush also wipes the
 # real tables — treat any post-handoff flush as an operator action (same as
 # flushing host-inbound itself) and re-apply to converge. ExecReload below
-# reinstalls the barrier manually while it is still expected (pre-handoff).
+# reinstalls the barrier manually while it is still expected (pre-handoff);
+# the command refuses once handed off (override with --force explicitly).
 #
 # Fresh installs: this unit is enabled --no-start (upgrades must never inject
 # a DROP chain into a live armed daemon). The postinst starts it live on
