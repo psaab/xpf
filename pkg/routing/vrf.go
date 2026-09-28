@@ -232,6 +232,7 @@ func (v *vrfManager) BindInterfaceToVRF(ifaceName, instanceName string) error {
 	slog.Info("interface bound to VRF", "interface", ifaceName, "vrf", vrfName)
 	return nil
 }
+
 // UnbindInterfaceFromVRFs detaches ifaceName only when its current master is
 // one of the named VRF devices. It deliberately leaves unrelated masters
 // untouched so a stale quarantine cannot detach a link owned by another
@@ -250,6 +251,10 @@ func (v *vrfManager) UnbindInterfaceFromVRFs(ifaceName string, instanceNames []s
 	if iface == nil || iface.Attrs() == nil || iface.Attrs().MasterIndex == 0 {
 		return false, nil
 	}
+	// The observed master index and subsequent LinkSetNoMaster are not atomic
+	// against arbitrary netlink writers. Daemon apply and periodic reassert
+	// serialize callers through applySem; concurrent out-of-band `ip link` or
+	// network-manager master changes are outside this guarantee.
 	masterIndex := iface.Attrs().MasterIndex
 	var lookupErrs []error
 	for _, instanceName := range instanceNames {
