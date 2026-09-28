@@ -397,11 +397,40 @@ If the two disagreed, the coordinator would reserve in one allocator while the
 workers reserve in another: its check would pass while the port the session
 actually names stayed free.
 
-**Note on the import outcome.** The control RPC's `ControlResponse.ok` is not
-yet driven by this refusal. The reservation now happens early enough that it
-COULD be — which was impossible before, since the worker-side reserve runs long
-after the RPC has answered — but wiring it through the handler, and the
-Prometheus counter for the new metric, are tracked separately.
+## Strict-Mirror Refusal Rollback (#10788-F1)
+
+Strict peer imports publish their conntrack mirror before shared authority,
+DNAT ownership, kernel session-map rows, reverse prewarm indexes, or worker
+fan-out. A strict mirror refusal therefore compensates only the coordinator's
+untracked NAT reservations and, when the forward mirror was written before a
+reverse-write failure, that forward conntrack row.
+
+The coordinator releases NAT64 then SNAT (reverse reservation order). For a
+same-key replacement it best-effort restores the previous entry's reservations
+and captured worker-holder bits, so the first worker release cannot free a
+reservation another worker still forwards through.
+
+The previous holder mask is captured in the same allocator live-state critical
+section as stale-record eviction and replacement installation. Worker upserts
+and releases therefore serialize either before that capture or after the
+replacement; they cannot OR or clear a bit in an uncaptured gap. Rollback keeps
+the captured-mask replay semantics above.
+
+Immediately before the forward conntrack write, under the import's tuple lease,
+the coordinator snapshots the actual bare-key BPF row value. If reverse
+publication then fails, it restores those exact bytes; if the snapshot was
+absent, it deletes only the newly written forward row. A failed exact restore
+also falls back to deleting that row. The rollback does not infer which alias
+last wrote the row from the shared `SessionKey` map: conntrack keys intentionally
+drop routing-domain and GRE-discriminator scope, and map iteration order is not
+write order.
+
+`synced_import_mirror_refused` counts strict mirror refusals. The
+`mirror_restore_republished`, `mirror_restore_deleted`, and
+`mirror_restore_failed` counters report compensation outcomes; a failed
+best-effort restore does not change the already-decided refusal. The helper
+returns bare `mirror-write-failed`, which Go treats as a mirror-health error:
+takeover readiness latches until a later successful mirror write heals it.
 
 ## Config-Epoch Guard (#5274)
 

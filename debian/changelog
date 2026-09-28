@@ -55,5 +55,11 @@ xpf (0.0.0) unstable; urgency=medium
   * Return accurate consumed-input counts from sanitizing writers on emit
     errors, permitting retries without duplicating already-emitted lines
     (#10900).
+  * Bind multi-zone snapshot authorization to the selected peer connection;
+    keep stale-auth reports from re-arming after capable-peer convergence,
+    make deferral reports and clears attempt-fresh across peer epochs and
+    capability changes, and clear superseded alarms only after current active
+    config succeeds; preserve local convergence after peer-only push failures
+    (#10782).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

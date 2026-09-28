@@ -826,7 +826,14 @@ type Daemon struct {
 	configSyncHasPushed   bool
 	configSyncPushedEpoch uint64
 	configSyncPushedGen   uint64
-	configSyncStable      time.Duration // stability threshold; 0 → default 30s (test override)
+	// A peer snapshot-protocol deferral remains an alarm until a compatible
+	// generation is successfully shared. These fields share configSyncMu with
+	// the reconciliation marker.
+	configSyncPeerSnapshotDeferred        bool
+	configSyncPeerSnapshotDeferredGen     uint64
+	configSyncPeerSnapshotDeferredEpoch   uint64
+	configSyncPeerSnapshotDeferredMessage string
+	configSyncStable                      time.Duration // stability threshold; 0 → default 30s (test override)
 	// configSyncPushForTest, when non-nil, replaces the reconciler's real
 	// SessionSync.QueueConfig push so a unit test can count pushes without a
 	// live TCP sync transport (mirrors syncPeerForTest for the commit path).
@@ -1001,14 +1008,12 @@ type Daemon struct {
 	// set, so a test that does not touch it is byte-identical to before.
 	applyErrForTest error
 
-	// syncPeerForTest, when non-nil, replaces the real d.syncConfigToPeer()
-	// push to the cluster peer on BOTH the commit-apply path (commitAndApply /
-	// commitConfirmedAndApply via applyAndSyncCommitted, #4034) AND the
-	// commit-confirmed timeout rollback re-sync (resyncRolledBackConfigToPeer,
-	// #3868). Test-only seam: the production push (syncConfigToPeer ->
-	// pushConfigToPeer -> SessionSync.QueueConfig) needs a live TCP transport,
-	// so tests inject this to observe that the committed/rolled-back config is
-	// pushed (and what text it would carry via d.store.ShowActive()).
+	// syncPeerForTest, when non-nil, replaces the real commit/rollback peer
+	// push after its snapshot-protocol preflight revalidation. Test-only seam:
+	// the production route ultimately queues through the SessionSync
+	// peer-snapshot-protocol guard and needs a live TCP transport, so tests
+	// inject this to observe the committed/rolled-back config, including the
+	// active text production reads from d.store.ShowActive().
 	syncPeerForTest func()
 
 	// hostInboundFailOpen groups the three previous-apply host-inbound

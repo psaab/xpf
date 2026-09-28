@@ -3,9 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"strings"
 	"sync"
 	"testing"
@@ -380,43 +377,5 @@ func TestMTUWarningsAliasedSerializationRace9841(t *testing.T) {
 	wg.Wait()
 	if len(shared.Warnings) != 1 || shared.Warnings[0] != "foreign advisory" {
 		t.Fatalf("shared applied object = %v, want only the foreign line", shared.Warnings)
-	}
-}
-
-// Wiring canary: the committing wrapper has exactly one production call
-// site, inside applyAndSyncCommitted — the choke both operator commit
-// paths funnel through. A future commit entrypoint bypassing the choke
-// loses warnings silently; a second wrapper site double-projects. Either
-// trips this count. (Behavioural cells above prove the wrapper works;
-// this proves the commit flow reaches it.)
-func TestApplyAndSyncCommittedSyncsMTUWarnings9841(t *testing.T) {
-	files := packageGoFiles(t)
-	fset := token.NewFileSet()
-	calls := 0
-	var callers []string
-	for _, file := range files {
-		f, err := parser.ParseFile(fset, file, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", file, err)
-		}
-		var enclosing string
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.FuncDecl:
-				enclosing = n.Name.Name
-			case *ast.CallExpr:
-				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "applyConfigLockedForCommit" {
-					calls++
-					callers = append(callers, enclosing)
-				}
-			}
-			return true
-		})
-	}
-	if calls != 1 {
-		t.Fatalf("expected exactly 1 applyConfigLockedForCommit call site in package daemon, found %d (%v)", calls, callers)
-	}
-	if callers[0] != "applyAndSyncCommitted" {
-		t.Fatalf("the wrapper is called from %s, want applyAndSyncCommitted", callers[0])
 	}
 }

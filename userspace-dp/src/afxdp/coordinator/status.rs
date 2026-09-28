@@ -429,6 +429,36 @@ impl super::Coordinator {
         self.sessions.import_reserve_refused.load(Ordering::Relaxed)
     }
 
+    /// #10788-F1: strict-mirror import refusals whose bare reason is
+    /// `mirror-write-failed`.
+    pub fn synced_import_mirror_refused_total(&self) -> u64 {
+        self.sessions
+            .synced_import_mirror_refused
+            .load(Ordering::Relaxed)
+    }
+
+    /// #10788-F1: refused imports whose overwritten forward mirror was restored
+    /// by republishing its authoritative survivor.
+    pub fn mirror_restore_republished_total(&self) -> u64 {
+        self.sessions
+            .mirror_restore_republished
+            .load(Ordering::Relaxed)
+    }
+
+    /// #10788-F1: refused imports whose overwritten forward mirror was deleted
+    /// because no authoritative survivor existed.
+    pub fn mirror_restore_deleted_total(&self) -> u64 {
+        self.sessions
+            .mirror_restore_deleted
+            .load(Ordering::Relaxed)
+    }
+
+    /// #10788-F1: best-effort rollback actions that failed (per action, not per
+    /// refused import).
+    pub fn mirror_restore_failed_total(&self) -> u64 {
+        self.sessions.mirror_restore_failed.load(Ordering::Relaxed)
+    }
+
     /// #1760 W3': shared-map NAT reverse-key displacement events — a
     /// `publish_shared_session` insert into `shared_nat_sessions`
     /// displaced a DIFFERENT forward session's entry at the same reverse

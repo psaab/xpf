@@ -117,7 +117,10 @@ type Config struct {
 	// ClockSkewAlarmsFn returns daemon-resident pre-break fabric-auth clock
 	// alarms for `show security alarms` and cluster status (#10025).
 	ClockSkewAlarmsFn func() []clockskew.ActiveAlarm
-	FeedsFn           func() map[string]feeds.FeedInfo // returns live feed status
+	// PeerSnapshotProtocolAlarmFn returns the active peer snapshot-protocol
+	// config-sync deferral alarm for `show system alarms`.
+	PeerSnapshotProtocolAlarmFn func() string
+	FeedsFn                     func() map[string]feeds.FeedInfo // returns live feed status
 	// FeedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#2049) — an address-name -> union-of-feed-CIDRs map for the active
 	// config — consulted by the `match-policies` simulator (#3042) so a
@@ -236,32 +239,33 @@ type Server struct {
 	// monitorClusterStateFn exposes the live ownership view to the interface
 	// monitor; nil uses cluster directly. Tests can advance RG ownership while
 	// a stream is open without a real cluster manager.
-	monitorClusterStateFn     func() monitorClusterState
-	dhcp                      *dhcp.Manager
-	dhcpServer                DHCPServerStatus
-	rpmResultsFn              func() []*rpm.ProbeResult
-	ipmonStatusFn             func() []ipmon.PolicyStatus
-	natPoolAlarmsFn           func() []natpoolalarm.ActiveAlarm
-	natPoolExhaustionAlarmsFn func() []natpoolalarm.ActiveExhaustionAlarm
-	clockSkewAlarmsFn         func() []clockskew.ActiveAlarm
-	feedsFn                   func() map[string]feeds.FeedInfo
-	feedOverlayFn             func() map[string][]string
-	lldpNeighborsFn           func() []*lldp.Neighbor
-	ddnsStatsFn               func() *dhcpserver.DDNSStats
-	ddnsOwnedRecordsFn        func() []dhcpserver.DDNSOwnedRecordView
-	surfaceADDNSStatsFn       func() *ddnspkg.SurfaceAStats
-	surfaceADDNSStatusFn      func() []ddnspkg.SurfaceAStatusView
-	surfaceADDNSForceFn       func(force bool) (bool, string)
-	flowCollectorHealthFn     func() []flowexport.ExporterCollectorHealth
-	commitFn                  func(ctx context.Context, authority configstore.CommitAuthority, comment string) (*config.Config, error)
-	commitConfirmedFn         func(ctx context.Context, authority configstore.CommitAuthority, minutes int) (*config.Config, error)
-	zeroizeFn                 func(ctx context.Context, wipe func() error) error
-	vrrpMgr                   *vrrp.Manager
-	raMgr                     *ra.Manager
-	fwdSampler                *fwdstatus.Sampler
-	startTime                 time.Time
-	addr                      string
-	version                   string
+	monitorClusterStateFn       func() monitorClusterState
+	dhcp                        *dhcp.Manager
+	dhcpServer                  DHCPServerStatus
+	rpmResultsFn                func() []*rpm.ProbeResult
+	ipmonStatusFn               func() []ipmon.PolicyStatus
+	natPoolAlarmsFn             func() []natpoolalarm.ActiveAlarm
+	natPoolExhaustionAlarmsFn   func() []natpoolalarm.ActiveExhaustionAlarm
+	clockSkewAlarmsFn           func() []clockskew.ActiveAlarm
+	peerSnapshotProtocolAlarmFn func() string
+	feedsFn                     func() map[string]feeds.FeedInfo
+	feedOverlayFn               func() map[string][]string
+	lldpNeighborsFn             func() []*lldp.Neighbor
+	ddnsStatsFn                 func() *dhcpserver.DDNSStats
+	ddnsOwnedRecordsFn          func() []dhcpserver.DDNSOwnedRecordView
+	surfaceADDNSStatsFn         func() *ddnspkg.SurfaceAStats
+	surfaceADDNSStatusFn        func() []ddnspkg.SurfaceAStatusView
+	surfaceADDNSForceFn         func(force bool) (bool, string)
+	flowCollectorHealthFn       func() []flowexport.ExporterCollectorHealth
+	commitFn                    func(ctx context.Context, authority configstore.CommitAuthority, comment string) (*config.Config, error)
+	commitConfirmedFn           func(ctx context.Context, authority configstore.CommitAuthority, minutes int) (*config.Config, error)
+	zeroizeFn                   func(ctx context.Context, wipe func() error) error
+	vrrpMgr                     *vrrp.Manager
+	raMgr                       *ra.Manager
+	fwdSampler                  *fwdstatus.Sampler
+	startTime                   time.Time
+	addr                        string
+	version                     string
 	// listenersFn returns the effective management-listener snapshot for
 	// `show system services` (#6385). Wired from Config.ListenersFn; nil in a
 	// no-daemon unit-test build.
@@ -386,49 +390,50 @@ func (s *Server) userspaceDataplaneControl() (userspaceControlProvider, error) {
 // authenticated fabric listener (RunFabricListener), not this one.
 func NewServer(addr string, cfg Config) *Server {
 	return &Server{
-		store:                     cfg.Store,
-		dp:                        cfg.DP,
-		eventBuf:                  cfg.EventBuf,
-		gc:                        cfg.GC,
-		routing:                   cfg.Routing,
-		frr:                       cfg.FRR,
-		ipsec:                     cfg.IPsec,
-		cluster:                   cfg.Cluster,
-		dhcp:                      cfg.DHCP,
-		dhcpServer:                cfg.DHCPServer,
-		rpmResultsFn:              cfg.RPMResultsFn,
-		ipmonStatusFn:             cfg.IPMonStatusFn,
-		natPoolAlarmsFn:           cfg.NATPoolAlarmsFn,
-		natPoolExhaustionAlarmsFn: cfg.NATPoolExhaustionAlarmsFn,
-		clockSkewAlarmsFn:         cfg.ClockSkewAlarmsFn,
-		feedsFn:                   cfg.FeedsFn,
-		feedOverlayFn:             cfg.FeedOverlayFn,
-		lldpNeighborsFn:           cfg.LLDPNeighborsFn,
-		ddnsStatsFn:               cfg.DDNSStatsFn,
-		ddnsOwnedRecordsFn:        cfg.DDNSOwnedRecordsFn,
-		surfaceADDNSStatsFn:       cfg.SurfaceADDNSStatsFn,
-		surfaceADDNSStatusFn:      cfg.SurfaceADDNSStatusFn,
-		surfaceADDNSForceFn:       cfg.SurfaceADDNSForceFn,
-		flowCollectorHealthFn:     cfg.FlowCollectorHealthFn,
-		commitFn:                  cfg.CommitFn,
-		commitConfirmedFn:         cfg.CommitConfirmedFn,
-		zeroizeFn:                 cfg.ZeroizeFn,
-		vrrpMgr:                   cfg.VRRPMgr,
-		raMgr:                     cfg.RAMgr,
-		fwdSampler:                cfg.FwdSampler,
-		startTime:                 time.Now(),
-		addr:                      addr,
-		requestedAddr:             addr,
-		version:                   cfg.Version,
-		fabricPeerAddrFn:          cfg.FabricPeerAddrFn,
-		fabricVRFDevice:           cfg.FabricVRFDevice,
-		listenersFn:               cfg.ListenersFn,
-		kernelUpgradeStatusFn:     cfg.KernelUpgradeStatusFn,
-		bootstrapImportFn:         cfg.BootstrapImportFn,
-		hostInboundAppliedFn:      cfg.HostInboundAppliedFn,
-		peerLookupFn:              cfg.PeerLookupFn,
-		d11ArmFn:                  cfg.D11ArmFn,
-		d11LedgerFn:               cfg.D11LedgerFn,
+		store:                       cfg.Store,
+		dp:                          cfg.DP,
+		eventBuf:                    cfg.EventBuf,
+		gc:                          cfg.GC,
+		routing:                     cfg.Routing,
+		frr:                         cfg.FRR,
+		ipsec:                       cfg.IPsec,
+		cluster:                     cfg.Cluster,
+		dhcp:                        cfg.DHCP,
+		dhcpServer:                  cfg.DHCPServer,
+		rpmResultsFn:                cfg.RPMResultsFn,
+		ipmonStatusFn:               cfg.IPMonStatusFn,
+		natPoolAlarmsFn:             cfg.NATPoolAlarmsFn,
+		natPoolExhaustionAlarmsFn:   cfg.NATPoolExhaustionAlarmsFn,
+		clockSkewAlarmsFn:           cfg.ClockSkewAlarmsFn,
+		peerSnapshotProtocolAlarmFn: cfg.PeerSnapshotProtocolAlarmFn,
+		feedsFn:                     cfg.FeedsFn,
+		feedOverlayFn:               cfg.FeedOverlayFn,
+		lldpNeighborsFn:             cfg.LLDPNeighborsFn,
+		ddnsStatsFn:                 cfg.DDNSStatsFn,
+		ddnsOwnedRecordsFn:          cfg.DDNSOwnedRecordsFn,
+		surfaceADDNSStatsFn:         cfg.SurfaceADDNSStatsFn,
+		surfaceADDNSStatusFn:        cfg.SurfaceADDNSStatusFn,
+		surfaceADDNSForceFn:         cfg.SurfaceADDNSForceFn,
+		flowCollectorHealthFn:       cfg.FlowCollectorHealthFn,
+		commitFn:                    cfg.CommitFn,
+		commitConfirmedFn:           cfg.CommitConfirmedFn,
+		zeroizeFn:                   cfg.ZeroizeFn,
+		vrrpMgr:                     cfg.VRRPMgr,
+		raMgr:                       cfg.RAMgr,
+		fwdSampler:                  cfg.FwdSampler,
+		startTime:                   time.Now(),
+		addr:                        addr,
+		requestedAddr:               addr,
+		version:                     cfg.Version,
+		fabricPeerAddrFn:            cfg.FabricPeerAddrFn,
+		fabricVRFDevice:             cfg.FabricVRFDevice,
+		listenersFn:                 cfg.ListenersFn,
+		kernelUpgradeStatusFn:       cfg.KernelUpgradeStatusFn,
+		bootstrapImportFn:           cfg.BootstrapImportFn,
+		hostInboundAppliedFn:        cfg.HostInboundAppliedFn,
+		peerLookupFn:                cfg.PeerLookupFn,
+		d11ArmFn:                    cfg.D11ArmFn,
+		d11LedgerFn:                 cfg.D11LedgerFn,
 	}
 }
 
