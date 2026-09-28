@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/psaab/xpf/pkg/configstore"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/ddns"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 	"github.com/psaab/xpf/pkg/fsatomic"
@@ -300,6 +301,45 @@ var zeroizeStopKeaAndEraseLeases = func() error {
 	return nil
 }
 
+// zeroizeEraseHelperState removes the helper state file at path plus
+// dead-writer temp siblings (legacy pre-#2957 orphans included), syncs the
+// parent, and verifies absence. UNGATED WIPES ONLY (mirrors daemon
+// sweepHelperStateVerified, which cannot be shared: daemon imports
+// grpcapi): no daemon post-verify follows on this path, and the helper is
+// not running in the offline contexts that take it. Live writers' temps,
+// removal/durability failures, or anything still present afterwards is an
+// error. Callers pass a non-empty path only.
+func zeroizeEraseHelperState(path string) error {
+	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var errs []error
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("zeroize: remove helper state file %s: %w", path, err))
+	}
+	live, serr := dpuserspace.SweepStaleStateTempsIncludingLegacy(path)
+	if serr != nil {
+		errs = append(errs, serr)
+	}
+	if len(live) != 0 {
+		errs = append(errs, fmt.Errorf("zeroize: live helper writer temps present for %s: %v", path, live))
+	}
+	if err := zeroizeSyncDir(filepath.Dir(path)); err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync helper state directory %s: %w", filepath.Dir(path), err))
+	}
+	if _, err := os.Lstat(path); err == nil {
+		errs = append(errs, fmt.Errorf("zeroize: helper state %s still present after sweep", path))
+	} else if !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", path, err))
+	}
+	if dead, live, verr := dpuserspace.ListStaleStateTempsIncludingLegacy(path); verr != nil {
+		errs = append(errs, verr)
+	} else if len(dead) != 0 || len(live) != 0 {
+		errs = append(errs, fmt.Errorf("zeroize: helper state temps remain for %s: dead=%v live=%v", path, dead, live))
+	}
+	return errors.Join(errs...)
+}
+
 // zeroizeFinalEraseVerification re-proves the race-prone erase sets
 // immediately before the pending markers clear: Kea lease files and the
 // DDNS/IPsec state files plus crash temps. Earlier legs erase and verify
@@ -307,8 +347,12 @@ var zeroizeStopKeaAndEraseLeases = func() error {
 // landing after an early check must fail the wipe here rather than slip
 // under a clean receipt. Canonicals are checked as well as temps: a
 // writer that completed a full save leaves a canonical with no temp
-// behind. The daemon post-verify remains as defense-in-depth behind it.
-func zeroizeFinalEraseVerification() error {
+// behind. The helper class is covered only for ungated completions with
+// a known path: gated wipes skip it (the helper is live until the daemon
+// stops it post-wipe, and the daemon sweep owns the path), and legacy
+// direct wipes name no path to check. The daemon post-verify remains as
+// defense-in-depth behind it.
+func zeroizeFinalEraseVerification(completion zeroizeCompletion) error {
 	var errs []error
 	for _, current := range zeroizeKeaLeasePaths {
 		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
@@ -339,6 +383,19 @@ func zeroizeFinalEraseVerification() error {
 		errs = append(errs, err)
 	} else if len(temps) != 0 {
 		errs = append(errs, fmt.Errorf("zeroize: IPsec crash temps present at final verification: %v", temps))
+	}
+	if !completion.pending && completion.helperPath != "" {
+		helperPath := completion.helperPath
+		if _, err := os.Lstat(helperPath); err == nil {
+			errs = append(errs, fmt.Errorf("zeroize: helper state %s present at final verification", helperPath))
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", helperPath, err))
+		}
+		if dead, live, err := dpuserspace.ListStaleStateTempsIncludingLegacy(helperPath); err != nil {
+			errs = append(errs, err)
+		} else if len(dead) != 0 || len(live) != 0 {
+			errs = append(errs, fmt.Errorf("zeroize: helper state temps present at final verification for %s: dead=%v live=%v", helperPath, dead, live))
+		}
 	}
 	return errors.Join(errs...)
 }

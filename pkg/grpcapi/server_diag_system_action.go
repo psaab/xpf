@@ -215,7 +215,12 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	if s.zeroizeFn != nil {
 		return s.zeroizeFn(ctx, wipe)
 	}
-	return PerformZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, ZeroizeLogInventoryFromConfig(s.store.ActiveConfig()))
+	// Ungated fallback (no daemon): snapshot the helper path for the
+	// wipe's own helper sweep + verification, since no post-verify
+	// follows. A custom path outside the wiped dirs would otherwise
+	// survive under a clean receipt.
+	helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
+	return PerformZeroizeWipeUngated(configDir, configBase, archiveDir, ZeroizeLogInventoryFromConfig(s.store.ActiveConfig()), helperPath)
 }
 
 func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {

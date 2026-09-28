@@ -196,9 +196,14 @@ func TestConsoleZeroizeOfflineFallbackUngatedWipe_5871(t *testing.T) {
 	// factoryResetFn deliberately left nil (no daemon).
 
 	var wiped, stopped bool
+	var gotHelperPath string
 	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
 	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error { wiped = true; return nil }
+	zeroizeFullWipe = func(_, _, _ string, _ zeroizeLogInventory, helperPath string) error {
+		wiped = true
+		gotHelperPath = helperPath
+		return nil
+	}
 	zeroizeStopDaemon = func() error { stopped = true; return nil }
 
 	if err := c.performConsoleZeroize(); err != nil {
@@ -206,6 +211,9 @@ func TestConsoleZeroizeOfflineFallbackUngatedWipe_5871(t *testing.T) {
 	}
 	if !wiped {
 		t.Fatal("offline-fallback console zeroize did not run the shared wipe primitive")
+	}
+	if gotHelperPath == "" {
+		t.Fatal("offline wipe must snapshot the helper path: no daemon follows to erase a custom path")
 	}
 	if !stopped {
 		t.Fatal("offline-fallback console zeroize did not stop the daemon after success")

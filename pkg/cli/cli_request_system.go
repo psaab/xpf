@@ -142,11 +142,13 @@ func (c *CLI) zeroizeConfigRoot() (configDir, configBase string, err error) {
 
 // zeroizeFullWipe is the shared factory-reset primitive the console delegates to
 // (#5890) — a package var so a test can spy the delegation without wiping real
-// system paths. It defaults to the log-aware gRPC primitive, with the
-// pre-wipe configured log inventory supplied by performConsoleZeroize (#10300).
+// system paths. It defaults to the log-aware gRPC UNGATED primitive (which
+// erases and verifies the helper state file itself), with the pre-wipe
+// configured log inventory and helper path supplied by performConsoleZeroize
+// (#10300).
 type zeroizeLogInventory = grpcapi.ZeroizeLogInventory
 
-var zeroizeFullWipe = grpcapi.PerformZeroizeWipeWithLogInventory
+var zeroizeFullWipe = grpcapi.PerformZeroizeWipeUngated
 
 // zeroizeFullWipePending is the gated-path wipe seam: records a PENDING
 // handoff (with the pre-wipe helper path) instead of completing, so the
@@ -220,13 +222,14 @@ func (c *CLI) performConsoleZeroize() error {
 		// wired, this closure runs inside its apply gate, so a waiting commit
 		// cannot add a destination after the inventory snapshot. The helper
 		// path is snapshotted here for the same reason: the wipe erases the
-		// config it derives from.
+		// config it derives from. Offline, the snapshot feeds the wipe's
+		// own helper sweep: no daemon follows to erase a custom path.
 		logInventory := grpcapi.ZeroizeLogInventoryFromConfig(c.store.ActiveConfig())
+		helperPath := dpuserspace.StateFilePathForConfig(c.store.ActiveConfig())
 		if c.factoryResetFn != nil {
-			helperPath := dpuserspace.StateFilePathForConfig(c.store.ActiveConfig())
 			return zeroizeFullWipePending(configDir, configBase, cliZeroizeArchiveDir(), logInventory, helperPath)
 		}
-		return zeroizeFullWipe(configDir, configBase, cliZeroizeArchiveDir(), logInventory)
+		return zeroizeFullWipe(configDir, configBase, cliZeroizeArchiveDir(), logInventory, helperPath)
 	}
 
 	// Route through the daemon's coordinated transaction when wired. When it is

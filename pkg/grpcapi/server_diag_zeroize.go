@@ -1511,16 +1511,19 @@ func completeZeroize(record zeroizePendingRecord, completion zeroizeCompletion) 
 	// (not a lone flag) gating the retry. Gated wipes record PENDING: the
 	// daemon flips the flag clean only after its post-verification passes,
 	// so a crash in between leaves repair-or-retry instead of a clean
-	// claim over unverified residue.
+	// claim over unverified residue. The helper path is recorded on BOTH
+	// completions: ungated wipes have no daemon post-verify, so boot
+	// repair must sweep the recorded path rather than re-derive the
+	// default from the erased config.
 	bootID, err := configstore.CurrentBootID()
 	if err != nil {
 		return fmt.Errorf("zeroize: snapshot boot id for reset handoff: %w", err)
 	}
-	dirty, helperPath := "", ""
+	dirty := ""
 	if completion.pending {
-		dirty, helperPath = configstore.ResetHandoffPending, completion.helperPath
+		dirty = configstore.ResetHandoffPending
 	}
-	if err := configstore.WriteResetHandoff(bootID, dirty, helperPath); err != nil {
+	if err := configstore.WriteResetHandoff(bootID, dirty, completion.helperPath); err != nil {
 		return fmt.Errorf("zeroize: %w", err)
 	}
 	loaderMarker := configstore.FactoryResetPendingPath

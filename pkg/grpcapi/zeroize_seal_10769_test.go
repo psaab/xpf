@@ -1542,9 +1542,95 @@ func TestFinalEraseVerificationCatchesReappearedCanonical10769(t *testing.T) {
 	isolateZeroizeSealPaths(t, root)
 	mustWriteFile(t, zeroizeDDNSLeaseStatePath, []byte(`{"version":1,"records":[]}`))
 	mustWriteFile(t, zeroizeIPsecStatePath, []byte(`{"loaded":[],"pending_terminate":[]}`))
-	if err := zeroizeFinalEraseVerification(); err == nil {
+	if err := zeroizeFinalEraseVerification(zeroizeComplete); err == nil {
 		t.Fatal("canonical-only reappearance must fail final verification")
 	} else if !strings.Contains(err.Error(), "present at final verification") {
 		t.Fatalf("final verification error must name the reappeared canonicals, got %v", err)
 	}
+}
+
+// The helper class is verified only for ungated completions with a known
+// path: gated wipes skip it (live helper; the daemon sweep owns the path).
+func TestFinalEraseVerificationCoversHelperOnUngated10769(t *testing.T) {
+	root := t.TempDir()
+	isolateZeroizeSealPaths(t, root)
+	helperFile := filepath.Join(root, "custom", "userspace-dp.json")
+	mustWriteFile(t, helperFile, []byte(`{"flows":["prior"]}`))
+	mustWriteFile(t, helperFile+".4250000000.1.tmp", []byte(`{"flows":["prior-temp"]}`))
+	if err := zeroizeFinalEraseVerification(zeroizeCompletion{pending: false, helperPath: helperFile}); err == nil {
+		t.Fatal("helper residue must fail ungated final verification")
+	} else if !strings.Contains(err.Error(), "helper state") {
+		t.Fatalf("final verification error must name helper residue, got %v", err)
+	}
+	if err := zeroizeFinalEraseVerification(zeroizeCompletion{pending: true, helperPath: helperFile}); err != nil {
+		t.Fatalf("gated final verification must skip the live helper class: %v", err)
+	}
+	if err := zeroizeFinalEraseVerification(zeroizeComplete); err != nil {
+		t.Fatalf("pathless completion must skip the helper class it cannot name: %v", err)
+	}
+}
+
+// ownProcStartTuple reads this test process's pid + start time (field 22
+// of /proc/self/stat) so a temp can be staged as a LIVE writer's
+// in-flight file. ok is false without /proc.
+func ownProcStartTuple(t *testing.T) (pid, start string, ok bool) {
+	t.Helper()
+	raw, err := os.ReadFile("/proc/self/stat")
+	if err != nil {
+		return "", "", false
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) < 22 {
+		return "", "", false
+	}
+	return fields[0], fields[21], true
+}
+
+// RED on revert: an ungated (offline/no-daemon) wipe that neither erases
+// nor verifies a custom helper state file records clean over surviving
+// tenant state, and boot repair re-derives the default instead.
+func TestUngatedWipeErasesCustomHelperState10769(t *testing.T) {
+	setup := func(t *testing.T) (root, configDir string) {
+		t.Helper()
+		root = t.TempDir()
+		hermeticWipe10100(t, root)
+		configDir = filepath.Join(root, "etc-xpf")
+		mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+		mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+		mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+		return root, configDir
+	}
+	t.Run("custom state-file leaf", func(t *testing.T) {
+		root, configDir := setup(t)
+		helperFile := filepath.Join(root, "custom", "userspace-dp.json")
+		mustWriteFile(t, helperFile, []byte(`{"flows":["prior"]}`))
+		mustWriteFile(t, helperFile+".4250000000.1.tmp", []byte(`{"flows":["prior-temp"]}`))
+		if err := PerformZeroizeWipeUngated(configDir, "xpf.conf", "", ZeroizeLogInventory{}, helperFile); err != nil {
+			t.Fatalf("PerformZeroizeWipeUngated: %v", err)
+		}
+		for _, path := range []string{helperFile, helperFile + ".4250000000.1.tmp"} {
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Errorf("helper residue %s survived the ungated wipe: %v", path, err)
+			}
+		}
+		_, dirty, gotPath, present, err := configstore.ReadResetHandoff()
+		if err != nil || !present || dirty != "" || gotPath != helperFile {
+			t.Fatalf("ungated handoff = dirty %q path %q present %v err %v, want clean with the recorded path", dirty, gotPath, present, err)
+		}
+	})
+	t.Run("live temp fails closed", func(t *testing.T) {
+		root, configDir := setup(t)
+		pid, start, ok := ownProcStartTuple(t)
+		if !ok {
+			t.Skip("no /proc in test environment")
+		}
+		helperFile := filepath.Join(root, "custom", "userspace-dp.json")
+		mustWriteFile(t, helperFile+"."+pid+"_"+start+".1.tmp", []byte(`{"inflight":true}`))
+		if err := PerformZeroizeWipeUngated(configDir, "xpf.conf", "", ZeroizeLogInventory{}, helperFile); err == nil {
+			t.Fatal("live helper temp must fail the ungated wipe, got success")
+		}
+		if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
+			t.Fatalf("failed wipe must retain the pending marker: %v", err)
+		}
+	})
 }

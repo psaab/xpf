@@ -367,8 +367,9 @@ type zeroizeCompletion struct {
 	helperPath string
 }
 
-// zeroizeComplete is the completion for ungated wipes: no daemon runs
-// post-verification, so the wipe's own final verification grounds clean.
+// zeroizeComplete is the completion for legacy/test direct wipes with no
+// known helper path: no daemon runs post-verification, so the wipe's own
+// final verification grounds clean, minus the helper class it cannot name.
 var zeroizeComplete = zeroizeCompletion{}
 
 // PerformZeroizeWipePending runs the shared wipe but records a PENDING
@@ -377,6 +378,16 @@ var zeroizeComplete = zeroizeCompletion{}
 // helper state path, then flip the flag clean after post-verification.
 func PerformZeroizeWipePending(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, helperPath string) error {
 	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, inv, zeroizeCompletion{pending: true, helperPath: helperPath})
+}
+
+// PerformZeroizeWipeUngated runs the shared wipe to completion for callers
+// with no daemon post-verification (offline console recovery, NoDataplane
+// gRPC fallback). Unlike the gated pending variant it must erase and verify
+// the helper state file itself: no helper stop/sweep follows, so an
+// unerased custom state file would otherwise survive under a clean
+// receipt. helperPath is the pre-wipe effective path (never "").
+func PerformZeroizeWipeUngated(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, helperPath string) error {
+	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, inv, zeroizeCompletion{pending: false, helperPath: helperPath})
 }
 
 var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, completion zeroizeCompletion) error {
@@ -415,10 +426,20 @@ var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir 
 	if err := zeroizeConfigDir(configDir, configBase); err != nil {
 		errs = append(errs, err)
 	}
+	// Ungated wipes erase the helper state file themselves: no daemon
+	// post-verify follows, and the helper is not running in the offline
+	// contexts that take this path. Gated wipes skip this—the helper is
+	// live until the daemon stops it post-wipe—and the daemon sweep owns
+	// the path instead.
+	if !completion.pending && completion.helperPath != "" {
+		if err := zeroizeEraseHelperState(completion.helperPath); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	// Final verification runs after every leg and immediately before the
 	// markers may clear, so a fence-escaper write that landed after an
 	// early per-leg check fails the wipe here with the boot gate intact.
-	if err := zeroizeFinalEraseVerification(); err != nil {
+	if err := zeroizeFinalEraseVerification(completion); err != nil {
 		errs = append(errs, err)
 	}
 	switch len(errs) {
