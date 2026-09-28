@@ -498,6 +498,23 @@ EOF
     chmod +x "$ROOT/bin/flock"
 }
 
+stub_flock_toctou() {
+    # Deterministic -e/flock TOCTOU: the marker exists at the postinst's
+    # -e check, then this stub unlinks it and execs the REAL flock(1),
+    # which recreates the file (missing-path exit 0). Proves the probe's
+    # umask 077 lands the recreated file at 0600 (not umask-derived).
+    command -v flock >/dev/null 2>&1 || { echo "FAIL: test host lacks a real flock(1) for the TOCTOU fixture"; exit 1; }
+    mkdir -p "$ROOT/bin"
+    REAL_FLOCK=$(command -v flock)
+    export REAL_FLOCK
+    cat > "$ROOT/bin/flock" <<EOF
+#!/bin/sh
+rm -f "\$2"
+exec "$REAL_FLOCK" "\$@"
+EOF
+    chmod +x "$ROOT/bin/flock"
+}
+
 scenario_first_install_skips_barrier_when_table_live() {
     build_first_install_success
     patched_postinst_barrier_live
@@ -603,17 +620,45 @@ scenario_first_install_skips_barrier_on_flock_error() {
     mkdir -p "$ROOT/run/xpf"
     : > "$ROOT/run/xpf/early-input-handoff.done"
     PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
-    # The stub's distinct exit proves the error path fired (not held/stale).
+    # Exit 2 is an ARBITRARY distinct nonzero — it proves the stub took
+    # the error path (not held/stale), NOT that real flock(1) uses 2 for
+    # operational errors. The gate maps ANY nonzero to live, so this pins
+    # the generic-nonzero branch (residual contract), not a util-linux code.
     grep -Fq 'flock exit=2' "$FLOCK_LOG" || {
         echo "FAIL: flock stub did not take the error path (fixture vacuous)"; exit 1; }
-    # Residual contract: every nonzero flock result reads live here (see
-    # the bounded-modes comment at the gate) — so an error skips.
     if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
         echo "FAIL: postinst injected despite a flock error (residual contract: errors read live)"; exit 1
     fi
     if [ -e "$NFT_LOG" ] && grep -Fq 'nft list table' "$NFT_LOG"; then
         echo "FAIL: postinst probed kernel despite a flock error (marker must win first)"; exit 1
     fi
+}
+
+scenario_first_install_toctou_recreated_marker_is_0600() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    stub_flock_toctou
+    command -v stat >/dev/null 2>&1 || { echo "FAIL: test host lacks stat for the mode assert"; exit 1; }
+    mkdir -p "$ROOT/run/xpf"
+    : > "$ROOT/run/xpf/early-input-handoff.done"
+    # Precondition (non-vacuity): the staged file must NOT already be 600
+    # (ambient umask 077 would make the mode assert vacuous).
+    if [ "$(stat -c %a "$ROOT/run/xpf/early-input-handoff.done")" = 600 ]; then
+        echo "FAIL: staged marker already 600 (ambient umask 077 makes the TOCTOU mode assert vacuous)"; exit 1
+    fi
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    # Branch expectations UNweakened: lockable (recreated) → kernel truth → inject.
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst skipped kernel truth on a TOCTOU-recreated marker"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: TOCTOU-recreated marker plus absent table did not trigger a barrier injection"; exit 1; }
+    # The probe recreated the file (missing-path exit 0) — under umask 077.
+    [ -e "$ROOT/run/xpf/early-input-handoff.done" ] || {
+        echo "FAIL: TOCTOU did not recreate the marker (stub did not unlink?)"; exit 1; }
+    mode=$(stat -c %a "$ROOT/run/xpf/early-input-handoff.done")
+    [ "$mode" = 600 ] || {
+        echo "FAIL: TOCTOU-recreated marker mode = $mode, want 600 (probe must run under umask 077)"; exit 1; }
 }
 
 scenario_upgrade_never_starts_barrier() {
@@ -639,6 +684,7 @@ run_scenario first_install_skips_barrier_with_live_handoff_marker
 run_scenario first_install_injects_barrier_with_stale_handoff_marker
 run_scenario first_install_proceeds_without_flock_binary
 run_scenario first_install_skips_barrier_on_flock_error
+run_scenario first_install_toctou_recreated_marker_is_0600
 run_scenario upgrade_never_starts_barrier
 run_scenario recovers_cli_through_current
 run_scenario recovers_helper_through_current
