@@ -373,6 +373,7 @@
   },
   "control_response": {
     "ok": false,
+    "persistent_nat_lease_count": 0,
     "policy_delete_complete": false,
     "policy_delete_outcomes": [],
     "session_export_dropped": 0,

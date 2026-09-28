@@ -13,6 +13,13 @@ xpf (0.0.0) unstable; urgency=medium
   * Install live-address host-input fences on #1960/#10297 fail-closed
     cold boots, preserving management addresses while blocking data addresses
     until a valid config can be applied (#10732).
+  * Revoke authoritative userspace persistent NAT leases on clear, refresh the
+    display mirror, propagate the operation to the HA peer, and fence stale
+    SHOW refreshes and synced-session re-creation. Carry bounded clear fences
+    across retained-pool allocator reseeds and same-address pool renames, even
+    when no live reservations remain; prune expired keys and convert active-shell
+    markers to a finite 60-second horizon when the shell itself is not carried
+    (#10784).
   * Register day-0 and Debian maintainer-script regression tests with
     `make selftest` and census both test locations (#10747).
   * Mark subscriber-overrun gaps in CLI flow and packet-drop, gRPC packet-drop,

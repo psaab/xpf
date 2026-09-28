@@ -229,6 +229,28 @@ the complete tuple metadata (`source_ip`, `destination_ip`, protocol, and ports)
 on the control wire; helpers reject legacy emit-on-wire requests instead of
 synthesizing tuple identity locally.
 
+### Persistent-NAT clear (#10784)
+
+`clear_persistent_nat_leases` is a control-socket mutation of the helper's
+allocator, not just a clear of Go's display mirror. The helper immediately
+removes idle leases and releases their PAT occupancy. Incoming peer idle-lease
+records are fenced for 60 seconds after clear: per-key for known leases and
+allocator-wide for keys not yet installed on the receiver. A fresh local
+same-key lease does not remove or restart that fence, so its early expiry cannot
+re-admit a delayed pre-clear record. Once the full window ends, an old record
+may be admitted (#11486 residual).
+
+Active leases remain as revoked `u64::MAX` shells until their last active flow
+drains, then retain a per-key 60-second import fence. Revoked shells are hidden
+from export/display. New local flows cannot reuse a cleared mapping, though
+synced live sessions can join an existing shell to preserve their already-live
+tuple. Expired tombstones are pruned on a later clear, not by a timer. A drained
+shell is reclaimed by normal GC or safely retired before a same-key overwrite,
+even if a budgeted GC pass skipped it. The response's
+`persistent_nat_lease_count` reports only leases newly revoked by this
+operation; repeating clear while a revoked shell drains reports zero. Go clears
+the SHOW mirror only after the helper acknowledges the clear.
+
 ## Reconciliation
 
 `replan_queues` derives the binding plan from the current
