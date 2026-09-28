@@ -2775,6 +2775,13 @@ type compileOpts struct {
 	// and silently conflated the two — still BOOTS, now with a deterministic
 	// warning. Same doctrine as lenientInterfaceUnitRef (#5933).
 	lenientRIMemberCollision bool
+	// lenientRIDualClaim11060 (#11060) downgrades a cross-RI Linux-device
+	// ownership conflict from a hard compile error to a tolerant-load
+	// quarantine. Strict commit rejects aliases or refs resolving to the same
+	// kernel device; tolerant boot removes every conflicting membership,
+	// leaves the device unbound, and records alarm/metric evidence while
+	// preserving unaffected units from a bare member.
+	lenientRIDualClaim11060 bool
 	// lenientRoutingInstanceType9814 (#9814) downgrades the routing-instance
 	// instance-type value-domain gate (validateRoutingInstanceTypeStrict9814)
 	// from a hard compile error to a cfg.Warnings entry. A mistyped or
@@ -3041,6 +3048,7 @@ func lenientCompileOpts() compileOpts {
 		lenientAddressBookNames:                true,
 		lenientReservedAddressNames:            true,
 		lenientAddressBookNameCollision:        true,
+		lenientRIDualClaim11060:                true,
 		lenientZoneInterfaceMembership:         true,
 		lenientZoneInterfaceDefined:            true,
 		lenientZoneInterfacesNonEmpty:          true,

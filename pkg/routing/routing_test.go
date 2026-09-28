@@ -30,11 +30,12 @@ type fakeVRFOps struct {
 	// LinkAdd and the readback).
 	substituteAfterAdd map[string]netlink.Link
 
-	adds       int
-	dels       int
-	setUps     int
-	byNameHits int
-
+	adds        int
+	dels        int
+	setUps      int
+	noMasters   int
+	byNameHits  int
+	noMasterErr error
 	// #847 orphan-reap test hooks.
 	extraLinks  []netlink.Link // non-VRF links to surface via LinkList
 	linkListErr error          // when set, LinkList returns this error
@@ -101,6 +102,15 @@ func (f *fakeVRFOps) LinkSetUp(link netlink.Link) error {
 // reconcile path never calls it; the fake just records nothing and
 // succeeds so *fakeVRFOps satisfies the interface.
 func (f *fakeVRFOps) LinkSetMaster(link, master netlink.Link) error {
+	return nil
+}
+
+func (f *fakeVRFOps) LinkSetNoMaster(link netlink.Link) error {
+	f.noMasters++
+	if f.noMasterErr != nil {
+		return f.noMasterErr
+	}
+	link.Attrs().MasterIndex = 0
 	return nil
 }
 

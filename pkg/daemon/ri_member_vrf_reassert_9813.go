@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -17,7 +18,7 @@ import (
 // next apply of any kind. The fabric half of this issue fixed the same shape
 // for fab0/fab1 and vrf-mgmt.
 //
-// Two properties keep this loop from fighting the code that owns these binds:
+// Three properties keep this loop from fighting the code that owns these binds:
 //
 //   - It binds only a member whose master is NOT its VRF. BindInterfaceToVRF
 //     logs at Info on every call, so re-running the apply's bind loop on every
@@ -29,6 +30,10 @@ import (
 //     bind, so a daemon-side bind would move the master with the claim
 //     bookkeeping left behind. List members are step 0a's — the #1884 case-2
 //     veto says so in as many words — and they are what this loop re-asserts.
+//   - It skips a Linux device claimed by multiple RI list members. Strict
+//     commits reject the ambiguity (#11060), but an older persisted config
+//     must still boot on the tolerant path. There is no unique intended owner
+//     for its link, so reasserting it would alternate the master on every tick.
 
 // riMemberVRFReassertInterval paces the re-assert, matching its siblings
 // (fabricIPVLANReassertLoop, proxyARPReassertLoop, raDeadSenderReassertLoop).
@@ -78,11 +83,15 @@ func (d *Daemon) reassertRIMemberVRFOnce(ctx context.Context) {
 	d.rebindRIMembersOutsideTheirVRF(cfg)
 }
 
-// rebindRIMembersOutsideTheirVRF binds every configured list member that sits
-// outside the VRF its instance names. A failure is logged, and the next tick
-// retries it.
+// rebindRIMembersOutsideTheirVRF binds list members that sit outside their VRF
+// and detaches quarantined devices only when their current master is one of the
+// conflicting VRFs. Unrelated masters are never detached.
 func (d *Daemon) rebindRIMembersOutsideTheirVRF(cfg *config.Config) {
 	for _, m := range d.riMembersOutsideTheirVRF(cfg) {
+		if m.conflict != nil {
+			d.detachRIMemberDeviceConflict(*m.conflict)
+			continue
+		}
 		slog.Warn("routing-instance member outside its VRF — re-binding",
 			"interface", m.linuxName, "instance", m.instance)
 		if err := d.routing.BindInterfaceToVRF(m.linuxName, m.instance); err != nil {
@@ -92,31 +101,84 @@ func (d *Daemon) rebindRIMembersOutsideTheirVRF(cfg *config.Config) {
 	}
 }
 
-// riMember names one routing-instance list member and the instance it belongs to.
+// riMember names one routing-instance list member that needs reconciliation.
+// A non-nil conflict requests a safe detach rather than a bind.
 type riMember struct {
 	linuxName string
 	instance  string
+	conflict  *config.RoutingInstanceMemberDeviceConflict
 }
 
-// riMembersOutsideTheirVRF returns the configured list members that exist but
-// sit outside the VRF their instance names.
-//
-// Name resolution goes through riMemberLinuxName with cfg.TunnelNameMap(),
-// exactly as step 0a resolves it, so this loop and the apply reason about ONE
-// name set — the same reason #6805 gave for sharing one bind implementation.
-// The netlink reads go through the shared fabricLinkByName seam, so a test can
-// drive this against a synthetic link table.
-//
-// A member absent on this chassis is skipped silently: a routing instance may
-// legitimately name an interface this chassis does not have, and step 0a
-// already treats that as best-effort rather than an error.
+// riMemberDeviceConflicts combines freshly derived ambiguity with evidence
+// retained by the tolerant compiler after it has removed the bad memberships.
+// The latter is essential: kernel state can still carry the old VRF master even
+// though the sanitized config no longer contains either claimant.
+func riMemberDeviceConflicts(cfg *config.Config) []config.RoutingInstanceMemberDeviceConflict {
+	if cfg == nil {
+		return nil
+	}
+	byDevice := make(map[string]map[string]config.RoutingInstanceMemberClaim)
+	add := func(conflict config.RoutingInstanceMemberDeviceConflict) {
+		if conflict.LinuxName == "" {
+			return
+		}
+		claims := byDevice[conflict.LinuxName]
+		if claims == nil {
+			claims = make(map[string]config.RoutingInstanceMemberClaim)
+			byDevice[conflict.LinuxName] = claims
+		}
+		for _, claim := range conflict.Claims {
+			claims[claim.Instance+"\x00"+claim.Member] = claim
+		}
+	}
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		add(conflict)
+	}
+	for _, conflict := range config.RoutingInstanceMemberDeviceConflicts(cfg, cfg.TunnelNameMap()) {
+		add(conflict)
+	}
+	devices := make([]string, 0, len(byDevice))
+	for device := range byDevice {
+		devices = append(devices, device)
+	}
+	sort.Strings(devices)
+	out := make([]config.RoutingInstanceMemberDeviceConflict, 0, len(devices))
+	for _, device := range devices {
+		claimKeys := make([]string, 0, len(byDevice[device]))
+		for key := range byDevice[device] {
+			claimKeys = append(claimKeys, key)
+		}
+		sort.Strings(claimKeys)
+		conflict := config.RoutingInstanceMemberDeviceConflict{LinuxName: device}
+		for _, key := range claimKeys {
+			conflict.Claims = append(conflict.Claims, byDevice[device][key])
+		}
+		out = append(out, conflict)
+	}
+	return out
+}
+
+// riMembersOutsideTheirVRF returns list members requiring reconciliation.
+// Quarantined conflicts produce detach actions only while they remain mastered
+// by one of their claimant VRFs; unrelated or already-default links stay alone.
 func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 	if cfg == nil {
 		return nil
 	}
+	conflicts := riMemberDeviceConflicts(cfg)
+	conflictByDevice := make(map[string]config.RoutingInstanceMemberDeviceConflict, len(conflicts))
+	var out []riMember
+	for _, conflict := range conflicts {
+		conflictByDevice[conflict.LinuxName] = conflict
+		if !d.riMemberConflictNeedsDetach(conflict) {
+			continue
+		}
+		c := conflict
+		out = append(out, riMember{linuxName: conflict.LinuxName, conflict: &c})
+	}
+
 	stanza := tunnelsWithTheirOwnRIStanza(cfg)
 	tunMap := cfg.TunnelNameMap()
-	var out []riMember
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
 			continue
@@ -125,8 +187,11 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 		if err != nil || vrf == nil || vrf.Attrs() == nil {
 			continue // no VRF device on the box: ReconcileVRFs owns creating it
 		}
-		for _, ifaceName := range ri.Interfaces {
-			linuxName := riMemberLinuxName(cfg, tunMap, ifaceName)
+		for _, key := range config.RoutingInstanceMemberDeviceKeysForInstance(cfg, tunMap, ri) {
+			linuxName := key.LinuxName
+			if _, found := conflictByDevice[linuxName]; found {
+				continue // #11060: quarantine owns this device, never bind it
+			}
 			if stanza[linuxName] {
 				continue // the tunnel manager's claim, not step 0a's
 			}
@@ -143,14 +208,75 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 	return out
 }
 
-// tunnelsWithTheirOwnRIStanza names the tunnel devices whose config carries a
-// `routing-instance` stanza. The tunnel manager binds those itself and records
-// the claim, so this loop leaves them alone.
+func (d *Daemon) riMemberConflictNeedsDetach(conflict config.RoutingInstanceMemberDeviceConflict) bool {
+	link, err := d.fabricLinkByName(conflict.LinuxName)
+	if err != nil || link == nil || link.Attrs() == nil || link.Attrs().MasterIndex == 0 {
+		return false
+	}
+	for _, claim := range conflict.Claims {
+		if claim.Instance == "" || config.IsReservedRoutingInstanceName(claim.Instance) {
+			continue
+		}
+		vrf, err := d.fabricLinkByName("vrf-" + claim.Instance)
+		if err == nil && vrf != nil && vrf.Attrs() != nil &&
+			link.Attrs().MasterIndex == vrf.Attrs().Index {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Daemon) detachRIMemberDeviceConflict(conflict config.RoutingInstanceMemberDeviceConflict) {
+	if d.routing == nil {
+		return
+	}
+	instances := make([]string, 0, len(conflict.Claims))
+	seen := make(map[string]struct{}, len(conflict.Claims))
+	for _, claim := range conflict.Claims {
+		if claim.Instance == "" || config.IsReservedRoutingInstanceName(claim.Instance) {
+			continue
+		}
+		if _, found := seen[claim.Instance]; found {
+			continue
+		}
+		seen[claim.Instance] = struct{}{}
+		instances = append(instances, claim.Instance)
+	}
+	detached, err := d.routing.UnbindInterfaceFromVRFs(conflict.LinuxName, instances)
+	if err != nil {
+		slog.Error("quarantined routing-instance member detach failed; will retry",
+			"interface", conflict.LinuxName, "claims", instances, "err", err, "issue", "#11060")
+		return
+	}
+	if detached {
+		slog.Warn("quarantined routing-instance member detached to default routing context",
+			"interface", conflict.LinuxName, "claims", instances, "issue", "#11060")
+	}
+}
+
+// tunnelsWithTheirOwnRIStanza names every configured tunnel device with an
+// explicit routing-instance stanza. The tunnel manager owns those bindings;
+// list-member reconciliation must not bind or reassert them.
 func tunnelsWithTheirOwnRIStanza(cfg *config.Config) map[string]bool {
 	out := map[string]bool{}
-	for _, tc := range collectAppliedTunnels(cfg) {
-		if tc != nil && tc.RoutingInstance != "" {
+	if cfg == nil {
+		return out
+	}
+	for _, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		if tc := ifc.Tunnel; tc != nil && tc.RoutingInstance != "" && tc.Name != "" {
 			out[tc.Name] = true
+		}
+		for _, unit := range ifc.Units {
+			if unit == nil || unit.Tunnel == nil || unit.Tunnel.RoutingInstance == "" {
+				continue
+			}
+			name := unit.Tunnel.Name
+			if name != "" {
+				out[name] = true
+			}
 		}
 	}
 	return out

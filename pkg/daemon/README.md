@@ -530,8 +530,7 @@ startup-phase and shutdown ordering is untouched:
   (netlink route writes) and `reconcileDNSFromDHCP` — none of which pass through
   `beginBackgroundApply`. Stopping the callback is what closes that half.
 - `daemon_run_routehelpers.go` — route/tunnel inference helpers:
-  `riMemberLinuxName`, `collectAppliedTunnels`, `linkLocalV6Net`,
-  `inferIPv6StaticNextHopInterfaces`.
+  `collectAppliedTunnels`, `linkLocalV6Net`, `inferIPv6StaticNextHopInterfaces`.
 
 ### Struct decomposition (#4407, in progress)
 
@@ -1414,7 +1413,7 @@ member under every spelling a lease can present. Three consequences of
 1. a lease key can never contain a slash, so the raw config token is not a
    candidate key at all and is no longer inserted;
 2. a lease key never carries a unit NUMBER (`DHCPLeaseIfName` has no
-   unit-number fallback), so `logicalUnitDeviceKey`'s `base.<unit>` arm —
+   unit-number fallback), so `config.LogicalUnitDeviceKey`'s `base.<unit>` arm —
    correct for the netdev-name family (#8321/#8597) — is wrong here;
 3. a member naming the WHOLE DEVICE claims every unit on it (#9063's reading),
    and a tagged unit's lease key is `base.<vlan-id>`, which the device name
@@ -2119,15 +2118,15 @@ never lock an operator out of a remote box it manages.
   `config.LinuxIfName()` — the unit number — so the producer wrote
   `ge-0-0-1.100`, the consumers looked up `ge-0-0-1.10`, and every VRF-scoped
   lookup missed. Three consumers shared the assumption:
-  `riMemberLinuxName` (the VRF bind name — the bind failed against a
-  nonexistent device while the commit reported success, leaving the member in
-  the main table), `collectPrefixesForInterface` (a VRF-scoped static next-hop
-  left without interface scope), and the `claimedByVRF` stamp (a VRF-owned
-  interface stayed visible to the GLOBAL table, so a global next-hop could
-  resolve onto a tenant's interface).
-  The rule now lives in one place, `logicalUnitDeviceKey`, called by the
-  producer and by `logicalUnitDeviceKeyForRef` on the consumer side, so the two
-  cannot drift apart again.
+  `config.RoutingInstanceMemberDeviceKeys` (the VRF bind name — a wrong VLAN
+  device name made the bind fail while commit reported success),
+  `collectPrefixesForInterface` (a VRF-scoped static next-hop left without
+  interface scope), and the `claimedByVRF` stamp (a VRF-owned interface stayed
+  visible to the GLOBAL table, so a global next-hop could resolve onto a
+  tenant's interface).
+  The rule now lives in `config.LogicalUnitDeviceKey` and
+  `config.LogicalUnitDeviceKeyForRef`, shared by producers and consumers so the
+  two cannot drift apart again.
   Three traps for the next reader:
   - **It is not a substitution of one field for the other.** A unit with no
     `vlan-id` is not tagged, and `base.<unit>` is correct there. Dropping that
@@ -2144,6 +2143,18 @@ never lock an operator out of a remote box it manages.
   cells used units 50/80 with no `vlan-id` and passed against both
   implementations, which is how the producer-side defect survived to #8321 and
   the consumer-side to #8597.
+
+- **RI membership conflicts use Linux-device identity (#11060).**
+  `config.RoutingInstanceMemberDeviceKeys` feeds strict validation, the daemon
+  bind/reassert passes, and userspace membership maps. Slash/dash aliases and
+  multiple unit refs sharing one tunnel netdevice are conflicts; distinct VLAN
+  IDs remain separate devices. Forwarding instances participate in the
+  device-owner gate — a forwarding+VRF same-device overlap is strict-rejected
+  and tolerant-quarantined in either declaration order — even though they own
+  no VRF device and bind nothing to Linux VRFs. Tolerant loads remove
+  ambiguous memberships, retain safe generated sibling units, and leave the
+  contested device in the default routing context. Apply emits an ERROR alarm and
+  `xpf_routing_instance_member_device_conflicts` remains alertable.
 
 - **Every shutdown-path `applySem` acquire is BOUNDED (#8597).**
   `daemon_run_shutdown.go` states the rule at its own drain — *"bound it
@@ -2968,10 +2979,10 @@ never lock an operator out of a remote box it manages.
     apply's bind loop each tick would log on every tick of a healthy node. It
     leaves a tunnel carrying its own `routing-instance` stanza alone, because
     that is the tunnel manager's claim (`reconcileVRFClaimLocked` case 1, recorded
-    in `appliedRI` only from its own bind), and it resolves names through
-    `riMemberLinuxName` exactly as step 0a does, so the two reason about ONE name
-    set. It takes `applySem` before the config read that drives the binding
-    (#4001). Tests: `ri_member_vrf_reassert_9813_test.go`, including a kernel cell.
+    in `appliedRI` only from its own bind), and it resolves devices through the
+    shared `config.RoutingInstanceMemberLinuxNames` helper, so both passes reason
+    about ONE device set. It takes `applySem` before the config read that drives
+    the binding (#4001). Tests: `ri_member_vrf_reassert_9813_test.go`, including a kernel cell.
 
   **Host-inbound conntrack revocation retry (#6802, the same recovery shape):**
   `flushDeniedHostInboundConntrack` (the #5566 reconcile) deletes established

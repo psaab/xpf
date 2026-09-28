@@ -91,5 +91,11 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesRoutingInstanceType9814(tree, cfg, opts); err != nil {
 		return err
 	}
+	// #11060: keep dual routing-instance membership dead-last as well. The
+	// order of uniform gates is observable: do not steal the first-error slot
+	// from an existing validation.
+	if err := runUniformGatesRIDualClaim11060(tree, cfg, opts); err != nil {
+		return err
+	}
 	return nil
 }
