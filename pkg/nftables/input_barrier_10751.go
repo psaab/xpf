@@ -66,8 +66,11 @@
 // the daemon's first-apply handoff, after a successful real host-inbound
 // install, a successful cold-boot/gap fence install, or a successful
 // no-enforcement teardown — never before enforcement (or intended
-// non-enforcement) is established. A genuine removal failure is returned so the
-// caller stays visibly fail-closed rather than believing the barrier lifted.
+// non-enforcement) is established. Bootstrap (which suppresses the ordinary
+// apply) instead swaps the table for the lifeline-admitting variant, keeping
+// data and link-local ingress closed while recovery stays reachable. A
+// genuine removal failure is returned so the caller stays visibly fail-closed
+// rather than believing the barrier lifted.
 package nftables
 
 import (
@@ -99,8 +102,22 @@ const earlyInputBarrierLoopback = "lo"
 // InstallEarlyInputBarrier installs the #10751 boot input barrier: an inet-only
 // input-hook chain with policy DROP and just config-free loopback/L3/DHCP-client
 // admits. Replace-on-call makes boot retries converge to the same shape.
-
 func (in *netlinkInstaller) InstallEarlyInputBarrier() error {
+	return in.installEarlyInputBarrier(nil)
+}
+
+// InstallEarlyInputBarrierWithLifelineAdmit installs the same barrier table
+// with one additional leading rule: `iifname {lifelines} accept`. Bootstrap
+// swaps the global barrier for this variant (same table name, so the ordinary
+// apply handoff removes it unchanged): data and link-local ingress stay
+// DROP-closed while the management lifeline stays reachable for recovery.
+// Replace-on-call, like the base install. An empty lifeline set installs the
+// base shape.
+func (in *netlinkInstaller) InstallEarlyInputBarrierWithLifelineAdmit(lifelines []string) error {
+	return in.installEarlyInputBarrier(lifelines)
+}
+
+func (in *netlinkInstaller) installEarlyInputBarrier(lifelines []string) error {
 	c, err := in.newConn()
 	if err != nil {
 		return fmt.Errorf("nftables conn: %w", err)
@@ -116,7 +133,7 @@ func (in *netlinkInstaller) InstallEarlyInputBarrier() error {
 	tbl = c.AddTable(tbl)
 	chain := c.AddChain(earlyInputBarrierChain(tbl))
 	p := &nlPlan{c: c, table: tbl, chain: chain}
-	emitEarlyInputBarrierAdmits(p)
+	emitEarlyInputBarrierAdmitsWithLifeline(p, lifelines)
 	if p.err != nil {
 		return p.err
 	}
@@ -164,6 +181,16 @@ func earlyInputBarrierChain(tbl *nftables.Table) *nftables.Chain {
 // policy. FRR/HA ingress is deliberately deferred until the first host-inbound
 // handoff (see the file doc comment) — no from-any service pinholes.
 func emitEarlyInputBarrierAdmits(p *nlPlan) {
+	emitEarlyInputBarrierAdmitsWithLifeline(p, nil)
+}
+
+// emitEarlyInputBarrierAdmitsWithLifeline adds a leading `iifname {lifelines}
+// accept` (bootstrap recovery) ahead of the base admits. Empty lifelines
+// emit the base shape unchanged.
+func emitEarlyInputBarrierAdmitsWithLifeline(p *nlPlan, lifelines []string) {
+	if len(lifelines) > 0 {
+		p.rule().iifname(lifelines).emit(verdictAccept()...)
+	}
 	p.rule().iifname([]string{earlyInputBarrierLoopback}).emit(verdictAccept()...)
 	hostInboundFenceMandatoryAdmitsNetlink(p, nil)
 	p.rule().l4Port(protoUDP, "dport", portsFromUint16(earlyInputBarrierDHCPClientPorts), false).emit(verdictAccept()...)

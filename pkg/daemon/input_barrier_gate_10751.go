@@ -45,24 +45,47 @@ func ensureEarlyInputProtectionForNaming() bool {
 	return false
 }
 
-// removeEarlyInputBarrierForBootstrap lifts the #10751 pre-networkd barrier
-// when the daemon runs in bootstrap mode (no committed configuration, or a
-// fail-closed load). Bootstrap suppresses the ordinary apply that would hand
-// the barrier off, while remote recovery itself needs management connections
-// the barrier blocks — without this handoff a bootstrap boot retains a global
-// DROP indefinitely (management lockout). Callers install any fail-closed
-// fences FIRST (see the initManagers ordering) so data addresses keep scoped
-// protection; the lifeline stays reachable throughout (established sessions
-// never drop; new management connections work once the barrier lifts).
-// Removal is idempotent (absent -> nil). A removal failure is LOUD (error
-// log) but does not stop boot — the console remains for recovery.
-func (d *Daemon) removeEarlyInputBarrierForBootstrap(reason string) {
-	if err := nftInstaller.RemoveEarlyInputBarrier(); err != nil {
-		slog.Error("bootstrap cannot lift early host-input barrier; management recovery may be blocked — use the console",
-			"reason", reason, "err", tagNftInstallErr(err))
+// Default lifelines admitted by the bootstrap input guard when detection
+// yields nothing better. fxp0/em0 are the canonical management NICs and
+// fab0/fab1 the cluster control links; a name with no such interface simply
+// never matches, so over-listing defaults is safe.
+var earlyInputBootstrapDefaultLifelines = []string{"fxp0", "em0", "fab0", "fab1"}
+
+// ensureEarlyInputBootstrapGuard replaces the #10751 global pre-networkd
+// barrier with the lifeline-admitting variant when the daemon runs in
+// bootstrap mode (no committed configuration, or a fail-closed load).
+// Bootstrap suppresses the ordinary apply that would hand the barrier off,
+// while remote recovery itself needs management connections the global
+// barrier blocks — but lifting the barrier entirely would reopen data and
+// link-local ingress the fail-closed fences do not cover (fence discovery
+// or install can fail, and fences exclude link-locals). The variant keeps
+// all non-lifeline ingress DROP-closed while the management lifeline stays
+// reachable for recovery. Same table name, so the first ordinary apply
+// removes it through the unchanged handoff path (handoffDone stays false
+// until then). A variant-install failure retains the global barrier (fail
+// closed) and is LOUD — the console remains for recovery.
+func (d *Daemon) ensureEarlyInputBootstrapGuard() {
+	lifelines := append([]string(nil), earlyInputBootstrapDefaultLifelines...)
+	if name, found, err := detectLifelineInterfaceFn(); err != nil {
+		slog.Warn("bootstrap lifeline detection failed; admitting default management interfaces only",
+			"err", err)
+	} else if found && name != "" {
+		duplicate := false
+		for _, existing := range lifelines {
+			if existing == name {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			lifelines = append(lifelines, name)
+		}
+	}
+	if err := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(lifelines); err != nil {
+		slog.Error("bootstrap cannot install lifeline-admitting input guard; global barrier retained — use the console if management is unreachable",
+			"lifelines", lifelines, "err", tagNftInstallErr(err))
 		return
 	}
-	d.earlyInputHandoffDone.Store(true)
-	slog.Warn("bootstrap lifted early host-input barrier without an ordinary config apply; data-interface services are unenforced until the first commit",
-		"reason", reason)
+	slog.Warn("bootstrap swapped the global input barrier for a lifeline-admitting guard; data-interface services stay closed until the first commit",
+		"lifelines", lifelines)
 }

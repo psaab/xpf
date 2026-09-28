@@ -269,7 +269,45 @@ func assertEarlyInputBarrierInstalled10751(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read early input barrier rules: %v", err)
 	}
-	if len(rules) != 9 {
-		t.Fatalf("installed early input barrier has %d rules, want 9", len(rules))
+	if len(rules) != 7 {
+		t.Fatalf("installed early input barrier has %d rules, want 7 (loopback + five mandatory L3 + DHCP-client)", len(rules))
+	}
+}
+
+func TestEarlyInputBarrierLifelineAdmit10751(t *testing.T) {
+	p := newBuildPlan(t, EarlyInputBarrierTableName, gnft.ChainPriority(earlyInputBarrierPriority))
+	p.chain = earlyInputBarrierChain(p.table)
+	emitEarlyInputBarrierAdmitsWithLifeline(p, []string{"fxp0", "hb0"})
+	if p.err != nil {
+		t.Fatalf("build lifeline guard: %v", p.err)
+	}
+	// Base 7 rules plus the leading lifeline admit.
+	if len(p.rules) != 8 {
+		t.Fatalf("lifeline guard rule count = %d, want 8", len(p.rules))
+	}
+	first := p.rules[0]
+	meta, ok := first[0].(*expr.Meta)
+	if !ok || meta.Key != expr.MetaKeyIIFNAME {
+		t.Fatalf("first rule head = %#v, want iifname match", first[0])
+	}
+	lookup, ok := first[1].(*expr.Lookup)
+	if !ok {
+		t.Fatalf("first rule match = %#v, want an iifname set lookup for two lifelines", first[1])
+	}
+	elements, ok := p.sets[lookup.SetID]
+	if !ok {
+		t.Fatalf("lifeline rule references unrecorded nft set %d", lookup.SetID)
+	}
+	if len(elements) != 2 || !bytes.Equal(elements[0].Key, ifname16("fxp0")) || !bytes.Equal(elements[1].Key, ifname16("hb0")) {
+		t.Fatalf("lifeline set keys = %v, want fxp0 + hb0", elements)
+	}
+	assertInputBarrierAccepts10751(t, first)
+	// The base shape follows unchanged; a lifeline swap must not widen it.
+	second := p.rules[1]
+	if len(second) != 3 {
+		t.Fatalf("second rule has %d expressions, want the base loopback rule", len(second))
+	}
+	if m, ok := second[0].(*expr.Meta); !ok || m.Key != expr.MetaKeyIIFNAME {
+		t.Fatalf("second rule head = %#v, want base loopback iifname", second[0])
 	}
 }

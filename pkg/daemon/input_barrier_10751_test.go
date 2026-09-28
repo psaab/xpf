@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
@@ -647,49 +648,153 @@ func TestEarlyInputGateForLinkActivation10751(t *testing.T) {
 	})
 }
 
-func TestEarlyInputBootstrapHandoff10751(t *testing.T) {
+func TestEarlyInputBootstrapGuard10751(t *testing.T) {
 	orig := nftInstaller
 	t.Cleanup(func() { nftInstaller = orig })
 
-	t.Run("bootstrap lifts the barrier", func(t *testing.T) {
+	t.Run("bootstrap swaps global barrier for lifeline guard", func(t *testing.T) {
+		withFailClosedBootDetect(t, func() (string, bool, error) { return "hb0", true, nil })
 		fake := &fakeNftInstaller{}
 		nftInstaller = fake
 		d := &Daemon{}
 		d.bootstrapMode.Store(true)
-		d.removeEarlyInputBarrierForBootstrap("test-bootstrap")
-		if len(fake.earlyInputBarrierCalls) != 1 || fake.earlyInputBarrierCalls[0] != "remove" {
-			t.Fatalf("barrier calls = %v, want a single bootstrap lift", fake.earlyInputBarrierCalls)
+		d.ensureEarlyInputBootstrapGuard()
+		if len(fake.earlyInputBarrierCalls) != 1 || fake.earlyInputBarrierCalls[0] != "install-lifeline" {
+			t.Fatalf("barrier calls = %v, want a single lifeline-guard swap (never a lift)", fake.earlyInputBarrierCalls)
 		}
-		if !d.earlyInputHandoffDone.Load() {
-			t.Fatal("bootstrap lift must mark the handoff done")
+		if len(fake.earlyInputBarrierLifelineSpecs) != 1 {
+			t.Fatalf("lifeline specs recorded = %d, want 1", len(fake.earlyInputBarrierLifelineSpecs))
+		}
+		got := map[string]bool{}
+		for _, name := range fake.earlyInputBarrierLifelineSpecs[0] {
+			got[name] = true
+		}
+		for _, want := range []string{"fxp0", "em0", "fab0", "fab1", "hb0"} {
+			if !got[want] {
+				t.Errorf("lifeline guard omits %q (admitted %v)", want, fake.earlyInputBarrierLifelineSpecs[0])
+			}
+		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("installed guard must not mark the handoff done (the table still stands)")
 		}
 	})
 
-	t.Run("bootstrap lift failure is loud but non-fatal", func(t *testing.T) {
+	t.Run("guard install failure retains the global barrier", func(t *testing.T) {
+		withFailClosedBootDetect(t, func() (string, bool, error) { return "hb0", true, nil })
 		nftInstaller = &fakeNftInstaller{
-			earlyInputBarrierRemove: func() error { return errors.New("kernel delete failed") },
+			earlyInputBarrierLifelineInstall: func([]string) error { return errors.New("kernel install failed") },
 		}
 		d := &Daemon{}
 		d.bootstrapMode.Store(true)
-		d.removeEarlyInputBarrierForBootstrap("test-bootstrap")
+		d.ensureEarlyInputBootstrapGuard()
 		if d.earlyInputHandoffDone.Load() {
-			t.Fatal("failed bootstrap lift must not mark the handoff done")
+			t.Fatal("failed guard swap must not mark the handoff done")
 		}
 	})
 
-	t.Run("fail-closed fences install before the bootstrap lift", func(t *testing.T) {
+	t.Run("detection failure still admits default lifelines", func(t *testing.T) {
+		withFailClosedBootDetect(t, func() (string, bool, error) { return "", false, errors.New("no routes readable") })
+		fake := &fakeNftInstaller{}
+		nftInstaller = fake
+		d := &Daemon{}
+		d.bootstrapMode.Store(true)
+		d.ensureEarlyInputBootstrapGuard()
+		if len(fake.earlyInputBarrierLifelineSpecs) != 1 {
+			t.Fatalf("lifeline specs recorded = %d, want 1", len(fake.earlyInputBarrierLifelineSpecs))
+		}
+		got := map[string]bool{}
+		for _, name := range fake.earlyInputBarrierLifelineSpecs[0] {
+			got[name] = true
+		}
+		for _, want := range []string{"fxp0", "em0", "fab0", "fab1"} {
+			if !got[want] {
+				t.Errorf("fallback guard omits default %q (admitted %v)", want, fake.earlyInputBarrierLifelineSpecs[0])
+			}
+		}
+	})
+
+	t.Run("fail-closed fences install before the guard swap", func(t *testing.T) {
 		d, fake := failClosedBootFixture(t)
 		var events []string
 		fake.coldBootFence = func(xnft.FenceSpec) error { events = append(events, "host-fence"); return nil }
 		fake.lo0ColdBootFence = func(xnft.FenceSpec) error { events = append(events, "lo0-fence"); return nil }
-		fake.earlyInputBarrierRemove = func() error { events = append(events, "lift-barrier"); return nil }
+		fake.earlyInputBarrierLifelineInstall = func([]string) error { events = append(events, "install-guard"); return nil }
 		d.bootstrapMode.Store(true)
-		// initManagers order: fail-closed fences first, then the bootstrap lift.
+		// initManagers order: fail-closed fences first, then the guard swap.
 		d.installFailClosedBootHostFences(true)
-		d.removeEarlyInputBarrierForBootstrap("test-fail-closed")
-		want := "host-fence,lo0-fence,lift-barrier"
+		d.ensureEarlyInputBootstrapGuard()
+		want := "host-fence,lo0-fence,install-guard"
 		if got := strings.Join(events, ","); got != want {
-			t.Fatalf("bootstrap order = %q, want %q (data fences must own their scope before the global lift)", got, want)
+			t.Fatalf("bootstrap order = %q, want %q (data fences own their scope before the guard swap)", got, want)
+		}
+		removes := 0
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "remove" {
+				removes++
+			}
+		}
+		if removes != 0 {
+			t.Fatalf("barrier calls = %v, bootstrap must swap the guard, never lift it", fake.earlyInputBarrierCalls)
+		}
+	})
+
+	t.Run("failed fence installation still swaps the guard", func(t *testing.T) {
+		d, fake := failClosedBootFixture(t)
+		fake.coldBootFence = func(xnft.FenceSpec) error { return errors.New("host fence failed") }
+		fake.lo0ColdBootFence = func(xnft.FenceSpec) error { return errors.New("lo0 fence failed") }
+		d.bootstrapMode.Store(true)
+		d.installFailClosedBootHostFences(true)
+		d.ensureEarlyInputBootstrapGuard()
+		installs := 0
+		removes := 0
+		for _, call := range fake.earlyInputBarrierCalls {
+			switch call {
+			case "install-lifeline":
+				installs++
+			case "remove":
+				removes++
+			}
+		}
+		if installs != 1 || removes != 0 {
+			t.Fatalf("barrier calls = %v, want exactly one guard swap and no lift when fences fail", fake.earlyInputBarrierCalls)
+		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("guard swap must not mark the handoff done")
+		}
+	})
+
+	t.Run("data link-local ingress stays guarded in bootstrap", func(t *testing.T) {
+		withFailClosedBootLifelineFile(t)
+		withFailClosedBootDetect(t, func() (string, bool, error) { return "fxp0", true, nil })
+		withFailClosedBootLinkList(t, func() ([]netlink.Link, error) {
+			return []netlink.Link{failClosedBootTestLink("fxp0", false), failClosedBootTestLink("ge-0-0-0", false)}, nil
+		})
+		withFailClosedBootAddrList(t, func(link netlink.Link, _ int) ([]netlink.Addr, error) {
+			if link.Attrs().Name == "ge-0-0-0" {
+				return []netlink.Addr{failClosedBootTestAddr(t, "fe80::10/64")}, nil
+			}
+			return []netlink.Addr{failClosedBootTestAddr(t, "10.0.0.1/24")}, nil
+		})
+		fake := &fakeNftInstaller{}
+		withFailClosedBootNft(t, fake)
+		d := &Daemon{store: &configstore.Store{}}
+		d.bootstrapMode.Store(true)
+		// The fail-closed fences exclude link-locals by design (#10732); the
+		// lifeline guard's DROP policy is what covers them — so bootstrap
+		// must install the guard (not lift the table) on this box.
+		d.installFailClosedBootHostFences(true)
+		d.ensureEarlyInputBootstrapGuard()
+		removes, installs := 0, 0
+		for _, call := range fake.earlyInputBarrierCalls {
+			switch call {
+			case "install-lifeline":
+				installs++
+			case "remove":
+				removes++
+			}
+		}
+		if installs != 1 || removes != 0 {
+			t.Fatalf("barrier calls = %v, want the guard standing over link-local data ingress", fake.earlyInputBarrierCalls)
 		}
 	})
 }
