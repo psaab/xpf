@@ -361,22 +361,46 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 		return &pb.SystemActionResponse{Message: "NAT translation statistics cleared"}, nil
 
 	case "clear-persistent-nat":
-		// #2114/#6743-F2: resolve the table ONCE. Under the daemon's live
-		// indirection each GetPersistentNAT() is its own cell load, so a
-		// check-then-use pair nil-dereferences if the daemon disowns the
-		// backend in between.
-		var table *dataplane.PersistentNATTable
-		if s.dp != nil {
-			table = s.dp.GetPersistentNAT()
+		// Resolve the live dataplane once so the clear and the mirror update
+		// describe the same published backend.
+		backend := s.dpProbe()
+		tableProvider, ok := backend.(interface {
+			GetPersistentNAT() *dataplane.PersistentNATTable
+		})
+		if !ok {
+			return &pb.SystemActionResponse{Message: "Persistent NAT table not available"}, nil
 		}
+		table := tableProvider.GetPersistentNAT()
 		if table == nil {
 			return &pb.SystemActionResponse{Message: "Persistent NAT table not available"}, nil
 		}
-		count := table.Len()
-		table.Clear()
-		return &pb.SystemActionResponse{
-			Message: fmt.Sprintf("Cleared %d persistent NAT bindings", count),
-		}, nil
+		count := uint64(table.Len())
+		if clearer, ok := backend.(interface {
+			ClearPersistentNATLeases() (uint64, error)
+		}); ok {
+			var err error
+			count, err = clearer.ClearPersistentNATLeases()
+			if err != nil {
+				return nil, status.Errorf(codes.Unavailable, "clear persistent NAT leases: %v", err)
+			}
+		} else {
+			// The non-userspace table is itself authoritative.
+			table.Clear()
+		}
+		message := fmt.Sprintf("Cleared %d persistent NAT bindings", count)
+		// A peer clear is one hop only. The forwarded SystemAction lands here
+		// with the trusted marker and performs only its local authoritative clear.
+		if !peerForwardedFromContext(ctx) && s.cluster != nil {
+			peerResp, err := s.proxyPeerSystemAction(ctx, req)
+			if err != nil {
+				message += fmt.Sprintf("; WARNING: peer persistent NAT clear failed: %v", err)
+			} else if peerResp == nil {
+				message += "; WARNING: peer persistent NAT clear returned no response"
+			} else {
+				message += "; peer: " + peerResp.Message
+			}
+		}
+		return &pb.SystemActionResponse{Message: message}, nil
 
 	case "ospf-clear":
 		if s.frr == nil {

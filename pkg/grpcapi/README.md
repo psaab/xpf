@@ -108,6 +108,11 @@ The marker still rides an ordinary metadata header on the wire between nodes
 evidence only when the listener that received it is one a peer could have
 dialed.
 
+`SystemAction("clear-persistent-nat")` is an exact additional fabric-listener
+exception for the userspace helper's authoritative persistent-NAT clear
+(#10784). The receiving peer executes the clear without forwarding it again;
+no other `SystemAction` action is added to the fabric allowlist.
+
 ### Fabric-listener supervision (#5047)
 
 `RunFabricListener` is a supervised loop, not a one-shot. A transient
