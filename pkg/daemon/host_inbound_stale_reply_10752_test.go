@@ -838,44 +838,99 @@ func runStaleReplyUDPPacketPath(t *testing.T, localIP, peerIP string) {
 	}
 
 	// HIGH residual pin: exempt BFD control-plane replies are NOT guarded.
-	// Conformant bfdd sources single-hop control from an ephemeral sport to
-	// dport 3784 (RFC 5881 §4), so the box socket binds ephemeral — NOT 3784
-	// (an explicit sport-3784 bind would manufacture an artificial ORIG
-	// box:3784 tuple no conforming peer produces). The box-originated entry
-	// recreates all the same, and the peer reply rides the broad accept.
-	// RIP/SAP/LDP-UDP share the exclusion.
-	bfdPeerAddr := &net.UDPAddr{IP: net.ParseIP(peerIP), Port: 3784}
-	bfdPeer, err := net.ListenUDP("udp", bfdPeerAddr)
+	// Each SSOT bfd dport — single-hop control 3784 (RFC 5881 §4),
+	// echo 3785 (RFC 5880), multihop control 4784 (RFC 5883) — is
+	// sourced by conformant bfdd from an ephemeral sport, so the box
+	// socket binds ephemeral — NOT the dport (an explicit fixed-sport
+	// bind would manufacture an artificial ORIG tuple no conforming peer
+	// produces). The box-originated entry recreates all the same, and
+	// the peer reply rides the broad accept. RIP/SAP/LDP-UDP share the
+	// exclusion.
+	for _, port := range []int{3784, 3785, 4784} {
+		bfdPeerAddr := &net.UDPAddr{IP: net.ParseIP(peerIP), Port: port}
+		bfdPeer, err := net.ListenUDP("udp", bfdPeerAddr)
+		if err != nil {
+			netnsSkipOrFail(t, "bind peer UDP/"+strconv.Itoa(port), err)
+		}
+		defer bfdPeer.Close()
+		bfdBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(localIP)})
+		if err != nil {
+			netnsSkipOrFail(t, "bind box ephemeral BFD socket", err)
+		}
+		defer bfdBox.Close()
+		if sport := bfdBox.LocalAddr().(*net.UDPAddr).Port; sport == port {
+			t.Fatalf("box BFD socket must source ephemeral, got sport %d for dport %d", sport, port)
+		}
+		if err := bfdBox.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bfdBox.WriteToUDP([]byte("bfd-hello"), bfdPeerAddr); err != nil {
+			t.Fatalf("send box-originated BFD hello: %v", err)
+		}
+		if err := bfdPeer.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		n, source, err = bfdPeer.ReadFromUDP(request)
+		if err != nil || string(request[:n]) != "bfd-hello" {
+			t.Fatalf("peer did not receive BFD hello: n=%d err=%v", n, err)
+		}
+		if _, err := bfdPeer.WriteToUDP([]byte("bfd-reply"), source); err != nil {
+			t.Fatalf("send BFD reply: %v", err)
+		}
+		if n, _, err = bfdBox.ReadFromUDP(request); err != nil || string(request[:n]) != "bfd-reply" {
+			t.Fatalf("exempt BFD reply was not delivered (HIGH residual pins allow): n=%d err=%v dport=%d", n, err, port)
+		}
+	}
+}
+
+// TestUnguardedBFDProcedureCoversEcho10752 pins the BFD removal procedure's
+// discovery filter against the SSOT: the filter must cover every UDP dport
+// the bfd token admits (control 3784, echo 3785, multihop 4784), and must
+// stay destination-based (a --sport filter would miss conforming
+// ephemeral-source flows). Fail-on-revert: dropping 3785 from the filter
+// REDs this test while the packet proof above still passes.
+func TestUnguardedBFDProcedureCoversEcho10752(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/host-inbound-service-matrix.md")
 	if err != nil {
-		netnsSkipOrFail(t, "bind peer UDP/3784", err)
+		t.Fatalf("read service matrix: %v", err)
 	}
-	defer bfdPeer.Close()
-	bfdBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(localIP)})
-	if err != nil {
-		netnsSkipOrFail(t, "bind box ephemeral BFD socket", err)
+	var row string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "| BFD |") {
+			row = line
+			break
+		}
 	}
-	defer bfdBox.Close()
-	if sport := bfdBox.LocalAddr().(*net.UDPAddr).Port; sport == 3784 {
-		t.Fatalf("box BFD socket must source ephemeral (RFC 5881 §4), got sport %d", sport)
+	if row == "" {
+		t.Fatal("BFD removal-procedure row not found in the service matrix")
 	}
-	if err := bfdBox.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatal(err)
+	start := strings.Index(row, "dport=(")
+	if start < 0 {
+		t.Fatalf("BFD row carries no dport=(...) discovery filter: %q", row)
 	}
-	if _, err := bfdBox.WriteToUDP([]byte("bfd-hello"), bfdPeerAddr); err != nil {
-		t.Fatalf("send box-originated BFD hello: %v", err)
+	rest := row[start+len("dport=("):]
+	end := strings.Index(rest, ")")
+	if end < 0 {
+		t.Fatalf("BFD row discovery filter is unterminated: %q", row)
 	}
-	if err := bfdPeer.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatal(err)
+	covered := map[string]bool{}
+	for _, p := range strings.Split(rest[:end], "|") {
+		covered[p] = true
 	}
-	n, source, err = bfdPeer.ReadFromUDP(request)
-	if err != nil || string(request[:n]) != "bfd-hello" {
-		t.Fatalf("peer did not receive BFD hello: n=%d err=%v", n, err)
+	for _, m := range config.HostInboundProtocolMatch("bfd", "ip") {
+		if m.Proto != config.HostInboundProtoUDP {
+			continue
+		}
+		for _, r := range m.Ports {
+			for p := r.Lo; p <= r.Hi; p++ {
+				if !covered[strconv.Itoa(int(p))] {
+					t.Errorf("SSOT bfd dport %d missing from the BFD discovery filter (covered=%v)", p, covered)
+				}
+			}
+		}
 	}
-	if _, err := bfdPeer.WriteToUDP([]byte("bfd-reply"), source); err != nil {
-		t.Fatalf("send BFD reply: %v", err)
-	}
-	if n, _, err = bfdBox.ReadFromUDP(request); err != nil || string(request[:n]) != "bfd-reply" {
-		t.Fatalf("exempt BFD reply was not delivered (HIGH residual pins allow): n=%d err=%v", n, err)
+	if !strings.Contains(row, "never `--sport 3784`") {
+		t.Error("BFD row must retain the destination-based discipline note (never --sport 3784)")
 	}
 }
 
