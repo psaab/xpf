@@ -358,7 +358,6 @@ func zeroizeClearTmpDir(dir string) error {
 		return fmt.Errorf("zeroize: read tmp directory %s: %w", dir, err)
 	}
 	var errs []error
-	removed := false
 	for _, entry := range entries {
 		preserved := false
 		for _, prefix := range zeroizeTmpPreservedPrefixes {
@@ -377,14 +376,12 @@ func zeroizeClearTmpDir(dir string) error {
 		// os.RemoveAll on a symlink removes the link, never the target.
 		if err := os.RemoveAll(full); err != nil {
 			errs = append(errs, fmt.Errorf("zeroize: remove tmp entry %s: %w", filepath.Join(dir, entry.Name()), err))
-			continue
 		}
-		removed = true
 	}
-	if removed {
-		if err := zeroizeSyncDir(dir); err != nil {
-			errs = append(errs, fmt.Errorf("zeroize: sync tmp directory %s: %w", dir, err))
-		}
+	// Always sync an existing directory, even when nothing was removed: a
+	// prior attempt may have unlinked entries but failed this barrier.
+	if err := zeroizeSyncDir(dir); err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync tmp directory %s: %w", dir, err))
 	}
 	return errors.Join(errs...)
 }
@@ -572,7 +569,6 @@ func zeroizeClearRunXPFDir(dir string) error {
 		return fmt.Errorf("zeroize: read run directory %s: %w", dir, err)
 	}
 	var errs []error
-	removed := false
 	for _, entry := range entries {
 		if entry.Name() == zeroizeRunXPFPreserved {
 			continue
@@ -585,14 +581,12 @@ func zeroizeClearRunXPFDir(dir string) error {
 		// socket fds survive their name's unlink.
 		if err := os.RemoveAll(full); err != nil {
 			errs = append(errs, fmt.Errorf("zeroize: remove run entry %s: %w", filepath.Join(dir, entry.Name()), err))
-			continue
 		}
-		removed = true
 	}
-	if removed {
-		if err := zeroizeSyncDir(dir); err != nil {
-			errs = append(errs, fmt.Errorf("zeroize: sync run directory %s: %w", dir, err))
-		}
+	// Always sync an existing directory, even when nothing was removed: a
+	// prior attempt may have unlinked entries but failed this barrier.
+	if err := zeroizeSyncDir(dir); err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync run directory %s: %w", dir, err))
 	}
 	return errors.Join(errs...)
 }
@@ -664,6 +658,28 @@ func zeroizeTruncateFile(path string) error {
 	return zeroizeSyncDir(filepath.Dir(path))
 }
 
+// zeroizeSyncDurable syncs dir, or the nearest existing ancestor when dir
+// itself is absent. Retry durability for removals: if an earlier attempt
+// unlinked entries (or the directory) but failed its barrier, a retry that
+// finds nothing must still sync the survivor — otherwise the marker can
+// complete with the unlink undurable. Syncing the surviving ancestor makes
+// the ancestor's removal durable too, closing the debt structurally.
+func zeroizeSyncDurable(dir string) error {
+	d := filepath.Clean(dir)
+	for {
+		if _, err := os.Lstat(d); err == nil {
+			return zeroizeSyncDir(d)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("zeroize: inspect %s: %w", d, err)
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return fmt.Errorf("zeroize: no existing ancestor for %s", dir)
+		}
+		d = parent
+	}
+}
+
 func zeroizeClearDir(dir string) error {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -685,10 +701,13 @@ func zeroizeClearDir(dir string) error {
 			errs = append(errs, err)
 		}
 	}
-	if len(entries) != 0 {
-		if err := zeroizeSyncDir(dir); err != nil {
-			errs = append(errs, fmt.Errorf("zeroize: sync directory %s: %w", dir, err))
-		}
+	// Always sync an existing directory, even when it read empty: a prior
+	// attempt may have unlinked its entries but failed this barrier, and a
+	// retry that skips it would let the marker complete over undurable
+	// unlinks. A never-existing directory carries no debt and returns nil
+	// above.
+	if err := zeroizeSyncDir(dir); err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync directory %s: %w", dir, err))
 	}
 	return errors.Join(errs...)
 }
@@ -697,23 +716,18 @@ func zeroizeClearDir(dir string) error {
 // is durable before the reset marker clears (#10769 d05-F6). Every seal-leg
 // removal funnels through here, so durability holds structurally rather than
 // depending on an audited sync inventory at the end of each leg. An absent
-// path still syncs its parent: an earlier attempt may have unlinked it but
-// failed the barrier, and skipping the sync on retry would let a later
-// attempt complete the marker with that unlink undurable. A sync failure is
-// surfaced fail-closed so the reset is never reported clean on unpersisted
-// unlinks.
+// path still syncs the nearest surviving ancestor: an earlier attempt may
+// have unlinked it (or its parent) but failed the barrier, and skipping the
+// sync on retry would let a later attempt complete the marker with that
+// unlink undurable. A sync failure is surfaced fail-closed so the reset is
+// never reported clean on unpersisted unlinks.
 func zeroizeRemovePath(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		// Retry durability: the unlink may have landed on an attempt whose
-		// barrier failed. Syncing the existing parent retires that debt; a
-		// missing parent carries none (no entry can reappear without it).
-		if _, derr := os.Lstat(filepath.Dir(path)); errors.Is(derr, os.ErrNotExist) {
-			return nil
-		} else if derr != nil {
-			return fmt.Errorf("zeroize: inspect parent of %s: %w", path, derr)
-		}
-		if err := zeroizeSyncDir(filepath.Dir(path)); err != nil {
+		// barrier failed. Syncing the nearest surviving ancestor retires
+		// that debt and also makes an ancestor's own removal durable.
+		if err := zeroizeSyncDurable(filepath.Dir(path)); err != nil {
 			return fmt.Errorf("zeroize: sync parent of %s: %w", path, err)
 		}
 		return nil
@@ -738,7 +752,7 @@ func zeroizeRemovePath(path string) error {
 	if len(hardlinks) != 0 {
 		errs = append(errs, fmt.Errorf("zeroize: removed %s but hard-linked bytes survive at %v", path, hardlinks))
 	}
-	if err := zeroizeSyncDir(filepath.Dir(path)); err != nil {
+	if err := zeroizeSyncDurable(filepath.Dir(path)); err != nil {
 		errs = append(errs, fmt.Errorf("zeroize: sync parent of %s: %w", path, err))
 	}
 	return errors.Join(errs...)

@@ -973,3 +973,103 @@ func TestPerformZeroizeWarnsOnEscapingInteriorSymlink10769(t *testing.T) {
 		t.Fatalf("wipe must log the escaping target; logs:\n%s", logs.String())
 	}
 }
+
+func TestPerformZeroizeSyncsEmptiedDirsOnRetry10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	aptFile := filepath.Join(zeroizeAptListsDir, "example_Packages")
+	mustWriteFile(t, aptFile, []byte("package list"))
+	tmpFile := filepath.Join(zeroizeTmpDirs[0], "tenant-tmp.txt")
+	mustWriteFile(t, tmpFile, []byte("tmp data"))
+	orig := zeroizeSyncDir
+	t.Cleanup(func() { zeroizeSyncDir = orig })
+	boom := fmt.Errorf("injected dir-clear barrier failure")
+	aptDir := filepath.Clean(zeroizeAptListsDir)
+	tmpDir := filepath.Clean(zeroizeTmpDirs[0])
+	failBarrier := true
+	zeroizeSyncDir = func(dir string) error {
+		clean := filepath.Clean(dir)
+		if failBarrier && (clean == aptDir || clean == tmpDir) {
+			return boom
+		}
+		return orig(dir)
+	}
+	// First attempt unlinks both entries but fails both barriers.
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); !errors.Is(err, boom) {
+		t.Fatalf("first attempt must fail on the injected barriers: %v", err)
+	}
+	for _, path := range []string{aptFile, tmpFile} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("entry %s should be unlinked even though its barrier failed: %v", path, err)
+		}
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
+		t.Fatalf("failed wipe must retain the pending marker: %v", err)
+	}
+	// Retry reads both directories EMPTY and must still sync each before
+	// the marker may complete.
+	failBarrier = false
+	synced := map[string]bool{}
+	zeroizeSyncDir = func(dir string) error {
+		synced[filepath.Clean(dir)] = true
+		return orig(dir)
+	}
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("retry must converge: %v", err)
+	}
+	for _, dir := range []string{aptDir, tmpDir} {
+		if !synced[dir] {
+			t.Fatalf("retry never synced emptied directory %s (synced=%v)", dir, synced)
+		}
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); !os.IsNotExist(err) {
+		t.Fatalf("converged retry must clear the pending marker: %v", err)
+	}
+}
+
+func TestZeroizeRemovePathSyncsSurvivingAncestor10769(t *testing.T) {
+	root := t.TempDir()
+	grandparent := filepath.Join(root, "gp")
+	parent := filepath.Join(grandparent, "p")
+	file := filepath.Join(parent, "leaf")
+	mustWriteFile(t, file, []byte("x"))
+	orig := zeroizeSyncDir
+	t.Cleanup(func() { zeroizeSyncDir = orig })
+	boom := fmt.Errorf("injected parent barrier failure")
+	zeroizeSyncDir = func(dir string) error {
+		if filepath.Clean(dir) == filepath.Clean(parent) {
+			return boom
+		}
+		return orig(dir)
+	}
+	if err := zeroizeRemovePath(file); !errors.Is(err, boom) {
+		t.Fatalf("removal must surface the parent barrier failure, got %v", err)
+	}
+	// The parent itself disappears between attempts; the retry finds
+	// neither the file nor its parent.
+	if err := os.RemoveAll(parent); err != nil {
+		t.Fatal(err)
+	}
+	var synced []string
+	zeroizeSyncDir = func(dir string) error {
+		synced = append(synced, filepath.Clean(dir))
+		return orig(dir)
+	}
+	if err := zeroizeRemovePath(file); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	found := false
+	for _, dir := range synced {
+		if dir == filepath.Clean(grandparent) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("retry never synced surviving ancestor %s (synced=%v)", grandparent, synced)
+	}
+}
