@@ -586,16 +586,16 @@ func TestAPIAuthConfig(t *testing.T) {
 system {
     services {
         web-management {
-            http;
             api-auth {
+                expires 2099-01-01;
                 user admin {
-                    password secret123;
+                    password correct-horse-battery;
                 }
                 user readonly {
-                    password view456;
+                    password view-only-passphrase;
                 }
-                api-key tok-abc-123;
-                api-key tok-xyz-789;
+                api-key machine-generated-key-alpha;
+                api-key machine-generated-key-bravo;
             }
         }
     }
@@ -610,31 +610,33 @@ system {
 		t.Fatalf("CompileConfig: %v", err)
 	}
 	wm := cfg.System.Services.WebManagement
-	if wm == nil {
-		t.Fatal("web-management is nil")
+	if wm == nil || wm.APIAuth == nil {
+		t.Fatal("web-management api-auth is nil")
 	}
-	if wm.APIAuth == nil {
-		t.Fatal("api-auth is nil")
-	}
-	if len(wm.APIAuth.Users) != 2 {
-		t.Fatalf("expected 2 users, got %d", len(wm.APIAuth.Users))
-	}
-	if len(wm.APIAuth.APIKeys) != 2 {
-		t.Fatalf("expected 2 api-keys, got %d", len(wm.APIAuth.APIKeys))
+	if len(wm.APIAuth.Users) != 2 || len(wm.APIAuth.APIKeys) != 2 {
+		t.Fatalf("got %d users and %d api-keys, want 2 each", len(wm.APIAuth.Users), len(wm.APIAuth.APIKeys))
 	}
 	foundAdmin := false
 	for _, u := range wm.APIAuth.Users {
-		if u.Username == "admin" && u.Password == "secret123" {
-			foundAdmin = true
+		if u.Username == "admin" {
+			foundAdmin = VerifyAPIAuthSecret(u.Password.Reveal(), "correct-horse-battery")
 		}
 	}
 	if !foundAdmin {
-		t.Error("admin user not found with correct password")
+		t.Error("admin password was not compiled to a usable salted verifier")
+	}
+	if !VerifyAPIAuthSecret(wm.APIAuth.APIKeys[0].Reveal(), "machine-generated-key-alpha") ||
+		!VerifyAPIAuthSecret(wm.APIAuth.APIKeys[1].Reveal(), "machine-generated-key-bravo") {
+		t.Error("API keys were not compiled to usable salted verifiers")
 	}
 }
 
 func TestAPIAuthFlatSet(t *testing.T) {
-	cmds := []string{"set system services web-management http", "set system services web-management api-auth user admin password secret123", "set system services web-management api-auth api-key tok-abc-123"}
+	cmds := []string{
+		"set system services web-management api-auth expires 2099-01-01",
+		"set system services web-management api-auth user admin password correct-horse-battery",
+		"set system services web-management api-auth api-key machine-generated-key-alpha",
+	}
 	tree := &ConfigTree{}
 	for _, cmd := range cmds {
 		if err := tree.SetPath(strings.Fields(cmd)[1:]); err != nil {
@@ -646,23 +648,16 @@ func TestAPIAuthFlatSet(t *testing.T) {
 		t.Fatalf("CompileConfig: %v", err)
 	}
 	wm := cfg.System.Services.WebManagement
-	if wm == nil {
-		t.Fatal("web-management is nil")
+	if wm == nil || wm.APIAuth == nil {
+		t.Fatal("web-management api-auth is nil")
 	}
-	if wm.APIAuth == nil {
-		t.Fatal("api-auth is nil")
+	if len(wm.APIAuth.Users) != 1 || wm.APIAuth.Users[0].Username != "admin" ||
+		!VerifyAPIAuthSecret(wm.APIAuth.Users[0].Password.Reveal(), "correct-horse-battery") {
+		t.Errorf("compiled Basic identity = %+v, want admin with usable verifier", wm.APIAuth.Users)
 	}
-	if len(wm.APIAuth.Users) != 1 {
-		t.Fatalf("expected 1 user, got %d", len(wm.APIAuth.Users))
-	}
-	if wm.APIAuth.Users[0].Username != "admin" || wm.APIAuth.Users[0].Password != "secret123" {
-		t.Errorf("user = %+v, want admin/secret123", wm.APIAuth.Users[0])
-	}
-	if len(wm.APIAuth.APIKeys) != 1 {
-		t.Fatalf("expected 1 api-key, got %d", len(wm.APIAuth.APIKeys))
-	}
-	if wm.APIAuth.APIKeys[0] != "tok-abc-123" {
-		t.Errorf("api-key = %q, want tok-abc-123", wm.APIAuth.APIKeys[0])
+	if len(wm.APIAuth.APIKeys) != 1 ||
+		!VerifyAPIAuthSecret(wm.APIAuth.APIKeys[0].Reveal(), "machine-generated-key-alpha") {
+		t.Errorf("compiled api-key = %v, want one usable verifier", wm.APIAuth.APIKeys)
 	}
 }
 

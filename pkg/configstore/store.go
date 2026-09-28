@@ -391,9 +391,12 @@ type Store struct {
 	editPath []string
 
 	// Archival settings
-	archiveDir string // local archive directory (empty = disabled)
+	archiveDir string // configured archive directory (empty = disabled)
 	archiveMax int    // max archives to keep
-
+	// apiAuthArchiveMigrationDir is an explicit xpf-owned local archive root
+	// opted into api-auth legacy cleanup during Load. Custom/remote destinations
+	// are never inferred from archiveDir and remain outside the migration.
+	apiAuthArchiveMigrationDir string
 	// archiveSeedDir is the archive dir for which the archiveSeq reseed scan
 	// last SUCCEEDED (#6396 Codex MINOR 4). ensureArchiveSeededLocked scans a
 	// dir only when it differs from this. #6404: the reseed retry is driven not
@@ -988,6 +991,14 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	for _, p := range config.SanitizeTreeControlChars(tree) {
 		slog.Warn("sanitized control characters in peer-synced config value",
 			"path", p, "issue", "#1798")
+	}
+
+	// #10826: lenient compilers hash a private expansion clone for runtime
+	// credentials, but SyncApply persists this source tree below. Hash the
+	// peer-supplied tree itself before compile/promotion so an older primary
+	// cannot reintroduce cleartext credentials into active or rollback storage.
+	if _, err := config.HashAPIAuthSecrets(tree); err != nil {
+		return nil, fmt.Errorf("sync config api-auth hash error: %w", err)
 	}
 
 	// Tolerant compile: a config peer-synced from a possibly-un-upgraded

@@ -1,6 +1,9 @@
 package api
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // auth_retained_5561_test.go pins AuthForRetainedListener's semantics (#5561
 // round 12). The daemon-side tests prove the reconciler CALLS it at the right
@@ -183,5 +186,46 @@ func TestCredentialCountIgnoresDisabledAPIKeys_5561(t *testing.T) {
 			"is an api-key mapped to false — a credential neither snapshot would ever accept. "+
 			"An over-reported withholding is a warning an operator has to go and disprove "+
 			"(committed %+v, published %+v)", withheld, next, publish)
+	}
+}
+
+// A reused credential whose class changes is a grant to the retained endpoint,
+// even though its secret is unchanged. Withhold it until the endpoint converges.
+func TestAuthForRetainedListenerWithholdsPrivilegeUpgrade10826(t *testing.T) {
+	live := &AuthConfig{
+		Users:         map[string]string{"admin": "same-password"},
+		UserClasses:   map[string]string{"admin": "read-only"},
+		APIKeys:       map[string]bool{"same-api-key": true},
+		APIKeyClasses: map[string]string{"same-api-key": "read-only"},
+	}
+	next := &AuthConfig{
+		Users:         map[string]string{"admin": "same-password"},
+		UserClasses:   map[string]string{"admin": "super-user"},
+		APIKeys:       map[string]bool{"same-api-key": true},
+		APIKeyClasses: map[string]string{"same-api-key": "super-user"},
+	}
+	got := AuthForRetainedListener(live, next)
+	if CredentialCount(got) != 0 || len(got.Users) != 0 || len(got.APIKeys) != 0 {
+		t.Fatalf("retained listener received the privilege-upgraded credential set: %+v; "+
+			"unchanged secrets do not make a class change safe on an address this commit is leaving",
+			got)
+	}
+}
+
+func TestAuthForRetainedListenerWithholdsExpiryExtension10826(t *testing.T) {
+	now := time.Now()
+	const key = "same-api-key"
+	live := &AuthConfig{
+		APIKeys:       map[string]bool{key: true},
+		APIKeyClasses: map[string]string{key: "read-only"},
+		APIKeyExpires: map[string]time.Time{key: now.Add(time.Hour)},
+	}
+	next := &AuthConfig{
+		APIKeys:       map[string]bool{key: true},
+		APIKeyClasses: map[string]string{key: "read-only"},
+		APIKeyExpires: map[string]time.Time{key: now.Add(2 * time.Hour)},
+	}
+	if got := AuthForRetainedListener(live, next); got.APIKeys[key] {
+		t.Fatalf("retained listener received an extended credential lifetime: %+v", got)
 	}
 }

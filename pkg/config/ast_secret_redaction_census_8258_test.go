@@ -119,6 +119,9 @@ type secretLeafClaim struct {
 // secret field cannot be added without either covering it here or explaining
 // why it cannot be covered.
 var astLeafForSecretField = map[string]secretLeafClaim{
+	"APIAuthKey.Secret": {
+		set: `set system services web-management api-auth key k1 secret "%s"`,
+	},
 	"APIAuthUser.Password": {
 		set: `set system services rest api-auth user u1 password "%s"`,
 	},

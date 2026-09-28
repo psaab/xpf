@@ -78,6 +78,56 @@ func TestShowSystemServicesEffectiveListenersGRPC(t *testing.T) {
 	}
 }
 
+func TestShowSystemServicesAPIAuthCredentialCounts10826(t *testing.T) {
+	tests := []struct {
+		name     string
+		commands []string
+		want     string
+	}{
+		{
+			name: "named key only",
+			commands: []string{
+				"set system services web-management api-auth expires 2099-01-01",
+				"set system services web-management api-auth key automation secret automation-key-secret-012345",
+			},
+			want: "API auth:       0 user(s), 1 API key(s)",
+		},
+		{
+			name: "mixed named and legacy credentials",
+			commands: []string{
+				"set system services web-management api-auth expires 2099-01-01",
+				"set system services web-management api-auth user admin password very-long-password-10826",
+				"set system services web-management api-auth api-key machine-generated-key-10826",
+				"set system services web-management api-auth key automation secret automation-key-secret-012345",
+			},
+			want: "API auth:       1 user(s), 2 API key(s)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+			if err := store.EnterConfigure(); err != nil {
+				t.Fatalf("EnterConfigure(): %v", err)
+			}
+			commands := append([]string{"set system host-name xpf-test"}, tc.commands...)
+			for _, command := range commands {
+				if _, err := store.LoadSet(command); err != nil {
+					t.Fatalf("LoadSet(%q): %v", command, err)
+				}
+			}
+			if _, err := store.Commit(); err != nil {
+				t.Fatalf("Commit(): %v", err)
+			}
+			s := &Server{store: store}
+			var buf strings.Builder
+			s.showSystemServices(&buf)
+			if out := buf.String(); !strings.Contains(out, tc.want) {
+				t.Fatalf("remote API-auth credential counts = %q, want %q:\n%s", out, tc.want, out)
+			}
+		})
+	}
+}
+
 // TestShowSystemServicesFailedHTTPGRPC pins the #6401 fold on the remote path:
 // a CONFIGURED-but-FAILED HTTP bind renders "(bind failed)", distinct from the
 // "disabled" a genuinely-off listener renders.

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/api"
 	"github.com/psaab/xpf/pkg/config"
@@ -64,28 +65,78 @@ func TestResolveAPIBindsClampsHTTPSWithoutWebManagement(t *testing.T) {
 	}
 }
 
-// TestResolveAPIBindsRespectsWebManagementAuth pins that an off-loopback bind
-// WITH api-auth derived from a web-management stanza is preserved
-// (authenticated off-loopback is allowed). It guards that the now-unconditional
-// clamp still derives + respects web-management api-auth, and that the
-// extraction of resolveAPIBinds kept the auth-derivation intact.
-func TestResolveAPIBindsRespectsWebManagementAuth(t *testing.T) {
+// TestResolveAPIBindsDisablesClearHTTPWithAPIAuth_10826 pins the two-leg
+// transport policy: auth credentials disable the HTTP leg while the configured
+// HTTPS leg keeps the same hashed credential snapshot.
+func TestResolveAPIBindsDisablesClearHTTPWithAPIAuth_10826(t *testing.T) {
+	password, err := config.HashAPIAuthSecret("0123456789ab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
 	d := &Daemon{}
 	cfg := &config.Config{}
 	cfg.System.Services = &config.SystemServicesConfig{
 		WebManagement: &config.WebManagementConfig{
+			HTTP:  true,
+			HTTPS: true,
 			APIAuth: &config.APIAuthConfig{
-				Users: []*config.APIAuthUser{{Username: "admin", Password: config.Secret("secret")}},
+				DefaultClass:     "read-only",
+				DefaultExpiresAt: expires,
+				Users: []*config.APIAuthUser{{
+					Username:  "admin",
+					Password:  config.Secret(password),
+					Class:     "read-only",
+					ExpiresAt: expires,
+				}},
 			},
 		},
 	}
 	apiCfg := api.Config{Addr: "10.0.0.5:8080"}
 	d.resolveAPIBinds(&apiCfg, cfg)
-	if apiCfg.Addr != "10.0.0.5:8080" {
-		t.Fatalf("authenticated off-loopback Addr = %q, want it preserved", apiCfg.Addr)
+	if apiCfg.Addr != "" {
+		t.Fatalf("clear HTTP address = %q, want disabled when api-auth is configured", apiCfg.Addr)
 	}
-	if apiCfg.Auth == nil || apiCfg.Auth.Users["admin"] != "secret" {
-		t.Fatalf("Auth = %+v, want derived from web-management api-auth", apiCfg.Auth)
+	if !apiCfg.TLS || apiCfg.HTTPSAddr != "127.0.0.1:443" {
+		t.Fatalf("HTTPS leg = (TLS=%v Addr=%q), want configured HTTPS leg retained",
+			apiCfg.TLS, apiCfg.HTTPSAddr)
+	}
+	if apiCfg.Auth == nil || apiCfg.Auth.Users["admin"] != password ||
+		apiCfg.Auth.UserClasses["admin"] != "read-only" ||
+		!apiCfg.Auth.UserExpires["admin"].Equal(expires) {
+		t.Fatalf("Auth = %+v, want the hashed read-only credential derived for HTTPS", apiCfg.Auth)
+	}
+}
+
+func TestResolveAPIBindsClampsWhenOnlyDeniedShortAPIAuthRemains10825(t *testing.T) {
+	tree, parseErrs := config.NewParser(`system {
+ services {
+  web-management {
+   api-auth {
+    expires 2099-01-01;
+    user admin { password tiny; }
+   }
+  }
+ }
+}`).Parse()
+	if len(parseErrs) != 0 {
+		t.Fatalf("parse short API-auth fixture: %v", parseErrs)
+	}
+	if changed, err := config.HashAPIAuthSecrets(tree); err != nil || !changed {
+		t.Fatalf("HashAPIAuthSecrets = (%v, %v), want changed=true without error", changed, err)
+	}
+	compiled, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient after short-secret migration: %v", err)
+	}
+
+	apiCfg := api.Config{Addr: "10.0.0.5:8080"}
+	(&Daemon{}).resolveAPIBinds(&apiCfg, compiled)
+	if apiCfg.Auth != nil {
+		t.Fatalf("denied short legacy credential remained active in API auth: %+v", apiCfg.Auth)
+	}
+	if apiCfg.Addr != "127.0.0.1:8080" {
+		t.Fatalf("off-loopback API bind with no usable credentials = %q, want loopback clamp", apiCfg.Addr)
 	}
 }
 

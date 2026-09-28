@@ -45,7 +45,7 @@ const (
 	// counter, invisible at the shipped Info level while the gRPC half was
 	// Warned and counted. Same bounded pattern as the surfaces above.
 	SurfaceRESTLoginClass  Surface = "rest_login_class"
-	SurfaceRESTAPIAuthFail Surface = "rest_api_auth_fail"
+	SurfaceRESTAPIAuthFail Surface = "rest_api_auth"
 )
 
 // Surfaces returns every surface, in a stable order.

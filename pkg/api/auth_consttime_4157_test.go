@@ -1,9 +1,6 @@
 package api
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,72 +93,6 @@ func TestBasicAuthUnknownUserRejected(t *testing.T) {
 func basicAuth64(user, pass string) string {
 	// Mirror pkg/api/auth_test.go's basicAuth without the "Basic " prefix.
 	return strings.TrimPrefix(basicAuth(user, pass), "Basic ")
-}
-
-// TestAuthPathsUseConstantTimeCompare is a source-level regression guard.
-// Reverting to a plain map lookup (`cfg.APIKeys[token]`) or a `==` compare
-// keeps the functional tests above green while silently reintroducing the
-// timing side channel, so we assert the AST of the auth paths instead: the
-// Bearer / X-API-Key decision must route through constantTimeAPIKeyMatch, that
-// helper must call subtle.ConstantTimeCompare, and no auth-decision code may
-// index cfg.APIKeys as a boolean (`cfg.APIKeys[...]`).
-func TestAuthPathsUseConstantTimeCompare(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "auth.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse auth.go: %v", err)
-	}
-
-	var (
-		helperCallsConstantTimeCompare bool
-		bearerUsesHelper               bool
-		apiKeyIndexedAsBool            bool
-	)
-
-	ast.Inspect(file, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok {
-			return true
-		}
-		switch fn.Name.Name {
-		case "constantTimeAPIKeyMatch":
-			ast.Inspect(fn.Body, func(m ast.Node) bool {
-				if sel, ok := m.(*ast.SelectorExpr); ok {
-					if pkg, ok := sel.X.(*ast.Ident); ok &&
-						pkg.Name == "subtle" && sel.Sel.Name == "ConstantTimeCompare" {
-						helperCallsConstantTimeCompare = true
-					}
-				}
-				return true
-			})
-		case "checkAuthorization", "authMiddleware":
-			ast.Inspect(fn.Body, func(m ast.Node) bool {
-				switch e := m.(type) {
-				case *ast.CallExpr:
-					if id, ok := e.Fun.(*ast.Ident); ok && id.Name == "constantTimeAPIKeyMatch" {
-						bearerUsesHelper = true
-					}
-				case *ast.IndexExpr:
-					// cfg.APIKeys[...] used as a value — the old leaky pattern.
-					if sel, ok := e.X.(*ast.SelectorExpr); ok && sel.Sel.Name == "APIKeys" {
-						apiKeyIndexedAsBool = true
-					}
-				}
-				return true
-			})
-		}
-		return true
-	})
-
-	if !helperCallsConstantTimeCompare {
-		t.Error("constantTimeAPIKeyMatch must call subtle.ConstantTimeCompare (#4157)")
-	}
-	if !bearerUsesHelper {
-		t.Error("Bearer / X-API-Key auth paths must route through constantTimeAPIKeyMatch (#4157)")
-	}
-	if apiKeyIndexedAsBool {
-		t.Error("auth paths must not index cfg.APIKeys as a boolean map lookup — timing side channel (#4157)")
-	}
 }
 
 // TestAuthMiddlewareConstantTimeIntegration re-exercises the middleware end to

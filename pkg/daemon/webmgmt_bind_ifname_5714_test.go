@@ -10,13 +10,12 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// webmgmtIfnameCfg builds a config whose web-management HTTP listener binds to
-// the authored Junos interface httpIface, WITH api-auth so an off-loopback
-// resolved bind survives the #4047/#5127 loopback fail-safe clamp (an
-// unauthenticated off-loopback bind is otherwise pulled back to loopback,
-// masking the resolution result). The dataplane interface ge-0/0/0 is modeled
-// so config.ResolveKernelIfName maps the Junos ref to its Linux ifname.
-func webmgmtIfnameCfg(httpIface string) *config.Config {
+// webmgmtIfnameCfg builds a config whose authenticated HTTPS listener binds to
+// the authored Junos interface name. Valid credentials keep the resolved
+// non-loopback bind past the #4047/#5127 clamp. The dataplane interface is
+// modeled so config.ResolveKernelIfName maps the Junos ref to its Linux ifname.
+func webmgmtIfnameCfg(t *testing.T, httpsIface string) *config.Config {
+	t.Helper()
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
 		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{
@@ -25,11 +24,10 @@ func webmgmtIfnameCfg(httpIface string) *config.Config {
 	}
 	cfg.System.Services = &config.SystemServicesConfig{
 		WebManagement: &config.WebManagementConfig{
-			HTTP:          true,
-			HTTPInterface: httpIface,
-			APIAuth: &config.APIAuthConfig{
-				Users: []*config.APIAuthUser{{Username: "admin", Password: config.Secret("secret")}},
-			},
+			HTTPS:               true,
+			HTTPSInterface:      httpsIface,
+			SystemGeneratedCert: true,
+			APIAuth:             webmgmtTestAuth(t),
 		},
 	}
 	return cfg
@@ -60,11 +58,14 @@ func TestWebMgmtBindResolvesJunosIfnameToLinux_5714(t *testing.T) {
 
 	d := &Daemon{}
 	apiCfg := api.Config{Addr: "127.0.0.1:8080"}
-	d.resolveAPIBinds(&apiCfg, webmgmtIfnameCfg("ge-0/0/0.0"))
+	d.resolveAPIBinds(&apiCfg, webmgmtIfnameCfg(t, "ge-0/0/0.0"))
 
-	if apiCfg.Addr != "10.0.0.5:80" {
-		t.Fatalf("web-mgmt bind Addr = %q, want 10.0.0.5:80 (Junos ge-0/0/0.0 -> Linux ge-0-0-0, canonical web-mgmt port #5715). "+
-			"127.0.0.1 means the authored Junos name reached the kernel lookup verbatim (the #5714 bug)", apiCfg.Addr)
+	if apiCfg.HTTPSAddr != "10.0.0.5:443" {
+		t.Fatalf("web-mgmt HTTPS bind = %q, want 10.0.0.5:443 (Junos ge-0/0/0.0 -> Linux ge-0-0-0, canonical web-mgmt port #5715). "+
+			"127.0.0.1 means the authored Junos name reached the kernel lookup verbatim (the #5714 bug)", apiCfg.HTTPSAddr)
+	}
+	if apiCfg.Addr != "" {
+		t.Fatalf("api-auth left clear HTTP enabled at %q, want it disabled", apiCfg.Addr)
 	}
 }
 
@@ -92,7 +93,7 @@ func TestWebMgmtBindUnresolvableLogsLoudError_5714(t *testing.T) {
 
 	d := &Daemon{}
 	apiCfg := api.Config{Addr: "127.0.0.1:8080"}
-	d.resolveAPIBinds(&apiCfg, webmgmtIfnameCfg("ge-0/0/9.0"))
+	d.resolveAPIBinds(&apiCfg, webmgmtIfnameCfg(t, "ge-0/0/9.0"))
 
 	var loud bool
 	for _, r := range sink.records() {
@@ -105,10 +106,12 @@ func TestWebMgmtBindUnresolvableLogsLoudError_5714(t *testing.T) {
 		t.Fatalf("unresolvable web-mgmt interface must log a LOUD ERROR naming the interface, "+
 			"not a silent fallback; got records: %+v", sink.records())
 	}
-	// Fallback is retained (loopback), so the mgmt API still serves locally —
-	// on the canonical web-mgmt port (#5715), since `web-management http` is
-	// explicitly configured.
-	if apiCfg.Addr != "127.0.0.1:80" {
-		t.Fatalf("unresolvable interface bind Addr = %q, want loopback fallback 127.0.0.1:80", apiCfg.Addr)
+	// Fallback remains on loopback so the authenticated HTTPS API can serve
+	// locally while the configured management interface is unavailable.
+	if apiCfg.HTTPSAddr != "127.0.0.1:443" {
+		t.Fatalf("unresolvable interface HTTPSAddr = %q, want loopback fallback 127.0.0.1:443", apiCfg.HTTPSAddr)
+	}
+	if apiCfg.Addr != "" {
+		t.Fatalf("api-auth left clear HTTP enabled at %q, want it disabled", apiCfg.Addr)
 	}
 }

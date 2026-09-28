@@ -17,11 +17,14 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/psaab/xpf/pkg/api"
+	"github.com/psaab/xpf/pkg/sysservices"
 )
 
 // fakeLn is an in-memory net.Listener: Accept blocks until Close, so an
@@ -674,5 +677,87 @@ func TestMgmtReconcileRotationRevokesDespiteHTTPRebindFailure_5561(t *testing.T)
 	if got := m.srv.LiveAuth(); got == nil || got.Users["admin"] != "new-secret" {
 		t.Fatalf("post-convergence snapshot = %+v, want the rotated secret live on the endpoint "+
 			"the operator committed", got)
+	}
+}
+
+func TestMgmtHTTPAuthActivationDisablesClearLegBeforePublishing10826(t *testing.T) {
+	reg := newFakeReg()
+	m := newTestMgmt(reg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := m.startTo(ctx, cfgFor(reg, "127.0.0.1:8080", false, "", nil)); err != nil {
+		t.Fatalf("initial HTTP start: %v", err)
+	}
+	oldHTTP := reg.get("127.0.0.1:8080")
+	oldHandler := m.srv.HTTPHandlerForTest()
+	if oldHTTP == nil || oldHandler == nil {
+		t.Fatal("fixture has no serving HTTP leg to retire")
+	}
+	nextAuth := &api.AuthConfig{
+		APIKeys:       map[string]bool{"new-api-key": true},
+		APIKeyClasses: map[string]string{"new-api-key": "read-only"},
+		APIKeyExpires: map[string]time.Time{"new-api-key": time.Now().Add(time.Hour)},
+	}
+
+	if err := m.reconcileTo(cfgFor(reg, "", false, "", nextAuth)); err != nil {
+		t.Fatalf("enable auth and disable clear HTTP: %v", err)
+	}
+	waitClosed(t, oldHTTP)
+	if m.srv.HTTPServing() || m.srv.EffectiveHTTPAddr() != "" {
+		t.Fatalf("clear HTTP remains serving after auth activation: serving=%v addr=%q",
+			m.srv.HTTPServing(), m.srv.EffectiveHTTPAddr())
+	}
+	if got := m.effectiveHTTPListener().State; got != sysservices.StateDisabled {
+		t.Fatalf("effective HTTP state = %v, want Disabled", got)
+	}
+	if got := m.srv.LiveAuth(); got == nil || !got.APIKeys["new-api-key"] {
+		t.Fatalf("the active snapshot did not publish the HTTPS/next-endpoint credential: %+v", got)
+	}
+
+	// The old handler is still reachable while its leg drains. Its slot must
+	// remain pinned to deny-all rather than follow the new global snapshot.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	req.Header.Set("X-API-Key", "new-api-key")
+	rec := httptest.NewRecorder()
+	oldHandler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("retiring clear-HTTP handler accepted the newly published credential: %d %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+func TestMgmtFailedRebindWithholdsCredentialPrivilegeUpgrade10826(t *testing.T) {
+	reg := newFakeReg()
+	m := newTestMgmt(reg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const key = "same-api-key"
+	oldAuth := &api.AuthConfig{
+		APIKeys:       map[string]bool{key: true},
+		APIKeyClasses: map[string]string{key: "read-only"},
+	}
+	nextAuth := &api.AuthConfig{
+		APIKeys:       map[string]bool{key: true},
+		APIKeyClasses: map[string]string{key: "super-user"},
+	}
+	if err := m.startTo(ctx, cfgFor(reg, "10.0.0.1:8080", false, "", oldAuth)); err != nil {
+		t.Fatalf("initial start: %v", err)
+	}
+	reg.failAddr["10.0.0.2:8080"] = true
+	if err := m.reconcileTo(cfgFor(reg, "10.0.0.2:8080", false, "", nextAuth)); err == nil {
+		t.Fatal("the failed bind was not surfaced")
+	}
+	if got := m.srv.LiveAuth(); got == nil || got.APIKeys[key] {
+		t.Fatalf("a failed rebind retained the same secret with its upgraded super-user scope: %+v", got)
+	}
+
+	delete(reg.failAddr, "10.0.0.2:8080")
+	if err := m.reconcileTo(cfgFor(reg, "10.0.0.2:8080", false, "", nextAuth)); err != nil {
+		t.Fatalf("converge rebind: %v", err)
+	}
+	if got := m.srv.LiveAuth(); got == nil || !got.APIKeys[key] || got.APIKeyClasses[key] != "super-user" {
+		t.Fatalf("credential scope was not published after endpoint convergence: %+v", got)
 	}
 }

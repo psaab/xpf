@@ -85,15 +85,16 @@ func TestAPIAuthEmptyAPIKeyRejected(t *testing.T) {
 	}
 }
 
-// A non-empty Basic password still commits cleanly on an off-loopback bind
-// (regression guard — the fix must not break the valid case).
-func TestAPIAuthNonEmptyBasicPasswordCommits(t *testing.T) {
+// A compliant Basic password commits when API credentials are served only over HTTPS.
+func TestAPIAuthNonEmptyBasicPasswordHTTPSCommits(t *testing.T) {
 	tree := build5636Tree(t,
-		"set system services web-management http interface fxp0.0",
-		"set system services web-management api-auth user admin password s3cret",
+		"set system services web-management https system-generated-certificate",
+		"set system services web-management https interface fxp0.0",
+		"set system services web-management api-auth expires 2099-01-01",
+		"set system services web-management api-auth user admin password correct-horse-battery",
 	)
 	if _, err := CompileConfig(tree); err != nil {
-		t.Fatalf("CompileConfig: off-loopback + non-empty password must commit, got: %v", err)
+		t.Fatalf("CompileConfig: HTTPS + compliant Basic password must commit, got: %v", err)
 	}
 }
 
@@ -103,7 +104,8 @@ func TestAPIAuthNonEmptyBasicPasswordCommits(t *testing.T) {
 func TestAPIAuthMixedEmptyAndUsableRejected(t *testing.T) {
 	tree := build5636Tree(t,
 		"set system services web-management http interface fxp0.0",
-		"set system services web-management api-auth user good password s3cret",
+		"set system services web-management api-auth expires 2099-01-01",
+		"set system services web-management api-auth user good password correct-horse-battery",
 		`set system services web-management api-auth user bad password ""`,
 	)
 	_, err := CompileConfig(tree)

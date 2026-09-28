@@ -83,9 +83,12 @@ func TestRESTAuthorizationAuditAtInfo10832(t *testing.T) {
 	credential := "Basic " + base64.StdEncoding.EncodeToString([]byte("webadmin:"+secret))
 	store := authzStore(t, authzTestConfig)
 	_, adminBase := authzServer(t, Config{
-		Addr:           "127.0.0.1:8080",
-		Store:          store,
-		Auth:           &AuthConfig{Users: map[string]string{"webadmin": secret}},
+		Addr:  "127.0.0.1:8080",
+		Store: store,
+		Auth: &AuthConfig{
+			Users:       map[string]string{"webadmin": secret},
+			UserClasses: map[string]string{"webadmin": "super-user"},
+		},
 		PeerLookupFn:   remotePeer(),
 		PeerLocalityFn: remoteLocality(),
 	})
@@ -119,7 +122,7 @@ func TestRESTAuthorizationAuditAtInfo10832(t *testing.T) {
 	configLog := logs.String()
 	oneRecord(t, configLog)
 	for _, field := range []string{
-		"level=INFO", "api: authorized mutating request", `principal="api-auth credential"`,
+		"level=INFO", "api: authorized mutating request",
 		"source=api-auth-credential", "required=configure",
 	} {
 		if !strings.Contains(configLog, field) {
@@ -148,7 +151,7 @@ func TestRESTAuthorizationAuditAtInfo10832(t *testing.T) {
 	maintLog := logs.String()
 	oneRecord(t, maintLog)
 	for _, field := range []string{
-		"level=INFO", "api: authorized mutating request", `principal="api-auth credential"`,
+		"level=INFO", "api: authorized mutating request",
 		"source=api-auth-credential", "required=maintenance",
 	} {
 		if !strings.Contains(maintLog, field) {

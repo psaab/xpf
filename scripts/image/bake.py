@@ -132,11 +132,14 @@ GRUB_DROPIN = (
 )
 
 SSHD_DROPIN = (
-    '# xpf factory posture (#1879, #10771): root password is EMPTY (console-only\n'
-    '# login, vSRX parity). Pin the OpenSSH defaults explicitly.\n'
+    '# xpf factory posture (#1879, #10771, #10825): root password is EMPTY (console-only\n'
+    '# login, vSRX parity). Pin the OpenSSH defaults and bound authentication attempts.\n'
     'PermitRootLogin prohibit-password\n'
     'PermitEmptyPasswords no\n'
-    'PasswordAuthentication no'
+    'PasswordAuthentication no\n'
+    'KbdInteractiveAuthentication no\n'
+    'MaxAuthTries 3\n'
+    'LoginGraceTime 30'
 )
 
 

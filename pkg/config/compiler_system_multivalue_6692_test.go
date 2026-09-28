@@ -55,6 +55,9 @@ func sixNineTwoSpellings(t *testing.T, hierPath []string, leaf, v1, v2 string) m
 		if len(errs) > 0 {
 			t.Fatalf("%s: parse %q: %v", name, body, errs)
 		}
+		if err := addAPITestExpiry(tree, hierPath); err != nil {
+			t.Fatal(err)
+		}
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("%s: CompileConfig(%q): %v", name, body, err)
@@ -73,13 +76,15 @@ func sixNineTwoSpellings(t *testing.T, hierPath []string, leaf, v1, v2 string) m
 				t.Fatalf("%s: SetPath(%q): %v", name, c, err)
 			}
 		}
+		if err := addAPITestExpiry(tree, hierPath); err != nil {
+			t.Fatal(err)
+		}
 		cfg, err := CompileConfig(tree)
 		if err != nil {
 			t.Fatalf("%s: CompileConfig(%v): %v", name, cmds, err)
 		}
 		return cfg
 	}
-
 	flat := "set " + strings.Join(hierPath, " ") + " " + leaf
 	return map[string]*Config{
 		"A-hier-bracket": compileBrace("A-hier-bracket", brace(leaf+" [ "+v1+" "+v2+" ];")),
@@ -88,6 +93,13 @@ func sixNineTwoSpellings(t *testing.T, hierPath []string, leaf, v1, v2 string) m
 		"D-set-bracket":  compileSet("D-set-bracket", flat+" [ "+v1+" "+v2+" ]"),
 		"E-set-repeat":   compileSet("E-set-repeat", flat+" "+v1, flat+" "+v2),
 	}
+}
+func addAPITestExpiry(tree *ConfigTree, hierPath []string) error {
+	if strings.Join(hierPath, " ") != "system services web-management api-auth" {
+		return nil
+	}
+	path := append(append([]string(nil), hierPath...), "expires", "2099-01-01")
+	return tree.SetPath(path)
 }
 
 // assertSliceEverySpelling checks the extracted slice EQUALS want in every
@@ -303,22 +315,24 @@ func TestSSHKeyExchangeValidatorCoversEverySlot_6692(t *testing.T) {
 }
 
 func TestAPIKeyMultiValue_6692(t *testing.T) {
+	const (
+		keyA = "machine-generated-key-alpha"
+		keyB = "machine-generated-key-bravo"
+	)
 	cfgs := sixNineTwoSpellings(t,
 		[]string{"system", "services", "web-management", "api-auth"}, "api-key",
-		"keyA", "keyB")
-	assertSliceEverySpelling(t, cfgs,
-		[]string{"keyA", "keyB"},
-		func(c *Config) []string {
-			if c.System.Services == nil || c.System.Services.WebManagement == nil ||
-				c.System.Services.WebManagement.APIAuth == nil {
-				return nil
-			}
-			var out []string
-			for _, k := range c.System.Services.WebManagement.APIAuth.APIKeys {
-				out = append(out, string(k))
-			}
-			return out
-		})
+		keyA, keyB)
+	for spelling, cfg := range cfgs {
+		auth := cfg.System.Services.WebManagement.APIAuth
+		if auth == nil || len(auth.APIKeys) != 2 {
+			t.Errorf("%s: got APIAuth=%+v, want two keys", spelling, auth)
+			continue
+		}
+		if !VerifyAPIAuthSecret(auth.APIKeys[0].Reveal(), keyA) ||
+			!VerifyAPIAuthSecret(auth.APIKeys[1].Reveal(), keyB) {
+			t.Errorf("%s: API-key list did not preserve both usable verifiers", spelling)
+		}
+	}
 }
 
 // TestAPIKeyEmptySecretGateSeesEverySlot_6692 pins WHY api-key uses

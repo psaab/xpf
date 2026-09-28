@@ -708,10 +708,6 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 	if cfg.System.Services != nil {
 		ssh = cfg.System.Services.SSH
 	}
-
-	// buildSSHDConfig is nil-safe and returns "" when there is nothing to
-	// manage, so an absent ssh stanza and an ssh stanza with no recognised
-	// leaves collapse to the same "no managed settings" case.
 	content := buildSSHDConfig(ssh)
 
 	// Read the prior content once: needed both to skip no-op writes and to
@@ -890,16 +886,14 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 	return nil
 }
 
-// buildSSHDConfig renders the xpf-managed sshd drop-in body from the SSH
-// service config, or "" when there is nothing to manage. Each setting is an
-// independent line: root-login → PermitRootLogin, key-exchange → KexAlgorithms
-// (H5, #2008). sshd validates algorithm spellings at reload, so xpf does not
-// enum-check the key-exchange list.
-// filterSSHAlgorithms drops any token that is not a safe OpenSSH algorithm
-// name (config.ValidateSSHAlgorithm), the render-side belt for #4902. Only the
-// injection/breakage shape (comma/space/control char) is filtered; sshd still
-// owns the actual algorithm-spelling check at reload. A dropped token is logged
-// so an operator can see why a leniently-loaded value did not take effect.
+// buildSSHDConfig renders the xpf-managed sshd drop-in body for a configured
+// SSH service. A missing SSH stanza produces no daemon drop-in: the image's
+// factory drop-in owns the unconditional attempt limits (#10825). Configured
+// stanzas repeat those limits before user-selected settings: root-login →
+// PermitRootLogin, key-exchange → KexAlgorithms (H5, #2008). sshd validates
+// algorithm spellings at reload. filterSSHAlgorithms drops any token that is
+// not a safe OpenSSH algorithm name (config.ValidateSSHAlgorithm), the
+// render-side belt for #4902.
 func filterSSHAlgorithms(in []string) []string {
 	out := in[:0:0]
 	for _, tok := range in {
@@ -916,7 +910,11 @@ func buildSSHDConfig(ssh *config.SSHServiceConfig) string {
 	if ssh == nil {
 		return ""
 	}
-	var lines []string
+	lines := []string{
+		"MaxAuthTries 3",
+		"LoginGraceTime 30",
+		"PermitEmptyPasswords no",
+	}
 	if ssh.RootLogin != "" {
 		var permitRoot string
 		switch ssh.RootLogin {
