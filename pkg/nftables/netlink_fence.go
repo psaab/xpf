@@ -137,8 +137,9 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	// non-lifeline fxp1 member stays denied. sdifname is inert on
 	// non-VRF traffic (unset, misses). Both precede the DROP; with no
 	// lifeline set both are omitted and shared stays denied on all
-	// ingress (fail-closed). Expression orders match the oracle text —
-	// parity-pinned.
+	// ingress (fail-closed). sdifname needs 5.17+; emitted unguarded —
+	// the ≥6.18 platform floor covers it (README/bake; pre-5.17 cannot
+	// run xpfd). Expression orders match the oracle text — parity-pinned.
 	if len(spec.LifelineNetdevs) > 0 {
 		if len(spec.SharedV4) > 0 {
 			p.rule().iifname(spec.LifelineNetdevs).daddr(famV4, spec.SharedV4, false).emit(verdictAccept()...)

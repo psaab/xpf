@@ -1091,17 +1091,22 @@ shared master, where an interface DROP would shadow addressed siblings
 callback instead: any non-lifeline DHCP lease forces the full recompile
 that installs destination DROPs. Accepted window: lease-install to
 debounced re-apply (~2s plus apply time), the #3698 lag class.
-FAULT residual (distinct, Opus9 round-9 — accepted): if that triggered
-apply itself FAILS (nft error), no retry owner re-drives it — the
-callback is one-shot, same-content renewals do not refire
-(commitLease change-gating), the #7181 STALE flag is report-only, the
-#9811 debt covers auto-rollback only (DHCP path explicitly out of
-scope), and the #9693/IPsec/conntrack/feed loops are scoped elsewhere
-(traced, no owner found). The lease then sits uncovered until the next
-external trigger (commit, content-changing lease event, restart) runs
-a successful apply — potentially unbounded under a held lease with
-healthy renewals. STALE surfaces it via the API; recovery is the next
-successful apply, which covers the still-held lease.
+FAULT residual (distinct, Opus9 round-9 / Opus10 round-10 — accepted,
+see #11497): a failed REAL install still converges — the same apply
+installs the gap DROP for the lease (M5 proof:
+TestVRFLeaseWindowBoundedByGapAfterFailedRerender10751) — so only the
+DOUBLE failure (real AND gap install both fail) strands the lease: no
+retry owner re-drives it — the callback is one-shot, same-content
+renewals do not refire (commitLease change-gating), the #7181 STALE
+flag is report-only, the #9811 debt covers auto-rollback only (DHCP
+path explicitly out of scope), and the #9693/IPsec/conntrack/feed
+loops are scoped elsewhere (traced, no owner found). The lease then
+sits uncovered until the next trigger (lease-content change, commit,
+feed/poll/sync apply, restart) runs a successful apply — potentially
+unbounded under a held lease with healthy renewals. STALE surfaces it
+via the API; recovery is the next successful apply, which covers the
+still-held lease. Follow-up #11497 (retry/convergence owner) would
+bound the wait.
 
 Two observability surfaces consume it:
 
@@ -1269,7 +1274,12 @@ snapshot produces a zero-drop table shell:
   `iifname` rule for unenslaved lifelines plus one `meta sdifname` rule
   recovering the member behind VRF LOCAL_IN master semantics, so an
   enslaved fxp0 is admitted while a co-enslaved non-lifeline fxp1 stays
-  denied (no vrf-mgmt blanket). A global withhold (R7-C) left shared
+  denied (no vrf-mgmt blanket). The `meta sdifname` rules are emitted
+  unguarded: they rely on the platform kernel floor (≥ 6.18 per
+  README/bake — below it xpfd cannot run at all, so no fallback exists
+  by design). Mechanism note: a hypothetical rejection would abort the
+  whole atomic gap batch, leaving day-2 newcomers uncovered (fail-open)
+  — not lockout. A global withhold (R7-C) left shared
   values fail-open post-handoff, when no barrier stands behind the gap;
   the exception preserves lifeline management while data ingress stays
   denied. The handoff baseline still excludes shared (conditionally
