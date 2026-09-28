@@ -57,6 +57,9 @@ var (
 	zeroizeVarBackupsDir    = "/var/backups"
 	zeroizeNetworkdLeaseDir = "/var/lib/systemd/network"
 	zeroizeDHCPClientStateDirs = []string{"/var/lib/dhcp", "/var/lib/dhclient"}
+	zeroizeTmpDirs         = []string{"/tmp", "/var/tmp"}
+	zeroizeShmDir          = "/dev/shm"
+	zeroizeEtcDir          = "/etc"
 )
 
 var (
@@ -125,12 +128,27 @@ func zeroizeImageSealResidue() error {
 	// login-account teardown runs those commands after this function returns.
 	// zeroizeEraseAccountBackups runs after that teardown instead.
 	// Package lists and downloaded archives are caches and can be recreated
-	// by apt. Temporary directories and generic /etc backup files are not
-	// swept: unrelated live services may hold temp files open, and those
-	// backups are not provably xpf-owned. This is an intentional survivor
-	// decision rather than a silent claim that these image-seal legs ran.
+	// by apt.
 	for _, dir := range []string{zeroizeAptListsDir, zeroizeAptArchiveDir} {
 		fail(zeroizeClearDir(dir))
+	}
+
+	// Temporary directories (seal tmp-files parity, #10769 d05-F6). /tmp and
+	// /var/tmp are cleared of tenant data; /dev/shm is cleared of
+	// xpf/DHCP-attributable entries only, since a full shm clear would pull
+	// live segments from under still-running host services.
+	for _, dir := range zeroizeTmpDirs {
+		fail(zeroizeClearTmpDir(dir))
+	}
+	fail(zeroizeClearShmDir(zeroizeShmDir))
+
+	// Editor backups (seal backup-files parity, #10769 d05-F6). /etc top
+	// level is stem-gated to backups of the reset-owned identity files;
+	// service-owned directories are swept for any editor backup, since a
+	// backup there is by definition a copy of service config.
+	fail(zeroizeSweepOwnedEtcBackups(zeroizeEtcDir))
+	for _, dir := range zeroizeServiceBackupSweepDirs() {
+		fail(zeroizeSweepEditorBackups(dir))
 	}
 
 	// DHCP client identity (#10769 d05-F6): xpf's own per-interface DUIDs
@@ -282,6 +300,200 @@ func zeroizeSweepNetworkdLeases(dir string) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// zeroizeTmpPreservedPrefixes are tmp entries that belong to live service
+// infrastructure rather than tenant data: systemd private-tmp mount points
+// and snap's private tmp. Unlinking those would destabilize still-running
+// host services for no tenant-clean gain (their contents are namespaced
+// away from the host view anyway).
+var zeroizeTmpPreservedPrefixes = []string{"systemd-private-", "snap-private-tmp-"}
+
+// zeroizeClearTmpDir removes every entry in a tmp directory (#10769 d05-F6,
+// seal tmp-files parity). Unlike zeroizeRemovePath it unlinks symlinks,
+// sockets, fifos, and device nodes as names rather than refusing them: by
+// the FHS tmp contract nothing here is persistent service state, factory
+// reset is a decommissioning operation, and live file descriptors survive
+// an unlink. Only the preserved service-infrastructure prefixes are kept.
+func zeroizeClearTmpDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("zeroize: read tmp directory %s: %w", dir, err)
+	}
+	var errs []error
+	removed := false
+	for _, entry := range entries {
+		preserved := false
+		for _, prefix := range zeroizeTmpPreservedPrefixes {
+			if strings.HasPrefix(entry.Name(), prefix) {
+				preserved = true
+				break
+			}
+		}
+		if preserved {
+			continue
+		}
+		// os.RemoveAll on a symlink removes the link, never the target.
+		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+			errs = append(errs, fmt.Errorf("zeroize: remove tmp entry %s: %w", filepath.Join(dir, entry.Name()), err))
+			continue
+		}
+		removed = true
+	}
+	if removed {
+		if err := zeroizeSyncDir(dir); err != nil {
+			errs = append(errs, fmt.Errorf("zeroize: sync tmp directory %s: %w", dir, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// zeroizeIsShmResetEntry reports whether a /dev/shm entry is attributable to
+// xpf/DHCP and therefore safe to unlink on reset. A full shm clear would
+// pull live shared-memory segments out from under still-running host
+// services; arbitrary prior-tenant shm outside these patterns is reboot-
+// cleared tmpfs (documented residual for stop-without-reboot).
+func zeroizeIsShmResetEntry(name string) bool {
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{"xpf", "kea", "dhcp"} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return strings.Contains(lower, "xpf") || strings.Contains(lower, "kea")
+}
+
+func zeroizeClearShmDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("zeroize: read shm directory %s: %w", dir, err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		if entry.IsDir() || !zeroizeIsShmResetEntry(entry.Name()) {
+			continue
+		}
+		if err := zeroizeRemovePath(filepath.Join(dir, entry.Name())); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// editorBackupStem strips an editor-backup suffix (~, .bak, .old, .orig)
+// and reports the stem. Used to scope backup sweeps to backups OF owned
+// files rather than every backup-suffixed name on the box.
+func editorBackupStem(name string) (string, bool) {
+	if strings.HasSuffix(name, "~") {
+		return strings.TrimSuffix(name, "~"), true
+	}
+	for _, suffix := range []string{".bak", ".old", ".orig"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix), true
+		}
+	}
+	return "", false
+}
+
+// zeroizeSweepEditorBackups removes every editor-backup file directly inside
+// dir. Callers pass only service-owned directories (xpf drop-in dirs,
+// rendered-config dirs), never a shared root: within those, a backup is by
+// definition a copy of service config, possibly with secrets. A symlinked
+// backup fails closed for operator inspection.
+func zeroizeSweepEditorBackups(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("zeroize: read directory %s for backup sweep: %w", dir, err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if _, ok := editorBackupStem(entry.Name()); !ok {
+			continue
+		}
+		if err := zeroizeRemovePath(filepath.Join(dir, entry.Name())); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// zeroizeOwnedEtcBackupStems are the /etc top-level files whose editor
+// backups the reset owns: backups of the identity files it resets.
+var zeroizeOwnedEtcBackupStems = []string{"hostname", "hosts", "resolv.conf", "passwd", "shadow", "group", "gshadow"}
+
+// zeroizeSweepOwnedEtcBackups removes editor backups of the reset-owned
+// /etc files (hostname.bak, hosts~, ...). /etc is a shared root, so unlike
+// the service-dir sweep this one gates on the stem: a backup of any other
+// file is left for the operator.
+func zeroizeSweepOwnedEtcBackups(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("zeroize: read directory %s for backup sweep: %w", dir, err)
+	}
+	owned := make(map[string]bool, len(zeroizeOwnedEtcBackupStems))
+	for _, stem := range zeroizeOwnedEtcBackupStems {
+		owned[stem] = true
+	}
+	var errs []error
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		stem, ok := editorBackupStem(entry.Name())
+		if !ok || !owned[stem] {
+			continue
+		}
+		if err := zeroizeRemovePath(filepath.Join(dir, entry.Name())); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// zeroizeServiceBackupSweepDirs returns the deduplicated service-owned
+// directories whose editor backups the reset erases: the xpf drop-in dirs,
+// the rendered-config dirs, rsyslog/networkd config dirs, and the SSH
+// config dir. Derived from the seamed path vars so tests relocate the
+// whole inventory into a disposable tree.
+func zeroizeServiceBackupSweepDirs() []string {
+	candidates := []string{
+		zeroizeSSHHostKeyDir,
+		zeroizeRsyslogConfDir,
+		zeroizeNetworkdDir,
+		filepath.Dir(zeroizeFRRConf),
+		filepath.Dir(zeroizeSwanctlSnippet),
+		filepath.Dir(zeroizeKea4Conf),
+		filepath.Dir(zeroizeKea6Conf),
+	}
+	for _, dropin := range zeroizeManagedDropins {
+		candidates = append(candidates, filepath.Dir(dropin))
+	}
+	seen := make(map[string]bool, len(candidates))
+	var out []string
+	for _, dir := range candidates {
+		clean := filepath.Clean(dir)
+		if clean == "" || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		out = append(out, dir)
+	}
+	return out
 }
 
 // zeroizeCheckDDNSStateEmpty is the preflight used before beginZeroize writes

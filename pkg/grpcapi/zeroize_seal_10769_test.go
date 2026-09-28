@@ -24,7 +24,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	oldPasswdBackups, oldHostKeys := zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath
 	oldDropins, oldVarLog := zeroizeManagedDropins, zeroizeVarLogDir
 	oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec := zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath
-	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs
+	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient, oldTmp, oldShm, oldEtc := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir
 	t.Cleanup(func() {
 		zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory = oldMachine, oldSSH, oldRootSSH, oldHistory
 		zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
@@ -34,7 +34,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 		zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath = oldPasswdBackups, oldHostKeys
 		zeroizeManagedDropins, zeroizeVarLogDir = oldDropins, oldVarLog
 		zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath = oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec
-		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient
+		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient, oldTmp, oldShm, oldEtc
 	})
 
 	zeroizeMachineIDPath = filepath.Join(root, "etc", "machine-id")
@@ -78,6 +78,9 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	zeroizeVarBackupsDir = filepath.Join(root, "var", "backups")
 	zeroizeNetworkdLeaseDir = filepath.Join(root, "var", "lib", "systemd", "network")
 	zeroizeDHCPClientStateDirs = []string{filepath.Join(root, "var", "lib", "dhcp"), filepath.Join(root, "var", "lib", "dhclient")}
+	zeroizeTmpDirs = []string{filepath.Join(root, "tmp"), filepath.Join(root, "var", "tmp")}
+	zeroizeShmDir = filepath.Join(root, "dev", "shm")
+	zeroizeEtcDir = filepath.Join(root, "etc")
 	zeroizeVarLogDir = filepath.Join(root, "var", "log")
 }
 
@@ -658,5 +661,103 @@ func TestPerformZeroizeErasesDHCPClientIdentity10769(t *testing.T) {
 	}
 	if _, err := os.Lstat(bystander); err != nil {
 		t.Errorf("non-lease networkd state must survive: %v", err)
+	}
+}
+
+func TestPerformZeroizeClearsTmpAndShm10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	tmpFile := filepath.Join(zeroizeTmpDirs[0], "tenant-secret.txt")
+	mustWriteFile(t, tmpFile, []byte("prior tenant tmp data"))
+	tmpNested := filepath.Join(zeroizeTmpDirs[1], "nested", "deep.txt")
+	mustWriteFile(t, tmpNested, []byte("nested tmp data"))
+	// A symlink inside tmp: the link goes, its outside target stays.
+	linkTarget := filepath.Join(root, "elsewhere", "victim.txt")
+	mustWriteFile(t, linkTarget, []byte("not in tmp"))
+	link := filepath.Join(zeroizeTmpDirs[0], "evil-link")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(linkTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	// Service-infrastructure tmp survives.
+	preserved := filepath.Join(zeroizeTmpDirs[0], "systemd-private-abc", "keep")
+	mustWriteFile(t, preserved, []byte("service infra"))
+	shmXPF := filepath.Join(zeroizeShmDir, "xpf-segment")
+	mustWriteFile(t, shmXPF, []byte("xpf shm"))
+	shmKea := filepath.Join(zeroizeShmDir, "kea-mem")
+	mustWriteFile(t, shmKea, []byte("kea shm"))
+	shmOther := filepath.Join(zeroizeShmDir, "unrelated-service")
+	mustWriteFile(t, shmOther, []byte("live service shm"))
+
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	for _, path := range []string{tmpFile, tmpNested, link, shmXPF, shmKea} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("tmp/shm residue %s survived: %v", path, err)
+		}
+	}
+	for _, path := range []string{linkTarget, preserved, shmOther} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("bystander %s must survive: %v", path, err)
+		}
+	}
+}
+
+func TestPerformZeroizeSweepsEditorBackups10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	// Backups OF owned config-root artifacts are erased; a backup of an
+	// unowned sibling survives (stem-gated, #5768).
+	ownedBackups := []string{
+		filepath.Join(configDir, "xpf.conf~"),
+		filepath.Join(configDir, "xpf.conf.bak"),
+		filepath.Join(configDir, "rescue.conf.orig"),
+		filepath.Join(configDir, "xpf.conf.1~"),
+	}
+	for _, path := range ownedBackups {
+		mustWriteFile(t, path, []byte("prior config text with secrets"))
+	}
+	unownedBackup := filepath.Join(configDir, "notes.txt.bak")
+	mustWriteFile(t, unownedBackup, []byte("not ours"))
+	// /etc top level: owned-identity backups erased, others kept.
+	etcOwned := []string{
+		filepath.Join(zeroizeEtcDir, "hostname.bak"),
+		filepath.Join(zeroizeEtcDir, "hosts~"),
+		filepath.Join(zeroizeEtcDir, "resolv.conf.orig"),
+	}
+	for _, path := range etcOwned {
+		mustWriteFile(t, path, []byte("prior identity backup"))
+	}
+	etcOther := filepath.Join(zeroizeEtcDir, "motd.bak")
+	mustWriteFile(t, etcOther, []byte("not reset-owned"))
+	// Service-owned dirs: any editor backup erased, live files kept.
+	swanctlBackup := filepath.Join(filepath.Dir(zeroizeSwanctlSnippet), "xpf.conf.bak")
+	mustWriteFile(t, swanctlBackup, []byte("prior IKE PSK backup"))
+	sshdBackup := filepath.Join(filepath.Dir(zeroizeManagedDropins[0]), "00-xpf.conf~")
+	mustWriteFile(t, sshdBackup, []byte("prior sshd policy backup"))
+
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	for _, path := range append(append(append([]string{}, ownedBackups...), etcOwned...), swanctlBackup, sshdBackup) {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("editor backup %s survived: %v", path, err)
+		}
+	}
+	for _, path := range []string{unownedBackup, etcOther} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("unowned backup %s must survive: %v", path, err)
+		}
 	}
 }

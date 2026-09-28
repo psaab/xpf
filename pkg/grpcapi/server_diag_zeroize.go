@@ -300,8 +300,9 @@ func zeroizeConfigDir(configDir, configBase string) error {
 
 	// Top-level artifacts in a single ReadDir pass. #5768: match ONLY names xpf
 	// itself created/tracks — the live config file, the rescue config, the audit
-	// journal (+ rotated segments), the numbered text rollback slots, and fsatomic
-	// crash temps. The pre-#5768 code matched a broad `*.conf` suffix and
+	// journal (+ rotated segments), the numbered text rollback slots, DUID
+	// files, editor backups OF those owned names, and fsatomic crash temps.
+	// The pre-#5768 code matched a broad `*.conf` suffix and
 	// `rollback*` prefix; when a custom -config resolved configDir to a shared or
 	// subdir location that slipped past ValidateFactoryResetRoot, those globs
 	// deleted UNOWNED siblings (a neighbor's foo.conf, xpf's own rendered
@@ -333,6 +334,7 @@ func zeroizeConfigDir(configDir, configBase string) error {
 			strings.HasPrefix(name, ".config.journal.") ||
 			strings.HasPrefix(name, "dhcpv6-duid-") || // DHCPv6 DUID persistence: the daemon passes Dir(configFile) as the DHCP state dir, so every per-interface DUID lives here (#10769 d05-F6)
 			isTextRollbackFile(name, configBase) || // <configBase>.<N> text slots
+			isOwnedEditorBackup(name, configBase) || // editor backups OF owned artifacts (#10769 d05-F6)
 			isFsatomicTemp(name) {
 			found, herr := configstore.CollectHardlinkedFiles(full, "")
 			hardlinks = append(hardlinks, found...)
@@ -413,6 +415,28 @@ func isTextRollbackFile(name, configBase string) bool {
 func isFsatomicTemp(name string) bool {
 	ok, _ := filepath.Match(".*.tmp-*", name)
 	return ok
+}
+
+// isOwnedEditorBackup reports whether name is an editor backup (~, .bak,
+// .old, .orig) OF an owned config-root artifact (#10769 d05-F6): the live
+// config, rescue config, day-0 stamp, journal, a rollback slot, or a DUID
+// file. Gated on the stem (not a bare suffix match) so a backup of an
+// unowned sibling in a shared root is never touched (#5768).
+func isOwnedEditorBackup(name, configBase string) bool {
+	stem, ok := editorBackupStem(name)
+	if !ok {
+		return false
+	}
+	if stem == configBase ||
+		stem == configstore.RescueConfigBase ||
+		stem == configstore.Day0ConfigAppliedBase ||
+		stem == ".config.journal" ||
+		strings.HasPrefix(stem, ".config.journal.") ||
+		strings.HasPrefix(stem, "dhcpv6-duid-") ||
+		isTextRollbackFile(stem, configBase) {
+		return true
+	}
+	return false
 }
 
 // zeroizeRenderedConfigs erases the RENDERED service configs xpfd writes
