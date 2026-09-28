@@ -2148,11 +2148,12 @@ never lock an operator out of a remote box it manages.
   `config.RoutingInstanceMemberDeviceKeys` feeds strict validation, the daemon
   bind/reassert passes, and userspace membership maps. Slash/dash aliases and
   multiple unit refs sharing one tunnel netdevice are conflicts; distinct VLAN
-  IDs remain separate devices. Forwarding instances do not own a VRF device
-  and remain in the default routing context rather than participating in the
-  device-owner gate. Tolerant loads remove ambiguous memberships, retain safe
-  generated sibling units, and leave the contested device in the default
-  routing context. Apply emits an ERROR alarm and
+  IDs remain separate devices. Forwarding instances participate in the
+  device-owner gate — a forwarding+VRF same-device overlap is strict-rejected
+  and tolerant-quarantined in either declaration order — even though they own
+  no VRF device and bind nothing to Linux VRFs. Tolerant loads remove
+  ambiguous memberships, retain safe generated sibling units, and leave the
+  contested device in the default routing context. Apply emits an ERROR alarm and
   `xpf_routing_instance_member_device_conflicts` remains alertable.
 
 - **Every shutdown-path `applySem` acquire is BOUNDED (#8597).**
