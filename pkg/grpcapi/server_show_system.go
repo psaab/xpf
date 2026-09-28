@@ -126,8 +126,15 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 	if s.clockSkewAlarmsFn != nil {
 		clockAlarms = s.clockSkewAlarmsFn()
 	}
+	var peerSnapshotAlarm string
+	if s.peerSnapshotProtocolAlarmFn != nil {
+		peerSnapshotAlarm = s.peerSnapshotProtocolAlarmFn()
+	}
 	n := len(warnings) + len(clockAlarms)
 	if divergence != "" {
+		n++
+	}
+	if peerSnapshotAlarm != "" {
 		n++
 	}
 	if n == 0 {
@@ -141,6 +148,9 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 	fmt.Fprintf(buf, "%d active alarm(s):\n", n)
 	if divergence != "" {
 		fmt.Fprintf(buf, "  CRITICAL: %s\n", divergence)
+	}
+	if peerSnapshotAlarm != "" {
+		fmt.Fprintf(buf, "  CRITICAL: %s\n", peerSnapshotAlarm)
 	}
 	for _, w := range warnings {
 		fmt.Fprintf(buf, "  WARNING: %s\n", w)
