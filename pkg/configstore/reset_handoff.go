@@ -28,6 +28,22 @@ var (
 	ErrResetHandoffRebootRequired = errors.New("factory reset requires a reboot before new configuration")
 )
 
+// Reset handoff dirty-reason classes. Boot repair dispatches on the class
+// prefix ("helper: ..."); unknown or unprefixed reasons (stop failures,
+// the pending sentinel, pre-path flags) repair every class — verification,
+// not the reason, is the ground truth for clearing.
+const (
+	ResetHandoffReasonHelper = "helper"
+	ResetHandoffReasonKea    = "kea"
+	ResetHandoffReasonTemps  = "temps"
+)
+
+// ResetHandoffPending is the dirty reason a completed wipe records while
+// daemon post-verification has not yet passed. A crash in that window
+// leaves pending + no markers; boot repair treats it as unknown-cause and
+// repairs every class before the flag may downgrade.
+const ResetHandoffPending = "reset verification pending"
+
 // maxResetHandoffBytes bounds handoff-flag and boot-id reads: both are tiny,
 // and authoritative store reads must be bounded (#8597).
 const maxResetHandoffBytes = 1 << 16
@@ -46,14 +62,24 @@ func CurrentBootID() (string, error) {
 }
 
 // WriteResetHandoff durably records a completed reset for boot ID with the
-// given dirty reason ("" when clean). The reason is flattened to one line:
+// given dirty reason ("" when clean) and the pre-wipe effective helper
+// state path ("" when unknown). The reason is flattened to one line:
 // joined errors carry newlines that would otherwise corrupt the line format
-// and fail every later read closed.
-func WriteResetHandoff(bootID, dirty string) error {
+// and fail every later read closed. The helper path is recorded because
+// post-wipe the config it derives from is erased: boot repair must sweep
+// the recorded path, never re-derive the default. A path containing a line
+// break fails closed rather than corrupting the format.
+func WriteResetHandoff(bootID, dirty, helperPath string) error {
 	var b strings.Builder
 	b.WriteString("boot_id=" + strings.TrimSpace(bootID) + "\n")
 	flat := strings.Join(strings.Fields(dirty), " ")
 	b.WriteString("dirty=" + flat + "\n")
+	if hp := strings.TrimSpace(helperPath); hp != "" {
+		if strings.ContainsAny(hp, "\r\n") {
+			return fmt.Errorf("write reset handoff flag: helper path %q contains a line break", hp)
+		}
+		b.WriteString("helper_path=" + hp + "\n")
+	}
 	if err := fsatomic.WriteFileDurable(ResetHandoffPath, []byte(b.String()), 0o644); err != nil {
 		return fmt.Errorf("write reset handoff flag: %w", err)
 	}
@@ -61,14 +87,15 @@ func WriteResetHandoff(bootID, dirty string) error {
 }
 
 // ReadResetHandoff parses the handoff flag. present is false when no flag
-// exists. A corrupt flag is returned as an error (fail closed).
-func ReadResetHandoff() (bootID, dirty string, present bool, err error) {
+// exists. A corrupt flag is returned as an error (fail closed). helperPath
+// is "" when the flag predates path recording.
+func ReadResetHandoff() (bootID, dirty, helperPath string, present bool, err error) {
 	data, rerr := ReadBoundedFile(ResetHandoffPath, maxResetHandoffBytes)
 	if errors.Is(rerr, os.ErrNotExist) {
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	if rerr != nil {
-		return "", "", false, fmt.Errorf("read reset handoff flag: %w", rerr)
+		return "", "", "", false, fmt.Errorf("read reset handoff flag: %w", rerr)
 	}
 	seenBoot := false
 	for _, line := range strings.Split(string(data), "\n") {
@@ -76,14 +103,16 @@ func ReadResetHandoff() (bootID, dirty string, present bool, err error) {
 			bootID, seenBoot = strings.TrimSpace(rest), true
 		} else if rest, ok := strings.CutPrefix(line, "dirty="); ok {
 			dirty = strings.TrimSpace(rest)
+		} else if rest, ok := strings.CutPrefix(line, "helper_path="); ok {
+			helperPath = strings.TrimSpace(rest)
 		} else if strings.TrimSpace(line) != "" {
-			return "", "", false, fmt.Errorf("reset handoff flag %s is corrupt", ResetHandoffPath)
+			return "", "", "", false, fmt.Errorf("reset handoff flag %s is corrupt", ResetHandoffPath)
 		}
 	}
 	if !seenBoot || bootID == "" {
-		return "", "", false, fmt.Errorf("reset handoff flag %s is corrupt", ResetHandoffPath)
+		return "", "", "", false, fmt.Errorf("reset handoff flag %s is corrupt", ResetHandoffPath)
 	}
-	return bootID, dirty, true, nil
+	return bootID, dirty, helperPath, true, nil
 }
 
 // ClearResetHandoff removes the flag (post-reboot convergence). Absence is clean.
@@ -98,9 +127,10 @@ func ClearResetHandoff() error {
 }
 
 // MarkResetHandoffDirty records a post-success residue reason, preserving the
-// recorded boot ID (or the current one when no flag exists yet).
+// recorded boot ID (or the current one when no flag exists yet) and the
+// recorded helper path.
 func MarkResetHandoffDirty(reason string) error {
-	bootID, _, present, err := ReadResetHandoff()
+	bootID, _, helperPath, present, err := ReadResetHandoff()
 	if err != nil {
 		return err
 	}
@@ -110,14 +140,29 @@ func MarkResetHandoffDirty(reason string) error {
 			return err
 		}
 	}
-	return WriteResetHandoff(bootID, reason)
+	return WriteResetHandoff(bootID, reason, helperPath)
+}
+
+// FlipResetHandoffClean rewrites a pending/dirty flag clean after daemon
+// post-verification passed, preserving the recorded boot ID and helper
+// path. An absent or unreadable flag fails closed: the wipe must have
+// recorded pending first, so absence means the protocol was bypassed.
+func FlipResetHandoffClean() error {
+	bootID, _, helperPath, present, err := ReadResetHandoff()
+	if err != nil {
+		return fmt.Errorf("flip reset handoff clean: %w", err)
+	}
+	if !present {
+		return fmt.Errorf("flip reset handoff clean: no flag recorded")
+	}
+	return WriteResetHandoff(bootID, "", helperPath)
 }
 
 // CheckResetHandoff enforces the N+1 provisioning gate. Dirty refuses until a
 // clean reset overwrites the flag; clean-but-unrebooted refuses until a
 // reboot (clearing the flag on first observation post-reboot). Absence opens.
 func CheckResetHandoff() error {
-	bootID, dirty, present, err := ReadResetHandoff()
+	bootID, dirty, _, present, err := ReadResetHandoff()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrResetHandoffDirty, err)
 	}

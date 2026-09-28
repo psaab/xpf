@@ -1083,7 +1083,7 @@ func TestPerformZeroizeWritesHandoffFlag10769(t *testing.T) {
 	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
 		t.Fatalf("PerformZeroizeWipe: %v", err)
 	}
-	boot, dirty, present, err := configstore.ReadResetHandoff()
+	boot, dirty, _, present, err := configstore.ReadResetHandoff()
 	if err != nil || !present {
 		t.Fatalf("successful wipe must write the handoff flag: present=%v err=%v", present, err)
 	}
@@ -1127,7 +1127,7 @@ func TestResetStopMonitorVerifiesStop10769(t *testing.T) {
 	if err := resetStopMonitor(); err != nil {
 		t.Fatalf("verified stop must be clean: %v", err)
 	}
-	if _, _, present, _ := configstore.ReadResetHandoff(); present {
+	if _, _, _, present, _ := configstore.ReadResetHandoff(); present {
 		t.Fatal("verified stop must not write the handoff flag")
 	}
 }
@@ -1140,7 +1140,7 @@ func TestResetStopMonitorFlagsUnverifiedStop10769(t *testing.T) {
 		if err := resetStopMonitor(); err != nil {
 			t.Fatalf("dirty marking must succeed: %v", err)
 		}
-		_, dirty, present, err := configstore.ReadResetHandoff()
+		_, dirty, _, present, err := configstore.ReadResetHandoff()
 		if err != nil || !present || !strings.Contains(dirty, "stop failed") {
 			t.Fatalf("stop error must mark dirty: present=%v dirty=%q err=%v", present, dirty, err)
 		}
@@ -1150,7 +1150,7 @@ func TestResetStopMonitorFlagsUnverifiedStop10769(t *testing.T) {
 		if err := resetStopMonitor(); err != nil {
 			t.Fatalf("dirty marking must succeed: %v", err)
 		}
-		_, dirty, present, err := configstore.ReadResetHandoff()
+		_, dirty, _, present, err := configstore.ReadResetHandoff()
 		if err != nil || !present || !strings.Contains(dirty, "still active") {
 			t.Fatalf("unverified stop must mark dirty: present=%v dirty=%q err=%v", present, dirty, err)
 		}

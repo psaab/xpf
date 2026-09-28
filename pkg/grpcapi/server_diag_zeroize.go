@@ -1513,7 +1513,7 @@ func completeZeroize(record zeroizePendingRecord) error {
 	if err != nil {
 		return fmt.Errorf("zeroize: snapshot boot id for reset handoff: %w", err)
 	}
-	if err := configstore.WriteResetHandoff(bootID, ""); err != nil {
+	if err := configstore.WriteResetHandoff(bootID, "", ""); err != nil {
 		return fmt.Errorf("zeroize: %w", err)
 	}
 	loaderMarker := configstore.FactoryResetPendingPath

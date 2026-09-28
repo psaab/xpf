@@ -497,7 +497,7 @@ func (d *Daemon) removeResetHelperStateAfterStop(cfg *config.Config) {
 	if err := sweepHelperStateVerified(path); err != nil {
 		slog.Error("reset shutdown: helper state sweep failed; marking reset handoff dirty",
 			"path", path, "err", err)
-		if derr := configstore.MarkResetHandoffDirty(fmt.Sprintf("helper state sweep failed: %v", err)); derr != nil {
+		if derr := configstore.MarkResetHandoffDirty(fmt.Sprintf(configstore.ResetHandoffReasonHelper+": helper state sweep failed: %v", err)); derr != nil {
 			slog.Error("reset shutdown: cannot mark reset handoff dirty", "err", derr)
 		}
 	}

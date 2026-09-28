@@ -327,8 +327,10 @@ func eraseKeaLeasesForReset() error {
 	synced := make(map[string]bool)
 	for _, current := range resetKeaLeaseCurrents {
 		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				errs = append(errs, fmt.Errorf("factory reset: re-erase Kea lease file %s: %w", path, err))
+			if err := os.Remove(path); err != nil {
+				if !os.IsNotExist(err) {
+					errs = append(errs, fmt.Errorf("factory reset: re-erase Kea lease file %s: %w", path, err))
+				}
 				continue
 			}
 			synced[filepath.Dir(path)] = true
@@ -521,7 +523,7 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 		if rt != nil || cfg != nil {
 			if serr := sweepHelperStateVerified(dpuserspace.StateFilePathForConfig(cfg)); serr != nil {
 				verifyErr = errors.Join(verifyErr, serr)
-				markResetHandoffDirtyQuiet("helper state sweep failed: " + serr.Error())
+				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonHelper + ": helper state sweep failed: " + serr.Error())
 			}
 		}
 		if kerr := verifyKeaLeasesErasedForReset(); kerr != nil {
@@ -535,10 +537,10 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 			// Unrepaired residue marks the handoff dirty (never silent).
 			if rerr := eraseKeaLeasesForReset(); rerr != nil {
 				verifyErr = errors.Join(verifyErr, kerr, rerr)
-				markResetHandoffDirtyQuiet("kea lease re-erase failed: " + rerr.Error())
+				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonKea + ": kea lease re-erase failed: " + rerr.Error())
 			} else if rerr := verifyKeaLeasesErasedForReset(); rerr != nil {
 				verifyErr = errors.Join(verifyErr, kerr, rerr)
-				markResetHandoffDirtyQuiet("kea leases reappeared after re-erase: " + rerr.Error())
+				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonKea + ": kea leases reappeared after re-erase: " + rerr.Error())
 			} else {
 				verifyErr = errors.Join(verifyErr, kerr)
 			}
@@ -550,10 +552,10 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 			// handoff dirty.
 			if rerr := eraseStateTempsForReset(); rerr != nil {
 				verifyErr = errors.Join(verifyErr, terr, rerr)
-				markResetHandoffDirtyQuiet("state temp re-erase failed: " + rerr.Error())
+				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonTemps + ": state temp re-erase failed: " + rerr.Error())
 			} else if rerr := verifyStateTempsErasedForReset(); rerr != nil {
 				verifyErr = errors.Join(verifyErr, terr, rerr)
-				markResetHandoffDirtyQuiet("state temps reappeared after re-erase: " + rerr.Error())
+				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonTemps + ": state temps reappeared after re-erase: " + rerr.Error())
 			} else {
 				verifyErr = errors.Join(verifyErr, terr)
 			}
