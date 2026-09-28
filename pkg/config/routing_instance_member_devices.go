@@ -294,9 +294,9 @@ func RoutingInstanceMemberDeviceConflicts(cfg *Config, tunnelNames map[string]st
 	}
 
 	// A tunnel's explicit routing-instance stanza is an ownership claim on the
-	// tunnel's Linux device, just like an RI list member. WireGuard unit stanzas
-	// that share an interface-level device use the parent name, matching the
-	// scope identity in validateWireguardRoutingInstance9909.
+	// tunnel's compiled Linux device, just like an RI list member. The compiler
+	// assigns shared WireGuard units the parent name and mode-overriding units
+	// their distinct uN name, so use the resolved unit name verbatim.
 	interfaceNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
 	for ifName := range cfg.Interfaces.Interfaces {
 		interfaceNames = append(interfaceNames, ifName)
@@ -320,11 +320,7 @@ func RoutingInstanceMemberDeviceConflicts(cfg *Config, tunnelNames map[string]st
 			if unit == nil || unit.Tunnel == nil || unit.Tunnel.RoutingInstance == "" {
 				continue
 			}
-			device := unit.Tunnel.Name
-			if ifc.Tunnel != nil && ifc.Tunnel.Mode == "wireguard" && ifc.Tunnel.Name != "" {
-				device = ifc.Tunnel.Name
-			}
-			recordOwner(device, unit.Tunnel.RoutingInstance,
+			recordOwner(unit.Tunnel.Name, unit.Tunnel.RoutingInstance,
 				fmt.Sprintf("%s.%d tunnel routing-instance", ifName, unitNum))
 		}
 	}

@@ -146,11 +146,7 @@ func quarantineRIDualClaimDevices(cfg *Config, tunnelNames map[string]string) {
 			if unit == nil || unit.Tunnel == nil {
 				continue
 			}
-			device := unit.Tunnel.Name
-			if ifc.Tunnel != nil && ifc.Tunnel.Mode == "wireguard" && ifc.Tunnel.Name != "" {
-				device = ifc.Tunnel.Name
-			}
-			clearStanza(unit.Tunnel, device)
+			clearStanza(unit.Tunnel, unit.Tunnel.Name)
 		}
 	}
 }

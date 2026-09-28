@@ -101,9 +101,12 @@ func riVRFDaemon9813(ops *bindRecorderOps) *Daemon {
 
 // linkWithMaster9813 makes a device exist in the fake table with a master index.
 func linkWithMaster9813(ops *bindRecorderOps, name string, index, master int) {
-	ops.links[name] = &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{
-		Name: name, Index: index, Flags: net.FlagUp, MasterIndex: master,
-	}}
+	attrs := netlink.LinkAttrs{Name: name, Index: index, Flags: net.FlagUp, MasterIndex: master}
+	if strings.HasPrefix(name, "vrf-") {
+		ops.links[name] = &netlink.Vrf{LinkAttrs: attrs}
+		return
+	}
+	ops.links[name] = &netlink.Dummy{LinkAttrs: attrs}
 }
 
 // blueCfg9813 is one vrf instance with a physical list member.
@@ -527,5 +530,28 @@ func TestRIMemberReassertTakesApplySemBeforeActing_9813(t *testing.T) {
 	if act < acq {
 		t.Errorf("reassertRIMemberVRFOnce binds BEFORE acquiring applySem; the config it acts on can be " +
 			"a pre-commit snapshot (#4001)")
+	}
+}
+
+func TestTunnelStanzaOwnerUsesCompiledModeOverrideDevice11060(t *testing.T) {
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"wg0": {
+				Name:   "wg0",
+				Tunnel: &config.TunnelConfig{Name: "wg0", Mode: "wireguard"},
+				Units: map[int]*config.InterfaceUnit{
+					3: {
+						Number: 3,
+						Tunnel: &config.TunnelConfig{
+							Name: "wg0u3", Mode: "gre", RoutingInstance: "blue",
+						},
+					},
+				},
+			},
+		}},
+	}
+	owners := tunnelsWithTheirOwnRIStanza(cfg)
+	if !owners["wg0u3"] || owners["wg0"] {
+		t.Fatalf("stanza-owned devices = %v, want only the mode-overriding unit device wg0u3", owners)
 	}
 }

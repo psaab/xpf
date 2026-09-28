@@ -274,9 +274,6 @@ func tunnelsWithTheirOwnRIStanza(cfg *config.Config) map[string]bool {
 				continue
 			}
 			name := unit.Tunnel.Name
-			if ifc.Tunnel != nil && ifc.Tunnel.Mode == "wireguard" && ifc.Tunnel.Name != "" {
-				name = ifc.Tunnel.Name
-			}
 			if name != "" {
 				out[name] = true
 			}

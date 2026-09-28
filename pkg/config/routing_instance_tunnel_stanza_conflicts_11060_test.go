@@ -74,3 +74,63 @@ func TestTunnelStanzaAndListDeviceClaimsConflictBothOrders11060(t *testing.T) {
 		}
 	}
 }
+
+func TestWireguardModeOverridingUnitStanzaConflictsOnUnitDevice11060(t *testing.T) {
+	stanzaLines := append(wg6941Base(),
+		"set interfaces wg0 unit 3 tunnel mode gre",
+		"set interfaces wg0 unit 3 tunnel source 10.1.1.1",
+		"set interfaces wg0 unit 3 tunnel destination 10.1.1.2",
+		"set interfaces wg0 unit 3 tunnel routing-instance destination blue")
+	memberLines := []string{
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances red instance-type virtual-router",
+		"set routing-instances red interface wg0.3",
+	}
+	for _, order := range []string{"stanza-first", "list-first"} {
+		t.Run(order, func(t *testing.T) {
+			lines := make([]string, 0, len(stanzaLines)+len(memberLines))
+			if order == "stanza-first" {
+				lines = append(lines, stanzaLines...)
+				lines = append(lines, memberLines...)
+			} else {
+				lines = append(lines, memberLines...)
+				lines = append(lines, stanzaLines...)
+			}
+
+			_, strictErr := CompileConfig(buildTree(t, lines))
+			if strictErr == nil {
+				t.Fatal("strict compile accepted distinct-owner claims on wg0u3")
+			}
+			for _, want := range []string{"wg0u3", "blue", "red", "#11060"} {
+				if !strings.Contains(strictErr.Error(), want) {
+					t.Errorf("strict conflict %q omits %q", strictErr, want)
+				}
+			}
+
+			cfg, err := CompileConfigLenient(buildTree(t, lines))
+			if err != nil {
+				t.Fatalf("tolerant compile: %v", err)
+			}
+			if len(cfg.QuarantinedRIMemberDeviceConflicts) != 1 ||
+				cfg.QuarantinedRIMemberDeviceConflicts[0].LinuxName != "wg0u3" {
+				t.Fatalf("quarantined conflicts = %+v, want wg0u3",
+					cfg.QuarantinedRIMemberDeviceConflicts)
+			}
+			ifc := cfg.Interfaces.Interfaces["wg0"]
+			if ifc == nil || ifc.Units[3] == nil || ifc.Units[3].Tunnel == nil {
+				t.Fatalf("unit tunnel missing after tolerant compile: %+v", ifc)
+			}
+			if got := ifc.Units[3].Tunnel.Name; got != "wg0u3" {
+				t.Fatalf("mode-overriding unit device = %q, want wg0u3", got)
+			}
+			if got := ifc.Units[3].Tunnel.RoutingInstance; got != "" {
+				t.Fatalf("conflicting unit tunnel routing-instance survived: %q", got)
+			}
+			for _, ri := range cfg.RoutingInstances {
+				if len(ri.Interfaces) != 0 {
+					t.Errorf("conflicting list membership survived in %s: %v", ri.Name, ri.Interfaces)
+				}
+			}
+		})
+	}
+}
