@@ -94,10 +94,12 @@ func TestLeaseCountIsBoundedByTheBody8792(t *testing.T) {
 	in := []userspace.IdleLeaseWire{
 		{Pool: "p1", Protocol: 6, SrcIP: "10.0.0.1", SrcPort: 1024,
 			RoutingScope: persistentNatLeaseScope(0),
-			TranslatedIP: "192.0.2.1", TranslatedPort: 2048, RemainingNs: 5, TimeoutNs: 9},
+			TranslatedIP: "192.0.2.1", TranslatedPort: 2048,
+			RemainingNs: minPersistentNatLeaseTimeoutNS, TimeoutNs: minPersistentNatLeaseTimeoutNS},
 		{Pool: "p2", Protocol: 17, SrcIP: "10.0.0.2", SrcPort: 1025,
 			RoutingScope: persistentNatLeaseScope(0),
-			TranslatedIP: "192.0.2.2", TranslatedPort: 2049, RemainingNs: 6, TimeoutNs: 10},
+			TranslatedIP: "192.0.2.2", TranslatedPort: 2049,
+			RemainingNs: minPersistentNatLeaseTimeoutNS + 1, TimeoutNs: minPersistentNatLeaseTimeoutNS + 1},
 	}
 	got, ok := decodePersistentNatLeasePayload(encodePersistentNatLeasePayload(in))
 	if !ok || len(got) != len(in) {
