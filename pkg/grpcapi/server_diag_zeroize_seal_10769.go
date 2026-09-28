@@ -155,14 +155,17 @@ func zeroizeImageSealResidue() error {
 	}
 
 	// DHCP client identity (#10769 d05-F6): xpf's own per-interface DUIDs
-	// live in the config root (erased with it); systemd-networkd and legacy
-	// dhclient lease/identity state lives here. Acquired addresses, DNS,
-	// and client DUID/IAIDs regenerate on the next lease acquisition.
-	// networkd keeps leases in two places: persistent *.lease files under
-	// /var/lib/systemd/network and runtime per-ifindex files under
-	// /run/systemd/netif/leases (both present on systemd hosts; the image
-	// enables networkd with DHCP clients). Both are swept.
-	fail(zeroizeSweepNetworkdLeases(zeroizeNetworkdLeaseDir))
+	// live in the config root (erased with it). systemd-networkd keeps
+	// runtime per-ifindex leases under /run/systemd/netif/leases/ and
+	// persistent state under /var/lib/systemd/network/ (both literals
+	// present in the shipped systemd 261 networkd binary, which the image
+	// enables with DHCP clients). Both directories are networkd-exclusive
+	// and empty on a fresh install, so both are cleared wholesale rather
+	// than by filename shape; legacy dhclient state likewise. Acquired
+	// addresses, DNS, and client DUID/IAIDs regenerate on the next lease
+	// acquisition. A DHCP renew racing the sweep can only rewrite inside
+	// the pre-reboot window the handoff gate already holds for N+1.
+	fail(zeroizeClearDir(zeroizeNetworkdLeaseDir))
 	fail(zeroizeClearDir(zeroizeNetifLeaseDir))
 	for _, dir := range zeroizeDHCPClientStateDirs {
 		fail(zeroizeClearDir(dir))
@@ -347,30 +350,6 @@ func isShadowBackupEntry(name string) bool {
 		}
 	}
 	return false
-}
-
-// zeroizeSweepNetworkdLeases removes systemd-networkd DHCP lease files
-// (#10769 d05-F6): per-link acquired addresses, routes, DNS, and the client
-// DUID/IAID they were acquired with. Only *.lease entries are removed;
-// anything else networkd keeps in that directory is left alone.
-func zeroizeSweepNetworkdLeases(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("zeroize: read networkd lease directory %s: %w", dir, err)
-	}
-	var errs []error
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".lease") {
-			continue
-		}
-		if err := zeroizeRemovePath(filepath.Join(dir, entry.Name())); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
 }
 
 // zeroizeTmpPreservedPrefixes are tmp entries that belong to live service

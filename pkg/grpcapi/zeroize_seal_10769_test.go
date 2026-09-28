@@ -676,20 +676,17 @@ func TestPerformZeroizeErasesDHCPClientIdentity10769(t *testing.T) {
 	mustWriteFile(t, dhclientLease, []byte("lease { address 192.0.2.11; }"))
 	dhclient6Lease := filepath.Join(zeroizeDHCPClientStateDirs[1], "dhclient6.leases")
 	mustWriteFile(t, dhclient6Lease, []byte("lease6 { ia-na {...} }"))
-	// Non-lease state beside networkd leases is out of scope and survives.
-	bystander := filepath.Join(zeroizeNetworkdLeaseDir, "other.state")
-	mustWriteFile(t, bystander, []byte("not a lease"))
+	// Anything else in the networkd-exclusive dir goes with the leases.
+	extra := filepath.Join(zeroizeNetworkdLeaseDir, "other.state")
+	mustWriteFile(t, extra, []byte("networkd state"))
 
 	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
 		t.Fatalf("PerformZeroizeWipe: %v", err)
 	}
-	for _, path := range []string{duid, v4lease, netifLease, dhclientLease, dhclient6Lease} {
+	for _, path := range []string{duid, v4lease, netifLease, dhclientLease, dhclient6Lease, extra} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Errorf("DHCP client identity %s survived: %v", path, err)
 		}
-	}
-	if _, err := os.Lstat(bystander); err != nil {
-		t.Errorf("non-lease networkd state must survive: %v", err)
 	}
 }
 
