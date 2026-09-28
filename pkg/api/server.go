@@ -1311,6 +1311,19 @@ func (s *Server) HTTPHandlerForTest() http.Handler {
 	return s.httpLeg.srv.Handler
 }
 
+// HTTPSHandlerForTest returns the http.Handler the LIVE HTTPS leg is serving,
+// or nil when no HTTPS leg exists. Like HTTPHandlerForTest, this is a
+// cross-package test seam for checking the auth policy pinned to a retiring
+// listener.
+func (s *Server) HTTPSHandlerForTest() http.Handler {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	if s.httpsLeg == nil || s.httpsLeg.srv == nil {
+		return nil
+	}
+	return s.httpsLeg.srv.Handler
+}
+
 // HTTPSLegDrainedForTest reports whether the installed HTTPS leg has finished
 // its EXIT PATH AND ITS DRAIN — the listener is gone and every connection it
 // accepted has been finished or severed, hijacked connections excepted (Go

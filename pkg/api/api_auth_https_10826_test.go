@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -80,5 +82,37 @@ func TestScopedAPIKeyServesHTTPSWhenClearHTTPIsDisabled10826(t *testing.T) {
 		if got := send(http.MethodPost, path, `{}`); got != http.StatusForbidden {
 			t.Errorf("read-only API key over HTTPS returned %d for %s, want 403", got, path)
 		}
+	}
+}
+
+func TestConfigShowCandidateRedactsNamedAPIKeySecret10826(t *testing.T) {
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	const leakedSecret = "LEAK-NAMED-API-KEY-SECRET-10826"
+	if _, err := store.LoadSet(
+		"set system services web-management api-auth key automation secret " + leakedSecret); err != nil {
+		t.Fatalf("LoadSet named API key: %v", err)
+	}
+
+	s := &Server{store: store}
+	for _, format := range []string{"", "set", "json", "xml"} {
+		t.Run("format="+format, func(t *testing.T) {
+			url := "/api/v1/config/show?target=candidate&format=" + format
+			rr := httptest.NewRecorder()
+			s.configShowHandler(rr, httptest.NewRequest(http.MethodGet, url, nil))
+			if rr.Code != http.StatusOK {
+				t.Fatalf("candidate display status = %d, body: %s", rr.Code, rr.Body.String())
+			}
+			body := rr.Body.String()
+			if strings.Contains(body, leakedSecret) {
+				t.Fatalf("candidate display leaked named API-key secret:\n%s", body)
+			}
+			if !strings.Contains(body, config.SecretDataPlaceholder) {
+				t.Fatalf("candidate display omitted redaction marker %q:\n%s",
+					config.SecretDataPlaceholder, body)
+			}
+		})
 	}
 }

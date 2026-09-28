@@ -3093,9 +3093,12 @@ never lock an operator out of a remote box it manages.
   the path and so none of them would notice a wrong production value), and one
   seam relocates file and parent together — the property `provisionedUsersDir`
   already has for the three #5841 marker roots.
-  The #10825 drop-in also sets `MaxAuthTries 3`, `LoginGraceTime 30`, and
-  `PermitEmptyPasswords no`, bounding password attempts per SSH connection and
-  refusing empty passwords; `daemon_ssh_test.go` covers the generated defaults.
+  The #10825 image-factory drop-in (`10-xpf-factory.conf`) sets
+  `MaxAuthTries 3`, `LoginGraceTime 30`, and `PermitEmptyPasswords no` for
+  images regardless of whether `system services ssh` is configured. The
+  daemon's managed `00-xpf.conf` repeats those bounds when an SSH stanza exists;
+  `daemon_ssh_test.go` covers runtime rendering and
+  `scripts/image/test_bake_sshd_password_auth_10771.py` checks the image drop-in.
 
   **Retry-owner visibility completed (#7615).** Six always-on loops in `Run`
   re-drive a failure that had no other owner. #6800 and #6802 published;

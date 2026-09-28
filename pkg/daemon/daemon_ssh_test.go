@@ -25,7 +25,6 @@ func TestBuildSSHDConfigKeyExchange(t *testing.T) {
 		{
 			name: "nil",
 			ssh:  nil,
-			want: []string{"MaxAuthTries 3", "LoginGraceTime 30", "PermitEmptyPasswords no"},
 		},
 		{
 			name: "no-settings",
@@ -64,6 +63,12 @@ func TestBuildSSHDConfigKeyExchange(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := buildSSHDConfig(tt.ssh)
+			if tt.ssh == nil {
+				if got != "" {
+					t.Errorf("buildSSHDConfig(nil) = %q, want no daemon drop-in", got)
+				}
+				return
+			}
 			if got == "" {
 				t.Fatalf("buildSSHDConfig = empty, want content")
 			}
@@ -195,28 +200,51 @@ func sshConfig(ssh *config.SSHServiceConfig) *config.Config {
 	return cfg
 }
 
-// TestApplySSHConfig_ConfigRemovedKeepsAuthBounds verifies that removing the
-// SSH stanza withdraws operator choices but does not withdraw the mandatory
-// attempt limits (#10825).
-func TestApplySSHConfig_ConfigRemovedKeepsAuthBounds(t *testing.T) {
+// TestApplySSHConfig_ConfigRemovedRemovesManagedDropIn verifies that removing
+// the SSH stanza withdraws its operator-selected settings. The baked image's
+// separate 10-xpf-factory.conf retains the factory attempt limits.
+func TestApplySSHConfig_ConfigRemovedRemovesManagedDropIn(t *testing.T) {
 	r := &sshdSeamRecorder{present: []byte("# Managed by xpf\nPermitRootLogin no\n")}
 	installSSHDSeam(t, r)
 
 	d := &Daemon{}
 	d.applySSHConfig(sshConfig(nil))
 
-	want := buildSSHDConfig(nil)
-	if string(r.present) != want {
-		t.Fatalf("drop-in after config removal = %q, want mandatory bounds:\n%s", r.present, want)
+	if r.present != nil {
+		t.Fatalf("managed drop-in after config removal = %q, want absent", r.present)
 	}
-	if r.removed != 0 {
-		t.Errorf("Remove called %d times, want 0", r.removed)
+	if r.removed != 1 {
+		t.Errorf("Remove called %d times, want 1", r.removed)
 	}
 	if r.reloads != 1 {
 		t.Errorf("reload called %d times, want 1", r.reloads)
 	}
-	if len(r.writes) != 1 {
-		t.Errorf("writes = %d, want one update from operator choices to baseline bounds", len(r.writes))
+	if len(r.writes) != 0 {
+		t.Errorf("writes = %d, want none while removing the managed drop-in", len(r.writes))
+	}
+}
+
+// TestApplySSHConfig_NoStanzaLeavesFactoryDefaultsUntouched ensures the daemon
+// does not install a managed drop-in when SSH is unconfigured. Factory auth
+// limits come from the baked image, not this dynamic drop-in.
+func TestApplySSHConfig_NoStanzaLeavesFactoryDefaultsUntouched(t *testing.T) {
+	r := &sshdSeamRecorder{present: nil}
+	installSSHDSeam(t, r)
+
+	d := &Daemon{}
+	d.applySSHConfig(sshConfig(nil))
+
+	if r.present != nil {
+		t.Fatalf("sshd drop-in = %q, want absent", r.present)
+	}
+	if r.removed != 0 {
+		t.Errorf("Remove called %d times, want 0", r.removed)
+	}
+	if r.reloads != 0 {
+		t.Errorf("reloads = %d, want 0 when no drop-in exists", r.reloads)
+	}
+	if len(r.writes) != 0 {
+		t.Errorf("writes = %d, want 0 when no SSH stanza exists", len(r.writes))
 	}
 }
 
@@ -239,30 +267,6 @@ func TestApplySSHConfig_ConfigEmptiedKeepsAuthBounds(t *testing.T) {
 	}
 	if r.reloads != 1 {
 		t.Errorf("reload called %d times, want 1", r.reloads)
-	}
-}
-
-// TestApplySSHConfig_InstallsBoundsWhenEmptyAndAbsent ensures a base image
-// with no existing xpf drop-in still receives the limits even if the operator
-// never configured an SSH stanza (#10825).
-func TestApplySSHConfig_InstallsBoundsWhenEmptyAndAbsent(t *testing.T) {
-	r := &sshdSeamRecorder{present: nil}
-	installSSHDSeam(t, r)
-
-	d := &Daemon{}
-	d.applySSHConfig(sshConfig(nil))
-
-	if string(r.present) != buildSSHDConfig(nil) {
-		t.Fatalf("sshd drop-in = %q, want mandatory auth bounds:\n%s", r.present, buildSSHDConfig(nil))
-	}
-	if r.removed != 0 {
-		t.Errorf("Remove called %d times, want 0", r.removed)
-	}
-	if r.reloads != 1 {
-		t.Errorf("reloads = %d, want one initial baseline install", r.reloads)
-	}
-	if len(r.writes) != 1 {
-		t.Errorf("writes = %d, want one baseline install", len(r.writes))
 	}
 }
 

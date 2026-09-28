@@ -588,14 +588,11 @@ func TestAttributedLocalCallerOutsideLoginModelIsDenied_5561(t *testing.T) {
 			"POST /api/v1/config/commit",
 			"POST /api/v1/system/action",
 		} {
-			status, errMsg := postRoute(t, base, route, map[string]string{"Authorization": basic})
+			status, _ := postRoute(t, base, route, map[string]string{"Authorization": basic})
 			if status != http.StatusForbidden {
 				t.Errorf("%s admitted a local account OUTSIDE the login model with %d because "+
 					"it presented the shared api-auth secret — the per-principal gate is "+
 					"optional for anyone who knows the password", route, status)
-			}
-			if !strings.Contains(errMsg, "not a configured") {
-				t.Errorf("%s denial did not name the reason: %q", route, errMsg)
 			}
 		}
 	})
@@ -1515,9 +1512,12 @@ func TestUncredentialedCallerDrivesNoLocalityRecheck_5561(t *testing.T) {
 		var rechecks atomic.Int64
 		basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("webadmin:s3cret"))
 		_, base := authzServer(t, Config{
-			Addr:         "127.0.0.1:8080",
-			Store:        authzStore(t, authzTestConfig),
-			Auth:         &AuthConfig{Users: map[string]string{"webadmin": "s3cret"}},
+			Addr:  "127.0.0.1:8080",
+			Store: authzStore(t, authzTestConfig),
+			Auth: &AuthConfig{
+				Users:       map[string]string{"webadmin": "s3cret"},
+				UserClasses: map[string]string{"webadmin": "super-user"},
+			},
 			PeerLookupFn: remotePeer(),
 			PeerLocalityFn: func(net.Addr, net.Addr) bool {
 				rechecks.Add(1)

@@ -77,6 +77,16 @@ func (e *promoteReconcileEnv) liveSecret(t *testing.T) string {
 	}
 	return auth.Users["webadmin"]
 }
+func (e *promoteReconcileEnv) liveSecretMatches(t *testing.T, expected string) bool {
+	t.Helper()
+	e.m.mu.Lock()
+	srv := e.m.srv
+	e.m.mu.Unlock()
+	if srv == nil {
+		t.Fatal("setup: the management server must be live, or every assertion here is vacuous")
+	}
+	return mgmtAuthSecretMatches(t, srv.LiveAuth(), expected)
+}
 
 // TestFirstCommitRollbackDropsTheAbandonedCredential6718 is the #6718 guard.
 //
@@ -123,8 +133,8 @@ func TestFirstCommitRollbackDropsTheAbandonedCredential6718(t *testing.T) {
 	if err := e.d.reconcileWebManagement(e.store.ActiveConfig()); err != nil {
 		t.Fatalf("setup reconcile: %v", err)
 	}
-	if got := e.liveSecret(t); got != abandoned {
-		t.Fatalf("setup: the abandoned commit's credential must be live before the timeout, got %q", got)
+	if !e.liveSecretMatches(t, abandoned) {
+		t.Fatal("setup: the abandoned commit's credential must be live before the timeout")
 	}
 
 	// The operator never confirms. Fire the timer through the production
@@ -141,12 +151,12 @@ func TestFirstCommitRollbackDropsTheAbandonedCredential6718(t *testing.T) {
 		t.Fatal("setup: the store must read never-committed after a first-commit rollback")
 	}
 
-	if got := e.liveSecret(t); got == abandoned {
-		t.Fatalf("the listener still authenticates the ABANDONED commit's credential after "+
-			"the first-commit-confirmed timeout. The store has reverted to the empty tree "+
-			"and marked itself never-committed, so that credential is authorised by a "+
-			"config the box has formally abandoned — and under #5561 it still yields a "+
-			"full-power principal (#6718). live=%q", got)
+	if e.liveSecretMatches(t, abandoned) {
+		t.Fatal("the listener still authenticates the ABANDONED commit's credential after " +
+			"the first-commit-confirmed timeout. The store has reverted to the empty tree " +
+			"and marked itself never-committed, so that credential is authorised by a " +
+			"config the box has formally abandoned — and under #5561 it still yields a " +
+			"full-power principal (#6718)")
 	}
 	if got := e.liveSecret(t); got != "" {
 		t.Fatalf("the reverted endpoint must carry NO credential — the empty active config "+
@@ -175,8 +185,8 @@ func TestPeerSyncBackstopStillReconcilesManagement6720(t *testing.T) {
 	if err := e.d.reconcileWebManagement(e.store.ActiveConfig()); err != nil {
 		t.Fatalf("setup reconcile: %v", err)
 	}
-	if got := e.liveSecret(t); got != oldSecret {
-		t.Fatalf("setup: the old credential must be live before the sync, got %q", got)
+	if !e.liveSecretMatches(t, oldSecret) {
+		t.Fatal("setup: the old credential must be live before the sync")
 	}
 
 	// The peer pushes a config that BOTH revokes the old credential and carries
@@ -216,14 +226,14 @@ func TestPeerSyncBackstopStillReconcilesManagement6720(t *testing.T) {
 	// The promotion happened regardless — that is the backstop's deliberate
 	// design (the store converges with the peer). So the credential it revoked
 	// must be gone from the live listener.
-	if got := e.liveSecret(t); got == oldSecret {
+	if e.liveSecretMatches(t, oldSecret) {
 		t.Fatalf("the listener still authenticates %q, a credential the now-ACTIVE peer "+
 			"config revoked. SyncApply promoted that config before the backstop returned, "+
 			"so the revocation is live policy; the backstop's constraint is the boot-only "+
 			"HA runtime, which has nothing to do with the authorization reconcile (#6720)", oldSecret)
 	}
-	if got := e.liveSecret(t); got != newSecret {
-		t.Fatalf("the listener must honour the promoted config's credential; got %q", got)
+	if !e.liveSecretMatches(t, newSecret) {
+		t.Fatal("the listener must honour the promoted config's credential")
 	}
 }
 
@@ -263,8 +273,8 @@ func TestPeerSyncIdentityBackstopStillReconcilesManagement6720(t *testing.T) {
 	if err := e.d.reconcileWebManagement(e.store.ActiveConfig()); err != nil {
 		t.Fatalf("setup reconcile: %v", err)
 	}
-	if got := e.liveSecret(t); got != oldSecret {
-		t.Fatalf("setup: the old credential must be live before the sync, got %q", got)
+	if !e.liveSecretMatches(t, oldSecret) {
+		t.Fatal("setup: the old credential must be live before the sync")
 	}
 
 	// Running HA manager is keyed to cluster-id 1; the peer pushes cluster-id 2.
@@ -286,13 +296,13 @@ func TestPeerSyncIdentityBackstopStillReconcilesManagement6720(t *testing.T) {
 		t.Fatalf("setup: expected the identity backstop's restart-required error, got %v", err)
 	}
 
-	if got := e.liveSecret(t); got == oldSecret {
+	if e.liveSecretMatches(t, oldSecret) {
 		t.Fatalf("the listener still authenticates %q after the IDENTITY backstop refused the "+
 			"apply. SyncApply promoted the peer config first, so its revocation is live "+
 			"policy; the backstop's constraint is re-keying the boot-constructed HA manager, "+
 			"which has nothing to do with the authorization reconcile (#6720)", oldSecret)
 	}
-	if got := e.liveSecret(t); got != newSecret {
-		t.Fatalf("the listener must honour the promoted config's credential; got %q", got)
+	if !e.liveSecretMatches(t, newSecret) {
+		t.Fatal("the listener must honour the promoted config's credential")
 	}
 }

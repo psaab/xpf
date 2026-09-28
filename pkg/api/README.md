@@ -569,6 +569,11 @@ plaintext. Loading a legacy database migrates those trees before they can serve
 or roll back; the confirm-record hash transition preserves the auto-rollback
 window if a restart interrupts that migration.
 
+Named API-key `secret` leaves are also masked in raw-AST config displays,
+exports, searches, and control-character diagnostics. The generic keyword is
+recognized only below `api-auth key`, avoiding false redaction of unrelated
+identifiers.
+
 REST authentication failures are throttled per source/account (5 failures in
 10 minutes locks the pair for 5 minutes with exponential re-locks, capped at
 one hour) and per source (20 failures in 10 minutes) to stop username rotation.

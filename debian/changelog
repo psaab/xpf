@@ -73,5 +73,6 @@ xpf (0.0.0) unstable; urgency=medium
     password login, and hash configured API-auth secrets (#10825).
   * Scope API-auth identities by login class and UTC expiry, require HTTPS for
     credentials, and migrate persisted credentials to bcrypt verifiers (#10826).
+  * Redact named API-key `secret` values from REST config output and diagnostics.
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
