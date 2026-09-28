@@ -751,6 +751,8 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// they had just removed was still being served.
 		HostInboundConntrackRevocationOwedFn: d.HostInboundConntrackRevocationOwed,
 		HostInboundConntrackFlushFailuresFn:  d.HostInboundConntrackFlushFailures,
+		HostInboundTCPlooseDisabledFn:        d.TCPlooseDisabled,
+		HostInboundTCPloosePostureFailuresFn: d.TCPloosePostureFailures,
 		// #6800: surface the managed-service reload debt so
 		// xpf_managed_service_reload_pending reads 1 (and
 		// xpf_managed_service_reload_failures_total climbs) while a service

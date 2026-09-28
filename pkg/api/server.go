@@ -384,6 +384,12 @@ type Config struct {
 	// Backs the xpf_host_inbound_conntrack_revocation_failures_total counter.
 	// Optional; if nil, the counter is not emitted.
 	HostInboundConntrackFlushFailuresFn func() uint64
+	// HostInboundTCPlooseDisabledFn reports whether nf_conntrack_tcp_loose
+	// last verified as 0 (#10752). Backs xpf_host_inbound_tcp_loose_disabled.
+	HostInboundTCPlooseDisabledFn func() bool
+	// HostInboundTCPloosePostureFailuresFn reports monotonic loose-posture
+	// establish/verify failures. Backs the failures_total counter.
+	HostInboundTCPloosePostureFailuresFn func() uint64
 	// ManagedServiceReloadOwedFn reports, per xpf-managed service, whether a
 	// runtime reload is still owed because the on-disk configuration converged
 	// but the reload that would load it failed (#6800). Nil on a server that
@@ -640,6 +646,8 @@ type Server struct {
 	ipsecRebindPendingFn                 func() bool
 	hostInboundConntrackRevocationOwedFn func() bool
 	hostInboundConntrackFlushFailuresFn  func() uint64
+	hostInboundTCPlooseDisabledFn        func() bool
+	hostInboundTCPloosePostureFailuresFn func() uint64
 	managedServiceReloadOwedFn           func() map[string]bool
 	managedServiceReloadFailuresFn       func() map[string]uint64
 	raDeadSenderPendingFn                func() bool
@@ -766,6 +774,8 @@ func NewServer(cfg Config) *Server {
 		ipsecRebindPendingFn:                 cfg.IPsecRebindPendingFn,
 		hostInboundConntrackRevocationOwedFn: cfg.HostInboundConntrackRevocationOwedFn,
 		hostInboundConntrackFlushFailuresFn:  cfg.HostInboundConntrackFlushFailuresFn,
+		hostInboundTCPlooseDisabledFn:        cfg.HostInboundTCPlooseDisabledFn,
+		hostInboundTCPloosePostureFailuresFn: cfg.HostInboundTCPloosePostureFailuresFn,
 		managedServiceReloadOwedFn:           cfg.ManagedServiceReloadOwedFn,
 		managedServiceReloadFailuresFn:       cfg.ManagedServiceReloadFailuresFn,
 		raDeadSenderPendingFn:                cfg.RADeadSenderPendingFn,

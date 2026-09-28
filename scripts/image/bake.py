@@ -108,6 +108,9 @@ SYSCTL_CONF = (
     "net.core.bpf_jit_enable=1\n"
     "net.ipv6.conf.all.accept_ra=0\n"
     "net.ipv6.conf.default.accept_ra=0\n"
+    # Prevent TCP mid-stream pickup from recreating host-inbound conntrack
+    # entries box-oriented after the apply-time flush (#10752).
+    "net.netfilter.nf_conntrack_tcp_loose=0\n"
 )
 
 # apt-get update exits 0 even when an index fetch fails; --error-on=any

@@ -1003,7 +1003,11 @@ func validateHostInboundStanzaWarnings(cfg *Config) []string {
 					"(GRE/ESP/AH/OSPF/PIM/VRRP/future proto numbers) to the "+
 					"zone's local addresses — a superset of Junos's per-service "+
 					"union; if you intend only specific services, list them "+
-					"explicitly.", where, svc))
+					"explicitly. Tightening this stanza later to named services "+
+					"leaves any custom-port (non-catalog) box-oriented flows "+
+					"authorized until they close or time out — see the "+
+					"non-catalog TCP HIGH-residual procedure in "+
+					"docs/host-inbound-service-matrix.md.", where, svc))
 			return // one advisory per stanza
 		}
 	}

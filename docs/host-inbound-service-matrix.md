@@ -571,59 +571,341 @@ diverged.
 
 ## Stale kernel authorization on a tightening (#5566)
 
-The `ct state established,related accept` above is the FIRST rule in the chain
-(and, in the `to-zone junos-host` program branch, the residual established accept
-follows the fine DROP but still precedes the per-zone coarse drops). Replacing the
-`xpf_hostinbound` table does **not** flush Linux netfilter conntrack. So an
-EXISTING direct-kernel host connection admitted under a looser prior config — an
-SSH / HTTPS / SNMP session to a firewall-local address — kept riding that leading
-established-accept after the operator REMOVED the service: the new per-zone
-catch-all DROP never saw the flow's original-direction packets. That was a
-host-inbound false-allow confined to the direct-kernel delivery path; the Rust
-userspace local-delivery path already re-checks the effective host-inbound set on
-every session hit and tears a now-denied session down
-(`userspace-dp/src/afxdp/poll_descriptor/mod.rs`), but the kernel path had no
-equivalent teardown.
+The leading `ct state established,related ct direction reply accept` is ahead
+of ingress-zone judgement (and the `to-zone junos-host` program's residual
+established accept follows the fine DROP but precedes the per-zone coarse
+drops). Replacing the `xpf_hostinbound` table does **not** flush Linux netfilter
+conntrack. An existing direct-kernel host connection admitted under a looser
+prior config — SSH / HTTPS / SNMP to a firewall-local address — therefore kept
+riding the reply-direction accept after the operator REMOVED the service. The
+Rust userspace local-delivery path already re-checks the effective set on every
+session hit and tears a denied session down
+(`userspace-dp/src/afxdp/poll_descriptor/mod.rs`); the kernel path did not.
 
-**Fix — conntrack reconcile after every successful apply**
-(`pkg/daemon/host_inbound_conntrack_flush.go`, wired at the tail of
-`applyHostInboundFilter`). After the real `xpf_hostinbound` table loads, the
-daemon deletes every established/related **kernel** conntrack entry whose
-original-direction destination is a **covered** firewall-local host-inbound
-address (an address that carries a default-deny — the same `desiredDrop` set as
-#5789) and whose `(proto, dport)` the CURRENT coarse rules no longer admit. The
-next original-direction packet is then re-evaluated and dropped by the per-zone
-catch-all instead of short-circuiting on the established-accept. Properties:
+The original #5566 reconcile keyed only on the conntrack original destination.
+That finds peer-first entries (`ORIG peer:ephemeral → box:service`) but misses
+box-oriented entries (`ORIG box:service → peer:ephemeral`): for those, the
+original destination is the peer, even though the peer's packet is now a
+conntrack reply to the firewall-local service. TCP could acquire that
+orientation through loose mid-stream pickup (`nf_conntrack_tcp_loose=1`); UDP
+does not need a loose-pickup setting, so firewall-originated IKE DPD/rekey
+datagrams can recreate a box-oriented entry immediately after the apply-time
+flush (#10764).
 
-- **Reconcile, not a delta.** The flush condition is "not admitted by the CURRENT
-  config", derived from the SAME structured SSOT the nft chain renders from
-  (`config.HostInboundServiceMatch` / `HostInboundProtocolMatch`), so the admit
-  decision cannot drift from the chain's per-zone accepts. No prior-config
-  snapshot is persisted; the sweep is a no-op on loosening / unchanged commits
-  because still-permitted flows are kept. A service that stays configured is never
-  flushed (no connection-reset regression).
-- **Lifeline-safe.** Only addresses in the covered default-deny set are eligible;
-  management / cluster-control lifelines (fxp0 / em0 / fab<N>) are excluded from the
-  host-inbound views, so their conntrack is never flushed. Addressed-but-unzoned
-  addresses (#4420 HI-2) are covered with an empty admit set (fully denied except
-  the global exemptions below).
-- **Global exemptions preserved.** ESP/AH (proto 50/51), ICMP ND/PMTUD/error, and
-  the configured WireGuard listen port (#5582) are never flushed, mirroring the
-  chain's global accepts. ICMP echo conntrack is short-lived and left to age out.
+**Fix — reconcile both orientations and guard the reply accept
+ (#10752/#10764).** After every successful real apply, the daemon deletes
+ now-denied peer-oriented entries by `(proto, dport)` and box-oriented entries
+ only when `(proto, sport)` is in the shared, sorted service-port catalog and is
+ denied by BOTH the destination-owner union and every ingress view that judges
+ it (#9637). A tuple some ingress zone still permits is kept — deleting it
+ would break that permitted cross-zone use — while the per-ingress nft guard
+ judges each reply packet by its actual arrival zone. Ephemeral egress, DHCP/NTP
+ client ports, BGP/LDP/MSDP and legacy reserved-client TCP ports, ranges, bare
+ IP protocols, and ICMP are deliberately outside that catalog: a conntrack tuple
+ alone cannot prove that those flows are stale instead of a live box-originated
+ client/control-plane exchange. The matcher remains conservative about them.
+
+ Flush is necessary but not sufficient for the UDP twin: after deleting an IKE
+ entry, the firewall's next DPD datagram can create a fresh box-oriented entry.
+ The real `xpf_hostinbound` ruleset now places catalogued stale-reply DROPs
+ ahead of the broad reply-direction accept, scoped by effective ingress-zone
+ policy: per-ingress-view `iifname` guards judge every destination by the
+ arrival zone's CURRENT set, an ambiguous-ingress guard fails closed, and an
+ `iifname != <covered+reinject>` fallback applies destination-owner policy to
+ uncovered arrivals while preserving the trusted `xpf-usp0` reinject exemption.
+ Still-admitted service replies and non-catalog client/ephemeral replies keep
+ the old fast accept. The text oracle and production netlink renderer consume
+ the same `pkg/nftables.HostInboundStaleReplyGuardRules` result. Cold-boot and
+ coverage-gap fences use destination-only guards with their all-services-denied
+ address sets (no ingress scope, no reinject exemption), and the #9506 fence
+ conntrack predicate now also recognizes catalogued box-oriented entries.
+
+TCP loose pickup is disabled both at runtime bringup
+(`/proc/sys/net/netfilter/nf_conntrack_tcp_loose=0`) and by the appliance's
+early-boot `/etc/sysctl.d/99-xpf.conf` drop-in. This prevents conntrack from
+adopting otherwise-unassociated mid-stream TCP packets as new flows. The reply
+guard remains the revocation backstop for entries predating that posture and
+for UDP.
+
+Properties:
+
+- **Reconcile, not a delta.** The admit decision is derived from the same
+  structured SSOT as the chain (`config.HostInboundServiceMatch` /
+  `HostInboundProtocolMatch`). No prior-config snapshot is persisted; a
+  still-permitted tuple is not flushed or dropped.
+- **Lifeline exclusion is interface-based, not address-based.** Lifeline
+  interfaces (fxp0 / em0 / fab<N>) are excluded from host-inbound views, so an
+  address reachable only there is not reconciled. Reusing that address on a
+  non-lifeline default-deny attachment does not retain a blanket exemption:
+  when its effective host-inbound views admit no service, the covered-address
+  flush can remove an existing management SSH conntrack entry. A view that
+  admits SSH preserves that tuple; see the #7284 shared-address limitation.
+- **Global exemptions preserved.** ESP/AH (proto 50/51), ICMP ND/PMTUD/error,
+  and configured WireGuard listen ports (#5582) are never flushed by the
+  ordinary matcher. ICMP echo conntrack is short-lived and left to age out.
+- **HIGH residual: exempt/custom UDP, bare protocols, and ranges are NOT
+  revoked box-oriented.** BFD/RIP/SAP/LDP-UDP, DHCP/NTP client ports,
+  custom/non-catalog UDP (e.g. UDP 2222 admitted only packet-wide via
+  `any-service` — same catalog-miss keep and no guard as its TCP twin, plus
+  ongoing recreation via any box datagram since UDP has no loose gate), bare
+  IP protocols (OSPF/PIM/VRRP/GRE/IGMP/RSVP/PGM/NHRP), and port ranges
+  (traceroute) are never flushed box-oriented nor guarded: the box originates
+  datagrams from those tuples, so a conntrack tuple alone cannot distinguish a
+  stale service reply from live control/client egress. After removing such a
+  service, box-originated hellos/adverts/probes recreate a box-oriented entry
+  and peer packets ride the broad reply accept — so restart/reboot alone does
+  NOT clear it: a restarted daemon immediately re-originates the same tuple.
+  Removal requires the stop/disable + delete + verify + commit procedure
+  below; without the delete, an idle entry expires on the ~120s UDP stream
+  timeout (30s unreplied) after the last packet, but a persistent peer
+  sustains it, so delete plus verify is the durable step. The BFD packet-path
+  subtest pins the documented allow. Closing this without operator action
+  needs per-socket identity (mark/cgroup), not tuple matching, or tying
+  origination to host-inbound admit.
+- **HIGH residual: non-catalog/custom TCP and TCP client-role exempts are NOT
+  revoked box-oriented (status-quo-ante, NOT a regression).** SSOT SSH is
+  TCP/22-only, so a custom port such as 2222 (admitted only packet-wide via
+  `any-service`) can never enter the discrete-port catalog; after tightening,
+  a box-oriented `ORIG box:2222→peer` entry is kept by the flush (catalog
+  miss) and has no guard DROP, riding the broad reply accept until close or
+  idle-expiry — the ~5d TCP established timeout is an IDLE timeout, not a
+  maximum: active traffic refreshes conntrack indefinitely, exactly as a
+  persistent peer sustains the UDP residual above. Pre-PR/post-PR comparison:
+  the pre-PR predicate was DstIP-only with no box-oriented branch, so it kept
+  these entries identically (peer DstIP never in the admit map); peer-oriented
+  2222 flushes in BOTH generations via the unchanged destination branch. The
+  only behavior delta is the intended catalogued revocation. `loose=0` stops
+  NEW box-oriented pickup of mid-stream traffic, so passive/listener-only
+  cases linger only as upgrade-time entries — but active TCP originators (FTP
+  active from 20, rsh/explicit-bind clients, anything sourcing fresh SYNs from
+  a fixed sport) form NEW box-oriented entries despite `loose=0`, which blocks
+  mid-stream pickup, not new connections. Same holds for the TCP client-role
+  exempts excluded by tuple ambiguity with box-originated
+  control-plane/client traffic: FTP-data 20, BGP 179, rexec/rlogin/rsh
+  512/513/514, MSDP 639, LDP-TCP 646. Removal requires stopping/disable the
+  ORIGINATOR — not just the listener: established children and client sockets
+  originate without listening (FTP-data 20 never listens at all), so verify NO
+  socket (`ss -ltn` AND any-state `ss -tan`), then delete + filtered-verify +
+  commit per the procedure below. Tightening while the service keeps running
+  has its own procedure below (restrict, not decommission). Matcher pins:
+  peer-oriented 2222 flushes, box-oriented 2222 and TCP/179 are kept; neither
+  appears in any guard DROP. Warning surfaces, each with exact scope. The
+  any-service breadth advisory names this consequence while the stanza is
+  open. A narrowed scope is a full-admit loss or an unguarded-token
+  removal, computed with the canonical physical+unit override union
+  (zone-level only where no replacing override applies). Exception:
+  bare trunk-parent addresses (VLAN unit-0) form no scope in the
+  units-only model, so all-units-overridden plus zone-stanza
+  narrowing stays silent for kept flows there — including
+  exempt/bare, which have no journal backstop. When this
+  attempt's sweep observed stranded customs, exempt, or bare flows on an
+  address the OLD config covered in a narrowed effective scope, the
+  tightening commit carries evidence lines (customs, exempt/bare) naming
+  ONLY those scopes — zone:<name> or zone:<name>|iface:<unit> — with
+  counts and samples drawn ONLY from the intersecting addresses of that
+  class (scope lists cap at four names, remainder as (+N more)),
+  plus a silent-class pointer sentence. The customs line
+  additionally requires a full-admit loss or the loss of a token
+  admitting sweep-custom tuples (today p:rip/p:ripng plus p:bfd
+  Echo 3785 — fixed-sport UDP the sweep records as customs): other
+  narrowings (exempts, bare protocols, ranges, true customs) never
+  admitted customs, so customs observed there are
+  unchanged-authorization flows and yield the advisory instead.
+  Attribution is scope-plus-class granular, not per-tuple: an unrelated
+  true-custom flow coinciding with a rip removal on the same narrowed
+  scope shares the customs line and its sample reveals the actual tuple
+  (#11493).
+  Otherwise — zero kept flows, or evidence only outside every
+  narrowed scope — the commit carries a transition-only advisory naming
+  the narrowed scopes with honest zero-observed wording and a
+  manual-procedure pointer, so silent-class narrowings (in-range
+  customs — UDP, or TCP without a local LISTEN — ranges, post-sweep
+  reconnects, sweep misses) never pass commit-silent; the advisory is
+  suppressed only when the narrowed scopes' zones own no address in
+  either generation (zone-granular by design: an addressless member in
+  an addressed zone still warns).
+  Commits with no transition stay silent, as do narrowings no address
+  can strand. The daemon additionally warns in the journal on any apply
+  (commit or background) that keeps denied non-catalog customs below
+  the ephemeral floor, plus TCP customs inside the range when backed by
+  a local LISTEN socket. Deliberately journal-silent: exempt and bare
+  flows (steady-state control-plane traffic would warn on every apply;
+  they surface through the commit warning), ephemeral egress and ranges
+  (indistinguishable from ordinary clients AND policy-invariant
+  authorized — no chain can drop a non-catalog reply tuple, proven by
+  the catalog-boundedness test; covered by the advisory's pointer on
+  transition commits, not by observation), WireGuard (globally
+  admitted), and ingress-permitted catalogued tuples (correctly kept:
+  the per-ingress guard judges each reply packet, so keeping them is
+  enforcement, not residual). Sweep misses (created-after-dump,
+  per-family interleave) and post-sweep reconnects are covered by the
+  advisory's silent-class pointer on the transition commit itself — no
+  future apply is needed for the warning — while catalogued misses
+  still drop via the guard meanwhile. A flap (tighten→loosen→tighten)
+  re-evaluates transition plus evidence at each commit independently.
+- **Race bound: guard-first closes the catalogued Install→flush window; the
+  peer-oriented uncovered window is bounded by sweep duration, not packets.**
+  The guard installs atomically with the table, before the conntrack sweep, so
+  a packet arriving between install and flush still meets the guard for
+  catalogued tuples — that half needs no timing bound. The per-family
+  dump+delete sweep is not atomic, and peer-oriented original-direction
+  has no reply-direction guard: an uncovered/mismatched-iifname arrival rides
+  the residual accept until flush deletes the entry. That window is the
+  Install→flush code duration (one netlink batch plus a dump+delete sweep over
+  the small host-only table, sequential per family) — NOT single-packet: a
+  high-rate sender gets rate×duration packets through, and sweep misses
+  (created-after-dump, per-family interleave) extend it further with no #6802
+  retry debt (a miss returns success, unlike a failure). Catalogued misses
+  still drop via the guard; peer-oriented uncovered is an accepted bounded
+  flood window, and non-catalog box-oriented has no guard at all (HIGH
+  residuals above). The order test pins install-before-flush only, not a
+  packet count.
+- **Availability: admitted services survive conntrack loss flaglessly;
+  ephemeral clients must re-establish.** Admitted TCP service accepts carry no
+  `tcp flags` predicate, so SYN-less mid-stream to an admitted dport still
+  matches after conntrack eviction/timeout (loose=0 safe). Ephemeral replies
+  without conntrack miss the service accepts and the reply accept and drop at
+  ingress/destination scope: a host-originated TCP client whose conntrack is
+  evicted must reconnect (accepted risk — established timeout ~5d, only on
+  table-full/eviction; reboot/failover sockets are gone anyway). UDP is
+  unaffected (clients always send first, recreating conntrack).
 - **Not a commit failure — but it IS retried and IS visible (#6802).** The nft
   table is already applied, so enforcement for NEW connections holds regardless,
   and failing the commit would roll back correct enforcement over a transient
-  conntrack-subsystem error. That rationale is unchanged. What #6802 corrected is
-  the rest of it: before #6802 the flush returned nothing, set no dirty flag,
-  bumped no counter, published no metric, and no ticker re-ran it — every ticker
-  under `pkg/daemon` was enumerated and none re-drives `applyConfig`,
-  `applyHostInboundFilter` or the flush, so the only re-attempt was the next
-  externally-triggered apply. See "Revocation failure is retried" below.
+  conntrack-subsystem error. The existing retry owner retains failed flush debt;
+  see "Revocation failure is retried" below.
 
 Kernel netfilter conntrack on this appliance tracks only host-terminated /
 kernel-forwarded flows (transit forwarding runs through userspace-dp's own session
 table), so the swept table is small. Fail-on-revert proofs:
 `pkg/daemon/host_inbound_conntrack_flush_5566_test.go`.
+
+### Removal procedures for unguarded tuples
+
+Generic shape for every class below: (1) stop/disable the originator; (2)
+delete the box-oriented entries; (3) verify with the SAME filters (expect
+empty); (4) commit the host-inbound removal. Removal is only meaningful when
+decommissioning the feature — if the daemon must keep running, keep its
+host-inbound. Restart/reboot alone is never sufficient: a restarted daemon
+re-originates the same tuple.
+
+Delete/verify command shapes (run for BOTH `-f ipv4` and `-f ipv6` unless the
+class is single-family; conntrack-tools accepts numeric protos). Stops below
+go through xpf config plus a stopping commit FIRST — every full apply
+regenerates managed daemon configs and reloads, so direct daemon-CLI edits
+are diagnostic-only and temporary (details per row):
+
+- UDP tuple with a FIXED box sport (services/exempts bound to their port):
+  `conntrack -D -p udp -s <box-ip> --sport <port> -f <fam>`; verify
+  `conntrack -L -p udp -s <box-ip> --sport <port> -f <fam>` shows nothing.
+  Socket discovery uses all-state `ss -uan` (never `-lun`: `-l` misses
+  connected UDP senders); add `p` for process attribution.
+- Ephemeral-source UDP (BFD control, traceroute probes, and any sender the
+  rows below mark ephemeral): do NOT filter by `--sport` — discover ORIG
+  tuples by destination instead: `conntrack -L -p udp -s <box-ip> -f <fam> |
+  grep -E 'dport=<(dports)>'`, delete each full tuple (`conntrack -D -p udp
+  -s <box-ip> --sport <ephem> -d <peer> --dport <dport> -f <fam>`), and
+  verify the filtered list empty. A `--sport` filter here would miss every
+  conforming flow and prove nothing.
+- TCP tuple/exempt: `conntrack -D -p tcp -s <box-ip> --sport <port> -f <fam>`;
+  verify likewise. Additionally verify NO socket on the port: listeners via
+  `ss -ltn sport = :<port>`, any-state (established children, clients) via
+  `ss -tan '( sport = :<port> or dport = :<port> )'` — both must be empty
+  (`-t` alone misses listeners; `-l` alone misses established).
+- Bare IP protocol (no ports; `--sport` does not apply): `conntrack -D -p
+  <num> -s <box-ip> -f <fam>` with 89 OSPF, 103 PIM, 112 VRRP, 47 GRE, 2 IGMP
+  (covers DVMRP, carried inside IGMP), 46 RSVP, 113 PGM, 54 NHRP; verify with
+  the same `-L` filters.
+- Port range (traceroute UDP dports 33434–33523): box probes source ephemeral,
+  so discover ORIG tuples by destination peer — `conntrack -L -p udp -s
+  <box-ip> -d <probed-peer> -f <fam>` (the operator knows what was probed;
+  entries show dports in range) — delete each full tuple, verify the filtered
+  list empty. Do NOT loop `--sport` over the range: those are DESTINATION
+  ports, and the loop would miss every conforming probe while reporting
+  empty. The broad alternative (`conntrack -D -p udp -s <box-ip>`) also
+  deletes legitimate box-originated ephemeral UDP (DNS stub queries etc.) —
+  they retransmit, but prefer discovery.
+
+Per-class originators, stop actions, and recurrence timers:
+
+| Class | Tuple | Originator on this appliance | Stop/disable action | Recurrence timer |
+|---|---|---|---|---|
+| BFD | UDP dports 3784/3785/4784 (control/echo/multihop); control/multihop source ephemeral per RFC 5881 §4/5883, echo fixed sport=dport=3785 in FRR echo-mode (operator-enabled, non-default) | FRR bfdd (one global daemon; all peers share the dports; control sessions each use an ephemeral sport) | remove `bfd-liveness-detection` from EVERY xpf interface/group stanza + stopping commit — one peer is not enough; direct vtysh peer removal is temporary (next commit regenerates). Discover/delete by DESTINATION (`conntrack -L -p udp -s <box-ip> -f <fam> | grep -E 'dport=(3784|3785|4784)'`), never `--sport 3784` (matches no conforming Control flow; echo 3785 is covered by the dport filter regardless) | sub-second hellos (300ms x3 detect default) |
+| RIP | UDP 520, mcast 224.0.0.9 | FRR ripd | delete/deactivate `protocols rip` (or the neighbor/interface) + stopping commit; direct `no router rip` in vtysh is temporary (next commit regenerates) | 30s updates |
+| RIPng | UDP 521, mcast ff02::9 | no xpf-managed ripngd in-tree | stop any third-party ripngd (identify via `ss -uan sport = :521`) | 30s if present |
+| SAP | UDP dport 9875 (sources ephemeral in all demonstrated defaults — PipeWire sport 0, FFmpeg ephemeral unless localport forced; RFC 2974 mandates the destination only; no in-tree announcer, so no supported fixed-9875 sender here) | none in-tree | identify the announcer (`ss -uanp` + conntrack dport=9875 discovery as for BFD), stop it | announce interval (minutes) if present |
+| LDP-UDP | UDP 646 (hellos carry sport 646 → dport 646, like RIP) | none in-tree (no FRR ldpd render) | identify via socket/conntrack (`--sport 646` applies here), stop it | 5s/15s hellos if present |
+| DHCPv4 | UDP 67/68 | xpfd native dhcp.Manager client; Kea DHCP server; xpfd-native dhcprelay relay | delete the interface `dhcp` stanza (commit stops the client); disable `system services dhcp-local-server` groups and `forwarding-options dhcp-relay` + stopping commit | T1 renewals (lease-dependent, typically hours) |
+| DHCPv6 | UDP 546/547 | xpfd native dhcp.Manager client; Kea `system services dhcpv6-local-server`; xpfd-native relay (`forwarding-options dhcp-relay dhcpv6`, binds 547) | delete the `dhcpv6` stanza AND disable the local-server groups AND the relay + stopping commit — the stanza alone leaves server/relay sockets originating | T1/rebind (hours) |
+| NTP | UDP 123 | chrony (appliance NTP; `system ntp server` renders its sources; default sport 123, but acquisitionport/unprivileged setups source ephemeral) | remove `system ntp server` lines (commit reloads chrony) and/or stop chronyd; discover by DESTINATION (`conntrack -L -p udp -s <box-ip> -f <fam> | grep dport=123`, catches both sport shapes), delete each ORIG tuple, verify empty; confirm no sport-123 socket in any state (`ss -uan sport = :123`) | polls 64–1024s |
+| OSPF/OSPFv3 | proto 89, mcast .5/.6 + ff02::5/6 | FRR ospfd/ospf6d | delete/deactivate `protocols ospf`/`ospf3` (area/interface, or `passive`) + stopping commit; direct vtysh removal is temporary | 10s hellos |
+| PIM | proto 103, mcast .13 + ff02::d | none in-tree | identify + stop | 30s hellos if present |
+| VRRP | proto 112, mcast .18 + ff02::12 | xpfd native VRRP instances | delete/down the vrrp-group (VIP) + stopping commit | 1s adverts |
+| GRE | proto 47 | gr- tunnel units | delete/disable the tunnel unit + stopping commit | data-driven (no hello to quote) |
+| IGMP | proto 2 | kernel reports on group joins (no daemon) | leave via the joining owner: stop the daemon/socket that joined (manual IP joins always have an owning socket — `ip maddr del` manages only static L2 entries and canNOT drop IP membership); verify `ip maddr show dev <if>` shows no group | query-driven |
+| DVMRP | proto 2 (in IGMP), mcast .4 | none in-tree | same as IGMP + identify | — |
+| RSVP | proto 46 | none in-tree | identify + stop | 30s refresh if present |
+| PGM | proto 113 | none in-tree | identify + stop | — |
+| NHRP | proto 54 | none in-tree | identify + stop | registration timers if present |
+| traceroute range | UDP dports 33434–33523 (sources ephemeral) | operator-initiated probes (no daemon) | stop probing, then dport-based discovery per the range shape above (peer filter or eyeball) — never the `--sport` loop | N/A (manual) |
+| custom UDP | UDP \<port\> | listener / explicit-bind client | stop both; any NEW box datagram from the sport recreates the entry | app-driven |
+| custom TCP | TCP \<port\> | listener / explicit-bind client | stop listener + verify no socket (`ss -ltn` AND `ss -tan`); no reformation ONLY if nothing originates new SYNs from the sport (`loose=0` blocks mid-stream pickup, not new SYNs) — re-verify after one app interval, hunt reformers via `ss -tnp` | — (close/idle-timeout only if truly passive) |
+| FTP-data 20 | TCP 20 | FTP server active transfers (never listens) | disable active FTP / stop transfers; verify `ss -tan sport = :20` empty; re-verify (active originators reform on next transfer) | transfer-driven |
+| BGP 179 | TCP 179 | FRR bgpd sessions + listener | delete/deactivate the `protocols bgp` neighbor/group + stopping commit (direct `neighbor shutdown` in vtysh is temporary); standard sessions use ephemeral source so fixed-sport entries are pickup/upgrade artifacts — still re-verify after one hold interval, hunt reformers via `ss -tnp` | 60s keepalives / 180s hold |
+| rsh 512–514 | TCP 512/513/514 | rshd servers + rsh clients (privileged sport bind) | stop server AND clients (clients reform on every new connection); verify `ss -tan` empty both directions | session-driven |
+| MSDP 639 | TCP 639 | none in-tree | identify + stop; re-verify (session-driven reformers possible) | 60s keepalives if present |
+| LDP-TCP 646 | TCP 646 | none in-tree (no FRR ldpd render) | identify + stop; re-verify | session-driven if present |
+
+Why this holds. Unicast: with no origination there is no box-oriented entry
+to ride, and a peer-only packet afterwards is NEW (or briefly UNREPLIED) and
+meets the destination/ingress deny for the removed service — no guard needed,
+so nothing is unavoidable once the originator is stopped. Multicast
+(OSPF/PIM/VRRP/RIP groups above): host-bound multicast is admitted packet-wide
+via policy accept with no per-zone scoping (#4455), so post-delete peer
+packets do NOT meet a deny — non-delivery there relies on group-leave:
+stopping the daemon leaves its groups (verify `ip maddr show dev <if>` shows
+no group), and the kernel drops unjoined-group packets for lack of a socket.
+IS-IS needs no procedure (L2-only, never in IP conntrack); ICMP
+router-discovery is globally accepted/short-lived.
+
+Tightening with the service still running (restrict, not decommission):
+peer-oriented and NEW flows are handled automatically — peer-oriented stale
+flushes via the destination branch, and NEW attempts meet the
+destination/ingress deny (unicast), so no action is needed there — but any
+pre-existing box-oriented entry for a non-catalogued/exempt tuple survives
+the flush and, with active traffic, rides the reply accept indefinitely to
+the still-listening service. Per affected (box, proto, port): list
+box-oriented entries (`conntrack -L -p <tcp|udp> -s <box-ip> --sport <port>
+-f <fam>`), delete them (`conntrack -D` with the same filters), verify empty,
+then commit. Durability after delete depends on origination, not on TCP-vs-UDP
+alone: a passive/listener-only custom TCP service with no socket left (`ss
+-ltn` AND `ss -tan` empty) cannot reform — `loose=0` blocks mid-stream pickup
+and nothing sends new SYNs. But any TCP originator that sends fresh SYNs from
+a fixed sport reforms immediately despite `loose=0` (which blocks only
+mid-stream pickup, not new connections): FTP active transfers from 20,
+explicit-bind clients, rsh clients binding 512–514, and any process `ss -tnp`
+shows sourcing the port. For those, stop/disable the outbound origination
+through commit (same disjunction as UDP/bare: stop it or keep the
+host-inbound), then delete + verify + re-verify after one app interval. The
+any-service breadth advisory names this consequence while the stanza is
+open; the tightening commit itself warns — evidence lines naming the
+narrowed effective scopes with intersecting stranded flows of that
+class (counts and samples from those scopes' addresses only; the
+customs line needs a full-admit loss or a lost sweep-custom token
+(rip/ripng/bfd-Echo), since other token-only narrowings never admitted
+customs), or a transition-only advisory naming the
+narrowed scopes when the sweep observed nothing stranded in them —
+and the daemon warns in the journal on applies that keep
+denied non-catalog customs below the ephemeral floor (TCP also when
+listener-backed). Ephemeral egress and ranges are never observed as
+evidence (indistinguishable from ordinary clients; proven
+policy-invariant authorized by the catalog-boundedness test), but
+transition commits covering them still carry the advisory with its
+silent-class pointer; admitted tuples stay silent everywhere, as do
+commits with no transition. Sweep misses and post-sweep reconnects
+are covered by that same advisory pointer on the transition commit
+itself rather than surfacing on a later apply's sweep.
+
 
 ### Revocation failure is retried, counted, and published (#6802)
 
@@ -660,19 +942,23 @@ succeeded, and the call site records the outcome as **retry debt**:
   retaining stale debt would make the owner re-drive a revocation whose target no
   longer exists.
 
-Operator-visible surface — both emitted even when the dataplane is not loaded,
+Operator-visible surface — all emitted even when the dataplane is not loaded,
 because the daemon rebuilds the kernel table in config-only mode too:
 
 | Series | Meaning |
 |---|---|
 | `xpf_host_inbound_conntrack_revocation_pending` | `1` while a revocation has failed and not yet been re-driven. While set, a now-denied host service may still be reachable on an established kernel connection. |
 | `xpf_host_inbound_conntrack_revocation_failures_total` | Every failed attempt, retries included. Climbing while the gauge stays `1` means the retry owner is running but not converging. |
+| `xpf_host_inbound_tcp_loose_disabled` | `1` when `nf_conntrack_tcp_loose` last verified as `0` (#10752). `0` is degraded mode: loose mid-stream pickup may be active and stale TCP replies rely on the catalog guard alone. Re-driven on every successful host-inbound apply. |
+| `xpf_host_inbound_tcp_loose_posture_failures_total` | Every loose-posture establish/verify failure. Climbing while the gauge stays `0` means reassertion is running but not converging (unloaded module, denied write, or reverted value). |
 
-Both are omitted entirely — not published as `0` — on a server that has not wired
+All are omitted entirely — not published as `0` — on a server that has not wired
 the accessors, so an unwired node cannot be mistaken for a converged one (the
 #6828 absent-vs-zero distinction). Fail-on-revert proofs:
-`pkg/daemon/host_inbound_conntrack_retry_6802_test.go` and
-`pkg/api/metrics_hostinbound_conntrack_revoke_6802_test.go`.
+`pkg/daemon/host_inbound_conntrack_retry_6802_test.go`,
+`pkg/api/metrics_hostinbound_conntrack_revoke_6802_test.go`, and for the loose
+pair `pkg/daemon/host_inbound_tcp_loose_10752_test.go` plus
+`pkg/api/metrics_hostinbound_tcp_loose_10752_test.go`.
 
 ## Fail-closed invariant for a nil / configured=false known zone (#3705)
 

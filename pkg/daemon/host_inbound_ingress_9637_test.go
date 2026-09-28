@@ -129,12 +129,18 @@ func TestHostInboundSharedParentOnlyDoesNotFallThrough10431(t *testing.T) {
 // by the early split.
 func TestHostInboundEstablishedReevaluatesIngressBeforeResidualAccept10431(t *testing.T) {
 	payload := buildHostInboundFilterPayload(ingressViews9637(true), nil, nil, nil, nil, true)
-	ingressAt := strings.Index(payload, `iifname "fwlan"`)
 	residualAt := strings.Index(payload, "    ct state established,related accept")
 	replyAt := strings.Index(payload, "    ct state established,related ct direction reply accept")
-	if ingressAt < 0 || residualAt < 0 || replyAt < 0 {
-		t.Fatalf("missing established/ingress rules:\n%s", payload)
+	if residualAt < 0 || replyAt < 0 {
+		t.Fatalf("missing established rules:\n%s", payload)
 	}
+	// Ingress-zone rules start after the early reply accept (stale-reply
+	// guards carry iifname before it, so search from the reply accept).
+	ingressAt := strings.Index(payload[replyAt:], `iifname "fwlan"`)
+	if ingressAt < 0 {
+		t.Fatalf("missing ingress rules:\n%s", payload)
+	}
+	ingressAt += replyAt
 	if replyAt > ingressAt || residualAt < ingressAt {
 		t.Fatalf("reply established must precede ingress, residual established must follow ingress (reply=%d ingress=%d residual=%d):\n%s", replyAt, ingressAt, residualAt, payload)
 	}
