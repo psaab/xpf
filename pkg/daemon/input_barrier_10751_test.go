@@ -1668,7 +1668,7 @@ func TestHandoffRefusesWhenEnforcementMissingAfterRemove10751(t *testing.T) {
 	t.Cleanup(func() { nftInstaller = orig })
 	fake := &fakeNftInstaller{
 		earlyInputBarrierPresent: func() (bool, error) { return true, nil },
-		tablePresent: func(name string) (bool, error) {
+		tableEnforcing: func(name string) (bool, error) {
 			if name == xnft.HostInboundTableName {
 				return false, nil // wiped between install and removal
 			}
@@ -1712,7 +1712,7 @@ func TestHandoffRefusesOnUnreadableEnforcement10751(t *testing.T) {
 	readErr := errors.New("nftables list denied")
 	fake := &fakeNftInstaller{
 		earlyInputBarrierPresent: func() (bool, error) { return true, nil },
-		tablePresent:             func(string) (bool, error) { return false, readErr },
+		tableEnforcing:           func(string) (bool, error) { return false, readErr },
 	}
 	nftInstaller = fake
 	d := &Daemon{}
@@ -1735,7 +1735,7 @@ func TestHandoffVerifiesGapTableWhenStanding10751(t *testing.T) {
 	fake := &fakeNftInstaller{
 		hostInbound:              func(xnft.HostInboundSpec) error { return installErr },
 		earlyInputBarrierPresent: func() (bool, error) { return true, nil },
-		tablePresent: func(name string) (bool, error) {
+		tableEnforcing: func(name string) (bool, error) {
 			return name != xnft.HostInboundGapTableName, nil
 		},
 	}
@@ -1750,8 +1750,8 @@ func TestHandoffVerifiesGapTableWhenStanding10751(t *testing.T) {
 	if !d.hostInboundGapFenceActive.Load() {
 		t.Fatal("fixture must have installed a gap fence; else the cell is vacuous")
 	}
-	if got, want := fake.tablePresentCalls, []string{xnft.HostInboundTableName, xnft.HostInboundGapTableName}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("tablePresent calls = %v, want %v", got, want)
+	if got, want := fake.tableEnforcingCalls, []string{xnft.HostInboundTableName, xnft.HostInboundGapTableName}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tableEnforcing calls = %v, want %v", got, want)
 	}
 	if d.earlyInputHandoffDone.Load() {
 		t.Fatal("handoff marked done with the gap table missing")
@@ -1766,7 +1766,7 @@ func TestHandoffSkipsVerifyOnTeardown10751(t *testing.T) {
 	t.Cleanup(func() { nftInstaller = orig })
 	fake := &fakeNftInstaller{
 		earlyInputBarrierPresent: func() (bool, error) { return true, nil },
-		tablePresent:             func(string) (bool, error) { return false, nil },
+		tableEnforcing:           func(string) (bool, error) { return false, nil },
 	}
 	nftInstaller = fake
 	d := &Daemon{}
@@ -1774,10 +1774,10 @@ func TestHandoffSkipsVerifyOnTeardown10751(t *testing.T) {
 		t.Fatalf("teardown apply err = %v, want nil", err)
 	}
 	if !d.earlyInputHandoffDone.Load() {
-		t.Fatal("teardown must hand off without consulting table presence")
+		t.Fatal("teardown must hand off without consulting table enforcement")
 	}
-	if len(fake.tablePresentCalls) != 0 {
-		t.Fatalf("tablePresent calls = %v, want none on the teardown path", fake.tablePresentCalls)
+	if len(fake.tableEnforcingCalls) != 0 {
+		t.Fatalf("tableEnforcing calls = %v, want none on the teardown path", fake.tableEnforcingCalls)
 	}
 }
 

@@ -246,14 +246,16 @@ func hostInboundCoverageNewcomers(cfg *config.Config, installed map[string]struc
 //
 // expectedTables names the enforcement tables this handoff installed and now
 // relies on (main table, plus the gap table when one stands). After a
-// successful removal the helper re-reads their presence (#10751 R4-5): a
-// flush interleaved between the install and the removal wipes enforcement
-// while absent-removal still succeeds, so presence must be re-proven AFTER
-// the removal, not just before. A missing table (or an unreadable readback)
-// reinstalls the guard and refuses WITHOUT recording handoff-done. The
-// teardown path passes nil — intended-empty needs no readback. A flush AFTER
-// this readback is an accepted residual (no kernel-side transaction couples
-// the two syscalls; the window is one list round-trip).
+// successful removal the helper re-reads their ENFORCEMENT SHAPE, not bare
+// presence (#10751 R4-5/R7-D): a flush interleaved between the install and
+// the removal wipes enforcement while absent-removal still succeeds, and a
+// surgical flush-to-shell keeps a present-but-open table — so shape must
+// be re-proven AFTER the removal, not just before. A missing/empty table
+// (or an unreadable readback) reinstalls the guard and refuses WITHOUT
+// recording handoff-done. The teardown path passes nil — intended-empty
+// needs no readback. A flush AFTER this readback is an accepted residual
+// (no kernel-side transaction couples the two syscalls; the window is one
+// list round-trip).
 //
 // installedCovered is the destination set the standing enforcement was
 // rendered from (S1 real desired scope; nil for teardown). After the
@@ -277,7 +279,7 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTa
 			return removeErr
 		}
 		for _, table := range expectedTables {
-			ok, readErr := nftInstaller.TablePresent(table)
+			ok, readErr := nftInstaller.TableEnforcing(table)
 			if readErr == nil && ok {
 				continue
 			}

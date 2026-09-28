@@ -84,17 +84,13 @@ type Installer interface {
 	// kernel/permission failure -> error, preserving the fail-closed teardown
 	// contract #5790).
 	DeleteTable(name string) error
-	// TablePresent reports whether the named inet-family table is currently
-	// installed (kernel readback). The daemon's handoff re-verifies its
-	// just-installed enforcement through it after removing the early
-	// barrier (#10751 R4-5 micro-TOCTOU close).
-	TablePresent(name string) (bool, error)
 	// TableEnforcing reports whether the named inet-family table currently
 	// ENFORCES an input hook: the table exists with a type-filter
 	// input-hook chain carrying at least one rule. A present-but-empty
 	// (flushed shell) table is NOT enforcing — with no input hook it
-	// filters nothing. The `ensure` command proves liveness through this
-	// instead of bare presence (#10751 R6-B).
+	// filters nothing. The `ensure` command and the handoff tripwire
+	// prove liveness through this instead of bare presence (#10751
+	// R6-B/R7-D).
 	TableEnforcing(name string) (bool, error)
 	// TableDropsInput reports whether the named inet-family table
 	// currently DROPS on its input hook: enforcing shape (see above)
@@ -367,16 +363,6 @@ func (in *netlinkInstaller) DeleteTable(name string) error {
 		return fmt.Errorf("nftables delete table %s: %w", name, err)
 	}
 	return nil
-}
-
-// TablePresent reports whether the named inet-family table is currently
-// installed.
-func (in *netlinkInstaller) TablePresent(name string) (bool, error) {
-	c, err := in.newConn()
-	if err != nil {
-		return false, fmt.Errorf("nftables conn: %w", err)
-	}
-	return tableExists(c, name)
 }
 
 // TableEnforcing reports whether the named inet-family table currently

@@ -62,7 +62,6 @@ func (noopNftInstaller) InstallIpsecDivert(xnft.IpsecDivertSpec) error          
 func (noopNftInstaller) RemoveIpsecDivert() error                                  { return nil }
 func (noopNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error)              { return fakeLo0Rules(s), nil }
 func (noopNftInstaller) DeleteTable(string) error                                  { return nil }
-func (noopNftInstaller) TablePresent(string) (bool, error)                         { return true, nil }
 func (noopNftInstaller) TableEnforcing(string) (bool, error)                       { return true, nil }
 func (noopNftInstaller) TableDropsInput(string) (bool, error)                      { return true, nil }
 
@@ -106,24 +105,16 @@ type fakeNftInstaller struct {
 	// #9506 F1 ambiguity fallback: this hook succeeds only after the fake has
 	// observed the guard candidate, mirroring the production installer’s
 	// install+readback contract.
-	quarantineGuard   func(xnft.IpsecDivertSpec) error
-	quarantineCalls   []string
-	overlayReadback   func(xnft.HostInputFenceOverlay) error
-	tablePresent      func(string) (bool, error)
-	tablePresentCalls []string
-	tableEnforcing    func(string) (bool, error)
-	tableDropsInput   func(string) (bool, error)
-}
-
-func (f *fakeNftInstaller) TablePresent(name string) (bool, error) {
-	f.tablePresentCalls = append(f.tablePresentCalls, name)
-	if f.tablePresent != nil {
-		return f.tablePresent(name)
-	}
-	return true, nil
+	quarantineGuard     func(xnft.IpsecDivertSpec) error
+	quarantineCalls     []string
+	overlayReadback     func(xnft.HostInputFenceOverlay) error
+	tableEnforcing      func(string) (bool, error)
+	tableEnforcingCalls []string
+	tableDropsInput     func(string) (bool, error)
 }
 
 func (f *fakeNftInstaller) TableEnforcing(name string) (bool, error) {
+	f.tableEnforcingCalls = append(f.tableEnforcingCalls, name)
 	if f.tableEnforcing != nil {
 		return f.tableEnforcing(name)
 	}
@@ -263,7 +254,6 @@ func (c countingNftInstaller) InstallLo0(s xnft.Lo0FilterSpec) (int, error) {
 	return fakeLo0Rules(s), nil
 }
 func (c countingNftInstaller) DeleteTable(string) error             { *c.calls++; return nil }
-func (c countingNftInstaller) TablePresent(string) (bool, error)    { return true, nil }
 func (c countingNftInstaller) TableEnforcing(string) (bool, error)  { return true, nil }
 func (c countingNftInstaller) TableDropsInput(string) (bool, error) { return true, nil }
 
