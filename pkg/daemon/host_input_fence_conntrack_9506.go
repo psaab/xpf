@@ -21,18 +21,39 @@ import (
 // host-inbound policy would otherwise permit.
 type hostInputFenceConntrackFilter struct {
 	destinations map[netip.Addr]struct{}
+	guardTCP     map[uint16]struct{}
+	guardUDP     map[uint16]struct{}
 }
 
 func (f *hostInputFenceConntrackFilter) MatchConntrackFlow(flow *netlink.ConntrackFlow) bool {
 	if f == nil || flow == nil {
 		return false
 	}
-	dst, ok := netip.AddrFromSlice(flow.Forward.DstIP)
+	if dst, ok := netip.AddrFromSlice(flow.Forward.DstIP); ok {
+		if _, covered := f.destinations[dst.Unmap()]; covered {
+			return true
+		}
+	}
+	// A box-originated datagram can recreate a conntrack entry after the
+	// fence's apply-time flush. Match only catalogued service source ports;
+	// ordinary ephemeral egress and known client-role ports are preserved.
+	src, ok := netip.AddrFromSlice(flow.Forward.SrcIP)
 	if !ok {
 		return false
 	}
-	_, ok = f.destinations[dst.Unmap()]
-	return ok
+	if _, covered := f.destinations[src.Unmap()]; !covered {
+		return false
+	}
+	switch flow.Forward.Protocol {
+	case config.HostInboundProtoTCP:
+		_, covered := f.guardTCP[flow.Forward.SrcPort]
+		return covered
+	case config.HostInboundProtoUDP:
+		_, covered := f.guardUDP[flow.Forward.SrcPort]
+		return covered
+	default:
+		return false
+	}
 }
 
 // hostInputFenceAllLocalAddrs is the complete kernel-local address census,
@@ -110,7 +131,20 @@ func buildHostInputFenceConntrackFilter(destinations []string) *hostInputFenceCo
 	if len(parsed) == 0 {
 		return nil
 	}
-	return &hostInputFenceConntrackFilter{destinations: parsed}
+	guardTCP := map[uint16]struct{}{}
+	guardUDP := map[uint16]struct{}{}
+	for _, family := range []string{"ip", "ip6"} {
+		catalog := xnft.HostInboundStaleReplyCatalog(family)
+		for _, port := range catalog.TCP {
+			guardTCP[port] = struct{}{}
+		}
+		for _, port := range catalog.UDP {
+			guardUDP[port] = struct{}{}
+		}
+	}
+	return &hostInputFenceConntrackFilter{
+		destinations: parsed, guardTCP: guardTCP, guardUDP: guardUDP,
+	}
 }
 
 func hostInputFenceConntrackDestinations(cfg *config.Config, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string) ([]string, error) {

@@ -821,6 +821,11 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		slog.Warn("failed to delete obsolete host-inbound gap fence after successful real install",
 			"err", err)
 	}
+	// #10752: the nft install guarantees conntrack is loaded, so re-establish
+	// loose=0 here to close the early-boot race where the boot-time write hit
+	// an unloaded module. Verified + counted; a manual revert converges on
+	// the next successful apply.
+	d.reassertTCPloosePosture()
 	// #5566: reconcile Linux netfilter conntrack against the just-applied
 	// host-inbound set. The early reply-direction established accept precedes
 	// the per-zone coarse drops, while original-direction established traffic
@@ -992,44 +997,48 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16) string {
 	// Same hook/priority as the real host-inbound chain so the fence occupies the
 	// same evaluation slot (#3364).
-	return buildFenceTablePayload(xnft.HostInboundTableName, nftHostInboundPriority, views, unzonedV4, unzonedV6, wgListenPorts)
+	return buildFenceTablePayload(xnft.HostInboundTableName, nftHostInboundPriority, views, unzonedV4, unzonedV6, wgListenPorts, true)
 }
 
 // buildLo0FencePayload assembles the #6476 lo0 cold-boot fail-closed fence
-// payload (see installLo0ColdBootFence). It is the SAME fence body as
-// buildHostInboundFencePayload — mandatory admits then a catch-all DROP for every
-// firewall-local address the real ruleset would scope, NO per-service accepts, NO
-// named counters — but rendered into the xpf_lo0 table at the lo0 filter priority
-// (0), the same slot the real lo0 RE-protection filter occupies, so a later
-// successful InstallLo0 atomically replaces it. It shares buildFenceTablePayload
-// with the host-inbound fence so the two fence oracles can never drift. Used by
-// the T1 parity gate to prove the netlink InstallLo0ColdBootFence is
-// bit-equivalent. Empty address inputs intentionally produce a zero-drop shell.
+// payload (see installLo0ColdBootFence). It shares mandatory admits and
+// address-scoped drops with the host-inbound fence, but deliberately omits the
+// host-inbound stale-reply guard: lo0 protects a different policy surface and
+// must preserve its established-flow admit. The fence is rendered into the
+// xpf_lo0 table at the lo0 filter priority (0), the same slot the real lo0
+// RE-protection filter occupies, so a later successful InstallLo0 atomically
+// replaces it. Used by the T1 parity gate to prove the netlink
+// InstallLo0ColdBootFence is bit-equivalent. Empty address inputs intentionally
+// produce a zero-drop shell.
 func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16) string {
-	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, wgListenPorts)
+	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, wgListenPorts, false)
 }
 
 // buildFenceTablePayload renders a fail-closed cold-boot fence into the named
-// inet table at the given hook-input priority: the shared mandatory admits
-// (hostInboundFenceMandatoryAdmits) then a catch-all DROP for every firewall-local
-// address the real ruleset would scope — per host-inbound-configured zone
-// (default-deny parity, #3405) and the addressed-but-unzoned set (#4420 HI-2).
-// These sets exclude lifeline INTERFACES, not lifeline address VALUES: a
-// management address shared onto a non-lifeline interface is denied here like any
-// other, and the drop carries no iifname (#6492 Finding A). During the fence
-// window even a `system-services all` zone is denied (maximally fail-closed); the
-// next clean commit restores the real
-// accepts. It is the single body shared by the host-inbound fence
-// (xpf_hostinbound, priority 10, #5644) and the lo0 fence (xpf_lo0, priority 0,
-// #6476) so their admit/deny posture can never diverge. Empty address inputs
-// intentionally produce a zero-drop table shell.
-func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16) string {
+// inet table at the given hook-input priority: optionally the host-inbound
+// stale-reply guard, then shared mandatory admits (hostInboundFenceMandatoryAdmits)
+// and a catch-all DROP for every firewall-local address the real ruleset would
+// scope — per host-inbound-configured zone (default-deny parity, #3405) and the
+// addressed-but-unzoned set (#4420 HI-2). These sets exclude lifeline INTERFACES,
+// not lifeline address VALUES: a management address shared onto a non-lifeline
+// interface is denied here like any other, and the drop carries no iifname
+// (#6492 Finding A). During the fence window even a `system-services all` zone
+// is denied (maximally fail-closed); the next clean commit restores the accepts.
+// The same body serves the host-inbound fence (with reply guard) and lo0 fence
+// (without it), so their shared admit/deny posture cannot drift. Empty address
+// inputs intentionally produce a zero-drop table shell.
+func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, guardStaleReplies bool) string {
 	var rules []string
 	rules = append(rules, "add table inet "+tableName)
 	rules = append(rules, "delete table inet "+tableName)
 	rules = append(rules, "table inet "+tableName+" {")
 	rules = append(rules, "  chain input {")
 	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", priority))
+	if guardStaleReplies {
+		rules = append(rules, hostInboundStaleReplyGuardText(
+			xnft.HostInboundStaleReplyFenceRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts),
+		)...)
+	}
 	rules = append(rules, hostInboundFenceMandatoryAdmits(wgListenPorts)...)
 	for _, v := range views {
 		if len(v.V4Addrs) > 0 {
@@ -1077,6 +1086,39 @@ func hostInboundFenceMandatoryAdmits(wgListenPorts []uint16) []string {
 		admits = append(admits, "    udp dport "+renderWireGuardPortSpec(wgListenPorts)+" accept")
 	}
 	return admits
+}
+
+// hostInboundStaleReplyGuardText renders the #10752/#10764 catalog drops before
+// the broad reply-direction accepts. The netlink renderer consumes the same
+// StaleReplyGuardRule rows; T1 parity proves both enforcement paths agree.
+// Per-ingress rules carry `iifname <set>`; the uncovered-ingress fallback
+// carries `iifname != <covered+reinject>` so trusted reinjects keep their
+// exemption; fence guards carry no iifname predicate.
+func hostInboundStaleReplyGuardText(guards []xnft.StaleReplyGuardRule) []string {
+	out := make([]string, 0, len(guards))
+	for _, guard := range guards {
+		proto := "tcp"
+		if guard.Proto == config.HostInboundProtoUDP {
+			proto = "udp"
+		}
+		ports := make([]config.PortRange, len(guard.Ports))
+		for i, port := range guard.Ports {
+			ports[i] = config.PortRange{Lo: port, Hi: port}
+		}
+		scope := ""
+		if len(guard.Ingress) > 0 {
+			if guard.IngressNegated {
+				scope = "iifname != " + nftIifnameSet(guard.Ingress) + " "
+			} else {
+				scope = "iifname " + nftIifnameSet(guard.Ingress) + " "
+			}
+		}
+		out = append(out, fmt.Sprintf(
+			"    ct state established,related ct direction reply %s%s daddr %s %s dport %s drop",
+			scope, guard.Family, nftAddrSet(guard.Addresses), proto, renderHostInboundPortSpec(ports),
+		))
+	}
+	return out
 }
 
 // hostInboundDropAddrKey canonicalizes a firewall-local destination address into
@@ -1165,6 +1207,9 @@ func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListen
 	rules = append(rules, "table inet xpf_hostinbound_gap {")
 	rules = append(rules, "  chain input {")
 	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", nftHostInboundGapPriority))
+	rules = append(rules, hostInboundStaleReplyGuardText(
+		xnft.HostInboundStaleReplyGuardRules(nil, uncoveredV4, uncoveredV6, wgListenPorts, false),
+	)...)
 	rules = append(rules, hostInboundFenceMandatoryAdmits(wgListenPorts)...)
 	if len(uncoveredV4) > 0 {
 		rules = append(rules, "    ip daddr "+nftAddrSet(uncoveredV4)+" drop")
@@ -1544,6 +1589,9 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		// passthrough stage returns before the fine junos-host policy, and the
 		// kernel XFRM stack decrypts host-terminated IPsec before any deny.
 		rules = append(rules, "    meta l4proto { 50, 51 } accept")
+		rules = append(rules, hostInboundStaleReplyGuardText(
+			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
+		)...)
 		// (2) Firewall-ORIGINATED reply traffic (host-OUTBOUND flow return).
 		// junos-host governs host-INBOUND original-direction only, so only the
 		// reply direction is admitted ahead of the fine DROP; the denied source's
@@ -1575,6 +1623,9 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		// regression once #3070 turns a previously-no-op `ike` stanza into real
 		// enforcement.
 		rules = append(rules, "    meta l4proto { 50, 51 } accept")
+		rules = append(rules, hostInboundStaleReplyGuardText(
+			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
+		)...)
 		// Firewall-ORIGINATED reply traffic is accepted before ingress
 		// adjudication; original-direction established traffic reaches the
 		// residual accept only after the ingress-zone rules below.

@@ -28,12 +28,14 @@ func reinjectViews9637() ([]dpuserspace.ZoneHostInboundView, []string, []string)
 	return views, []string{"10.0.99.1"}, []string{"2001:db8:99::1"}
 }
 
-// reinjectAcceptLines returns the rendered reinject-accept rule lines.
+// reinjectAcceptLines returns the rendered reinject-accept rule lines
+// (excluding stale-reply guard DROPs, which also name xpf-usp0 in their
+// negated fallback scope when fresh).
 func reinjectAcceptLines(t *testing.T, payload string) []string {
 	t.Helper()
 	var out []string
 	for _, l := range strings.Split(payload, "\n") {
-		if strings.Contains(l, `"xpf-usp0"`) {
+		if strings.Contains(l, `"xpf-usp0"`) && strings.HasSuffix(strings.TrimSpace(l), "accept") {
 			out = append(out, l)
 		}
 	}
@@ -71,16 +73,19 @@ func TestHostInboundReinjectAcceptShape9637(t *testing.T) {
 			acceptIdx, firstIngressIdx, residualIdx := -1, -1, -1
 			for i, l := range lines {
 				s := strings.TrimSpace(l)
-				if strings.Contains(l, `"xpf-usp0"`) {
+				// Reinject accept only (guards also name xpf-usp0 when fresh,
+				// but end in drop, not accept).
+				if strings.Contains(l, `"xpf-usp0"`) && strings.HasSuffix(s, "accept") {
 					acceptIdx = i
 				}
 				if s == "ct state established,related accept" {
 					residualIdx = i
 				}
-				// Program jumps also carry iifname but no daddr; the first
-				// ingress-zone rule is the first iifname+daddr line that is
-				// not the reinject accept.
-				if firstIngressIdx < 0 && strings.HasPrefix(s, "iifname ") && strings.Contains(l, "daddr") && !strings.Contains(l, `"xpf-usp0"`) {
+				// Program jumps also carry iifname but no daddr; stale-reply
+				// guards carry iifname+daddr but are ct-direction-reply drops
+				// before the reply accept. The first ingress-zone rule is the
+				// first iifname+daddr line that is neither.
+				if firstIngressIdx < 0 && strings.HasPrefix(s, "iifname ") && strings.Contains(l, "daddr") && !strings.Contains(l, `"xpf-usp0"`) && !strings.Contains(l, "ct direction reply") {
 					firstIngressIdx = i
 				}
 			}
@@ -94,7 +99,15 @@ func TestHostInboundReinjectAcceptShape9637(t *testing.T) {
 			// reinject accept. Original-direction established traffic is
 			// re-evaluated by ingress rules before the residual accept.
 			for _, global := range []string{"ct state established,related ct direction reply accept", "meta l4proto { 50, 51 } accept"} {
-				if idx := strings.Index(payload, global); idx < 0 || strings.Index(payload, `"xpf-usp0"`) < idx {
+				globalIdx := strings.Index(payload, global)
+				reinjectIdx := -1
+				for _, l := range lines {
+					if strings.Contains(l, `"xpf-usp0"`) && strings.HasSuffix(strings.TrimSpace(l), "accept") {
+						reinjectIdx = strings.Index(payload, l)
+						break
+					}
+				}
+				if globalIdx < 0 || reinjectIdx < 0 || reinjectIdx < globalIdx {
 					t.Errorf("global %q must precede the reinject accept", global)
 				}
 			}

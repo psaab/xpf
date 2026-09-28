@@ -1110,6 +1110,21 @@ type Daemon struct {
 	// the operator-visible signal the pre-#6802 code had none of; a rising value
 	// means now-denied host-inbound flows may still be authorized.
 	hostInboundConntrackFlushFailures atomic.Uint64
+	// keptSuspiciousMu guards keptSuspiciousStash: the last flush sweep's
+	// kept-suspicious evidence (#10752 round 4). The commit funnel clears it
+	// immediately before its apply; flushDeniedHostInboundConntrack stores a
+	// fresh report at the end of every sweep it runs; the funnel reads it
+	// when projecting the transition-aware commit warning. Same-goroutine
+	// under applySem on the commit path; the mutex covers background applies
+	// (DHCP/HA/retry) that also run the sweep.
+	keptSuspiciousMu    sync.Mutex
+	keptSuspiciousStash *keptSuspiciousApplyReport
+	// tcpLoosePostureFailures counts nf_conntrack_tcp_loose=0 establish/verify
+	// failures (#10752). tcpLooseDisabled latches true only when the value last
+	// verified as zero; every successful host-inbound apply re-drives both, so
+	// a manual revert converges on the next commit.
+	tcpLoosePostureFailures atomic.Uint64
+	tcpLooseDisabled        atomic.Bool
 	// hostInputFenceConntrackDebt is separate from the service-tightening
 	// reconcile above: an XFRM master overlay revokes every direct-host flow,
 	// including flows that ordinary host-inbound policy still permits.

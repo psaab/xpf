@@ -37,6 +37,21 @@ func hostInboundFenceMandatoryAdmitsNetlink(p *nlPlan, wgListenPorts []uint16) {
 // that signal back into an authoritative zero — add a distinct fence-state
 // signal instead.
 func buildHostInboundFenceNetlink(p *nlPlan, spec FenceSpec) {
+	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyFenceRules(
+		spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts,
+	))
+	buildFenceMandatoryDropsNetlink(p, spec)
+}
+
+// buildLo0FenceNetlink mirrors buildLo0FencePayload. The lo0 cold-boot fence
+// shares mandatory admits and address drops with host-inbound, but must preserve
+// its established-flow accept without the host-inbound-specific stale-reply
+// guard.
+func buildLo0FenceNetlink(p *nlPlan, spec FenceSpec) {
+	buildFenceMandatoryDropsNetlink(p, spec)
+}
+
+func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
 	hostInboundFenceMandatoryAdmitsNetlink(p, spec.WGListenPorts)
 	for _, v := range spec.Views {
 		if len(v.V4Addrs) > 0 {
@@ -59,6 +74,9 @@ func buildHostInboundFenceNetlink(p *nlPlan, spec FenceSpec) {
 // addresses. The caller has created the table + `input` chain (priority
 // nftHostInboundGapPriority, policy accept).
 func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
+	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
+		nil, spec.UncoveredV4, spec.UncoveredV6, spec.WGListenPorts, false,
+	))
 	hostInboundFenceMandatoryAdmitsNetlink(p, spec.WGListenPorts)
 	if len(spec.UncoveredV4) > 0 {
 		p.rule().daddr(famV4, spec.UncoveredV4, false).emit(verdictDrop()...)
