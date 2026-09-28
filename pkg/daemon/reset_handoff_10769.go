@@ -23,7 +23,8 @@ import (
 // clean. A canonical aliasing reserved reset-gate/identity state is never
 // unlinked: the sweep skips it with a loud warning (it holds correct
 // post-wipe contents) while still sweeping exact-shape temps beside it.
-// Symlinked canonicals fail closed before unlinking.
+// Symlinked or hardlinked canonicals fail closed before unlinking
+// (FactoryResetHardlinkError with the inode scan), retry-persistent.
 func sweepHelperStateVerified(path string) error {
 	// A missing state directory means no helper state was ever written
 	// here: nothing to remove, verify, or sync.
@@ -47,8 +48,16 @@ func sweepHelperStateVerified(path string) error {
 		case lerr != nil && !os.IsNotExist(lerr):
 			canonicalErr = fmt.Errorf("inspect helper state %s: %w", path, lerr)
 		case lerr == nil:
-			if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
-				canonicalErr = fmt.Errorf("remove helper state file %s: %w", path, rerr)
+			hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
+			switch {
+			case herr != nil:
+				canonicalErr = fmt.Errorf("inspect hard links for helper state %s: %w", path, herr)
+			case len(hardlinks) != 0:
+				canonicalErr = fmt.Errorf("refusing to erase hard-linked helper state %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
+			default:
+				if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
+					canonicalErr = fmt.Errorf("remove helper state file %s: %w", path, rerr)
+				}
 			}
 		}
 		if canonicalErr != nil {

@@ -317,8 +317,8 @@ var zeroizeStopKeaAndEraseLeases = func() error {
 // removal/durability failures, or anything still present afterwards is an
 // error. A canonical aliasing reserved reset-gate/identity state is never
 // unlinked (skipped with a loud warning; exact-shape temps beside it are
-// still swept). Symlinked canonicals fail closed before unlinking.
-// Callers pass a non-empty path only.
+// still swept). Symlinked or hardlinked canonicals fail closed before
+// unlinking, retry-persistent. Callers pass a non-empty path only.
 func zeroizeEraseHelperState(path string) error {
 	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -337,8 +337,16 @@ func zeroizeEraseHelperState(path string) error {
 		case lerr != nil && !os.IsNotExist(lerr):
 			canonicalErr = fmt.Errorf("zeroize: inspect helper state %s: %w", path, lerr)
 		case lerr == nil:
-			if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
-				canonicalErr = fmt.Errorf("zeroize: remove helper state file %s: %w", path, rerr)
+			hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
+			switch {
+			case herr != nil:
+				canonicalErr = fmt.Errorf("zeroize: inspect hard links for helper state %s: %w", path, herr)
+			case len(hardlinks) != 0:
+				canonicalErr = fmt.Errorf("zeroize: refusing to erase hard-linked helper state %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
+			default:
+				if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
+					canonicalErr = fmt.Errorf("zeroize: remove helper state file %s: %w", path, rerr)
+				}
 			}
 		}
 		if canonicalErr != nil {
@@ -520,9 +528,9 @@ var zeroizeTmpPreservedPrefixes = []string{"systemd-private-", "snap-private-tmp
 // the FHS tmp contract nothing here is persistent service state, factory
 // reset is a decommissioning operation, and live file descriptors survive
 // an unlink. Only the preserved service-infrastructure prefixes are kept.
-// No hardlink census is needed: every name in the directory is removed,
-// so intra-directory links die with their names (a sibling outside the
-// directory is an out-of-scope file that survives as itself).
+// Hardlinked entries are refused before unlinking (FactoryResetHardlinkError
+// with the inode scan): an external sibling would otherwise retain the
+// bytes silently under a clean receipt.
 func zeroizeClearTmpDir(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -546,6 +554,15 @@ func zeroizeClearTmpDir(dir string) error {
 		full := filepath.Join(dir, entry.Name())
 		if entry.IsDir() {
 			zeroizeWarnEscapingInteriorLinks(full)
+		}
+		hardlinks, herr := configstore.CollectHardlinkedFiles(full, "")
+		if herr != nil {
+			errs = append(errs, fmt.Errorf("zeroize: inspect hard links for tmp entry %s: %w", full, herr))
+			continue
+		}
+		if len(hardlinks) != 0 {
+			errs = append(errs, fmt.Errorf("zeroize: refusing to erase hard-linked tmp entry %s: %w", full, &configstore.FactoryResetHardlinkError{Paths: hardlinks}))
+			continue
 		}
 		// os.RemoveAll on a symlink removes the link, never the target.
 		if err := os.RemoveAll(full); err != nil {
@@ -748,9 +765,10 @@ const zeroizeRunXPFPreserved = "upgrade.lock"
 // sockets and state files carrying tenant flow/session data. Reset is
 // wipe-then-stop with no reboot, so volatile state left here would be
 // observable pre-reboot. Unlinking a live socket's name does not disturb
-// its established connections; the upgrade lock is preserved. No hardlink
-// census is needed: every name but the lock is removed, so
-// intra-directory links die with their names.
+// its established connections; the upgrade lock is preserved. Hardlinked
+// entries are refused before unlinking (FactoryResetHardlinkError with
+// the inode scan): an external sibling would otherwise retain the bytes
+// silently under a clean receipt.
 func zeroizeClearRunXPFDir(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -767,6 +785,15 @@ func zeroizeClearRunXPFDir(dir string) error {
 		full := filepath.Join(dir, entry.Name())
 		if entry.IsDir() {
 			zeroizeWarnEscapingInteriorLinks(full)
+		}
+		hardlinks, herr := configstore.CollectHardlinkedFiles(full, "")
+		if herr != nil {
+			errs = append(errs, fmt.Errorf("zeroize: inspect hard links for run entry %s: %w", full, herr))
+			continue
+		}
+		if len(hardlinks) != 0 {
+			errs = append(errs, fmt.Errorf("zeroize: refusing to erase hard-linked run entry %s: %w", full, &configstore.FactoryResetHardlinkError{Paths: hardlinks}))
+			continue
 		}
 		// Names only: RemoveAll on a symlink removes the link, and live
 		// socket fds survive their name's unlink.

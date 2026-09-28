@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // tempWriterInstance identifies the helper process instance that staged a
@@ -198,6 +200,19 @@ func SweepStaleStateTempsIncludingLegacy(dest string) (live []string, err error)
 func removeStateTempDead(dead []string) error {
 	var errs []error
 	for _, full := range dead {
+		hardlinks, herr := configstore.CollectHardlinkedFiles(full, "")
+		if herr != nil {
+			errs = append(errs, fmt.Errorf("sweep stale state temp %s: inspect hard links: %w", full, herr))
+			continue
+		}
+		if len(hardlinks) != 0 {
+			// Fail BEFORE unlinking: removing first would destroy the
+			// census evidence and let a retry succeed while a sibling
+			// retains the bytes. Same FactoryResetHardlinkError policy
+			// as the seal remover.
+			errs = append(errs, fmt.Errorf("sweep stale state temp: refusing to erase hard-linked %s: %w", full, &configstore.FactoryResetHardlinkError{Paths: hardlinks}))
+			continue
+		}
 		if rerr := os.Remove(full); rerr != nil && !os.IsNotExist(rerr) {
 			errs = append(errs, fmt.Errorf("sweep stale state temp %s: %w", full, rerr))
 			continue

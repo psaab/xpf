@@ -1749,3 +1749,64 @@ func TestZeroizeEraseHelperStateSkipsReserved10769(t *testing.T) {
 		}
 	})
 }
+
+// RED on revert: unlinking before the census destroys the nlink evidence,
+// so a retry succeeds while the sibling retains the bytes.
+func TestZeroizeEraseHelperStateRefusesHardlinkedCanonical10769(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "userspace-dp.json")
+	mustWriteFile(t, dest, []byte(`{"flows":[]}`))
+	sibling := filepath.Join(dir, "sibling.json")
+	if err := os.Link(dest, sibling); err != nil {
+		t.Fatalf("hardlink plant: %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		var linkErr *configstore.FactoryResetHardlinkError
+		if err := zeroizeEraseHelperState(dest); !errors.As(err, &linkErr) {
+			t.Fatalf("attempt %d: expected FactoryResetHardlinkError, got %v", attempt, err)
+		}
+		for _, path := range []string{dest, sibling} {
+			if _, serr := os.Lstat(path); serr != nil {
+				t.Fatalf("attempt %d: refusal must remove nothing, %s stat err=%v", attempt, path, serr)
+			}
+		}
+	}
+}
+
+func TestZeroizeClearTmpDirRefusesHardlinkedEntry10769(t *testing.T) {
+	dir := t.TempDir()
+	entry := filepath.Join(dir, "tenant.tmp")
+	mustWriteFile(t, entry, []byte("tenant bytes"))
+	sibling := filepath.Join(dir, "sibling.tmp")
+	if err := os.Link(entry, sibling); err != nil {
+		t.Fatalf("hardlink plant: %v", err)
+	}
+	var linkErr *configstore.FactoryResetHardlinkError
+	if err := zeroizeClearTmpDir(dir); !errors.As(err, &linkErr) {
+		t.Fatalf("expected FactoryResetHardlinkError, got %v", err)
+	}
+	for _, path := range []string{entry, sibling} {
+		if _, serr := os.Lstat(path); serr != nil {
+			t.Fatalf("refusal must remove nothing, %s stat err=%v", path, serr)
+		}
+	}
+}
+
+func TestZeroizeClearRunXPFDirRefusesHardlinkedEntry10769(t *testing.T) {
+	dir := t.TempDir()
+	entry := filepath.Join(dir, "state.json")
+	mustWriteFile(t, entry, []byte("tenant bytes"))
+	sibling := filepath.Join(dir, "sibling.json")
+	if err := os.Link(entry, sibling); err != nil {
+		t.Fatalf("hardlink plant: %v", err)
+	}
+	var linkErr *configstore.FactoryResetHardlinkError
+	if err := zeroizeClearRunXPFDir(dir); !errors.As(err, &linkErr) {
+		t.Fatalf("expected FactoryResetHardlinkError, got %v", err)
+	}
+	for _, path := range []string{entry, sibling} {
+		if _, serr := os.Lstat(path); serr != nil {
+			t.Fatalf("refusal must remove nothing, %s stat err=%v", path, serr)
+		}
+	}
+}

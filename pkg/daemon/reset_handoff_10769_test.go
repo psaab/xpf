@@ -861,3 +861,55 @@ func TestSweepHelperStateVerifiedSkipsReserved10769(t *testing.T) {
 		}
 	})
 }
+
+// RED on revert: unlinking a hardlinked helper canonical before the
+// census destroys the nlink evidence, so a retry succeeds while the
+// sibling retains tenant state. Both attempts must fail with the
+// inode-scan error and remove nothing.
+func TestSweepHelperStateVerifiedRefusesHardlinkedCanonical10769(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "userspace-dp.json")
+	if err := os.WriteFile(dest, []byte(`{"flows":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(dir, "sibling.json")
+	if err := os.Link(dest, sibling); err != nil {
+		t.Fatalf("hardlink plant: %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		var linkErr *configstore.FactoryResetHardlinkError
+		if err := sweepHelperStateVerified(dest); !errors.As(err, &linkErr) {
+			t.Fatalf("attempt %d: expected FactoryResetHardlinkError, got %v", attempt, err)
+		}
+		for _, path := range []string{dest, sibling} {
+			if _, serr := os.Lstat(path); serr != nil {
+				t.Fatalf("attempt %d: refusal must remove nothing, %s stat err=%v", attempt, path, serr)
+			}
+		}
+	}
+}
+
+func TestEraseKeaLeasesForResetRefusesHardlinkedLease10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	lease := resetKeaLeaseCurrents[0]
+	if err := os.MkdirAll(filepath.Dir(lease), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lease, []byte("address,hwaddr\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(filepath.Dir(lease), "sibling.csv")
+	if err := os.Link(lease, sibling); err != nil {
+		t.Fatalf("hardlink plant: %v", err)
+	}
+	var linkErr *configstore.FactoryResetHardlinkError
+	if err := eraseKeaLeasesForReset(); !errors.As(err, &linkErr) {
+		t.Fatalf("expected FactoryResetHardlinkError, got %v", err)
+	}
+	for _, path := range []string{lease, sibling} {
+		if _, serr := os.Lstat(path); serr != nil {
+			t.Fatalf("refusal must remove nothing, %s stat err=%v", path, serr)
+		}
+	}
+}

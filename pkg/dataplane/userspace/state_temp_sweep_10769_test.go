@@ -1,11 +1,14 @@
 package userspace
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 func TestParseStateTempInstance(t *testing.T) {
@@ -174,5 +177,32 @@ func TestSweepStaleStateTempsIncludingLegacy(t *testing.T) {
 	}
 	if len(live) != 1 || filepath.Base(live[0]) != newLive {
 		t.Errorf("live after sweep = %v, want exactly [%s]", live, newLive)
+	}
+}
+
+// RED on revert: unlinking a hardlinked temp before the census destroys
+// the nlink evidence, so a retry succeeds while the sibling retains the
+// bytes. Both attempts must fail with the inode-scan error.
+func TestSweepStaleStateTempsRefusesHardlinkedTemp10769(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "state.json")
+	temp := filepath.Join(dir, "state.json.4250000000_1.1.tmp")
+	if err := os.WriteFile(temp, []byte("orphan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(dir, "sibling.tmp")
+	if err := os.Link(temp, sibling); err != nil {
+		t.Fatalf("hardlink plant: %v", err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		var linkErr *configstore.FactoryResetHardlinkError
+		if _, err := SweepStaleStateTempsIncludingLegacy(dest); !errors.As(err, &linkErr) {
+			t.Fatalf("attempt %d: expected FactoryResetHardlinkError, got %v", attempt, err)
+		}
+		for _, p := range []string{temp, sibling} {
+			if _, serr := os.Lstat(p); serr != nil {
+				t.Fatalf("attempt %d: refusal must remove nothing, %s stat err=%v", attempt, p, serr)
+			}
+		}
 	}
 }

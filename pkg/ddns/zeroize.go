@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
@@ -47,12 +48,19 @@ func CheckStateEmpty(path string) error {
 // Crash-leaked fsatomic write temps for the store are removed with it: every
 // durable save stages full state JSON in a .<base>.tmp-* file first, so a
 // temp orphaned by a crash during reconcile holds tenant FQDNs/addresses a
-// canonical-only erase would hand to the next tenant. Hardlink residual
-// (F2): no nlink census on the canonical or its temps — a hardlinked
-// store is unlinked by name while a sibling retains the bytes silently.
+// canonical-only erase would hand to the next tenant. Hardlinked canonicals
+// and temps are refused before unlinking (FactoryResetHardlinkError with
+// the inode scan), so a retry cannot succeed over bytes a sibling holds.
 func EraseStateIfEmpty(path string) error {
 	if err := CheckStateEmpty(path); err != nil {
 		return err
+	}
+	hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
+	if herr != nil {
+		return fmt.Errorf("ddns: inspect hard links for %s: %w", path, herr)
+	}
+	if len(hardlinks) != 0 {
+		return fmt.Errorf("ddns: refusing to erase hard-linked %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("ddns: remove empty ownership state %s: %w", path, err)
@@ -115,6 +123,15 @@ func sweepCrashTemps(path string) error {
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			errs = append(errs, fmt.Errorf("ddns: crash temp %s is a symlink; NOT erasing it", full))
+			continue
+		}
+		hardlinks, herr := configstore.CollectHardlinkedFiles(full, "")
+		if herr != nil {
+			errs = append(errs, fmt.Errorf("ddns: inspect hard links for crash temp %s: %w", full, herr))
+			continue
+		}
+		if len(hardlinks) != 0 {
+			errs = append(errs, fmt.Errorf("ddns: refusing to erase hard-linked crash temp %s: %w", full, &configstore.FactoryResetHardlinkError{Paths: hardlinks}))
 			continue
 		}
 		if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {

@@ -331,15 +331,23 @@ func eraseStateTempsForReset() error {
 // parents. It runs only to repair a post-wipe reappearance before the reset
 // reports failure: with the pending markers already cleared and the config
 // wiped, leaving the rows would hand prior leases to the next tenant's Kea
-// with no boot gate left to force another pass. Hardlink residual (F2): no
-// nlink census — a hardlinked lease file is unlinked by name while a
-// sibling retains the rows silently. Same blind shape as the helper and
-// DDNS/IPsec sweeps.
+// with no boot gate left to force another pass. Hardlinked lease files are
+// refused before unlinking (FactoryResetHardlinkError with the inode
+// scan), so a retry cannot succeed over rows a sibling holds.
 func eraseKeaLeasesForReset() error {
 	var errs []error
 	synced := make(map[string]bool)
 	for _, current := range resetKeaLeaseCurrents {
 		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
+			hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
+			if herr != nil {
+				errs = append(errs, fmt.Errorf("factory reset: inspect hard links for Kea lease file %s: %w", path, herr))
+				continue
+			}
+			if len(hardlinks) != 0 {
+				errs = append(errs, fmt.Errorf("factory reset: refusing to erase hard-linked Kea lease file %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks}))
+				continue
+			}
 			if err := os.Remove(path); err != nil {
 				if !os.IsNotExist(err) {
 					errs = append(errs, fmt.Errorf("factory reset: re-erase Kea lease file %s: %w", path, err))
