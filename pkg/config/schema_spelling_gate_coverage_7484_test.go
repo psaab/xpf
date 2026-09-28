@@ -396,7 +396,10 @@ func gateLeafChangesWarnings(g gateLeaf, pre string, epath []string) bool {
 // #10827 adds the two custom HTTPS credential paths; both become comparable.
 // #11059's three shrink-guard runtime thresholds also become comparable after
 // the named feed-server reader consumes compact key tails; tighten 777 -> 780.
-const gateCoverageFloor = 780
+// #10826 adds seven api-auth class/expiry/named-key leaves. The UTC date pair
+// and a valid sibling credential for per-user/per-key fields make all seven
+// comparable; tighten the measured floor 780 -> 787.
+const gateCoverageFloor = 787
 
 var gateBlindCeiling = map[gateBlindClass]int{
 	// #7492 moved leaves out of `unreachable` in two rounds. The parent

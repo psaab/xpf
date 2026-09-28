@@ -531,6 +531,8 @@ var notAValueList = map[string]string{
 // be distinctive strings — see trap (2) above.
 var gateValuePairs = []struct{ name, v1, v2 string }{
 	{"word", "zzqaaa1", "zzqbbb2"},
+	// #10826 expiries parse UTC calendar dates; word-only probes are inert.
+	{"date", "2099-01-01", "2099-12-31"},
 	{"smallint", "101", "202"},
 	{"bigint", "40961", "40962"},
 	{"cidr", "10.211.212.0/24", "10.211.213.0/24"},
@@ -964,6 +966,10 @@ var gateParentPrereq = map[string]string{
 	// are observable when a complete group is present. The prerequisite
 	// deliberately omits both family leaves under test.
 	"forwarding-options dhcp-relay dhcpv6": "server-group sg6 2001:db8::5; group g6 active-server-group sg6; group g6 interface ge-0/0/0.0;",
+	// #10826: identity-scoped class/expiry leaves are meaningful only once the
+	// credential exists. Keep that sibling independent of the leaf under test.
+	"system services web-management api-auth user <*>": "password gate-api-auth-password;",
+	"system services web-management api-auth key <*>": "secret gate-api-auth-key-0123456789;",
 }
 
 // gateLeafPrereq returns the parent prerequisite for this leaf as a brace body

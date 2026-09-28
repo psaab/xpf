@@ -22,7 +22,7 @@
 // Both budgets are checked BEFORE the credential verify, so a locked-out
 // caller never reaches the (post-#10826 bcrypt) compare — the lockout is what
 // bounds attacker-driven verify CPU. Every lockout rejection is still counted
-// under the existing rest_api_auth_fail surface (a lockout rejection IS an
+// under the existing rest_api_auth surface (a lockout rejection IS an
 // authentication failure); no second surface is created for the same event.
 //
 // State lives on the middleware instance, never in a package global: the
