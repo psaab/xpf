@@ -423,7 +423,7 @@ func TestHostInboundStaleReplyGuardsPrecedeReplyAccept10752And10764(t *testing.T
 	}
 
 	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil)
-	gap := buildHostInboundGapFencePayload([]string{"172.16.50.8"}, nil, nil, nil, nil)
+	gap := buildHostInboundGapFencePayload([]string{"172.16.50.8"}, nil, nil, nil, nil, nil, nil, nil)
 	for name, text := range map[string]string{"cold-boot": fence, "gap": gap} {
 		guardAt, acceptAt := -1, -1
 		for i, line := range strings.Split(text, "\n") {

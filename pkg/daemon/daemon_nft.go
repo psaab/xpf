@@ -845,25 +845,40 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// successful real install. A gap install failure joins the commit error so
 			// the newly reachable address is never silently left fail-open.
 			uncoveredV4, uncoveredV6 := hostInboundUncoveredDropAddrs(views, unzonedV4, unzonedV6, d.hostInboundCoveredAddrs)
-			// #10751 R7-C: Finding A applies to the gap too — a bare gap
-			// DROP has no per-service accepts to protect management, so
-			// withhold lifeline-shared values (same definition as the
-			// cold-boot fence). Withheld addresses stay barrier-protected
-			// pre-handoff instead of gap-DROPped on every ingress path.
+			// #10751 M1: ingress-aware gap scope (supersedes the R7-C
+			// global withhold for the install — withholding shared values
+			// outright left them fail-open post-handoff, when no barrier
+			// stands behind the gap). Shared values stay IN the uncovered
+			// DROP (denied on data ingress) with a preceding
+			// lifeline-ingress exception ACCEPT. The handoff baseline
+			// below still excludes shared (conditionally denied, not
+			// unconditionally), so pre-handoff refusal is unchanged.
+			var sharedV4, sharedV6 []string
 			if len(uncoveredV4)+len(uncoveredV6) > 0 {
 				withheld := dpuserspace.BuildFenceAddrSetsFromSnapshots(cfg, snaps1, views)
-				uncoveredV4 = hostInboundWithoutAddrs(uncoveredV4, withheld.WithheldV4)
-				uncoveredV6 = hostInboundWithoutAddrs(uncoveredV6, withheld.WithheldV6)
+				sharedV4 = hostInboundSharedAddrs(uncoveredV4, withheld.WithheldV4)
+				sharedV6 = hostInboundSharedAddrs(uncoveredV6, withheld.WithheldV6)
 			}
 			if len(uncoveredV4) > 0 || len(uncoveredV6) > 0 {
-				if gapErr := d.installHostInboundGapFence(uncoveredV4, uncoveredV6, wgListenPorts, unleasedV4, unleasedV6); gapErr != nil {
+				spec := xnft.GapFenceSpec{
+					UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6,
+					WGListenPorts: wgListenPorts,
+					UnleasedV4:    unleasedV4, UnleasedV6: unleasedV6,
+					SharedV4: sharedV4, SharedV6: sharedV6,
+					LifelineNetdevs: dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
+				}
+				if gapErr := d.installHostInboundGapFence(spec); gapErr != nil {
 					// #7181: the apply failed AND the gap could not be installed.
 					// Record the staleness before returning -- this is the worst
 					// applied state and the one an operator most needs surfaced.
 					d.noteHostInboundApplyFailed(time.Now())
 					return errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), gapErr)
 				}
-				gapV4ThisApply, gapV6ThisApply = uncoveredV4, uncoveredV6
+				// Baseline records the UNCONDITIONALLY-denied subset:
+				// shared is conditionally denied (data ingress only),
+				// so it stays out and pre-handoff refusal is preserved
+				// (F7-C regression retained).
+				gapV4ThisApply, gapV6ThisApply = hostInboundWithoutAddrs(uncoveredV4, sharedV4), hostInboundWithoutAddrs(uncoveredV6, sharedV6)
 				// #7181: a gap fence is now standing beside the retained real
 				// table. Part of the applied truth -- this box enforces through
 				// TWO tables until the next successful real install.
@@ -1091,22 +1106,21 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 // A load failure returns the error (joined into the commit result by the caller)
 // so a newly reachable local address is never silently left without a host-inbound
 // deny. Caller guarantees >=1 uncovered address (the payload has >=1 DROP).
-func (d *Daemon) installHostInboundGapFence(uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, unleasedV4, unleasedV6 []string) error {
+func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundGapFencePayload oracle).
-	spec := xnft.GapFenceSpec{UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wgListenPorts, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
 	if err := nftInstaller.InstallGapFence(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Error("COVERAGE-GAP FAIL-OPEN GUARD: host-inbound real install failed AND the additive "+
 			"gap fence for newly-appeared local addresses could not be installed; those addresses "+
 			"may be reachable without host-inbound enforcement until the next successful commit",
 			"err", err,
-			"uncovered_v4", len(uncoveredV4), "uncovered_v6", len(uncoveredV6))
+			"uncovered_v4", len(spec.UncoveredV4), "uncovered_v6", len(spec.UncoveredV6))
 		return fmt.Errorf("install host-inbound coverage-gap fence: %w", err)
 	}
 	slog.Warn("host-inbound real install failed; retained generation does not cover newly-appeared "+
 		"local addresses — installed an additive gap fence denying them (retained accepts preserved)",
-		"gap_v4", len(uncoveredV4), "gap_v6", len(uncoveredV6))
+		"gap_v4", len(spec.UncoveredV4), "gap_v6", len(spec.UncoveredV6))
 	return nil
 }
 
@@ -1431,6 +1445,27 @@ func hostInboundWithoutAddrs(addrs, drop []string) []string {
 	return out
 }
 
+// hostInboundSharedAddrs returns the subset of addrs also present in
+// withheld: uncovered destinations shared with a lifeline, which the M1
+// gap admits on lifeline ingress ahead of the bare DROP. Order follows
+// addrs; nil when either side is empty.
+func hostInboundSharedAddrs(addrs, withheld []string) []string {
+	if len(addrs) == 0 || len(withheld) == 0 {
+		return nil
+	}
+	keep := make(map[string]bool, len(withheld))
+	for _, a := range withheld {
+		keep[a] = true
+	}
+	var out []string
+	for _, a := range addrs {
+		if keep[a] {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // buildHostInboundGapFencePayload assembles the #5789 ADDITIVE gap fence: a
 // SEPARATE inet xpf_hostinbound_gap table at nftHostInboundGapPriority (strictly
 // AFTER the main xpf_hostinbound table) that denies ONLY the supplied uncovered
@@ -1441,15 +1476,17 @@ func hostInboundWithoutAddrs(addrs, drop []string) []string {
 // valid rules"): a covered address is service-accepted or catch-all-dropped by
 // the main table (prio 10) and either way its verdict is unchanged, while a
 // newly-appeared uncovered address falls through the main chain's policy-accept
-// and is dropped here. Unlike earlier behavior, lifeline-shared address
-// VALUES are withheld from the uncovered lists before install (#10751
-// R7-C): a bare gap DROP carries no per-service accepts, so fencing a
-// shared management address would drop new lifeline connections with no
-// iifname to distinguish the ingress path. Withheld addresses stay
-// barrier-protected pre-handoff instead. Callers must only invoke this
-// with a non-empty uncovered set (an all-empty payload would be a pointless
-// zero-drop shell); an empty set instead deletes the table.
-func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, unleasedV4, unleasedV6 []string) string {
+// and is dropped here. Lifeline-shared address VALUES stay IN the uncovered
+// lists (bare DROP on data ingress) with a preceding lifeline-ingress
+// exception ACCEPT (#10751 M1 ingress-aware scope): a bare gap DROP
+// carries no per-service accepts, but withholding shared values outright
+// left them fail-open post-handoff, when no barrier stands behind the gap
+// (supersedes the R7-C global withhold for the install; the handoff
+// baseline still excludes shared, so pre-handoff refusal is unchanged).
+// Callers must only invoke this with a non-empty uncovered set (an
+// all-empty payload would be a pointless zero-drop shell); an empty set
+// instead deletes the table.
+func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, unleasedV4, unleasedV6, sharedV4, sharedV6, lifelineNetdevs []string) string {
 	var rules []string
 	rules = append(rules, "add table inet xpf_hostinbound_gap")
 	rules = append(rules, "delete table inet xpf_hostinbound_gap")
@@ -1461,6 +1498,16 @@ func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListen
 	)...)
 	rules = append(rules, hostInboundFenceMandatoryAdmits(wgListenPorts)...)
 	emitUnleasedDHCPAdmits(&rules, unleasedV4, unleasedV6)
+	// #10751 M1: admit shared values on lifeline ingress ahead of the
+	// bare DROP (mirrors the netlink builder; parity-pinned).
+	if len(lifelineNetdevs) > 0 {
+		if len(sharedV4) > 0 {
+			rules = append(rules, "    iifname "+nftIifnameSet(lifelineNetdevs)+" ip daddr "+nftAddrSet(sharedV4)+" accept")
+		}
+		if len(sharedV6) > 0 {
+			rules = append(rules, "    iifname "+nftIifnameSet(lifelineNetdevs)+" ip6 daddr "+nftAddrSet(sharedV6)+" accept")
+		}
+	}
 	if len(uncoveredV4) > 0 {
 		rules = append(rules, "    ip daddr "+nftAddrSet(uncoveredV4)+" drop")
 	}

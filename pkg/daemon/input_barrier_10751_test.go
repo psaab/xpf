@@ -2456,7 +2456,7 @@ func TestUnleasedOraclePlacement10751(t *testing.T) {
 	for name, payload := range map[string]string{
 		"real":  buildHostInboundFilterPayloadWithOverlay(views, []string{"10.9.9.9"}, nil, nil, nil, true, nil, unleasedV4, unleasedV6),
 		"fence": buildHostInboundFencePayload(views, nil, nil, nil, unleasedV4, unleasedV6),
-		"gap":   buildHostInboundGapFencePayload([]string{"10.0.0.2"}, nil, nil, unleasedV4, unleasedV6),
+		"gap":   buildHostInboundGapFencePayload([]string{"10.0.0.2"}, nil, nil, unleasedV4, unleasedV6, nil, nil, nil),
 	} {
 		for _, want := range []string{wantDropV4, wantDropV6, wantAdmitV4, wantAdmitV6} {
 			if !strings.Contains(payload, want) {
@@ -2509,21 +2509,23 @@ func sharedLifelineDataSnaps10751() []dpuserspace.InterfaceSnapshot {
 	}
 }
 
-// TestFallbackDoubleFailureWithholdsSharedFromGap10751: apply1 real-fails
+// TestFallbackDoubleFailureRefusesWithGapException10751: apply1 real-fails
 // → fence withholds W and REFUSES handoff; apply2 real-fails again →
-// Enforced, so the gap branch runs — but W is WITHHELD from the gap set
-// (no gap install at all), and the joint-actual baseline
-// (retained ∪ gap-this-apply) still lacks W → REFUSE again. The barrier
-// stays retained throughout (lifeline-admitting: fxp0 in every guard
-// spec, so new management on W provably works) while data stays
-// DROP-closed. Apply3 heals. RED on revert: gap-DROPs W (lockout) or
-// hands off over it (fail-open).
-func TestFallbackDoubleFailureWithholdsSharedFromGap10751(t *testing.T) {
+// Enforced, so the gap branch runs — the gap installs WITH W (bare DROP
+// on data ingress plus the lifeline-ingress exception ACCEPT, M1), but
+// the joint-actual baseline still excludes conditionally-denied shared →
+// REFUSE again (pre-handoff refusal retained: the barrier backstop stays
+// until a real install). The barrier stays retained throughout
+// (lifeline-admitting: fxp0 in every guard spec, so new management on W
+// provably works) while data stays DROP-closed. Apply3 heals. RED on
+// revert: gap-DROPs W without the exception (lockout) or hands off over
+// it (fail-open).
+func TestFallbackDoubleFailureRefusesWithGapException10751(t *testing.T) {
 	orig := nftInstaller
 	t.Cleanup(func() { nftInstaller = orig })
 	installErr := errors.New("real host-inbound load failed")
 	calls := 0
-	gapCalls := 0
+	var gapSpecs []xnft.GapFenceSpec
 	fake := &fakeNftInstaller{
 		hostInbound: func(xnft.HostInboundSpec) error {
 			calls++
@@ -2533,8 +2535,8 @@ func TestFallbackDoubleFailureWithholdsSharedFromGap10751(t *testing.T) {
 			return nil
 		},
 		coldBootFence: func(xnft.FenceSpec) error { return nil },
-		gapFence: func(xnft.GapFenceSpec) error {
-			gapCalls++
+		gapFence: func(spec xnft.GapFenceSpec) error {
+			gapSpecs = append(gapSpecs, spec)
 			return nil
 		},
 	}
@@ -2552,9 +2554,10 @@ func TestFallbackDoubleFailureWithholdsSharedFromGap10751(t *testing.T) {
 			t.Fatalf("apply%d err = %v, want fence/gap coverage refusal naming W", i+1, err)
 		}
 	}
-	if gapCalls != 0 {
-		t.Fatalf("gap installs = %d, want 0: W must be withheld, never gap-DROPped", gapCalls)
+	if len(gapSpecs) != 1 {
+		t.Fatalf("gap installs = %d, want 1: apply2 installs the gap WITH the lifeline exception for W", len(gapSpecs))
 	}
+	assertGapExceptShared10751(t, gapSpecs[0], []string{"10.0.0.5"}, []string{"10.0.0.5"})
 	for _, ev := range fake.earlyInputBarrierCalls {
 		if ev == "remove" {
 			t.Fatalf("barrier calls = %v: double failure must retain, never remove", fake.earlyInputBarrierCalls)
@@ -2582,11 +2585,46 @@ func TestFallbackDoubleFailureWithholdsSharedFromGap10751(t *testing.T) {
 	}
 }
 
-// TestGapInstallWithholdsSharedKeepsRest10751: gap branch with uncovered
-// {W-shared, X-new} installs a gap covering ONLY X. The handoff still
-// refuses on W (joint lacks it) — converging on the next successful real
-// install, never by fencing management.
-func TestGapInstallWithholdsSharedKeepsRest10751(t *testing.T) {
+// assertGapExceptShared10751 pins the M1 gap shape: Uncovered carries both
+// the shared values (bare DROP on data ingress) and the plain newcomers,
+// Shared carries exactly the lifeline-shared subset (exception ACCEPT on
+// lifeline ingress), and the lifeline set covers the defaults.
+func assertGapExceptShared10751(t *testing.T, spec xnft.GapFenceSpec, wantUncovered, wantShared []string) {
+	t.Helper()
+	has := func(list []string, want string) bool {
+		for _, a := range list {
+			if a == want {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range wantUncovered {
+		if !has(spec.UncoveredV4, want) {
+			t.Fatalf("gap spec uncovered v4 = %v, want %q (bare DROP on data ingress)", spec.UncoveredV4, want)
+		}
+	}
+	if len(spec.SharedV4) != len(wantShared) {
+		t.Fatalf("gap spec shared v4 = %v, want exactly %v", spec.SharedV4, wantShared)
+	}
+	for _, want := range wantShared {
+		if !has(spec.SharedV4, want) {
+			t.Fatalf("gap spec shared v4 = %v, want %q (lifeline-ingress exception)", spec.SharedV4, want)
+		}
+	}
+	for _, want := range []string{"fxp0", "em0"} {
+		if !has(spec.LifelineNetdevs, want) {
+			t.Fatalf("gap spec lifelines = %v, want default %q in the exception scope", spec.LifelineNetdevs, want)
+		}
+	}
+}
+
+// TestGapInstallExceptLifelineShared10751: gap branch with uncovered
+// {W-shared, X-new} installs a gap covering BOTH in the bare DROP with W
+// in the lifeline-ingress exception. The handoff still refuses on W (the
+// baseline excludes conditionally-denied shared) — converging on the next
+// successful real install, never by fencing management.
+func TestGapInstallExceptLifelineShared10751(t *testing.T) {
 	orig := nftInstaller
 	t.Cleanup(func() { nftInstaller = orig })
 	installErr := errors.New("real host-inbound load failed")
@@ -2614,21 +2652,108 @@ func TestGapInstallWithholdsSharedKeepsRest10751(t *testing.T) {
 	d.hostInboundCoveredAddrs = map[string]struct{}{hostInboundDropAddrKey('4', "10.0.0.1"): {}}
 	err := d.applyHostInboundFilter(cfg)
 	if err == nil || !strings.Contains(err.Error(), "not covered by installed fallback") {
-		t.Fatalf("apply err = %v, want joint-coverage refusal (W withheld from gap)", err)
+		t.Fatalf("apply err = %v, want joint-coverage refusal (shared excluded from the baseline)", err)
 	}
 	if len(gapSpecs) != 1 {
-		t.Fatalf("gap installs = %d, want 1 (for X)", len(gapSpecs))
+		t.Fatalf("gap installs = %d, want 1 (X plus shared W with the exception)", len(gapSpecs))
 	}
-	for _, a := range gapSpecs[0].UncoveredV4 {
-		if a == "10.0.0.5" {
-			t.Fatalf("gap spec covers W; must withhold lifeline-shared: %+v", gapSpecs[0])
+	assertGapExceptShared10751(t, gapSpecs[0], []string{"10.0.0.5", "10.0.0.9"}, []string{"10.0.0.5"})
+}
+
+// TestGapExceptLifelineSharedDayTwo10751 is the Opus8 R4-2 day-2 shape:
+// HandoffDone=true, retained covers Y only, W lifeline+data shared and X
+// newly appear, real fails. The gap installs WITH W (bare DROP on data
+// ingress plus the lifeline-ingress exception) and X; the apply reports
+// the real-install error WITHOUT the pre-handoff coverage refusal
+// (post-handoff skips those checks — no barrier is left to retain);
+// healing converges on the next success and tears the gap down. RED on
+// revert: W missing from the gap (data fail-open) or refused post-handoff
+// (never heals without a barrier to retain).
+func TestGapExceptLifelineSharedDayTwo10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	installErr := errors.New("real host-inbound load failed")
+	calls := 0
+	var gapSpecs []xnft.GapFenceSpec
+	var deleted []string
+	fake := &fakeNftInstaller{
+		hostInbound: func(xnft.HostInboundSpec) error {
+			calls++
+			if calls == 1 {
+				return installErr
+			}
+			return nil
+		},
+		gapFence: func(spec xnft.GapFenceSpec) error {
+			gapSpecs = append(gapSpecs, spec)
+			return nil
+		},
+		del: func(name string) error { deleted = append(deleted, name); return nil },
+	}
+	nftInstaller = fake
+	cfg := sharedLifelineDataConfig10751()
+	uni := int(netlink.SCOPE_UNIVERSE)
+	s := []dpuserspace.InterfaceSnapshot{
+		scriptedSnap10751("fxp0.0", "", scriptedAddr10751("inet", "10.0.0.5/24", uni)),
+		scriptedSnap10751("ge-0/0/0.0", "trust",
+			scriptedAddr10751("inet", "10.0.0.1/24", uni),
+			scriptedAddr10751("inet", "10.0.0.5/24", uni),
+			scriptedAddr10751("inet", "10.0.0.9/24", uni)),
+	}
+	scriptSnapshotTransition10751(t, s, s)
+	d := &Daemon{}
+	d.hostInboundEnforced.Store(true) // retained real generation covering Y only
+	d.hostInboundCoveredAddrs = map[string]struct{}{hostInboundDropAddrKey('4', "10.0.0.1"): {}}
+	d.earlyInputHandoffDone.Store(true) // POST-handoff: no barrier stands behind the gap
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !strings.Contains(err.Error(), installErr.Error()) {
+		t.Fatalf("apply err = %v, want the real-install error", err)
+	}
+	if strings.Contains(err.Error(), "not covered by installed fallback") {
+		t.Fatalf("apply err = %v, want NO coverage refusal post-handoff (nothing left to retain)", err)
+	}
+	if len(gapSpecs) != 1 {
+		t.Fatalf("gap installs = %d, want 1 (X plus shared W with the exception)", len(gapSpecs))
+	}
+	assertGapExceptShared10751(t, gapSpecs[0], []string{"10.0.0.5", "10.0.0.9"}, []string{"10.0.0.5"})
+	if !d.hostInboundGapFenceActive.Load() {
+		t.Fatal("gap fence must stand beside the retained table until healing")
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("handoff must stay done")
+	}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("healed apply err = %v, want nil", err)
+	}
+	for _, name := range deleted {
+		if name == xnft.HostInboundGapTableName {
+			return
 		}
 	}
-	foundX := false
-	for _, a := range gapSpecs[0].UncoveredV4 {
-		foundX = foundX || a == "10.0.0.9"
+	t.Fatalf("deleted tables = %v, want the obsolete gap torn down on heal", deleted)
+}
+
+// TestGapLifelineExceptionPlacement10751: the gap oracle renders the
+// lifeline-ingress exception ACCEPT before the bare DROP, scoped to the
+// lifeline set; empty shared/lifelines omit it (fail-closed: shared stays
+// bare-DROPped on every ingress).
+func TestGapLifelineExceptionPlacement10751(t *testing.T) {
+	payload := buildHostInboundGapFencePayload(
+		[]string{"10.0.0.5", "10.0.0.9"}, nil, nil, nil, nil,
+		[]string{"10.0.0.5"}, nil, []string{"em0", "fxp0"})
+	wantExcept := `iifname { "em0", "fxp0" } ip daddr 10.0.0.5 accept`
+	wantDrop := `ip daddr { 10.0.0.5, 10.0.0.9 } drop`
+	if !strings.Contains(payload, wantExcept) {
+		t.Errorf("gap oracle lacks the lifeline exception %q:\n%s", wantExcept, payload)
 	}
-	if !foundX {
-		t.Fatalf("gap spec = %+v, want X covered", gapSpecs[0])
+	if !strings.Contains(payload, wantDrop) {
+		t.Fatalf("gap oracle lacks the bare DROP %q:\n%s", wantDrop, payload)
+	}
+	if strings.Index(payload, wantExcept) > strings.Index(payload, wantDrop) {
+		t.Errorf("gap oracle places the exception after the bare DROP (lifeline management would be denied):\n%s", payload)
+	}
+	plain := buildHostInboundGapFencePayload([]string{"10.0.0.9"}, nil, nil, nil, nil, nil, nil, nil)
+	if strings.Contains(plain, "iifname") {
+		t.Errorf("gap oracle without shared must emit no iifname rule:\n%s", plain)
 	}
 }

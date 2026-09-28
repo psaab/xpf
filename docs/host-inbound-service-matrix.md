@@ -1249,12 +1249,17 @@ snapshot produces a zero-drop table shell:
   chain's `policy accept` (a `drop` is terminal, an `accept` is not, so an already
   service-accepted or catch-all-dropped covered address keeps its main-table
   verdict) and is dropped by the gap. The uncovered lists derive from the same
-  lifeline-subtracted views/unzoned sets, minus lifeline-shared address VALUES
-  withheld like the cold-boot fence (#10751 R7-C: a bare gap DROP has no
-  accepts to protect management), so the gap never fences management /
-  cluster-control traffic. A gap install failure JOINS the commit error
-  (fail-closed); the gap is torn down by the next successful real install (best
-  effort — a lingering gap fences only, never opens) and on a successful teardown.
+  lifeline-subtracted views/unzoned sets and INCLUDE lifeline-shared address
+  VALUES in the bare DROP — with a preceding lifeline-ingress exception
+  ACCEPT (`iifname <lifelines> daddr <shared> accept`, #10751 M1
+  ingress-aware scope). A global withhold (R7-C) left shared values
+  fail-open post-handoff, when no barrier stands behind the gap; the
+  exception preserves lifeline management while data ingress stays denied.
+  The handoff baseline still excludes shared (conditionally denied), so
+  pre-handoff refusal is unchanged. A gap install failure JOINS the commit
+  error (fail-closed); the gap is torn down by the next successful real
+  install (best effort — a lingering gap fences only, never opens) and on
+  a successful teardown.
 - `installHostInboundColdBootFence` / `buildHostInboundFencePayload`
   (`daemon_nft.go`) build the fence: the same atomic-replace `xpf_hostinbound`
   table reduced to the global mandatory admits (`ct established,related`, raw

@@ -105,9 +105,10 @@ func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
 }
 
 // buildHostInboundGapFenceNetlink mirrors buildHostInboundGapFencePayload: the
-// mandatory admits plus a catch-all DROP for ONLY the supplied uncovered
-// addresses. The caller has created the table + `input` chain (priority
-// nftHostInboundGapPriority, policy accept).
+// mandatory admits, the lifeline-ingress exception for shared values, then a
+// catch-all DROP for ONLY the supplied uncovered addresses. The caller has
+// created the table + `input` chain (priority nftHostInboundGapPriority,
+// policy accept).
 func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 		nil, spec.UncoveredV4, spec.UncoveredV6, spec.WGListenPorts, false,
@@ -116,6 +117,20 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	// #10751 F8-A: admit the DHCP client's own replies before the
 	// destination drops (see emitUnleasedDHCPAdmitsNetlink).
 	emitUnleasedDHCPAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6)
+	// #10751 M1: lifeline-shared values stay reachable on lifeline
+	// ingress (exception ACCEPT) while denied everywhere else (bare
+	// DROP below). The exception precedes the DROP; with no lifeline
+	// set it is omitted and shared stays denied on all ingress
+	// (fail-closed). Expression order (iifname, nfproto, daddr)
+	// matches the oracle text — parity-pinned.
+	if len(spec.LifelineNetdevs) > 0 {
+		if len(spec.SharedV4) > 0 {
+			p.rule().iifname(spec.LifelineNetdevs).daddr(famV4, spec.SharedV4, false).emit(verdictAccept()...)
+		}
+		if len(spec.SharedV6) > 0 {
+			p.rule().iifname(spec.LifelineNetdevs).daddr(famV6, spec.SharedV6, false).emit(verdictAccept()...)
+		}
+	}
 	if len(spec.UncoveredV4) > 0 {
 		p.rule().daddr(famV4, spec.UncoveredV4, false).emit(verdictDrop()...)
 	}

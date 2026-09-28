@@ -1149,6 +1149,52 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 	return v4, v6
 }
 
+// HostInboundLifelineIngressNetdevs returns the sorted linux LOCAL_IN netdev
+// names whose ingress must keep management reachability to lifeline-shared
+// values (#10751 M1): the unconditional defaults (fxp0/em0/fab0/fab1 —
+// never narrowed, the withhold side does not narrow either) plus the
+// linux names of every configured unit the lifeline predicate recognizes
+// (chassis-cluster control/fabric links, fabN), plus the vrf-mgmt master
+// (VRF-enslaved lifeline members arrive showing the master, F3-C/B4).
+// This MIRRORS the withhold-side interface definition
+// (HostInboundLifelineInterface): an interface whose addresses get
+// withheld must have its ingress excepted in the gap, or the exception
+// under-covers and strands management. Bound: live-but-unconfigured
+// non-default lifeline names (a hand-made fab7) are missed — the same
+// verifiable-identity bound the barrier's guard accepts (the daemon only
+// ever creates fab0/fab1; configured names arrive via the stanza).
+func HostInboundLifelineIngressNetdevs(cfg *config.Config) []string {
+	set := map[string]bool{
+		"fxp0": true, "em0": true, "fab0": true, "fab1": true,
+		config.ManagementVRFDeviceName: true,
+	}
+	if cfg != nil {
+		lifelines := hostInboundLifelineSet(cfg)
+		for ifName, iface := range cfg.Interfaces.Interfaces {
+			if iface == nil {
+				continue
+			}
+			for un, unit := range iface.Units {
+				if unit == nil {
+					continue
+				}
+				if !hostInboundLifelineInterface(fmt.Sprintf("%s.%d", ifName, un), lifelines) {
+					continue
+				}
+				if ln := snapshotLinuxName(cfg, ifName, iface, unit); ln != "" {
+					set[ln] = true
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // forEachFirewallLocalAddr visits every (interface ref, address) pair that makes
 // an address firewall-local: the live/configured interface addresses from the
 // canonical snapshot builder, configured VRRP virtual addresses, and the

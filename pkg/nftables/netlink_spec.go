@@ -305,7 +305,12 @@ type FenceSpec struct {
 }
 
 // GapFenceSpec is the additive coverage-gap fence render request (#5789): the
-// uncovered addresses to DROP plus the mandatory-admit WG ports.
+// uncovered addresses to DROP plus the mandatory-admit WG ports. Uncovered
+// addresses shared with a lifeline are ALSO listed in SharedV4/V6: the gap
+// denies them on data ingress (bare DROP) while a preceding exception
+// admits them on lifeline ingress (M1 ingress-aware scope — a global
+// withhold would leave them fail-open post-handoff, when no barrier
+// stands behind the gap).
 type GapFenceSpec struct {
 	UncoveredV4   []string
 	UncoveredV6   []string
@@ -313,4 +318,14 @@ type GapFenceSpec struct {
 	// UnleasedV4/V6, as in HostInboundSpec (uniform backstop).
 	UnleasedV4 []string
 	UnleasedV6 []string
+	// SharedV4/V6 are the Uncovered subset shared with a lifeline,
+	// admitted on lifeline ingress ahead of the bare DROP. Empty
+	// omits the exception.
+	SharedV4 []string
+	SharedV6 []string
+	// LifelineNetdevs is the exception's iifname set: linux LOCAL_IN
+	// names of lifeline interfaces (HostInboundLifelineIngressNetdevs).
+	// Empty with non-empty Shared omits the exception (fail-closed:
+	// shared stays bare-DROPped on every ingress).
+	LifelineNetdevs []string
 }

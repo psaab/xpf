@@ -148,3 +148,51 @@ func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 		}
 	})
 }
+
+// TestHostInboundLifelineIngressNetdevs10751 pins the M1 gap-exception
+// ingress set: unconditional defaults (never narrowed — the withhold side
+// does not narrow) plus every configured lifeline unit's linux name plus
+// the vrf-mgmt master. It must MIRROR the withhold-side interface
+// definition; an interface missing here while its addresses are withheld
+// would strand management on the gap's bare DROP.
+func TestHostInboundLifelineIngressNetdevs10751(t *testing.T) {
+	has := func(list []string, want string) bool {
+		for _, n := range list {
+			if n == want {
+				return true
+			}
+		}
+		return false
+	}
+	t.Run("defaults always", func(t *testing.T) {
+		got := HostInboundLifelineIngressNetdevs(&config.Config{})
+		for _, want := range []string{"fxp0", "em0", "fab0", "fab1", "vrf-mgmt"} {
+			if !has(got, want) {
+				t.Errorf("ingress = %v, want default %q listed", got, want)
+			}
+		}
+	})
+	t.Run("configured control link included, data excluded, no narrowing", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Chassis.Cluster = &config.ClusterConfig{ControlInterface: "ge-0/0/5"}
+		cfg.System.ManagementInterface = "ge-0/0/1"
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"ge-0/0/5": {Name: "ge-0/0/5", Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0},
+			}},
+			"ge-0/0/6": {Name: "ge-0/0/6", Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0},
+			}},
+		}
+		got := HostInboundLifelineIngressNetdevs(cfg)
+		if !has(got, "ge-0-0-5") {
+			t.Errorf("ingress = %v, want the control link's linux name listed", got)
+		}
+		if has(got, "ge-0-0-6") {
+			t.Errorf("ingress = %v, want the data unit excluded", got)
+		}
+		if !has(got, "fxp0") {
+			t.Errorf("ingress = %v, want fxp0 despite the mgmt leaf (no narrowing — withhold does not narrow)", got)
+		}
+	})
+}

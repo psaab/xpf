@@ -130,7 +130,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 	t.Run("gap_fence", func(t *testing.T) {
 		uncoveredV4 := []string{"10.0.1.1", "10.0.9.1"}
 		uncoveredV6 := []string{"2001:db8:1::1"}
-		oracle := buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6, wg, nil, nil)
+		oracle := buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6, wg, nil, nil, nil, nil, nil)
 		spec := xnft.GapFenceSpec{UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wg}
 		parityCheck(t, xnft.HostInboundGapTableName, oracle, func() error { return inst.InstallGapFence(spec) })
 	})
@@ -157,9 +157,26 @@ func runNftNetlinkParityInner(t *testing.T) {
 		fspec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
 		parityCheck(t, xnft.HostInboundTableName, foracle, func() error { return inst.InstallColdBootFence(fspec) })
 
-		gapOracle := buildHostInboundGapFencePayload([]string{"10.0.1.1"}, nil, wg, unleasedV4, unleasedV6)
+		gapOracle := buildHostInboundGapFencePayload([]string{"10.0.1.1"}, nil, wg, unleasedV4, unleasedV6, nil, nil, nil)
 		gspec := xnft.GapFenceSpec{UncoveredV4: []string{"10.0.1.1"}, WGListenPorts: wg, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
 		parityCheck(t, xnft.HostInboundGapTableName, gapOracle, func() error { return inst.InstallGapFence(gspec) })
+	})
+
+	t.Run("gap_shared_exception", func(t *testing.T) {
+		// #10751 M1: the lifeline-ingress exception ACCEPT for shared
+		// values plus the bare DROP covering them must render
+		// identically on both surfaces. Shared is a strict subset of
+		// uncovered (X stays bare-only); two lifelines pin the set
+		// form and the per-rule iifname check pins the scope.
+		uncovered := []string{"10.0.0.5", "10.0.0.9"}
+		shared := []string{"10.0.0.5"}
+		lifelines := []string{"fxp0", "em0"}
+		oracle := buildHostInboundGapFencePayload(uncovered, nil, wg, nil, nil, shared, nil, lifelines)
+		if !strings.Contains(oracle, "iifname") || !strings.Contains(oracle, "accept") {
+			t.Fatal("gap oracle emitted no exception rule; the diff below would be vacuous")
+		}
+		spec := xnft.GapFenceSpec{UncoveredV4: uncovered, WGListenPorts: wg, SharedV4: shared, LifelineNetdevs: lifelines}
+		parityCheck(t, xnft.HostInboundGapTableName, oracle, func() error { return inst.InstallGapFence(spec) })
 	})
 
 	t.Run("lo0_filter", func(t *testing.T) {
