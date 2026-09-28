@@ -208,30 +208,33 @@ func RoutingInstanceMemberDeviceConflicts(cfg *Config, tunnelNames map[string]st
 	}
 	ownersByDevice := make(map[string][]owner)
 	ownerIndex := make(map[string]map[string]int)
+	recordOwner := func(linuxName, instance, member string) {
+		if linuxName == "" || instance == "" {
+			return
+		}
+		byInstance := ownerIndex[linuxName]
+		if byInstance == nil {
+			byInstance = make(map[string]int)
+			ownerIndex[linuxName] = byInstance
+		}
+		idx, exists := byInstance[instance]
+		if !exists {
+			idx = len(ownersByDevice[linuxName])
+			byInstance[instance] = idx
+			ownersByDevice[linuxName] = append(ownersByDevice[linuxName], owner{
+				claim: RoutingInstanceMemberClaim{Instance: instance, Member: member},
+				seen:  make(map[string]struct{}),
+			})
+		}
+		ownersByDevice[linuxName][idx].seen[member] = struct{}{}
+	}
 	for _, ri := range cfg.RoutingInstances {
-		if ri == nil || ri.InstanceType == "forwarding" || IsReservedRoutingInstanceName(ri.Name) {
+		if ri == nil || IsReservedRoutingInstanceName(ri.Name) {
 			continue
 		}
 		for _, member := range ri.Interfaces {
 			for _, key := range RoutingInstanceMemberDeviceKeys(cfg, tunnelNames, member) {
-				if key.LinuxName == "" {
-					continue
-				}
-				byInstance := ownerIndex[key.LinuxName]
-				if byInstance == nil {
-					byInstance = make(map[string]int)
-					ownerIndex[key.LinuxName] = byInstance
-				}
-				idx, exists := byInstance[ri.Name]
-				if !exists {
-					idx = len(ownersByDevice[key.LinuxName])
-					byInstance[ri.Name] = idx
-					ownersByDevice[key.LinuxName] = append(ownersByDevice[key.LinuxName], owner{
-						claim: RoutingInstanceMemberClaim{Instance: ri.Name, Member: member},
-						seen:  make(map[string]struct{}),
-					})
-				}
-				ownersByDevice[key.LinuxName][idx].seen[member] = struct{}{}
+				recordOwner(key.LinuxName, ri.Name, member)
 			}
 		}
 	}

@@ -23,7 +23,7 @@ func validateRIDualClaimStrict11060(cfg *Config) error {
 
 func routingInstanceMemberConflictError(conflict RoutingInstanceMemberDeviceConflict) error {
 	return fmt.Errorf(
-		"Linux interface device %q is claimed by multiple VRF-backed routing-instances %s; an interface must belong to exactly one VRF-backed routing-instance (#11060: remove every conflicting member except one)",
+		"Linux interface device %q is claimed by multiple routing-instances %s; an interface must have exactly one routing-instance owner (#11060: remove every conflicting member except one)",
 		conflict.LinuxName, formatRoutingInstanceMemberClaims(conflict.Claims))
 }
 

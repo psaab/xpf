@@ -151,8 +151,10 @@ func TestCollectAppliedTunnelsPopulatesMTUAndRIListMember(t *testing.T) {
 			},
 		},
 	}
+	// Keep the forwarding-instance skip check on a separate device: forwarding
+	// ownership otherwise conflicts with the VRF member under #11060.
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{
-		{Name: "fwd", InstanceType: "forwarding", Interfaces: []string{"gr-0/0/0.0"}},
+		{Name: "fwd", InstanceType: "forwarding", Interfaces: []string{"ge-0/0/0"}},
 		{Name: "red", InstanceType: "vrf", Interfaces: []string{"gr-0/0/0.0"}},
 		{Name: "blue", InstanceType: "vrf", Interfaces: []string{"gr-0/0/1.1"}},
 	}
