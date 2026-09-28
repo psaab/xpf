@@ -2290,17 +2290,20 @@ func emitUnzonedHostInboundDeny(rules *[]string, family string, addrs []string) 
 }
 
 // emitUnleasedHostInboundDeny appends the #10751 R7-B backstop DROPs for
-// unzoned DHCP units with no lease yet: per-family LAST-placed `iifname
-// <dev> drop` rules so a first lease lands already denied. After every
-// destination rule, so addressed families and explicit programs still win.
-// No-op per family when no unit is unleased there. No named counter
-// (transient boot-state rule, like the fence).
+// unzoned DHCP units with no lease yet: per-family LAST-placed,
+// family-guarded `iifname <dev> meta nfproto <fam> drop` rules so a first
+// lease lands already denied. After every destination rule, so addressed
+// families and explicit programs still win. The nfproto guard is
+// load-bearing: a bare iifname DROP would also deny the OTHER family's
+// fallthrough (broadcast, multicast, unlisted destinations) on a
+// mixed-leased interface. No-op per family when no unit is unleased
+// there. No named counter (transient boot-state rule, like the fence).
 func emitUnleasedHostInboundDeny(rules *[]string, unleasedV4, unleasedV6 []string) {
 	if len(unleasedV4) > 0 {
-		*rules = append(*rules, "    iifname "+nftIifnameSet(unleasedV4)+" drop")
+		*rules = append(*rules, "    iifname "+nftIifnameSet(unleasedV4)+" meta nfproto ipv4 drop")
 	}
 	if len(unleasedV6) > 0 {
-		*rules = append(*rules, "    iifname "+nftIifnameSet(unleasedV6)+" drop")
+		*rules = append(*rules, "    iifname "+nftIifnameSet(unleasedV6)+" meta nfproto ipv6 drop")
 	}
 }
 

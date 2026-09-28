@@ -1070,10 +1070,13 @@ installed deny keeps covering link-local destinations — the chain is
 `policy accept`, so pending-intent is deliberately stricter than
 enforceability for DHCP-intent scopes. Unzoned DHCP units with no lease
 yet are NOT pending (no hold — a never-leasing unit must not strand the
-global barrier); instead the first apply renders per-family LAST-placed
-`iifname <dev> drop` rules for them (#10751 R7-B), so a first lease lands
-already denied and the debounced re-apply replaces the interface rules
-with destination DROPs. Each still-unleased family also gets a TOP-placed
+global barrier); instead the first apply renders per-family LAST-placed,
+family-guarded `iifname <dev> meta nfproto <fam> drop` rules for them
+(#10751 R7-B; the guard keeps a v6-only backstop from shadowing v4
+fallthrough such as broadcast/multicast, and vice versa), so a first
+lease lands already denied and the debounced re-apply replaces the
+interface rules with destination DROPs. Each still-unleased family also
+gets a TOP-placed
 `iifname <dev> udp dport <68|546> accept` ahead of the destination drops
 (#10751 F8-A): without it a first ADVERTISE/OFFER — not
 conntrack-established when multicast-originated — would hit the interface

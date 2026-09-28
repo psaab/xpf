@@ -96,16 +96,13 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	}
 	emitUnzonedHostInboundDenyNetlink(p, famV4, "ip", spec.UnzonedV4)
 	emitUnzonedHostInboundDenyNetlink(p, famV6, "ip6", spec.UnzonedV6)
-	// #10751 R7-B: unzoned DHCP units with no lease yet get LAST-placed
-	// per-family interface DROPs so a first lease lands already denied.
-	// After every destination rule, so addressed families and explicit
-	// programs win.
-	if len(spec.UnleasedV4) > 0 {
-		p.rule().iifname(spec.UnleasedV4).emit(verdictDrop()...)
-	}
-	if len(spec.UnleasedV6) > 0 {
-		p.rule().iifname(spec.UnleasedV6).emit(verdictDrop()...)
-	}
+	// #10751 R7-B: unzoned DHCP units with no lease yet get LAST-placed,
+	// family-guarded per-family interface DROPs so a first lease lands
+	// already denied. After every destination rule, so addressed families
+	// and explicit programs win; the nfproto guard keeps a v6-only
+	// backstop from shadowing v4 fallthrough (and vice versa).
+	emitUnleasedDropNetlink(p, famV4, spec.UnleasedV4)
+	emitUnleasedDropNetlink(p, famV6, spec.UnleasedV6)
 	for i, prog := range spec.Programs {
 		p.inChain(chains[i], func() { emitJunosHostProgramChainNetlink(p, prog) })
 	}

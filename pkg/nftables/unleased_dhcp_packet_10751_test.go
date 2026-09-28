@@ -365,3 +365,111 @@ func enableBroadcast10751(t *testing.T, conn *net.UDPConn) {
 		t.Fatalf("SO_BROADCAST: %v", opErr)
 	}
 }
+
+// TestUnleasedBackstopFamilyGuard10751: the per-family LAST DROPs are
+// family-guarded (meta nfproto) — a v6-only backstop must not shadow v4
+// fallthrough (broadcast here: DHCP OFFER-shaped traffic to unlisted
+// ports, mDNS-style) and vice versa. Each phase pairs a survival
+// positive with a same-family DROP control proving the backstop is
+// installed and active. RED on revert: bare iifname DROPs deny the
+// other family's fallthrough.
+func TestUnleasedBackstopFamilyGuard10751(t *testing.T) {
+	enterPrivateNetns(t)
+	testLL := mkUnleasedVeth10751(t)
+	testLink, err := netlink.LinkByName(unleasedTestNetdev10751)
+	if err != nil {
+		t.Fatalf("LinkByName: %v", err)
+	}
+	peerLink, err := netlink.LinkByName("vpeer0")
+	if err != nil {
+		t.Fatalf("LinkByName peer: %v", err)
+	}
+	mustAddrAdd10751(t, testLink, "192.0.2.2/24")
+	mustAddrAdd10751(t, peerLink, "192.0.2.1/24")
+	in := NewNetlinkInstaller()
+
+	v4survive, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 4444})
+	if err != nil {
+		t.Fatalf("listen :4444: %v", err)
+	}
+	defer v4survive.Close()
+	v6drop, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 9999})
+	if err != nil {
+		t.Fatalf("listen [::]:9999: %v", err)
+	}
+	defer v6drop.Close()
+	v6survive, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 4445})
+	if err != nil {
+		t.Fatalf("listen [::]:4445: %v", err)
+	}
+	defer v6survive.Close()
+	v4drop, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 80})
+	if err != nil {
+		t.Fatalf("listen :80: %v", err)
+	}
+	defer v4drop.Close()
+	bcast, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("broadcast sender bind: %v", err)
+	}
+	defer bcast.Close()
+	enableBroadcast10751(t, bcast)
+	v6server, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 0})
+	if err != nil {
+		t.Fatalf("v6 sender bind: %v", err)
+	}
+	defer v6server.Close()
+
+	// Phase A (v6-only backstop): v4 broadcast fallthrough survives;
+	// v6 non-DHCP is denied (backstop active).
+	if err := in.InstallHostInbound(HostInboundSpec{UnleasedV6: []string{unleasedTestNetdev10751}}); err != nil {
+		t.Fatalf("v6-only install: %v", err)
+	}
+	bcast4444 := &net.UDPAddr{IP: net.ParseIP("192.0.2.255"), Port: 4444}
+	if !udpExchange10751(t, v4survive, func() error {
+		_, err := bcast.WriteToUDP([]byte("bcast"), bcast4444)
+		return err
+	}, 3*time.Second) {
+		t.Fatal("v4 broadcast was dropped under a v6-only backstop: the DROP is not family-guarded (cross-family shadow)")
+	}
+	// Absorb source DAD: repeat a throwaway v6 send until the source is
+	// usable. Dropped under the v6-only table, so nothing pollutes the
+	// control below.
+	for i := 0; ; i++ {
+		_, serr := v6server.WriteToUDP([]byte("dad"), &net.UDPAddr{IP: testLL, Port: 9999, Zone: "vpeer0"})
+		if serr == nil {
+			break
+		}
+		if i >= 100 {
+			t.Fatalf("v6 source never usable: %v", serr)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	junk6 := &net.UDPAddr{IP: testLL, Port: 9999, Zone: "vpeer0"}
+	if udpExchange10751(t, v6drop, func() error {
+		_, err := v6server.WriteToUDP([]byte("junk"), junk6)
+		return err
+	}, time.Second) {
+		t.Fatal("v6 non-DHCP arrived under a v6-only backstop: the DROP is missing")
+	}
+
+	// Phase B (v4-only backstop): v6 unicast survives (retried: DAD);
+	// v4 broadcast non-DHCP is denied (backstop active).
+	if err := in.InstallHostInbound(HostInboundSpec{UnleasedV4: []string{unleasedTestNetdev10751}}); err != nil {
+		t.Fatalf("v4-only install: %v", err)
+	}
+	survive6 := &net.UDPAddr{IP: testLL, Port: 4445, Zone: "vpeer0"}
+	if !udpExchangeRetry10751(t, v6survive, func() error {
+		_, err := v6server.WriteToUDP([]byte("v6"), survive6)
+		return err
+	}, 300*time.Millisecond, 10*time.Second) {
+		t.Fatal("v6 unicast was dropped under a v4-only backstop: the DROP is not family-guarded (cross-family shadow)")
+	}
+	bcast80 := &net.UDPAddr{IP: net.ParseIP("192.0.2.255"), Port: 80}
+	if udpExchange10751(t, v4drop, func() error {
+		_, err := bcast.WriteToUDP([]byte("junk"), bcast80)
+		return err
+	}, time.Second) {
+		t.Fatal("v4 broadcast non-DHCP arrived under a v4-only backstop: the DROP is missing")
+	}
+}

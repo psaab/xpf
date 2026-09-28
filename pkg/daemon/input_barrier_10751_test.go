@@ -2441,16 +2441,17 @@ func TestUnzonedDHCPFallbackKeepsInterfaceDrop10751(t *testing.T) {
 
 // TestUnleasedOraclePlacement10751: the text oracles render the per-family
 // backstop LAST (after every destination rule, so addressed families and
-// explicit programs win) and the per-family DHCP admits BEFORE every
-// destination rule (so a first ADVERTISE is not shadowed by the link-local
-// DROP on an already-up link). Set form for several netdevs; omitted when
-// empty.
+// explicit programs win), family-guarded (a v6-only backstop must not
+// shadow v4 fallthrough and vice versa), and the per-family DHCP admits
+// BEFORE every destination rule (so a first ADVERTISE is not shadowed by
+// the link-local DROP on an already-up link). Set form for several
+// netdevs; omitted when empty.
 func TestUnleasedOraclePlacement10751(t *testing.T) {
 	views := []dpuserspace.ZoneHostInboundView{{Zone: "trust", V4Addrs: []string{"10.0.0.1"}}}
 	unleasedV4 := []string{"ge-0-0-8", "ge-0-0-9"}
 	unleasedV6 := []string{"ge-0-0-9"}
-	wantDropV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } drop`
-	wantDropV6 := `iifname "ge-0-0-9" drop`
+	wantDropV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 drop`
+	wantDropV6 := `iifname "ge-0-0-9" meta nfproto ipv6 drop`
 	wantAdmitV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 udp dport 68 accept`
 	wantAdmitV6 := `iifname "ge-0-0-9" meta nfproto ipv6 udp dport 546 accept`
 	for name, payload := range map[string]string{

@@ -48,6 +48,21 @@ func emitUnleasedDHCPAdmitsNetlink(p *nlPlan, unleasedV4, unleasedV6 []string) {
 	}
 }
 
+// emitUnleasedDropNetlink appends one family-guarded backstop DROP
+// (`iifname <dev> meta nfproto <fam> drop`, mirroring
+// emitUnleasedHostInboundDeny). The guard is load-bearing: a bare iifname
+// DROP would also deny the other family's fallthrough on a mixed-leased
+// interface. No-op on an empty set. Expression order (iifname, nfproto)
+// matches the oracle text — parity-pinned.
+func emitUnleasedDropNetlink(p *nlPlan, f nlFamily, netdevs []string) {
+	if len(netdevs) == 0 {
+		return
+	}
+	r := p.rule().iifname(netdevs)
+	r.needNfproto(f)
+	r.emit(verdictDrop()...)
+}
+
 // buildHostInboundFenceNetlink mirrors buildHostInboundFencePayload: the
 // mandatory admits plus a catch-all DROP for every firewall-local address the
 // real ruleset would scope (per host-inbound-configured zone + the unzoned set).
@@ -96,12 +111,8 @@ func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
 		p.rule().daddr(famV6, spec.UnzonedV6, false).emit(verdictDrop()...)
 	}
 	// #10751 R7-B: unleased-DHCP interface backstop (see the real builder).
-	if len(spec.UnleasedV4) > 0 {
-		p.rule().iifname(spec.UnleasedV4).emit(verdictDrop()...)
-	}
-	if len(spec.UnleasedV6) > 0 {
-		p.rule().iifname(spec.UnleasedV6).emit(verdictDrop()...)
-	}
+	emitUnleasedDropNetlink(p, famV4, spec.UnleasedV4)
+	emitUnleasedDropNetlink(p, famV6, spec.UnleasedV6)
 }
 
 // buildHostInboundGapFenceNetlink mirrors buildHostInboundGapFencePayload: the
@@ -138,10 +149,6 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 		p.rule().daddr(famV6, spec.UncoveredV6, false).emit(verdictDrop()...)
 	}
 	// #10751 R7-B: unleased-DHCP interface backstop (see the real builder).
-	if len(spec.UnleasedV4) > 0 {
-		p.rule().iifname(spec.UnleasedV4).emit(verdictDrop()...)
-	}
-	if len(spec.UnleasedV6) > 0 {
-		p.rule().iifname(spec.UnleasedV6).emit(verdictDrop()...)
-	}
+	emitUnleasedDropNetlink(p, famV4, spec.UnleasedV4)
+	emitUnleasedDropNetlink(p, famV6, spec.UnleasedV6)
 }

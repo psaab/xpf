@@ -1046,9 +1046,11 @@ func BuildUnzonedHostInboundAddrsFromSnapshots(cfg *config.Config, snaps []Inter
 // BY FAMILY (#10751 R7-B/F8-A): an unzoned DHCP unit with no lease has no
 // destination for the unzoned catch-all, yet its first lease would land
 // host-reachable before the debounced re-apply installs one. The daemon
-// renders these as LAST-placed per-family `iifname <dev> drop` rules (after
-// every destination rule, so addressed families and explicit programs still
-// win): interface-scoped protection that needs no hold and vanishes on
+// renders these as LAST-placed, family-guarded per-family `iifname <dev>
+// meta nfproto <fam> drop` rules (after every destination rule, so
+// addressed families and explicit programs still win; the guard keeps a
+// v6-only backstop from shadowing v4 fallthrough and vice versa):
+// interface-scoped protection that needs no hold and vanishes on
 // lease (the unit leaves this set the moment it resolves). A family that is
 // STILL unleased also gets a TOP-placed `iifname <dev> udp dport <68|546>
 // accept` (F8-A) admitting the DHCP client's own replies ahead of the
