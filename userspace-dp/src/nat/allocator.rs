@@ -3693,6 +3693,97 @@ impl PortAllocator {
         }
     }
 
+    /// Carry only clear-replay fences into a replacement allocator. A renamed
+    /// pool can have no live-flow reservations after clear removes idle leases,
+    /// while stale HA records still need to be rejected.
+    pub(crate) fn carry_persistent_nat_clear_fences_from(
+        &self,
+        prev: &PortAllocator,
+        now_ns: u64,
+    ) {
+        let fence_capacity = self.shared.max_tracked_flows;
+        let (clear_fences, previous_clear_ns, overflow_fence_until_ns) = {
+            let prev_live = prev.lock_live();
+            let mut fences =
+                Vec::with_capacity(prev_live.revoked_persistent.len().min(fence_capacity));
+            let mut overflow_until_ns = None;
+            for (key, raw_until_ns) in &prev_live.revoked_persistent {
+                // Active shells are not carried with the persistent lease map.
+                // Their permanent marker therefore becomes one finite replay
+                // horizon from this reseed; otherwise a missing shell could
+                // leave the key fenced forever.
+                let until_ns = if *raw_until_ns == ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS {
+                    now_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
+                } else {
+                    *raw_until_ns
+                };
+                if until_ns <= now_ns {
+                    continue;
+                }
+                if fences.len() < fence_capacity {
+                    fences.push((*key, until_ns));
+                } else {
+                    overflow_until_ns = Some(
+                        overflow_until_ns.map_or(until_ns, |old: u64| old.max(until_ns)),
+                    );
+                }
+            }
+            (
+                fences,
+                prev_live.last_persistent_nat_clear_ns,
+                overflow_until_ns,
+            )
+        };
+        let mut clear_ns = previous_clear_ns.filter(|clear_ns| {
+            now_ns < clear_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
+        });
+        if let Some(until_ns) = overflow_fence_until_ns {
+            let widened_clear_ns =
+                until_ns.saturating_sub(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
+            clear_ns = Some(clear_ns.map_or(widened_clear_ns, |old| old.max(widened_clear_ns)));
+        }
+        {
+            let mut live = self.lock_live();
+            live.revoked_persistent
+                .retain(|_, until_ns| *until_ns > now_ns);
+            for (key, until_ns) in clear_fences {
+                live.revoked_persistent
+                    .entry(key)
+                    .and_modify(|old| *old = (*old).max(until_ns))
+                    .or_insert(until_ns);
+            }
+            let existing_clear_ns = live.last_persistent_nat_clear_ns.filter(|clear_ns| {
+                now_ns < clear_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
+            });
+            let mut carried_clear_ns = match (existing_clear_ns, clear_ns) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (Some(clear_ns), None) | (None, Some(clear_ns)) => Some(clear_ns),
+                (None, None) => None,
+            };
+            let mut retained = 0;
+            let mut overflow_until_ns = None;
+            live.revoked_persistent.retain(|_, until_ns| {
+                if retained < fence_capacity {
+                    retained += 1;
+                    true
+                } else {
+                    overflow_until_ns = Some(
+                        overflow_until_ns.map_or(*until_ns, |old: u64| old.max(*until_ns)),
+                    );
+                    false
+                }
+            });
+            if let Some(until_ns) = overflow_until_ns {
+                let widened_clear_ns =
+                    until_ns.saturating_sub(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
+                carried_clear_ns = Some(
+                    carried_clear_ns.map_or(widened_clear_ns, |old| old.max(widened_clear_ns)),
+                );
+            }
+            live.last_persistent_nat_clear_ns = carried_clear_ns;
+        }
+    }
+
     /// #4388: reserve a SPECIFIC translated `(ip, port)` for `flow` WITHOUT
     /// running the round-robin allocator, so a peer-synced session's NAT pool
     /// port is marked allocated in this node's LOCAL allocator. Without this,
@@ -3779,13 +3870,10 @@ impl PortAllocator {
         if index_map.is_empty() {
             return out;
         }
-        // Snapshot the previous live set and its clear fence, then RELEASE
-        // that lock before touching this allocator's. The per-key map is
-        // bounded by this allocator's flow capacity; expired entries are
-        // pruned, and omitted live entries are covered by a widened batch
-        // barrier below.
-        let fence_capacity = self.shared.max_tracked_flows;
-        let (carried, clear_fences, previous_clear_ns, overflow_fence_until_ns) = {
+        self.carry_persistent_nat_clear_fences_from(prev, now_ns);
+        // Snapshot the previous live set and RELEASE its lock before touching
+        // this allocator's, so the two mutexes are never held at once.
+        let carried = {
             let prev_live = prev.lock_live();
             // #7560: count the persistent leases this pass is about to drop,
             // split by whether their address survived the pool change. Done
@@ -3799,90 +3887,13 @@ impl PortAllocator {
                     out.dropped_persistent_on_removed += 1;
                 }
             }
-            let mut fences =
-                Vec::with_capacity(prev_live.revoked_persistent.len().min(fence_capacity));
-            let mut overflow_until_ns = None;
-            for (key, raw_until_ns) in &prev_live.revoked_persistent {
-                // Active shells are not carried with the persistent lease map.
-                // Their permanent marker therefore becomes one finite replay
-                // horizon from this reseed; otherwise a missing shell could
-                // leave the key fenced forever.
-                let until_ns = if *raw_until_ns == ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS {
-                    now_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
-                } else {
-                    *raw_until_ns
-                };
-                if until_ns <= now_ns {
-                    continue;
-                }
-                if fences.len() < fence_capacity {
-                    fences.push((*key, until_ns));
-                } else {
-                    overflow_until_ns = Some(
-                        overflow_until_ns.map_or(until_ns, |old: u64| old.max(until_ns)),
-                    );
-                }
-            }
-            (
-                prev_live
-                    .live_by_flow
-                    .iter()
-                    .filter(|(_, a)| index_map.contains_key(&a.addr_index))
-                    .map(|(f, a)| (*f, *a))
-                    .collect::<Vec<_>>(),
-                fences,
-                prev_live.last_persistent_nat_clear_ns,
-                overflow_until_ns,
-            )
+            prev_live
+                .live_by_flow
+                .iter()
+                .filter(|(_, a)| index_map.contains_key(&a.addr_index))
+                .map(|(f, a)| (*f, *a))
+                .collect::<Vec<_>>()
         };
-        let mut clear_ns = previous_clear_ns.filter(|clear_ns| {
-            now_ns < clear_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
-        });
-        if let Some(until_ns) = overflow_fence_until_ns {
-            let widened_clear_ns =
-                until_ns.saturating_sub(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
-            clear_ns = Some(clear_ns.map_or(widened_clear_ns, |old| old.max(widened_clear_ns)));
-        }
-        {
-            let mut live = self.lock_live();
-            live.revoked_persistent
-                .retain(|_, until_ns| *until_ns > now_ns);
-            for (key, until_ns) in clear_fences {
-                live.revoked_persistent
-                    .entry(key)
-                    .and_modify(|old| *old = (*old).max(until_ns))
-                    .or_insert(until_ns);
-            }
-            let existing_clear_ns = live.last_persistent_nat_clear_ns.filter(|clear_ns| {
-                now_ns < clear_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
-            });
-            let mut carried_clear_ns = match (existing_clear_ns, clear_ns) {
-                (Some(left), Some(right)) => Some(left.max(right)),
-                (Some(clear_ns), None) | (None, Some(clear_ns)) => Some(clear_ns),
-                (None, None) => None,
-            };
-            let mut retained = 0;
-            let mut overflow_until_ns = None;
-            live.revoked_persistent.retain(|_, until_ns| {
-                if retained < fence_capacity {
-                    retained += 1;
-                    true
-                } else {
-                    overflow_until_ns = Some(
-                        overflow_until_ns.map_or(*until_ns, |old: u64| old.max(*until_ns)),
-                    );
-                    false
-                }
-            });
-            if let Some(until_ns) = overflow_until_ns {
-                let widened_clear_ns =
-                    until_ns.saturating_sub(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
-                carried_clear_ns = Some(
-                    carried_clear_ns.map_or(widened_clear_ns, |old| old.max(widened_clear_ns)),
-                );
-            }
-            live.last_persistent_nat_clear_ns = carried_clear_ns;
-        }
         for (flow, alloc) in carried {
             let Some(&new_index) = index_map.get(&alloc.addr_index) else {
                 continue;

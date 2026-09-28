@@ -8580,6 +8580,43 @@ fn f6_flow() -> SourceNatFlowKey {
     }
 }
 
+fn f6_persistent_rule_10784(rule: &str, pool: &str) -> SourceNATRuleSnapshot {
+    let mut snapshot = f6_rule(rule, pool);
+    snapshot.persistent_nat = true;
+    snapshot.persistent_nat_permit_any_remote_host = true;
+    snapshot.persistent_nat_inactivity_timeout = 300;
+    snapshot
+}
+
+fn mint_f6_idle_record_10784(rule: &SourceNatRule) -> IdleLeaseRecord {
+    let flow = f6_flow();
+    let translated = rule
+        .pool_allocator
+        .allocate_translation(
+            flow,
+            PoolAddressFamily::V4(&rule.pool_addresses_v4),
+            0,
+            false,
+            true,
+            PersistentNatPermit::AnyRemoteHost,
+            rule.persistent_nat_timeout_ns,
+            NS_PER_SEC,
+            NatHolder::Untracked,
+        )
+        .expect("fixture: persistent pool must mint an idle-lease record");
+    assert!(rule.pool_allocator.release_flow(
+        flow,
+        translated,
+        2 * NS_PER_SEC,
+        NatHolder::Untracked
+    ));
+    rule.pool_allocator
+        .export_idle_leases(2 * NS_PER_SEC)
+        .into_iter()
+        .next()
+        .expect("fixture: persistent pool must export the pre-clear record")
+}
+
 /// Build a generation with pools `a` and `b` over one shared address, with the
 /// SECOND holding a live translation.
 fn f6_generation_with_b_holding() -> Vec<SourceNatRule> {
@@ -8702,6 +8739,103 @@ fn rename_onto_a_new_pool_name_carries_live_reservations_6979() {
         1,
         "renaming onto a name with no predecessor takes the FRESH-allocator branch; the \
          live translation must still be carried, or it is freed while its session lives"
+    );
+}
+
+/// Fence-only empty clears must survive a rename onto a brand-new allocator;
+/// the pre-clear record key was not installed when the clear ran.
+#[test]
+fn renamed_empty_clear_batch_fence_reaches_fresh_allocator_10784() {
+    let counters = NatCounterStore::default();
+    let previous = parse_source_nat_rules(&[f6_persistent_rule_10784("r1", "a")]);
+    let peer = parse_source_nat_rules(&[f6_persistent_rule_10784("peer", "peer")]);
+    let stale = mint_f6_idle_record_10784(&peer[0]);
+    assert_eq!(
+        previous[0]
+            .pool_allocator
+            .clear_persistent_leases(3 * NS_PER_SEC),
+        0,
+        "the renamed allocator must have an empty clear and only a batch fence"
+    );
+
+    let renamed = parse_source_nat_rules_with_previous(
+        &[f6_persistent_rule_10784("r1", "c")],
+        Some(&previous),
+        &counters,
+        4 * NS_PER_SEC,
+    );
+    let addresses = [IpAddr::V4("203.0.113.1".parse().expect("pool address"))];
+    assert_eq!(
+        renamed[0].pool_allocator.import_idle_lease(
+            &stale,
+            &addresses,
+            renamed[0].persistent_nat_timeout_ns,
+            5 * NS_PER_SEC,
+        ),
+        IdleLeaseImport::SkippedExisting,
+        "a fresh renamed allocator must inherit the empty-clear batch barrier"
+    );
+}
+
+/// A cleared per-key marker must reach a destination allocator that is reused
+/// under the new pool name, even though the source has no live flows to reseed.
+#[test]
+fn renamed_key_fence_reaches_reused_destination_allocator_10784() {
+    let counters = NatCounterStore::default();
+    let previous = parse_source_nat_rules(&[
+        f6_persistent_rule_10784("r1", "a"),
+        f6_persistent_rule_10784("r2", "b"),
+    ]);
+    let stale = mint_f6_idle_record_10784(&previous[0]);
+    assert_eq!(
+        previous[0]
+            .pool_allocator
+            .clear_persistent_leases(3 * NS_PER_SEC),
+        1
+    );
+    let mut destination_flow = f6_flow();
+    destination_flow.src_port = 2222;
+    assert!(previous[1].pool_allocator.reserve_flow(
+        destination_flow,
+        TranslatedTuple {
+            ip: "203.0.113.1".parse().expect("pool address"),
+            port: 20000,
+        },
+        0,
+        false,
+        0,
+        NatHolder::Untracked,
+    ));
+
+    let renamed = parse_source_nat_rules_with_previous(
+        &[f6_persistent_rule_10784("r2", "b")],
+        Some(&previous),
+        &counters,
+        4 * NS_PER_SEC,
+    );
+    assert_eq!(
+        renamed[0].pool_allocator.live_flow_count(),
+        1,
+        "the destination must be the previous b allocator, not a fresh allocation"
+    );
+    let addresses = [IpAddr::V4("203.0.113.1".parse().expect("pool address"))];
+    let key = f6_flow().persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    assert_eq!(
+        renamed[0].pool_allocator.import_idle_lease(
+            &stale,
+            &addresses,
+            renamed[0].persistent_nat_timeout_ns,
+            5 * NS_PER_SEC,
+        ),
+        IdleLeaseImport::SkippedExisting,
+        "the reused destination must inherit the renamed source key fence"
+    );
+    assert!(
+        !renamed[0]
+            .pool_allocator
+            .debug_live()
+            .persistent_by_source
+            .contains_key(&key)
     );
 }
 
