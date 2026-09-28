@@ -12,7 +12,10 @@
 use super::super::ServerState;
 use crate::ControlResponse;
 use crate::afxdp::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
-use crate::nat::IdleLeaseRecord;
+use crate::nat::{
+    IdleLeaseRecord, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
+    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS,
+};
 use crate::protocol::{DisplayLeaseWire, IdleLeaseWire};
 use std::net::IpAddr;
 
@@ -76,9 +79,16 @@ fn to_wire(rec: &PoolIdleLease) -> IdleLeaseWire {
 /// `None` when the record cannot be understood. The caller counts these rather
 /// than substituting a default.
 pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
-    if w.pool_name.is_empty() || w.remaining_ns == 0 {
+    if w.pool_name.is_empty()
+        || w.remaining_ns == 0
+        || w.timeout_ns < MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS
+    {
         return None;
     }
+    // A release may re-arm expiry after the exporter samples `remaining_ns`;
+    // clamp that honest skew, as well as peer values above the schema ceiling.
+    let timeout_ns = w.timeout_ns.min(MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS);
+    let remaining_ns = w.remaining_ns.min(timeout_ns);
     // #10018: an old helper omits this field and serde maps that to `None`.
     // Refuse rather than defaulting to domain 0; otherwise a mixed helper
     // pair silently merges the record into the default tenant's lease.
@@ -105,8 +115,8 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
             translated_ip,
             translated_port: w.translated_port,
             address_only: w.address_only,
-            remaining_ns: w.remaining_ns,
-            timeout_ns: w.timeout_ns,
+            remaining_ns,
+            timeout_ns,
         },
     })
 }
@@ -331,6 +341,16 @@ mod tests {
                 Box::new(|w: &mut IdleLeaseWire| w.remaining_ns = 0),
             ),
             (
+                "zero timeout",
+                Box::new(|w: &mut IdleLeaseWire| w.timeout_ns = 0)
+                    as Box<dyn Fn(&mut IdleLeaseWire)>,
+            ),
+            (
+                "subsecond timeout",
+                Box::new(|w: &mut IdleLeaseWire| w.timeout_ns = 1)
+                    as Box<dyn Fn(&mut IdleLeaseWire)>,
+            ),
+            (
                 "bad src",
                 Box::new(|w: &mut IdleLeaseWire| w.src_ip = "x".to_string()),
             ),
@@ -351,6 +371,24 @@ mod tests {
             mutate(&mut w);
             assert!(from_wire(&w).is_none(), "{label} must be refused");
         }
+    }
+
+    #[test]
+    fn skewed_honest_wire_lifetimes_are_clamped_10789_f4() {
+        let mut skewed = wire();
+        skewed.remaining_ns = skewed.timeout_ns + 1_000_000;
+        let parsed = from_wire(&skewed).expect("honest clock skew must not drop a record");
+        assert_eq!(parsed.lease.timeout_ns, skewed.timeout_ns);
+        assert_eq!(parsed.lease.remaining_ns, skewed.timeout_ns);
+        let normalized = to_wire(&parsed);
+        assert_eq!(normalized.remaining_ns, skewed.timeout_ns);
+
+        let mut oversized = wire();
+        oversized.timeout_ns = MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS + 200;
+        oversized.remaining_ns = u64::MAX;
+        let parsed = from_wire(&oversized).expect("oversized lifetimes must clamp");
+        assert_eq!(parsed.lease.timeout_ns, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS);
+        assert_eq!(parsed.lease.remaining_ns, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS);
     }
 }
 

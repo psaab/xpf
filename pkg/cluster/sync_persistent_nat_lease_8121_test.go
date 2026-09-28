@@ -32,7 +32,7 @@ func sampleIdleLease() userspace.IdleLeaseWire {
 		Protocol:       6,
 		SrcIP:          "10.0.61.50",
 		SrcPort:        40000,
-		RoutingScope: persistentNatLeaseScope(7),
+		RoutingScope:   persistentNatLeaseScope(7),
 		RemoteIP:       "8.8.8.8",
 		RemotePort:     443,
 		TranslatedIP:   "203.0.113.1",
@@ -78,6 +78,60 @@ func TestPersistentNatLeasePayload_RoundTrip(t *testing.T) {
 		}
 	}
 }
+func TestPersistentNatLeaseDecodeRejectsInvalidLifetimes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*userspace.IdleLeaseWire)
+	}{
+		{"zero remaining", func(l *userspace.IdleLeaseWire) { l.RemainingNs = 0 }},
+		{"zero timeout", func(l *userspace.IdleLeaseWire) { l.TimeoutNs = 0 }},
+		{"subsecond timeout", func(l *userspace.IdleLeaseWire) { l.TimeoutNs = 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := sampleIdleLease()
+			tc.mutate(&rec)
+			if _, ok := decodePersistentNatLeasePayload(
+				encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{rec}),
+			); ok {
+				t.Fatal("invalid lifetime must reject the whole payload")
+			}
+		})
+	}
+}
+
+func TestPersistentNatLeaseDecodeClampsLifetimeSkew(t *testing.T) {
+	const maxLifetime uint64 = 86_400_000_000_000
+	skewed := sampleIdleLease()
+	skewed.RemainingNs = skewed.TimeoutNs + 1_000_000
+	other := sampleIdleLease()
+	other.Pool = "Q"
+	out, ok := decodePersistentNatLeasePayload(
+		encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{skewed, other}),
+	)
+	if !ok || len(out) != 2 {
+		t.Fatalf("honest clock skew must not drop this record or its batch: len=%d ok=%v", len(out), ok)
+	}
+	if out[0].TimeoutNs != skewed.TimeoutNs || out[0].RemainingNs != skewed.TimeoutNs {
+		t.Fatalf("skewed remaining lifetime was not clamped: %+v", out[0])
+	}
+	if !equalIdleLeaseWire(out[1], other) {
+		t.Fatalf("a sibling record in the batch changed: got %+v want %+v", out[1], other)
+	}
+
+	oversized := sampleIdleLease()
+	oversized.TimeoutNs = maxLifetime + 200
+	oversized.RemainingNs = maxLifetime + 300
+	out, ok = decodePersistentNatLeasePayload(
+		encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{oversized}),
+	)
+	if !ok || len(out) != 1 {
+		t.Fatalf("oversized peer lifetimes must be clamped, not rejected: len=%d ok=%v", len(out), ok)
+	}
+	if out[0].TimeoutNs != maxLifetime || out[0].RemainingNs != maxLifetime {
+		t.Fatalf("oversized lifetimes were not clamped to the schema ceiling: %+v", out[0])
+	}
+}
+
 
 // #4892 shape: a string field longer than the uint16 length prefix can describe
 // must DROP that record, never narrow the prefix. A wrapped length misframes the
@@ -113,9 +167,9 @@ func TestPersistentNatLeaseEncode_OversizedFieldDropsOnlyThatRecord(t *testing.T
 	}
 }
 
-// #7175 discipline: a full-set push REPLACES the peer's set, so a truncated
-// payload must report INCOMPLETE. Returning a prefix as if it were the whole
-// set would silently delete every lease past the truncation point.
+// A malformed advertisement batch is rejected as incomplete. No prefix is
+// delivered to the receiver, while records omitted from later valid batches
+// remain governed by the additive import path rather than replacement.
 func TestPersistentNatLeasePayload_TruncationReportsIncomplete(t *testing.T) {
 	full := encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{
 		sampleIdleLease(), sampleIdleLease(),
@@ -182,8 +236,8 @@ func TestPersistentNatLeaseMalformedSetDoesNotAdvanceSequence10018(t *testing.T)
 	sets := 0
 	ss.OnPersistentNatLeasesReceived = func([]userspace.IdleLeaseWire) { sets++ }
 
-	// A high-sequence malformed full set must be retained as no-op, not become
-	// the high-water mark that blocks a later valid lower-sequence set.
+	// A high-sequence malformed lease batch must be a no-op, not become the
+	// high-water mark that blocks a later valid lower-sequence advertisement.
 	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped,
 		appendFullSetSeq([]byte{1, 2, 3}, 9000, 99))
 	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped,
