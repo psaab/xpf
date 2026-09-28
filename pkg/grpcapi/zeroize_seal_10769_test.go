@@ -1867,3 +1867,36 @@ func TestSystemdUsesInstalledMachineIDVerbatim10769(t *testing.T) {
 		}
 	})
 }
+
+// The sealed appliance carries /var/lib/dbus/machine-id as a tmpfiles
+// symlink to /etc/machine-id (nothing stages the file; the L-line creates
+// the link when absent). Refusing symlinks here would fail every reset
+// on the target image; only the link goes, and rotation still applies.
+func TestPerformZeroizeRemovesSymlinkedDBusMachineID10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	mustWriteFile(t, zeroizeMachineIDPath, []byte("0123456789abcdef0123456789abcdef\n"))
+	if err := os.MkdirAll(filepath.Dir(zeroizeDBusMachineIDPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(zeroizeMachineIDPath, zeroizeDBusMachineIDPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("symlinked dbus alias must not fail the wipe: %v", err)
+	}
+	if _, err := os.Lstat(zeroizeDBusMachineIDPath); !os.IsNotExist(err) {
+		t.Fatalf("dbus symlink must be unlinked: %v", err)
+	}
+	body, err := os.ReadFile(zeroizeMachineIDPath)
+	if err != nil {
+		t.Fatalf("machine-id must survive link removal: %v", err)
+	}
+	if id := strings.TrimSpace(string(body)); len(id) != 32 || id == "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("machine-id must rotate despite the alias shape, got %q", body)
+	}
+}

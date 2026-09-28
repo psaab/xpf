@@ -123,9 +123,9 @@ func zeroizeImageSealResidue() error {
 	// machine-id is replaced with fresh random bytes (deliberately NOT
 	// the seal's truncate: v261 regenerates an empty id from the stable
 	// SMBIOS UUID on VMs, reproducing the prior DUID-EN). The D-Bus
-	// alias copy is removed outright (D-Bus regenerates a missing one).
+	// alias copy is removed in either shape it ships (symlink or file).
 	fail(zeroizeRotateMachineID(zeroizeMachineIDPath))
-	fail(zeroizeRemovePath(zeroizeDBusMachineIDPath))
+	fail(zeroizeEraseDBusMachineID(zeroizeDBusMachineIDPath))
 
 	// The image seals every ssh_host_* private/public/certificate file. The
 	// first-boot xpf-day0-config unit runs ssh-keygen -A before ssh.service, so
@@ -1061,6 +1061,38 @@ func zeroizeEraseKnownHosts(path string) error {
 		return fmt.Errorf("zeroize: read SSH known-hosts %s: %w", path, err)
 	} else if !strings.HasPrefix(string(data), zeroizeManagedHostKeysHeader) {
 		slog.Info("zeroize: removing foreign SSH known-hosts file (no xpfd header; prior-tenant trust does not survive reset)", "path", path)
+	}
+	return zeroizeRemovePath(path)
+}
+
+// zeroizeEraseDBusMachineID removes the D-Bus machine-id alias copy in
+// whichever shape the image carries it: the tmpfiles L-line creates a
+// symlink to /etc/machine-id when nothing stages the file (the sealed
+// appliance runtime shape), while older/materialized installs carry a
+// regular file. A symlink has only the LINK unlinked (never the target,
+// so the freshly rotated /etc/machine-id is untouched); a regular file
+// goes through the standard remover. Either way the alias regenerates
+// from the rotated id.
+func zeroizeEraseDBusMachineID(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if serr := zeroizeSyncDurable(filepath.Dir(path)); serr != nil {
+			return fmt.Errorf("zeroize: sync parent of absent D-Bus machine-id %s: %w", path, serr)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("zeroize: inspect D-Bus machine-id %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		slog.Info("zeroize: removing D-Bus machine-id symlink (link only; /etc/machine-id untouched)", "path", path)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("zeroize: remove D-Bus machine-id symlink %s: %w", path, err)
+		}
+		if err := zeroizeSyncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("zeroize: sync D-Bus machine-id directory %s: %w", filepath.Dir(path), err)
+		}
+		return nil
 	}
 	return zeroizeRemovePath(path)
 }
