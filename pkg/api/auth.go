@@ -249,7 +249,7 @@ func throttledAuthCheck(throttle *authFailureTracker, cfg AuthConfig, metricsReq
 // throttledAuthCheckWithCheck admits a request atomically before invoking the
 // verifier. The checker is injectable only to let bounded tests hold verifier
 // work behind a barrier and observe the admission limit.
-func throttledAuthCheckWithCheck(throttle *authFailureTracker, cfg AuthConfig, metricsRequireAuth bool, r *http.Request, check func(AuthConfig, bool, *http.Request) (bool, string)) (authorized bool, retryAfter time.Duration) {
+func throttledAuthCheckWithCheck(throttle *authFailureTracker, cfg AuthConfig, metricsRequireAuth bool, r *http.Request, check func(AuthConfig, bool, *http.Request) (bool, string, bool)) (authorized bool, retryAfter time.Duration) {
 	if r.URL.Path == "/health" || (r.URL.Path == "/metrics" && !metricsRequireAuth) {
 		return true, 0
 	}
@@ -258,8 +258,8 @@ func throttledAuthCheckWithCheck(throttle *authFailureTracker, cfg AuthConfig, m
 	if retryAfter > 0 {
 		return false, retryAfter
 	}
-	authorized, verified := check(cfg, metricsRequireAuth, r)
-	throttle.complete(&reservation, authorized, verified)
+	authorized, verified, authorizationFailed := check(cfg, metricsRequireAuth, r)
+	throttle.complete(&reservation, authorized, verified, authorizationFailed)
 	return authorized, 0
 }
 
@@ -284,26 +284,28 @@ func logRESTAPIAuthFailure(r *http.Request) {
 // /health + loopback-/metrics exemptions and the #4157/#5636 constant-time,
 // empty-secret-rejecting credential checks.
 func authCheck(cfg AuthConfig, metricsRequireAuth bool, r *http.Request) bool {
-	authorized, _ := authCheckCredential(cfg, metricsRequireAuth, r)
+	authorized, _, _ := authCheckCredential(cfg, metricsRequireAuth, r)
 	return authorized
 }
 
-// authCheckCredential reports the verified account bucket along with the
-// authorization decision so throttling clears both a Basic username claimed
-// before verification and the identity that actually supplied the credential.
-func authCheckCredential(cfg AuthConfig, metricsRequireAuth bool, r *http.Request) (bool, string) {
+// authCheckCredential reports the verified account bucket and whether a
+// supplied Authorization header failed before an X-API-Key fallback. The
+// throttled path charges that failed attempt even when the fallback authorizes
+// the request.
+func authCheckCredential(cfg AuthConfig, metricsRequireAuth bool, r *http.Request) (authorized bool, verified string, authorizationFailed bool) {
 	if r.URL.Path == "/health" || (r.URL.Path == "/metrics" && !metricsRequireAuth) {
-		return true, ""
+		return true, "", false
 	}
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		if account, ok := checkAuthorizationIdentity(auth, cfg); ok {
-			return true, account
+			return true, account, false
 		}
+		authorizationFailed = true
 	}
 	if key := r.Header.Get("X-API-Key"); key != "" && constantTimeAPIKeyMatch(cfg, key) {
-		return true, authThrottleAPIKeyAccount
+		return true, authThrottleAPIKeyAccount, authorizationFailed
 	}
-	return false, ""
+	return false, "", authorizationFailed
 }
 
 // writeAuthChallenge emits the 401 + WWW-Authenticate response for an

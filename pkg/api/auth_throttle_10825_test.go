@@ -119,7 +119,7 @@ func TestAuthThrottleAdmissionCapsConcurrentVerifierWork10825(t *testing.T) {
 			defer releaseAll()
 
 			var current, peak atomic.Int64
-			check := func(AuthConfig, bool, *http.Request) (bool, string) {
+			check := func(AuthConfig, bool, *http.Request) (bool, string, bool) {
 				active := current.Add(1)
 				for {
 					previous := peak.Load()
@@ -130,7 +130,7 @@ func TestAuthThrottleAdmissionCapsConcurrentVerifierWork10825(t *testing.T) {
 				entered <- struct{}{}
 				<-release
 				current.Add(-1)
-				return false, ""
+				return false, "", false
 			}
 			for i := 0; i < tc.workers; i++ {
 				go func(i int) {
@@ -210,8 +210,8 @@ func TestInvalidAuthorizationFallsBackToValidAPIKeyIdentity10825(t *testing.T) {
 			if !authCheck(cfg, true, r) {
 				t.Fatal("authCheck rejected the valid X-API-Key fallback")
 			}
-			if authorized, verified := authCheckCredential(cfg, true, r); !authorized || verified != "api-key" {
-				t.Fatalf("verified throttle identity = (%v, %q), want (true, api-key)", authorized, verified)
+			if authorized, verified, authorizationFailed := authCheckCredential(cfg, true, r); !authorized || verified != "api-key" || !authorizationFailed {
+				t.Fatalf("fallback result = (%v, %q, %v), want (true, api-key, failed Authorization)", authorized, verified, authorizationFailed)
 			}
 			identity, class, ok := credentialPrincipalIdentity(cfg, r)
 			if !ok || identity != "deployment" || class != "operator" {
@@ -225,7 +225,7 @@ func TestInvalidAuthorizationFallsBackToValidAPIKeyIdentity10825(t *testing.T) {
 	}
 }
 
-func TestAuthFallbackClearsClaimedAndVerifiedBucketsOnly10825(t *testing.T) {
+func TestAuthFallbackChargesClaimedAndSourceAndClearsVerifiedBucket10825(t *testing.T) {
 	const (
 		source = "198.51.100.52"
 		apiKey = "deployment-secret-key"
@@ -257,21 +257,24 @@ func TestAuthFallbackClearsClaimedAndVerifiedBucketsOnly10825(t *testing.T) {
 	unrelatedBucket := tracker.accounts[source+"\x00unrelated"]
 	sourceBucket := tracker.sources[source]
 	tracker.mu.Unlock()
-	if claimedBucket != nil || verifiedBucket != nil {
-		t.Fatalf("success retained cleared claimed/verified buckets: claimed=%+v verified=%+v", claimedBucket, verifiedBucket)
+	if claimedBucket == nil || claimedBucket.failures != 3 {
+		t.Fatalf("fallback did not charge its failed Basic account: %+v, want three failures", claimedBucket)
+	}
+	if verifiedBucket != nil {
+		t.Fatalf("successful API-key fallback retained its cleared bucket: %+v", verifiedBucket)
 	}
 	if unrelatedBucket == nil || unrelatedBucket.failures != 2 {
 		t.Fatalf("unrelated account failures = %+v, want two preserved failures", unrelatedBucket)
 	}
-	if sourceBucket == nil || sourceBucket.failures != 6 || sourceBucket.inFlight != 0 {
-		t.Fatalf("source budget = %+v, want six preserved failures and no reservations", sourceBucket)
+	if sourceBucket == nil || sourceBucket.failures != 7 || sourceBucket.inFlight != 0 {
+		t.Fatalf("source budget = %+v, want seven failures and no reservations", sourceBucket)
 	}
-	if len(tracker.accounts) != 1 {
-		t.Fatalf("account buckets = %d, want only unrelated (API keys share one api-key bucket)", len(tracker.accounts))
+	if len(tracker.accounts) != 2 {
+		t.Fatalf("account buckets = %d, want only charged Basic and unrelated buckets", len(tracker.accounts))
 	}
 
-	// An invalid request that also presents a bad fallback key remains charged
-	// to the unverified Basic username; it creates no per-key account bucket.
+	// An invalid Authorization plus a bad fallback key charges the claimed
+	// Basic account and source, and does not create a verified API-key bucket.
 	r = httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
 	r.RemoteAddr = source + ":43000"
 	r.SetBasicAuth("claimed-user", "wrong-password")
@@ -284,14 +287,60 @@ func TestAuthFallbackClearsClaimedAndVerifiedBucketsOnly10825(t *testing.T) {
 	verifiedBucket = tracker.accounts[source+"\x00api-key"]
 	sourceBucket = tracker.sources[source]
 	tracker.mu.Unlock()
-	if claimedBucket == nil || claimedBucket.failures != 1 {
-		t.Fatalf("invalid claimed-account bucket = %+v, want one failure", claimedBucket)
+	if claimedBucket == nil || claimedBucket.failures != 4 {
+		t.Fatalf("invalid claimed-account bucket = %+v, want four failures", claimedBucket)
 	}
 	if verifiedBucket != nil {
 		t.Fatalf("invalid request created an API-key account bucket: %+v", verifiedBucket)
 	}
-	if sourceBucket == nil || sourceBucket.failures != 7 {
-		t.Fatalf("source failures after invalid request = %+v, want seven", sourceBucket)
+	if sourceBucket == nil || sourceBucket.failures != 8 {
+		t.Fatalf("source failures after invalid request = %+v, want eight", sourceBucket)
+	}
+}
+
+func TestRESTAuthWrongBasicGuessesWithValidAPIKeyFallbackStillLockOut10825(t *testing.T) {
+	const (
+		source = "198.51.100.54"
+		apiKey = "deployment-secret-key"
+	)
+	h := authMiddleware(AuthConfig{
+		Users:   map[string]string{"administrator": "correct-password"},
+		APIKeys: map[string]bool{apiKey: true},
+	}, true, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for i := 0; i < authThrottleAccountFailures; i++ {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+		r.RemoteAddr = source + ":43000"
+		r.SetBasicAuth("administrator", fmt.Sprintf("wrong-password-%d", i))
+		r.Header.Set("X-API-Key", apiKey)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("valid API-key fallback attempt %d returned %d, want 204", i, w.Code)
+		}
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	r.RemoteAddr = source + ":43000"
+	r.SetBasicAuth("administrator", "another-wrong-password")
+	r.Header.Set("X-API-Key", apiKey)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("locked Basic account with valid fallback returned %d, Retry-After=%q; want 429",
+			w.Code, w.Header().Get("Retry-After"))
+	}
+
+	// The lockout is account-scoped. A clean request using the valid key stays
+	// available while the source budget remains below its separate threshold.
+	r = httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	r.RemoteAddr = source + ":43000"
+	r.Header.Set("X-API-Key", apiKey)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("clean API-key request after Basic lockout returned %d, want 204", w.Code)
 	}
 }
 
@@ -381,8 +430,8 @@ func TestAuthThrottleReservationFailureCompletesExactlyOnce10825(t *testing.T) {
 	if retry != 0 {
 		t.Fatalf("initial reservation returned retry-after %v", retry)
 	}
-	tracker.complete(&reservation, false, "")
-	tracker.complete(&reservation, false, "")
+	tracker.complete(&reservation, false, "", false)
+	tracker.complete(&reservation, false, "", false)
 
 	tracker.mu.Lock()
 	account := tracker.accounts["192.0.2.99\x00operator"]
@@ -425,8 +474,8 @@ func TestAuthThrottleAdmissionResetsExpiredFailuresPreservingInflight10825(t *te
 		t.Fatalf("source bucket after expiration = %+v, want zero failures and two in-flight reservations", sourceBucket)
 	}
 
-	tracker.complete(&first, false, "")
-	tracker.complete(&second, false, "")
+	tracker.complete(&first, false, "", false)
+	tracker.complete(&second, false, "", false)
 	tracker.mu.Lock()
 	accountBucket = tracker.accounts[source+"\x00"+account]
 	sourceBucket = tracker.sources[source]

@@ -237,11 +237,11 @@ func resetExpiredFailuresLocked(bucket *authFailureBucket, now time.Time) {
 	bucket.windowStart = now
 }
 
-// complete releases both reservations. Failure charges each budget once;
-// success clears only the claimed and verified account buckets, never source
-// failures. In-flight counts survive clears so older admitted checks remain
-// bounded and their eventual failures still charge exactly once.
-func (t *authFailureTracker) complete(reservation *authThrottleReservation, success bool, verified string) {
+// complete releases both reservations. Clean success clears the claimed and
+// verified account buckets, never source failures. When a bad Authorization
+// header falls back to a valid X-API-Key, it charges the failed claimed account
+// and source while clearing a distinct, successfully verified key bucket.
+func (t *authFailureTracker) complete(reservation *authThrottleReservation, authorized bool, verified string, authorizationFailed bool) {
 	if reservation == nil {
 		return
 	}
@@ -254,7 +254,7 @@ func (t *authFailureTracker) complete(reservation *authThrottleReservation, succ
 	now := t.now()
 	reservation.account.inFlight--
 	reservation.sourceBucket.inFlight--
-	if success {
+	if authorized && !authorizationFailed {
 		t.clearAccountLocked(reservation.source, reservation.claimed, now)
 		if verified != "" && verified != reservation.claimed {
 			t.clearAccountLocked(reservation.source, verified, now)
@@ -265,6 +265,9 @@ func (t *authFailureTracker) complete(reservation *authThrottleReservation, succ
 			delete(t.sources, reservation.source)
 		}
 		return
+	}
+	if authorized && authorizationFailed && verified != "" && verified != reservation.claimed {
+		t.clearAccountLocked(reservation.source, verified, now)
 	}
 	t.chargeLocked(reservation.account, now, authThrottleAccountFailures)
 	t.chargeLocked(reservation.sourceBucket, now, authThrottleSourceFailures)

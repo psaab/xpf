@@ -578,6 +578,11 @@ REST authentication failures are throttled per source/account (5 failures in
 10 minutes locks the pair for 5 minutes with exponential re-locks, capped at
 one hour) and per source (20 failures in 10 minutes) to stop username rotation.
 Failures and lockout refusals increment the fixed `rest_api_auth` audit counter.
+
+A bad `Authorization` header remains a charged failed attempt even when a valid
+`X-API-Key` fallback authorizes the request. The account lock follows the
+claimed identity; a clean key-only request remains available while the
+source-level budget is below its cap.
 Credentials are not accepted over clear HTTP: strict compile rejects explicit
 HTTP plus api-auth, and runtime disables the HTTP leg whenever an api-auth
 identity is active; use HTTPS for credentialed REST access.
