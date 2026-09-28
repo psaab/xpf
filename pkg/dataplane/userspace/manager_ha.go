@@ -715,15 +715,17 @@ func (m *Manager) syncDesiredForwardingStateLocked() error {
 	// watchdog heartbeat does — would need its own answer, and this line is the
 	// place that says so rather than implying it is already handled.
 	//
-	// The watchdog's OTHER half is deliberately NOT suppressed, and the reason is
-	// concrete rather than cautious. The shim map write in UpdateHAWatchdog is the
-	// kernel-visible liveness signal the BPF ~2s stale window depends on. The
-	// update_ha_state IPC is that same signal in its socket form: it is the ONLY
-	// thing that refreshes the helper's per-RG forwarding lease
-	// (Coordinator::update_ha_state -> HAGroupRuntime::active_lease_until ->
-	// ActiveUntil(watchdog + HA_WATCHDOG_STALE_AFTER_SECS), 10s in
-	// userspace-dp/src/afxdp/mod.rs), and is_forwarding_active consults that lease
-	// per packet. Gating it for the length of a link cycle — whose lease TTL is
+	// The helper's lease refresh is deliberately NOT suppressed, and the reason is
+	// concrete rather than cautious. The ha_watchdog map write in UpdateHAWatchdog
+	// feeds only Go's own HA refresh paths — no live userspace-XDP shim BPF
+	// program reads it (#10791). The update_ha_state IPC is the ONLY thing that
+	// refreshes the helper's per-RG forwarding lease, and that lease is
+	// receipt-anchored, not value-anchored (Coordinator::update_ha_state ->
+	// HAGroupRuntime::active_lease_until -> ActiveUntil(max(watchdog, now) +
+	// HA_WATCHDOG_STALE_AFTER_SECS), 10s in userspace-dp/src/afxdp/mod.rs; `now`
+	// is sampled at receipt, so each active receipt mints a full lease).
+	// is_forwarding_active consults it per packet. Gating it for the length of
+	// a link cycle — whose lease TTL is
 	// 60s — would expire the helper's forwarding lease outright. That is an
 	// OUTAGE, strictly worse than the respawn race being closed, and it is why
 	// the gate is on the set_forwarding_state emitter rather than on
@@ -1316,10 +1318,13 @@ func (m *Manager) markHAWatchdogIPCSyncedLocked() {
 }
 
 func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
-	// Fast path: write the kernel-visible watchdog timestamp to the shim map on
-	// EVERY tick. The BPF ~2s stale window relies on this, so it is never
-	// throttled. Indirected through haWatchdogMapWrite so unit tests can exercise
-	// the IPC-throttle path below without a loaded BPF map.
+	// Fast path: write the watchdog timestamp to the Go-owned ha_watchdog map on
+	// EVERY tick, never throttled, so Go's own refresh paths always read it
+	// fresh. No live userspace-XDP shim BPF program consumes this map (#10791);
+	// the fail-closed backstop is the helper's receipt-anchored 10s forwarding
+	// lease, refreshed by the throttled update_ha_state IPC below. Indirected
+	// through haWatchdogMapWrite so unit tests can exercise the IPC-throttle
+	// BPF map.
 	mapWrite := m.haWatchdogMapWrite
 	if mapWrite == nil {
 		mapWrite = m.bpfShim.UpdateHAWatchdog

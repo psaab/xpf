@@ -464,6 +464,85 @@ func TestUserspaceXDPShimObjectMatchesRetainedCollectionAllowlist(t *testing.T) 
 	}
 }
 
+// TestHAWatchdogIsNotReferencedByTheUserspaceShim10791 pins the retirement
+// boundary: ha_watchdog is Go-owned bookkeeping, not a live shim BPF input.
+// Checking both Rust source and the embedded object prevents a future map
+// declaration from silently restoring the retired kernel liveness path.
+func TestHAWatchdogIsNotReferencedByTheUserspaceShim10791(t *testing.T) {
+	t.Parallel()
+
+	sourceRoot := filepath.Join(repoRootForBoundaryCanary, "userspace-xdp", "src")
+	for _, path := range rustSourceFilesUnder(t, sourceRoot) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read userspace XDP source %s: %v", path, err)
+		}
+		if strings.Contains(string(raw), "ha_watchdog") {
+			t.Errorf("live userspace XDP source %s references ha_watchdog", repoRelativePath(t, path))
+		}
+	}
+
+	spec, err := loadRustUserspaceXDP()
+	if err != nil {
+		t.Fatalf("load userspace XDP shim object: %v", err)
+	}
+	if _, ok := spec.Maps["ha_watchdog"]; ok {
+		t.Fatal("embedded userspace XDP shim object references ha_watchdog")
+	}
+}
+
+// TestHAWatchdogClaimsUseTheHelperLease10791 guards both sides of the
+// correction: named code/docs sites state the receipt-anchored 10s helper
+// lease, and none reintroduces the retired BPF ~2s fail-closed claim.
+func TestHAWatchdogClaimsUseTheHelperLease10791(t *testing.T) {
+	t.Parallel()
+
+	paths := []string{
+		"pkg/dataplane/maps_fabric.go",
+		"pkg/daemon/daemon_ha_comms_wiring.go",
+		"pkg/daemon/daemon_run_shutdown.go",
+		"pkg/dataplane/userspace/manager.go",
+		"pkg/dataplane/userspace/manager_ha.go",
+		"pkg/dataplane/userspace/manager_ha_test.go",
+		"pkg/dataplane/userspace/link_cycle_ha_watchdog_6871_test.go",
+		"pkg/dataplane/userspace/runtime_adapter_binding_6871_test.go",
+		"docs/ha-failover-status.md",
+		"docs/reth-mac.md",
+		"docs/memory.md",
+		"docs/vrrp-elimination-study.md",
+		"docs/log/9629.md",
+		"docs/operations/worker-supervisor.md",
+		"docs/testing-procedures.md",
+		"docs/phases.md",
+	}
+	staleClaims := []string{
+		"BPF watchdog",
+		"BPF ~2s stale window",
+		"BPF ~2s shim window",
+		"BPF stops forwarding within 2s",
+		"BPF watchdog detects death within 2s",
+		"BPF checks this to detect userspace liveness",
+		"timestamp is stale (>2s)",
+		"ActiveUntil(watchdog + HA_WATCHDOG_STALE_AFTER_SECS)",
+	}
+
+	for _, rel := range paths {
+		raw, err := os.ReadFile(filepath.Join(repoRootForBoundaryCanary, rel))
+		if err != nil {
+			t.Fatalf("read HA watchdog contract site %s: %v", rel, err)
+		}
+		text := string(raw)
+		for _, stale := range staleClaims {
+			if strings.Contains(text, stale) {
+				t.Errorf("%s reintroduces stale HA watchdog claim %q", rel, stale)
+			}
+		}
+		if !strings.Contains(text, "receipt-anchored") || !strings.Contains(text, "10s") {
+			t.Errorf("%s must describe the receipt-anchored 10s helper lease", rel)
+		}
+	}
+}
+
 func TestUserspaceDegradedPathCounterStatusStructAvoidsFallbackField(t *testing.T) {
 	t.Parallel()
 

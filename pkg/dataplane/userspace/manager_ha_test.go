@@ -1209,9 +1209,11 @@ func drainUpdateHAStateCount(ch <-chan string) int {
 }
 
 // TestUpdateHAWatchdogThrottlesIPCButWritesMapEveryTick proves the #2549 split:
-// the kernel-visible shim watchdog MAP WRITE fires on every 500ms heartbeat tick
-// (the BPF ~2s stale window relies on it), while the update_ha_state socket IPC
-// is throttled to a periodic backstop (~once per haWatchdogIPCBackstopSecs) so it
+// the Go-owned watchdog MAP WRITE fires on every 500ms heartbeat tick (never
+// throttled, so Go's own HA refresh reads it fresh; no live userspace-XDP shim
+// BPF program consumes it — the fail-closed backstop is the helper's
+// receipt-anchored 10s lease, #10791), while the update_ha_state socket IPC is
+// throttled to a periodic backstop (~once per haWatchdogIPCBackstopSecs) so it
 // stops being a >1/s control-socket caller that starves session installs.
 //
 // FAIL-ON-REVERT: master's UpdateHAWatchdog calls syncHAStateLocked

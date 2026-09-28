@@ -110,12 +110,13 @@ func TestHAControllerWatchdogReachesTheManager_6871(t *testing.T) {
 	}
 
 	if n := countRequests(srv.requests(), "update_ha_state"); n != 1 {
-		t.Fatalf("update_ha_state requests = %d, want 1: the watchdog never reached the "+
-			"helper through the production adapter. The daemon's 500ms heartbeat "+
-			"(daemon_ha_sync.go) is the ONLY refresh of the helper's per-RG forwarding "+
-			"lease — Coordinator::update_ha_state -> ActiveUntil(watchdog + "+
-			"HA_WATCHDOG_STALE_AFTER_SECS), 10s — and is_forwarding_active consults it on "+
-			"every packet. A severed hop here expires that lease and STOPS FORWARDING for "+
+		t.Fatalf("update_ha_state requests = %d, want 1: the receipt-anchored HA "+
+			"lease refresh never reached the helper through the production adapter. "+
+			"The daemon's 500ms heartbeat (daemon_ha_sync.go) is the ONLY refresh "+
+			"lease — Coordinator::update_ha_state -> ActiveUntil(max(watchdog, now) + "+
+			"HA_WATCHDOG_STALE_AFTER_SECS), 10s, receipt-anchored (#10791); each active "+
+			"receipt mints a full lease — and is_forwarding_active consults it on every "+
+			"packet. A severed hop here expires that lease and STOPS FORWARDING for "+
 			"the redundancy group, while every test that calls Manager.UpdateHAWatchdog "+
 			"directly stays green (#6871). Requests: %v", n, srv.requests())
 	}
