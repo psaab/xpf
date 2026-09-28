@@ -144,25 +144,6 @@ func zeroizeImageSealResidue() error {
 	// may be written before xpfd stops, but prior-tenant persisted entries are
 	// unlinked. Volatile /run logs disappear at reboot.
 	fail(zeroizeClearDir(zeroizeVarLogDir))
-	if st, err := os.Stat(zeroizeVarLogDir); err == nil && st.IsDir() {
-		fail(zeroizeSyncDir(zeroizeVarLogDir))
-	}
-	if st, err := os.Stat(zeroizeSSHHostKeyDir); err == nil && st.IsDir() {
-		fail(zeroizeSyncDir(zeroizeSSHHostKeyDir))
-	}
-	if st, err := os.Stat(filepath.Dir(zeroizeMachineIDPath)); err == nil && st.IsDir() {
-		fail(zeroizeSyncDir(filepath.Dir(zeroizeMachineIDPath)))
-	}
-	for _, dir := range []string{
-		filepath.Dir(zeroizeHostnamePath),
-		filepath.Dir(zeroizeResolvConfPath),
-		filepath.Dir(zeroizeKeaLeasePaths[0]),
-		filepath.Dir(zeroizeKeaLeasePaths[1]),
-	} {
-		if st, err := os.Stat(dir); err == nil && st.IsDir() {
-			fail(zeroizeSyncDir(dir))
-		}
-	}
 	if len(errs) == 0 {
 		// Do not change the running device name until every earlier cleanup
 		// leg has succeeded; reset is recoverable when residue remains.
@@ -276,7 +257,16 @@ func zeroizeClearDir(dir string) error {
 	return errors.Join(errs...)
 }
 
+// zeroizeRemovePath unlinks path and syncs its parent directory so the removal
+// is durable before the reset marker clears (#10769 d05-F6). Every seal-leg
+// removal funnels through here, so durability holds structurally rather than
+// depending on an audited sync inventory at the end of each leg. An absent
+// path is the goal (no barrier needed); a sync failure is surfaced
+// fail-closed so the reset is never reported clean on unpersisted unlinks.
 func zeroizeRemovePath(path string) error {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if sk, isLink := configstore.SymlinkTarget(path); isLink {
 		return fmt.Errorf("zeroize: refusing to erase symlink %s -> %s", sk.Path, sk.Target)
 	}
@@ -284,14 +274,17 @@ func zeroizeRemovePath(path string) error {
 	if herr != nil {
 		return fmt.Errorf("zeroize: inspect hard links for %s: %w", path, herr)
 	}
-	removeErr := os.RemoveAll(path)
-	if removeErr != nil {
+	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return fmt.Errorf("zeroize: remove %s: %w", path, removeErr)
 	}
+	var errs []error
 	if len(hardlinks) != 0 {
-		return fmt.Errorf("zeroize: removed %s but hard-linked bytes survive at %v", path, hardlinks)
+		errs = append(errs, fmt.Errorf("zeroize: removed %s but hard-linked bytes survive at %v", path, hardlinks))
 	}
-	return nil
+	if err := zeroizeSyncDir(filepath.Dir(path)); err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync parent of %s: %w", path, err))
+	}
+	return errors.Join(errs...)
 }
 
 func zeroizeRemoveManagedHostKeys(path string) error {

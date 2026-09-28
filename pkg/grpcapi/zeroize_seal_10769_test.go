@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -338,5 +339,134 @@ func TestPerformZeroizeKeepsConfigWhenKeaCannotStop10769(t *testing.T) {
 		if _, err := os.Lstat(path); err != nil {
 			t.Errorf("Kea stop failure must preserve %s: %v", path, err)
 		}
+	}
+}
+
+func TestZeroizeRemovePathSyncsParent10769(t *testing.T) {
+	root := t.TempDir()
+	isolateZeroizeSealPaths(t, root)
+	orig := zeroizeSyncDir
+	t.Cleanup(func() { zeroizeSyncDir = orig })
+	var synced []string
+	zeroizeSyncDir = func(dir string) error {
+		synced = append(synced, filepath.Clean(dir))
+		return orig(dir)
+	}
+	victim := filepath.Join(root, "nested", "dir", "leaf")
+	mustWriteFile(t, victim, []byte("x"))
+	if err := zeroizeRemovePath(victim); err != nil {
+		t.Fatalf("zeroizeRemovePath: %v", err)
+	}
+	want := filepath.Join(root, "nested", "dir")
+	found := false
+	for _, dir := range synced {
+		if dir == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("parent %s was not synced after removal (synced=%v)", want, synced)
+	}
+	synced = nil
+	boom := fmt.Errorf("injected fsync failure")
+	zeroizeSyncDir = func(dir string) error {
+		if filepath.Clean(dir) == want {
+			return boom
+		}
+		return orig(dir)
+	}
+	mustWriteFile(t, victim, []byte("x"))
+	if err := zeroizeRemovePath(victim); !errors.Is(err, boom) {
+		t.Fatalf("parent sync failure must propagate, got %v", err)
+	}
+}
+
+func TestPerformZeroizeSyncsEverySealParent10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	// One planted file per seal parent directory; the wipe must sync every
+	// containing dir before the pending marker can clear.
+	planted := []string{
+		zeroizeMachineIDPath,
+		filepath.Join(zeroizeSSHHostKeyDir, "ssh_host_ed25519_key"),
+		filepath.Join(zeroizeRootSSHUserDir, "id_ed25519"),
+		zeroizeRootBashHistory,
+		zeroizeSNMPEngineIDPath,
+		zeroizeSystemdRandomSeed,
+		filepath.Join(zeroizeAptListsDir, "example_Packages"),
+		zeroizeRunUtmpPath,
+		zeroizeDay0RejectedPath,
+		zeroizePasswdBackupPaths[0],
+		zeroizeManagedHostKeysPath,
+		zeroizeManagedDropins[0],
+		zeroizeManagedDropins[2],
+		zeroizeManagedDropins[3],
+		zeroizeManagedDropins[4],
+		zeroizeResolvConfPath,
+		zeroizeKeaLeasePaths[0],
+		filepath.Join(zeroizeVarLogDir, "old.log"),
+	}
+	for _, path := range planted {
+		body := "prior tenant residue"
+		if path == zeroizeManagedHostKeysPath {
+			body = zeroizeManagedHostKeysHeader + "old.example ssh-ed25519 AAAA\n"
+		}
+		if path == zeroizeResolvConfPath {
+			body = zeroizeManagedResolvConfHeader + "nameserver 192.0.2.53\n"
+		}
+		mustWriteFile(t, path, []byte(body))
+	}
+	orig := zeroizeSyncDir
+	t.Cleanup(func() { zeroizeSyncDir = orig })
+	synced := map[string]bool{}
+	zeroizeSyncDir = func(dir string) error {
+		synced[filepath.Clean(dir)] = true
+		return orig(dir)
+	}
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	wantParents := map[string]bool{}
+	for _, path := range planted {
+		wantParents[filepath.Clean(filepath.Dir(path))] = true
+	}
+	// The wipe removes the whole root .ssh directory (not the planted key
+	// inside it), so its barrier lands on the parent of that directory.
+	delete(wantParents, filepath.Clean(zeroizeRootSSHUserDir))
+	wantParents[filepath.Clean(filepath.Dir(zeroizeRootSSHUserDir))] = true
+	for dir := range wantParents {
+		if !synced[dir] {
+			t.Errorf("seal removal in %s left no durability barrier (synced=%v)", dir, synced)
+		}
+	}
+}
+
+func TestPerformZeroizeRetainsMarkerOnSealSyncFailure10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	mustWriteFile(t, zeroizeKeaLeasePaths[0], []byte("lease"))
+	orig := zeroizeSyncDir
+	t.Cleanup(func() { zeroizeSyncDir = orig })
+	boom := fmt.Errorf("injected seal parent fsync failure")
+	keaDir := filepath.Clean(filepath.Dir(zeroizeKeaLeasePaths[0]))
+	zeroizeSyncDir = func(dir string) error {
+		if filepath.Clean(dir) == keaDir {
+			return boom
+		}
+		return orig(dir)
+	}
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); !errors.Is(err, boom) {
+		t.Fatalf("seal sync failure must fail the wipe, got %v", err)
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
+		t.Fatalf("failed wipe must retain the pending marker: %v", err)
 	}
 }
