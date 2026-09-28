@@ -59,6 +59,17 @@ func keaLFCLeaseFileSetPaths(current string) []string {
 	return []string{current + ".completed", current + ".2", current + ".1", current}
 }
 
+// KeaLeaseWipePaths returns every file factory reset must erase for one Kea
+// memfile family (#10769 d05-F6): the lease-bearing LFC set (current, .1, .2,
+// .completed) plus the compactor's intermediate output and pid file. Derived
+// from keaLFCLeaseFileSetPaths so the wipe set cannot drift from the reader's
+// source selection; .output/.pid are not lease sources but are Kea runtime
+// residue in the same directory.
+func KeaLeaseWipePaths(current string) []string {
+	paths := append([]string(nil), keaLFCLeaseFileSetPaths(current)...)
+	return append(paths, current+".output", current+".pid")
+}
+
 // keaLFCLeaseFilePaths returns the candidate paths in Kea's source-selection
 // order. It is the convenience form for callers without an already captured
 // identity snapshot; parseActiveLeases uses keaLFCLeaseFileSetPaths plus
