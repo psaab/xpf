@@ -1204,11 +1204,17 @@ the NAT module applies it:
   subscriber its whole block rather than one port, because
   `allocate_deterministic_v4` restarts its scan at the block start.
   Per-pool `persistent-nat` lease reuse is helper-local userspace runtime
-  state keyed by source tuple `(protocol, source IP, source port)` to
-  translated tuple. Compatible in-process snapshot refreshes preserve it;
-  helper restart does not. #1449 closes HA behavior as an explicit userspace
-  capability gate: HA configs using persistent source-NAT pools are not
-  admitted because persistent leases are not synchronized.
+  state keyed by source tuple `(protocol, source IP, source port)` to translated
+  tuple. Compatible in-process snapshot refreshes preserve it; helper restart
+  does not. HA synchronization is supported: live leases are rebuilt from synced
+  sessions (#7360/#8132), and idle leases are exported/imported explicitly
+  (#8121). Idle imports share the pool's `max_tracked_flows` lease-table cap
+  with local mints first-come-first-served: after one bounded expiry-GC
+  pressure pass, a still-full table refuses the import — and likewise refuses
+  local mints — so the cap bounds total table growth with shared fate for both
+  sides. Imported
+  leases also check live address-only and PAT owners across exact, target-host,
+  and any-remote scopes.
 - **Rule-set precedence — most-specific-scope-wins (#4161).** When several
   source-NAT rule-sets overlap on a flow, selection follows Junos: the rule-set
   whose match CONTEXT is most specific wins — **interface > zone >
