@@ -328,6 +328,7 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 		return
 	}
 	tunMap := cfg.TunnelNameMap()
+	stanzaOwned := tunnelsWithTheirOwnRIStanza(cfg)
 	conflicts := riMemberDeviceConflicts(cfg)
 	conflictByDevice := make(map[string]config.RoutingInstanceMemberDeviceConflict, len(conflicts))
 	for _, conflict := range conflicts {
@@ -342,16 +343,18 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 		if ri == nil || ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
 			continue
 		}
-		for _, ifaceName := range ri.Interfaces {
-			for _, linuxName := range config.RoutingInstanceMemberLinuxNames(cfg, tunMap, ifaceName) {
-				if _, found := conflictByDevice[linuxName]; found {
-					continue
-				}
-				if err := d.routing.BindInterfaceToVRF(linuxName, ri.Name); err != nil {
-					slog.Warn("failed to bind interface to VRF",
-						"interface", ifaceName, "linux", linuxName,
-						"instance", ri.Name, "err", err)
-				}
+		for _, key := range config.RoutingInstanceMemberDeviceKeysForInstance(cfg, tunMap, ri) {
+			linuxName := key.LinuxName
+			if _, found := conflictByDevice[linuxName]; found {
+				continue
+			}
+			if stanzaOwned[linuxName] {
+				continue // tunnel manager owns an explicit stanza binding
+			}
+			if err := d.routing.BindInterfaceToVRF(linuxName, ri.Name); err != nil {
+				slog.Warn("failed to bind interface to VRF",
+					"interface", key.InterfaceKey, "linux", linuxName,
+					"instance", ri.Name, "err", err)
 			}
 		}
 	}

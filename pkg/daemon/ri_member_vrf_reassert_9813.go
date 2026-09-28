@@ -187,23 +187,22 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 		if err != nil || vrf == nil || vrf.Attrs() == nil {
 			continue // no VRF device on the box: ReconcileVRFs owns creating it
 		}
-		for _, ifaceName := range ri.Interfaces {
-			for _, linuxName := range config.RoutingInstanceMemberLinuxNames(cfg, tunMap, ifaceName) {
-				if _, found := conflictByDevice[linuxName]; found {
-					continue // #11060: quarantine owns this device, never bind it
-				}
-				if stanza[linuxName] {
-					continue // the tunnel manager's claim, not step 0a's
-				}
-				link, err := d.fabricLinkByName(linuxName)
-				if err != nil || link == nil || link.Attrs() == nil {
-					continue // absent on this chassis
-				}
-				if link.Attrs().MasterIndex == vrf.Attrs().Index {
-					continue // already a member
-				}
-				out = append(out, riMember{linuxName: linuxName, instance: ri.Name})
+		for _, key := range config.RoutingInstanceMemberDeviceKeysForInstance(cfg, tunMap, ri) {
+			linuxName := key.LinuxName
+			if _, found := conflictByDevice[linuxName]; found {
+				continue // #11060: quarantine owns this device, never bind it
 			}
+			if stanza[linuxName] {
+				continue // the tunnel manager's claim, not step 0a's
+			}
+			link, err := d.fabricLinkByName(linuxName)
+			if err != nil || link == nil || link.Attrs() == nil {
+				continue // absent on this chassis
+			}
+			if link.Attrs().MasterIndex == vrf.Attrs().Index {
+				continue // already a member
+			}
+			out = append(out, riMember{linuxName: linuxName, instance: ri.Name})
 		}
 	}
 	return out
@@ -255,14 +254,32 @@ func (d *Daemon) detachRIMemberDeviceConflict(conflict config.RoutingInstanceMem
 	}
 }
 
-// tunnelsWithTheirOwnRIStanza names the tunnel devices whose config carries a
-// `routing-instance` stanza. The tunnel manager binds those itself and records
-// the claim, so this loop leaves them alone.
+// tunnelsWithTheirOwnRIStanza names every configured tunnel device with an
+// explicit routing-instance stanza. The tunnel manager owns those bindings;
+// list-member reconciliation must not bind or reassert them.
 func tunnelsWithTheirOwnRIStanza(cfg *config.Config) map[string]bool {
 	out := map[string]bool{}
-	for _, tc := range collectAppliedTunnels(cfg) {
-		if tc != nil && tc.RoutingInstance != "" {
+	if cfg == nil {
+		return out
+	}
+	for _, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		if tc := ifc.Tunnel; tc != nil && tc.RoutingInstance != "" && tc.Name != "" {
 			out[tc.Name] = true
+		}
+		for _, unit := range ifc.Units {
+			if unit == nil || unit.Tunnel == nil || unit.Tunnel.RoutingInstance == "" {
+				continue
+			}
+			name := unit.Tunnel.Name
+			if ifc.Tunnel != nil && ifc.Tunnel.Mode == "wireguard" && ifc.Tunnel.Name != "" {
+				name = ifc.Tunnel.Name
+			}
+			if name != "" {
+				out[name] = true
+			}
 		}
 	}
 	return out

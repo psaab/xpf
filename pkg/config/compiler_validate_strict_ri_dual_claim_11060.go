@@ -2,14 +2,14 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
 // validateRIDualClaimStrict11060 rejects any Linux netdevice claimed by more
-// than one routing instance. Logical refs are expanded by
-// RoutingInstanceMemberDeviceKeys, the same resolver used by kernel binding and
-// userspace membership maps, so aliases, VLAN IDs, and shared tunnels have one
-// ownership identity.
+// than one routing instance through list membership or a tunnel routing-instance
+// stanza. Logical refs use the shared device resolver, so aliases, VLAN IDs,
+// shared tunnels, and explicit tunnel ownership have one identity.
 func validateRIDualClaimStrict11060(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -60,9 +60,13 @@ func quarantineRIDualClaimDevices(cfg *Config, tunnelNames map[string]string) {
 		quarantined[conflict.LinuxName] = struct{}{}
 	}
 
-	// Keep unaffected generated units from a bare member as explicit refs.
-	// Retaining the original bare ref would fan back down over the quarantined
-	// device and recreate the ambiguous bind in both dataplane planes.
+	// Preserve unaffected fanout units as explicit refs. A bare member's
+	// primary key is stored as a typed base-only claim, never as the original
+	// bare reference which would expand over a quarantined sibling again.
+	primarySeen := make(map[string]struct{}, len(cfg.QuarantinedRIMemberPrimaryClaims))
+	for _, claim := range cfg.QuarantinedRIMemberPrimaryClaims {
+		primarySeen[claim.Instance+"\x00"+claim.InterfaceKey+"\x00"+claim.LinuxName] = struct{}{}
+	}
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil {
 			continue
@@ -86,15 +90,68 @@ func quarantineRIDualClaimDevices(cfg *Config, tunnelNames map[string]string) {
 				continue
 			}
 			for _, key := range keys {
-				if !key.Fanout || key.LinuxName == "" {
+				if key.LinuxName == "" {
 					continue
 				}
-				if _, found := quarantined[key.LinuxName]; !found {
+				if _, found := quarantined[key.LinuxName]; found {
+					continue
+				}
+				if key.Fanout {
 					kept = append(kept, key.InterfaceKey)
+					continue
+				}
+				claim := RoutingInstanceMemberPrimaryClaim{
+					Instance: ri.Name, InterfaceKey: key.InterfaceKey, LinuxName: key.LinuxName,
+				}
+				claimKey := claim.Instance + "\x00" + claim.InterfaceKey + "\x00" + claim.LinuxName
+				if _, found := primarySeen[claimKey]; !found {
+					primarySeen[claimKey] = struct{}{}
+					cfg.QuarantinedRIMemberPrimaryClaims = append(
+						cfg.QuarantinedRIMemberPrimaryClaims, claim)
 				}
 			}
 		}
 		ri.Interfaces = kept
+	}
+	sort.Slice(cfg.QuarantinedRIMemberPrimaryClaims, func(i, j int) bool {
+		left, right := cfg.QuarantinedRIMemberPrimaryClaims[i], cfg.QuarantinedRIMemberPrimaryClaims[j]
+		if left.Instance != right.Instance {
+			return left.Instance < right.Instance
+		}
+		if left.InterfaceKey != right.InterfaceKey {
+			return left.InterfaceKey < right.InterfaceKey
+		}
+		return left.LinuxName < right.LinuxName
+	})
+
+	// A conflicting tunnel stanza is also an ownership claim. Clear every
+	// stanza resolving to the contested device so the tunnel manager does not
+	// re-enslave it after both conflicting memberships have been quarantined.
+	for _, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		clearStanza := func(tc *TunnelConfig, device string) {
+			if tc == nil || device == "" {
+				return
+			}
+			if _, found := quarantined[device]; found {
+				tc.RoutingInstance = ""
+			}
+		}
+		if ifc.Tunnel != nil {
+			clearStanza(ifc.Tunnel, ifc.Tunnel.Name)
+		}
+		for _, unit := range ifc.Units {
+			if unit == nil || unit.Tunnel == nil {
+				continue
+			}
+			device := unit.Tunnel.Name
+			if ifc.Tunnel != nil && ifc.Tunnel.Mode == "wireguard" && ifc.Tunnel.Name != "" {
+				device = ifc.Tunnel.Name
+			}
+			clearStanza(unit.Tunnel, device)
+		}
 	}
 }
 

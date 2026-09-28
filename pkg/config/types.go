@@ -480,6 +480,11 @@ type Config struct {
 	// The active config needs this compile-time evidence for apply-time alarms
 	// and config-derived metrics; it is not part of the wire/config shape.
 	QuarantinedRIMemberDeviceConflicts []RoutingInstanceMemberDeviceConflict `json:"-"`
+	// QuarantinedRIMemberPrimaryClaims preserves uncontested base-device keys
+	// from bare refs whose fanout units were partially quarantined. These typed
+	// claims are consumed by the same kernel/userspace membership helpers but
+	// never re-expand through the bare-member string.
+	QuarantinedRIMemberPrimaryClaims []RoutingInstanceMemberPrimaryClaim `json:"-"`
 	Firewall                           FirewallConfig
 	ClassOfService                     *ClassOfServiceConfig
 	Services                           ServicesConfig

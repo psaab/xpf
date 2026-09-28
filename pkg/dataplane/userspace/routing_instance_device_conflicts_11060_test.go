@@ -45,3 +45,34 @@ func TestRIMemberDeviceConflictLeavesAliasClaimUnassigned11060(t *testing.T) {
 		t.Fatalf("unambiguous VLAN sibling IPv6 table = %q, want blue.inet6.0", got)
 	}
 }
+
+
+func TestTolerantTunnelStanzaConflictUsesDefaultDataplaneMembership11060(t *testing.T) {
+	lines := []string{
+		"set system dataplane-type userspace",
+		"set interfaces gr-0/0/0 tunnel source 192.0.2.1",
+		"set interfaces gr-0/0/0 tunnel destination 192.0.2.2",
+		"set interfaces gr-0/0/0 tunnel routing-instance destination blue",
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances red instance-type virtual-router",
+		"set routing-instances red interface gr-0/0/0",
+	}
+	cfg, err := config.CompileConfigLenient(treeFromSet6722(t, lines))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	if len(cfg.QuarantinedRIMemberDeviceConflicts) != 1 ||
+		cfg.QuarantinedRIMemberDeviceConflicts[0].LinuxName != "gr-0-0-0" {
+		t.Fatalf("quarantine evidence = %+v, want gr-0-0-0", cfg.QuarantinedRIMemberDeviceConflicts)
+	}
+	if cfg.Interfaces.Interfaces["gr-0/0/0"].Tunnel.RoutingInstance != "" {
+		t.Fatal("tunnel stanza remained scoped after its competing membership was quarantined")
+	}
+	if got := buildInterfaceRoutingInstances(cfg); len(got) != 0 {
+		t.Fatalf("userspace assigned a quarantined tunnel to an RI: %v", got)
+	}
+	v4, v6 := buildInterfaceRouteTables(cfg)
+	if len(v4) != 0 || len(v6) != 0 {
+		t.Fatalf("userspace route tables retained a quarantined tunnel claim: v4=%v v6=%v", v4, v6)
+	}
+}

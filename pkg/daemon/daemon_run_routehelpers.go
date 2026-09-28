@@ -16,21 +16,20 @@ func collectAppliedTunnels(cfg *config.Config) []*config.TunnelConfig {
 	}
 	anchorOnly := dataplane.EffectiveType(cfg.System.DataplaneType) == dataplane.TypeUserspace
 	// Linux interface name -> routing-instance whose `interface` list
-	// names it, mirroring the step-0a bind loop (forwarding instances
-	// skipped; shared normalization; later entries overwrite, matching
-	// 0a's last-bind-wins iteration). Feeds TunnelConfig.RIListMember.
+	// names it. Forwarding instances do not bind Linux VRFs; contested devices
+	// and tunnel-stanza-owned devices are excluded from list ownership. Feeds
+	// TunnelConfig.RIListMember only for tunnel-manager observation, not binding.
 	riListMember := map[string]string{}
 	tunMap := cfg.TunnelNameMap()
 	multiClaimed := config.RoutingInstanceDualClaimedLinuxNames(cfg, tunMap)
+	stanzaOwned := tunnelsWithTheirOwnRIStanza(cfg)
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.InstanceType == "forwarding" {
 			continue
 		}
-		for _, ifaceName := range ri.Interfaces {
-			for _, linuxName := range config.RoutingInstanceMemberLinuxNames(cfg, tunMap, ifaceName) {
-				if !multiClaimed[linuxName] {
-					riListMember[linuxName] = ri.Name
-				}
+		for _, linuxName := range config.RoutingInstanceMemberLinuxNamesForInstance(cfg, tunMap, ri) {
+			if !multiClaimed[linuxName] && !stanzaOwned[linuxName] {
+				riListMember[linuxName] = ri.Name
 			}
 		}
 	}
@@ -69,7 +68,11 @@ func collectAppliedTunnels(cfg *config.Config) []*config.TunnelConfig {
 			tc := *ifc.Tunnel
 			tc.AnchorOnly = anchorOnly
 			tc.MTU = ifc.MTU
-			tc.RIListMember = riListMember[tc.Name]
+			if stanzaOwned[tc.Name] {
+				tc.RIListMember = ""
+			} else {
+				tc.RIListMember = riListMember[tc.Name]
+			}
 			tunnels = append(tunnels, &tc)
 		}
 		for _, unit := range ifc.Units {
@@ -97,7 +100,11 @@ func collectAppliedTunnels(cfg *config.Config) []*config.TunnelConfig {
 			if unit.MTU > 0 {
 				tc.MTU = unit.MTU
 			}
-			tc.RIListMember = riListMember[tc.Name]
+			if stanzaOwned[tc.Name] {
+				tc.RIListMember = ""
+			} else {
+				tc.RIListMember = riListMember[tc.Name]
+			}
 			tunnels = append(tunnels, &tc)
 		}
 	}
