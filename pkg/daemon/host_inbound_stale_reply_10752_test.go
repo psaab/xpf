@@ -794,6 +794,7 @@ func runStaleReplyNoConntrackPacketPath(t *testing.T, localIP, peerIP string) {
 		t.Fatalf("untracked ephemeral without conntrack was delivered (err %v), want DROP", err)
 	}
 
+	assertNotrackRulesHit(t, 2)
 	assertNoConntrackForUDPTuples(t, box, 161, uint16(ephemeralPort))
 }
 
@@ -825,12 +826,16 @@ func installNotrackTestRules(t *testing.T, box net.IP, dports ...uint16) func() 
 	pre := c.AddChain(&gnft.Chain{Name: "pre", Table: tbl, Type: gnft.ChainTypeFilter, Hooknum: gnft.ChainHookPrerouting, Priority: gnft.ChainPriorityRaw, Policy: &pol})
 	out := c.AddChain(&gnft.Chain{Name: "out", Table: tbl, Type: gnft.ChainTypeFilter, Hooknum: gnft.ChainHookOutput, Priority: gnft.ChainPriorityRaw, Policy: &pol})
 	for _, port := range dports {
+		// Each rule carries a trailing anonymous counter so the test can
+		// prove the NOTRACK path actually matched the test traffic (read
+		// back via GetRules after the exchange).
 		preExprs := append(append([]expr.Any{}, l4udp...),
 			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: append([]byte(nil), box4...)},
 			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: be16(port)},
 			&expr.Notrack{},
+			&expr.Counter{},
 		)
 		c.AddRule(&gnft.Rule{Table: tbl, Chain: pre, Exprs: preExprs})
 		outExprs := append(append([]expr.Any{}, l4udp...),
@@ -839,6 +844,7 @@ func installNotrackTestRules(t *testing.T, box net.IP, dports ...uint16) func() 
 			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 0, Len: 2},
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: be16(port)},
 			&expr.Notrack{},
+			&expr.Counter{},
 		)
 		c.AddRule(&gnft.Rule{Table: tbl, Chain: out, Exprs: outExprs})
 		// Locally-generated peer→box packets hit OUTPUT conntrack before
@@ -850,6 +856,7 @@ func installNotrackTestRules(t *testing.T, box net.IP, dports ...uint16) func() 
 			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
 			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: be16(port)},
 			&expr.Notrack{},
+			&expr.Counter{},
 		)
 		c.AddRule(&gnft.Rule{Table: tbl, Chain: out, Exprs: outInExprs})
 	}
@@ -870,6 +877,9 @@ func installNotrackTestRules(t *testing.T, box net.IP, dports ...uint16) func() 
 // entry references the box address with one of the given UDP ports in either
 // direction. This is what makes the no-conntrack label honest: delivery (or
 // drop) verdicts above are only meaningful untracked if no entry exists.
+// The dump size is logged so -v output shows the check ran over a live table
+// (earlier subtests leave tracked entries behind; only the NOTRACK tuples
+// must be absent).
 func assertNoConntrackForUDPTuples(t *testing.T, box net.IP, ports ...uint16) {
 	t.Helper()
 	flows, err := netlink.ConntrackTableList(netlink.ConntrackTable, unix.AF_INET)
@@ -889,6 +899,39 @@ func assertNoConntrackForUDPTuples(t *testing.T, box net.IP, ports ...uint16) {
 		}
 		if net.IP(f.Forward.DstIP).Equal(box) && want[f.Forward.DstPort] {
 			t.Fatalf("conntrack entry exists for supposedly untracked box dport %d: %+v", f.Forward.DstPort, f.Forward)
+		}
+	}
+	t.Logf("conntrack dump: %d v4 flows, none reference box %v UDP ports %v", len(flows), box, ports)
+}
+
+// assertNotrackRulesHit reads back the raw-table rules and requires the
+// NOTRACK path to have matched the test traffic: at least one packet per
+// tuple in prerouting and in output. Per-rule counters are logged so -v
+// output retains the hit evidence. Without this, installed-but-never-matched
+// rules plus an empty conntrack table could fake the proof.
+func assertNotrackRulesHit(t *testing.T, tuples int) {
+	t.Helper()
+	c, err := gnft.New()
+	if err != nil {
+		netnsSkipOrFail(t, "open nftables conn for NOTRACK readback", err)
+	}
+	tbl := &gnft.Table{Family: gnft.TableFamilyIPv4, Name: "xpf_nt_10752"}
+	for _, chain := range []string{"pre", "out"} {
+		rules, err := c.GetRules(tbl, &gnft.Chain{Name: chain, Table: tbl})
+		if err != nil {
+			t.Fatalf("read back NOTRACK %s rules: %v", chain, err)
+		}
+		var packets uint64
+		for i, r := range rules {
+			for _, e := range r.Exprs {
+				if ctr, ok := e.(*expr.Counter); ok {
+					t.Logf("NOTRACK %s rule %d: packets=%d bytes=%d", chain, i, ctr.Packets, ctr.Bytes)
+					packets += ctr.Packets
+				}
+			}
+		}
+		if packets < uint64(tuples) {
+			t.Fatalf("NOTRACK %s chain matched %d packets, want >= %d (rules installed but traffic bypassed them?)", chain, packets, tuples)
 		}
 	}
 }
