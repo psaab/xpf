@@ -3,8 +3,10 @@ package ddns
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,5 +136,115 @@ func TestSurfaceAResetWithdrawalPreservesRecordWithoutAddress10769(t *testing.T)
 	}
 	if got := len(m.state.all()); got != 1 {
 		t.Fatalf("record without an address must retain delete authority, got %d records", got)
+	}
+}
+
+func TestLeaseResetWithdrawalPreservesUnreconstructableOwnership10769(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "ddns.json")
+	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
+	owned := ownedRecord{
+		Family: 4, Identity: "client", Address: "", FQDN: "client.example.test",
+		ForwardType: "A", PTRName: "8.2.0.192.in-addr.arpa", TTL: 300,
+		BackendFingerprint: dhcpBackendFingerprint(policyFromConfig(provider), provider),
+	}
+	writeResetState10769(t, statePath, owned)
+	updater := newFakeUpdater()
+	m := newManagerForTesting(nil, updater, statePath, "", "", "node0", time.Now)
+	m.newUpdater = func(ddnsPolicy, *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+		return updater, nil
+	}
+
+	if err := m.WithdrawForReset(context.Background(), &config.DHCPServerConfig{DynamicDNS: provider}); err == nil {
+		t.Fatal("incomplete Surface B ownership must fail factory reset closed, not authorize it")
+	}
+	if got := len(updater.deletes); got != 0 {
+		t.Fatalf("unreconstructable record issued %d delete(s), want none (no guessed wire RR)", got)
+	}
+	if got := len(m.state.all()); got != 1 {
+		t.Fatalf("unreconstructable record must retain delete authority, got %d records", got)
+	}
+	if err := CheckStateEmpty(statePath); err == nil {
+		t.Fatal("unreconstructable ownership must keep the durable store non-empty")
+	}
+}
+
+func TestLeaseResetWithdrawalSurfacesProviderDeleteFailure10769(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "ddns.json")
+	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
+	owned := ownedRecord{
+		Family: 4, Identity: "client", Address: "192.0.2.8", FQDN: "client.example.test",
+		ForwardType: "A", PTRName: "8.2.0.192.in-addr.arpa", TTL: 300,
+		BackendFingerprint: dhcpBackendFingerprint(policyFromConfig(provider), provider),
+	}
+	writeResetState10769(t, statePath, owned)
+	updater := newFakeUpdater()
+	updater.failDel["client.example.test"] = true
+	m := newManagerForTesting(nil, updater, statePath, "", "", "node0", time.Now)
+	m.newUpdater = func(ddnsPolicy, *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+		return updater, nil
+	}
+
+	if err := m.WithdrawForReset(context.Background(), &config.DHCPServerConfig{DynamicDNS: provider}); err == nil {
+		t.Fatal("provider delete failure must fail factory reset closed")
+	}
+	if got := len(m.state.all()); got != 1 {
+		t.Fatalf("failed delete must retain delete authority, got %d records", got)
+	}
+}
+
+func TestLeaseResetWithdrawalSurfacesStateSaveFailure10769(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "ddns.json")
+	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
+	owned := ownedRecord{
+		Family: 4, Identity: "client", Address: "192.0.2.8", FQDN: "client.example.test",
+		ForwardType: "A", PTRName: "8.2.0.192.in-addr.arpa", TTL: 300,
+		BackendFingerprint: dhcpBackendFingerprint(policyFromConfig(provider), provider),
+	}
+	writeResetState10769(t, statePath, owned)
+	updater := newFakeUpdater()
+	m := newManagerForTesting(nil, updater, statePath, "", "", "node0", time.Now)
+	m.newUpdater = func(ddnsPolicy, *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+		return updater, nil
+	}
+	// Break durability AFTER the load: replace the state dir with a regular
+	// file so the post-withdrawal save fails ENOTDIR while the loaded
+	// ownership stays intact.
+	statedir := filepath.Dir(statePath)
+	if err := os.RemoveAll(statedir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statedir, []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.WithdrawForReset(context.Background(), &config.DHCPServerConfig{DynamicDNS: provider}); err == nil {
+		t.Fatal("post-withdrawal save failure must fail factory reset closed")
+	}
+}
+
+func TestLeaseResetWithdrawalIncludesBackendConstructionError10769(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "ddns.json")
+	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
+	owned := ownedRecord{
+		Family: 4, Identity: "client", Address: "192.0.2.8", FQDN: "client.example.test",
+		ForwardType: "A", PTRName: "8.2.0.192.in-addr.arpa", TTL: 300,
+		BackendFingerprint: dhcpBackendFingerprint(policyFromConfig(provider), provider),
+	}
+	writeResetState10769(t, statePath, owned)
+	m := newManagerForTesting(nil, newFakeUpdater(), statePath, "", "", "node0", time.Now)
+	m.newUpdater = func(ddnsPolicy, *config.DHCPDynamicDNSConfig) (DNSUpdater, error) {
+		return nil, fmt.Errorf("dial 192.0.2.53:53: connection refused")
+	}
+
+	err := m.WithdrawForReset(context.Background(), &config.DHCPServerConfig{DynamicDNS: provider})
+	if err == nil {
+		t.Fatal("backend construction failure must fail factory reset closed")
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("withdrawal error must carry the construction root cause, got %v", err)
+	}
+	if got := len(m.state.all()); got != 1 {
+		t.Fatalf("failed withdrawal must retain delete authority, got %d records", got)
 	}
 }

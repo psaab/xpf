@@ -42,11 +42,23 @@ func (m *Manager) WithdrawForReset(ctx context.Context, cfg *config.DHCPServerCo
 			errs = append(errs, fmt.Errorf("ddns: cannot prove the publish backend for %s during factory reset", owned.FQDN))
 			continue
 		}
+		// Surface-B reconstructability guard (#10769 d05-F6): deleteOwnedLocked
+		// drops an entry whose address no longer parses WITHOUT issuing a wire
+		// delete (manager.go, the wedged-reconcile escape hatch). On the reset
+		// path that drop would let the post-withdrawal empty-store check
+		// authorize credential erasure for a record that was never deleted.
+		// Uncertain cleanup authority must fail the reset closed instead, so
+		// validate BEFORE deleting and preserve the entry on any doubt.
+		if _, err := buildLeaseRecord(owned.FQDN, owned.Address, owned.TTL); err != nil {
+			errs = append(errs, fmt.Errorf("ddns: cannot safely withdraw %s for factory reset: stored ownership has no reconstructable address: %w", owned.FQDN, err))
+			continue
+		}
 		idx := famIdx(owned.Family)
 		var updater DNSUpdater
+		var newUpdaterErr error
 		currentFP := dhcpBackendFingerprint(policies[idx], configs[idx])
 		if currentFP != "" && currentFP == owned.BackendFingerprint && m.newUpdater != nil {
-			updater, _ = m.newUpdater(policies[idx], configs[idx])
+			updater, newUpdaterErr = m.newUpdater(policies[idx], configs[idx])
 		}
 		// The live, in-process anchor is safe only when its saved identity proves
 		// it is the endpoint that published this record. This also supports a
@@ -59,7 +71,11 @@ func (m *Manager) WithdrawForReset(ctx context.Context, cfg *config.DHCPServerCo
 			}
 		}
 		if updater == nil || isNopUpdater(updater) {
-			errs = append(errs, fmt.Errorf("ddns: cannot safely withdraw %s for factory reset: no live backend matches its stored fingerprint", owned.FQDN))
+			if newUpdaterErr != nil {
+				errs = append(errs, fmt.Errorf("ddns: cannot safely withdraw %s for factory reset: no live backend matches its stored fingerprint (backend construction failed: %v)", owned.FQDN, newUpdaterErr))
+			} else {
+				errs = append(errs, fmt.Errorf("ddns: cannot safely withdraw %s for factory reset: no live backend matches its stored fingerprint", owned.FQDN))
+			}
 			continue
 		}
 		if err := m.deleteOwnedLocked(ctx, updater, owned); err != nil {
