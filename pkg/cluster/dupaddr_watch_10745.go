@@ -193,10 +193,10 @@ type duplicateIdentityReplayCache struct {
 }
 
 // checkAndRecord reports whether nonce was already recorded live, and records
-// it when it was not. deadline is when the entry stops suppressing replays
-// (BEACON-02: max(receipt, stamp)+MaxAge, so a skewed-future beacon's nonce
-// always outlives its timestamp's validity). At capacity, expired entries go
-// first and the single oldest survivor
+// it when it was not. deadline is the last instant the entry suppresses
+// replays, inclusive (BEACON-02: max(receipt, stamp)+MaxAge, so a
+// skewed-future beacon's nonce always outlives its timestamp's validity).
+// At capacity, expired entries go first and the single oldest survivor
 // (earliest deadline) is evicted only when nothing had expired — eviction
 // order is by age, never arbitrary, so a flood displaces the entries
 // closest to natural expiry first.
@@ -206,12 +206,12 @@ func (c *duplicateIdentityReplayCache) checkAndRecord(nonce [16]byte, deadline t
 	if c.entries == nil {
 		c.entries = make(map[[16]byte]time.Time)
 	}
-	if at, seen := c.entries[nonce]; seen && now.Before(at) {
+	if at, seen := c.entries[nonce]; seen && !now.After(at) {
 		return true
 	}
 	if len(c.entries) >= duplicateIdentityReplayCap {
 		for seen, at := range c.entries {
-			if !now.Before(at) {
+			if now.After(at) {
 				delete(c.entries, seen)
 			}
 		}
@@ -231,14 +231,16 @@ func (c *duplicateIdentityReplayCache) checkAndRecord(nonce [16]byte, deadline t
 	return false
 }
 
-// sweep drops entries whose suppression deadline has passed. Called by the
+// sweep drops entries whose suppression deadline has passed. The deadline
+// instant itself still suppresses (inclusive, matching freshness acceptance
+// at exactly +-30s); only strictly-later sweeps reap. Called by the
 // watcher's periodic sweep loop, so expiry never depends on further matching
 // traffic arriving.
 func (c *duplicateIdentityReplayCache) sweep(now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for seen, at := range c.entries {
-		if !now.Before(at) {
+		if now.After(at) {
 			delete(c.entries, seen)
 		}
 	}

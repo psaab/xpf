@@ -647,3 +647,55 @@ func TestDuplicateIdentitySendIntervalFloorsAt10PerSecond_10745(t *testing.T) {
 		t.Fatalf("5s heartbeat yields beacon interval %v, want unchanged 5s", got)
 	}
 }
+
+// TestDuplicateIdentityReplayCoversAcceptedIntervalExactly_10745 pins the
+// R2-3 alignment: freshness accepts delta exactly +-30s (inclusive), so
+// replay suppression must cover the accepted interval exactly — suppressed
+// at the last accepted timestamp, rejected immediately beyond. Fixed
+// wall-clock base keeps the equality instants deterministic.
+func TestDuplicateIdentityReplayCoversAcceptedIntervalExactly_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+	w := newDuplicateIdentityWatcher(mgr, "em0", nil, nil, nil, time.Second, mgr.beaconSenderID())
+	stamp := time.Unix(1700000000, 0)
+	edge := stamp.Add(duplicateIdentityBeaconMaxAge) // last accepted instant
+	foreign := beaconTestInstance(t)
+	if foreign == mgr.beaconSenderID() {
+		t.Fatal("fixture collision: foreign instance equals the manager's stable ID")
+	}
+	frame, err := marshalDuplicateIdentityBeacon(beaconTestCluster, beaconTestNode,
+		[]byte(beaconTestPSK), foreign, stamp)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	// First sighting at the stamp itself warns and records deadline edge.
+	w.handleBeacon(frame, stamp)
+	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
+		t.Fatalf("first delivery produced %d warnings, want 1", got)
+	}
+	// At the last accepted instant the same packet is a suppressed replay,
+	// not a new duplicate (strict-expiry code warns here: the R2-3 gap).
+	mgr.mu.Lock()
+	mgr.lastDupNodeIDWarn = time.Time{}
+	mgr.mu.Unlock()
+	w.handleBeacon(frame, edge)
+	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
+		t.Fatalf("replay at the last accepted instant produced %d warnings, want 1 (suppressed)", got)
+	}
+	// One nanosecond later the packet is freshness-rejected: still silent,
+	// and the sweep now reaps the entry.
+	w.handleBeacon(frame, edge.Add(time.Nanosecond))
+	if got := beaconHistoryCount(mgr, "authenticated control-link beacon"); got != 1 {
+		t.Fatalf("stale delivery produced %d warnings, want 1 (rejected)", got)
+	}
+	if got := mgr.beaconReplay.len(); got != 1 {
+		t.Fatalf("cache holds %d entries before the sweep, want the live 1", got)
+	}
+	mgr.beaconReplay.sweep(edge)
+	if got := mgr.beaconReplay.len(); got != 1 {
+		t.Fatalf("sweep at the deadline instant holds %d entries, want 1 (inclusive)", got)
+	}
+	mgr.beaconReplay.sweep(edge.Add(time.Nanosecond))
+	if got := mgr.beaconReplay.len(); got != 0 {
+		t.Fatalf("sweep past the deadline holds %d entries, want 0", got)
+	}
+}
