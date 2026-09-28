@@ -197,16 +197,19 @@ func (s *Server) runZeroize(ctx context.Context) error {
 			archiveDir = configuredArchiveDir
 		}
 	}
-	// Snapshot configured firewall-log names immediately before the shared wipe
-	// runs. This closure executes inside ZeroizeFn's apply gate, so a commit
-	// that was waiting for the gate cannot add a destination after the
-	// inventory snapshot and escape erasure (#10300). The helper path is
-	// snapshotted from the in-memory active config for the same reason: the
-	// wipe erases the config it derives from, and daemon post-verification
-	// plus boot repair need the pre-wipe path recorded in the flag.
-	helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
+	// Snapshot configured firewall-log names and the helper state path
+	// immediately before the shared wipe runs. This closure executes
+	// inside ZeroizeFn's apply gate, so a commit that was waiting for the
+	// gate cannot add a destination (or change the helper state file)
+	// after the snapshot and escape erasure (#10300): snapshotting
+	// before the gate would let an interleaving commit move the state
+	// file first, recording a stale path the boot repair then sweeps
+	// instead of the residue. The wipe erases the config both derive
+	// from, and daemon post-verification plus boot repair need the
+	// pre-wipe path recorded in the flag.
 	wipe := func() error {
 		logInventory := ZeroizeLogInventoryFromConfig(s.store.ActiveConfig())
+		helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
 		return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, logInventory, zeroizeCompletion{pending: true, helperPath: helperPath})
 	}
 	if s.zeroizeFn != nil {

@@ -190,3 +190,56 @@ func TestGatedZeroizeWipeRecordsPending10769(t *testing.T) {
 		t.Fatal("gated wipe must record the pre-wipe helper path")
 	}
 }
+
+// RED on revert: snapshotting the helper path before the apply gate lets a
+// commit delayed at the gate move the state file first, recording a stale
+// path the boot repair then sweeps instead of the residue.
+func TestGatedZeroizeSnapshotsHelperPathInsideGate10769(t *testing.T) {
+	origWipe := performZeroizeWipeWithLogInventory
+	origStop := scheduleStopDaemon
+	t.Cleanup(func() {
+		performZeroizeWipeWithLogInventory = origWipe
+		scheduleStopDaemon = origStop
+	})
+	var got zeroizeCompletion
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, c zeroizeCompletion) error {
+		got = c
+		return nil
+	}
+	scheduleStopDaemon = func() {}
+	dir := t.TempDir()
+	store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))
+	commitStateFile := func(path string) {
+		t.Helper()
+		if err := store.EnterConfigure(); err != nil {
+			t.Fatal(err)
+		}
+		set := "set system dataplane-type userspace\n" +
+			"set system dataplane state-file " + path + "\n"
+		if _, err := store.LoadSet(set); err != nil {
+			t.Fatalf("LoadSet: %v", err)
+		}
+		if _, err := store.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		store.ExitConfigure()
+	}
+	pathA := filepath.Join(dir, "a", "userspace-dp.json")
+	pathB := filepath.Join(dir, "b", "userspace-dp.json")
+	commitStateFile(pathA)
+	s := &Server{
+		store: store,
+		zeroizeFn: func(_ context.Context, wipe func() error) error {
+			// Model the commit delayed at the gate: it lands after
+			// runZeroize's entry but before the wipe runs inside it.
+			commitStateFile(pathB)
+			return wipe()
+		},
+	}
+	if _, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "zeroize"}); err != nil {
+		t.Fatalf("SystemAction(zeroize): %v", err)
+	}
+	if !got.pending || got.helperPath != pathB {
+		t.Fatalf("pending completion = %+v, want pending with helper path %q", got, pathB)
+	}
+}
