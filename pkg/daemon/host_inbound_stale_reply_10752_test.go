@@ -556,6 +556,32 @@ func nftTextRuleHasPort(line string, want uint16) bool {
 	return false
 }
 
+// TestNotrackEvidenceLogPresent10752 pins the committed verbose-run snapshot
+// for the no-conntrack proof (Opus4 F3): reviewers without a privileged
+// netns can read the per-tuple hit lines and dump check here instead of
+// re-running. The live subtest re-proves the same facts on every run, so
+// this only guards the snapshot against accidental deletion or silent edit
+// (structural markers, not exact ports/timings, which vary per run).
+func TestNotrackEvidenceLogPresent10752(t *testing.T) {
+	raw, err := os.ReadFile("testdata/notrack_evidence_10752.log")
+	if err != nil {
+		t.Fatalf("committed NOTRACK evidence log missing: %v", err)
+	}
+	for _, marker := range []string{
+		"NOTRACK pre rule",
+		"NOTRACK out rule",
+		"addrOff=16 portOff=2",
+		"conntrack dump:",
+		"none reference box",
+		"availability-no-conntrack",
+		"--- PASS",
+	} {
+		if !strings.Contains(string(raw), marker) {
+			t.Errorf("evidence log must contain %q (recapture from a verbose child run if the format changed)", marker)
+		}
+	}
+}
+
 func TestHostInboundStaleReplyPacketPath10752And10764(t *testing.T) {
 	const childEnv = "XPF_HOSTINBOUND_STALE_REPLY_NETNS_CHILD"
 	if os.Getenv(childEnv) == "1" {
@@ -850,7 +876,7 @@ func runStaleReplyNoConntrackPacketPath(t *testing.T, localIP, peerIP string) {
 		t.Fatalf("untracked ephemeral without conntrack was delivered (err %v), want DROP", err)
 	}
 
-	assertNotrackRulesHit(t, 2)
+	assertNotrackRulesHit(t, 161, uint16(ephemeralPort))
 	assertNoConntrackForUDPTuples(t, box, 161, uint16(ephemeralPort))
 }
 
@@ -960,36 +986,97 @@ func assertNoConntrackForUDPTuples(t *testing.T, box net.IP, ports ...uint16) {
 	t.Logf("conntrack dump: %d v4 flows, none reference box %v UDP ports %v", len(flows), box, ports)
 }
 
-// assertNotrackRulesHit reads back the raw-table rules and requires the
-// NOTRACK path to have matched the test traffic: at least one packet per
-// tuple in prerouting and in output. Per-rule counters are logged so -v
-// output retains the hit evidence. Without this, installed-but-never-matched
-// rules plus an empty conntrack table could fake the proof.
-func assertNotrackRulesHit(t *testing.T, tuples int) {
+// assertNotrackRulesHit reads back the raw-table rules and requires EACH
+// tuple's NOTRACK rules to have matched individually: per port, the
+// prerouting daddr/dport rule and the output daddr/dport rule (which catches
+// locally-generated loopback traffic) must each show >= 1 packet, while the
+// output saddr/sport rules must show exactly 0 (the box never sends in this
+// subtest — a hit there would mean confounding origination). Chain-wide sums
+// are NOT accepted: one tuple's duplicate hits must not mask another tuple
+// bypassing its rules. Every rule's key and count is logged so -v output
+// retains the evidence; a captured run is also committed at
+// testdata/notrack_evidence_10752.log.
+func assertNotrackRulesHit(t *testing.T, ports ...uint16) {
 	t.Helper()
 	c, err := gnft.New()
 	if err != nil {
 		netnsSkipOrFail(t, "open nftables conn for NOTRACK readback", err)
 	}
 	tbl := &gnft.Table{Family: gnft.TableFamilyIPv4, Name: "xpf_nt_10752"}
+	type ruleKey struct {
+		chain   string
+		addrOff uint32
+		portOff uint32
+		port    uint16
+	}
+	hits := map[ruleKey]uint64{}
 	for _, chain := range []string{"pre", "out"} {
 		rules, err := c.GetRules(tbl, &gnft.Chain{Name: chain, Table: tbl})
 		if err != nil {
 			t.Fatalf("read back NOTRACK %s rules: %v", chain, err)
 		}
-		var packets uint64
 		for i, r := range rules {
-			for _, e := range r.Exprs {
-				if ctr, ok := e.(*expr.Counter); ok {
-					t.Logf("NOTRACK %s rule %d: packets=%d bytes=%d", chain, i, ctr.Packets, ctr.Bytes)
-					packets += ctr.Packets
-				}
+			addrOff, portOff, port, packets, ok := notrackRuleKey(r.Exprs)
+			if !ok {
+				t.Fatalf("NOTRACK %s rule %d has unexpected shape (cannot attribute hits)", chain, i)
 			}
-		}
-		if packets < uint64(tuples) {
-			t.Fatalf("NOTRACK %s chain matched %d packets, want >= %d (rules installed but traffic bypassed them?)", chain, packets, tuples)
+			key := ruleKey{chain: chain, addrOff: addrOff, portOff: portOff, port: port}
+			hits[key] += packets
+			t.Logf("NOTRACK %s rule %d: addrOff=%d portOff=%d port=%d packets=%d", chain, i, addrOff, portOff, port, packets)
 		}
 	}
+	for _, port := range ports {
+		for _, want := range []struct {
+			key ruleKey
+			min uint64
+			max uint64
+			why string
+		}{
+			{ruleKey{"pre", 16, 2, port}, 1, ^uint64(0), "prerouting must NOTRACK the inbound tuple"},
+			{ruleKey{"out", 16, 2, port}, 1, ^uint64(0), "output must NOTRACK the locally-generated inbound tuple before conntrack sees it"},
+			{ruleKey{"out", 12, 0, port}, 0, 0, "box-originated rule must stay idle (box never sends here)"},
+		} {
+			got := hits[want.key]
+			if got < want.min || got > want.max {
+				t.Fatalf("NOTRACK %s addrOff=%d portOff=%d port=%d: packets=%d, want %d..%d (%s)", want.key.chain, want.key.addrOff, want.key.portOff, want.key.port, got, want.min, want.max, want.why)
+			}
+		}
+	}
+}
+
+// notrackRuleKey identifies one test-constructed NOTRACK rule by its network
+// address offset (16=daddr, 12=saddr), transport port offset (2=dport,
+// 0=sport), and compared port, plus its counter's packet count. Only the
+// shapes installNotrackTestRules emits are recognized.
+func notrackRuleKey(exprs []expr.Any) (addrOff, portOff uint32, port uint16, packets uint64, ok bool) {
+	var seenAddr, seenPort, seenCounter bool
+	for _, e := range exprs {
+		switch x := e.(type) {
+		case *expr.Payload:
+			switch x.Base {
+			case expr.PayloadBaseNetworkHeader:
+				if x.Len != 4 {
+					return 0, 0, 0, 0, false
+				}
+				addrOff, seenAddr = x.Offset, true
+			case expr.PayloadBaseTransportHeader:
+				if x.Len != 2 {
+					return 0, 0, 0, 0, false
+				}
+				portOff = x.Offset
+			}
+		case *expr.Cmp:
+			if len(x.Data) == 2 {
+				port, seenPort = binary.BigEndian.Uint16(x.Data), true
+			}
+		case *expr.Counter:
+			packets, seenCounter = x.Packets, true
+		}
+	}
+	if !seenAddr || !seenPort || !seenCounter {
+		return 0, 0, 0, 0, false
+	}
+	return addrOff, portOff, port, packets, true
 }
 
 func isTimeout(err error) bool {
