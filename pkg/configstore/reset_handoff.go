@@ -28,9 +28,13 @@ var (
 	ErrResetHandoffRebootRequired = errors.New("factory reset requires a reboot before new configuration")
 )
 
+// maxResetHandoffBytes bounds handoff-flag and boot-id reads: both are tiny,
+// and authoritative store reads must be bounded (#8597).
+const maxResetHandoffBytes = 1 << 16
+
 // CurrentBootID returns the kernel boot ID, stable for the running boot.
 func CurrentBootID() (string, error) {
-	data, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	data, err := ReadBoundedFile("/proc/sys/kernel/random/boot_id", maxResetHandoffBytes)
 	if err != nil {
 		return "", fmt.Errorf("read boot id: %w", err)
 	}
@@ -55,10 +59,11 @@ func WriteResetHandoff(bootID, dirty string) error {
 	}
 	return nil
 }
+
 // ReadResetHandoff parses the handoff flag. present is false when no flag
 // exists. A corrupt flag is returned as an error (fail closed).
 func ReadResetHandoff() (bootID, dirty string, present bool, err error) {
-	data, rerr := os.ReadFile(ResetHandoffPath)
+	data, rerr := ReadBoundedFile(ResetHandoffPath, maxResetHandoffBytes)
 	if errors.Is(rerr, os.ErrNotExist) {
 		return "", "", false, nil
 	}
