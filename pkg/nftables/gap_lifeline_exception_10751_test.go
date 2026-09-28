@@ -150,14 +150,18 @@ func TestGapLifelineExceptionBothIngress10751(t *testing.T) {
 
 // TestGapExceptionDiscriminatesVRFMembers10751 is Opus9's exact shape
 // with a REAL VRF: fxp0 (true lifeline) and fxp1 (non-lifeline) enslaved
-// in vrf-mgmt, W shared across fxp0 and a data interface, X data-only.
-// The gap (Uncovered {W,X}, Shared {W}, lifelines {em0,fxp0} — NO
-// vrf-mgmt blanket) must admit W via fxp0 (sdifname recovers the slave
-// where iifname shows the master), deny W via fxp1, deny W via data,
-// and deny X. Listeners: vrf-bound for enslaved ingress (unbound
-// sockets cannot receive it — VRF socket isolation), unbound for data
-// ingress. fxp1's peer uses a static ND entry (W is not assigned there,
-// so dynamic resolution has nothing to answer).
+// in vrf-mgmt, W shared across fxp0, fxp1, and a data interface (fxp1
+// carries W purely for L3 deliverability — VRF slaves deliver only
+// locally-assigned destinations — while lifeline status comes from the
+// interface NAME), X data-only. The gap (Uncovered {W,X}, Shared {W},
+// lifelines {em0,fxp0} — NO vrf-mgmt blanket) must admit W via fxp0
+// (sdifname recovers the slave where iifname shows the master), deny W
+// via fxp1, deny W via data, and deny X. Listeners: vrf-bound for
+// enslaved ingress (unbound sockets cannot receive it — VRF socket
+// isolation), unbound for data ingress. Two delivery controls pin the
+// W-fxp1 negative: the exact W-via-fxp1 packet first WITHOUT any filter
+// (in-fixture control — must arrive), plus unlisted Y2 via fxp1 after
+// the install (transport control — must arrive).
 func TestGapExceptionDiscriminatesVRFMembers10751(t *testing.T) {
 	enterPrivateNetns(t)
 	const (
@@ -191,24 +195,12 @@ func TestGapExceptionDiscriminatesVRFMembers10751(t *testing.T) {
 	// here — verified: static ND plus off-link W timed out without any
 	// firewall). Lifeline status comes from the interface NAME (fxp1 is
 	// non-lifeline), and the verdict keys on ingress plus daddr VALUE,
-	// so the exception still must deny it. Y2 (unlisted) proves fxp1-link
-	// delivery independently, so the W-fxp1 negative below observes a
-	// firewall verdict rather than broken delivery.
+	// so the exception still must deny it.
 	mustAddrAdd10751(t, fxp1, wAddr+"/64")
 	mustAddrAdd10751(t, fxp1, y2Addr+"/64")
 	mustAddrAdd10751(t, dataLink, wAddr+"/64")
 	mustAddrAdd10751(t, dataLink, xAddr+"/64")
 	waitAddrsValid10751(t, map[string][]string{"fxp0": {wAddr}, "fxp1": {wAddr, y2Addr}, unleasedTestNetdev10751: {wAddr, xAddr}})
-
-	in := NewNetlinkInstaller()
-	spec := GapFenceSpec{
-		UncoveredV6:     []string{wAddr, xAddr},
-		SharedV6:        []string{wAddr},
-		LifelineNetdevs: []string{"em0", "fxp0"},
-	}
-	if err := in.InstallGapFence(spec); err != nil {
-		t.Fatalf("gap install: %v", err)
-	}
 
 	vrfSock, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 4000})
 	if err != nil {
@@ -245,22 +237,49 @@ func TestGapExceptionDiscriminatesVRFMembers10751(t *testing.T) {
 	oifFxp1 := linkIndex10751(t, "vpeer1")
 	oifData := linkIndex10751(t, "vpeer2")
 	wIP, xIP := net.ParseIP(wAddr), net.ParseIP(xAddr)
+	// IN-FIXTURE DELIVERY CONTROL (Opus10 M1): the exact W-via-fxp1
+	// packet with NO filter installed (fresh netns: no tables, policy
+	// accept) MUST reach the VRF-bound listener. This rules out the
+	// false-negative reading where strict VRF route lookup drops W on
+	// fxp1 regardless of the filter — Y2 alone cannot, since it proves
+	// fxp1 transport for a DIFFERENT address. Doubles as the vpeer1
+	// source-readiness wait. Distinct payload: strays are ignored by
+	// the content-checked exchanges below.
+	if !udpExchangeRetryWant10751(t, vrfSock, func() error {
+		return sendToScope10751(t, fxp1Sender, []byte("pre-w"), wIP, 4000, oifFxp1)
+	}, []byte("pre-w"), 300*time.Millisecond, 10*time.Second) {
+		dumpNetState10751(t)
+		t.Fatal("W via fxp1 was dropped with NO filter installed: fxp1/W delivery broken (infra, not verdict)")
+	}
+	in := NewNetlinkInstaller()
+	spec := GapFenceSpec{
+		UncoveredV6:     []string{wAddr, xAddr},
+		SharedV6:        []string{wAddr},
+		LifelineNetdevs: []string{"em0", "fxp0"},
+	}
+	if err := in.InstallGapFence(spec); err != nil {
+		t.Fatalf("gap install: %v", err)
+	}
 	if !udpExchangeRetryWant10751(t, vrfSock, func() error {
 		return sendToScope10751(t, lifeSender, []byte("mgmt"), wIP, 4000, oifLife)
 	}, []byte("mgmt"), 300*time.Millisecond, 10*time.Second) {
 		dumpNetState10751(t)
 		t.Fatal("W via enslaved fxp0 was dropped: the sdifname exception is missing or shadowed (management lockout)")
 	}
-	// Delivery control for fxp1's link: unlisted Y2 must arrive (policy
-	// accept), proving the W-fxp1 negative below observes a firewall
-	// verdict rather than broken delivery. Doubles as the vpeer1 source
-	// readiness wait.
+	// Transport control for fxp1's link, kept alongside the pre-filter
+	// exact-packet control above: unlisted Y2 must STILL arrive after
+	// the install (policy accept), proving the gap did not break fxp1
+	// transport generally.
 	y2IP := net.ParseIP(y2Addr)
 	if !udpExchangeRetryWant10751(t, vrfSock, func() error {
 		return sendToScope10751(t, fxp1Sender, []byte("y2"), y2IP, 4000, oifFxp1)
 	}, []byte("y2"), 300*time.Millisecond, 10*time.Second) {
 		t.Fatal("Y2 via fxp1 link was dropped: fxp1-link delivery broken (infra, not verdict)")
 	}
+	// The discrimination negative: W-via-fxp1 must NOT arrive now. The
+	// pre-filter control above proved this exact packet reaches LOCAL_IN
+	// unfiltered, so a timeout here is the gap's DROP verdict — not a
+	// route-lookup false negative.
 	if udpExchangeWant10751(t, vrfSock, func() error {
 		return sendToScope10751(t, fxp1Sender, []byte("probe-fxp1"), wIP, 4000, oifFxp1)
 	}, []byte("probe-fxp1"), time.Second) {
