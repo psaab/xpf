@@ -643,33 +643,25 @@ Properties:
 - **Global exemptions preserved.** ESP/AH (proto 50/51), ICMP ND/PMTUD/error,
   and configured WireGuard listen ports (#5582) are never flushed by the
   ordinary matcher. ICMP echo conntrack is short-lived and left to age out.
-- **HIGH residual: exempt UDP, bare protocols, and ranges are NOT revoked
-  box-oriented.** BFD/RIP/SAP/LDP-UDP, DHCP/NTP client ports, bare IP protocols
-  (OSPF/PIM/VRRP/GRE/IGMP/RSVP/PGM/NHRP), and port ranges (traceroute) are never
-  flushed box-oriented nor guarded: the box originates control-plane datagrams
-  from those tuples, so a conntrack tuple alone cannot distinguish a stale
-  service reply from live control/client egress. After removing such a service,
-  box-originated hellos/adverts/probes recreate a box-oriented entry and peer
-  packets ride the broad reply accept — so restart/reboot alone does NOT clear
-  it: a restarted daemon immediately re-originates the same tuple. Effective
-  removal procedure (required; removal is only meaningful when decommissioning
-  the feature — if the daemon must keep running, keep its host-inbound): (1)
-  stop/disable the originator feature first (FRR: remove the BFD peer or `no
-  router rip`; VRRP: down the instance; chrony: stop chronyd or remove the
-  server; DHCP: release/stop the client); (2) delete any box-oriented tuple
-  (`conntrack -D -p udp -s <box-ip> --sport <port>`); (3) verify `conntrack -L`
-  shows no box-oriented entry for the tuple; (4) commit the host-inbound
-  removal. Why this holds: with no origination there is no box-oriented entry
-  to ride, and a peer-only packet afterwards is NEW (or briefly UNREPLIED) and
-  meets the destination/ingress deny for the removed service — no guard
-  needed, so nothing is unavoidable once the originator is stopped. Without
-  the delete, an idle entry expires on the ~120s UDP stream timeout after the
-  last packet (originator timers: BFD hellos sub-second, RIP updates 30s, NTP
-  polls 64–1024s, DHCP renewals hours), but a persistent peer sustains it, so
-  the delete plus verify is the durable step. The BFD packet-path subtest pins
-  the documented allow. Closing this without operator action needs per-socket
-  identity (mark/cgroup), not tuple matching, or tying origination to
-  host-inbound admit.
+- **HIGH residual: exempt/custom UDP, bare protocols, and ranges are NOT
+  revoked box-oriented.** BFD/RIP/SAP/LDP-UDP, DHCP/NTP client ports,
+  custom/non-catalog UDP (e.g. UDP 2222 admitted only packet-wide via
+  `any-service` — same catalog-miss keep and no guard as its TCP twin, plus
+  ongoing recreation via any box datagram since UDP has no loose gate), bare
+  IP protocols (OSPF/PIM/VRRP/GRE/IGMP/RSVP/PGM/NHRP), and port ranges
+  (traceroute) are never flushed box-oriented nor guarded: the box originates
+  datagrams from those tuples, so a conntrack tuple alone cannot distinguish a
+  stale service reply from live control/client egress. After removing such a
+  service, box-originated hellos/adverts/probes recreate a box-oriented entry
+  and peer packets ride the broad reply accept — so restart/reboot alone does
+  NOT clear it: a restarted daemon immediately re-originates the same tuple.
+  Removal requires the stop/disable + delete + verify + commit procedure
+  below; without the delete, an idle entry expires on the ~120s UDP stream
+  timeout (30s unreplied) after the last packet, but a persistent peer
+  sustains it, so delete plus verify is the durable step. The BFD packet-path
+  subtest pins the documented allow. Closing this without operator action
+  needs per-socket identity (mark/cgroup), not tuple matching, or tying
+  origination to host-inbound admit.
 - **HIGH residual: non-catalog/custom TCP and TCP client-role exempts are NOT
   revoked box-oriented (status-quo-ante, NOT a regression).** SSOT SSH is
   TCP/22-only, so a custom port such as 2222 (admitted only packet-wide via
@@ -728,6 +720,77 @@ Kernel netfilter conntrack on this appliance tracks only host-terminated /
 kernel-forwarded flows (transit forwarding runs through userspace-dp's own session
 table), so the swept table is small. Fail-on-revert proofs:
 `pkg/daemon/host_inbound_conntrack_flush_5566_test.go`.
+
+### Removal procedures for unguarded tuples
+
+Generic shape for every class below: (1) stop/disable the originator; (2)
+delete the box-oriented entries; (3) verify with the SAME filters (expect
+empty); (4) commit the host-inbound removal. Removal is only meaningful when
+decommissioning the feature — if the daemon must keep running, keep its
+host-inbound. Restart/reboot alone is never sufficient: a restarted daemon
+re-originates the same tuple.
+
+Delete/verify command shapes (run for BOTH `-f ipv4` and `-f ipv6` unless the
+class is single-family; conntrack-tools accepts numeric protos):
+
+- UDP tuple: `conntrack -D -p udp -s <box-ip> --sport <port> -f <fam>`; verify
+  `conntrack -L -p udp -s <box-ip> --sport <port> -f <fam>` shows nothing.
+- TCP tuple/exempt: `conntrack -D -p tcp -s <box-ip> --sport <port> -f <fam>`;
+  verify likewise. Additionally verify NO socket on the port: listeners via
+  `ss -ltn sport = :<port>`, any-state (established children, clients) via
+  `ss -tn '( sport = :<port> or dport = :<port> )'` — both must be empty.
+- Bare IP protocol (no ports; `--sport` does not apply): `conntrack -D -p
+  <num> -s <box-ip> -f <fam>` with 89 OSPF, 103 PIM, 112 VRRP, 47 GRE, 2 IGMP
+  (covers DVMRP, carried inside IGMP), 46 RSVP, 113 PGM, 54 NHRP; verify with
+  the same `-L` filters.
+- Port range (traceroute UDP 33434–33523): loop — `for p in $(seq 33434
+  33523); do conntrack -D -p udp -s <box-ip> --sport $p -f <fam>; done`,
+  verify by looping `-L` the same way. The broad alternative (`conntrack -D
+  -p udp -s <box-ip>`) also deletes legitimate box-originated ephemeral UDP
+  (DNS stub queries etc.) — they retransmit, but prefer the loop.
+
+Per-class originators, stop actions, and recurrence timers:
+
+| Class | Tuple | Originator on this appliance | Stop/disable action | Recurrence timer |
+|---|---|---|---|---|
+| BFD | UDP 3784/3785/4784 | FRR bfdd (one global daemon; every peer shares the sports) | remove/disable EVERY BFD peer on the tuple, or shutdown bfdd — one peer is not enough | sub-second hellos (300ms x3 detect default) |
+| RIP | UDP 520, mcast 224.0.0.9 | FRR ripd | `no router rip` / remove neighbors | 30s updates |
+| RIPng | UDP 521, mcast ff02::9 | no xpf-managed ripngd in-tree | stop any third-party ripngd (identify via `ss -lun sport = :521`) | 30s if present |
+| SAP | UDP 9875 | none in-tree | identify via `ss -lun sport = :9875`, stop the announcer | announce interval (minutes) if present |
+| LDP-UDP | UDP 646 | none in-tree (no FRR ldpd render) | identify via socket/conntrack, stop it | 5s/15s hellos if present |
+| DHCPv4 | UDP 67/68 | xpfd native dhcp.Manager client; Kea server/relay roles | delete the `dhcp` stanza (commit stops the client); disable Kea server/relay if configured | T1 renewals (lease-dependent, typically hours) |
+| DHCPv6 | UDP 546/547 | xpfd native dhcp.Manager | delete the `dhcpv6` stanza | T1/rebind (hours) |
+| NTP | UDP 123 | chrony (appliance NTP; `system ntp server` renders its sources) | remove `system ntp server` lines (commit reloads chrony) and/or stop chronyd; confirm no sport-123 socket (`ss -lun sport = :123`) to catch any non-chrony sender | polls 64–1024s |
+| OSPF/OSPFv3 | proto 89, mcast .5/.6 + ff02::5/6 | FRR ospfd/ospf6d | remove the area/interface, set `passive`, or down the protocol | 10s hellos |
+| PIM | proto 103, mcast .13 + ff02::d | none in-tree | identify + stop | 30s hellos if present |
+| VRRP | proto 112, mcast .18 + ff02::12 | xpfd native VRRP instances | delete/down the vrrp-group (VIP) | 1s adverts |
+| GRE | proto 47 | gr- tunnel units | delete/disable the tunnel unit | data-driven (no hello to quote) |
+| IGMP | proto 2 | kernel reports on group joins (no daemon) | leave groups (`ip maddr del <group> dev <if>` for manual joins; stopping the joining socket/daemon leaves the rest) | query-driven |
+| DVMRP | proto 2 (in IGMP), mcast .4 | none in-tree | same as IGMP + identify | — |
+| RSVP | proto 46 | none in-tree | identify + stop | 30s refresh if present |
+| PGM | proto 113 | none in-tree | identify + stop | — |
+| NHRP | proto 54 | none in-tree | identify + stop | registration timers if present |
+| traceroute range | UDP 33434–33523 | operator-initiated probes (no daemon) | stop probing | N/A (manual) |
+| custom UDP | UDP \<port\> | listener / explicit-bind client | stop both; any NEW box datagram from the sport recreates the entry | app-driven |
+| custom TCP | TCP \<port\> | listener / explicit-bind client | stop listener + verify no socket (`ss -ltn` AND `ss -tn`); no reformation after delete (`loose=0`) | — (close/timeout only) |
+| FTP-data 20 | TCP 20 | FTP server active transfers (never listens) | disable active FTP / stop transfers; verify `ss -tn sport = :20` empty | transfer-driven |
+| BGP 179 | TCP 179 | FRR bgpd sessions + listener | shut down BGP sessions (`neighbor <peer> shutdown`) or stop bgpd — listener-stop alone leaves established children originating | 60s keepalives / 180s hold |
+| rsh 512–514 | TCP 512/513/514 | rshd servers + rsh clients (privileged sport bind) | stop server AND clients | session-driven |
+| MSDP 639 | TCP 639 | none in-tree | identify + stop | 60s keepalives if present |
+| LDP-TCP 646 | TCP 646 | none in-tree (no FRR ldpd render) | identify + stop | session-driven if present |
+
+Why this holds. Unicast: with no origination there is no box-oriented entry
+to ride, and a peer-only packet afterwards is NEW (or briefly UNREPLIED) and
+meets the destination/ingress deny for the removed service — no guard needed,
+so nothing is unavoidable once the originator is stopped. Multicast
+(OSPF/PIM/VRRP/RIP groups above): host-bound multicast is admitted packet-wide
+via policy accept with no per-zone scoping (#4455), so post-delete peer
+packets do NOT meet a deny — non-delivery there relies on group-leave:
+stopping the daemon leaves its groups (verify `ip maddr show dev <if>` shows
+no group), and the kernel drops unjoined-group packets for lack of a socket.
+IS-IS needs no procedure (L2-only, never in IP conntrack); ICMP
+router-discovery is globally accepted/short-lived.
+
 
 ### Revocation failure is retried, counted, and published (#6802)
 
