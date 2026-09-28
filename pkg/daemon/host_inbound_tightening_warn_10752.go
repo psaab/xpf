@@ -574,25 +574,35 @@ func hostInboundZoneReplacementStates10752(oldCfg, newCfg *config.Config, zone s
 }
 
 // hostInboundScopesForAddrs10752 maps kept box addresses to the OLD effective
-// scope keys whose enforcement actually covered each address. Every owned
-// stanza unit contributes its interface scope — the member's enforcement,
-// whether the OLD generation sourced it from an override or the zone stanza
-// (an override added in NEW still narrows the member's OLD zone-sourced
-// admission). The zone scope joins only where NO override applied, since
-// the zone stanza is effective nowhere on an override-covered member. Unit
-// ownership comes from the OLD interface stanzas (static addresses plus
-// VRRP virtual addresses, both authoritative addr→unit) and from
-// singleton-interface OLD views (whose every address, including stable
-// RETH link-locals, belongs to that unit's effective-token group); zone
-// and override applicability come from the OLD ownership map and
-// canonical override index. Only addresses on no unit anywhere —
-// multi-interface-view derived addresses — fall back to the OLD views'
-// addr→zone membership at zone granularity. Addresses covered nowhere
-// (lifeline-only, unzoned) map to no scope. Kept flows can only have been
-// stranded by transitions in the returned scopes. Scope identity is
-// preserved end to end: projection intersects and names these exact keys.
+// scope keys whose enforcement actually covered each address, group by
+// group over the OLD views (each view is one effective-token group). A
+// group contributes the interface scope of every owned member unit it can
+// place the address on — authoritative stanza/VRRP ownership where it
+// exists (a VIP joins its unit's group, so a VIP on an overridden unit
+// enforces the override), else the group's own unit membership, which
+// covers derived addresses (stable RETH link-locals) with the narrowed
+// owners rather than dropping them. The zone scope joins per unit only
+// where NO override applied, since the zone stanza is effective nowhere
+// on an override-covered member — and per group only when the group
+// yielded no unit scope at all (bare/base groups), so a shared derived
+// address keeps its zone coverage alongside unit pins. Ownership and
+// override applicability come from the OLD ownership map and canonical
+// override index. Addresses covered nowhere (lifeline-only, unzoned)
+// map to no scope. Kept flows can only have been stranded by transitions
+// in the returned scopes. Scope identity is preserved end to end:
+// projection intersects and names these exact keys.
 func hostInboundScopesForAddrs10752(oldCfg *config.Config, oldViews []dpuserspace.ZoneHostInboundView, addrs []netip.Addr) map[netip.Addr][]string {
+	targets := make(map[netip.Addr]bool, len(addrs))
+	for _, addr := range addrs {
+		targets[addr.Unmap()] = true
+	}
+	// Tier 1 (authoritative): stanza static + VRRP virtual addresses pin
+	// their unit. Static addresses are CIDR; VRRP virtual addresses are
+	// bare or CIDR (mirroring the view builder's hostIPFromCIDR).
 	addrUnits := map[netip.Addr][]string{}
+	var owners map[string]string
+	var overrides map[string]*config.HostInboundTraffic
+	var lifelines map[string]bool
 	if oldCfg != nil {
 		for base, ifCfg := range oldCfg.Interfaces.Interfaces {
 			if ifCfg == nil {
@@ -603,11 +613,6 @@ func hostInboundScopesForAddrs10752(oldCfg *config.Config, oldViews []dpuserspac
 					continue
 				}
 				literal := oldCfg.SplitInterfaceUnitRef(fmt.Sprintf("%s.%d", base, num)).Literal
-				// Static addresses are CIDR; VRRP virtual addresses are
-				// bare or CIDR (mirroring the view builder's
-				// hostIPFromCIDR). Both pin the address to this unit:
-				// VIPs join their unit's effective-token group, so a VIP
-				// on an overridden unit enforces the override.
 				owns := func(raw string) {
 					if ip, err := netip.ParseAddr(raw); err == nil {
 						addrUnits[ip.Unmap()] = append(addrUnits[ip.Unmap()], literal)
@@ -631,32 +636,9 @@ func hostInboundScopesForAddrs10752(oldCfg *config.Config, oldViews []dpuserspac
 				}
 			}
 		}
-		// Singleton-view units: a view with exactly one interface owns
-		// every address in it (stable RETH link-locals and any other
-		// derived addresses join their unit's effective-token group).
-		// Multi-interface views stay ambiguous and keep the zone
-		// fallback below; bare singletons cannot form unit scopes.
-		for _, v := range oldViews {
-			if len(v.Interfaces) != 1 {
-				continue
-			}
-			split := oldCfg.SplitInterfaceUnitRef(v.Interfaces[0])
-			if !split.HasUnit {
-				continue
-			}
-			for _, raw := range append(append([]string(nil), v.V4Addrs...), v.V6Addrs...) {
-				if ip, err := netip.ParseAddr(raw); err == nil {
-					addrUnits[ip.Unmap()] = append(addrUnits[ip.Unmap()], split.Literal)
-				}
-			}
-		}
-	}
-	var owners map[string]string
-	var overrides map[string]*config.HostInboundTraffic
-	if oldCfg != nil {
 		owners = config.InterfaceZoneMap(oldCfg)
 		overrides = hostInboundOverrideIndex10752(oldCfg)
-		lifelines := config.HostInboundLifelineSet(oldCfg)
+		lifelines = config.HostInboundLifelineSet(oldCfg)
 		for addr, units := range addrUnits {
 			kept := units[:0]
 			for _, unit := range units {
@@ -667,48 +649,73 @@ func hostInboundScopesForAddrs10752(oldCfg *config.Config, oldViews []dpuserspac
 			addrUnits[addr] = kept
 		}
 	}
-	viewZones := map[netip.Addr][]string{}
+	acc := map[netip.Addr][]string{}
+	seen := map[netip.Addr]map[string]bool{}
+	add := func(addr netip.Addr, scope string) {
+		if seen[addr] == nil {
+			seen[addr] = map[string]bool{}
+		}
+		if !seen[addr][scope] {
+			seen[addr][scope] = true
+			acc[addr] = append(acc[addr], scope)
+		}
+	}
 	for _, v := range oldViews {
+		var vifaces []string
+		if oldCfg != nil {
+			for _, raw := range v.Interfaces {
+				if s := oldCfg.SplitInterfaceUnitRef(raw); s.HasUnit {
+					vifaces = append(vifaces, s.Literal)
+				}
+			}
+		}
 		for _, raw := range append(append([]string(nil), v.V4Addrs...), v.V6Addrs...) {
 			ip, err := netip.ParseAddr(raw)
 			if err != nil {
 				continue
 			}
-			viewZones[ip.Unmap()] = append(viewZones[ip.Unmap()], v.Zone)
+			addr := ip.Unmap()
+			if !targets[addr] {
+				continue
+			}
+			var vu []string
+			if tier1 := addrUnits[addr]; len(tier1) > 0 {
+				inView := map[string]bool{}
+				for _, u := range vifaces {
+					inView[u] = true
+				}
+				for _, u := range tier1 {
+					if inView[u] {
+						vu = append(vu, u)
+					}
+				}
+			} else {
+				vu = vifaces
+			}
+			var scoped []string
+			for _, u := range vu {
+				if owners[u] == "" || config.HostInboundLifelineInterface(u, lifelines) {
+					continue
+				}
+				scoped = append(scoped, u)
+			}
+			if len(scoped) == 0 {
+				add(addr, "zone:"+v.Zone)
+				continue
+			}
+			for _, u := range scoped {
+				zone := owners[u]
+				add(addr, "zone:"+zone+"|iface:"+u)
+				if _, ok := overrides[u]; !ok {
+					add(addr, "zone:"+zone)
+				}
+			}
 		}
 	}
 	out := map[netip.Addr][]string{}
-	for _, addr := range addrs {
-		seen := map[string]bool{}
-		var scopes []string
-		add := func(scope string) {
-			if !seen[scope] {
-				seen[scope] = true
-				scopes = append(scopes, scope)
-			}
-		}
-		for _, unit := range addrUnits[addr.Unmap()] {
-			zone := owners[unit]
-			if zone == "" {
-				continue
-			}
-			add("zone:" + zone + "|iface:" + unit)
-			if _, ok := overrides[unit]; !ok {
-				add("zone:" + zone)
-			}
-		}
-		// Zone-level fallback only when no unit pinned the address: an
-		// override-covered address must never attribute to the zone
-		// stanza, which is effective nowhere on it.
-		if len(scopes) == 0 {
-			for _, zone := range viewZones[addr.Unmap()] {
-				add("zone:" + zone)
-			}
-		}
-		if len(scopes) > 0 {
-			sort.Strings(scopes)
-			out[addr] = scopes
-		}
+	for addr, scopes := range acc {
+		sort.Strings(scopes)
+		out[addr] = scopes
 	}
 	return out
 }

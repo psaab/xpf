@@ -7,6 +7,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
@@ -685,13 +686,13 @@ func TestWithTighteningWarningsVIPOverrideIsolation10752(t *testing.T) {
 	}
 }
 
-// TestHostInboundScopesForAddrsSingleton10752 pins the singleton-view
-// unit rule directly: a derived address (stable link-local shape) in a
-// single-interface view attributes to that unit's scopes, while a
-// multi-interface view keeps the zone fallback.
-func TestHostInboundScopesForAddrsSingleton10752(t *testing.T) {
-	oldCfg := hostInboundTestConfig()
-	oldCfg.Security.Zones["wan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"any-service"}}
+// TestHostInboundScopesForAddrsProvenance10752 pins group provenance
+// directly: a derived address (stable link-local shape) attributes to
+// its view's member units — singleton or grouped — while a bare-only
+// group contributes the zone, and stanza precision survives multi-view
+// membership (a static never gains sibling scopes).
+func TestHostInboundScopesForAddrsProvenance10752(t *testing.T) {
+	oldCfg := twoUnitWanCfg10752(t, []string{"any-service"})
 	oldCfg.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
 		"reth0.50": {SystemServices: []string{"ssh"}},
 	}
@@ -703,26 +704,49 @@ func TestHostInboundScopesForAddrsSingleton10752(t *testing.T) {
 	if len(got[ll]) != 1 || got[ll][0] != "zone:wan|iface:reth0.50" {
 		t.Fatalf("singleton-view derived addr = %v, want [zone:wan|iface:reth0.50] (override applies, no zone scope)", got[ll])
 	}
-	// Multi-interface view: ambiguous, keeps the zone fallback.
+	// Grouped view: every owned member unit is a provenance owner (.60
+	// enforces the zone stanza, so the zone joins through it).
 	views[0].Interfaces = []string{"reth0.50", "reth0.60"}
 	got = hostInboundScopesForAddrs10752(oldCfg, views, []netip.Addr{ll})
-	if len(got[ll]) != 1 || got[ll][0] != "zone:wan" {
-		t.Fatalf("multi-view derived addr = %v, want [zone:wan]", got[ll])
+	want := map[string]bool{"zone:wan|iface:reth0.50": true, "zone:wan|iface:reth0.60": true, "zone:wan": true}
+	if len(got[ll]) != 3 {
+		t.Fatalf("grouped-view derived addr = %v, want the two iface scopes + zone", got[ll])
 	}
-	// Bare singleton: cannot form a unit scope, keeps the zone fallback.
+	for _, scope := range got[ll] {
+		if !want[scope] {
+			t.Fatalf("grouped-view derived addr = %v, want %v", got[ll], want)
+		}
+	}
+	// Bare-only group: cannot form a unit scope, contributes the zone.
 	views[0].Interfaces = []string{"reth0"}
 	got = hostInboundScopesForAddrs10752(oldCfg, views, []netip.Addr{ll})
 	if len(got[ll]) != 1 || got[ll][0] != "zone:wan" {
-		t.Fatalf("bare-singleton derived addr = %v, want [zone:wan]", got[ll])
+		t.Fatalf("bare-group derived addr = %v, want [zone:wan]", got[ll])
+	}
+	// Per-group fallback: a shared derived address keeps zone coverage
+	// from its bare group alongside pins from unit groups.
+	views = []dpuserspace.ZoneHostInboundView{
+		{Zone: "wan", Interfaces: []string{"reth0"}, V6Addrs: []string{"fe80::bf72:1:2"}},
+		{Zone: "wan", Interfaces: []string{"reth0.50"}, V6Addrs: []string{"fe80::bf72:1:2"}},
+	}
+	got = hostInboundScopesForAddrs10752(oldCfg, views, []netip.Addr{ll})
+	want = map[string]bool{"zone:wan|iface:reth0.50": true, "zone:wan": true}
+	if len(got[ll]) != 2 {
+		t.Fatalf("shared derived addr = %v, want [iface + zone]", got[ll])
+	}
+	for _, scope := range got[ll] {
+		if !want[scope] {
+			t.Fatalf("shared derived addr = %v, want %v", got[ll], want)
+		}
 	}
 	// Stanza precision survives multi-view membership: a static addr on
-	// .50 keeps its unit scopes even when a multi view also lists it.
-	views[0].Interfaces = []string{"reth0.50", "reth0.60"}
-	views[0].V4Addrs = []string{"172.16.50.8"}
+	// .50 keeps its unit scopes only, never sibling scopes.
+	views = []dpuserspace.ZoneHostInboundView{
+		{Zone: "wan", Interfaces: []string{"reth0.50", "reth0.60"}, V4Addrs: []string{"172.16.50.8"}},
+	}
 	wan := netip.MustParseAddr("172.16.50.8")
 	got = hostInboundScopesForAddrs10752(oldCfg, views, []netip.Addr{wan})
-	want := map[string]bool{"zone:wan|iface:reth0.50": true}
-	if len(got[wan]) != 1 || !want[got[wan][0]] {
+	if len(got[wan]) != 1 || got[wan][0] != "zone:wan|iface:reth0.50" {
 		t.Fatalf("stanza addr in multi view = %v, want [zone:wan|iface:reth0.50]", got[wan])
 	}
 }
@@ -943,6 +967,80 @@ func TestWithTighteningWarningsVIPNarrowingWarnsInterface10752(t *testing.T) {
 	if !strings.Contains(resp.Warnings[0], "(zone:wan|iface:reth0.50)") ||
 		!strings.Contains(resp.Warnings[0], "172.16.50.100:2222") {
 		t.Errorf("custom line must name the narrowed VIP unit with its sample: %q", resp.Warnings[0])
+	}
+}
+
+// TestWithTighteningWarningsGroupedDerivedEvidence10752 is the
+// production-grouped shape: two IPv6 RETH units in one zone/RG, both
+// overridden any-service, sharing one production view with their
+// derived stable link-local. Tightening both overrides to ssh with
+// retained customs on the LL must emit evidence lines naming both
+// narrowed interface scopes — zone-only fallback drops the evidence
+// (the zone-default key narrows nowhere here) and falsely claims
+// zero observed.
+func TestWithTighteningWarningsGroupedDerivedEvidence10752(t *testing.T) {
+	mkCfg := func(memberServices []string) *config.Config {
+		cfg := &config.Config{}
+		cfg.Chassis.Cluster = &config.ClusterConfig{
+			ClusterID:        7,
+			NodeID:           0,
+			NodeIDSet:        true,
+			RedundancyGroups: []*config.RedundancyGroup{{ID: 1}},
+		}
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"reth0": {Name: "reth0", RedundancyGroup: 1, Units: map[int]*config.InterfaceUnit{
+				50: {Number: 50, VlanID: 50, Addresses: []string{"2001:db8:50::8/64"}},
+				60: {Number: 60, VlanID: 60, Addresses: []string{"2001:db8:60::8/64"}},
+			}},
+		}
+		cfg.Security.Zones = map[string]*config.ZoneConfig{
+			"wan": {
+				Name:               "wan",
+				Interfaces:         []string{"reth0.50", "reth0.60"},
+				HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}},
+				InterfaceHostInbound: map[string]*config.HostInboundTraffic{
+					"reth0.50": {SystemServices: memberServices},
+					"reth0.60": {SystemServices: memberServices},
+				},
+			},
+		}
+		return cfg
+	}
+	oldCfg := mkCfg([]string{"any-service"})
+	newCfg := mkCfg([]string{"ssh"})
+	if got, _ := hostInboundTightenedScopes(oldCfg, newCfg); len(got) != 2 {
+		t.Fatalf("tightened = %v, want both narrowed interface scopes", got)
+	}
+	ll := cluster.StableRethLinkLocal(7, 1)
+	llAddr := netip.MustParseAddr(ll.String())
+	grouped := false
+	for _, v := range dpuserspace.BuildZoneHostInboundViews(oldCfg) {
+		hasLL := false
+		for _, raw := range append(append([]string(nil), v.V4Addrs...), v.V6Addrs...) {
+			if ip, err := netip.ParseAddr(raw); err == nil && ip.Unmap() == llAddr {
+				hasLL = true
+			}
+		}
+		if hasLL && len(v.Interfaces) >= 2 {
+			grouped = true
+		}
+	}
+	if !grouped {
+		t.Fatal("sanity: the stable LL must share a multi-interface production view for this test to mean anything")
+	}
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		llAddr: kept10752(1, []string{"udp [" + llAddr.String() + "]:2222→203.0.113.7:40000"}, 0, nil),
+	})
+	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
+	if resp == newCfg {
+		t.Fatal("grouped derived evidence on narrowed overrides must warn, got identity")
+	}
+	if len(resp.Warnings) != 2 {
+		t.Fatalf("warnings = %v, want [custom line, pointer]", resp.Warnings)
+	}
+	if !strings.Contains(resp.Warnings[0], "(zone:wan|iface:reth0.50, zone:wan|iface:reth0.60)") {
+		t.Errorf("custom line must name both narrowed owner scopes: %q", resp.Warnings[0])
 	}
 }
 
