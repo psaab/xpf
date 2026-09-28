@@ -287,9 +287,13 @@ type Manager struct {
 	// a feed change so the duplicate-publish gate lets the refresh through.
 	feedOverlay map[string][]string
 	haGroups    map[int]HAGroupStatus
-	// haWatchdogMapWrite writes the kernel-visible watchdog timestamp into the
-	// BPF shim's ha_watchdog map. It runs on EVERY heartbeat tick (the BPF ~2s
-	// stale window relies on this fast map write, so it is never throttled).
+	// haWatchdogMapWrite writes the watchdog timestamp into the Go-owned
+	// ha_watchdog map. It runs on EVERY heartbeat tick — never throttled — so
+	// Go's own HA refresh paths (refreshHAStateFromMapsLocked,
+	// refreshHAWatchdogOnlyFromMapsLocked) always read a fresh timestamp. No
+	// live userspace-XDP shim BPF program consumes this map (#10791); the
+	// fail-closed backstop is the helper's receipt-anchored 10s forwarding
+	// lease, refreshed by the update_ha_state IPC, not by this write.
 	// Indirected through a field so tests can drive the IPC-throttle path in
 	// UpdateHAWatchdog without a loaded BPF map. Defaults to
 	// bpfShim.UpdateHAWatchdog (set in New()); nil-safe at the call site.
@@ -299,10 +303,10 @@ type Manager struct {
 	haRGActiveMapWrite func(rgID int, active bool) error
 	// haWatchdogIPCSynced tracks, per RG, the watchdog timestamp and Active
 	// state last published to the helper via the update_ha_state socket IPC.
-	// It throttles that IPC (see UpdateHAWatchdog): the shim map write above
+	// It throttles that IPC (see UpdateHAWatchdog): the Go-owned map write above
 	// happens every tick, but the JSON socket round-trip fires only on an
 	// Active-state change (failover/failback — instant) or a periodic backstop
-	// comfortably under the helper's ~10s stale-lease window. Guarded by m.mu.
+	// comfortably under the helper's receipt-anchored 10s lease. Guarded by m.mu.
 	haWatchdogIPCSynced map[int]haWatchdogIPCSyncState
 	// haWatchdogSnapshot is a lock-free-readable copy of the HA watchdog
 	// refresh inputs (#9629, verdict item 1). It is published under m.mu by

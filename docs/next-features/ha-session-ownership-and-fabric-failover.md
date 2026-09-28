@@ -56,7 +56,13 @@ Code paths:
 - `pkg/dataplane/types.go`
 - `bpf/headers/xpf_conntrack.h`
 
-### 2. `NO_NEIGH` failover handling drops VLAN context
+### 2. `NO_NEIGH` failover handling drops VLAN context (historical diagnosis; not a current call path)
+
+> **Historical diagnosis — not a current call path.** This section records an
+> earlier BPF implementation/design claim. The cited `bpf/xdp/xdp_zone.c` file
+> is not present in the current tree; `check_egress_rg_active` remains only as
+> an unused header definition with no `.c` caller. Do not treat the following
+> call/path list as current source documentation.
 
 In the `BPF_FIB_LKUP_RET_NO_NEIGH` path, the active-active check calls
 `check_egress_rg_active(fib.ifindex, 0)`.
@@ -72,7 +78,7 @@ Impact:
 - local kernel fallback instead of cross-chassis forwarding
 - intermittent session stalls during RG movement
 
-Code paths:
+Code paths in the historical diagnosis:
 
 - `bpf/xdp/xdp_zone.c`
 - `bpf/headers/xpf_helpers.h`
