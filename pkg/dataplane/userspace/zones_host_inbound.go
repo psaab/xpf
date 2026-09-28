@@ -242,46 +242,6 @@ func hostInboundScopeLinkUnresolved(unitRef string, a InterfaceAddressSnapshot, 
 	return !configuredKeys[hostInboundAddrKey(unitRef, a.Family, hostIPFromCIDR(a.Address))]
 }
 
-// SnapshotNewcomerAddrs returns the sorted bare host addresses present in
-// fresh but not in baseline (#10751 R4-2): the install sample covered the
-// baseline set, so a newcomer is an address the installed ruleset does not
-// cover and the handoff must wait for a re-render. Include-ALL on purpose —
-// kernel scope-link rows included: installed views deny link-local
-// destinations, so a NEW fe80::/64 (a link that came up mid-apply) is
-// uncovered by the `policy accept` table exactly like a new global, and
-// handing off over it would open link-local host input. Scope-link is
-// excluded ONLY from pending-intent resolution (a standing fe80 never
-// satisfies lease intent), never from this coverage comparison. An address
-// that VANISHED between samples is not reported — installed rules covering
-// a stale address over-deny harmlessly, the safe direction. Config-derived
-// addresses (VIPs, stable RETH LL) are absent from both snapshots by
-// construction and cannot change within one apply, so comparing snapshot
-// rows alone is sound.
-func SnapshotNewcomerAddrs(baseline, fresh []InterfaceSnapshot) []string {
-	have := map[string]bool{}
-	for _, snap := range baseline {
-		for _, a := range snap.Addresses {
-			if host := hostIPFromCIDR(a.Address); host != "" {
-				have[host] = true
-			}
-		}
-	}
-	var out []string
-	seen := map[string]bool{}
-	for _, snap := range fresh {
-		for _, a := range snap.Addresses {
-			host := hostIPFromCIDR(a.Address)
-			if host == "" || have[host] || seen[host] {
-				continue
-			}
-			seen[host] = true
-			out = append(out, host)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // BuildZoneHostInboundViewsFromSnapshots renders zone views from ONE caller-
 // supplied address snapshot instead of sampling the kernel itself (#10751
 // R4-2). The daemon's apply path samples once and threads that snapshot

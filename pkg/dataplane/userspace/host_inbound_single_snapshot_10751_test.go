@@ -1,15 +1,13 @@
-// #10751 R4-2: the install inputs, the handoff retention verdict, and the
-// handoff change check all derive from observed address snapshots instead of
-// re-sampling the kernel piecemeal — a lease landing mid-apply must not skew
-// the installed ruleset against the retention decision. SnapshotNewcomerAddrs
-// is the change check: any address present in the handoff re-sample but
-// absent from the install sample is uncovered by the installed ruleset,
-// INCLUDING a new kernel link-local (installed views deny fe80 destinations,
-// so a link that came up mid-apply is uncovered exactly like a new global).
+// #10751 R4-2/R5-B: the install inputs, the handoff retention verdict, and
+// the handoff change checks all derive from observed address snapshots
+// instead of re-sampling the kernel piecemeal — a lease landing mid-apply
+// must not skew the installed ruleset against the retention decision. The
+// change checks compare RENDERED desired destinations (daemon-side, via the
+// FromSnapshots builders plus the uncovered-drop helper), never raw rows:
+// only an actually-denied destination counts.
 package userspace
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -22,42 +20,6 @@ func newcomerRow10751(name, zone string, addrs ...InterfaceAddressSnapshot) Inte
 
 func newcomerAddr10751(fam, cidr string, scope int) InterfaceAddressSnapshot {
 	return InterfaceAddressSnapshot{Family: fam, Address: cidr, Scope: scope}
-}
-
-func TestSnapshotNewcomerAddrs10751(t *testing.T) {
-	link := int(netlink.SCOPE_LINK)
-	universe := int(netlink.SCOPE_UNIVERSE)
-	v4 := newcomerAddr10751("inet", "10.0.0.1/24", universe)
-	v6 := newcomerAddr10751("inet6", "2001:db8::99/64", universe)
-	ll := newcomerAddr10751("inet6", "fe80::7/64", link)
-	row := func(addrs ...InterfaceAddressSnapshot) []InterfaceSnapshot {
-		return []InterfaceSnapshot{newcomerRow10751("ge-0/0/0.0", "trust", addrs...)}
-	}
-	for _, tc := range []struct {
-		name  string
-		base  []InterfaceSnapshot
-		fresh []InterfaceSnapshot
-		want  []string
-	}{
-		{"no change", row(v4), row(v4), nil},
-		{"new global", row(v4), row(v4, v6), []string{"2001:db8::99"}},
-		// A NEW link-local is uncovered by the install sample's ruleset
-		// exactly like a new global (installed views deny fe80). RED on
-		// revert: scope-filtering the comparison drops this newcomer and
-		// the handoff would open link-local host input.
-		{"new link-local", row(v4), row(v4, ll), []string{"fe80::7"}},
-		{"standing link-local both sides", row(v4, ll), row(v4, ll), nil},
-		{"removal is not a newcomer", row(v4, v6), row(v4), nil},
-		{"link-local removal is not a newcomer", row(v4, ll), row(v4), nil},
-		{"empty baseline", nil, row(v4, ll), []string{"10.0.0.1", "fe80::7"}},
-		{"empty fresh", row(v4), nil, nil},
-		{"unparseable rows skipped", row(v4), []InterfaceSnapshot{newcomerRow10751("ge-0/0/0.0", "trust",
-			v4, newcomerAddr10751("inet6", "not-an-address", universe))}, nil},
-	} {
-		if got := SnapshotNewcomerAddrs(tc.base, tc.fresh); !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("%s: SnapshotNewcomerAddrs = %v, want %v", tc.name, got, tc.want)
-		}
-	}
 }
 
 // TestHostInboundPendingIntentFromSnapshots10751 drives the handoff retention

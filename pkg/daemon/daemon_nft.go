@@ -689,13 +689,16 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				slog.Warn("retaining early host-input barrier: lo0 protection failed in this apply")
 				return nil
 			}
-			// #10751 R4-2: re-sample at handoff. The teardown above deleted on
-			// the install sample's premise (nothing to enforce); an address
-			// that appeared since aborts the handoff so the next apply
-			// installs with it covered. Tables already deleted + barrier
-			// retained + retry is the fail-closed ordering.
+			// #10751 R5-B: re-sample at handoff and prove coverage. The
+			// teardown above deleted on the install sample's premise
+			// (nothing to enforce); a fresh desired destination not
+			// covered by the (empty) installed set aborts the handoff so
+			// the next apply installs with it covered. Tables already
+			// deleted + barrier retained + retry is the fail-closed
+			// ordering. Rendered destinations, not raw rows: only an
+			// actually-denied destination counts.
 			freshSnaps := sampleHostInboundSnapshots(cfg)
-			if newcomers := dpuserspace.SnapshotNewcomerAddrs(snaps1, freshSnaps); len(newcomers) > 0 {
+			if newcomers := hostInboundCoverageNewcomers(cfg, nil, freshSnaps); len(newcomers) > 0 {
 				slog.Warn("retaining early host-input barrier: addresses changed during apply; retry",
 					"newcomers", strings.Join(newcomers, ","))
 				d.noteHostInboundApplyFailed(time.Now())
@@ -710,7 +713,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				return nil
 			}
 		}
-		if err := d.removeEarlyInputBarrierAtHandoff(cfg, nil); err != nil {
+		if err := d.removeEarlyInputBarrierAtHandoff(cfg, nil, nil); err != nil {
 			err = tagNftInstallErr(err)
 			slog.Warn("failed to remove early host-input barrier after no-enforcement teardown", "err", err)
 			// The tables are gone but the handoff is incomplete: record the
@@ -844,12 +847,14 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// successful install or no-enforcement teardown.
 			// B1: pre-handoff, a failed lo0 in this apply also retains the
 			// barrier — the fence covers only the host-inbound scope.
-			// #10751 R4-2: handoff re-sample (see the real-install site).
+			// #10751 R5-B: handoff re-sample (see the real-install site):
+			// prove the S1 desired scope still covers every fresh
+			// desired destination.
 			var freshSnaps []dpuserspace.InterfaceSnapshot
 			var snapshotChanged []string
 			if !d.earlyInputHandoffDone.Load() {
 				freshSnaps = sampleHostInboundSnapshots(cfg)
-				snapshotChanged = dpuserspace.SnapshotNewcomerAddrs(snaps1, freshSnaps)
+				snapshotChanged = hostInboundCoverageNewcomers(cfg, desiredDrop, freshSnaps)
 			}
 			if !d.earlyInputHandoffDone.Load() && d.lo0LastFailed.Load() {
 				slog.Warn("retaining early host-input barrier after fenced fallback: lo0 protection failed in this apply")
@@ -859,7 +864,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
 			} else if !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps) {
 				slog.Warn("retaining early host-input barrier after fenced fallback: enforcing scopes have no address yet")
-			} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, hostInboundHandoffExpectedTables(d.hostInboundGapFenceActive.Load())); barrierErr != nil {
+			} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, hostInboundHandoffExpectedTables(d.hostInboundGapFenceActive.Load()), desiredDrop); barrierErr != nil {
 				barrierErr = tagNftInstallErr(barrierErr)
 				slog.Warn("failed to remove early host-input barrier after fenced fallback", "err", barrierErr)
 				barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", barrierErr)
@@ -917,16 +922,18 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// both scopes, and the lo0 error already fails the commit. The next
 	// successful apply hands off.
 	lo0RetainsBarrier := !d.earlyInputHandoffDone.Load() && d.lo0LastFailed.Load()
-	// #10751 R4-2: re-sample at handoff over the SAME snapshot discipline
-	// as the install. A newcomer address since the install sample means
-	// the just-installed ruleset does not cover it: retain the barrier
-	// and fail so the next apply re-renders with it covered. A removal
-	// needs no action (installed rules over-deny harmlessly).
+	// #10751 R5-B: re-sample at handoff over the SAME snapshot discipline
+	// as the install, and prove coverage: a fresh desired destination NOT
+	// in the just-installed scope means the ruleset does not cover it —
+	// retain the barrier and fail so the next apply re-renders with it
+	// covered. Rendered destinations, not raw rows, so lifeline-withheld
+	// rows can neither hide a real newcomer nor force a spurious retry.
+	// A removal needs no action (installed rules over-deny harmlessly).
 	var freshSnaps []dpuserspace.InterfaceSnapshot
 	var snapshotChanged []string
 	if !d.earlyInputHandoffDone.Load() {
 		freshSnaps = sampleHostInboundSnapshots(cfg)
-		snapshotChanged = dpuserspace.SnapshotNewcomerAddrs(snaps1, freshSnaps)
+		snapshotChanged = hostInboundCoverageNewcomers(cfg, desiredDrop, freshSnaps)
 	}
 	pendingRetainsBarrier := !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps)
 	snapshotChangedRetainsBarrier := len(snapshotChanged) > 0
@@ -938,7 +945,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
 	} else if pendingRetainsBarrier {
 		slog.Warn("retaining early host-input barrier after real install: enforcing scopes have no address yet")
-	} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, []string{xnft.HostInboundTableName}); barrierErr != nil {
+	} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, []string{xnft.HostInboundTableName}, desiredDrop); barrierErr != nil {
 		barrierErr = tagNftInstallErr(barrierErr)
 		slog.Warn("failed to remove early host-input barrier after real install", "err", barrierErr)
 		barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound install: %w", barrierErr)

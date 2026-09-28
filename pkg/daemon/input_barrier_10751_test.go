@@ -1620,8 +1620,8 @@ func TestSnapshotStableHandsOff10751(t *testing.T) {
 	if !d.earlyInputHandoffDone.Load() {
 		t.Fatal("stable apply must mark the handoff done")
 	}
-	if *calls != 2 {
-		t.Fatalf("snapshot samples = %d, want 2 (install + handoff re-sample)", *calls)
+	if *calls != 3 {
+		t.Fatalf("snapshot samples = %d, want 3 (install + handoff re-sample + post-removal re-sample)", *calls)
 	}
 }
 
@@ -1824,5 +1824,163 @@ func TestNoDHCPLinkLocalOnlyHandsOff10751(t *testing.T) {
 	}
 	if !d.earlyInputHandoffDone.Load() {
 		t.Fatal("handoff must be marked done")
+	}
+}
+
+// --- #10751 R5-B: coverage-proof newcomer + post-removal re-sample ---
+
+// scriptSnapshot3Phase10751 scripts install (S1), handoff re-sample (S2),
+// and post-removal re-sample (S3) independently.
+func scriptSnapshot3Phase10751(t *testing.T, s1, s2, s3 []dpuserspace.InterfaceSnapshot) *int {
+	t.Helper()
+	orig := sampleHostInboundSnapshots
+	t.Cleanup(func() { sampleHostInboundSnapshots = orig })
+	calls := 0
+	sampleHostInboundSnapshots = func(*config.Config) []dpuserspace.InterfaceSnapshot {
+		calls++
+		switch calls {
+		case 1:
+			return s1
+		case 2:
+			return s2
+		default:
+			return s3
+		}
+	}
+	return &calls
+}
+
+// TestCoverageNewcomerFindsLifelineWithheld10751: 10.0.0.5 lives on the
+// lifeline in S1 (withheld from the rendered scope, never denied), then
+// appears on a data interface in S2 whose zone admits ssh (non-empty view
+// keeps the shared address, so it IS rendered). Raw bare-IP comparison
+// would miss it — the IP exists in S1 rows — but the S1 rendered scope
+// never covered it, so the handoff must refuse. RED on revert: compare
+// raw rows and the handoff succeeds over the uncovered destination.
+func TestCoverageNewcomerFindsLifelineWithheld10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
+	cfg.Security.Zones["trust"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"ssh"}}
+	uni := int(netlink.SCOPE_UNIVERSE)
+	y := scriptedAddr10751("inet", "10.0.0.1/24", uni)
+	shared := scriptedAddr10751("inet", "10.0.0.5/24", uni)
+	llRow := func(addrs ...dpuserspace.InterfaceAddressSnapshot) dpuserspace.InterfaceSnapshot {
+		return scriptedSnap10751("fxp0.0", "", addrs...)
+	}
+	s1 := []dpuserspace.InterfaceSnapshot{
+		llRow(shared),
+		scriptedSnap10751("ge-0/0/0.0", "trust", y),
+	}
+	s2 := []dpuserspace.InterfaceSnapshot{
+		llRow(shared),
+		scriptedSnap10751("ge-0/0/0.0", "trust", y, shared),
+	}
+	// Preconditions proving the cell discriminates rendered coverage from
+	// raw presence: S1 rows carry the bare IP, but the S1 rendered scope
+	// does not, while the S2 rendered scope does.
+	s1views := dpuserspace.BuildZoneHostInboundViewsFromSnapshots(cfg, s1)
+	for _, v := range s1views {
+		for _, a := range v.V4Addrs {
+			if a == "10.0.0.5" {
+				t.Fatalf("S1 rendered scope unexpectedly covers 10.0.0.5: %+v", s1views)
+			}
+		}
+	}
+	s2covered := false
+	for _, v := range dpuserspace.BuildZoneHostInboundViewsFromSnapshots(cfg, s2) {
+		for _, a := range v.V4Addrs {
+			s2covered = s2covered || a == "10.0.0.5"
+		}
+	}
+	if !s2covered {
+		t.Fatal("S2 rendered scope must cover 10.0.0.5 (non-empty view keeps the shared address)")
+	}
+	scriptSnapshotTransition10751(t, s1, s2)
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "changed during apply") {
+		t.Fatalf("apply err = %v, want coverage-newcomer retry error", err)
+	}
+	assertBarrierRetained10751(t, fake, d)
+}
+
+// TestCoverageNewcomerIgnoresLifelineOnly10751: an address appearing ONLY
+// on a lifeline between samples is never a rendered destination, so it
+// must not stall the handoff. (Raw include-all comparison would flag it
+// and retry spuriously.)
+func TestCoverageNewcomerIgnoresLifelineOnly10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
+	uni := int(netlink.SCOPE_UNIVERSE)
+	y := scriptedAddr10751("inet", "10.0.0.1/24", uni)
+	z := scriptedAddr10751("inet", "10.9.9.9/24", uni)
+	s1 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", y)}
+	s2 := []dpuserspace.InterfaceSnapshot{
+		scriptedSnap10751("fxp0.0", "", z),
+		scriptedSnap10751("ge-0/0/0.0", "trust", y),
+	}
+	scriptSnapshotTransition10751(t, s1, s2)
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("lifeline-only newcomer apply err = %v, want nil (never a rendered destination)", err)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("a lifeline-only address must not block the handoff")
+	}
+}
+
+// TestPostRemovalCoverageDriftReinstalls10751: S1 and S2 agree (pre-removal
+// checks pass, the barrier is removed), but S3 — sampled AFTER removal —
+// gains an address. The handoff must detect the drift, reinstall the
+// guard, and refuse WITHOUT recording handoff-done: the address landed in
+// the S2→removal interval, absent from both the installed ruleset and the
+// finished pre-removal comparison. RED on revert: drop the S3 check and
+// the handoff succeeds over the uncovered address.
+func TestPostRemovalCoverageDriftReinstalls10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
+	uni := int(netlink.SCOPE_UNIVERSE)
+	y := scriptedAddr10751("inet", "10.0.0.1/24", uni)
+	late := scriptedAddr10751("inet", "10.0.0.99/24", uni)
+	s12 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", y)}
+	s3 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", y, late)}
+	calls := scriptSnapshot3Phase10751(t, s12, s12, s3)
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "after barrier removal") {
+		t.Fatalf("apply err = %v, want post-removal drift refusal", err)
+	}
+	var removes, reinstalls int
+	for _, ev := range fake.earlyInputBarrierCalls {
+		switch ev {
+		case "remove":
+			removes++
+		case "install-lifeline":
+			reinstalls++
+		}
+	}
+	if removes != 1 {
+		t.Fatalf("barrier calls = %v, want the removal to have run before drift was found", fake.earlyInputBarrierCalls)
+	}
+	if reinstalls != 2 {
+		t.Fatalf("barrier calls = %v, want pre-apply converge + post-drift guard reinstall", fake.earlyInputBarrierCalls)
+	}
+	if d.earlyInputHandoffDone.Load() {
+		t.Fatal("handoff marked done over an address that landed after the last pre-removal sample")
+	}
+	if !d.hostInboundLastApplyFailed.Load() {
+		t.Fatal("post-removal drift must record STALE")
+	}
+	if *calls != 3 {
+		t.Fatalf("snapshot samples = %d, want 3 (S1 + S2 + post-removal S3)", *calls)
 	}
 }

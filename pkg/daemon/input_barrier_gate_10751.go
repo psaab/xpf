@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -190,9 +191,9 @@ func (d *Daemon) ensureEarlyInputBootstrapGuard() {
 }
 
 // sampleHostInboundSnapshots samples the interface address rows for the
-// host-inbound apply path. A package var so handoff-race tests can script an
-// address transition between the install sample and the handoff re-sample;
-// production always samples the kernel. See SnapshotNewcomerAddrs.
+// host-inbound apply path. A package var so handoff-race tests can script
+// address transitions between the install sample, the handoff re-sample,
+// and the post-removal re-sample; production always samples the kernel.
 var sampleHostInboundSnapshots = dpuserspace.BuildInterfaceSnapshots
 
 // hostInboundHasPendingEnforcingIntentFromSnapshots reports whether any
@@ -206,6 +207,22 @@ var sampleHostInboundSnapshots = dpuserspace.BuildInterfaceSnapshots
 // unprotected until a later apply.
 func hostInboundHasPendingEnforcingIntentFromSnapshots(cfg *config.Config, snaps []dpuserspace.InterfaceSnapshot) bool {
 	return dpuserspace.HostInboundPendingIntentFromSnapshots(cfg, snaps)
+}
+
+// hostInboundCoverageNewcomers renders the desired host-inbound destinations
+// from snaps and returns those NOT covered by installed — the destination
+// set the standing enforcement was rendered from (#10751 R5-B). Unlike raw
+// snapshot comparison, this proves coverage: lifeline-withheld and
+// unscoping rows never appear in a rendered set, so they can neither hide
+// a real newcomer (a bare-IP baseline hit is not a rendered-destination
+// hit) nor force a spurious retry. Sorted bare hosts for stable messages.
+func hostInboundCoverageNewcomers(cfg *config.Config, installed map[string]struct{}, snaps []dpuserspace.InterfaceSnapshot) []string {
+	views := dpuserspace.BuildZoneHostInboundViewsFromSnapshots(cfg, snaps)
+	u4, u6 := dpuserspace.BuildUnzonedHostInboundAddrsFromSnapshots(cfg, snaps)
+	v4, v6 := hostInboundUncoveredDropAddrs(views, u4, u6, installed)
+	out := append(append([]string{}, v4...), v6...)
+	sort.Strings(out)
+	return out
 }
 
 // removeEarlyInputBarrierAtHandoff removes the barrier for a first handoff
@@ -234,11 +251,19 @@ func hostInboundHasPendingEnforcingIntentFromSnapshots(cfg *config.Config, snaps
 // this readback is an accepted residual (no kernel-side transaction couples
 // the two syscalls; the window is one list round-trip).
 //
+// installedCovered is the destination set the standing enforcement was
+// rendered from (S1 real desired scope; nil for teardown). After the
+// presence re-read, the helper samples once more and proves that coverage
+// still includes every fresh desired destination (#10751 R5-B) — an
+// address landing after the last pre-removal sample is otherwise absent
+// from both the installed ruleset and the finished newcomer comparison
+// when the barrier is removed. Drift reinstalls the guard and refuses.
+//
 // Post-handoff calls remove idempotently (barrier expected absent — e.g.
 // ExecReload residue cleanup); no attestation there. Install success implies
 // exact shape: the installer flushes one atomic nf_tables batch, so success
 // leaves no partial table to verify.
-func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTables []string) error {
+func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTables []string, installedCovered map[string]struct{}) error {
 	if d.earlyInputHandoffDone.Load() {
 		return nftInstaller.RemoveEarlyInputBarrier()
 	}
@@ -266,6 +291,23 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTa
 				return fmt.Errorf("enforcement table %s unreadable after barrier removal; guard reinstalled, handoff refused", table)
 			}
 			return fmt.Errorf("enforcement table %s missing after barrier removal; guard reinstalled, handoff refused", table)
+		}
+		// #10751 R5-B: close the S2→removal interval. Sample AFTER removal
+		// and prove the installed coverage still includes every fresh
+		// desired destination; an address landing after the last
+		// pre-removal sample is absent from both the installed ruleset
+		// and the finished newcomer comparison, so without this the
+		// removal would expose it. On drift, reinstall the guard and
+		// refuse — detect-and-reclose. Anything landing after this
+		// sample is post-handoff-equivalent steady state (healed by
+		// lease-triggered re-apply).
+		if drift := hostInboundCoverageNewcomers(cfg, installedCovered, sampleHostInboundSnapshots(cfg)); len(drift) > 0 {
+			slog.Warn("fresh addresses not covered by installed enforcement after barrier removal; reinstalling guard and refusing handoff",
+				"newcomers", strings.Join(drift, ","))
+			if installErr := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(resolveEarlyInputGuardLifelines(cfg)); installErr != nil {
+				return fmt.Errorf("reinstall early guard at handoff: %w", tagNftInstallErr(installErr))
+			}
+			return fmt.Errorf("host-inbound addresses changed after barrier removal; retry: %s", strings.Join(drift, ","))
 		}
 		return nil
 	}
