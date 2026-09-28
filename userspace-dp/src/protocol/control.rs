@@ -891,6 +891,9 @@ pub(crate) struct ControlResponse {
     pub policy_delete_complete: bool,
     #[serde(rename = "policy_delete_errors", default, skip_serializing_if = "Vec::is_empty")]
     pub policy_delete_errors: Vec<String>,
+    /// #10784: authoritative persistent-lease bindings revoked by clear.
+    #[serde(rename = "persistent_nat_lease_count", default)]
+    pub persistent_nat_lease_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

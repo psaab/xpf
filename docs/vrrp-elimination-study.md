@@ -223,10 +223,16 @@ The only missing piece is **~10 lines in `electRG()`** to detect dual-active in 
 **Sustained control link failure:**
 - Heartbeat timeout → both nodes run single-node election → both claim primary
 - No resolution possible without communication — same limitation as VRRP when all links fail
-- Mitigation: peer fencing (`disable-rg`), BPF watchdog
+- Mitigation: peer fencing (`disable-rg`). Loss of all peer links cannot be
+  resolved by a local helper lease while the daemon continues running.
 
-**Daemon crash / SIGKILL:**
-- BPF watchdog detects death within 2s → `rg_active=false`
+**Daemon crash / SIGKILL while the helper remains alive:**
+- The helper's receipt-anchored 10s forwarding lease
+  (`ActiveUntil(max(watchdog, now) + 10s)`) expires after the last
+  `update_ha_state` receipt; its per-packet check then treats the RG inactive.
+- The lease is stored in helper memory and does not survive helper death;
+  process loss/ctrl-disable and fresh-helper republish are separate from lease
+  expiry.
 - Peer heartbeat timeout → takes over all RGs
 - Same as current VRRP behavior
 

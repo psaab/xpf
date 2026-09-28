@@ -24,6 +24,26 @@ fn pool_rule(name: &str, pool: &str, addrs: &[&str]) -> SourceNATRuleSnapshot {
         ..SourceNATRuleSnapshot::default()
     }
 }
+/// Seed an idle lease through the IMPORT path. `allocate_translation` is
+/// private to `nat`, and these cells are about ROUTING rather than minting —
+/// part 1's cells already bind the allocator behaviour.
+fn record(pool: &str, src: &str, translated: &str, port: u16) -> PoolIdleLease {
+    PoolIdleLease {
+        pool_name: pool.to_string(),
+        lease: crate::nat::IdleLeaseRecord {
+            protocol: 6,
+            src_ip: src.parse().unwrap(),
+            src_port: 40000,
+            routing_scope: 0,
+            remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+            translated_ip: translated.parse().unwrap(),
+            translated_port: port,
+            address_only: false,
+            remaining_ns: TIMEOUT_NS,
+            timeout_ns: TIMEOUT_NS,
+        },
+    }
+}
 
 /// Create a locally-owned idle lease through the coordinator's real SNAT path.
 fn mint_local_idle_lease(coord: &Coordinator, pool: &str) -> PoolIdleLease {
@@ -221,4 +241,34 @@ fn repeated_unique_import_batches_remain_within_pool_capacity_11475() {
         2,
         "unique imported keys must not grow the persistent table beyond cap"
     );
+}
+
+/// Clearing reaches each distinct pool allocator once and keeps a pre-clear
+/// full-set push from reinstalling the revoked idle lease (#10784).
+#[test]
+fn clear_revokes_allocator_leases_and_rejects_stale_peer_import_10784() {
+    let mut coord = Coordinator::new();
+    coord.forwarding.source_nat_rules = parse_source_nat_rules(&[
+        pool_rule("r1", "P", &["203.0.113.1"]),
+        pool_rule("r2", "P", &["203.0.113.1"]),
+    ]);
+    let stale = record("P", "10.0.61.50", "203.0.113.1", 1024);
+    let seeded = coord.import_idle_persistent_leases(&[stale.clone()], 3_000);
+    assert_eq!(
+        seeded.installed, 1,
+        "setup: the authoritative lease must exist"
+    );
+    assert_eq!(coord.export_display_persistent_leases(4_000).len(), 1);
+
+    assert_eq!(
+        coord.clear_persistent_nat_leases(),
+        1,
+        "a shared allocator must be counted once, not once per rule"
+    );
+    assert!(coord.export_idle_persistent_leases(4_001).is_empty());
+    assert!(coord.export_display_persistent_leases(4_001).is_empty());
+
+    let delayed = coord.import_idle_persistent_leases(&[stale], 4_001);
+    assert_eq!(delayed.installed, 0);
+    assert_eq!(delayed.skipped_existing, 1);
 }

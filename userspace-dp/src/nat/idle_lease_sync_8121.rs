@@ -151,7 +151,10 @@ impl PortAllocator {
         live.persistent_by_source
             .iter()
             .filter(|(_, lease)| {
-                lease.active_flows == 0 && lease.expires_at_ns > now_ns && !lease.imported
+                !lease.revoked
+                    && lease.active_flows == 0
+                    && lease.expires_at_ns > now_ns
+                    && !lease.imported
             })
             .map(|(key, lease)| IdleLeaseRecord {
                 protocol: key.protocol,
@@ -190,7 +193,9 @@ impl PortAllocator {
         let live = self.lock_live();
         live.persistent_by_source
             .iter()
-            .filter(|(_, lease)| lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+            .filter(|(_, lease)| {
+                !lease.revoked && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+            })
             .map(|(key, lease)| DisplayLeaseRecord {
                 protocol: key.protocol,
                 src_ip: key.src_ip,
@@ -247,7 +252,9 @@ impl PortAllocator {
             remote: rec.remote,
         };
         let mut live = self.lock_live();
-        if live.persistent_by_source.contains_key(&key) {
+        if live.persistent_nat_import_is_clear_fenced(&key, now_ns)
+            || live.persistent_by_source.contains_key(&key)
+        {
             return IdleLeaseImport::SkippedExisting;
         }
         // Imports and local mints share the persistent-table cap. Give one
@@ -298,6 +305,7 @@ impl PortAllocator {
                 // successfully completes its marked release; reserve and
                 // rollback alone never transfer peer ownership.
                 imported: true,
+                revoked: false,
             },
         );
         // Without this the lease is invisible to GC and outlives what the

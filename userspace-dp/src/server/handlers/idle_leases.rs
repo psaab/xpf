@@ -426,3 +426,11 @@ pub(super) fn export_display(guard: &mut ServerState, response: &mut ControlResp
         .map(to_display_wire)
         .collect();
 }
+
+/// #10784: revoke the authoritative allocator leases. Active flows retain
+/// their occupied translation while the lease drains; the SHOW mirror is
+/// cleared independently by the Go caller after this ack.
+pub(super) fn clear(guard: &mut ServerState, response: &mut ControlResponse) {
+    response.persistent_nat_lease_count = guard.afxdp.clear_persistent_nat_leases() as u64;
+    response.ok = true;
+}
