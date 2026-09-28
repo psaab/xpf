@@ -88,5 +88,8 @@ xpf (0.0.0) unstable; urgency=medium
     from the xpf-owned local archive (#10825).
   * Include named API keys in local and remote `show system services` counts
     (#10826).
+  * Resolve routing-instance ownership by Linux device identity, reject
+    alias/tunnel dual claims, and quarantine ambiguous memberships on tolerant
+    loads with an apply alarm and alertable metric (#11060).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

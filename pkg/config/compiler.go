@@ -976,13 +976,9 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// P6b (#4406 step 4): uniform fail-open validation gates. Extracted into
 	// runUniformGates (compiler_uniformgates.go) — the long contiguous run of
 	// ~75 independent validators, each of which returns the FIRST strict error
-	// or downgrades to a warning on its tolerant flag. Reads the compiled
-	// *Config, the group-expanded *ConfigTree (validateEventOptionsWithinAST is
-	// an AST pre-walk), and opts; performs NO cfg mutation. Behavior-preserving
-	// lift; runs AFTER the P6a early-strict + folds accumulator above and BEFORE
-	// the P7 tail gates below, so the strict first-error slot (invariant #6) and
-	// the tolerant-path warning order (invariant #7) are unchanged. Do NOT
-	// reorder any gate.
+	// or downgrades to a warning on its tolerant flag. They read the compiled
+	// *Config and expanded tree; warnings/diagnostic metadata may be appended,
+	// but tolerant #11060 membership rewrites are deferred until tail validation.
 	if err := runUniformGates(tree, cfg, opts); err != nil {
 		return nil, err
 	}
@@ -996,6 +992,13 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// tolerant-path warning order are unchanged.
 	if err := runTailGates(cfg, opts); err != nil {
 		return nil, err
+	}
+	// #11060: tolerant conflicts are recorded in the uniform-gate phase but
+	// memberships are removed only now, after legacy tail validators have seen
+	// the authored refs. No compiled-config consumer observes the ambiguous
+	// memberships because this runs before CompileConfig returns.
+	if len(cfg.QuarantinedRIMemberDeviceConflicts) > 0 {
+		quarantineRIDualClaimDevices(cfg, cfg.TunnelNameMap())
 	}
 
 	// #1539: the structural invariant `cfg.System.DPDKDataplane = nil`

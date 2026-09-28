@@ -237,26 +237,10 @@ func TestAUnitRefMustNotDragTheBaseIntoTheVRF9132(t *testing.T) {
 	}
 }
 
-// The ordering rule the fan-down forces someone to choose: an EXPLICIT unit
-// reference beats a unit key reached by fanning a BARE reference down.
-//
-// Before #9132 the two could not collide — a bare reference claimed only the
-// bare key. A single pass with plain assignment would resolve this by the order
-// of `cfg.RoutingInstances`, which is a silent order-dependent VRF binding for a
-// contradictory config.
-//
-// FIXTURE NOTE, and it cost a wrong verdict first. `cfg.RoutingInstances` is in
-// AUTHORING order (measured — not sorted by name), but the position of an
-// instance is fixed by its FIRST mention, which is the `instance-type` line.
-// An earlier version of this cell varied the order of the `interface` lines
-// only, so BOTH its sub-cases produced the same slice order, and a
-// single-pass-last-writer-wins mutant SURVIVED it: with the bare reference in
-// the earlier instance, last-writer-wins happens to agree with the rule. The
-// order is now varied where it is actually decided, the slice order is
-// ASSERTED so the cell cannot silently stop varying it, and the discriminating
-// arrangement — the EXPLICIT unit reference in the EARLIER instance — is the
-// first sub-case.
-func TestExplicitUnitRefBeatsAFannedDownBareRef9132(t *testing.T) {
+// A bare member fanout and an explicit member in another VRF now constitute
+// the same Linux-device ownership conflict, so tolerant compilation removes
+// the contested unit instead of choosing an order-dependent owner.
+func TestCrossRIUnitFanoutIsQuarantined9132(t *testing.T) {
 	refs := []string{
 		"set routing-instances tenant-a interface ge-0/0/0",
 		"set routing-instances tenant-b interface ge-0/0/0.1",
@@ -277,26 +261,21 @@ func TestExplicitUnitRefBeatsAFannedDownBareRef9132(t *testing.T) {
 		wantOrder []string
 	}{
 		{
-			// THE DISCRIMINATING ARRANGEMENT. The instance holding the EXPLICIT
-			// unit reference comes first, so a single pass lets the later bare
-			// reference's fan-down overwrite it.
 			name:      "explicit-unit-instance-first",
 			lines:     lines("tenant-b", "tenant-a"),
 			wantOrder: []string{"tenant-b", "tenant-a"},
 		},
 		{
-			// The control: the bare reference's instance comes first, where
-			// last-writer-wins happens to agree with the rule. Its job is to
-			// show the answer is ORDER-INDEPENDENT, not to catch the mutant.
 			name:      "bare-instance-first",
 			lines:     lines("tenant-a", "tenant-b"),
 			wantOrder: []string{"tenant-a", "tenant-b"},
 		},
 	} {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := routingDomainCfg7160(t, tc.lines...)
-
+			cfg, err := config.CompileConfigLenient(treeFromSet6722(t, tc.lines))
+			if err != nil {
+				t.Fatalf("tolerant compile: %v", err)
+			}
 			gotOrder := make([]string, 0, len(cfg.RoutingInstances))
 			for _, ri := range cfg.RoutingInstances {
 				gotOrder = append(gotOrder, ri.Name)
@@ -306,33 +285,30 @@ func TestExplicitUnitRefBeatsAFannedDownBareRef9132(t *testing.T) {
 			}
 			for i := range tc.wantOrder {
 				if gotOrder[i] != tc.wantOrder[i] {
-					t.Fatalf("fixture: RoutingInstances order = %v, want %v — the two "+
-						"sub-cases must differ HERE or neither exercises the ordering rule",
+					t.Fatalf("fixture: RoutingInstances order = %v, want %v",
 						gotOrder, tc.wantOrder)
 				}
 			}
 
 			ri := buildInterfaceRoutingInstances(cfg)
-			if got := ri["ge-0/0/0.1"]; got != "tenant-b" {
-				t.Errorf("buildInterfaceRoutingInstances[%q] = %q, want %q: the "+
-					"explicitly named unit must beat the unit key a bare reference "+
-					"fans down onto, whichever instance is authored first",
-					"ge-0/0/0.1", got, "tenant-b")
+			if _, found := ri["ge-0/0/0.1"]; found {
+				t.Fatalf("ambiguous unit acquired an RI after tolerant quarantine: %v", ri)
 			}
 			if got := ri["ge-0/0/0.0"]; got != "tenant-a" {
-				t.Errorf("buildInterfaceRoutingInstances[%q] = %q, want %q: the bare "+
-					"reference still reaches the units nobody named explicitly",
-					"ge-0/0/0.0", got, "tenant-a")
+				t.Fatalf("unambiguous unit-zero membership = %q, want tenant-a: %v", got, ri)
 			}
 			if got := ri["ge-0/0/0"]; got != "tenant-a" {
-				t.Errorf("buildInterfaceRoutingInstances[%q] = %q, want %q",
-					"ge-0/0/0", got, "tenant-a")
+				t.Fatalf("uncontested physical primary = %q, want tenant-a after sibling quarantine: %v", got, ri)
 			}
 			v4, _ := buildInterfaceRouteTables(cfg)
-			if got := v4["ge-0/0/0.1"]; got != "tenant-b.inet.0" {
-				t.Errorf("interfaceTablesV4[%q] = %q, want %q: the route-table map "+
-					"must resolve the collision the same way the instance map does",
-					"ge-0/0/0.1", got, "tenant-b.inet.0")
+			if got := v4["ge-0/0/0"]; got != "tenant-a.inet.0" {
+				t.Fatalf("uncontested physical primary IPv4 table = %q, want tenant-a.inet.0: %v", got, v4)
+			}
+			if _, found := v4["ge-0/0/0.1"]; found {
+				t.Fatalf("ambiguous unit acquired an IPv4 table after quarantine: %v", v4)
+			}
+			if got := v4["ge-0/0/0.0"]; got != "tenant-a.inet.0" {
+				t.Fatalf("unambiguous unit-zero IPv4 table = %q, want tenant-a.inet.0", got)
 			}
 		})
 	}

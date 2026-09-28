@@ -144,6 +144,19 @@ func (c *xpfCollector) initHostInboundDescriptors() {
 			"Labeled by the two routing instances and the overlapping prefix.",
 		[]string{"instance_a", "instance_b", "prefix"}, nil,
 	)
+	// #11060: tolerant boot quarantines every cross-RI Linux-device membership
+	// and leaves that device in the default routing context. This persistent
+	// fail-closed disposition is not visible through a commit response, so keep
+	// an explicit zero/nonzero config-derived signal for operators.
+	c.riMemberDeviceConflicts = prometheus.NewDesc(
+		"xpf_routing_instance_member_device_conflicts",
+		"Number of Linux netdevices claimed by multiple routing instances and "+
+			"quarantined on tolerant load (#11060). Conflicting memberships are "+
+			"removed and the device remains unbound, so its traffic uses the "+
+			"default routing table instead of either intended tenant VRF. Alert "+
+			"on > 0; the apply log names each device and its competing members.",
+		nil, nil,
+	)
 	// #4422: per-`then count` hit counters for the kernel lo0 loopback input
 	// filter (`inet xpf_lo0` table). lo0 host-inbound traffic is enforced by
 	// the KERNEL nftables chain (not the userspace fast path), so its

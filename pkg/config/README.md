@@ -712,6 +712,30 @@ split) are NOT rejected; a bare physical interface and one of its units
 across zones ARE (same logical interface). Same fail-closed-on-load
 doctrine as #3043/#2401.
 
+**A Linux device is claimed by exactly one routing instance (#11060):**
+`RoutingInstanceMemberDeviceKeys` is the shared resolver for the strict
+validator, tolerant sanitizer, daemon VRF binding/reassertion, and userspace
+membership maps. Explicit `TunnelConfig.RoutingInstance` stanzas also claim
+their tunnel's Linux device and conflict with a different RI list owner. The
+identity check compares actual Linux netdevices, not authored spellings, so
+slash/dash aliases and distinct unit refs that share an interface-level tunnel
+device cannot evade the gate. Strict commits reject a device claimed by
+multiple routing instances and name every competing member. Forwarding
+instances participate because userspace consumes their memberships even though
+they do not bind devices to Linux VRFs; separate VLAN units remain valid when
+their Linux names differ.
+
+On tolerant boot/peer-sync, every contested device is removed from all
+conflicting RI memberships before either dataplane is built; unaffected
+generated units from a bare member are retained as explicit refs, and an
+uncontested primary key is retained as a typed base-only claim without keeping
+the fanout-capable bare reference. Conflicting tunnel stanzas are cleared, so
+the tunnel manager cannot re-enslave the quarantined device. The contested
+device is left unbound in the default routing context.
+warning and apply-time ERROR log name the device and competing claims, and
+`xpf_routing_instance_member_device_conflicts` remains alertable for the active
+config (`> 0` means a tolerant-load quarantine is in effect).
+
 **Backup-router destination family must match the next-hop (#2911):**
 `renderBackupRouter` (`pkg/frr/config_render.go`) keys the static-route
 prefix keyword (`ip` vs `ipv6`) on the NEXT-HOP family (#2891/#2907). An
