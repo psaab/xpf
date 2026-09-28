@@ -122,15 +122,17 @@ func TestInputBarrierCloseRefusesAfterHandoff10751(t *testing.T) {
 // daemon, never fail an xpfd start behind its Requires edge); pre-handoff
 // it installs fail-closed like close.
 func TestInputBarrierEnsure10751(t *testing.T) {
-	oldInstall := earlyInputBarrierInstall
+	oldInstall, oldPresent, oldHost := earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent
 	oldMarker := daemon.EarlyInputHandoffMarkerPath
 	t.Cleanup(func() {
-		earlyInputBarrierInstall = oldInstall
+		earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent = oldInstall, oldPresent, oldHost
 		daemon.EarlyInputHandoffMarkerPath = oldMarker
 	})
 	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
 	installs := 0
 	earlyInputBarrierInstall = func() error { installs++; return nil }
+	earlyInputBarrierPresent = func() (bool, error) { return false, nil }
+	hostInboundTablePresent = func() (bool, error) { return false, nil }
 	var stdout, stderr bytes.Buffer
 	// Pre-handoff (no marker): install, fail-closed on error.
 	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
@@ -164,5 +166,85 @@ func TestInputBarrierEnsure10751(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "nothing to do") || stderr.Len() != 0 {
 		t.Fatalf("ensure with marker stdout=%q stderr=%q, want no-op note on stdout only", stdout.String(), stderr.String())
+	}
+}
+
+// TestInputBarrierEnsurePreservesLiveEnforcement10751 (#10751 R5-C
+// lifecycle check 1): marker absent (write failed or cleared) but
+// host-inbound enforcement live — a unit start must NO-OP, never install
+// global DROP into the live handed-off daemon.
+func TestInputBarrierEnsurePreservesLiveEnforcement10751(t *testing.T) {
+	oldInstall, oldPresent, oldHost := earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent
+	oldMarker := daemon.EarlyInputHandoffMarkerPath
+	t.Cleanup(func() {
+		earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent = oldInstall, oldPresent, oldHost
+		daemon.EarlyInputHandoffMarkerPath = oldMarker
+	})
+	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	installs := 0
+	earlyInputBarrierInstall = func() error { installs++; return nil }
+	earlyInputBarrierPresent = func() (bool, error) { return false, nil }
+	hostInboundTablePresent = func() (bool, error) { return true, nil }
+	var stdout, stderr bytes.Buffer
+	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("ensure with live enforcement exit = %d, want 0", code)
+	}
+	if installs != 0 {
+		t.Fatal("ensure must not install when enforcement is live despite the missing marker")
+	}
+	if !strings.Contains(stdout.String(), "enforcement is live") || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q, want live-enforcement no-op note on stdout only", stdout.String(), stderr.String())
+	}
+}
+
+// TestInputBarrierEnsurePreservesStandingBarrier10751 (#10751 R5-C
+// lifecycle check 2): marker absent, no enforcement, barrier already
+// present (a live bootstrap lifeline guard) — a reload/start must NO-OP,
+// never replace the guard with the global form.
+func TestInputBarrierEnsurePreservesStandingBarrier10751(t *testing.T) {
+	oldInstall, oldPresent, oldHost := earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent
+	oldMarker := daemon.EarlyInputHandoffMarkerPath
+	t.Cleanup(func() {
+		earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent = oldInstall, oldPresent, oldHost
+		daemon.EarlyInputHandoffMarkerPath = oldMarker
+	})
+	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	installs := 0
+	earlyInputBarrierInstall = func() error { installs++; return nil }
+	earlyInputBarrierPresent = func() (bool, error) { return true, nil }
+	hostInboundTablePresent = func() (bool, error) { return false, nil }
+	var stdout, stderr bytes.Buffer
+	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("ensure with standing barrier exit = %d, want 0", code)
+	}
+	if installs != 0 {
+		t.Fatal("ensure must not reinstall over a standing barrier (would clobber a lifeline guard)")
+	}
+	if !strings.Contains(stdout.String(), "already present") || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q, want already-present no-op note on stdout only", stdout.String(), stderr.String())
+	}
+}
+
+// TestInputBarrierEnsureReadErrorFallsThrough10751: unreadable readbacks
+// prove nothing live, so ensure falls through to the fail-closed install
+// (pre-handoff boot path preserved).
+func TestInputBarrierEnsureReadErrorFallsThrough10751(t *testing.T) {
+	oldInstall, oldPresent, oldHost := earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent
+	oldMarker := daemon.EarlyInputHandoffMarkerPath
+	t.Cleanup(func() {
+		earlyInputBarrierInstall, earlyInputBarrierPresent, hostInboundTablePresent = oldInstall, oldPresent, oldHost
+		daemon.EarlyInputHandoffMarkerPath = oldMarker
+	})
+	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	installs := 0
+	earlyInputBarrierInstall = func() error { installs++; return nil }
+	earlyInputBarrierPresent = func() (bool, error) { return false, errors.New("list denied") }
+	hostInboundTablePresent = func() (bool, error) { return false, errors.New("list denied") }
+	var stdout, stderr bytes.Buffer
+	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("ensure with unreadable state exit = %d, want 0 via fail-closed install", code)
+	}
+	if installs != 1 {
+		t.Fatalf("installs = %d, want 1: unreadable state must install fail-closed", installs)
 	}
 }

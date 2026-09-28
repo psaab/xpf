@@ -75,10 +75,13 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   identity exists; narrow a repurposed fxp0 OUT with the
   management-interface leaf); the first commit converges to configured
   policy.
-- `xpfd input-barrier ensure` — the boot unit's ExecStart: installs pre-handoff
-  (fail closed), and is a verified no-op success post-handoff so starting the
-  unit never injects a DROP chain into a live armed daemon nor fails an xpfd
-  start behind its Requires edge.
+- `xpfd input-barrier ensure` — the boot unit's ExecStart AND ExecReload:
+  installs pre-handoff when nothing is present (fail closed), and is a
+  verified no-op success post-handoff, when host-inbound enforcement is
+  already live, or when a barrier (global or bootstrap lifeline guard) is
+  already standing — never injecting global DROP into a live daemon, never
+  clobbering a lifeline guard, never failing an xpfd start behind its
+  Requires edge.
 - `xpfd input-barrier remove` — removes the host-input barrier only after the
   real firewall/fallback is installed or a no-enforcement teardown completes.
 - A kernel without bridge nf_tables reports degraded success with a warning

@@ -25,13 +25,17 @@
 # real tables — treat any post-handoff flush as an operator action (same as
 # flushing host-inbound itself) and re-apply to converge.
 #
-# ExecStart uses `input-barrier ensure`: pre-handoff it installs (fail
-# closed); post-handoff it is a verified no-op success — the daemon owns
-# enforcement and a restart converges it on first apply. Failing the start
-# post-handoff would strand xpfd behind its own Requires edge (R4-4), and
-# reinstalling unconditionally would inject a global DROP into a live armed
-# daemon. ExecReload stays `close`: a manual reload pre-handoff reinstalls,
-# post-handoff it refuses (override with --force explicitly).
+# ExecStart and ExecReload both use `input-barrier ensure`, which never
+# installs global DROP into a live daemon and never clobbers a standing
+# lifeline guard with the global form (R5-C): post-handoff (marker) it is a
+# verified no-op success — the daemon owns enforcement and a restart
+# converges it on first apply. Failing the start post-handoff would strand
+# xpfd behind its own Requires edge (R4-4). With the marker absent it still
+# no-ops when host-inbound enforcement is live (marker write failed or
+# marker cleared) or when a barrier — global or bootstrap lifeline guard —
+# is already present; only a truly absent barrier installs (fail closed).
+# A manual `input-barrier close` still force-installs the global form
+# pre-handoff (post-handoff it refuses; override with --force explicitly).
 #
 # Fresh installs: this unit is enabled --no-start (upgrades must never inject
 # a DROP chain into a live armed daemon). The postinst starts it live on
@@ -64,7 +68,7 @@ Type=oneshot
 RemainAfterExit=yes
 TimeoutStartSec=30
 ExecStart=/usr/local/sbin/xpfd input-barrier ensure
-ExecReload=/usr/local/sbin/xpfd input-barrier close
+ExecReload=/usr/local/sbin/xpfd input-barrier ensure
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=xpf-input-closed

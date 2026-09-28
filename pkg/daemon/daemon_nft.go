@@ -721,7 +721,10 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			d.noteHostInboundApplyFailed(time.Now())
 			return fmt.Errorf("remove early host-input barrier after host-inbound teardown: %w", err)
 		}
-		d.setEarlyInputHandoffDone()
+		if err := d.setEarlyInputHandoffDone(); err != nil {
+			d.noteHostInboundApplyFailed(time.Now())
+			return fmt.Errorf("record early-input handoff after host-inbound teardown: %w", err)
+		}
 		return nil
 	}
 	// #5582: the configured WireGuard listen port(s). The XDP shim steers
@@ -868,8 +871,9 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				barrierErr = tagNftInstallErr(barrierErr)
 				slog.Warn("failed to remove early host-input barrier after fenced fallback", "err", barrierErr)
 				barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", barrierErr)
-			} else {
-				d.setEarlyInputHandoffDone()
+			} else if err := d.setEarlyInputHandoffDone(); err != nil {
+				slog.Warn("failed to record early-input handoff after fenced fallback", "err", err)
+				barrierHandoffErr = fmt.Errorf("record early-input handoff after host-inbound fallback: %w", err)
 			}
 		}
 		// #7181: the retained generation is unchanged and may still be
@@ -1001,7 +1005,16 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// apply removes it. The host-inbound scope itself installed cleanly,
 	// so applied-success is still recorded.
 	if !lo0RetainsBarrier && !pendingRetainsBarrier && !snapshotChangedRetainsBarrier {
-		d.setEarlyInputHandoffDone()
+		if err := d.setEarlyInputHandoffDone(); err != nil {
+			// The real table stands covering desiredDrop but the handoff
+			// is incomplete without a durable marker: established-
+			// but-STALE, and the next apply retries the marker.
+			d.hostInboundEnforced.Store(true)
+			d.hostInboundCoveredAddrs = desiredDrop
+			d.hostInboundGapFenceActive.Store(false)
+			d.noteHostInboundApplyFailed(time.Now())
+			return fmt.Errorf("record early-input handoff after host-inbound install: %w", err)
+		}
 	}
 	slog.Info("host-inbound filter applied", "zones", len(views),
 		"unzoned_deny_v4", len(unzonedV4), "unzoned_deny_v6", len(unzonedV6),

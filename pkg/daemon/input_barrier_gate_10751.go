@@ -349,21 +349,36 @@ var errEarlyInputProtectionRefused = errors.New("early host-input barrier missin
 var EarlyInputHandoffMarkerPath = "/run/xpf/early-input-handoff.done"
 
 // setEarlyInputHandoffDone records a completed first handoff in memory and
-// on disk (best-effort marker write; a write failure only weakens the CLI
-// guard, never the commit). All handoff-completion sites funnel through
-// here so the two records cannot diverge. It also clears a latched
-// bootstrap swap failure: the barrier is gone and enforcement is live, so a
-// recovered box must not keep reporting swap-failed (#10751 R4-7).
-func (d *Daemon) setEarlyInputHandoffDone() {
-	d.earlyInputHandoffDone.Store(true)
-	d.earlyInputGuardSwapFailed.Store(false)
+// on disk. The marker write is DURABLE, not best-effort: memory is marked
+// only after the write succeeds, so a failed write blocks handoff
+// completion (the commit fails and the next apply retries) instead of
+// leaving memory-true with the marker absent — a state in which a later
+// barrier-unit start would install global DROP into a live handed-off
+// daemon (#10751 R5-C). Post-handoff idempotent refreshes stay best-effort
+// (already durable from the first handoff; the ensure command also
+// re-checks live enforcement, so a deleted marker cannot inject). It also
+// clears a latched bootstrap swap failure: the barrier is gone and
+// enforcement is live, so a recovered box must not keep reporting
+// swap-failed (#10751 R4-7).
+func (d *Daemon) setEarlyInputHandoffDone() error {
+	first := !d.earlyInputHandoffDone.Load()
 	if err := os.MkdirAll(filepath.Dir(EarlyInputHandoffMarkerPath), 0755); err != nil {
-		slog.Warn("cannot record early-input handoff marker; CLI reload guard degraded", "err", err)
-		return
+		slog.Warn("cannot record early-input handoff marker", "err", err)
+		if !first {
+			return nil
+		}
+		return fmt.Errorf("record early-input handoff marker: %w", err)
 	}
 	if err := os.WriteFile(EarlyInputHandoffMarkerPath, []byte("handed-off\n"), 0644); err != nil {
-		slog.Warn("cannot record early-input handoff marker; CLI reload guard degraded", "err", err)
+		slog.Warn("cannot record early-input handoff marker", "err", err)
+		if !first {
+			return nil
+		}
+		return fmt.Errorf("record early-input handoff marker: %w", err)
 	}
+	d.earlyInputHandoffDone.Store(true)
+	d.earlyInputGuardSwapFailed.Store(false)
+	return nil
 }
 
 // EarlyInputHandoffMarked reports whether the handoff marker file exists

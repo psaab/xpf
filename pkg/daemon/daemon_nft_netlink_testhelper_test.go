@@ -14,10 +14,14 @@ package daemon
 // overrides nftInstaller with a fakeNftInstaller and restores it. It also forces
 // nftProbeAvailable to "available" so the nf_tables-unavailable classification
 // (tagNftInstallErr) is deterministic and never opens a real netlink socket during
-// unit tests.
+// unit tests. And it redirects the #10751 handoff marker into a temp dir:
+// marker writes are durable (a failed first handoff write blocks the commit),
+// and the sandbox cannot write /run/xpf.
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
@@ -29,6 +33,13 @@ func init() {
 	// Classification defaults to "subsystem available" so tagNftInstallErr does not
 	// probe a real socket and does not tag an injected non-nf_tables failure.
 	nftProbeAvailable = func() error { return nil }
+	// #10751 R5-C: handoff marker writes are durable (a failed first-handoff
+	// write blocks the commit), so redirect the marker package-wide into a
+	// temp dir — the sandbox cannot write /run/xpf. Marker-durability tests
+	// save/restore this var with their own paths.
+	if dir, err := os.MkdirTemp("", "xpf-handoff-test-"); err == nil {
+		EarlyInputHandoffMarkerPath = filepath.Join(dir, "early-input-handoff.done")
+	}
 }
 
 // noopNftInstaller is the default test Installer: every op succeeds and touches

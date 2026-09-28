@@ -831,7 +831,7 @@ func TestEarlyInputBarrierBootUnitAndStaging10751(t *testing.T) {
 		{section: installSection, want: "RequiredBy=systemd-networkd.service"},
 		{section: installSection, want: "RequiredBy=xpfd.service"},
 		{section: serviceSection, want: "ExecStart=/usr/local/sbin/xpfd input-barrier ensure"},
-		{section: serviceSection, want: "ExecReload=/usr/local/sbin/xpfd input-barrier close"},
+		{section: serviceSection, want: "ExecReload=/usr/local/sbin/xpfd input-barrier ensure"},
 		{section: serviceSection, want: "Type=oneshot"},
 		{section: serviceSection, want: "RemainAfterExit=yes"},
 	} {
@@ -1982,5 +1982,82 @@ func TestPostRemovalCoverageDriftReinstalls10751(t *testing.T) {
 	}
 	if *calls != 3 {
 		t.Fatalf("snapshot samples = %d, want 3 (S1 + S2 + post-removal S3)", *calls)
+	}
+}
+
+// --- #10751 R5-C: durable handoff marker ---
+
+// blockHandoffMarker10751 redirects the marker path under a regular file so
+// every marker write fails deterministically (MkdirAll: not a directory).
+func blockHandoffMarker10751(t *testing.T) {
+	t.Helper()
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0644); err != nil {
+		t.Fatalf("stage marker blocker: %v", err)
+	}
+	EarlyInputHandoffMarkerPath = filepath.Join(blocker, "early-input-handoff.done")
+}
+
+// TestHandoffMarkerWriteFailureBlocksHandoff10751: a failed marker write
+// blocks handoff completion — memory stays unmarked (so a later unit start
+// correctly installs instead of injecting into a live handed-off daemon),
+// the commit fails STALE with the enforcement recorded, and healing the
+// path lets the next apply converge and complete.
+// RED on revert: warn-past (nil error) completes the handoff in memory
+// with no marker on disk.
+func TestHandoffMarkerWriteFailureBlocksHandoff10751(t *testing.T) {
+	orig := nftInstaller
+	origMarker := EarlyInputHandoffMarkerPath
+	t.Cleanup(func() { nftInstaller = orig; EarlyInputHandoffMarkerPath = origMarker })
+	nftInstaller = &fakeNftInstaller{}
+	blockHandoffMarker10751(t)
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(hostInboundTestConfig())
+	if err == nil || !strings.Contains(err.Error(), "record early-input handoff") {
+		t.Fatalf("apply err = %v, want durable-marker failure", err)
+	}
+	if d.earlyInputHandoffDone.Load() {
+		t.Fatal("memory must stay unmarked when the marker write fails")
+	}
+	if !d.hostInboundLastApplyFailed.Load() {
+		t.Fatal("marker failure must record STALE")
+	}
+	if !d.hostInboundEnforced.Load() {
+		t.Fatal("real table stands; must record established coverage")
+	}
+	EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
+		t.Fatalf("healed apply err = %v, want nil", err)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("healed apply must complete the handoff")
+	}
+	if _, err := os.Stat(EarlyInputHandoffMarkerPath); err != nil {
+		t.Fatalf("marker missing after healed handoff: %v", err)
+	}
+}
+
+// TestPostHandoffMarkerRefreshBestEffort10751: once handed off, an
+// idempotent marker refresh failure must NOT fail the commit (already
+// durable from the first handoff; live enforcement re-checked by ensure).
+func TestPostHandoffMarkerRefreshBestEffort10751(t *testing.T) {
+	orig := nftInstaller
+	origMarker := EarlyInputHandoffMarkerPath
+	t.Cleanup(func() { nftInstaller = orig; EarlyInputHandoffMarkerPath = origMarker })
+	nftInstaller = &fakeNftInstaller{}
+	EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
+		t.Fatalf("first apply err = %v, want nil", err)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("first apply must hand off")
+	}
+	blockHandoffMarker10751(t)
+	if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
+		t.Fatalf("post-handoff apply err = %v, want nil (refresh is best-effort)", err)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("post-handoff refresh failure must not unmark the handoff")
 	}
 }
