@@ -1,15 +1,18 @@
 # 9506 delta plan: ship P-MECH permits on the current master (research/9506-delta)
 
-- Review state: **v14 revision; parent re-gate pending; this worker assigns
-  no verdict.** Round thirteen at `0705fc8b2` returned NEEDS-MAJOR
-  2-of-3 + NEEDS-MINOR (Opus R1/R2/R3: FRR guard contradicts the
+- Review state: **v15 micro-revision; parent re-gate pending; this worker assigns
+  no verdict.** V14 gate was NEEDS-MINOR 3-of-3; this revision closes its
+  four residuals (R3-ANCHORS; Host P1 row-4/drift and P2 routing; Sec F1
+  stall-window composition/counting). V14's prior record: Round thirteen at
+  `0705fc8b2` returned NEEDS-MAJOR 2-of-3 + NEEDS-MINOR (Opus R1/R2/R3:
+  FRR guard contradicts the
   immutable-q0-FIB invariant; M3 silently replaces the canonical
   route-derived contract; tip audit falsely claims no-impact through
   `2ccea8434` — Host P1/P2: OPEN-vs-mutation predicates contradict;
   structural attestation scheduled after dependent live entry — Sec
   B1–B6 minor: M1 wording/exposure, Q2 cells, kernel-bits binding,
-  LANDED-matrix rule, Gate-2 recovery wiring, supervisor/handoff
-  liveness). This revision closes all eleven with no deferrals: ONE
+  LANDED-matrix rule, Gate-2 recovery wiring, supervisor/handoff liveness).
+  That v14 revision closed all eleven with no deferrals: ONE
   normative per-table/per-protocol FRR/FIB mutation-authority table
   (xpfd sole AUTHORIZED writer inside the owner-approved support envelope;
   unexpected external writers remain detection-bounded; R/A/K audit-only;
@@ -386,9 +389,9 @@ reserved quarantine bit.
 
 | Change | Re-anchored consumers at observed `0ab1c7d87` | Required P-MECH composition |
 |---|---|---|
-| `2ccea8434` peer-snapshot authorization (`peer_snapshot_protocol_gate_6650.go:34-120`) | Commit preflight includes plain and confirmed commits (`daemon_apply_commit.go:274-288,876-889`); push/revalidation (`:481-526`); active snapshot/reservation and queue (`daemon_ha_sync.go:464-486,519-590`); reconnect/retry reconciler (`:705-820`); receive-side HA `handleConfigSyncWithAncestry` (`:880-913`). | M3's v36 shape floor must be included in every preflight and reconnect/retry decision. Compose the required floor as the maximum of ingress-prefix, multi-zone and every other concurrently-required feature floor. Preserve connection epoch + selected `SessionSync` capability authorization through the queue. |
+| `2ccea8434` peer-snapshot authorization (`peer_snapshot_protocol_gate_6650.go:34-120`) | Commit preflight includes plain and confirmed commits (`daemon_apply_commit.go:274-288,876-889`); `pushCommittedConfigToPeer` (`:493-527`) + revalidation; active snapshot/reservation and queue (`daemon_ha_sync.go:464-486,519-590`); reconnect/retry reconciler (`:705-820`); receive-side HA `handleConfigSyncWithAncestry` (`:880-913`). | M3's v36 shape floor must be included in every preflight and reconnect/retry decision. Compose the required floor as the maximum of ingress-prefix, multi-zone and every other concurrently-required feature floor. Preserve connection epoch + selected `SessionSync` capability authorization through the queue. |
 | Final queue/socket boundary from `2ccea8434` | `SessionSync` final peer-state/active-connection check is under `peerSnapshotProtocolWriteMu` (`pkg/cluster/sync_conn_config.go:320-335`); `QueueConfigWithPeerSnapshotProtocolAtGeneration` begins at `:346`. | The M3 prefix floor is a required operand to the atomic queue check and final socket write; an earlier daemon preflight alone is insufficient. A reconnect or capability change between auth and write withholds the text and leaves reconcile unclaimed/retryable. Do not lower the floor when multi-zone and ingress-prefix features coexist. |
-| `fd32d2df5` (#11478), plus `3be469bc3`/#10788 and `01879c222`/#10789 holder restore | `AllocatorHolderSnapshot` captures the published RuntimeView's SNAT/NAT64 holder masks (`session_import.rs:221-223,338-437`); strict-refusal rollback restores the incumbent reservation (`:439-568`), with worker loops at `:501-543` and forward BPF-mirror restoration at `:571+`. Atomic allocator capture is `CapturedLiveGuard` (`nat/allocator.rs:1510-1518`) + `capture_and_replace` (`:1699-1713`); retained allocator reseed is `:3452`, NAT64 prefix reseed `nat64.rs:938`. Current HA rollback interprets every bit `0..127` as a worker. | The quarantine census covers capture, refused replacement/rollback, worker-holder reconstruction, BPF mirror restoration, allocator reseed, NAT64/SNAT, worker retirement, and release/expiry. Reserve bit 127 exclusively for quarantine; worker restore covers 0–126 only; keep bit/HOLD through refused HA replacement. The §5 quarantine cell is mandatory. |
+| `fd32d2df5` (#11478), plus `3be469bc3`/#10788 and `01879c222`/#10789 holder restore | `AllocatorHolderSnapshot` (`:221-224`) captures the published RuntimeView's SNAT/NAT64 holder masks (`reserve_synced_translation` `:340-437` in `session_import.rs`); `rollback_rejected_mirror_import` (`:439-573`) restores the incumbent allocator reservation, with worker loops at `:503,533` (both `0u32..128`); `restore_rejected_forward_mirror` (`:575+`) restores the forward BPF mirror. Atomic allocator capture is `CapturedLiveGuard` (`nat/allocator.rs:1827-1831`) + `capture_and_replace` (`:2017-2045`); retained allocator reseed is `reseed_retained_from` (`:4086-4223`), NAT64 prefix reseed `nat64.rs:938`. Current HA rollback interprets every bit `0..127` as a worker. | The quarantine census covers capture, refused replacement/rollback, worker-holder reconstruction, BPF mirror restoration, allocator reseed, NAT64/SNAT, worker retirement, and release/expiry. Reserve bit 127 exclusively for quarantine; worker restore covers 0–126 only; keep bit/HOLD through refused HA replacement. The §5 quarantine cell is mandatory. |
 | Post-pin routing/allocator/lifecycle intersection, `2ccea8434..0ab1c7d87` (11 commits; 309 paths in total) | `8413be3a5` adds `UnbindInterfaceFromVRFs`/`LinkSetNoMaster` (`pkg/routing/vrf.go:240`), a route-domain writer added to M1. In `daemon_flow.go`, `RouteReplace` is now `:608,:689` and `RouteDel` `:740`; the `8413` flow/routes diff is the claim-helper rename, not a new route writer. `5c7c57c54` adds API-auth hashing to `Store.SyncApply` (`configstore/store.go:993`) before the still-required lenient compile (`:822-845`); M3 validation must remain in that compile. `0c3d0b7a0` adds bounded idle-lease import state in `nat/allocator.rs`; `20c731bf1` adds persistent-NAT clear fences and allocator carry (`carry_persistent_nat_clear_fences_from`); both are additional quarantine-preservation/cleanup consumers. `b100d557f` changes the HA watchdog cleanup portion of `daemon_run_shutdown.go`, not the #9506 helper-stop/join/flag-writer quiescence order. `1f436241f` adds host-input warning/flush logic to `daemon_apply_commit.go`, not the peer-snapshot authorization check. | The post-pin intersections were path-checked and the cited functions re-anchored; specifically re-review M3's post-hash lenient validator and quarantine survival across idle import, persistent-clear carry, helper shutdown and allocator reseed. New q0 route-domain unbinds are refused through the same S4 pre-effective boundary. |
 
 The effective snapshot floor and authorization are a single end-to-end
@@ -993,17 +996,23 @@ all 35 design paths exist, as checked in §4.2.
   → tombstone `ACCOUNTED` + counters + `Finalized` bookkeeping; (ii)
   physical buffer → freed/reused iff `IoRelease` proved, else deliberately
   leaked (`mem::forget` + per-op `Leaked` row + `RetainedCounters`);
-  (iii) unresolved-I/O obligation → NEVER reaped by any ceiling: `Leaked`
-  rows persist in the obligation store (bounded by `LEAKED_OBLIGATION_MAX
-  = 16384`, the `terminal_tombstone` precedent) and PERMANENTLY fence
-  their epoch (no clean ack for that epoch ever; reopen only under a NEW
-  epoch); an unresolved ANCESTOR obligation continues to prohibit routing
-  mutation/reopening wherever its late emission could matter — a new epoch
-  NEVER silently discards that requirement (cumulative with the
-  all-old-I/O-final reopen rule); store overflow sets a poison flag →
-  ALL fence acks fail (deny-only) + alarm until operator reset. Crash
-  cleanliness is a ONE-SHOT generation-bound marker with an INDEPENDENT
-  expected-authority source (comparing the marker to itself would be
+  (iii) unresolved-I/O obligations are NEVER reaped by any ceiling.
+  `Leaked` rows persist in the obligation store (bounded by
+  `LEAKED_OBLIGATION_MAX = 16384`, the `terminal_tombstone` precedent)
+  and permanently fence their epoch: no clean ack for that epoch ever;
+  no descendant generation clears the ancestor, and OPEN/mutation stay
+  refused until reboot retires the boot-bound epoch. An unreleased
+  `IoRelease` ancestor blocks OPEN/mutation until target-write release
+  or bound-writer death-proof, after which all remaining S4 gates still
+  apply. A drift `ASYNC-SUSPECT` blocks OPEN until the S4 fence proves
+  all old-epoch I/O final; only then may same-environment re-admission
+  pass the ordinary S4 checks. The boot-current PERMUTATION-FREEZE
+  continues to refuse step-6 mutation until reboot. A new epoch never
+  silently discards an unresolved `Leaked` or `IoRelease` ancestor;
+  store overflow sets a poison flag → ALL fence acks fail (deny-only) +
+  alarm until operator reset. Crash cleanliness is a ONE-SHOT
+  generation-bound marker with an INDEPENDENT expected-authority source
+  (comparing the marker to itself would be
   vacuous, and a fresh supervisor's zero identity would freeze every
   clean restart): source is a NEW durable
   `/var/lib/xpf/ipsec-fence-authority` (`MkdirAllDurable` +
@@ -1270,13 +1279,18 @@ all 35 design paths exist, as checked in §4.2.
   retire/join (`coordinator/mod.rs:1022-1050`) and ordinary expiry.
   v14 R3 holder census through `fd32d2df5` (#11478), re-anchored at
   `0ab1c7d87`: HA refused-replacement rollback captures/restores the
-  incumbent holder mask in `AllocatorHolderSnapshot` /
-  `restore_rejected_forward_mirror` (`afxdp/ha/session_import.rs:221-228,
-  445-567`; restore loops at `:503-515,533-545`); allocator capture/
-  replace and `SourceNatReservationSnapshot` live in
-  `nat/allocator.rs:1502-1518,1692-1712`; retained allocator reseed is
-  `reseed_retained_from` (`:4086`), snapshot and restore metadata are
-  `:5676`/`:5958`, with corresponding NAT64 reservation/holder restore
+  incumbent holder mask in `AllocatorHolderSnapshot` (`:221-224`) /
+  `rollback_rejected_mirror_import` (`afxdp/ha/session_import.rs:439-573`,
+  allocator reservation restoration; worker loops at `:503,533`, both
+  `0u32..128`) vs `restore_rejected_forward_mirror` (`:575+`, forward BPF
+  mirror restoration); allocator capture is `CapturedLiveGuard`
+  (`nat/allocator.rs:1827-1831`) + `capture_and_replace` (`:2017-2045`);
+  `SourceNatReservationSnapshot` (incumbent reservation state) is the type
+  at `:878` with `impl` at `:5947` (`holder_mask` `:5950`,
+  `restore_metadata` `:5958`) — distinct from `PortAllocator::snapshot`
+  (`:5676`, status returning `PortAllocatorSnapshot` `:6027`); retained
+  allocator reseed is `reseed_retained_from` (`:4086-4223`), with
+  corresponding NAT64 reservation/holder restore
   paths in `nat64.rs` and `nat/source/nat64_ports.rs`. Current HA restore
   loops interpret EVERY bit `0..127` as a worker. v14 reserves bit 127
   exclusively for `NatHolder::Quarantine`, caps worker IDs at
@@ -1494,7 +1508,11 @@ all 35 design paths exist, as checked in §4.2.
   before notification: worst case ≤1s + dump + revoke before denial, which
   admits up to ≤1s of NEW q0 writes under the changed environment PLUS the
   in-flight cap at detection (both quantities are asserted; not in-flight
-  alone). `RuleSubscribe` reduces normal event latency to callback+revoke,
+  alone). CASE COMPOSITION: healthy-census detection is ≤1s + dump +
+  revoke, while a stall-start write is exposed until independent
+  watchdog-fire at ~3s + revoke; both bounds include the in-flight set at
+  detection; §7 requires recording the stalled packet window. `RuleSubscribe`
+  reduces normal event latency to callback+revoke,
   not zero pre-effective exposure; dropped rule events are covered by the
   1s census audit. FIB route events similarly deny at callback+revoke; a
   dropped edge is bounded by the 1s periodic raw-FIB re-read. These external
@@ -1836,8 +1854,10 @@ all 35 design paths exist, as checked in §4.2.
   already phys-only + explicit usp exclusion); the (4) audit re-verifies
   FULL predicate every tick. DRIFT IS NEVER INSTANTLY SAFE: mode
   drift → synchronous revoke + fence; epochs finalized after the last
-  GOOD readback are marked ASYNC-SUSPECT; step-6 mutation is then
-  prohibited by a PERMUTATION-FREEZE until reboot (persisted flag, new
+  GOOD readback are marked ASYNC-SUSPECT until the S4 fence proves all
+  old-epoch I/O final. That proof permits same-environment OPEN only
+  after the remaining S4 checks pass; step-6 mutation remains prohibited
+  by a boot-bound PERMUTATION-FREEZE until reboot (persisted flag, new
   `/var/lib/xpf/pmech-permutation-freeze` beside the kernel-promoted
   state — reboot is the designated retirement boundary for
   untrackable downstream skbs). FLAG DISCIPLINE (R9 P1-freeze —
@@ -1863,9 +1883,10 @@ all 35 design paths exist, as checked in §4.2.
   RETRIED on every stale read until it succeeds — best-effort,
   one locked syscall per read);
   current boot + non-empty entries → mutation REFUSED.
-  Stale-unlink failure → refuse + alarm (disk broken ⇒ deny,
-  consistent with authority persist failures). Non-ENOENT read
-  error → treat as SET (fail-closed) + alarm. WRITE SIDE
+  Known stale-boot unlink failure → row 6: alarm; refuse mutation,
+  but OPEN iff otherwise admissible (same-environment fresh admission,
+  no unresolved ancestor). Non-ENOENT read error → row 5: treat as SET,
+  REFUSE both OPEN and mutation, and alarm. WRITE SIDE
   (R9 Host-6/7 — cumulative appends are FORBIDDEN without a
   boot check): every flag write runs read-modify-write under
   the flag flock (same `withEpochFileLock` pattern as the
@@ -1901,15 +1922,18 @@ all 35 design paths exist, as checked in §4.2.
   refused while boot-current entries exist.
   ENFORCEMENT: admission verifies every predicate field; change attempts
   while OPEN are refused before effective change. S4 OPEN-VS-MUTATION
-  DECISION TABLE (v14 Host P1; sole authority for this subsection, recovery
-  section (g), M1 and §7 — replace any prose-level rule that disagrees):
+  DECISION TABLE (v14 Host P1 base; v15 closes the row-4 and read-routing
+  residuals; sole authority for this subsection, recovery section (g), M1
+  and §7 — replace any prose-level rule that disagrees):
 
   | State at `tryOpenPermit` | OPEN | Routing/FIB mutation |
   |---|---|---|
   | Current-boot flag absent/clear; mirror clear; no unresolved ancestor; fresh predicate/mode/authority/worker/ledger checks pass | Allowed for this generation | Only by S4 close → fence ACK + zero old I/O → owned mutation → fresh admission |
   | Current-boot durable flag set; mirror clear; same effective routing/mode environment re-proved; zero old I/O and no unresolved ancestor | Allowed after same-environment re-admission (same or fresh generation); the flag does not itself block OPEN | REFUSED until reboot retires the flag |
   | `fenceFlagLive` sticky mirror SET, regardless of file contents or fresh predicate | REFUSED until reboot-init clears the mirror | REFUSED until reboot |
-  | Any unresolved ancestor (`Leaked`, unreleased `IoRelease`, or `ASYNC-SUSPECT`) regardless of a new generation or clean current snapshot | REFUSED; descendants cannot erase ancestor obligations | REFUSED until old obligation is resolved/proven dead or reboot retires it |
+  | Unresolved `Leaked` ancestor, regardless of descendant generation or clean snapshot | REFUSED until reboot retires the boot-bound epoch | REFUSED until reboot retires the boot-bound epoch |
+  | Unreleased `IoRelease` ancestor | REFUSED until target-write release or bound-writer death-proof; then re-evaluate all remaining S4 OPEN checks | REFUSED while unproved; after proof, only the ordinary S4 close → fence ACK + zero old I/O → owned mutation → fresh admission sequence |
+  | Drift `ASYNC-SUSPECT` ancestor | REFUSED until the S4 fence proves all old-epoch I/O final; then same-environment fresh admission only, subject to the remaining rows | REFUSED while the boot-current PERMUTATION-FREEZE is set, including after fence finality; reboot is required |
   | Malformed/unreadable current file or non-ENOENT read error | REFUSED + alarm | REFUSED + alarm |
   | Known stale-boot file whose unlink failed; mirror clear; no unresolved ancestor | OPEN only if same-environment fresh admission passes | REFUSED + alarm until a locked stale-read unlink succeeds |
 
@@ -1970,10 +1994,12 @@ all 35 design paths exist, as checked in §4.2.
   per-branch member-text table
   (B1–B8 with file:line@tag) + honest F-statuses
   (RECIPE-EXECUTED, never LANDED pre-P2); DRIFT FIXTURE — inject
-  mode drift → revoke + fence + boot-bound permutation-freeze
-  (mutation refused even after fence, same-env reopen allowed,
-  flag persists across helper restart AND self-clears on boot
-  change — post-reboot mutation-allowed-again cell REQUIRED).
+  mode drift → revoke + fence; ASYNC-SUSPECT blocks OPEN until the
+  fence proves all old-epoch I/O final, then mark-present + same-env
+  OPEN-allowed only after fresh admission, while mutation remains
+  refused by the boot-current permutation-freeze. Assert that mark
+  survives helper restart and is stale-unlinked only after boot change;
+  require the post-reboot mutation-allowed-again cell.
 - M2 egress oracle: before the first Permit is coded, approve a design that
   correlates each q0 submission to the actual selected egress table/domain and
   observes post-write disposition. The nft `delivered` witness is only a
@@ -2043,7 +2069,7 @@ all 35 design paths exist, as checked in §4.2.
   `types_security.go:1973-1980`; strict compiler
   `configstore/store.go:619-628`; lenient compiler
   `configstore/store.go:822-845`; HA ingress `daemon_ha_sync.go:880-913`;
-  commit/ancestry ingress `daemon_apply_commit.go:530`
+  commit/ancestry ingress `daemon_apply_commit.go:542`
   (`syncAndApplyWithAncestry`); boot `store_persist.go:79`. (5) TRANSPORT/PUBLISH: add sorted normalized
   v4/v6 CIDR vectors (max 64 each) to Go/Rust `IpsecTunnelRowSnapshot`,
   serde REQUIRED, bump exact snapshot version 35→36 and set
@@ -2238,33 +2264,38 @@ slice commit's Validation section):
   xfrmi recreate/if_id-change/zone-move fencing with STALE→DROP. Revert mutant:
   compile-valid collapse of `Ipsec` to `None` must merge sessions and fail.
 - P1-entry Q2 bypass-hunt cells (three independent packet/transition fixtures;
-  each archives exact build, config, interfaces, tuple, packet counters, and
-  correlated event):
+  each archives exact build, config, interfaces, tuple, timestamped harness
+  sends/events, nft forward-rule/policy snapshots (and only configured rule
+  counters), and sender/receiver counts; no product forward-drop counter is
+  assumed):
   (1) Force bridge-family unsupported-only (`IsTransitBarrierBridgeUnsupportedOnly`)
-  while bridge forwarding is configured. Expected reason
-  `ErrTransitBarrierBridgeUnsupported`, `bridge_coverage_unavailable=1`,
-  and a `TRANSIT_BARRIER_DEGRADED` fixture event; P1 admission is HOLD even
-  though the inet-forward barrier remains installed. Any attempted bridge
-  plaintext frame must be `DROP` / receiver count 0 or the bypass is confirmed
-  and hardening blocks P1. Fail-on-revert mutant treats degraded exit 0 as
-  complete bridge coverage.
+  while bridge forwarding is configured. Expected product reason is
+  `ErrTransitBarrierBridgeUnsupported`; the harness records
+  `bridge_coverage_unavailable=1` and a `TRANSIT_BARRIER_DEGRADED` fixture
+  event (harness labels, not claimed daemon telemetry). P1 admission is HOLD
+  even though the inet-forward barrier remains installed. For attempted
+  bridge plaintext, inspect nft forward policy/rules and receiver count:
+  receiver must remain 0; any delivery confirms bypass and blocks P1.
+  Fail-on-revert mutant treats degraded exit 0 as complete bridge coverage.
   (2) Send paired loopback-local and xfrmi-to-remote packets across the
-  `fec7d18a3` exemption. Expected local packet is delivered only to local
-  input (`loopback_local=1`, `loopback_remote_forward=0`, event
-  `LOOPBACK_LOCAL_ONLY`); remote packet reason is
-  `TRANSIT_BARRIER_DEFAULT_DROP`, forward-drop counter increments once,
-  receiver count remains 0, and packet-correlated event is
-  `TRANSIT_FENCE_PACKET_DROP`. Mutant broadens the exemption to a forward
-  path.
+  `fec7d18a3` exemption. Harness observations require the local packet to
+  reach only local input (`loopback_local=1`, `loopback_remote_forward=0`,
+  harness event `LOOPBACK_LOCAL_ONLY`). For the remote packet, record the harness
+  event `TRANSIT_FENCE_PACKET_DROP` correlated with the attempted packet,
+  inspect the nft default-DROP rule/policy, and require receiver count 0;
+  `q0 delivered` is only a fence-mark witness, never drop evidence. Mutant
+  broadens the exemption to a forward path.
   (3) Exercise every boot/first-install transition where capture or forwarding
-  can become active. Expected reason `TRANSIT_BARRIER_DEFAULT_DROP` before
-  first possible forwarding, one corresponding forward-drop counter and
-  correlated `TRANSIT_FENCE_PACKET_DROP`, with receiver count 0 and q0=0;
-  fence must be present before forwarding is enabled. Mutant reorders the
+  can become active. Before first possible forwarding, record the harness
+  event `TRANSIT_BARRIER_DEFAULT_DROP`, inspect nft forward base-chain
+  policy/rule state, and send a correlated probe; require receiver count 0
+  and q0=0. The fence must be present before forwarding is enabled;
+  `q0 delivered` is not a forward-drop counter. Mutant reorders the
   first-forward step ahead of fence installation.
-  Missing/mismatched reason-counter-event, any unexpected receiver/q0 packet,
-  or any unsupported-bridge PASS fails P1 entry; "fail-closed at every
-  intermediate" is unavailable until all three pass.
+  Missing/mismatched harness event, nft barrier state, receiver count, any
+  unexpected receiver/q0 packet, or any unsupported-bridge PASS fails P1
+  entry; "fail-closed at every intermediate" is unavailable until all three
+  pass.
 - P2-entry cells must PASS before production Permit code: exact admitted-RPDB
   IPv4/IPv6 fixture with PBR-free rib-group leak refusal and unrelated
   ingress-scoped-PBR control; M1 enforcement (ruleOps/facade/apply/FIB/
@@ -2302,8 +2333,15 @@ slice commit's Validation section):
   out-of-envelope rationale. The same bounded-count cell covers route-event
   FIB changes and dropped-edge periodic re-read; poll errors deny. A separate
   nonblocking watchdog test stalls the census/supervisor >3s and requires
-  deny-only plus alarm from independent watchdog. q0-path event cell
-  records synchronous revoke, callback latency, and skipped coalescing but
+  deny-only plus alarm from the independent watchdog. Record harness-observed
+  NEW q0 packet counts from stall start through watchdog fire using
+  timestamped harness sends plus observable nft-rule/receiver count
+  snapshots (do not treat `q0 delivered` as a forward-drop counter or assume
+  product forward-drop telemetry), and record the in-flight I/O set at
+  watchdog fire. Exposure remains watchdog-bounded (~3s + revoke) but
+  unquantified by evidence until these observations are captured. q0-path
+  event cell records synchronous revoke, callback latency, and skipped
+  coalescing but
   grants no pre-effective exclusion credit; M1
   in-flight fence sequence (revoke → Rust acknowledged close → cancel
   queued → account started + unreleased I/O → `FenceAuthorityAck` →
