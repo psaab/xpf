@@ -90,7 +90,7 @@
 
 use super::source::SourceNatFlowKey;
 use rustc_hash::FxHashMap;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::Hasher;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 // #4800: both are now used unconditionally by `PortAllocator::lock_live`
@@ -102,6 +102,11 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 pub(super) const NS_PER_SEC: u64 = 1_000_000_000;
+// The lease sync stream re-primes every 30s and retires a silent connection
+// after its 10s read deadline. Keep clear tombstones across two full-set ticks
+// so an already in-flight pre-clear record cannot immediately restore a lease.
+const PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS: u64 = 60 * 1_000_000_000;
+const ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS: u64 = u64::MAX;
 const MAX_SOURCE_NAT_POOL_TRACKED_FLOWS: usize = 262_144;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -800,10 +805,11 @@ pub(super) struct PortAllocatorLiveState {
     pub(super) persistent_by_source: FxHashMap<PersistentSourceKey, PersistentLease>,
     pub(super) lease_expirations: BTreeSet<(u64, PersistentSourceKey)>,
     pub(super) lease_expirations_by_addr: Vec<BTreeSet<(u64, PersistentSourceKey)>>,
-    // #10784: fence a cleared idle lease from a pre-clear HA export. A later
-    // local allocation removes this tombstone only when it mints a replacement.
-    // Active cleared leases remain as draining records until their holders release.
-    pub(super) revoked_persistent: BTreeSet<PersistentSourceKey>,
+    // #10784: fence a cleared idle lease from a pre-clear HA export for a
+    // bounded replay horizon. A later local allocation removes its tombstone
+    // only when it mints a replacement; active cleared leases remain as
+    // draining records until their holders release.
+    pub(super) revoked_persistent: BTreeMap<PersistentSourceKey, u64>,
     // #5269: address-only occupancy tokens — the translated reverse identity of a
     // `port no-translation` / port-less flow mapped to its owning FORWARD flow.
     // Populated by `reserve_address_only` (which denies a second flow that would
@@ -1724,13 +1730,17 @@ impl PortAllocator {
     /// Idle leases are removed and their PAT occupancy is released. Leases
     /// with live flows become draining shells: fresh flows cannot reuse them,
     /// but their existing holders retain the occupied tuple until release.
-    /// Revocation tombstones also fence off an idle lease that was exported
-    /// before the clear and arrives in a later HA import.
-    pub(crate) fn clear_persistent_leases(&self) -> usize {
+    /// Revocation tombstones fence a pre-clear HA export for two full-set sync
+    /// ticks; after that replay horizon, the lease is considered too stale to
+    /// block imports indefinitely.
+    pub(crate) fn clear_persistent_leases(&self, now_ns: u64) -> usize {
         let mut freed = Vec::new();
+        let replay_until_ns = now_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
         let count;
         {
             let mut live = self.lock_live();
+            live.revoked_persistent
+                .retain(|_, expires_at_ns| *expires_at_ns > now_ns);
             let leases: Vec<_> = live
                 .persistent_by_source
                 .iter()
@@ -1738,7 +1748,12 @@ impl PortAllocator {
                 .collect();
             count = leases.len();
             for (key, lease) in leases {
-                live.revoked_persistent.insert(key);
+                let revoked_until_ns = if lease.active_flows == 0 {
+                    replay_until_ns
+                } else {
+                    ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS
+                };
+                live.revoked_persistent.insert(key, revoked_until_ns);
                 if lease.active_flows != 0 {
                     continue;
                 }
@@ -2574,7 +2589,11 @@ impl PortAllocator {
         // and the read-only fragment probe pass.
         holder: NatHolder,
     ) -> LeaseReuse {
-        if live.revoked_persistent.contains(&key) {
+        if live
+            .revoked_persistent
+            .get(&key)
+            .is_some_and(|expires_at_ns| *expires_at_ns > now_ns)
+        {
             return if live
                 .persistent_by_source
                 .get(&key)
@@ -2875,13 +2894,14 @@ impl PortAllocator {
             return;
         };
         let mut refresh_expiry = None;
+        let revoked_until_ns = live.revoked_persistent.get(&key).copied();
         if let Some(lease) = live.persistent_by_source.get_mut(&key) {
             lease.completed_flows = lease.completed_flows.saturating_add(1);
             lease.activation_saw_completion = true;
             lease.active_flows = lease.active_flows.saturating_sub(1);
             if lease.active_flows == 0 {
                 let old_expires_at_ns = lease.expires_at_ns;
-                let expires_at_ns = if live.revoked_persistent.contains(&key) {
+                let expires_at_ns = if revoked_until_ns.is_some_and(|until| until > now_ns) {
                     now_ns
                 } else {
                     now_ns.saturating_add(lease.timeout_ns)
@@ -2889,6 +2909,14 @@ impl PortAllocator {
                 lease.expires_at_ns = expires_at_ns;
                 refresh_expiry = Some((lease.addr_index, old_expires_at_ns, expires_at_ns));
             }
+        }
+        if revoked_until_ns == Some(ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS)
+            && refresh_expiry.is_some()
+        {
+            live.revoked_persistent.insert(
+                key,
+                now_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS),
+            );
         }
         if let Some((addr_index, old_expires_at_ns, expires_at_ns)) = refresh_expiry {
             Self::remove_lease_expiration_locked(live, addr_index, old_expires_at_ns, key);
@@ -3057,7 +3085,10 @@ impl PortAllocator {
         self.unlink_live_allocation_locked(&mut live, &flow, existing);
         if let Some(key) = existing.persistent_key {
             let mut remove_lease = false;
-            let revoked = live.revoked_persistent.contains(&key);
+            let revoked = live
+                .revoked_persistent
+                .get(&key)
+                .is_some_and(|revoked_until_ns| *revoked_until_ns > now_ns);
             let mut insert_expiry = None;
             if let Some(lease) = live.persistent_by_source.get_mut(&key) {
                 lease.active_flows = lease.active_flows.saturating_sub(1);
@@ -3076,6 +3107,17 @@ impl PortAllocator {
                         remove_lease = true;
                     }
                 }
+            }
+            if revoked
+                && live
+                    .persistent_by_source
+                    .get(&key)
+                    .is_some_and(|lease| lease.active_flows == 0)
+            {
+                live.revoked_persistent.insert(
+                    key,
+                    now_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS),
+                );
             }
             if remove_lease {
                 live.persistent_by_source.remove(&key);
@@ -3797,6 +3839,16 @@ impl PortAllocator {
         // `LiveAllocation` at the tuple the lease already owns and bumps the
         // refcount. This is the synced twin of that, and it is what makes the
         // lease's `active_flows` mean what it says.
+        // A synced live flow may join a still-draining shell to retain its
+        // active wire tuple. If clear removed the lease, reserve this session
+        // without persistence instead of recreating the cleared pin.
+        let persistent = persistent.filter(|(key, _)| {
+            !live
+                .revoked_persistent
+                .get(key)
+                .is_some_and(|revoked_until_ns| *revoked_until_ns > now_ns)
+                || live.persistent_by_source.contains_key(key)
+        });
         if let Some((persistent_key, timeout_ns)) = persistent {
             if let Some(lease) = live.persistent_by_source.get(&persistent_key).copied() {
                 // A lease that names a DIFFERENT tuple than the wire does is
@@ -4086,6 +4138,15 @@ impl PortAllocator {
         // leave it disagreeing with the global `lease_expirations` — a lease
         // the per-address GC sweep can never reap. Mirrors the
         // `addr_index >= occupancy.len()` guard on the port-bearing arm.
+        // Match the port-bearing path: live sessions may join a draining shell,
+        // but a removed tombstoned lease must not be minted again by session sync.
+        let persistent = persistent.filter(|(key, _)| {
+            !live
+                .revoked_persistent
+                .get(key)
+                .is_some_and(|revoked_until_ns| *revoked_until_ns > now_ns)
+                || live.persistent_by_source.contains_key(key)
+        });
         let mut idle_lease_to_deindex: Option<(usize, u64)> = None;
         if let Some((persistent_key, _)) = persistent {
             if addr_index >= live.lease_expirations_by_addr.len() {
@@ -4714,7 +4775,11 @@ impl PortAllocator {
         let mut expired: Option<(TranslatedTuple, usize, u64, bool)> = None;
         // #9158: a LIVE PAT lease must be left standing. See the arm below.
         let mut live_mode_mismatch = false;
-        if live.revoked_persistent.contains(&key) {
+        if live
+            .revoked_persistent
+            .get(&key)
+            .is_some_and(|revoked_until_ns| *revoked_until_ns > now_ns)
+        {
             live_mode_mismatch = live
                 .persistent_by_source
                 .get(&key)

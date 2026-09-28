@@ -1,7 +1,7 @@
 //! #8121: idle persistent-NAT lease export/import.
 
 use super::allocator::{NatHolder, PoolAddressFamily, PortAllocator, TranslatedTuple};
-use super::idle_lease_sync_8121::{IdleLeaseImport, IdleLeaseRecord};
+use super::idle_lease_sync_8121::IdleLeaseImport;
 use super::source::{PersistentNatPermit, SourceNatFlowKey};
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -629,7 +629,7 @@ fn clearing_idle_leases_revokes_allocator_and_stale_ha_import_10784() {
         .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
         .expect("control: the target idle lease must be exportable before clear");
 
-    assert_eq!(allocator.clear_persistent_leases(), 2);
+    assert_eq!(allocator.clear_persistent_leases(3_000), 2);
     assert!(allocator.export_idle_leases(3_001).is_empty());
     assert!(allocator.export_display_leases(3_001).is_empty());
     let original_index = addrs.iter().position(|ip| *ip == original.ip).unwrap();
@@ -664,7 +664,7 @@ fn clearing_live_lease_drains_without_reuse_or_port_leak_10784() {
     let original = mint_persistent_any_remote(&allocator, &addrs, client, 1_000);
     let original_index = addrs.iter().position(|ip| *ip == original.ip).unwrap();
 
-    assert_eq!(allocator.clear_persistent_leases(), 1);
+    assert_eq!(allocator.clear_persistent_leases(2_000), 1);
     assert!(
         allocator.debug_is_port_occupied(original_index, original.port),
         "a live flow must keep its translated tuple occupied during clear"
@@ -709,7 +709,7 @@ fn clearing_address_only_lease_blocks_reuse_and_stale_import_10784() {
     let original = mint_persistent_address_only_any_remote(&allocator, &addrs, client, 1_000);
     assert_eq!(allocator.export_display_leases(1_000).len(), 1);
 
-    assert_eq!(allocator.clear_persistent_leases(), 1);
+    assert_eq!(allocator.clear_persistent_leases(2_000), 1);
     let mut next_flow = client;
     next_flow.dst_ip = "1.1.1.1".parse().unwrap();
     let next = mint_persistent_address_only_any_remote(&allocator, &addrs, next_flow, 2_000);
@@ -738,10 +738,148 @@ fn clearing_idle_address_only_lease_rejects_stale_import_10784() {
         .find(|lease| lease.src_ip == client.src_ip && lease.src_port == client.src_port)
         .expect("address-only lease must be exportable before clear");
 
-    assert_eq!(allocator.clear_persistent_leases(), 1);
+    assert_eq!(allocator.clear_persistent_leases(3_000), 1);
     assert_eq!(
         allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), 3_001),
         IdleLeaseImport::SkippedExisting
     );
     assert!(allocator.export_display_leases(3_001).is_empty());
+}
+#[test]
+fn cleared_idle_pat_key_cannot_be_recreated_by_synced_session_10784() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let original = mint_persistent_any_remote(&allocator, &addrs, client, 1_000);
+    assert!(allocator.release_flow(client, original, 2_000, NatHolder::Untracked));
+    assert_eq!(allocator.clear_persistent_leases(3_000), 1);
+
+    let mut synced_flow = client;
+    synced_flow.dst_ip = "1.1.1.1".parse().unwrap();
+    let key = synced_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let addr_index = addrs.iter().position(|ip| IpAddr::V4(*ip) == original.ip).unwrap();
+    let mut previous_holders = None;
+    assert!(allocator.reserve_flow_maybe_persistent(
+        synced_flow,
+        original,
+        addr_index,
+        false,
+        4_000,
+        NatHolder::Untracked,
+        Some((key, TIMEOUT_NS)),
+        false,
+        &mut previous_holders,
+    ));
+    assert!(
+        allocator.debug_live().persistent_by_source.is_empty(),
+        "session sync may reserve the live tuple, but must not recreate the cleared lease"
+    );
+    assert!(allocator.export_display_leases(4_000).is_empty());
+    assert!(allocator.debug_is_port_occupied(addr_index, original.port));
+
+    assert!(allocator.release_flow(synced_flow, original, 5_000, NatHolder::Untracked));
+    assert!(!allocator.debug_is_port_occupied(addr_index, original.port));
+}
+
+#[test]
+fn cleared_idle_address_only_key_cannot_be_recreated_by_synced_session_10784() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(addrs.len(), 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let original = mint_persistent_address_only_any_remote(&allocator, &addrs, client, 1_000);
+    assert!(allocator.release_flow(client, original, 2_000, NatHolder::Untracked));
+    assert_eq!(allocator.clear_persistent_leases(3_000), 1);
+
+    let mut synced_flow = client;
+    synced_flow.dst_ip = "1.1.1.1".parse().unwrap();
+    let key = synced_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let addr_index = addrs.iter().position(|ip| IpAddr::V4(*ip) == original.ip).unwrap();
+    let mut previous_holders = None;
+    assert_eq!(
+        allocator.reserve_address_only_maybe_persistent(
+            synced_flow,
+            original.ip,
+            addr_index,
+            4_000,
+            NatHolder::Untracked,
+            Some((key, TIMEOUT_NS)),
+            false,
+            &mut previous_holders,
+        ),
+        Ok(original)
+    );
+    assert!(
+        allocator.debug_live().persistent_by_source.is_empty(),
+        "address-only session sync must not recreate the cleared lease"
+    );
+    assert!(allocator.export_display_leases(4_000).is_empty());
+    assert!(allocator.release_flow(synced_flow, original, 5_000, NatHolder::Untracked));
+}
+
+#[test]
+fn synced_session_can_join_active_cleared_shell_10784() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let original = mint_persistent_any_remote(&allocator, &addrs, client, 1_000);
+    assert_eq!(allocator.clear_persistent_leases(2_000), 1);
+
+    let mut synced_flow = client;
+    synced_flow.dst_ip = "1.1.1.1".parse().unwrap();
+    let key = synced_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
+    let addr_index = addrs.iter().position(|ip| IpAddr::V4(*ip) == original.ip).unwrap();
+    let mut previous_holders = None;
+    assert!(allocator.reserve_flow_maybe_persistent(
+        synced_flow,
+        original,
+        addr_index,
+        false,
+        3_000,
+        NatHolder::Untracked,
+        Some((key, TIMEOUT_NS)),
+        false,
+        &mut previous_holders,
+    ));
+    assert_eq!(
+        allocator
+            .debug_live()
+            .persistent_by_source
+            .get(&key)
+            .unwrap()
+            .active_flows,
+        2,
+        "a still-live cleared shell must retain active-session ownership"
+    );
+    assert!(allocator.export_display_leases(3_000).is_empty());
+
+    assert!(allocator.release_flow(synced_flow, original, 4_000, NatHolder::Untracked));
+    assert!(allocator.release_flow(client, original, 5_000, NatHolder::Untracked));
+    assert!(allocator.export_display_leases(5_000).is_empty());
+}
+
+#[test]
+fn cleared_idle_key_expires_after_ha_replay_horizon_10784() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let translated = mint_persistent(&allocator, &addrs, client, 1_000);
+    assert!(allocator.release_flow(client, translated, 2_000, NatHolder::Untracked));
+    let stale = allocator
+        .export_idle_leases(3_000)
+        .into_iter()
+        .next()
+        .expect("control: idle lease must be exportable before clear");
+    assert_eq!(allocator.clear_persistent_leases(3_000), 1);
+    assert_eq!(
+        allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), 3_001),
+        IdleLeaseImport::SkippedExisting
+    );
+
+    let after_horizon_ns = 60_000_003_001;
+    assert_eq!(
+        allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), after_horizon_ns),
+        IdleLeaseImport::Installed,
+        "after the documented replay horizon, the allocator stops retaining the tombstone"
+    );
+    assert_eq!(allocator.export_display_leases(after_horizon_ns).len(), 1);
 }

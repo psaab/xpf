@@ -137,15 +137,18 @@ func (d *Daemon) refreshPersistentNatShowTable() {
 	// #8615: prefer the DISPLAY verb, which carries bindings with LIVE flows
 	// too. Degrade to the idle-only export only when the helper does not
 	// implement it — a mixed-version window during a rolling upgrade.
+	// Capture before export; a concurrent clear changes the table generation and
+	// makes this response ineligible for ReplaceAll.
+	clearGen := table.ClearGeneration()
 	display, err := mgr.ExportPersistentLeaseDisplay()
 	if err == nil {
-		applyPersistentNatShowRefreshDisplay(table, display, nil, time.Now())
+		applyPersistentNatShowRefreshDisplay(table, display, nil, time.Now(), clearGen)
 		return
 	}
 	if !errors.Is(err, dpuserspace.ErrPersistentLeaseDisplayUnsupported) {
 		// A genuine failure. Hand it to the decision half, which keeps the
 		// previous snapshot rather than asserting an emptiness nobody observed.
-		applyPersistentNatShowRefreshDisplay(table, nil, err, time.Now())
+		applyPersistentNatShowRefreshDisplay(table, nil, err, time.Now(), clearGen)
 		return
 	}
 	// The helper predates #8615. Say so once per tick at Debug — loud enough to
@@ -155,7 +158,7 @@ func (d *Daemon) refreshPersistentNatShowTable() {
 		"persistent-NAT show table will omit bindings that still have live flows",
 		"verb", "export_persistent_lease_display")
 	leases, idleErr := mgr.ExportIdleLeases()
-	applyPersistentNatShowRefresh(table, leases, idleErr, time.Now())
+	applyPersistentNatShowRefresh(table, leases, idleErr, time.Now(), clearGen)
 }
 
 // applyPersistentNatShowRefreshDisplay is applyPersistentNatShowRefresh for the
@@ -167,6 +170,7 @@ func applyPersistentNatShowRefreshDisplay(
 	leases []dpuserspace.DisplayLeaseWire,
 	err error,
 	now time.Time,
+	clearGen uint64,
 ) bool {
 	if table == nil {
 		return false
@@ -177,7 +181,12 @@ func applyPersistentNatShowRefreshDisplay(
 			"err", err)
 		return false
 	}
-	table.ReplaceAll(persistentNatBindingsFromDisplayLeases(leases, now))
+	if !table.ReplaceAllUnlessClearedSince(
+		persistentNatBindingsFromDisplayLeases(leases, now),
+		clearGen,
+	) {
+		return false
+	}
 	return true
 }
 
@@ -264,6 +273,7 @@ func applyPersistentNatShowRefresh(
 	leases []dpuserspace.IdleLeaseWire,
 	err error,
 	now time.Time,
+	clearGen uint64,
 ) bool {
 	if table == nil {
 		return false
@@ -274,7 +284,12 @@ func applyPersistentNatShowRefresh(
 			"err", err)
 		return false
 	}
-	table.ReplaceAll(persistentNatBindingsFromLeases(leases, now))
+	if !table.ReplaceAllUnlessClearedSince(
+		persistentNatBindingsFromLeases(leases, now),
+		clearGen,
+	) {
+		return false
+	}
 	return true
 }
 
