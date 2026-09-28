@@ -82,5 +82,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Scope stale host-input guards by ingress zone with trusted-reinject
     fallback, reassert verified TCP loose pickup disablement, and harden
     packet proof with HIGH exempt-UDP residual (#10752/#10764).
+  * Resolve routing-instance ownership by Linux device identity, reject
+    alias/tunnel dual claims, and quarantine ambiguous memberships on tolerant
+    loads with an apply alarm and alertable metric (#11060).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

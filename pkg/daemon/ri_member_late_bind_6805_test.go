@@ -36,8 +36,9 @@ import (
 // isLinkNotFound recognises — identical to every other test using it.
 type bindRecorderOps struct {
 	*reconcileFakeLinkOps
-	mu    sync.Mutex
-	binds []string // "member->master"
+	mu      sync.Mutex
+	binds   []string // "member->master"
+	unbound []string // members detached from a master
 }
 
 func (b *bindRecorderOps) LinkSetMaster(l, master netlink.Link) error {
@@ -47,10 +48,24 @@ func (b *bindRecorderOps) LinkSetMaster(l, master netlink.Link) error {
 	return nil
 }
 
+func (b *bindRecorderOps) LinkSetNoMaster(l netlink.Link) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.unbound = append(b.unbound, l.Attrs().Name)
+	l.Attrs().MasterIndex = 0
+	return nil
+}
+
 func (b *bindRecorderOps) recorded() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]string(nil), b.binds...)
+}
+
+func (b *bindRecorderOps) unboundRecorded() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.unbound...)
 }
 
 // addLink6805 makes a device exist in the fake table, modelling

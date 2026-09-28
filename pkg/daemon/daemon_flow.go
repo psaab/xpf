@@ -94,16 +94,16 @@ func dhcpLeaseKeysForMember(cfg *config.Config, member string) []string {
 	// spelling the `interfaces` stanza used (#8829); linux-name matching
 	// lives in the helper, first-sorted for determinism.
 	s := cfg.SplitInterfaceUnitRef(member)
-	claim := resolveMemberDeclaredBase(cfg, member)
+	claim := config.ResolveRoutingInstanceMemberBase(cfg, member)
 	base := config.LinuxIfName(s.Base)
 	var ifc *config.InterfaceConfig
-	if claim.ok {
-		base = config.LinuxIfName(claim.base)
-		ifc = cfg.Interfaces.Interfaces[claim.base]
+	if claim.OK {
+		base = config.LinuxIfName(claim.Base)
+		ifc = cfg.Interfaces.Interfaces[claim.Base]
 	}
 	whole := !s.HasUnit
-	if claim.ok {
-		whole = !claim.hasUnit
+	if claim.OK {
+		whole = !claim.HasUnit
 	}
 
 	if whole {
@@ -126,8 +126,8 @@ func dhcpLeaseKeysForMember(cfg *config.Config, member string) []string {
 		return keys
 	}
 	var unit *config.InterfaceUnit
-	if claim.ok && claim.hasUnit && claim.unit >= 0 && ifc != nil {
-		unit = ifc.Units[claim.unit]
+	if claim.OK && claim.HasUnit && claim.Unit >= 0 && ifc != nil {
+		unit = ifc.Units[claim.Unit]
 	}
 	// A nil unit (stanza absent, or an unparseable unit token) yields the bare
 	// base — which is what an untagged lease is keyed by, so this degrades to
@@ -280,23 +280,23 @@ func dhcpConnectedPrefixesByVRF(cfg *config.Config, mgmtSet map[string]bool) map
 			continue
 		}
 		for _, member := range ri.Interfaces {
-			claim := resolveMemberDeclaredBase(cfg, member)
-			if !claim.ok {
+			claim := config.ResolveRoutingInstanceMemberBase(cfg, member)
+			if !claim.OK {
 				continue
 			}
-			ifc := cfg.Interfaces.Interfaces[claim.base]
+			ifc := cfg.Interfaces.Interfaces[claim.Base]
 			if ifc == nil {
 				continue
 			}
-			if claim.hasUnit {
-				if claim.unit >= 0 && ifc.Units[claim.unit] != nil {
-					unitVRF[interfaceUnit{name: claim.base, num: claim.unit}] = ri.Name
+			if claim.HasUnit {
+				if claim.Unit >= 0 && ifc.Units[claim.Unit] != nil {
+					unitVRF[interfaceUnit{name: claim.Base, num: claim.Unit}] = ri.Name
 				}
 				continue
 			}
 			for num, unit := range ifc.Units {
 				if unit != nil {
-					unitVRF[interfaceUnit{name: claim.base, num: num}] = ri.Name
+					unitVRF[interfaceUnit{name: claim.Base, num: num}] = ri.Name
 				}
 			}
 		}
