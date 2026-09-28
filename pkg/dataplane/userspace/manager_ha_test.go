@@ -1209,9 +1209,11 @@ func drainUpdateHAStateCount(ch <-chan string) int {
 }
 
 // TestUpdateHAWatchdogThrottlesIPCButWritesMapEveryTick proves the #2549 split:
-// the kernel-visible shim watchdog MAP WRITE fires on every 500ms heartbeat tick
-// (the BPF ~2s stale window relies on it), while the update_ha_state socket IPC
-// is throttled to a periodic backstop (~once per haWatchdogIPCBackstopSecs) so it
+// the Go-owned watchdog MAP WRITE fires on every 500ms heartbeat tick (never
+// throttled, so Go's own HA refresh reads it fresh; no live userspace-XDP shim
+// BPF program consumes it — the fail-closed backstop is the helper's
+// receipt-anchored 10s lease, #10791), while the update_ha_state socket IPC is
+// throttled to a periodic backstop (~once per haWatchdogIPCBackstopSecs) so it
 // stops being a >1/s control-socket caller that starves session installs.
 //
 // FAIL-ON-REVERT: master's UpdateHAWatchdog calls syncHAStateLocked
@@ -1248,13 +1250,13 @@ func TestUpdateHAWatchdogThrottlesIPCButWritesMapEveryTick(t *testing.T) {
 	}
 
 	if mapWrites != ticks {
-		t.Fatalf("shim map write fired %d times over %d ticks, want every tick (kernel watchdog must stay fresh)", mapWrites, ticks)
+		t.Fatalf("Go-owned map write fired %d times over %d ticks, want every tick (Go's HA map readback must stay current)", mapWrites, ticks)
 	}
 
 	ipc := drainUpdateHAStateCount(reqTypes)
 	// 3s backstop -> IPC at ts 0,3,6,9 = 4 sends over the 10s span.
 	if ipc < 2 {
-		t.Fatalf("update_ha_state IPC fired %d times over a 10s span — the periodic backstop never refreshed the helper (stale-lease would expire)", ipc)
+		t.Fatalf("update_ha_state IPC fired %d times over a 10s span — the periodic backstop never refreshed the helper (receipt-anchored lease could expire without refresh)", ipc)
 	}
 	if ipc > 6 {
 		t.Fatalf("update_ha_state IPC fired %d times over %d ticks (10s span); want throttled to ~once/%ds (<=6), not per-tick like master (=%d)", ipc, ticks, haWatchdogIPCBackstopSecs, ticks)

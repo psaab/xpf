@@ -142,10 +142,11 @@ detection and per-binding state rebuild.
 A dead worker on the chassis-cluster primary does **NOT** trigger
 chassis-cluster failover. Reasons:
 
-- The chassis-cluster failover state machine watches **node-level**
-  liveness (VRRP advertisements + the BPF watchdog map at
-  `bpf/headers/xpf_helpers.h`). It does not watch per-worker
-  liveness.
+- The chassis-cluster failover state machine follows peer/VRRP state; no live
+  BPF caller consumes `ha_watchdog`, and it does not watch per-worker health.
+  The Go `ha_watchdog` map is bookkeeping only (#10791). The helper's per-RG
+  forwarding backstop is the receipt-anchored 10s lease refreshed by
+  `update_ha_state`.
 - A single dead worker affects only the bindings/queues owned by
   that worker; the other workers continue to forward. Escalating
   to a node-level failover for a partial outage would be a
@@ -157,6 +158,6 @@ chassis-cluster failover. Reasons:
   `request chassis cluster failover redundancy-group N` from the
   CLI / API. That keeps the policy decision out of the daemon.
 
-The existing `make test-failover` / `make test-ha-crash` harnesses
-exercise the VRRP + BPF-watchdog failover paths and are unchanged
-by Phase 2.
+The existing `make test-failover` / `make test-ha-crash` harnesses exercise
+peer failover and crash-recovery paths; they do not exercise per-worker
+failure handling.
