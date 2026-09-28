@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/psaab/xpf/pkg/policymatch"
 	"github.com/psaab/xpf/pkg/wgkey"
@@ -38,6 +40,8 @@ func (c *CLI) handleRequestSecurity(args []string) error {
 		}
 		fmt.Printf("Cleared %d IPsec SA(s)\n", count)
 		return nil
+	case "dynamic-address":
+		return c.handleRequestSecurityDynamicAddress(args[1:])
 	case "wireguard":
 		return c.handleRequestSecurityWireguard(args[1:])
 	case "policies":
@@ -45,6 +49,96 @@ func (c *CLI) handleRequestSecurity(args []string) error {
 	default:
 		return fmt.Errorf("unknown request security target: %s", args[0])
 	}
+}
+
+func (c *CLI) handleRequestSecurityDynamicAddress(args []string) error {
+	const usage = "usage: request security dynamic-address acknowledge-shrink <feed> candidate-id <id> candidate-hash <sha256> baseline-hash <sha256> old-count <count> new-count <count> reason <reason...>"
+	if len(args) == 0 || args[0] != "acknowledge-shrink" {
+		fmt.Println("request security dynamic-address:")
+		writeCompletionHelp(os.Stdout, treeHelpCandidates(operationalTree["request"].Children["security"].Children["dynamic-address"].Children))
+		return nil
+	}
+	if len(args) < 14 || args[2] != "candidate-id" || args[4] != "candidate-hash" ||
+		args[6] != "baseline-hash" || args[8] != "old-count" || args[10] != "new-count" || args[12] != "reason" {
+		return fmt.Errorf("%s", usage)
+	}
+	feed := args[1]
+	if feed == "" || strings.TrimSpace(feed) != feed {
+		return fmt.Errorf("%s: feed name is required", usage)
+	}
+	for i := range args[3] {
+		if args[3][i] < '0' || args[3][i] > '9' {
+			return fmt.Errorf("%s: candidate ID must be a positive uint64", usage)
+		}
+	}
+	candidateID, err := strconv.ParseUint(args[3], 10, 64)
+	if err != nil || candidateID == 0 {
+		return fmt.Errorf("%s: candidate ID must be a positive uint64", usage)
+	}
+	candidateHash := args[5]
+	if !validShrinkCandidateHash(candidateHash) {
+		return fmt.Errorf("%s: candidate hash must be a 64-character lowercase SHA-256 hex value", usage)
+	}
+	baselineHash := args[7]
+	if !validShrinkCandidateHash(baselineHash) {
+		return fmt.Errorf("%s: baseline hash must be a 64-character lowercase SHA-256 hex value", usage)
+	}
+	oldCountValue, err := strconv.ParseUint(args[9], 10, 32)
+	if err != nil || oldCountValue == 0 {
+		return fmt.Errorf("%s: old count must be a positive uint32", usage)
+	}
+	newCountValue, err := strconv.ParseUint(args[11], 10, 32)
+	if err != nil {
+		return fmt.Errorf("%s: new count must be a uint32", usage)
+	}
+	oldCount, newCount := int(oldCountValue), int(newCountValue)
+	reason := strings.TrimSpace(strings.Join(args[13:], " "))
+	if reason == "" {
+		return fmt.Errorf("%s: reason is required", usage)
+	}
+	if len(reason) > 512 {
+		return fmt.Errorf("%s: reason exceeds 512 bytes", usage)
+	}
+	if c.feedsFn == nil || c.feedsAckFn == nil || c.store == nil {
+		return fmt.Errorf("dynamic-address feed acknowledgement unavailable")
+	}
+	info, exists := c.feedsFn()[feed]
+	if !exists {
+		return fmt.Errorf("dynamic-address feed %q not found", feed)
+	}
+	if !info.ShrinkRefused {
+		return fmt.Errorf("dynamic-address feed %q has no current refused shrink", feed)
+	}
+	if info.ShrinkRefusalID != candidateID ||
+		info.ShrinkCandidateHash != candidateHash ||
+		info.ShrinkBaselineHash != baselineHash ||
+		info.ShrinkCandidateOldCount != oldCount ||
+		info.ShrinkCandidateNewCount != newCount {
+		return fmt.Errorf("dynamic-address feed %q refusal candidate tuple is stale", feed)
+	}
+	actor := c.journalPrincipal()
+	if err := c.feedsAckFn(feed, candidateID, candidateHash, baselineHash, oldCount, newCount, actor, reason); err != nil {
+		return fmt.Errorf("dynamic-address feed %q shrink acknowledgement rejected: %w", feed, err)
+	}
+	c.store.LogSystemActionAs(
+		fmt.Sprintf("dynamic-address-shrink-ack feed=%q candidate_id=%d candidate_sha256=%q baseline_sha256=%q old_count=%d new_count=%d reason=%q", feed, candidateID, candidateHash, baselineHash, oldCount, newCount, reason),
+		actor,
+	)
+	fmt.Printf("Acknowledged refused shrink candidate %d for dynamic-address feed %q\n", candidateID, feed)
+	return nil
+}
+
+func validShrinkCandidateHash(candidateHash string) bool {
+	if len(candidateHash) != 64 {
+		return false
+	}
+	for i := range candidateHash {
+		if !((candidateHash[i] >= '0' && candidateHash[i] <= '9') ||
+			(candidateHash[i] >= 'a' && candidateHash[i] <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // handleRequestSecurityPolicies implements `request security policies check`

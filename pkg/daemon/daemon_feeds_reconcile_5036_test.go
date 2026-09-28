@@ -98,6 +98,20 @@ func TestFeedsConfigHash(t *testing.T) {
 		t.Fatal("a changed feed URL did not change the hash (day-2 URL edit would be ignored)")
 	}
 
+	// Each runtime guard threshold participates in the producer hash, so a
+	// committed tuning change reaches Manager.Apply without a process restart.
+	for name, tune := range map[string]func(*config.FeedServer){
+		"minimum old count": func(fs *config.FeedServer) { fs.ShrinkGuardMinOldCount = 64 },
+		"retained percent":  func(fs *config.FeedServer) { fs.ShrinkGuardMinRetainPercent = 60 },
+		"minimum drop":      func(fs *config.FeedServer) { fs.ShrinkGuardMinDrop = 20 },
+	} {
+		tuned := serverA()
+		tune(tuned["a"])
+		if feedsConfigHash(base) == feedsConfigHash(&config.DynamicAddressConfig{FeedServers: tuned}) {
+			t.Errorf("changing %s did not alter the producer hash", name)
+		}
+	}
+
 	// Added second server: DIFFERENT hash.
 	two := &config.DynamicAddressConfig{FeedServers: map[string]*config.FeedServer{
 		"a": {Name: "a", URL: "https://feeds.example/a", UpdateInterval: 60},

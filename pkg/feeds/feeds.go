@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -86,14 +87,9 @@ const maxInvalidSampleTotalBytes = maxInvalidSample * maxInvalidSampleEntryBytes
 // snapshot.
 const maxFeedBodyBytes = 32 << 20 // 32 MiB
 
-// maxFeedPrefixes caps the number of parsed entries a single feed may install
-// (#3934). This is a secondary guard on top of the byte cap: a body of many
-// short lines (e.g. bare IPv4 addresses) can stay under the byte cap while
-// producing an entry count that would blow the dataplane address-book map. A
-// feed exceeding this count fails the whole fetch (retain last-good) — a
-// partial-but-huge set is never installed. The count is measured on parsed
-// (pre-dedup) entries so memory is bounded during the parse loop.
-const maxFeedPrefixes = 1 << 20 // 1,048,576 entries
+// maxFeedPrefixes aliases the config-time limit so operators cannot configure
+// a threshold the parser can never reach.
+const maxFeedPrefixes = config.MaxDynamicAddressFeedPrefixes
 
 // httpClientTimeout bounds a single feed fetch end-to-end (connect + headers +
 // body read), so a slow-loris feed server that dribbles bytes cannot hold the
@@ -105,6 +101,64 @@ const httpClientTimeout = 30 * time.Second
 // reachable later answers (serial fallback without Happy Eyeballs). It is a
 // var so tests can shrink it; production stays well under httpClientTimeout.
 var feedDialAttemptTimeout = 5 * time.Second
+
+// Default drastic-shrink guard thresholds (#11059). Runtime behavior is
+// configured per feed-server in the committed config; these defaults apply
+// when a leaf is omitted or malformed on a lenient load.
+const (
+	feedShrinkGuardMinOldCountDefault      = config.DefaultDynamicAddressShrinkGuardMinOldCount
+	feedShrinkGuardMinRetainPercentDefault = config.DefaultDynamicAddressShrinkGuardRetainPct
+	feedShrinkGuardMinDropDefault          = config.DefaultDynamicAddressShrinkGuardMinDrop
+	feedShrinkWarnInterval                 = time.Hour
+	maxShrinkAckReasonBytes                = 512
+)
+
+type shrinkGuardThresholds struct {
+	minOldCount      int
+	minRetainPercent int
+	minDrop          int
+}
+
+var defaultShrinkGuardThresholds = shrinkGuardThresholds{
+	minOldCount:      feedShrinkGuardMinOldCountDefault,
+	minRetainPercent: feedShrinkGuardMinRetainPercentDefault,
+	minDrop:          feedShrinkGuardMinDropDefault,
+}
+
+func resolveShrinkGuardThresholds(fsCfg *config.FeedServer) shrinkGuardThresholds {
+	thresholds := defaultShrinkGuardThresholds
+	if fsCfg == nil {
+		return thresholds
+	}
+	for _, knob := range []struct {
+		name string
+		got  int
+		min  int
+		max  int
+		dst  *int
+	}{
+		{"shrink-guard-min-old-count", fsCfg.ShrinkGuardMinOldCount, 1, maxFeedPrefixes, &thresholds.minOldCount},
+		{"shrink-guard-min-retain-percent", fsCfg.ShrinkGuardMinRetainPercent, 1, 100, &thresholds.minRetainPercent},
+		{"shrink-guard-min-drop", fsCfg.ShrinkGuardMinDrop, 1, maxFeedPrefixes - 1, &thresholds.minDrop},
+	} {
+		if knob.got == 0 {
+			continue
+		}
+		if knob.got < knob.min || knob.got > knob.max {
+			slog.Warn("dynamic-address: invalid shrink-guard value on lenient config load; using safe default",
+				"setting", knob.name, "value", knob.got, "default", *knob.dst)
+			continue
+		}
+		*knob.dst = knob.got
+	}
+	return thresholds
+}
+
+func validShrinkGuardThresholds(t shrinkGuardThresholds) bool {
+	return t.minOldCount >= 1 && t.minOldCount <= maxFeedPrefixes &&
+		t.minRetainPercent >= 1 && t.minRetainPercent <= 100 &&
+		t.minDrop >= 1 && t.minDrop < maxFeedPrefixes
+}
 
 // maxFeedRedirects preserves net/http's built-in redirect bound after the
 // client installs the feed-specific CheckRedirect policy below.
@@ -204,6 +258,30 @@ type feedState struct {
 	// snapshot to empty; only an explicit positive value arms the
 	// drop-after-N-seconds opt-in.
 	holdInterval time.Duration
+	shrinkGuard  shrinkGuardThresholds
+
+	// The active refused candidate and one-shot acknowledgement are runtime
+	// status, not persisted across a producer replacement. The refusal counter,
+	// candidate sequence, and warning cadence survive same-name Apply swaps.
+	// The baseline hash pins the last-good snapshot the delta was reviewed
+	// against; IDs restart after recreate/restart, so the candidate tuple alone
+	// cannot distinguish the same candidate recurring under a different baseline.
+	shrinkRefused           bool
+	shrinkRefusalCount      uint64
+	shrinkRefusalID         uint64
+	shrinkCandidateHash     [32]byte
+	shrinkBaselineHash      [32]byte
+	shrinkCandidateOldCount int
+	shrinkCandidateNewCount int
+	shrinkLastWarn          time.Time
+	shrinkAckPending        bool
+	shrinkAckRefusalID      uint64
+	shrinkAckCandidateHash  [32]byte
+	shrinkAckBaselineHash   [32]byte
+	shrinkAckOldCount       int
+	shrinkAckNewCount       int
+	shrinkAckActor          string
+	shrinkAckReason         string
 
 	// Active enforced snapshot (canonicalized, deduped, sorted).
 	prefixes    []string
@@ -547,11 +625,12 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 	// first step) is also what lets a PERSISTED feed carry its last-good
 	// snapshot forward across the reconfigure — see the swap below.
 	type feedPlan struct {
-		name     string
-		url      string
-		hold     time.Duration
-		interval time.Duration
-		server   string
+		name        string
+		url         string
+		hold        time.Duration
+		interval    time.Duration
+		server      string
+		shrinkGuard shrinkGuardThresholds
 	}
 	var plans []feedPlan
 	if daCfg != nil && len(daCfg.FeedServers) > 0 {
@@ -573,6 +652,7 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 			}
 			interval := feedIntervalSeconds(fsCfg.UpdateInterval, time.Hour)
 			hold := resolveHoldInterval(fsCfg.HoldInterval)
+			shrinkGuard := resolveShrinkGuardThresholds(fsCfg)
 
 			plan := func(name, url string) {
 				if name == "" {
@@ -591,7 +671,10 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 					return
 				}
 				seen[name] = true
-				plans = append(plans, feedPlan{name: name, url: url, hold: hold, interval: interval, server: fsCfg.Name})
+				plans = append(plans, feedPlan{
+					name: name, url: url, hold: hold, interval: interval,
+					server: fsCfg.Name, shrinkGuard: shrinkGuard,
+				})
 			}
 
 			if len(fsCfg.FeedEntries) > 0 {
@@ -662,6 +745,7 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 			name:         p.name,
 			url:          p.url,
 			holdInterval: p.hold,
+			shrinkGuard:  p.shrinkGuard,
 			cancel:       cancel,
 			done:         make(chan struct{}),
 		}
@@ -707,10 +791,13 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 // persisted hold-dropped feed becomes indistinguishable from a never-fetched
 // feed after reconfiguration and #9689's fail-mode-drop semantics are lost.
 func carryForwardSnapshot(dst, src *feedState) {
-	if src == nil {
-		return
-	}
 	dst.holdDropped = src.holdDropped
+	// Counts and the sequence survive a same-name reconfigure, but the
+	// refused candidate and its acknowledgement are tied to the prior producer
+	// configuration. The new endpoint must be fetched and reviewed afresh.
+	dst.shrinkRefusalCount = src.shrinkRefusalCount
+	dst.shrinkRefusalID = src.shrinkRefusalID
+	dst.shrinkLastWarn = src.shrinkLastWarn
 	if !src.hasSnapshot || len(src.prefixes) == 0 {
 		return
 	}
@@ -946,18 +1033,46 @@ func (m *Manager) AllFeeds() map[string]FeedInfo {
 		if fs.hasSnapshot {
 			hash = fmt.Sprintf("%x", fs.hash)
 		}
+		candidateHash := ""
+		candidateBaselineHash := ""
+		if fs.shrinkRefused {
+			candidateHash = fmt.Sprintf("%x", fs.shrinkCandidateHash)
+			candidateBaselineHash = fmt.Sprintf("%x", fs.shrinkBaselineHash)
+		}
+		ackHash := ""
+		ackBaselineHash := ""
+		if fs.shrinkAckPending {
+			ackHash = fmt.Sprintf("%x", fs.shrinkAckCandidateHash)
+			ackBaselineHash = fmt.Sprintf("%x", fs.shrinkAckBaselineHash)
+		}
+		shrinkPolicy := thresholdsForFeed(fs)
 		result[name] = FeedInfo{
-			URL:           fs.url,
-			Prefixes:      len(fs.prefixes),
-			LastFetch:     fs.lastFetch,
-			LastSuccess:   fs.lastSuccess,
-			LastError:     fs.lastError,
-			StaleSince:    fs.staleSince,
-			Hash:          hash,
-			InvalidLines:  fs.invalidLines,
-			InvalidSample: append([]string(nil), fs.invalidSample...),
-			Degraded:      fs.invalidLines > 0,
-			HoldDropped:   fs.holdDropped,
+			URL:                         fs.url,
+			Prefixes:                    len(fs.prefixes),
+			LastFetch:                   fs.lastFetch,
+			LastSuccess:                 fs.lastSuccess,
+			LastError:                   fs.lastError,
+			StaleSince:                  fs.staleSince,
+			Hash:                        hash,
+			InvalidLines:                fs.invalidLines,
+			InvalidSample:               append([]string(nil), fs.invalidSample...),
+			Degraded:                    fs.invalidLines > 0,
+			HoldDropped:                 fs.holdDropped,
+			ShrinkRefused:               fs.shrinkRefused,
+			ShrinkRefusalCount:          fs.shrinkRefusalCount,
+			ShrinkRefusalID:             fs.shrinkRefusalID,
+			ShrinkCandidateHash:         candidateHash,
+			ShrinkBaselineHash:          candidateBaselineHash,
+			ShrinkCandidateOldCount:     fs.shrinkCandidateOldCount,
+			ShrinkCandidateNewCount:     fs.shrinkCandidateNewCount,
+			ShrinkAckPending:            fs.shrinkAckPending,
+			ShrinkAckActor:              fs.shrinkAckActor,
+			ShrinkAckHash:               ackHash,
+			ShrinkAckBaselineHash:       ackBaselineHash,
+			ShrinkAckReason:             fs.shrinkAckReason,
+			ShrinkGuardMinOldCount:      shrinkPolicy.minOldCount,
+			ShrinkGuardMinRetainPercent: shrinkPolicy.minRetainPercent,
+			ShrinkGuardMinDrop:          shrinkPolicy.minDrop,
 		}
 	}
 	return result
@@ -994,6 +1109,26 @@ type FeedInfo struct {
 	// HoldDropped is true after a hold-interval drop and until the next
 	// successful fetch (#9689).
 	HoldDropped bool
+
+	// ShrinkRefused is the live refusal alarm; ShrinkRefusalCount is the
+	// manager-lifetime per-feed counter. The candidate tuple is present only
+	// while a refusal remains current and binds the delta to the last-good
+	// baseline hash.
+	ShrinkRefused               bool
+	ShrinkRefusalCount          uint64
+	ShrinkRefusalID             uint64
+	ShrinkCandidateHash         string
+	ShrinkBaselineHash          string
+	ShrinkCandidateOldCount     int
+	ShrinkCandidateNewCount     int
+	ShrinkAckPending            bool
+	ShrinkAckActor              string
+	ShrinkAckHash               string
+	ShrinkAckBaselineHash       string
+	ShrinkAckReason             string
+	ShrinkGuardMinOldCount      int
+	ShrinkGuardMinRetainPercent int
+	ShrinkGuardMinDrop          int
 }
 
 func (m *Manager) refreshLoop(ctx context.Context, fs *feedState, interval time.Duration) {
@@ -1406,6 +1541,121 @@ func hashPrefixes(canon []string) [32]byte {
 	return sum
 }
 
+// AcknowledgeFeedShrink arms a one-shot bypass for the exact refusal shown by
+// AllFeeds. Every tuple field is matched because refusal IDs can be reused
+// after a feed is removed, recreated, or the manager restarts.
+func (m *Manager) AcknowledgeFeedShrink(name string, refusalID uint64, candidateHash, baselineHash string, oldCount, newCount int, actor, reason string) error {
+	actor = strings.TrimSpace(actor)
+	reason = strings.TrimSpace(reason)
+	if strings.TrimSpace(name) == "" || refusalID == 0 {
+		return fmt.Errorf("feed name and nonzero refusal ID are required")
+	}
+	if len(candidateHash) != sha256.Size*2 || len(baselineHash) != sha256.Size*2 || oldCount <= 0 || oldCount > maxFeedPrefixes || newCount < 0 || newCount > maxFeedPrefixes {
+		return fmt.Errorf("acknowledgement requires valid candidate and baseline hashes and old/new counts")
+	}
+	if actor == "" || len(actor) > 1024 {
+		return fmt.Errorf("authenticated actor is required")
+	}
+	if reason == "" || len(reason) > maxShrinkAckReasonBytes {
+		return fmt.Errorf("acknowledgement reason must contain 1-%d bytes", maxShrinkAckReasonBytes)
+	}
+	for _, value := range []string{actor, reason} {
+		for _, r := range value {
+			if unicode.IsControl(r) {
+				return fmt.Errorf("acknowledgement actor and reason must not contain control characters")
+			}
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fs, ok := m.feeds[name]
+	if !ok {
+		return fmt.Errorf("dynamic-address feed %q does not exist", name)
+	}
+	if !fs.shrinkRefused {
+		return fmt.Errorf("dynamic-address feed %q has no current refused shrink", name)
+	}
+	if fs.shrinkRefusalID != refusalID ||
+		candidateHash != fmt.Sprintf("%x", fs.shrinkCandidateHash) ||
+		baselineHash != fmt.Sprintf("%x", fs.shrinkBaselineHash) ||
+		fs.hash != fs.shrinkBaselineHash ||
+		oldCount != fs.shrinkCandidateOldCount ||
+		newCount != fs.shrinkCandidateNewCount {
+		return fmt.Errorf("dynamic-address feed %q refusal candidate tuple is stale", name)
+	}
+	fs.shrinkAckPending = true
+	fs.shrinkAckRefusalID = refusalID
+	fs.shrinkAckCandidateHash = fs.shrinkCandidateHash
+	fs.shrinkAckBaselineHash = fs.shrinkBaselineHash
+	fs.shrinkAckOldCount = fs.shrinkCandidateOldCount
+	fs.shrinkAckNewCount = fs.shrinkCandidateNewCount
+	fs.shrinkAckActor = actor
+	fs.shrinkAckReason = reason
+	return nil
+}
+
+func clearShrinkAck(fs *feedState) {
+	fs.shrinkAckPending = false
+	fs.shrinkAckRefusalID = 0
+	fs.shrinkAckCandidateHash = [32]byte{}
+	fs.shrinkAckBaselineHash = [32]byte{}
+	fs.shrinkAckOldCount = 0
+	fs.shrinkAckNewCount = 0
+	fs.shrinkAckActor = ""
+	fs.shrinkAckReason = ""
+}
+
+func clearShrinkCandidate(fs *feedState) {
+	fs.shrinkRefused = false
+	fs.shrinkCandidateHash = [32]byte{}
+	fs.shrinkBaselineHash = [32]byte{}
+	fs.shrinkCandidateOldCount = 0
+	fs.shrinkCandidateNewCount = 0
+	clearShrinkAck(fs)
+}
+
+func (fs *feedState) shrinkCandidateMatches(hash, baselineHash [32]byte, oldCount, newCount int) bool {
+	return fs.shrinkRefused &&
+		fs.shrinkCandidateHash == hash &&
+		fs.shrinkBaselineHash == baselineHash &&
+		fs.shrinkCandidateOldCount == oldCount &&
+		fs.shrinkCandidateNewCount == newCount
+}
+
+func (fs *feedState) shrinkAckMatches(hash, baselineHash [32]byte, oldCount, newCount int) bool {
+	return fs.shrinkAckPending &&
+		fs.shrinkAckRefusalID == fs.shrinkRefusalID &&
+		fs.shrinkAckCandidateHash == hash &&
+		fs.shrinkAckBaselineHash == baselineHash &&
+		fs.shrinkAckOldCount == oldCount &&
+		fs.shrinkAckNewCount == newCount &&
+		fs.shrinkCandidateMatches(hash, baselineHash, oldCount, newCount)
+}
+
+// shrinkGuardTripped reports whether installing newCount prefixes over a
+// last-good snapshot is a drastic shrink under the runtime defaults.
+func shrinkGuardTripped(oldCount, newCount int) bool {
+	return shrinkGuardTrippedWithThresholds(oldCount, newCount, defaultShrinkGuardThresholds)
+}
+
+func shrinkGuardTrippedWithThresholds(oldCount, newCount int, thresholds shrinkGuardThresholds) bool {
+	if !validShrinkGuardThresholds(thresholds) || oldCount < thresholds.minOldCount {
+		return false
+	}
+	if newCount >= oldCount || oldCount-newCount < thresholds.minDrop {
+		return false
+	}
+	return int64(newCount)*100 < int64(oldCount)*int64(thresholds.minRetainPercent)
+}
+
+func thresholdsForFeed(fs *feedState) shrinkGuardThresholds {
+	if fs != nil && validShrinkGuardThresholds(fs.shrinkGuard) {
+		return fs.shrinkGuard
+	}
+	return defaultShrinkGuardThresholds
+}
+
 // installSnapshot replaces the active snapshot with a fresh good fetch, stamps
 // success, clears stale/error state, and (re-)publishes to the dataplane when
 // the fetched content differs from what was last SUCCESSFULLY applied.
@@ -1421,6 +1671,12 @@ func hashPrefixes(canon []string) [32]byte {
 // content unpublished and the next identical refetch RE-FIRES onUpdate to retry
 // the apply. The retry fires on the normal refresh cadence (one publish attempt
 // per fetch), never a tight loop.
+// Drastic-shrink guard (#11059): a non-empty, non-whole-space fetch can still
+// be a SHRUNK stub (5 prefixes where 50k stood). installSnapshot refuses such
+// a fetch — retaining last-good, marking stale, alarming, publishing nothing —
+// unless the shrink was operator-acknowledged (AcknowledgeFeedShrink). Bootstrap
+// (no prior snapshot) is exempt; growth, equal counts, and small-feed churn
+// install normally.
 func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	m.mu.Lock()
 	// Staleness suppress (#9916 F-133): Apply swaps the producer set without
@@ -1455,6 +1711,65 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	// publishedHash stale, so this stays true on an identical refetch → retry.
 	needsPublish := !fs.hasPublished || fs.publishedHash != res.hash
 	oldCount := len(fs.prefixes)
+	baselineHash := fs.hash
+	// Drastic-shrink guard (#11059). Acknowledgements match the refused
+	// candidate's sequence, content hash, baseline hash, and old/new counts.
+	guardBypass := false
+	guardActor := ""
+	guardReason := ""
+	var guardBaselineHash [32]byte
+	if fs.hasSnapshot && shrinkGuardTrippedWithThresholds(oldCount, len(res.prefixes), thresholdsForFeed(fs)) {
+		newCount := len(res.prefixes)
+		if fs.shrinkAckMatches(res.hash, baselineHash, oldCount, newCount) {
+			guardBypass = true
+			guardActor = fs.shrinkAckActor
+			guardReason = fs.shrinkAckReason
+			guardBaselineHash = fs.shrinkAckBaselineHash
+			clearShrinkAck(fs)
+		} else {
+			sameCandidate := fs.shrinkCandidateMatches(res.hash, baselineHash, oldCount, newCount)
+			if !sameCandidate {
+				fs.shrinkRefusalID++
+				fs.shrinkRefused = true
+				fs.shrinkCandidateHash = res.hash
+				fs.shrinkBaselineHash = baselineHash
+				fs.shrinkCandidateOldCount = oldCount
+				fs.shrinkCandidateNewCount = newCount
+				clearShrinkAck(fs)
+			}
+			fs.shrinkRefusalCount++
+			now := m.now()
+			warn := !sameCandidate ||
+				fs.shrinkLastWarn.IsZero() ||
+				now.Sub(fs.shrinkLastWarn) >= feedShrinkWarnInterval
+			if warn {
+				fs.shrinkLastWarn = now
+			}
+			thresholds := thresholdsForFeed(fs)
+			ferr := fmt.Errorf(
+				"drastic shrink refused: candidate %d prefixes vs %d last-good; retain-percent floor %d%% and minimum drop %d; retaining last-good snapshot",
+				newCount, oldCount, thresholds.minRetainPercent, thresholds.minDrop)
+			failure := m.recordFailureLocked(fs, ferr)
+			refusalID := fs.shrinkRefusalID
+			refusalCount := fs.shrinkRefusalCount
+			candidateHash := fmt.Sprintf("%x", res.hash)
+			refusalBaselineHash := fmt.Sprintf("%x", baselineHash)
+			m.mu.Unlock()
+			if warn {
+				slog.Warn("dynamic-address: feed drastic shrink REFUSED — retaining last-good snapshot",
+					"name", fs.name, "refusal_id", refusalID, "candidate_hash", candidateHash,
+					"baseline_hash", refusalBaselineHash, "candidate_prefixes", newCount,
+					"previous_prefixes", oldCount, "refusal_count", refusalCount)
+			} else {
+				slog.Debug("dynamic-address: feed drastic shrink still REFUSED — retaining last-good snapshot",
+					"name", fs.name, "refusal_id", refusalID, "candidate_hash", candidateHash,
+					"baseline_hash", refusalBaselineHash, "candidate_prefixes", newCount,
+					"previous_prefixes", oldCount, "refusal_count", refusalCount)
+			}
+			m.finishFailure(fs, failure, false)
+			return
+		}
+	}
 	now := m.now()
 	fs.prefixes = res.prefixes
 	fs.hash = res.hash
@@ -1466,6 +1781,9 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	fs.staleSince = time.Time{}
 	fs.invalidLines = res.invalidLines
 	fs.invalidSample = res.invalidSample
+	// Any successful install re-baselines last-good and clears an outstanding
+	// refusal/acknowledgement. An ack can never apply to a later candidate.
+	clearShrinkCandidate(fs)
 	m.mu.Unlock()
 
 	slog.Info("dynamic-address: feed updated",
@@ -1480,6 +1798,13 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		slog.Warn("dynamic-address: feed installed a PARTIAL set — skipped invalid lines (degraded)",
 			"name", fs.name, "prefixes", len(res.prefixes),
 			"invalid_lines", res.invalidLines, "invalid_sample", res.invalidSample)
+	}
+
+	if guardBypass {
+		slog.Warn("dynamic-address: feed installed the exact acknowledged drastic-shrink candidate",
+			"name", fs.name, "refusal_id", fs.shrinkRefusalID, "candidate_hash", fmt.Sprintf("%x", res.hash),
+			"baseline_hash", fmt.Sprintf("%x", guardBaselineHash), "prefixes", len(res.prefixes),
+			"previous", oldCount, "actor", guardActor, "reason", guardReason)
 	}
 
 	if !needsPublish {
@@ -1530,103 +1855,98 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 //
 // A one-time slog.Warn fires when the feed first ENTERS the stale state, not
 // on every failing tick, so a persistently-down feed does not flood the log.
+type feedFailureTransition struct {
+	current      bool
+	enteredStale bool
+	dropped      bool
+	lastError    string
+	holdInterval time.Duration
+}
+
+// recordFailureLocked applies the shared retain/drop policy. The caller holds
+// m.mu so refusal failures and ordinary fetch errors observe the same explicit
+// hold-interval behavior.
+func (m *Manager) recordFailureLocked(fs *feedState, ferr error) feedFailureTransition {
+	if cur, ok := m.feeds[fs.name]; !ok || cur != fs {
+		return feedFailureTransition{}
+	}
+	now := m.now()
+	fs.lastError = redactFeedURLInError9164(ferr.Error(), fs.url)
+	transition := feedFailureTransition{
+		current:      true,
+		lastError:    fs.lastError,
+		holdInterval: fs.holdInterval,
+	}
+	if fs.hasSnapshot && len(fs.prefixes) > 0 {
+		if fs.staleSince.IsZero() {
+			fs.staleSince = now
+			transition.enteredStale = true
+		}
+		if fs.holdInterval > 0 && now.Sub(fs.staleSince) >= fs.holdInterval {
+			dropSnapshotToEmptyLocked(fs)
+			transition.dropped = true
+		}
+	}
+	return transition
+}
+
+func dropSnapshotToEmptyLocked(fs *feedState) {
+	fs.prefixes = nil
+	fs.hash = [32]byte{}
+	fs.hasSnapshot = false
+	fs.staleSince = time.Time{}
+	fs.invalidLines = 0
+	fs.invalidSample = nil
+	fs.publishedHash = [32]byte{}
+	fs.hasPublished = false
+	fs.holdDropped = true
+	clearShrinkCandidate(fs)
+}
+
 func (m *Manager) recordFailure(fs *feedState, ferr error) {
 	m.mu.Lock()
-	// Same staleness suppress as installSnapshot (#9916 F-133): an orphaned
-	// fetch's failure (including a hold-interval drop-to-empty, which fires
-	// onUpdate) must not publish against the post-swap state.
-	if cur, ok := m.feeds[fs.name]; !ok || cur != fs {
-		m.mu.Unlock()
+	transition := m.recordFailureLocked(fs, ferr)
+	m.mu.Unlock()
+	if !transition.current {
 		slog.Debug("dynamic-address: stale feed failure suppressed (post-swap)",
 			"name", fs.name)
 		return
 	}
-	now := m.now()
-	fs.lastError = redactFeedURLInError9164(ferr.Error(), fs.url)
+	m.finishFailure(fs, transition, true)
+}
 
-	enteredStale := false
-	dropped := false
-	if fs.hasSnapshot && len(fs.prefixes) > 0 {
-		if fs.staleSince.IsZero() {
-			fs.staleSince = now
-			enteredStale = true
-		}
-		// retainForever (the default) never drops; only an explicit positive
-		// hold-interval arms the timed drop-to-empty.
-		if fs.holdInterval > 0 && now.Sub(fs.staleSince) >= fs.holdInterval {
-			fs.prefixes = nil
-			fs.hash = [32]byte{}
-			fs.hasSnapshot = false
-			// Copilot #2: no snapshot is retained as stale anymore — clear
-			// StaleSince so FeedInfo.StaleSince matches its docstring.
-			fs.staleSince = time.Time{}
-			// No snapshot remains, so its parse-quality is meaningless — clear
-			// the degraded markers too (#2993).
-			fs.invalidLines = 0
-			fs.invalidSample = nil
-			// #5646: reset the published-hash tracking. The enforced set is now
-			// empty; if this feed later RECOVERS and refetches its prior content,
-			// installSnapshot must re-fire onUpdate to re-enforce it. Leaving a
-			// stale publishedHash equal to the recovered content would suppress
-			// that re-apply and leave the recovered denylist un-enforced.
-			fs.publishedHash = [32]byte{}
-			fs.hasPublished = false
-			fs.holdDropped = true
-			dropped = true
-		}
-	}
-	m.mu.Unlock()
-
-	switch {
-	case dropped:
+func (m *Manager) finishFailure(fs *feedState, transition feedFailureTransition, logRetained bool) {
+	if transition.dropped {
 		slog.Warn("dynamic-address: hold interval elapsed, dropping stale feed to empty",
-			// #10015: use the already-redacted error text. Go's transport error
-			// quotes the dialed URL, which may contain a per-tenant bearer token.
-			"name", fs.name, "err", fs.lastError, "hold", fs.holdInterval)
+			"name", fs.name, "err", transition.lastError, "hold", transition.holdInterval)
 		if m.onUpdate != nil {
-			// #9527: the drop-to-empty has NO fixed safety direction. It depends
-			// on how the operator uses the feed: an empty denylist stops denying
-			// (fail-OPEN, which is why hold-interval is opt-in), and an empty
-			// allowlist stops permitting.
-			//
-			// And for any enforced policy that references a binding on this feed,
-			// the empty set does not reach the dataplane at all:
-			//   - SnapshotForBindings omits the binding;
-			//   - the policy lowers to __unsupported_address__;
-			//   - the helper's integrity preflight rejects the whole snapshot and
-			//     keeps the previous-good one (fresh boot: default-deny).
-			//
-			// That keeps the last-good prefixes enforced: still DENYING them for
-			// a denylist, still PERMITTING them for an allowlist. So retention is
-			// not "strictly safer" than an empty set. The userspace manager warns
-			// on that reject and records ProcessStatus reject reasons (#3261); an
-			// error returned by onUpdate is only logged here. publishedHash was
-			// already reset above, so a later recovery re-publishes regardless.
+			// An empty set has no fixed safety direction: a denylist stops
+			// denying while an allowlist stops permitting. The existing binding
+			// fail-mode controls the dataplane consequence; keep the hold policy
+			// shared by ordinary fetch failures and shrink refusals.
 			if err := m.onUpdate(); err != nil {
 				slog.Warn("dynamic-address: drop-to-empty apply rejected — dataplane retains last-good set",
 					"name", fs.name, "err", err)
 			}
 		}
-	case enteredStale:
-		// One-time loud warning on entry to the stale state. Subsequent
-		// failing ticks are logged at Debug to avoid flooding the journal for
-		// a persistently-down feed.
+		return
+	}
+	if !logRetained {
+		return
+	}
+	if transition.enteredStale {
 		slog.Warn("dynamic-address: feed entered STALE — fetch failed, retaining last-good snapshot",
-			// #9164: the REDACTED text, not `ferr`. Go's transport error quotes
-			// the URL it dialled, and a dynamic-address feed routinely carries a
-			// per-tenant bearer token in its query string.
-			"name", fs.name, "err", fs.lastError, "retain",
+			"name", fs.name, "err", transition.lastError, "retain",
 			func() string {
-				if fs.holdInterval > 0 {
-					return fs.holdInterval.String()
+				if transition.holdInterval > 0 {
+					return transition.holdInterval.String()
 				}
 				return "forever"
 			}())
-	default:
-		slog.Debug("dynamic-address: fetch failed, retaining last-good",
-			// #10015: use the already-redacted error text rather than `ferr`.
-			"name", fs.name, "err", fs.lastError)
+		return
 	}
+	slog.Debug("dynamic-address: fetch failed, retaining last-good",
+		"name", fs.name, "err", transition.lastError)
 }
 
 // redactFeedURLInError9164 removes a feed URL's credential from a transport

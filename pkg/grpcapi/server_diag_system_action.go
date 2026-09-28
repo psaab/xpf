@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/clusterfailover"
 	"github.com/psaab/xpf/pkg/configstore"
@@ -21,6 +22,8 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+const maxDynamicAddressShrinkAckReasonBytes = 512
 
 func (s *Server) proxyPeerSystemAction(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
 	peerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -170,6 +173,65 @@ func (s *Server) runZeroize(ctx context.Context) error {
 	return wipe()
 }
 
+func (s *Server) acknowledgeDynamicAddressShrink(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+	principal, ok := authorizedPrincipalFromContext(ctx)
+	if !ok || principal.Source == authz.SourceNone {
+		return nil, status.Error(codes.Unauthenticated, "dynamic-address shrink acknowledgement requires an authenticated principal")
+	}
+	if req.Target == "" || strings.TrimSpace(req.Target) != req.Target {
+		return nil, status.Error(codes.InvalidArgument, "dynamic-address shrink acknowledgement requires an exact feed name")
+	}
+	if req.CandidateId == 0 {
+		return nil, status.Error(codes.InvalidArgument, "dynamic-address shrink acknowledgement requires a positive candidate ID")
+	}
+	if len(req.CandidateHash) != 64 || len(req.BaselineHash) != 64 || req.CandidateOldCount == 0 {
+		return nil, status.Error(codes.InvalidArgument, "dynamic-address shrink acknowledgement requires candidate and baseline SHA-256 hashes and positive old count")
+	}
+	if len(req.Reason) > maxDynamicAddressShrinkAckReasonBytes {
+		return nil, status.Errorf(codes.InvalidArgument, "acknowledgement reason exceeds %d bytes", maxDynamicAddressShrinkAckReasonBytes)
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		return nil, status.Error(codes.InvalidArgument, "dynamic-address shrink acknowledgement requires a reason")
+	}
+	for _, r := range reason {
+		if r < 0x20 || r == 0x7f {
+			return nil, status.Error(codes.InvalidArgument, "acknowledgement reason must not contain control characters")
+		}
+	}
+	if s.feedsAckFn == nil {
+		return nil, status.Error(codes.Unavailable, "dynamic-address feed acknowledgement unavailable")
+	}
+	if s.feedsFn == nil || s.store == nil {
+		return nil, status.Error(codes.Unavailable, "dynamic-address feed state or audit journal unavailable")
+	}
+	feed, exists := s.feedsFn()[req.Target]
+	if !exists {
+		return nil, status.Errorf(codes.NotFound, "dynamic-address feed %q not found", req.Target)
+	}
+	if !feed.ShrinkRefused {
+		return nil, status.Errorf(codes.FailedPrecondition, "dynamic-address feed %q has no current refused shrink", req.Target)
+	}
+	if feed.ShrinkRefusalID != req.CandidateId ||
+		feed.ShrinkCandidateHash != req.CandidateHash ||
+		feed.ShrinkBaselineHash != req.BaselineHash ||
+		feed.ShrinkCandidateOldCount != int(req.CandidateOldCount) ||
+		feed.ShrinkCandidateNewCount != int(req.CandidateNewCount) {
+		return nil, status.Errorf(codes.FailedPrecondition, "dynamic-address feed %q refusal candidate tuple is stale", req.Target)
+	}
+
+	actor := journalPrincipalForContext(s, ctx, connSessionID(ctx))
+	if err := s.feedsAckFn(req.Target, req.CandidateId, req.CandidateHash, req.BaselineHash, int(req.CandidateOldCount), int(req.CandidateNewCount), actor, reason); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "dynamic-address feed %q shrink acknowledgement rejected: %v", req.Target, err)
+	}
+	detail := fmt.Sprintf("%s feed=%q candidate_id=%d candidate_sha256=%q baseline_sha256=%q old_count=%d new_count=%d reason=%q",
+		req.Action, req.Target, req.CandidateId, req.CandidateHash, req.BaselineHash, req.CandidateOldCount, req.CandidateNewCount, reason)
+	s.store.LogSystemActionAs(detail, actor)
+	return &pb.SystemActionResponse{
+		Message: fmt.Sprintf("Acknowledged refused shrink candidate %d for dynamic-address feed %q", req.CandidateId, req.Target),
+	}, nil
+}
+
 func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "system action request is required")
@@ -196,6 +258,9 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 		return &pb.SystemActionResponse{Message: "D11 attestation authority armed"}, nil
 	}
 	switch req.Action {
+	case "dynamic-address-shrink-ack":
+		return s.acknowledgeDynamicAddressShrink(ctx, req)
+
 	case "reboot":
 		slog.Warn("system reboot requested via gRPC")
 		// Journal BEFORE the box goes down: the fsynced record survives the

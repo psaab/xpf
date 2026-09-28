@@ -290,6 +290,21 @@ func TestSystemActionPermissionIsReadFromTheDecodedRequest_5278(t *testing.T) {
 	}
 }
 
+func TestDynamicAddressShrinkAckRequiresConfigurePermission11059(t *testing.T) {
+	usePasswdFixture5278(t)
+	s := NewServer("", Config{Store: authzStore5278(t, authzConfig5278)})
+	full := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/SystemAction"
+	req := &pb.SystemActionRequest{Action: "dynamic-address-shrink-ack"}
+	for _, uid := range []uint32{authzUIDReadOnly, authzUIDOperator} {
+		if err := s.authorizeRPC(ctxWithPeerUID(uid), full, req); err == nil {
+			t.Errorf("uid %d without configure permission was admitted for shrink acknowledgement", uid)
+		}
+	}
+	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDSuperuser), full, req); err != nil {
+		t.Fatalf("super-user with configure permission was denied: %v", err)
+	}
+}
+
 // TestPrimaryAndFabricChainsAreDistinct_5278 is the structural half of "do not
 // touch the fabric listener": the two servers are built by different functions
 // and the #5278 interceptors appear only in the primary one.
