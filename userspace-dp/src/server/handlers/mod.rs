@@ -153,6 +153,7 @@ pub(crate) fn handle_stream(
         policy_delete_outcomes: Vec::new(),
         policy_delete_complete: false,
         policy_delete_errors: Vec::new(),
+        persistent_nat_lease_count: 0,
     };
     let mut persist_state = false;
     // Capture suppress_status before the match — bool is Copy so this
@@ -443,6 +444,10 @@ pub(crate) fn handle_stream(
             // the sync record is forbidden to carry.
             "export_persistent_lease_display" => {
                 idle_leases::export_display(&mut guard, &mut response)
+            }
+            // #10784: revoke leases in the helper allocator, not only the Go display mirror.
+            "clear_persistent_nat_leases" => {
+                idle_leases::clear(&mut guard, &mut response)
             }
             "import_idle_leases" => {
                 idle_leases::import(&mut guard, &request.idle_leases, &mut response)

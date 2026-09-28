@@ -1206,37 +1206,36 @@ func parseProxiedFailoverAction(action string) (rgID, nodeID int, ok bool) {
 }
 
 // isFabricSafeSystemAction reports whether a SystemAction request carries a
-// well-formed cross-node cluster-failover action the peer legitimately proxies
-// over the fabric — delegating the strict parse to parseProxiedFailoverAction.
+// narrowly scoped operation a peer legitimately proxies over the fabric:
+// well-formed cross-node failover or the exact persistent-NAT clear action.
 //
-// These re-balance redundancy-group ownership — an operation squarely within the
-// fabric peer's trust boundary (coordinating RG ownership is the fabric's job).
-// Every other action — zeroize, reboot, halt, power-off, the local-only
-// clear-* / cluster-failover-reset verbs, and any malformed failover suffix —
-// is denied on the fabric listener. Node-local execution via the trusted
-// loopback listener is unaffected: an operator SSHed into the target node still
-// runs any action.
+// Failover rebalances redundancy-group ownership, while clearing persistent NAT
+// revokes the cluster's replicated binding state. Both are peer-coordination
+// operations within the fabric trust boundary. Every other action — zeroize,
+// reboot, halt, power-off, local-only clear-* / cluster-failover-reset verbs,
+// and malformed failover suffixes — is denied on the fabric listener. Node-local
+// execution via the trusted loopback listener is unaffected.
 //
 // This is the nested-action choice over a blanket SystemAction exclusion:
-// excluding SystemAction entirely would make a cross-node `request chassis
-// cluster failover ... node <peer>` return PermissionDenied when the initiating
-// node proxies it, regressing a shipped HA operator workflow. Allowing ONLY the
-// two well-formed failover forms preserves that flow while keeping
-// node-lifecycle actions (zeroize/reboot/...) off the unauthenticated fabric
-// surface.
+// excluding SystemAction entirely would break peer-coordinated failover and NAT
+// clear, while admitting only these exact forms keeps node-lifecycle actions
+// (zeroize/reboot/...) off the fabric surface.
 func isFabricSafeSystemAction(req interface{}) bool {
 	sa, ok := req.(*pb.SystemActionRequest)
 	if !ok {
 		return false
+	}
+	if sa.GetAction() == "clear-persistent-nat" {
+		return true
 	}
 	_, _, ok = parseProxiedFailoverAction(sa.GetAction())
 	return ok
 }
 
 // fabricAllowlistUnaryInterceptor fail-closes unary RPCs on the cluster fabric
-// listener (#4122): only the peer-proxied read/monitor RPCs
-// (fabricAllowedUnaryMethods), the two cross-node cluster-failover SystemAction
-// forms (isFabricSafeSystemAction) and the proxied ShowText topic
+// listener (#4122): only peer-proxied read/monitor RPCs
+// (fabricAllowedUnaryMethods), cross-node failover and persistent-NAT clear
+// SystemAction actions (isFabricSafeSystemAction), and the proxied ShowText topic
 // (isFabricSafeShowText, #9059) are served; every other method is rejected with
 // PermissionDenied before the handler runs. The loopback
 // listener does NOT install this interceptor and keeps the full service.

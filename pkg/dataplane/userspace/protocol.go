@@ -600,6 +600,9 @@ type ControlResponse struct {
 	PolicyDeleteOutcomes []string `json:"policy_delete_outcomes,omitempty"`
 	PolicyDeleteComplete bool     `json:"policy_delete_complete,omitempty"`
 	PolicyDeleteErrors   []string `json:"policy_delete_errors,omitempty"`
+	// PersistentNatLeaseCount reports the authoritative allocator population
+	// revoked by clear_persistent_nat_leases (#10784).
+	PersistentNatLeaseCount uint64 `json:"persistent_nat_lease_count,omitempty"`
 }
 
 // QueueEpochSnapshot is one queue-number/epoch pair. It is a list rather than

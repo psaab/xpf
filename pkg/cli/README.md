@@ -457,6 +457,12 @@ presenter's rendered output is byte-identical:
   the same way. Scoped clears (`clear security flow session <filter>`, `clear
   dhcp client-identifier interface <name>`) are unaffected — they legitimately
   take a scope.
+- **Persistent-NAT clear (`clear security nat source persistent-nat-table`)**:
+  in userspace mode the helper allocator is authoritative, so the CLI waits for
+  its clear acknowledgement and reports the helper's lease count before
+  clearing the SHOW mirror. Other dataplanes clear their authoritative table
+  directly. In cluster mode the CLI also sends the exact `clear-persistent-nat`
+  peer action; a peer failure is reported as a warning after the local clear.
 - `show security match-policies` (`showMatchPolicies`) and `test policy`
   (`testPolicy`) are THIN adapters over the single shared policy simulator
   `pkg/policymatch` (#3042) — the same matcher the REST and gRPC surfaces
