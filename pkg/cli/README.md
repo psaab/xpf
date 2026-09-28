@@ -14,7 +14,7 @@ both the daemon-local CLI (xpfd in TTY mode) and the remote CLI
   start; add a new command in `pkg/cmdtree/tree.go` and it shows up
   here, in the remote CLI, and in gRPC tab completion automatically.
 - Per-injection setters: `SetForwardingSampler`, `SetRPMResultsFn`,
-  `SetFeedsFn`, `SetLLDPNeighborsFn`, `SetVRRPManager`,
+  `SetFeedsFn`, `SetFeedsAckFn`, `SetLLDPNeighborsFn`, `SetVRRPManager`,
   `SetApplyConfigFn`, `SetCommitFns`, …. All on `*CLI`.
 
 ## Request / diagnostic command files (#4653)

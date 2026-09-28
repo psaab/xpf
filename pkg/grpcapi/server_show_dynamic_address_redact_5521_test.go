@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/feeds"
 )
 
 // TestShowDynamicAddressRedactsFeedURLCredentials pins #5521: the
@@ -54,5 +55,43 @@ func TestShowDynamicAddressRedactsFeedURLCredentials(t *testing.T) {
 	// The feed name label must survive unchanged.
 	if !strings.Contains(out, "Feed server: tenant-feed") {
 		t.Errorf("feed-server name label missing from output:\n%s", out)
+	}
+}
+
+func TestShowDynamicAddressReportsShrinkRefusal(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.DynamicAddress.FeedServers = map[string]*config.FeedServer{
+		"threat": {Name: "threat", URL: "https://feeds.example/list"},
+	}
+	s := &Server{
+		feedsFn: func() map[string]feeds.FeedInfo {
+			return map[string]feeds.FeedInfo{
+				"threat": {
+					Prefixes: 100, Hash: "installedhash", ShrinkRefused: true, ShrinkRefusalCount: 3,
+					ShrinkRefusalID: 9, ShrinkCandidateHash: "candidatehash", ShrinkBaselineHash: "installedhash",
+					ShrinkCandidateOldCount: 100, ShrinkCandidateNewCount: 49,
+					ShrinkAckPending: true, ShrinkAckActor: "operator=alice",
+					ShrinkAckHash: "candidatehash", ShrinkAckBaselineHash: "installedhash",
+					ShrinkAckReason:        "provider confirmed",
+					ShrinkGuardMinOldCount: 32, ShrinkGuardMinRetainPercent: 50,
+					ShrinkGuardMinDrop: 16,
+				},
+			}
+		},
+	}
+	var buf strings.Builder
+	s.showDynamicAddress(cfg, &buf)
+	out := buf.String()
+	for _, want := range []string{
+		"Shrink guard: old >= 32 prefixes; refuse below 50% retained with a drop of at least 16",
+		"Shrink refusals: 3",
+		"Installed snapshot sha256=installedhash",
+		"SHRINK-HELD: candidate 49/100 prefixes; refusal #9; candidate_sha256=candidatehash baseline_sha256=installedhash",
+		"SHRINK-ACKED: exact candidate #9 awaiting next fetch",
+		"Acked candidate_sha256=candidatehash baseline_sha256=installedhash by operator=alice; reason: \"provider confirmed\"",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dynamic-address show lacks %q:\n%s", want, out)
+		}
 	}
 }

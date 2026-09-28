@@ -867,6 +867,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			return nil
 		})
+		if d.feeds != nil {
+			shell.SetFeedsAckFn(d.feeds.AcknowledgeFeedShrink)
+		}
 		// #3105: live feed-prefix overlay so the in-process CLI's
 		// `show security match-policies` / `test policy` simulators resolve
 		// feed-backed address-names to their live CIDRs, matching the REST/gRPC
