@@ -48,11 +48,10 @@
 //!    free a bit belonging to that other flow. So the import claims the bit and
 //!    REFUSES the lease if it cannot.
 //!
-//!    Address-only leases own no occupancy bit. A remote-bound import instead
-//!    checks its exact reverse identity against live address-only and PAT
-//!    owners; every address-only import also counts against the shared
-//!    `max_tracked_flows` lease-table cap. A permit-any-remote record names no
-//!    single reverse identity and is governed by that cap.
+//!    Imports check remote scopes against both live address-only and PAT
+//!    owners: `Some((host, port))` is an exact endpoint, `Some((host, 0))` is a
+//!    target-host wildcard, and `None` covers any remote. Every address-only
+//!    import also counts against the shared `max_tracked_flows` lease-table cap.
 
 // PART 1 OF #8121. This is the helper core — the two operations and every
 // invariant that makes them safe. Nothing calls it yet: the cluster transport
@@ -67,9 +66,7 @@
 // re-reviewed when the core moved.
 #![allow(dead_code)]
 
-use super::allocator::{
-    AddressOnlyReverseKey, PersistentLease, PersistentSourceKey, PortAllocator, TranslatedTuple,
-};
+use super::allocator::{PersistentLease, PersistentSourceKey, PortAllocator, TranslatedTuple};
 use std::net::IpAddr;
 
 /// One idle lease, in the shape a peer can act on: identity and lifetime only.
@@ -256,23 +253,19 @@ impl PortAllocator {
         if self.import_idle_lease_capacity_reached(&mut live, now_ns) {
             return IdleLeaseImport::SkippedCapacity;
         }
-        if rec.address_only {
-            // Address-only leases claim no bitmap bit. For remote-bound leases,
-            // consult both ownership domains using the exact reverse identity
-            // the local mint would claim.
-            if let Some((dst_ip, dst_port)) = rec.remote {
-                let rkey = AddressOnlyReverseKey {
-                    protocol: rec.protocol,
-                    translated_ip: rec.translated_ip,
-                    translated_port: rec.translated_port,
-                    dst_ip,
-                    dst_port,
-                };
-                if live.import_idle_address_only_contended(&rkey) {
-                    return IdleLeaseImport::SkippedIdentityBusy;
-                }
-            }
+        let translated = TranslatedTuple {
+            ip: rec.translated_ip,
+            port: rec.translated_port,
+        };
+        let identity_busy = if rec.address_only {
+            live.import_idle_address_only_contended(rec.protocol, translated, rec.remote)
         } else {
+            live.import_idle_pat_address_only_contended(rec.protocol, translated, rec.remote)
+        };
+        if identity_busy {
+            return IdleLeaseImport::SkippedIdentityBusy;
+        }
+        if !rec.address_only {
             // Module note 4: take the occupancy bit BEFORE installing, and
             // refuse rather than install a lease over an identity someone else
             // holds.
@@ -286,10 +279,7 @@ impl PortAllocator {
         live.persistent_by_source.insert(
             key,
             PersistentLease {
-                translated: TranslatedTuple {
-                    ip: rec.translated_ip,
-                    port: rec.translated_port,
-                },
+                translated,
                 addr_index,
                 expires_at_ns,
                 timeout_ns: rec.timeout_ns,

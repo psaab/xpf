@@ -1210,7 +1210,9 @@ the NAT module applies it:
   sessions (#7360/#8132), and idle leases are exported/imported explicitly
   (#8121). Idle imports share the pool's `max_tracked_flows` lease-table cap
   with local mints; after one bounded expiry-GC pressure pass, a still-full
-  table refuses the import rather than starving local allocation.
+  table refuses the import rather than starving local allocation. Imported
+  leases also check live address-only and PAT owners across exact, target-host,
+  and any-remote scopes.
 - **Rule-set precedence — most-specific-scope-wins (#4161).** When several
   source-NAT rule-sets overlap on a flow, selection follows Junos: the rule-set
   whose match CONTEXT is most specific wins — **interface > zone >
