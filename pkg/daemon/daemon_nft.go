@@ -871,6 +871,27 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 					// #7181: the apply failed AND the gap could not be installed.
 					// Record the staleness before returning -- this is the worst
 					// applied state and the one an operator most needs surfaced.
+					//
+					// #10751 BLOCKING-5 residual (day-2 double failure,
+					// EXPLICITLY UNBOUNDED): both atomic nft transactions are
+					// down, so the newcomer stays reachable until the NEXT
+					// trigger (lease-content change, commit, feed/poll/sync
+					// apply, restart) — no wall-clock retry owner exists on
+					// this path. The joined error dies at applyConfigUnderSem
+					// (Warn plus void return, no debt latch); the #9811
+					// full-apply loop never latches here (its scope comment
+					// excludes caller-less paths as a separate decision);
+					// the routing/conntrack/service loops never reach
+					// host-inbound; a content-identical T1 renew is gated out
+					// at commitLease. A VRF-enslaved unzoned lease is the
+					// sharpest case (no backstop covers it either). Single
+					// real-install failure IS bounded synchronously (this gap
+					// — see TestVRFLeaseWindowBoundedByGapAfterFailedRerender10751);
+					// only the double failure waits unboundedly: while nft is
+					// down no retry could install anyway, and once it heals
+					// convergence still waits for the next trigger. Widening
+					// #9811 to latch here would bound it at 30s and is left
+					// as an explicit follow-up for reviewer acceptance.
 					d.noteHostInboundApplyFailed(time.Now())
 					return errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), gapErr)
 				}
