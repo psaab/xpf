@@ -25,7 +25,9 @@ Bootstrap feeds with no last-good snapshot are exempt. Refusal does not replace
 the installed set, stamp success, or publish to the dataplane. `LastError`,
 `StaleSince`, `show security dynamic-address`, and the per-feed refusal metrics
 identify the held candidate. The zero-prefix, truncation, and whole-address-
-space guards remain independent and unchanged.
+space guards remain independent and unchanged. Repeated sub-threshold shrinkage
+that cumulatively bleeds scope, and equal-count content swaps, are outside this
+per-fetch guard and tracked in follow-up #11489.
 
 Thresholds are runtime `feed-server` configuration, not build-time variables:
 
@@ -60,21 +62,21 @@ pending acknowledgement also displays its bound hash, authenticated actor, and
 reason. Then run from the authenticated local console or remote CLI:
 
 ```
-request security dynamic-address acknowledge-shrink <feed> candidate-id <id> reason "<why this exact candidate is legitimate>"
+request security dynamic-address acknowledge-shrink <feed> candidate-id <id> candidate-hash <sha256> old-count <count> new-count <count> reason "<why this exact candidate is legitimate>"
 ```
 
 This requires configuration privilege on either CLI surface. The remote
 daemon derives the actor from the authenticated gRPC principal; the local
 console records its kernel-resolved UID/account and RBAC login class. Both
-require a non-empty bounded reason and record actor/reason in the audit journal.
-The acknowledgement is bound to the currently refused candidate's ID, content
-hash, and old/new counts; another candidate remains refused and requires a new
-review. A normal successful install clears a pending acknowledgement, and
-`Manager.Apply` drops it when producer config is replaced. An explicit positive
-`hold-interval` also applies to shrink refusal: once that interval expires, the
-shared hold policy drops the last-good set and publishes the configured
-hold-expiry result. With no retained baseline after that drop, a later valid
-fetch is handled as a bootstrap install.
+require a non-empty bounded reason and record the full candidate tuple, actor,
+and reason in the audit journal. The acknowledgement is bound to the currently
+refused candidate's ID, content hash, and old/new counts; another candidate
+requires a new review. A normal successful install clears a pending
+acknowledgement; `Manager.Apply` drops it when producer config is replaced. An
+explicit positive `hold-interval` also applies to shrink refusal: once that
+interval expires, the shared hold policy drops the last-good set and publishes
+the configured hold-expiry result. With no retained baseline after that drop,
+a later valid fetch is handled as a bootstrap install.
 
 The guard logs an initial Warn and re-Warns at most hourly for a persistent
 refusal. Prometheus exposes an active gauge and a per-feed refusal counter.
