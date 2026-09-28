@@ -874,6 +874,16 @@ func zeroizeRotateMachineID(path string) error {
 	if err == nil && !info.Mode().IsRegular() {
 		return fmt.Errorf("zeroize: refusing to replace non-regular file %s", path)
 	}
+	// Durable rename replaces the inode: a preexisting hardlink would
+	// keep the OLD identity bytes alive at a sibling. Refuse like the
+	// seal remover (uniform F2 policy) rather than rotate around it.
+	hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
+	if herr != nil {
+		return fmt.Errorf("zeroize: inspect hard links for %s: %w", path, herr)
+	}
+	if len(hardlinks) != 0 {
+		return fmt.Errorf("zeroize: refusing to rotate hard-linked %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
+	}
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return fmt.Errorf("zeroize: generate machine-id: %w", err)

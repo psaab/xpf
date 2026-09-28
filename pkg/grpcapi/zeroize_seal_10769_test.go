@@ -1677,6 +1677,24 @@ func TestZeroizeRotateMachineIDCreatesAndRefusesLink10769(t *testing.T) {
 			t.Fatal("symlinked machine-id must fail closed")
 		}
 	})
+	t.Run("hardlink refused", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "machine-id")
+		mustWriteFile(t, path, []byte("0123456789abcdef0123456789abcdef\n"))
+		sibling := filepath.Join(dir, "sibling-id")
+		if err := os.Link(path, sibling); err != nil {
+			t.Fatalf("hardlink plant: %v", err)
+		}
+		var linkErr *configstore.FactoryResetHardlinkError
+		if err := zeroizeRotateMachineID(path); !errors.As(err, &linkErr) {
+			t.Fatalf("expected FactoryResetHardlinkError, got %v", err)
+		}
+		for _, p := range []string{path, sibling} {
+			if body, serr := os.ReadFile(p); serr != nil || string(body) != "0123456789abcdef0123456789abcdef\n" {
+				t.Fatalf("refusal must leave original bytes intact, %s body=%q err=%v", p, body, serr)
+			}
+		}
+	})
 }
 
 // RED on revert: unlinking before the census destroys the nlink evidence,
