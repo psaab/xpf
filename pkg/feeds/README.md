@@ -14,6 +14,30 @@ feed servers and triggers config recompile when the resolved set changes
 - `GetPrefixes(name)` — `feeds.go`. Returns the current enforced (last-good) snapshot.
 - `StopAll()`, `FeedInfo`, `AllFeeds()` — surfaced to `show security dynamic-address`. `StopAll` is the shutdown path (cancels every producer, empties the map); `Apply` no longer routes through it (#5282).
 
+## Drastic-shrink protection (#11059)
+
+`installSnapshot` compares each non-empty fetched set with that feed's
+last-good snapshot before replacing it. By default, the guard refuses a fetch
+when the last-good set has at least 32 prefixes, the candidate drops at least
+16 prefixes, and fewer than 50% of the old prefixes remain. For example,
+50,000→5 is refused even though the body is otherwise valid; the last-good set
+stays enforced, `LastError`/`StaleSince` expose the refusal, and a Warn alarms
+on the first refused candidate (repeated identical refusals are Debug to avoid
+journal flooding). A refused fetch does not stamp success or trigger dataplane
+publication. The zero-prefix, truncation, and whole-address-space guards remain
+independent and unchanged.
+
+The defaults are tunable in `feeds.go` (`feedShrinkGuardMinOldCount`,
+`feedShrinkGuardMinRetainPercent`, and `feedShrinkGuardMinDrop`). Smaller
+reductions that remain above the floors install normally, so ordinary churn and
+gradual shrink proceed without an override. When an operator has verified that
+a single drastic reduction is legitimate, call the manager's
+`AcknowledgeFeedShrink(feedName)` before the next fetch. It returns false for an
+unknown feed; for a known feed the next guarded shrink is installed once and
+logs a Warn identifying the operator-acknowledged override. Any successful
+intervening install clears a pending acknowledgement, and the bypass never
+applies to a subsequent shrink.
+
 ## Day-2 reconcile (#5036)
 
 `Manager.Apply` is driven by the daemon, not called once at boot. The daemon

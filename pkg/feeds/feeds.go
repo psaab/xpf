@@ -106,6 +106,32 @@ const httpClientTimeout = 30 * time.Second
 // var so tests can shrink it; production stays well under httpClientTimeout.
 var feedDialAttemptTimeout = 5 * time.Second
 
+// Drastic-shrink guard tunables (#11059). A feed fetch that passes parseFeed
+// (non-empty, non-whole-space) can still be a SHRUNK stub — a provider bug or
+// hijack serving HTTP-200 with 5 prefixes where 50k stood. installSnapshot
+// compares every install against the last-good snapshot and refuses a drastic
+// shrink, retaining last-good + alarming, instead of fail-opening the
+// denylist. The tunables are vars (like feedDialAttemptTimeout) so tests can
+// shrink them; production uses the defaults below.
+var (
+	// feedShrinkGuardMinOldCount exempts small feeds: the guard only applies
+	// when the last-good snapshot holds at least this many prefixes. A ratio
+	// is meaningless at small counts (20→8 after a provider dedup is churn,
+	// not a stub), and a false alarm there would delay a legitimate install.
+	// Zero-prefix fetches are still refused by parseFeed regardless of size.
+	feedShrinkGuardMinOldCount = 32
+	// feedShrinkGuardMinRetainPercent is the relative floor: a fetch must
+	// retain at least this percent of the last-good prefix count or it is a
+	// drastic shrink (default 50 — the new set must be >= half the old).
+	feedShrinkGuardMinRetainPercent = 50
+	// feedShrinkGuardMinDrop is the absolute floor: the shrink must also drop
+	// at least this many prefixes to trip. With the defaults it is subsumed
+	// by the ratio gate (old >= 32 collapsing below half always drops > 16),
+	// but it stays an independent tunable so a looser ratio cannot re-arm
+	// small-count noise.
+	feedShrinkGuardMinDrop = 16
+)
+
 // maxFeedRedirects preserves net/http's built-in redirect bound after the
 // client installs the feed-specific CheckRedirect policy below.
 const maxFeedRedirects = 10
@@ -212,6 +238,16 @@ type feedState struct {
 	// holdDropped marks a feed whose snapshot was dropped by its hold-interval,
 	// as opposed to one never fetched (#9689). Cleared by the next install.
 	holdDropped bool
+
+	// Drastic-shrink guard state (#11059). shrinkHoldHash suppresses repeated
+	// Warns for the same refused candidate; a different candidate alarms again.
+	// shrinkAcked is a one-shot operator bypass armed by
+	// AcknowledgeFeedShrink and consumed by the next guard trip — or cleared
+	// by any intervening install, so a stale ack never bypasses a later,
+	// different shrink. Neither field crosses Apply (carryForwardSnapshot
+	// deliberately does not carry it).
+	shrinkHoldHash [32]byte
+	shrinkAcked    bool
 
 	// publishedHash is the content hash of the snapshot last CONFIRMED applied
 	// to the dataplane — it advances ONLY when the onUpdate publish callback
@@ -1406,6 +1442,43 @@ func hashPrefixes(canon []string) [32]byte {
 	return sum
 }
 
+// AcknowledgeFeedShrink arms a one-shot bypass of the #11059 drastic-shrink
+// guard for the named feed: the next shrunken fetch installs despite the
+// guard, with a loud Warn recording the operator ack. This is the immediate
+// operator-override path for a shrink the operator has investigated and
+// confirmed legitimate. Smaller intermediate reductions that remain above the
+// configured relative/absolute floors install normally. The ack is consumed
+// by the bypass, and any intervening successful install clears it, so it can
+// never bypass a later, different shrink. It reports false for an unknown feed.
+func (m *Manager) AcknowledgeFeedShrink(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fs, ok := m.feeds[name]
+	if !ok {
+		return false
+	}
+	fs.shrinkAcked = true
+	return true
+}
+
+// shrinkGuardTripped reports whether installing newCount prefixes over a
+// last-good snapshot of oldCount prefixes is a drastic shrink under the #11059
+// tunables. Growth, equal counts, and small-feed churn never trip; only a
+// large last-good set collapsing below the relative floor (and past the
+// absolute drop floor) trips.
+func shrinkGuardTripped(oldCount, newCount int) bool {
+	if oldCount < feedShrinkGuardMinOldCount {
+		return false
+	}
+	if newCount >= oldCount {
+		return false
+	}
+	if oldCount-newCount < feedShrinkGuardMinDrop {
+		return false
+	}
+	return newCount*100 < oldCount*feedShrinkGuardMinRetainPercent
+}
+
 // installSnapshot replaces the active snapshot with a fresh good fetch, stamps
 // success, clears stale/error state, and (re-)publishes to the dataplane when
 // the fetched content differs from what was last SUCCESSFULLY applied.
@@ -1421,6 +1494,12 @@ func hashPrefixes(canon []string) [32]byte {
 // content unpublished and the next identical refetch RE-FIRES onUpdate to retry
 // the apply. The retry fires on the normal refresh cadence (one publish attempt
 // per fetch), never a tight loop.
+// Drastic-shrink guard (#11059): a non-empty, non-whole-space fetch can still
+// be a SHRUNK stub (5 prefixes where 50k stood). installSnapshot refuses such
+// a fetch — retaining last-good, marking stale, alarming, publishing nothing —
+// unless the shrink was operator-acknowledged (AcknowledgeFeedShrink). Bootstrap
+// (no prior snapshot) is exempt; growth, equal counts, and small-feed churn
+// install normally.
 func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	m.mu.Lock()
 	// Staleness suppress (#9916 F-133): Apply swaps the producer set without
@@ -1455,6 +1534,41 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	// publishedHash stale, so this stays true on an identical refetch → retry.
 	needsPublish := !fs.hasPublished || fs.publishedHash != res.hash
 	oldCount := len(fs.prefixes)
+	// Drastic-shrink guard (#11059) — see the doc comment. guardBypass records
+	// WHY a tripped guard still installed, for the loud Warn below.
+	guardBypass := ""
+	if fs.hasSnapshot && shrinkGuardTripped(oldCount, len(res.prefixes)) {
+		switch {
+		case fs.shrinkAcked:
+			// Immediate operator override (see AcknowledgeFeedShrink).
+			fs.shrinkAcked = false
+			fs.shrinkHoldHash = [32]byte{}
+			guardBypass = "operator-acknowledged"
+		default:
+			// REFUSE: retain last-good + alarm. No snapshot, hash, or
+			// published-hash mutation, no onUpdate — the enforced set is
+			// untouched. lastError/staleSince surface the refusal via the
+			// existing FeedInfo status surface.
+			repeatedCandidate := fs.shrinkHoldHash == res.hash
+			fs.shrinkHoldHash = res.hash
+			now := m.now()
+			newCount := len(res.prefixes)
+			fs.lastError = fmt.Sprintf("drastic shrink refused: fetched %d prefixes vs %d last-good (< %d%% retained); retaining last-good snapshot",
+				newCount, oldCount, feedShrinkGuardMinRetainPercent)
+			if fs.staleSince.IsZero() {
+				fs.staleSince = now
+			}
+			m.mu.Unlock()
+			if repeatedCandidate {
+				slog.Debug("dynamic-address: feed drastic shrink still REFUSED — retaining last-good snapshot",
+					"name", fs.name, "prefixes", newCount, "previous", oldCount)
+			} else {
+				slog.Warn("dynamic-address: feed drastic shrink REFUSED — retaining last-good snapshot",
+					"name", fs.name, "prefixes", newCount, "previous", oldCount)
+			}
+			return
+		}
+	}
 	now := m.now()
 	fs.prefixes = res.prefixes
 	fs.hash = res.hash
@@ -1466,6 +1580,11 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	fs.staleSince = time.Time{}
 	fs.invalidLines = res.invalidLines
 	fs.invalidSample = res.invalidSample
+	// Any successful install re-baselines last-good: clear the refused
+	// candidate marker and any pending ack (a stale ack must never bypass a
+	// later, different shrink).
+	fs.shrinkHoldHash = [32]byte{}
+	fs.shrinkAcked = false
 	m.mu.Unlock()
 
 	slog.Info("dynamic-address: feed updated",
@@ -1480,6 +1599,12 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		slog.Warn("dynamic-address: feed installed a PARTIAL set — skipped invalid lines (degraded)",
 			"name", fs.name, "prefixes", len(res.prefixes),
 			"invalid_lines", res.invalidLines, "invalid_sample", res.invalidSample)
+	}
+
+	if guardBypass != "" {
+		slog.Warn("dynamic-address: feed installed a DRASTICALLY SHRUNK set via override — verify the provider did not serve a stub",
+			"name", fs.name, "prefixes", len(res.prefixes), "previous", oldCount,
+			"override", guardBypass)
 	}
 
 	if !needsPublish {
