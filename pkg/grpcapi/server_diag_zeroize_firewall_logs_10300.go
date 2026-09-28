@@ -384,6 +384,12 @@ var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir 
 	if err := zeroizeConfigDir(configDir, configBase); err != nil {
 		errs = append(errs, err)
 	}
+	// Final verification runs after every leg and immediately before the
+	// markers may clear, so a fence-escaper write that landed after an
+	// early per-leg check fails the wipe here with the boot gate intact.
+	if err := zeroizeFinalEraseVerification(); err != nil {
+		errs = append(errs, err)
+	}
 	switch len(errs) {
 	case 0:
 		return completeZeroize(record)

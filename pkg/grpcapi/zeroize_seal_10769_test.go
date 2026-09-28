@@ -1158,3 +1158,33 @@ func TestResetStopMonitorFlagsUnverifiedStop10769(t *testing.T) {
 		}
 	})
 }
+
+func TestPerformZeroizeFinalVerificationCatchesBypassedLeg10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	lease := zeroizeKeaLeasePaths[0]
+	mustWriteFile(t, lease, []byte("escaper lease"))
+	// Bypass the Kea leg entirely (a fence escaper re-creating faster than
+	// the early check): only the pre-completion verification can catch it.
+	origLeg := zeroizeStopKeaAndEraseLeases
+	t.Cleanup(func() { zeroizeStopKeaAndEraseLeases = origLeg })
+	zeroizeStopKeaAndEraseLeases = func() error { return nil }
+	stopCalled := false
+	zeroizeStopKeaUnits = func() error {
+		stopCalled = true
+		return nil
+	}
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err == nil || !strings.Contains(err.Error(), "final verification") {
+		t.Fatalf("bypassed erase must fail at final verification, got %v", err)
+	}
+	if stopCalled {
+		t.Fatal("Kea leg must stay bypassed so the catch proves the final check")
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
+		t.Fatalf("failed final verification must retain the pending marker: %v", err)
+	}
+}

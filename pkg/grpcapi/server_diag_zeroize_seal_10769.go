@@ -202,7 +202,10 @@ func zeroizeImageSealResidue() error {
 	return nil
 }
 
-func zeroizeStopKeaAndEraseLeases() error {
+// zeroizeStopKeaAndEraseLeases is a package var (like performZeroizeWipe) so
+// the final-verification regression can bypass the Kea leg and prove the
+// pre-completion check catches what the bypassed leg missed.
+var zeroizeStopKeaAndEraseLeases = func() error {
 	// Stop, verify, and unlink in one critical section with no intervening
 	// wipe I/O: a Kea restart between stop and unlink would re-persist prior
 	// leases under the erasure. No mask/disable: a mask persists across the
@@ -245,6 +248,40 @@ func zeroizeStopKeaAndEraseLeases() error {
 		}
 	}
 	return nil
+}
+
+// zeroizeFinalEraseVerification re-proves the race-prone erase sets
+// immediately before the pending markers clear: Kea lease files and
+// DDNS/IPsec crash temps. Earlier legs erase and verify each of these, but
+// later legs run in between; a fence-escaper write landing after an early
+// check must fail the wipe here rather than slip under a clean receipt.
+// The daemon post-verify remains as defense-in-depth behind it.
+func zeroizeFinalEraseVerification() error {
+	var errs []error
+	for _, current := range zeroizeKeaLeasePaths {
+		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
+			if _, err := os.Lstat(path); err == nil {
+				errs = append(errs, fmt.Errorf("zeroize: Kea lease file %s present at final verification", path))
+			} else if !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("zeroize: inspect Kea lease file %s: %w", path, err))
+			}
+		}
+	}
+	ddnsPaths := []string{zeroizeDDNSLeaseStatePath, zeroizeDDNSSurfaceAPath}
+	for _, path := range ddnsPaths {
+		temps, err := ddns.ListCrashTemps(path)
+		if err != nil {
+			errs = append(errs, err)
+		} else if len(temps) != 0 {
+			errs = append(errs, fmt.Errorf("zeroize: DDNS crash temps present at final verification: %v", temps))
+		}
+	}
+	if temps, err := ipsec.ListCrashTemps(zeroizeIPsecStatePath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("zeroize: IPsec crash temps present at final verification: %v", temps))
+	}
+	return errors.Join(errs...)
 }
 
 // zeroizeShadowBackupNames are the Debian shadow-tools backups in
