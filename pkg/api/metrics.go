@@ -72,6 +72,7 @@ type xpfCollector struct {
 	hostInboundAddresslessIface  *prometheus.Desc
 	hostInboundAmbiguousAddrs    *prometheus.Desc
 	vrfOverlapPBRAdmitted        *prometheus.Desc
+	riMemberDeviceConflicts      *prometheus.Desc
 	lo0CounterHits               *prometheus.Desc
 	pbrRulesInstalled            *prometheus.Desc
 	pbrRulesDesired              *prometheus.Desc
@@ -951,6 +952,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.hostInboundAddresslessIface
 	ch <- c.hostInboundAmbiguousAddrs
 	ch <- c.vrfOverlapPBRAdmitted
+	ch <- c.riMemberDeviceConflicts
 	ch <- c.lo0CounterHits
 	ch <- c.pbrRulesInstalled
 	ch <- c.pbrRulesDesired
@@ -1812,6 +1814,10 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 	// operator most needs to discover the state, and below the gate the series
 	// would vanish there.
 	c.collectVRFOverlapPBRAdmitted(ch)
+	// #11060: tolerant-load RI device conflicts remain unbound after compile
+	// quarantine; report them independently of dataplane load so the default-
+	// routing disposition cannot disappear on a degraded/config-only boot.
+	c.collectRIMemberDeviceConflicts(ch)
 
 	// #4422: kernel nftables lo0 loopback input-filter `then count` hits. The
 	// `inet xpf_lo0` chain is installed by the daemon INDEPENDENT of dataplane

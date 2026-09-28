@@ -153,6 +153,14 @@ func (m *Manager) VRFMissTerminatorNeedsReconcile() bool {
 func (m *Manager) BindInterfaceToVRF(ifaceName, instanceName string) error {
 	return m.vrf.BindInterfaceToVRF(ifaceName, instanceName)
 }
+// UnbindInterfaceFromVRFs detaches an interface only if its current master is
+// one of the named routing-instance VRFs. Unrelated masters are left intact.
+func (m *Manager) UnbindInterfaceFromVRFs(ifaceName string, instanceNames []string) (bool, error) {
+	if m == nil || m.vrf == nil {
+		return false, nil
+	}
+	return m.vrf.UnbindInterfaceFromVRFs(ifaceName, instanceNames)
+}
 
 // --- Route reads ---
 
