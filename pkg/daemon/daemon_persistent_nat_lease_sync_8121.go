@@ -61,14 +61,24 @@ func (d *Daemon) wirePersistentNatLeaseCallbacks(ss *cluster.SessionSync) {
 	}
 }
 
-// runPersistentNatLeaseSyncLoop pushes the local idle-lease set on a slow tick.
+// runPersistentNatLeaseSyncLoop re-advertises locally-owned idle leases on a
+// slow tick. Imported leases are filtered at the allocator. A local reserve
+// joining an imported lease, whether idle (0 -> 1) or active (N -> N+1), carries
+// a per-flow marker and transfers ownership only when that local flow completes
+// through ordinary `release_flow`. Rollback, synced joins, worker retirement,
+// and stale-tuple eviction do not promote. Once locally owned, the lease is
+// re-advertised after its final flow drains on the next tick, so the former
+// owner can rebuild it for failback/restart; failback before local completion
+// intentionally leaves the lease peer-owned.
+// The node-level RG-master gate still cannot identify per-RG lease ownership,
+// so an imported idle lease on a newly-mastered RG remains suppressed until
+// locally used.
 //
-// GATED ON BEING RG MASTER, which is not merely an optimisation. A standby has
-// leases only because it IMPORTED them; exporting those and pushing them back
-// would bounce the same set between the nodes forever, and each bounce would
-// re-derive the remaining lifetime from the receiver's clock — so a lease could
-// be refreshed indefinitely by the echo rather than expiring. The gate is what
-// makes the channel one-directional per RG.
+// A peer running the old helper can echo records during a rolling upgrade; the
+// accepted bounded window ends when that peer upgrades/restarts. A copy already
+// received by a peer can remain usable until its derived expiry after A retires
+// it early: this additive channel has no retract/tombstone. Config sync still
+// converges configuration, while the stale peer copy ages out.
 func (d *Daemon) runPersistentNatLeaseSyncLoop(ctx context.Context) {
 	ticker := time.NewTicker(persistentNatLeaseSyncInterval)
 	defer ticker.Stop()
@@ -93,10 +103,13 @@ func (d *Daemon) runPersistentNatLeaseSyncLoop(ctx context.Context) {
 				slog.Debug("persistent-NAT idle lease export failed", "err", err)
 				continue
 			}
-			// An empty set is still pushed: it is a FULL-SET replace, and a
-			// peer whose last lease just expired must learn that the set is
-			// now empty rather than keep the previous one forever.
-			ss.QueuePersistentNatLeases(leases)
+			// This is additive state, not a full-set replacement: an empty
+			// batch cannot retract a peer copy and is not sent. Re-advertise
+			// nonempty local leases each slow tick so a reconnecting peer can
+			// learn them; early retirements converge by expiry, not retraction.
+			if len(leases) != 0 {
+				ss.QueuePersistentNatLeases(leases)
+			}
 		}
 	}
 }

@@ -586,10 +586,7 @@ identical `electRG` code and compute the identical result. There is no
 correct runtime resolution; the only remedy is correcting
 `/etc/xpf/node-id` on one chassis.
 
-The receive and election paths have different outcomes; only the election
-tie-break fails closed:
-
-- **Join point (`heartbeatReceiver.recvLoop`, `heartbeat.go`).** On a
+- **Join point (`heartbeatReceiver.readLoop`, `heartbeat.go`).** On a
   unicast point-to-point control link a node never receives its own
   frame, so a same-cluster heartbeat carrying the local node-id is a
   duplicate-node-id peer, not a loopback. The receiver still discards it
@@ -601,10 +598,59 @@ tie-break fails closed:
   the startup peer-absent grace, each node independently runs `electSingleNode`;
   eligible RGs can claim PRIMARY on both nodes, creating duplicate VIPs. The
   warning names that outcome, not fail-closed election behavior.
+  In the documented shared `${node}` shape (`ha-pair.conf` puts both `em0`
+  and `peer-address` inside the selected node group) two chassis with the
+  same node-id hold the same local address and point at a peer address held
+  by neither, so no heartbeat datagram is ever delivered and this check
+  cannot fire there (#10745) — the beacon below is the live signal for
+  exactly that shape.
+
+- **Authenticated identity beacon (`dupaddr_watch_10745.go`, #10745).**
+  Each keyed heartbeat tenure also sends a compact HMAC-authenticated
+  identity beacon (cluster-id, node-id, timestamp, stable sender-instance
+  id, nonce) to the control-link subnet broadcast address on UDP 4786, and
+  listens for it. Broadcast is designed to cross the shared-shape gap that
+  unicast cannot: the duplicate peer's beacons should arrive even though
+  its heartbeats never can. The receiver verifies the HMAC (against every
+  accepted control-link key, so rotation stays interoperable) and freshness
+  BEFORE comparing node IDs or warning, so an arbitrary L2/UDP sender
+  cannot forge the operator-facing `slog.Error`; a stable per-process
+  sender id excludes the socket's own looped-back broadcast (including
+  beacons sent just before a heartbeat restart), and a manager-lifetime
+  nonce cache (4096 entries, evict-expired-then-oldest, 5s sweep)
+  suppresses exact replays across watcher restarts. Beacon transmits are
+  capped at 10/s regardless of heartbeat cadence (which the schema allows
+  down to 1ms), so honest traffic holds at most ~600 live entries
+  against the 4096 cap. A verified
+  same-cluster/same-node-id beacon from another sender calls
+  `NoteDuplicateNodeIDBeacon`, which shares the 30s duplicate-node-id
+  limiter. Like the join point, it only warns — the peer stays absent and
+  both nodes can promote independently, and the warning names that
+  outcome. Beacons never touch liveness, replay state, or election.
+
+  Three operating prerequisites, stated so the blast radius is honest.
+  (1) **Time sync.** Freshness is a ±30s wall-clock window validated at
+  both edges; nodes further than 30s apart silently miss genuine
+  duplicates (warn path only — never an election effect), so the pair
+  must hold wall-clock within 30s of each other (NTP/Chrony).
+  (2) **Best-effort bringup.** Unkeyed, IPv6-only, or /31-or-narrower
+  control links skip the watcher, as do broadcast-derivation and socket
+  failures — every skip is a `Debug` log and the heartbeat proceeds, so a
+  skipped detector is invisible at operator log levels by design.
+  Receiving a broadcast sourced from the local address additionally
+  depends on the best-effort `net.ipv4.conf.all.accept_local=1` posture
+  (`daemon_run_bringup.go`); if that write failed, the kernel drops the
+  duplicate's beacons before the socket sees them.
+  (3) **Wire proof pending.** Same-source-IP broadcast delivery on the
+  real control L2 (actual VRF + `accept_local` posture) is lab-unproven;
+  the in-gate live test covers authenticated warn/silence over loopback
+  sockets, not L2 delivery. A dual-PRIMARY shared-shape wire proof is a
+  tracked follow-up; until it lands this paragraph — not the mechanism
+  above — is the delivery claim.
 
 - **Election tie-break (`electRG`, `election.go`).** If a same-node-id
   peer ever does reach election (the direct API / tests, or any future
-  path that does not go through `recvLoop`), the dual-active tie, the
+  path that does not go through `readLoop`), the dual-active tie, the
   preempt tie, and the initial-state tie all detect
   `m.nodeID == m.peerNodeID` and **fail closed to SECONDARY** (via
   `warnDuplicateNodeIDLocked`). Before the fix the dual-active and preempt
