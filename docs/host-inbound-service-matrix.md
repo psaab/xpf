@@ -650,12 +650,26 @@ Properties:
   from those tuples, so a conntrack tuple alone cannot distinguish a stale
   service reply from live control/client egress. After removing such a service,
   box-originated hellos/adverts/probes recreate a box-oriented entry and peer
-  packets ride the broad reply accept. Operator advisory: after removing BFD,
-  RIP, or other control-plane host-inbound, restart the originating daemon
-  (FRR/VRRP/chrony/DHCP) or reboot to clear recreated entries; do not rely on
-  the flush/guard for these tuples. The BFD packet-path subtest pins the
-  documented allow. Closing this needs per-socket identity (mark/cgroup), not
-  tuple matching, or tying origination to host-inbound admit.
+  packets ride the broad reply accept — so restart/reboot alone does NOT clear
+  it: a restarted daemon immediately re-originates the same tuple. Effective
+  removal procedure (required; removal is only meaningful when decommissioning
+  the feature — if the daemon must keep running, keep its host-inbound): (1)
+  stop/disable the originator feature first (FRR: remove the BFD peer or `no
+  router rip`; VRRP: down the instance; chrony: stop chronyd or remove the
+  server; DHCP: release/stop the client); (2) delete any box-oriented tuple
+  (`conntrack -D -p udp -s <box-ip> --sport <port>`); (3) verify `conntrack -L`
+  shows no box-oriented entry for the tuple; (4) commit the host-inbound
+  removal. Why this holds: with no origination there is no box-oriented entry
+  to ride, and a peer-only packet afterwards is NEW (or briefly UNREPLIED) and
+  meets the destination/ingress deny for the removed service — no guard
+  needed, so nothing is unavoidable once the originator is stopped. Without
+  the delete, an idle entry expires on the ~120s UDP stream timeout after the
+  last packet (originator timers: BFD hellos sub-second, RIP updates 30s, NTP
+  polls 64–1024s, DHCP renewals hours), but a persistent peer sustains it, so
+  the delete plus verify is the durable step. The BFD packet-path subtest pins
+  the documented allow. Closing this without operator action needs per-socket
+  identity (mark/cgroup), not tuple matching, or tying origination to
+  host-inbound admit.
 - **HIGH residual: non-catalog/custom TCP and TCP client-role exempts are NOT
   revoked box-oriented (status-quo-ante, NOT a regression).** SSOT SSH is
   TCP/22-only, so a custom port such as 2222 (admitted only packet-wide via
