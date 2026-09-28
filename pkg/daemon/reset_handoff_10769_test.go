@@ -646,3 +646,39 @@ func TestReconcileReverifiesCleanFlag10769(t *testing.T) {
 		}
 	})
 }
+
+// Boot repair must see canonical-only reappearances too: empty canonicals
+// converge, record-bearing ones refuse.
+func TestReconcileRepairsCanonicalOnlyReappearance10769(t *testing.T) {
+	t.Run("empty canonicals converge", func(t *testing.T) {
+		custom, rp := isolateHandoffRepairPaths(t)
+		writeHandoffResidue(t, rp.ddnsLease, `{"version":1,"records":[]}`)
+		writeHandoffResidue(t, rp.ddnsSurface, `{"version":1,"records":[]}`)
+		writeHandoffResidue(t, rp.ipsec, `{"loaded":[],"pending_terminate":[]}`)
+		if err := configstore.WriteResetHandoff("other-boot", configstore.ResetHandoffReasonTemps+": recheck", custom); err != nil {
+			t.Fatal(err)
+		}
+		d := &Daemon{store: handoffTestStore(t)}
+		d.reconcileResetHandoffAtBoot()
+		assertHandoffGone(t, rp.ddnsLease, rp.ddnsSurface, rp.ipsec)
+		if _, err := os.Lstat(configstore.ResetHandoffPath); !os.IsNotExist(err) {
+			t.Fatalf("repaired flag must be cleared post-reboot: %v", err)
+		}
+	})
+	t.Run("record canonical refuses", func(t *testing.T) {
+		custom, rp := isolateHandoffRepairPaths(t)
+		writeHandoffResidue(t, rp.ddnsLease, `{"version":1,"records":[{"family":4,"identity":"mac:aa","address":"203.0.113.5","fqdn":"host.example.net","forward_type":"A","ptr_name":"5.113.0.203.in-addr.arpa","ttl":300}]}`)
+		if err := configstore.WriteResetHandoff("other-boot", configstore.ResetHandoffReasonTemps+": recheck", custom); err != nil {
+			t.Fatal(err)
+		}
+		d := &Daemon{store: handoffTestStore(t)}
+		d.reconcileResetHandoffAtBoot()
+		_, dirty, _, present, err := configstore.ReadResetHandoff()
+		if err != nil || !present || dirty == "" {
+			t.Fatalf("record residue must keep the flag dirty: dirty=%q present=%v err=%v", dirty, present, err)
+		}
+		if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+			t.Fatalf("gate over record residue = %v, want incomplete", err)
+		}
+	})
+}

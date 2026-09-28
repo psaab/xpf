@@ -1534,3 +1534,17 @@ func TestPerformZeroizeWipePendingRecordsPending10769(t *testing.T) {
 		t.Fatalf("completed wipe must clear the pending marker: %v", err)
 	}
 }
+
+// RED on revert: temps-only final verification clears the markers over a
+// canonical state file whose writer completed a full save (no temp left).
+func TestFinalEraseVerificationCatchesReappearedCanonical10769(t *testing.T) {
+	root := t.TempDir()
+	isolateZeroizeSealPaths(t, root)
+	mustWriteFile(t, zeroizeDDNSLeaseStatePath, []byte(`{"version":1,"records":[]}`))
+	mustWriteFile(t, zeroizeIPsecStatePath, []byte(`{"loaded":[],"pending_terminate":[]}`))
+	if err := zeroizeFinalEraseVerification(); err == nil {
+		t.Fatal("canonical-only reappearance must fail final verification")
+	} else if !strings.Contains(err.Error(), "present at final verification") {
+		t.Fatalf("final verification error must name the reappeared canonicals, got %v", err)
+	}
+}

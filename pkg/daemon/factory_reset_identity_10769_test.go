@@ -373,3 +373,69 @@ func TestFactoryResetFailsWhenStateTempsReappear10769(t *testing.T) {
 		t.Fatalf("retry after a repaired temp failure must converge: %v", err)
 	}
 }
+
+// A writer that completed a full save leaves a canonical with no temp
+// behind; temps-only verification would clear over it. Empty canonicals
+// are repaired (removed) but still fail the reset; the retry converges.
+func TestFactoryResetFailsWhenStateCanonicalsReappear10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
+	canonicals := map[string]string{
+		resetDDNSLeaseStatePath: `{"version":1,"records":[]}`,
+		resetIPsecStatePath:     `{"loaded":[],"pending_terminate":[]}`,
+	}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	err := d.factoryReset(context.Background(), func() error {
+		for path, body := range canonicals {
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "reappeared") {
+		t.Fatalf("recreated canonicals must fail the reset, got %v", err)
+	}
+	for path := range canonicals {
+		if _, serr := os.Lstat(path); !os.IsNotExist(serr) {
+			t.Fatalf("reappeared canonical %s must be re-erased before the failure returns: %v", path, serr)
+		}
+	}
+	if err := d.factoryReset(context.Background(), fakePendingWipe(t)); err != nil {
+		t.Fatalf("retry after a repaired canonical failure must converge: %v", err)
+	}
+}
+
+// A reappeared RECORD (not just an empty canonical) is a fence breach,
+// not a repairable race: the erase refuses to delete delete-authority,
+// the residue stays, and the handoff is marked dirty.
+func TestFactoryResetMarksDirtyWhenStateRecordsReappear10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
+	withRecords := `{"version":1,"records":[{"family":4,"identity":"mac:aa","address":"203.0.113.5","fqdn":"host.example.net","forward_type":"A","ptr_name":"5.113.0.203.in-addr.arpa","ttl":300}]}`
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	err := d.factoryReset(context.Background(), func() error {
+		if err := os.MkdirAll(filepath.Dir(resetDDNSLeaseStatePath), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(resetDDNSLeaseStatePath, []byte(withRecords), 0o600)
+	})
+	if err == nil || !strings.Contains(err.Error(), "reappeared") {
+		t.Fatalf("recreated records must fail the reset, got %v", err)
+	}
+	if _, serr := os.Lstat(resetDDNSLeaseStatePath); serr != nil {
+		t.Fatalf("record-bearing canonical must be preserved for operator withdrawal, stat err=%v", serr)
+	}
+	_, dirty, _, present, rerr := configstore.ReadResetHandoff()
+	if rerr != nil || !present || !strings.HasPrefix(dirty, configstore.ResetHandoffReasonTemps+":") {
+		t.Fatalf("record reappearance must mark temps-dirty: dirty=%q present=%v err=%v", dirty, present, rerr)
+	}
+	if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+		t.Fatalf("gate over record residue = %v, want incomplete", err)
+	}
+}

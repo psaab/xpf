@@ -276,12 +276,22 @@ func verifyKeaLeasesErasedForReset() error {
 	return nil
 }
 
-// verifyStateTempsErasedForReset re-checks the DDNS/IPsec crash-temp sets
-// after the wipe reports success, mirroring the Kea lease re-verification:
-// a temp recreated in the sweep→success window must fail the reset, not
-// survive silently beside a clean receipt.
+// verifyStateTempsErasedForReset re-checks the DDNS/IPsec state files and
+// their crash-temp sets after the wipe reports success, mirroring the Kea
+// lease re-verification: state recreated in the sweep→success window must
+// fail the reset, not survive silently beside a clean receipt. Canonicals
+// are checked as well as temps: a writer that completed a full save leaves
+// a canonical with no temp behind, and temps-only verification would clear
+// over it.
 func verifyStateTempsErasedForReset() error {
 	var errs []error
+	for _, path := range []string{resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath} {
+		if _, err := os.Lstat(path); err == nil {
+			errs = append(errs, fmt.Errorf("factory reset: state file %s reappeared after the wipe", path))
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("factory reset: inspect state file %s: %w", path, err))
+		}
+	}
 	if temps, err := ddns.ListCrashTemps(resetDDNSLeaseStatePath); err != nil {
 		errs = append(errs, err)
 	} else if len(temps) != 0 {

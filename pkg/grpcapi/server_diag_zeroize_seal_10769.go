@@ -301,11 +301,13 @@ var zeroizeStopKeaAndEraseLeases = func() error {
 }
 
 // zeroizeFinalEraseVerification re-proves the race-prone erase sets
-// immediately before the pending markers clear: Kea lease files and
-// DDNS/IPsec crash temps. Earlier legs erase and verify each of these, but
-// later legs run in between; a fence-escaper write landing after an early
-// check must fail the wipe here rather than slip under a clean receipt.
-// The daemon post-verify remains as defense-in-depth behind it.
+// immediately before the pending markers clear: Kea lease files and the
+// DDNS/IPsec state files plus crash temps. Earlier legs erase and verify
+// each of these, but later legs run in between; a fence-escaper write
+// landing after an early check must fail the wipe here rather than slip
+// under a clean receipt. Canonicals are checked as well as temps: a
+// writer that completed a full save leaves a canonical with no temp
+// behind. The daemon post-verify remains as defense-in-depth behind it.
 func zeroizeFinalEraseVerification() error {
 	var errs []error
 	for _, current := range zeroizeKeaLeasePaths {
@@ -315,6 +317,13 @@ func zeroizeFinalEraseVerification() error {
 			} else if !os.IsNotExist(err) {
 				errs = append(errs, fmt.Errorf("zeroize: inspect Kea lease file %s: %w", path, err))
 			}
+		}
+	}
+	for _, path := range []string{zeroizeDDNSLeaseStatePath, zeroizeDDNSSurfaceAPath, zeroizeIPsecStatePath} {
+		if _, err := os.Lstat(path); err == nil {
+			errs = append(errs, fmt.Errorf("zeroize: state file %s present at final verification", path))
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("zeroize: inspect state file %s: %w", path, err))
 		}
 	}
 	ddnsPaths := []string{zeroizeDDNSLeaseStatePath, zeroizeDDNSSurfaceAPath}
