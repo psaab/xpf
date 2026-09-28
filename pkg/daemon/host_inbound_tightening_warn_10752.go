@@ -21,9 +21,11 @@ import (
 // control-plane/client ports, bare IP protocols) keep riding the broad reply
 // accept. Commit-time ValidateConfig sees only the NEW config, so it cannot
 // observe the transition — and the any-service breadth advisory fires only
-// while the stanza is still open. This file closes that gap at the one funnel
-// that holds old and new together:
-// applyAndSyncCommittedWithPeerSnapshotAuthorization (oldActive + compiled).
+// while the stanza is still open. This file closes that gap at the commit
+// funnel — the only applier returning a response object capable of carrying
+// warnings: applyAndSyncCommittedWithPeerSnapshotAuthorization (oldActive +
+// compiled). Other old+new holders (syncAndApply, executeConfirmedRollback)
+// run the sweep and journal without projecting transition warnings.
 //
 // Firing has two shapes. When this attempt's own conntrack sweep (stashed by
 // flushDeniedHostInboundConntrack, cleared per attempt) observed stranded
@@ -37,13 +39,14 @@ import (
 // observed nothing in them — zero kept flows, or evidence only on addresses
 // outside every narrowed scope — the commit carries a transition-only
 // advisory naming the narrowed scopes with honest zero-observed wording
-// zero-observed wording and a manual-procedure pointer, so silent-class
-// narrowings never pass commit-silent. The advisory is suppressed only when
-// the narrowed scopes own no address in either generation (nothing exists
-// to strand or verify). The advisory lives in the commit channel because
-// only this funnel holds old and new together: the sweep (and the journal
-// WARN it feeds) sees only the new state, so per-apply journal context
-// cannot express a transition.
+// and a manual-procedure pointer, so silent-class narrowings never pass
+// commit-silent. The advisory is suppressed only when the narrowed scopes'
+// zones own no address in either generation (zone-granular by design: an
+// addressless member in an addressed zone still warns, and DHCP members
+// may gain addresses at any time). The advisory lives in the commit
+// channel because only the commit funnel returns a response object: the
+// sweep (and the journal WARN it feeds) sees only the new state, so
+// per-apply journal context cannot express a transition.
 //
 // A scope narrows two ways: it loses packet-wide full-admit (custom ports
 // lose their only admission), or it loses an unguarded-relevant token (a
@@ -530,8 +533,8 @@ const silentClasses10752 = "in-range UDP customs, ranges, post-sweep reconnects,
 // pointer sentence. With narrowed scopes but zero intersecting evidence:
 // one transition-only advisory naming the narrowed scopes with honest
 // zero-observed wording, so silent-class narrowings never pass
-// commit-silent. The advisory is suppressed only when the narrowed scopes
-// own no address in either generation — nothing exists to strand or verify.
+// commit-silent. The advisory is suppressed only when the narrowed scopes'
+// zones own no address in either generation (zone-granular by design).
 func (d *Daemon) withTighteningWarningsForResponse10752(respCfg, oldActive, compiled *config.Config) *config.Config {
 	if respCfg == nil {
 		return respCfg
