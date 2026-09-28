@@ -199,6 +199,10 @@ func TestInvalidAuthorizationFallsBackToValidAPIKeyIdentity10825(t *testing.T) {
 	}{
 		{name: "invalid-bearer", authorization: "Bearer invalid-token", claimed: authThrottleBearerAccount},
 		{name: "invalid-basic", authorization: basicAuth("claimed-user", "wrong-password"), claimed: "basic:claimed-user"},
+		{name: "unknown-scheme", authorization: "Token invalid-token", claimed: authThrottleInvalidAuthorizationAccount},
+		{name: "lowercase-bearer", authorization: "bearer invalid-token", claimed: authThrottleInvalidAuthorizationAccount},
+		{name: "bare-basic", authorization: "Basic", claimed: authThrottleInvalidAuthorizationAccount},
+		{name: "bare-bearer", authorization: "Bearer", claimed: authThrottleInvalidAuthorizationAccount},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -344,14 +348,17 @@ func TestRESTAuthWrongBasicGuessesWithValidAPIKeyFallbackStillLockOut10825(t *te
 	}
 }
 
-func TestRESTAuthInvalidBearerDoesNotLockValidAPIKeyBucket10825(t *testing.T) {
+func TestRESTAuthInvalidAuthorizationDoesNotLockValidAPIKeyBucket10825(t *testing.T) {
 	const apiKey = "deployment-secret-key"
 	for _, tc := range []struct {
 		name          string
+		scheme        string
 		validFallback bool
 	}{
-		{name: "invalid Bearer only"},
-		{name: "invalid Bearer with valid key fallback", validFallback: true},
+		{name: "invalid Bearer only", scheme: "Bearer"},
+		{name: "invalid Bearer with valid key fallback", scheme: "Bearer", validFallback: true},
+		{name: "unknown scheme only", scheme: "Token"},
+		{name: "unknown scheme with valid key fallback", scheme: "Token", validFallback: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := authMiddleware(AuthConfig{APIKeys: map[string]bool{apiKey: true}}, true,
@@ -385,8 +392,8 @@ func TestRESTAuthInvalidBearerDoesNotLockValidAPIKeyBucket10825(t *testing.T) {
 					fallback = apiKey
 					want = http.StatusNoContent
 				}
-				if got := request(fmt.Sprintf("Bearer invalid-%d", i), fallback); got != want {
-					t.Fatalf("invalid Bearer attempt %d returned %d, want %d", i+1, got, want)
+				if got := request(fmt.Sprintf("%s invalid-%d", tc.scheme, i), fallback); got != want {
+					t.Fatalf("invalid %s attempt %d returned %d, want %d", tc.scheme, i+1, got, want)
 				}
 			}
 			if got := request("", apiKey); got != http.StatusNoContent {

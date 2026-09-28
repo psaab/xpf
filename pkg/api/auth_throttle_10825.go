@@ -73,12 +73,14 @@ const (
 	// forgives failures early (fail-open on memory pressure, never fail-closed
 	// into a permanent lockout).
 	authThrottleMaxEntries = 4096
-	// Identity namespaces keep Basic usernames, Bearer presentations, API keys,
-	// and malformed Basic presentations from sharing account lockouts.
-	authThrottleBasicAccountPrefix  = "basic:"
-	authThrottleInvalidBasicAccount = "basic-invalid"
-	authThrottleBearerAccount       = "bearer"
-	authThrottleAPIKeyAccount       = "api-key"
+	// Identity namespaces keep Basic usernames, Bearer presentations, malformed
+	// Basic headers, unsupported Authorization schemes, and API keys from
+	// sharing account lockouts.
+	authThrottleBasicAccountPrefix         = "basic:"
+	authThrottleInvalidBasicAccount        = "basic-invalid"
+	authThrottleBearerAccount              = "bearer"
+	authThrottleInvalidAuthorizationAccount = "authorization-invalid"
+	authThrottleAPIKeyAccount              = "api-key"
 )
 
 // authFailureBucket is one lockout cell: either a (source, account) pair or a
@@ -459,8 +461,8 @@ func (s *Server) throttle() *authFailureTracker {
 
 // throttleIdentity derives the (source, account) pair a request is budgeted
 // under. Source is the TCP peer IP (RemoteAddr without the port). Basic
-// usernames and Bearer presentations use namespaces distinct from API keys, so
-// an invalid Bearer cannot lock out a clean X-API-Key request.
+// usernames, Bearer presentations, and malformed/unsupported Authorization
+// headers use fixed namespaces distinct from the API-key account bucket.
 func throttleIdentity(r *http.Request) (source, account string) {
 	source = r.RemoteAddr
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
@@ -480,7 +482,7 @@ func throttleIdentity(r *http.Request) (source, account string) {
 		} else if strings.HasPrefix(auth, "Bearer ") {
 			account = authThrottleBearerAccount
 		} else {
-			account = authThrottleAPIKeyAccount
+			account = authThrottleInvalidAuthorizationAccount
 		}
 	} else if r.Header.Get("X-API-Key") != "" {
 		account = authThrottleAPIKeyAccount
