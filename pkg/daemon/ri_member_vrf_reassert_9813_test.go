@@ -180,6 +180,77 @@ func TestRIMemberReassertSkipsMultiClaimedKey11060(t *testing.T) {
 		t.Fatalf("three ticks re-bound multi-claimed device: %v, want no LinkSetMaster calls (#11060)", got)
 	}
 }
+
+func compileLenientRIMemberConflict11060(t *testing.T) *config.Config {
+	t.Helper()
+	tree := &config.ConfigTree{}
+	for _, line := range []string{
+		"set interfaces ge-0/0/5 unit 0 family inet address 192.0.2.1/24",
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue interface ge-0/0/5",
+		"set routing-instances red instance-type virtual-router",
+		"set routing-instances red interface ge-0/0/5.0",
+	} {
+		path, err := config.ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if len(cfg.QuarantinedRIMemberDeviceConflicts) != 1 ||
+		cfg.QuarantinedRIMemberDeviceConflicts[0].LinuxName != "ge-0-0-5" {
+		t.Fatalf("fixture did not compile into the expected quarantine: %+v",
+			cfg.QuarantinedRIMemberDeviceConflicts)
+	}
+	return cfg
+}
+
+func TestRIMemberTolerantQuarantineDetachesPreviouslyMasteredDevice11060(t *testing.T) {
+	cfg := compileLenientRIMemberConflict11060(t)
+	ops := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	linkWithMaster9813(ops, "vrf-blue", 77, 0)
+	linkWithMaster9813(ops, "vrf-red", 78, 0)
+	linkWithMaster9813(ops, "ge-0-0-5", 10, 77)
+	d := riVRFDaemon9813(ops)
+
+	// The ordinary apply path sees only sanitized membership plus quarantine
+	// evidence; it must still remove the stale blue master.
+	d.bindRoutingInstanceMembers(cfg)
+	if got := ops.unboundRecorded(); len(got) != 1 || got[0] != "ge-0-0-5" {
+		t.Fatalf("apply detach calls = %v, want [ge-0-0-5]", got)
+	}
+	if got := ops.links["ge-0-0-5"].Attrs().MasterIndex; got != 0 {
+		t.Fatalf("apply left quarantined device mastered by %d, want default context", got)
+	}
+
+	// If networkd or another apply stage re-enslaves it, periodic reassertion
+	// must detach again rather than treating the sanitized config as unowned.
+	ops.links["ge-0-0-5"].Attrs().MasterIndex = 77
+	d.rebindRIMembersOutsideTheirVRF(cfg)
+	if got := ops.unboundRecorded(); len(got) != 2 || got[1] != "ge-0-0-5" {
+		t.Fatalf("reassert detach calls = %v, want a second [ge-0-0-5]", got)
+	}
+
+	// A quarantine must not detach an unrelated master just because its device
+	// name remains in the metadata.
+	ops.links["ge-0-0-5"].Attrs().MasterIndex = 99
+	d.bindRoutingInstanceMembers(cfg)
+	if got := ops.unboundRecorded(); len(got) != 2 {
+		t.Fatalf("quarantine detached unrelated master 99: %v", got)
+	}
+	if got := ops.links["ge-0-0-5"].Attrs().MasterIndex; got != 99 {
+		t.Fatalf("unrelated master changed to %d, want 99", got)
+	}
+	if got := ops.recorded(); len(got) != 0 {
+		t.Fatalf("quarantined device was also bound: %v", got)
+	}
+}
 func TestRIMemberApplySkipsCrossSpelledDeviceConflictAndLogsAlarm11060(t *testing.T) {
 	cfg := &config.Config{
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{

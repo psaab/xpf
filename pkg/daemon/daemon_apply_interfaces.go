@@ -328,25 +328,23 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 		return
 	}
 	tunMap := cfg.TunnelNameMap()
-	conflicts := config.RoutingInstanceMemberDeviceConflicts(cfg, tunMap)
+	conflicts := riMemberDeviceConflicts(cfg)
 	conflictByDevice := make(map[string]config.RoutingInstanceMemberDeviceConflict, len(conflicts))
 	for _, conflict := range conflicts {
 		conflictByDevice[conflict.LinuxName] = conflict
+		logRIMemberDeviceConflict(conflict)
+		// A tolerant config has already had its conflicting references removed,
+		// but a link can retain the old master across restart. Detach it here and
+		// let the periodic reassertion retry if netlink fails.
+		d.detachRIMemberDeviceConflict(conflict)
 	}
-	alreadyReported := make(map[string]struct{}, len(conflicts))
 	for _, ri := range cfg.RoutingInstances {
-		if ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
+		if ri == nil || ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
 			continue
 		}
 		for _, ifaceName := range ri.Interfaces {
-			// Each generated logical key resolves through the shared identity
-			// helper; deduplicate devices shared by unit zero or a tunnel.
 			for _, linuxName := range config.RoutingInstanceMemberLinuxNames(cfg, tunMap, ifaceName) {
-				if conflict, found := conflictByDevice[linuxName]; found {
-					if _, reported := alreadyReported[linuxName]; !reported {
-						logRIMemberDeviceConflict(conflict)
-						alreadyReported[linuxName] = struct{}{}
-					}
+				if _, found := conflictByDevice[linuxName]; found {
 					continue
 				}
 				if err := d.routing.BindInterfaceToVRF(linuxName, ri.Name); err != nil {
