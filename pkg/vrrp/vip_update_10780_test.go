@@ -994,6 +994,111 @@ func TestVIPSpellingAliasKeepsKernelAddressAndMasterReady(t *testing.T) {
 	}
 }
 
+// TestVIPFailedAddFiltersCanonicalAliasesAndRetries ensures every spelling of
+// a failed binary address is excluded from kernel-truth publication. A later
+// reconcile must attempt the address again rather than treating its alias as
+// already present in the stored set.
+func TestVIPFailedAddFiltersCanonicalAliasesAndRetries(t *testing.T) {
+	const iface = "reth10780-failed-alias"
+	const aliasA = "2001:0DB8:0:0::1/64"
+	const aliasB = "2001:db8::1/64"
+	const oldVIP = "2001:db8:1147::99/64"
+	failedID := canonicalVIPIdentity(aliasA)
+	if failedID != canonicalVIPIdentity(aliasB) {
+		t.Fatalf("test aliases do not identify the same VIP: %s vs %s", aliasA, aliasB)
+	}
+
+	vi := newInstance(Instance{
+		Interface: iface, GroupID: 101, Priority: 200, GARPCount: 1,
+		VirtualAddresses: []string{oldVIP},
+	}, &net.Interface{Name: iface, Index: 10787}, make(chan VRRPEvent, 8), nil)
+	vi.setState(StateMaster)
+	installFakeVIPNetlink(vi)
+	vi.addrsFn = func() ([]net.Addr, error) { return nil, nil }
+	kernelVIPs := map[string]bool{canonicalVIPIdentity(oldVIP): true}
+	var addCalls int
+	vi.addrAddFn = func(_ netlink.Link, addr *netlink.Addr) error {
+		addCalls++
+		id := canonicalVIPIdentity(addr.IPNet.String())
+		if id == failedID && addCalls == 1 {
+			return fmt.Errorf("injected AddrAdd failure for %s", addr.IPNet)
+		}
+		kernelVIPs[id] = true
+		return nil
+	}
+	vi.addrDelFn = func(_ netlink.Link, addr *netlink.Addr) error {
+		delete(kernelVIPs, canonicalVIPIdentity(addr.IPNet.String()))
+		return nil
+	}
+
+	oldSend, oldGARP, oldNA, oldProbe := sendPacketFn, garpBurstFn, naBurstFn, arpProbeFn
+	t.Cleanup(func() {
+		sendPacketFn = oldSend
+		garpBurstFn, naBurstFn, arpProbeFn = oldGARP, oldNA, oldProbe
+	})
+	var advertised [][]string
+	sendPacketFn = func(_ *vrrpInstance, pkt *VRRPPacket, _ bool) error {
+		ips := make([]string, len(pkt.IPAddresses))
+		for i, ip := range pkt.IPAddresses {
+			ips[i] = ip.String()
+		}
+		advertised = append(advertised, ips)
+		return nil
+	}
+	var garped []string
+	burst := func(_ string, ip net.IP, _ int, _ cluster.BurstStillValid) error {
+		garped = append(garped, ip.String())
+		return nil
+	}
+	garpBurstFn, naBurstFn = burst, burst
+	arpProbeFn = func(string, net.IP, net.IP) error { return nil }
+
+	desired := []string{aliasA, aliasB, oldVIP}
+	firstErr := vi.updateVIPs(desired)
+	if firstErr == nil {
+		t.Error("first update succeeded despite the injected binary-address add failure")
+	}
+	if addCalls != 1 {
+		t.Errorf("AddrAdd calls after failed update = %d, want 1", addCalls)
+	}
+	if got := vi.vipsSnapshot(); !vipsEqual(got, []string{oldVIP}) {
+		t.Errorf("stored VIPs after failed add = %v, want only existing VIP [%s]", got, oldVIP)
+	}
+	if !vi.vipUpdateDiverged.Load() {
+		t.Error("failed alias add did not mark VIP state diverged")
+	}
+	for _, vip := range vi.vipsSnapshot() {
+		if canonicalVIPIdentity(vip) == failedID {
+			t.Errorf("failed binary address leaked into stored set: %v", vi.vipsSnapshot())
+		}
+	}
+	if len(advertised) != 1 || !vipsEqual(advertised[0], []string{"2001:db8:1147::99"}) {
+		t.Errorf("advert after failed add = %v, want only existing VIP", advertised)
+	}
+	for _, ip := range garped {
+		if ip == "2001:db8::1" {
+			t.Errorf("failed binary address was GARP/NA announced: %v", garped)
+		}
+	}
+	if kernelVIPs[failedID] {
+		t.Error("fake kernel unexpectedly contains the address whose add failed")
+	}
+
+	retryErr := vi.updateVIPs(desired)
+	if retryErr != nil {
+		t.Errorf("retry after failed canonical alias add: %v", retryErr)
+	}
+	if addCalls != 2 {
+		t.Errorf("AddrAdd calls after retry = %d, want 2", addCalls)
+	}
+	if vi.vipUpdateDiverged.Load() {
+		t.Error("successful retry left VIP state diverged")
+	}
+	if !kernelVIPs[failedID] {
+		t.Error("successful retry did not install the canonical address")
+	}
+}
+
 // TestVIPSpellingAliasDuringReservedBurstDoesNotStrandPending pins the race
 // where an old raw snapshot finishes after a spelling-only adoption. Pending
 // state must use parsed identity so the old snapshot's successful completion

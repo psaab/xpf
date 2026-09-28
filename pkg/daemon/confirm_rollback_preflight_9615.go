@@ -89,7 +89,10 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(gen uint64) bool {
 		}
 	}
 	delete(d.confirmFeedDeferrals, gen)
-	if _, ok := d.store.PromoteRollback(gen); !ok {
+	d.pendingRenameMu.Lock()
+	_, ok = d.store.PromoteRollback(gen)
+	d.pendingRenameMu.Unlock()
+	if !ok {
 		// Superseded between the check and the promotion; nothing to do.
 		return true
 	}

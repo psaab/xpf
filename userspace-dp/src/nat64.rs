@@ -1779,19 +1779,36 @@ fn reserve_synced_nat64_port_unless_peer_owns(
     capture_previous_holders: bool,
     previous_holders: &mut Option<u128>,
 ) -> bool {
-    *previous_holders = capture_previous_holders
-        .then(|| prefix.port_allocator.holder_mask_for_flow(&flow))
-        .flatten();
-    if !reserve_nat64_pool_port(
-        &prefix.port_allocator,
-        flow,
-        snat_v4,
-        port,
-        addr_index,
-        prefix.deterministic_v6.is_some(),
-        now_ns,
-        holder,
-    ) {
+    let (reserved, captured_holders) = if capture_previous_holders {
+        #[cfg(test)]
+        crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);
+        crate::nat::reserve_nat64_pool_port_capture_and_replace(
+            &prefix.port_allocator,
+            flow,
+            snat_v4,
+            port,
+            addr_index,
+            prefix.deterministic_v6.is_some(),
+            now_ns,
+            holder,
+        )
+    } else {
+        (
+            reserve_nat64_pool_port(
+                &prefix.port_allocator,
+                flow,
+                snat_v4,
+                port,
+                addr_index,
+                prefix.deterministic_v6.is_some(),
+                now_ns,
+                holder,
+            ),
+            None,
+        )
+    };
+    *previous_holders = captured_holders;
+    if !reserved {
         return false;
     }
     crate::nat::nat64_refuse_if_peer_owns(

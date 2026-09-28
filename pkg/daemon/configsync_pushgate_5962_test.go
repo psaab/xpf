@@ -42,15 +42,13 @@ import (
 	"github.com/psaab/xpf/pkg/cluster"
 )
 
-// newPushGateDaemon wires a Daemon that can reach the real push body without a
-// live TCP peer.
+// newPushGateDaemon wires a Daemon that can reach the guarded push body without
+// a live TCP peer.
 //
-// A non-nil *cluster.SessionSync clears the transport-presence guards in
-// syncConfigToPeer and pushConfigToPeer. Nothing is written to a socket: a
-// zero-value SessionSync has no active connection, so QueueConfig no-ops. The
-// observable is the #5863 reconcile marker, which pushConfigToPeer stamps via
-// markConfigSyncPushed AFTER it has committed to pushing — so the marker is set
-// if and only if control reached the push body.
+// A non-nil *cluster.SessionSync clears the transport-presence guard in
+// syncConfigToPeerWithAuthorization. The in-process queue hook avoids socket
+// I/O; the observable is the #5863 reconcile marker, which is recorded only
+// after the push hook returns successfully.
 func newPushGateDaemon(t *testing.T, cl *cluster.Manager) *Daemon {
 	t.Helper()
 	d := &Daemon{
@@ -67,7 +65,7 @@ func newPushGateDaemon(t *testing.T, cl *cluster.Manager) *Daemon {
 	return d
 }
 
-// reachedPush reports whether control reached pushConfigToPeer's push body.
+// reachedPush reports whether the guarded push route recorded its marker.
 func reachedPush(d *Daemon) bool {
 	d.configSyncMu.Lock()
 	defer d.configSyncMu.Unlock()

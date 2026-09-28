@@ -206,14 +206,15 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	// failed removes (kept: still on the wire). On BACKUP, added VIPs are
 	// configured but not actuated unless an over-capacity failed removal
 	// requires deferring them to keep the stored set advertisable.
+	// Exclude every spelling of a failed binary address from kernel truth.
 	failedAdd := make(map[string]struct{}, len(addRes.failed))
 	for _, vip := range addRes.failed {
-		failedAdd[vip] = struct{}{}
+		failedAdd[canonicalVIPIdentity(vip)] = struct{}{}
 	}
 	var addedOK []string
 	if state == StateMaster {
 		for _, vip := range added {
-			if _, bad := failedAdd[vip]; !bad {
+			if _, bad := failedAdd[canonicalVIPIdentity(vip)]; !bad {
 				addedOK = append(addedOK, vip)
 			}
 		}
@@ -221,7 +222,7 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	vi.mu.Lock()
 	newSet := make([]string, 0, len(want)+len(removedFailed))
 	for _, vip := range want {
-		if _, bad := failedAdd[vip]; !bad {
+		if _, bad := failedAdd[canonicalVIPIdentity(vip)]; !bad {
 			newSet = append(newSet, vip)
 		}
 	}

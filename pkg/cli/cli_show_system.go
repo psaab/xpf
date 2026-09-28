@@ -1128,8 +1128,15 @@ func (c *CLI) handleShowSystem(args []string) error {
 		if c.clockSkewAlarmsFn != nil {
 			clockAlarms = c.clockSkewAlarmsFn()
 		}
+		var peerSnapshotAlarm string
+		if c.peerSnapshotProtocolAlarmFn != nil {
+			peerSnapshotAlarm = c.peerSnapshotProtocolAlarmFn()
+		}
 		n := len(warnings) + len(clockAlarms)
 		if divergence != "" {
+			n++
+		}
+		if peerSnapshotAlarm != "" {
 			n++
 		}
 		if n == 0 {
@@ -1142,6 +1149,9 @@ func (c *CLI) handleShowSystem(args []string) error {
 			fmt.Printf("%d active alarm(s):\n", n)
 			if divergence != "" {
 				fmt.Printf("  CRITICAL: %s\n", divergence)
+			}
+			if peerSnapshotAlarm != "" {
+				fmt.Printf("  CRITICAL: %s\n", peerSnapshotAlarm)
 			}
 			for _, w := range warnings {
 				fmt.Printf("  WARNING: %s\n", w)
