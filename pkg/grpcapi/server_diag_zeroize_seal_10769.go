@@ -756,6 +756,11 @@ func zeroizeEraseKnownHosts(path string) error {
 	return zeroizeRemovePath(path)
 }
 
+// zeroizeSethostname sets the live kernel hostname during reset. A package
+// var (mirroring the daemon's sethostname seam) so tests observe the call
+// without renaming the test host; production is syscall.Sethostname.
+var zeroizeSethostname = syscall.Sethostname
+
 func zeroizeResetHostname(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -773,6 +778,13 @@ func zeroizeResetHostname(path string) error {
 	}
 	if err := fsatomic.WriteFileDurable(path, []byte("xpf\n"), 0o644); err != nil {
 		return fmt.Errorf("zeroize: reset hostname %s: %w", path, err)
+	}
+	// Reset is wipe-then-stop with no reboot: the live kernel name must move
+	// with the file or the prior-tenant transient hostname stays observable
+	// pre-reboot. A failed sethostname fails the wipe (a failed reset
+	// restores both via the daemon identity snapshot).
+	if err := zeroizeSethostname([]byte("xpf")); err != nil {
+		return fmt.Errorf("zeroize: set live hostname: %w", err)
 	}
 	return nil
 }

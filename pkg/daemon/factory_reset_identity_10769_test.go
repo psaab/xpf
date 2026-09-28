@@ -282,3 +282,42 @@ func TestFactoryResetRestoresIdentitySymlinkAfterFailedWipe10769(t *testing.T) {
 		t.Fatalf("restored link target = %q, want %q (err=%v)", got, target, err)
 	}
 }
+
+func TestFactoryResetRestoresKernelHostnameAfterFailedWipe10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	var renamed []string
+	sethostname = func(name []byte) error {
+		renamed = append(renamed, string(name))
+		return nil
+	}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	wipeErr := errors.New("wipe failed")
+	if err := d.factoryReset(context.Background(), func() error { return wipeErr }); !errors.Is(err, wipeErr) {
+		t.Fatalf("factoryReset error = %v, want %v", err, wipeErr)
+	}
+	if len(renamed) != 1 || renamed[0] != "test-kernel" {
+		t.Fatalf("kernel restore calls = %q, want exactly [test-kernel]", renamed)
+	}
+}
+
+func TestFactoryResetSkipsKernelRestoreWhenSnapshotFails10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	osHostname = func() (string, error) { return "", errors.New("uname unavailable") }
+	renamed := false
+	sethostname = func([]byte) error {
+		renamed = true
+		return nil
+	}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	wipeErr := errors.New("wipe failed")
+	// A failed kernel read must not block the reset: there is simply
+	// nothing to restore the live name to.
+	if err := d.factoryReset(context.Background(), func() error { return wipeErr }); !errors.Is(err, wipeErr) {
+		t.Fatalf("factoryReset error = %v, want %v", err, wipeErr)
+	}
+	if renamed {
+		t.Fatal("no kernel restore may run without a snapshot")
+	}
+}

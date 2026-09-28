@@ -30,15 +30,17 @@ func isolateFactoryResetOwnershipPaths(t *testing.T) {
 }
 
 // isolateFactoryResetIdentityPaths redirects the identity snapshot/restore
-// files and the post-wipe lease verification into a disposable tree. Every
-// factoryReset test must call it: without isolation a failed-wipe test would
-// restore into the REAL /etc/hostname, /etc/hosts, /etc/resolv.conf and
-// /etc/ssh/ssh_known_hosts, and a success test would verify the REAL Kea
-// lease paths.
+// files and the post-wipe lease verification into a disposable tree, and
+// stubs the kernel-hostname seams. Every factoryReset test must call it:
+// without isolation a failed-wipe test would restore into the REAL
+// /etc/hostname, /etc/hosts, /etc/resolv.conf and
+// /etc/ssh/ssh_known_hosts, rename the REAL kernel hostname, and verify
+// the REAL Kea lease paths.
 func isolateFactoryResetIdentityPaths(t *testing.T) {
 	t.Helper()
 	oldHostname, oldHosts, oldResolv, oldKnown := hostnamePath, resetHostsPath, resetResolvConfPath, resetKnownHostsPath
 	oldKea := resetKeaLeaseCurrents
+	oldOsHostname, oldSethostname := osHostname, sethostname
 	root := t.TempDir()
 	hostnamePath = filepath.Join(root, "etc", "hostname")
 	resetHostsPath = filepath.Join(root, "etc", "hosts")
@@ -48,9 +50,12 @@ func isolateFactoryResetIdentityPaths(t *testing.T) {
 		filepath.Join(root, "var", "lib", "kea", "kea-leases4.csv"),
 		filepath.Join(root, "var", "lib", "kea", "kea-leases6.csv"),
 	}
+	osHostname = func() (string, error) { return "test-kernel", nil }
+	sethostname = func([]byte) error { return nil }
 	t.Cleanup(func() {
 		hostnamePath, resetHostsPath, resetResolvConfPath, resetKnownHostsPath = oldHostname, oldHosts, oldResolv, oldKnown
 		resetKeaLeaseCurrents = oldKea
+		osHostname, sethostname = oldOsHostname, oldSethostname
 	})
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -329,6 +330,7 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	wipeStarted := false
 	wipeSucceeded := false
 	var identity map[string]resetIdentityFile
+	kernelBeforeReset := ""
 	resetFailed := func(err error) error {
 		errs := []error{err}
 		// Restore the pre-wipe identity files only when the wipe itself ran
@@ -337,6 +339,14 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 		if wipeStarted && !wipeSucceeded && identity != nil {
 			if restoreErr := restoreResetIdentity(identity); restoreErr != nil {
 				errs = append(errs, restoreErr)
+			}
+		}
+		// The wipe moves the live kernel name with /etc/hostname; move it
+		// back on the same failed-wipe path (empty when the pre-wipe read
+		// failed, in which case there is nothing to restore to).
+		if wipeStarted && !wipeSucceeded && kernelBeforeReset != "" {
+			if rerr := sethostname([]byte(kernelBeforeReset)); rerr != nil {
+				errs = append(errs, fmt.Errorf("restore kernel hostname after failed factory reset: %w", rerr))
 			}
 		}
 		if ipsecMayNeedRestore {
@@ -363,6 +373,14 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 		return resetFailed(err)
 	}
 	identity = snap
+	// Snapshot the live kernel name the wipe moves with /etc/hostname.
+	// Best-effort: unlike the files, a failed read must not block the reset
+	// (there is simply nothing to restore to on failure).
+	if kernel, kerr := osHostname(); kerr != nil {
+		slog.Warn("factory reset: cannot snapshot kernel hostname; live name will not be restored on failure", "err", kerr)
+	} else {
+		kernelBeforeReset = kernel
+	}
 	if err := d.quiesceDDNSForReset(); err != nil {
 		return resetFailed(err)
 	}

@@ -24,7 +24,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	oldPasswdBackups, oldHostKeys := zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath
 	oldDropins, oldVarLog := zeroizeManagedDropins, zeroizeVarLogDir
 	oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec := zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath
-	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir
+	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal, oldSethostname := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir, zeroizeSethostname
 	t.Cleanup(func() {
 		zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory = oldMachine, oldSSH, oldRootSSH, oldHistory
 		zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
@@ -34,7 +34,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 		zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath = oldPasswdBackups, oldHostKeys
 		zeroizeManagedDropins, zeroizeVarLogDir = oldDropins, oldVarLog
 		zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath = oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec
-		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal
+		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir, zeroizeSethostname = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal, oldSethostname
 	})
 
 	zeroizeMachineIDPath = filepath.Join(root, "etc", "machine-id")
@@ -75,6 +75,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	}
 	zeroizeStopKeaUnits = func() error { return nil }
 	zeroizeVerifyKeaStopped = func() error { return nil }
+	zeroizeSethostname = func([]byte) error { return nil }
 	zeroizeVarBackupsDir = filepath.Join(root, "var", "backups")
 	zeroizeNetworkdLeaseDir = filepath.Join(root, "var", "lib", "systemd", "network")
 	zeroizeDHCPClientStateDirs = []string{filepath.Join(root, "var", "lib", "dhcp"), filepath.Join(root, "var", "lib", "dhclient")}
@@ -171,6 +172,11 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 		keaVerified = true
 		return nil
 	}
+	var liveNames []string
+	zeroizeSethostname = func(name []byte) error {
+		liveNames = append(liveNames, string(name))
+		return nil
+	}
 
 	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
 		t.Fatalf("PerformZeroizeWipe: %v", err)
@@ -180,6 +186,9 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	}
 	if !keaVerified {
 		t.Fatal("Kea must verify inactive between stop and lease unlink")
+	}
+	if len(liveNames) != 1 || liveNames[0] != "xpf" {
+		t.Fatalf("live kernel hostname calls = %q, want exactly [xpf]", liveNames)
 	}
 	if body, err := os.ReadFile(machineID); err != nil || len(body) != 0 {
 		t.Fatalf("machine-id should remain present but empty for systemd regeneration; body=%q err=%v", body, err)
@@ -888,5 +897,35 @@ func TestPerformZeroizeErasesStateCrashTemps10769(t *testing.T) {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Errorf("crash temp %s survived a reported-success reset: %v", path, err)
 		}
+	}
+}
+
+func TestZeroizeLeavesLiveHostnameOnSealFailure10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	mustWriteFile(t, zeroizeHostnamePath, []byte("prior-tenant.example\n"))
+	// Force an earlier seal-leg failure: machine-id as a directory is
+	// refused by the truncate leg, so the hostname leg (file + live) must
+	// not run at all.
+	if err := os.MkdirAll(zeroizeMachineIDPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var liveNames []string
+	zeroizeSethostname = func(name []byte) error {
+		liveNames = append(liveNames, string(name))
+		return nil
+	}
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err == nil {
+		t.Fatal("seal failure must fail the wipe")
+	}
+	if len(liveNames) != 0 {
+		t.Fatalf("live hostname must stay untouched on seal failure, got %q", liveNames)
+	}
+	if body, err := os.ReadFile(zeroizeHostnamePath); err != nil || string(body) != "prior-tenant.example\n" {
+		t.Fatalf("hostname file must stay untouched on seal failure: body=%q err=%v", body, err)
 	}
 }
