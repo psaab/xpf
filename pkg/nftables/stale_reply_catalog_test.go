@@ -92,7 +92,7 @@ func TestHostInboundStaleReplyGuardRulesRespectAddressUnion10752(t *testing.T) {
 		{Zone: "ike", SystemServices: []string{"ike"}, V4Addrs: []string{"192.0.2.11"}},
 		{Zone: "open", SystemServices: []string{"any-service"}, V4Addrs: []string{"192.0.2.12"}},
 	}
-	rules := HostInboundStaleReplyGuardRules(views, []string{"192.0.2.13"}, nil, []uint16{51820})
+	rules := HostInboundStaleReplyGuardRules(views, []string{"192.0.2.13"}, nil, []uint16{51820}, false)
 	if !guardRuleHasTuple(rules, "192.0.2.10", "ip", config.HostInboundProtoUDP, 500) {
 		t.Fatal("IKE/UDP 500 reply to a denied covered address lacks a guard DROP")
 	}
@@ -106,14 +106,14 @@ func TestHostInboundStaleReplyGuardRulesRespectAddressUnion10752(t *testing.T) {
 		t.Fatal("addressed-but-unzoned address lacks the default-deny guard")
 	}
 
-	wgRules := HostInboundStaleReplyGuardRules(views[:1], nil, nil, []uint16{500})
+	wgRules := HostInboundStaleReplyGuardRules(views[:1], nil, nil, []uint16{500}, false)
 	if guardRuleHasTuple(wgRules, "192.0.2.10", "ip", config.HostInboundProtoUDP, 500) {
 		t.Fatal("globally admitted WireGuard listen port was guarded")
 	}
 	sharedAddressRules := HostInboundStaleReplyGuardRules([]HostInboundZoneView{
 		{Zone: "ssh", SystemServices: []string{"ssh"}, V4Addrs: []string{"192.0.2.20"}},
 		{Zone: "ike", SystemServices: []string{"ike"}, V4Addrs: []string{"192.0.2.20"}},
-	}, nil, nil, nil)
+	}, nil, nil, nil, false)
 	if guardRuleHasTuple(sharedAddressRules, "192.0.2.20", "ip", config.HostInboundProtoTCP, 22) ||
 		guardRuleHasTuple(sharedAddressRules, "192.0.2.20", "ip", config.HostInboundProtoUDP, 500) {
 		t.Fatal("a service admitted by another view of the same address must not be guarded")
@@ -131,7 +131,7 @@ func TestHostInboundStaleReplyGuardsFollowIngressPolicy10752(t *testing.T) {
 		{Zone: "deny", SystemServices: []string{"snmp"}, V4Addrs: []string{"192.0.2.10"}, IngressNetdevs: []string{"eth-deny"}},
 		{Zone: "open", SystemServices: []string{"any-service"}, V4Addrs: []string{"192.0.2.12"}, IngressNetdevs: []string{"eth-open"}},
 	}
-	rules := HostInboundStaleReplyGuardRules(views, nil, nil, nil)
+	rules := HostInboundStaleReplyGuardRules(views, nil, nil, nil, true)
 	// Denying ingress emits a positive iifname guard covering every judged
 	// destination, including the open zone's address.
 	if !guardRuleHasIngressTuple(rules, []string{"eth-deny"}, false, "192.0.2.12", "ip", config.HostInboundProtoTCP, 22) {
@@ -184,6 +184,18 @@ func TestHostInboundStaleReplyGuardsFollowIngressPolicy10752(t *testing.T) {
 			t.Fatalf("fence guard must be destination-only, got %+v", r)
 		}
 	}
+	// Stale (no trusted reinject): fallback must guard TUN arrivals since no
+	// exemption exists to preserve.
+	for _, r := range HostInboundStaleReplyGuardRules(views, nil, nil, nil, false) {
+		if !r.IngressNegated {
+			continue
+		}
+		for _, n := range r.Ingress {
+			if n == HostInboundReinjectIfname {
+				t.Fatalf("stale fallback must not exclude TUN, got %+v", r)
+			}
+		}
+	}
 }
 
 func TestHostInboundStaleReplyNetlinkEmitsIngressScope10752(t *testing.T) {
@@ -191,7 +203,7 @@ func TestHostInboundStaleReplyNetlinkEmitsIngressScope10752(t *testing.T) {
 		{Zone: "deny", SystemServices: []string{"snmp"}, V4Addrs: []string{"192.0.2.10"}, IngressNetdevs: []string{"eth-deny"}},
 		{Zone: "open", SystemServices: []string{"any-service"}, V4Addrs: []string{"192.0.2.12"}, IngressNetdevs: []string{"eth-open"}},
 	}
-	guards := HostInboundStaleReplyGuardRules(views, nil, nil, nil)
+	guards := HostInboundStaleReplyGuardRules(views, nil, nil, nil, true)
 	p := newBuildPlan(t, "xpf_test_stale_10752", 10)
 	emitHostInboundStaleReplyGuards(p, guards)
 	if p.err != nil {

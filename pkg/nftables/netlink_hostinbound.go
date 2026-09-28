@@ -51,7 +51,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		// junos-host path — coarse-then-fine order (#4146).
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
-			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts,
+			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
 		))
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		for i, prog := range spec.Programs {
@@ -62,7 +62,7 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	} else {
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
-			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts,
+			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
 		))
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		emitHostInboundICMPAcceptsNetlink(p)

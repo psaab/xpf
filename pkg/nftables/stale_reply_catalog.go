@@ -155,18 +155,21 @@ type staleReplyAdmit struct {
 //   - ambiguous-ingress rules: `iifname <deny netdevs> daddr <all dests>
 //     dport <full catalog>` — fail-closed, matching the unconditional
 //     IngressDenyNetdevs drop;
-//   - uncovered-ingress fallback: `iifname != <covered+deny+reinject> daddr
+//   - uncovered-ingress fallback: `iifname != <covered+deny[+reinject]> daddr
 //     <owner address> dport <denied by owner union>` — packets arriving
-//     where no ingress view judges fall back to destination-owner policy,
-//     while the trusted reinject TUN (xpf-usp0) is excluded so
-//     userspace-adjudicated reinjects keep their exemption.
+//     where no ingress view judges fall back to destination-owner policy.
+//     The trusted reinject TUN (xpf-usp0) is excluded only when
+//     trustedReinject is true (the chain will actually render the reinject
+//     accept: dataplane fresh AND addressed views). When stale or
+//     viewless, TUN packets are guarded like any other uncovered arrival
+//     since no exemption exists to preserve.
 //
 // An address admitted by any-service is omitted from the fallback, matching
 // the chain's address-level union semantics; a view admitting any-service
 // emits no per-ingress guard. Unzoned addresses are covered with an empty
 // owner admit set in the fallback and are included in every per-ingress
 // destination set. WG listen ports remain globally admitted.
-func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16) []StaleReplyGuardRule {
+func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, trustedReinject bool) []StaleReplyGuardRule {
 	wg := make(map[uint16]bool, len(wgListenPorts))
 	for _, port := range wgListenPorts {
 		wg[port] = true
@@ -249,7 +252,11 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 	}
 	// Uncovered-ingress fallback (destination-owner policy).
 	covered := staleReplySortedUniqueStrings(collectIngressNetdevs(views))
-	fallbackIngress := staleReplySortedUniqueStrings(append(append([]string(nil), covered...), HostInboundReinjectIfname))
+	fallbackIngress := append([]string(nil), covered...)
+	if trustedReinject {
+		fallbackIngress = append(fallbackIngress, HostInboundReinjectIfname)
+	}
+	fallbackIngress = staleReplySortedUniqueStrings(fallbackIngress)
 	admit, allowsAll := staleReplyOwnerAdmits(views, unzonedV4, unzonedV6)
 	for ip := range allowsAll {
 		delete(admit, ip)
@@ -455,7 +462,7 @@ func HostInboundStaleReplyFenceRules(views []HostInboundZoneView, unzonedV4, unz
 		v4 = append(v4, view.V4Addrs...)
 		v6 = append(v6, view.V6Addrs...)
 	}
-	rules := HostInboundStaleReplyGuardRules(nil, v4, v6, wgListenPorts)
+	rules := HostInboundStaleReplyGuardRules(nil, v4, v6, wgListenPorts, false)
 	for i := range rules {
 		rules[i].Ingress = nil
 		rules[i].IngressNegated = false

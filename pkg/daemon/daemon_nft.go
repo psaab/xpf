@@ -1208,7 +1208,7 @@ func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListen
 	rules = append(rules, "  chain input {")
 	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", nftHostInboundGapPriority))
 	rules = append(rules, hostInboundStaleReplyGuardText(
-		xnft.HostInboundStaleReplyGuardRules(nil, uncoveredV4, uncoveredV6, wgListenPorts),
+		xnft.HostInboundStaleReplyGuardRules(nil, uncoveredV4, uncoveredV6, wgListenPorts, false),
 	)...)
 	rules = append(rules, hostInboundFenceMandatoryAdmits(wgListenPorts)...)
 	if len(uncoveredV4) > 0 {
@@ -1590,7 +1590,7 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		// kernel XFRM stack decrypts host-terminated IPsec before any deny.
 		rules = append(rules, "    meta l4proto { 50, 51 } accept")
 		rules = append(rules, hostInboundStaleReplyGuardText(
-			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts),
+			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
 		)...)
 		// (2) Firewall-ORIGINATED reply traffic (host-OUTBOUND flow return).
 		// junos-host governs host-INBOUND original-direction only, so only the
@@ -1624,7 +1624,7 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		// enforcement.
 		rules = append(rules, "    meta l4proto { 50, 51 } accept")
 		rules = append(rules, hostInboundStaleReplyGuardText(
-			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts),
+			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
 		)...)
 		// Firewall-ORIGINATED reply traffic is accepted before ingress
 		// adjudication; original-direction established traffic reaches the

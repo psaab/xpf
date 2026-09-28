@@ -75,7 +75,7 @@ func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
 // nftHostInboundGapPriority, policy accept).
 func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
-		nil, spec.UncoveredV4, spec.UncoveredV6, spec.WGListenPorts,
+		nil, spec.UncoveredV4, spec.UncoveredV6, spec.WGListenPorts, false,
 	))
 	hostInboundFenceMandatoryAdmitsNetlink(p, spec.WGListenPorts)
 	if len(spec.UncoveredV4) > 0 {

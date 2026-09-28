@@ -241,7 +241,7 @@ func TestHostInboundStaleReplyGuardsFollowIngressPolicy10752(t *testing.T) {
 	t.Run("ingress-permits-owner-denies", func(t *testing.T) {
 		cfg := hostInboundFlushTestConfig("snmp")
 		views := dpuserspace.BuildZoneHostInboundViews(cfg)
-		payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, false)
+		payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
 		lines := strings.Split(payload, "\n")
 		// Wan ingress denies SSH/IKE: its per-ingress guard must cover them
 		// to every judged destination (including the open lan address).
@@ -291,7 +291,7 @@ func TestHostInboundStaleReplyGuardsFollowIngressPolicy10752(t *testing.T) {
 		cfg := hostInboundFlushTestConfig("ssh", "ike", "snmp")
 		cfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"snmp"}}
 		views := dpuserspace.BuildZoneHostInboundViews(cfg)
-		payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, false)
+		payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
 		lines := strings.Split(payload, "\n")
 		// Lan ingress denies SSH: its guard must cover the wan address even
 		// though the wan owner permits it.
