@@ -129,8 +129,8 @@ pub(crate) enum IdleLeaseImport {
     /// A PAT occupancy bit is already held here, so installing the lease would
     /// duplicate a translated identity (module note 4).
     SkippedPortBusy,
-    /// The reverse identity for an address-only lease is already held by a live
-    /// PAT or address-only allocation.
+    /// The reverse identity for the imported lease is already held by a live
+    /// PAT or address-only owner. Covers both PAT and address-only imports;
     SkippedIdentityBusy,
     /// Import would exceed the bounded persistent lease table after the
     /// pressure-GC pass.
