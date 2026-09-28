@@ -509,9 +509,9 @@ var retiredHAWatchdogClaimPatterns10791 = []*regexp.Regexp{
 	regexp.MustCompile(`\bkernel visible ((bpf )?(shim )?map )?write\b`),
 	regexp.MustCompile(`\b(bpf|kernel) checks? freshness\b`),
 	regexp.MustCompile(`\bcheck egress rg active verifies freshness\b`),
-	regexp.MustCompile(`\b(bpf|kernel|ha watchdog) [a-z0-9 ]{0,80} 2s stale\b`),
-	regexp.MustCompile(`\b(bpf|kernel|ha watchdog) [a-z0-9 ]{0,80} 2s (stale )?window\b`),
-	regexp.MustCompile(`\bbpf stops forwarding within 2s\b`),
+	regexp.MustCompile(`\b(bpf|kernel|ha watchdog)( [a-z0-9]+){0,12} 2s stale\b`),
+	regexp.MustCompile(`\b(bpf|kernel|ha watchdog)( [a-z0-9]+){0,12} 2s (stale|staleness)? ?window\b`),
+	regexp.MustCompile(`\b(bpf|kernel|ha watchdog) (stops|halts|drops|blocks) forwarding (within|in) 2s\b`),
 	regexp.MustCompile(`\b10s stale lease\b`),
 	regexp.MustCompile(`\bstale lease would expire\b`),
 	regexp.MustCompile(`\bactiveuntil watchdog\b`),
@@ -523,6 +523,10 @@ var haWatchdogParagraphSeparator10791 = regexp.MustCompile(`\n\s*\n`)
 var haWatchdogPunctuation10791 = regexp.MustCompile(`[^a-z0-9]+`)
 var haWatchdogTwoSecond10791 = regexp.MustCompile(`\b(two|2) seconds?\b`)
 var haWatchdogTwoS10791 = regexp.MustCompile(`\b2 s\b`)
+var haWatchdogGroupPattern10791 = regexp.MustCompile(`\b(rg|redundancy group)\b`)
+var haWatchdogImpactPattern10791 = regexp.MustCompile(`\b(drop|drops|dropped|dropping|inactive|stop|stops|halt|halts|block|blocks|forward|forwards|forwarding)\b`)
+var haWatchdogListItemSeparator10791 = regexp.MustCompile(`(?m)^\s*[-*]\s+`)
+var haWatchdogSentenceSeparator10791 = regexp.MustCompile(`[.!?]\s+`)
 
 func normalizeHAWatchdogText10791(text string) string {
 	normalized := strings.ToLower(text)
@@ -541,6 +545,9 @@ func retiredHAWatchdogClaims10791(text string) []string {
 				claims = append(claims, match)
 			}
 		}
+		if hasRetiredHAHeartbeatClaim10791(paragraph) {
+			claims = append(claims, "2s heartbeat/timestamp RG drop-or-forward claim")
+		}
 		if hasHAWatchdogContext10791(normalized) {
 			for _, claim := range []string{"bpf shim map", "shim map write"} {
 				if strings.Contains(normalized, claim) {
@@ -550,6 +557,27 @@ func retiredHAWatchdogClaims10791(text string) []string {
 		}
 	}
 	return claims
+}
+
+func hasRetiredHAHeartbeatClaim10791(text string) bool {
+	for _, item := range haWatchdogListItemSeparator10791.Split(text, -1) {
+		for _, sentence := range haWatchdogSentenceSeparator10791.Split(item, -1) {
+			normalized := normalizeHAWatchdogText10791(sentence)
+			agedTimestamp := strings.Contains(normalized, "older than") ||
+				strings.Contains(normalized, "stale") ||
+				strings.Contains(normalized, "exceeds") ||
+				strings.Contains(normalized, "over ")
+			if strings.Contains(normalized, "2s") &&
+				strings.Contains(normalized, "heartbeat") &&
+				strings.Contains(normalized, "timestamp") &&
+				agedTimestamp &&
+				haWatchdogGroupPattern10791.MatchString(normalized) &&
+				haWatchdogImpactPattern10791.MatchString(normalized) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hasHAWatchdogContext10791(normalized string) bool {
@@ -639,6 +667,12 @@ func TestHAWatchdogClaimMatcherRejectsRewordedAndFootnotedStaleClaims10791(t *te
 		"The BPF shim map has a ~10s stale-lease window.",
 		"ActiveUntil(watchdog + HA_WATCHDOG_STALE_AFTER_SECS).",
 		"BPF stops forwarding within two seconds.",
+		"The dataplane drops the RG when its heartbeat timestamp is older than two seconds.",
+		"BPF halts forwarding in ~2 seconds.",
+		"BPF ~2s staleness window.",
+		"BPF 2s stale window.",
+		"ha_watchdog 2s stale means inactive.",
+		"BPF 2s window.",
 	} {
 		if claims := retiredHAWatchdogClaims10791(stale); len(claims) == 0 {
 			t.Errorf("stale claim escaped normalized matcher: %q", stale)
@@ -687,6 +721,20 @@ func TestRetiredBPFWatchdogHeadersHaveNoLiveCallers10791(t *testing.T) {
 		if callPattern.Match(raw) {
 			t.Errorf("live BPF C source %s calls retired check_egress_rg_active", repoRelativePath(t, path))
 		}
+	}
+	docRel := "docs/next-features/ha-session-ownership-and-fabric-failover.md"
+	docRaw, err := os.ReadFile(filepath.Join(repoRootForBoundaryCanary, docRel))
+	if err != nil {
+		t.Fatalf("read legacy caller design note %s: %v", docRel, err)
+	}
+	doc := normalizeHAWatchdogText10791(string(docRaw))
+	historicalLabel := strings.Index(doc, "historical diagnosis not a current call path")
+	documentedCaller := strings.Index(doc, "check egress rg active")
+	if historicalLabel < 0 || documentedCaller < 0 || historicalLabel > documentedCaller {
+		t.Errorf("%s must label its legacy check_egress_rg_active callsite as historical before describing it", docRel)
+	}
+	if !strings.Contains(doc, "no c caller") {
+		t.Errorf("%s must explain there is no current C caller", docRel)
 	}
 }
 
