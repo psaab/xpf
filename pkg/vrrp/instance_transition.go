@@ -44,17 +44,17 @@ func (vi *vrrpInstance) setState(s VRRPState) {
 // hasIPv4VIP reports whether this instance advertises at least one IPv4 virtual
 // address (dual-stack or IPv4-only). It anchors the equal-priority MASTER-MASTER
 // tie-break to the v4 family so both nodes decide off the same ordering (#4376).
-// cfg.VirtualAddresses is immutable per instance (VIP changes rebuild the
-// instance), so no lock is needed — same rationale as vipAddrSet.
 func (vi *vrrpInstance) hasIPv4VIP() bool {
 	hasIPv4, _ := vi.vipFamilies()
 	return hasIPv4
 }
 
 // vipFamilies reports which IP families have at least one parseable virtual
-// address. Instance VIPs are immutable after construction, so callers may use
-// it without locking.
+// address. VIP sets can change in place at config commit (#10780), so inspect
+// the mutable slice under vi.mu.
 func (vi *vrrpInstance) vipFamilies() (hasIPv4, hasIPv6 bool) {
+	vi.mu.RLock()
+	defer vi.mu.RUnlock()
 	for _, vip := range vi.cfg.VirtualAddresses {
 		addr := vip
 		if idx := strings.Index(addr, "/"); idx >= 0 {
@@ -93,9 +93,10 @@ func (vi *vrrpInstance) becomeMaster() bool {
 	// #6779: refuse ownership we cannot advertise — #5082's "do not claim what
 	// you cannot back" applied to the advert. Before setState/addVIPs so there
 	// is nothing to roll back. Rationale + log-rate note: advert_capacity.go.
-	if vi.advertCapacityErr != nil {
+	capErr := vi.getAdvertCapacityErr()
+	if capErr != nil {
 		slog.Debug("vrrp: cannot build a legal advertisement, not claiming ownership (fail-closed)",
-			"key", vi.key(), "err", vi.advertCapacityErr)
+			"key", vi.key(), "err", capErr)
 		return false
 	}
 	pri := vi.getPriority()
@@ -136,11 +137,11 @@ func (vi *vrrpInstance) becomeMaster() bool {
 		vi.emitEvent()
 		return false
 	}
+	vi.garpEpoch.Add(1)
 	vi.vipMu.Unlock()
 
 	vi.sendAdvert(pri)
 	vi.emitEvent()
-	vi.garpEpoch.Add(1)
 	if !vi.suppressGARP.Load() {
 		// Non-forced: a routine MASTER transition is rate-limited by the
 		// 500ms dampener (the epoch dedup still guarantees one burst per

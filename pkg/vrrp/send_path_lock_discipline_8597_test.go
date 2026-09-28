@@ -106,6 +106,7 @@ func TestSendGARPReadsGARPCountUnderTheLock_8597(t *testing.T) {
 	t.Cleanup(func() { garpBurstFn, arpProbeFn = prevBurst, prevProbe })
 
 	vi := raceTestInstance(t)
+	vi.setState(StateMaster)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -135,6 +136,7 @@ func TestGARPEpochBumpActuallyReachesTheCountRead_8597(t *testing.T) {
 	t.Cleanup(func() { garpBurstFn, arpProbeFn = prevBurst, prevProbe })
 
 	vi := raceTestInstance(t)
+	vi.setState(StateMaster)
 	for i := 0; i < 5; i++ {
 		vi.garpEpoch.Add(1)
 		vi.sendGARP(true)
