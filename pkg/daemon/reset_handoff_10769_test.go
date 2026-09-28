@@ -1277,6 +1277,22 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	isolateHandoffFlag(t)
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
+	// Host-mutation isolation: the authoring apply renames the host
+	// (phase 5) and the failed-reset restore touches the kernel name
+	// (phase 1). Stub the kernel/disk seams so the suite cannot rename
+	// the test host or rewrite /etc/hostname even as root; phase 5
+	// asserts the stubs intercepted a genuine rename attempt.
+	origSethostname, origHostnamePath, origOsHostname := sethostname, hostnamePath, osHostname
+	t.Cleanup(func() { sethostname, hostnamePath, osHostname = origSethostname, origHostnamePath, origOsHostname })
+	hostnamePath = filepath.Join(t.TempDir(), "hostname")
+	kernelName := "test-host-before"
+	osHostname = func() (string, error) { return kernelName, nil }
+	var hostRenames []string
+	sethostname = func(b []byte) error {
+		hostRenames = append(hostRenames, string(b))
+		kernelName = string(b)
+		return nil
+	}
 	root := t.TempDir()
 	gateRoot := t.TempDir()
 	fixedRoot := t.TempDir()
@@ -1463,6 +1479,29 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	}
 	if err := freshStore.ConfirmCommit(); err != nil {
 		t.Fatalf("confirm the authored window: %v", err)
+	}
+	// Host-write isolation proof. NoDataplane skips the tunable block
+	// (daemon_apply_tail.go) so the apply captures no sysctl state; a
+	// capture here would mean a live /proc write path ran. The
+	// hostname rename genuinely attempted and was intercepted by the
+	// stub (kernel name + redirected file), never the live host.
+	d2.priorTunablesMu.Lock()
+	tunableCaptures := d2.priorTunables != nil && (len(d2.priorTunables.neighRetrans) != 0 || len(d2.priorTunables.governors) != 0 || d2.priorTunables.budget != "" || len(d2.priorTunables.mlx5Adaptive) != 0)
+	d2.priorTunablesMu.Unlock()
+	if tunableCaptures {
+		t.Fatal("authoring apply must capture no host tunables (no live sysctl writes even as root)")
+	}
+	renamed := false
+	for _, name := range hostRenames {
+		if name == "recovered" {
+			renamed = true
+		}
+	}
+	if !renamed {
+		t.Fatalf("hostname stub must intercept the authoring rename, got %q", hostRenames)
+	}
+	if body, err := os.ReadFile(hostnamePath); err != nil || string(body) != "recovered\n" {
+		t.Fatalf("redirected hostname file = %q err=%v, want the authored name", body, err)
 	}
 	// The authored config must be durable, not just in-memory: a fresh
 	// handle loads it back before the rerun wipes the root again.
