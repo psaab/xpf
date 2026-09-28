@@ -353,6 +353,13 @@ func hostInboundTightenedScopes(oldCfg, newCfg *config.Config) ([]string, map[st
 		if old.full {
 			continue
 		}
+		if neu.full {
+			// New full-admit covers every old token: a loosening,
+			// never a narrowing. A full new state carries an empty
+			// token set, so without this guard every old unguarded
+			// token would read as removed.
+			continue
+		}
 		for tok := range old.tokens {
 			if unguarded[tok] && !neu.tokens[tok] {
 				out = append(out, key)

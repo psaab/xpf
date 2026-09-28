@@ -51,6 +51,40 @@ func TestHostInboundTightenedScopes10752(t *testing.T) {
 			oldW: named, oldL: named, newW: full, newL: full,
 		},
 		{
+			name: "loosening named-with-exempt to full-admit stays silent",
+			oldW: named, oldL: named, newW: full, newL: named,
+			mutate: func(old, new *config.Config) {
+				old.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"bgp"}
+			},
+			// New full-admit covers every old token: without the
+			// neu.full guard the empty new token set reads p:bgp as
+			// removed and this loosening spuriously warns.
+		},
+		{
+			name: "loosening named-with-bare-protocol to full-admit stays silent",
+			oldW: named, oldL: named, newW: full, newL: named,
+			mutate: func(old, new *config.Config) {
+				old.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"ospf"}
+			},
+		},
+		{
+			name: "loosening named-with-range to full-admit stays silent",
+			oldW: []string{"ssh", "traceroute"}, oldL: named,
+			newW: full, newL: named,
+		},
+		{
+			name: "loosening override union to full-admit stays silent",
+			oldW: named, oldL: named, newW: named, newL: named,
+			mutate: func(old, new *config.Config) {
+				old.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
+					"reth0.50": {SystemServices: named, Protocols: []string{"bgp"}},
+				}
+				new.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
+					"reth0.50": {SystemServices: full},
+				}
+			},
+		},
+		{
 			name: "staying open stays silent",
 			oldW: full, oldL: full, newW: full, newL: full,
 		},
@@ -705,6 +739,24 @@ func TestWithTighteningWarningsTokenOnlyCustomsAdvisory10752(t *testing.T) {
 	}
 	if !strings.Contains(resp.Warnings[0], "leaves 1 box-oriented custom-port") {
 		t.Fatalf("full-admit loss must emit the customs line, got %v", resp.Warnings)
+	}
+}
+
+// TestWithTighteningWarningsLooseningToFullStaysSilent10752 is the
+// response-level loosening pin: named-with-exempt to any-service is no
+// transition, so even observed evidence stays projection-silent.
+func TestWithTighteningWarningsLooseningToFullStaysSilent10752(t *testing.T) {
+	oldCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	oldCfg.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"bgp"}
+	newCfg := tighteningScopeCfg(t, []string{"any-service"}, []string{"ssh"})
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		netip.MustParseAddr("172.16.50.8"): kept10752(1,
+			[]string{"tcp 172.16.50.8:2222→203.0.113.7:40000"}, 1,
+			[]string{"tcp 172.16.50.8:179→203.0.113.7:40001"}),
+	})
+	if resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg); resp != newCfg {
+		t.Fatalf("loosening to full-admit must stay silent, got %v", resp.Warnings)
 	}
 }
 
