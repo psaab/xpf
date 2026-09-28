@@ -165,8 +165,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return e
 		}},
 		{"interface-naming", func(context.Context) error {
-			d.setupInterfaceNaming()
-			return nil
+			// #10751/B2: a barrier-gate refusal aborts startup before any
+			// link activation; systemd backoff retries until protection
+			// is available. Bootstrap lifeline naming never refuses.
+			return d.setupInterfaceNaming()
 		}},
 		{"manager-init", func(context.Context) error {
 			return d.initManagers(configFailClosed)

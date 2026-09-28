@@ -1,14 +1,18 @@
 package daemon
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/networkd"
 	xnft "github.com/psaab/xpf/pkg/nftables"
+	"github.com/psaab/xpf/pkg/vrrp"
 	"github.com/vishvananda/netlink"
 )
 
@@ -1208,6 +1212,85 @@ func TestEarlyInputHandoffReattestation10751(t *testing.T) {
 		}
 		if st := d.HostInboundApplied(); !st.LastApplyFailed {
 			t.Fatalf("applied state = %+v, want failure recorded", st)
+		}
+	})
+}
+
+func TestEarlyInputRefusalAbortsActivationBoundary10751(t *testing.T) {
+	origInstaller, origProbe := nftInstaller, nftProbeAvailable
+	t.Cleanup(func() { nftInstaller, nftProbeAvailable = origInstaller, origProbe })
+	refuseInstaller := func() {
+		nftInstaller = &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
+			earlyInputBarrierLifelineInstall: func([]string) error {
+				return errors.New("guard install failed")
+			},
+		}
+		nftProbeAvailable = func() error { return nil }
+	}
+
+	t.Run("startup naming refusal aborts with no link ops", func(t *testing.T) {
+		refuseInstaller()
+		var linkOps []string
+		oldByName, oldDown, oldName, oldUp := nlLinkByName, nlLinkSetDown, nlLinkSetName, nlLinkSetUp
+		t.Cleanup(func() {
+			nlLinkByName, nlLinkSetDown, nlLinkSetName, nlLinkSetUp = oldByName, oldDown, oldName, oldUp
+		})
+		nlLinkByName = func(name string) (netlink.Link, error) {
+			linkOps = append(linkOps, "byname:"+name)
+			return nil, errors.New("no links in refusal test")
+		}
+		nlLinkSetDown = func(netlink.Link) error { linkOps = append(linkOps, "down"); return nil }
+		nlLinkSetName = func(netlink.Link, string) error { linkOps = append(linkOps, "rename"); return nil }
+		nlLinkSetUp = func(netlink.Link) error { linkOps = append(linkOps, "up"); return nil }
+		d := &Daemon{store: newConfigStore(t, filepath.Join(t.TempDir(), "config.db"))}
+		err := d.setupInterfaceNaming()
+		if !errors.Is(err, errEarlyInputProtectionRefused) {
+			t.Fatalf("setupInterfaceNaming error = %v, want barrier refusal sentinel", err)
+		}
+		if len(linkOps) != 0 {
+			t.Fatalf("link operations after refusal = %v, want none", linkOps)
+		}
+	})
+
+	t.Run("config apply aborts before reconcile on refusal", func(t *testing.T) {
+		installFakeNetworkctl(t)
+		refuseInstaller()
+		tailCalled := false
+		if fake, ok := nftInstaller.(*fakeNftInstaller); ok {
+			fake.hostInbound = func(xnft.HostInboundSpec) error { tailCalled = true; return nil }
+			fake.lo0 = func(xnft.Lo0FilterSpec) error { tailCalled = true; return nil }
+		}
+		dp := &runtimeOnlyApplyTestDP{}
+		d := &Daemon{
+			networkd: networkd.NewInDir(t.TempDir()),
+			store:    newConfigStore(t, filepath.Join(t.TempDir(), "config.db")),
+			vrrpMgr:  vrrp.NewManager(),
+			opts:     Options{NoDataplane: true},
+		}
+		d.setDataplane(dp)
+		cfg := &config.Config{}
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"reth0": {Name: "reth0", Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0, Addresses: []string{"10.7.7.1/24"}},
+			}},
+		}
+		cfg.Security.Zones = map[string]*config.ZoneConfig{
+			"trust": {
+				Name:               "trust",
+				Interfaces:         []string{"reth0.0"},
+				HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}},
+			},
+		}
+		err := d.applyConfigLocked(context.Background(), cfg)
+		if err == nil || !strings.Contains(err.Error(), "early host-input guard") {
+			t.Fatalf("apply error = %v, want pre-apply guard refusal", err)
+		}
+		if tailCalled {
+			t.Fatal("host-inbound/lo0 tail ran after a pre-apply refusal")
+		}
+		if dp.applyCalls != 0 {
+			t.Fatalf("dataplane apply ran %d times after refusal, want 0", dp.applyCalls)
 		}
 	})
 }

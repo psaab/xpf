@@ -230,3 +230,9 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config) error {
 	}
 	return errors.New("early barrier missing at handoff; guard reinstalled, handoff refused")
 }
+
+// errEarlyInputProtectionRefused marks an activation refusal: the early
+// barrier is known-absent and cannot be reinstalled while nftables is
+// usable. Callers match it with errors.Is to abort link activation while
+// letting unrelated naming failures keep their historical handling.
+var errEarlyInputProtectionRefused = errors.New("early host-input barrier missing and reinstall failed")

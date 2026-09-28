@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"log/slog"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -13,7 +14,7 @@ import (
 // step-0 host tunables — all before any manager creation or dataplane load.
 // Extracted verbatim from Run()'s PHASE 2 (#4662 Increment 6); a self-contained
 // block with no crossing output, no early return, and no ordering change.
-func (d *Daemon) setupInterfaceNaming() {
+func (d *Daemon) setupInterfaceNaming() error {
 	// Enumerate PCI NICs and assign vSRX-style names (fxp0, em0, ge-X-0-Y)
 	// before any manager creation or BPF load.
 	if !d.opts.NoDataplane {
@@ -89,6 +90,13 @@ func (d *Daemon) setupInterfaceNaming() {
 			// (no device-map) is bit-identical to pre-#1956.
 			if err := applyStartupNamingPolicy(d.store.ActiveConfig(), nodeID, clusterMode,
 				userspaceWorkers, rssEnabled, rssAllowed, d.resolveProtectedInterfaces()); err != nil {
+				// #10751/B2: a barrier-gate refusal aborts startup before
+				// any link activation (the phase returns this error and
+				// managers/dataplane never start). Other naming failures
+				// keep the historical warn-and-continue.
+				if errors.Is(err, errEarlyInputProtectionRefused) {
+					return err
+				}
 				// Log stays generic: helper already selected device-map vs
 				// positional; callers care only that startup naming failed.
 				slog.Warn("interface naming failed", "err", err)
@@ -107,6 +115,7 @@ func (d *Daemon) setupInterfaceNaming() {
 				coalesceExplicit, coalesceEnable, coalesceRX, coalesceTX, rssAllowed)
 		}
 	}
+	return nil
 }
 
 // namingParamsFromConfig derives the startup-naming inputs from a config: the

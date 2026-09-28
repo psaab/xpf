@@ -106,7 +106,7 @@ func applyStartupNamingPolicy(cfg *config.Config, nodeID int, clusterMode bool,
 	// link-locals reachable before the first host-inbound apply; the unit
 	// Requires edge covers systemd boots, this gate covers direct starts.
 	if !ensureEarlyInputProtectionForNaming(cfg) {
-		return errors.New("refusing interface naming: early host-input barrier missing and reinstall failed")
+		return fmt.Errorf("refusing interface naming: %w", errEarlyInputProtectionRefused)
 	}
 
 	if deviceMapNamingActive(cfg) {

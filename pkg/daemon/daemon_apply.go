@@ -416,6 +416,17 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 			"err", err)
 	}
 
+	// #10751/B2: converge the pre-handoff guard before ANY link-affecting
+	// mutation in this apply (bootstrap-exit/config-arrival renames, VRF,
+	// interface/bond reconcile, dataplane arm, tail). A refusal aborts the
+	// apply here so no data link activates without protection. Placed after
+	// the SNMP/management reconciles (credential revocation must run even
+	// on early-abort applies) and before everything that touches links.
+	// Post-handoff this is a no-op atomic check.
+	if err := d.requireEarlyInputProtectionPreApply(cfg); err != nil {
+		return err
+	}
+
 	// #1922 Item 2 bootstrap exit: the FIRST apply of a non-empty config
 	// (an interface-claiming confirmed commit, or a cluster SyncApply from
 	// the primary) leaves bootstrap mode and runs the one-time startup
