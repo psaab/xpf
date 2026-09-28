@@ -10,6 +10,8 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/dataplane"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 func isolateHandoffFlag(t *testing.T) {
@@ -168,4 +170,126 @@ func TestReconcileHandoffAtBoot10769(t *testing.T) {
 			t.Fatalf("unrepaired dirty flag must be kept: %v", err)
 		}
 	})
+}
+
+// resetHelperDP simulates a userspace dataplane whose helper writes its
+// final state (plus an orphan temp sibling, exact writer shape) when
+// stopped — the write the post-wipe sweep must catch and verify.
+type resetHelperDP struct {
+	dataplane.RuntimeDataPlane
+
+	stateFile string
+	stops     int
+}
+
+func (d *resetHelperDP) Start(context.Context) error { return nil }
+func (d *resetHelperDP) Close() error                { return nil }
+func (d *resetHelperDP) Teardown() error             { return nil }
+func (d *resetHelperDP) StopHelperForReset() {
+	d.stops++
+	if d.stateFile == "" {
+		return
+	}
+	// Best-effort final write: sweep-failure cells point stateFile at an
+	// unwritable path on purpose, and the helper's own write error is not
+	// what they assert.
+	_ = os.MkdirAll(filepath.Dir(d.stateFile), 0o700)
+	_ = os.WriteFile(d.stateFile, []byte("final snapshot"), 0o600)
+	base := filepath.Base(d.stateFile)
+	_ = os.WriteFile(filepath.Join(filepath.Dir(d.stateFile), base+".1_1.1.tmp"), []byte("orphan temp"), 0o600)
+}
+
+// The reset stop must keep matching the concrete userspace manager: a
+// signature drift that silently disables the optional-interface assertion
+// fails the build here instead of skipping the helper stop.
+var _ helperResetStopper = (*dpuserspace.Manager)(nil)
+
+func TestFactoryResetStopsSweepsAndDisarmsHelper10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
+	v4, v6 := withTempTransitForwardSysctls(t, "1")
+	withApplianceMarker10733(t, true)
+	fence := withBarrierRecorder(t)
+	root := t.TempDir()
+	stateFile := filepath.Join(root, "run", "xpf", "userspace-dp.json")
+	store := handoffTestStore(t)
+	commitUserspaceStateFile(t, store, stateFile)
+	stub := &resetHelperDP{stateFile: stateFile}
+	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1)}
+	d.setDataplane(stub)
+	d.dataplaneArmed.Store(true)
+	if err := d.factoryReset(context.Background(), func() error { return nil }); err != nil {
+		t.Fatalf("factoryReset: %v", err)
+	}
+	if stub.stops != 1 {
+		t.Fatalf("helper stops = %d, want exactly one pre-success stop", stub.stops)
+	}
+	if _, err := os.Lstat(stateFile); !os.IsNotExist(err) {
+		t.Fatalf("helper state survived post-stop sweep: %v", err)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(stateFile)); len(entries) != 0 {
+		t.Fatalf("helper temp siblings survived: %v", entries)
+	}
+	if d.dataplaneArmed.Load() {
+		t.Fatal("dataplane must be disarmed after a successful wipe")
+	}
+	if got := lastBarrierCall(fence); got != "install" {
+		t.Fatalf("barrier call = %q, want install", got)
+	}
+	assertTransitForwarding(t, v4, v6, "0", "after a successful wipe")
+	if _, _, present, _ := configstore.ReadResetHandoff(); present {
+		t.Fatal("clean reset must not mark the handoff dirty")
+	}
+}
+
+func TestFactoryResetSkipsHelperStopOnWipeFailure10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
+	v4, v6 := withTempTransitForwardSysctls(t, "1")
+	withApplianceMarker10733(t, true)
+	fence := withBarrierRecorder(t)
+	stub := &resetHelperDP{}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	d.setDataplane(stub)
+	d.dataplaneArmed.Store(true)
+	wipeErr := errors.New("wipe failed")
+	if err := d.factoryReset(context.Background(), func() error { return wipeErr }); !errors.Is(err, wipeErr) {
+		t.Fatalf("factoryReset error = %v, want %v", err, wipeErr)
+	}
+	if stub.stops != 0 {
+		t.Fatal("failed wipe must not stop the helper (box stays serving)")
+	}
+	if !d.dataplaneArmed.Load() {
+		t.Fatal("failed wipe must not disarm transit")
+	}
+	if got := lastBarrierCall(fence); got != "" {
+		t.Fatalf("barrier call = %q, want none on wipe failure", got)
+	}
+	assertTransitForwarding(t, v4, v6, "1", "after a failed wipe")
+}
+
+func TestFactoryResetMarksHandoffDirtyOnSweepFailure10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := handoffTestStore(t)
+	commitUserspaceStateFile(t, store, filepath.Join(blocker, "userspace-dp.json"))
+	stub := &resetHelperDP{}
+	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1)}
+	d.setDataplane(stub)
+	if err := d.factoryReset(context.Background(), func() error { return nil }); err == nil {
+		t.Fatal("sweep failure must fail the reset")
+	}
+	if _, dirty, present, _ := configstore.ReadResetHandoff(); !present || dirty == "" {
+		t.Fatalf("sweep failure must mark the handoff dirty: present=%v dirty=%q", present, dirty)
+	}
+	if stub.stops != 1 {
+		t.Fatal("helper stop precedes the sweep and must still have run")
+	}
 }

@@ -80,13 +80,54 @@ var schedulePowerAction = func(systemctlArg string) {
 // scheduled ONLY on a fully-successful wipe (never on a fail-closed partial
 // wipe). The daemon has already entered the terminal reset generation (see
 // ZeroizeFn), so the ~1s grace cannot re-render anything.
+
+// Reset stop-verification seams. Production stops xpfd after the grace,
+// then polls until the unit is inactive; tests stub the timing, the unit
+// runner, and the active probe to drive the monitor synchronously.
+var (
+	zeroizeStopGrace        = time.Second
+	zeroizeStopVerifyBudget = 30 * time.Second
+	zeroizeStopVerifyPoll   = time.Second
+	zeroizeStopDaemonUnit   = func() error {
+		// context.Background(): a confirmed factory reset must not be cancelled
+		// by client disconnect.
+		return runTimeout(context.Background(), "systemctl", "stop", "xpfd")
+	}
+	zeroizeDaemonUnitActive = func() bool {
+		_, err := combinedOutputTimeoutUnlimited(context.Background(), "systemctl", "is-active", "--quiet", "xpfd")
+		return err == nil
+	}
+)
+
 var scheduleStopDaemon = func() {
 	go func() {
-		time.Sleep(1 * time.Second)
-		// context.Background(): a confirmed factory reset must not be cancelled
-		// by client disconnect. Error ignored (mirrors schedulePowerAction).
-		runTimeout(context.Background(), "systemctl", "stop", "xpfd")
+		if err := resetStopMonitor(); err != nil {
+			slog.Error("factory reset: stop verification failed", "err", err)
+		}
 	}()
+}
+
+// resetStopMonitor stops xpfd after the grace and verifies the unit went
+// inactive. A stop that cannot be verified leaves the daemon serving
+// pre-wipe in-memory state behind a clean receipt with the post-stop
+// helper sweep never run, so it marks the handoff dirty (gating N+1
+// provisioning until a clean reset) instead of failing silently.
+func resetStopMonitor() error {
+	time.Sleep(zeroizeStopGrace)
+	stopErr := zeroizeStopDaemonUnit()
+	deadline := time.Now().Add(zeroizeStopVerifyBudget)
+	for zeroizeDaemonUnitActive() && time.Now().Before(deadline) {
+		time.Sleep(zeroizeStopVerifyPoll)
+	}
+	if stopErr == nil && !zeroizeDaemonUnitActive() {
+		return nil
+	}
+	reason := "xpfd still active after reset stop"
+	if stopErr != nil {
+		reason = fmt.Sprintf("xpfd stop failed: %v", stopErr)
+	}
+	slog.Error("factory reset: daemon stop unverified; marking reset handoff dirty", "reason", reason)
+	return configstore.MarkResetHandoffDirty(reason)
 }
 
 // zeroizeConfigRoot resolves the CONFIGURED config root the factory-reset wipe

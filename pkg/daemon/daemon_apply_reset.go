@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/ddns"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 	"github.com/psaab/xpf/pkg/fsatomic"
@@ -299,6 +301,23 @@ func eraseKeaLeasesForReset() error {
 	return errors.Join(errs...)
 }
 
+// helperResetStopper is implemented by a dataplane runtime with a helper
+// process to stop before reset verification. An OPTIONAL interface like
+// controlShutdownBounder (only the userspace backend has a helper), with a
+// compile-time assertion in reset_handoff_10769_test.go so a signature drift
+// that silently disables the stop fails the build.
+type helperResetStopper interface{ StopHelperForReset() }
+
+// markResetHandoffDirtyQuiet records post-success residue durably, logging
+// when even the flag write fails (nothing else can be done: the wipe
+// already reported its own outcome and the process is stopping).
+func markResetHandoffDirtyQuiet(reason string) {
+	slog.Error("factory reset: residue remains; marking reset handoff dirty", "reason", reason)
+	if err := configstore.MarkResetHandoffDirty(reason); err != nil {
+		slog.Error("factory reset: cannot mark reset handoff dirty", "err", err)
+	}
+}
+
 // factoryReset runs a gRPC-initiated zeroize under the SAME global writer gate
 // (d.applySem) that commit / apply / HA-sync serialize on, then enters the
 // terminal reset generation so no concurrent or subsequent config writer can
@@ -437,8 +456,34 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	var verifyErr error
 	if wipeErr == nil {
 		wipeSucceeded = true
-		verifyErr = verifyKeaLeasesErasedForReset()
-		if verifyErr != nil {
+		// The config is gone: stop serving the prior tenant at once rather
+		// than until the process stop ~1s later. Kernel transit is disarmed
+		// (fail-closed fence + sysctls, mirroring shutdown order); a live
+		// userspace helper is stopped so its final state write lands now,
+		// while the fence is still held, and is swept and verified below
+		// before the RPC can report success.
+		d.markDataplaneNotArmed("reset", "factory reset wiped config: closing transit before daemon stop")
+		rt := d.dataplane()
+		if rt != nil {
+			if hs, ok := rt.(helperResetStopper); ok {
+				hs.StopHelperForReset()
+			}
+		}
+		var cfg *config.Config
+		if d.store != nil {
+			cfg = d.store.ActiveConfig()
+		}
+		// Sweep only when this process manages (or may manage) a helper:
+		// no published dataplane and no config means no writer could have
+		// produced helper state. Besides scoping the work, this keeps
+		// config-less fixtures off the production default path.
+		if rt != nil || cfg != nil {
+			if serr := sweepHelperStateVerified(dpuserspace.StateFilePathForConfig(cfg)); serr != nil {
+				verifyErr = errors.Join(verifyErr, serr)
+				markResetHandoffDirtyQuiet("helper state sweep failed: " + serr.Error())
+			}
+		}
+		if kerr := verifyKeaLeasesErasedForReset(); kerr != nil {
 			// The wipe already cleared the pending markers, so a bare
 			// failure here would strand reappeared leases with no boot
 			// gate and a wiped config. Re-erase under the still-held
@@ -446,10 +491,15 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 			// (a reappearance is a fence-escaper bug signal, never a
 			// clean outcome) but every leg stays idempotent, so a retry
 			// — or a reboot into the day-0 path — converges cleanly.
+			// Unrepaired residue marks the handoff dirty (never silent).
 			if rerr := eraseKeaLeasesForReset(); rerr != nil {
-				verifyErr = errors.Join(verifyErr, rerr)
+				verifyErr = errors.Join(verifyErr, kerr, rerr)
+				markResetHandoffDirtyQuiet("kea lease re-erase failed: " + rerr.Error())
 			} else if rerr := verifyKeaLeasesErasedForReset(); rerr != nil {
-				verifyErr = errors.Join(verifyErr, rerr)
+				verifyErr = errors.Join(verifyErr, kerr, rerr)
+				markResetHandoffDirtyQuiet("kea leases reappeared after re-erase: " + rerr.Error())
+			} else {
+				verifyErr = errors.Join(verifyErr, kerr)
 			}
 		}
 	}

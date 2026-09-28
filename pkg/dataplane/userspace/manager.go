@@ -958,13 +958,26 @@ func (m *Manager) Close() error {
 	m.stopLocked()
 	return m.bpfShim.Close()
 }
-
 func (m *Manager) Teardown() error {
 	m.cutInFlightControlIO()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopLocked()
 	return m.bpfShim.Teardown()
+}
+
+// StopHelperForReset stops the helper process without releasing BPF handles,
+// for factory reset after a successful wipe (#10769 d05-F6): the helper's
+// final state write must land before the reset sweeps and verifies its
+// output, and the RPC success must not precede that verification. Unlike
+// Close/Teardown this leaves BPF state alone (the process stop that follows
+// still runs the full teardown, whose stopLocked is a no-op once proc is
+// nil). Idempotent: stopping an already-stopped helper is a no-op.
+func (m *Manager) StopHelperForReset() {
+	m.cutInFlightControlIO()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopLocked()
 }
 
 // SetDeferWorkers tells the manager to skip worker startup during the next

@@ -160,6 +160,8 @@ var declaredUnboundedForks = []unboundedForkExemption{
 		"schedulePowerAction / scheduleStopDaemon: a CONFIRMED reboot/halt/poweroff " +
 			"or zeroize daemon-stop must not be refused because the diagnostic " +
 			"budget is busy; both are behind the maintenance authz tier"},
+	{"server_diag_system_action.go", "<package-scope>", "combinedOutputTimeoutUnlimited",
+		"reset stop verification (is-active poll): confirming the post-reset daemon stop must not be refused by diagnostic backpressure"},
 	{"server_diag_system_action.go", "SystemAction", "combinedOutputTimeoutUnlimited",
 		"ip -4/-6 neigh flush: state-changing operator actions behind PermControl, " +
 			"not diagnostics — cheap, and refusing them under diagnostic load is a regression"},

@@ -19,6 +19,11 @@ import (
 // afterwards is an error: the caller marks the reset handoff dirty rather
 // than reporting clean.
 func sweepHelperStateVerified(path string) error {
+	// A missing state directory means no helper state was ever written
+	// here: nothing to remove, verify, or sync.
+	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	var errs []error
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("remove helper state file %s: %w", path, err))

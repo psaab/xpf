@@ -39,6 +39,14 @@ func TestResetHandoffRoundTrip(t *testing.T) {
 	if _, err := os.Lstat(path); err != nil {
 		t.Fatalf("flag must exist: %v", err)
 	}
+	// Multi-line reasons (joined errors) must flatten, never corrupt.
+	if err := MarkResetHandoffDirty("first\nsecond"); err != nil {
+		t.Fatal(err)
+	}
+	_, gotDirty, _, err = ReadResetHandoff()
+	if err != nil || gotDirty != "first second" {
+		t.Fatalf("flattened dirty = %q, %v", gotDirty, err)
+	}
 	if err := ClearResetHandoff(); err != nil {
 		t.Fatalf("clear: %v", err)
 	}

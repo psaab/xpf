@@ -42,17 +42,19 @@ func CurrentBootID() (string, error) {
 }
 
 // WriteResetHandoff durably records a completed reset for boot ID with the
-// given dirty reason ("" when clean).
+// given dirty reason ("" when clean). The reason is flattened to one line:
+// joined errors carry newlines that would otherwise corrupt the line format
+// and fail every later read closed.
 func WriteResetHandoff(bootID, dirty string) error {
 	var b strings.Builder
-	b.WriteString("boot_id=" + bootID + "\n")
-	b.WriteString("dirty=" + dirty + "\n")
+	b.WriteString("boot_id=" + strings.TrimSpace(bootID) + "\n")
+	flat := strings.Join(strings.Fields(dirty), " ")
+	b.WriteString("dirty=" + flat + "\n")
 	if err := fsatomic.WriteFileDurable(ResetHandoffPath, []byte(b.String()), 0o644); err != nil {
 		return fmt.Errorf("write reset handoff flag: %w", err)
 	}
 	return nil
 }
-
 // ReadResetHandoff parses the handoff flag. present is false when no flag
 // exists. A corrupt flag is returned as an error (fail closed).
 func ReadResetHandoff() (bootID, dirty string, present bool, err error) {
