@@ -24,7 +24,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	oldPasswdBackups, oldHostKeys := zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath
 	oldDropins, oldVarLog := zeroizeManagedDropins, zeroizeVarLogDir
 	oldHostname, oldResolv, oldIPsec := zeroizeHostnamePath, zeroizeResolvConfPath, zeroizeIPsecStatePath
-	oldKeaPaths, oldStopKea, oldVerifyKea := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped
+	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir
 	t.Cleanup(func() {
 		zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory = oldMachine, oldSSH, oldRootSSH, oldHistory
 		zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
@@ -34,7 +34,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 		zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath = oldPasswdBackups, oldHostKeys
 		zeroizeManagedDropins, zeroizeVarLogDir = oldDropins, oldVarLog
 		zeroizeHostnamePath, zeroizeResolvConfPath, zeroizeIPsecStatePath = oldHostname, oldResolv, oldIPsec
-		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped = oldKeaPaths, oldStopKea, oldVerifyKea
+		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups
 	})
 
 	zeroizeMachineIDPath = filepath.Join(root, "etc", "machine-id")
@@ -73,6 +73,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	}
 	zeroizeStopKeaUnits = func() error { return nil }
 	zeroizeVerifyKeaStopped = func() error { return nil }
+	zeroizeVarBackupsDir = filepath.Join(root, "var", "backups")
 	zeroizeVarLogDir = filepath.Join(root, "var", "log")
 }
 
@@ -537,5 +538,59 @@ func TestPerformZeroizeAbortsWhenKeaVerifyFails10769(t *testing.T) {
 		if _, err := os.Lstat(path); err != nil {
 			t.Errorf("Kea verify failure must preserve %s: %v", path, err)
 		}
+	}
+}
+
+func TestPerformZeroizeErasesRecreatedAccountBackups10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+
+	provDir := filepath.Join(root, "provisioned-users")
+	sudoersDir := filepath.Join(root, "sudoers.d")
+	homeBase := filepath.Join(root, "home")
+	passwdPath := filepath.Join(root, "passwd")
+	mustWriteFile(t, passwdPath, []byte(
+		"root:x:0:0:root:/root:/bin/bash\n"+
+			"alice:x:1001:1001:alice:/home/alice:/bin/bash\n"))
+	mustWriteFile(t, filepath.Join(provDir, "alice"), []byte("1001"))
+	mustWriteFile(t, filepath.Join(homeBase, "alice", ".ssh", "authorized_keys"), []byte("ssh-ed25519 AAAA alice\n"))
+	deleted := setZeroizeLoginPaths(t, provDir, sudoersDir, homeBase, passwdPath)
+	// Simulate the shadow-tools backup contract (man shadow: /etc/shadow-
+	// is the backup of the password database; Debian also keeps
+	// /var/backups/shadow.bak): every userdel recreates these with
+	// pre-modification account data. The wipe's backup sweep must run
+	// after this teardown, not in the early seal legs.
+	innerUserdel := zeroizeUserdel
+	zeroizeUserdel = func(name string) ([]byte, error) {
+		out, err := innerUserdel(name)
+		for _, path := range zeroizePasswdBackupPaths {
+			mustWriteFile(t, path, []byte("pre-modification account data"))
+		}
+		mustWriteFile(t, filepath.Join(zeroizeVarBackupsDir, "shadow.bak"), []byte("pre-modification shadow"))
+		mustWriteFile(t, filepath.Join(zeroizeVarBackupsDir, "passwd.bak"), []byte("pre-modification passwd"))
+		return out, err
+	}
+	bystander := filepath.Join(zeroizeVarBackupsDir, "unrelated.txt")
+	mustWriteFile(t, bystander, []byte("not an account backup"))
+
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	if len(*deleted) != 1 || (*deleted)[0] != "alice" {
+		t.Fatalf("userdel invoked for %v, want exactly [alice]", *deleted)
+	}
+	for _, path := range append(append([]string{}, zeroizePasswdBackupPaths...),
+		filepath.Join(zeroizeVarBackupsDir, "shadow.bak"),
+		filepath.Join(zeroizeVarBackupsDir, "passwd.bak")) {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("recreated account backup %s survived: %v", path, err)
+		}
+	}
+	if _, err := os.Lstat(bystander); err != nil {
+		t.Errorf("non-backup bystander %s must survive: %v", bystander, err)
 	}
 }

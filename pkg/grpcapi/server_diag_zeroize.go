@@ -1585,6 +1585,15 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 		legErrs = append(legErrs, e)
 	}
 
+	// Account-database backups (#10769 d05-F6): shadow tools rewrite
+	// passwd-/shadow-/group-/gshadow- and /var/backups/shadow.bak on every
+	// userdel/passwd invocation above, so this sweep runs AFTER the account
+	// teardown — an early-seal sweep would be re-created with
+	// pre-modification account data. Security-critical like the teardown.
+	if e := zeroizeEraseAccountBackups(); e != nil {
+		legErrs = append(legErrs, e)
+	}
+
 	// Local config archive (#5186): /var/lib/xpf/archive holds
 	// config-<ts>.<seq>.conf snapshots — 0600 copies of the full committed
 	// config TEXT WITH cleartext secret leaves (IKE PSK, WireGuard keys, SNMP

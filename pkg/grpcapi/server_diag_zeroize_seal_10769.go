@@ -51,6 +51,7 @@ var (
 	zeroizeKeaLeasePaths  = []string{dhcpserver.DefaultKeaLeaseFile4Path, dhcpserver.DefaultKeaLeaseFile6Path}
 	zeroizeStopKeaUnits   = stopKeaUnits
 	zeroizeVerifyKeaStopped = verifyKeaUnitsStopped
+	zeroizeVarBackupsDir    = "/var/backups"
 )
 
 var (
@@ -112,10 +113,10 @@ func zeroizeImageSealResidue() error {
 		fail(zeroizeRemovePath(path))
 	}
 
-	for _, path := range zeroizePasswdBackupPaths {
-		fail(zeroizeRemovePath(path))
-	}
-
+	// NOTE: the passwd-/shadow-/group-/gshadow- backups are NOT erased here.
+	// Shadow tools recreate them on every userdel/passwd invocation, and the
+	// login-account teardown runs those commands after this function returns.
+	// zeroizeEraseAccountBackups runs after that teardown instead.
 	// Package lists and downloaded archives are caches and can be recreated
 	// by apt. Temporary directories and generic /etc backup files are not
 	// swept: unrelated live services may hold temp files open, and those
@@ -196,6 +197,51 @@ func zeroizeStopKeaAndEraseLeases() error {
 		}
 	}
 	return nil
+}
+
+// zeroizeShadowBackupNames are the Debian shadow-tools backups in
+// /var/backups, rewritten on every passwd/userdel invocation.
+var zeroizeShadowBackupNames = []string{"passwd.bak", "group.bak", "shadow.bak", "gshadow.bak"}
+
+// zeroizeEraseAccountBackups removes the account-database backups AFTER the
+// login-account teardown that recreates them (#10769 d05-F6): the /etc
+// passwd-/shadow-/group-/gshadow- files plus the /var/backups shadow set and
+// any editor tilde-backup beside them. Running this in the early seal legs
+// would let userdel/passwd re-create pre-modification backups afterwards.
+func zeroizeEraseAccountBackups() error {
+	var errs []error
+	for _, path := range zeroizePasswdBackupPaths {
+		if err := zeroizeRemovePath(path); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	entries, err := os.ReadDir(zeroizeVarBackupsDir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("zeroize: read backup directory %s: %w", zeroizeVarBackupsDir, err))
+		}
+		return errors.Join(errs...)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() {
+			continue
+		}
+		shadow := false
+		for _, want := range zeroizeShadowBackupNames {
+			if name == want {
+				shadow = true
+				break
+			}
+		}
+		if !shadow && !strings.HasSuffix(name, "~") {
+			continue
+		}
+		if err := zeroizeRemovePath(filepath.Join(zeroizeVarBackupsDir, name)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // zeroizeCheckDDNSStateEmpty is the preflight used before beginZeroize writes
