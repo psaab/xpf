@@ -1259,3 +1259,223 @@ func TestPerformZeroizeFailsClosedOnImmutableNetworkdPlant10769(t *testing.T) {
 		t.Fatalf("wipe error must name the networkd leg, got %v", err)
 	}
 }
+
+// RED on revert: dropping a selective loop's unconditional barrier lets a
+// retry that finds zero matches complete the marker over undurable unlinks.
+// Each case fails the first attempt's barrier after the unlink lands, then
+// requires the empty retry to sync the affected directory pre-marker. Only
+// the case's entry is seeded and no other leg references the directory, so
+// the sync is attributable to the fixed loop. (The ssh, known-hosts, and
+// backup sweeps share directories with helper-synced legs and are covered
+// at leg level below instead.)
+func TestPerformZeroizeSyncsSelectiveLoopsOnRetry10769(t *testing.T) {
+	cases := []struct {
+		name    string
+		seed    func(t *testing.T) string
+		syncDir func() string
+	}{
+		{"shadow backups",
+			func(t *testing.T) string {
+				p := filepath.Join(zeroizeVarBackupsDir, "shadow.bak")
+				mustWriteFile(t, p, []byte("backup"))
+				return p
+			},
+			func() string { return zeroizeVarBackupsDir }},
+		{"shm entries",
+			func(t *testing.T) string {
+				p := filepath.Join(zeroizeShmDir, "xpf-test-seg")
+				mustWriteFile(t, p, []byte("segment"))
+				return p
+			},
+			func() string { return zeroizeShmDir }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			hermeticWipe10100(t, root)
+			configDir := filepath.Join(root, "etc-xpf")
+			mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+			mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+			mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+			seeded := tc.seed(t)
+			orig := zeroizeSyncDir
+			t.Cleanup(func() { zeroizeSyncDir = orig })
+			boom := fmt.Errorf("injected %s barrier failure", tc.name)
+			target := filepath.Clean(tc.syncDir())
+			failBarrier := true
+			zeroizeSyncDir = func(dir string) error {
+				if failBarrier && filepath.Clean(dir) == target {
+					return boom
+				}
+				return orig(dir)
+			}
+			if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); !errors.Is(err, boom) {
+				t.Fatalf("first attempt must fail on the injected barrier: %v", err)
+			}
+			if _, err := os.Lstat(seeded); !os.IsNotExist(err) {
+				t.Fatalf("seeded entry should be unlinked even though its barrier failed: %v", err)
+			}
+			if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
+				t.Fatalf("failed wipe must retain the pending marker: %v", err)
+			}
+			failBarrier = false
+			var retrySynced []string
+			zeroizeSyncDir = func(dir string) error {
+				retrySynced = append(retrySynced, filepath.Clean(dir))
+				return orig(dir)
+			}
+			if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+				t.Fatalf("retry must converge: %v", err)
+			}
+			found := false
+			for _, dir := range retrySynced {
+				if dir == target {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("empty retry never synced %s (synced=%v)", target, retrySynced)
+			}
+			if _, err := os.Lstat(configstore.FactoryResetPendingPath); !os.IsNotExist(err) {
+				t.Fatalf("converged retry must clear the pending marker: %v", err)
+			}
+		})
+	}
+}
+
+// The backup sweeps share their directories with removal legs that sync via
+// the common helper, so wipe-level attribution is impossible: exercise the
+// retry barrier at leg level on a private dir instead.
+func TestBackupSweepsSyncEmptyDirOnRetry10769(t *testing.T) {
+	orig := zeroizeSyncDir
+	t.Cleanup(func() { zeroizeSyncDir = orig })
+	boom := errors.New("injected backup barrier failure")
+	t.Run("service sweep", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWriteFile(t, filepath.Join(dir, "xpf.conf~"), []byte("backup"))
+		owned := func(stem string) bool { return stem == "xpf.conf" }
+		failBarrier := true
+		zeroizeSyncDir = func(d string) error {
+			if failBarrier && filepath.Clean(d) == filepath.Clean(dir) {
+				return boom
+			}
+			return orig(d)
+		}
+		if err := zeroizeSweepOwnedBackups(dir, owned); !errors.Is(err, boom) {
+			t.Fatalf("first sweep must fail on the injected barrier: %v", err)
+		}
+		failBarrier = false
+		synced := false
+		zeroizeSyncDir = func(d string) error {
+			if filepath.Clean(d) == filepath.Clean(dir) {
+				synced = true
+			}
+			return orig(d)
+		}
+		if err := zeroizeSweepOwnedBackups(dir, owned); err != nil {
+			t.Fatalf("empty retry must converge: %v", err)
+		}
+		if !synced {
+			t.Fatal("empty retry never synced the swept directory")
+		}
+	})
+	t.Run("etc sweep", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWriteFile(t, filepath.Join(dir, "hosts~"), []byte("backup"))
+		failBarrier := true
+		zeroizeSyncDir = func(d string) error {
+			if failBarrier && filepath.Clean(d) == filepath.Clean(dir) {
+				return boom
+			}
+			return orig(d)
+		}
+		if err := zeroizeSweepOwnedEtcBackups(dir); !errors.Is(err, boom) {
+			t.Fatalf("first sweep must fail on the injected barrier: %v", err)
+		}
+		failBarrier = false
+		synced := false
+		zeroizeSyncDir = func(d string) error {
+			if filepath.Clean(d) == filepath.Clean(dir) {
+				synced = true
+			}
+			return orig(d)
+		}
+		if err := zeroizeSweepOwnedEtcBackups(dir); err != nil {
+			t.Fatalf("empty retry must converge: %v", err)
+		}
+		if !synced {
+			t.Fatal("empty retry never synced the swept directory")
+		}
+	})
+}
+
+// The ssh-key and known-hosts legs share /etc/ssh with helper-synced legs
+// (whose absent-path ancestor climb syncs the parent), so wipe-level
+// attribution is impossible: exercise the retry barrier at leg level on a
+// private dir instead.
+func TestIdentityLegsSyncEmptyDirOnRetry10769(t *testing.T) {
+	orig := zeroizeSyncDir
+	t.Cleanup(func() { zeroizeSyncDir = orig })
+	boom := errors.New("injected identity barrier failure")
+	t.Run("ssh host keys", func(t *testing.T) {
+		dir := t.TempDir()
+		oldSSH := zeroizeSSHHostKeyDir
+		t.Cleanup(func() { zeroizeSSHHostKeyDir = oldSSH })
+		zeroizeSSHHostKeyDir = dir
+		mustWriteFile(t, filepath.Join(dir, "ssh_host_ed25519_key"), []byte("private"))
+		failBarrier := true
+		zeroizeSyncDir = func(d string) error {
+			if failBarrier && filepath.Clean(d) == filepath.Clean(dir) {
+				return boom
+			}
+			return orig(d)
+		}
+		if err := zeroizeEraseSSHHostKeys(); !errors.Is(err, boom) {
+			t.Fatalf("first sweep must fail on the injected barrier: %v", err)
+		}
+		failBarrier = false
+		synced := false
+		zeroizeSyncDir = func(d string) error {
+			if filepath.Clean(d) == filepath.Clean(dir) {
+				synced = true
+			}
+			return orig(d)
+		}
+		if err := zeroizeEraseSSHHostKeys(); err != nil {
+			t.Fatalf("empty retry must converge: %v", err)
+		}
+		if !synced {
+			t.Fatal("empty retry never synced the key directory")
+		}
+	})
+	t.Run("known hosts", func(t *testing.T) {
+		dir := t.TempDir()
+		knownHosts := filepath.Join(dir, "ssh_known_hosts")
+		mustWriteFile(t, knownHosts, []byte("hostkey"))
+		failBarrier := true
+		zeroizeSyncDir = func(d string) error {
+			if failBarrier && filepath.Clean(d) == filepath.Clean(dir) {
+				return boom
+			}
+			return orig(d)
+		}
+		if err := zeroizeEraseKnownHosts(knownHosts); !errors.Is(err, boom) {
+			t.Fatalf("first erase must fail on the injected barrier: %v", err)
+		}
+		failBarrier = false
+		synced := false
+		zeroizeSyncDir = func(d string) error {
+			if filepath.Clean(d) == filepath.Clean(dir) {
+				synced = true
+			}
+			return orig(d)
+		}
+		if err := zeroizeEraseKnownHosts(knownHosts); err != nil {
+			t.Fatalf("absent retry must converge: %v", err)
+		}
+		if !synced {
+			t.Fatal("absent retry never synced the parent directory")
+		}
+	})
+}

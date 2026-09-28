@@ -73,6 +73,33 @@ var (
 
 const zeroizeManagedHostKeysHeader = "# Managed by xpfd — do not edit\n"
 
+// zeroizeEraseSSHHostKeys removes the sealed ssh_host_* key files. The
+// directory is synced unconditionally, even with zero matches: a prior
+// attempt may have unlinked entries but failed this barrier, and a retry
+// that skips it would let the marker complete over undurable unlinks.
+func zeroizeEraseSSHHostKeys() error {
+	entries, err := os.ReadDir(zeroizeSSHHostKeyDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var errs []error
+	if err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: read SSH host-key directory %s: %w", zeroizeSSHHostKeyDir, err))
+	} else {
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "ssh_host_") {
+				if rerr := zeroizeRemovePath(filepath.Join(zeroizeSSHHostKeyDir, entry.Name())); rerr != nil {
+					errs = append(errs, rerr)
+				}
+			}
+		}
+	}
+	if serr := zeroizeSyncDurable(zeroizeSSHHostKeyDir); serr != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync SSH host-key directory %s: %w", zeroizeSSHHostKeyDir, serr))
+	}
+	return errors.Join(errs...)
+}
+
 // zeroizeImageSealResidue removes the safely-regenerable members of the
 // image's own factory seal set. It deliberately leaves files whose deletion
 // would destroy live service state or lacks a regeneration/ownership proof;
@@ -93,16 +120,7 @@ func zeroizeImageSealResidue() error {
 	// The image seals every ssh_host_* private/public/certificate file. The
 	// first-boot xpf-day0-config unit runs ssh-keygen -A before ssh.service, so
 	// deleting these here regenerates a fresh device identity on reboot.
-	entries, err := os.ReadDir(zeroizeSSHHostKeyDir)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		fail(fmt.Errorf("zeroize: read SSH host-key directory %s: %w", zeroizeSSHHostKeyDir, err))
-	} else {
-		for _, entry := range entries {
-			if strings.HasPrefix(entry.Name(), "ssh_host_") {
-				fail(zeroizeRemovePath(filepath.Join(zeroizeSSHHostKeyDir, entry.Name())))
-			}
-		}
-	}
+	fail(zeroizeEraseSSHHostKeys())
 
 	// The sysprep ssh-userdir and bash-history operations apply to root here.
 	// Provisioned non-root homes have already been handled by the marker-aware
@@ -310,19 +328,25 @@ func zeroizeEraseAccountBackups() error {
 		}
 	}
 	entries, err := os.ReadDir(zeroizeVarBackupsDir)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("zeroize: read backup directory %s: %w", zeroizeVarBackupsDir, err))
-		}
+	if errors.Is(err, os.ErrNotExist) {
 		return errors.Join(errs...)
 	}
-	for _, entry := range entries {
-		if entry.IsDir() || !isShadowBackupEntry(entry.Name()) {
-			continue
+	if err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: read backup directory %s: %w", zeroizeVarBackupsDir, err))
+	} else {
+		for _, entry := range entries {
+			if entry.IsDir() || !isShadowBackupEntry(entry.Name()) {
+				continue
+			}
+			if err := zeroizeRemovePath(filepath.Join(zeroizeVarBackupsDir, entry.Name())); err != nil {
+				errs = append(errs, err)
+			}
 		}
-		if err := zeroizeRemovePath(filepath.Join(zeroizeVarBackupsDir, entry.Name())); err != nil {
-			errs = append(errs, err)
-		}
+	}
+	// Always sync, even with zero matches: a prior attempt may have unlinked
+	// entries but failed this barrier (retry durability).
+	if serr := zeroizeSyncDurable(zeroizeVarBackupsDir); serr != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync backup directory %s: %w", zeroizeVarBackupsDir, serr))
 	}
 	return errors.Join(errs...)
 }
@@ -434,6 +458,11 @@ func zeroizeClearShmDir(dir string) error {
 			errs = append(errs, err)
 		}
 	}
+	// Always sync an existing directory, even with zero matches: retry
+	// durability for a prior unlink whose barrier failed.
+	if err := zeroizeSyncDir(dir); err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync shm directory %s: %w", dir, err))
+	}
 	return errors.Join(errs...)
 }
 
@@ -476,6 +505,11 @@ func zeroizeSweepOwnedBackups(dir string, owned func(stem string) bool) error {
 			errs = append(errs, err)
 		}
 	}
+	// Always sync an existing directory, even with zero matches: retry
+	// durability for a prior unlink whose barrier failed.
+	if err := zeroizeSyncDir(dir); err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync backup directory %s: %w", dir, err))
+	}
 	return errors.Join(errs...)
 }
 
@@ -511,6 +545,11 @@ func zeroizeSweepOwnedEtcBackups(dir string) error {
 		if err := zeroizeRemovePath(filepath.Join(dir, entry.Name())); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	// Always sync an existing directory, even with zero matches: retry
+	// durability for a prior unlink whose barrier failed.
+	if err := zeroizeSyncDir(dir); err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync backup directory %s: %w", dir, err))
 	}
 	return errors.Join(errs...)
 }
@@ -818,6 +857,11 @@ func zeroizeLinkTargetEscapes(root, linkPath, target string) bool {
 func zeroizeEraseKnownHosts(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
+		// Retry durability: a prior attempt may have unlinked the file
+		// but failed its barrier; sync the surviving ancestor anyway.
+		if serr := zeroizeSyncDurable(filepath.Dir(path)); serr != nil {
+			return fmt.Errorf("zeroize: sync parent of absent known-hosts %s: %w", path, serr)
+		}
 		return nil
 	}
 	if err != nil {
