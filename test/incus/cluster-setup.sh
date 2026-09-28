@@ -920,11 +920,13 @@ deploy_vm() {
 	# Install systemd units
 	info "Installing systemd services on $vm..."
 	incus file push "${SCRIPT_DIR}/xpfd.service" "${rinst}/etc/systemd/system/xpfd.service"
-	# #9852: stage and start the barrier before raw xpfd; its RequiredBy=
-	# systemd-networkd.service dependency protects every subsequent reboot.
+	# #9852 / #10751: stage and start both barriers before raw xpfd; their
+	# RequiredBy= systemd-networkd.service dependencies protect every reboot.
 	incus file push "${PROJECT_ROOT}/scripts/image/xpf-transit-closed.service" "${rinst}/etc/systemd/system/xpf-transit-closed.service"
+	incus file push "${PROJECT_ROOT}/scripts/image/xpf-input-closed.service" "${rinst}/etc/systemd/system/xpf-input-closed.service"
 	incus exec "$rinst" -- systemctl daemon-reload
 	incus exec "$rinst" -- systemctl enable --now xpf-transit-closed.service
+	incus exec "$rinst" -- systemctl enable --now xpf-input-closed.service
 	incus exec "$rinst" -- systemctl enable --now xpfd
 
 	# Backstop (#2176): assert the LIVE xpfd is the binary we just pushed and the

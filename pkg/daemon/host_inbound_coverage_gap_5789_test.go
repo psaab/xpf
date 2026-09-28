@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
+	"github.com/vishvananda/netlink"
 )
 
 // #5789: hostInboundEnforced=true only proves SOME protecting table loaded at
@@ -92,6 +94,132 @@ func TestHostInboundCoverageGapFencesNewAddressAfterFailedRerender_5789(t *testi
 	}
 	if realCalls != 1 {
 		t.Errorf("step 2: expected exactly one real install attempt, got %d", realCalls)
+	}
+}
+
+// TestVRFLeaseWindowBoundedByGapAfterFailedRerender10751 is the #10751
+// BLOCKING-5 VRF-lease-window bound. VRF-enslaved unzoned DHCP units are
+// SKIPPED by the unleased backstop (their LOCAL_IN identity is the shared
+// master, where an iifname DROP would shadow addressed siblings), so their
+// only convergence is the lease-callback recompile installing destination
+// DROPs (the predicate half is pinned by
+// TestDHCPLeaseChangeRequiresRecompile_VRFEnslavedNonLifeline10751). This
+// cell pins the failure half: when that recompile's real transaction FAILS
+// (injected), the SAME apply must install the additive gap DROP for the
+// VRF lease with no new event — the window stays bounded by the apply
+// instead of stretching to the next trigger. The double failure (gap also
+// fails) is the explicitly-unbounded residual documented at the
+// gap-failure join in daemon_nft.go (no wall-clock retry owner).
+func TestVRFLeaseWindowBoundedByGapAfterFailedRerender10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+		"ge-0/0/9": {Name: "ge-0/0/9", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCP: true, DHCPv6: true}}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust": {Name: "trust", Interfaces: []string{"ge-0/0/0.0"}},
+	}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "data", Interfaces: []string{"ge-0/0/9.0"}}}
+
+	// Step 1: sibling zoned+addressed (enforcement on), VRF unit unleased.
+	var specs []xnft.HostInboundSpec
+	nftInstaller = &fakeNftInstaller{
+		hostInbound: func(spec xnft.HostInboundSpec) error { specs = append(specs, spec); return nil },
+	}
+	uni := int(netlink.SCOPE_UNIVERSE)
+	sib := scriptedSnap10751("ge-0/0/0.0", "trust", scriptedAddr10751("inet", "10.0.0.1/24", uni))
+	vrfDown := scriptedSnap10751("ge-0/0/9.0", "")
+	vrfDown.RoutingInstance = "data"
+	s1 := []dpuserspace.InterfaceSnapshot{sib, vrfDown}
+	scriptSnapshotTransition10751(t, s1, s1)
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("step 1 (install): %v", err)
+	}
+	if !d.hostInboundEnforced.Load() {
+		t.Fatal("step 1: hostInboundEnforced must be true after a successful real install")
+	}
+	if _, ok := d.hostInboundCoveredAddrs[hostInboundDropAddrKey('4', "10.0.0.1")]; !ok {
+		t.Fatalf("step 1: covered set must include 10.0.0.1, got %v", d.hostInboundCoveredAddrs)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("step 1: first apply must hand off (step 2 runs day-2, with no barrier standing behind the gap)")
+	}
+	if len(specs) != 1 {
+		t.Fatalf("step 1: real specs = %d, want 1", len(specs))
+	}
+	// No backstop covers the VRF unit: the exclusion premise this bound
+	// relies on. (An unenslaved unzoned DHCP unit WOULD appear here —
+	// R7-B pins that positive — so this assert fails if VRF disengages.)
+	for _, a := range specs[0].UnleasedV4 {
+		if a == "ge-0-0-9" {
+			t.Fatalf("step 1: VRF-enslaved ge-0/0/9.0 must be skipped by the unleased backstop, got %v", specs[0].UnleasedV4)
+		}
+	}
+	for _, a := range specs[0].UnleasedV6 {
+		if a == "ge-0-0-9" {
+			t.Fatalf("step 1: VRF-enslaved ge-0/0/9.0 must be skipped by the unleased backstop, got %v", specs[0].UnleasedV6)
+		}
+	}
+	// Positive control: the SAME unit without RI membership WOULD be
+	// backstopped — proving the skip above is caused by VRF enslavement
+	// (not by fixture shape) and the loops are non-vacuous.
+	plainCfg := *cfg
+	plainCfg.RoutingInstances = nil
+	plainV4, plainV6 := dpuserspace.BuildUnzonedDHCPUnleasedNetdevs(&plainCfg, s1)
+	if !sliceContains(plainV4, "ge-0-0-9") || !sliceContains(plainV6, "ge-0-0-9") {
+		t.Fatalf("control: unenslaved ge-0/0/9.0 must be backstopped, got %v/%v (fixture shape wrong?)", plainV4, plainV6)
+	}
+
+	// Step 2: the VRF lease lands (v4+v6) and the real rerender FAILS.
+	injected := errors.New("nftables: VRF-lease rerender failed")
+	var realCalls, gapCalls int
+	var gapSpec xnft.GapFenceSpec
+	nftInstaller = &fakeNftInstaller{
+		hostInbound: func(xnft.HostInboundSpec) error { realCalls++; return injected },
+		gapFence:    func(spec xnft.GapFenceSpec) error { gapCalls++; gapSpec = spec; return nil },
+	}
+	vrfUp := scriptedSnap10751("ge-0/0/9.0", "",
+		scriptedAddr10751("inet", "203.0.113.9/24", uni),
+		scriptedAddr10751("inet6", "2001:db8:9::9/64", uni))
+	vrfUp.RoutingInstance = "data"
+	s2 := []dpuserspace.InterfaceSnapshot{sib, vrfUp}
+	scriptSnapshotTransition10751(t, s2, s2)
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !errors.Is(err, injected) {
+		t.Fatalf("step 2: the failed rerender must surface the netlink error, got %v", err)
+	}
+	if !d.hostInboundEnforced.Load() {
+		t.Fatal("step 2: hostInboundEnforced must remain true (the retained real table is untouched)")
+	}
+	if realCalls != 1 {
+		t.Fatalf("step 2: real attempts = %d, want exactly 1 (no retry storm, no new event)", realCalls)
+	}
+	if gapCalls != 1 {
+		t.Fatalf("step 2 (VRF-LEASE-WINDOW): the VRF lease appeared and the rerender failed, but no "+
+			"additive gap fence was installed — no backstop covers VRF-enslaved units, so the lease "+
+			"is fail-open until the next trigger (gap installs=%d)", gapCalls)
+	}
+	if !sliceContains(gapSpec.UncoveredV4, "203.0.113.9") {
+		t.Errorf("gap fence must deny the VRF lease 203.0.113.9:\n%+v", gapSpec)
+	}
+	if !sliceContains(gapSpec.UncoveredV6, "2001:db8:9::9") {
+		t.Errorf("gap fence must deny the VRF lease 2001:db8:9::9:\n%+v", gapSpec)
+	}
+	if sliceContains(gapSpec.UncoveredV4, "10.0.0.1") {
+		t.Errorf("gap fence must NOT re-fence the already-covered 10.0.0.1 (retained table serves it):\n%+v", gapSpec)
+	}
+	if len(gapSpec.SharedV4) != 0 || len(gapSpec.SharedV6) != 0 {
+		t.Errorf("gap shared = %v/%v, want empty/empty (the VRF lease is nobody's lifeline-shared value: bare DROP, no exception)",
+			gapSpec.SharedV4, gapSpec.SharedV6)
+	}
+	if _, ok := d.hostInboundCoveredAddrs[hostInboundDropAddrKey('4', "203.0.113.9")]; ok {
+		t.Error("covered set must NOT include the gap-only VRF lease (retained real table does not cover it)")
+	}
+	if _, ok := d.hostInboundCoveredAddrs[hostInboundDropAddrKey('6', "2001:db8:9::9")]; ok {
+		t.Error("covered set must NOT include the gap-only VRF lease (retained real table does not cover it)")
 	}
 }
 
@@ -255,8 +383,8 @@ func TestHostInboundTeardownClearsCoverageAndGap_5789(t *testing.T) {
 // but not the other.
 func TestHostInboundGapFenceMirrorsColdBootAdmits_5789(t *testing.T) {
 	wg := []uint16{51820}
-	coldBoot := buildHostInboundFencePayload(buildAndCheckViews(t, hostInboundTestConfig()), nil, nil, wg)
-	gap := buildHostInboundGapFencePayload([]string{"172.16.50.9"}, nil, wg)
+	coldBoot := buildHostInboundFencePayload(buildAndCheckViews(t, hostInboundTestConfig()), nil, nil, wg, nil, nil)
+	gap := buildHostInboundGapFencePayload([]string{"172.16.50.9"}, nil, wg, nil, nil, nil, nil, nil)
 	for _, admit := range hostInboundFenceMandatoryAdmits(wg) {
 		if !strings.Contains(coldBoot, admit) {
 			t.Errorf("cold-boot fence missing shared admit %q", strings.TrimSpace(admit))

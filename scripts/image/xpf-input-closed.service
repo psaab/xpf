@@ -1,0 +1,94 @@
+# xpf #10751 boot host-input fence.
+#
+# Persisted systemd-networkd .network files install addresses and IPv6 link-local
+# addresses before xpfd starts. xpfd starts after network-online + FRR, and its
+# first host-inbound table is installed in the first apply tail. This separate
+# input-only unit installs a config-free inet input DROP chain before networkd
+# can bring addresses up, closing the host-listener window at cold boot.
+#
+# Keep this separate from xpf-transit-closed.service: the #9852 forward unit and
+# its xpfd command are deliberately forward-only. The early input barrier admits
+# only loopback, established/related, mandatory L3, and DHCP-client replies.
+# FRR/HA ingress and ordinary host services remain denied until xpfd atomically
+# installs host-inbound enforcement (or completes a no-enforcement teardown).
+#
+# RequiredBy=systemd-networkd.service and RequiredBy=xpfd.service are essential,
+# not merely ordering hints: a failed barrier install MUST prevent
+# systemd-networkd from bringing up any addresses AND prevent xpfd from
+# activating links directly (its renames bring links up, including v6
+# link-locals). ExecStart is deliberately bare, without systemd's '-' prefix.
+# xpfd's `input-barrier` command loads no config and takes no daemon lock.
+#
+# A privileged `nft flush ruleset` or nftables.service restart between this
+# install and the daemon's first handoff wipes the table; the daemon
+# re-attests and reinstalls pre-handoff. Post-handoff a flush also wipes the
+# real tables — treat any post-handoff flush as an operator action (same as
+# flushing host-inbound itself) and re-apply to converge.
+#
+# ExecStart and ExecReload both use `input-barrier ensure`, which never
+# installs global DROP into a live daemon and never clobbers a standing
+# lifeline guard with the global form (R5-C/R6-B/R7-A/M2): post-handoff
+# (live-held marker) it is a verified no-op success — the daemon owns
+# and a restart converges it on first apply. Failing the start
+# post-handoff would strand xpfd behind its own Requires edge (R4-4).
+# With the marker absent it still no-ops only when host-inbound DROPS
+# (input chain + a DROP verdict — admits-only shells don't count) with
+# first-apply ownership recorded by this boot's daemon and xpfd active:
+# a stale table restored by nftables.service before xpfd starts (or an
+# active-but-not-yet-applied xpfd — Type=simple is active-at-fork)
+# installs instead of trusting it — or when an enforcing barrier
+# already stands. Only a truly absent barrier installs (fail closed).
+# A manual `input-barrier close` force-installs the global form pre-handoff
+# and on a stale (present-but-unheld) marker (fail-closed like ensure);
+# with a LIVE owner it refuses (override with --force explicitly).
+# Residual (accepted): an operator nftables.service restart/flush plus a
+# MANUAL ensure/reload in the pre-handoff window trusts a stale
+# enforcing-shaped table until the daemon's next pre-apply guard install
+# (operator action, like a post-handoff flush; the boot-unit path is
+# unaffected — inactive installs). Likewise a manual reload racing a
+# concurrent lifeline-guard install is last-writer-wins (check-then-
+# install has no flock): if the global form wins, new permitted
+# sessions block until the daemon's next pre-apply re-converges the
+# guard. Manual-only, fail-closed, established sessions survive — the
+# service never-clobbers holds except that micro-window.
+#
+# Fresh installs: this unit is enabled --no-start (upgrades must never inject
+# a DROP chain into a live armed daemon). The postinst starts it live on
+# first install when no xpfd owns enforcement; if that fails (or on manual
+# installs), reboot — or run `systemctl enable --now xpf-input-closed`
+# BEFORE the network comes up — or host input stays unenforced until reboot.
+#
+# Bootstrap boots swap this table for a lifeline-admitting variant (same
+# table, leading iifname admit): NON-lifeline data and link-local ingress
+# stay DROP-closed, but whole lifeline NICs — including their link-local
+# addresses — are open. Membership is em0/fab0/fab1/fxp0/vrf-mgmt by NAME
+# assumption plus the persisted lifeline record and the explicit
+# management-interface leaf; set the leaf when fxp0 is repurposed — a
+# non-fxp0 leaf narrows fxp0 OUT. A default-route fallback NIC is admitted
+# whole ONLY with zero verified identity (no leaf, no record); otherwise
+# an unlisted detected NIC is data until proven management and stays
+# closed. A static-default-via-data boot therefore opens that NIC for the
+# bootstrap window — inherent without config. The first commit converges
+# to configured policy.
+[Unit]
+DefaultDependencies=no
+After=nftables.service
+Before=network-pre.target systemd-networkd.service frr.service xpfd.service
+Wants=network-pre.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=30
+ExecStart=/usr/local/sbin/xpfd input-barrier ensure
+ExecReload=/usr/local/sbin/xpfd input-barrier ensure
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=xpf-input-closed
+
+[Install]
+WantedBy=sysinit.target
+RequiredBy=systemd-networkd.service
+RequiredBy=xpfd.service

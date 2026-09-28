@@ -30,7 +30,10 @@ patched_postrm() {
       -e "s#^STAGED_GEN=.*#STAGED_GEN=$ROOT/var/lib/xpf/staged-gen#" \
       -e "s#^DROPIN=.*#DROPIN=$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf#" \
       -e "s#^TRANSIT_CLOSED_REQUIRES_LINK=.*#TRANSIT_CLOSED_REQUIRES_LINK=$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-transit-closed.service#" \
+      -e "s#^INPUT_CLOSED_REQUIRES_LINK=.*#INPUT_CLOSED_REQUIRES_LINK=$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-input-closed.service#" \
+      -e "s#^INPUT_CLOSED_XPFD_REQUIRES_LINK=.*#INPUT_CLOSED_XPFD_REQUIRES_LINK=$ROOT/etc/systemd/system/xpfd.service.requires/xpf-input-closed.service#" \
       -e "s#^TRANSIT_IPV4_SYSCTL=.*#TRANSIT_IPV4_SYSCTL=$ROOT/proc/sys/net/ipv4/ip_forward#" \
+      -e "s#^EARLY_INPUT_HANDOFF_MARKER=.*#EARLY_INPUT_HANDOFF_MARKER=$ROOT/run/xpf/early-input-handoff.done#" \
       -e "s#^TRANSIT_IPV6_SYSCTL=.*#TRANSIT_IPV6_SYSCTL=$ROOT/proc/sys/net/ipv6/conf/all/forwarding#" \
       -e "s#\\[ -d /run/systemd/system \\]#false#" \
       "$POSTRM" > "$ROOT/postrm"
@@ -38,13 +41,15 @@ patched_postrm() {
 }
 
 # Patch the real pre-removal hook into the same isolated tree and replace
-# #DEBHELPER# with a stop-hook sentinel: it fails if the legacy Requires link
+# #DEBHELPER# with a stop-hook sentinel: it fails if either Requires link
 # still exists when the generated stop hook would run.
 patched_prerm() {
     sed \
-      -e "s|^    requires_link=.*|    requires_link=\"$REQUIRES_LINK\"|" \
-      -e "s|\[ -d /run/systemd/system \]|false|" \
-      -e "s@^#DEBHELPER#\$@test ! -L \"$REQUIRES_LINK\" || { echo \"FAIL: legacy .requires link remained before generated stop hook\"; exit 1; }@" \
+      -e "s#^TRANSIT_CLOSED_REQUIRES_LINK=.*#TRANSIT_CLOSED_REQUIRES_LINK=$REQUIRES_LINK#" \
+      -e "s#^INPUT_CLOSED_REQUIRES_LINK=.*#INPUT_CLOSED_REQUIRES_LINK=$INPUT_REQUIRES_LINK#" \
+      -e "s#^INPUT_CLOSED_XPFD_REQUIRES_LINK=.*#INPUT_CLOSED_XPFD_REQUIRES_LINK=$INPUT_XPFD_REQUIRES_LINK#" \
+      -e "s#\[ -d /run/systemd/system \]#false#" \
+      -e "s@^#DEBHELPER#\$@test ! -L \"$REQUIRES_LINK\" && test ! -L \"$INPUT_REQUIRES_LINK\" && test ! -L \"$INPUT_XPFD_REQUIRES_LINK\" || { echo \"FAIL: boot-barrier .requires link remained before generated stop hook\"; exit 1; }@" \
       "$PRERM" > "$ROOT/prerm"
     chmod +x "$ROOT/prerm"
 }
@@ -60,11 +65,19 @@ run_scenario() {
     DROPIN="$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf"
     REQUIRES_DIR="$ROOT/etc/systemd/system/systemd-networkd.service.requires"
     REQUIRES_LINK="$REQUIRES_DIR/xpf-transit-closed.service"
+    INPUT_REQUIRES_LINK="$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-input-closed.service"
+    XPFD_REQUIRES_DIR="$ROOT/etc/systemd/system/xpfd.service.requires"
+    INPUT_XPFD_REQUIRES_LINK="$XPFD_REQUIRES_DIR/xpf-input-closed.service"
     TRANSIT_IPV4_SYSCTL="$ROOT/proc/sys/net/ipv4/ip_forward"
     TRANSIT_IPV6_SYSCTL="$ROOT/proc/sys/net/ipv6/conf/all/forwarding"
     mkdir -p "$(dirname "$TRANSIT_IPV4_SYSCTL")" "$(dirname "$TRANSIT_IPV6_SYSCTL")"
     printf '0\n' > "$TRANSIT_IPV4_SYSCTL"
     printf '0\n' > "$TRANSIT_IPV6_SYSCTL"
+    INPUT_BARRIER_LOG="$ROOT/input-barrier.log"
+    TRANSIT_BARRIER_LOG="$ROOT/transit-barrier.log"
+    TRANSIT_BARRIER_FAIL=no
+    INPUT_BARRIER_FAIL=no
+    export INPUT_BARRIER_LOG TRANSIT_BARRIER_LOG TRANSIT_BARRIER_FAIL INPUT_BARRIER_FAIL
     BINS="xpfd cli xpf-userspace-dp xpf-day0-config"
     patched_postrm
     "scenario_$name"
@@ -85,7 +98,18 @@ if [ "$1" = seed-runtime ] && [ "$2" = --capability-check ]; then
     echo "seed-runtime supported"; exit 0
 fi
 if [ "$1" = transit-barrier ] && [ "$2" = remove ]; then
+    echo remove >> "$TRANSIT_BARRIER_LOG"
+    if [ "$TRANSIT_BARRIER_FAIL" = yes ]; then
+        echo "transit barrier removal failed"; exit 1
+    fi
     echo "transit barrier removed"; exit 0
+fi
+if [ "$1" = input-barrier ] && [ "$2" = remove ]; then
+    echo remove >> "$INPUT_BARRIER_LOG"
+    if [ "$INPUT_BARRIER_FAIL" = yes ]; then
+        echo "input barrier removal failed"; exit 1
+    fi
+    echo "input barrier removed"; exit 0
 fi
 [ "$1" = version ] && { echo "xpfd VER (commit x, built y)"; exit 0; }
 echo "unknown command" >&2; exit 1
@@ -148,6 +172,33 @@ EOF
     "$ROOT/postrm" remove
     [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 0 ] || { echo "FAIL: IPv4 forwarding opened after failed barrier removal"; exit 1; }
     [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 0 ] || { echo "FAIL: IPv6 forwarding opened after failed barrier removal"; exit 1; }
+}
+
+# A transit-removal failure must not skip the independent input-table cleanup,
+# but forwarding sysctls remain unchanged because the transit fence may remain.
+scenario_transit_failure_still_removes_input_barrier() {
+    build_hardened "1.0.0"
+    TRANSIT_BARRIER_FAIL=yes
+    export TRANSIT_BARRIER_FAIL
+    "$ROOT/postrm" remove
+    [ "$(cat "$TRANSIT_BARRIER_LOG")" = remove ] || { echo "FAIL: transit removal was not attempted"; exit 1; }
+    [ "$(cat "$INPUT_BARRIER_LOG")" = remove ] || { echo "FAIL: input removal skipped after transit failure"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 0 ] || { echo "FAIL: IPv4 forwarding opened after transit removal failure"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 0 ] || { echo "FAIL: IPv6 forwarding opened after transit removal failure"; exit 1; }
+}
+
+# Symmetric case: an input-removal failure is reported and keeps host input
+# closed, but must not suppress forwarding restoration after the transit
+# table was removed.
+scenario_input_failure_still_restores_forwarding() {
+    build_hardened "1.0.0"
+    INPUT_BARRIER_FAIL=yes
+    export INPUT_BARRIER_FAIL
+    "$ROOT/postrm" remove
+    [ "$(cat "$TRANSIT_BARRIER_LOG")" = remove ] || { echo "FAIL: transit removal was not attempted"; exit 1; }
+    [ "$(cat "$INPUT_BARRIER_LOG")" = remove ] || { echo "FAIL: input removal was not attempted"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV4_SYSCTL")" = 1 ] || { echo "FAIL: IPv4 forwarding not restored after successful transit removal"; exit 1; }
+    [ "$(cat "$TRANSIT_IPV6_SYSCTL")" = 1 ] || { echo "FAIL: IPv6 forwarding not restored after successful transit removal"; exit 1; }
 }
 
 # purge removes the through-current sbin links, the runtime drop-in (#1967),
@@ -216,26 +267,37 @@ scenario_remove_no_dropin_ok() {
     done
 }
 
-# #10758: the new prerm removes the legacy Requires edge before the generated
-# debhelper stop hook, so stopping the fence cannot stop systemd-networkd.
+# #10758/#10751: prerm removes all legacy Requires edges before the generated
+# debhelper stop hook, so stopping either boot fence cannot stop networkd or xpfd.
 scenario_prerm_scrubs_legacy_requires_before_stop() {
-    mkdir -p "$REQUIRES_DIR"
+    mkdir -p "$REQUIRES_DIR" "$XPFD_REQUIRES_DIR"
     ln -sf "/lib/systemd/system/xpf-transit-closed.service" "$REQUIRES_LINK"
+    ln -sf "/lib/systemd/system/xpf-input-closed.service" "$INPUT_REQUIRES_LINK"
+    ln -sf "/lib/systemd/system/xpf-input-closed.service" "$INPUT_XPFD_REQUIRES_LINK"
     patched_prerm
     "$ROOT/prerm" remove
-    [ ! -e "$REQUIRES_LINK" ] && [ ! -L "$REQUIRES_LINK" ] || { echo "FAIL: legacy .requires link not removed before generated stop hook"; exit 1; }
-    [ ! -d "$REQUIRES_DIR" ] || { echo "FAIL: empty .requires directory not removed by prerm"; exit 1; }
+    [ ! -e "$REQUIRES_LINK" ] && [ ! -L "$REQUIRES_LINK" ] || { echo "FAIL: transit .requires link not removed before generated stop hook"; exit 1; }
+    [ ! -e "$INPUT_REQUIRES_LINK" ] && [ ! -L "$INPUT_REQUIRES_LINK" ] || { echo "FAIL: input .requires link not removed before generated stop hook"; exit 1; }
+    [ ! -e "$INPUT_XPFD_REQUIRES_LINK" ] && [ ! -L "$INPUT_XPFD_REQUIRES_LINK" ] || { echo "FAIL: input xpfd .requires link not removed before generated stop hook"; exit 1; }
+    [ ! -d "$REQUIRES_DIR" ] || { echo "FAIL: empty networkd .requires directory not removed by prerm"; exit 1; }
+    [ ! -d "$XPFD_REQUIRES_DIR" ] || { echo "FAIL: empty xpfd .requires directory not removed by prerm"; exit 1; }
 }
 
-# #10758: postrm is a fallback for older maintainer-script flows, and must
-# remove the legacy symlink on apt remove (not just purge).
+# #10758/#10751: postrm is a fallback for older maintainer-script flows, and
+# must remove all three legacy symlinks and tear down the input barrier on apt remove.
 scenario_postrm_scrubs_legacy_requires_link() {
     build_hardened "1.0.0"
-    mkdir -p "$REQUIRES_DIR"
+    mkdir -p "$REQUIRES_DIR" "$XPFD_REQUIRES_DIR"
     ln -sf "/lib/systemd/system/xpf-transit-closed.service" "$REQUIRES_LINK"
+    ln -sf "/lib/systemd/system/xpf-input-closed.service" "$INPUT_REQUIRES_LINK"
+    ln -sf "/lib/systemd/system/xpf-input-closed.service" "$INPUT_XPFD_REQUIRES_LINK"
     "$ROOT/postrm" remove
-    [ ! -e "$REQUIRES_LINK" ] && [ ! -L "$REQUIRES_LINK" ] || { echo "FAIL: legacy .requires link not removed by postrm remove"; exit 1; }
-    [ ! -d "$REQUIRES_DIR" ] || { echo "FAIL: empty .requires directory not removed by postrm"; exit 1; }
+    [ ! -e "$REQUIRES_LINK" ] && [ ! -L "$REQUIRES_LINK" ] || { echo "FAIL: transit .requires link not removed by postrm remove"; exit 1; }
+    [ ! -e "$INPUT_REQUIRES_LINK" ] && [ ! -L "$INPUT_REQUIRES_LINK" ] || { echo "FAIL: input .requires link not removed by postrm remove"; exit 1; }
+    [ ! -e "$INPUT_XPFD_REQUIRES_LINK" ] && [ ! -L "$INPUT_XPFD_REQUIRES_LINK" ] || { echo "FAIL: input xpfd .requires link not removed by postrm remove"; exit 1; }
+    [ ! -d "$REQUIRES_DIR" ] || { echo "FAIL: empty networkd .requires directory not removed by postrm"; exit 1; }
+    [ ! -d "$XPFD_REQUIRES_DIR" ] || { echo "FAIL: empty xpfd .requires directory not removed by postrm"; exit 1; }
+    [ "$(cat "$INPUT_BARRIER_LOG")" = remove ] || { echo "FAIL: input barrier remove was not invoked by postrm"; exit 1; }
 }
 
 # downgrade to a pre-hardened package: drop-in removed, sbin repointed to
@@ -512,13 +574,31 @@ scenario_oldbug_leaves_orphan_proves_nontautology() {
     [ -e "$DROPIN" ] || { echo "FAIL(non-tautology): old-bug postrm UNEXPECTEDLY removed the orphan drop-in — the rerun test would not discriminate the fix"; exit 1; }
 }
 
+# #10751: remove and purge must clear a stale handoff marker — per-boot
+# runtime state that would otherwise make a same-boot reinstall skip the
+# fresh-install barrier injection.
+scenario_remove_and_purge_clear_handoff_marker() {
+    build_hardened "1.0.0"
+    MARKER="$ROOT/run/xpf/early-input-handoff.done"
+    mkdir -p "$(dirname "$MARKER")"
+    : > "$MARKER"
+    "$ROOT/postrm" remove
+    [ ! -e "$MARKER" ] || { echo "FAIL: remove left a stale handoff marker"; exit 1; }
+    : > "$MARKER"
+    "$ROOT/postrm" purge
+    [ ! -e "$MARKER" ] || { echo "FAIL: purge left a stale handoff marker"; exit 1; }
+}
+
 run_scenario remove_keeps_versions
 run_scenario remove_barrier_failure_keeps_sysctls_closed
+run_scenario transit_failure_still_removes_input_barrier
+run_scenario input_failure_still_restores_forwarding
 run_scenario purge_removes_versions
 run_scenario remove_keeps_foreign_dropin
 run_scenario remove_no_dropin_ok
 run_scenario prerm_scrubs_legacy_requires_before_stop
 run_scenario postrm_scrubs_legacy_requires_link
+run_scenario remove_and_purge_clear_handoff_marker
 run_scenario downgrade_to_prehardened
 run_scenario downgrade_skips_foreign_link
 run_scenario upgrade_to_hardened_noop

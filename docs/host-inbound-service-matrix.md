@@ -1056,6 +1056,58 @@ interface assigned yet resolves no address; zones that are scoped, whose only
 interfaces are management/cluster-control lifelines (fxp0 / em0 / fab<N>), or that
 have no interfaces are deliberately NOT reported (low-noise).
 
+Kernel scope-link addresses (the self-assigned IPv6 link-local present from
+link-up, IPv4 169.254 fallbacks) do NOT close the window for DHCP-intent
+zones (#10751 R4-1): they are automatic, not the intended
+global/ULA/lease addresses, so a DHCP zone with only link-locals stays
+reported and the daemon retains the early input barrier until a routable
+address resolves. A link-local-only zone with NO DHCP client is scoped,
+not reported: its installed link-local deny already covers everything
+reachable and no lease will arrive (#10751 R5-A). Explicitly configured
+link-locals (a static fe80::/64, the stable RETH LL) still scope, with
+per-unit provenance (a static on unit A never satisfies unit B). The
+installed deny keeps covering link-local destinations — the chain is
+`policy accept`, so pending-intent is deliberately stricter than
+enforceability for DHCP-intent scopes. Unzoned DHCP units with no lease
+yet are NOT pending (no hold — a never-leasing unit must not strand the
+global barrier); instead the first apply renders per-family LAST-placed,
+family-guarded `iifname <dev> meta nfproto <fam> drop` rules for them
+(#10751 R7-B; the guard keeps a v6-only backstop from shadowing v4
+fallthrough such as broadcast/multicast, and vice versa), so a first
+lease lands already denied and the debounced re-apply replaces the
+interface rules with destination DROPs. Each still-unleased family also
+gets a TOP-placed
+`iifname <dev> udp dport <68|546> accept` ahead of the destination drops
+(#10751 F8-A): without it a first ADVERTISE/OFFER — not
+conntrack-established when multicast-originated — would hit the interface
+DROP (or the unzoned link-local DROP on an already-up link) and deadlock
+acquisition. The admits are scoped to the unleased netdevs of each
+family, so leased families stay under pure destination judgement; they
+sit after the #10752 stale-reply guards, whose catalog exempts DHCP
+client ports. Lifeline units are excluded (management must survive).
+VRF-enslaved units are excluded too — their LOCAL_IN identity is the
+shared master, where an interface DROP would shadow addressed siblings
+(and the slave name never matches) — and converge via the lease
+callback instead: any non-lifeline DHCP lease forces the full recompile
+that installs destination DROPs. Accepted window: lease-install to
+debounced re-apply (~2s plus apply time), the #3698 lag class.
+FAULT residual (distinct, Opus9 round-9 / Opus10 round-10 — accepted,
+see #11497): a failed REAL install still converges — the same apply
+installs the gap DROP for the lease (M5 proof:
+TestVRFLeaseWindowBoundedByGapAfterFailedRerender10751) — so only the
+DOUBLE failure (real AND gap install both fail) strands the lease: no
+retry owner re-drives it — the callback is one-shot, same-content
+renewals do not refire (commitLease change-gating), the #7181 STALE
+flag is report-only, the #9811 debt covers auto-rollback only (DHCP
+path explicitly out of scope), and the #9693/IPsec/conntrack/feed
+loops are scoped elsewhere (traced, no owner found). The lease then
+sits uncovered until the next trigger (lease-content change, commit,
+feed/poll/sync apply, restart) runs a successful apply — potentially
+unbounded under a held lease with healthy renewals. STALE surfaces it
+via the API; recovery is the next successful apply, which covers the
+still-held lease. Follow-up #11497 (retry/convergence owner) would
+bound the wait.
+
 Two observability surfaces consume it:
 
 - **State-transition log** (`daemon_nft.go`, `logHostInboundAddresslessTransitions`).
@@ -1216,10 +1268,28 @@ snapshot produces a zero-drop table shell:
   chain's `policy accept` (a `drop` is terminal, an `accept` is not, so an already
   service-accepted or catch-all-dropped covered address keeps its main-table
   verdict) and is dropped by the gap. The uncovered lists derive from the same
-  lifeline-subtracted views/unzoned sets, so the gap never fences management /
-  cluster-control traffic. A gap install failure JOINS the commit error
-  (fail-closed); the gap is torn down by the next successful real install (best
-  effort — a lingering gap fences only, never opens) and on a successful teardown.
+  lifeline-subtracted views/unzoned sets and INCLUDE lifeline-shared address
+  VALUES in the bare DROP — with preceding lifeline-ingress exception
+  ACCEPTs (#10751 M1 ingress-aware scope, Opus9 per-member design): one
+  `iifname` rule for unenslaved lifelines plus one `meta sdifname` rule
+  recovering the member behind VRF LOCAL_IN master semantics, so an
+  enslaved fxp0 is admitted while a co-enslaved non-lifeline fxp1 stays
+  denied (no vrf-mgmt blanket). The `meta sdifname` rules are emitted
+  unguarded: they rely on the platform kernel floor (≥ 6.18 per
+  README/bake); kernels below the floor are UNSUPPORTED, so no
+  fallback exists by design (a support statement, not an enforced
+  runtime impossibility — no xpfd/daemon version gate exists, and
+  `--no-dataplane` config-only mode runs anywhere). Mechanism note: a
+  hypothetical rejection would abort the whole atomic gap batch,
+  leaving day-2 newcomers uncovered (fail-open) — not lockout.
+  A global withhold (R7-C) left shared
+  values fail-open post-handoff, when no barrier stands behind the gap;
+  the exception preserves lifeline management while data ingress stays
+  denied. The handoff baseline still excludes shared (conditionally
+  denied), so pre-handoff refusal is unchanged. A gap install failure
+  JOINS the commit error (fail-closed); the gap is torn down by the next
+  successful real install (best effort — a lingering gap fences only,
+  never opens) and on a successful teardown.
 - `installHostInboundColdBootFence` / `buildHostInboundFencePayload`
   (`daemon_nft.go`) build the fence: the same atomic-replace `xpf_hostinbound`
   table reduced to the global mandatory admits (`ct established,related`, raw

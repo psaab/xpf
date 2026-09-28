@@ -290,6 +290,16 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 	return buildInterfaceSnapshotsFrom(cfg, sampleLiveXfrmNetdevs())
 }
 
+// BuildInterfaceSnapshots builds the interface rows against a FRESH kernel
+// sample: the exported entry point for cross-package single-snapshot flows.
+// Callers that must derive several inputs from ONE address sample (the
+// daemon's host-inbound apply: installed ruleset plus handoff decision,
+// #10751 R4-2) sample once here and thread the rows through the
+// ...FromSnapshots builders instead of calling the fresh builders piecemeal.
+func BuildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
+	return buildInterfaceSnapshots(cfg)
+}
+
 func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) []InterfaceSnapshot {
 	if !snapshotHasInterfaceRows(cfg) {
 		return nil

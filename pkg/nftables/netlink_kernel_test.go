@@ -1,10 +1,13 @@
 package nftables
 
 import (
+	"bytes"
+	"net"
 	"runtime"
 	"testing"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netns"
 )
 
@@ -266,5 +269,129 @@ func TestFenceTableReadsCounterless(t *testing.T) {
 	if state != HostInboundTableAbsent {
 		t.Errorf("state after teardown = %d, want HostInboundTableAbsent (%d)",
 			state, HostInboundTableAbsent)
+	}
+}
+
+// TestTableEnforcingDistinguishesShellTables10751: a fully installed table
+// reads enforcing; a shell (table + bare input chain, no rules) and an
+// absent table read non-enforcing. Needs CAP_NET_ADMIN (skips otherwise).
+func TestTableEnforcingDistinguishesShellTables10751(t *testing.T) {
+	enterPrivateNetns(t)
+	in := NewNetlinkInstaller()
+	if ok, err := in.TableEnforcing(HostInboundTableName); err != nil || ok {
+		t.Fatalf("absent table enforcing = %v, %v; want false, nil", ok, err)
+	}
+	if err := in.InstallHostInbound(hostInboundScenario()); err != nil {
+		t.Fatalf("host-inbound install: %v", err)
+	}
+	if ok, err := in.TableEnforcing(HostInboundTableName); err != nil || !ok {
+		t.Fatalf("installed table enforcing = %v, %v; want true, nil", ok, err)
+	}
+	if err := in.DeleteTable(HostInboundTableName); err != nil {
+		t.Fatalf("delete table: %v", err)
+	}
+	c, err := nftables.New()
+	if err != nil {
+		t.Fatalf("open netlink: %v", err)
+	}
+	tbl := c.AddTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: HostInboundTableName})
+	prio := nftables.ChainPriority(hostInboundPriority)
+	pol := nftables.ChainPolicyAccept
+	c.AddChain(&nftables.Chain{Name: "input", Table: tbl, Type: nftables.ChainTypeFilter, Hooknum: nftables.ChainHookInput, Priority: &prio, Policy: &pol})
+	if err := c.Flush(); err != nil {
+		t.Fatalf("create shell table: %v", err)
+	}
+	if ok, err := in.TableEnforcing(HostInboundTableName); err != nil || ok {
+		t.Fatalf("shell table enforcing = %v, %v; want false, nil", ok, err)
+	}
+}
+
+// TestTableDropsInputRequiresDropVerdict10751: a real install (catch-all
+// DROPs) reads dropping; an admits-only zero-drop fence shell (mandatory
+// admits, policy accept, zero DROP — still "enforcing" by shape) reads
+// non-dropping, as do bare shells and absent tables. Needs CAP_NET_ADMIN
+// (skips otherwise).
+func TestTableDropsInputRequiresDropVerdict10751(t *testing.T) {
+	enterPrivateNetns(t)
+	in := NewNetlinkInstaller()
+	if ok, err := in.TableDropsInput(HostInboundTableName); err != nil || ok {
+		t.Fatalf("absent table drops = %v, %v; want false, nil", ok, err)
+	}
+	if err := in.InstallHostInbound(hostInboundScenario()); err != nil {
+		t.Fatalf("host-inbound install: %v", err)
+	}
+	if ok, err := in.TableDropsInput(HostInboundTableName); err != nil || !ok {
+		t.Fatalf("real table drops = %v, %v; want true, nil", ok, err)
+	}
+	// Zero-drop fence shell: admits-only, policy accept — enforcing shape
+	// without any DROP verdict.
+	if err := in.InstallColdBootFence(FenceSpec{}); err != nil {
+		t.Fatalf("zero-drop fence install: %v", err)
+	}
+	if ok, err := in.TableEnforcing(HostInboundTableName); err != nil || !ok {
+		t.Fatalf("admits-only shell enforcing = %v, %v; want true, nil (shape holds rules)", ok, err)
+	}
+	if ok, err := in.TableDropsInput(HostInboundTableName); err != nil || ok {
+		t.Fatalf("admits-only shell drops = %v, %v; want false, nil", ok, err)
+	}
+}
+
+// TestGapFenceWithholdsSharedNetns10751: a gap spec carrying only X (W
+// withheld daemon-side, #10751 R7-C) installs an X DROP with no W match
+// anywhere; mandatory admits present (positive control). Needs
+// CAP_NET_ADMIN (skips otherwise).
+func TestGapFenceWithholdsSharedNetns10751(t *testing.T) {
+	enterPrivateNetns(t)
+	in := NewNetlinkInstaller()
+	x, w := "10.0.0.9", "10.0.0.5"
+	if err := in.InstallGapFence(GapFenceSpec{UncoveredV4: []string{x}}); err != nil {
+		t.Fatalf("gap install: %v", err)
+	}
+	c, err := nftables.New()
+	if err != nil {
+		t.Fatalf("open netlink: %v", err)
+	}
+	tbl := &nftables.Table{Family: nftables.TableFamilyINet, Name: HostInboundGapTableName}
+	chain, err := c.ListChain(tbl, "input")
+	if err != nil {
+		t.Fatalf("read gap chain: %v", err)
+	}
+	rules, err := c.GetRules(tbl, chain)
+	if err != nil {
+		t.Fatalf("read gap rules: %v", err)
+	}
+	xb, wb := net.ParseIP(x).To4(), net.ParseIP(w).To4()
+	var xDrop, wSeen, acceptSeen bool
+	for _, r := range rules {
+		var cmpX, cmpW, drop bool
+		for _, e := range r.Exprs {
+			switch v := e.(type) {
+			case *expr.Verdict:
+				if v.Kind == expr.VerdictDrop {
+					drop = true
+				}
+				if v.Kind == expr.VerdictAccept {
+					acceptSeen = true
+				}
+			case *expr.Cmp:
+				if bytes.Equal(v.Data, xb) {
+					cmpX = true
+				}
+				if bytes.Equal(v.Data, wb) {
+					cmpW = true
+				}
+			}
+		}
+		xDrop = xDrop || (cmpX && drop)
+		wSeen = wSeen || cmpW
+	}
+	if !xDrop {
+		t.Error("gap table has no DROP matching X")
+	}
+	if wSeen {
+		t.Error("gap table matches withheld W")
+	}
+	if !acceptSeen {
+		t.Error("gap table lost its mandatory admits (positive control)")
 	}
 }

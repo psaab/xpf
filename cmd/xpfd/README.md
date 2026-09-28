@@ -65,6 +65,28 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   boot unit runs it before `systemd-networkd.service`.
 - `xpfd transit-barrier remove` — removes both transit-barrier tables so package
   removal can release the boot/shutdown fence.
+- `xpfd input-barrier close` — installs the config-free host-input DROP barrier
+  before networkd. It admits loopback, mandatory L3, family-split DHCP-client
+  replies, and established flows; all host services remain blocked until
+  host-inbound handoff. Bootstrap swaps in a lifeline-admitting variant
+  (whole lifeline NICs, including their link-locals — em0/fab0/fab1/
+  fxp0/vrf-mgmt by name assumption plus record/leaf identity, with a
+  default-route fallback NIC admitted whole only when no verified
+  identity exists; narrow a repurposed fxp0 OUT with the
+  management-interface leaf); the first commit converges to configured
+  policy.
+- `xpfd input-barrier ensure` — the boot unit's ExecStart AND ExecReload:
+  installs pre-handoff when nothing is present (fail closed), and is a
+  verified no-op success post-handoff, when host-inbound DROPS (input
+  chain + a DROP verdict — admits-only shells don't count) with
+  first-apply ownership recorded by this boot's daemon and xpfd active,
+  or when an enforcing barrier already stands — never injecting global
+  DROP into a live daemon (a stale table restored before xpfd starts,
+  or an active-but-not-yet-applied xpfd, installs instead), never
+  clobbering a lifeline guard, never failing an xpfd start behind its
+  Requires edge.
+- `xpfd input-barrier remove` — removes the host-input barrier only after the
+  real firewall/fallback is installed or a no-enforcement teardown completes.
 - A kernel without bridge nf_tables reports degraded success with a warning
   when the inet barrier is active; inet failures and real bridge errors fail.
 

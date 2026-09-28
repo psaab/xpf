@@ -442,3 +442,40 @@ func TestHealthHandler_RollbackHistoryHealthy(t *testing.T) {
 		t.Errorf("rollback_history_degraded = %v, want false-and-present", data["rollback_history_degraded"])
 	}
 }
+
+// TestHealthHandler_ReportsEarlyInputGuardSwapFailed pins #10751: while the
+// latest bootstrap lifeline-guard swap failed, /health surfaces the
+// early_input_guard_swap_failed field as true — but stays 200/ok, because
+// the daemon is up and fail-closed (only remote recovery may be blocked).
+func TestHealthHandler_ReportsEarlyInputGuardSwapFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		failed bool
+	}{
+		{"failed", true},
+		{"healthy", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{
+				earlyInputGuardSwapFailedFn: func() bool { return tc.failed },
+			}
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/health", nil)
+			s.healthHandler(rr, req)
+			if rr.Code != 200 {
+				t.Errorf("status = %d, want 200 (swap failure is non-fatal)", rr.Code)
+			}
+			var resp Response
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			data, ok := resp.Data.(map[string]any)
+			if !ok {
+				t.Fatalf("data = %T, want map", resp.Data)
+			}
+			if got, _ := data["early_input_guard_swap_failed"].(bool); got != tc.failed {
+				t.Errorf("field = %v, want %v", got, tc.failed)
+			}
+		})
+	}
+}

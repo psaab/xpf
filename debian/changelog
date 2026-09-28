@@ -13,6 +13,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Install live-address host-input fences on #1960/#10297 fail-closed
     cold boots, preserving management addresses while blocking data addresses
     until a valid config can be applied (#10732).
+  * Install a separate pre-networkd host-input barrier before addresses become
+    reachable; admit only loopback/L3/DHCP-client traffic, defer FRR/HA
+    ingress, and hand off after enforcement or no-enforcement teardown (#10751).
   * Revoke authoritative userspace persistent NAT leases on clear, refresh the
     display mirror, propagate the operation to the HA peer, and fence stale
     SHOW refreshes and synced-session re-creation. Carry bounded clear fences

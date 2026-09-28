@@ -302,6 +302,17 @@ func (a *ruleAsm) iifname(names []string) *ruleAsm {
 	return a.add(a.p.iifnameMatch(names)...)
 }
 
+// sdifname appends `meta sdifname "<n>"` / `meta sdifname { .. }` (no
+// nfproto/l4proto dep). The slave-device match survives VRF LOCAL_IN
+// master semantics: an enslaved member's ingress shows the master via
+// iifname but the member via sdifname, so per-member policy (the gap
+// lifeline exception) keys on sdifname where iifname would over-admit
+// the whole VRF. For non-VRF ingress sdifname is unset and the match
+// simply misses (the iifname twin covers those).
+func (a *ruleAsm) sdifname(names []string) *ruleAsm {
+	return a.add(a.p.sdifnameMatch(names)...)
+}
+
 // iifnameExcept appends `iifname != "<n>"` / `iifname != { .. }` — the
 // uncovered-ingress fallback scope for stale-reply guards. Single-name uses
 // CmpOpNeq; multi-name uses an anonymous-set Lookup with Invert, which is
@@ -760,6 +771,41 @@ func (p *nlPlan) iifnameMatch(names []string) []expr.Any {
 	// inputs render identically and invalid inputs never silently
 	// install (#9903 M2).
 	load := &expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1}
+	if len(names) == 1 {
+		return []expr.Any{load, &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifname16(names[0])}}
+	}
+	els := make([]nftables.SetElement, len(names))
+	for i, n := range names {
+		els[i] = nftables.SetElement{Key: ifname16(n)}
+	}
+	set := p.addAnonSet(nftables.TypeIFName, false, els)
+	if set == nil {
+		return nil
+	}
+	return []expr.Any{load, &expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID}}
+}
+
+// metaKeySDIFNAME is NFT_META_SDIFNAME (slave device name, UAPI value 34
+// — include/uapi/linux/netfilter/nf_tables.h). Neither
+// google/nftables v0.3.0 nor x/sys expose it yet, so it is pinned here;
+// the value is kernel-UAPI-stable. It MUST stay in sync with the
+// `meta sdifname` oracle text (parity-pinned wherever used).
+const metaKeySDIFNAME = 34
+
+// sdifnameMatch mirrors iifnameMatch with the slave-device key: same
+// validation (fail CLOSED on unrepresentable names), same single-Cmp /
+// anonymous-set shapes, same ifname key type.
+func (p *nlPlan) sdifnameMatch(names []string) []expr.Any {
+	if len(names) == 0 {
+		return nil
+	}
+	for _, n := range names {
+		if n == "" || len(n) > unix.IFNAMSIZ-1 || strings.IndexByte(n, 0) >= 0 {
+			p.fail(fmt.Errorf("sdifname %q is not a representable interface name (empty, embedded NUL, or over the 15-byte limit) and would never match", n))
+			return nil
+		}
+	}
+	load := &expr.Meta{Key: expr.MetaKey(metaKeySDIFNAME), Register: 1}
 	if len(names) == 1 {
 		return []expr.Any{load, &expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifname16(names[0])}}
 	}

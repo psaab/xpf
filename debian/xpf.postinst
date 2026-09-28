@@ -39,6 +39,10 @@ SBIN=/usr/local/sbin
 # list diverges from manifest.Names(). Edit both together.
 BINS="xpfd cli xpf-userspace-dp xpf-day0-config"
 
+# Runtime state dir, probed (not managed) by the fresh-install barrier gate
+# below. Rewritten to a temp root by the installer test harness.
+XPF_RUN_DIR=/run/xpf
+
 case "$1" in
     configure)
         # $2 is the previously-configured version, empty on first install.
@@ -82,6 +86,100 @@ case "$1" in
                     # INSIDE a real directory at the link path.
                     ln -sfnT "$STAGED/$b" "$SBIN/$b"
                 done
+            fi
+            # === #10751 fresh-install barrier (fail-closed until first apply) ===
+            #
+            # dh_installsystemd --no-start stages xpf-input-closed.service for the
+            # next boot but never starts it live. On a fresh install with the
+            # network already up and no daemon enforcing, host listeners would
+            # stay unenforced until reboot. Close that window now when booted
+            # under systemd and nothing owns enforcement. Enforcement ownership
+            # is probed cheapest-correct-first: a handoff marker from any xpfd
+            # process (covers raw-binary daemons invisible to systemctl), then
+            # a live barrier table (kernel truth, idempotent). Either hit skips
+            # injection. A live xpfd with NEITHER is pre-handoff or flushed:
+            # inject anyway — its next apply hands the table off — because an
+            # is-active-first order would consult no kernel truth at all on a
+            # live-but-pre-handoff daemon (round-4 finding R4-6). If that
+            # daemon is actually armed with a failed marker write, `enable
+            # --now` still injects nothing: ensure re-checks kernel truth
+            # (live enforcement or a standing barrier) and no-ops. Only a
+            # fully unguarded corner installs — and the daemon's next apply
+            # hands it off. Upgrades never reach this branch. Never fail
+            # the install.
+            # Residual race (accepted): a concurrent first handoff between our
+            # probes and `enable --now` still takes an injection it immediately
+            # hands off; the window is milliseconds and the first apply
+            # converges by removing the table.
+            if [ -d /run/systemd/system ] && [ -x "$SBIN/xpfd" ]; then # 10751-BARRIER-GATE
+                # NOTE: this probe is enforcing-aware, not presence-based: a
+                # present-but-open shell (table exists, no DROP verdict —
+                # flushed, or an admits-only generation) must INJECT, not
+                # skip. Word-matching "drop" is sound for this fixed table
+                # (no chain/counter/set name contains it; every enforcing
+                # barrier variant carries a DROP verdict), and a missing
+                # table (nft errors, no output) injects too.
+                # M2 liveness: a merely present marker may be a dead
+                # daemon's file surviving best-effort cleanup (or planted).
+                # flock succeeds iff NO live process holds it (stale — do
+                # not skip on it); it fails iff the owner lives (skip —
+                # covers raw binaries invisible to systemctl). No flock(1)
+                # means liveness is unprovable: treat as stale and fall
+                # through to kernel truth (fail-closed; the R4-6 corner
+                # self-heals). Residual (bounded, Opus10 M2 / Opus11 M2 —
+                # every nonzero flock result reads live here, unlike the
+                # daemon's error discrimination; reachable modes on /run
+                # (tmpfs), each evidenced, exit table verified on tmpfs:
+                # free 0, EX-held 1, SH-held 1, missing-path 0):
+                # EX contention → live → skip: CORRECT, the live-owner case
+                # (harness-pinned under sh+dash).
+                # SH-only contention → live → skip: MISREAD, negligible —
+                # no production SH holder exists (the sole LOCK_SH is the
+                # daemon's transient discriminator probe), and 0600
+                # root-only markers mean a persistent SH holder implies
+                # root, out of model.
+                # Missing FILE with present parent (the file-only -e/flock
+                # TOCTOU) → exit 0 → stale → proceed: SAFE — and the probe
+                # runs under umask 077, so a TOCTOU-recreated file lands
+                # 0600 (not umask-derived 0664): the SH-negligible premise
+                # holds for it too (mode asserted by fixture).
+                # Missing PARENT → flock exits 66 → live → skip: bounded —
+                # creation ensures the dir (daemon MkdirAll 0755), removal
+                # unlinks file-only (daemon clear, postrm rm -f), and dpkg
+                # serializes postrm vs postinst, so only a manual rm -rf in
+                # the microsecond window triggers it; self-heals at the
+                # next daemon write (MkdirAll recreates).
+                # Internal/allocation errors → live → skip: MISREAD,
+                # negligible — flock(2) LOCK_NB reports contention as
+                # EWOULDBLOCK; anything else is allocation-scale on a box
+                # already dying. Fresh-install branch only (upgrades
+                # structurally excluded, harness-pinned), and the next
+                # first apply self-heals.
+                marker_live=false
+                if [ -e "$XPF_RUN_DIR/early-input-handoff.done" ]; then
+                    if command -v flock >/dev/null 2>&1; then
+                        if (umask 077; flock -n "$XPF_RUN_DIR/early-input-handoff.done" true 2>/dev/null); then
+                            : # lockable: stale/orphaned, fall through below
+                        else
+                            marker_live=true
+                        fi
+                    else
+                        : # no flock(1): unprovable, treat as stale (proceed)
+                    fi
+                fi
+                if [ "$marker_live" = true ]; then
+                    : # handed off with a live owner (covers raw binaries invisible to systemctl)
+                elif command -v nft >/dev/null 2>&1 && nft list table inet xpf_input_barrier 2>/dev/null | grep -qw drop; then
+                    : # barrier already enforcing (DROP-bearing); nothing to inject (kernel truth)
+                else
+                    if systemctl is-active --quiet xpfd 2>/dev/null; then
+                        echo "xpf: active xpfd is neither handed off nor guarded; injecting the input barrier until its next apply hands off" >&2
+                    fi
+                    if ! systemctl enable --now xpf-input-closed.service 2>/dev/null; then
+                        echo "xpf: WARNING could not start xpf-input-closed on fresh install;" \
+                             "reboot before exposing host services (or run: systemctl enable --now xpf-input-closed)" >&2
+                    fi
+                fi
             fi
         else
             # Upgrade: do NOT touch the live symlinks. Only recover one that

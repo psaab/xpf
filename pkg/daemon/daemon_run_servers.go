@@ -899,6 +899,9 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// files. The active config is durable; this flags a degraded
 		// recovery aid, so it does not 503.
 		RollbackHistoryDegradedFn: d.store.RollbackHistoryDegraded,
+		// #10751: surface bootstrap lifeline-guard swap failure (non-fatal
+		// field + gauge; the daemon is up and fail-closed).
+		EarlyInputGuardSwapFailedFn: d.EarlyInputGuardSwapFailed,
 		// #9898 F-113: surface journal permission-repair state so
 		// /health reports it (non-fatal) and
 		// xpf_config_journal_perms_degraded reads 1 while a segment

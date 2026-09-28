@@ -10,6 +10,7 @@
 /xpf.xpfd.service
 /xpf.xpf-day0-config.service
 /xpf.xpf-transit-closed.service
+/xpf.xpf-input-closed.service
 # the per-package build trees dpkg assembles
 /xpf/
 /xpf-appliance/

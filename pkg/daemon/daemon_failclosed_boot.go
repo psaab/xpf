@@ -157,3 +157,16 @@ func (d *Daemon) installFailClosedBootHostFences(failClosedLoad bool) {
 			"err", err, "v4", dataV4, "v6", dataV6)
 	}
 }
+
+// installBootstrapInputProtection installs fail-closed input protection
+// during manager init: live-address fences when the last config failed to
+// load, then the bootstrap lifeline guard when in bootstrap mode.
+// Extracted so the fences-before-guard order and the bootstrap gate are
+// pinned through production code rather than re-sequenced in tests;
+// initManagers is the sole production caller.
+func (d *Daemon) installBootstrapInputProtection(failClosedLoad bool) {
+	d.installFailClosedBootHostFences(failClosedLoad)
+	if d.inBootstrap() {
+		d.ensureEarlyInputBootstrapGuard()
+	}
+}
