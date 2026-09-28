@@ -593,26 +593,32 @@ datagrams can recreate a box-oriented entry immediately after the apply-time
 flush (#10764).
 
 **Fix — reconcile both orientations and guard the reply accept
-(#10752/#10764).** After every successful real apply, the daemon deletes
-now-denied peer-oriented entries by `(proto, dport)` and box-oriented entries
-only when `(proto, sport)` is in the shared, sorted service-port catalog and is
-not admitted for the covered box address. Ephemeral egress, DHCP/NTP client
-ports, BGP/LDP/MSDP and legacy reserved-client TCP ports, ranges, bare IP
-protocols, and ICMP are deliberately outside that catalog: a conntrack tuple
-alone cannot prove that those flows are stale instead of a live box-originated
-client/control-plane exchange. The matcher remains conservative about them.
+ (#10752/#10764).** After every successful real apply, the daemon deletes
+ now-denied peer-oriented entries by `(proto, dport)` and box-oriented entries
+ only when `(proto, sport)` is in the shared, sorted service-port catalog and is
+ denied by BOTH the destination-owner union and every ingress view that judges
+ it (#9637). A tuple some ingress zone still permits is kept — deleting it
+ would break that permitted cross-zone use — while the per-ingress nft guard
+ judges each reply packet by its actual arrival zone. Ephemeral egress, DHCP/NTP
+ client ports, BGP/LDP/MSDP and legacy reserved-client TCP ports, ranges, bare
+ IP protocols, and ICMP are deliberately outside that catalog: a conntrack tuple
+ alone cannot prove that those flows are stale instead of a live box-originated
+ client/control-plane exchange. The matcher remains conservative about them.
 
-Flush is necessary but not sufficient for the UDP twin: after deleting an IKE
-entry, the firewall's next DPD datagram can create a fresh box-oriented entry.
-The real `xpf_hostinbound` ruleset now places a catalogued stale-reply DROP
-ahead of the broad reply-direction accept. For each covered local address it
-drops only catalog TCP/UDP reply destination ports denied by the CURRENT set;
-still-admitted service replies and non-catalog client/ephemeral replies keep
-the old fast accept. The text oracle and production netlink renderer consume
-the same `pkg/nftables.HostInboundStaleReplyGuardRules` result. Cold-boot and
-coverage-gap fences use the same port catalog with their all-services-denied
-address sets, and the #9506 fence conntrack predicate now also recognizes
-catalogued box-oriented entries.
+ Flush is necessary but not sufficient for the UDP twin: after deleting an IKE
+ entry, the firewall's next DPD datagram can create a fresh box-oriented entry.
+ The real `xpf_hostinbound` ruleset now places catalogued stale-reply DROPs
+ ahead of the broad reply-direction accept, scoped by effective ingress-zone
+ policy: per-ingress-view `iifname` guards judge every destination by the
+ arrival zone's CURRENT set, an ambiguous-ingress guard fails closed, and an
+ `iifname != <covered+reinject>` fallback applies destination-owner policy to
+ uncovered arrivals while preserving the trusted `xpf-usp0` reinject exemption.
+ Still-admitted service replies and non-catalog client/ephemeral replies keep
+ the old fast accept. The text oracle and production netlink renderer consume
+ the same `pkg/nftables.HostInboundStaleReplyGuardRules` result. Cold-boot and
+ coverage-gap fences use destination-only guards with their all-services-denied
+ address sets (no ingress scope, no reinject exemption), and the #9506 fence
+ conntrack predicate now also recognizes catalogued box-oriented entries.
 
 TCP loose pickup is disabled both at runtime bringup
 (`/proc/sys/net/netfilter/nf_conntrack_tcp_loose=0`) and by the appliance's

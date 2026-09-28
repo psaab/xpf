@@ -112,13 +112,19 @@ func (a *hostInboundAdmit) add(m config.L4Match) {
 // selects now-denied host-inbound kernel conntrack entries for deletion (#5566).
 // Ordinary peer-oriented flows are selected by their original destination and
 // destination port. Box-oriented entries are selected only when the local
-// original source address and source port match a guardable host-service tuple;
-// this bounded catalog avoids flushing ephemeral egress and client-role ports.
+// original source address and source port match a guardable host-service tuple
+// denied by BOTH the destination-owner union and every ingress view that
+// judges it (#9637); this intersection avoids deleting a flow some ingress
+// zone still permits, while the ingress-scoped nft guard enforces per-packet.
+// The bounded catalog avoids flushing ephemeral egress and client-role ports.
 type hostInboundConntrackFlushFilter struct {
-	admit    map[netip.Addr]*hostInboundAdmit
-	wgPorts  []uint16
-	guardTCP map[uint16]struct{}
-	guardUDP map[uint16]struct{}
+	admit            map[netip.Addr]*hostInboundAdmit
+	wgPorts          []uint16
+	guardTCP         map[uint16]struct{}
+	guardUDP         map[uint16]struct{}
+	ingressTCP       []config.PortRange
+	ingressUDP       []config.PortRange
+	ingressAllowsAll bool
 }
 
 func (f *hostInboundConntrackFlushFilter) boxOrientedDenied(addr netip.Addr, flow *netlink.ConntrackFlow) bool {
@@ -142,7 +148,28 @@ func (f *hostInboundConntrackFlushFilter) boxOrientedDenied(addr netip.Addr, flo
 	if _, ok := guard[port]; !ok {
 		return false
 	}
-	return !f.flowAdmitted(a, flow.Forward.Protocol, port)
+	if f.flowAdmitted(a, flow.Forward.Protocol, port) {
+		return false
+	}
+	// Ingress intersection: some ingress zone may still permit this tuple to
+	// this destination (ingress-permits/owner-denies). Flushing would break
+	// that permitted use; the per-ingress nft guard already judges each
+	// reply packet by its actual arrival zone, so keep the entry and let
+	// the guard enforce.
+	if f.ingressAllowsAll {
+		return false
+	}
+	switch flow.Forward.Protocol {
+	case config.HostInboundProtoTCP:
+		if portInRanges(port, f.ingressTCP) {
+			return false
+		}
+	case config.HostInboundProtoUDP:
+		if portInRanges(port, f.ingressUDP) {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *hostInboundConntrackFlushFilter) flowAdmitted(a *hostInboundAdmit, proto uint8, port uint16) bool {
@@ -288,8 +315,50 @@ func buildHostInboundConntrackFlushFilter(views []dpuserspace.ZoneHostInboundVie
 			guardUDP[port] = struct{}{}
 		}
 	}
+	// Ingress admit union across every view that judges arrivals (#9637).
+	// Only views with an ingress scope contribute; a view without netdevs
+	// judges nothing via ingress. Trusted reinjection needs no separate
+	// admit: it only fast-paths packets userspace already admitted under
+	// this same ingress policy.
+	var ingressTCP, ingressUDP []config.PortRange
+	ingressAllowsAll := false
+	for _, v := range views {
+		if len(v.IngressNetdevs) == 0 {
+			continue
+		}
+		if hostInboundAllowsAll(v) {
+			ingressAllowsAll = true
+			continue
+		}
+		for _, family := range []string{"ip", "ip6"} {
+			for _, svc := range v.SystemServices {
+				for _, m := range config.HostInboundServiceMatch(svc, family) {
+					if m.Reject {
+						continue
+					}
+					switch m.Proto {
+					case config.HostInboundProtoTCP:
+						ingressTCP = append(ingressTCP, m.Ports...)
+					case config.HostInboundProtoUDP:
+						ingressUDP = append(ingressUDP, m.Ports...)
+					}
+				}
+			}
+			for _, proto := range v.Protocols {
+				for _, m := range config.HostInboundProtocolMatch(proto, family) {
+					switch m.Proto {
+					case config.HostInboundProtoTCP:
+						ingressTCP = append(ingressTCP, m.Ports...)
+					case config.HostInboundProtoUDP:
+						ingressUDP = append(ingressUDP, m.Ports...)
+					}
+				}
+			}
+		}
+	}
 	return &hostInboundConntrackFlushFilter{
 		admit: admit, wgPorts: wgListenPorts, guardTCP: guardTCP, guardUDP: guardUDP,
+		ingressTCP: ingressTCP, ingressUDP: ingressUDP, ingressAllowsAll: ingressAllowsAll,
 	}
 }
 

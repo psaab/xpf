@@ -117,11 +117,19 @@ func HostInboundStaleReplyCatalog(family string) StaleReplyGuardPorts {
 // StaleReplyGuardRule drops reply-direction traffic to a covered local address
 // when the reply's destination port is a currently denied catalog tuple.
 // Addresses and ports are deterministic sorted slices for both renderers.
+// Ingress scopes the rule to an arrival interface set (#9637 ingress-zone
+// policy): when empty the rule is destination-only (fence guards); otherwise
+// it matches `iifname <set>` (IngressNegated=false) or `iifname != <set>`
+// (IngressNegated=true, the uncovered-ingress fallback which also excludes
+// the trusted reinject TUN so userspace-adjudicated reinjects keep their
+// exemption). Ingress is sorted for deterministic rendering.
 type StaleReplyGuardRule struct {
-	Family    string
-	Proto     uint8
-	Ports     []uint16
-	Addresses []string
+	Family         string
+	Proto          uint8
+	Ports          []uint16
+	Addresses      []string
+	Ingress        []string
+	IngressNegated bool
 }
 
 type staleReplyAdmit struct {
@@ -130,11 +138,185 @@ type staleReplyAdmit struct {
 }
 
 // HostInboundStaleReplyGuardRules derives the denied reply-tuple rules from
-// the same desired views used to render the ordinary host-inbound chain.
-// An address admitted by any-service is omitted, matching the chain's
-// address-level union semantics. Unzoned addresses are covered with an empty
-// admit set. WG listen ports remain globally admitted.
+// the same desired views used to render the ordinary host-inbound chain,
+// reconciled with effective ingress-zone policy (#9637) and trusted
+// reinjection semantics.
+//
+// Junos judges host-inbound traffic by the zone of the interface it arrives
+// on, whichever local address it names. A destination-owner-only guard is
+// wrong in both disagreement directions: it drops replies the ingress zone
+// permits (ingress-permits/owner-denies) and admits replies the ingress zone
+// denies (ingress-denies/owner-permits), because the broad reply accept
+// precedes ingress adjudication. The guard therefore has three layers:
+//
+//   - per-ingress-view rules: `iifname <view netdevs> daddr <all judged
+//     dests> dport <denied by that view>` — the view's own policy judges
+//     every destination, matching emitHostInboundZoneIngress;
+//   - ambiguous-ingress rules: `iifname <deny netdevs> daddr <all dests>
+//     dport <full catalog>` — fail-closed, matching the unconditional
+//     IngressDenyNetdevs drop;
+//   - uncovered-ingress fallback: `iifname != <covered+deny+reinject> daddr
+//     <owner address> dport <denied by owner union>` — packets arriving
+//     where no ingress view judges fall back to destination-owner policy,
+//     while the trusted reinject TUN (xpf-usp0) is excluded so
+//     userspace-adjudicated reinjects keep their exemption.
+//
+// An address admitted by any-service is omitted from the fallback, matching
+// the chain's address-level union semantics; a view admitting any-service
+// emits no per-ingress guard. Unzoned addresses are covered with an empty
+// owner admit set in the fallback and are included in every per-ingress
+// destination set. WG listen ports remain globally admitted.
 func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16) []StaleReplyGuardRule {
+	wg := make(map[uint16]bool, len(wgListenPorts))
+	for _, port := range wgListenPorts {
+		wg[port] = true
+	}
+	judgedV4, judgedV6 := hostInboundIngressDestinations(views, unzonedV4, unzonedV6)
+	sortedV4 := append([]string(nil), judgedV4...)
+	sortedV6 := append([]string(nil), judgedV6...)
+	sort.Strings(sortedV4)
+	sort.Strings(sortedV6)
+
+	var out []StaleReplyGuardRule
+	// Per-ingress-view guards.
+	for _, v := range views {
+		if len(v.IngressNetdevs) == 0 || hostInboundAllowsAll(v) {
+			continue
+		}
+		ingress := append([]string(nil), v.IngressNetdevs...)
+		sort.Strings(ingress)
+		for _, fam := range []struct {
+			name  string
+			dests []string
+		}{
+			{"ip", sortedV4},
+			{"ip6", sortedV6},
+		} {
+			if len(fam.dests) == 0 {
+				continue
+			}
+			admit := staleReplyViewAdmit(v, fam.name)
+			catalog := HostInboundStaleReplyCatalog(fam.name)
+			for _, pair := range []struct {
+				proto uint8
+				ports []uint16
+				allow []config.PortRange
+			}{
+				{config.HostInboundProtoTCP, catalog.TCP, admit.tcp},
+				{config.HostInboundProtoUDP, catalog.UDP, admit.udp},
+			} {
+				denied := staleReplyDeniedPorts(pair.ports, pair.allow, pair.proto, wg)
+				if len(denied) > 0 {
+					out = append(out, StaleReplyGuardRule{
+						Family: fam.name, Proto: pair.proto, Ports: denied,
+						Addresses: append([]string(nil), fam.dests...),
+						Ingress:   append([]string(nil), ingress...),
+					})
+				}
+			}
+		}
+	}
+	// Ambiguous-ingress fail-closed guards.
+	if deny := staleReplySortedUniqueStrings(collectIngressDenyNetdevs(views)); len(deny) > 0 {
+		for _, fam := range []struct {
+			name  string
+			dests []string
+		}{
+			{"ip", sortedV4},
+			{"ip6", sortedV6},
+		} {
+			if len(fam.dests) == 0 {
+				continue
+			}
+			catalog := HostInboundStaleReplyCatalog(fam.name)
+			for _, pair := range []struct {
+				proto uint8
+				ports []uint16
+			}{
+				{config.HostInboundProtoTCP, catalog.TCP},
+				{config.HostInboundProtoUDP, catalog.UDP},
+			} {
+				denied := staleReplyDeniedPorts(pair.ports, nil, pair.proto, wg)
+				if len(denied) > 0 {
+					out = append(out, StaleReplyGuardRule{
+						Family: fam.name, Proto: pair.proto, Ports: denied,
+						Addresses: append([]string(nil), fam.dests...),
+						Ingress:   append([]string(nil), deny...),
+					})
+				}
+			}
+		}
+	}
+	// Uncovered-ingress fallback (destination-owner policy).
+	covered := staleReplySortedUniqueStrings(collectIngressNetdevs(views))
+	fallbackIngress := staleReplySortedUniqueStrings(append(append([]string(nil), covered...), HostInboundReinjectIfname))
+	admit, allowsAll := staleReplyOwnerAdmits(views, unzonedV4, unzonedV6)
+	for ip := range allowsAll {
+		delete(admit, ip)
+	}
+	addrs := make([]netip.Addr, 0, len(admit))
+	for ip := range admit {
+		addrs = append(addrs, ip)
+	}
+	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Less(addrs[j]) })
+	for _, ip := range addrs {
+		a := admit[ip]
+		family := "ip"
+		if ip.Is6() {
+			family = "ip6"
+		}
+		catalog := HostInboundStaleReplyCatalog(family)
+		for _, pair := range []struct {
+			proto uint8
+			ports []uint16
+			allow []config.PortRange
+		}{
+			{config.HostInboundProtoTCP, catalog.TCP, a.tcp},
+			{config.HostInboundProtoUDP, catalog.UDP, a.udp},
+		} {
+			denied := staleReplyDeniedPorts(pair.ports, pair.allow, pair.proto, wg)
+			if len(denied) > 0 {
+				out = append(out, StaleReplyGuardRule{
+					Family: family, Proto: pair.proto, Ports: denied, Addresses: []string{ip.String()},
+					Ingress: append([]string(nil), fallbackIngress...), IngressNegated: true,
+				})
+			}
+		}
+	}
+	return out
+}
+
+func staleReplyViewAdmit(v HostInboundZoneView, family string) staleReplyAdmit {
+	var a staleReplyAdmit
+	for _, token := range v.SystemServices {
+		for _, expanded := range config.HostInboundServiceTokenExpansion(token) {
+			for _, m := range config.HostInboundServiceMatch(expanded, family) {
+				if m.Reject {
+					continue
+				}
+				switch m.Proto {
+				case config.HostInboundProtoTCP:
+					a.tcp = append(a.tcp, m.Ports...)
+				case config.HostInboundProtoUDP:
+					a.udp = append(a.udp, m.Ports...)
+				}
+			}
+		}
+	}
+	for _, token := range v.Protocols {
+		for _, m := range config.HostInboundProtocolMatch(token, family) {
+			switch m.Proto {
+			case config.HostInboundProtoTCP:
+				a.tcp = append(a.tcp, m.Ports...)
+			case config.HostInboundProtoUDP:
+				a.udp = append(a.udp, m.Ports...)
+			}
+		}
+	}
+	return a
+}
+
+func staleReplyOwnerAdmits(views []HostInboundZoneView, unzonedV4, unzonedV6 []string) (map[netip.Addr]*staleReplyAdmit, map[netip.Addr]bool) {
 	admit := map[netip.Addr]*staleReplyAdmit{}
 	allowsAll := map[netip.Addr]bool{}
 	ensure := func(raw string) (netip.Addr, *staleReplyAdmit) {
@@ -161,31 +343,9 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 				allowsAll[ip] = true
 				continue
 			}
-			for _, token := range v.SystemServices {
-				for _, expanded := range config.HostInboundServiceTokenExpansion(token) {
-					for _, m := range config.HostInboundServiceMatch(expanded, family) {
-						if m.Reject {
-							continue
-						}
-						switch m.Proto {
-						case config.HostInboundProtoTCP:
-							a.tcp = append(a.tcp, m.Ports...)
-						case config.HostInboundProtoUDP:
-							a.udp = append(a.udp, m.Ports...)
-						}
-					}
-				}
-			}
-			for _, token := range v.Protocols {
-				for _, m := range config.HostInboundProtocolMatch(token, family) {
-					switch m.Proto {
-					case config.HostInboundProtoTCP:
-						a.tcp = append(a.tcp, m.Ports...)
-					case config.HostInboundProtoUDP:
-						a.udp = append(a.udp, m.Ports...)
-					}
-				}
-			}
+			got := staleReplyViewAdmit(v, family)
+			a.tcp = append(a.tcp, got.tcp...)
+			a.udp = append(a.udp, got.udp...)
 		}
 	}
 	for _, v := range views {
@@ -198,52 +358,50 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 	for _, raw := range unzonedV6 {
 		ensure(raw)
 	}
-	for ip := range allowsAll {
-		delete(admit, ip)
-	}
+	return admit, allowsAll
+}
 
-	wg := make(map[uint16]bool, len(wgListenPorts))
-	for _, port := range wgListenPorts {
-		wg[port] = true
-	}
-	addrs := make([]netip.Addr, 0, len(admit))
-	for ip := range admit {
-		addrs = append(addrs, ip)
-	}
-	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Less(addrs[j]) })
-
-	var out []StaleReplyGuardRule
-	for _, ip := range addrs {
-		a := admit[ip]
-		family := "ip"
-		if ip.Is6() {
-			family = "ip6"
+func staleReplyDeniedPorts(catalog []uint16, allow []config.PortRange, proto uint8, wg map[uint16]bool) []uint16 {
+	var denied []uint16
+	for _, port := range catalog {
+		if proto == config.HostInboundProtoUDP && wg[port] {
+			continue
 		}
-		catalog := HostInboundStaleReplyCatalog(family)
-		for _, pair := range []struct {
-			proto uint8
-			ports []uint16
-			allow []config.PortRange
-		}{
-			{config.HostInboundProtoTCP, catalog.TCP, a.tcp},
-			{config.HostInboundProtoUDP, catalog.UDP, a.udp},
-		} {
-			var denied []uint16
-			for _, port := range pair.ports {
-				if pair.proto == config.HostInboundProtoUDP && wg[port] {
-					continue
-				}
-				if !portInRanges(port, pair.allow) {
-					denied = append(denied, port)
-				}
-			}
-			if len(denied) > 0 {
-				out = append(out, StaleReplyGuardRule{
-					Family: family, Proto: pair.proto, Ports: denied, Addresses: []string{ip.String()},
-				})
-			}
+		if !portInRanges(port, allow) {
+			denied = append(denied, port)
 		}
 	}
+	return denied
+}
+
+func collectIngressNetdevs(views []HostInboundZoneView) []string {
+	var out []string
+	for _, v := range views {
+		out = append(out, v.IngressNetdevs...)
+		out = append(out, v.IngressDenyNetdevs...)
+	}
+	return out
+}
+
+func collectIngressDenyNetdevs(views []HostInboundZoneView) []string {
+	var out []string
+	for _, v := range views {
+		out = append(out, v.IngressDenyNetdevs...)
+	}
+	return out
+}
+
+func staleReplySortedUniqueStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -287,7 +445,9 @@ func sortedPortKeys(set map[uint16]bool) []uint16 {
 // for the addresses carried by a cold-boot fence. Fences keep the global
 // established-reply accept for ordinary client traffic, but must not let a
 // box-originated service-port flow recreate the exact stale authorization the
-// fence flushed.
+// fence flushed. Fence guards are destination-only (no ingress scope): the
+// fence denies every service on every interface, including the reinject TUN,
+// since it carries no reinject exemption.
 func HostInboundStaleReplyFenceRules(views []HostInboundZoneView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16) []StaleReplyGuardRule {
 	v4 := append([]string(nil), unzonedV4...)
 	v6 := append([]string(nil), unzonedV6...)
@@ -295,5 +455,10 @@ func HostInboundStaleReplyFenceRules(views []HostInboundZoneView, unzonedV4, unz
 		v4 = append(v4, view.V4Addrs...)
 		v6 = append(v6, view.V6Addrs...)
 	}
-	return HostInboundStaleReplyGuardRules(nil, v4, v6, wgListenPorts)
+	rules := HostInboundStaleReplyGuardRules(nil, v4, v6, wgListenPorts)
+	for i := range rules {
+		rules[i].Ingress = nil
+		rules[i].IngressNegated = false
+	}
+	return rules
 }

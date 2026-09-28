@@ -17,7 +17,12 @@ import (
 )
 
 func TestHostInboundBoxOrientedConntrackFlush10752And10764(t *testing.T) {
+	// Both zones deny SSH/IKE so no ingress view permits the tuple: the
+	// wan box-oriented entries are denied by owner AND every ingress and
+	// must flush. hostInboundFlushTestConfig opens lan to any-service, so
+	// tighten it here to isolate the owner-denied case.
 	cfg := hostInboundFlushTestConfig("snmp")
+	cfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"snmp"}}
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
 	filter := buildHostInboundConntrackFlushFilter(views, unzonedV4, unzonedV6, nil)
@@ -47,6 +52,7 @@ func TestHostInboundBoxOrientedConntrackFlush10752And10764(t *testing.T) {
 	}
 
 	admittedCfg := hostInboundFlushTestConfig("ssh", "ike", "snmp")
+	admittedCfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"snmp"}}
 	admittedViews := dpuserspace.BuildZoneHostInboundViews(admittedCfg)
 	admittedV4, admittedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(admittedCfg)
 	admitted := buildHostInboundConntrackFlushFilter(admittedViews, admittedV4, admittedV6, nil)
@@ -60,11 +66,46 @@ func TestHostInboundBoxOrientedConntrackFlush10752And10764(t *testing.T) {
 		}
 	}
 	identResetCfg := hostInboundFlushTestConfig("ident-reset")
+	identResetCfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"snmp"}}
 	identViews := dpuserspace.BuildZoneHostInboundViews(identResetCfg)
 	identV4, identV6 := dpuserspace.BuildUnzonedHostInboundAddrs(identResetCfg)
 	identFilter := buildHostInboundConntrackFlushFilter(identViews, identV4, identV6, nil)
 	if !identFilter.MatchConntrackFlow(boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 113)) {
 		t.Fatal("ident-reset is a reject, not an admit; box-oriented TCP/113 must remain flushable")
+	}
+}
+
+func TestHostInboundBoxOrientedFlushRespectsIngressPermits10752(t *testing.T) {
+	// Ingress-permits/owner-denies: wan denies SSH/IKE but lan is open, so
+	// some ingress zone still permits the tuple to the wan address. The
+	// flush must keep the entry (no disruption); the per-ingress nft guard
+	// judges each reply packet by its actual arrival zone.
+	cfg := hostInboundFlushTestConfig("snmp")
+	views := dpuserspace.BuildZoneHostInboundViews(cfg)
+	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
+	filter := buildHostInboundConntrackFlushFilter(views, unzonedV4, unzonedV6, nil)
+	if filter == nil {
+		t.Fatal("expected a filter for the enforcing configuration")
+	}
+	for _, flow := range []*netlink.ConntrackFlow{
+		boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 22),
+		boxOrientedFlow(config.HostInboundProtoUDP, "172.16.50.8", 500),
+		boxOrientedFlow(config.HostInboundProtoUDP, "172.16.50.8", 4500),
+		boxOrientedFlow(config.HostInboundProtoUDP, "2001:db8:50::8", 500),
+	} {
+		if filter.MatchConntrackFlow(flow) {
+			t.Errorf("ingress-permitted box-oriented tuple %+v must be kept, not flushed", flow.Forward)
+		}
+	}
+	// Admitted-client control: ephemeral and NTP/DHCP client tuples are kept
+	// regardless of ingress policy.
+	for _, flow := range []*netlink.ConntrackFlow{
+		boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 41000),
+		boxOrientedFlow(config.HostInboundProtoUDP, "172.16.50.8", 123),
+	} {
+		if filter.MatchConntrackFlow(flow) {
+			t.Errorf("client tuple %+v must be kept", flow.Forward)
+		}
 	}
 }
 
@@ -135,8 +176,8 @@ func TestHostInboundStaleReplyGuardsPrecedeReplyAccept10752And10764(t *testing.T
 		}
 	}
 	for _, line := range lines {
-		if strings.Contains(line, "ct state established,related ct direction reply") && strings.HasSuffix(line, " drop") && strings.Contains(line, "daddr 10.0.61.1") {
-			t.Fatalf("any-service address was guarded: %s", line)
+		if strings.Contains(line, "ct state established,related ct direction reply") && strings.HasSuffix(line, " drop") && strings.Contains(line, "iifname !=") && strings.Contains(line, "daddr 10.0.61.1") {
+			t.Fatalf("any-service address must not appear in the uncovered-ingress fallback: %s", line)
 		}
 	}
 
@@ -192,6 +233,136 @@ func TestHostInboundStaleReplyGuardsPrecedeReplyAccept10752And10764(t *testing.T
 	if got := hostForwardingPostureSysctls["/proc/sys/net/netfilter/nf_conntrack_tcp_loose"]; got != "0" {
 		t.Fatalf("runtime TCP conntrack posture = %q, want 0", got)
 	}
+}
+func TestHostInboundStaleReplyGuardsFollowIngressPolicy10752(t *testing.T) {
+	// Both disagreement directions, verified on the production text renderer
+	// (parity proves netlink identical; pkg/nftables pins netlink directly).
+	// wan ingress netdev is reth0.50, lan is reth1 (see dump in review).
+	t.Run("ingress-permits-owner-denies", func(t *testing.T) {
+		cfg := hostInboundFlushTestConfig("snmp")
+		views := dpuserspace.BuildZoneHostInboundViews(cfg)
+		payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, false)
+		lines := strings.Split(payload, "\n")
+		// Wan ingress denies SSH/IKE: its per-ingress guard must cover them
+		// to every judged destination (including the open lan address).
+		if !payloadHasGuard(lines, `"reth0.50"`, false, "172.16.50.8", "tcp", 22) {
+			t.Error("wan ingress guard must drop TCP/22 replies arriving on reth0.50")
+		}
+		if !payloadHasGuard(lines, `"reth0.50"`, false, "10.0.61.1", "tcp", 22) {
+			t.Error("wan ingress guard must cover cross-zone destination 10.0.61.1 for TCP/22")
+		}
+		if !payloadHasGuard(lines, `"reth0.50"`, false, "172.16.50.8", "udp", 500) {
+			t.Error("wan ingress guard must drop UDP/500 replies arriving on reth0.50")
+		}
+		// Lan ingress is open: no per-ingress guard for its netdev.
+		for _, line := range lines {
+			if isGuardDrop(line) && strings.Contains(line, `iifname "reth1"`) {
+				t.Errorf("open lan ingress must emit no per-ingress guard, got: %s", line)
+			}
+		}
+		// Uncovered fallback still guards the owner-denied wan address and
+		// excludes the trusted reinject TUN.
+		foundFallback := false
+		for _, line := range lines {
+			if isGuardDrop(line) && strings.Contains(line, "iifname !=") && strings.Contains(line, "daddr 172.16.50.8") && strings.Contains(line, " tcp dport ") && nftTextRuleHasPort(line, 22) {
+				foundFallback = true
+				if !strings.Contains(line, `"xpf-usp0"`) {
+					t.Errorf("fallback must exclude trusted reinject TUN xpf-usp0: %s", line)
+				}
+			}
+		}
+		if !foundFallback {
+			t.Error("uncovered-ingress fallback must guard owner-denied TCP/22 to 172.16.50.8")
+		}
+		// Admitted-client control: ephemeral and NTP never guarded.
+		for _, line := range lines {
+			if !isGuardDrop(line) {
+				continue
+			}
+			if strings.Contains(line, " tcp dport ") && nftTextRuleHasPort(line, 41000) {
+				t.Errorf("ephemeral TCP must never be guarded: %s", line)
+			}
+			if strings.Contains(line, " udp dport ") && nftTextRuleHasPort(line, 123) {
+				t.Errorf("NTP client must never be guarded: %s", line)
+			}
+		}
+	})
+	t.Run("ingress-denies-owner-permits", func(t *testing.T) {
+		cfg := hostInboundFlushTestConfig("ssh", "ike", "snmp")
+		cfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"snmp"}}
+		views := dpuserspace.BuildZoneHostInboundViews(cfg)
+		payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, false)
+		lines := strings.Split(payload, "\n")
+		// Lan ingress denies SSH: its guard must cover the wan address even
+		// though the wan owner permits it.
+		if !payloadHasGuard(lines, `"reth1"`, false, "172.16.50.8", "tcp", 22) {
+			t.Error("lan ingress guard must drop TCP/22 replies arriving on reth1 to 172.16.50.8")
+		}
+		if !payloadHasGuard(lines, `"reth1"`, false, "172.16.50.8", "udp", 500) {
+			t.Error("lan ingress guard must drop UDP/500 replies arriving on reth1 to 172.16.50.8")
+		}
+		// Wan ingress permits: no wan per-ingress guard for SSH/IKE.
+		for _, line := range lines {
+			if !isGuardDrop(line) || !strings.Contains(line, `iifname "reth0.50"`) {
+				continue
+			}
+			if strings.Contains(line, " tcp dport ") && nftTextRuleHasPort(line, 22) {
+				t.Errorf("wan ingress permits SSH, must not guard TCP/22: %s", line)
+			}
+			if strings.Contains(line, " udp dport ") && (nftTextRuleHasPort(line, 500) || nftTextRuleHasPort(line, 4500)) {
+				t.Errorf("wan ingress permits IKE, must not guard UDP/500/4500: %s", line)
+			}
+		}
+		// Owner-permitted wan address has no uncovered fallback for SSH/IKE.
+		for _, line := range lines {
+			if !isGuardDrop(line) || !strings.Contains(line, "iifname !=") || !strings.Contains(line, "daddr 172.16.50.8") {
+				continue
+			}
+			if strings.Contains(line, " tcp dport ") && nftTextRuleHasPort(line, 22) {
+				t.Errorf("owner-permitted wan address must have no fallback for TCP/22: %s", line)
+			}
+			if strings.Contains(line, " udp dport ") && (nftTextRuleHasPort(line, 500) || nftTextRuleHasPort(line, 4500)) {
+				t.Errorf("owner-permitted wan address must have no fallback for UDP/500/4500: %s", line)
+			}
+		}
+		// Owner-denied lan address retains its fallback.
+		found := false
+		for _, line := range lines {
+			if isGuardDrop(line) && strings.Contains(line, "iifname !=") && strings.Contains(line, "daddr 10.0.61.1") && strings.Contains(line, " tcp dport ") && nftTextRuleHasPort(line, 22) {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("owner-denied lan address must retain uncovered fallback for TCP/22")
+		}
+	})
+}
+
+func isGuardDrop(line string) bool {
+	return strings.Contains(line, "ct state established,related ct direction reply") && strings.HasSuffix(line, " drop")
+}
+
+func payloadHasGuard(lines []string, iifsubstr string, negated bool, daddrSubstr, proto string, port uint16) bool {
+	for _, line := range lines {
+		if !isGuardDrop(line) {
+			continue
+		}
+		hasNeg := strings.Contains(line, "iifname !=")
+		if hasNeg != negated {
+			continue
+		}
+		if !strings.Contains(line, iifsubstr) {
+			continue
+		}
+		if !strings.Contains(line, daddrSubstr) {
+			continue
+		}
+		if !strings.Contains(line, " "+proto+" dport ") || !nftTextRuleHasPort(line, port) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func boxOrientedFlow(proto uint8, localIP string, sport uint16) *netlink.ConntrackFlow {

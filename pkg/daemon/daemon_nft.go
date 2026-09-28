@@ -1086,6 +1086,9 @@ func hostInboundFenceMandatoryAdmits(wgListenPorts []uint16) []string {
 // hostInboundStaleReplyGuardText renders the #10752/#10764 catalog drops before
 // the broad reply-direction accepts. The netlink renderer consumes the same
 // StaleReplyGuardRule rows; T1 parity proves both enforcement paths agree.
+// Per-ingress rules carry `iifname <set>`; the uncovered-ingress fallback
+// carries `iifname != <covered+reinject>` so trusted reinjects keep their
+// exemption; fence guards carry no iifname predicate.
 func hostInboundStaleReplyGuardText(guards []xnft.StaleReplyGuardRule) []string {
 	out := make([]string, 0, len(guards))
 	for _, guard := range guards {
@@ -1097,9 +1100,17 @@ func hostInboundStaleReplyGuardText(guards []xnft.StaleReplyGuardRule) []string 
 		for i, port := range guard.Ports {
 			ports[i] = config.PortRange{Lo: port, Hi: port}
 		}
+		scope := ""
+		if len(guard.Ingress) > 0 {
+			if guard.IngressNegated {
+				scope = "iifname != " + nftIifnameSet(guard.Ingress) + " "
+			} else {
+				scope = "iifname " + nftIifnameSet(guard.Ingress) + " "
+			}
+		}
 		out = append(out, fmt.Sprintf(
-			"    ct state established,related ct direction reply %s daddr %s %s dport %s drop",
-			guard.Family, nftAddrSet(guard.Addresses), proto, renderHostInboundPortSpec(ports),
+			"    ct state established,related ct direction reply %s%s daddr %s %s dport %s drop",
+			scope, guard.Family, nftAddrSet(guard.Addresses), proto, renderHostInboundPortSpec(ports),
 		))
 	}
 	return out

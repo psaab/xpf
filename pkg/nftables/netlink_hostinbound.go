@@ -97,7 +97,9 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 
 // emitHostInboundStaleReplyGuards mirrors hostInboundStaleReplyGuardText:
 // catalogued box-originated replies to a currently denied local service are
-// dropped before the broad reply-direction accept.
+// dropped before the broad reply-direction accept. Expression order matches
+// the oracle (ct state, ct direction, iifname, daddr, dport) so T1 parity
+// holds.
 func emitHostInboundStaleReplyGuards(p *nlPlan, guards []StaleReplyGuardRule) {
 	for _, guard := range guards {
 		family := famV4
@@ -108,9 +110,17 @@ func emitHostInboundStaleReplyGuards(p *nlPlan, guards []StaleReplyGuardRule) {
 		if guard.Proto == config.HostInboundProtoUDP {
 			proto = protoUDP
 		}
-		p.rule().
+		rule := p.rule().
 			ctEstablishedRelated().
-			ctDirectionReply().
+			ctDirectionReply()
+		if len(guard.Ingress) > 0 {
+			if guard.IngressNegated {
+				rule.iifnameExcept(guard.Ingress)
+			} else {
+				rule.iifname(guard.Ingress)
+			}
+		}
+		rule.
 			daddr(family, guard.Addresses, false).
 			l4Port(proto, "dport", portsFromUint16(guard.Ports), false).
 			emit(verdictDrop()...)

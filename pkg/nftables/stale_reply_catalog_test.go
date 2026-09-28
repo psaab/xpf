@@ -1,8 +1,11 @@
 package nftables
 
 import (
+	"bytes"
 	"sort"
 	"testing"
+
+	"github.com/google/nftables/expr"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -121,6 +124,184 @@ func TestHostInboundStaleReplyGuardRulesRespectAddressUnion10752(t *testing.T) {
 		!guardRuleHasTuple(fenceRules, "192.0.2.12", "ip", config.HostInboundProtoUDP, 500) {
 		t.Fatal("cold-boot fence must guard service-port replies to every fenced address")
 	}
+}
+
+func TestHostInboundStaleReplyGuardsFollowIngressPolicy10752(t *testing.T) {
+	views := []HostInboundZoneView{
+		{Zone: "deny", SystemServices: []string{"snmp"}, V4Addrs: []string{"192.0.2.10"}, IngressNetdevs: []string{"eth-deny"}},
+		{Zone: "open", SystemServices: []string{"any-service"}, V4Addrs: []string{"192.0.2.12"}, IngressNetdevs: []string{"eth-open"}},
+	}
+	rules := HostInboundStaleReplyGuardRules(views, nil, nil, nil)
+	// Denying ingress emits a positive iifname guard covering every judged
+	// destination, including the open zone's address.
+	if !guardRuleHasIngressTuple(rules, []string{"eth-deny"}, false, "192.0.2.12", "ip", config.HostInboundProtoTCP, 22) {
+		t.Fatal("denying ingress must guard TCP/22 to every judged destination including 192.0.2.12")
+	}
+	if !guardRuleHasIngressTuple(rules, []string{"eth-deny"}, false, "192.0.2.10", "ip", config.HostInboundProtoUDP, 500) {
+		t.Fatal("denying ingress must guard UDP/500")
+	}
+	// Open ingress emits no per-ingress guard.
+	for _, r := range rules {
+		if !r.IngressNegated && len(r.Ingress) == 1 && r.Ingress[0] == "eth-open" {
+			t.Fatalf("open ingress must emit no per-ingress guard, got %+v", r)
+		}
+	}
+	// Fallback is negated, covers the owner-denied address, omits the open
+	// address, and excludes the trusted reinject TUN.
+	foundFallback := false
+	for _, r := range rules {
+		if !r.IngressNegated {
+			continue
+		}
+		hasReinject := false
+		for _, n := range r.Ingress {
+			if n == HostInboundReinjectIfname {
+				hasReinject = true
+			}
+		}
+		if !hasReinject {
+			t.Fatalf("fallback must exclude trusted reinject TUN, got %+v", r)
+		}
+		for _, a := range r.Addresses {
+			if a == "192.0.2.12" {
+				t.Fatalf("open address must not appear in fallback: %+v", r)
+			}
+			if a == "192.0.2.10" && r.Proto == config.HostInboundProtoTCP {
+				for _, p := range r.Ports {
+					if p == 22 {
+						foundFallback = true
+					}
+				}
+			}
+		}
+	}
+	if !foundFallback {
+		t.Fatal("owner-denied address must retain negated fallback for TCP/22")
+	}
+	// Fence guards stay destination-only.
+	for _, r := range HostInboundStaleReplyFenceRules(views, nil, nil, nil) {
+		if len(r.Ingress) != 0 || r.IngressNegated {
+			t.Fatalf("fence guard must be destination-only, got %+v", r)
+		}
+	}
+}
+
+func TestHostInboundStaleReplyNetlinkEmitsIngressScope10752(t *testing.T) {
+	views := []HostInboundZoneView{
+		{Zone: "deny", SystemServices: []string{"snmp"}, V4Addrs: []string{"192.0.2.10"}, IngressNetdevs: []string{"eth-deny"}},
+		{Zone: "open", SystemServices: []string{"any-service"}, V4Addrs: []string{"192.0.2.12"}, IngressNetdevs: []string{"eth-open"}},
+	}
+	guards := HostInboundStaleReplyGuardRules(views, nil, nil, nil)
+	p := newBuildPlan(t, "xpf_test_stale_10752", 10)
+	emitHostInboundStaleReplyGuards(p, guards)
+	if p.err != nil {
+		t.Fatalf("netlink guard build failed: %v", p.err)
+	}
+	if len(p.rules) != len(guards) {
+		t.Fatalf("netlink emitted %d rules for %d guards", len(p.rules), len(guards))
+	}
+	foundPositive, foundNegated := false, false
+	for i, exprs := range p.rules {
+		got, negated := netlinkGuardIifname(t, p, exprs)
+		want := guards[i].Ingress
+		if len(want) == 0 {
+			if len(got) != 0 {
+				t.Fatalf("rule %d: want no iifname, got %v", i, got)
+			}
+			continue
+		}
+		if negated != guards[i].IngressNegated {
+			t.Fatalf("rule %d: negated=%v, want %v", i, negated, guards[i].IngressNegated)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("rule %d: iifname %v, want %v", i, got, want)
+		}
+		for j := range got {
+			if got[j] != want[j] {
+				t.Fatalf("rule %d: iifname %v, want %v", i, got, want)
+			}
+		}
+		if negated {
+			foundNegated = true
+		} else {
+			foundPositive = true
+		}
+		// Every guard must be a terminal DROP.
+		last := exprs[len(exprs)-1]
+		vd, ok := last.(*expr.Verdict)
+		if !ok || vd.Kind != expr.VerdictDrop {
+			t.Fatalf("rule %d: last expr = %#v, want DROP verdict", i, last)
+		}
+	}
+	if !foundPositive || !foundNegated {
+		t.Fatalf("want both positive and negated iifname guards, got positive=%v negated=%v", foundPositive, foundNegated)
+	}
+}
+
+func guardRuleHasIngressTuple(rules []StaleReplyGuardRule, ingress []string, negated bool, address, family string, proto uint8, port uint16) bool {
+	for _, r := range rules {
+		if r.Family != family || r.Proto != proto || r.IngressNegated != negated || len(r.Ingress) != len(ingress) {
+			continue
+		}
+		match := true
+		for i := range ingress {
+			if r.Ingress[i] != ingress[i] {
+				match = false
+			}
+		}
+		if !match {
+			continue
+		}
+		foundAddr := false
+		for _, a := range r.Addresses {
+			if a == address {
+				foundAddr = true
+			}
+		}
+		if !foundAddr {
+			continue
+		}
+		for _, p := range r.Ports {
+			if p == port {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func netlinkGuardIifname(t *testing.T, p *nlPlan, exprs []expr.Any) ([]string, bool) {
+	t.Helper()
+	for i, e := range exprs {
+		meta, ok := e.(*expr.Meta)
+		if !ok || meta.Key != expr.MetaKeyIIFNAME {
+			continue
+		}
+		if i+1 >= len(exprs) {
+			t.Fatalf("iifname meta at end of rule without comparator")
+		}
+		switch cmp := exprs[i+1].(type) {
+		case *expr.Cmp:
+			name := string(bytes.TrimRight(cmp.Data, "\x00"))
+			if cmp.Op == expr.CmpOpEq {
+				return []string{name}, false
+			}
+			if cmp.Op == expr.CmpOpNeq {
+				return []string{name}, true
+			}
+			t.Fatalf("unexpected iifname cmp op %v", cmp.Op)
+		case *expr.Lookup:
+			var out []string
+			for _, el := range p.setElementsForID(cmp.SetID) {
+				out = append(out, string(bytes.TrimRight(el.Key, "\x00")))
+			}
+			sort.Strings(out)
+			return out, cmp.Invert
+		default:
+			t.Fatalf("unexpected iifname comparator %T", exprs[i+1])
+		}
+	}
+	return nil, false
 }
 
 func portSet(ports []uint16) map[uint16]struct{} {
