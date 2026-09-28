@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"net"
 	"net/netip"
 	"strings"
 	"testing"
@@ -792,10 +793,12 @@ func TestWithTighteningWarningsTokenOnlyCustomsAdvisory10752(t *testing.T) {
 }
 
 // TestHostInboundSweepCustomTokenPorts10752 pins the customs carve-out
-// universe: exactly p:rip/p:ripng admit sweep-custom tuples today.
-// bgp (exempt), ospf (bare), traceroute (range), dns (catalogued),
-// ntp (exempt) are excluded by rule; bfd/sap are excluded by the
-// documented conformant-ephemeral behavioral call.
+// universe: p:rip/p:ripng plus p:bfd Echo 3785 admit sweep-custom
+// tuples today. bgp (exempt), ospf (bare), traceroute (range), dns
+// (catalogued), ntp (exempt) are excluded by rule; bfd Control
+// (3784/4784) is excluded by the conformant-ephemeral call while Echo
+// 3785 stays; sap is excluded by the demonstrated-default call (no
+// supported fixed-9875 sender).
 func TestHostInboundSweepCustomTokenPorts10752(t *testing.T) {
 	m := hostInboundSweepCustomTokenPorts10752()
 	if got := m["p:rip"]; len(got) != 1 || got[0] != "17/520" {
@@ -804,7 +807,10 @@ func TestHostInboundSweepCustomTokenPorts10752(t *testing.T) {
 	if got := m["p:ripng"]; len(got) != 1 || got[0] != "17/521" {
 		t.Errorf(`p:ripng ports = %v, want ["17/521"]`, got)
 	}
-	for _, tok := range []string{"p:bgp", "p:ospf", "p:bfd", "p:sap", "p:ldp", "p:msdp", "s:dns", "s:ntp", "s:ssh", "s:traceroute", "s:dhcp"} {
+	if got := m["p:bfd"]; len(got) != 1 || got[0] != "17/3785" {
+		t.Errorf(`p:bfd ports = %v, want ["17/3785"] (Echo only, Control excluded)`, got)
+	}
+	for _, tok := range []string{"p:bgp", "p:ospf", "p:sap", "p:ldp", "p:msdp", "s:dns", "s:ntp", "s:ssh", "s:traceroute", "s:dhcp"} {
 		if got, ok := m[tok]; ok {
 			t.Errorf("token %s must not admit sweep-custom tuples, got %v", tok, got)
 		}
@@ -854,6 +860,63 @@ func TestWithTighteningWarningsRipRemovalWarnsCustoms10752(t *testing.T) {
 		!strings.Contains(line, "leaves 1 box-oriented custom-port") ||
 		!strings.Contains(line, "172.16.50.8:520") {
 		t.Errorf("custom line must name the narrowed scopes with the 520 sample: %q", line)
+	}
+}
+
+// TestWithTighteningWarningsBfdEchoRemovalWarnsCustoms10752 is the BFD
+// Echo carve-in RED pin: p:bfd removal is token-only, but FRR echo-mode
+// (operator-enabled, non-default) sends fixed sport=dport=3785, which
+// the sweep records as customs — so a kept 3785→3785 flow is genuinely
+// stranded and must emit the customs evidence line, not the advisory.
+// The collector leg also pins the Control-shape negative control:
+// RFC-conformant ephemeral-sport Control (49152+) stays sweep-silent.
+func TestWithTighteningWarningsBfdEchoRemovalWarnsCustoms10752(t *testing.T) {
+	origRange := readEphemeralPortRange
+	readEphemeralPortRange = func() (uint16, uint16) { return 32768, 60999 }
+	defer func() { readEphemeralPortRange = origRange }()
+	cfg := hostInboundFlushTestConfig("snmp")
+	views := dpuserspace.BuildZoneHostInboundViews(cfg)
+	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
+	filter := buildHostInboundConntrackFlushFilter(views, unzonedV4, unzonedV6, nil)
+	if filter == nil {
+		t.Fatal("expected a filter for the enforcing configuration")
+	}
+	mkFlow := func(sport, dport uint16) *netlink.ConntrackFlow {
+		return &netlink.ConntrackFlow{Forward: netlink.IPTuple{
+			SrcIP: net.ParseIP("172.16.50.8"), DstIP: net.ParseIP("203.0.113.7"),
+			Protocol: config.HostInboundProtoUDP, SrcPort: sport, DstPort: dport,
+		}}
+	}
+	if filter.MatchConntrackFlow(mkFlow(3785, 3785)) {
+		t.Fatal("denied echo-shaped tuple must be kept (catalog miss), not flushed")
+	}
+	if filter.MatchConntrackFlow(mkFlow(50000, 3784)) {
+		t.Fatal("denied control-shaped tuple must be kept (catalog miss), not flushed")
+	}
+	if got, _ := filter.keptSuspiciousReport(); got != 1 {
+		t.Fatalf("kept-suspicious count = %d, want 1 (echo recorded, control silent)", got)
+	}
+
+	oldCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	oldCfg.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"bfd"}
+	newCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		netip.MustParseAddr("172.16.50.8"): kept10752(1,
+			[]string{"udp 172.16.50.8:3785→203.0.113.7:3785"}, 0, nil),
+	})
+	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
+	if resp == newCfg {
+		t.Fatal("bfd removal with a kept echo flow must warn, got identity")
+	}
+	if len(resp.Warnings) != 2 {
+		t.Fatalf("warnings = %v, want [custom line, pointer]", resp.Warnings)
+	}
+	line := resp.Warnings[0]
+	if !strings.Contains(line, "(zone:wan, zone:wan|iface:reth0.50)") ||
+		!strings.Contains(line, "leaves 1 box-oriented custom-port") ||
+		!strings.Contains(line, "172.16.50.8:3785") {
+		t.Errorf("custom line must name the narrowed scopes with the echo sample: %q", line)
 	}
 }
 

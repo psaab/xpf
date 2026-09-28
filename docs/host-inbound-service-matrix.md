@@ -706,8 +706,8 @@ Properties:
   class (scope lists cap at four names, remainder as (+N more)),
   plus a silent-class pointer sentence. The customs line
   additionally requires a full-admit loss or the loss of a token
-  admitting sweep-custom tuples (today p:rip/p:ripng — fixed-sport
-  UDP 520/521 the sweep records as customs): other token-only
+  admitting sweep-custom tuples (today p:rip/p:ripng plus p:bfd
+  Echo 3785 — fixed-sport UDP the sweep records as customs): other
   narrowings (exempts, bare protocols, ranges, true customs) never
   admitted customs, so customs observed there are
   unchanged-authorization flows and yield the advisory instead.
@@ -826,7 +826,7 @@ Per-class originators, stop actions, and recurrence timers:
 
 | Class | Tuple | Originator on this appliance | Stop/disable action | Recurrence timer |
 |---|---|---|---|---|
-| BFD | UDP dports 3784/3785/4784 (control/echo/multihop); sources ephemeral per RFC 5881 §4/5883 | FRR bfdd (one global daemon; all peers share the dports, each session its own ephemeral sport) | remove `bfd-liveness-detection` from EVERY xpf interface/group stanza + stopping commit — one peer is not enough; direct vtysh peer removal is temporary (next commit regenerates). Discover/delete by DESTINATION (`conntrack -L -p udp -s <box-ip> -f <fam> | grep -E 'dport=(3784|3785|4784)'`), never `--sport 3784` (matches nothing conforming) | sub-second hellos (300ms x3 detect default) |
+| BFD | UDP dports 3784/3785/4784 (control/echo/multihop); control/multihop source ephemeral per RFC 5881 §4/5883, echo fixed sport=dport=3785 in FRR echo-mode (operator-enabled, non-default) | FRR bfdd (one global daemon; all peers share the dports; control sessions each use an ephemeral sport) | remove `bfd-liveness-detection` from EVERY xpf interface/group stanza + stopping commit — one peer is not enough; direct vtysh peer removal is temporary (next commit regenerates). Discover/delete by DESTINATION (`conntrack -L -p udp -s <box-ip> -f <fam> | grep -E 'dport=(3784|3785|4784)'`), never `--sport 3784` (matches no conforming Control flow; echo 3785 is covered by the dport filter regardless) | sub-second hellos (300ms x3 detect default) |
 | RIP | UDP 520, mcast 224.0.0.9 | FRR ripd | delete/deactivate `protocols rip` (or the neighbor/interface) + stopping commit; direct `no router rip` in vtysh is temporary (next commit regenerates) | 30s updates |
 | RIPng | UDP 521, mcast ff02::9 | no xpf-managed ripngd in-tree | stop any third-party ripngd (identify via `ss -uan sport = :521`) | 30s if present |
 | SAP | UDP dport 9875 (sources ephemeral) | none in-tree | identify the announcer (`ss -uanp` + conntrack dport=9875 discovery as for BFD), stop it | announce interval (minutes) if present |
@@ -888,7 +888,7 @@ open; the tightening commit itself warns — evidence lines naming the
 narrowed effective scopes with intersecting stranded flows of that
 class (counts and samples from those scopes' addresses only; the
 customs line needs a full-admit loss or a lost sweep-custom token
-(rip/ripng), since other token-only narrowings never admitted
+(rip/ripng/bfd-Echo), since other token-only narrowings never admitted
 customs), or a transition-only advisory naming the
 narrowed scopes when the sweep observed nothing stranded in them —
 and the daemon warns in the journal on applies that keep

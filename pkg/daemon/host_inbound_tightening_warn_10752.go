@@ -54,7 +54,8 @@ import (
 // removal changes no guard or flush behavior — exempts, bare protocols,
 // ranges, and the sweep-custom RIP tokens). Customs evidence fires on
 // full-admit loss or the loss of a sweep-custom-admitting token (rip,
-// ripng); other token-only narrowings never admitted customs.
+// ripng, bfd Echo 3785); other token-only narrowings never admitted
+// customs.
 // Narrowings that drop only catalogued tokens need no warning: flush+guard
 // enforce those. Effective override state comes from the CANONICAL resolver
 // (config.ResolveInterfaceHostInbound: physical∪unit union, quarantine), and
@@ -363,21 +364,29 @@ var hostInboundUnguardedTokens10752 = sync.OnceValue(func() map[string]bool {
 // HostInboundStaleReplyIsExempt the collector uses, so the set matches
 // sweep classification by construction), families unioned. Ranges are
 // excluded (range tuples are sweep-silent in-range or indistinguishable
-// ephemeral shapes); ICMP/bare protocols are not TCP/UDP. p:bfd and
-// p:sap are EXCLUDED although their dports satisfy the tuple rule:
-// conformant BFD/SAP sources ephemeral box sports (RFC 5881 §4 / SAP
-// announcer behavior, pinned by the round-5 packet reshape), so those
-// tuples never appear as sweep-observable box-side sports — including
-// them would only widen over-fire for unrelated customs on bfd/sap
-// removal. Membership today is exactly p:rip/p:ripng (fixed-sport UDP
-// 520/521 below the ephemeral floor, routinely present at removal);
+// ephemeral shapes); ICMP/bare protocols are not TCP/UDP. Two
+// behavioral refinements narrow the tuple rule to sweep-OBSERVABLE
+// box-side sports. p:bfd contributes Echo-shape 3785 only: conformant
+// Control sources ephemeral (RFC 5881 §4 mandates it; the packet
+// reshape pins ephemeral for 3784/4784), so 3784/4784 never appear as
+// observable box sports — but FRR echo-mode (operator-enabled,
+// non-default) sends fixed sport=dport=3785, which the sweep records.
+// p:sap is EXCLUDED although 9875 satisfies the tuple rule: no
+// supported deployed sender binds fixed 9875 (no in-tree announcer;
+// demonstrated defaults source ephemeral — PipeWire sport 0, FFmpeg
+// ephemeral unless localport forced; RFC 2974 constrains the
+// destination only). Membership today is p:rip/p:ripng (fixed-sport
+// UDP 520/521, routinely present at removal) plus p:bfd Echo 3785;
 // future discrete-port UDP-protocol tokens inherit membership
 // automatically. A scope losing one of these ports genuinely
 // de-admits a sweep-observable custom flow. Computed once; pure SSOT
-// plus the two documented behavioral exclusions.
+// plus the two documented behavioral refinements.
 var hostInboundSweepCustomTokenPorts10752 = sync.OnceValue(func() map[string][]string {
 	out := map[string][]string{}
-	consider := func(key string, matches func(family string) []config.L4Match) {
+	// keep, when non-nil, restricts which tuples a token contributes
+	// (BFD Control-shape exclusion below); nil keeps every qualifying
+	// tuple.
+	consider := func(key string, matches func(family string) []config.L4Match, keep func(proto uint8, port uint16) bool) {
 		seen := map[string]bool{}
 		for _, family := range []string{"ip", "ip6"} {
 			catalog := xnft.HostInboundStaleReplyCatalog(family)
@@ -406,6 +415,9 @@ var hostInboundSweepCustomTokenPorts10752 = sync.OnceValue(func() map[string][]s
 					if set[r.Lo] || xnft.HostInboundStaleReplyIsExempt(m.Proto, r.Lo) {
 						continue
 					}
+					if keep != nil && !keep(m.Proto, r.Lo) {
+						continue
+					}
 					pp := fmt.Sprintf("%d/%d", m.Proto, r.Lo)
 					if !seen[pp] {
 						seen[pp] = true
@@ -421,20 +433,31 @@ var hostInboundSweepCustomTokenPorts10752 = sync.OnceValue(func() map[string][]s
 		}
 		consider("s:"+tok, func(family string) []config.L4Match {
 			return config.HostInboundServiceMatch(tok, family)
-		})
+		}, nil)
 	}
 	for tok := range config.KnownHostInboundProtocols {
 		if tok == "all" {
 			continue
 		}
-		if tok == "bfd" || tok == "sap" {
-			// Behavioral exclusion (see header): conformant
-			// ephemeral sourcing, no observable box-side sports.
+		if tok == "sap" {
+			// Behavioral exclusion (see header): no supported
+			// deployed sender binds fixed 9875; demonstrated
+			// defaults source ephemeral.
 			continue
+		}
+		keep := func(proto uint8, port uint16) bool { return true }
+		if tok == "bfd" {
+			// Control-shape exclusion (see header): conformant
+			// Control sources ephemeral (RFC 5881 §4), so only
+			// Echo-shape 3785 — fixed sport in FRR echo-mode —
+			// is sweep-observable.
+			keep = func(proto uint8, port uint16) bool {
+				return proto == config.HostInboundProtoUDP && port == 3785
+			}
 		}
 		consider("p:"+tok, func(family string) []config.L4Match {
 			return config.HostInboundProtocolMatch(tok, family)
-		})
+		}, keep)
 	}
 	return out
 })
@@ -447,7 +470,8 @@ var hostInboundSweepCustomTokenPorts10752 = sync.OnceValue(func() map[string][]s
 // warning: flush+guard enforce those. Nil old (first commit) yields nil.
 // The second return flags scopes where customs evidence fires: full-admit
 // loss, or loss of a named token admitting sweep-custom tuples (today
-// p:rip/p:ripng — fixed-sport UDP the sweep classifies custom). Other
+// p:rip/p:ripng plus p:bfd Echo 3785 — fixed-sport UDP the sweep
+// classifies custom). Other
 // token-only narrowings never admitted customs, so customs observed
 // there are unchanged-authorization flows and yield the advisory;
 // exempt/bare evidence strands on any tightening shape.
@@ -772,7 +796,7 @@ func (d *Daemon) withTighteningWarningsForResponse10752(respCfg, oldActive, comp
 	// custom evidence must not appear on the exempt/bare line, and vice
 	// versa. A scope with both classes' evidence appears on both lines.
 	// Customs additionally require the scope to have lost full-admit or a
-	// named token admitting sweep-custom tuples (rip/ripng): other
+	// named token admitting sweep-custom tuples (rip/ripng/bfd-Echo): other
 	// token-only narrowings never admitted customs, so observed customs
 	// there are unchanged-authorization flows, not stranded ones, and
 	// the transition falls through to the advisory instead.
