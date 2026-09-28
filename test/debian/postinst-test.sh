@@ -445,14 +445,37 @@ scenario_first_install_injects_barrier_with_active_unhanded_daemon() {
 }
 
 stub_nft() {
-    # NFT_TABLE_PRESENT=yes simulates a live barrier table.
+    # NFT_TABLE_PRESENT=yes simulates a live barrier table (exit 0 plus a
+    # DROP-bearing dump); NFT_TABLE_SHELL=yes simulates a present-but-open
+    # shell (exit 0, table header with no DROP verdict).
     mkdir -p "$ROOT/bin"
     NFT_LOG="$ROOT/nft.log"
-    export NFT_LOG NFT_TABLE_PRESENT
+    export NFT_LOG NFT_TABLE_PRESENT NFT_TABLE_SHELL
     cat > "$ROOT/bin/nft" <<EOF
 #!/bin/sh
 echo "nft \$*" >> "$NFT_LOG"
-[ "\$1 \$2 \$3 \$4" = "list table inet xpf_input_barrier" ] && [ "\$NFT_TABLE_PRESENT" = yes ]
+if [ "\$1 \$2 \$3 \$4" = "list table inet xpf_input_barrier" ]; then
+    if [ "\$NFT_TABLE_SHELL" = yes ]; then
+        echo 'table inet xpf_input_barrier {'
+        echo '  chain input {'
+        echo '    type filter hook input priority 12; policy accept;'
+        echo '  }'
+        echo '}'
+        exit 0
+    elif [ "\$NFT_TABLE_PRESENT" = yes ]; then
+        echo 'table inet xpf_input_barrier {'
+        echo '  chain input {'
+        echo '    type filter hook input priority 12; policy accept;'
+        echo '    ct state established,related accept'
+        echo '    iifname != { "fxp0" } drop'
+        echo '  }'
+        echo '}'
+        exit 0
+    else
+        exit 1
+    fi
+fi
+exit 1
 EOF
     chmod +x "$ROOT/bin/nft"
 }
@@ -472,6 +495,20 @@ scenario_first_install_skips_barrier_when_table_live() {
     if [ -e "$SYSTEMCTL_LOG" ] && grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG"; then
         echo "FAIL: postinst probed the daemon despite a live table (table must win first)"; exit 1
     fi
+}
+
+scenario_first_install_injects_barrier_when_table_shell() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 0
+    NFT_TABLE_PRESENT=yes
+    NFT_TABLE_SHELL=yes
+    export NFT_TABLE_PRESENT NFT_TABLE_SHELL
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst did not probe kernel barrier state"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: present-but-open shell table did not trigger a barrier injection"; exit 1; }
 }
 
 scenario_first_install_skips_barrier_with_handoff_marker() {
@@ -510,6 +547,7 @@ run_scenario first_install_killed_during_seed_keeps_launch_links
 run_scenario first_install_starts_barrier_without_daemon
 run_scenario first_install_injects_barrier_with_active_unhanded_daemon
 run_scenario first_install_skips_barrier_when_table_live
+run_scenario first_install_injects_barrier_when_table_shell
 run_scenario first_install_skips_barrier_with_handoff_marker
 run_scenario upgrade_never_starts_barrier
 run_scenario recovers_cli_through_current
