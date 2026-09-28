@@ -34,7 +34,7 @@ import (
 // scopes with intersecting evidence OF ITS CLASS — "zone:<name>" or
 // "zone:<name>|iface:<canonical-unit>" — with counts and samples drawn
 // ONLY from those scopes' addresses, plus a silent-class pointer sentence
-// (the sweep cannot observe in-range UDP customs, ranges, post-sweep
+// (the sweep cannot observe in-range customs, ranges, post-sweep
 // reconnects, or sweep misses). When narrowed scopes exist but the sweep
 // observed nothing in them — zero kept flows, or evidence only on addresses
 // outside every narrowed scope — the commit carries a transition-only
@@ -169,7 +169,10 @@ func hostInboundOverrideIndex10752(cfg *config.Config) map[string]*config.HostIn
 // bare→unit fan-down, first-sorted-owner wins, lifelines skipped. Shared by
 // scope-state construction and disappearance replacement comparison so both
 // agree on membership. name is the zone map key (ownership compares
-// against it, not the struct field).
+// against it, not the struct field). Units-only by design: bare
+// trunk-parent addresses form no scope, so all-units-overridden plus a
+// zone-stanza narrowing stays silent for kept flows there (documented
+// exception in the service matrix warning section).
 func hostInboundOwnedMembers10752(cfg *config.Config, name string, ifaces []string, owners map[string]string, lifelines map[string]bool) []string {
 	if cfg == nil {
 		return nil
@@ -722,7 +725,7 @@ func hostInboundScopesForAddrs10752(oldCfg *config.Config, oldViews []dpuserspac
 
 // silentClasses10752 are the stranded-flow shapes the conntrack sweep cannot
 // observe, named identically in both commit-warning shapes.
-const silentClasses10752 = "in-range UDP customs, ranges, post-sweep reconnects, or sweep misses"
+const silentClasses10752 = "in-range customs (UDP, or TCP without a local LISTEN), ranges, post-sweep reconnects, or sweep misses"
 
 // withTighteningWarningsForResponse10752 returns the config object a commit
 // response projects: respCfg itself when nothing narrowed, else a shallow

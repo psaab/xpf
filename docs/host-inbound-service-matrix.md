@@ -693,13 +693,18 @@ Properties:
   any-service breadth advisory names this consequence while the stanza is
   open. A narrowed scope is a full-admit loss or an unguarded-token
   removal, computed with the canonical physical+unit override union
-  (zone-level only where no replacing override applies). When this
+  (zone-level only where no replacing override applies). Exception:
+  bare trunk-parent addresses (VLAN unit-0) form no scope in the
+  units-only model, so all-units-overridden plus zone-stanza
+  narrowing stays silent for kept flows there — including
+  exempt/bare, which have no journal backstop. When this
   attempt's sweep observed stranded customs, exempt, or bare flows on an
   address the OLD config covered in a narrowed effective scope, the
   tightening commit carries evidence lines (customs, exempt/bare) naming
   ONLY those scopes — zone:<name> or zone:<name>|iface:<unit> — with
   counts and samples drawn ONLY from the intersecting addresses of that
-  class, plus a silent-class pointer sentence. The customs line
+  class (scope lists cap at four names, remainder as (+N more)),
+  plus a silent-class pointer sentence. The customs line
   additionally requires a full-admit loss or the loss of a token
   admitting sweep-custom tuples (today p:rip/p:ripng — fixed-sport
   UDP 520/521 the sweep records as customs): other token-only
@@ -709,11 +714,12 @@ Properties:
   Otherwise — zero kept flows, or evidence only outside every
   narrowed scope — the commit carries a transition-only advisory naming
   the narrowed scopes with honest zero-observed wording and a
-  manual-procedure pointer, so silent-class narrowings (in-range UDP
-  customs, ranges, post-sweep reconnects, sweep misses) never pass
-  commit-silent; the advisory is suppressed only when the narrowed
-  scopes' zones own no address in either generation (zone-granular by
-  design: an addressless member in an addressed zone still warns).
+  manual-procedure pointer, so silent-class narrowings (in-range
+  customs — UDP, or TCP without a local LISTEN — ranges, post-sweep
+  reconnects, sweep misses) never pass commit-silent; the advisory is
+  suppressed only when the narrowed scopes' zones own no address in
+  either generation (zone-granular by design: an addressless member in
+  an addressed zone still warns).
   Commits with no transition stay silent, as do narrowings no address
   can strand. The daemon additionally warns in the journal on any apply
   (commit or background) that keeps denied non-catalog customs below
