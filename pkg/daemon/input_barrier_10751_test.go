@@ -8,6 +8,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
+	"github.com/vishvananda/netlink"
 )
 
 func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
@@ -547,6 +548,105 @@ func TestEarlyInputBarrierAttestation10751(t *testing.T) {
 	})
 }
 
+func TestEarlyInputGateForLinkActivation10751(t *testing.T) {
+	origInstaller := nftInstaller
+	origProbe := nftProbeAvailable
+	t.Cleanup(func() { nftInstaller = origInstaller; nftProbeAvailable = origProbe })
+
+	t.Run("present barrier proceeds", func(t *testing.T) {
+		fake := &fakeNftInstaller{}
+		nftInstaller = fake
+		if !ensureEarlyInputProtectionForNaming() {
+			t.Fatal("gate refused with the barrier present")
+		}
+		if fake.earlyInputBarrierPresentCalls != 1 {
+			t.Fatalf("presence attestations = %d, want 1", fake.earlyInputBarrierPresentCalls)
+		}
+	})
+
+	t.Run("absent barrier reinstalls and proceeds", func(t *testing.T) {
+		fake := &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
+		}
+		nftInstaller = fake
+		if !ensureEarlyInputProtectionForNaming() {
+			t.Fatal("gate refused after a successful reinstall")
+		}
+		installs := 0
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "install" {
+				installs++
+			}
+		}
+		if installs != 1 {
+			t.Fatalf("barrier install calls = %d, want 1 self-heal reinstall", installs)
+		}
+	})
+
+	t.Run("absent barrier with unusable nft proceeds loudly", func(t *testing.T) {
+		fake := &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
+			earlyInputBarrierInstall: func() error { return errors.New("nft unavailable") },
+		}
+		nftInstaller = fake
+		nftProbeAvailable = func() error { return errors.New("no nf_tables") }
+		if !ensureEarlyInputProtectionForNaming() {
+			t.Fatal("gate refused on an unenforceable platform; boot must never brick where no enforcement is possible")
+		}
+	})
+
+	t.Run("absent barrier with usable nft refuses", func(t *testing.T) {
+		fake := &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
+			earlyInputBarrierInstall: func() error { return errors.New("reinstall failed") },
+		}
+		nftInstaller = fake
+		nftProbeAvailable = func() error { return nil }
+		if ensureEarlyInputProtectionForNaming() {
+			t.Fatal("gate proceeded with protection known-absent and nft usable")
+		}
+	})
+
+	t.Run("readback error proceeds", func(t *testing.T) {
+		fake := &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, errors.New("netlink readback failed") },
+		}
+		nftInstaller = fake
+		if !ensureEarlyInputProtectionForNaming() {
+			t.Fatal("gate refused on a presence-readback error; it blocks on known-absent, not on unobservable")
+		}
+	})
+
+	t.Run("naming policy performs no link activation on gate refusal", func(t *testing.T) {
+		nftInstaller = &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
+			earlyInputBarrierInstall: func() error { return errors.New("reinstall failed") },
+		}
+		nftProbeAvailable = func() error { return nil }
+		// Belt-and-braces link-op recorders: the gate returns before any
+		// enumeration, so none of these may fire.
+		var linkOps []string
+		oldByName, oldDown, oldName, oldUp := nlLinkByName, nlLinkSetDown, nlLinkSetName, nlLinkSetUp
+		t.Cleanup(func() {
+			nlLinkByName, nlLinkSetDown, nlLinkSetName, nlLinkSetUp = oldByName, oldDown, oldName, oldUp
+		})
+		nlLinkByName = func(name string) (netlink.Link, error) {
+			linkOps = append(linkOps, "byname:"+name)
+			return nil, errors.New("no links in gate test")
+		}
+		nlLinkSetDown = func(netlink.Link) error { linkOps = append(linkOps, "down"); return nil }
+		nlLinkSetName = func(netlink.Link, string) error { linkOps = append(linkOps, "rename"); return nil }
+		nlLinkSetUp = func(netlink.Link) error { linkOps = append(linkOps, "up"); return nil }
+		err := applyStartupNamingPolicy(nil, 0, false, 0, true, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "early host-input barrier") {
+			t.Fatalf("naming policy error = %v, want barrier gate refusal", err)
+		}
+		if len(linkOps) != 0 {
+			t.Fatalf("link operations on gate refusal = %v, want none", linkOps)
+		}
+	})
+}
+
 func addresslessProgramOnlyConfig10751(t *testing.T) *config.Config {
 	t.Helper()
 	unit := &config.InterfaceUnit{Number: 0, DHCP: true}
@@ -593,7 +693,9 @@ func TestEarlyInputBarrierBootUnitAndStaging10751(t *testing.T) {
 		{section: unitSection, want: "After=nftables.service"},
 		{section: unitSection, want: "Before=network-pre.target systemd-networkd.service frr.service xpfd.service"},
 		{section: installSection, want: "RequiredBy=systemd-networkd.service"},
+		{section: installSection, want: "RequiredBy=xpfd.service"},
 		{section: serviceSection, want: "ExecStart=/usr/local/sbin/xpfd input-barrier close"},
+		{section: serviceSection, want: "ExecReload=/usr/local/sbin/xpfd input-barrier close"},
 		{section: serviceSection, want: "Type=oneshot"},
 		{section: serviceSection, want: "RemainAfterExit=yes"},
 	} {

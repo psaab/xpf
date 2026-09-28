@@ -12,10 +12,19 @@
 # FRR/HA ingress and ordinary host services remain denied until xpfd atomically
 # installs host-inbound enforcement (or completes a no-enforcement teardown).
 #
-# RequiredBy=systemd-networkd.service is essential, not merely an ordering hint:
-# a failed barrier install MUST prevent systemd-networkd from bringing up any
-# addresses. ExecStart is deliberately bare, without systemd's '-' prefix.
+# RequiredBy=systemd-networkd.service and RequiredBy=xpfd.service are essential,
+# not merely ordering hints: a failed barrier install MUST prevent
+# systemd-networkd from bringing up any addresses AND prevent xpfd from
+# activating links directly (its renames bring links up, including v6
+# link-locals). ExecStart is deliberately bare, without systemd's '-' prefix.
 # xpfd's `input-barrier` command loads no config and takes no daemon lock.
+#
+# A privileged `nft flush ruleset` or nftables.service restart between this
+# install and the daemon's first handoff wipes the table; the daemon
+# re-attests and reinstalls pre-handoff. Post-handoff a flush also wipes the
+# real tables — treat any post-handoff flush as an operator action (same as
+# flushing host-inbound itself) and re-apply to converge. ExecReload below
+# reinstalls the barrier manually while it is still expected (pre-handoff).
 [Unit]
 DefaultDependencies=no
 After=nftables.service
@@ -29,6 +38,7 @@ Type=oneshot
 RemainAfterExit=yes
 TimeoutStartSec=30
 ExecStart=/usr/local/sbin/xpfd input-barrier close
+ExecReload=/usr/local/sbin/xpfd input-barrier close
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=xpf-input-closed
@@ -36,3 +46,4 @@ SyslogIdentifier=xpf-input-closed
 [Install]
 WantedBy=sysinit.target
 RequiredBy=systemd-networkd.service
+RequiredBy=xpfd.service

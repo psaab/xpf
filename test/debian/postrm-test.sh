@@ -31,6 +31,7 @@ patched_postrm() {
       -e "s#^DROPIN=.*#DROPIN=$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf#" \
       -e "s#^TRANSIT_CLOSED_REQUIRES_LINK=.*#TRANSIT_CLOSED_REQUIRES_LINK=$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-transit-closed.service#" \
       -e "s#^INPUT_CLOSED_REQUIRES_LINK=.*#INPUT_CLOSED_REQUIRES_LINK=$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-input-closed.service#" \
+      -e "s#^INPUT_CLOSED_XPFD_REQUIRES_LINK=.*#INPUT_CLOSED_XPFD_REQUIRES_LINK=$ROOT/etc/systemd/system/xpfd.service.requires/xpf-input-closed.service#" \
       -e "s#^TRANSIT_IPV4_SYSCTL=.*#TRANSIT_IPV4_SYSCTL=$ROOT/proc/sys/net/ipv4/ip_forward#" \
       -e "s#^TRANSIT_IPV6_SYSCTL=.*#TRANSIT_IPV6_SYSCTL=$ROOT/proc/sys/net/ipv6/conf/all/forwarding#" \
       -e "s#\\[ -d /run/systemd/system \\]#false#" \
@@ -45,8 +46,9 @@ patched_prerm() {
     sed \
       -e "s#^TRANSIT_CLOSED_REQUIRES_LINK=.*#TRANSIT_CLOSED_REQUIRES_LINK=$REQUIRES_LINK#" \
       -e "s#^INPUT_CLOSED_REQUIRES_LINK=.*#INPUT_CLOSED_REQUIRES_LINK=$INPUT_REQUIRES_LINK#" \
-      -e "s#\\[ -d /run/systemd/system \\]#false#" \
-      -e "s@^#DEBHELPER#\$@test ! -L \"$REQUIRES_LINK\" && test ! -L \"$INPUT_REQUIRES_LINK\" || { echo \"FAIL: boot-barrier .requires link remained before generated stop hook\"; exit 1; }@" \
+      -e "s#^INPUT_CLOSED_XPFD_REQUIRES_LINK=.*#INPUT_CLOSED_XPFD_REQUIRES_LINK=$INPUT_XPFD_REQUIRES_LINK#" \
+      -e "s#\[ -d /run/systemd/system \]#false#" \
+      -e "s@^#DEBHELPER#\$@test ! -L \"$REQUIRES_LINK\" && test ! -L \"$INPUT_REQUIRES_LINK\" && test ! -L \"$INPUT_XPFD_REQUIRES_LINK\" || { echo \"FAIL: boot-barrier .requires link remained before generated stop hook\"; exit 1; }@" \
       "$PRERM" > "$ROOT/prerm"
     chmod +x "$ROOT/prerm"
 }
@@ -63,6 +65,8 @@ run_scenario() {
     REQUIRES_DIR="$ROOT/etc/systemd/system/systemd-networkd.service.requires"
     REQUIRES_LINK="$REQUIRES_DIR/xpf-transit-closed.service"
     INPUT_REQUIRES_LINK="$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-input-closed.service"
+    XPFD_REQUIRES_DIR="$ROOT/etc/systemd/system/xpfd.service.requires"
+    INPUT_XPFD_REQUIRES_LINK="$XPFD_REQUIRES_DIR/xpf-input-closed.service"
     TRANSIT_IPV4_SYSCTL="$ROOT/proc/sys/net/ipv4/ip_forward"
     TRANSIT_IPV6_SYSCTL="$ROOT/proc/sys/net/ipv6/conf/all/forwarding"
     mkdir -p "$(dirname "$TRANSIT_IPV4_SYSCTL")" "$(dirname "$TRANSIT_IPV6_SYSCTL")"
@@ -244,30 +248,36 @@ scenario_remove_no_dropin_ok() {
     done
 }
 
-# #10758/#10751: prerm removes both legacy Requires edges before the generated
-# debhelper stop hook, so stopping either boot fence cannot stop networkd.
+# #10758/#10751: prerm removes all legacy Requires edges before the generated
+# debhelper stop hook, so stopping either boot fence cannot stop networkd or xpfd.
 scenario_prerm_scrubs_legacy_requires_before_stop() {
-    mkdir -p "$REQUIRES_DIR"
+    mkdir -p "$REQUIRES_DIR" "$XPFD_REQUIRES_DIR"
     ln -sf "/lib/systemd/system/xpf-transit-closed.service" "$REQUIRES_LINK"
     ln -sf "/lib/systemd/system/xpf-input-closed.service" "$INPUT_REQUIRES_LINK"
+    ln -sf "/lib/systemd/system/xpf-input-closed.service" "$INPUT_XPFD_REQUIRES_LINK"
     patched_prerm
     "$ROOT/prerm" remove
     [ ! -e "$REQUIRES_LINK" ] && [ ! -L "$REQUIRES_LINK" ] || { echo "FAIL: transit .requires link not removed before generated stop hook"; exit 1; }
     [ ! -e "$INPUT_REQUIRES_LINK" ] && [ ! -L "$INPUT_REQUIRES_LINK" ] || { echo "FAIL: input .requires link not removed before generated stop hook"; exit 1; }
-    [ ! -d "$REQUIRES_DIR" ] || { echo "FAIL: empty .requires directory not removed by prerm"; exit 1; }
+    [ ! -e "$INPUT_XPFD_REQUIRES_LINK" ] && [ ! -L "$INPUT_XPFD_REQUIRES_LINK" ] || { echo "FAIL: input xpfd .requires link not removed before generated stop hook"; exit 1; }
+    [ ! -d "$REQUIRES_DIR" ] || { echo "FAIL: empty networkd .requires directory not removed by prerm"; exit 1; }
+    [ ! -d "$XPFD_REQUIRES_DIR" ] || { echo "FAIL: empty xpfd .requires directory not removed by prerm"; exit 1; }
 }
 
 # #10758/#10751: postrm is a fallback for older maintainer-script flows, and
-# must remove both legacy symlinks and tear down the input barrier on apt remove.
+# must remove all three legacy symlinks and tear down the input barrier on apt remove.
 scenario_postrm_scrubs_legacy_requires_link() {
     build_hardened "1.0.0"
-    mkdir -p "$REQUIRES_DIR"
+    mkdir -p "$REQUIRES_DIR" "$XPFD_REQUIRES_DIR"
     ln -sf "/lib/systemd/system/xpf-transit-closed.service" "$REQUIRES_LINK"
     ln -sf "/lib/systemd/system/xpf-input-closed.service" "$INPUT_REQUIRES_LINK"
+    ln -sf "/lib/systemd/system/xpf-input-closed.service" "$INPUT_XPFD_REQUIRES_LINK"
     "$ROOT/postrm" remove
     [ ! -e "$REQUIRES_LINK" ] && [ ! -L "$REQUIRES_LINK" ] || { echo "FAIL: transit .requires link not removed by postrm remove"; exit 1; }
     [ ! -e "$INPUT_REQUIRES_LINK" ] && [ ! -L "$INPUT_REQUIRES_LINK" ] || { echo "FAIL: input .requires link not removed by postrm remove"; exit 1; }
-    [ ! -d "$REQUIRES_DIR" ] || { echo "FAIL: empty .requires directory not removed by postrm"; exit 1; }
+    [ ! -e "$INPUT_XPFD_REQUIRES_LINK" ] && [ ! -L "$INPUT_XPFD_REQUIRES_LINK" ] || { echo "FAIL: input xpfd .requires link not removed by postrm remove"; exit 1; }
+    [ ! -d "$REQUIRES_DIR" ] || { echo "FAIL: empty networkd .requires directory not removed by postrm"; exit 1; }
+    [ ! -d "$XPFD_REQUIRES_DIR" ] || { echo "FAIL: empty xpfd .requires directory not removed by postrm"; exit 1; }
     [ "$(cat "$INPUT_BARRIER_LOG")" = remove ] || { echo "FAIL: input barrier remove was not invoked by postrm"; exit 1; }
 }
 

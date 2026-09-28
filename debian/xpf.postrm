@@ -78,6 +78,7 @@ DROPIN=/etc/systemd/system/xpfd.service.d/10-xpf-version.conf
 # script flows. Only symlinks are ours.
 TRANSIT_CLOSED_REQUIRES_LINK=/etc/systemd/system/systemd-networkd.service.requires/xpf-transit-closed.service
 INPUT_CLOSED_REQUIRES_LINK=/etc/systemd/system/systemd-networkd.service.requires/xpf-input-closed.service
+INPUT_CLOSED_XPFD_REQUIRES_LINK=/etc/systemd/system/xpfd.service.requires/xpf-input-closed.service
 # apt source that the Tailscale-style install.sh writes (#1924, H-16). It is
 # NOT a dpkg payload file (install.sh writes it, not the package), so dpkg
 # never removes it — but its Signed-By keyring IS package payload
@@ -226,15 +227,15 @@ remove_runtime_dropin() {
     fi
 }
 
-# remove_legacy_networkd_requires_links scrubs the pre-#10758 Requires links if
-# an older script flow reaches postrm without the new prerm removing them before
-# the generated stop hook. Only symlinks created by systemd enablement are ours;
-# leave regular operator files and foreign entries alone.
-remove_legacy_networkd_requires_links() {
+# remove_legacy_barrier_requires_links scrubs the pre-#10758 Requires links (plus
+# the #10751 xpfd Requires link) if an older script flow reaches postrm without
+# the new prerm removing them before the generated stop hook. Only symlinks
+# created by systemd enablement are ours; leave regular operator files alone.
+remove_legacy_barrier_requires_links() {
     removed_link=no
-    for requires_link in "$TRANSIT_CLOSED_REQUIRES_LINK" "$INPUT_CLOSED_REQUIRES_LINK"; do
+    for requires_link in "$TRANSIT_CLOSED_REQUIRES_LINK" "$INPUT_CLOSED_REQUIRES_LINK" "$INPUT_CLOSED_XPFD_REQUIRES_LINK"; do
         if [ -L "$requires_link" ]; then
-            echo "xpf: removing legacy systemd-networkd .requires link $requires_link (#10758)" >&2
+            echo "xpf: removing legacy boot-barrier .requires link $requires_link (#10758)" >&2
             rm -f "$requires_link"
             rmdir "$(dirname "$requires_link")" 2>/dev/null || true
             removed_link=yes
@@ -297,10 +298,10 @@ case "$1" in
         # drop-in pins ExecStart to a deleted versions/<ver>/xpfd path and
         # leaves a broken unit. Safe if absent (legacy/never-seeded hosts).
         remove_runtime_dropin
-        # Clear both pre-#10758 networkd Requires links. xpf.prerm normally
+        # Clear the pre-#10758 networkd Requires links and the #10751 xpfd link. xpf.prerm normally
         # removes them before the generated stop hook; this is an idempotent
-        # postrm fallback so remove-without-purge cannot leave either dangling.
-        remove_legacy_networkd_requires_links
+        # postrm fallback so remove-without-purge cannot leave any dangling.
+        remove_legacy_barrier_requires_links
         # Purge the install.sh-written apt source (#1924, H-16): the keyring it
         # references is package payload dpkg is deleting now, so leaving the
         # source would break `apt update`. Marker-gated so operator sources are

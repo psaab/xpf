@@ -1,15 +1,16 @@
 #!/bin/sh
-# #10758: remove the legacy systemd-networkd Requires links BEFORE the
-# generated dh_installsystemd stop hook. Stopping either required boot barrier
-# propagates a stop to networkd on package removal.
+# #10758/#10751: remove the legacy boot-barrier Requires links BEFORE the
+# generated dh_installsystemd stop hook. Stopping a required boot barrier
+# propagates a stop to networkd (both fences) or xpfd (input fence) on removal.
 set -e
 
 TRANSIT_CLOSED_REQUIRES_LINK=/etc/systemd/system/systemd-networkd.service.requires/xpf-transit-closed.service
 INPUT_CLOSED_REQUIRES_LINK=/etc/systemd/system/systemd-networkd.service.requires/xpf-input-closed.service
+INPUT_CLOSED_XPFD_REQUIRES_LINK=/etc/systemd/system/xpfd.service.requires/xpf-input-closed.service
 
 if [ "$1" = remove ] || [ "$1" = purge ]; then
     removed_link=no
-    for requires_link in "$TRANSIT_CLOSED_REQUIRES_LINK" "$INPUT_CLOSED_REQUIRES_LINK"; do
+    for requires_link in "$TRANSIT_CLOSED_REQUIRES_LINK" "$INPUT_CLOSED_REQUIRES_LINK" "$INPUT_CLOSED_XPFD_REQUIRES_LINK"; do
         if [ -L "$requires_link" ]; then
             rm -f "$requires_link"
             rmdir "$(dirname "$requires_link")" 2>/dev/null || true
