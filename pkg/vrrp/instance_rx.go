@@ -253,7 +253,9 @@ func (vi *vrrpInstance) reaffirmMaster() {
 		}
 	}
 
+	vi.vipMu.Lock()
 	epoch := vi.garpEpoch.Add(1)
+	vi.vipMu.Unlock()
 	go func() {
 		// A later winner refresh supersedes this one, and a demotion must
 		// not emit an asynchronous burst after ownership has moved away.

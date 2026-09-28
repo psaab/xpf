@@ -172,7 +172,7 @@ pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
         ip: IpAddr::V4(snat_v4),
         port,
     };
-    let mut previous_holders = None;
+    let mut previous_snapshot = None;
     let reserved = allocator.reserve_flow_maybe_persistent(
         flow,
         translated,
@@ -182,9 +182,9 @@ pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
         holder,
         None,
         true,
-        &mut previous_holders,
+        &mut previous_snapshot,
     );
-    (reserved, previous_holders)
+    (reserved, previous_snapshot.map(|snapshot| snapshot.holder_mask()))
 }
 
 /// #8115 R3: refuse a NAT64 mint whose translated identity a PEER allocator

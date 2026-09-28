@@ -11,11 +11,11 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// #2156 — UpdateInstances build-before-teardown: a transient member-link or
-// socket-open failure during a VIP-change restart must NOT orphan the RG out
-// of VRRP election. The old instance keeps running and is retried once the
-// interface returns. These tests drive the real UpdateInstances diff via the
-// injectable resolveIface / openInstanceSocket / runInstance / stopInstance
+// #2156 — UpdateInstances build-before-teardown for interface-index changes:
+// a transient member-link or socket-open failure during rebind must NOT orphan
+// the RG out of VRRP election. The old instance keeps running and is retried
+// once the interface returns. VIP-set commits use updateVIPs in place (#10780).
+// These tests drive the real UpdateInstances diff via injectable lifecycle
 // seams (no real sockets, no live run() goroutine).
 
 // newTestManagerNoNetwork returns a Manager whose lifecycle seams never touch
@@ -32,6 +32,9 @@ func newTestManagerNoNetwork() (*Manager, *lifecycleRecorder) {
 	// a real netlink address socket. Returning nil leaves the watcher
 	// subscribed-but-silent (no events), matching the link-watcher stub above.
 	m.subscribeAddrs = func(ch chan<- netlink.AddrUpdate, done <-chan struct{}) error { return nil }
+	// A VIP-family edit is covered by dedicated socket tests; the lifecycle
+	// manager fixture must never open privileged raw sockets.
+	m.ensureVIPFamilySockets = func(*vrrpInstance, []string) error { return nil }
 
 	// resolveIface returns a synthetic interface; failures are injected via
 	// openInstanceSocket so we exercise the socket-open arm of the bug.
@@ -95,13 +98,15 @@ func (r *lifecycleRecorder) snapshot() (open, run, stop int) {
 }
 
 // TestUpdateInstances_BuildBeforeTeardown_KeepsOldOnSocketFailure asserts the
-// #2156 fix: when a VIP change forces a restart but the replacement's socket
-// fails to open, the ORIGINAL instance stays in m.instances unchanged — it is
-// neither deleted (orphaned) nor stopped, and the failed replacement is never
-// started.
+// #2156 fix for an ifindex rebind: if the replacement socket fails to open,
+// the ORIGINAL instance stays in m.instances unchanged — it is neither deleted
+// (orphaned) nor stopped, and the failed replacement is never started.
 func TestUpdateInstances_BuildBeforeTeardown_KeepsOldOnSocketFailure(t *testing.T) {
 	m, rec := newTestManagerNoNetwork()
 	defer stopManagerForTest(m)
+	m.resolveIface = func(name string) (*net.Interface, error) {
+		return &net.Interface{Name: name, Index: 2}, nil
+	}
 
 	key := instanceKey{iface: "reth0.50", groupID: 101} // RETH VRID for RG 1
 
@@ -122,14 +127,15 @@ func TestUpdateInstances_BuildBeforeTeardown_KeepsOldOnSocketFailure(t *testing.
 		t.Fatal("RGVRRPReady(1) should be true with the original instance present")
 	}
 
-	// Inject a socket-open failure, then push a VIP change (forces restart).
+	// Inject a socket-open failure, then simulate the member netdev being
+	// recreated under the same name with a new ifindex.
 	rec.openShouldFail.Store(true)
 	desired := []*Instance{{
 		Interface:        "reth0.50",
 		GroupID:          101,
 		Priority:         200,
-		Preempt:          true,
-		VirtualAddresses: []string{"172.16.50.2/24"}, // changed VIP
+		Preempt:           true,
+		VirtualAddresses: []string{"172.16.50.1/24"},
 	}}
 	if err := m.UpdateInstances(desired); err != nil {
 		t.Fatalf("UpdateInstances: %v", err)
@@ -159,26 +165,44 @@ func TestUpdateInstances_BuildBeforeTeardown_KeepsOldOnSocketFailure(t *testing.
 	if stop != 0 {
 		t.Errorf("stopInstance calls = %d, want 0 (original kept running)", stop)
 	}
-
-	// The original still advertises its OLD VIP set (strictly better than
-	// dropping out of election).
+	// The old instance remains registered with its prior config; because its
+	// ifindex is stale, this assertion does not claim the old socket advertises.
 	if got.cfg.VirtualAddresses[0] != "172.16.50.1/24" {
 		t.Errorf("original VIP = %q, want 172.16.50.1/24 (unchanged)", got.cfg.VirtualAddresses[0])
 	}
 
-	// RGVRRPReady stays truthful — never a phantom-ready hole.
-	if ready, reasons := m.RGVRRPReady(1, true); !ready {
-		t.Fatalf("RGVRRPReady(1) should stay true through the failed restart: %v", reasons)
+	// The stale socket is retained safely, but the RG is not ready until rebind.
+	if ready, reasons := m.RGVRRPReady(1, true); ready {
+		t.Fatal("RGVRRPReady(1) must be false while the retained instance may be bound to a stale ifindex")
+	} else if len(reasons) == 0 || !strings.Contains(strings.Join(reasons, " "), "ifindex rebind failed") {
+		t.Fatalf("stale-ifindex readiness reason missing: %v", reasons)
+	}
+
+	// A later transient probe error must not erase a previously observed,
+	// unresolved rebind from RG readiness.
+	m.resolveIface = func(string) (*net.Interface, error) {
+		return nil, errSocketOpenFailed
+	}
+	if err := m.UpdateInstances(desired); err != nil {
+		t.Fatalf("UpdateInstances after transient resolve failure: %v", err)
+	}
+	if ready, reasons := m.RGVRRPReady(1, true); ready ||
+		!strings.Contains(strings.Join(reasons, " "), "ifindex rebind failed") {
+		t.Fatalf("stale-ifindex readiness was cleared by a probe error: ready=%v reasons=%v",
+			ready, reasons)
 	}
 }
 
 // TestUpdateInstances_ReDriveRecoversOnLinkReturn asserts the bounded
 // self-recovery (#2156 B1 at the manager layer): after a transient socket
-// failure left the old instance running, a subsequent UpdateInstances with
-// the socket now succeeding swaps in the new VIP set and stops the old one.
+// failure leaves the old ifindex-bound instance running, a subsequent reconcile
+// after the replacement socket succeeds swaps it and stops the old instance.
 func TestUpdateInstances_ReDriveRecoversOnLinkReturn(t *testing.T) {
 	m, rec := newTestManagerNoNetwork()
 	defer stopManagerForTest(m)
+	m.resolveIface = func(name string) (*net.Interface, error) {
+		return &net.Interface{Name: name, Index: 2}, nil
+	}
 
 	key := instanceKey{iface: "reth0.50", groupID: 101}
 	orig := newInstance(Instance{
@@ -197,10 +221,10 @@ func TestUpdateInstances_ReDriveRecoversOnLinkReturn(t *testing.T) {
 		GroupID:          101,
 		Priority:         200,
 		Preempt:          true,
-		VirtualAddresses: []string{"172.16.50.2/24"},
+		VirtualAddresses: []string{"172.16.50.1/24"},
 	}}
 
-	// Pass 1: socket fails — old instance survives (the deferred restart).
+	// Pass 1: socket fails — old ifindex-bound instance survives.
 	rec.openShouldFail.Store(true)
 	if err := m.UpdateInstances(desired); err != nil {
 		t.Fatalf("UpdateInstances pass 1: %v", err)
@@ -212,8 +236,8 @@ func TestUpdateInstances_ReDriveRecoversOnLinkReturn(t *testing.T) {
 	}
 	m.mu.RUnlock()
 
-	// Pass 2: interface returned — socket now opens. The re-drive swaps in
-	// the new VIP set and tears down the old instance.
+	// Pass 2: replacement socket now opens. The re-drive rebinds the
+	// unchanged config to the new ifindex and tears down the old instance.
 	rec.openShouldFail.Store(false)
 	if err := m.UpdateInstances(desired); err != nil {
 		t.Fatalf("UpdateInstances pass 2: %v", err)
@@ -232,8 +256,8 @@ func TestUpdateInstances_ReDriveRecoversOnLinkReturn(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("pass 2: expected exactly 1 instance, got %d", n)
 	}
-	if got.cfg.VirtualAddresses[0] != "172.16.50.2/24" {
-		t.Errorf("pass 2: new VIP = %q, want 172.16.50.2/24", got.cfg.VirtualAddresses[0])
+	if got.cfg.VirtualAddresses[0] != "172.16.50.1/24" {
+		t.Errorf("pass 2: VIP = %q, want 172.16.50.1/24", got.cfg.VirtualAddresses[0])
 	}
 
 	// Ordering: exactly one stop (the old) and one run (the new), and the

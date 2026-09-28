@@ -247,6 +247,24 @@ type Manager struct {
 	// Heartbeat goroutines (nil when not started).
 	hbSender   *heartbeatSender
 	hbReceiver *heartbeatReceiver
+	// duplicateIdentityWatcher sends/receives authenticated identity beacons
+	// on the control-link broadcast address (#10745). It shares the heartbeat
+	// tenure and is stopped/replaced with the receiver.
+	duplicateIdentityWatcher *duplicateIdentityWatcher
+	// beaconReplay is the process-lifetime record of observed duplicate-
+	// identity beacon nonces (#10745). It deliberately OUTLIVES the watcher:
+	// a heartbeat restart must not forget replays. By value so the zero
+	// Manager is ready; guarded by its own mutex, never m.mu.
+	beaconReplay duplicateIdentityReplayCache
+	// beaconSenderIDValue is this node's stable duplicate-identity beacon
+	// sender ID (#10745). Stable per MANAGER, not per watcher: the ID is the
+	// only self-vs-peer discriminator (identity and PSK are identical by
+	// design), so a replacement watcher minted a fresh ID would read this
+	// node's own in-flight beacons — sent just before the restart — as a
+	// foreign duplicate. Guarded by m.mu; beaconSenderIDSet distinguishes
+	// "minted" from the zero value so struct-literal Managers work.
+	beaconSenderIDValue [16]byte
+	beaconSenderIDSet   bool
 	// hbStartInWindowHook, when non-nil, is invoked by StartHeartbeat INSIDE the
 	// window the #7257 epoch guard covers — after the tenure is captured, before
 	// the sockets are created. Production leaves it nil; a test sets it to land a

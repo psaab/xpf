@@ -210,8 +210,12 @@ pub(crate) struct NatScopeCtx<'a> {
 }
 
 pub(crate) use allocator::{
-    DeterministicV6, MAX_NAT_HOLDER_WORKERS, NatHolder, PortAllocator, PortAllocatorSnapshot,
+    DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
+    MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PortAllocator, PortAllocatorSnapshot,
+    SourceNatReservationSnapshot,
 };
+#[cfg(test)]
+pub(crate) use allocator::PersistentLeaseDebugState;
 pub(crate) use destination::{DnatKey, DnatTable, DnatValue};
 pub(crate) use iface_registry::{
     INTERFACE_SNAT_IDENTITY_EXHAUSTION, INTERFACE_SNAT_PAT_COLLISIONS,
@@ -224,7 +228,7 @@ pub(crate) use source::{
     // #8115 R3: the peer index type, the allocator-level query, and the
     // cross-feature wiring pass NAT64 needs.
     PoolAddressOwners, nat64_refuse_if_peer_owns, peer_owns_identity_in,
-    wire_nat64_overlap_peers,
+    wire_nat64_overlap_peers, PersistentNatPermit,
     SourceNatFailure, SourceNatFailureReason, SourceNatFlowKey, SourceNatLookup, SourceNatRule,
     flowless_source_nat_rule_possible,
     SyncedNatZones, allocate_nat64_pool_port, allocate_nat64_pool_port_deterministic_v6,
