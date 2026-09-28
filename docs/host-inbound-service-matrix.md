@@ -771,14 +771,18 @@ interfaces are management/cluster-control lifelines (fxp0 / em0 / fab<N>), or th
 have no interfaces are deliberately NOT reported (low-noise).
 
 Kernel scope-link addresses (the self-assigned IPv6 link-local present from
-link-up, IPv4 169.254 fallbacks) do NOT close the window (#10751 R4-1): they
-are automatic, not the intended global/ULA/lease addresses, so a zone with
-only link-locals stays reported and the daemon retains the early input
-barrier until a routable address resolves. Explicitly configured link-locals
-(a static fe80::/64, the stable RETH LL) still scope, with per-unit
-provenance (a static on unit A never satisfies unit B). The installed deny
-keeps covering link-local destinations — the chain is `policy accept`, so
-pending-intent is deliberately stricter than enforceability.
+link-up, IPv4 169.254 fallbacks) do NOT close the window for DHCP-intent
+zones (#10751 R4-1): they are automatic, not the intended
+global/ULA/lease addresses, so a DHCP zone with only link-locals stays
+reported and the daemon retains the early input barrier until a routable
+address resolves. A link-local-only zone with NO DHCP client is scoped,
+not reported: its installed link-local deny already covers everything
+reachable and no lease will arrive (#10751 R5-A). Explicitly configured
+link-locals (a static fe80::/64, the stable RETH LL) still scope, with
+per-unit provenance (a static on unit A never satisfies unit B). The
+installed deny keeps covering link-local destinations — the chain is
+`policy accept`, so pending-intent is deliberately stricter than
+enforceability for DHCP-intent scopes.
 
 Two observability surfaces consume it:
 

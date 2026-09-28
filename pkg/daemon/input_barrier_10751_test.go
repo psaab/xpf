@@ -1776,3 +1776,53 @@ func TestHandoffSkipsVerifyOnTeardown10751(t *testing.T) {
 		t.Fatalf("tablePresent calls = %v, want none on the teardown path", fake.tablePresentCalls)
 	}
 }
+
+// TestNoDHCPLinkLocalOnlyHandsOff10751 (#10751 R5-A lifecycle): a
+// non-lifeline enforcing unit with only automatic fe80::/64 and NO DHCP
+// intent installs its link-local deny and COMPLETES the handoff — the
+// installed rules already cover its only reachable address, so retaining
+// the global barrier would strand it indefinitely with no lease ever
+// arriving. RED on revert: without the DHCP-intent guard the zone stays
+// pending and no removal runs.
+func TestNoDHCPLinkLocalOnlyHandsOff10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	var specs []xnft.HostInboundSpec
+	fake := &fakeNftInstaller{
+		hostInbound: func(spec xnft.HostInboundSpec) error {
+			specs = append(specs, spec)
+			return nil
+		},
+	}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
+	s := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust",
+		scriptedAddr10751("inet6", "fe80::7/64", int(netlink.SCOPE_LINK)))}
+	scriptSnapshotTransition10751(t, s, s)
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("LL-only no-DHCP apply err = %v, want nil (handoff must complete)", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("real installs = %d, want 1 (the LL deny must install)", len(specs))
+	}
+	covered := false
+	for _, v := range specs[0].Views {
+		for _, a := range v.V6Addrs {
+			covered = covered || a == "fe80::7"
+		}
+	}
+	if !covered {
+		t.Fatalf("installed spec views = %+v, want fe80::7 denied", specs[0].Views)
+	}
+	removed := false
+	for _, ev := range fake.earlyInputBarrierCalls {
+		removed = removed || ev == "remove"
+	}
+	if !removed {
+		t.Fatalf("barrier calls = %v, want a removal: LL-only no-DHCP must hand off", fake.earlyInputBarrierCalls)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("handoff must be marked done")
+	}
+}

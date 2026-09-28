@@ -32,26 +32,59 @@ type AddresslessEnforcingZone struct {
 // core over ONE caller-supplied snapshot. Scoping reads the zone views
 // rendered from that snapshot with kernel scope-link rows EXCLUDED (#10751
 // R4-1): a zone whose only addresses are self-assigned link-locals is still
-// awaiting its intended (global/ULA/lease) addresses, so it stays reported.
-// Explicitly configured link-locals (static fe80::/64, stable RETH LL) still
-// scope — only kernel scope-link rows are excluded.
+// awaiting its intended (global/ULA/lease) addresses — WHEN it has DHCP
+// intent to acquire more. A link-local-only zone with NO DHCP client is
+// already fully enforced (the installed deny covers its only reachable
+// addresses and no lease will ever arrive), so it is scoped, not reported
+// (#10751 R5-A). Explicitly configured link-locals (static fe80::/64,
+// stable RETH LL) still scope — only unconfigured kernel scope-link rows
+// are excluded, and only for DHCP-intent zones.
 func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot) []AddresslessEnforcingZone {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
 	}
 	// A zone is "scoped" iff at least one of its scope-aware views carries
-	// an address. This is DELIBERATELY stricter than the install path's
-	// hostInboundHasEnforceableView (any view address, link-locals
-	// included): a link-local-only zone gets a real deny installed for
-	// those addresses AND stays reported here, so the daemon installs
-	// enforcement without handing the early barrier off early.
+	// an address (non-link-local or configured link-local). A zone whose
+	// only addresses are unconfigured kernel link-locals stays reported
+	// ONLY when some non-lifeline unit in the zone runs a DHCP client
+	// (lease intent outstanding — the DHCPv6 case); without DHCP intent
+	// the installed link-local deny already covers everything reachable
+	// and no lease will arrive, so reporting it would hold the early
+	// barrier forever over an already-enforced scope. Truly addressless
+	// zones (no address at all) stay reported regardless — conservative
+	// pre-existing behavior for unaddressed interfaces.
 	scoped := make(map[string]bool)
 	for _, v := range buildZoneHostInboundViewsFromSnaps(cfg, snaps, true) {
 		if len(v.V4Addrs) > 0 || len(v.V6Addrs) > 0 {
 			scoped[v.Zone] = true
 		}
 	}
+	scopedAny := make(map[string]bool)
+	for _, v := range buildZoneHostInboundViewsFromSnaps(cfg, snaps, false) {
+		if len(v.V4Addrs) > 0 || len(v.V6Addrs) > 0 {
+			scopedAny[v.Zone] = true
+		}
+	}
 	lifelines := hostInboundLifelineSet(cfg)
+	zoneByIface := buildInterfaceZoneMap(cfg)
+	dhcpIntent := make(map[string]bool)
+	for ifName, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil {
+			continue
+		}
+		for un, unit := range iface.Units {
+			if unit == nil || (!unit.DHCP && !unit.DHCPv6 && unit.DHCPv6Client == nil) {
+				continue
+			}
+			unitRef := fmt.Sprintf("%s.%d", ifName, un)
+			if hostInboundLifelineInterface(unitRef, lifelines) {
+				continue
+			}
+			if zone := zoneByIface[unitRef]; zone != "" {
+				dhcpIntent[zone] = true
+			}
+		}
+	}
 	names := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
@@ -60,6 +93,11 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 	var out []AddresslessEnforcingZone
 	for _, name := range names {
 		if scoped[name] {
+			continue
+		}
+		if scopedAny[name] && !dhcpIntent[name] {
+			// Link-local-only with no DHCP intent: the installed deny
+			// already covers its only reachable addresses.
 			continue
 		}
 		zone := cfg.Security.Zones[name]
@@ -94,15 +132,20 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 // read back from the zone-view builder itself — the same core that drives the
 // nft emission — so this observability signal tracks what
 // applyHostInboundFilter enforces. Kernel scope-link addresses (self-assigned
-// IPv6 link-locals, IPv4 169.254 fallbacks) do NOT scope a zone (#10751 R4-1):
-// they are automatic at link-up, not the intended global/ULA/lease addresses,
-// so a zone with only link-locals is still awaiting enforcement scope and
-// stays reported (the daemon installs a deny for the link-locals AND retains
-// the early barrier until a routable address resolves).
+// IPv6 link-locals, IPv4 169.254 fallbacks) do NOT scope a DHCP-intent zone
+// (#10751 R4-1): they are automatic at link-up, not the intended
+// global/ULA/lease addresses, so a DHCP zone with only link-locals is still
+// awaiting enforcement scope and stays reported (the daemon installs a deny
+// for the link-locals AND retains the early barrier until a routable
+// address resolves). A link-local-only zone with NO DHCP client is scoped,
+// not reported: its installed link-local deny already covers everything
+// reachable and no lease will arrive (#10751 R5-A).
 //
 // Excluded (NOT reported), so the signal stays low-noise and precise:
 //   - zones that resolve any non-link-local address (static / DHCP-learned /
 //     VRRP VIP / configured link-local) — scoped;
+//   - link-local-only zones with no DHCP intent — installed LL deny covers
+//     all reachable addresses, nothing further expected;
 //   - zones whose only interfaces are lifelines (fxp0 / em0 / fab*) — lifeline
 //     traffic is never denied, so there is no fail-open to surface;
 //   - zones with no interfaces assigned — nothing to protect.

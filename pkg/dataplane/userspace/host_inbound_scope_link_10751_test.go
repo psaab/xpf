@@ -329,3 +329,48 @@ func TestConfiguredProvenanceIsPerUnit10751(t *testing.T) {
 		t.Fatal("installed views lost fe80::1: provenance must not change deny coverage")
 	}
 }
+
+// TestNoDHCPLinkLocalOnlyZoneIsScoped10751 (#10751 R5-A): an enforcing zone
+// whose only live address is automatic fe80::/64 and which runs NO DHCP
+// client is already fully enforced — the installed link-local deny covers
+// its only reachable address and no lease will ever arrive — so it must be
+// scoped (silent), not reported as pending. Reporting it would hold the
+// global early barrier indefinitely over an already-enforced scope.
+// RED on revert: drop the DHCP-intent guard and the zone is reported.
+// Contrast: TestScopeLinkDoesNotResolveEnforcingIntent10751 proves the
+// DHCPv6 LL-only shape STAYS pending.
+func TestNoDHCPLinkLocalOnlyZoneIsScoped10751(t *testing.T) {
+	stubScopeLinkAddrs10751(t, []InterfaceAddressSnapshot{
+		{Family: "inet6", Address: "fe80::7/64", Scope: int(netlink.SCOPE_LINK)},
+	})
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0-0-7": {Name: "ge-0-0-7", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0}, // no DHCP, no DHCPv6, no static: unnumbered
+		}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"wan": {Name: "wan", Interfaces: []string{"ge-0-0-7.0"}},
+	}
+	if zones := AddresslessEnforcingZones(cfg); len(zones) != 0 {
+		t.Fatalf("AddresslessEnforcingZones = %+v, want silent: LL-only with no DHCP intent is enforced, not pending", zones)
+	}
+	if got := AddresslessEnforcingInterfaces(cfg); len(got) != 0 {
+		t.Fatalf("AddresslessEnforcingInterfaces = %+v, want empty (no DHCP client to be pending)", got)
+	}
+	if pending := HostInboundPendingIntentFromSnapshots(cfg, BuildInterfaceSnapshots(cfg)); pending {
+		t.Fatal("pending intent must be false so the handoff completes")
+	}
+	covered := false
+	for _, v := range BuildZoneHostInboundViews(cfg) {
+		if v.Zone != "wan" {
+			continue
+		}
+		for _, a := range v.V6Addrs {
+			covered = covered || a == "fe80::7"
+		}
+	}
+	if !covered {
+		t.Fatal("installed wan views must still deny fe80::7 (coverage unchanged)")
+	}
+}
