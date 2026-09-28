@@ -310,7 +310,12 @@ func TestHostInboundKeptSuspiciousWarnScope10752(t *testing.T) {
 	if openFilter.MatchConntrackFlow(deniedCustom) {
 		t.Fatal("ingress-permitted custom must not flush (would break the permitted use)")
 	}
-	evCustom, _, evOther, _, _ := openFilter.keptEvidenceReport()
+	evidence := openFilter.keptEvidenceReport()
+	var evCustom, evOther uint64
+	for _, ev := range evidence {
+		evCustom += ev.custom
+		evOther += ev.other
+	}
 	if evCustom != 1 || evOther != 0 {
 		t.Fatalf("ingress-permitted custom must record evidence (custom=1, other=0), got %d/%d", evCustom, evOther)
 	}

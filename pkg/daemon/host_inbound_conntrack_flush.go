@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -135,24 +134,22 @@ type hostInboundConntrackFlushFilter struct {
 	ingressAllowsAll bool
 	ephemLo          uint16
 	ephemHi          uint16
-	// keptCustom counts box-oriented covered flows the sweep deliberately kept
-	// that look like tightening-with-service-running staleness: TCP/UDP,
-	// owner-denied, outside the catalog and the client-role exempt sets, and
-	// either outside the ephemeral range or (TCP only) backed by a local
-	// LISTEN socket. keptCustomSamples holds the first few tuple descriptions.
-	// keptOther counts the same shape for exempt control-plane/client ports
-	// and bare IP protocols (also owner-denied, never flushed, never
-	// guarded). keptAddrs is every recorded flow's box address, for
-	// intersecting evidence with tightened zones at commit-projection time.
-	// MatchConntrackFlow may run on the sweeper's goroutine(s), hence atomic
-	// counters + mutex rather than plain fields.
-	keptCustom    atomic.Uint64
-	keptOther     atomic.Uint64
-	keptMu        sync.Mutex
-	keptSamples   []string
-	keptOtherDesc []string
-	keptAddrs     map[netip.Addr]bool
-	tcpListeners  map[uint16]bool
+	// keptByAddr records box-oriented covered flows the sweep deliberately
+	// kept, keyed by box address with per-class counts and samples
+	// (keptAddrEvidence). The custom class looks like
+	// tightening-with-service-running staleness: TCP/UDP, owner-denied,
+	// outside the catalog and the client-role exempt sets, and either
+	// outside the ephemeral range or (TCP only) backed by a local LISTEN
+	// socket. The other class is the same shape for exempt
+	// control-plane/client ports and bare IP protocols (also
+	// owner-denied, never flushed, never guarded). Per-address keying (not
+	// global counts) lets commit projection attribute counts AND samples
+	// to the narrowed effective scopes whose OLD enforcement actually
+	// covered each address. MatchConntrackFlow may run on the sweeper's
+	// goroutine(s), hence the mutex.
+	keptMu       sync.Mutex
+	keptByAddr   map[netip.Addr]*keptAddrEvidence
+	tcpListeners map[uint16]bool
 }
 
 // readEphemeralPortRange returns the kernel's ephemeral source-port range for
@@ -280,15 +277,12 @@ func (f *hostInboundConntrackFlushFilter) noteKeptSuspicious(addr netip.Addr, fl
 	if a == nil || f.flowAdmitted(a, flow.Forward.Protocol, port) {
 		return
 	}
-	f.keptCustom.Add(1)
 	f.keptMu.Lock()
 	defer f.keptMu.Unlock()
-	if f.keptAddrs == nil {
-		f.keptAddrs = map[netip.Addr]bool{}
-	}
-	f.keptAddrs[addr.Unmap()] = true
-	if len(f.keptSamples) < 5 {
-		f.keptSamples = append(f.keptSamples, keptFlowSample10752(flow))
+	ev := f.keptFor(addr.Unmap())
+	ev.custom++
+	if len(ev.customSamples) < 5 {
+		ev.customSamples = append(ev.customSamples, keptFlowSample10752(flow))
 	}
 }
 
@@ -314,16 +308,27 @@ func (f *hostInboundConntrackFlushFilter) noteKeptOther(addr netip.Addr, flow *n
 			return
 		}
 	}
-	f.keptOther.Add(1)
 	f.keptMu.Lock()
 	defer f.keptMu.Unlock()
-	if f.keptAddrs == nil {
-		f.keptAddrs = map[netip.Addr]bool{}
+	ev := f.keptFor(addr.Unmap())
+	ev.other++
+	if len(ev.otherSamples) < 3 {
+		ev.otherSamples = append(ev.otherSamples, keptFlowSample10752(flow))
 	}
-	f.keptAddrs[addr.Unmap()] = true
-	if len(f.keptOtherDesc) < 3 {
-		f.keptOtherDesc = append(f.keptOtherDesc, keptFlowSample10752(flow))
+}
+
+// keptFor returns the per-address evidence bucket, creating it (and the map)
+// on first use. Callers must hold keptMu.
+func (f *hostInboundConntrackFlushFilter) keptFor(addr netip.Addr) *keptAddrEvidence {
+	if f.keptByAddr == nil {
+		f.keptByAddr = map[netip.Addr]*keptAddrEvidence{}
 	}
+	ev, ok := f.keptByAddr[addr]
+	if !ok {
+		ev = &keptAddrEvidence{}
+		f.keptByAddr[addr] = ev
+	}
+	return ev
 }
 
 func keptFlowSample10752(flow *netlink.ConntrackFlow) string {
@@ -333,25 +338,53 @@ func keptFlowSample10752(flow *netlink.ConntrackFlow) string {
 }
 
 // keptSuspiciousReport returns the recorded custom-keep count and sample
-// tuples (the journal WARN class).
+// tuples (the journal WARN class): totals across addresses, samples in
+// sorted-address order capped at five.
 func (f *hostInboundConntrackFlushFilter) keptSuspiciousReport() (uint64, []string) {
 	f.keptMu.Lock()
 	defer f.keptMu.Unlock()
-	return f.keptCustom.Load(), append([]string(nil), f.keptSamples...)
+	var total uint64
+	var samples []string
+	for _, addr := range sortedKeptAddrs10752(f.keptByAddr) {
+		ev := f.keptByAddr[addr]
+		total += ev.custom
+		for _, s := range ev.customSamples {
+			if len(samples) >= 5 {
+				break
+			}
+			samples = append(samples, s)
+		}
+	}
+	return total, samples
 }
 
-// keptEvidenceReport returns the full evidence for commit projection: custom
-// and exempt/bare counts with samples, plus every recorded box address
-// (sorted) for intersecting with tightened zones.
-func (f *hostInboundConntrackFlushFilter) keptEvidenceReport() (custom uint64, customSamples []string, other uint64, otherSamples []string, addrs []netip.Addr) {
+// keptEvidenceReport returns the full evidence for commit projection: the
+// per-address snapshot (a fresh map; callers may retain it).
+func (f *hostInboundConntrackFlushFilter) keptEvidenceReport() map[netip.Addr]keptAddrEvidence {
 	f.keptMu.Lock()
 	defer f.keptMu.Unlock()
-	for addr := range f.keptAddrs {
+	if len(f.keptByAddr) == 0 {
+		return nil
+	}
+	out := make(map[netip.Addr]keptAddrEvidence, len(f.keptByAddr))
+	for addr, ev := range f.keptByAddr {
+		out[addr] = keptAddrEvidence{
+			custom:        ev.custom,
+			customSamples: append([]string(nil), ev.customSamples...),
+			other:         ev.other,
+			otherSamples:  append([]string(nil), ev.otherSamples...),
+		}
+	}
+	return out
+}
+
+func sortedKeptAddrs10752(byAddr map[netip.Addr]*keptAddrEvidence) []netip.Addr {
+	addrs := make([]netip.Addr, 0, len(byAddr))
+	for addr := range byAddr {
 		addrs = append(addrs, addr)
 	}
 	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Less(addrs[j]) })
-	return f.keptCustom.Load(), append([]string(nil), f.keptSamples...),
-		f.keptOther.Load(), append([]string(nil), f.keptOtherDesc...), addrs
+	return addrs
 }
 
 func protoName10752(proto uint8) string {
@@ -623,17 +656,16 @@ func (d *Daemon) flushDeniedHostInboundConntrack(views []dpuserspace.ZoneHostInb
 	// 2222 after an any-service→named tightening). Unlike the #6802 debt this
 	// is not a failure — nothing failed — so it must not join the commit
 	// error; but unlike a clean sweep it leaves authorization the new rules
-	// no longer grant, so it must not pass silently either. The full report
-	// (customs + exempt/bare counts, samples, box addresses) is stashed for
-	// the commit funnel's transition-aware warning; the journal WARN below
-	// covers customs only, since exempt/bare steady-state traffic (DHCP
-	// renewals, NTP polls, OSPF hellos in never-admitting zones) would make
-	// a per-apply journal line pure noise.
-	custom, samples, other, otherSamples, addrs := filter.keptEvidenceReport()
+	// no longer grant, so it must not pass silently either. The per-address
+	// report (per-class counts with samples) is stashed for the commit
+	// funnel's transition-aware warning; the journal WARN below covers
+	// customs only, since exempt/bare steady-state traffic (DHCP renewals,
+	// NTP polls, OSPF hellos in never-admitting zones) would make a
+	// per-apply journal line pure noise.
 	if d != nil {
-		d.recordKeptSuspicious10752(custom, samples, other, otherSamples, addrs)
+		d.recordKeptSuspicious10752(filter.keptEvidenceReport())
 	}
-	if custom > 0 {
+	if custom, samples := filter.keptSuspiciousReport(); custom > 0 {
 		slog.Warn("host-inbound conntrack reconcile kept box-oriented non-catalog flows to covered addresses; with active traffic they ride the broad reply accept indefinitely — delete per the Removal procedures for unguarded tuples in docs/host-inbound-service-matrix.md, or verify with ss that each is a legitimate explicit-bind client",
 			"kept", custom, "samples", samples)
 	}
