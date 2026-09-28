@@ -782,7 +782,12 @@ link-locals (a static fe80::/64, the stable RETH LL) still scope, with
 per-unit provenance (a static on unit A never satisfies unit B). The
 installed deny keeps covering link-local destinations — the chain is
 `policy accept`, so pending-intent is deliberately stricter than
-enforceability for DHCP-intent scopes.
+enforceability for DHCP-intent scopes. Unzoned DHCP units with no lease
+yet are NOT pending (no hold — a never-leasing unit must not strand the
+global barrier); instead the first apply renders LAST-placed `iifname
+<dev> drop` rules for them (#10751 R7-B), so a first lease lands
+already denied and the debounced re-apply replaces the interface rule
+with destination DROPs. Lifeline and VRF-enslaved units are excluded.
 
 Two observability surfaces consume it:
 

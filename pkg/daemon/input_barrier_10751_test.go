@@ -2227,3 +2227,217 @@ func TestClearHostInboundFirstApplyMarker10751(t *testing.T) {
 		t.Fatalf("marker still present after clear: %v", err)
 	}
 }
+
+// --- #10751 R7-B: unzoned DHCP interface backstop ---
+//
+// An unzoned DHCP unit with no lease has no destination for any catch-all,
+// yet its first lease would land host-reachable before the debounced
+// re-apply installs one. The first apply therefore renders LAST-placed
+// `iifname <dev> drop` rules for such units and hands off WITH that
+// protection — no hold (a never-leasing unit must not strand the GLOBAL
+// barrier), no window. A later lease re-renders to destination DROPs.
+
+// unzonedDHCPConfig10751 builds a config with an unzoned DHCP unit
+// (ge-0/0/9.0) and, optionally, a scoped trust zone.
+func unzonedDHCPConfig10751(withTrustZone bool) *config.Config {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/9": {Name: "ge-0/0/9", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, DHCP: true, DHCPv6: true},
+		}},
+	}
+	if withTrustZone {
+		cfg.Interfaces.Interfaces["ge-0/0/0"] = &config.InterfaceConfig{Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0},
+		}}
+		cfg.Security.Zones = map[string]*config.ZoneConfig{
+			"trust": {Name: "trust", Interfaces: []string{"ge-0/0/0.0"}},
+		}
+	}
+	return cfg
+}
+
+// TestUnzonedDHCPHandsOffWithInterfaceDrop10751: zoned-plus-unzoned config,
+// unzoned DHCP unit unleased at first apply — the real install carries the
+// interface DROP and the handoff COMPLETES with protection (no hold, no
+// window). A later lease re-renders to destination DROPs and drops the
+// interface rule. RED on revert: without the backstop the spec has no
+// unleased rule while the handoff still completes.
+func TestUnzonedDHCPHandsOffWithInterfaceDrop10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	var specs []xnft.HostInboundSpec
+	fake := &fakeNftInstaller{
+		hostInbound: func(spec xnft.HostInboundSpec) error {
+			specs = append(specs, spec)
+			return nil
+		},
+	}
+	nftInstaller = fake
+	cfg := unzonedDHCPConfig10751(true)
+	uni := int(netlink.SCOPE_UNIVERSE)
+	y := scriptedAddr10751("inet", "10.0.0.1/24", uni)
+	s1 := []dpuserspace.InterfaceSnapshot{
+		scriptedSnap10751("ge-0/0/0.0", "trust", y),
+		scriptedSnap10751("ge-0/0/9.0", ""),
+	}
+	if hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, s1) {
+		t.Fatal("unzoned DHCP is intentionally not pending (no hold); protection comes from the interface rule")
+	}
+	scriptSnapshotTransition10751(t, s1, s1)
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("first apply err = %v, want nil (hand off WITH interface protection)", err)
+	}
+	if len(specs) != 1 || len(specs[0].UnleasedNetdevs) != 1 || specs[0].UnleasedNetdevs[0] != "ge-0-0-9" {
+		t.Fatalf("real spec unleased = %+v, want [ge-0-0-9]", specs)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("first apply must hand off (protected by the interface rule, not held)")
+	}
+	// Lease lands: the re-rendered spec carries destination DROPs for the
+	// lease and drops the interface rule (the unit is no longer unleased).
+	lease := scriptedAddr10751("inet", "203.0.113.9/24", uni)
+	lease6 := scriptedAddr10751("inet6", "2001:db8:9::9/64", uni)
+	s2 := []dpuserspace.InterfaceSnapshot{
+		scriptedSnap10751("ge-0/0/0.0", "trust", y),
+		scriptedSnap10751("ge-0/0/9.0", "", lease, lease6),
+	}
+	scriptSnapshotTransition10751(t, s2, s2)
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("lease apply err = %v, want nil", err)
+	}
+	if len(specs) != 2 {
+		t.Fatalf("real installs = %d, want 2", len(specs))
+	}
+	if len(specs[1].UnleasedNetdevs) != 0 {
+		t.Fatalf("leased spec unleased = %v, want empty (replaced by destination DROPs)", specs[1].UnleasedNetdevs)
+	}
+	covered := false
+	for _, a := range specs[1].UnzonedV4 {
+		covered = covered || a == "203.0.113.9"
+	}
+	if !covered {
+		t.Fatalf("leased spec unzoned v4 = %v, want the lease denied by destination", specs[1].UnzonedV4)
+	}
+	covered6 := false
+	for _, a := range specs[1].UnzonedV6 {
+		covered6 = covered6 || a == "2001:db8:9::9"
+	}
+	if !covered6 {
+		t.Fatalf("leased spec unzoned v6 = %v, want the lease denied by destination", specs[1].UnzonedV6)
+	}
+	if !covered {
+		t.Fatalf("leased spec unzoned v4 = %v, want the lease denied by destination", specs[1].UnzonedV4)
+	}
+}
+
+// TestUnzonedDHCPBlocksTeardown10751: zone-less config with ONLY an unzoned
+// DHCP unit (nothing enforceable by address) must NOT tear down — it
+// installs the interface backstop and hands off protected.
+func TestUnzonedDHCPBlocksTeardown10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	var specs []xnft.HostInboundSpec
+	var deleted []string
+	fake := &fakeNftInstaller{
+		hostInbound: func(spec xnft.HostInboundSpec) error {
+			specs = append(specs, spec)
+			return nil
+		},
+		del: func(name string) error { deleted = append(deleted, name); return nil },
+	}
+	nftInstaller = fake
+	cfg := unzonedDHCPConfig10751(false)
+	s := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/9.0", "")}
+	scriptSnapshotTransition10751(t, s, s)
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("apply err = %v, want nil", err)
+	}
+	for _, name := range deleted {
+		if name == xnft.HostInboundTableName {
+			t.Fatalf("deleted tables = %v: teardown must not delete the host table (unleased blocks teardown; gap cleanup alone is fine)", deleted)
+		}
+	}
+	if len(specs) != 1 || len(specs[0].UnleasedNetdevs) != 1 {
+		t.Fatalf("real specs = %+v, want one install carrying the interface backstop", specs)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("must hand off with interface protection installed")
+	}
+}
+
+// TestUnzonedDHCPFallbackKeepsInterfaceDrop10751: real fails on the
+// unleased shape — the cold-boot fence carries the interface backstop
+// and the handoff completes protected; healing converges to the real
+// table. Failure must never drop the backstop before convergence.
+func TestUnzonedDHCPFallbackKeepsInterfaceDrop10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	installErr := errors.New("real host-inbound load failed")
+	var fenceSpecs []xnft.FenceSpec
+	var realSpecs []xnft.HostInboundSpec
+	calls := 0
+	fake := &fakeNftInstaller{
+		hostInbound: func(spec xnft.HostInboundSpec) error {
+			calls++
+			realSpecs = append(realSpecs, spec)
+			if calls == 1 {
+				return installErr
+			}
+			return nil
+		},
+		coldBootFence: func(spec xnft.FenceSpec) error {
+			fenceSpecs = append(fenceSpecs, spec)
+			return nil
+		},
+	}
+	nftInstaller = fake
+	cfg := unzonedDHCPConfig10751(false)
+	s := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/9.0", "")}
+	scriptSnapshotTransition10751(t, s, s)
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !strings.Contains(err.Error(), installErr.Error()) {
+		t.Fatalf("failing apply err = %v, want the real-install error (fence stands)", err)
+	}
+	if len(fenceSpecs) != 1 || len(fenceSpecs[0].UnleasedNetdevs) != 1 {
+		t.Fatalf("fence specs = %+v, want the interface backstop in the fence", fenceSpecs)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("fence with interface backstop must hand off (scoped, protected)")
+	}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("healed apply err = %v, want nil", err)
+	}
+	if len(realSpecs) != 2 || len(realSpecs[1].UnleasedNetdevs) != 1 {
+		t.Fatalf("healed real spec = %+v, want the backstop retained while unleased", realSpecs)
+	}
+}
+
+// TestUnleasedOraclePlacement10751: the text oracles render the backstop
+// LAST (after every destination rule, so addressed families and explicit
+// programs win), in set form for several netdevs, and omit it when empty.
+func TestUnleasedOraclePlacement10751(t *testing.T) {
+	views := []dpuserspace.ZoneHostInboundView{{Zone: "trust", V4Addrs: []string{"10.0.0.1"}}}
+	unleased := []string{"ge-0-0-8", "ge-0-0-9"}
+	want := `iifname { "ge-0-0-8", "ge-0-0-9" } drop`
+	for name, payload := range map[string]string{
+		"real":  buildHostInboundFilterPayloadWithOverlay(views, []string{"10.9.9.9"}, nil, nil, nil, true, nil, unleased),
+		"fence": buildHostInboundFencePayload(views, nil, nil, nil, unleased),
+		"gap":   buildHostInboundGapFencePayload([]string{"10.0.0.2"}, nil, nil, unleased),
+	} {
+		if !strings.Contains(payload, want) {
+			t.Errorf("%s oracle lacks %q:\n%s", name, want, payload)
+			continue
+		}
+		if strings.LastIndex(payload, "daddr") > strings.Index(payload, want) {
+			t.Errorf("%s oracle places the interface backstop before a destination rule:\n%s", name, payload)
+		}
+	}
+	plain := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
+	if strings.Contains(plain, "ge-0-0-9") {
+		t.Errorf("real oracle without unleased must not reference the netdev:\n%s", plain)
+	}
+}

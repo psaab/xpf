@@ -84,6 +84,12 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	}
 	emitUnzonedHostInboundDenyNetlink(p, famV4, "ip", spec.UnzonedV4)
 	emitUnzonedHostInboundDenyNetlink(p, famV6, "ip6", spec.UnzonedV6)
+	// #10751 R7-B: unzoned DHCP units with no lease yet get a LAST-placed
+	// interface DROP so a first lease lands already denied. After every
+	// destination rule, so addressed families and explicit programs win.
+	if len(spec.UnleasedNetdevs) > 0 {
+		p.rule().iifname(spec.UnleasedNetdevs).emit(verdictDrop()...)
+	}
 	for i, prog := range spec.Programs {
 		p.inChain(chains[i], func() { emitJunosHostProgramChainNetlink(p, prog) })
 	}

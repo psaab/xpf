@@ -52,6 +52,10 @@ func buildHostInboundFenceNetlink(p *nlPlan, spec FenceSpec) {
 	if len(spec.UnzonedV6) > 0 {
 		p.rule().daddr(famV6, spec.UnzonedV6, false).emit(verdictDrop()...)
 	}
+	// #10751 R7-B: unleased-DHCP interface backstop (see the real builder).
+	if len(spec.UnleasedNetdevs) > 0 {
+		p.rule().iifname(spec.UnleasedNetdevs).emit(verdictDrop()...)
+	}
 }
 
 // buildHostInboundGapFenceNetlink mirrors buildHostInboundGapFencePayload: the
@@ -65,5 +69,9 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	}
 	if len(spec.UncoveredV6) > 0 {
 		p.rule().daddr(famV6, spec.UncoveredV6, false).emit(verdictDrop()...)
+	}
+	// #10751 R7-B: unleased-DHCP interface backstop (see the real builder).
+	if len(spec.UnleasedNetdevs) > 0 {
+		p.rule().iifname(spec.UnleasedNetdevs).emit(verdictDrop()...)
 	}
 }

@@ -1043,6 +1043,95 @@ func BuildUnzonedHostInboundAddrsFromSnapshots(cfg *config.Config, snaps []Inter
 	return buildUnzonedHostInboundAddrsFromSnaps(cfg, snaps)
 }
 
+// BuildUnzonedDHCPUnleasedNetdevs returns the sorted LOCAL_IN netdev names of
+// unzoned non-lifeline units with DHCP intent and no resolved address in
+// that family (#10751 R7-B): an unzoned DHCP unit with no lease has no
+// destination for the unzoned catch-all, yet its first lease would land
+// host-reachable before the debounced re-apply installs one. The daemon
+// renders these as LAST-placed `iifname <dev> drop` rules (after every
+// destination rule, so addressed families and explicit programs still
+// win): interface-scoped protection that needs no hold and vanishes on
+// lease (the unit leaves this set the moment it resolves). VRF-enslaved
+// units are skipped (their LOCAL_IN identity is the shared master — an
+// iifname DROP there would shadow addressed siblings; they rely on
+// lease-callback convergence). Lifelines are skipped (management must
+// survive). A unit with EITHER family unleased-and-intended is listed.
+func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) []string {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
+		return nil
+	}
+	lifelines := hostInboundLifelineSet(cfg)
+	zoneByIface := buildInterfaceZoneMap(cfg)
+	vrfEnslaved := config.HostInboundVRFEnslavedNetdevs(cfg)
+	configuredAddrs := configuredHostInboundAddrKeys(cfg)
+	// Per-unit resolved families, same lens as the per-interface intent
+	// detector (unconfigured scope-link rows never resolve).
+	hasFam := make(map[string]map[string]bool)
+	for _, snap := range snaps {
+		for _, a := range snap.Addresses {
+			if hostInboundScopeLinkUnresolved(snap.Name, a, configuredAddrs) {
+				continue
+			}
+			if hostIPFromCIDR(a.Address) == "" {
+				continue
+			}
+			m := hasFam[snap.Name]
+			if m == nil {
+				m = map[string]bool{}
+				hasFam[snap.Name] = m
+			}
+			m[a.Family] = true
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
+	for n := range cfg.Interfaces.Interfaces {
+		ifNames = append(ifNames, n)
+	}
+	sort.Strings(ifNames)
+	for _, ifName := range ifNames {
+		iface := cfg.Interfaces.Interfaces[ifName]
+		if iface == nil {
+			continue
+		}
+		unitNums := make([]int, 0, len(iface.Units))
+		for un := range iface.Units {
+			unitNums = append(unitNums, un)
+		}
+		sort.Ints(unitNums)
+		for _, un := range unitNums {
+			unit := iface.Units[un]
+			if unit == nil {
+				continue
+			}
+			unitRef := fmt.Sprintf("%s.%d", ifName, un)
+			if hostInboundLifelineInterface(unitRef, lifelines) {
+				continue
+			}
+			if zoneByIface[unitRef] != "" {
+				continue
+			}
+			fam := hasFam[unitRef]
+			v4unleased := unit.DHCP && !fam["inet"]
+			v6unleased := (unit.DHCPv6 || unit.DHCPv6Client != nil) && !fam["inet6"]
+			if !v4unleased && !v6unleased {
+				continue
+			}
+			linuxName := snapshotLinuxName(cfg, ifName, iface, unit)
+			if linuxName == "" || vrfEnslaved[linuxName] {
+				continue
+			}
+			if !seen[linuxName] {
+				seen[linuxName] = true
+				out = append(out, linuxName)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // forEachFirewallLocalAddr visits every (interface ref, address) pair that makes
 // an address firewall-local: the live/configured interface addresses from the
 // canonical snapshot builder, configured VRRP virtual addresses, and the
@@ -1201,6 +1290,10 @@ type FenceAddrSets struct {
 	UnzonedV6  []string
 	WithheldV4 []string
 	WithheldV6 []string
+	// UnleasedNetdevs are LOCAL_IN netdevs of unzoned DHCP units with no
+	// lease yet (#10751 R7-B), rendered as interface DROPs so a first
+	// lease lands already denied. Empty omits the rule.
+	UnleasedNetdevs []string
 }
 
 // BuildFenceAddrSets derives the cold-boot fence's drop scope from cfg and the
@@ -1284,6 +1377,7 @@ func buildFenceAddrSetsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, 
 	sort.Strings(withheld)
 	out.UnzonedV4, out.UnzonedV6 = splitFams(rest)
 	out.WithheldV4, out.WithheldV6 = splitFams(withheld)
+	out.UnleasedNetdevs = BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
 	return out
 }
 
