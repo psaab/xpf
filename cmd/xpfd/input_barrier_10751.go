@@ -73,7 +73,7 @@ func runInputBarrierSubcommand(args []string, stdout, stderr io.Writer) int {
 	if args[0] == "ensure" {
 		return runInputBarrierEnsure(stdout, stderr)
 	}
-	if !force && daemon.EarlyInputHandoffMarked() {
+	if !force && daemon.EarlyInputHandoffLive() {
 		fmt.Fprintf(stderr, "input-barrier: host input already handed off to the daemon; refusing reinstall (use --force to override)\n")
 		return 1
 	}

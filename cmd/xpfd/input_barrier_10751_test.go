@@ -129,10 +129,21 @@ func TestInputBarrierCloseRefusesAfterHandoff10751(t *testing.T) {
 	if err := os.WriteFile(daemon.EarlyInputHandoffMarkerPath, []byte("handed-off\n"), 0644); err != nil {
 		t.Fatalf("stage marker: %v", err)
 	}
+	// Live owner holds the marker: close refuses (fail-closed for the
+	// operator verb would be backwards — refusing protects the live
+	// daemon from a manual DROP injection, and --force overrides).
+	owner, err := os.OpenFile(daemon.EarlyInputHandoffMarkerPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open staged marker: %v", err)
+	}
+	defer owner.Close()
+	if err := syscall.Flock(int(owner.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("stage live owner: %v", err)
+	}
 	stdout.Reset()
 	stderr.Reset()
 	if code := runInputBarrierSubcommand([]string{"close"}, &stdout, &stderr); code != 1 {
-		t.Fatalf("close with marker exit = %d, want 1", code)
+		t.Fatalf("close with live marker exit = %d, want 1", code)
 	}
 	if installs != 1 {
 		t.Fatal("refused close must not install")
@@ -147,6 +158,18 @@ func TestInputBarrierCloseRefusesAfterHandoff10751(t *testing.T) {
 	}
 	if installs != 2 {
 		t.Fatalf("installs = %d, want forced reinstall to proceed", installs)
+	}
+	// Stale marker (owner dead, lock released): close installs
+	// fail-closed like ensure — refusing on stale would leave nothing
+	// standing until the operator guesses --force.
+	owner.Close()
+	stdout.Reset()
+	stderr.Reset()
+	if code := runInputBarrierSubcommand([]string{"close"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("close with stale marker exit = %d, want 0 via install", code)
+	}
+	if installs != 3 {
+		t.Fatalf("installs = %d, want stale-marker close to install fail-closed", installs)
 	}
 }
 
