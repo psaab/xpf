@@ -803,6 +803,13 @@ func forEachRoutingInstanceInterfaceKey(cfg *config.Config, bind func(riName, ke
 				members = append(members, memberKeys{riName: ri.Name, keys: keys})
 			}
 		}
+		for _, claim := range cfg.QuarantinedRIMemberPrimaryClaims {
+			if claim.Instance == ri.Name && claim.InterfaceKey != "" && claim.LinuxName != "" {
+				members = append(members, memberKeys{riName: ri.Name, keys: []config.RoutingInstanceMemberDeviceKey{{
+					InterfaceKey: claim.InterfaceKey, LinuxName: claim.LinuxName,
+				}}})
+			}
+		}
 	}
 	seen := make(map[string]struct{})
 	for pass := range 2 {

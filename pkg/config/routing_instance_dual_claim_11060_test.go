@@ -53,6 +53,8 @@ func TestRIDualClaimRejectedAndToleratedWithWarning11060(t *testing.T) {
 	}
 }
 
+
+
 // A bare member claims its configured units, so it conflicts with another
 // instance that lists one of those units explicitly.
 func TestRIBareAndUnitClaimRejectedAcrossInstances11060(t *testing.T) {
@@ -209,7 +211,21 @@ func TestRIDualClaimTolerantBareMemberKeepsOnlyUnambiguousUnits11060(t *testing.
 		instances[ri.Name] = ri
 	}
 	if got := instances["blue"].Interfaces; len(got) != 1 || got[0] != "ge-0/0/7.20" {
-		t.Fatalf("safe unit was not retained explicitly after bare-member quarantine: %v", got)
+		t.Fatalf("safe fanout unit was not retained explicitly: %v", got)
+	}
+	if got := cfg.QuarantinedRIMemberPrimaryClaims; len(got) != 1 ||
+		got[0].Instance != "blue" || got[0].InterfaceKey != "ge-0/0/7" ||
+		got[0].LinuxName != "ge-0-0-7" {
+		t.Fatalf("uncontested bare primary was not retained as a base-only claim: %+v", got)
+	}
+	keys := RoutingInstanceMemberDeviceKeysForInstance(cfg, cfg.TunnelNameMap(), instances["blue"])
+	kept := make(map[string]string, len(keys))
+	for _, key := range keys {
+		kept[key.InterfaceKey] = key.LinuxName
+	}
+	if len(kept) != 2 || kept["ge-0/0/7"] != "ge-0-0-7" ||
+		kept["ge-0/0/7.20"] != "ge-0-0-7.200" {
+		t.Fatalf("sanitized ownership keys = %v, want primary base and safe tagged sibling", kept)
 	}
 	if got := instances["red"].Interfaces; len(got) != 0 {
 		t.Fatalf("ambiguous explicit member remained in red: %v", got)

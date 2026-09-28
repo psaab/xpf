@@ -297,10 +297,13 @@ func TestCrossRIUnitFanoutIsQuarantined9132(t *testing.T) {
 			if got := ri["ge-0/0/0.0"]; got != "tenant-a" {
 				t.Fatalf("unambiguous unit-zero membership = %q, want tenant-a: %v", got, ri)
 			}
-			if got := ri["ge-0/0/0"]; got != "" {
-				t.Fatalf("quarantined bare member still claims the physical key: %q", got)
+			if got := ri["ge-0/0/0"]; got != "tenant-a" {
+				t.Fatalf("uncontested physical primary = %q, want tenant-a after sibling quarantine: %v", got, ri)
 			}
 			v4, _ := buildInterfaceRouteTables(cfg)
+			if got := v4["ge-0/0/0"]; got != "tenant-a.inet.0" {
+				t.Fatalf("uncontested physical primary IPv4 table = %q, want tenant-a.inet.0: %v", got, v4)
+			}
 			if _, found := v4["ge-0/0/0.1"]; found {
 				t.Fatalf("ambiguous unit acquired an IPv4 table after quarantine: %v", v4)
 			}
