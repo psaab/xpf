@@ -147,7 +147,7 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 	if live, ok := d.liveDataplane(); ok {
 		grpcDP = live
 	}
-	var feedsAckFn func(name string, refusalID uint64, candidateHash string, oldCount, newCount int, actor, reason string) error
+	var feedsAckFn func(name string, refusalID uint64, candidateHash, baselineHash string, oldCount, newCount int, actor, reason string) error
 	if d.feeds != nil {
 		feedsAckFn = d.feeds.AcknowledgeFeedShrink
 	}

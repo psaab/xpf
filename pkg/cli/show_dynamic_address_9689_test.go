@@ -27,10 +27,10 @@ func TestRenderDynamicAddressAgreesWithEnforcement9689(t *testing.T) {
 		"threat-feed": {
 			Prefixes: 3, LastFetch: time.Now(), Hash: "installedhash",
 			ShrinkRefused: true, ShrinkRefusalCount: 2, ShrinkRefusalID: 7,
-			ShrinkCandidateHash: "candidatehash", ShrinkCandidateOldCount: 100,
+			ShrinkCandidateHash: "candidatehash", ShrinkBaselineHash: "installedhash", ShrinkCandidateOldCount: 100,
 			ShrinkCandidateNewCount: 49, ShrinkAckPending: true,
 			ShrinkAckActor: "operator=alice", ShrinkAckHash: "candidatehash",
-			ShrinkAckReason: "provider confirmed",
+			ShrinkAckBaselineHash: "installedhash", ShrinkAckReason: "provider confirmed",
 		},
 	}
 	var b strings.Builder
@@ -42,9 +42,9 @@ func TestRenderDynamicAddressAgreesWithEnforcement9689(t *testing.T) {
 		"Shrink guard: old >= 32 prefixes; refuse below 50% retained with a drop of at least 16",
 		"Shrink refusals: 2",
 		"Installed snapshot sha256=installedhash",
-		"SHRINK-HELD: candidate 49/100 prefixes; refusal #7; sha256=candidatehash",
+		"SHRINK-HELD: candidate 49/100 prefixes; refusal #7; candidate_sha256=candidatehash baseline_sha256=installedhash",
 		"SHRINK-ACKED: exact candidate #7 awaiting next fetch",
-		"Acked candidate sha256=candidatehash by operator=alice; reason: \"provider confirmed\"",
+		"Acked candidate_sha256=candidatehash baseline_sha256=installedhash by operator=alice; reason: \"provider confirmed\"",
 		"HOLD-DROPPED",
 		"allow-partners: feeds partner-feed, fail-mode drop",
 		"1 feed(s) dropped by hold-interval, publishing the other 0 feed(s)' prefixes (fail-mode drop)",

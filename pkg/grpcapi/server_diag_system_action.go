@@ -184,8 +184,8 @@ func (s *Server) acknowledgeDynamicAddressShrink(ctx context.Context, req *pb.Sy
 	if req.CandidateId == 0 {
 		return nil, status.Error(codes.InvalidArgument, "dynamic-address shrink acknowledgement requires a positive candidate ID")
 	}
-	if len(req.CandidateHash) != 64 || req.CandidateOldCount == 0 {
-		return nil, status.Error(codes.InvalidArgument, "dynamic-address shrink acknowledgement requires the candidate SHA-256 hash and positive old count")
+	if len(req.CandidateHash) != 64 || len(req.BaselineHash) != 64 || req.CandidateOldCount == 0 {
+		return nil, status.Error(codes.InvalidArgument, "dynamic-address shrink acknowledgement requires candidate and baseline SHA-256 hashes and positive old count")
 	}
 	if len(req.Reason) > maxDynamicAddressShrinkAckReasonBytes {
 		return nil, status.Errorf(codes.InvalidArgument, "acknowledgement reason exceeds %d bytes", maxDynamicAddressShrinkAckReasonBytes)
@@ -214,17 +214,18 @@ func (s *Server) acknowledgeDynamicAddressShrink(ctx context.Context, req *pb.Sy
 	}
 	if feed.ShrinkRefusalID != req.CandidateId ||
 		feed.ShrinkCandidateHash != req.CandidateHash ||
+		feed.ShrinkBaselineHash != req.BaselineHash ||
 		feed.ShrinkCandidateOldCount != int(req.CandidateOldCount) ||
 		feed.ShrinkCandidateNewCount != int(req.CandidateNewCount) {
 		return nil, status.Errorf(codes.FailedPrecondition, "dynamic-address feed %q refusal candidate tuple is stale", req.Target)
 	}
 
 	actor := journalPrincipalForContext(s, ctx, connSessionID(ctx))
-	if err := s.feedsAckFn(req.Target, req.CandidateId, req.CandidateHash, int(req.CandidateOldCount), int(req.CandidateNewCount), actor, reason); err != nil {
+	if err := s.feedsAckFn(req.Target, req.CandidateId, req.CandidateHash, req.BaselineHash, int(req.CandidateOldCount), int(req.CandidateNewCount), actor, reason); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "dynamic-address feed %q shrink acknowledgement rejected: %v", req.Target, err)
 	}
-	detail := fmt.Sprintf("%s feed=%q candidate_id=%d candidate_sha256=%q old_count=%d new_count=%d reason=%q",
-		req.Action, req.Target, req.CandidateId, req.CandidateHash, req.CandidateOldCount, req.CandidateNewCount, reason)
+	detail := fmt.Sprintf("%s feed=%q candidate_id=%d candidate_sha256=%q baseline_sha256=%q old_count=%d new_count=%d reason=%q",
+		req.Action, req.Target, req.CandidateId, req.CandidateHash, req.BaselineHash, req.CandidateOldCount, req.CandidateNewCount, reason)
 	s.store.LogSystemActionAs(detail, actor)
 	return &pb.SystemActionResponse{
 		Message: fmt.Sprintf("Acknowledged refused shrink candidate %d for dynamic-address feed %q", req.CandidateId, req.Target),

@@ -497,13 +497,13 @@ func renderDynamicAddressFeedStatus(w io.Writer, indent string, fi feeds.FeedInf
 		if fi.Hash != "" {
 			fmt.Fprintf(w, "%sInstalled snapshot sha256=%s\n", indent, fi.Hash)
 		}
-		fmt.Fprintf(w, "%sSHRINK-HELD: candidate %d/%d prefixes; refusal #%d; sha256=%s\n",
+		fmt.Fprintf(w, "%sSHRINK-HELD: candidate %d/%d prefixes; refusal #%d; candidate_sha256=%s baseline_sha256=%s\n",
 			indent, fi.ShrinkCandidateNewCount, fi.ShrinkCandidateOldCount,
-			fi.ShrinkRefusalID, fi.ShrinkCandidateHash)
+			fi.ShrinkRefusalID, fi.ShrinkCandidateHash, fi.ShrinkBaselineHash)
 		if fi.ShrinkAckPending {
 			fmt.Fprintf(w, "%sSHRINK-ACKED: exact candidate #%d awaiting next fetch\n", indent, fi.ShrinkRefusalID)
-			fmt.Fprintf(w, "%s  Acked candidate sha256=%s by %s; reason: %q\n",
-				indent, fi.ShrinkAckHash, fi.ShrinkAckActor, fi.ShrinkAckReason)
+			fmt.Fprintf(w, "%s  Acked candidate_sha256=%s baseline_sha256=%s by %s; reason: %q\n",
+				indent, fi.ShrinkAckHash, fi.ShrinkAckBaselineHash, fi.ShrinkAckActor, fi.ShrinkAckReason)
 		} else {
 			fmt.Fprintf(w, "%sSHRINK-HELD: requires authorized acknowledgement with a reason\n", indent)
 		}

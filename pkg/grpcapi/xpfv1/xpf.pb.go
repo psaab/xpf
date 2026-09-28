@@ -8845,13 +8845,14 @@ type SystemActionRequest struct {
 	Action string                 `protobuf:"bytes,1,opt,name=action,proto3" json:"action,omitempty"` // "reboot", "halt", "zeroize", "dhcp-renew"
 	Target string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"` // optional target (e.g. interface name for dhcp-renew)
 	// #11059: dynamic-address-shrink-ack carries the exact refusal candidate to
-	// acknowledge (target is the feed name), its content hash and old/new prefix
-	// counts, plus the mandatory operator reason.
+	// acknowledge (target is the feed name), its candidate and last-good baseline
+	// hashes and old/new prefix counts, plus the mandatory operator reason.
 	CandidateId       uint64 `protobuf:"varint,3,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
 	Reason            string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
 	CandidateHash     string `protobuf:"bytes,5,opt,name=candidate_hash,json=candidateHash,proto3" json:"candidate_hash,omitempty"`
 	CandidateOldCount uint32 `protobuf:"varint,6,opt,name=candidate_old_count,json=candidateOldCount,proto3" json:"candidate_old_count,omitempty"`
 	CandidateNewCount uint32 `protobuf:"varint,7,opt,name=candidate_new_count,json=candidateNewCount,proto3" json:"candidate_new_count,omitempty"`
+	BaselineHash      string `protobuf:"bytes,8,opt,name=baseline_hash,json=baselineHash,proto3" json:"baseline_hash,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -8933,6 +8934,13 @@ func (x *SystemActionRequest) GetCandidateNewCount() uint32 {
 		return x.CandidateNewCount
 	}
 	return 0
+}
+
+func (x *SystemActionRequest) GetBaselineHash() string {
+	if x != nil {
+		return x.BaselineHash
+	}
+	return ""
 }
 
 type SystemActionResponse struct {
@@ -10106,7 +10114,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\x14GetSystemInfoRequest\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\"/\n" +
 	"\x15GetSystemInfoResponse\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\tR\x06output\"\x87\x02\n" +
+	"\x06output\x18\x01 \x01(\tR\x06output\"\xac\x02\n" +
 	"\x13SystemActionRequest\x12\x16\n" +
 	"\x06action\x18\x01 \x01(\tR\x06action\x12\x16\n" +
 	"\x06target\x18\x02 \x01(\tR\x06target\x12!\n" +
@@ -10114,7 +10122,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\x12%\n" +
 	"\x0ecandidate_hash\x18\x05 \x01(\tR\rcandidateHash\x12.\n" +
 	"\x13candidate_old_count\x18\x06 \x01(\rR\x11candidateOldCount\x12.\n" +
-	"\x13candidate_new_count\x18\a \x01(\rR\x11candidateNewCount\"0\n" +
+	"\x13candidate_new_count\x18\a \x01(\rR\x11candidateNewCount\x12#\n" +
+	"\rbaseline_hash\x18\b \x01(\tR\fbaselineHash\"0\n" +
 	"\x14SystemActionResponse\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\"\xbb\x02\n" +
 	"\x18MonitorPacketDropRequest\x12#\n" +

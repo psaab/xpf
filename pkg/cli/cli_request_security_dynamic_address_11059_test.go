@@ -73,7 +73,7 @@ func TestLocalDynamicAddressShrinkAckRequiresConfigPermissionAndInstallsCurrentC
 		feedsFn:    manager.AllFeeds,
 		feedsAckFn: manager.AcknowledgeFeedShrink,
 	}
-	command := fmt.Sprintf("request security dynamic-address acknowledge-shrink ack-feed candidate-id %d candidate-hash %s old-count %d new-count %d reason provider confirmed intended scope", refused.ShrinkRefusalID, refused.ShrinkCandidateHash, refused.ShrinkCandidateOldCount, refused.ShrinkCandidateNewCount)
+	command := fmt.Sprintf("request security dynamic-address acknowledge-shrink ack-feed candidate-id %d candidate-hash %s baseline-hash %s old-count %d new-count %d reason provider confirmed intended scope", refused.ShrinkRefusalID, refused.ShrinkCandidateHash, refused.ShrinkBaselineHash, refused.ShrinkCandidateOldCount, refused.ShrinkCandidateNewCount)
 	if err := cli.dispatchOperational(command); err == nil || !strings.Contains(err.Error(), "requires a higher login class") {
 		t.Fatalf("operator class did not require configure permission: %v", err)
 	}
@@ -82,6 +82,19 @@ func TestLocalDynamicAddressShrinkAckRequiresConfigPermissionAndInstallsCurrentC
 	}
 
 	cli.userClass = "super-user"
+	staleBaselineCommand := strings.Replace(
+		command,
+		"baseline-hash "+refused.ShrinkBaselineHash,
+		"baseline-hash "+strings.Repeat("0", 64),
+		1,
+	)
+	if err := cli.dispatchOperational(staleBaselineCommand); err == nil ||
+		!strings.Contains(err.Error(), "refusal candidate tuple is stale") {
+		t.Fatalf("local command accepted stale baseline hash: %v", err)
+	}
+	if info := manager.AllFeeds()["ack-feed"]; !info.ShrinkRefused || info.ShrinkAckPending {
+		t.Fatalf("stale baseline acknowledgement changed feed state: %+v", info)
+	}
 	captureStdout(t, func() {
 		if err := cli.dispatchOperational(command); err != nil {
 			t.Fatalf("authorized local acknowledgement: %v", err)
@@ -89,16 +102,17 @@ func TestLocalDynamicAddressShrinkAckRequiresConfigPermissionAndInstallsCurrentC
 	})
 	armed := manager.AllFeeds()["ack-feed"]
 	wantActor := "source=local-shell;uid=4242;user=operator;class=super-user;session=none"
-	if !armed.ShrinkAckPending || armed.ShrinkAckActor != wantActor || armed.ShrinkAckReason != "provider confirmed intended scope" {
-		t.Fatalf("local command did not arm the current candidate with its authenticated actor: %+v", armed)
+	if !armed.ShrinkAckPending || armed.ShrinkAckActor != wantActor || armed.ShrinkAckReason != "provider confirmed intended scope" ||
+		armed.ShrinkAckBaselineHash != refused.ShrinkBaselineHash {
+		t.Fatalf("local command did not arm the current candidate and baseline with its authenticated actor: %+v", armed)
 	}
 
 	rawJournal, err := os.ReadFile(filepath.Join(filepath.Dir(configPath), ".config.journal"))
 	if err != nil {
 		t.Fatalf("read local acknowledgement journal: %v", err)
 	}
-	wantDetail := fmt.Sprintf(`dynamic-address-shrink-ack feed=\"ack-feed\" candidate_id=%d candidate_sha256=\"%s\" old_count=%d new_count=%d reason=\"provider confirmed intended scope\"`,
-		refused.ShrinkRefusalID, refused.ShrinkCandidateHash, refused.ShrinkCandidateOldCount, refused.ShrinkCandidateNewCount)
+	wantDetail := fmt.Sprintf(`dynamic-address-shrink-ack feed=\"ack-feed\" candidate_id=%d candidate_sha256=\"%s\" baseline_sha256=\"%s\" old_count=%d new_count=%d reason=\"provider confirmed intended scope\"`,
+		refused.ShrinkRefusalID, refused.ShrinkCandidateHash, refused.ShrinkBaselineHash, refused.ShrinkCandidateOldCount, refused.ShrinkCandidateNewCount)
 	if !strings.Contains(string(rawJournal), wantDetail) {
 		t.Fatalf("local acknowledgement journal omitted candidate tuple %q: %s", wantDetail, rawJournal)
 	}

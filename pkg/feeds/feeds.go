@@ -263,16 +263,21 @@ type feedState struct {
 	// The active refused candidate and one-shot acknowledgement are runtime
 	// status, not persisted across a producer replacement. The refusal counter,
 	// candidate sequence, and warning cadence survive same-name Apply swaps.
+	// The baseline hash pins the last-good snapshot the delta was reviewed
+	// against; IDs restart after recreate/restart, so the candidate tuple alone
+	// cannot distinguish the same candidate recurring under a different baseline.
 	shrinkRefused           bool
 	shrinkRefusalCount      uint64
 	shrinkRefusalID         uint64
 	shrinkCandidateHash     [32]byte
+	shrinkBaselineHash      [32]byte
 	shrinkCandidateOldCount int
 	shrinkCandidateNewCount int
 	shrinkLastWarn          time.Time
 	shrinkAckPending        bool
 	shrinkAckRefusalID      uint64
 	shrinkAckCandidateHash  [32]byte
+	shrinkAckBaselineHash   [32]byte
 	shrinkAckOldCount       int
 	shrinkAckNewCount       int
 	shrinkAckActor          string
@@ -1029,12 +1034,16 @@ func (m *Manager) AllFeeds() map[string]FeedInfo {
 			hash = fmt.Sprintf("%x", fs.hash)
 		}
 		candidateHash := ""
+		candidateBaselineHash := ""
 		if fs.shrinkRefused {
 			candidateHash = fmt.Sprintf("%x", fs.shrinkCandidateHash)
+			candidateBaselineHash = fmt.Sprintf("%x", fs.shrinkBaselineHash)
 		}
 		ackHash := ""
+		ackBaselineHash := ""
 		if fs.shrinkAckPending {
 			ackHash = fmt.Sprintf("%x", fs.shrinkAckCandidateHash)
+			ackBaselineHash = fmt.Sprintf("%x", fs.shrinkAckBaselineHash)
 		}
 		shrinkPolicy := thresholdsForFeed(fs)
 		result[name] = FeedInfo{
@@ -1053,11 +1062,13 @@ func (m *Manager) AllFeeds() map[string]FeedInfo {
 			ShrinkRefusalCount:          fs.shrinkRefusalCount,
 			ShrinkRefusalID:             fs.shrinkRefusalID,
 			ShrinkCandidateHash:         candidateHash,
+			ShrinkBaselineHash:          candidateBaselineHash,
 			ShrinkCandidateOldCount:     fs.shrinkCandidateOldCount,
 			ShrinkCandidateNewCount:     fs.shrinkCandidateNewCount,
 			ShrinkAckPending:            fs.shrinkAckPending,
 			ShrinkAckActor:              fs.shrinkAckActor,
 			ShrinkAckHash:               ackHash,
+			ShrinkAckBaselineHash:       ackBaselineHash,
 			ShrinkAckReason:             fs.shrinkAckReason,
 			ShrinkGuardMinOldCount:      shrinkPolicy.minOldCount,
 			ShrinkGuardMinRetainPercent: shrinkPolicy.minRetainPercent,
@@ -1101,17 +1112,19 @@ type FeedInfo struct {
 
 	// ShrinkRefused is the live refusal alarm; ShrinkRefusalCount is the
 	// manager-lifetime per-feed counter. The candidate tuple is present only
-	// while a refusal remains current and is the operator's acknowledgement
-	// token context.
+	// while a refusal remains current and binds the delta to the last-good
+	// baseline hash.
 	ShrinkRefused               bool
 	ShrinkRefusalCount          uint64
 	ShrinkRefusalID             uint64
 	ShrinkCandidateHash         string
+	ShrinkBaselineHash          string
 	ShrinkCandidateOldCount     int
 	ShrinkCandidateNewCount     int
 	ShrinkAckPending            bool
 	ShrinkAckActor              string
 	ShrinkAckHash               string
+	ShrinkAckBaselineHash       string
 	ShrinkAckReason             string
 	ShrinkGuardMinOldCount      int
 	ShrinkGuardMinRetainPercent int
@@ -1531,14 +1544,14 @@ func hashPrefixes(canon []string) [32]byte {
 // AcknowledgeFeedShrink arms a one-shot bypass for the exact refusal shown by
 // AllFeeds. Every tuple field is matched because refusal IDs can be reused
 // after a feed is removed, recreated, or the manager restarts.
-func (m *Manager) AcknowledgeFeedShrink(name string, refusalID uint64, candidateHash string, oldCount, newCount int, actor, reason string) error {
+func (m *Manager) AcknowledgeFeedShrink(name string, refusalID uint64, candidateHash, baselineHash string, oldCount, newCount int, actor, reason string) error {
 	actor = strings.TrimSpace(actor)
 	reason = strings.TrimSpace(reason)
 	if strings.TrimSpace(name) == "" || refusalID == 0 {
 		return fmt.Errorf("feed name and nonzero refusal ID are required")
 	}
-	if len(candidateHash) != sha256.Size*2 || oldCount <= 0 || oldCount > maxFeedPrefixes || newCount < 0 || newCount > maxFeedPrefixes {
-		return fmt.Errorf("acknowledgement requires a valid candidate hash and old/new counts")
+	if len(candidateHash) != sha256.Size*2 || len(baselineHash) != sha256.Size*2 || oldCount <= 0 || oldCount > maxFeedPrefixes || newCount < 0 || newCount > maxFeedPrefixes {
+		return fmt.Errorf("acknowledgement requires valid candidate and baseline hashes and old/new counts")
 	}
 	if actor == "" || len(actor) > 1024 {
 		return fmt.Errorf("authenticated actor is required")
@@ -1565,6 +1578,8 @@ func (m *Manager) AcknowledgeFeedShrink(name string, refusalID uint64, candidate
 	}
 	if fs.shrinkRefusalID != refusalID ||
 		candidateHash != fmt.Sprintf("%x", fs.shrinkCandidateHash) ||
+		baselineHash != fmt.Sprintf("%x", fs.shrinkBaselineHash) ||
+		fs.hash != fs.shrinkBaselineHash ||
 		oldCount != fs.shrinkCandidateOldCount ||
 		newCount != fs.shrinkCandidateNewCount {
 		return fmt.Errorf("dynamic-address feed %q refusal candidate tuple is stale", name)
@@ -1572,6 +1587,7 @@ func (m *Manager) AcknowledgeFeedShrink(name string, refusalID uint64, candidate
 	fs.shrinkAckPending = true
 	fs.shrinkAckRefusalID = refusalID
 	fs.shrinkAckCandidateHash = fs.shrinkCandidateHash
+	fs.shrinkAckBaselineHash = fs.shrinkBaselineHash
 	fs.shrinkAckOldCount = fs.shrinkCandidateOldCount
 	fs.shrinkAckNewCount = fs.shrinkCandidateNewCount
 	fs.shrinkAckActor = actor
@@ -1583,6 +1599,7 @@ func clearShrinkAck(fs *feedState) {
 	fs.shrinkAckPending = false
 	fs.shrinkAckRefusalID = 0
 	fs.shrinkAckCandidateHash = [32]byte{}
+	fs.shrinkAckBaselineHash = [32]byte{}
 	fs.shrinkAckOldCount = 0
 	fs.shrinkAckNewCount = 0
 	fs.shrinkAckActor = ""
@@ -1592,25 +1609,28 @@ func clearShrinkAck(fs *feedState) {
 func clearShrinkCandidate(fs *feedState) {
 	fs.shrinkRefused = false
 	fs.shrinkCandidateHash = [32]byte{}
+	fs.shrinkBaselineHash = [32]byte{}
 	fs.shrinkCandidateOldCount = 0
 	fs.shrinkCandidateNewCount = 0
 	clearShrinkAck(fs)
 }
 
-func (fs *feedState) shrinkCandidateMatches(hash [32]byte, oldCount, newCount int) bool {
+func (fs *feedState) shrinkCandidateMatches(hash, baselineHash [32]byte, oldCount, newCount int) bool {
 	return fs.shrinkRefused &&
 		fs.shrinkCandidateHash == hash &&
+		fs.shrinkBaselineHash == baselineHash &&
 		fs.shrinkCandidateOldCount == oldCount &&
 		fs.shrinkCandidateNewCount == newCount
 }
 
-func (fs *feedState) shrinkAckMatches(hash [32]byte, oldCount, newCount int) bool {
+func (fs *feedState) shrinkAckMatches(hash, baselineHash [32]byte, oldCount, newCount int) bool {
 	return fs.shrinkAckPending &&
 		fs.shrinkAckRefusalID == fs.shrinkRefusalID &&
 		fs.shrinkAckCandidateHash == hash &&
+		fs.shrinkAckBaselineHash == baselineHash &&
 		fs.shrinkAckOldCount == oldCount &&
 		fs.shrinkAckNewCount == newCount &&
-		fs.shrinkCandidateMatches(hash, oldCount, newCount)
+		fs.shrinkCandidateMatches(hash, baselineHash, oldCount, newCount)
 }
 
 // shrinkGuardTripped reports whether installing newCount prefixes over a
@@ -1691,24 +1711,28 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	// publishedHash stale, so this stays true on an identical refetch → retry.
 	needsPublish := !fs.hasPublished || fs.publishedHash != res.hash
 	oldCount := len(fs.prefixes)
+	baselineHash := fs.hash
 	// Drastic-shrink guard (#11059). Acknowledgements match the refused
-	// candidate's sequence, content hash, and old/new counts.
+	// candidate's sequence, content hash, baseline hash, and old/new counts.
 	guardBypass := false
 	guardActor := ""
 	guardReason := ""
+	var guardBaselineHash [32]byte
 	if fs.hasSnapshot && shrinkGuardTrippedWithThresholds(oldCount, len(res.prefixes), thresholdsForFeed(fs)) {
 		newCount := len(res.prefixes)
-		if fs.shrinkAckMatches(res.hash, oldCount, newCount) {
+		if fs.shrinkAckMatches(res.hash, baselineHash, oldCount, newCount) {
 			guardBypass = true
 			guardActor = fs.shrinkAckActor
 			guardReason = fs.shrinkAckReason
+			guardBaselineHash = fs.shrinkAckBaselineHash
 			clearShrinkAck(fs)
 		} else {
-			sameCandidate := fs.shrinkCandidateMatches(res.hash, oldCount, newCount)
+			sameCandidate := fs.shrinkCandidateMatches(res.hash, baselineHash, oldCount, newCount)
 			if !sameCandidate {
 				fs.shrinkRefusalID++
 				fs.shrinkRefused = true
 				fs.shrinkCandidateHash = res.hash
+				fs.shrinkBaselineHash = baselineHash
 				fs.shrinkCandidateOldCount = oldCount
 				fs.shrinkCandidateNewCount = newCount
 				clearShrinkAck(fs)
@@ -1729,17 +1753,18 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 			refusalID := fs.shrinkRefusalID
 			refusalCount := fs.shrinkRefusalCount
 			candidateHash := fmt.Sprintf("%x", res.hash)
+			refusalBaselineHash := fmt.Sprintf("%x", baselineHash)
 			m.mu.Unlock()
 			if warn {
 				slog.Warn("dynamic-address: feed drastic shrink REFUSED — retaining last-good snapshot",
 					"name", fs.name, "refusal_id", refusalID, "candidate_hash", candidateHash,
-					"candidate_prefixes", newCount, "previous_prefixes", oldCount,
-					"refusal_count", refusalCount)
+					"baseline_hash", refusalBaselineHash, "candidate_prefixes", newCount,
+					"previous_prefixes", oldCount, "refusal_count", refusalCount)
 			} else {
 				slog.Debug("dynamic-address: feed drastic shrink still REFUSED — retaining last-good snapshot",
 					"name", fs.name, "refusal_id", refusalID, "candidate_hash", candidateHash,
-					"candidate_prefixes", newCount, "previous_prefixes", oldCount,
-					"refusal_count", refusalCount)
+					"baseline_hash", refusalBaselineHash, "candidate_prefixes", newCount,
+					"previous_prefixes", oldCount, "refusal_count", refusalCount)
 			}
 			m.finishFailure(fs, failure, false)
 			return
@@ -1778,8 +1803,8 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	if guardBypass {
 		slog.Warn("dynamic-address: feed installed the exact acknowledged drastic-shrink candidate",
 			"name", fs.name, "refusal_id", fs.shrinkRefusalID, "candidate_hash", fmt.Sprintf("%x", res.hash),
-			"prefixes", len(res.prefixes), "previous", oldCount,
-			"actor", guardActor, "reason", guardReason)
+			"baseline_hash", fmt.Sprintf("%x", guardBaselineHash), "prefixes", len(res.prefixes),
+			"previous", oldCount, "actor", guardActor, "reason", guardReason)
 	}
 
 	if !needsPublish {

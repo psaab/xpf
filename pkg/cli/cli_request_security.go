@@ -52,14 +52,14 @@ func (c *CLI) handleRequestSecurity(args []string) error {
 }
 
 func (c *CLI) handleRequestSecurityDynamicAddress(args []string) error {
-	const usage = "usage: request security dynamic-address acknowledge-shrink <feed> candidate-id <id> candidate-hash <sha256> old-count <count> new-count <count> reason <reason...>"
+	const usage = "usage: request security dynamic-address acknowledge-shrink <feed> candidate-id <id> candidate-hash <sha256> baseline-hash <sha256> old-count <count> new-count <count> reason <reason...>"
 	if len(args) == 0 || args[0] != "acknowledge-shrink" {
 		fmt.Println("request security dynamic-address:")
 		writeCompletionHelp(os.Stdout, treeHelpCandidates(operationalTree["request"].Children["security"].Children["dynamic-address"].Children))
 		return nil
 	}
-	if len(args) < 12 || args[2] != "candidate-id" || args[4] != "candidate-hash" ||
-		args[6] != "old-count" || args[8] != "new-count" || args[10] != "reason" {
+	if len(args) < 14 || args[2] != "candidate-id" || args[4] != "candidate-hash" ||
+		args[6] != "baseline-hash" || args[8] != "old-count" || args[10] != "new-count" || args[12] != "reason" {
 		return fmt.Errorf("%s", usage)
 	}
 	feed := args[1]
@@ -79,16 +79,20 @@ func (c *CLI) handleRequestSecurityDynamicAddress(args []string) error {
 	if !validShrinkCandidateHash(candidateHash) {
 		return fmt.Errorf("%s: candidate hash must be a 64-character lowercase SHA-256 hex value", usage)
 	}
-	oldCountValue, err := strconv.ParseUint(args[7], 10, 32)
+	baselineHash := args[7]
+	if !validShrinkCandidateHash(baselineHash) {
+		return fmt.Errorf("%s: baseline hash must be a 64-character lowercase SHA-256 hex value", usage)
+	}
+	oldCountValue, err := strconv.ParseUint(args[9], 10, 32)
 	if err != nil || oldCountValue == 0 {
 		return fmt.Errorf("%s: old count must be a positive uint32", usage)
 	}
-	newCountValue, err := strconv.ParseUint(args[9], 10, 32)
+	newCountValue, err := strconv.ParseUint(args[11], 10, 32)
 	if err != nil {
 		return fmt.Errorf("%s: new count must be a uint32", usage)
 	}
 	oldCount, newCount := int(oldCountValue), int(newCountValue)
-	reason := strings.TrimSpace(strings.Join(args[11:], " "))
+	reason := strings.TrimSpace(strings.Join(args[13:], " "))
 	if reason == "" {
 		return fmt.Errorf("%s: reason is required", usage)
 	}
@@ -107,16 +111,17 @@ func (c *CLI) handleRequestSecurityDynamicAddress(args []string) error {
 	}
 	if info.ShrinkRefusalID != candidateID ||
 		info.ShrinkCandidateHash != candidateHash ||
+		info.ShrinkBaselineHash != baselineHash ||
 		info.ShrinkCandidateOldCount != oldCount ||
 		info.ShrinkCandidateNewCount != newCount {
 		return fmt.Errorf("dynamic-address feed %q refusal candidate tuple is stale", feed)
 	}
 	actor := c.journalPrincipal()
-	if err := c.feedsAckFn(feed, candidateID, candidateHash, oldCount, newCount, actor, reason); err != nil {
+	if err := c.feedsAckFn(feed, candidateID, candidateHash, baselineHash, oldCount, newCount, actor, reason); err != nil {
 		return fmt.Errorf("dynamic-address feed %q shrink acknowledgement rejected: %w", feed, err)
 	}
 	c.store.LogSystemActionAs(
-		fmt.Sprintf("dynamic-address-shrink-ack feed=%q candidate_id=%d candidate_sha256=%q old_count=%d new_count=%d reason=%q", feed, candidateID, candidateHash, oldCount, newCount, reason),
+		fmt.Sprintf("dynamic-address-shrink-ack feed=%q candidate_id=%d candidate_sha256=%q baseline_sha256=%q old_count=%d new_count=%d reason=%q", feed, candidateID, candidateHash, baselineHash, oldCount, newCount, reason),
 		actor,
 	)
 	fmt.Printf("Acknowledged refused shrink candidate %d for dynamic-address feed %q\n", candidateID, feed)

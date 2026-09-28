@@ -384,9 +384,9 @@ func (c *ctl) handleRequestSecurityDynamicAddress(args []string) error {
 		printRemoteTreeHelp("request security dynamic-address:", "request", "security", "dynamic-address")
 		return nil
 	}
-	const usage = "usage: request security dynamic-address acknowledge-shrink <feed> candidate-id <id> candidate-hash <sha256> old-count <count> new-count <count> reason <reason...>"
-	if len(args) < 12 || args[2] != "candidate-id" || args[4] != "candidate-hash" ||
-		args[6] != "old-count" || args[8] != "new-count" || args[10] != "reason" {
+	const usage = "usage: request security dynamic-address acknowledge-shrink <feed> candidate-id <id> candidate-hash <sha256> baseline-hash <sha256> old-count <count> new-count <count> reason <reason...>"
+	if len(args) < 14 || args[2] != "candidate-id" || args[4] != "candidate-hash" ||
+		args[6] != "baseline-hash" || args[8] != "old-count" || args[10] != "new-count" || args[12] != "reason" {
 		return fmt.Errorf("%s", usage)
 	}
 	feed := args[1]
@@ -407,15 +407,19 @@ func (c *ctl) handleRequestSecurityDynamicAddress(args []string) error {
 	if !validDynamicAddressShrinkCandidateHash(candidateHash) {
 		return fmt.Errorf("%s: candidate hash must be a 64-character lowercase SHA-256 hex value", usage)
 	}
-	oldCount, err := strconv.ParseUint(args[7], 10, 32)
+	baselineHash := args[7]
+	if !validDynamicAddressShrinkCandidateHash(baselineHash) {
+		return fmt.Errorf("%s: baseline hash must be a 64-character lowercase SHA-256 hex value", usage)
+	}
+	oldCount, err := strconv.ParseUint(args[9], 10, 32)
 	if err != nil || oldCount == 0 {
 		return fmt.Errorf("%s: old count must be a positive uint32", usage)
 	}
-	newCount, err := strconv.ParseUint(args[9], 10, 32)
+	newCount, err := strconv.ParseUint(args[11], 10, 32)
 	if err != nil {
 		return fmt.Errorf("%s: new count must be a uint32", usage)
 	}
-	reason := strings.TrimSpace(strings.Join(args[11:], " "))
+	reason := strings.TrimSpace(strings.Join(args[13:], " "))
 	if reason == "" {
 		return fmt.Errorf("%s: reason is required", usage)
 	}
@@ -432,6 +436,7 @@ func (c *ctl) handleRequestSecurityDynamicAddress(args []string) error {
 		Target:            feed,
 		CandidateId:       candidateID,
 		CandidateHash:     candidateHash,
+		BaselineHash:      baselineHash,
 		CandidateOldCount: uint32(oldCount),
 		CandidateNewCount: uint32(newCount),
 		Reason:            reason,

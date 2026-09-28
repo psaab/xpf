@@ -68,10 +68,11 @@ func TestShowDynamicAddressReportsShrinkRefusal(t *testing.T) {
 			return map[string]feeds.FeedInfo{
 				"threat": {
 					Prefixes: 100, Hash: "installedhash", ShrinkRefused: true, ShrinkRefusalCount: 3,
-					ShrinkRefusalID: 9, ShrinkCandidateHash: "candidatehash",
+					ShrinkRefusalID: 9, ShrinkCandidateHash: "candidatehash", ShrinkBaselineHash: "installedhash",
 					ShrinkCandidateOldCount: 100, ShrinkCandidateNewCount: 49,
 					ShrinkAckPending: true, ShrinkAckActor: "operator=alice",
-					ShrinkAckHash: "candidatehash", ShrinkAckReason: "provider confirmed",
+					ShrinkAckHash: "candidatehash", ShrinkAckBaselineHash: "installedhash",
+					ShrinkAckReason: "provider confirmed",
 					ShrinkGuardMinOldCount: 32, ShrinkGuardMinRetainPercent: 50,
 					ShrinkGuardMinDrop: 16,
 				},
@@ -85,9 +86,9 @@ func TestShowDynamicAddressReportsShrinkRefusal(t *testing.T) {
 		"Shrink guard: old >= 32 prefixes; refuse below 50% retained with a drop of at least 16",
 		"Shrink refusals: 3",
 		"Installed snapshot sha256=installedhash",
-		"SHRINK-HELD: candidate 49/100 prefixes; refusal #9; sha256=candidatehash",
+		"SHRINK-HELD: candidate 49/100 prefixes; refusal #9; candidate_sha256=candidatehash baseline_sha256=installedhash",
 		"SHRINK-ACKED: exact candidate #9 awaiting next fetch",
-		"Acked candidate sha256=candidatehash by operator=alice; reason: \"provider confirmed\"",
+		"Acked candidate_sha256=candidatehash baseline_sha256=installedhash by operator=alice; reason: \"provider confirmed\"",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dynamic-address show lacks %q:\n%s", want, out)

@@ -129,7 +129,7 @@ func TestShrinkAckIsBoundToCurrentCandidate11059(t *testing.T) {
 	server.set(shrinkBody11059(5), http.StatusOK)
 	m.fetchFeed(context.Background(), fs)
 	first := m.AllFeeds()[fs.name]
-	if err := m.AcknowledgeFeedShrink(fs.name, first.ShrinkRefusalID, first.ShrinkCandidateHash, first.ShrinkCandidateOldCount, first.ShrinkCandidateNewCount, "operator=alice", "provider confirmed the intended scope"); err != nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, first.ShrinkRefusalID, first.ShrinkCandidateHash, first.ShrinkBaselineHash, first.ShrinkCandidateOldCount, first.ShrinkCandidateNewCount, "operator=alice", "provider confirmed the intended scope"); err != nil {
 		t.Fatalf("acknowledging candidate A: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestShrinkAckIsBoundToCurrentCandidate11059(t *testing.T) {
 	if got := strings.Count(logs.String(), "drastic shrink REFUSED"); got != 2 {
 		t.Fatalf("new candidate did not get its own initial Warn: count=%d\n%s", got, logs.String())
 	}
-	if err := m.AcknowledgeFeedShrink(fs.name, first.ShrinkRefusalID, first.ShrinkCandidateHash, first.ShrinkCandidateOldCount, first.ShrinkCandidateNewCount, "operator=alice", "stale approval"); err == nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, first.ShrinkRefusalID, first.ShrinkCandidateHash, first.ShrinkBaselineHash, first.ShrinkCandidateOldCount, first.ShrinkCandidateNewCount, "operator=alice", "stale approval"); err == nil {
 		t.Fatal("stale candidate ID was accepted")
 	}
 }
@@ -182,20 +182,20 @@ func TestShrinkAckRefusesReusedCandidateID11059(t *testing.T) {
 		t.Fatalf("recreated candidate B did not reuse ID with a different hash: A=%+v B=%+v", first, second)
 	}
 
-	if err := m.AcknowledgeFeedShrink(fs.name, first.ShrinkRefusalID, first.ShrinkCandidateHash, first.ShrinkCandidateOldCount, first.ShrinkCandidateNewCount, "operator=alice", "stale candidate A approval"); err == nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, first.ShrinkRefusalID, first.ShrinkCandidateHash, first.ShrinkBaselineHash, first.ShrinkCandidateOldCount, first.ShrinkCandidateNewCount, "operator=alice", "stale candidate A approval"); err == nil {
 		t.Fatal("candidate A tuple authorized candidate B after ID reuse")
 	}
 	if got := m.AllFeeds()[fs.name]; !got.ShrinkRefused || got.ShrinkAckPending || got.ShrinkCandidateHash != second.ShrinkCandidateHash {
 		t.Fatalf("stale tuple changed candidate B state: %+v", got)
 	}
 
-	if err := m.AcknowledgeFeedShrink(fs.name, second.ShrinkRefusalID, second.ShrinkCandidateHash, second.ShrinkCandidateOldCount-1, second.ShrinkCandidateNewCount, "operator=alice", "stale old count"); err == nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, second.ShrinkRefusalID, second.ShrinkCandidateHash, second.ShrinkBaselineHash, second.ShrinkCandidateOldCount-1, second.ShrinkCandidateNewCount, "operator=alice", "stale old count"); err == nil {
 		t.Fatal("candidate tuple with a stale old count was accepted")
 	}
-	if err := m.AcknowledgeFeedShrink(fs.name, second.ShrinkRefusalID, second.ShrinkCandidateHash, second.ShrinkCandidateOldCount, second.ShrinkCandidateNewCount+1, "operator=alice", "stale new count"); err == nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, second.ShrinkRefusalID, second.ShrinkCandidateHash, second.ShrinkBaselineHash, second.ShrinkCandidateOldCount, second.ShrinkCandidateNewCount+1, "operator=alice", "stale new count"); err == nil {
 		t.Fatal("candidate tuple with a stale new count was accepted")
 	}
-	if err := m.AcknowledgeFeedShrink(fs.name, second.ShrinkRefusalID, second.ShrinkCandidateHash, second.ShrinkCandidateOldCount, second.ShrinkCandidateNewCount, "operator=alice", "reviewed candidate B"); err != nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, second.ShrinkRefusalID, second.ShrinkCandidateHash, second.ShrinkBaselineHash, second.ShrinkCandidateOldCount, second.ShrinkCandidateNewCount, "operator=alice", "reviewed candidate B"); err != nil {
 		t.Fatalf("current candidate B tuple was rejected: %v", err)
 	}
 	m.fetchFeed(context.Background(), fs)
@@ -219,7 +219,7 @@ func TestNormalInstallClearsPendingShrinkAck11059(t *testing.T) {
 	server.set(shrinkBody11059(5), http.StatusOK)
 	m.fetchFeed(context.Background(), fs)
 	info := m.AllFeeds()[fs.name]
-	if err := m.AcknowledgeFeedShrink(fs.name, info.ShrinkRefusalID, info.ShrinkCandidateHash, info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount, "operator=alice", "verified feed update"); err != nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, info.ShrinkRefusalID, info.ShrinkCandidateHash, info.ShrinkBaselineHash, info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount, "operator=alice", "verified feed update"); err != nil {
 		t.Fatalf("arm candidate acknowledgement: %v", err)
 	}
 
@@ -242,17 +242,17 @@ func TestShrinkAckRequiresReasonAndInstallsExactCandidate11059(t *testing.T) {
 	server.set(shrinkBody11059(5), http.StatusOK)
 	m.fetchFeed(context.Background(), fs)
 	info := m.AllFeeds()[fs.name]
-	if err := m.AcknowledgeFeedShrink(fs.name, info.ShrinkRefusalID, info.ShrinkCandidateHash, info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount, "operator=alice", "   "); err == nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, info.ShrinkRefusalID, info.ShrinkCandidateHash, info.ShrinkBaselineHash, info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount, "operator=alice", "   "); err == nil {
 		t.Fatal("empty acknowledgement reason was accepted")
 	}
-	if err := m.AcknowledgeFeedShrink(fs.name, info.ShrinkRefusalID, info.ShrinkCandidateHash, info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount, "", "reason"); err == nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, info.ShrinkRefusalID, info.ShrinkCandidateHash, info.ShrinkBaselineHash, info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount, "", "reason"); err == nil {
 		t.Fatal("missing authenticated actor was accepted")
 	}
-	if err := m.AcknowledgeFeedShrink(fs.name, info.ShrinkRefusalID, info.ShrinkCandidateHash, info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount, "operator=alice", "reason\u0085text"); err == nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, info.ShrinkRefusalID, info.ShrinkCandidateHash, info.ShrinkBaselineHash, info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount, "operator=alice", "reason\u0085text"); err == nil {
 		t.Fatal("acknowledgement reason with a Unicode control character was accepted")
 	}
 	const actor, reason = "source=grpc;user=alice", "provider incident INC-42 verified"
-	if err := m.AcknowledgeFeedShrink(fs.name, info.ShrinkRefusalID, info.ShrinkCandidateHash, info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount, actor, reason); err != nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, info.ShrinkRefusalID, info.ShrinkCandidateHash, info.ShrinkBaselineHash, info.ShrinkCandidateOldCount, info.ShrinkCandidateNewCount, actor, reason); err != nil {
 		t.Fatalf("acknowledging current candidate: %v", err)
 	}
 	armed := m.AllFeeds()[fs.name]
@@ -397,7 +397,7 @@ func TestApplyDropsPendingShrinkAcknowledgement11059(t *testing.T) {
 	server.set(shrinkBody11059(5), http.StatusOK)
 	m.fetchFeed(context.Background(), fs)
 	before := m.AllFeeds()[fs.name]
-	if err := m.AcknowledgeFeedShrink(fs.name, before.ShrinkRefusalID, before.ShrinkCandidateHash, before.ShrinkCandidateOldCount, before.ShrinkCandidateNewCount, "operator=alice", "reviewed exact candidate"); err != nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, before.ShrinkRefusalID, before.ShrinkCandidateHash, before.ShrinkBaselineHash, before.ShrinkCandidateOldCount, before.ShrinkCandidateNewCount, "operator=alice", "reviewed exact candidate"); err != nil {
 		t.Fatalf("arm acknowledgement: %v", err)
 	}
 	if !m.AllFeeds()[fs.name].ShrinkAckPending {
@@ -431,7 +431,100 @@ func TestApplyDropsPendingShrinkAcknowledgement11059(t *testing.T) {
 		after.ShrinkRefusalCount != before.ShrinkRefusalCount {
 		t.Fatalf("Apply did not preserve last-good/counter while dropping candidate ack: before=%+v after=%+v", before, after)
 	}
-	if err := m.AcknowledgeFeedShrink(fs.name, before.ShrinkRefusalID, before.ShrinkCandidateHash, before.ShrinkCandidateOldCount, before.ShrinkCandidateNewCount, "operator=alice", "stale ack"); err == nil {
+	if err := m.AcknowledgeFeedShrink(fs.name, before.ShrinkRefusalID, before.ShrinkCandidateHash, before.ShrinkBaselineHash, before.ShrinkCandidateOldCount, before.ShrinkCandidateNewCount, "operator=alice", "stale ack"); err == nil {
 		t.Fatal("pre-Apply refusal ID remained acknowledgeable after candidate reset")
 	}
+}
+
+func TestShrinkAckBindsLastGoodBaseline11059(t *testing.T) {
+	m, server, initialFS := newShrinkFeed11059(t, "baseline-bound-feed", retainForever, nil)
+	baselineA := shrinkBody11059(100)
+	baselineB := strings.ReplaceAll(baselineA, "198.18.", "198.19.")
+	candidateBody := shrinkBody11059(5)
+	refuse := func(t *testing.T, manager *Manager, fs *feedState, baseline string) FeedInfo {
+		t.Helper()
+		server.set(baseline, http.StatusOK)
+		manager.fetchFeed(context.Background(), fs)
+		server.set(candidateBody, http.StatusOK)
+		manager.fetchFeed(context.Background(), fs)
+		info := manager.AllFeeds()[fs.name]
+		if !info.ShrinkRefused || info.ShrinkCandidateHash == "" ||
+			info.ShrinkBaselineHash == "" || info.ShrinkCandidateOldCount != 100 ||
+			info.ShrinkCandidateNewCount != 5 {
+			t.Fatalf("refused candidate state = %+v", info)
+		}
+		return info
+	}
+	assertSameCandidateAcrossBaselines := func(t *testing.T, first, second FeedInfo) {
+		t.Helper()
+		if first.ShrinkRefusalID != second.ShrinkRefusalID ||
+			first.ShrinkCandidateHash != second.ShrinkCandidateHash ||
+			first.ShrinkCandidateOldCount != second.ShrinkCandidateOldCount ||
+			first.ShrinkCandidateNewCount != second.ShrinkCandidateNewCount ||
+			first.ShrinkBaselineHash == second.ShrinkBaselineHash {
+			t.Fatalf("refusal tuples did not isolate the changed baseline: A=%+v B=%+v", first, second)
+		}
+	}
+	assertStaleRejectedAndCurrentAccepted := func(t *testing.T, manager *Manager, fs *feedState, stale, current FeedInfo) {
+		t.Helper()
+		if err := manager.AcknowledgeFeedShrink(fs.name, stale.ShrinkRefusalID, stale.ShrinkCandidateHash,
+			stale.ShrinkBaselineHash, stale.ShrinkCandidateOldCount, stale.ShrinkCandidateNewCount,
+			"operator=alice", "stale baseline approval"); err == nil {
+			t.Fatal("same candidate approval from a different last-good baseline was accepted")
+		}
+		afterStale := manager.AllFeeds()[fs.name]
+		if !afterStale.ShrinkRefused || afterStale.ShrinkAckPending ||
+			afterStale.Prefixes != 100 || afterStale.ShrinkBaselineHash != current.ShrinkBaselineHash {
+			t.Fatalf("stale tuple changed current refusal: %+v", afterStale)
+		}
+		if err := manager.AcknowledgeFeedShrink(fs.name, current.ShrinkRefusalID, current.ShrinkCandidateHash,
+			current.ShrinkBaselineHash, current.ShrinkCandidateOldCount, current.ShrinkCandidateNewCount,
+			"operator=alice", "reviewed current baseline and candidate"); err != nil {
+			t.Fatalf("same-baseline current tuple was rejected: %v", err)
+		}
+		manager.fetchFeed(context.Background(), fs)
+		installed := manager.AllFeeds()[fs.name]
+		if installed.Prefixes != current.ShrinkCandidateNewCount ||
+			installed.Hash != current.ShrinkCandidateHash ||
+			installed.ShrinkRefused || installed.ShrinkAckPending {
+			t.Fatalf("current same-baseline acknowledgement did not install exact candidate: %+v", installed)
+		}
+	}
+
+	// The current tuple remains a valid one-shot acknowledgement when its
+	// baseline is unchanged.
+	control := New(nil)
+	controlFS := control.newFeed(initialFS.name, initialFS.url, retainForever)
+	controlInfo := refuse(t, control, controlFS, baselineA)
+	if err := control.AcknowledgeFeedShrink(controlFS.name, controlInfo.ShrinkRefusalID,
+		controlInfo.ShrinkCandidateHash, controlInfo.ShrinkBaselineHash,
+		controlInfo.ShrinkCandidateOldCount, controlInfo.ShrinkCandidateNewCount,
+		"operator=alice", "reviewed unchanged baseline"); err != nil {
+		t.Fatalf("same-baseline positive control was rejected: %v", err)
+	}
+	control.fetchFeed(context.Background(), controlFS)
+	if installed := control.AllFeeds()[controlFS.name]; installed.Prefixes != 5 ||
+		installed.Hash != controlInfo.ShrinkCandidateHash || installed.ShrinkRefused {
+		t.Fatalf("same-baseline positive control failed to install: %+v", installed)
+	}
+
+	// Remove/recreate with a different 100-prefix last-good snapshot. The
+	// refusal ID, candidate bytes, and counts intentionally all repeat.
+	removed := refuse(t, m, initialFS, baselineA)
+	m.StopAll()
+	recreatedFS := m.newFeed(initialFS.name, initialFS.url, retainForever)
+	recreated := refuse(t, m, recreatedFS, baselineB)
+	assertSameCandidateAcrossBaselines(t, removed, recreated)
+	assertStaleRejectedAndCurrentAccepted(t, m, recreatedFS, removed, recreated)
+
+	// A fresh manager reproduces the same ID reuse across restart while the
+	// changed baseline is the only differing field in the refused tuple.
+	beforeRestart := New(nil)
+	beforeRestartFS := beforeRestart.newFeed(initialFS.name, initialFS.url, retainForever)
+	restartOld := refuse(t, beforeRestart, beforeRestartFS, baselineA)
+	afterRestart := New(nil)
+	afterRestartFS := afterRestart.newFeed(initialFS.name, initialFS.url, retainForever)
+	restartCurrent := refuse(t, afterRestart, afterRestartFS, baselineB)
+	assertSameCandidateAcrossBaselines(t, restartOld, restartCurrent)
+	assertStaleRejectedAndCurrentAccepted(t, afterRestart, afterRestartFS, restartOld, restartCurrent)
 }
