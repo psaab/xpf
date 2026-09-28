@@ -75,6 +75,9 @@ impl Coordinator {
     /// (`SourceNatPoolAllocatorKey` is built from the pool, not the rule), and
     /// exporting once per RULE would send the same lease as many times as there
     /// are rules pointing at that pool.
+    /// #10789-F4: the allocator export is local-origin only. Imported idle
+    /// leases are not echoed; the coordinator neither retracts records missing
+    /// from a later push nor carries tombstones for early retirement.
     pub(crate) fn export_idle_persistent_leases(&self, now_ns: u64) -> Vec<PoolIdleLease> {
         let mut seen: HashSet<&str> = HashSet::new();
         let mut out = Vec::new();
@@ -123,6 +126,8 @@ impl Coordinator {
     }
 
     /// Install a batch of peer idle leases.
+    /// Imported records are additive reservations only; an empty or shorter
+    /// batch never removes leases already installed on this node.
     pub(crate) fn import_idle_persistent_leases(
         &self,
         records: &[PoolIdleLease],
@@ -150,7 +155,7 @@ impl Coordinator {
                 .collect();
             match rule
                 .pool_allocator
-                .import_idle_lease(&rec.lease, &addrs, now_ns)
+                .import_idle_lease(&rec.lease, &addrs, rule.persistent_nat_timeout_ns, now_ns)
             {
                 IdleLeaseImport::Installed => counts.installed += 1,
                 IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1,

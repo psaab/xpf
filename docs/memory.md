@@ -86,7 +86,10 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 - **Fabric txqueuelen:** virtio-net TX ring max 256 entries; set `txqueuelen=10000` on fabric interface to avoid `bpf_redirect_map` drops under bidirectional load
 - **RETH gotchas:** `.link` must use `OriginalName=` (MAC alternates), EAGAIN on UP link MAC set, import cycle workaround
 - **Posture reconciliation (#86→#101):** Context-aware delay — 10s during startup (first 30s), 2s steady-state. CRITICAL: use `UpdateRGPriority` NOT `ForceRGMaster`
-- **BPF watchdog (#102):** `ha_watchdog` ARRAY map, Go writes every 500ms, BPF checks freshness >2s = inactive. Ensures fail-closed on SIGKILL/panic
+- **HA forwarding backstop (#10791):** Active `update_ha_state` receipts mint a
+  receipt-anchored 10s `ActiveUntil(max(watchdog_timestamp, now)+10s)` lease,
+  checked per packet. The Go `ha_watchdog` timestamp map is not consumed by the
+  userspace-XDP shim BPF program.
 - **Misc fixes (#98-#100,#103):** writeFull loops (#99), heartbeat MTU 1472 (#100), neighbor warmup chains (#98), readiness gate (#103)
 - **HA sync & activation (#131-#134):** LastSeen-based session refresh (#131), all-instances RG activation (#132), syncReady reset on disconnect (#133), hold timer `time.AfterFunc` wakeup (#134)
 - **Fabric monitor resolution (#135-#137):** Monitor commands resolve fab0/fab1 overlay→physical parent for stats/tcpdump; `inc_iface_tx` added to `try_fabric_redirect`

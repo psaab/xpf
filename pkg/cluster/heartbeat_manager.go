@@ -147,6 +147,11 @@ func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 	}
 	sendConn := sendPkt.(*net.UDPConn)
 
+	// Prepare the optional authenticated identity beacon sockets before taking
+	// m.mu: preparation reads the accepted key set. It does not start goroutines
+	// until publication below, and the superseded branch closes the sockets.
+	duplicateWatcher := prepareDuplicateIdentityWatcher(m, controlIface, localAddr, vrfDevice, interval)
+
 	m.mu.Lock()
 	// #7257: refuse a start that a teardown superseded. StopHeartbeat bumps
 	// hbEpoch under this same lock, so comparing the entry epoch HERE — in the
@@ -158,12 +163,16 @@ func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 		m.mu.Unlock()
 		recvConn.Close()
 		sendConn.Close()
+		if duplicateWatcher != nil {
+			duplicateWatcher.stop()
+		}
 		slog.Info("cluster: heartbeat start superseded by a teardown, not publishing",
 			"local", localAddr, "peer", peerAddr)
 		return ErrHeartbeatStartSuperseded
 	}
 	sender := newHeartbeatSender(m, sendConn, peer, interval)
 	receiver := newHeartbeatReceiver(m, recvConn, threshold, interval, peer)
+	m.duplicateIdentityWatcher = duplicateWatcher
 	// #9722: arm BEFORE start(), so the timeout goroutine never observes the
 	// replacement without its seed or with the cold-boot grace.
 	receiver.armRestart(restartSeed, inheritedHold)
@@ -186,6 +195,9 @@ func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 	// with nothing able to stop them. start() only spawns (`go run()` /
 	// `go readLoop()` + `go timeoutLoop()`), so it cannot block on this lock.
 	receiver.start()
+	if duplicateWatcher != nil {
+		duplicateWatcher.start()
+	}
 	sender.start()
 	m.mu.Unlock()
 
@@ -262,8 +274,10 @@ func (m *Manager) stopHeartbeat() {
 	m.mu.Lock()
 	sender := m.hbSender
 	receiver := m.hbReceiver
+	duplicateWatcher := m.duplicateIdentityWatcher
 	m.hbSender = nil
 	m.hbReceiver = nil
+	m.duplicateIdentityWatcher = nil
 	// #7257: supersede any StartHeartbeat that is mid-flight. It captured the
 	// previous epoch on entry and compares it under this lock before publishing,
 	// so from here on it cannot install a pair this Stop would never see.
@@ -277,6 +291,9 @@ func (m *Manager) stopHeartbeat() {
 	}
 	if receiver != nil {
 		receiver.stop()
+	}
+	if duplicateWatcher != nil {
+		duplicateWatcher.stop()
 	}
 }
 
