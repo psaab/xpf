@@ -527,6 +527,7 @@ var haWatchdogGroupPattern10791 = regexp.MustCompile(`\b(rg|redundancy group)\b`
 var haWatchdogImpactPattern10791 = regexp.MustCompile(`\b(drop|drops|dropped|dropping|inactive|stop|stops|halt|halts|block|blocks|forward|forwards|forwarding)\b`)
 var haWatchdogListItemSeparator10791 = regexp.MustCompile(`(?m)^\s*[-*]\s+`)
 var haWatchdogSentenceSeparator10791 = regexp.MustCompile(`[.!?]\s+`)
+var haWatchdogAgedTimestampPattern10791 = regexp.MustCompile(`\b(older?|aged?|exceed(ed|s)?|over|more than|stale)\b`)
 
 func normalizeHAWatchdogText10791(text string) string {
 	normalized := strings.ToLower(text)
@@ -561,23 +562,30 @@ func retiredHAWatchdogClaims10791(text string) []string {
 
 func hasRetiredHAHeartbeatClaim10791(text string) bool {
 	for _, item := range haWatchdogListItemSeparator10791.Split(text, -1) {
-		for _, sentence := range haWatchdogSentenceSeparator10791.Split(item, -1) {
-			normalized := normalizeHAWatchdogText10791(sentence)
-			agedTimestamp := strings.Contains(normalized, "older than") ||
-				strings.Contains(normalized, "stale") ||
-				strings.Contains(normalized, "exceeds") ||
-				strings.Contains(normalized, "over ")
-			if strings.Contains(normalized, "2s") &&
-				strings.Contains(normalized, "heartbeat") &&
-				strings.Contains(normalized, "timestamp") &&
-				agedTimestamp &&
-				haWatchdogGroupPattern10791.MatchString(normalized) &&
-				haWatchdogImpactPattern10791.MatchString(normalized) {
+		sentences := haWatchdogSentenceSeparator10791.Split(item, -1)
+		for i, sentence := range sentences {
+			current := normalizeHAWatchdogText10791(sentence)
+			if hasRetiredHAHeartbeatClaimInNormalized10791(current) {
 				return true
+			}
+			if i+1 < len(sentences) {
+				next := normalizeHAWatchdogText10791(sentences[i+1])
+				if hasRetiredHAHeartbeatClaimInNormalized10791(current + " " + next) {
+					return true
+				}
 			}
 		}
 	}
 	return false
+}
+
+func hasRetiredHAHeartbeatClaimInNormalized10791(normalized string) bool {
+	return strings.Contains(normalized, "2s") &&
+		strings.Contains(normalized, "heartbeat") &&
+		strings.Contains(normalized, "timestamp") &&
+		haWatchdogAgedTimestampPattern10791.MatchString(normalized) &&
+		haWatchdogGroupPattern10791.MatchString(normalized) &&
+		haWatchdogImpactPattern10791.MatchString(normalized)
 }
 
 func hasHAWatchdogContext10791(normalized string) bool {
@@ -668,6 +676,8 @@ func TestHAWatchdogClaimMatcherRejectsRewordedAndFootnotedStaleClaims10791(t *te
 		"ActiveUntil(watchdog + HA_WATCHDOG_STALE_AFTER_SECS).",
 		"BPF stops forwarding within two seconds.",
 		"The dataplane drops the RG when its heartbeat timestamp is older than two seconds.",
+		"The heartbeat timestamp exceeded two seconds. The RG forwarding was suspended.",
+		"The HA heartbeat timestamp was older than two seconds. Therefore the redundancy group is inactive.",
 		"BPF halts forwarding in ~2 seconds.",
 		"BPF ~2s staleness window.",
 		"BPF 2s stale window.",
