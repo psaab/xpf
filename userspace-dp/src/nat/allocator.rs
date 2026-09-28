@@ -841,6 +841,29 @@ impl PortAllocatorLiveState {
                 translated.port,
             ))
     }
+    /// #11475: exact reverse-identity contention for an imported idle
+    /// ADDRESS-ONLY lease whose record binds a remote (`remote.is_some()`).
+    ///
+    /// The module-note-4 analog for the path that claims no occupancy bit:
+    /// a lease pinning `(translated_ip, translated_port)` for a source that
+    /// talks to `remote` must not be installed over that exact wire identity
+    /// while a live flow owns it — in EITHER domain (`address_only_owners`
+    /// for preserved ports, `pat_owners` for PAT). Both maps are keyed on
+    /// the same five tuple, so one lookup per domain answers it. A
+    /// `permit-any-remote-host` record (`remote.is_none()`) names no single
+    /// identity and is governed by the lease-table cap alone.
+    pub(super) fn import_idle_address_only_contended(&self, rkey: &AddressOnlyReverseKey) -> bool {
+        if self.address_only_owners.contains_key(rkey) {
+            return true;
+        }
+        self.pat_owners.contains_key(&PatReverseKey {
+            protocol: rkey.protocol,
+            translated_ip: rkey.translated_ip,
+            translated_port: rkey.translated_port,
+            dst_ip: rkey.dst_ip,
+            dst_port: rkey.dst_port,
+        })
+    }
 
     /// Record one live PAT owner of an exact reverse identity. Persistent NAT
     /// can place multiple forward flows on one translated tuple, so this is a
@@ -2075,6 +2098,24 @@ impl PortAllocator {
     pub(super) fn try_claim_translated_port(&self, addr_index: usize, port: u16) -> Option<bool> {
         Some(self.shared.occupancy.get(addr_index)?.reserve(port))
     }
+    /// #11475: make room for an imported lease using the same bounded
+    /// persistent-table pressure sweep as local persistent-NAT mints.
+    ///
+    /// Called with `live` held after the caller has checked for an existing
+    /// source key. The table length is authoritative under this guard; an
+    /// import cannot race another insert past the cap.
+    pub(super) fn import_idle_lease_capacity_reached(
+        &self,
+        live: &mut PortAllocatorLiveState,
+        now_ns: u64,
+    ) -> bool {
+        if live.persistent_by_source.len() < self.shared.max_tracked_flows {
+            return false;
+        }
+        self.gc_expired_locked(live, now_ns, PRESSURE_GC_BUDGET);
+        live.persistent_by_source.len() >= self.shared.max_tracked_flows
+    }
+
 
     /// Free a translated port's occupancy bit. `recycle` pushes the port onto
     /// the FIFO reuse ring (#3011); the deterministic path passes `false`.

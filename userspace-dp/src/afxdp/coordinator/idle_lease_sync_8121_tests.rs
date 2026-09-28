@@ -108,3 +108,52 @@ fn an_import_routes_by_pool_name_and_counts_an_unknown_pool_8121() {
         "a record for an unknown pool must be counted, not misrouted: {counts:?}"
     );
 }
+
+/// Repeated unique-key sync batches cannot grow the persistent table past the
+/// allocator cap. This covers address-only imports too: they claim no PAT bit,
+/// but still consume one bounded persistent-table entry each.
+#[test]
+fn repeated_unique_import_batches_remain_within_pool_capacity_11475() {
+    let mut rule = pool_rule("r1", "P", &["203.0.113.1"]);
+    rule.port_low = 20_000;
+    rule.port_high = 20_001;
+    let mut coord = Coordinator::new();
+    coord.forwarding.source_nat_rules = parse_source_nat_rules(&[rule]);
+
+    let mut installed = 0;
+    let mut skipped_capacity = 0;
+    for batch in 0..4 {
+        let records: Vec<PoolIdleLease> = (0..3)
+            .map(|offset| {
+                let mut lease = record(
+                    "P",
+                    &format!("10.0.{}.{}", batch + 1, offset + 1),
+                    "203.0.113.1",
+                    if offset == 1 { 20_001 } else { 20_000 },
+                );
+                if offset == 1 {
+                    // Address-only import bypasses the occupancy bitmap but
+                    // must still be bounded by the shared persistent table.
+                    lease.lease.address_only = true;
+                    lease.lease.translated_port = lease.lease.src_port;
+                }
+                lease
+            })
+            .collect();
+        let counts = coord.import_idle_persistent_leases(&records, 3_000);
+        installed += counts.installed;
+        skipped_capacity += counts.skipped_capacity;
+    }
+
+    assert_eq!(
+        (installed, skipped_capacity),
+        (2, 10),
+        "only the cap-sized first pair may install, got installed={installed} \
+         capacity={skipped_capacity}"
+    );
+    assert_eq!(
+        coord.export_idle_persistent_leases(4_000).len(),
+        2,
+        "unique imported keys must not grow the persistent table beyond cap"
+    );
+}

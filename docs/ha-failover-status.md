@@ -464,6 +464,13 @@ derived from, so nothing above reaches it. #8121's `export_idle_leases` /
 wired end to end — allocator verbs, control handler, Go manager, cluster sync
 payload, daemon hook — with the wire pinned across the two languages
 (`idle_lease_wire` in `protocol_wire_v1.json`).
+The receiver admits each idle lease into the same bounded
+`persistent_by_source` table used by local persistent-NAT mints. If the table
+is still at `max_tracked_flows` after one bounded expiry-GC pressure pass, the
+record is skipped as capacity (reported separately from a busy identity), so
+HA import cannot crowd local mints out. Address-only, remote-bound records
+also check both local address-only and PAT reverse-identity owners because
+they claim no bitmap bit.
 
 ### The population is now claimed COMPLETE, and the claim is bound
 

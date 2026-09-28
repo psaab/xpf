@@ -301,6 +301,162 @@ fn a_local_lease_is_not_overwritten_by_an_imported_one_8121() {
     );
 }
 
+/// Idle imports are subject to the same persistent-table cap and pressure-GC
+/// pass as local persistent mints. At capacity, refusing an import must not
+/// invert priority and leave local allocation reporting anything but
+/// `AllocatorExhausted`.
+#[test]
+fn an_idle_import_at_capacity_does_not_starve_local_mints_11475() {
+    let addrs = ["203.0.113.10".parse().unwrap()];
+    let pool_addrs = ipv4_pool(&addrs);
+    let allocator = PortAllocator::new(1, 20_000, 20_001);
+    let record = |src_ip: &str, translated_port| IdleLeaseRecord {
+        protocol: TCP,
+        src_ip: src_ip.parse().unwrap(),
+        src_port: 40_000,
+        routing_scope: 0,
+        remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+        translated_ip: IpAddr::V4(addrs[0]),
+        translated_port,
+        address_only: false,
+        remaining_ns: TIMEOUT_NS,
+        timeout_ns: TIMEOUT_NS,
+    };
+
+    for (src_ip, port) in [("10.0.61.50", 20_000), ("10.0.61.51", 20_001)] {
+        assert_eq!(
+            allocator.import_idle_lease(&record(src_ip, port), &pool_addrs, 1_000),
+            IdleLeaseImport::Installed
+        );
+    }
+    assert_eq!(allocator.snapshot().persistent_leases, 2);
+    assert_eq!(
+        allocator.import_idle_lease(&record("10.0.61.52", 20_000), &pool_addrs, 1_000),
+        IdleLeaseImport::SkippedCapacity
+    );
+    assert_eq!(allocator.snapshot().persistent_leases, 2);
+
+    let local = allocator.allocate_translation(
+        flow("10.0.61.99", 40_099),
+        PoolAddressFamily::V4(&addrs),
+        0,
+        false,
+        true,
+        PersistentNatPermit::TargetHostPort,
+        TIMEOUT_NS,
+        2_000,
+        NatHolder::Untracked,
+    );
+    assert!(
+        matches!(
+            local,
+            Err(super::source::SourceNatFailureReason::AllocatorExhausted)
+        ),
+        "a full imported lease table must leave local mints failing closed as \
+         AllocatorExhausted, got {local:?}"
+    );
+}
+
+/// The pressure pass reclaims an expired idle lease before deciding the import
+/// cannot fit; the newly admitted lease remains the only table entry.
+#[test]
+fn an_idle_import_pressure_pass_reclaims_expired_capacity_11475() {
+    let addrs = ["203.0.113.10".parse().unwrap()];
+    let pool_addrs = ipv4_pool(&addrs);
+    let allocator = PortAllocator::new(1, 20_000, 20_000);
+    let record = |src_ip: &str| IdleLeaseRecord {
+        protocol: TCP,
+        src_ip: src_ip.parse().unwrap(),
+        src_port: 40_000,
+        routing_scope: 0,
+        remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+        translated_ip: IpAddr::V4(addrs[0]),
+        translated_port: 20_000,
+        address_only: false,
+        remaining_ns: 100,
+        timeout_ns: TIMEOUT_NS,
+    };
+
+    assert_eq!(
+        allocator.import_idle_lease(&record("10.0.61.50"), &pool_addrs, 1_000),
+        IdleLeaseImport::Installed
+    );
+    assert_eq!(
+        allocator.import_idle_lease(&record("10.0.61.51"), &pool_addrs, 1_100),
+        IdleLeaseImport::Installed,
+        "one bounded pressure-GC pass must make room for a non-expired incoming lease"
+    );
+    assert_eq!(allocator.snapshot().persistent_leases, 1);
+    assert_eq!(allocator.export_idle_leases(1_100).len(), 1);
+    assert_eq!(
+        allocator.export_idle_leases(1_100)[0].src_ip,
+        "10.0.61.51".parse::<IpAddr>().unwrap()
+    );
+}
+
+/// Address-only records do not claim bitmap bits, but a remote-bound import
+/// must still honor both reverse-identity ownership domains.
+#[test]
+fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
+    let addrs = ["203.0.113.10".parse().unwrap()];
+    let pool_addrs = ipv4_pool(&addrs);
+    let mut rec = IdleLeaseRecord {
+        protocol: TCP,
+        src_ip: "10.0.61.50".parse().unwrap(),
+        src_port: 20_000,
+        routing_scope: 0,
+        remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+        translated_ip: IpAddr::V4(addrs[0]),
+        translated_port: 20_000,
+        address_only: true,
+        remaining_ns: TIMEOUT_NS,
+        timeout_ns: TIMEOUT_NS,
+    };
+    let translated = TranslatedTuple {
+        ip: rec.translated_ip,
+        port: rec.translated_port,
+    };
+
+    let pat_allocator = PortAllocator::new(1, 20_000, 20_001);
+    assert!(pat_allocator.reserve_flow(
+        flow("10.0.61.99", 20_000),
+        translated,
+        0,
+        false,
+        1_000,
+        NatHolder::Untracked,
+    ));
+    assert_eq!(
+        pat_allocator.import_idle_lease(&rec, &pool_addrs, 2_000),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "a live PAT reverse identity must block an address-only lease import"
+    );
+
+    let address_only_allocator = PortAllocator::new(1, 20_000, 20_001);
+    assert!(
+        address_only_allocator
+            .reserve_address_only(
+                flow("10.0.61.99", 20_000),
+                rec.translated_ip,
+                NatHolder::Untracked,
+            )
+            .is_ok()
+    );
+    assert_eq!(
+        address_only_allocator.import_idle_lease(&rec, &pool_addrs, 2_000),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "a live address-only reverse identity must block a duplicate lease import"
+    );
+
+    rec.remote = None;
+    let unscoped_allocator = PortAllocator::new(1, 20_000, 20_001);
+    assert_eq!(
+        unscoped_allocator.import_idle_lease(&rec, &pool_addrs, 2_000),
+        IdleLeaseImport::Installed,
+        "permit-any-remote leases name no exact reverse identity"
+    );
+}
+
 // --- #8121: the lease POPULATION census -------------------------------------
 //
 // WHY THIS EXISTS. #8121, #7360 and #8132 each cover one route by which an
