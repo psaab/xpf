@@ -100,10 +100,12 @@ case "$1" in
             # injection. A live xpfd with NEITHER is pre-handoff or flushed:
             # inject anyway — its next apply hands the table off — because an
             # is-active-first order would consult no kernel truth at all on a
-            # live-but-pre-handoff daemon (round-4 finding R4-6). The corner of
-            # injecting into an armed daemon whose marker write failed is
-            # accepted (fresh-install-only branch; the daemon's next apply
-            # removes the table). Upgrades never reach this branch. Never fail
+            # live-but-pre-handoff daemon (round-4 finding R4-6). If that
+            # daemon is actually armed with a failed marker write, `enable
+            # --now` still injects nothing: ensure re-checks kernel truth
+            # (live enforcement or a standing barrier) and no-ops. Only a
+            # fully unguarded corner installs — and the daemon's next apply
+            # hands it off. Upgrades never reach this branch. Never fail
             # the install.
             # Residual race (accepted): a concurrent first handoff between our
             # probes and `enable --now` still takes an injection it immediately
