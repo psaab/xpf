@@ -8396,3 +8396,28 @@ fn process_status_ipsec_inner_counters_serialize_under_snake_case_keys_9506() {
         );
     }
 }
+
+/// #10784: the clear operation is an explicit helper control verb and reports
+/// its authoritative count (zero is a valid empty-table result).
+///
+/// RED on revert: remove the `clear_persistent_nat_leases` dispatcher arm and
+/// this real socket request returns `unknown request type` instead of its clear
+/// acknowledgement.
+#[test]
+fn clear_persistent_nat_leases_control_verb_is_dispatched_10784() {
+    let state = new_state(ProcessStatus::default());
+    let cleared = run_request(state.clone(), req("clear_persistent_nat_leases"));
+    assert!(
+        cleared.ok,
+        "clear_persistent_nat_leases failed: {}",
+        cleared.error
+    );
+    assert_eq!(cleared.persistent_nat_lease_count, 0);
+
+    let displayed = run_request(state, req("export_persistent_lease_display"));
+    assert!(displayed.ok, "display export failed: {}", displayed.error);
+    assert!(
+        displayed.display_leases.is_empty(),
+        "the helper display must no longer publish bindings after a clear"
+    );
+}

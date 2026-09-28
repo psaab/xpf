@@ -54,6 +54,11 @@ type PersistentNATTable struct {
 	bindings    map[persistentNATKey]*PersistentNATBinding
 	poolConfigs map[string]PersistentNATPoolInfo // pool name -> config
 	natIPToPool map[netip.Addr]string            // NAT IP -> pool name
+
+	// clearGen fences a SHOW refresh against an operator clear (#10784).
+	// Every Clear bumps it; a refresh that exported the helper's view before
+	// the bump must drop its stale set instead of replacing the cleared table.
+	clearGen uint64
 }
 
 // NewPersistentNATTable creates a new persistent NAT table.
@@ -245,6 +250,37 @@ func (t *PersistentNATTable) GC() int {
 // bindings" is an answer, and the caller is responsible for not calling this
 // when it could not ASK (see the daemon refresher, which skips on error).
 func (t *PersistentNATTable) ReplaceAll(bindings []*PersistentNATBinding) {
+	next := indexPersistentNATBindings(bindings)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.bindings = next
+}
+
+// ClearGeneration reports the table's clear generation. A SHOW refresh captures
+// it before exporting the helper's view and hands it back to
+// ReplaceAllUnlessClearedSince, so an export that started before an operator
+// clear is dropped instead of repopulating the mirror (#10784).
+func (t *PersistentNATTable) ClearGeneration() uint64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.clearGen
+}
+
+// ReplaceAllUnlessClearedSince replaces the table only if no Clear has landed
+// since gen was captured. It reports whether the table was replaced, so the
+// refresher can tell "clear won" apart from "replaced" without reading back.
+func (t *PersistentNATTable) ReplaceAllUnlessClearedSince(bindings []*PersistentNATBinding, gen uint64) bool {
+	next := indexPersistentNATBindings(bindings)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.clearGen != gen {
+		return false
+	}
+	t.bindings = next
+	return true
+}
+
+func indexPersistentNATBindings(bindings []*PersistentNATBinding) map[persistentNATKey]*PersistentNATBinding {
 	next := make(map[persistentNATKey]*PersistentNATBinding, len(bindings))
 	for _, b := range bindings {
 		if b == nil {
@@ -252,17 +288,19 @@ func (t *PersistentNATTable) ReplaceAll(bindings []*PersistentNATBinding) {
 		}
 		next[persistentNATKey{SrcIP: b.SrcIP, SrcPort: b.SrcPort, Pool: b.PoolName}] = b
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.bindings = next
+	return next
 }
 
 // Clear removes all bindings.
+//
+// It also bumps the clear generation: a SHOW refresh that exported before this
+// clear must not ReplaceAll its stale set back over the table (#10784).
 func (t *PersistentNATTable) Clear() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	t.bindings = make(map[persistentNATKey]*PersistentNATBinding)
+	t.clearGen++
 }
 
 // Len returns the number of active bindings.
