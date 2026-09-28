@@ -2844,6 +2844,10 @@ func filesUnder(t *testing.T, root, extension string) []string {
 			return err
 		}
 		if d.IsDir() {
+			// Cargo build output is not shim input and may contain large binaries.
+			if d.Name() == "target" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if extension == "" || strings.EqualFold(filepath.Ext(path), extension) {
