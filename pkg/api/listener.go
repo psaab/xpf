@@ -538,15 +538,17 @@ func (s *Server) HTTPServing() bool {
 }
 
 // ReconcileHTTP make-before-break rebinds ONLY the HTTP listener to addr (#5866),
-// leaving the HTTPS leg untouched. A same-addr call is a no-op. The new listener
-// is bound and serving BEFORE the old is retired (no unreachable HTTP window). A
-// bind failure retains the previous HTTP listener (fail-closed) and returns the
-// error so the caller records retry debt.
+// leaving the HTTPS leg untouched. An empty addr disables HTTP and retires its
+// live leg. A same-addr call is a no-op. Bind failure retains the previous
+// listener (fail-closed) and returns the error so the caller records retry debt.
 func (s *Server) ReconcileHTTP(addr string) error {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
 	if addr == "" {
-		return fmt.Errorf("api: refusing to reconcile the HTTP listener to an empty bind address")
+		old := s.httpLeg
+		s.httpLeg = nil
+		s.stopLegLocked(old)
+		return nil
 	}
 	// The same-address short circuit requires the leg to still be SERVING, the
 	// way ReconcileHTTPS's does (#6803). Without the serving() half, a leg whose

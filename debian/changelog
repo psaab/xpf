@@ -76,6 +76,18 @@ xpf (0.0.0) unstable; urgency=medium
     capability changes, and clear superseded alarms only after current active
     config succeeds; preserve local convergence after peer-only push failures
     (#10782).
+  * Throttle REST authentication failures per source and account, harden SSH
+    password login, and hash configured API-auth secrets (#10825).
+  * Scope API-auth identities by login class and UTC expiry, require HTTPS for
+    credentials, and migrate persisted credentials to bcrypt verifiers (#10826).
+  * Redact named API-key `secret` values in REST config output and diagnostics,
+    and hash API credentials received via peer config sync before persistence
+    (#10826).
+  * Throttle Basic and API-key verification, migrate credentials across active,
+    rollback, rescue, and exported configs, and purge affected snapshots only
+    from the xpf-owned local archive (#10825).
+  * Include named API keys in local and remote `show system services` counts
+    (#10826).
   * Flush box-oriented host-inbound conntrack entries and guard denied TCP/UDP
     replies before established accepts; disable TCP loose pickup at boot/runtime
     (#10752/#10764).

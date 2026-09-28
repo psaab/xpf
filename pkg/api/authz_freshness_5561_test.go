@@ -322,8 +322,10 @@ func TestRevokedCredentialCannotFinishAnInFlightRequest_5561(t *testing.T) {
 						Addr:  "127.0.0.1:8080",
 						Store: authzStore(t, authzTestConfig),
 						Auth: &AuthConfig{
-							Users:   map[string]string{user: secret},
-							APIKeys: map[string]bool{apiKey: true},
+							Users:         map[string]string{user: secret},
+							UserClasses:   map[string]string{user: "super-user"},
+							APIKeys:       map[string]bool{apiKey: true},
+							APIKeyClasses: map[string]string{apiKey: "super-user"},
 						},
 						PeerLookupFn: remotePeer(),
 						// The production step this stands in for is
@@ -466,8 +468,10 @@ func TestCredentialRereadDeniesBeforeTheBodyIsSupplied_5561(t *testing.T) {
 						Addr:  "127.0.0.1:8080",
 						Store: authzStore(t, authzTestConfig),
 						Auth: &AuthConfig{
-							Users:   map[string]string{user: secret},
-							APIKeys: map[string]bool{apiKey: true},
+							Users:         map[string]string{user: secret},
+							UserClasses:   map[string]string{user: "super-user"},
+							APIKeys:       map[string]bool{apiKey: true},
+							APIKeyClasses: map[string]string{apiKey: "super-user"},
 						},
 						// Off-box, so principalFrom takes the credential row —
 						// the only row whose re-read this case isolates.
@@ -959,7 +963,10 @@ func TestAuthorizationIsRemadeAfterTheCallerSuppliesItsBody_5561(t *testing.T) {
 					var enumerations atomic.Int64
 					cfg := Config{Addr: "127.0.0.1:8080", Store: store}
 					if tc.credentialRow {
-						cfg.Auth = &AuthConfig{Users: map[string]string{credUser: credPass}}
+						cfg.Auth = &AuthConfig{
+							Users:       map[string]string{credUser: credPass},
+							UserClasses: map[string]string{credUser: "super-user"},
+						}
 						cfg.PeerLookupFn = remotePeer()
 						cfg.PeerLocalityFn = func(net.Addr, net.Addr) bool {
 							enumerations.Add(1)

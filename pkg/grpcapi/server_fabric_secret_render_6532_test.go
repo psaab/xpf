@@ -57,6 +57,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"google.golang.org/grpc"
 )
@@ -69,6 +70,11 @@ import (
 // commit gate REJECTS it outright (#4288 — RFC 5798 VRRPv3 removed
 // authentication), so it cannot exist in an active config and staging it makes
 // Commit() fail rather than exercising a render.
+const (
+	fabricAPIAuthUserPasswordSentinel = "FAB6532-API-USER-PW"
+	fabricAPIAuthLegacyKeySentinel    = "FAB6532-API-KEY-TOKEN"
+)
+
 var fabricSecretConfig = []string{
 	"set security ike policy pol1 pre-shared-key ascii-text FAB6532-IKE-PSK",
 	"set security ipsec vpn site-a pre-shared-key FAB6532-IPSEC-VPN-PSK",
@@ -87,8 +93,9 @@ var fabricSecretConfig = []string{
 	"set protocols isis interface ge-0-0-2 authentication-key FAB6532-ISIS-IFACE-AUTHKEY",
 	"set protocols isis interface ge-0-0-2 authentication-type md5",
 	"set protocols bgp group external authentication-key FAB6532-BGP-AUTHPW",
-	"set system services web-management api-auth user admin password FAB6532-API-USER-PW",
-	"set system services web-management api-auth api-key FAB6532-API-KEY-TOKEN",
+	"set system services web-management api-auth expires 2099-01-01",
+	"set system services web-management api-auth user admin password " + fabricAPIAuthUserPasswordSentinel,
+	"set system services web-management api-auth api-key " + fabricAPIAuthLegacyKeySentinel,
 	"set snmp v3 usm local-engine user admin authentication-sha256 authentication-password FAB6532-SNMPV3-AUTHPW",
 	"set snmp v3 usm local-engine user admin privacy-des privacy-password FAB6532-SNMPV3-PRIVPW",
 	"set snmp community FAB6532-SNMP-COMMUNITY authorization read-only",
@@ -110,8 +117,8 @@ var fabricSecretConfig = []string{
 var fabricSecretSentinels = []string{
 	"FAB6532-IKE-PSK", "FAB6532-IPSEC-VPN-PSK", "FAB6532-OSPF-MD5KEY",
 	"FAB6532-OSPF-SIMPLE", "FAB6532-RIP-AUTHKEY", "FAB6532-ISIS-AREA-AUTHKEY",
-	"FAB6532-ISIS-IFACE-AUTHKEY", "FAB6532-BGP-AUTHPW", "FAB6532-API-USER-PW",
-	"FAB6532-API-KEY-TOKEN", "FAB6532-SNMPV3-AUTHPW", "FAB6532-SNMPV3-PRIVPW",
+	"FAB6532-ISIS-IFACE-AUTHKEY", "FAB6532-BGP-AUTHPW", fabricAPIAuthUserPasswordSentinel,
+	fabricAPIAuthLegacyKeySentinel, "FAB6532-SNMPV3-AUTHPW", "FAB6532-SNMPV3-PRIVPW",
 	"FAB6532-SNMP-COMMUNITY", "FAB6532-TSIG-SECRET", "FAB6532-DDNS-APITOKEN",
 	"FAB6532-DDNS-AWSSECRET", "FAB6532-DDNS-HTTP-PW", "FAB6532-WG-PRIVKEY",
 	"FAB6532-WG-PSK", "rootHASH6532rootHASH", "loginHASH6532loginHASH",
@@ -314,6 +321,30 @@ func newFabricSecretServer(t *testing.T) *Server {
 	return &Server{store: store}
 }
 
+func fabricAPIAuthVerifierSentinels(t *testing.T, s *Server) []string {
+	t.Helper()
+	active := s.store.ActiveConfig()
+	if active == nil || active.System.Services == nil ||
+		active.System.Services.WebManagement == nil ||
+		active.System.Services.WebManagement.APIAuth == nil {
+		t.Fatal("committed active config lost staged API-auth credentials")
+	}
+	apiAuth := active.System.Services.WebManagement.APIAuth
+	if len(apiAuth.Users) != 1 || len(apiAuth.APIKeys) != 1 || len(apiAuth.Keys) != 0 {
+		t.Fatalf("compiled API-auth credentials = users:%d legacy keys:%d named keys:%d, want 1/1/0",
+			len(apiAuth.Users), len(apiAuth.APIKeys), len(apiAuth.Keys))
+	}
+	passwordVerifier := string(apiAuth.Users[0].Password)
+	keyVerifier := string(apiAuth.APIKeys[0])
+	if !config.VerifyAPIAuthSecret(passwordVerifier, fabricAPIAuthUserPasswordSentinel) {
+		t.Fatal("compiled API-auth user verifier does not match the staged password")
+	}
+	if !config.VerifyAPIAuthSecret(keyVerifier, fabricAPIAuthLegacyKeySentinel) {
+		t.Fatal("compiled legacy API-key verifier does not match the staged key")
+	}
+	return []string{passwordVerifier, keyVerifier}
+}
+
 // fabricAdmittedMethods enumerates every method the fabric interceptors can
 // admit: the two allowlist maps plus any method the interceptor source
 // special-cases by name (today: SystemAction, via isFabricSafeSystemAction).
@@ -402,20 +433,30 @@ func funcBody(t *testing.T, src, decl string) string {
 
 // TestFabricSecretStagingIsReal guards the sweep against the worst failure
 // mode of a "no secret appeared" assertion: passing because nothing was ever
-// staged. A `set` line that the compiler silently drops (renamed leaf, changed
-// grammar) would make every downstream scan vacuously green. Assert every
-// sentinel is really in the committed active config, in cleartext, BEFORE
-// trusting an absence downstream.
+// staged (a `set` line can be silently dropped). Assert the non-API-auth
+// sentinels remain in the committed config and that compiled API-auth
+// verifiers match their staged cleartext values before trusting an absence
+// downstream.
 func TestFabricSecretStagingIsReal(t *testing.T) {
 	s := newFabricSecretServer(t)
 	active := s.store.ShowActive()
 	for _, sentinel := range fabricSecretSentinels {
+		if sentinel == fabricAPIAuthUserPasswordSentinel ||
+			sentinel == fabricAPIAuthLegacyKeySentinel {
+			continue // API-auth secrets are migrated to tagged bcrypt before persistence.
+		}
 		if !strings.Contains(active, sentinel) {
 			t.Errorf("secret sentinel %q is NOT in the committed active config — the "+
 				"staging `set` line was dropped, so every scan for it downstream is "+
 				"vacuous. Fix fabricSecretConfig.", sentinel)
 		}
 	}
+	for _, secret := range []string{fabricAPIAuthUserPasswordSentinel, fabricAPIAuthLegacyKeySentinel} {
+		if strings.Contains(active, secret) {
+			t.Errorf("cleartext API-auth secret %q remains in the committed config", secret)
+		}
+	}
+	_ = fabricAPIAuthVerifierSentinels(t, s)
 	if n := len(fabricSecretSentinels); n < 20 {
 		t.Errorf("only %d secret sentinels staged; the redaction SSOT "+
 			"(pkg/config/ast_redact.go secretIndices) covers more — the sweep has "+
@@ -425,8 +466,8 @@ func TestFabricSecretStagingIsReal(t *testing.T) {
 
 // TestNoFabricAllowlistedRPCRendersAConfiguredSecret is the #6532 invariant:
 // drive every fabric-reachable RPC against a config carrying every secret leaf
-// and assert no cleartext credential reaches the wire. It goes RED against
-// pre-fix code (ShowText{snmp} emits the community).
+// and assert no cleartext credential or API-auth verifier reaches the wire. It
+// goes RED against pre-fix code (ShowText{snmp} emits the community).
 //
 // Its inputs are proven real by TestFabricSecretStagingIsReal above.
 func TestNoFabricAllowlistedRPCRendersAConfiguredSecret(t *testing.T) {
@@ -444,6 +485,8 @@ func TestNoFabricAllowlistedRPCRendersAConfiguredSecret(t *testing.T) {
 	}
 
 	s := newFabricSecretServer(t)
+	apiAuthVerifiers := fabricAPIAuthVerifierSentinels(t, s)
+	redactionTargets := append(append([]string(nil), fabricSecretSentinels...), apiAuthVerifiers...)
 	for method, probe := range probes {
 		if probe.render == nil {
 			if probe.structuralOnly == "" {
@@ -454,9 +497,9 @@ func TestNoFabricAllowlistedRPCRendersAConfiguredSecret(t *testing.T) {
 		}
 		t.Run(strings.TrimPrefix(method, "/xpf.v1.BpfrxService/"), func(t *testing.T) {
 			for _, out := range probe.render(t, s) {
-				for _, leak := range fabricSecretSentinels {
+				for _, leak := range redactionTargets {
 					if strings.Contains(out, leak) {
-						t.Errorf("%s rendered the cleartext secret %q on the "+
+						t.Errorf("%s rendered configured credential material %q on the "+
 							"network-exposed fabric surface (#6532):\n%s", method, leak, out)
 					}
 				}

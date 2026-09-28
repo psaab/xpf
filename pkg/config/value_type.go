@@ -123,6 +123,10 @@ const (
 	// tokens reached the neighbour list past a validator that had been wired
 	// on but not typed.
 	ValueInterfaceName
+	// ValueString is an opaque single-token string whose accepted form is
+	// defined by the leaf's validator. It marks validator-backed values that
+	// are not identifiers, numbers, or another specialized type.
+	ValueString
 )
 
 // Placeholder returns the angle-bracket placeholder name shown in `?`
@@ -173,6 +177,8 @@ func (v ValueType) Placeholder() string {
 		return "<st-interface>"
 	case ValueUnixSocketPath:
 		return "<socket-path>"
+	case ValueString:
+		return "<value>"
 	}
 	return ""
 }

@@ -550,6 +550,11 @@ type Server struct {
 	// ReplaceAuth swaps it; a bind-address/port/TLS change instead goes through a
 	// make-before-break listener rebuild (managementReconciler).
 	auth atomic.Pointer[AuthConfig]
+	// authThrottle is shared across the HTTP/HTTPS legs and survives listener
+	// rebuilds. Its keys are source IP plus claimed account, with a second
+	// source-only budget to stop username rotation (#10825).
+	authThrottleMu sync.Mutex
+	authThrottle   *authFailureTracker
 	// #5866 per-listener lifecycle: the HTTP and HTTPS listeners are managed
 	// INDEPENDENTLY so a day-2 TLS enable/disable or HTTPS-bind change rebinds
 	// ONLY the HTTPS leg while the live HTTP listener keeps serving (and an HTTP
@@ -991,17 +996,13 @@ func NewServer(cfg Config) *Server {
 //
 // While the leg is LIVE the slot follows the server-wide snapshot: load() reads
 // s.auth, so a ReplaceAuth is enforced on that leg's very next request with no
-// per-leg bookkeeping — byte-for-byte the pre-round-14 behavior, and the reason
-// the plain day-2 credential swap is untouched by this.
+// per-leg bookkeeping.
 //
 // When the leg is RETIRED the slot is PINNED to what that address was serving at
-// the moment of retirement, and from then on it can only tighten. That is the
-// ordering fix: retirement is asynchronous (stopLegLocked only wakes the serve
-// goroutine, which closes the socket and drains later), so between
-// ReconcileHTTP returning and the retired listener actually going away there is
-// an interval in which the reconciler publishes the credential set the commit
-// authorized for the NEW address. Following s.auth through that interval handed
-// that credential to the address the commit had just retired.
+// the moment of retirement, and from then on it can only tighten. Both the
+// request's authentication middleware and its later authorization re-check use
+// this slot; otherwise a retained leg could admit a newly published credential
+// between the two checks.
 type authSlot struct {
 	srv    *Server
 	pinned atomic.Pointer[AuthConfig]
@@ -1022,6 +1023,28 @@ func (a *authSlot) load() *AuthConfig {
 		return a.pinned.Load()
 	}
 	return a.srv.auth.Load()
+}
+
+// authForRequest returns the credential policy attached to the request's
+// listener. Direct handler tests without a connection context use the live
+// snapshot; production HTTP requests carry their per-leg authSlot from accept.
+func (s *Server) authForRequest(r *http.Request) *AuthConfig {
+	if r != nil {
+		if peer, ok := peerIdentityFrom(r.Context()); ok && peer.authSlot != nil {
+			return peer.authSlot.load()
+		}
+	}
+	return s.auth.Load()
+}
+
+func (s *Server) connContextForAuthSlot(slot *authSlot) func(context.Context, net.Conn) context.Context {
+	return func(ctx context.Context, c net.Conn) context.Context {
+		ctx = s.connContext(ctx, c)
+		if peer, ok := peerIdentityFrom(ctx); ok {
+			peer.authSlot = slot
+		}
+		return ctx
+	}
 }
 
 // pin freezes the slot at cur. Ordered so the pinned value is visible before the
@@ -1153,7 +1176,7 @@ func (s *Server) buildHTTPServer(addr string, slot *authSlot) *http.Server {
 		// #5561: resolve the peer's identity at ACCEPT and carry it into every
 		// request on the connection. Deferring it would let the caller choose
 		// the moment of the lookup — and choose to make it fail.
-		ConnContext: s.connContext,
+		ConnContext: s.connContextForAuthSlot(slot),
 		// WriteTimeout intentionally unset — see the const block above (SSE
 		// streams + large scrapes must not be severed).
 	})
@@ -1180,7 +1203,7 @@ func (s *Server) buildHTTPSServer(addr string, slot *authSlot) (*http.Server, er
 		IdleTimeout:       apiIdleTimeout,
 		MaxHeaderBytes:    apiMaxHeaderBytes,
 		// #5561: same peer-identity plumbing as the HTTP leg.
-		ConnContext: s.connContext,
+		ConnContext: s.connContextForAuthSlot(slot),
 		// WriteTimeout intentionally unset — see the const block above.
 		TLSConfig: &tls.Config{
 			GetCertificate: s.managementTLSGetCertificate,
@@ -1298,6 +1321,19 @@ func (s *Server) HTTPHandlerForTest() http.Handler {
 	return s.httpLeg.srv.Handler
 }
 
+// HTTPSHandlerForTest returns the http.Handler the LIVE HTTPS leg is serving,
+// or nil when no HTTPS leg exists. Like HTTPHandlerForTest, this is a
+// cross-package test seam for checking the auth policy pinned to a retiring
+// listener.
+func (s *Server) HTTPSHandlerForTest() http.Handler {
+	s.lifeMu.Lock()
+	defer s.lifeMu.Unlock()
+	if s.httpsLeg == nil || s.httpsLeg.srv == nil {
+		return nil
+	}
+	return s.httpsLeg.srv.Handler
+}
+
 // HTTPSLegDrainedForTest reports whether the installed HTTPS leg has finished
 // its EXIT PATH AND ITS DRAIN — the listener is gone and every connection it
 // accepted has been finished or severed, hijacked connections excepted (Go
@@ -1378,11 +1414,16 @@ func (s *Server) dynamicAuthMiddleware(metricsRequireAuth bool, slot *authSlot, 
 			next.ServeHTTP(w, r)
 			return
 		}
-		if authCheck(*a, metricsRequireAuth, r) {
+		authorized, retryAfter := throttledAuthCheck(s.throttle(), *a, metricsRequireAuth, r)
+		if authorized {
 			next.ServeHTTP(w, r)
 			return
 		}
 		logRESTAPIAuthFailure(r)
+		if retryAfter > 0 {
+			writeAuthLockedOut(w, retryAfter)
+			return
+		}
 		writeAuthChallenge(w)
 	})
 }

@@ -42,6 +42,7 @@ const (
 func applyMarkerDaemon9175(t *testing.T) *Daemon {
 	t.Helper()
 	installFakeNetworkctl(t)
+	installSSHDSeam(t, &sshdSeamRecorder{})
 	d := &Daemon{
 		vrrpMgr: vrrp.NewManager(),
 		store:   newConfigStore(t, filepath.Join(t.TempDir(), "config.db")),

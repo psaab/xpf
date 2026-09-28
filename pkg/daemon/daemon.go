@@ -51,11 +51,15 @@ import (
 
 // Options configures the daemon.
 type Options struct {
-	ConfigFile  string
-	NoDataplane bool   // set to true to run without a dataplane (config-only mode)
-	APIAddr     string // HTTP API listen address (empty = disabled)
-	GRPCAddr    string // gRPC API listen address (empty = disabled)
-	Version     string // software version string
+	ConfigFile string
+	// APIAuthArchiveMigrationDir explicitly opts an xpf-owned local archive
+	// root into legacy api-auth cleanup. Production supplies only its default
+	// local archive path; tests/custom users leave it empty or inject a temp dir.
+	APIAuthArchiveMigrationDir string
+	NoDataplane                bool   // set to true to run without a dataplane (config-only mode)
+	APIAddr                    string // HTTP API listen address (empty = disabled)
+	GRPCAddr                   string // gRPC API listen address
+	Version                    string // build version for the config DB compatibility envelope
 	// #1620: cold-path latency histogram sample mask. nil pointer ⇒
 	// userspace-dp uses default 0xff (1-in-256). Non-nil pointer ⇒
 	// the operator explicitly set --cold-path-sample-mask (and, if
@@ -1917,6 +1921,10 @@ func New(opts Options) (*Daemon, error) {
 	store, err := configstore.New(opts.ConfigFile)
 	if err != nil {
 		return nil, fmt.Errorf("config store: %w", err)
+	}
+
+	if opts.APIAuthArchiveMigrationDir != "" {
+		store.SetAPIAuthArchiveMigrationDir(opts.APIAuthArchiveMigrationDir)
 	}
 
 	// Stamp the build version into the config-DB compatibility envelope on

@@ -418,16 +418,89 @@ func TestUnknownMutatingRouteFailsClosed_5561(t *testing.T) {
 	}
 }
 
-// TestApiAuthCredentialIsAFullPowerPrincipal_5561 covers the second identity and
-// its precedence. A valid api-auth credential authorizes a caller that is NOT on
-// this host — the remote administrator #4047 requires it for — and it does not
-// speak for ANY local caller, identified or not.
-func TestApiAuthCredentialIsAFullPowerPrincipal_5561(t *testing.T) {
+// TestViewScopedAPICredential_10826 covers the remote api-auth identity and its
+// effective permission scope. Possession is still required off-box, but the key
+// now resolves to its configured login class rather than a superuser.
+func TestViewScopedAPICredential_10826(t *testing.T) {
+	usePasswdFixture(t)
+	key, err := config.HashAPIAuthSecret("0123456789abcdef-view-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := &AuthConfig{
+		APIKeys:       map[string]bool{key: true},
+		APIKeyNames:   map[string]string{key: "view-automation"},
+		APIKeyClasses: map[string]string{key: "read-only"},
+		APIKeyExpires: map[string]time.Time{key: time.Now().Add(time.Hour)},
+	}
+	headers := map[string]string{"X-API-Key": "0123456789abcdef-view-key"}
+	store := authzStore(t, authzTestConfig)
+	session := "rest-" + strings.Repeat("0", 32)
+	if err := store.EnterConfigureSession(session); err != nil {
+		t.Fatalf("enter test config session: %v", err)
+	}
+	t.Cleanup(func() { store.ExitConfigureSession(session) })
+	_, base := authzServer(t, Config{
+		Addr:           "127.0.0.1:8080",
+		Store:          store,
+		Auth:           auth,
+		PeerLookupFn:   remotePeer(),
+		PeerLocalityFn: remoteLocality(),
+	})
+
+	req, err := http.NewRequest(http.MethodGet, base+"/api/v1/config", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-API-Key", headers["X-API-Key"])
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("view-scoped API key could not read config: %d", resp.StatusCode)
+	}
+
+	for _, tc := range []struct {
+		route string
+		body  string
+	}{
+		{"POST /api/v1/config/set", `{"input":"set system host-name view-key-write"}`},
+		{"POST /api/v1/system/action", `{"action":"clear-config-lock"}`},
+	} {
+		t.Run(tc.route, func(t *testing.T) {
+			method, path, ok := strings.Cut(tc.route, " ")
+			if !ok {
+				t.Fatalf("malformed route %q", tc.route)
+			}
+			req, err := http.NewRequest(method, base+path, strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-API-Key", headers["X-API-Key"])
+			req.Header.Set(restConfigSessionHeader, session)
+			resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("%s admitted a view-scoped API key with %d; want 403: %s",
+					tc.route, resp.StatusCode, raw)
+			}
+		})
+	}
+}
+
+func TestAPIAuthCredentialStillRequiresAValidCredential_5561(t *testing.T) {
 	usePasswdFixture(t)
 	auth := &AuthConfig{Users: map[string]string{"webadmin": "s3cret"}}
 	basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("webadmin:s3cret"))
 
-	t.Run("credential authorizes a caller that is not on this host", func(t *testing.T) {
+	t.Run("credential authorizes only a view-scoped remote read", func(t *testing.T) {
 		_, base := authzServer(t, Config{
 			Addr:           "127.0.0.1:8080",
 			Store:          authzStore(t, authzTestConfig),
@@ -435,10 +508,18 @@ func TestApiAuthCredentialIsAFullPowerPrincipal_5561(t *testing.T) {
 			PeerLookupFn:   remotePeer(),
 			PeerLocalityFn: remoteLocality(),
 		})
-		status, errMsg := postRoute(t, base, "POST /api/v1/config/enter",
-			map[string]string{"Authorization": basic})
-		if status == http.StatusForbidden {
-			t.Fatalf("a valid api-auth credential was refused for an off-box caller: %q", errMsg)
+		req, err := http.NewRequest(http.MethodGet, base+"/api/v1/config", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", basic)
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("a valid api-auth credential was refused for a view read: %d", resp.StatusCode)
 		}
 	})
 
@@ -451,9 +532,8 @@ func TestApiAuthCredentialIsAFullPowerPrincipal_5561(t *testing.T) {
 			PeerLocalityFn: remoteLocality(),
 		})
 		status, _ := postRoute(t, base, "POST /api/v1/config/enter", nil)
-		// The api-auth middleware answers first with its own 401 challenge.
-		if status == http.StatusOK {
-			t.Fatal("an uncredentialed, unidentifiable caller reached the handler")
+		if status != http.StatusUnauthorized {
+			t.Fatalf("an uncredentialed remote caller got %d, want 401", status)
 		}
 	})
 
@@ -467,8 +547,7 @@ func TestApiAuthCredentialIsAFullPowerPrincipal_5561(t *testing.T) {
 		status, errMsg := postRoute(t, base, "POST /api/v1/config/enter",
 			map[string]string{"Authorization": basic})
 		if status != http.StatusForbidden {
-			t.Fatalf("a read-only login user holding the api-auth secret was admitted to "+
-				"configure with %d — the shared secret re-privileged a restricted account", status)
+			t.Fatalf("a read-only peer holding the api-auth secret was admitted with %d, want 403", status)
 		}
 		if !strings.Contains(errMsg, "opsuser") {
 			t.Errorf("denial did not attribute the read-only account: %q", errMsg)
@@ -509,14 +588,11 @@ func TestAttributedLocalCallerOutsideLoginModelIsDenied_5561(t *testing.T) {
 			"POST /api/v1/config/commit",
 			"POST /api/v1/system/action",
 		} {
-			status, errMsg := postRoute(t, base, route, map[string]string{"Authorization": basic})
+			status, _ := postRoute(t, base, route, map[string]string{"Authorization": basic})
 			if status != http.StatusForbidden {
 				t.Errorf("%s admitted a local account OUTSIDE the login model with %d because "+
 					"it presented the shared api-auth secret — the per-principal gate is "+
 					"optional for anyone who knows the password", route, status)
-			}
-			if !strings.Contains(errMsg, "not a configured") {
-				t.Errorf("%s denial did not name the reason: %q", route, errMsg)
 			}
 		}
 	})
@@ -600,10 +676,9 @@ func TestUnattributableLocalCallerCannotBorrowCredential_5561(t *testing.T) {
 	})
 
 	// The negative control for the rule above: a caller that is genuinely NOT
-	// on this host is exactly who the credential exists to identify (#4047), so
-	// it must still be admitted. A gate that refused every unattributed caller
-	// would pass the subtest above and lock out every remote administrator.
-	t.Run("a remote caller with the credential is still admitted", func(t *testing.T) {
+	// on this host is exactly who the credential exists to identify (#4047).
+	// Its default read-only class may read config, but does not mutate it.
+	t.Run("a remote caller receives only the credential's view scope", func(t *testing.T) {
 		_, base := authzServer(t, Config{
 			Addr:           "127.0.0.1:8080",
 			Store:          authzStore(t, authzTestConfig),
@@ -611,11 +686,18 @@ func TestUnattributableLocalCallerCannotBorrowCredential_5561(t *testing.T) {
 			PeerLookupFn:   remotePeer(),
 			PeerLocalityFn: remoteLocality(),
 		})
-		status, errMsg := postRoute(t, base, "POST /api/v1/config/enter",
-			map[string]string{"Authorization": basic})
-		if status == http.StatusForbidden {
-			t.Fatalf("a remote administrator holding a valid api-auth credential was refused: %q",
-				errMsg)
+		req, err := http.NewRequest(http.MethodGet, base+"/api/v1/config", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", basic)
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("a remote caller with a valid read-only credential got %d, want 200", resp.StatusCode)
 		}
 	})
 }
@@ -1430,9 +1512,12 @@ func TestUncredentialedCallerDrivesNoLocalityRecheck_5561(t *testing.T) {
 		var rechecks atomic.Int64
 		basic := "Basic " + base64.StdEncoding.EncodeToString([]byte("webadmin:s3cret"))
 		_, base := authzServer(t, Config{
-			Addr:         "127.0.0.1:8080",
-			Store:        authzStore(t, authzTestConfig),
-			Auth:         &AuthConfig{Users: map[string]string{"webadmin": "s3cret"}},
+			Addr:  "127.0.0.1:8080",
+			Store: authzStore(t, authzTestConfig),
+			Auth: &AuthConfig{
+				Users:       map[string]string{"webadmin": "s3cret"},
+				UserClasses: map[string]string{"webadmin": "super-user"},
+			},
 			PeerLookupFn: remotePeer(),
 			PeerLocalityFn: func(net.Addr, net.Addr) bool {
 				rechecks.Add(1)

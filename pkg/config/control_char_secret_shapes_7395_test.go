@@ -74,6 +74,10 @@ func secretLeaves7395() map[string]struct {
 		"key (context: authentication md5)": {[]string{
 			"protocols", "ospf", "area", "0", "interface", "ge-0/0/0", "authentication", "md5", "1",
 		}, "key"},
+		"api-auth named-key secret": {
+			[]string{"system", "services", "web-management", "api-auth", "key", "automation"},
+			"secret",
+		},
 	}
 }
 

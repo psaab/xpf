@@ -262,6 +262,12 @@ func (s *Server) showSystemServices(buf *strings.Builder) {
 				}
 				fmt.Fprintf(buf, "  Web HTTPS:      enabled (interface: %s%s)\n", iface, cert)
 			}
+			if wm.APIAuth != nil {
+				apiKeyCount := wm.APIAuth.APIKeyCount()
+				if len(wm.APIAuth.Users) > 0 || apiKeyCount > 0 {
+					fmt.Fprintf(buf, "  API auth:       %d user(s), %d API key(s)\n", len(wm.APIAuth.Users), apiKeyCount)
+				}
+			}
 		}
 		if cfg.System.Services.DNSEnabled {
 			fmt.Fprintln(buf, "  DNS:            enabled")

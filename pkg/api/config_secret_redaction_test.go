@@ -47,6 +47,7 @@ var secretSetCommands = []string{
 	// IKE pre-shared key (policy-level).
 	"set security ike proposal ike-p1 authentication-method pre-shared-keys",
 	"set security ike proposal ike-p1 encryption-algorithm aes-256-cbc",
+	"set security ike proposal ike-p1 authentication-algorithm sha-256",
 	"set security ike proposal ike-p1 dh-group group14",
 	"set security ike policy pol1 mode main",
 	"set security ike policy pol1 proposals ike-p1",
@@ -90,8 +91,11 @@ var secretSetCommands = []string{
 	// above (same leaf name) and by pkg/config/ast_redact_test.go, which stage
 	// a VRRP auth key through the AST RedactedClone path (no strict commit).
 	"set interfaces ge-0-0-3 unit 0 family inet address 10.0.3.1/24 vrrp-group 1 virtual-address 10.0.3.254/24",
-	// REST API basic-auth password + API key.
-	"set system services web-management http",
+	// REST API basic-auth password + API key. No `http` leg: clear HTTP
+	// cannot serve api-auth credentials (#10826), and the loopback default
+	// keeps the fixture committable. The shared expiry satisfies the
+	// bounded-lifetime gate for both the user and the legacy key (#10826).
+	"set system services web-management api-auth expires 2099-01-01",
 	"set system services web-management api-auth user admin password LEAK-API-USER-PW",
 	"set system services web-management api-auth api-key LEAK-API-KEY-TOKEN",
 	// SNMPv3 auth + priv passwords, and a v1/v2c community string (the secret).

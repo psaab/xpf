@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/daemon"
 )
 
@@ -411,9 +412,11 @@ func TestRunDaemonExecution5809(t *testing.T) {
 		{
 			name: "defaults info logger",
 			checkOpts: func(t *testing.T, got daemon.Options) {
-				if got.ConfigFile != "/etc/xpf/xpf.conf" || got.NoDataplane ||
-					got.APIAddr != "127.0.0.1:8080" || got.GRPCAddr != "127.0.0.1:50051" ||
-					got.Version != "test-version" || got.ColdPathSampleMask != nil {
+				if got.ConfigFile != "/etc/xpf/xpf.conf" ||
+					got.APIAuthArchiveMigrationDir != configstore.DefaultArchiveDir ||
+					got.NoDataplane || got.APIAddr != "127.0.0.1:8080" ||
+					got.GRPCAddr != "127.0.0.1:50051" || got.Version != "test-version" ||
+					got.ColdPathSampleMask != nil {
 					t.Fatalf("default options = %+v", got)
 				}
 			},
@@ -430,8 +433,8 @@ func TestRunDaemonExecution5809(t *testing.T) {
 			},
 			wantDebug: true,
 			checkOpts: func(t *testing.T, got daemon.Options) {
-				if got.ConfigFile != "/tmp/daemon.conf" || !got.NoDataplane ||
-					got.APIAddr != "" || got.GRPCAddr != "127.0.0.2:6000" ||
+				if got.ConfigFile != "/tmp/daemon.conf" || got.APIAuthArchiveMigrationDir != "" ||
+					!got.NoDataplane || got.APIAddr != "" || got.GRPCAddr != "127.0.0.2:6000" ||
 					got.Version != "test-version" || got.ColdPathSampleMask == nil ||
 					*got.ColdPathSampleMask != 3 {
 					t.Fatalf("all-field options = %+v", got)

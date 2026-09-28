@@ -332,6 +332,9 @@ func (m *managementReconciler) effectiveHTTPListener() sysservices.Listener {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.curSet && m.cur.addr == "" {
+		return sysservices.Listener{State: sysservices.StateDisabled}
+	}
 	if !m.curSet {
 		return sysservices.Listener{Addr: m.lastHTTPAttempt, State: sysservices.StateFailed}
 	}
@@ -438,6 +441,19 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	// about to move off (or is already off) what this config named — which is
 	// what makes the credential publish below conditional. It is read AGAIN
 	// after the rebinds, where it says whether everything landed.
+	// Enabling credentials must never publish them to a clear-HTTP leg, even
+	// during its asynchronous drain. First publish a non-nil empty policy, then
+	// retire the HTTP leg so its auth slot pins deny-all, and only afterwards
+	// let the ordinary credential publication reach the surviving HTTPS leg.
+	if next.Addr == "" && next.Auth != nil && m.srv.HTTPServing() {
+		m.srv.ReplaceAuth(&api.AuthConfig{})
+		if err := m.srv.ReconcileHTTP(""); err != nil {
+			errs = append(errs, err)
+		} else {
+			m.cur.addr, m.curSet = "", true
+			m.lastHTTPAttempt = ""
+		}
+	}
 	sanctioned := m.cur.everyLiveLegNamedBy(next)
 
 	// The REVOCATION half of a non-nil credential set is published BEFORE any
@@ -501,24 +517,9 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 		m.publishNilDirectionLocked()
 	}
 
-	// HTTP leg: make-before-break rebind ONLY if the HTTP bind changed. Advance
-	// the converged fingerprint only on success (retry debt on failure).
-	//
-	// The `!HTTPServing()` disjunct is the HTTP counterpart of the HTTPS
-	// liveness check below, and it was missing (#6803). The fingerprint records
-	// what the last SUCCESSFUL reconcile bound; it is not evidence the socket is
-	// still up. An unexpected serve exit marks the leg dead and leaves it
-	// installed, so `next.Addr != m.cur.addr` was FALSE on every later commit,
-	// ReconcileHTTP was never called, and the REST/management API stayed down
-	// until a daemon restart even though the operator's configuration never
-	// changed — the identical defect #6827 round 6 fixed for HTTPS, on the leg
-	// that fix did not touch.
-	//
-	// The liveness disjunct is gated on a NON-EMPTY desired address so this stays
-	// strictly ADDITIVE: the original `next.Addr != m.cur.addr` arm is untouched
-	// (an empty desired address still reaches ReconcileHTTP and still surfaces its
-	// refusal), and the new arm only fires where something was actually asked to
-	// serve. Not-serving is a defect only when a bind was requested.
+	// HTTP leg: rebind only when the address changes; an empty desired address
+	// disables the cleartext listener. Retry an unexpected exit only when a
+	// non-empty bind is still requested.
 	if next.Addr != m.cur.addr || (next.Addr != "" && !m.srv.HTTPServing()) {
 		// Record the attempted bind so `show system services` reports the address
 		// a boot-failed listener is retrying, not the one it failed at boot (#6401).

@@ -540,13 +540,20 @@ func runDaemon(
 		Level: logLevel,
 	})))
 
+	archiveMigrationDir := ""
+	if result.flags.configFile == "/etc/xpf/xpf.conf" {
+		// Only the production root proves that this is the appliance-owned
+		// local archive directory; custom config roots retain their archives.
+		archiveMigrationDir = configstore.DefaultArchiveDir
+	}
 	runner, err := factory(daemon.Options{
-		ConfigFile:         result.flags.configFile,
-		NoDataplane:        result.flags.noDataplane,
-		APIAddr:            result.flags.apiAddr,
-		GRPCAddr:           result.flags.grpcAddr,
-		Version:            buildVersion,
-		ColdPathSampleMask: result.flags.coldPathSampleMask,
+		ConfigFile:                 result.flags.configFile,
+		APIAuthArchiveMigrationDir: archiveMigrationDir,
+		NoDataplane:                result.flags.noDataplane,
+		APIAddr:                    result.flags.apiAddr,
+		GRPCAddr:                   result.flags.grpcAddr,
+		Version:                    buildVersion,
+		ColdPathSampleMask:         result.flags.coldPathSampleMask,
 	})
 	if err != nil {
 		// #1893: fail closed — a daemon that cannot persist config must
