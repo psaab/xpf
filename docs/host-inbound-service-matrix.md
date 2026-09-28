@@ -711,6 +711,10 @@ Properties:
   narrowings (exempts, bare protocols, ranges, true customs) never
   admitted customs, so customs observed there are
   unchanged-authorization flows and yield the advisory instead.
+  Attribution is scope-plus-class granular, not per-tuple: an unrelated
+  true-custom flow coinciding with a rip removal on the same narrowed
+  scope shares the customs line and its sample reveals the actual tuple
+  (#11493).
   Otherwise — zero kept flows, or evidence only outside every
   narrowed scope — the commit carries a transition-only advisory naming
   the narrowed scopes with honest zero-observed wording and a
