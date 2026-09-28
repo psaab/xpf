@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1183,5 +1184,78 @@ func TestPerformZeroizeFinalVerificationCatchesBypassedLeg10769(t *testing.T) {
 	}
 	if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
 		t.Fatalf("failed final verification must retain the pending marker: %v", err)
+	}
+}
+
+func TestPerformZeroizeErasesRenderedNetworkd10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	rendered := filepath.Join(zeroizeNetworkdDir, "10-xpf-geo.network")
+	mustWriteFile(t, rendered, []byte("[Match]\nName=ge-0\n"))
+	foreign := filepath.Join(zeroizeNetworkdDir, "99-dhcp.network")
+	mustWriteFile(t, foreign, []byte("[Match]\nName=en*\n"))
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	if _, err := os.Lstat(rendered); !os.IsNotExist(err) {
+		t.Fatalf("rendered networkd file %s survived: %v", rendered, err)
+	}
+	if _, err := os.Lstat(foreign); err != nil {
+		t.Fatalf("foreign networkd file %s must survive: %v", foreign, err)
+	}
+}
+
+// RED on revert: restoring the warn-only networkd sweep reports success
+// while the unlink failure (and the topology-resurrecting file) survives.
+func TestPerformZeroizeFailsClosedOnNetworkdUnlinkFailure10769(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions; unlink would not fail")
+	}
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	rendered := filepath.Join(zeroizeNetworkdDir, "10-xpf-geo.network")
+	mustWriteFile(t, rendered, []byte("[Match]\nName=ge-0\n"))
+	if err := os.Chmod(zeroizeNetworkdDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(zeroizeNetworkdDir, 0o755) })
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err == nil {
+		t.Fatal("networkd unlink failure must fail the wipe, got success")
+	} else if !strings.Contains(err.Error(), "networkd") {
+		t.Fatalf("wipe error must name the networkd leg, got %v", err)
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
+		t.Fatalf("failed wipe must retain the pending marker: %v", err)
+	}
+}
+
+// A prior-root immutable plant is the concrete topology-residue shape: the
+// wipe must fail loudly, never report success over the surviving file.
+// Skipped where the filesystem or privileges cannot set the immutable bit.
+func TestPerformZeroizeFailsClosedOnImmutableNetworkdPlant10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	rendered := filepath.Join(zeroizeNetworkdDir, "10-xpf-geo.network")
+	mustWriteFile(t, rendered, []byte("[Match]\nName=ge-0\n"))
+	if err := exec.Command("chattr", "+i", rendered).Run(); err != nil {
+		t.Skipf("immutable bit unsupported here: %v", err)
+	}
+	t.Cleanup(func() { exec.Command("chattr", "-i", rendered).Run() })
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err == nil {
+		t.Fatal("immutable networkd plant must fail the wipe, got success")
+	} else if !strings.Contains(err.Error(), "networkd") {
+		t.Fatalf("wipe error must name the networkd leg, got %v", err)
 	}
 }

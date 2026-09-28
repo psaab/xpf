@@ -1562,6 +1562,52 @@ func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
 	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, ZeroizeLogInventory{})
 }
 
+// zeroizeRenderedNetworkd removes the xpf-rendered networkd drop-ins
+// (10-xpf-*) from the system network directory (#10769 d05-F6). This leg is
+// FAIL-CLOSED, not best-effort: the daemon's own apply path proves orphaned
+// 10-xpf-* snippets resurrect stale addresses, bonds, and interface renames
+// on the next reload (daemon_apply_dataplane.go), so a surviving file hands
+// prior-tenant topology to the next tenant — and a prior root can plant an
+// immutable file to force exactly that. ReadDir/unlink failures fail the
+// wipe, the directory is synced unconditionally (a retry that finds no
+// matches must still retire the barrier debt of a prior unlink), and a
+// post-sync re-list must show no 10-xpf-* entry left.
+func zeroizeRenderedNetworkd() error {
+	entries, err := os.ReadDir(zeroizeNetworkdDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var errs []error
+	if err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: read networkd directory %s: %w", zeroizeNetworkdDir, err))
+	} else {
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), "10-xpf-") {
+				continue
+			}
+			if rerr := zeroizeRemovePath(filepath.Join(zeroizeNetworkdDir, entry.Name())); rerr != nil {
+				errs = append(errs, rerr)
+			}
+		}
+	}
+	if serr := zeroizeSyncDir(zeroizeNetworkdDir); serr != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync networkd directory %s: %w", zeroizeNetworkdDir, serr))
+	}
+	verify, verr := os.ReadDir(zeroizeNetworkdDir)
+	if verr != nil {
+		if !errors.Is(verr, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("zeroize: re-list networkd directory %s: %w", zeroizeNetworkdDir, verr))
+		}
+	} else {
+		for _, entry := range verify {
+			if strings.HasPrefix(entry.Name(), "10-xpf-") {
+				errs = append(errs, fmt.Errorf("zeroize: networkd file %s survived erasure", filepath.Join(zeroizeNetworkdDir, entry.Name())))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
 var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	// DDNS ownership and IPsec teardown debt are durable external-delete
 	// authorities. Refuse the on-disk wipe unless manager withdrawal has emptied
@@ -1670,20 +1716,15 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 		legErrs = append(legErrs, e)
 	}
 
-	// BPF pins + managed networkd files carry no secret material, so their
-	// removal stays best-effort (logged, never fatal — they do not gate the
-	// success/failure of the factory reset).
+	// BPF pins carry no secret material, so their removal stays best-effort
+	// (logged, never fatal). The rendered networkd drop-ins are
+	// fail-closed: surviving 10-xpf-* files resurrect prior-tenant
+	// topology on reload.
 	if e := os.RemoveAll(zeroizeBPFPinDir); e != nil {
 		slog.Warn("zeroize: remove BPF pins failed", "err", e)
 	}
-	if ndFiles, e := os.ReadDir(zeroizeNetworkdDir); e == nil {
-		for _, f := range ndFiles {
-			if strings.HasPrefix(f.Name(), "10-xpf-") {
-				if re := os.Remove(filepath.Join(zeroizeNetworkdDir, f.Name())); re != nil && !errors.Is(re, os.ErrNotExist) {
-					slog.Warn("zeroize: remove networkd file failed", "file", f.Name(), "err", re)
-				}
-			}
-		}
+	if e := zeroizeRenderedNetworkd(); e != nil {
+		legErrs = append(legErrs, e)
 	}
 	// Zero legs failed → clean wipe (nil, exactly as before). One leg failed
 	// → its error unwrapped (identity preserved). Several failed → joined in
