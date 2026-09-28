@@ -92,7 +92,7 @@ func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
 	// reset generation, and the gate is RELEASED (so shutdown-time work can still
 	// acquire it).
 	wiped = false
-	if err := d.factoryReset(context.Background(), func() error { wiped = true; return nil }); err != nil {
+	if err := d.factoryReset(context.Background(), func() error { wiped = true; return fakePendingWipe(t)() }); err != nil {
 		t.Fatalf("factoryReset success: %v", err)
 	}
 	if !wiped {

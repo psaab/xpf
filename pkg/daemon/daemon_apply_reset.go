@@ -381,14 +381,18 @@ func markResetHandoffDirtyQuiet(reason string) {
 //     writers that bypass applySem. Fence + JOIN them before the wipe so
 //     neither the archive directory nor rescue.conf can be recreated after
 //     it is erased.
-//  3. Run the wipe while holding applySem.
+//  3. Run the wipe while holding applySem. The wipe records a PENDING reset
+//     handoff (never clean): daemon post-verification below flips it clean
+//     only after passing, so a crash in between leaves repair-or-retry.
 //     - On FAILURE: exit the reset generation and release applySem (deferred)
 //     so the half-reset box is recoverable and a retry can run, and return
 //     the error. The caller must NOT stop the daemon — a stop here would
 //     strand a box whose secrets are still on disk.
-//     - On SUCCESS: stay in the reset generation (never cleared) and return nil;
-//     the caller stops xpfd. applySem is released on return, but the resetting
-//     flag keeps every later writer from re-rendering during the stop window.
+//     - On SUCCESS: stop the helper, sweep and re-verify its state plus the
+//     Kea leases and DDNS/IPsec temps, flip the handoff clean, stay in the
+//     reset generation (never cleared) and return nil; the caller stops
+//     xpfd. applySem is released on return, but the resetting flag keeps
+//     every later writer from re-rendering during the stop window.
 func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return err
@@ -567,6 +571,13 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	}
 	if verifyErr != nil {
 		return resetFailed(verifyErr)
+	}
+	// The wipe recorded PENDING; only this passing post-verification flips
+	// the flag clean. A flip failure fails the reset closed: reporting
+	// success without the durable clean claim would leave the retry/boot
+	// logic guessing the verification outcome.
+	if ferr := configstore.FlipResetHandoffClean(); ferr != nil {
+		return resetFailed(ferr)
 	}
 	return nil
 }

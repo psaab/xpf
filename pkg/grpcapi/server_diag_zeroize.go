@@ -1505,15 +1505,22 @@ func beginZeroize(configDir, configBase, archiveDir string, inv ZeroizeLogInvent
 	return record, nil
 }
 
-func completeZeroize(record zeroizePendingRecord) error {
+func completeZeroize(record zeroizePendingRecord, completion zeroizeCompletion) error {
 	// Record the handoff FIRST: N+1 provisioning is refused until a reboot,
 	// and a crash before the marker removals below must leave the markers
-	// (not a lone clean flag) gating the retry.
+	// (not a lone flag) gating the retry. Gated wipes record PENDING: the
+	// daemon flips the flag clean only after its post-verification passes,
+	// so a crash in between leaves repair-or-retry instead of a clean
+	// claim over unverified residue.
 	bootID, err := configstore.CurrentBootID()
 	if err != nil {
 		return fmt.Errorf("zeroize: snapshot boot id for reset handoff: %w", err)
 	}
-	if err := configstore.WriteResetHandoff(bootID, "", ""); err != nil {
+	dirty, helperPath := "", ""
+	if completion.pending {
+		dirty, helperPath = configstore.ResetHandoffPending, completion.helperPath
+	}
+	if err := configstore.WriteResetHandoff(bootID, dirty, helperPath); err != nil {
 		return fmt.Errorf("zeroize: %w", err)
 	}
 	loaderMarker := configstore.FactoryResetPendingPath
@@ -1559,7 +1566,7 @@ func completeZeroize(record zeroizePendingRecord) error {
 // communities, was never examined and the reset reported clean. Pass "" to mean
 // "archival disabled, nothing to erase".
 func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
-	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, ZeroizeLogInventory{})
+	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, ZeroizeLogInventory{}, zeroizeComplete)
 }
 
 // zeroizeRenderedNetworkd removes the xpf-rendered networkd drop-ins

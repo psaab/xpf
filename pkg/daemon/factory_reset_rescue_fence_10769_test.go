@@ -36,11 +36,15 @@ func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
 		releaseWipe := func() { wipeReleaseOnce.Do(func() { close(finishWipe) }) }
 		defer releaseWipe()
 		resetDone := make(chan error, 1)
+		pending := fakePendingWipe(t)
 		go func() {
 			resetDone <- d.factoryReset(context.Background(), func() error {
 				close(wipeStarted)
 				<-finishWipe
-				return os.Remove(filepath.Join(dir, configstore.RescueConfigBase))
+				if err := os.Remove(filepath.Join(dir, configstore.RescueConfigBase)); err != nil {
+					return err
+				}
+				return pending()
 			})
 		}()
 		select {

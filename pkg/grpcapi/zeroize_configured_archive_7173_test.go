@@ -42,7 +42,7 @@ func TestZeroizePassesTheConfiguredArchiveDir7173(t *testing.T) {
 
 	var gotArchive string
 	var called bool
-	performZeroizeWipeWithLogInventory = func(_, _, archiveDir string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, archiveDir string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		called = true
 		gotArchive = archiveDir
 		return nil
@@ -87,7 +87,7 @@ func TestZeroizeErasesDefaultArchiveWhenArchiveDirUnset10739(t *testing.T) {
 
 	// Keep this integration at the affected archive boundary: use the actual
 	// ownership-guarded eraser while avoiding the unrelated system wipe legs.
-	performZeroizeWipeWithLogInventory = func(_, _, archiveDir string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, archiveDir string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		return configstore.FactoryResetArchiveDir(archiveDir)
 	}
 	scheduleStopDaemon = func() {}

@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/configstore"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -36,7 +37,7 @@ func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
 	// sequence is gate → wipe → stop (never stop-before-wipe, never a bypassed
 	// gate).
 	var seq []string
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		seq = append(seq, "wipe")
 		return nil
 	}
@@ -94,7 +95,7 @@ func TestZeroizeFailClosedDoesNotStopDaemon(t *testing.T) {
 	})
 
 	wantErr := errors.New("configdb not fully erased")
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		return wantErr
 	}
 	var stopped bool
@@ -136,7 +137,7 @@ func TestZeroizeFallsBackToDirectWipeWithoutGate(t *testing.T) {
 	})
 
 	var wiped, stopped bool
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		wiped = true
 		return nil
 	}
@@ -154,5 +155,38 @@ func TestZeroizeFallsBackToDirectWipeWithoutGate(t *testing.T) {
 	}
 	if !stopped {
 		t.Fatal("zeroize fallback must still stop the daemon")
+	}
+}
+
+// RED on revert: a gated wipe that records clean instead of pending lets a
+// crash before daemon post-verification open N+1 provisioning over
+// unverified residue. The gated path must record PENDING (with the helper
+// path) and leave the clean flip to the daemon.
+func TestGatedZeroizeWipeRecordsPending10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	store := newConfigStore(t, filepath.Join(configDir, "xpf.conf"))
+	origStop := scheduleStopDaemon
+	t.Cleanup(func() { scheduleStopDaemon = origStop })
+	scheduleStopDaemon = func() {}
+	s := &Server{
+		store: store,
+		zeroizeFn: func(_ context.Context, wipe func() error) error {
+			return wipe()
+		},
+	}
+	if _, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "zeroize"}); err != nil {
+		t.Fatalf("SystemAction(zeroize): %v", err)
+	}
+	_, dirty, helperPath, present, err := configstore.ReadResetHandoff()
+	if err != nil || !present || dirty != configstore.ResetHandoffPending {
+		t.Fatalf("gated wipe must record pending: dirty=%q present=%v err=%v", dirty, present, err)
+	}
+	if helperPath == "" {
+		t.Fatal("gated wipe must record the pre-wipe helper path")
 	}
 }

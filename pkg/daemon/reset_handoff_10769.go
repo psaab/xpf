@@ -119,6 +119,25 @@ func repairHandoffTemps() error {
 	return verifyStateTempsErasedForReset()
 }
 
+// verifyAllResetResidue returns the per-class residue errors (nil per clean
+// class): helper state at helperFile, Kea leases, DDNS/IPsec temps.
+func verifyAllResetResidue(helperFile string) (helperErr, keaErr, tempsErr error) {
+	helperErr = verifyHelperStateErased(helperFile)
+	keaErr = verifyKeaLeasesErasedForReset()
+	tempsErr = verifyStateTempsErasedForReset()
+	return helperErr, keaErr, tempsErr
+}
+
+// repairAllResetResidue runs every class repair (all idempotent). Repair
+// errors join the caller's verdict alongside the post-repair verification:
+// a repair can fail durability (sync) while the residue is already absent.
+func repairAllResetResidue(helperFile string) (helperErr, keaErr, tempsErr error) {
+	helperErr = sweepHelperStateVerified(helperFile)
+	keaErr = repairHandoffKea()
+	tempsErr = repairHandoffTemps()
+	return helperErr, keaErr, tempsErr
+}
+
 // handoffFailureReason tags per-class repair/verify failures for re-marking.
 // A single failing class keeps its dispatch prefix; multiple failures use
 // an unprefixed aggregate so the next repair covers every class.
@@ -148,14 +167,17 @@ func handoffFailureReason(helperErr, keaErr, tempsErr error) string {
 }
 
 // reconcileResetHandoffAtBoot converges the reset handoff flag before the
-// dataplane (and helper) starts. Clean + rebooted clears silently; same
-// boot keeps the reboot requirement; dirty repairs the recorded residue
-// class while no live writer exists yet, then verifies EVERY class before
-// the flag may downgrade (verified repair downgrades to the plain reboot
-// requirement, or clears outright post-reboot). Unrepaired residue
-// re-marks the flag dirty, never clears. Never fails boot: enforcement
-// happens at provisioning time, and bricking boot on a flag read would
-// strand remote boxes.
+// dataplane (and helper) starts. Clean re-verifies every residue class
+// before the reboot gate may open (a crash between verification and the
+// reboot — the shutdown helper's final write, a fence escaper — can
+// strand residue under a clean claim); same boot keeps the reboot
+// requirement; dirty repairs the recorded residue class while no live
+// writer exists yet, then verifies EVERY class before the flag may
+// downgrade (verified repair downgrades to the plain reboot requirement,
+// or clears outright post-reboot). Unrepaired residue re-marks the flag
+// dirty, never clears. Never fails boot: enforcement happens at
+// provisioning time, and bricking boot on a flag read would strand
+// remote boxes.
 func (d *Daemon) reconcileResetHandoffAtBoot() {
 	bootID, dirty, helperPath, present, err := configstore.ReadResetHandoff()
 	if err != nil {
@@ -170,7 +192,31 @@ func (d *Daemon) reconcileResetHandoffAtBoot() {
 		slog.Warn("reset handoff: cannot read boot id; leaving flag for the provisioning gate", "err", cerr)
 		return
 	}
+	var cfg *config.Config
+	if d.store != nil {
+		cfg = d.store.ActiveConfig()
+	}
+	helperFile := effectiveHelperStatePath(helperPath, cfg)
 	if dirty == "" {
+		helperErr, keaErr, tempsErr := verifyAllResetResidue(helperFile)
+		if helperErr != nil || keaErr != nil || tempsErr != nil {
+			slog.Warn("reset handoff: clean flag but residue present; attempting repair before refusing",
+				"helperErr", helperErr, "keaErr", keaErr, "tempsErr", tempsErr)
+			rHelper, rKea, rTemps := repairAllResetResidue(helperFile)
+			vHelper, vKea, vTemps := verifyAllResetResidue(helperFile)
+			helperErr = errors.Join(rHelper, vHelper)
+			keaErr = errors.Join(rKea, vKea)
+			tempsErr = errors.Join(rTemps, vTemps)
+		}
+		if helperErr != nil || keaErr != nil || tempsErr != nil {
+			reason := handoffFailureReason(helperErr, keaErr, tempsErr)
+			slog.Error("reset handoff: clean flag with unrepaired residue; re-marking dirty, provisioning refused",
+				"repair", reason)
+			if merr := configstore.MarkResetHandoffDirty(reason); merr != nil {
+				slog.Warn("reset handoff: cannot re-mark failed repair", "err", merr)
+			}
+			return
+		}
 		if bootID != current {
 			if cerr := configstore.ClearResetHandoff(); cerr != nil {
 				slog.Warn("reset handoff: cannot clear converged flag", "err", cerr)
@@ -180,11 +226,6 @@ func (d *Daemon) reconcileResetHandoffAtBoot() {
 		}
 		return
 	}
-	var cfg *config.Config
-	if d.store != nil {
-		cfg = d.store.ActiveConfig()
-	}
-	helperFile := effectiveHelperStatePath(helperPath, cfg)
 	doHelper, doKea, doTemps := handoffRepairClasses(dirty)
 	var helperErr, keaErr, tempsErr error
 	if doHelper {
@@ -198,15 +239,10 @@ func (d *Daemon) reconcileResetHandoffAtBoot() {
 	}
 	// Verify every class regardless of dispatch: the recorded reason may
 	// under-report (a later Mark overwrites an earlier one).
-	if verr := verifyHelperStateErased(helperFile); verr != nil {
-		helperErr = errors.Join(helperErr, verr)
-	}
-	if verr := verifyKeaLeasesErasedForReset(); verr != nil {
-		keaErr = errors.Join(keaErr, verr)
-	}
-	if verr := verifyStateTempsErasedForReset(); verr != nil {
-		tempsErr = errors.Join(tempsErr, verr)
-	}
+	vHelper, vKea, vTemps := verifyAllResetResidue(helperFile)
+	helperErr = errors.Join(helperErr, vHelper)
+	keaErr = errors.Join(keaErr, vKea)
+	tempsErr = errors.Join(tempsErr, vTemps)
 	if helperErr != nil || keaErr != nil || tempsErr != nil {
 		reason := handoffFailureReason(helperErr, keaErr, tempsErr)
 		slog.Error("reset handoff: dirty flag repair failed; provisioning stays refused until a clean reset",

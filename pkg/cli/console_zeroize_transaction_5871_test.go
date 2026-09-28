@@ -30,9 +30,9 @@ func TestConsoleZeroizeRoutesThroughDaemonTransaction_5871(t *testing.T) {
 	c := &CLI{store: newConfigStore(t, filepath.Join(t.TempDir(), "site.conf"))}
 
 	var enteredTransaction, wipedAtAll, wipedInsideTransaction, stopped bool
-	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
-	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error {
+	origWipe, origStop := zeroizeFullWipePending, zeroizeStopDaemon
+	t.Cleanup(func() { zeroizeFullWipePending, zeroizeStopDaemon = origWipe, origStop })
+	zeroizeFullWipePending = func(string, string, string, zeroizeLogInventory, string) error {
 		wipedAtAll = true
 		// Records that the wipe ran only AFTER the transaction was entered —
 		// proving fencing (apply-gate + reset generation) precedes erasure.
@@ -88,9 +88,9 @@ func TestConsoleZeroizeSnapshotsFirewallInventoryInsideGate10300(t *testing.T) {
 	c := &CLI{store: store}
 
 	var got zeroizeLogInventory
-	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
-	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(_, _, _ string, inv zeroizeLogInventory) error {
+	origWipe, origStop := zeroizeFullWipePending, zeroizeStopDaemon
+	t.Cleanup(func() { zeroizeFullWipePending, zeroizeStopDaemon = origWipe, origStop })
+	zeroizeFullWipePending = func(_, _, _ string, inv zeroizeLogInventory, _ string) error {
 		got = inv
 		return nil
 	}
@@ -129,9 +129,9 @@ func TestConsoleZeroizeSurfacesTransactionFailure_5871(t *testing.T) {
 	// exact "reconciler/removal FAILURE surfaced (not discarded)" contract.
 	removalErr := errors.New("remove rendered frr.conf failed")
 	var enteredTransaction, stopped bool
-	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
-	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error { return removalErr }
+	origWipe, origStop := zeroizeFullWipePending, zeroizeStopDaemon
+	t.Cleanup(func() { zeroizeFullWipePending, zeroizeStopDaemon = origWipe, origStop })
+	zeroizeFullWipePending = func(string, string, string, zeroizeLogInventory, string) error { return removalErr }
 	zeroizeStopDaemon = func() error { stopped = true; return nil }
 
 	c.factoryResetFn = func(_ context.Context, wipe func() error) error {
@@ -164,9 +164,9 @@ func TestConsoleZeroizeSurfacesGateAcquireFailure_5871(t *testing.T) {
 
 	gateErr := errors.New("apply gate: context canceled")
 	var wiped, stopped bool
-	origWipe, origStop := zeroizeFullWipe, zeroizeStopDaemon
-	t.Cleanup(func() { zeroizeFullWipe, zeroizeStopDaemon = origWipe, origStop })
-	zeroizeFullWipe = func(string, string, string, zeroizeLogInventory) error { wiped = true; return nil }
+	origWipe, origStop := zeroizeFullWipePending, zeroizeStopDaemon
+	t.Cleanup(func() { zeroizeFullWipePending, zeroizeStopDaemon = origWipe, origStop })
+	zeroizeFullWipePending = func(string, string, string, zeroizeLogInventory, string) error { wiped = true; return nil }
 	zeroizeStopDaemon = func() error { stopped = true; return nil }
 
 	// The transaction fails to enter the gate and never invokes the wipe closure.

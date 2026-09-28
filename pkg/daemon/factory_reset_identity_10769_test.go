@@ -147,7 +147,7 @@ func TestFactoryResetFailsWhenKeaLeasesReappear10769(t *testing.T) {
 	if got, _ := os.ReadFile(hostnamePath); string(got) != "xpf\n" {
 		t.Fatalf("completed-wipe identity must stand after a verify failure, got %q", got)
 	}
-	if err := d.factoryReset(context.Background(), func() error { return nil }); err != nil {
+	if err := d.factoryReset(context.Background(), fakePendingWipe(t)); err != nil {
 		t.Fatalf("retry after a repaired verify failure must converge: %v", err)
 	}
 }
@@ -362,7 +362,7 @@ func TestFactoryResetFailsWhenStateTempsReappear10769(t *testing.T) {
 			t.Fatalf("reappeared temp %s must be re-erased before the failure returns: %v", temp, serr)
 		}
 	}
-	if err := d.factoryReset(context.Background(), func() error { return nil }); err != nil {
+	if err := d.factoryReset(context.Background(), fakePendingWipe(t)); err != nil {
 		t.Fatalf("retry after a repaired temp failure must converge: %v", err)
 	}
 }

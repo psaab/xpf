@@ -130,7 +130,7 @@ func TestZeroizeReceiptAttestsFirewallLogScope10300(t *testing.T) {
 		scheduleStopDaemon = origStop
 	})
 	var got ZeroizeLogInventory
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, inv ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, inv ZeroizeLogInventory, _ zeroizeCompletion) error {
 		got = inv
 		return nil
 	}
@@ -176,7 +176,7 @@ func TestZeroizeSnapshotsFirewallInventoryInsideGate10300(t *testing.T) {
 		scheduleStopDaemon = origStop
 	})
 	var got ZeroizeLogInventory
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, inv ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, inv ZeroizeLogInventory, _ zeroizeCompletion) error {
 		got = inv
 		return nil
 	}
@@ -322,7 +322,7 @@ func TestInterruptedZeroizeRemainsFailClosedAndReplaysInventory10742(t *testing.
 		return originalSync(dir)
 	}
 
-	err = performZeroizeWipeWithLogInventory(configDir, "xpf.conf", customArchive, inventory)
+	err = performZeroizeWipeWithLogInventory(configDir, "xpf.conf", customArchive, inventory, zeroizeComplete)
 	if !errors.Is(err, interrupt) || !configSyncFailed {
 		t.Fatalf("wipe error = %v, want simulated post-config interruption", err)
 	}
@@ -351,7 +351,7 @@ func TestInterruptedZeroizeRemainsFailClosedAndReplaysInventory10742(t *testing.
 	// inventory; the custom archive remains an explicit incomplete-reset error.
 	mustWriteFile(t, filepath.Join(varLog, "trace-10742.log"), []byte("late trace generation"))
 	mustWriteFile(t, filepath.Join(varLog, "syslog-10742.log"), []byte("late syslog generation"))
-	retryErr := performZeroizeWipeWithLogInventory(configDir, "xpf.conf", "", ZeroizeLogInventory{})
+	retryErr := performZeroizeWipeWithLogInventory(configDir, "xpf.conf", "", ZeroizeLogInventory{}, zeroizeComplete)
 	var archiveSkipped *configstore.ArchiveDirSkippedError
 	if !errors.As(retryErr, &archiveSkipped) {
 		t.Fatalf("retry error = %v, want persisted custom archive ownership failure", retryErr)
@@ -443,7 +443,7 @@ func TestCompleteZeroizeKeepsLoaderGateUntilConfigMarkerDurable10742(t *testing.
 		return originalSync(dir)
 	}
 
-	if err := completeZeroize(record); !errors.Is(err, syncFailure) {
+	if err := completeZeroize(record, zeroizeComplete); !errors.Is(err, syncFailure) {
 		t.Fatalf("complete zeroize error = %v, want config-marker sync failure", err)
 	}
 	if len(syncOrder) == 0 || syncOrder[0] != filepath.Clean(configDir) {

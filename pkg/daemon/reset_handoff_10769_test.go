@@ -23,6 +23,21 @@ func isolateHandoffFlag(t *testing.T) {
 	t.Cleanup(func() { configstore.ResetHandoffPath = orig })
 }
 
+// fakePendingWipe returns a factoryReset wipe closure honoring the pending
+// protocol a real gated wipe follows: record PENDING, then succeed. The
+// daemon flips pending→clean only after post-verification passes, so a
+// fake success without pending fails closed like a bypassed wipe.
+func fakePendingWipe(t *testing.T) func() error {
+	t.Helper()
+	return func() error {
+		boot, err := configstore.CurrentBootID()
+		if err != nil {
+			return err
+		}
+		return configstore.WriteResetHandoff(boot, configstore.ResetHandoffPending, "")
+	}
+}
+
 func handoffTestStore(t *testing.T) *configstore.Store {
 	t.Helper()
 	store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
@@ -225,7 +240,7 @@ func TestFactoryResetStopsSweepsAndDisarmsHelper10769(t *testing.T) {
 	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1)}
 	d.setDataplane(stub)
 	d.dataplaneArmed.Store(true)
-	if err := d.factoryReset(context.Background(), func() error { return nil }); err != nil {
+	if err := d.factoryReset(context.Background(), fakePendingWipe(t)); err != nil {
 		t.Fatalf("factoryReset: %v", err)
 	}
 	if stub.stops != 1 {
@@ -244,8 +259,8 @@ func TestFactoryResetStopsSweepsAndDisarmsHelper10769(t *testing.T) {
 		t.Fatalf("barrier call = %q, want install", got)
 	}
 	assertTransitForwarding(t, v4, v6, "0", "after a successful wipe")
-	if _, _, _, present, _ := configstore.ReadResetHandoff(); present {
-		t.Fatal("clean reset must not mark the handoff dirty")
+	if _, dirty, _, present, _ := configstore.ReadResetHandoff(); !present || dirty != "" {
+		t.Fatalf("successful reset must flip the handoff clean: present=%v dirty=%q", present, dirty)
 	}
 }
 
@@ -323,6 +338,97 @@ func TestSweepHelperStateVerifiedRemovesLegacyTemps10769(t *testing.T) {
 	}
 }
 
+// handoffResiduePaths is the isolated residue inventory boot-repair tests
+// seed and assert on: a custom helper path, the Kea wipe set, and the
+// DDNS/IPsec canonicals plus crash temps.
+type handoffResiduePaths struct {
+	customHelper string
+	customTemp   string
+	kea          []string
+	ddnsLease    string
+	ddnsSurface  string
+	ipsec        string
+	ddnsTemps    []string
+	ipsecTemps   []string
+}
+
+// isolateHandoffRepairPaths redirects the Kea/DDNS/IPsec verify sets into a
+// disposable tree and returns the residue inventory plus the custom helper
+// path tests record in the flag.
+func isolateHandoffRepairPaths(t *testing.T) (custom string, rp handoffResiduePaths) {
+	t.Helper()
+	isolateHandoffFlag(t)
+	oldLease, oldSurfaceA, oldIPsec := resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath
+	oldKea := resetKeaLeaseCurrents
+	root := t.TempDir()
+	resetDDNSLeaseStatePath = filepath.Join(root, "ddns", "dhcp-ddns-state.json")
+	resetDDNSSurfaceAPath = filepath.Join(root, "ddns", "interface-ddns-state.json")
+	resetIPsecStatePath = filepath.Join(root, "ipsec", "ipsec-conn-state.json")
+	resetKeaLeaseCurrents = []string{
+		filepath.Join(root, "kea", "kea-leases4.csv"),
+		filepath.Join(root, "kea", "kea-leases6.csv"),
+	}
+	t.Cleanup(func() {
+		resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath = oldLease, oldSurfaceA, oldIPsec
+		resetKeaLeaseCurrents = oldKea
+	})
+	custom = filepath.Join(root, "custom", "userspace-dp.json")
+	rp.customHelper = custom
+	rp.customTemp = filepath.Join(root, "custom", "userspace-dp.json.4250000000.1.tmp")
+	for _, current := range resetKeaLeaseCurrents {
+		rp.kea = append(rp.kea, dhcpserver.KeaLeaseWipePaths(current)...)
+	}
+	rp.ddnsLease, rp.ddnsSurface, rp.ipsec = resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath
+	rp.ddnsTemps = []string{
+		filepath.Join(root, "ddns", ".dhcp-ddns-state.json.tmp-1"),
+		filepath.Join(root, "ddns", ".interface-ddns-state.json.tmp-2"),
+	}
+	rp.ipsecTemps = []string{filepath.Join(root, "ipsec", ".ipsec-conn-state.json.tmp-3")}
+	return custom, rp
+}
+
+func writeHandoffResidue(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedHandoffHelper(t *testing.T, rp handoffResiduePaths) {
+	t.Helper()
+	writeHandoffResidue(t, rp.customHelper, `{"flows":["prior"]}`)
+	writeHandoffResidue(t, rp.customTemp, `{"flows":["prior-temp"]}`)
+}
+
+func seedHandoffKea(t *testing.T, rp handoffResiduePaths) {
+	t.Helper()
+	for _, p := range rp.kea {
+		writeHandoffResidue(t, p, "address,hwaddr\n")
+	}
+}
+
+func seedHandoffTemps(t *testing.T, rp handoffResiduePaths) {
+	t.Helper()
+	writeHandoffResidue(t, rp.ddnsLease, `{"version":1,"records":[]}`)
+	writeHandoffResidue(t, rp.ddnsSurface, `{"version":1,"records":[]}`)
+	writeHandoffResidue(t, rp.ipsec, `{"loaded":[],"pending_terminate":[]}`)
+	for _, p := range append(append([]string{}, rp.ddnsTemps...), rp.ipsecTemps...) {
+		writeHandoffResidue(t, p, `{"orphan":true}`)
+	}
+}
+
+func assertHandoffGone(t *testing.T, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("residue %s survived boot repair: %v", p, err)
+		}
+	}
+}
+
 // RED on revert: repairing every dirty flag with a helper-only sweep at a
 // re-derived path leaves Kea/temps residue and sweeps the default instead
 // of the recorded custom path. Each dirty reason is crossed with a custom
@@ -330,108 +436,39 @@ func TestSweepHelperStateVerifiedRemovesLegacyTemps10769(t *testing.T) {
 // yields the compiled default), and must repair its class without
 // prematurely clearing.
 func TestReconcileRepairsRecordedClassWithConfigErased10769(t *testing.T) {
-	type residuePaths struct {
-		customHelper string
-		customTemp   string
-		kea          []string
-		ddnsLease    string
-		ddnsSurface  string
-		ipsec        string
-		ddnsTemps    []string
-		ipsecTemps   []string
-	}
-	setup := func(t *testing.T) (store *configstore.Store, custom string, rp residuePaths) {
+	setup := func(t *testing.T) (store *configstore.Store, custom string, rp handoffResiduePaths) {
 		t.Helper()
-		isolateHandoffFlag(t)
-		oldLease, oldSurfaceA, oldIPsec := resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath
-		oldKea := resetKeaLeaseCurrents
-		root := t.TempDir()
-		resetDDNSLeaseStatePath = filepath.Join(root, "ddns", "dhcp-ddns-state.json")
-		resetDDNSSurfaceAPath = filepath.Join(root, "ddns", "interface-ddns-state.json")
-		resetIPsecStatePath = filepath.Join(root, "ipsec", "ipsec-conn-state.json")
-		resetKeaLeaseCurrents = []string{
-			filepath.Join(root, "kea", "kea-leases4.csv"),
-			filepath.Join(root, "kea", "kea-leases6.csv"),
-		}
-		t.Cleanup(func() {
-			resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath = oldLease, oldSurfaceA, oldIPsec
-			resetKeaLeaseCurrents = oldKea
-		})
-		custom = filepath.Join(root, "custom", "userspace-dp.json")
-		rp.customHelper = custom
-		rp.customTemp = filepath.Join(root, "custom", "userspace-dp.json.4250000000.1.tmp")
-		for _, current := range resetKeaLeaseCurrents {
-			rp.kea = append(rp.kea, dhcpserver.KeaLeaseWipePaths(current)...)
-		}
-		rp.ddnsLease, rp.ddnsSurface, rp.ipsec = resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath
-		rp.ddnsTemps = []string{
-			filepath.Join(root, "ddns", ".dhcp-ddns-state.json.tmp-1"),
-			filepath.Join(root, "ddns", ".interface-ddns-state.json.tmp-2"),
-		}
-		rp.ipsecTemps = []string{filepath.Join(root, "ipsec", ".ipsec-conn-state.json.tmp-3")}
+		custom, rp = isolateHandoffRepairPaths(t)
 		// Config erased: a fresh store with no active config, so path
 		// re-derivation yields the compiled default, not custom.
 		return handoffTestStore(t), custom, rp
 	}
-	write := func(t *testing.T, path, body string) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	seedHelper := func(t *testing.T, rp residuePaths) {
-		t.Helper()
-		write(t, rp.customHelper, `{"flows":["prior"]}`)
-		write(t, rp.customTemp, `{"flows":["prior-temp"]}`)
-	}
-	seedKea := func(t *testing.T, rp residuePaths) {
-		t.Helper()
-		for _, p := range rp.kea {
-			write(t, p, "address,hwaddr\n")
-		}
-	}
-	seedTemps := func(t *testing.T, rp residuePaths) {
-		t.Helper()
-		write(t, rp.ddnsLease, `{"version":1,"records":[]}`)
-		write(t, rp.ddnsSurface, `{"version":1,"records":[]}`)
-		write(t, rp.ipsec, `{"loaded":[],"pending_terminate":[]}`)
-		for _, p := range append(append([]string{}, rp.ddnsTemps...), rp.ipsecTemps...) {
-			write(t, p, `{"orphan":true}`)
-		}
-	}
-	assertGone := func(t *testing.T, paths ...string) {
-		t.Helper()
-		for _, p := range paths {
-			if _, err := os.Lstat(p); !os.IsNotExist(err) {
-				t.Errorf("residue %s survived boot repair: %v", p, err)
-			}
-		}
-	}
+	seedHelper := seedHandoffHelper
+	seedKea := seedHandoffKea
+	seedTemps := seedHandoffTemps
+	assertGone := assertHandoffGone
 	cases := []struct {
 		name   string
 		reason string
-		seed   func(t *testing.T, rp residuePaths)
-		check  func(t *testing.T, rp residuePaths)
+		seed   func(t *testing.T, rp handoffResiduePaths)
+		check  func(t *testing.T, rp handoffResiduePaths)
 	}{
 		{"helper", configstore.ResetHandoffReasonHelper + ": helper state sweep failed: boom",
 			seedHelper,
-			func(t *testing.T, rp residuePaths) { assertGone(t, rp.customHelper, rp.customTemp) }},
+			func(t *testing.T, rp handoffResiduePaths) { assertGone(t, rp.customHelper, rp.customTemp) }},
 		{"kea", configstore.ResetHandoffReasonKea + ": kea leases reappeared after re-erase: boom",
 			seedKea,
-			func(t *testing.T, rp residuePaths) { assertGone(t, rp.kea...) }},
+			func(t *testing.T, rp handoffResiduePaths) { assertGone(t, rp.kea...) }},
 		{"temps", configstore.ResetHandoffReasonTemps + ": state temps reappeared after re-erase: boom",
 			seedTemps,
-			func(t *testing.T, rp residuePaths) {
+			func(t *testing.T, rp handoffResiduePaths) {
 				assertGone(t, rp.ddnsLease, rp.ddnsSurface, rp.ipsec)
 				assertGone(t, rp.ddnsTemps...)
 				assertGone(t, rp.ipsecTemps...)
 			}},
 		{"unprefixed stop", "xpfd still active after reset stop",
-			func(t *testing.T, rp residuePaths) { seedHelper(t, rp); seedKea(t, rp); seedTemps(t, rp) },
-			func(t *testing.T, rp residuePaths) {
+			func(t *testing.T, rp handoffResiduePaths) { seedHelper(t, rp); seedKea(t, rp); seedTemps(t, rp) },
+			func(t *testing.T, rp handoffResiduePaths) {
 				assertGone(t, rp.customHelper, rp.customTemp)
 				assertGone(t, rp.kea...)
 				assertGone(t, rp.ddnsLease, rp.ddnsSurface, rp.ipsec)
@@ -439,8 +476,8 @@ func TestReconcileRepairsRecordedClassWithConfigErased10769(t *testing.T) {
 				assertGone(t, rp.ipsecTemps...)
 			}},
 		{"pending", configstore.ResetHandoffPending,
-			func(t *testing.T, rp residuePaths) { seedHelper(t, rp); seedKea(t, rp); seedTemps(t, rp) },
-			func(t *testing.T, rp residuePaths) {
+			func(t *testing.T, rp handoffResiduePaths) { seedHelper(t, rp); seedKea(t, rp); seedTemps(t, rp) },
+			func(t *testing.T, rp handoffResiduePaths) {
 				assertGone(t, rp.customHelper, rp.customTemp)
 				assertGone(t, rp.kea...)
 				assertGone(t, rp.ddnsLease, rp.ddnsSurface, rp.ipsec)
@@ -537,4 +574,75 @@ func TestReconcileKeepsDirtyWhenRepairFails10769(t *testing.T) {
 	if _, err := os.Lstat(custom); err != nil {
 		t.Fatalf("unrepaired residue must still be present: %v", err)
 	}
+}
+
+// RED on revert: clearing a clean post-reboot flag without re-verifying
+// opens N+1 provisioning over residue stranded by a crash between
+// verification and the reboot (the shutdown helper's final write, a
+// fence escaper). Clean + residue must repair-and-converge when
+// repairable, and re-mark dirty + refuse when not.
+func TestReconcileReverifiesCleanFlag10769(t *testing.T) {
+	t.Run("repairable residue converges", func(t *testing.T) {
+		custom, rp := isolateHandoffRepairPaths(t)
+		seedHandoffHelper(t, rp)
+		seedHandoffKea(t, rp)
+		seedHandoffTemps(t, rp)
+		if err := configstore.WriteResetHandoff("other-boot", "", custom); err != nil {
+			t.Fatal(err)
+		}
+		d := &Daemon{store: handoffTestStore(t)}
+		d.reconcileResetHandoffAtBoot()
+		assertHandoffGone(t, rp.customHelper, rp.customTemp)
+		assertHandoffGone(t, rp.kea...)
+		assertHandoffGone(t, rp.ddnsLease, rp.ddnsSurface, rp.ipsec)
+		assertHandoffGone(t, rp.ddnsTemps...)
+		assertHandoffGone(t, rp.ipsecTemps...)
+		if _, err := os.Lstat(configstore.ResetHandoffPath); !os.IsNotExist(err) {
+			t.Fatalf("repaired clean flag must be cleared post-reboot: %v", err)
+		}
+	})
+	t.Run("unrepairable residue re-marks dirty", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses directory permissions; erase would not fail")
+		}
+		custom, rp := isolateHandoffRepairPaths(t)
+		seedHandoffHelper(t, rp)
+		if err := os.Chmod(filepath.Dir(custom), 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(filepath.Dir(custom), 0o755) })
+		if err := configstore.WriteResetHandoff("other-boot", "", custom); err != nil {
+			t.Fatal(err)
+		}
+		d := &Daemon{store: handoffTestStore(t)}
+		d.reconcileResetHandoffAtBoot()
+		_, dirty, gotPath, present, err := configstore.ReadResetHandoff()
+		if err != nil || !present || dirty == "" {
+			t.Fatalf("unrepaired clean flag must re-mark dirty: dirty=%q present=%v err=%v", dirty, present, err)
+		}
+		if gotPath != custom {
+			t.Fatalf("re-marked flag must preserve the recorded path, got %q", gotPath)
+		}
+		if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+			t.Fatalf("gate over unrepaired residue = %v, want incomplete", err)
+		}
+	})
+	t.Run("clean same-boot with residue repairs and stays clean", func(t *testing.T) {
+		custom, rp := isolateHandoffRepairPaths(t)
+		seedHandoffKea(t, rp)
+		boot, err := configstore.CurrentBootID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := configstore.WriteResetHandoff(boot, "", custom); err != nil {
+			t.Fatal(err)
+		}
+		d := &Daemon{store: handoffTestStore(t)}
+		d.reconcileResetHandoffAtBoot()
+		assertHandoffGone(t, rp.kea...)
+		_, dirty, _, present, err := configstore.ReadResetHandoff()
+		if err != nil || !present || dirty != "" {
+			t.Fatalf("repaired same-boot flag must stay clean: dirty=%q present=%v err=%v", dirty, present, err)
+		}
+	})
 }

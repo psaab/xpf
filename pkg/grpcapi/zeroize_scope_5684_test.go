@@ -35,7 +35,7 @@ func TestZeroizeRefusesSharedConfigRoot(t *testing.T) {
 	})
 
 	var wiped bool
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		wiped = true
 		return nil
 	}

@@ -62,6 +62,7 @@ func TestFactoryResetHoldsFenceAcrossWipe10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	pending := fakePendingWipe(t)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan error, 1)
@@ -69,7 +70,7 @@ func TestFactoryResetHoldsFenceAcrossWipe10769(t *testing.T) {
 		done <- d.factoryReset(context.Background(), func() error {
 			close(started)
 			<-release
-			return nil
+			return pending()
 		})
 	}()
 	<-started

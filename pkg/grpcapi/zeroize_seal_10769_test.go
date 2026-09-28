@@ -1479,3 +1479,30 @@ func TestIdentityLegsSyncEmptyDirOnRetry10769(t *testing.T) {
 		}
 	})
 }
+
+func TestPerformZeroizeWipePendingRecordsPending10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	helperPath := filepath.Join(root, "custom", "userspace-dp.json")
+	if err := PerformZeroizeWipePending(configDir, "xpf.conf", "", ZeroizeLogInventory{}, helperPath); err != nil {
+		t.Fatalf("PerformZeroizeWipePending: %v", err)
+	}
+	boot, dirty, gotPath, present, err := configstore.ReadResetHandoff()
+	if err != nil || !present {
+		t.Fatalf("pending wipe must write the handoff flag: present=%v err=%v", present, err)
+	}
+	current, err := configstore.CurrentBootID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boot != current || dirty != configstore.ResetHandoffPending || gotPath != helperPath {
+		t.Fatalf("handoff = boot %q dirty %q path %q, want current boot, pending, %q", boot, dirty, gotPath, helperPath)
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); !os.IsNotExist(err) {
+		t.Fatalf("completed wipe must clear the pending marker: %v", err)
+	}
+}
