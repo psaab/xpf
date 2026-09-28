@@ -56,6 +56,7 @@ var (
 	zeroizeVerifyKeaStopped    = verifyKeaUnitsStopped
 	zeroizeVarBackupsDir       = "/var/backups"
 	zeroizeNetworkdLeaseDir    = "/var/lib/systemd/network"
+	zeroizeNetifLeaseDir       = "/run/systemd/netif/leases"
 	zeroizeDHCPClientStateDirs = []string{"/var/lib/dhcp", "/var/lib/dhclient"}
 	zeroizeTmpDirs             = []string{"/tmp", "/var/tmp"}
 	zeroizeShmDir              = "/dev/shm"
@@ -157,7 +158,12 @@ func zeroizeImageSealResidue() error {
 	// live in the config root (erased with it); systemd-networkd and legacy
 	// dhclient lease/identity state lives here. Acquired addresses, DNS,
 	// and client DUID/IAIDs regenerate on the next lease acquisition.
+	// networkd keeps leases in two places: persistent *.lease files under
+	// /var/lib/systemd/network and runtime per-ifindex files under
+	// /run/systemd/netif/leases (both present on systemd hosts; the image
+	// enables networkd with DHCP clients). Both are swept.
 	fail(zeroizeSweepNetworkdLeases(zeroizeNetworkdLeaseDir))
+	fail(zeroizeClearDir(zeroizeNetifLeaseDir))
 	for _, dir := range zeroizeDHCPClientStateDirs {
 		fail(zeroizeClearDir(dir))
 	}
