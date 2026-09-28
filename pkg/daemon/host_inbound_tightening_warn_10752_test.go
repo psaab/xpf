@@ -8,6 +8,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
@@ -235,7 +236,7 @@ func TestHostInboundTightenedScopes10752(t *testing.T) {
 			if tc.mutate != nil {
 				tc.mutate(oldCfg, newCfg)
 			}
-			got := hostInboundTightenedScopes(oldCfg, newCfg)
+			got, _ := hostInboundTightenedScopes(oldCfg, newCfg)
 			if len(got) != len(tc.want) {
 				t.Fatalf("scopes = %v, want %v", got, tc.want)
 			}
@@ -249,7 +250,7 @@ func TestHostInboundTightenedScopes10752(t *testing.T) {
 }
 
 func TestHostInboundTightenedScopesSkipsLifelinesAndNil10752(t *testing.T) {
-	if got := hostInboundTightenedScopes(nil, &config.Config{}); got != nil {
+	if got, _ := hostInboundTightenedScopes(nil, &config.Config{}); got != nil {
 		t.Fatalf("nil old must yield nil, got %v", got)
 	}
 	oldCfg := &config.Config{Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
@@ -260,7 +261,7 @@ func TestHostInboundTightenedScopesSkipsLifelinesAndNil10752(t *testing.T) {
 		"mgmt": {Name: "mgmt", Interfaces: []string{"fxp0.0"},
 			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}}},
 	}}}
-	if got := hostInboundTightenedScopes(oldCfg, newCfg); len(got) != 0 {
+	if got, _ := hostInboundTightenedScopes(oldCfg, newCfg); len(got) != 0 {
 		t.Fatalf("lifeline-only narrowing must stay silent, got %v", got)
 	}
 }
@@ -371,7 +372,7 @@ func TestWithTighteningWarningsAdvisory10752(t *testing.T) {
 	// would warn nowhere.
 	rangeOld := tighteningScopeCfg(t, []string{"ssh", "traceroute"}, []string{"ssh"})
 	rangeNew := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
-	if got := hostInboundTightenedScopes(rangeOld, rangeNew); len(got) != 2 {
+	if got, _ := hostInboundTightenedScopes(rangeOld, rangeNew); len(got) != 2 {
 		t.Fatalf("traceroute removal must narrow the wan scopes, got %v", got)
 	}
 	d.recordKeptSuspicious10752(nil)
@@ -460,7 +461,7 @@ func TestWithTighteningWarningsSameZoneInterfaceIsolation10752(t *testing.T) {
 	newCfg.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
 		"reth0.50": {SystemServices: []string{"ssh"}},
 	}
-	if got := hostInboundTightenedScopes(oldCfg, newCfg); len(got) != 1 || got[0] != "zone:wan|iface:reth0.50" {
+	if got, _ := hostInboundTightenedScopes(oldCfg, newCfg); len(got) != 1 || got[0] != "zone:wan|iface:reth0.50" {
 		t.Fatalf("tightened = %v, want [zone:wan|iface:reth0.50]", got)
 	}
 	d := &Daemon{}
@@ -538,6 +539,248 @@ func TestWithTighteningWarningsOldAddressMoved10752(t *testing.T) {
 	}
 }
 
+// TestWithTighteningWarningsPerClassNaming10752 pins per-class scope
+// naming: two narrowed interfaces with opposite evidence classes must
+// name exactly their own scope on each line. A shared named set puts
+// both scopes on both lines — RED here.
+func TestWithTighteningWarningsPerClassNaming10752(t *testing.T) {
+	oldCfg := twoUnitWanCfg10752(t, []string{"ssh"})
+	oldCfg.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
+		"reth0.50": {SystemServices: []string{"any-service"}},
+		"reth0.60": {SystemServices: []string{"any-service"}},
+	}
+	newCfg := twoUnitWanCfg10752(t, []string{"ssh"})
+	newCfg.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
+		"reth0.50": {SystemServices: []string{"ssh"}},
+		"reth0.60": {SystemServices: []string{"ssh"}},
+	}
+	if got, _ := hostInboundTightenedScopes(oldCfg, newCfg); len(got) != 2 {
+		t.Fatalf("tightened = %v, want both narrowed interface scopes", got)
+	}
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		netip.MustParseAddr("172.16.50.8"): kept10752(1,
+			[]string{"tcp 172.16.50.8:2222→203.0.113.7:40000"}, 0, nil),
+		netip.MustParseAddr("172.16.60.8"): kept10752(0, nil, 1,
+			[]string{"tcp 172.16.60.8:179→203.0.113.7:40001"}),
+	})
+	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
+	if resp == newCfg {
+		t.Fatal("intersecting evidence must warn, got identity")
+	}
+	if len(resp.Warnings) != 3 {
+		t.Fatalf("warnings = %v, want [custom line, other line, pointer]", resp.Warnings)
+	}
+	if !strings.Contains(resp.Warnings[0], "(zone:wan|iface:reth0.50)") ||
+		strings.Contains(resp.Warnings[0], "reth0.60") {
+		t.Errorf("custom line must name exactly the custom-evidence scope: %q", resp.Warnings[0])
+	}
+	if !strings.Contains(resp.Warnings[1], "(zone:wan|iface:reth0.60)") ||
+		strings.Contains(resp.Warnings[1], "reth0.50") {
+		t.Errorf("other line must name exactly the exempt-evidence scope: %q", resp.Warnings[1])
+	}
+}
+
+// TestWithTighteningWarningsVIPOverrideIsolation10752 pins VIP unit
+// attribution: a VIP on an override-covered member enforces the
+// override, so its evidence must not name a zone-stanza narrowing.
+// Zone-granular fallback names zone:wan here — RED on the old rule.
+func TestWithTighteningWarningsVIPOverrideIsolation10752(t *testing.T) {
+	mkCfg := func(zoneServices []string) *config.Config {
+		cfg := twoUnitWanCfg10752(t, zoneServices)
+		cfg.Interfaces.Interfaces["reth0"].Units[50].VRRPGroups = map[string]*config.VRRPGroup{
+			"1": {ID: 1, VirtualAddresses: []string{"172.16.50.100"}},
+		}
+		cfg.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
+			"reth0.50": {SystemServices: []string{"any-service"}},
+		}
+		return cfg
+	}
+	oldCfg := mkCfg([]string{"any-service"})
+	newCfg := mkCfg([]string{"ssh"})
+	vip := netip.MustParseAddr("172.16.50.100")
+	found := false
+	for _, v := range dpuserspace.BuildZoneHostInboundViews(oldCfg) {
+		for _, raw := range append(append([]string(nil), v.V4Addrs...), v.V6Addrs...) {
+			if ip, err := netip.ParseAddr(raw); err == nil && ip.Unmap() == vip {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("sanity: the VIP must be present in the OLD views for this test to mean anything")
+	}
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		vip: kept10752(1, []string{"tcp 172.16.50.100:2222→203.0.113.7:40000"}, 0, nil),
+	})
+	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
+	if resp == newCfg {
+		t.Fatal("narrowed addressed scopes must carry at least the advisory, got identity")
+	}
+	if len(resp.Warnings) != 1 || !strings.Contains(resp.Warnings[0], "observed no stranded flows") {
+		t.Fatalf("VIP evidence on an unchanged override must yield advisory-only, got %v", resp.Warnings)
+	}
+	if strings.Contains(resp.Warnings[0], "172.16.50.100") {
+		t.Fatalf("advisory must not leak the VIP flow: %q", resp.Warnings[0])
+	}
+}
+
+// TestHostInboundScopesForAddrsSingleton10752 pins the singleton-view
+// unit rule directly: a derived address (stable link-local shape) in a
+// single-interface view attributes to that unit's scopes, while a
+// multi-interface view keeps the zone fallback.
+func TestHostInboundScopesForAddrsSingleton10752(t *testing.T) {
+	oldCfg := hostInboundTestConfig()
+	oldCfg.Security.Zones["wan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"any-service"}}
+	oldCfg.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
+		"reth0.50": {SystemServices: []string{"ssh"}},
+	}
+	ll := netip.MustParseAddr("fe80::bf72:1:2")
+	views := []dpuserspace.ZoneHostInboundView{
+		{Zone: "wan", Interfaces: []string{"reth0.50"}, V6Addrs: []string{"fe80::bf72:1:2"}},
+	}
+	got := hostInboundScopesForAddrs10752(oldCfg, views, []netip.Addr{ll})
+	if len(got[ll]) != 1 || got[ll][0] != "zone:wan|iface:reth0.50" {
+		t.Fatalf("singleton-view derived addr = %v, want [zone:wan|iface:reth0.50] (override applies, no zone scope)", got[ll])
+	}
+	// Multi-interface view: ambiguous, keeps the zone fallback.
+	views[0].Interfaces = []string{"reth0.50", "reth0.60"}
+	got = hostInboundScopesForAddrs10752(oldCfg, views, []netip.Addr{ll})
+	if len(got[ll]) != 1 || got[ll][0] != "zone:wan" {
+		t.Fatalf("multi-view derived addr = %v, want [zone:wan]", got[ll])
+	}
+	// Bare singleton: cannot form a unit scope, keeps the zone fallback.
+	views[0].Interfaces = []string{"reth0"}
+	got = hostInboundScopesForAddrs10752(oldCfg, views, []netip.Addr{ll})
+	if len(got[ll]) != 1 || got[ll][0] != "zone:wan" {
+		t.Fatalf("bare-singleton derived addr = %v, want [zone:wan]", got[ll])
+	}
+	// Stanza precision survives multi-view membership: a static addr on
+	// .50 keeps its unit scopes even when a multi view also lists it.
+	views[0].Interfaces = []string{"reth0.50", "reth0.60"}
+	views[0].V4Addrs = []string{"172.16.50.8"}
+	wan := netip.MustParseAddr("172.16.50.8")
+	got = hostInboundScopesForAddrs10752(oldCfg, views, []netip.Addr{wan})
+	want := map[string]bool{"zone:wan|iface:reth0.50": true}
+	if len(got[wan]) != 1 || !want[got[wan][0]] {
+		t.Fatalf("stanza addr in multi view = %v, want [zone:wan|iface:reth0.50]", got[wan])
+	}
+}
+
+// TestWithTighteningWarningsTokenOnlyCustomsAdvisory10752 is the T2(1)
+// negative pin: a token-only narrowing (ospf removal, no full-admit
+// loss) never admitted customs, so an observed already-denied custom
+// flow is unchanged-authorization — not stranded — and the commit must
+// carry the transition-only advisory, never a customs line.
+func TestWithTighteningWarningsTokenOnlyCustomsAdvisory10752(t *testing.T) {
+	oldCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	oldCfg.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"ospf"}
+	newCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		netip.MustParseAddr("172.16.50.8"): kept10752(1,
+			[]string{"tcp 172.16.50.8:2222→203.0.113.7:40000"}, 0, nil),
+	})
+	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
+	if resp == newCfg {
+		t.Fatal("token-only narrowing with observed customs must carry the advisory, got identity")
+	}
+	if len(resp.Warnings) != 1 || !strings.Contains(resp.Warnings[0], "observed no stranded flows") {
+		t.Fatalf("token-only customs must yield advisory-only, got %v", resp.Warnings)
+	}
+	if strings.Contains(resp.Warnings[0], "2222") || strings.Contains(resp.Warnings[0], "custom-port") {
+		t.Fatalf("advisory must not claim the unchanged custom flow: %q", resp.Warnings[0])
+	}
+	// Positive control: the same flow IS stranded by a full-admit loss.
+	fullOld := tighteningScopeCfg(t, []string{"any-service"}, []string{"ssh"})
+	fullNew := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		netip.MustParseAddr("172.16.50.8"): kept10752(1,
+			[]string{"tcp 172.16.50.8:2222→203.0.113.7:40000"}, 0, nil),
+	})
+	resp = d.withTighteningWarningsForResponse10752(fullNew, fullOld, fullNew)
+	if resp == fullNew {
+		t.Fatal("full-admit loss with customs must warn, got identity")
+	}
+	if !strings.Contains(resp.Warnings[0], "leaves 1 box-oriented custom-port") {
+		t.Fatalf("full-admit loss must emit the customs line, got %v", resp.Warnings)
+	}
+}
+
+// TestWithTighteningWarningsPerClassNamingBothZones10752 is the
+// cross-zone per-class pin: both zones narrow with opposite evidence
+// classes, and each line must name only its own class's scopes.
+func TestWithTighteningWarningsPerClassNamingBothZones10752(t *testing.T) {
+	oldCfg := tighteningScopeCfg(t, []string{"any-service"}, []string{"any-service"})
+	newCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		netip.MustParseAddr("172.16.50.8"): kept10752(1,
+			[]string{"tcp 172.16.50.8:2222→203.0.113.7:40000"}, 0, nil),
+		netip.MustParseAddr("10.0.61.1"): kept10752(0, nil, 5,
+			[]string{"tcp 10.0.61.1:179→203.0.113.7:40001"}),
+	})
+	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
+	if resp == newCfg {
+		t.Fatal("intersecting evidence must warn, got identity")
+	}
+	if len(resp.Warnings) != 3 {
+		t.Fatalf("warnings = %v, want [custom line, other line, pointer]", resp.Warnings)
+	}
+	custom, other := resp.Warnings[0], resp.Warnings[1]
+	if !strings.Contains(custom, "(zone:wan, zone:wan|iface:reth0.50)") ||
+		!strings.Contains(custom, "172.16.50.8:2222") ||
+		strings.Contains(custom, "zone:lan") || strings.Contains(custom, "10.0.61.1") {
+		t.Errorf("custom line must name/render WAN only: %q", custom)
+	}
+	if !strings.Contains(other, "(zone:lan, zone:lan|iface:reth1.0)") ||
+		!strings.Contains(other, "10.0.61.1:179") ||
+		strings.Contains(other, "zone:wan") || strings.Contains(other, "172.16.50.8") {
+		t.Errorf("other line must name/render LAN only: %q", other)
+	}
+}
+
+// TestWithTighteningWarningsVIPNarrowingWarnsInterface10752 is the
+// VIP positive pin: all units overridden, one override narrows, and
+// that unit's VIP has retained evidence — the commit must emit the
+// exact interface-scoped evidence line, not the zero-observed
+// advisory. Zone-granular fallback yields the advisory — RED there.
+func TestWithTighteningWarningsVIPNarrowingWarnsInterface10752(t *testing.T) {
+	mkCfg := func(member50 []string) *config.Config {
+		cfg := twoUnitWanCfg10752(t, []string{"ssh"})
+		cfg.Interfaces.Interfaces["reth0"].Units[50].VRRPGroups = map[string]*config.VRRPGroup{
+			"1": {ID: 1, VirtualAddresses: []string{"172.16.50.100"}},
+		}
+		cfg.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
+			"reth0.50": {SystemServices: member50},
+			"reth0.60": {SystemServices: []string{"any-service"}},
+		}
+		return cfg
+	}
+	oldCfg := mkCfg([]string{"any-service"})
+	newCfg := mkCfg([]string{"ssh"})
+	if got, _ := hostInboundTightenedScopes(oldCfg, newCfg); len(got) != 1 || got[0] != "zone:wan|iface:reth0.50" {
+		t.Fatalf("tightened = %v, want [zone:wan|iface:reth0.50]", got)
+	}
+	vip := netip.MustParseAddr("172.16.50.100")
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		vip: kept10752(1, []string{"tcp 172.16.50.100:2222→203.0.113.7:40000"}, 0, nil),
+	})
+	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
+	if resp == newCfg {
+		t.Fatal("VIP evidence on a narrowed override must warn, got identity")
+	}
+	if len(resp.Warnings) != 2 {
+		t.Fatalf("warnings = %v, want [custom line, pointer]", resp.Warnings)
+	}
+	if !strings.Contains(resp.Warnings[0], "(zone:wan|iface:reth0.50)") ||
+		!strings.Contains(resp.Warnings[0], "172.16.50.100:2222") {
+		t.Errorf("custom line must name the narrowed VIP unit with its sample: %q", resp.Warnings[0])
+	}
+}
+
 // TestWithTighteningWarningsSilentAddressless10752 pins the advisory's
 // address gate: a real transition on scopes owning no address in either
 // generation can strand nothing and offers nothing to verify, so the
@@ -554,7 +797,7 @@ func TestWithTighteningWarningsSilentAddressless10752(t *testing.T) {
 	}
 	oldCfg := mkCfg([]string{"any-service"})
 	newCfg := mkCfg([]string{"ssh"})
-	if got := hostInboundTightenedScopes(oldCfg, newCfg); len(got) != 2 {
+	if got, _ := hostInboundTightenedScopes(oldCfg, newCfg); len(got) != 2 {
 		t.Fatalf("tightened = %v, want the ghost zone + iface scopes (the gate, not the transition, must silence this)", got)
 	}
 	d := &Daemon{}

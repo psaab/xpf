@@ -28,14 +28,15 @@ import (
 // Firing has two shapes. When this attempt's own conntrack sweep (stashed by
 // flushDeniedHostInboundConntrack, cleared per attempt) observed stranded
 // box-oriented flows on box addresses the OLD config's enforcement covered
-// in a narrowed effective scope, the warning names ONLY those scopes —
-// "zone:<name>" or "zone:<name>|iface:<canonical-unit>" — with counts and
-// samples drawn ONLY from the intersecting addresses' evidence, plus a
-// silent-class pointer sentence (the sweep cannot observe in-range UDP
-// customs, ranges, post-sweep reconnects, or sweep misses). When narrowed
-// scopes exist but the sweep observed nothing in them — zero kept flows, or
-// evidence only on addresses outside every narrowed scope — the commit
-// carries a transition-only advisory naming the narrowed scopes with honest
+// in a narrowed effective scope, each warning line names ONLY the narrowed
+// scopes with intersecting evidence OF ITS CLASS — "zone:<name>" or
+// "zone:<name>|iface:<canonical-unit>" — with counts and samples drawn
+// ONLY from those scopes' addresses, plus a silent-class pointer sentence
+// (the sweep cannot observe in-range UDP customs, ranges, post-sweep
+// reconnects, or sweep misses). When narrowed scopes exist but the sweep
+// observed nothing in them — zero kept flows, or evidence only on addresses
+// outside every narrowed scope — the commit carries a transition-only
+// advisory naming the narrowed scopes with honest zero-observed wording
 // zero-observed wording and a manual-procedure pointer, so silent-class
 // narrowings never pass commit-silent. The advisory is suppressed only when
 // the narrowed scopes own no address in either generation (nothing exists
@@ -326,21 +327,27 @@ var hostInboundUnguardedTokens10752 = sync.OnceValue(func() map[string]bool {
 // from the unguarded set (exempts/bare/ranges whose removal changes no guard
 // or flush behavior). Narrowings that drop only catalogued tokens need no
 // warning: flush+guard enforce those. Nil old (first commit) yields nil.
-func hostInboundTightenedScopes(oldCfg, newCfg *config.Config) []string {
+// The second return flags which narrowed scopes lost full-admit: custom
+// evidence strands ONLY there (a token-only narrowing never admitted
+// customs, so observed customs there are unchanged-authorization flows,
+// not stranded ones); exempt/bare evidence strands on either shape.
+func hostInboundTightenedScopes(oldCfg, newCfg *config.Config) ([]string, map[string]bool) {
 	if oldCfg == nil || newCfg == nil {
-		return nil
+		return nil, nil
 	}
 	oldStates := hostInboundScopeStates(oldCfg)
 	if len(oldStates) == 0 {
-		return nil
+		return nil, nil
 	}
 	newStates := hostInboundScopeStates(newCfg)
 	unguarded := hostInboundUnguardedTokens10752()
 	var out []string
+	fullLoss := map[string]bool{}
 	for key, old := range oldStates {
 		neu := newStates[key]
 		if old.full && !neu.full {
 			out = append(out, key)
+			fullLoss[key] = true
 			continue
 		}
 		if old.full {
@@ -354,7 +361,7 @@ func hostInboundTightenedScopes(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, fullLoss
 }
 
 // hostInboundScopesForAddrs10752 maps kept box addresses to the OLD effective
@@ -364,15 +371,17 @@ func hostInboundTightenedScopes(oldCfg, newCfg *config.Config) []string {
 // (an override added in NEW still narrows the member's OLD zone-sourced
 // admission). The zone scope joins only where NO override applied, since
 // the zone stanza is effective nowhere on an override-covered member. Unit
-// ownership comes from the OLD interface stanzas (authoritative addr→unit);
-// zone and override applicability come from the OLD ownership map and
-// canonical override index. Addresses on no stanza unit (VIPs, link-locals)
-// fall back to the OLD views' addr→zone membership at zone granularity —
-// still zone-precise, with within-zone interface precision kept only for
-// stanza-addressed units. Addresses covered nowhere (lifeline-only,
-// unzoned) map to no scope. Kept flows can only have been stranded by
-// transitions in the returned scopes. Scope identity is preserved end to
-// end: projection intersects and names these exact keys.
+// ownership comes from the OLD interface stanzas (static addresses plus
+// VRRP virtual addresses, both authoritative addr→unit) and from
+// singleton-interface OLD views (whose every address, including stable
+// RETH link-locals, belongs to that unit's effective-token group); zone
+// and override applicability come from the OLD ownership map and
+// canonical override index. Only addresses on no unit anywhere —
+// multi-interface-view derived addresses — fall back to the OLD views'
+// addr→zone membership at zone granularity. Addresses covered nowhere
+// (lifeline-only, unzoned) map to no scope. Kept flows can only have been
+// stranded by transitions in the returned scopes. Scope identity is
+// preserved end to end: projection intersects and names these exact keys.
 func hostInboundScopesForAddrs10752(oldCfg *config.Config, oldViews []dpuserspace.ZoneHostInboundView, addrs []netip.Addr) map[netip.Addr][]string {
 	addrUnits := map[netip.Addr][]string{}
 	if oldCfg != nil {
@@ -385,13 +394,50 @@ func hostInboundScopesForAddrs10752(oldCfg *config.Config, oldViews []dpuserspac
 					continue
 				}
 				literal := oldCfg.SplitInterfaceUnitRef(fmt.Sprintf("%s.%d", base, num)).Literal
+				// Static addresses are CIDR; VRRP virtual addresses are
+				// bare or CIDR (mirroring the view builder's
+				// hostIPFromCIDR). Both pin the address to this unit:
+				// VIPs join their unit's effective-token group, so a VIP
+				// on an overridden unit enforces the override.
+				owns := func(raw string) {
+					if ip, err := netip.ParseAddr(raw); err == nil {
+						addrUnits[ip.Unmap()] = append(addrUnits[ip.Unmap()], literal)
+						return
+					}
+					if pfx, err := netip.ParsePrefix(raw); err == nil && pfx.IsValid() {
+						addr := pfx.Addr().Unmap()
+						addrUnits[addr] = append(addrUnits[addr], literal)
+					}
+				}
 				for _, raw := range unit.Addresses {
-					pfx, err := netip.ParsePrefix(raw)
-					if err != nil || !pfx.IsValid() {
+					owns(raw)
+				}
+				for _, vg := range unit.VRRPGroups {
+					if vg == nil {
 						continue
 					}
-					addr := pfx.Addr().Unmap()
-					addrUnits[addr] = append(addrUnits[addr], literal)
+					for _, raw := range vg.VirtualAddresses {
+						owns(raw)
+					}
+				}
+			}
+		}
+		// Singleton-view units: a view with exactly one interface owns
+		// every address in it (stable RETH link-locals and any other
+		// derived addresses join their unit's effective-token group).
+		// Multi-interface views stay ambiguous and keep the zone
+		// fallback below; bare singletons cannot form unit scopes.
+		for _, v := range oldViews {
+			if len(v.Interfaces) != 1 {
+				continue
+			}
+			split := oldCfg.SplitInterfaceUnitRef(v.Interfaces[0])
+			if !split.HasUnit {
+				continue
+			}
+			for _, raw := range append(append([]string(nil), v.V4Addrs...), v.V6Addrs...) {
+				if ip, err := netip.ParseAddr(raw); err == nil {
+					addrUnits[ip.Unmap()] = append(addrUnits[ip.Unmap()], split.Literal)
 				}
 			}
 		}
@@ -470,18 +516,20 @@ const silentClasses10752 = "in-range UDP customs, ranges, post-sweep reconnects,
 //
 // With stranded flows observed in narrowed scopes: at most three lines — the
 // customs line, the exempt/bare line (each present only when its class was
-// observed, naming only narrowed scopes with intersecting evidence, counts
-// and samples drawn only from those scopes' addresses), plus the
-// silent-class pointer sentence. With narrowed scopes but zero intersecting
-// evidence: one transition-only advisory naming the narrowed scopes with
-// honest zero-observed wording, so silent-class narrowings never pass
+// observed, naming only narrowed scopes with intersecting evidence OF THAT
+// CLASS, counts and samples drawn only from those scopes' addresses; the
+// customs line additionally requires a full-admit loss on the scope, since
+// token-only narrowings never admitted customs), plus the silent-class
+// pointer sentence. With narrowed scopes but zero intersecting evidence:
+// one transition-only advisory naming the narrowed scopes with honest
+// zero-observed wording, so silent-class narrowings never pass
 // commit-silent. The advisory is suppressed only when the narrowed scopes
 // own no address in either generation — nothing exists to strand or verify.
 func (d *Daemon) withTighteningWarningsForResponse10752(respCfg, oldActive, compiled *config.Config) *config.Config {
 	if respCfg == nil {
 		return respCfg
 	}
-	scopes := hostInboundTightenedScopes(oldActive, compiled)
+	scopes, fullLoss := hostInboundTightenedScopes(oldActive, compiled)
 	if len(scopes) == 0 {
 		return respCfg
 	}
@@ -500,54 +548,74 @@ func (d *Daemon) withTighteningWarningsForResponse10752(respCfg, oldActive, comp
 	var customSamples []string
 	var other uint64
 	var otherSamples []string
-	named := map[string]bool{}
+	// Named scopes are tracked separately per class: a scope with only
+	// custom evidence must not appear on the exempt/bare line, and vice
+	// versa. A scope with both classes' evidence appears on both lines.
+	// Customs additionally require a full-admit loss on the scope: a
+	// token-only narrowing never admitted customs, so observed customs
+	// there are unchanged-authorization flows, not stranded ones, and
+	// the transition falls through to the advisory instead.
+	namedCustom := map[string]bool{}
+	namedOther := map[string]bool{}
 	for _, addr := range addrs {
 		ev := evidence[addr]
-		intersects := false
+		var hit, hitFull []string
 		for _, scope := range attr[addr] {
-			if tight[scope] {
-				intersects = true
-				named[scope] = true
+			if !tight[scope] {
+				continue
+			}
+			hit = append(hit, scope)
+			if fullLoss[scope] {
+				hitFull = append(hitFull, scope)
 			}
 		}
-		if !intersects {
-			continue
-		}
-		custom += ev.custom
-		for _, s := range ev.customSamples {
-			if len(customSamples) >= 5 {
-				break
+		if ev.custom > 0 && len(hitFull) > 0 {
+			custom += ev.custom
+			for _, s := range ev.customSamples {
+				if len(customSamples) >= 5 {
+					break
+				}
+				customSamples = append(customSamples, s)
 			}
-			customSamples = append(customSamples, s)
-		}
-		other += ev.other
-		for _, s := range ev.otherSamples {
-			if len(otherSamples) >= 3 {
-				break
+			for _, scope := range hitFull {
+				namedCustom[scope] = true
 			}
-			otherSamples = append(otherSamples, s)
+		}
+		if ev.other > 0 && len(hit) > 0 {
+			other += ev.other
+			for _, s := range ev.otherSamples {
+				if len(otherSamples) >= 3 {
+					break
+				}
+				otherSamples = append(otherSamples, s)
+			}
+			for _, scope := range hit {
+				namedOther[scope] = true
+			}
 		}
 	}
 	var lines []string
-	if len(named) > 0 {
-		var ordered []string
-		for _, scope := range scopes {
-			if named[scope] {
-				ordered = append(ordered, scope)
+	if len(namedCustom)+len(namedOther) > 0 {
+		ordered := func(named map[string]bool) []string {
+			var out []string
+			for _, scope := range scopes {
+				if named[scope] {
+					out = append(out, scope)
+				}
 			}
+			return out
 		}
-		scopeText := scopeText10752(ordered)
 		if custom > 0 {
 			lines = append(lines, fmt.Sprintf(
 				"host-inbound tightening (%s) leaves %d box-oriented custom-port flow(s) with no current admit still authorized%s; "+
 					"delete per Removal procedures for unguarded tuples in docs/host-inbound-service-matrix.md",
-				scopeText, custom, sampleSuffix10752(customSamples)))
+				scopeText10752(ordered(namedCustom)), custom, sampleSuffix10752(customSamples)))
 		}
 		if other > 0 {
 			lines = append(lines, fmt.Sprintf(
 				"host-inbound tightening (%s) leaves %d exempt/bare-protocol flow(s) with no current admit still authorized%s; "+
 					"stop/disable the originator per Removal procedures for unguarded tuples in docs/host-inbound-service-matrix.md",
-				scopeText, other, sampleSuffix10752(otherSamples)))
+				scopeText10752(ordered(namedOther)), other, sampleSuffix10752(otherSamples)))
 		}
 		lines = append(lines, fmt.Sprintf(
 			"The sweep cannot observe %s — verify those per Removal procedures for unguarded tuples in docs/host-inbound-service-matrix.md",
