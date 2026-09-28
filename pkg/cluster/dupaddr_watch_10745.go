@@ -420,26 +420,45 @@ func (w *duplicateIdentityWatcher) readLoop() {
 	defer w.wg.Done()
 	buf := make([]byte, duplicateIdentityBeaconReadLen)
 	for {
-		if err := w.listen.SetReadDeadline(time.Now().Add(w.interval)); err != nil {
-			slog.Debug("cluster: authenticated duplicate-identity read deadline failed",
-				"iface", w.iface, "err", err)
+		n, alive := w.readStep(buf)
+		if !alive {
 			return
 		}
-		n, _, err := w.listen.ReadFromUDP(buf)
-		if err != nil {
-			select {
-			case <-w.stopCh:
-				return
-			default:
-			}
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue
-			}
-			slog.Debug("cluster: authenticated duplicate-identity receive ended",
-				"iface", w.iface, "err", err)
-			return
+		if n > 0 {
+			w.handleBeacon(buf[:n], time.Now())
 		}
-		w.handleBeacon(buf[:n], time.Now())
+	}
+}
+
+// readStep performs one socket read and reports whether the loop stays alive.
+// The error policy is heartbeatReceiver.readLoop's, exactly: timeouts and
+// transient read errors continue (a transient failure must not silently kill
+// day-0 detection for the tenure), and only a closed stopCh ends the loop.
+// The stopCh pre-check is the sibling's loop-top select inlined: without it a
+// stopped watcher whose socket only ever times out would spin instead of
+// exiting. Split out so the continue-vs-return policy is unit-testable
+// without driving the goroutine.
+func (w *duplicateIdentityWatcher) readStep(buf []byte) (int, bool) {
+	select {
+	case <-w.stopCh:
+		return 0, false
+	default:
+	}
+	_ = w.listen.SetReadDeadline(time.Now().Add(w.interval))
+	n, _, err := w.listen.ReadFromUDP(buf)
+	if err == nil {
+		return n, true
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return 0, true
+	}
+	select {
+	case <-w.stopCh:
+		return 0, false
+	default:
+		slog.Debug("cluster: authenticated duplicate-identity read error",
+			"iface", w.iface, "err", err)
+		return 0, true
 	}
 }
 

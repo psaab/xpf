@@ -441,3 +441,48 @@ func TestDuplicateIdentitySkewedFutureNonceOutlivesReceipt_10745(t *testing.T) {
 		t.Fatalf("replay of a still-fresh skewed beacon produced %d warnings, want 1", got)
 	}
 }
+
+// TestDuplicateIdentityReadStepSurvivesTransientErrors_10745 pins the
+// readLoop error policy (review Host P2): it is heartbeatReceiver.readLoop's,
+// exactly — transient errors continue, only a closed stopCh ends the loop.
+func TestDuplicateIdentityReadStepSurvivesTransientErrors_10745(t *testing.T) {
+	mgr := keyedBeaconManager(t, beaconTestPSK, "")
+
+	t.Run("closed_socket_stays_alive", func(t *testing.T) {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatalf("socket: %v", err)
+		}
+		w := newDuplicateIdentityWatcher(mgr, "lo", conn, nil, nil, 5*time.Millisecond, beaconTestInstance(t))
+		conn.Close() // every read now fails non-timeout, stopCh still open
+		if _, alive := w.readStep(make([]byte, duplicateIdentityBeaconReadLen)); !alive {
+			t.Fatal("a transient read error ended the loop — day-0 detection dies silently for the tenure")
+		}
+	})
+
+	t.Run("closed_stopCh_ends_loop", func(t *testing.T) {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatalf("socket: %v", err)
+		}
+		defer conn.Close()
+		w := newDuplicateIdentityWatcher(mgr, "lo", conn, nil, nil, 5*time.Millisecond, beaconTestInstance(t))
+		close(w.stopCh)
+		if _, alive := w.readStep(make([]byte, duplicateIdentityBeaconReadLen)); alive {
+			t.Fatal("a stopped watcher stayed alive")
+		}
+	})
+
+	t.Run("timeout_stays_alive", func(t *testing.T) {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatalf("socket: %v", err)
+		}
+		defer conn.Close()
+		w := newDuplicateIdentityWatcher(mgr, "lo", conn, nil, nil, 5*time.Millisecond, beaconTestInstance(t))
+		n, alive := w.readStep(make([]byte, duplicateIdentityBeaconReadLen))
+		if !alive || n != 0 {
+			t.Fatalf("timeout read returned n=%d alive=%v, want n=0 alive=true", n, alive)
+		}
+	})
+}
