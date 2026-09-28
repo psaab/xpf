@@ -662,8 +662,12 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		if err := nftInstaller.RemoveEarlyInputBarrier(); err != nil {
 			err = tagNftInstallErr(err)
 			slog.Warn("failed to remove early host-input barrier after no-enforcement teardown", "err", err)
+			// The tables are gone but the handoff is incomplete: record the
+			// failure so applied state and commit result agree (B9).
+			d.noteHostInboundApplyFailed(time.Now())
 			return fmt.Errorf("remove early host-input barrier after host-inbound teardown: %w", err)
 		}
+		d.earlyInputHandoffDone.Store(true)
 		return nil
 	}
 	// #5582: the configured WireGuard listen port(s). The XDP shim steers
@@ -746,6 +750,9 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// covered rather than only the zone-model ones.
 			sets := dpuserspace.BuildFenceAddrSets(cfg, views)
 			if fenceErr := d.installHostInboundColdBootFence(sets, wgListenPorts); fenceErr != nil {
+				// The real install failed AND no fallback stands: record the
+				// staleness — the worst applied state — alongside the error.
+				d.noteHostInboundApplyFailed(time.Now())
 				return errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), fenceErr)
 			}
 		} else {
@@ -788,12 +795,15 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				barrierErr = tagNftInstallErr(barrierErr)
 				slog.Warn("failed to remove early host-input barrier after fenced fallback", "err", barrierErr)
 				barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", barrierErr)
+			} else {
+				d.earlyInputHandoffDone.Store(true)
 			}
 		}
 		// #7181: the retained generation is unchanged and may still be
 		// protecting, so this marks the applied state STALE rather than
 		// clearing Established -- exactly the distinction a sticky bool cannot
 		// express.
+		d.noteHostInboundApplyFailed(time.Now())
 		return errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), barrierHandoffErr)
 	}
 	if overlay != nil {
@@ -816,17 +826,6 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		}
 		d.hostInputFenceConntrackActive.Store(&ctReq)
 	}
-	// A real host-inbound table is now installed. Record the historical success;
-	// a later failed install retains that exact generation and therefore skips the
-	// cold-boot fallback. This does not prove current table presence (#5790).
-	d.hostInboundEnforced.Store(true)
-	// #7181: advance the applied generation and clear the staleness flag and any
-	// gap-fence marker -- the real table now covers the desired set on its own.
-	d.noteHostInboundApplySucceeded()
-	// #5789: the retained generation now covers EXACTLY this desired drop set.
-	// Record it so a later failed rerender can tell which destinations a
-	// subsequently-appeared address left uncovered.
-	d.hostInboundCoveredAddrs = desiredDrop
 	// The real table now covers every desired destination, so any additive gap
 	// fence from a prior failed rerender is obsolete — a lingering gap would keep
 	// denying an address the real table now serves. Best effort: nftDeleteTable is
@@ -838,6 +837,12 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		slog.Warn("failed to delete obsolete host-inbound gap fence after successful real install",
 			"err", err)
 	}
+	// #10751/B9: hand the early barrier off BEFORE recording applied-success.
+	// The recorded generation and the commit result must agree: recording
+	// success and then returning a handoff error claims a fresh policy the box
+	// does not serve (it serves the real table PLUS the stale barrier). On a
+	// removal failure the real table still stands, so enforcement is recorded
+	// as established-but-STALE and the next apply retries the removal.
 	var barrierHandoffErr error
 	if barrierErr := nftInstaller.RemoveEarlyInputBarrier(); barrierErr != nil {
 		barrierErr = tagNftInstallErr(barrierErr)
@@ -869,10 +874,33 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	}
 	d.noteHostInboundConntrackFlush(ctReq,
 		d.flushDeniedHostInboundConntrack(views, unzonedV4, unzonedV6, wgListenPorts))
+	if barrierHandoffErr != nil {
+		// The real table stands but the handoff is incomplete: established,
+		// covering exactly the desired set, but STALE — never recorded as a
+		// fresh success alongside a failing commit result.
+		d.hostInboundEnforced.Store(true)
+		d.hostInboundCoveredAddrs = desiredDrop
+		d.hostInboundGapFenceActive.Store(false)
+		d.noteHostInboundApplyFailed(time.Now())
+		return barrierHandoffErr
+	}
+	// A real host-inbound table is now installed and handed off. Record the
+	// historical success; a later failed install retains that exact generation
+	// and therefore skips the cold-boot fallback. This does not prove current
+	// table presence (#5790).
+	d.hostInboundEnforced.Store(true)
+	// #7181: advance the applied generation and clear the staleness flag and any
+	// gap-fence marker -- the real table now covers the desired set on its own.
+	d.noteHostInboundApplySucceeded()
+	// #5789: the retained generation now covers EXACTLY this desired drop set.
+	// Record it so a later failed rerender can tell which destinations a
+	// subsequently-appeared address left uncovered.
+	d.hostInboundCoveredAddrs = desiredDrop
+	d.earlyInputHandoffDone.Store(true)
 	slog.Info("host-inbound filter applied", "zones", len(views),
 		"unzoned_deny_v4", len(unzonedV4), "unzoned_deny_v6", len(unzonedV6),
 		"junos_host_deny_programs", len(programs))
-	return barrierHandoffErr
+	return nil
 }
 
 // installHostInboundGapFence installs the #5789 ADDITIVE gap fence for the

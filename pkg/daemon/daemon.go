@@ -1041,6 +1041,15 @@ type Daemon struct {
 	// not a current readiness reader. nft success and the following Store are
 	// ordered operations in separate state domains, not one atomic publication.
 	hostInboundEnforced atomic.Bool
+
+	// earlyInputHandoffDone reports that the #10751 pre-networkd input barrier
+	// has been handed off (removed after host-inbound enforcement, a scoped
+	// fallback, a no-enforcement teardown, or bootstrap recovery). Before the
+	// first handoff the barrier is EXPECTED present, so pre-apply attestation
+	// reinstalls it when missing; after handoff it is EXPECTED absent and must
+	// never be reinstalled. Serialized under applySem with the handoff sites
+	// (plus the single-threaded bootstrap path, which runs before applies).
+	earlyInputHandoffDone atomic.Bool
 	// hostInboundDataplaneFresh is the #9637-D1 pre-landing fail-closed gate:
 	// true iff the dataplane runs this generation's snapshot. applyHostInboundFilter
 	// consults it to decide whether the reinject accept may be installed; a #5679
@@ -1188,6 +1197,16 @@ type Daemon struct {
 	// under applySem (via applyLo0Filter); atomic.Bool matches the
 	// hostInboundEnforced type.
 	lo0Enforced atomic.Bool
+
+	// lo0LastFailed records the outcome of the most recent applyLo0Filter call:
+	// true iff it returned an error. applyTailReconciles runs lo0 before
+	// host-inbound in every apply, so the host-inbound handoff reads this as
+	// the CURRENT apply's lo0 outcome and retains the #10751 early barrier
+	// when lo0 protection failed (an intended lo0-only policy must not lose
+	// its only backstop to an independent teardown). Direct (non-tail)
+	// host-inbound callers see false until the first lo0 apply, preserving
+	// the un-gated behavior there.
+	lo0LastFailed atomic.Bool
 
 	// mgmtVRFInterfaces tracks interfaces bound to the management VRF (vrf-mgmt).
 	// Used by collectDHCPRoutes to exclude management routes from FRR.

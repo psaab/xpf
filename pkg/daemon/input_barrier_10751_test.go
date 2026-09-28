@@ -36,6 +36,9 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 		if !d.hostInboundEnforced.Load() {
 			t.Fatal("real host-inbound table did not publish enforcement before handoff")
 		}
+		if !d.earlyInputHandoffDone.Load() {
+			t.Fatal("successful real install must mark the handoff done")
+		}
 	})
 
 	t.Run("real install surfaces barrier removal failure", func(t *testing.T) {
@@ -53,6 +56,21 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 		}
 		if !d.hostInboundEnforced.Load() {
 			t.Fatal("real host-inbound enforcement was not retained after removal failure")
+		}
+		// B9: the real table stands but the handoff is incomplete — the
+		// recorded state must agree with the failing result (STALE, gen held).
+		st := d.HostInboundApplied()
+		if !st.Established || !st.LastApplyFailed || st.Current() {
+			t.Fatalf("applied state after failed handoff = %+v, want established-but-stale", st)
+		}
+		if st.LastFailureAt.IsZero() {
+			t.Fatal("failed handoff did not record a failure timestamp")
+		}
+		if st.Generation != 0 {
+			t.Fatalf("applied generation = %d, want 0 (success must not advance on handoff failure)", st.Generation)
+		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("failed barrier removal must not mark the handoff done")
 		}
 	})
 
@@ -83,6 +101,54 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 		}
 		if !d.hostInboundEnforced.Load() {
 			t.Fatal("address-scoped fallback did not publish enforcement before handoff")
+		}
+		// The fallback protects but the requested real policy failed: STALE.
+		st := d.HostInboundApplied()
+		if !st.Established || !st.LastApplyFailed || st.Current() {
+			t.Fatalf("applied state after fenced fallback = %+v, want established-but-stale", st)
+		}
+		if st.LastFailureAt.IsZero() {
+			t.Fatal("fenced fallback did not record a failure timestamp")
+		}
+		if !d.earlyInputHandoffDone.Load() {
+			t.Fatal("successful fenced-fallback handoff must mark the handoff done")
+		}
+	})
+
+	t.Run("failed replacement after success marks stale", func(t *testing.T) {
+		installErr := errors.New("replacement host-inbound load failed")
+		calls := 0
+		nftInstaller = &fakeNftInstaller{
+			hostInbound: func(xnft.HostInboundSpec) error {
+				calls++
+				if calls == 1 {
+					return nil
+				}
+				return installErr
+			},
+		}
+		d := &Daemon{}
+		cfg := hostInboundTestConfig()
+		if err := d.applyHostInboundFilter(cfg); err != nil {
+			t.Fatalf("initial real install: %v", err)
+		}
+		if st := d.HostInboundApplied(); !st.Current() || st.Generation != 1 {
+			t.Fatalf("applied state after success = %+v, want current generation 1", st)
+		}
+		// Same snapshot: no new coverage gap, so no gap fence — the
+		// retained generation still stands, but the render failed.
+		if err := d.applyHostInboundFilter(cfg); !errors.Is(err, installErr) {
+			t.Fatalf("replacement error = %v, want real install error", err)
+		}
+		st := d.HostInboundApplied()
+		if !st.Established || !st.LastApplyFailed || st.Current() {
+			t.Fatalf("applied state after failed replacement = %+v, want established-but-stale", st)
+		}
+		if st.LastFailureAt.IsZero() {
+			t.Fatal("failed replacement did not record a failure timestamp")
+		}
+		if st.Generation != 1 {
+			t.Fatalf("applied generation = %d, want 1 (failed render must not advance)", st.Generation)
 		}
 	})
 
@@ -115,6 +181,9 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 		if d.hostInboundEnforced.Load() {
 			t.Fatal("failed real and fallback installs must not publish enforcement")
 		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("failed fallback must not mark the handoff done")
+		}
 	})
 
 	t.Run("zero-drop fallback keeps barrier", func(t *testing.T) {
@@ -144,6 +213,9 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 		if d.hostInboundEnforced.Load() {
 			t.Fatal("zero-drop fallback must not claim enforcement")
 		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("zero-drop fallback must not mark the handoff done")
+		}
 	})
 
 	t.Run("no-enforcement teardown", func(t *testing.T) {
@@ -169,6 +241,30 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 		}
 		if got := strings.Join(events, ","); got != strings.Join(want, ",") {
 			t.Fatalf("no-enforcement lifecycle = %q, want deletions before barrier handoff %q", got, strings.Join(want, ","))
+		}
+		if !d.earlyInputHandoffDone.Load() {
+			t.Fatal("successful no-enforcement teardown must mark the handoff done")
+		}
+	})
+
+	t.Run("teardown surfaces barrier removal failure", func(t *testing.T) {
+		removeErr := errors.New("early input barrier removal failed")
+		nftInstaller = &fakeNftInstaller{
+			del:                     func(string) error { return nil },
+			earlyInputBarrierRemove: func() error { return removeErr },
+		}
+		d := &Daemon{}
+		err := d.applyHostInboundFilter(&config.Config{})
+		if !errors.Is(err, removeErr) {
+			t.Fatalf("teardown handoff error = %v, want barrier removal failure", err)
+		}
+		// Tables are gone but the handoff is incomplete: failure recorded.
+		st := d.HostInboundApplied()
+		if st.Established || !st.LastApplyFailed || st.Current() {
+			t.Fatalf("applied state after failed teardown handoff = %+v, want failed, nothing established", st)
+		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("failed teardown handoff must not mark the handoff done")
 		}
 	})
 }
