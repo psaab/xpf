@@ -55,8 +55,17 @@ xpf (0.0.0) unstable; urgency=medium
   * Return accurate consumed-input counts from sanitizing writers on emit
     errors, permitting retries without duplicating already-emitted lines
     (#10900).
+  * Bind multi-zone snapshot authorization to the selected peer connection;
+    keep stale-auth reports from re-arming after capable-peer convergence,
+    make deferral reports and clears attempt-fresh across peer epochs and
+    capability changes, and clear superseded alarms only after current active
+    config succeeds; preserve local convergence after peer-only push failures
+    (#10782).
   * Flush box-oriented host-inbound conntrack entries and guard denied TCP/UDP
     replies before established accepts; disable TCP loose pickup at boot/runtime
     (#10752/#10764).
+  * Scope stale host-input guards by ingress zone with trusted-reinject
+    fallback, reassert verified TCP loose pickup disablement, and harden
+    packet proof with HIGH exempt-UDP residual (#10752/#10764).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

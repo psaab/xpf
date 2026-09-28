@@ -461,6 +461,26 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"pre-failover warning, not a post-mortem.",
 		nil, nil,
 	)
+	c.userspaceSyncedImportMirrorRefused = prometheus.NewDesc(
+		"xpf_userspace_synced_import_mirror_refused_total",
+		"Peer-synced imports refused because the strict conntrack mirror write failed (#10788-F1).",
+		nil, nil,
+	)
+	c.userspaceMirrorRestoreRepublished = prometheus.NewDesc(
+		"xpf_userspace_mirror_restore_republished_total",
+		"Forward conntrack mirror survivors republished after a strict reverse-mirror failure (#10788-F1).",
+		nil, nil,
+	)
+	c.userspaceMirrorRestoreDeleted = prometheus.NewDesc(
+		"xpf_userspace_mirror_restore_deleted_total",
+		"Overwritten forward conntrack mirror rows deleted when no survivor existed (#10788-F1).",
+		nil, nil,
+	)
+	c.userspaceMirrorRestoreFailed = prometheus.NewDesc(
+		"xpf_userspace_mirror_restore_failed_total",
+		"Individual best-effort allocator or conntrack mirror restoration actions that failed (#10788-F1).",
+		nil, nil,
+	)
 	// #10512: policy-delete micro-batch gate-lease holds — the empirical leg
 	// of the tree-consistent timing position (average hold must read
 	// ms-typical; max bounds the pathological case).

@@ -68,8 +68,9 @@ type CLI struct {
 	natPoolExhaustionAlarmsFn func() []natpoolalarm.ActiveExhaustionAlarm
 	// clockSkewAlarmsFn returns daemon-resident pre-break fabric-auth clock
 	// alarms for `show system alarms` (#10025). Nil when no monitor is wired.
-	clockSkewAlarmsFn func() []clockskew.ActiveAlarm
-	feedsFn           func() map[string]feeds.FeedInfo
+	clockSkewAlarmsFn           func() []clockskew.ActiveAlarm
+	peerSnapshotProtocolAlarmFn func() string
+	feedsFn                     func() map[string]feeds.FeedInfo
 	// feedOverlayFn returns the live dynamic-address feed-prefix overlay
 	// (#3105): an address-name -> union-of-live-feed-CIDR-strings map, the same
 	// source the REST/gRPC simulators consume (daemon SnapshotForBindings). The
@@ -282,6 +283,12 @@ func (c *CLI) SetNATPoolExhaustionAlarmsFn(fn func() []natpoolalarm.ActiveExhaus
 // fabric-auth clock alarms surfaced by `show system alarms` (#10025).
 func (c *CLI) SetClockSkewAlarmsFn(fn func() []clockskew.ActiveAlarm) {
 	c.clockSkewAlarmsFn = fn
+}
+
+// SetPeerSnapshotProtocolAlarmFn wires the daemon-resident snapshot-protocol
+// deferral alarm into `show system alarms`.
+func (c *CLI) SetPeerSnapshotProtocolAlarmFn(fn func() string) {
+	c.peerSnapshotProtocolAlarmFn = fn
 }
 
 // SetFeedsFn sets a callback for retrieving live dynamic address feed status.

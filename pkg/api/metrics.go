@@ -611,6 +611,10 @@ type xpfCollector struct {
 	userspaceSessionInstallStaleIgnored       *prometheus.Desc
 	userspaceSessionDeleteStaleIgnored        *prometheus.Desc
 	userspaceSyncedImportReserveRefused       *prometheus.Desc
+	userspaceSyncedImportMirrorRefused  *prometheus.Desc
+	userspaceMirrorRestoreRepublished   *prometheus.Desc
+	userspaceMirrorRestoreDeleted       *prometheus.Desc
+	userspaceMirrorRestoreFailed        *prometheus.Desc
 	userspaceSyncedImportUnknownRoutingDomain *prometheus.Desc
 	userspaceSyncedImportIncompleteKey        *prometheus.Desc
 	// #10512: policy-delete micro-batch gate-lease holds (count, total and
@@ -1204,6 +1208,10 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceSessionInstallStaleIgnored
 	ch <- c.userspaceSessionDeleteStaleIgnored
 	ch <- c.userspaceSyncedImportReserveRefused
+	ch <- c.userspaceSyncedImportMirrorRefused
+	ch <- c.userspaceMirrorRestoreRepublished
+	ch <- c.userspaceMirrorRestoreDeleted
+	ch <- c.userspaceMirrorRestoreFailed
 	ch <- c.userspaceSyncedImportUnknownRoutingDomain
 	ch <- c.userspaceSyncedImportIncompleteKey
 	ch <- c.userspacePolicyBatchCount
