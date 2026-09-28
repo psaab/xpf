@@ -44,6 +44,10 @@ func CheckStateEmpty(path string) error {
 
 // EraseStateIfEmpty removes an empty, trusted DDNS ownership store and durably
 // syncs its parent. It never erases delete authority for a published DNS RR.
+// Crash-leaked fsatomic write temps for the store are removed with it: every
+// durable save stages full state JSON in a .<base>.tmp-* file first, so a
+// temp orphaned by a crash during reconcile holds tenant FQDNs/addresses a
+// canonical-only erase would hand to the next tenant.
 func EraseStateIfEmpty(path string) error {
 	if err := CheckStateEmpty(path); err != nil {
 		return err
@@ -51,10 +55,52 @@ func EraseStateIfEmpty(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("ddns: remove empty ownership state %s: %w", path, err)
 	}
+	if err := sweepCrashTemps(path); err != nil {
+		return err
+	}
 	if err := fsatomic.SyncDir(filepath.Dir(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("ddns: sync ownership-state directory for %s: %w", path, err)
 	}
 	return nil
+}
+
+// sweepCrashTemps removes fsatomic write temps (".<base>.tmp-*") staged for
+// path but never renamed over it by a crashed save. Scoped to this store's
+// base name so another writer's temps in the shared directory are untouched.
+// A symlinked temp fails closed for operator inspection.
+func sweepCrashTemps(path string) error {
+	dir := filepath.Dir(path)
+	prefix := "." + filepath.Base(path) + ".tmp-"
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("ddns: inspect ownership-state directory for %s: %w", path, err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		full := filepath.Join(dir, entry.Name())
+		info, err := os.Lstat(full)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("ddns: inspect crash temp %s: %w", full, err))
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			errs = append(errs, fmt.Errorf("ddns: crash temp %s is a symlink; NOT erasing it", full))
+			continue
+		}
+		if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("ddns: remove crash temp %s: %w", full, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func checkNoStateResidue(path string) error {

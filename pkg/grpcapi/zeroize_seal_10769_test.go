@@ -864,3 +864,29 @@ func TestPerformZeroizeSyncsAbsentParentOnRetry10769(t *testing.T) {
 		t.Fatalf("converged retry must clear the pending marker: %v", err)
 	}
 }
+
+func TestPerformZeroizeErasesStateCrashTemps10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	// Crash-orphaned fsatomic temps beside trusted-empty canonicals: full
+	// state JSON from a save that never renamed.
+	mustWriteFile(t, zeroizeDDNSLeaseStatePath, []byte(`{"version":1,"records":[]}`))
+	ddnsTemp := filepath.Join(filepath.Dir(zeroizeDDNSLeaseStatePath), ".dhcp-ddns-state.json.tmp-999")
+	mustWriteFile(t, ddnsTemp, []byte(`{"version":1,"records":[{"fqdn":"tenant.example"}]}`))
+	mustWriteFile(t, zeroizeIPsecStatePath, []byte(`{"loaded":[],"pending_terminate":[]}`))
+	ipsecTemp := filepath.Join(filepath.Dir(zeroizeIPsecStatePath), ".ipsec-conn-state.json.tmp-999")
+	mustWriteFile(t, ipsecTemp, []byte(`{"loaded":["site-a"]}`))
+
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	for _, path := range []string{ddnsTemp, ipsecTemp} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("crash temp %s survived a reported-success reset: %v", path, err)
+		}
+	}
+}

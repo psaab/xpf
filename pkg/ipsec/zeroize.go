@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
@@ -34,6 +35,10 @@ func CheckConnStateEmpty(path string) error {
 
 // EraseConnStateIfEmpty removes only a trusted-empty state file after its
 // manager has successfully cleared the loaded connections and termination debt.
+// Crash-leaked fsatomic write temps for the store are removed with it: every
+// durable save stages full state JSON in a .<base>.tmp-* file first, so a
+// temp orphaned by a crash holds tenant connection names a canonical-only
+// erase would hand to the next tenant.
 func EraseConnStateIfEmpty(path string) error {
 	if err := CheckConnStateEmpty(path); err != nil {
 		return err
@@ -41,8 +46,50 @@ func EraseConnStateIfEmpty(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("ipsec: remove empty connection state %s: %w", path, err)
 	}
+	if err := sweepCrashTemps(path); err != nil {
+		return err
+	}
 	if err := fsatomic.SyncDir(filepath.Dir(path)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("ipsec: sync connection-state directory for %s: %w", path, err)
 	}
 	return nil
+}
+
+// sweepCrashTemps removes fsatomic write temps (".<base>.tmp-*") staged for
+// path but never renamed over it by a crashed save. Scoped to this store's
+// base name so another writer's temps in the shared directory are untouched.
+// A symlinked temp fails closed for operator inspection.
+func sweepCrashTemps(path string) error {
+	dir := filepath.Dir(path)
+	prefix := "." + filepath.Base(path) + ".tmp-"
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("ipsec: inspect connection-state directory for %s: %w", path, err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		full := filepath.Join(dir, entry.Name())
+		info, err := os.Lstat(full)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("ipsec: inspect crash temp %s: %w", full, err))
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			errs = append(errs, fmt.Errorf("ipsec: crash temp %s is a symlink; NOT erasing it", full))
+			continue
+		}
+		if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("ipsec: remove crash temp %s: %w", full, err))
+		}
+	}
+	return errors.Join(errs...)
 }
