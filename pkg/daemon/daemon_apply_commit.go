@@ -15,6 +15,15 @@ import (
 // initial active configuration. This is called on first start when the DB
 // has no active config yet.
 func (d *Daemon) bootstrapFromFile() error {
+	// #10769 d05-F6 R1: refuse day-0 bootstrap promotion while the reset
+	// handoff flag demands a reboot or reports residue — the same gate
+	// the ordinary commit paths enforce. Without this, a new medium
+	// promotes N+1 over a dirty post-reset box (the factory-reset
+	// pending marker is gone on a completed wipe; only this flag
+	// remains). Checked before any read or promotion.
+	if err := configstore.CheckResetHandoff(); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(d.opts.ConfigFile)
 	if err != nil {
 		return fmt.Errorf("read config file: %w", err)

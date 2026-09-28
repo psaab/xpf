@@ -682,3 +682,131 @@ func TestReconcileRepairsCanonicalOnlyReappearance10769(t *testing.T) {
 		}
 	})
 }
+
+func TestStartupPhasesReconcileBeforeBootstrap(t *testing.T) {
+	// Source-shape pin (same mechanism as the #6739 order cell): the
+	// phase list is a literal in Run, so assert the reconcile entry
+	// precedes the bootstrap entry textually.
+	runSrc := readSource6739(t, "daemon_run.go")
+	reconcile := strings.Index(runSrc, `"reset-handoff-reconcile"`)
+	bootstrap := strings.Index(runSrc, `"config-load-bootstrap"`)
+	if reconcile < 0 || bootstrap < 0 {
+		t.Fatalf("startup phases lack reconcile (%d) or bootstrap (%d) entries", reconcile, bootstrap)
+	}
+	if reconcile > bootstrap {
+		t.Fatal("reset-handoff-reconcile must precede config-load-bootstrap: dirty-handoff repair runs before any bootstrap promotion can import N+1")
+	}
+}
+
+// RED on revert: without the bootstrap gate, a new medium promotes N+1
+// over a dirty post-reset box (the pending marker is gone; only the
+// handoff flag remains).
+func TestBootstrapFromFileRefusesWhileHandoffDirty10769(t *testing.T) {
+	conf := "system { host-name fw; }\n"
+	t.Run("dirty refuses", func(t *testing.T) {
+		isolateHandoffFlag(t)
+		d, hasActive := bootstrapDaemon(t, conf, -1)
+		if err := configstore.WriteResetHandoff("other-boot", configstore.ResetHandoffReasonTemps+": residue", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.bootstrapFromFile(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+			t.Fatalf("dirty bootstrap = %v, want incomplete", err)
+		}
+		if hasActive() {
+			t.Fatal("refused bootstrap must leave NO active config")
+		}
+	})
+	t.Run("clean same-boot refuses", func(t *testing.T) {
+		isolateHandoffFlag(t)
+		d, hasActive := bootstrapDaemon(t, conf, -1)
+		boot, err := configstore.CurrentBootID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := configstore.WriteResetHandoff(boot, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := d.bootstrapFromFile(); !errors.Is(err, configstore.ErrResetHandoffRebootRequired) {
+			t.Fatalf("same-boot bootstrap = %v, want reboot-required", err)
+		}
+		if hasActive() {
+			t.Fatal("refused bootstrap must leave NO active config")
+		}
+	})
+	t.Run("absent flag promotes", func(t *testing.T) {
+		isolateHandoffFlag(t)
+		d, hasActive := bootstrapDaemon(t, conf, -1)
+		if err := d.bootstrapFromFile(); err != nil {
+			t.Fatalf("ungated bootstrap must promote: %v", err)
+		}
+		if !hasActive() {
+			t.Fatal("ungated bootstrap must install an active config")
+		}
+	})
+}
+
+// Opus5 R1 exact shape: a successful-reset handoff marked dirty, no active
+// config, and an importable new-medium file. Startup through bootstrap
+// cannot promote or apply N+1 until residue is verified clean and the
+// gate permits; repair failure with real seeded residue keeps it closed.
+func TestStartupRepairsBeforeBootstrap10769(t *testing.T) {
+	newMediumDaemon := func(t *testing.T) (*Daemon, string) {
+		t.Helper()
+		dir := t.TempDir()
+		medium := filepath.Join(dir, "xpf.conf")
+		if err := os.WriteFile(medium, []byte("system { host-name n-plus-one; }\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store, err := configstore.New(filepath.Join(dir, "config.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &Daemon{store: store, opts: Options{ConfigFile: medium}}, medium
+	}
+	t.Run("load alone refuses, reconcile then load converges", func(t *testing.T) {
+		custom, rp := isolateHandoffRepairPaths(t)
+		seedHandoffTemps(t, rp)
+		if err := configstore.WriteResetHandoff("other-boot", configstore.ResetHandoffReasonTemps+": residue", custom); err != nil {
+			t.Fatal(err)
+		}
+		d, _ := newMediumDaemon(t)
+		if _, err := d.loadAndBootstrapConfig(); err != nil {
+			t.Fatalf("load must not fail fatally on a gated bootstrap: %v", err)
+		}
+		if d.store.ActiveConfig() != nil {
+			t.Fatal("bootstrap before repair must NOT promote N+1 over a dirty handoff")
+		}
+		d.reconcileResetHandoffAtBoot()
+		if _, err := d.loadAndBootstrapConfig(); err != nil {
+			t.Fatalf("load after repair: %v", err)
+		}
+		if d.store.ActiveConfig() == nil {
+			t.Fatal("bootstrap after verified repair must promote N+1")
+		}
+	})
+	t.Run("repair failure keeps the gate closed", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses directory permissions; erase would not fail")
+		}
+		custom, rp := isolateHandoffRepairPaths(t)
+		seedHandoffHelper(t, rp)
+		if err := os.Chmod(filepath.Dir(custom), 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(filepath.Dir(custom), 0o755) })
+		if err := configstore.WriteResetHandoff("other-boot", configstore.ResetHandoffReasonHelper+": residue", custom); err != nil {
+			t.Fatal(err)
+		}
+		d, _ := newMediumDaemon(t)
+		d.reconcileResetHandoffAtBoot()
+		if _, err := d.loadAndBootstrapConfig(); err != nil {
+			t.Fatalf("load must not fail fatally on a gated bootstrap: %v", err)
+		}
+		if d.store.ActiveConfig() != nil {
+			t.Fatal("bootstrap must NOT promote while residue repair fails")
+		}
+		if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+			t.Fatalf("gate after failed repair = %v, want incomplete", err)
+		}
+	})
+}

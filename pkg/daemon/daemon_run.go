@@ -158,7 +158,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// proceeding into steady state. A PLAIN phase error keeps the historical
 	// path: return the error and let the deferred loop stops (#5308) run.
 	var configFailClosed bool
+	// Phase order is LOAD-BEARING: reset-handoff-reconcile MUST precede
+	// config-load-bootstrap so dirty-handoff repair runs before any
+	// bootstrap promotion can import N+1 config (#10769 d05-F6 R1); it
+	// also stays before the dataplane (and helper) starts so a dirty
+	// flag gets its repair sweep while no live writer exists yet.
+	// Order pinned by TestStartupPhasesReconcileBeforeBootstrap.
 	phases := []startupPhase{
+		{"reset-handoff-reconcile", func(context.Context) error {
+			d.reconcileResetHandoffAtBoot()
+			return nil
+		}},
 		{"config-load-bootstrap", func(context.Context) error {
 			var e error
 			configFailClosed, e = d.loadAndBootstrapConfig()
@@ -170,14 +180,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}},
 		{"manager-init", func(context.Context) error {
 			return d.initManagers(configFailClosed)
-		}},
-		// Converge the reset handoff flag before the dataplane (and helper)
-		// starts: a dirty flag gets a repair sweep while no live writer
-		// exists yet, and a clean post-reboot flag clears. Never fails boot;
-		// enforcement happens at provisioning time.
-		{"reset-handoff-reconcile", func(context.Context) error {
-			d.reconcileResetHandoffAtBoot()
-			return nil
 		}},
 		// #9615: after manager-init so the feed manager exists; an alarm only,
 		// never a refusal to keep the recovered window armed.
