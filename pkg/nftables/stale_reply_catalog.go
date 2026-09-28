@@ -48,13 +48,17 @@ package nftables
 //   - NTP/123: chrony is the appliance time client; its source-port selection
 //     is not pinned here, so keep it unguarded rather than risk breaking NTP.
 //
-// The residual hole is the exempt client-role set and services with no
-// authoritative L4 tuple. The conntrack tuple alone cannot distinguish a
-// service reply from an outbound client using that same source port; those
-// tuples are kept rather than risking a false revocation of control-plane or
-// client traffic. Bare-protocol and ranged flows are likewise unguarded.
-// These limits preserve service-specific enforcement for the catalogued
-// TCP/UDP tuples while keeping the normal ephemeral-source reply path intact.
+// The residual hole is the exempt client-role set, services with no
+// authoritative L4 tuple, and non-catalog/custom TCP sports (e.g. 2222
+// admitted only packet-wide via `any-service`). The conntrack tuple alone
+// cannot distinguish a service reply from an outbound client using that same
+// source port; those tuples are kept rather than risking a false revocation
+// of control-plane or client traffic. Bare-protocol and ranged flows are
+// likewise unguarded. These limits preserve service-specific enforcement for
+// the catalogued TCP/UDP tuples while keeping the normal ephemeral-source
+// reply path intact. Non-catalog box-oriented entries were kept identically
+// by the pre-PR DstIP-only predicate, so this is status-quo-ante bounded by
+// conntrack expiry, not a revocation-timeliness regression.
 
 import (
 	"net/netip"

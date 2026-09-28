@@ -108,6 +108,47 @@ func TestHostInboundBoxOrientedFlushRespectsIngressPermits10752(t *testing.T) {
 		}
 	}
 }
+func TestHostInboundNonCatalogTCPStatusQuo10752(t *testing.T) {
+	// Sec2 A: custom/non-SSOT TCP (2222 models any any-service-admitted
+	// custom port) is neither flushed box-oriented nor guarded — in BOTH
+	// generations. Pre-PR the predicate was DstIP-only with no box-oriented
+	// branch, so box 2222 (DstIP=peer, never in the admit map) was kept
+	// identically; post-PR the catalog miss keeps it. Peer-oriented 2222
+	// flushes in both via the unchanged destination branch. This pins the
+	// documented HIGH residual (expiry ~5d established timeout) against
+	// silent drift in either direction; same for the TCP client-role exempt
+	// 179 (tuple ambiguity with box-originated BGP).
+	cfg := hostInboundFlushTestConfig("snmp")
+	cfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"snmp"}}
+	views := dpuserspace.BuildZoneHostInboundViews(cfg)
+	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
+	filter := buildHostInboundConntrackFlushFilter(views, unzonedV4, unzonedV6, nil)
+	if filter == nil {
+		t.Fatal("expected a filter for the enforcing configuration")
+	}
+	if !filter.MatchConntrackFlow(ctFlow(config.HostInboundProtoTCP, "172.16.50.8", 2222)) {
+		t.Error("peer-oriented custom TCP/2222 to a denying owner must flush (both generations)")
+	}
+	for _, flow := range []*netlink.ConntrackFlow{
+		boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 2222),
+		boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 179),
+	} {
+		if filter.MatchConntrackFlow(flow) {
+			t.Errorf("box-oriented %+v must be kept (documented non-catalog/TCP-exempt HIGH residual)", flow.Forward)
+		}
+	}
+	payload := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, nil, nil, true)
+	for _, line := range strings.Split(payload, "\n") {
+		if !isGuardDrop(line) {
+			continue
+		}
+		for _, port := range []uint16{2222, 179} {
+			if strings.Contains(line, " tcp dport ") && nftTextRuleHasPort(line, port) {
+				t.Errorf("non-catalog/TCP-exempt port %d must never appear in a guard DROP: %s", port, line)
+			}
+		}
+	}
+}
 
 func TestHostInputFenceConntrackMatchesCataloguedBoxFlows10752And10764(t *testing.T) {
 	filter := buildHostInputFenceConntrackFilter([]string{"172.16.50.8", "2001:db8:50::8"})

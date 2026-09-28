@@ -656,6 +656,28 @@ Properties:
   the flush/guard for these tuples. The BFD packet-path subtest pins the
   documented allow. Closing this needs per-socket identity (mark/cgroup), not
   tuple matching, or tying origination to host-inbound admit.
+- **HIGH residual: non-catalog/custom TCP and TCP client-role exempts are NOT
+  revoked box-oriented (status-quo-ante, NOT a regression).** SSOT SSH is
+  TCP/22-only, so a custom port such as 2222 (admitted only packet-wide via
+  `any-service`) can never enter the discrete-port catalog; after tightening,
+  a box-oriented `ORIG box:2222→peer` entry is kept by the flush (catalog
+  miss) and has no guard DROP, riding the broad reply accept until close or
+  the ~5d TCP established timeout. Pre-PR/post-PR comparison: the pre-PR
+  predicate was DstIP-only with no box-oriented branch, so it kept these
+  entries identically (peer DstIP never in the admit map); peer-oriented 2222
+  flushes in BOTH generations via the unchanged destination branch. The only
+  behavior delta is the intended catalogued revocation. `loose=0` stops NEW
+  box-oriented pickup, so only upgrade-time entries linger. Same holds for the
+  TCP client-role exempts excluded by tuple ambiguity with box-originated
+  control-plane/client traffic: FTP-data 20, BGP 179, rexec/rlogin/rsh
+  512/513/514, MSDP 639, LDP-TCP 646. Operator advisory: when decommissioning
+  a custom-port service or an exempt control-plane listener, stop the listener
+  (`ss -ltn` shows nothing on the port), delete the tuple
+  (`conntrack -D -p tcp -s <box-ip> --sport <port>`), verify `conntrack -L`
+  shows no box-oriented entry, then commit the removal; without the delete, a
+  lingering entry survives until close/timeout. Matcher pins: peer-oriented
+  2222 flushes, box-oriented 2222 and TCP/179 are kept; neither appears in any
+  guard DROP.
 - **Race bound: guard-first closes the catalogued Install→flush window.**
   The guard installs atomically with the table, before the conntrack sweep, so
   a packet arriving between install and flush still meets the guard for
