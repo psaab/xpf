@@ -479,6 +479,18 @@ exit 1
 EOF
     chmod +x "$ROOT/bin/nft"
 }
+stub_flock() {
+    # FLOCK_HELD=yes simulates a live owner holding the marker (flock
+    # fails); unset simulates stale/orphaned (flock succeeds).
+    mkdir -p "$ROOT/bin"
+    export FLOCK_HELD
+    cat > "$ROOT/bin/flock" <<EOF
+#!/bin/sh
+if [ "\$FLOCK_HELD" = yes ]; then exit 1; fi
+exit 0
+EOF
+    chmod +x "$ROOT/bin/flock"
+}
 
 scenario_first_install_skips_barrier_when_table_live() {
     build_first_install_success
@@ -511,10 +523,13 @@ scenario_first_install_injects_barrier_when_table_shell() {
         echo "FAIL: present-but-open shell table did not trigger a barrier injection"; exit 1; }
 }
 
-scenario_first_install_skips_barrier_with_handoff_marker() {
+scenario_first_install_skips_barrier_with_live_handoff_marker() {
     build_first_install_success
     patched_postinst_barrier_live
     stub_systemctl 0
+    stub_flock
+    FLOCK_HELD=yes
+    export FLOCK_HELD
     mkdir -p "$ROOT/run/xpf"
     : > "$ROOT/run/xpf/early-input-handoff.done"
     PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
@@ -527,6 +542,22 @@ scenario_first_install_skips_barrier_with_handoff_marker() {
     if [ -e "$SYSTEMCTL_LOG" ] && grep -Fq 'systemctl is-active --quiet xpfd' "$SYSTEMCTL_LOG"; then
         echo "FAIL: postinst probed the daemon despite a handoff marker"; exit 1
     fi
+}
+
+scenario_first_install_injects_barrier_with_stale_handoff_marker() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    stub_flock
+    unset FLOCK_HELD
+    export FLOCK_HELD
+    mkdir -p "$ROOT/run/xpf"
+    : > "$ROOT/run/xpf/early-input-handoff.done"
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst skipped kernel truth on a stale unlocked marker"; exit 1; }
+    grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG" || {
+        echo "FAIL: stale unlocked marker plus absent table did not trigger a barrier injection"; exit 1; }
 }
 
 scenario_upgrade_never_starts_barrier() {
@@ -548,7 +579,8 @@ run_scenario first_install_starts_barrier_without_daemon
 run_scenario first_install_injects_barrier_with_active_unhanded_daemon
 run_scenario first_install_skips_barrier_when_table_live
 run_scenario first_install_injects_barrier_when_table_shell
-run_scenario first_install_skips_barrier_with_handoff_marker
+run_scenario first_install_skips_barrier_with_live_handoff_marker
+run_scenario first_install_injects_barrier_with_stale_handoff_marker
 run_scenario upgrade_never_starts_barrier
 run_scenario recovers_cli_through_current
 run_scenario recovers_helper_through_current

@@ -119,8 +119,30 @@ case "$1" in
                 # (no chain/counter/set name contains it; every enforcing
                 # barrier variant carries a DROP verdict), and a missing
                 # table (nft errors, no output) injects too.
+                # M2 liveness: a merely present marker may be a dead
+                # daemon's file surviving best-effort cleanup (or planted).
+                # flock succeeds iff NO live process holds it (stale — do
+                # not skip on it); it fails iff the owner lives (skip —
+                # covers raw binaries invisible to systemctl). No flock(1)
+                # means liveness is unprovable: treat as stale and fall
+                # through to kernel truth (fail-closed; the R4-6 corner
+                # self-heals). Residual: a flock internal error (lock
+                # exhaustion scale) also reads live; the daemon-side probe
+                # discriminates fully, this shell gate does not need to.
+                marker_live=false
                 if [ -e "$XPF_RUN_DIR/early-input-handoff.done" ]; then
-                    : # handed off (covers raw binaries invisible to systemctl)
+                    if command -v flock >/dev/null 2>&1; then
+                        if flock -n "$XPF_RUN_DIR/early-input-handoff.done" true 2>/dev/null; then
+                            : # lockable: stale/orphaned, fall through below
+                        else
+                            marker_live=true
+                        fi
+                    else
+                        : # no flock(1): unprovable, treat as stale (proceed)
+                    fi
+                fi
+                if [ "$marker_live" = true ]; then
+                    : # handed off with a live owner (covers raw binaries invisible to systemctl)
                 elif command -v nft >/dev/null 2>&1 && nft list table inet xpf_input_barrier 2>/dev/null | grep -qw drop; then
                     : # barrier already enforcing (DROP-bearing); nothing to inject (kernel truth)
                 else
