@@ -45,6 +45,8 @@ use std::net::IpAddr;
 fn idle_lease_import_is_notable(counts: &IdleLeaseImportCounts, malformed: u32) -> bool {
     counts.installed > 0
         || counts.skipped_port_busy > 0
+        || counts.skipped_identity_busy > 0
+        || counts.skipped_capacity > 0
         || counts.skipped_unknown_pool > 0
         || counts.skipped_unknown_address > 0
         || malformed > 0
@@ -148,13 +150,15 @@ pub(super) fn import(
     if idle_lease_import_is_notable(&counts, malformed) {
         eprintln!(
             "xpf-dp: idle-lease import installed={} existing={} expired={} unknown_addr={} \
-             unknown_pool={} port_busy={} malformed={}",
+             unknown_pool={} port_busy={} identity_busy={} capacity={} malformed={}",
             counts.installed,
             counts.skipped_existing,
             counts.skipped_expired,
             counts.skipped_unknown_address,
             counts.skipped_unknown_pool,
             counts.skipped_port_busy,
+            counts.skipped_identity_busy,
+            counts.skipped_capacity,
             malformed,
         );
     }
@@ -220,6 +224,22 @@ mod tests {
                 "port busy — installing would duplicate a translated identity",
                 IdleLeaseImportCounts {
                     skipped_port_busy: 1,
+                    ..zero
+                },
+                0,
+            ),
+            (
+                "address-only reverse identity already owned",
+                IdleLeaseImportCounts {
+                    skipped_identity_busy: 1,
+                    ..zero
+                },
+                0,
+            ),
+            (
+                "lease table at capacity",
+                IdleLeaseImportCounts {
+                    skipped_capacity: 1,
                     ..zero
                 },
                 0,
