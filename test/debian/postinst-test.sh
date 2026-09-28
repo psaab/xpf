@@ -27,6 +27,7 @@ patched_postinst() {
     sed \
       -e "s#^STAGED=.*#STAGED=$ROOT/usr/local/share/xpf/staged#" \
       -e "s#^SBIN=.*#SBIN=$ROOT/usr/local/sbin#" \
+      -e "s#^XPF_RUN_DIR=.*#XPF_RUN_DIR=$ROOT/run/xpf#" \
       -e "s#^\([[:space:]]*\)CURRENT_DIR=.*#\1CURRENT_DIR=$ROOT/var/lib/xpf/versions/current#" \
       -e "s#/etc/xpf/node-id#$ROOT/etc/xpf/node-id#g" \
       -e "s#\\[ -d /run/systemd/system \\]#false#g" \
@@ -36,6 +37,8 @@ patched_postinst() {
         echo "FAIL: patched postinst missing rewritten STAGED assignment"; exit 1; }
     [ "$(grep -E '^SBIN=' "$ROOT/postinst" || true)" = "SBIN=$ROOT/usr/local/sbin" ] || {
         echo "FAIL: patched postinst missing rewritten SBIN assignment"; exit 1; }
+    [ "$(grep -E '^XPF_RUN_DIR=' "$ROOT/postinst" || true)" = "XPF_RUN_DIR=$ROOT/run/xpf" ] || {
+        echo "FAIL: patched postinst missing rewritten XPF_RUN_DIR assignment"; exit 1; }
     current_line=$(grep -E '^[[:space:]]*CURRENT_DIR=' "$ROOT/postinst" || true)
     case "$current_line" in
         *"CURRENT_DIR=$ROOT/var/lib/xpf/versions/current") ;;
@@ -396,6 +399,9 @@ patched_postinst_barrier_live() {
     sed -i 's|if false && \[ -x "\$SBIN/xpfd" \]; then # 10751-BARRIER-GATE|if true; then # 10751-BARRIER-GATE|' "$ROOT/postinst"
     grep -Fq 'if true; then # 10751-BARRIER-GATE' "$ROOT/postinst" || {
         echo "FAIL: barrier gate re-arm did not match (postinst drift?)"; exit 1; }
+    NFT_TABLE_PRESENT=no
+    export NFT_TABLE_PRESENT
+    stub_nft
 }
 
 stub_systemctl() {
@@ -435,11 +441,65 @@ scenario_first_install_skips_barrier_with_live_daemon() {
     fi
 }
 
+stub_nft() {
+    # NFT_TABLE_PRESENT=yes simulates a live barrier table.
+    mkdir -p "$ROOT/bin"
+    NFT_LOG="$ROOT/nft.log"
+    export NFT_LOG NFT_TABLE_PRESENT
+    cat > "$ROOT/bin/nft" <<EOF
+#!/bin/sh
+echo "nft \$*" >> "$NFT_LOG"
+[ "\$1 \$2 \$3 \$4" = "list table inet xpf_input_barrier" ] && [ "\$NFT_TABLE_PRESENT" = yes ]
+EOF
+    chmod +x "$ROOT/bin/nft"
+}
+
+scenario_first_install_skips_barrier_when_table_live() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    NFT_TABLE_PRESENT=yes
+    export NFT_TABLE_PRESENT
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    grep -Fq 'nft list table inet xpf_input_barrier' "$NFT_LOG" || {
+        echo "FAIL: postinst did not probe kernel barrier state"; exit 1; }
+    if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst injected the barrier despite a live table"; exit 1
+    fi
+}
+
+scenario_first_install_skips_barrier_with_handoff_marker() {
+    build_first_install_success
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    mkdir -p "$ROOT/run/xpf"
+    : > "$ROOT/run/xpf/early-input-handoff.done"
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure ""
+    if grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: postinst injected the barrier despite a handoff marker (raw-binary daemon?)"; exit 1
+    fi
+}
+
+scenario_upgrade_never_starts_barrier() {
+    build_hardened "1.0.0"
+    patched_postinst_barrier_live
+    stub_systemctl 1
+    grep -Fq '10751-BARRIER-GATE' "$ROOT/postinst" || {
+        echo "FAIL: barrier block missing from patched postinst; absence pin would be vacuous"; exit 1; }
+    PATH="$ROOT/bin:$PATH" "$ROOT/postinst" configure "0.9.0"
+    if [ -e "$SYSTEMCTL_LOG" ] && grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
+        echo "FAIL: upgrade injected the barrier into a possibly armed daemon"; exit 1
+    fi
+}
+
 run_scenario first_install_configure_empty_seeds_layout
 run_scenario first_install_seed_failure_falls_back_to_staged
 run_scenario first_install_killed_during_seed_keeps_launch_links
 run_scenario first_install_starts_barrier_without_daemon
 run_scenario first_install_skips_barrier_with_live_daemon
+run_scenario first_install_skips_barrier_when_table_live
+run_scenario first_install_skips_barrier_with_handoff_marker
+run_scenario upgrade_never_starts_barrier
 run_scenario recovers_cli_through_current
 run_scenario recovers_helper_through_current
 run_scenario leaves_existing_and_dangling_links

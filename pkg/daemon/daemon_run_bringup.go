@@ -78,14 +78,7 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		// fences never see the retained addresses that networkd brought up.
 		// Fence their live destinations now, preserving the management
 		// lifeline, before the daemon starts its control surfaces.
-		d.installFailClosedBootHostFences(failClosed)
-		// #10751/B10: bootstrap suppresses the ordinary apply that hands the
-		// early barrier off. Swap it for the lifeline-admitting guard AFTER
-		// the fail-closed fences above (when any): data and link-local
-		// ingress stay closed while remote recovery keeps its lifeline.
-		if d.inBootstrap() {
-			d.ensureEarlyInputBootstrapGuard()
-		}
+		d.installBootstrapInputProtection(failClosed)
 
 		d.ipsec = ipsec.New()
 		d.ra = ra.New()

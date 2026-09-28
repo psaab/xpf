@@ -703,9 +703,9 @@ func TestEarlyInputBootstrapGuard10751(t *testing.T) {
 		fake.lo0ColdBootFence = func(xnft.FenceSpec) error { events = append(events, "lo0-fence"); return nil }
 		fake.earlyInputBarrierLifelineInstall = func([]string) error { events = append(events, "install-guard"); return nil }
 		d.bootstrapMode.Store(true)
-		// initManagers order: fail-closed fences first, then the guard swap.
-		d.installFailClosedBootHostFences(true)
-		d.ensureEarlyInputBootstrapGuard()
+		// Production order via installBootstrapInputProtection (initManagers
+		// calls this; reversing it must break this cell).
+		d.installBootstrapInputProtection(true)
 		want := "host-fence,lo0-fence,install-guard"
 		if got := strings.Join(events, ","); got != want {
 			t.Fatalf("bootstrap order = %q, want %q (data fences own their scope before the guard swap)", got, want)
@@ -726,8 +726,7 @@ func TestEarlyInputBootstrapGuard10751(t *testing.T) {
 		fake.coldBootFence = func(xnft.FenceSpec) error { return errors.New("host fence failed") }
 		fake.lo0ColdBootFence = func(xnft.FenceSpec) error { return errors.New("lo0 fence failed") }
 		d.bootstrapMode.Store(true)
-		d.installFailClosedBootHostFences(true)
-		d.ensureEarlyInputBootstrapGuard()
+		d.installBootstrapInputProtection(true)
 		installs := 0
 		removes := 0
 		for _, call := range fake.earlyInputBarrierCalls {
@@ -765,8 +764,7 @@ func TestEarlyInputBootstrapGuard10751(t *testing.T) {
 		// The fail-closed fences exclude link-locals by design (#10732); the
 		// lifeline guard's DROP policy is what covers them — so bootstrap
 		// must install the guard (not lift the table) on this box.
-		d.installFailClosedBootHostFences(true)
-		d.ensureEarlyInputBootstrapGuard()
+		d.installBootstrapInputProtection(true)
 		removes, installs := 0, 0
 		for _, call := range fake.earlyInputBarrierCalls {
 			switch call {

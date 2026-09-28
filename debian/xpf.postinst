@@ -39,6 +39,10 @@ SBIN=/usr/local/sbin
 # list diverges from manifest.Names(). Edit both together.
 BINS="xpfd cli xpf-userspace-dp xpf-day0-config"
 
+# Runtime state dir, probed (not managed) by the fresh-install barrier gate
+# below. Rewritten to a temp root by the installer test harness.
+XPF_RUN_DIR=/run/xpf
+
 case "$1" in
     configure)
         # $2 is the previously-configured version, empty on first install.
@@ -89,13 +93,23 @@ case "$1" in
             # next boot but never starts it live. On a fresh install with the
             # network already up and no daemon enforcing, host listeners would
             # stay unenforced until reboot. Close that window now when booted
-            # under systemd and no live xpfd owns enforcement (its first apply
-            # hands the barrier off). Upgrades never reach this branch, and a
-            # live daemon skips the injection — no DROP is ever injected into
-            # an armed daemon. Never fail the install.
+            # under systemd and nothing owns enforcement. Enforcement ownership
+            # is probed three ways (cheapest first); any hit skips injection:
+            # a live xpfd unit, a handoff marker from any xpfd process
+            # (covers raw-binary daemons invisible to systemctl), or a live
+            # barrier table (kernel truth, idempotent). Upgrades never reach
+            # this branch. Never fail the install.
+            # Residual race (accepted): an xpfd start completing its first
+            # handoff between our probes and `enable --now` could still take
+            # an injection it immediately hands off; the window is milliseconds
+            # and the first apply converges by removing the table.
             if [ -d /run/systemd/system ] && [ -x "$SBIN/xpfd" ]; then # 10751-BARRIER-GATE
                 if systemctl is-active --quiet xpfd 2>/dev/null; then
                     : # live daemon owns enforcement; its first apply hands off
+                elif [ -e "$XPF_RUN_DIR/early-input-handoff.done" ]; then
+                    : # a daemon process already handed off (covers raw binaries)
+                elif command -v nft >/dev/null 2>&1 && nft list table inet xpf_input_barrier >/dev/null 2>&1; then
+                    : # barrier already live; nothing to inject (kernel truth)
                 elif systemctl enable --now xpf-input-closed.service 2>/dev/null; then
                     :
                 else
