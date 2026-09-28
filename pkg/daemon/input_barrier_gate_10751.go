@@ -188,19 +188,23 @@ func (d *Daemon) ensureEarlyInputBootstrapGuard() {
 		"lifelines", lifelines)
 }
 
-// hostInboundHasPendingEnforcingIntent reports whether any configured
-// enforcement scope is still unresolved: a zone with interfaces but no
-// address yet (coarse, zone-level), or a specific interface-unit/family
-// with a DHCP client but no lease (fine-grained: mixed zones, sequential
-// v4/v6 acquisition). Consulted ONLY pre-handoff to retain the early
-// barrier until every intended scope installs its own protection —
-// otherwise an unrelated or first-family handoff lifts the global guard
-// while pending ingress stays unprotected until a later apply.
-func hostInboundHasPendingEnforcingIntent(cfg *config.Config) bool {
-	if len(dpuserspace.AddresslessEnforcingZones(cfg)) > 0 {
-		return true
-	}
-	return len(dpuserspace.AddresslessEnforcingInterfaces(cfg)) > 0
+// sampleHostInboundSnapshots samples the interface address rows for the
+// host-inbound apply path. A package var so handoff-race tests can script an
+// address transition between the install sample and the handoff re-sample;
+// production always samples the kernel. See SnapshotNewcomerAddrs.
+var sampleHostInboundSnapshots = dpuserspace.BuildInterfaceSnapshots
+
+// hostInboundHasPendingEnforcingIntentFromSnapshots reports whether any
+// configured enforcement scope is still unresolved in snaps: a zone with
+// interfaces but no address yet (coarse, zone-level), or a specific
+// interface-unit/family with a DHCP client but no lease (fine-grained:
+// mixed zones, sequential v4/v6 acquisition). Consulted ONLY pre-handoff,
+// over the handoff re-sample, to retain the early barrier until every
+// intended scope installs its own protection — otherwise an unrelated or
+// first-family handoff lifts the global guard while pending ingress stays
+// unprotected until a later apply.
+func hostInboundHasPendingEnforcingIntentFromSnapshots(cfg *config.Config, snaps []dpuserspace.InterfaceSnapshot) bool {
+	return dpuserspace.HostInboundPendingIntentFromSnapshots(cfg, snaps)
 }
 
 // removeEarlyInputBarrierAtHandoff removes the barrier for a first handoff

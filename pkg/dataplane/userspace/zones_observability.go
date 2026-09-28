@@ -165,9 +165,13 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 	// Per-unit resolved-family presence, from the SAME sources the views
 	// core scopes the kernel deny with: the interface snapshots (static
 	// config addresses merged with live kernel addresses) and the
-	// configured VRRP VIPs — MINUS kernel scope-link rows, which never
-	// satisfy lease intent (#10751 R4-1). A family present here is already
-	// covered by the deny, so it is NOT a fail-open window.
+	// configured VRRP VIPs — MINUS UNCONFIGURED kernel scope-link rows,
+	// which never satisfy lease intent (#10751 R4-1). A scope-link row
+	// whose address is explicitly configured still marks (the merge
+	// prefers live rows, so a configured fe80::/64 already installed on
+	// the kernel reads back as scope-link). A family present here is
+	// already covered by the deny, so it is NOT a fail-open window.
+	configuredAddrs := configuredHostInboundAddrKeys(cfg)
 	hasFam := make(map[string]map[string]bool)
 	mark := func(name, family string) {
 		m := hasFam[name]
@@ -179,7 +183,7 @@ func addresslessEnforcingInterfacesFromSnapshots(cfg *config.Config, snaps []Int
 	}
 	for _, snap := range snaps {
 		for _, a := range snap.Addresses {
-			if hostInboundScopeLinkAddr(a) {
+			if hostInboundScopeLinkUnresolved(snap.Name, a, configuredAddrs) {
 				continue
 			}
 			if hostIPFromCIDR(a.Address) != "" {
@@ -309,6 +313,20 @@ func AddresslessEnforcingInterfaces(cfg *config.Config) []AddresslessEnforcingIn
 		return nil
 	}
 	return addresslessEnforcingInterfacesFromSnapshots(cfg, buildInterfaceSnapshots(cfg))
+}
+
+// HostInboundPendingIntentFromSnapshots reports whether any configured
+// enforcement scope is still unresolved in ONE caller-supplied snapshot
+// (#10751 R4-2): the coarse zone-level window or the fine per-unit/family
+// DHCP window. The daemon's handoff decision calls this over its handoff
+// re-sample — the same sample its newcomer check compares — so the install
+// inputs, the retention verdict, and the change check all derive from
+// observed snapshots instead of re-sampling the kernel piecemeal.
+func HostInboundPendingIntentFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot) bool {
+	if len(addresslessEnforcingZonesFromSnapshots(cfg, snaps)) > 0 {
+		return true
+	}
+	return len(addresslessEnforcingInterfacesFromSnapshots(cfg, snaps)) > 0
 }
 
 // AmbiguousHostInboundAddress names a firewall-local address that is

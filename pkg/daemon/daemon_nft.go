@@ -573,7 +573,12 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		return err
 	}
 
-	views := dpuserspace.BuildZoneHostInboundViews(cfg)
+	// #10751 R4-2: ONE address snapshot feeds the install inputs (views,
+	// unzoned, fence scope) AND the handoff checks below. Sampling piecemeal
+	// let a lease landing mid-apply skew the installed ruleset against the
+	// retention verdict; the handoff re-sample plus newcomer check closes it.
+	snaps1 := sampleHostInboundSnapshots(cfg)
+	views := dpuserspace.BuildZoneHostInboundViewsFromSnapshots(cfg, snaps1)
 	// zone. xpfd applies an interface's address regardless of zone membership,
 	// but the per-zone views above scope the default-deny to ZONED addresses
 	// only, so host-bound traffic to an addressed-but-unzoned interface would
@@ -587,7 +592,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// connections to it and the #5566 reconcile — fed from this same set — flushed
 	// the established ones. See docs/host-inbound-service-matrix.md,
 	// "Lifeline exclusion is by address VALUE, in the fence and the real table".
-	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
+	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrsFromSnapshots(cfg, snaps1)
 	// #3698: surface the transient fail-open admit window. A configured
 	// host-inbound-enforcing zone whose non-lifeline interfaces have no
 	// resolvable address yet (DHCP WAN before its first lease, backup node before
@@ -684,10 +689,23 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				slog.Warn("retaining early host-input barrier: lo0 protection failed in this apply")
 				return nil
 			}
+			// #10751 R4-2: re-sample at handoff. The teardown above deleted on
+			// the install sample's premise (nothing to enforce); an address
+			// that appeared since aborts the handoff so the next apply
+			// installs with it covered. Tables already deleted + barrier
+			// retained + retry is the fail-closed ordering.
+			freshSnaps := sampleHostInboundSnapshots(cfg)
+			if newcomers := dpuserspace.SnapshotNewcomerAddrs(snaps1, freshSnaps); len(newcomers) > 0 {
+				slog.Warn("retaining early host-input barrier: addresses changed during apply; retry",
+					"newcomers", strings.Join(newcomers, ","))
+				d.noteHostInboundApplyFailed(time.Now())
+				return fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(newcomers, ","))
+			}
 			// B3/F3-A: 'nothing resolved now' is not 'operator requested no
 			// enforcement' — at zone AND interface/family granularity
-			// (mixed zones, sequential v4/v6 acquisition).
-			if hostInboundHasPendingEnforcingIntent(cfg) {
+			// (mixed zones, sequential v4/v6 acquisition), decided over the
+			// handoff re-sample.
+			if hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps) {
 				slog.Warn("retaining early host-input barrier: enforcing scopes have no address yet")
 				return nil
 			}
@@ -781,7 +799,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// fence strips every per-service ACCEPT, so a bare `daddr <mgmt-ip>
 			// drop` would lock out management), and every firewall-local address
 			// covered rather than only the zone-model ones.
-			sets := dpuserspace.BuildFenceAddrSets(cfg, views)
+			sets := dpuserspace.BuildFenceAddrSetsFromSnapshots(cfg, snaps1, views)
 			if fenceErr := d.installHostInboundColdBootFence(sets, wgListenPorts); fenceErr != nil {
 				// The real install failed AND no fallback stands: record the
 				// staleness — the worst applied state — alongside the error.
@@ -826,9 +844,20 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// successful install or no-enforcement teardown.
 			// B1: pre-handoff, a failed lo0 in this apply also retains the
 			// barrier — the fence covers only the host-inbound scope.
+			// #10751 R4-2: handoff re-sample (see the real-install site).
+			var freshSnaps []dpuserspace.InterfaceSnapshot
+			var snapshotChanged []string
+			if !d.earlyInputHandoffDone.Load() {
+				freshSnaps = sampleHostInboundSnapshots(cfg)
+				snapshotChanged = dpuserspace.SnapshotNewcomerAddrs(snaps1, freshSnaps)
+			}
 			if !d.earlyInputHandoffDone.Load() && d.lo0LastFailed.Load() {
 				slog.Warn("retaining early host-input barrier after fenced fallback: lo0 protection failed in this apply")
-			} else if !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntent(cfg) {
+			} else if len(snapshotChanged) > 0 {
+				slog.Warn("retaining early host-input barrier after fenced fallback: addresses changed during apply; retry",
+					"newcomers", strings.Join(snapshotChanged, ","))
+				barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
+			} else if !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps) {
 				slog.Warn("retaining early host-input barrier after fenced fallback: enforcing scopes have no address yet")
 			} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg); barrierErr != nil {
 				barrierErr = tagNftInstallErr(barrierErr)
@@ -888,9 +917,25 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// both scopes, and the lo0 error already fails the commit. The next
 	// successful apply hands off.
 	lo0RetainsBarrier := !d.earlyInputHandoffDone.Load() && d.lo0LastFailed.Load()
-	pendingRetainsBarrier := !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntent(cfg)
+	// #10751 R4-2: re-sample at handoff over the SAME snapshot discipline
+	// as the install. A newcomer address since the install sample means
+	// the just-installed ruleset does not cover it: retain the barrier
+	// and fail so the next apply re-renders with it covered. A removal
+	// needs no action (installed rules over-deny harmlessly).
+	var freshSnaps []dpuserspace.InterfaceSnapshot
+	var snapshotChanged []string
+	if !d.earlyInputHandoffDone.Load() {
+		freshSnaps = sampleHostInboundSnapshots(cfg)
+		snapshotChanged = dpuserspace.SnapshotNewcomerAddrs(snaps1, freshSnaps)
+	}
+	pendingRetainsBarrier := !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps)
+	snapshotChangedRetainsBarrier := len(snapshotChanged) > 0
 	if lo0RetainsBarrier {
 		slog.Warn("retaining early host-input barrier after real install: lo0 protection failed in this apply")
+	} else if snapshotChangedRetainsBarrier {
+		slog.Warn("retaining early host-input barrier after real install: addresses changed during apply; retry",
+			"newcomers", strings.Join(snapshotChanged, ","))
+		barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
 	} else if pendingRetainsBarrier {
 		slog.Warn("retaining early host-input barrier after real install: enforcing scopes have no address yet")
 	} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg); barrierErr != nil {
@@ -948,7 +993,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// B1/F3-A: a retained barrier is not a handoff — the next successful
 	// apply removes it. The host-inbound scope itself installed cleanly,
 	// so applied-success is still recorded.
-	if !lo0RetainsBarrier && !pendingRetainsBarrier {
+	if !lo0RetainsBarrier && !pendingRetainsBarrier && !snapshotChangedRetainsBarrier {
 		d.setEarlyInputHandoffDone()
 	}
 	slog.Info("host-inbound filter applied", "zones", len(views),

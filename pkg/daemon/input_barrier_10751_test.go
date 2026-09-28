@@ -3,8 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -928,13 +930,16 @@ func TestEarlyInputPendingIntentAllBranches10751(t *testing.T) {
 
 	runLifecycle := func(t *testing.T, zonesSilent bool, phase1, phase2 *config.Config, failPhase1Real bool) {
 		t.Helper()
-		if !hostInboundHasPendingEnforcingIntent(phase1) {
+		pendingOf := func(cfg *config.Config) bool {
+			return hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, dpuserspace.BuildInterfaceSnapshots(cfg))
+		}
+		if !pendingOf(phase1) {
 			t.Fatal("phase-1 fixture has no pending intent; the retention half would be vacuous")
 		}
 		if zonesSilent && len(dpuserspace.AddresslessEnforcingZones(phase1)) != 0 {
 			t.Fatal("phase-1 fixture must be zone-silent so only interface/family granularity catches it")
 		}
-		if hostInboundHasPendingEnforcingIntent(phase2) {
+		if pendingOf(phase2) {
 			t.Fatal("phase-2 fixture still pending; the completion half would be vacuous")
 		}
 		installErr := errors.New("phase-1 real install failed")
@@ -1350,5 +1355,264 @@ func TestEarlyInputGuardSwapFailedSignal10751(t *testing.T) {
 	d.ensureEarlyInputBootstrapGuard()
 	if d.EarlyInputGuardSwapFailed() {
 		t.Fatal("successful swap did not clear the signal")
+	}
+}
+
+// --- #10751 R4-2: single-snapshot handoff (transition injection) ---
+//
+// The install inputs render from one sample; the handoff re-samples and
+// refuses when an address appeared since. These cells script that transition
+// through sampleHostInboundSnapshots: the first call (install sample)
+// returns s1, later calls (handoff re-sample) return s2.
+
+func scriptedSnap10751(name, zone string, addrs ...dpuserspace.InterfaceAddressSnapshot) dpuserspace.InterfaceSnapshot {
+	return dpuserspace.InterfaceSnapshot{Name: name, Zone: zone, IsUnit: true, LinuxName: name, Addresses: addrs}
+}
+
+func scriptedAddr10751(fam, cidr string, scope int) dpuserspace.InterfaceAddressSnapshot {
+	return dpuserspace.InterfaceAddressSnapshot{Family: fam, Address: cidr, Scope: scope}
+}
+
+func scriptSnapshotTransition10751(t *testing.T, s1, s2 []dpuserspace.InterfaceSnapshot) *int {
+	t.Helper()
+	orig := sampleHostInboundSnapshots
+	t.Cleanup(func() { sampleHostInboundSnapshots = orig })
+	calls := 0
+	sampleHostInboundSnapshots = func(*config.Config) []dpuserspace.InterfaceSnapshot {
+		calls++
+		if calls == 1 {
+			return s1
+		}
+		return s2
+	}
+	return &calls
+}
+
+// newcomerCfg10751 builds a single-zone config over scripted units. Addresses
+// live ONLY in the scripted snapshots (the FromSnapshots cores never merge
+// config addresses), so units carry just identity plus DHCP flags.
+func newcomerCfg10751(zone string, units map[string]*config.InterfaceUnit) *config.Config {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{}
+	var refs []string
+	for name, unit := range units {
+		cfg.Interfaces.Interfaces[name] = &config.InterfaceConfig{Name: name, Units: map[int]*config.InterfaceUnit{unit.Number: unit}}
+		refs = append(refs, fmt.Sprintf("%s.%d", name, unit.Number))
+	}
+	sort.Strings(refs)
+	cfg.Security.Zones = map[string]*config.ZoneConfig{zone: {Name: zone, Interfaces: refs}}
+	return cfg
+}
+
+func assertBarrierRetained10751(t *testing.T, fake *fakeNftInstaller, d *Daemon) {
+	t.Helper()
+	for _, ev := range fake.earlyInputBarrierCalls {
+		if ev == "remove" {
+			t.Fatalf("barrier calls = %v: a newcomer must retain, never remove", fake.earlyInputBarrierCalls)
+		}
+	}
+	if d.earlyInputHandoffDone.Load() {
+		t.Fatal("handoff marked done over an uncovered newcomer")
+	}
+	if !d.hostInboundLastApplyFailed.Load() {
+		t.Fatal("newcomer abort must record STALE so the commit result agrees with applied state")
+	}
+}
+
+// TestSnapshotNewcomerRetainsBarrierRealInstall10751: a static unit (pending
+// impossible — no DHCP flags) whose re-sample gains an address. The install
+// covered only the install sample, so the handoff refuses with a retry
+// error. RED on revert: drop the newcomer block and the apply succeeds with
+// a removal.
+func TestSnapshotNewcomerRetainsBarrierRealInstall10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
+	v4 := scriptedAddr10751("inet", "10.0.0.1/24", int(netlink.SCOPE_UNIVERSE))
+	newcomer := scriptedAddr10751("inet6", "2001:db8::99/64", int(netlink.SCOPE_UNIVERSE))
+	s1 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", v4)}
+	s2 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", v4, newcomer)}
+	if hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, s1) || hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, s2) {
+		t.Fatal("static fixture must be pending-free on both samples; else the cell cannot isolate the newcomer check")
+	}
+	calls := scriptSnapshotTransition10751(t, s1, s2)
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "changed during apply") {
+		t.Fatalf("apply err = %v, want newcomer retry error", err)
+	}
+	assertBarrierRetained10751(t, fake, d)
+	if *calls != 2 {
+		t.Fatalf("snapshot samples = %d, want 2 (install + handoff re-sample)", *calls)
+	}
+}
+
+// TestSnapshotNewcomerBeatsPendingMasking10751 is the core race cell: sibling
+// A is resolved while sibling B's DHCPv6 lease lands BETWEEN the install
+// sample and the handoff re-sample. The re-sample alone is pending-free, so
+// without the newcomer check the handoff would proceed with the lease
+// uncovered; the install covered A only. RED on revert: same as above.
+func TestSnapshotNewcomerBeatsPendingMasking10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{
+		"ge-0/0/0": {Number: 0},
+		"ge-0/0/1": {Number: 0, DHCPv6: true},
+	})
+	v4 := scriptedAddr10751("inet", "10.0.0.1/24", int(netlink.SCOPE_UNIVERSE))
+	lease := scriptedAddr10751("inet6", "2001:db8::7/64", int(netlink.SCOPE_UNIVERSE))
+	s1 := []dpuserspace.InterfaceSnapshot{
+		scriptedSnap10751("ge-0/0/0.0", "trust", v4),
+		scriptedSnap10751("ge-0/0/1.0", "trust"),
+	}
+	s2 := []dpuserspace.InterfaceSnapshot{
+		scriptedSnap10751("ge-0/0/0.0", "trust", v4),
+		scriptedSnap10751("ge-0/0/1.0", "trust", lease),
+	}
+	if !hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, s1) {
+		t.Fatal("S1 must be pending (B DHCPv6-unresolved); else the transition is vacuous")
+	}
+	if hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, s2) {
+		t.Fatal("S2 must be pending-free; else the test cannot prove the newcomer check (not pending) retained")
+	}
+	scriptSnapshotTransition10751(t, s1, s2)
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "changed during apply") {
+		t.Fatalf("apply err = %v, want newcomer retry error", err)
+	}
+	assertBarrierRetained10751(t, fake, d)
+}
+
+// TestSnapshotNewcomerLinkLocalRetainsBarrier10751: a NEW link-local (a link
+// that came up mid-apply) is uncovered by the install sample's ruleset
+// exactly like a new global — installed views deny fe80 destinations, so
+// handing off over it would open link-local host input under `policy
+// accept`. The newcomer comparison is include-all; scope-link is excluded
+// ONLY from pending-intent resolution.
+func TestSnapshotNewcomerLinkLocalRetainsBarrier10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
+	v4 := scriptedAddr10751("inet", "10.0.0.1/24", int(netlink.SCOPE_UNIVERSE))
+	ll := scriptedAddr10751("inet6", "fe80::7/64", int(netlink.SCOPE_LINK))
+	s1 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", v4)}
+	s2 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", v4, ll)}
+	scriptSnapshotTransition10751(t, s1, s2)
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "changed during apply") || !strings.Contains(err.Error(), "fe80::7") {
+		t.Fatalf("apply err = %v, want newcomer retry error naming fe80::7", err)
+	}
+	assertBarrierRetained10751(t, fake, d)
+}
+
+// TestSnapshotNewcomerRetainsBarrierFallback10751: the fenced-fallback path
+// (real install failed, cold-boot fence standing) re-samples too — the
+// fence covered the install sample only.
+func TestSnapshotNewcomerRetainsBarrierFallback10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	installErr := errors.New("real host-inbound load failed")
+	fake := &fakeNftInstaller{hostInbound: func(xnft.HostInboundSpec) error { return installErr }}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
+	v4 := scriptedAddr10751("inet", "10.0.0.1/24", int(netlink.SCOPE_UNIVERSE))
+	newcomer := scriptedAddr10751("inet6", "2001:db8::99/64", int(netlink.SCOPE_UNIVERSE))
+	s1 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", v4)}
+	s2 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", v4, newcomer)}
+	scriptSnapshotTransition10751(t, s1, s2)
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "changed during apply") || !strings.Contains(err.Error(), installErr.Error()) {
+		t.Fatalf("apply err = %v, want joined real-install + newcomer errors", err)
+	}
+	assertBarrierRetained10751(t, fake, d)
+}
+
+// TestSnapshotNewcomerAbortsTeardownHandoff10751: the no-enforcement teardown
+// deleted on the install sample's premise (nothing to enforce); an address
+// in the re-sample aborts the handoff with a retry error (the newcomer arm
+// runs before the pending arm, so this errors rather than silently
+// retaining).
+func TestSnapshotNewcomerAbortsTeardownHandoff10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	var deleted []string
+	fake := &fakeNftInstaller{del: func(name string) error { deleted = append(deleted, name); return nil }}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0, DHCP: true, DHCPv6: true}})
+	s2 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust",
+		scriptedAddr10751("inet", "203.0.113.5/24", int(netlink.SCOPE_UNIVERSE)))}
+	scriptSnapshotTransition10751(t, nil, s2)
+	d := &Daemon{}
+	err := d.applyHostInboundFilter(cfg)
+	if err == nil || !strings.Contains(err.Error(), "changed during apply") {
+		t.Fatalf("apply err = %v, want newcomer retry error", err)
+	}
+	assertBarrierRetained10751(t, fake, d)
+	joined := strings.Join(deleted, ",")
+	if !strings.Contains(joined, xnft.HostInboundTableName) || !strings.Contains(joined, xnft.HostInboundGapTableName) {
+		t.Fatalf("deleted tables = %v, want the teardown deletes to have run before the abort", deleted)
+	}
+}
+
+// TestSnapshotStableHandsOff10751 (control): identical install and handoff
+// samples hand off normally — the seam and the newcomer check must not
+// disturb the stable path.
+func TestSnapshotStableHandsOff10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
+	s := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust",
+		scriptedAddr10751("inet", "10.0.0.1/24", int(netlink.SCOPE_UNIVERSE)))}
+	calls := scriptSnapshotTransition10751(t, s, s)
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("stable apply err = %v, want nil", err)
+	}
+	removed := false
+	for _, ev := range fake.earlyInputBarrierCalls {
+		removed = removed || ev == "remove"
+	}
+	if !removed {
+		t.Fatalf("barrier calls = %v, want a removal on the stable path", fake.earlyInputBarrierCalls)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("stable apply must mark the handoff done")
+	}
+	if *calls != 2 {
+		t.Fatalf("snapshot samples = %d, want 2 (install + handoff re-sample)", *calls)
+	}
+}
+
+// TestSnapshotRemovalStillHandsOff10751 pins the check's direction: an
+// address that VANISHED since the install sample is over-denied
+// harmlessly, so the handoff proceeds.
+func TestSnapshotRemovalStillHandsOff10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	fake := &fakeNftInstaller{}
+	nftInstaller = fake
+	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
+	v4 := scriptedAddr10751("inet", "10.0.0.1/24", int(netlink.SCOPE_UNIVERSE))
+	gone := scriptedAddr10751("inet6", "2001:db8::99/64", int(netlink.SCOPE_UNIVERSE))
+	s1 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", v4, gone)}
+	s2 := []dpuserspace.InterfaceSnapshot{scriptedSnap10751("ge-0/0/0.0", "trust", v4)}
+	scriptSnapshotTransition10751(t, s1, s2)
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(cfg); err != nil {
+		t.Fatalf("removal-direction apply err = %v, want nil", err)
+	}
+	if !d.earlyInputHandoffDone.Load() {
+		t.Fatal("a vanished address must not block the handoff")
 	}
 }

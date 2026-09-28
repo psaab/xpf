@@ -184,6 +184,104 @@ func hostInboundScopeLinkAddr(a InterfaceAddressSnapshot) bool {
 	return a.Scope == int(netlink.SCOPE_LINK)
 }
 
+// hostInboundAddrKey identifies a configured address by logical unit ref plus
+// family plus bare host IP (no prefix length — rendering detail, not
+// identity). Per-unit on purpose: a static fe80::/64 on unit A must never
+// satisfy unit B's lease intent.
+func hostInboundAddrKey(unitRef, family, host string) string {
+	return unitRef + "/" + family + "/" + host
+}
+
+// configuredHostInboundAddrKeys returns the set of (unit ref, family, host)
+// identities explicitly carried in unit.Addresses, for
+// configured-provenance checks.
+func configuredHostInboundAddrKeys(cfg *config.Config) map[string]bool {
+	keys := map[string]bool{}
+	if cfg == nil {
+		return keys
+	}
+	for ifName, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil {
+			continue
+		}
+		for un, unit := range iface.Units {
+			if unit == nil {
+				continue
+			}
+			unitRef := fmt.Sprintf("%s.%d", ifName, un)
+			for _, raw := range unit.Addresses {
+				host := hostIPFromCIDR(raw)
+				if host == "" {
+					continue
+				}
+				fam := "inet"
+				if strings.Contains(host, ":") {
+					fam = "inet6"
+				}
+				keys[hostInboundAddrKey(unitRef, fam, host)] = true
+			}
+		}
+	}
+	return keys
+}
+
+// hostInboundScopeLinkUnresolved reports whether a snapshot row is a kernel
+// scope-link address the pending-intent predicate must ignore: self-assigned
+// link-local with NO configured provenance on that same unit. A scope-link
+// row whose (family, host) is explicitly configured ON THE ROW'S UNIT still
+// resolves — the merge prefers live rows, so a configured fe80::/64 already
+// installed on the kernel reads back as scope-link (the kernel derives link
+// scope for fe80::/10), and ignoring it would stick the scope pending
+// forever with the barrier never handing off. Keyed by logical unit ref so
+// a static address on unit A cannot satisfy a DHCP-pending unit B that
+// happens to carry the same automatic value.
+func hostInboundScopeLinkUnresolved(unitRef string, a InterfaceAddressSnapshot, configuredKeys map[string]bool) bool {
+	if !hostInboundScopeLinkAddr(a) {
+		return false
+	}
+	return !configuredKeys[hostInboundAddrKey(unitRef, a.Family, hostIPFromCIDR(a.Address))]
+}
+
+// SnapshotNewcomerAddrs returns the sorted bare host addresses present in
+// fresh but not in baseline (#10751 R4-2): the install sample covered the
+// baseline set, so a newcomer is an address the installed ruleset does not
+// cover and the handoff must wait for a re-render. Include-ALL on purpose —
+// kernel scope-link rows included: installed views deny link-local
+// destinations, so a NEW fe80::/64 (a link that came up mid-apply) is
+// uncovered by the `policy accept` table exactly like a new global, and
+// handing off over it would open link-local host input. Scope-link is
+// excluded ONLY from pending-intent resolution (a standing fe80 never
+// satisfies lease intent), never from this coverage comparison. An address
+// that VANISHED between samples is not reported — installed rules covering
+// a stale address over-deny harmlessly, the safe direction. Config-derived
+// addresses (VIPs, stable RETH LL) are absent from both snapshots by
+// construction and cannot change within one apply, so comparing snapshot
+// rows alone is sound.
+func SnapshotNewcomerAddrs(baseline, fresh []InterfaceSnapshot) []string {
+	have := map[string]bool{}
+	for _, snap := range baseline {
+		for _, a := range snap.Addresses {
+			if host := hostIPFromCIDR(a.Address); host != "" {
+				have[host] = true
+			}
+		}
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, snap := range fresh {
+		for _, a := range snap.Addresses {
+			host := hostIPFromCIDR(a.Address)
+			if host == "" || have[host] || seen[host] {
+				continue
+			}
+			seen[host] = true
+			out = append(out, host)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // BuildZoneHostInboundViewsFromSnapshots renders zone views from ONE caller-
 // supplied address snapshot instead of sampling the kernel itself (#10751
 // R4-2). The daemon's apply path samples once and threads that snapshot
@@ -258,6 +356,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		return nil
 	}
 	ifaceSnaps := snaps
+	// Configured-provenance set for the scope-link intent filter below
+	// (built once: the snapshot walk consults it per row).
+	configuredAddrs := configuredHostInboundAddrKeys(cfg)
 	// Lifeline interfaces (fxp0 + the configured chassis-cluster
 	// control-interface / fabric interfaces, plus the em0/fab* defaults) are
 	// excluded from host-inbound deny scoping so management / cluster-control
@@ -471,7 +572,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		}
 		var g *group
 		for _, a := range snap.Addresses {
-			if excludeScopeLink && hostInboundScopeLinkAddr(a) {
+			if excludeScopeLink && hostInboundScopeLinkUnresolved(snap.Name, a, configuredAddrs) {
 				continue
 			}
 			host := hostIPFromCIDR(a.Address)

@@ -233,3 +233,99 @@ func TestFromSnapshotsEquivalence10751(t *testing.T) {
 		t.Errorf("fence FromSnapshots != fresh:\n got=%+v\nwant=%+v", got, want)
 	}
 }
+
+// TestConfiguredLinkLocalDuplicateLiveStillResolves10751: the config carries
+// static fe80::5/64 AND the kernel reports that same fe80::5/64 live with
+// scope-link (networkd installed it; the snapshot merge prefers the live
+// row, and the kernel derives link scope for fe80::/10). Configured
+// provenance must win: the family resolves instead of sticking pending
+// forever with the barrier never handing off. Installed coverage is
+// unchanged (fe80::5 stays denied).
+// RED on revert: scope-filter without the provenance override reports the
+// zone and the inet6 window.
+func TestConfiguredLinkLocalDuplicateLiveStillResolves10751(t *testing.T) {
+	stubScopeLinkAddrs10751(t, []InterfaceAddressSnapshot{
+		{Family: "inet6", Address: "fe80::5/64", Scope: int(netlink.SCOPE_LINK)},
+	})
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0-0-6": {Name: "ge-0-0-6", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"fe80::5/64"}, DHCPv6: true},
+		}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"ll": {Name: "ll", Interfaces: []string{"ge-0-0-6.0"}},
+	}
+	// Precondition proving the test exercises the merge-precedence shape:
+	// the merged snapshot row for fe80::5 must carry scope-link (live won).
+	mergedScope := -1
+	for _, snap := range BuildInterfaceSnapshots(cfg) {
+		if snap.Name != "ge-0-0-6.0" {
+			continue
+		}
+		for _, a := range snap.Addresses {
+			if hostIPFromCIDR(a.Address) == "fe80::5" {
+				mergedScope = a.Scope
+			}
+		}
+	}
+	if mergedScope != int(netlink.SCOPE_LINK) {
+		t.Fatalf("precondition: merged fe80::5 scope = %d, want SCOPE_LINK (%d) — the live row must win the merge or this cell is vacuous",
+			mergedScope, int(netlink.SCOPE_LINK))
+	}
+	if zones := AddresslessEnforcingZones(cfg); len(zones) != 0 {
+		t.Fatalf("AddresslessEnforcingZones = %+v, want silent: configured provenance resolves despite the live scope-link row", zones)
+	}
+	if got := AddresslessEnforcingInterfaces(cfg); len(got) != 0 {
+		t.Fatalf("AddresslessEnforcingInterfaces = %+v, want empty", got)
+	}
+	covered := false
+	for _, v := range BuildZoneHostInboundViews(cfg) {
+		for _, a := range v.V6Addrs {
+			covered = covered || a == "fe80::5"
+		}
+	}
+	if !covered {
+		t.Fatal("installed views lost fe80::5: the provenance fix must not change deny coverage")
+	}
+}
+
+// TestConfiguredProvenanceIsPerUnit10751: unit A carries static fe80::1/64
+// while DHCPv6-pending unit B reports that SAME value live with scope-link
+// (forced collision — the stub answers every link identically). A's static
+// must scope the zone, but it must NOT satisfy B's lease intent: B's inet6
+// window stays reported. RED on revert: global (not per-unit) configured
+// keys let A's static resolve B, and B's window goes silent.
+func TestConfiguredProvenanceIsPerUnit10751(t *testing.T) {
+	stubScopeLinkAddrs10751(t, []InterfaceAddressSnapshot{
+		{Family: "inet6", Address: "fe80::1/64", Scope: int(netlink.SCOPE_LINK)},
+	})
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0-0-1": {Name: "ge-0-0-1", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"fe80::1/64"}},
+		}},
+		"ge-0-0-2": {Name: "ge-0-0-2", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, DHCPv6: true},
+		}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"z": {Name: "z", Interfaces: []string{"ge-0-0-1.0", "ge-0-0-2.0"}},
+	}
+	if zones := AddresslessEnforcingZones(cfg); len(zones) != 0 {
+		t.Fatalf("AddresslessEnforcingZones = %+v, want silent: A's configured fe80::1 scopes the zone", zones)
+	}
+	got := AddresslessEnforcingInterfaces(cfg)
+	if len(got) != 1 || got[0].Zone != "z" || got[0].Interface != "ge-0-0-2.0" || got[0].Family != "inet6" {
+		t.Fatalf("AddresslessEnforcingInterfaces = %+v, want exactly [z ge-0-0-2.0 inet6]: A's static must not satisfy B", got)
+	}
+	covered := false
+	for _, v := range BuildZoneHostInboundViews(cfg) {
+		for _, a := range v.V6Addrs {
+			covered = covered || a == "fe80::1"
+		}
+	}
+	if !covered {
+		t.Fatal("installed views lost fe80::1: provenance must not change deny coverage")
+	}
+}
