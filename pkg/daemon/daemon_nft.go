@@ -811,7 +811,10 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		// #10751 R6-A: record whether THIS apply installed the cold-boot
 		// fence: its coverage (lifeline-shared withheld) is the correct
 		// handoff baseline, not the larger real desired scope.
+		// #10751 R7-C: record this apply's gap destinations for the joint
+		// baseline below.
 		fenceInstalledThisApply := false
+		var gapV4ThisApply, gapV6ThisApply []string
 		if !d.hostInboundEnforced.Load() {
 			// #6492: fence-only scope — lifeline-shared addresses withheld (the
 			// fence strips every per-service ACCEPT, so a bare `daddr <mgmt-ip>
@@ -841,6 +844,16 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// successful real install. A gap install failure joins the commit error so
 			// the newly reachable address is never silently left fail-open.
 			uncoveredV4, uncoveredV6 := hostInboundUncoveredDropAddrs(views, unzonedV4, unzonedV6, d.hostInboundCoveredAddrs)
+			// #10751 R7-C: Finding A applies to the gap too — a bare gap
+			// DROP has no per-service accepts to protect management, so
+			// withhold lifeline-shared values (same definition as the
+			// cold-boot fence). Withheld addresses stay barrier-protected
+			// pre-handoff instead of gap-DROPped on every ingress path.
+			if len(uncoveredV4)+len(uncoveredV6) > 0 {
+				withheld := dpuserspace.BuildFenceAddrSetsFromSnapshots(cfg, snaps1, views)
+				uncoveredV4 = hostInboundWithoutAddrs(uncoveredV4, withheld.WithheldV4)
+				uncoveredV6 = hostInboundWithoutAddrs(uncoveredV6, withheld.WithheldV6)
+			}
 			if len(uncoveredV4) > 0 || len(uncoveredV6) > 0 {
 				if gapErr := d.installHostInboundGapFence(uncoveredV4, uncoveredV6, wgListenPorts, unleased); gapErr != nil {
 					// #7181: the apply failed AND the gap could not be installed.
@@ -849,6 +862,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 					d.noteHostInboundApplyFailed(time.Now())
 					return errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), gapErr)
 				}
+				gapV4ThisApply, gapV6ThisApply = uncoveredV4, uncoveredV6
 				// #7181: a gap fence is now standing beside the retained real
 				// table. Part of the applied truth -- this box enforces through
 				// TWO tables until the next successful real install.
@@ -863,16 +877,30 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// successful install or no-enforcement teardown.
 			// B1: pre-handoff, a failed lo0 in this apply also retains the
 			// barrier — the fence covers only the host-inbound scope.
-			// #10751 R6-A: handoff re-sample against the ACTUALLY INSTALLED
-			// coverage. A cold-boot fence installed this apply withholds
-			// lifeline-shared destinations, so its recorded set — not the
-			// larger real desired scope — is the baseline; a stable
-			// shared address the fence never drops must refuse, not
-			// hand off. The gap branch keeps desiredDrop (retained real
-			// + gap jointly cover the S1 real scope).
+			// #10751 R6-A/R7-C: handoff re-sample against the ACTUALLY
+			// INSTALLED coverage. A cold-boot fence installed this apply
+			// withholds lifeline-shared destinations, so its recorded set
+			// — not the larger real desired scope — is the baseline.
+			// Otherwise (gap branch) the baseline is JOINT ACTUAL:
+			// retained coverage UNION this apply's gap destinations.
+			// Either way a stable shared address the installed
+			// fallback never drops must refuse (barrier lifeline-admits
+			// it; data stays DROP-closed), not hand off.
 			fallbackBaseline := desiredDrop
 			if fenceInstalledThisApply {
 				fallbackBaseline = d.hostInboundCoveredAddrs
+			} else {
+				joint := make(map[string]struct{}, len(d.hostInboundCoveredAddrs)+len(gapV4ThisApply)+len(gapV6ThisApply))
+				for k := range d.hostInboundCoveredAddrs {
+					joint[k] = struct{}{}
+				}
+				for _, a := range gapV4ThisApply {
+					joint[hostInboundDropAddrKey('4', a)] = struct{}{}
+				}
+				for _, a := range gapV6ThisApply {
+					joint[hostInboundDropAddrKey('6', a)] = struct{}{}
+				}
+				fallbackBaseline = joint
 			}
 			var freshSnaps []dpuserspace.InterfaceSnapshot
 			var snapshotChanged []string
@@ -883,15 +911,9 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			if !d.earlyInputHandoffDone.Load() && d.lo0LastFailed.Load() {
 				slog.Warn("retaining early host-input barrier after fenced fallback: lo0 protection failed in this apply")
 			} else if len(snapshotChanged) > 0 {
-				if fenceInstalledThisApply {
-					slog.Warn("retaining early host-input barrier after fenced fallback: destinations not covered by installed fallback; retry",
-						"newcomers", strings.Join(snapshotChanged, ","))
-					barrierHandoffErr = fmt.Errorf("host-inbound destinations not covered by installed fallback; retry: %s", strings.Join(snapshotChanged, ","))
-				} else {
-					slog.Warn("retaining early host-input barrier after fenced fallback: addresses changed during apply; retry",
-						"newcomers", strings.Join(snapshotChanged, ","))
-					barrierHandoffErr = fmt.Errorf("host-inbound addresses changed during apply; retry: %s", strings.Join(snapshotChanged, ","))
-				}
+				slog.Warn("retaining early host-input barrier after fenced fallback: destinations not covered by installed fallback; retry",
+					"newcomers", strings.Join(snapshotChanged, ","))
+				barrierHandoffErr = fmt.Errorf("host-inbound destinations not covered by installed fallback; retry: %s", strings.Join(snapshotChanged, ","))
 			} else if !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntentFromSnapshots(cfg, freshSnaps) {
 				slog.Warn("retaining early host-input barrier after fenced fallback: enforcing scopes have no address yet")
 			} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg, hostInboundHandoffExpectedTables(d.hostInboundGapFenceActive.Load()), fallbackBaseline); barrierErr != nil {
@@ -1344,6 +1366,27 @@ func hostInboundUncoveredDropAddrs(views []dpuserspace.ZoneHostInboundView, unzo
 	return v4, v6
 }
 
+// hostInboundWithoutAddrs returns addrs minus any bare address present in
+// drop, preserving order. A new slice is always returned (never mutates
+// the inputs). Used to withhold lifeline-shared values from the gap drop
+// set (#10751 R7-C).
+func hostInboundWithoutAddrs(addrs, drop []string) []string {
+	if len(addrs) == 0 || len(drop) == 0 {
+		return addrs
+	}
+	omit := make(map[string]bool, len(drop))
+	for _, a := range drop {
+		omit[a] = true
+	}
+	var out []string
+	for _, a := range addrs {
+		if !omit[a] {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // buildHostInboundGapFencePayload assembles the #5789 ADDITIVE gap fence: a
 // SEPARATE inet xpf_hostinbound_gap table at nftHostInboundGapPriority (strictly
 // AFTER the main xpf_hostinbound table) that denies ONLY the supplied uncovered
@@ -1354,11 +1397,12 @@ func hostInboundUncoveredDropAddrs(views []dpuserspace.ZoneHostInboundView, unzo
 // valid rules"): a covered address is service-accepted or catch-all-dropped by
 // the main table (prio 10) and either way its verdict is unchanged, while a
 // newly-appeared uncovered address falls through the main chain's policy-accept
-// and is dropped here. The uncovered lists inherit the same lifeline treatment as
-// the views/unzoned sets they derive from — lifeline INTERFACES excluded, lifeline
-// address VALUES not — so a management address shared onto a non-lifeline
-// interface can be fenced here too, with no iifname to distinguish the ingress
-// path (#6492 Finding A applies to this fence as well). Callers must only invoke this
+// and is dropped here. Unlike earlier behavior, lifeline-shared address
+// VALUES are withheld from the uncovered lists before install (#10751
+// R7-C): a bare gap DROP carries no per-service accepts, so fencing a
+// shared management address would drop new lifeline connections with no
+// iifname to distinguish the ingress path. Withheld addresses stay
+// barrier-protected pre-handoff instead. Callers must only invoke this
 // with a non-empty uncovered set (an all-empty payload would be a pointless
 // zero-drop shell); an empty set instead deletes the table.
 func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, unleased []string) string {

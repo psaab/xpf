@@ -949,7 +949,9 @@ snapshot produces a zero-drop table shell:
   chain's `policy accept` (a `drop` is terminal, an `accept` is not, so an already
   service-accepted or catch-all-dropped covered address keeps its main-table
   verdict) and is dropped by the gap. The uncovered lists derive from the same
-  lifeline-subtracted views/unzoned sets, so the gap never fences management /
+  lifeline-subtracted views/unzoned sets, minus lifeline-shared address VALUES
+  withheld like the cold-boot fence (#10751 R7-C: a bare gap DROP has no
+  accepts to protect management), so the gap never fences management /
   cluster-control traffic. A gap install failure JOINS the commit error
   (fail-closed); the gap is torn down by the next successful real install (best
   effort — a lingering gap fences only, never opens) and on a successful teardown.

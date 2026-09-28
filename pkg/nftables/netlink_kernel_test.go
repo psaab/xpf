@@ -1,10 +1,13 @@
 package nftables
 
 import (
+	"bytes"
+	"net"
 	"runtime"
 	"testing"
 
 	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netns"
 )
 
@@ -330,5 +333,65 @@ func TestTableDropsInputRequiresDropVerdict10751(t *testing.T) {
 	}
 	if ok, err := in.TableDropsInput(HostInboundTableName); err != nil || ok {
 		t.Fatalf("admits-only shell drops = %v, %v; want false, nil", ok, err)
+	}
+}
+
+// TestGapFenceWithholdsSharedNetns10751: a gap spec carrying only X (W
+// withheld daemon-side, #10751 R7-C) installs an X DROP with no W match
+// anywhere; mandatory admits present (positive control). Needs
+// CAP_NET_ADMIN (skips otherwise).
+func TestGapFenceWithholdsSharedNetns10751(t *testing.T) {
+	enterPrivateNetns(t)
+	in := NewNetlinkInstaller()
+	x, w := "10.0.0.9", "10.0.0.5"
+	if err := in.InstallGapFence(GapFenceSpec{UncoveredV4: []string{x}}); err != nil {
+		t.Fatalf("gap install: %v", err)
+	}
+	c, err := nftables.New()
+	if err != nil {
+		t.Fatalf("open netlink: %v", err)
+	}
+	tbl := &nftables.Table{Family: nftables.TableFamilyINet, Name: HostInboundGapTableName}
+	chain, err := c.ListChain(tbl, "input")
+	if err != nil {
+		t.Fatalf("read gap chain: %v", err)
+	}
+	rules, err := c.GetRules(tbl, chain)
+	if err != nil {
+		t.Fatalf("read gap rules: %v", err)
+	}
+	xb, wb := net.ParseIP(x).To4(), net.ParseIP(w).To4()
+	var xDrop, wSeen, acceptSeen bool
+	for _, r := range rules {
+		var cmpX, cmpW, drop bool
+		for _, e := range r.Exprs {
+			switch v := e.(type) {
+			case *expr.Verdict:
+				if v.Kind == expr.VerdictDrop {
+					drop = true
+				}
+				if v.Kind == expr.VerdictAccept {
+					acceptSeen = true
+				}
+			case *expr.Cmp:
+				if bytes.Equal(v.Data, xb) {
+					cmpX = true
+				}
+				if bytes.Equal(v.Data, wb) {
+					cmpW = true
+				}
+			}
+		}
+		xDrop = xDrop || (cmpX && drop)
+		wSeen = wSeen || cmpW
+	}
+	if !xDrop {
+		t.Error("gap table has no DROP matching X")
+	}
+	if wSeen {
+		t.Error("gap table matches withheld W")
+	}
+	if !acceptSeen {
+		t.Error("gap table lost its mandatory admits (positive control)")
 	}
 }
