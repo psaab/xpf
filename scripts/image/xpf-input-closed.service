@@ -23,9 +23,15 @@
 # install and the daemon's first handoff wipes the table; the daemon
 # re-attests and reinstalls pre-handoff. Post-handoff a flush also wipes the
 # real tables — treat any post-handoff flush as an operator action (same as
-# flushing host-inbound itself) and re-apply to converge. ExecReload below
-# reinstalls the barrier manually while it is still expected (pre-handoff);
-# the command refuses once handed off (override with --force explicitly).
+# flushing host-inbound itself) and re-apply to converge.
+#
+# ExecStart uses `input-barrier ensure`: pre-handoff it installs (fail
+# closed); post-handoff it is a verified no-op success — the daemon owns
+# enforcement and a restart converges it on first apply. Failing the start
+# post-handoff would strand xpfd behind its own Requires edge (R4-4), and
+# reinstalling unconditionally would inject a global DROP into a live armed
+# daemon. ExecReload stays `close`: a manual reload pre-handoff reinstalls,
+# post-handoff it refuses (override with --force explicitly).
 #
 # Fresh installs: this unit is enabled --no-start (upgrades must never inject
 # a DROP chain into a live armed daemon). The postinst starts it live on
@@ -51,7 +57,7 @@ Before=shutdown.target
 Type=oneshot
 RemainAfterExit=yes
 TimeoutStartSec=30
-ExecStart=/usr/local/sbin/xpfd input-barrier close
+ExecStart=/usr/local/sbin/xpfd input-barrier ensure
 ExecReload=/usr/local/sbin/xpfd input-barrier close
 StandardOutput=journal
 StandardError=journal

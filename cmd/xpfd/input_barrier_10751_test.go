@@ -15,12 +15,12 @@ func TestInputBarrierCommand10751(t *testing.T) {
 	if got := classifyCommand([]string{"xpfd", "input-barrier"}); got != cmdInputBarrier {
 		t.Fatalf("classifyCommand input-barrier = %d, want %d", got, cmdInputBarrier)
 	}
-	for _, args := range [][]string{{}, {"open"}, {"close", "extra"}, {"remove", "extra"}} {
+	for _, args := range [][]string{{}, {"open"}, {"close", "extra"}, {"remove", "extra"}, {"ensure", "extra"}, {"ensure", "--force"}} {
 		if err := parseInputBarrierArgs(args); err == nil {
 			t.Errorf("parseInputBarrierArgs(%q) unexpectedly succeeded", args)
 		}
 	}
-	for _, args := range [][]string{{"close"}, {"remove"}, {"close", "--force"}} {
+	for _, args := range [][]string{{"close"}, {"remove"}, {"close", "--force"}, {"ensure"}} {
 		if err := parseInputBarrierArgs(args); err != nil {
 			t.Errorf("parseInputBarrierArgs(%q): %v", args, err)
 		}
@@ -114,5 +114,55 @@ func TestInputBarrierCloseRefusesAfterHandoff10751(t *testing.T) {
 	}
 	if installs != 2 {
 		t.Fatalf("installs = %d, want forced reinstall to proceed", installs)
+	}
+}
+
+// TestInputBarrierEnsure10751 pins the ExecStart verb (#10751 R4-4):
+// post-handoff it is a verified no-op SUCCESS (never install into a live
+// daemon, never fail an xpfd start behind its Requires edge); pre-handoff
+// it installs fail-closed like close.
+func TestInputBarrierEnsure10751(t *testing.T) {
+	oldInstall := earlyInputBarrierInstall
+	oldMarker := daemon.EarlyInputHandoffMarkerPath
+	t.Cleanup(func() {
+		earlyInputBarrierInstall = oldInstall
+		daemon.EarlyInputHandoffMarkerPath = oldMarker
+	})
+	daemon.EarlyInputHandoffMarkerPath = filepath.Join(t.TempDir(), "early-input-handoff.done")
+	installs := 0
+	earlyInputBarrierInstall = func() error { installs++; return nil }
+	var stdout, stderr bytes.Buffer
+	// Pre-handoff (no marker): install, fail-closed on error.
+	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("ensure without marker exit = %d, want 0", code)
+	}
+	if installs != 1 || !strings.Contains(stdout.String(), "early input barrier installed") {
+		t.Fatalf("ensure without marker: installs=%d stdout=%q, want an install", installs, stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	installErr := errors.New("nftables permission denied")
+	earlyInputBarrierInstall = func() error { installs++; return installErr }
+	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("failed ensure exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), installErr.Error()) {
+		t.Fatalf("failed ensure stderr = %q, want the install error", stderr.String())
+	}
+	// Post-handoff (marker): no-op success, no install.
+	earlyInputBarrierInstall = func() error { installs++; return nil }
+	if err := os.WriteFile(daemon.EarlyInputHandoffMarkerPath, []byte("handed-off\n"), 0644); err != nil {
+		t.Fatalf("stage marker: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("ensure with marker exit = %d, want 0 (verified no-op success)", code)
+	}
+	if installs != 2 {
+		t.Fatalf("installs = %d, want 2: post-handoff ensure must not install", installs)
+	}
+	if !strings.Contains(stdout.String(), "nothing to do") || stderr.Len() != 0 {
+		t.Fatalf("ensure with marker stdout=%q stderr=%q, want no-op note on stdout only", stdout.String(), stderr.String())
 	}
 }

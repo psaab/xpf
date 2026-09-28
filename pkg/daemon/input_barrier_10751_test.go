@@ -829,7 +829,7 @@ func TestEarlyInputBarrierBootUnitAndStaging10751(t *testing.T) {
 		{section: unitSection, want: "Before=network-pre.target systemd-networkd.service frr.service xpfd.service"},
 		{section: installSection, want: "RequiredBy=systemd-networkd.service"},
 		{section: installSection, want: "RequiredBy=xpfd.service"},
-		{section: serviceSection, want: "ExecStart=/usr/local/sbin/xpfd input-barrier close"},
+		{section: serviceSection, want: "ExecStart=/usr/local/sbin/xpfd input-barrier ensure"},
 		{section: serviceSection, want: "ExecReload=/usr/local/sbin/xpfd input-barrier close"},
 		{section: serviceSection, want: "Type=oneshot"},
 		{section: serviceSection, want: "RemainAfterExit=yes"},

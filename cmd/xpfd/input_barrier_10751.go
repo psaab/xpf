@@ -20,13 +20,13 @@ var earlyInputBarrierRemove = func() error {
 }
 
 func parseInputBarrierArgs(args []string) error {
-	if len(args) == 1 && (args[0] == "close" || args[0] == "remove") {
+	if len(args) == 1 && (args[0] == "close" || args[0] == "remove" || args[0] == "ensure") {
 		return nil
 	}
 	if len(args) == 2 && args[0] == "close" && args[1] == "--force" {
 		return nil
 	}
-	return fmt.Errorf("usage: xpfd input-barrier {close [--force]|remove}")
+	return fmt.Errorf("usage: xpfd input-barrier {close [--force]|remove|ensure}")
 }
 
 func runInputBarrierSubcommand(args []string, stdout, stderr io.Writer) int {
@@ -44,6 +44,14 @@ func runInputBarrierSubcommand(args []string, stdout, stderr io.Writer) int {
 	}
 	force := len(args) == 2
 	if !force && daemon.EarlyInputHandoffMarked() {
+		// #10751 R4-4: `ensure` is the unit's ExecStart. Post-handoff the
+		// daemon owns enforcement (a restart converges it on first
+		// apply), so starting the unit must SUCCEED without installing —
+		// failing here would strand xpfd behind its own Requires edge.
+		if args[0] == "ensure" {
+			fmt.Fprintln(stdout, "early input barrier already handed off to the daemon; nothing to do")
+			return 0
+		}
 		fmt.Fprintf(stderr, "input-barrier: host input already handed off to the daemon; refusing reinstall (use --force to override)\n")
 		return 1
 	}

@@ -71,6 +71,10 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   host-inbound handoff. Bootstrap swaps in a lifeline-admitting variant
   (whole lifeline NICs, including their link-locals); the first commit
   converges to configured policy.
+- `xpfd input-barrier ensure` — the boot unit's ExecStart: installs pre-handoff
+  (fail closed), and is a verified no-op success post-handoff so starting the
+  unit never injects a DROP chain into a live armed daemon nor fails an xpfd
+  start behind its Requires edge.
 - `xpfd input-barrier remove` — removes the host-input barrier only after the
   real firewall/fallback is installed or a no-enforcement teardown completes.
 - A kernel without bridge nf_tables reports degraded success with a warning
