@@ -390,7 +390,7 @@ fn a_local_lease_is_not_overwritten_by_an_imported_one_8121() {
 /// port at capacity so guard-removal proves table growth rather than port
 /// exhaustion.
 #[test]
-fn an_idle_import_at_capacity_does_not_starve_local_mints_11475() {
+fn a_full_imported_table_refuses_local_mints_11475() {
     let addrs = ["203.0.113.10".parse().unwrap()];
     let pool_addrs = ipv4_pool(&addrs);
     let allocator = PortAllocator::new(1, 20_000, 20_001);
