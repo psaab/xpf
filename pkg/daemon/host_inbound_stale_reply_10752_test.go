@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/binary"
 	"net"
 	"os"
 	"os/exec"
@@ -9,7 +10,10 @@ import (
 	"testing"
 	"time"
 
+	gnft "github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -732,12 +736,21 @@ func runStaleReplyTCPPacketPath(t *testing.T, localIP, peerIP string) {
 
 func runStaleReplyNoConntrackPacketPath(t *testing.T, localIP, peerIP string) {
 	t.Helper()
-	// Availability without conntrack: an admitted service dport accepts NEW
-	// packets flaglessly, while an ephemeral dport with no conntrack drops.
-	// This is the mechanism behind the TCP-client recovery note: admitted
-	// host services survive conntrack loss; host-originated ephemeral clients
-	// must re-establish (accepted risk, documented).
-	snmpBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(localIP), Port: 161})
+	// True no-conntrack availability proof: a raw-table NOTRACK rule exempts
+	// the test tuples from conntrack in both directions, and a conntrack
+	// dump afterwards verifies no entry was created. An admitted service
+	// dport must still deliver (flagless service accept); an ephemeral dport
+	// with no conntrack must drop. This is the mechanism behind the
+	// TCP-client recovery note: admitted host services survive conntrack
+	// loss; host-originated ephemeral clients must re-establish (accepted
+	// risk, documented).
+	//
+	// CI vs lab: this runs wherever the netns packet-path runs (`unshare
+	// -Urn` with CAP_NET_ADMIN in the child, same gate as T1 parity, plus
+	// kernel raw-table support). Without those the parent skips with an
+	// explicit XPF-NETNS-SKIP reason instead of faking green.
+	box := net.ParseIP(localIP)
+	snmpBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: box, Port: 161})
 	if err != nil {
 		netnsSkipOrFail(t, "bind box UDP/161", err)
 	}
@@ -745,22 +758,7 @@ func runStaleReplyNoConntrackPacketPath(t *testing.T, localIP, peerIP string) {
 	if err := snmpBox.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(peerIP)})
-	if err != nil {
-		netnsSkipOrFail(t, "bind peer UDP ephemeral", err)
-	}
-	defer peer.Close()
-	snmpDst := &net.UDPAddr{IP: net.ParseIP(localIP), Port: 161}
-	if _, err := peer.WriteToUDP([]byte("snmp-new"), snmpDst); err != nil {
-		t.Fatalf("send NEW SNMP request: %v", err)
-	}
-	buf := make([]byte, 32)
-	n, _, err := snmpBox.ReadFromUDP(buf)
-	if err != nil || string(buf[:n]) != "snmp-new" {
-		t.Fatalf("NEW SNMP to admitted dport was not delivered: n=%d err=%v", n, err)
-	}
-
-	ephemeralBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(localIP)})
+	ephemeralBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: box})
 	if err != nil {
 		t.Fatalf("bind ephemeral box socket: %v", err)
 	}
@@ -769,12 +767,129 @@ func runStaleReplyNoConntrackPacketPath(t *testing.T, localIP, peerIP string) {
 	if err := ephemeralBox.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	ephemeralDst := &net.UDPAddr{IP: net.ParseIP(localIP), Port: ephemeralPort}
+	peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(peerIP)})
+	if err != nil {
+		netnsSkipOrFail(t, "bind peer UDP ephemeral", err)
+	}
+	defer peer.Close()
+
+	cleanupNotrack := installNotrackTestRules(t, box, 161, uint16(ephemeralPort))
+	defer cleanupNotrack()
+
+	snmpDst := &net.UDPAddr{IP: box, Port: 161}
+	if _, err := peer.WriteToUDP([]byte("snmp-new"), snmpDst); err != nil {
+		t.Fatalf("send untracked SNMP request: %v", err)
+	}
+	buf := make([]byte, 32)
+	n, _, err := snmpBox.ReadFromUDP(buf)
+	if err != nil || string(buf[:n]) != "snmp-new" {
+		t.Fatalf("untracked SNMP to admitted dport was not delivered: n=%d err=%v", n, err)
+	}
+
+	ephemeralDst := &net.UDPAddr{IP: box, Port: ephemeralPort}
 	if _, err := peer.WriteToUDP([]byte("ephemeral-new"), ephemeralDst); err != nil {
-		t.Fatalf("send NEW ephemeral request: %v", err)
+		t.Fatalf("send untracked ephemeral request: %v", err)
 	}
 	if _, _, err := ephemeralBox.ReadFromUDP(buf); !isTimeout(err) {
-		t.Fatalf("NEW ephemeral without conntrack was delivered (err %v), want DROP", err)
+		t.Fatalf("untracked ephemeral without conntrack was delivered (err %v), want DROP", err)
+	}
+
+	assertNoConntrackForUDPTuples(t, box, 161, uint16(ephemeralPort))
+}
+
+// installNotrackTestRules creates an `ip`-family raw table exempting the given
+// box UDP tuples from conntrack via NOTRACK in prerouting (peer→box) and
+// output (box→peer). Built with google/nftables directly: this daemon test
+// package cannot use the unexported nftables.nlPlan builder. Returns cleanup.
+func installNotrackTestRules(t *testing.T, box net.IP, dports ...uint16) func() {
+	t.Helper()
+	c, err := gnft.New()
+	if err != nil {
+		netnsSkipOrFail(t, "open nftables conn for NOTRACK", err)
+	}
+	box4 := box.To4()
+	if box4 == nil {
+		t.Fatalf("NOTRACK test needs an IPv4 box address, got %v", box)
+	}
+	be16 := func(p uint16) []byte {
+		b := make([]byte, 2)
+		binary.BigEndian.PutUint16(b, p)
+		return b
+	}
+	l4udp := []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_UDP}},
+	}
+	tbl := c.AddTable(&gnft.Table{Family: gnft.TableFamilyIPv4, Name: "xpf_nt_10752"})
+	pol := gnft.ChainPolicyAccept
+	pre := c.AddChain(&gnft.Chain{Name: "pre", Table: tbl, Type: gnft.ChainTypeFilter, Hooknum: gnft.ChainHookPrerouting, Priority: gnft.ChainPriorityRaw, Policy: &pol})
+	out := c.AddChain(&gnft.Chain{Name: "out", Table: tbl, Type: gnft.ChainTypeFilter, Hooknum: gnft.ChainHookOutput, Priority: gnft.ChainPriorityRaw, Policy: &pol})
+	for _, port := range dports {
+		preExprs := append(append([]expr.Any{}, l4udp...),
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: append([]byte(nil), box4...)},
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: be16(port)},
+			&expr.Notrack{},
+		)
+		c.AddRule(&gnft.Rule{Table: tbl, Chain: pre, Exprs: preExprs})
+		outExprs := append(append([]expr.Any{}, l4udp...),
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 12, Len: 4},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: append([]byte(nil), box4...)},
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 0, Len: 2},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: be16(port)},
+			&expr.Notrack{},
+		)
+		c.AddRule(&gnft.Rule{Table: tbl, Chain: out, Exprs: outExprs})
+		// Locally-generated peer→box packets hit OUTPUT conntrack before
+		// they loop to prerouting, so prerouting-only NOTRACK would be too
+		// late on loopback: exempt them at OUTPUT by destination too.
+		outInExprs := append(append([]expr.Any{}, l4udp...),
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: 16, Len: 4},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: append([]byte(nil), box4...)},
+			&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: be16(port)},
+			&expr.Notrack{},
+		)
+		c.AddRule(&gnft.Rule{Table: tbl, Chain: out, Exprs: outInExprs})
+	}
+	if err := c.Flush(); err != nil {
+		netnsSkipOrFail(t, "install NOTRACK rules", err)
+	}
+	return func() {
+		d, derr := gnft.New()
+		if derr != nil {
+			return
+		}
+		d.DelTable(&gnft.Table{Family: gnft.TableFamilyIPv4, Name: "xpf_nt_10752"})
+		_ = d.Flush()
+	}
+}
+
+// assertNoConntrackForUDPTuples dumps the v4 conntrack table and fails if any
+// entry references the box address with one of the given UDP ports in either
+// direction. This is what makes the no-conntrack label honest: delivery (or
+// drop) verdicts above are only meaningful untracked if no entry exists.
+func assertNoConntrackForUDPTuples(t *testing.T, box net.IP, ports ...uint16) {
+	t.Helper()
+	flows, err := netlink.ConntrackTableList(netlink.ConntrackTable, unix.AF_INET)
+	if err != nil {
+		netnsSkipOrFail(t, "dump conntrack table", err)
+	}
+	want := map[uint16]bool{}
+	for _, p := range ports {
+		want[p] = true
+	}
+	for _, f := range flows {
+		if f.Forward.Protocol != unix.IPPROTO_UDP {
+			continue
+		}
+		if net.IP(f.Forward.SrcIP).Equal(box) && want[f.Forward.SrcPort] {
+			t.Fatalf("conntrack entry exists for supposedly untracked box sport %d: %+v", f.Forward.SrcPort, f.Forward)
+		}
+		if net.IP(f.Forward.DstIP).Equal(box) && want[f.Forward.DstPort] {
+			t.Fatalf("conntrack entry exists for supposedly untracked box dport %d: %+v", f.Forward.DstPort, f.Forward)
+		}
 	}
 }
 
