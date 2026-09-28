@@ -679,3 +679,112 @@ func TestArchiveCleanupFailureIsNonfatalAndRetriesOnLaterLoad10825(t *testing.T)
 		t.Fatalf("archive cleanup did not retry after the path became accessible: %v", err)
 	}
 }
+
+func TestShortLegacyAPIAuthCredentialsRemainRepairableAcrossRestart10825(t *testing.T) {
+	const shortConfig = `system {
+ services {
+  web-management {
+   api-auth {
+    expires 2099-01-01;
+    user admin { password tiny; }
+    api-key tiny;
+   }
+  }
+ }
+}`
+	assertMigratedShortCredentials := func(t *testing.T, text string) {
+		t.Helper()
+		if strings.Contains(text, "password tiny") || strings.Contains(text, "api-key tiny") {
+			t.Fatalf("persisted short API-auth credentials remain cleartext:\n%s", text)
+		}
+		if strings.Count(text, "$xpf-invalid$") != 2 {
+			t.Fatalf("persisted short API-auth credentials were not both denied and tagged:\n%s", text)
+		}
+	}
+
+	t.Run("active password and key", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config")
+		first := newTestStoreAt(t, path)
+		if err := first.db.WriteActive(parseAuthMigrationTree10826(t, shortConfig)); err != nil {
+			t.Fatalf("write short active config: %v", err)
+		}
+		firstErr := first.Load()
+		if errors.Is(firstErr, ErrConfigDBUnreadable) {
+			t.Fatalf("first Load classified repairable short credentials as unreadable: %v", firstErr)
+		}
+		if firstErr != nil && !errors.Is(firstErr, ErrConfigCompile) {
+			t.Fatalf("first Load error = %v, want a repairable compile result", firstErr)
+		}
+		persisted, _, err := first.db.ReadActiveMeta()
+		if err != nil {
+			t.Fatalf("read first migrated active config: %v", err)
+		}
+		assertMigratedShortCredentials(t, persisted.Format())
+
+		restarted := newTestStoreAt(t, path)
+		err = restarted.Load()
+		if errors.Is(err, ErrConfigDBUnreadable) {
+			t.Fatalf("restart Load rejected the durable denied-legacy markers as unreadable: %v", err)
+		}
+		if err != nil && !errors.Is(err, ErrConfigCompile) {
+			t.Fatalf("restart Load error = %v, want a repairable compile result", err)
+		}
+		if err := restarted.EnterConfigure(); err != nil {
+			t.Fatalf("restart did not retain an in-band repair path: %v", err)
+		}
+	})
+
+	t.Run("rollback password and key", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config")
+		first := newTestStoreAt(t, path)
+		if err := first.db.WriteActive(&config.ConfigTree{}); err != nil {
+			t.Fatalf("write valid active config: %v", err)
+		}
+		if err := os.WriteFile(first.rollbackPath(1), []byte(shortConfig), 0o600); err != nil {
+			t.Fatalf("write short rollback config: %v", err)
+		}
+		if err := first.Load(); err != nil {
+			t.Fatalf("first Load with short rollback config: %v", err)
+		}
+		persisted, err := os.ReadFile(first.rollbackPath(1))
+		if err != nil {
+			t.Fatalf("read migrated rollback config: %v", err)
+		}
+		assertMigratedShortCredentials(t, string(persisted))
+
+		restarted := newTestStoreAt(t, path)
+		if err := restarted.Load(); err != nil {
+			t.Fatalf("restart Load with migrated short rollback config: %v", err)
+		}
+	})
+
+	t.Run("rescue password and key", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config")
+		first := newTestStoreAt(t, path)
+		if err := first.db.WriteActive(parseAuthMigrationTree10826(t, legacyAPIAuthConfig10826)); err != nil {
+			t.Fatalf("write valid active config: %v", err)
+		}
+		rescuePath := filepath.Join(filepath.Dir(path), RescueConfigBase)
+		if err := os.WriteFile(rescuePath, []byte(shortConfig), 0o600); err != nil {
+			t.Fatalf("write short rescue config: %v", err)
+		}
+		if err := first.Load(); err != nil {
+			t.Fatalf("first Load with short rescue config: %v", err)
+		}
+		rescue, err := os.ReadFile(rescuePath)
+		if err != nil {
+			t.Fatalf("read migrated rescue config: %v", err)
+		}
+		assertMigratedShortCredentials(t, string(rescue))
+
+		restarted := newTestStoreAt(t, path)
+		if err := restarted.Load(); err != nil {
+			t.Fatalf("restart Load with migrated short rescue config: %v", err)
+		}
+		rescue, err = os.ReadFile(rescuePath)
+		if err != nil {
+			t.Fatalf("read rescue config after restart: %v", err)
+		}
+		assertMigratedShortCredentials(t, string(rescue))
+	})
+}

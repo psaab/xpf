@@ -198,6 +198,44 @@ func TestHashAPIAuthSecretsHandlesActualSchemaPathInsideGroup10825(t *testing.T)
 	}
 }
 
+func TestHashAPIAuthSecretsKeepsDeniedShortLegacyVerifierStable10825(t *testing.T) {
+	tree := parseAPIAuthSecretsConfig10825(t, `system { services { web-management { api-auth {
+		expires 2099-01-01;
+		user admin { password tiny; }
+		api-key tiny;
+	} } } }`)
+	changed, err := HashAPIAuthSecrets(tree)
+	if err != nil || !changed {
+		t.Fatalf("first HashAPIAuthSecrets = (%v, %v), want changed=true without error", changed, err)
+	}
+	auth := tree.FindChild("system").FindChild("services").
+		FindChild("web-management").FindChild("api-auth")
+	password := auth.FindChild("user").FindChild("password").Keys[1]
+	apiKey := auth.FindChild("api-key").Keys[1]
+	for _, marker := range []string{password, apiKey} {
+		if !taggedAPIAuthHash(marker, apiAuthInvalidBcryptPrefix) {
+			t.Fatalf("short legacy credential was not stored as a valid denied marker: %q", marker)
+		}
+		if VerifyAPIAuthSecret(marker, "tiny") {
+			t.Fatal("denied short-credential marker authenticated as its legacy cleartext")
+		}
+	}
+	if HasMalformedAPIAuthSecretTag(tree) {
+		t.Fatal("well-formed denied legacy markers were reported as malformed")
+	}
+	changed, err = HashAPIAuthSecrets(tree)
+	if err != nil || changed {
+		t.Fatalf("repeat HashAPIAuthSecrets = (%v, %v), want changed=false without error", changed, err)
+	}
+	if _, err := CompileConfigLenient(tree); err != nil {
+		t.Fatalf("lenient compile rejected denied legacy markers before repair: %v", err)
+	}
+	if err := SchemaValidate(tree, nil); err == nil ||
+		!strings.Contains(err.Error(), "invalid stored verifier") {
+		t.Fatalf("strict schema validation error = %v, want denied-marker rejection", err)
+	}
+}
+
 func TestHashAPIAuthSecretsDoesNotLaunderTaggedVerifier10825(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

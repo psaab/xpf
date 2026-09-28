@@ -108,6 +108,38 @@ func TestResolveAPIBindsDisablesClearHTTPWithAPIAuth_10826(t *testing.T) {
 	}
 }
 
+func TestResolveAPIBindsClampsWhenOnlyDeniedShortAPIAuthRemains10825(t *testing.T) {
+	tree, parseErrs := config.NewParser(`system {
+ services {
+  web-management {
+   api-auth {
+    expires 2099-01-01;
+    user admin { password tiny; }
+   }
+  }
+ }
+}`).Parse()
+	if len(parseErrs) != 0 {
+		t.Fatalf("parse short API-auth fixture: %v", parseErrs)
+	}
+	if changed, err := config.HashAPIAuthSecrets(tree); err != nil || !changed {
+		t.Fatalf("HashAPIAuthSecrets = (%v, %v), want changed=true without error", changed, err)
+	}
+	compiled, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient after short-secret migration: %v", err)
+	}
+
+	apiCfg := api.Config{Addr: "10.0.0.5:8080"}
+	(&Daemon{}).resolveAPIBinds(&apiCfg, compiled)
+	if apiCfg.Auth != nil {
+		t.Fatalf("denied short legacy credential remained active in API auth: %+v", apiCfg.Auth)
+	}
+	if apiCfg.Addr != "127.0.0.1:8080" {
+		t.Fatalf("off-loopback API bind with no usable credentials = %q, want loopback clamp", apiCfg.Addr)
+	}
+}
+
 func TestResolveAPIBindsCarriesCustomTLSPaths(t *testing.T) {
 	d := &Daemon{}
 	cfg := &config.Config{}

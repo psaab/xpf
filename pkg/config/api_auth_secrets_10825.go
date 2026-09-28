@@ -143,8 +143,10 @@ func VerifyAPIAuthSecret(encoded, presented string) bool {
 
 // HashAPIAuthSecrets rewrites only credential leaves in the
 // system/services/web-management/api-auth schema subtree to salted bcrypt
-// verifiers. It intentionally mutates only the tree supplied by its caller;
-// compile and commit boundaries pass a private clone.
+// verifiers. Short legacy values use a well-formed, non-authenticating
+// `$xpf-invalid$` marker so the migration remains idempotent after restart.
+// It intentionally mutates only the tree supplied by its caller; compile and
+// commit boundaries pass a private clone.
 func HashAPIAuthSecrets(tree *ConfigTree) (bool, error) {
 	if tree == nil {
 		return false, nil
@@ -231,13 +233,20 @@ func HashAPIAuthSecrets(tree *ConfigTree) (bool, error) {
 }
 
 func isMalformedAPIAuthSecretTag(raw string) bool {
-	return strings.HasPrefix(raw, apiAuthInvalidBcryptPrefix) ||
-		strings.HasPrefix(raw, apiAuthBcryptPrefix) && !IsAPIAuthSecretHash(raw)
+	if strings.HasPrefix(raw, apiAuthInvalidBcryptPrefix) {
+		// This well-formed deny marker is persisted for short legacy values.
+		// It must survive later loads, but never passes IsAPIAuthSecretHash or
+		// the strict credential validators.
+		return !taggedAPIAuthHash(raw, apiAuthInvalidBcryptPrefix)
+	}
+	return strings.HasPrefix(raw, apiAuthBcryptPrefix) && !IsAPIAuthSecretHash(raw)
 }
 
 // HasMalformedAPIAuthSecretTag reports whether an API-auth credential slot
-// contains a reserved verifier tag that is not a valid verifier. It checks the
-// schema-defined root and group paths without mutating the supplied tree.
+// contains a reserved verifier tag with an invalid encoding. A well-formed
+// `$xpf-invalid$` is the durable deny marker for short legacy secrets; it is
+// structurally stable but remains unusable and is rejected by schema validation.
+// It checks the schema-defined root and group paths without mutating the tree.
 func HasMalformedAPIAuthSecretTag(tree *ConfigTree) bool {
 	if tree == nil {
 		return false
