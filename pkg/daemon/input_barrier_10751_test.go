@@ -448,46 +448,38 @@ func TestEarlyInputBarrierAttestation10751(t *testing.T) {
 	orig := nftInstaller
 	t.Cleanup(func() { nftInstaller = orig })
 
-	callsOf := func(fake *fakeNftInstaller, want string) int {
-		t.Helper()
-		n := 0
-		for _, call := range fake.earlyInputBarrierCalls {
-			if call == want {
-				n++
-			}
-		}
-		return n
-	}
-
-	t.Run("missing barrier reinstalled before real install", func(t *testing.T) {
-		fake := &fakeNftInstaller{
-			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
-		}
+	t.Run("pre-handoff apply converges to lifeline guard", func(t *testing.T) {
+		fake := &fakeNftInstaller{}
 		nftInstaller = fake
 		d := &Daemon{}
 		if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
-			t.Fatalf("reinstall-then-install apply: %v", err)
+			t.Fatalf("converge-then-install apply: %v", err)
 		}
-		if got := callsOf(fake, "install"); got != 1 {
-			t.Fatalf("barrier install calls = %d, want 1 reinstall of the flushed barrier", got)
+		lifeline, removes := 0, 0
+		for _, call := range fake.earlyInputBarrierCalls {
+			switch call {
+			case "install-lifeline":
+				lifeline++
+			case "remove":
+				removes++
+			}
 		}
-		if got := callsOf(fake, "remove"); got != 1 {
-			t.Fatalf("barrier remove calls = %d, want the real-install handoff after reinstall", got)
+		if lifeline != 1 || removes != 1 {
+			t.Fatalf("barrier calls = %v, want one guard converge plus the real-install handoff", fake.earlyInputBarrierCalls)
 		}
-		if fake.earlyInputBarrierPresentCalls != 1 {
-			t.Fatalf("presence attestations = %d, want 1 pre-apply readback", fake.earlyInputBarrierPresentCalls)
+		if len(fake.earlyInputBarrierLifelineSpecs) != 1 || len(fake.earlyInputBarrierLifelineSpecs[0]) == 0 {
+			t.Fatal("guard converge recorded no lifeline set")
 		}
 		if !d.earlyInputHandoffDone.Load() {
-			t.Fatal("reinstall-then-handoff must mark the handoff done")
+			t.Fatal("converge-then-handoff must mark the handoff done")
 		}
 	})
 
-	t.Run("missing barrier with failing reinstall fails closed", func(t *testing.T) {
-		installErr := errors.New("barrier reinstall failed")
+	t.Run("guard converge failure fails closed", func(t *testing.T) {
+		installErr := errors.New("guard converge failed")
 		realCalled := false
 		fake := &fakeNftInstaller{
-			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
-			earlyInputBarrierInstall: func() error { return installErr },
+			earlyInputBarrierLifelineInstall: func([]string) error { return installErr },
 			hostInbound: func(xnft.HostInboundSpec) error {
 				realCalled = true
 				return nil
@@ -497,54 +489,31 @@ func TestEarlyInputBarrierAttestation10751(t *testing.T) {
 		d := &Daemon{}
 		err := d.applyHostInboundFilter(hostInboundTestConfig())
 		if !errors.Is(err, installErr) {
-			t.Fatalf("reinstall failure error = %v, want the reinstall error", err)
+			t.Fatalf("converge failure error = %v, want the guard install error", err)
 		}
 		if realCalled {
-			t.Fatal("real install must not run when the missing barrier cannot be reinstalled")
+			t.Fatal("real install must not run when the guard cannot converge")
 		}
-		if got := callsOf(fake, "remove"); got != 0 {
-			t.Fatalf("barrier remove calls = %d, want none on reinstall failure", got)
+		if got := len(fake.earlyInputBarrierCalls); got != 1 {
+			t.Fatalf("barrier calls = %v, want only the failed converge attempt", fake.earlyInputBarrierCalls)
 		}
 		if st := d.HostInboundApplied(); !st.LastApplyFailed {
 			t.Fatalf("applied state = %+v, want failure recorded", st)
 		}
 	})
 
-	t.Run("flush with failed fallback stays closed", func(t *testing.T) {
-		installErr := errors.New("real host-inbound load failed")
-		fake := &fakeNftInstaller{
-			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
-			hostInbound:              func(xnft.HostInboundSpec) error { return installErr },
-			coldBootFence:            func(xnft.FenceSpec) error { return errors.New("fence failed") },
-		}
+	t.Run("post-handoff apply does not reinstall", func(t *testing.T) {
+		fake := &fakeNftInstaller{}
 		nftInstaller = fake
 		d := &Daemon{}
-		err := d.applyHostInboundFilter(hostInboundTestConfig())
-		if !errors.Is(err, installErr) {
-			t.Fatalf("flushed failed-handoff error = %v, want the real install error", err)
-		}
-		if got := callsOf(fake, "install"); got != 1 {
-			t.Fatalf("barrier install calls = %d, want 1 reinstall before the failed handoff", got)
-		}
-		if got := callsOf(fake, "remove"); got != 0 {
-			t.Fatalf("barrier remove calls = %d, a failed handoff must not lift the reinstalled barrier", got)
-		}
-	})
-
-	t.Run("present readback error proceeds to enforcement", func(t *testing.T) {
-		fake := &fakeNftInstaller{
-			earlyInputBarrierPresent: func() (bool, error) { return false, errors.New("netlink readback failed") },
-		}
-		nftInstaller = fake
-		d := &Daemon{}
+		d.earlyInputHandoffDone.Store(true)
 		if err := d.applyHostInboundFilter(hostInboundTestConfig()); err != nil {
-			t.Fatalf("readback-error apply: %v", err)
+			t.Fatalf("post-handoff apply: %v", err)
 		}
-		if got := callsOf(fake, "install"); got != 0 {
-			t.Fatalf("barrier install calls = %d, want none when presence is unreadable (warn-and-proceed)", got)
-		}
-		if got := callsOf(fake, "remove"); got != 1 {
-			t.Fatalf("barrier remove calls = %d, want the real-install handoff", got)
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "install-lifeline" {
+				t.Fatalf("barrier calls = %v, post-handoff must not reinstall the guard", fake.earlyInputBarrierCalls)
+			}
 		}
 	})
 }
@@ -554,56 +523,65 @@ func TestEarlyInputGateForLinkActivation10751(t *testing.T) {
 	origProbe := nftProbeAvailable
 	t.Cleanup(func() { nftInstaller = origInstaller; nftProbeAvailable = origProbe })
 
-	t.Run("present barrier proceeds", func(t *testing.T) {
+	t.Run("present barrier converges to guard and proceeds", func(t *testing.T) {
 		fake := &fakeNftInstaller{}
 		nftInstaller = fake
-		if !ensureEarlyInputProtectionForNaming() {
+		if !ensureEarlyInputProtectionForNaming(nil) {
 			t.Fatal("gate refused with the barrier present")
 		}
 		if fake.earlyInputBarrierPresentCalls != 1 {
 			t.Fatalf("presence attestations = %d, want 1", fake.earlyInputBarrierPresentCalls)
 		}
-	})
-
-	t.Run("absent barrier reinstalls and proceeds", func(t *testing.T) {
-		fake := &fakeNftInstaller{
-			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
-		}
-		nftInstaller = fake
-		if !ensureEarlyInputProtectionForNaming() {
-			t.Fatal("gate refused after a successful reinstall")
-		}
 		installs := 0
 		for _, call := range fake.earlyInputBarrierCalls {
-			if call == "install" {
+			if call == "install-lifeline" {
 				installs++
 			}
 		}
 		if installs != 1 {
-			t.Fatalf("barrier install calls = %d, want 1 self-heal reinstall", installs)
+			t.Fatalf("guard installs = %d, want 1 converge to the lifeline variant", installs)
+		}
+	})
+
+	t.Run("absent barrier installs guard and proceeds", func(t *testing.T) {
+		fake := &fakeNftInstaller{
+			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
+		}
+		nftInstaller = fake
+		if !ensureEarlyInputProtectionForNaming(nil) {
+			t.Fatal("gate refused after a successful guard install")
+		}
+		installs := 0
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "install-lifeline" {
+				installs++
+			}
+		}
+		if installs != 1 {
+			t.Fatalf("guard installs = %d, want 1 self-heal install", installs)
 		}
 	})
 
 	t.Run("absent barrier with unusable nft proceeds loudly", func(t *testing.T) {
 		fake := &fakeNftInstaller{
-			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
-			earlyInputBarrierInstall: func() error { return errors.New("nft unavailable") },
+			earlyInputBarrierPresent:         func() (bool, error) { return false, nil },
+			earlyInputBarrierLifelineInstall: func([]string) error { return errors.New("nft unavailable") },
 		}
 		nftInstaller = fake
 		nftProbeAvailable = func() error { return errors.New("no nf_tables") }
-		if !ensureEarlyInputProtectionForNaming() {
+		if !ensureEarlyInputProtectionForNaming(nil) {
 			t.Fatal("gate refused on an unenforceable platform; boot must never brick where no enforcement is possible")
 		}
 	})
 
 	t.Run("absent barrier with usable nft refuses", func(t *testing.T) {
 		fake := &fakeNftInstaller{
-			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
-			earlyInputBarrierInstall: func() error { return errors.New("reinstall failed") },
+			earlyInputBarrierPresent:         func() (bool, error) { return false, nil },
+			earlyInputBarrierLifelineInstall: func([]string) error { return errors.New("guard install failed") },
 		}
 		nftInstaller = fake
 		nftProbeAvailable = func() error { return nil }
-		if ensureEarlyInputProtectionForNaming() {
+		if ensureEarlyInputProtectionForNaming(nil) {
 			t.Fatal("gate proceeded with protection known-absent and nft usable")
 		}
 	})
@@ -613,15 +591,15 @@ func TestEarlyInputGateForLinkActivation10751(t *testing.T) {
 			earlyInputBarrierPresent: func() (bool, error) { return false, errors.New("netlink readback failed") },
 		}
 		nftInstaller = fake
-		if !ensureEarlyInputProtectionForNaming() {
+		if !ensureEarlyInputProtectionForNaming(nil) {
 			t.Fatal("gate refused on a presence-readback error; it blocks on known-absent, not on unobservable")
 		}
 	})
 
 	t.Run("naming policy performs no link activation on gate refusal", func(t *testing.T) {
 		nftInstaller = &fakeNftInstaller{
-			earlyInputBarrierPresent: func() (bool, error) { return false, nil },
-			earlyInputBarrierInstall: func() error { return errors.New("reinstall failed") },
+			earlyInputBarrierPresent:         func() (bool, error) { return false, nil },
+			earlyInputBarrierLifelineInstall: func([]string) error { return errors.New("reinstall failed") },
 		}
 		nftProbeAvailable = func() error { return nil }
 		// Belt-and-braces link-op recorders: the gate returns before any
@@ -1083,4 +1061,68 @@ func sequentialFamilyConfig10751(t *testing.T, addrs []string, dhcp, dhcpv6 bool
 		t.Fatal("fixture unexpectedly produced a host-input deny program")
 	}
 	return cfg
+}
+
+func TestResolveEarlyInputGuardLifelines10751(t *testing.T) {
+	origRecord := lifelineRecordNameFn
+	t.Cleanup(func() { lifelineRecordNameFn = origRecord })
+
+	leafConfig := func(leaf string) *config.Config {
+		cfg := &config.Config{}
+		if leaf != "" {
+			cfg.System.ManagementInterface = leaf
+		}
+		return cfg
+	}
+
+	for _, tc := range []struct {
+		name       string
+		leaf       string
+		record     string
+		recordOK   bool
+		detect     string
+		detectErr  bool
+		want       []string
+		wantAbsent []string
+	}{
+		{"defaults plus detected fallback", "", "", false, "ge-data", false,
+			[]string{"fxp0", "em0", "fab0", "fab1", "vrf-mgmt", "ge-data"}, nil},
+		{"leaf narrows fxp0 and excludes detected data", "hb0", "", false, "ge-data", false,
+			[]string{"hb0", "em0", "fab0", "fab1", "vrf-mgmt"}, []string{"fxp0", "ge-data"}},
+		{"record identity excludes detected data", "", "r1", true, "ge-data", false,
+			[]string{"fxp0", "em0", "fab0", "fab1", "vrf-mgmt", "r1"}, []string{"ge-data"}},
+		{"leaf plus record union", "hb0", "r1", true, "ge-data", false,
+			[]string{"hb0", "em0", "fab0", "fab1", "vrf-mgmt", "r1"}, []string{"fxp0", "ge-data"}},
+		{"detection failure keeps verified set", "hb0", "", false, "", true,
+			[]string{"hb0", "em0", "fab0", "fab1", "vrf-mgmt"}, []string{"fxp0"}},
+		{"detected member deduped", "", "", false, "fxp0", false,
+			[]string{"fxp0", "em0", "fab0", "fab1", "vrf-mgmt"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifelineRecordNameFn = func() (string, bool) { return tc.record, tc.recordOK }
+			if tc.detectErr {
+				withFailClosedBootDetect(t, func() (string, bool, error) { return "", false, errors.New("no routes") })
+			} else {
+				withFailClosedBootDetect(t, func() (string, bool, error) { return tc.detect, tc.detect != "", nil })
+			}
+			got := resolveEarlyInputGuardLifelines(leafConfig(tc.leaf))
+			set := map[string]bool{}
+			for _, n := range got {
+				if set[n] {
+					t.Fatalf("lifelines %v contain duplicate %q", got, n)
+				}
+				set[n] = true
+			}
+			for _, w := range tc.want {
+				if !set[w] {
+					t.Errorf("lifelines %v omit %q", got, w)
+				}
+			}
+			for _, b := range tc.wantAbsent {
+				if set[b] {
+					t.Errorf("lifelines %v wrongly admit %q", got, b)
+				}
+			}
+		})
+	}
 }

@@ -105,7 +105,7 @@ func applyStartupNamingPolicy(cfg *config.Config, nodeID int, clusterMode bool,
 	// known-absent. Renames bring links up (LinkSetUp), making v6
 	// link-locals reachable before the first host-inbound apply; the unit
 	// Requires edge covers systemd boots, this gate covers direct starts.
-	if !ensureEarlyInputProtectionForNaming() {
+	if !ensureEarlyInputProtectionForNaming(cfg) {
 		return errors.New("refusing interface naming: early host-input barrier missing and reinstall failed")
 	}
 

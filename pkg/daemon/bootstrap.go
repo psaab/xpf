@@ -20,6 +20,7 @@ import (
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/vishvananda/netlink"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -1100,7 +1101,11 @@ func (d *Daemon) setupBootstrapLifeline() {
 	// but proceed regardless — bootstrap is explicit recovery and the
 	// management lifeline takes precedence over the barrier (the #1960 order).
 	// A failed reinstall is already loud inside the ensure call.
-	_ = ensureEarlyInputProtectionForNaming()
+	var bootstrapCfg *config.Config
+	if d.store != nil {
+		bootstrapCfg = d.store.ActiveConfig()
+	}
+	_ = ensureEarlyInputProtectionForNaming(bootstrapCfg)
 
 	routeIface, _, routeErr := detectLifelineInterfaceFn()
 	if routeIface == "" && routeErr != nil {
