@@ -141,7 +141,11 @@ const (
 // retained the operator's filter, which — unlike the per-destination-address
 // host-inbound table — is not per-address scoped and still governs every local
 // address (the deliberate divergence from the #5789 gap fence).
-func (d *Daemon) applyLo0Filter(cfg *config.Config) error {
+func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
+	// #10751/B1: publish this apply's lo0 outcome for the host-inbound
+	// handoff gate. The tail runs lo0 before host-inbound, so by the time
+	// the host-inbound branches decide on barrier removal this flag is fresh.
+	defer func() { d.lo0LastFailed.Store(retErr != nil) }()
 	filterV4 := cfg.System.Lo0FilterInputV4
 	filterV6 := cfg.System.Lo0FilterInputV6
 	if filterV4 == "" && filterV6 == "" {
@@ -658,7 +662,34 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		d.hostInboundLastFailureUnixNano.Store(0)
 		d.hostInboundCoveredAddrs = nil
 		// Enforcement is intentionally absent; only now may the pre-networkd
-		// barrier hand off to the configured no-enforcement posture.
+		// barrier hand off to the configured no-enforcement posture — unless
+		// another intended protection is still outstanding. Both gates below
+		// apply ONLY before the first handoff: day-2 behavior is unchanged.
+		if !d.earlyInputHandoffDone.Load() {
+			// B1: lo0 failed in this apply (the tail runs lo0 first, so the
+			// flag is fresh). An intended lo0-only policy must not lose its
+			// only backstop to an independent host-inbound teardown; the
+			// lo0 error already fails the commit, and the next successful
+			// apply hands off.
+			if d.lo0LastFailed.Load() {
+				slog.Warn("retaining early host-input barrier: lo0 protection failed in this apply")
+				return nil
+			}
+			// B3: 'nothing resolved now' is not 'operator requested no
+			// enforcement'. A zone that intends enforcement but has no
+			// current address (DHCP/VIP pending) must keep the global
+			// barrier until an address appears and scoped protection
+			// installs; otherwise appearance precedes protection.
+			if pending := dpuserspace.AddresslessEnforcingZones(cfg); len(pending) > 0 {
+				zones := make([]string, 0, len(pending))
+				for _, z := range pending {
+					zones = append(zones, z.Zone)
+				}
+				slog.Warn("retaining early host-input barrier: enforcing zones have no address yet",
+					"zones", zones)
+				return nil
+			}
+		}
 		if err := nftInstaller.RemoveEarlyInputBarrier(); err != nil {
 			err = tagNftInstallErr(err)
 			slog.Warn("failed to remove early host-input barrier after no-enforcement teardown", "err", err)
@@ -791,7 +822,11 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// protects the current address snapshot. A zero-drop fallback
 			// deliberately leaves the early barrier installed until a later
 			// successful install or no-enforcement teardown.
-			if barrierErr := nftInstaller.RemoveEarlyInputBarrier(); barrierErr != nil {
+			// B1: pre-handoff, a failed lo0 in this apply also retains the
+			// barrier — the fence covers only the host-inbound scope.
+			if !d.earlyInputHandoffDone.Load() && d.lo0LastFailed.Load() {
+				slog.Warn("retaining early host-input barrier after fenced fallback: lo0 protection failed in this apply")
+			} else if barrierErr := nftInstaller.RemoveEarlyInputBarrier(); barrierErr != nil {
 				barrierErr = tagNftInstallErr(barrierErr)
 				slog.Warn("failed to remove early host-input barrier after fenced fallback", "err", barrierErr)
 				barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", barrierErr)
@@ -844,7 +879,14 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// removal failure the real table still stands, so enforcement is recorded
 	// as established-but-STALE and the next apply retries the removal.
 	var barrierHandoffErr error
-	if barrierErr := nftInstaller.RemoveEarlyInputBarrier(); barrierErr != nil {
+	// B1: pre-handoff, a failed lo0 in this apply retains the barrier even
+	// though the host-inbound scope installed cleanly — the barrier backstops
+	// both scopes, and the lo0 error already fails the commit. The next
+	// successful apply hands off.
+	lo0RetainsBarrier := !d.earlyInputHandoffDone.Load() && d.lo0LastFailed.Load()
+	if lo0RetainsBarrier {
+		slog.Warn("retaining early host-input barrier after real install: lo0 protection failed in this apply")
+	} else if barrierErr := nftInstaller.RemoveEarlyInputBarrier(); barrierErr != nil {
 		barrierErr = tagNftInstallErr(barrierErr)
 		slog.Warn("failed to remove early host-input barrier after real install", "err", barrierErr)
 		barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound install: %w", barrierErr)
@@ -896,7 +938,12 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// Record it so a later failed rerender can tell which destinations a
 	// subsequently-appeared address left uncovered.
 	d.hostInboundCoveredAddrs = desiredDrop
-	d.earlyInputHandoffDone.Store(true)
+	// B1: a lo0-retained barrier is not a handoff — the next successful
+	// apply removes it. The host-inbound scope itself installed cleanly,
+	// so applied-success is still recorded.
+	if !lo0RetainsBarrier {
+		d.earlyInputHandoffDone.Store(true)
+	}
 	slog.Info("host-inbound filter applied", "zones", len(views),
 		"unzoned_deny_v4", len(unzonedV4), "unzoned_deny_v6", len(unzonedV6),
 		"junos_host_deny_programs", len(programs))

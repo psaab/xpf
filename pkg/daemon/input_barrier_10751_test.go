@@ -269,6 +269,179 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 	})
 }
 
+func TestEarlyInputHandoffGatedOnLo0AndIntent10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+
+	lo0OnlyConfig := func() *config.Config {
+		cfg := &config.Config{}
+		cfg.System.Lo0FilterInputV4 = "protect-re"
+		cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
+			"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
+				{Name: "deny-rest", Action: "discard"},
+			}},
+		}
+		return cfg
+	}
+
+	t.Run("failed lo0 retains barrier on host teardown", func(t *testing.T) {
+		fake := &fakeNftInstaller{
+			lo0: func(xnft.Lo0FilterSpec) error { return errors.New("lo0 load failed") },
+		}
+		nftInstaller = fake
+		cfg := lo0OnlyConfig()
+		d := &Daemon{}
+		// Tail order: lo0 first, then host-inbound on the same Daemon.
+		if err := d.applyLo0Filter(cfg); err == nil {
+			t.Fatal("lo0 apply unexpectedly succeeded")
+		}
+		if err := d.applyHostInboundFilter(cfg); err != nil {
+			t.Fatalf("host teardown with failed lo0: %v", err)
+		}
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "remove" {
+				t.Fatalf("barrier calls = %v, a failed lo0 must retain the pre-handoff barrier", fake.earlyInputBarrierCalls)
+			}
+		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("failed lo0 must not mark the handoff done")
+		}
+	})
+
+	t.Run("successful lo0 hands off on host teardown", func(t *testing.T) {
+		fake := &fakeNftInstaller{}
+		nftInstaller = fake
+		cfg := lo0OnlyConfig()
+		d := &Daemon{}
+		if err := d.applyLo0Filter(cfg); err != nil {
+			t.Fatalf("lo0 apply: %v", err)
+		}
+		if err := d.applyHostInboundFilter(cfg); err != nil {
+			t.Fatalf("host teardown: %v", err)
+		}
+		if len(fake.earlyInputBarrierCalls) != 1 || fake.earlyInputBarrierCalls[0] != "remove" {
+			t.Fatalf("barrier calls = %v, want a single handoff remove", fake.earlyInputBarrierCalls)
+		}
+		if !d.earlyInputHandoffDone.Load() {
+			t.Fatal("successful lo0-only handoff must mark the handoff done")
+		}
+	})
+
+	t.Run("failed lo0 retains barrier after real host install", func(t *testing.T) {
+		fake := &fakeNftInstaller{
+			lo0: func(xnft.Lo0FilterSpec) error { return errors.New("lo0 load failed") },
+		}
+		nftInstaller = fake
+		cfg := lo0FenceTestConfig()
+		d := &Daemon{}
+		if err := d.applyLo0Filter(cfg); err == nil {
+			t.Fatal("lo0 apply unexpectedly succeeded")
+		}
+		if err := d.applyHostInboundFilter(cfg); err != nil {
+			t.Fatalf("real host install with failed lo0: %v", err)
+		}
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "remove" {
+				t.Fatalf("barrier calls = %v, failed lo0 must retain the barrier after a real host install", fake.earlyInputBarrierCalls)
+			}
+		}
+		if !d.hostInboundEnforced.Load() {
+			t.Fatal("real host install must still publish enforcement")
+		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("lo0-retained barrier must not mark the handoff done")
+		}
+		if st := d.HostInboundApplied(); !st.Current() {
+			t.Fatalf("host scope installed cleanly but applied state = %+v, want current", st)
+		}
+	})
+
+	t.Run("addressless enforcing zone retains barrier without programs", func(t *testing.T) {
+		fake := &fakeNftInstaller{}
+		nftInstaller = fake
+		cfg := enforcingZoneNoProgramConfig10751(t, nil, true)
+		if len(dpuserspace.AddresslessEnforcingZones(cfg)) == 0 {
+			t.Fatal("fixture has no addressless enforcing zone; the test would be vacuous")
+		}
+		d := &Daemon{}
+		if err := d.applyHostInboundFilter(cfg); err != nil {
+			t.Fatalf("addressless enforcing apply: %v", err)
+		}
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "remove" {
+				t.Fatalf("barrier calls = %v, intended-but-unresolved enforcement must retain the barrier", fake.earlyInputBarrierCalls)
+			}
+		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("addressless intended enforcement must not mark the handoff done")
+		}
+	})
+
+	t.Run("address appearance hands off v4 and v6", func(t *testing.T) {
+		fake := &fakeNftInstaller{}
+		var installed xnft.HostInboundSpec
+		fake.hostInbound = func(spec xnft.HostInboundSpec) error {
+			installed = spec
+			return nil
+		}
+		nftInstaller = fake
+		d := &Daemon{}
+		// Phase 1: DHCP-pending, nothing resolved — barrier retained.
+		if err := d.applyHostInboundFilter(enforcingZoneNoProgramConfig10751(t, nil, true)); err != nil {
+			t.Fatalf("addressless phase: %v", err)
+		}
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "remove" {
+				t.Fatalf("phase-1 barrier calls = %v, want no handoff before addresses appear", fake.earlyInputBarrierCalls)
+			}
+		}
+		// Phase 2: static v4+v6 arrive — real install hands off.
+		if err := d.applyHostInboundFilter(enforcingZoneNoProgramConfig10751(t,
+			[]string{"10.0.0.5/24", "2001:db8::5/64"}, false)); err != nil {
+			t.Fatalf("addressed phase: %v", err)
+		}
+		if len(hostInboundViewAddrs(installed, false)) == 0 || len(hostInboundViewAddrs(installed, true)) == 0 {
+			t.Fatal("addressed install did not scope both v4 and v6; the appearance half would be vacuous")
+		}
+		removes := 0
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "remove" {
+				removes++
+			}
+		}
+		if removes != 1 {
+			t.Fatalf("barrier calls = %v, want exactly one handoff remove after appearance", fake.earlyInputBarrierCalls)
+		}
+		if !d.earlyInputHandoffDone.Load() {
+			t.Fatal("addressed handoff must mark the handoff done")
+		}
+	})
+}
+
+// enforcingZoneNoProgramConfig10751 builds an enforcing zone with the given
+// static addresses (DHCP-pending when addrs is nil) and NO junos-host DENY
+// program — the ordinary addressless-zone branch, not the program-only
+// fallback branch.
+func enforcingZoneNoProgramConfig10751(t *testing.T, addrs []string, dhcp bool) *config.Config {
+	t.Helper()
+	unit := &config.InterfaceUnit{Number: 0, DHCP: dhcp, Addresses: addrs}
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"xpf10751wan": {Name: "xpf10751wan", Units: map[int]*config.InterfaceUnit{0: unit}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"untrust": {
+			Name:               "untrust",
+			Interfaces:         []string{"xpf10751wan.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}},
+		},
+	}
+	if len(dpuserspace.BuildJunosHostPrograms(cfg)) != 0 {
+		t.Fatal("fixture unexpectedly produced a host-input deny program")
+	}
+	return cfg
+}
+
 func addresslessProgramOnlyConfig10751(t *testing.T) *config.Config {
 	t.Helper()
 	unit := &config.InterfaceUnit{Number: 0, DHCP: true}
