@@ -40,25 +40,40 @@ This is the package that drives chassis-cluster failover.
   generation's goroutines and their deferred latch-clear only resets the
   latch if it still belongs to that generation.
 - `UpdateInstances(desired []*Instance) error` — `manager.go`.
-  Diffs the running instance set against the desired set. A VIP change
-  forces an instance restart, which is done **build-before-teardown**
-  (#2156): the replacement's interface is resolved and its socket opened
-  (the "proof" step) BEFORE the old instance is stopped and removed. A
-  transient member-link failure (carrier flap, mid-rename by networkd)
-  therefore leaves the old instance running and advertising its old VIPs
-  rather than orphaning the RG out of election. Priority/preempt/track
-  and the wire/timer/burst fields **advertise-interval** and
-  **gratuitous-arp-count** update in-place (no restart, no master-down
-  gap): the no-change gate compares `AdvertiseInterval` and `GARPCount`
-  so a day-2 commit changing only `reth-advertise-interval` or
-  `gratuitous-arp-count` is detected (not shortcut as no-change), and
-  `updateConfig` copies both into the running instance's `cfg` (#5087).
-  Neither needs an explicit timer poke — the MASTER advert timer
-  re-arms via `advertTimer.Reset(vi.advertInterval())` on its next
-  fire, the BACKUP master-down horizon re-reads `cfg.AdvertiseInterval`
-  through `masterDownInterval()`, and the next failover's `sendGARP`
-  re-reads `cfg.GARPCount`. Before #5087 the stale value persisted
-  until an unrelated restart.
+  diffs the running instance set against the desired set. A valid,
+  non-empty VIP-set commit on the same instance identity and ifindex updates
+  the existing instance in place (#10780): on a MASTER, only new VIPs are
+  added, removed VIPs are withdrawn, and the current set is advertised
+  without stopping the state machine. The existing MASTER therefore never
+  sends priority-zero resignation for this in-place delta, so an ordinary
+  day-2 address edit cannot trigger the peer's immediate takeover or create
+  the single-unit dual-`rg_active` / multi-unit VLAN split window. A commit
+  that also needs an ifindex rebind follows the build-before-teardown restart
+  path; invalid or empty desired sets are outside the in-place delta contract.
+  An over-capacity desired set is rejected while a same-key instance keeps
+  its previous valid set; the RG remains unready until the desired set is
+  corrected. New addresses are announced with GARP/NA; untouched VIPs are
+  normally neither removed nor re-announced, except that a still-current VIP
+  whose initial frame was interrupted by an epoch change stays pending until
+  the next announcement pass. A newly introduced address family must
+  have its send socket opened before the set is published. Socket-open
+  failure keeps the old VIP set but still applies independent scalar/track
+  updates. Partial netlink failure stores the addresses that actually remain
+  actuated, exposes the divergence in `InstanceStates`, and keeps
+  `RGVRRPReady` false until the 2s reconcile retry converges the delta.
+  Textual IP spelling changes with the same parsed address/prefix identity
+  are adopted without netlink churn or a new GARP epoch.
+  Priority/preempt/track and the wire/timer/burst fields **advertise-interval**
+  and **gratuitous-arp-count** also update in-place (no restart or master-down
+  gap): the no-change gate compares `AdvertiseInterval` and `GARPCount` so a
+  day-2 commit changing only `reth-advertise-interval` or
+  `gratuitous-arp-count` is detected, and `updateConfig` copies both into the
+  running instance's `cfg` (#5087). Neither needs an explicit timer poke — the
+  MASTER advert timer re-arms via `advertTimer.Reset(vi.advertInterval())` on
+  its next fire, the BACKUP master-down horizon re-reads
+  `cfg.AdvertiseInterval` through `masterDownInterval()`, and the next
+  failover's `sendGARP` re-reads `cfg.GARPCount`. Before #5087 the stale value
+  persisted until an unrelated restart.
   **Ifindex drift (#2294):** before the no-change / in-place branch, a
   cheap tolerant `name→ifindex` probe compares the live kernel ifindex
   against the one the instance's sockets are bound to. A member netdev
@@ -68,24 +83,18 @@ This is the package that drives chassis-cluster failover.
   sockets bound to the STALE ifindex and go permanently silent
   (split-brain / blackhole). A drift forces the same
   build-before-teardown restart path so the instance rebinds to the new
-  ifindex; a resolve failure is treated as "no drift" (a transient
-  netlink hiccup never blocks a time-critical priority update — the
-  build block already owns resolve-failure recovery). The probe runs
-  every ~2s reconcile tick and is idempotent (unchanged ifindex → no
-  restart, no churn). The restart preserves configured
-  priority/preempt/tracking and re-applies sync-hold suppression, so a
-  rebind cannot spuriously preempt or break the sync hold; RG role is
+  ifindex. If that rebind cannot be built, the retained instance does not
+  make the RG ready; readiness remains false across later probe errors until
+  a successful rebind. The probe runs every ~2s reconcile tick and is
+  idempotent (unchanged ifindex → no restart, no churn). The restart preserves
+  configured priority/preempt/tracking and re-applies sync-hold suppression,
+  so a rebind cannot spuriously preempt or break the sync hold; RG role is
   driven separately by the cluster heartbeat / debounced priority.
-  **Desired-vs-built record (#5641):** each pass recomputes
-  `m.unbuiltDesired` — the desired keys with no live instance — so
-  `RGVRRPReady` can refuse a partially-built RG (see the
-  build-before-teardown invariant below).
 - `RGVRRPReady(rgID int, hasRETH bool) (bool, []string)` — `manager.go`.
   Returns ready only when EVERY desired RETH key for the RG (VRID
   `100+rgID`) has a live instance AND at least one instance exists (or the
-  RG has no RETH interfaces). A desired key that failed to build
-  (resolve / socket / family capability) makes it `(false, reasons)`
-  naming the un-built key (#5641).
+  RG has no RETH interfaces). A desired key that failed to build, rebind, or
+  complete in-place VIP actuation makes it `(false, reasons)` naming the key.
 - `ReleaseSyncHold()` — `manager.go`. No-arg; releases hold for all
   instances.
 - `ResignRG(rgID int)` — `manager.go`. Forces this node out of master
@@ -355,17 +364,26 @@ the baseline with an ordinary advert.
       all configured VIPs and surfaces the result
       (`TestSupersededReconcileRollbackIsCoveredByBecomeBackup_9509`).
 - GARP suppression gates: `sendGARP(force)` has two gates — a per-epoch
-  dedup (`garpEpoch`/`lastGARPEpoch`, one burst per transition) and a
-  500 ms time dampener (`lastGARPTime`/`garpDampened`, storm control for
-  routine sends within the same ownership tenure). After mastership is
-  relinquished, a normal failback GARP bypasses the dampener because peers may
-  have learned the intervening master's MAC; `lastGARPOwnerGen` distinguishes
+  dedup (`garpEpoch`/`lastGARPEpoch`, one burst per ownership or VIP-membership
+  generation) and a 500 ms time dampener (`lastGARPTime`/`garpDampened`, storm
+  control for routine sends within the same ownership tenure). After mastership
+  is relinquished, a normal failback GARP bypasses the dampener because peers
+  may have learned the intervening master's MAC; `lastGARPOwnerGen` distinguishes
   that case from a rapid flap within one tenure. `force=true` also bypasses the
   dampener (the epoch dedup still applies). `becomeMaster` and the periodic
   path pass `force=false`; `ReconcileVIPs` passes `force=true` because the RETH
   MAC just changed and the correction GARP must not be swallowed by a routine
   burst that fired in the prior 500 ms (#2081). The decision lives in the
   network-free helper `garpSendAllowed`, which is unit-tested directly.
+  `updateVIPs` advances the epoch before starting any VIP withdrawal; additions
+  advance it when their membership is published. A deletion callback is
+  therefore invalid while later removals are still pending. `sendGARPFor`
+  tracks VIPs until their synchronous first frame succeeds; if an epoch change
+  interrupts a full-set send, the update carries only still-current pending
+  VIPs into its announcement pass, alongside newly added addresses. Thus a
+  pure-add with no interrupted burst remains added-only and an unsent survivor
+  cannot be stranded by an old-snapshot abort. Per-VIP `vipMu` sections bound
+  synchronous frame/probe locking, and later VIPs revalidate before proceeding.
 - Supplementary gateway ARP probe: after each IPv4 GARP burst, `sendGARP`
   also sends a directed ARP Request — VIP as the ARP sender (#2152) — to the
   subnet's first usable host (network address + 1, the most common gateway),
@@ -385,19 +403,20 @@ the baseline with an ordinary advert.
 - Burst follow-up abdication gate (#2867): the cluster burst helpers send the
   first GARP/NA frame synchronously, then fan the remaining `count-1` frames
   out over a detached goroutine spanning `(count-1)*50 ms`. `sendGARP` captures
-  `garpEpoch` and passes a `stillMaster` predicate
-  (`getState() == StateMaster && garpEpoch == captured`) into
-  `cluster.SendGratuitousARPBurstGated` / `SendGratuitousIPv6BurstGated`. The
-  follow-up loop re-reads that predicate before EVERY frame and stops the moment
-  it returns false. Without the gate, a node that abdicates (master→backup on a
-  link flap / rapid preemption / split-brain resolution) or whose burst is
-  superseded by a newer one (epoch bump from `ReconcileVIPs` / a later
+  the VIP snapshot, `garpEpoch`, and `ownerGen`; `sendGARPFor` validates that
+  token under `vipMu` before sending and passes a `stillMaster` predicate
+  (`getState() == StateMaster && ownerGen == captured && garpEpoch == captured`)
+  into `cluster.SendGratuitousARPBurstGated` /
+  `cluster.SendGratuitousIPv6BurstGated`. The follow-up loop re-reads that
+  predicate before EVERY frame and stops the moment it returns false. Without
+  the gate, a node that abdicates (master→backup on a link flap / rapid
+  preemption / split-brain resolution) or whose burst is superseded by a newer
+  one (epoch bump from `ReconcileVIPs`, a VIP membership change, or a later
   `becomeMaster`) keeps broadcasting GARP/NA for VIPs it no longer owns —
   re-poisoning neighbor caches toward an abdicated node, the exact blackhole
-  GARP exists to prevent. The gate is consulted only AFTER the synchronous first
-  frame, so the immediate failover advert is never suppressed; a nil predicate
-  (direct-mode re-announce, tests) keeps the original run-to-completion
-  behavior.
+  GARP exists to prevent. The epoch/owner check also protects the synchronous
+  first frame from an already-stale snapshot; a nil predicate (direct-mode
+  re-announce, tests) keeps the original run-to-completion behavior.
 - Event debounce 500 ms before priority updates.
 - Sync hold: VRRP starts with `preempt=false`; released after bulk
   session sync (or 10 s timeout). `preemptNowCh` triggers instant
@@ -833,13 +852,13 @@ Three layers now close it, and the cap is enforced at each:
    instance whose VIP set cannot advertise, same doctrine as the #4573 VRID
    guard, so a leniently-loaded config leaves the group out of the election
    rather than seating a silent non-advertiser.
-3. **Ownership** — `becomeMaster` consults `vi.advertCapacityErr` and returns
+3. **Ownership** — `becomeMaster` consults `vi.getAdvertCapacityErr()` and returns
    false **before** `setState`/`addVIPs`, so the VIPs are never claimed. This is
    the #5082 "do not claim what you cannot back" rule applied to the advert
-   instead of to VIP actuation. The predicate is computed once in `newInstance`
-   (the configured VIP list is immutable per instance — a VIP change rebuilds
-   it), so the ~97ms RETH retry path pays a nil check and the operator-facing
-   `Error` is logged once, not per retry.
+   instead of to VIP actuation. The predicate is initialized in `newInstance`
+   and recomputed under `vi.mu` on each in-place VIP-set update (#10780), so the
+   ~97ms RETH retry path pays a nil check and an operator-facing `Error` is
+   logged only on the configuration change, not on every retry.
 
 Because `pkg/vrrp` imports `pkg/config` and never the reverse, the cap is
 necessarily spelled in both packages
@@ -1236,35 +1255,32 @@ dataplane reuses this Go walker, and do NOT try to consolidate them.
   counter and triggers a reconciliation callback. Don't switch to an
   unbounded channel — the counter is the early warning that something
   upstream stopped draining.
-- Instance restart on VIP change is **build-before-teardown** (#2156):
-  the new socket must open before the old instance is stopped, so the
-  old `run()` goroutine and the new one never run concurrently for the
-  same key (the proof step opens the socket but does NOT start `run()`;
-  only the commit step stops the old, swaps, and starts the new). On a
-  build failure no placeholder is added to `m.instances`, so
-  `States` / `InstanceStates` / `Status` stay truthful. **`RGVRRPReady`
-  needs more than that (#5641):** an RG usually has SEVERAL desired RETH
-  keys under one VRID (a VLAN-tagged reth emits one instance per
-  sub-interface — `reth0.50` + `reth0.80` — and reths can share the RG),
-  so "one instance exists for the VRID" does NOT prove the RG is fully
-  built. `UpdateInstances` records every desired key with no live instance
-  in `m.unbuiltDesired` (the `desiredMap`-vs-`m.instances` diff, with the
-  captured resolve/socket reason), and `RGVRRPReady` returns
-  `(false, reasons)` naming any un-built key for the RG. This closes the
-  false-ready hole where a sibling member/VLAN-sub/family key failed to
-  build, its VIP was dark, yet the cluster state machine released the sync
-  hold / preempted / claimed ownership. A build failure that leaves the
-  OLD instance advertising (the case above) keeps its key in `m.instances`
-  and is therefore NOT flagged — the RG is still in election, just on its
-  previous VIP set. `RGVRRPReady` remains a pure readiness READ (no advert
-  timing / socket / datapath change).
+- Instance restart remains **build-before-teardown** (#2156) for ifindex
+  drift: the new socket must open before the old instance is stopped, so the
+  old `run()` goroutine and new one never run concurrently for the same key
+  (the proof step opens the socket but does NOT start `run()`; only commit
+  stops the old instance, swaps, and starts the replacement). VIP-set changes
+  no longer restart: they update the existing state machine in place
+  (described above), preventing the MASTER resignation/takeover path.
+  On a rebind build failure no placeholder is added to `m.instances`, so
+  `States` / `InstanceStates` / `Status` stay truthful. `RGVRRPReady` does
+  not infer readiness from a retained instance: it reports desired keys
+  whose rebind or in-place VIP actuation failed, as well as missing desired
+  instances. The failure reason remains until the relevant update succeeds.
+  `InstanceStates` exposes the current VIP set, `VIPDiverged`, and the
+  cumulative `VIPUpdateFailures` count. This closes the false-ready hole where
+  a sibling member/VLAN-sub/family key has a dark or incomplete VIP set, yet
+  the cluster state machine releases the sync hold / preempts / claims
+  ownership.
   Bounded self-recovery comes from the daemon's 2s
   `reconcileRGStateLoop`, which re-drives `reconcileVRRPInstances` →
-  `UpdateInstances` every tick; a deferred restart retries (and succeeds)
-  once the interface returns, with no operator re-commit. During the
-  failure window the RG keeps advertising the OLD VIP set — strictly
-  better than dropping out of election; the intended VIPs land on the
-  next successful re-drive (~2s).
+  `UpdateInstances` every tick. A deferred ifindex rebind retries once the
+  interface returns, with no operator re-commit; readiness stays false across
+  transient probe errors until a successful rebind. While replacement socket
+  creation is failing, the old instance remains registered in `m.instances`
+  and no partially built replacement is published; its socket may still be
+  bound to the retired ifindex, so this is lifecycle retention rather than a
+  claim that the stale socket continues advertising.
 - The instance-lifecycle seams (`resolveIface`, `openInstanceSocket`,
   `runInstance`, `stopInstance`), link seams (`linkState`,
   `subscribeLinks`), the address seam (`subscribeAddrs`, #2528), and the
