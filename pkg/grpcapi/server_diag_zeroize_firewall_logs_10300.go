@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/ipsec"
 )
 
 // ZeroizeLogInventory is the firewall-log wipe scope for a factory reset
@@ -349,8 +351,13 @@ func PerformZeroizeWipeWithLogInventory(configDir, configBase, archiveDir string
 var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory) error {
 	// External cleanup authority must be proven empty before beginZeroize
 	// writes a marker or any destructive leg can remove provider credentials.
-	if err := zeroizeCheckOwnershipStateEmpty(); err != nil {
-		return err
+	// Wrapped in the same sentinels as the inner erase legs so callers
+	// classifying aborts with errors.Is see one shape from either layer.
+	if err := zeroizeCheckDDNSStateEmpty(); err != nil {
+		return fmt.Errorf("%w: %w", errZeroizeDDNSOwnership, err)
+	}
+	if err := ipsec.CheckConnStateEmpty(zeroizeIPsecStatePath); err != nil {
+		return fmt.Errorf("%w: %w", errZeroizeIPsecOwnership, err)
 	}
 	record, err := beginZeroize(configDir, configBase, archiveDir, inv)
 	if err != nil {

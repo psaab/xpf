@@ -272,6 +272,8 @@ func TestPerformZeroizeKeepsConfigWhenDDNSWithdrawalIsUnresolved10769(t *testing
 
 	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err == nil {
 		t.Fatal("unresolved DDNS ownership must fail the reset before any wipe leg")
+	} else if !errors.Is(err, errZeroizeDDNSOwnership) {
+		t.Fatalf("outer DDNS preflight must carry the ownership sentinel, got %v", err)
 	}
 	for _, path := range []string{
 		filepath.Join(configDir, ".configdb", "master.key"),
@@ -365,6 +367,8 @@ func TestPerformZeroizeKeepsConfigWhenIPsecTeardownIsUnresolved10769(t *testing.
 
 	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err == nil {
 		t.Fatal("unresolved IPsec teardown must fail the reset before any wipe leg")
+	} else if !errors.Is(err, errZeroizeIPsecOwnership) {
+		t.Fatalf("outer IPsec preflight must carry the ownership sentinel, got %v", err)
 	}
 	if stopCalled {
 		t.Fatal("IPsec preflight must run before stopping Kea")

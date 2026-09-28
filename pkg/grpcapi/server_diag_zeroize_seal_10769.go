@@ -576,12 +576,6 @@ func zeroizeEraseDDNSState() error {
 	}
 	return nil
 }
-func zeroizeCheckOwnershipStateEmpty() error {
-	if err := zeroizeCheckDDNSStateEmpty(); err != nil {
-		return err
-	}
-	return ipsec.CheckConnStateEmpty(zeroizeIPsecStatePath)
-}
 
 func zeroizeEraseIPsecState() error {
 	if err := ipsec.CheckConnStateEmpty(zeroizeIPsecStatePath); err != nil {
