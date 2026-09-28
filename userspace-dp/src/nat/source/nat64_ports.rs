@@ -154,6 +154,39 @@ pub(crate) fn reserve_nat64_pool_port(
     allocator.reserve_flow(flow, translated, addr_index, deterministic, now_ns, holder)
 }
 
+/// #11478: coordinator form of [`reserve_nat64_pool_port`]. The holder mask is
+/// captured by the allocator's same live guard that evicts and installs the
+/// reservation, so worker OR/release operations cannot land between them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
+    allocator: &PortAllocator,
+    flow: SourceNatFlowKey,
+    snat_v4: Ipv4Addr,
+    port: u16,
+    addr_index: usize,
+    deterministic: bool,
+    now_ns: u64,
+    holder: NatHolder,
+) -> (bool, Option<u128>) {
+    let translated = TranslatedTuple {
+        ip: IpAddr::V4(snat_v4),
+        port,
+    };
+    let mut previous_holders = None;
+    let reserved = allocator.reserve_flow_maybe_persistent(
+        flow,
+        translated,
+        addr_index,
+        deterministic,
+        now_ns,
+        holder,
+        None,
+        true,
+        &mut previous_holders,
+    );
+    (reserved, previous_holders)
+}
+
 /// #8115 R3: refuse a NAT64 mint whose translated identity a PEER allocator
 /// already owns, and undo the reservation before failing.
 ///

@@ -58,5 +58,14 @@ xpf (0.0.0) unstable; urgency=medium
   * Complete factory-reset image-seal cleanup for regenerable device identity,
     managed service state, logs, and DHCP leases; refuse erasure while DDNS or
     IPsec teardown authority remains unresolved (#10769).
+  * Update same-key MASTER VIP changes in place; normalize address spelling,
+    fence GARP/NA follow-ups before withdrawal, retain unannounced survivors,
+    and bound send-lock scope to one VIP at a time (#10780).
+  * Bind multi-zone snapshot authorization to the selected peer connection;
+    keep stale-auth reports from re-arming after capable-peer convergence,
+    make deferral reports and clears attempt-fresh across peer epochs and
+    capability changes, and clear superseded alarms only after current active
+    config succeeds; preserve local convergence after peer-only push failures
+    (#10782).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

@@ -1478,15 +1478,15 @@ fn release_nat64_allocation_with_mode(
     now_ns: u64,
     rollback: bool,
     holder: crate::nat::NatHolder,
-) {
+) -> bool {
     if is_reverse || !nat.nat64 {
-        return;
+        return false;
     }
     let Some(IpAddr::V4(snat_v4)) = nat.rewrite_src else {
-        return;
+        return false;
     };
     let Some(port) = nat.rewrite_src_port else {
-        return;
+        return false;
     };
     let flow = SourceNatFlowKey {
         protocol: key.protocol,
@@ -1497,11 +1497,12 @@ fn release_nat64_allocation_with_mode(
         // #9680: the scope the allocation keyed (see allocate_source_with_holder).
         routing_scope: key.routing_domain,
     };
+    let mut freed = false;
     // #6876: no first-hit `break` — see the doc comment above. A flow can be
     // held in more than one prefix's allocator, and a prefix that does not hold
     // it is a cheap no-op (`release_flow` returns false on a tuple mismatch).
     for prefix in &nat64.prefixes {
-        release_nat64_pool_port(
+        freed |= release_nat64_pool_port(
             &prefix.port_allocator,
             flow,
             snat_v4,
@@ -1511,6 +1512,40 @@ fn release_nat64_allocation_with_mode(
             holder,
         );
     }
+    freed
+}
+
+/// #10788-F1: release a coordinator's import-time UNTRACKED NAT64 reservation —
+/// the ONLY permitted untracked production use, mirroring
+/// `release_synced_source_nat_allocation_untracked` (#9902 F-097).
+///
+/// The coordinator takes import-time reservations as `NatHolder::Untracked`
+/// (`reserve_synced_nat64_allocation`); when a strict-mirror import is refused
+/// before any worker adopts it there is no worker_id to thread, so the
+/// holder-aware `_for_worker` twins are the wrong call, not a safer one.
+/// Records a worker HAS adopted survive: `Untracked.bit()` is 0, so
+/// `drop_holder_locked` keeps any record with holders set. That is the
+/// deliberate direction for a release site that cannot name a worker: an
+/// under-release leaks a bounded pool port, an over-release hands a live
+/// worker's port to a new flow.
+///
+/// Returns whether a reservation was actually freed.
+pub(crate) fn release_synced_nat64_allocation_untracked(
+    nat64: &Nat64State,
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) -> bool {
+    release_nat64_allocation_with_mode(
+        nat64,
+        key,
+        nat,
+        is_reverse,
+        now_ns,
+        false,
+        crate::nat::NatHolder::Untracked,
+    )
 }
 
 /// #4381: release a NAT64 forward flow's translated pool port on session
@@ -1520,7 +1555,8 @@ fn release_nat64_allocation_with_mode(
 /// TEST-ONLY, so a production caller that forgot to thread its `worker_id` is a
 /// BUILD FAILURE in the non-test profile rather than a silent single-holder
 /// release of a reservation every worker holds. Production uses the
-/// `_for_worker` twin.
+/// `_for_worker` twin, or `release_synced_nat64_allocation_untracked` for the
+/// one permitted coordinator-rollback use above.
 #[cfg(test)]
 pub(crate) fn release_nat64_allocation(
     nat64: &Nat64State,
@@ -1529,15 +1565,7 @@ pub(crate) fn release_nat64_allocation(
     is_reverse: bool,
     now_ns: u64,
 ) {
-    release_nat64_allocation_with_mode(
-        nat64,
-        key,
-        nat,
-        is_reverse,
-        now_ns,
-        false,
-        crate::nat::NatHolder::Untracked,
-    );
+    release_synced_nat64_allocation_untracked(nat64, key, nat, is_reverse, now_ns);
 }
 
 /// #6211 F2: release THIS worker's hold on a NAT64 reservation. The
@@ -1644,6 +1672,7 @@ pub(crate) fn reserve_synced_nat64_allocation(
     is_reverse: bool,
     now_ns: u64,
 ) -> bool {
+    let mut previous_holders = None;
     reserve_synced_nat64_allocation_with_holder(
         nat64,
         key,
@@ -1651,7 +1680,31 @@ pub(crate) fn reserve_synced_nat64_allocation(
         is_reverse,
         now_ns,
         crate::nat::NatHolder::Untracked,
+        false,
+        &mut previous_holders,
     )
+}
+/// Coordinator twin that captures the incumbent worker-holder mask before a
+/// same-flow translated-tuple replacement can retire it.
+pub(crate) fn reserve_synced_nat64_allocation_untracked_with_holder_snapshot(
+    nat64: &Nat64State,
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    now_ns: u64,
+) -> (bool, Option<u128>) {
+    let mut previous_holders = None;
+    let reserved = reserve_synced_nat64_allocation_with_holder(
+        nat64,
+        key,
+        nat,
+        is_reverse,
+        now_ns,
+        crate::nat::NatHolder::Untracked,
+        true,
+        &mut previous_holders,
+    );
+    (reserved, previous_holders)
 }
 
 /// #6211 F2: reserve a synced NAT64 translation and record `worker_id` as a
@@ -1669,6 +1722,7 @@ pub(crate) fn reserve_synced_nat64_allocation_for_worker(
     now_ns: u64,
     worker_id: u32,
 ) -> bool {
+    let mut previous_holders = None;
     reserve_synced_nat64_allocation_with_holder(
         nat64,
         key,
@@ -1676,6 +1730,8 @@ pub(crate) fn reserve_synced_nat64_allocation_for_worker(
         is_reverse,
         now_ns,
         crate::nat::NatHolder::Worker(worker_id),
+        false,
+        &mut previous_holders,
     )
 }
 
@@ -1720,17 +1776,39 @@ fn reserve_synced_nat64_port_unless_peer_owns(
     addr_index: usize,
     now_ns: u64,
     holder: crate::nat::NatHolder,
+    capture_previous_holders: bool,
+    previous_holders: &mut Option<u128>,
 ) -> bool {
-    if !reserve_nat64_pool_port(
-        &prefix.port_allocator,
-        flow,
-        snat_v4,
-        port,
-        addr_index,
-        prefix.deterministic_v6.is_some(),
-        now_ns,
-        holder,
-    ) {
+    let (reserved, captured_holders) = if capture_previous_holders {
+        #[cfg(test)]
+        crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);
+        crate::nat::reserve_nat64_pool_port_capture_and_replace(
+            &prefix.port_allocator,
+            flow,
+            snat_v4,
+            port,
+            addr_index,
+            prefix.deterministic_v6.is_some(),
+            now_ns,
+            holder,
+        )
+    } else {
+        (
+            reserve_nat64_pool_port(
+                &prefix.port_allocator,
+                flow,
+                snat_v4,
+                port,
+                addr_index,
+                prefix.deterministic_v6.is_some(),
+                now_ns,
+                holder,
+            ),
+            None,
+        )
+    };
+    *previous_holders = captured_holders;
+    if !reserved {
         return false;
     }
     crate::nat::nat64_refuse_if_peer_owns(
@@ -1751,6 +1829,8 @@ fn reserve_synced_nat64_allocation_with_holder(
     is_reverse: bool,
     now_ns: u64,
     holder: crate::nat::NatHolder,
+    capture_previous_holders: bool,
+    previous_holders: &mut Option<u128>,
 ) -> bool {
     // #6600: returns whether the translation is RESERVED — true when a prefix
     // took it, and true when there was nothing to reserve. `false` means every
@@ -1807,7 +1887,15 @@ fn reserve_synced_nat64_allocation_with_holder(
         if let Some(addr_index) = prefix.pool_v4.iter().position(|a| *a == snat_v4) {
             // #9021: peer-ownership refusal applies here too.
             return reserve_synced_nat64_port_unless_peer_owns(
-                prefix, flow, snat_v4, port, addr_index, now_ns, holder,
+                prefix,
+                flow,
+                snat_v4,
+                port,
+                addr_index,
+                now_ns,
+                holder,
+                capture_previous_holders,
+                previous_holders,
             );
         }
     }
@@ -1830,7 +1918,15 @@ fn reserve_synced_nat64_allocation_with_holder(
         // shape on a path whose whole purpose is to keep working when the
         // narrowed pick cannot.
         if reserve_synced_nat64_port_unless_peer_owns(
-            prefix, flow, snat_v4, port, addr_index, now_ns, holder,
+            prefix,
+            flow,
+            snat_v4,
+            port,
+            addr_index,
+            now_ns,
+            holder,
+            capture_previous_holders,
+            previous_holders,
         ) {
             return true;
         }

@@ -113,15 +113,19 @@ func (vi *vrrpInstance) expectedIfindex() int {
 // receiver reads VRRP packets from the per-instance raw socket.
 func (vi *vrrpInstance) receiver() {
 	buf := make([]byte, 1500)
+	vi.socketMu.RLock()
+	rawConn, conn := vi.rawConn, vi.conn
+	vi.socketMu.RUnlock()
+	if rawConn == nil || conn == nil {
+		return
+	}
 
 	// Capture the per-packet arrival interface so cross-VLAN frames delivered
 	// to this wildcard-bound socket can be rejected (#2886). On VLAN
 	// sub-interfaces the socket is NOT bound to a device, so the kernel fans a
 	// proto-112 frame out to every instance's socket on the shared parent.
-	if vi.rawConn != nil {
-		if err := vi.rawConn.SetControlMessage(ipv4.FlagInterface, true); err != nil {
-			slog.Debug("vrrp: set control message failed", "key", vi.key(), "err", err)
-		}
+	if err := rawConn.SetControlMessage(ipv4.FlagInterface, true); err != nil {
+		slog.Debug("vrrp: set control message failed", "key", vi.key(), "err", err)
 	}
 
 	for {
@@ -135,8 +139,8 @@ func (vi *vrrpInstance) receiver() {
 		// ipv4.RawConn.ReadFrom uses RawRead which can get stuck in a
 		// blocking recvmsg syscall; the deadline ensures we periodically
 		// check stopCh even if the socket is unexpectedly in blocking mode.
-		vi.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-		hdr, payload, cm, err := vi.rawConn.ReadFrom(buf)
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		hdr, payload, cm, err := rawConn.ReadFrom(buf)
 		if err != nil {
 			select {
 			case <-vi.stopCh:
@@ -201,6 +205,12 @@ func (vi *vrrpInstance) receiver() {
 // Source address comes from the addr parameter of ReadFrom.
 func (vi *vrrpInstance) receiverIPv6() {
 	buf := make([]byte, 1500)
+	vi.socketMu.RLock()
+	conn, recv := vi.ipv6Conn, vi.ipv6Recv
+	vi.socketMu.RUnlock()
+	if conn == nil && recv == nil {
+		return
+	}
 
 	// Resolve the read seam. Production builds a wrapper over the raw conn that
 	// returns the per-packet control message (the arrival interface). The IPv6
@@ -209,9 +219,8 @@ func (vi *vrrpInstance) receiverIPv6() {
 	// proto-112 frame out to every instance's socket on the shared parent;
 	// without an arrival-interface check, sibling VLANs with the same VRID
 	// cross-process (#2886). Tests override ipv6Recv to inject a chosen ifindex.
-	recv := vi.ipv6Recv
 	if recv == nil {
-		pc := ipv6.NewPacketConn(vi.ipv6Conn)
+		pc := ipv6.NewPacketConn(conn)
 		// FlagInterface → arrival ifindex (#2886 cross-VLAN filter).
 		// FlagHopLimit → IPV6_RECVHOPLIMIT so the received hop limit is
 		// carried in the control message; the kernel strips the IPv6 header
@@ -222,7 +231,7 @@ func (vi *vrrpInstance) receiverIPv6() {
 			slog.Debug("vrrp: set ipv6 control message failed", "key", vi.key(), "err", err)
 		}
 		recv = func(b []byte) (int, int, int, net.Addr, error) {
-			vi.ipv6Conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+			conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 			n, cm, src, err := pc.ReadFrom(b)
 			ifindex := 0
 			hopLimit := 0

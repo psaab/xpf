@@ -76,11 +76,11 @@ SCOPE_SLUG=$(echo "$2" | tr ' ' '-' | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9-')
 git -C /home/ps/git/bpfrx fetch origin master
 git -C /home/ps/git/bpfrx worktree add \
   -b refactor/${ISSUE}-${SCOPE_SLUG} \
-  .claude/worktrees/${ISSUE}-${SCOPE_SLUG} \
+  /var/tmp/worktrees/${ISSUE}-${SCOPE_SLUG} \
   origin/master
 
 # CD into the worktree for everything that follows.
-cd /home/ps/git/bpfrx/.claude/worktrees/${ISSUE}-${SCOPE_SLUG}
+cd /var/tmp/worktrees/${ISSUE}-${SCOPE_SLUG}
 ```
 
 ## Step 1: Read the issue + study the affected code
@@ -156,7 +156,7 @@ directly. Both run in the background.
 ```
 node "/home/ps/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" task --background "Adversarial PLAN review for #<ISSUE> Step 1 ... Plan doc at docs/pr/<ISSUE>-<SLUG>/plan.md (commit <SHA> on branch refactor/<ISSUE>-<SLUG>).
 
-Repo: /home/ps/git/bpfrx/.claude/worktrees/<ISSUE>-<SLUG>
+Repo: /var/tmp/worktrees/<ISSUE>-<SLUG>
 
 This is a PLAN review, NOT a code review. No code has been written.
 
@@ -193,7 +193,7 @@ Adversarial PLAN review for #<ISSUE> Step 1 ...
 
 Prime context: you are an expert in HPC networking, OS, data structures, JIT, CPU design, networking protocols. The codebase is xpf, an eBPF-based firewall with a userspace AF_XDP dataplane in Rust.
 
-Plan doc to review: /home/ps/git/bpfrx/.claude/worktrees/<ISSUE>-<SLUG>/docs/pr/<ISSUE>-<SLUG>/plan.md (commit <SHA>).
+Plan doc to review: /var/tmp/worktrees/<ISSUE>-<SLUG>/docs/pr/<ISSUE>-<SLUG>/plan.md (commit <SHA>).
 
 [Same questions as Codex — request both reviewers verify independently.]
 
@@ -499,7 +499,7 @@ adversarial code review on the PR commit.
 ```
 # Codex hostile review
 Hostile code review of PR #<PR> (#<ISSUE> Step N: <title>).
-Repo: /home/ps/git/bpfrx/.claude/worktrees/<ISSUE>-<SLUG>
+Repo: /var/tmp/worktrees/<ISSUE>-<SLUG>
 Branch: refactor/<ISSUE>-<SLUG>
 Base: master (commit <BASE>)
 Head: commit <HEAD>

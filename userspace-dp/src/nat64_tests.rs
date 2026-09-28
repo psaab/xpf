@@ -4162,6 +4162,60 @@ fn nat64_4512_synced_session_reserves_translated_port() {
     );
 }
 
+// #10788-F1: a strict coordinator refusal has no worker id to release, so it
+// must use the named UNTRACKED release. The first case proves its reservation
+// becomes available to another flow; the second pins that this release cannot
+// clear a holder that a worker has already adopted.
+#[test]
+fn nat64_10788_untracked_release_frees_only_unadopted_reservation() {
+    let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
+    let key = nat64_synced_key("2001:db8::1");
+    let nat = Nat64State::forward_decision(
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+        1024,
+    );
+    let allocator = &state.prefixes[0].port_allocator;
+
+    assert!(reserve_synced_nat64_allocation(&state, &key, nat, false, 0));
+    assert!(allocator.debug_is_port_occupied(0, 1024));
+    release_synced_nat64_allocation_untracked(&state, &key, nat, false, 1);
+    assert!(!allocator.debug_is_port_occupied(0, 1024));
+    assert_eq!(
+        nat64_probe_alloc(&state).1,
+        1024,
+        "a fresh flow must be able to claim the port released from a refused import"
+    );
+}
+
+#[test]
+fn nat64_10788_untracked_release_preserves_adopted_worker_holder() {
+    let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
+    let key = nat64_synced_key("2001:db8::1");
+    let nat = Nat64State::forward_decision(
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(8, 8, 8, 8),
+        1024,
+    );
+    let allocator = &state.prefixes[0].port_allocator;
+
+    assert!(reserve_synced_nat64_allocation(&state, &key, nat, false, 0));
+    assert!(reserve_synced_nat64_allocation_for_worker(
+        &state, &key, nat, false, 1, 7
+    ));
+    release_synced_nat64_allocation_untracked(&state, &key, nat, false, 2);
+    assert!(
+        allocator.debug_is_port_occupied(0, 1024),
+        "the coordinator cannot free a reservation a worker has adopted"
+    );
+
+    release_nat64_allocation_for_worker(&state, &key, nat, false, 3, 7);
+    assert!(
+        !allocator.debug_is_port_occupied(0, 1024),
+        "the last worker release must still free the adopted reservation"
+    );
+}
+
 // #4512: a peer-synced REVERSE entry carries the destination rewrite, not the
 // translated source port, and must reserve nothing (mirrors the is_reverse
 // guard on the release path). A fresh flow then gets the first port 1024.

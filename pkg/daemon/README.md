@@ -185,6 +185,33 @@ in `commitConfirmedAndApply` is for. It already validated the rollback target
 for device-map safety (#1956 R-8/V-3), cluster topology (#5840) and cluster
 identity (#6192).
 
+The candidate also passes the #6650 cross-chassis snapshot-protocol gate
+before promotion (#10782). This refuses a connected pre-v4 peer that would
+narrow a multi-zone scoped policy; a disconnected peer remains a liveness
+exception because it cannot receive the config yet.
+
+The offline exception is not a permanent bypass: the active multi-zone config
+is held back at the config-push boundary and the reconnect reconciler repeats
+the gate before queueing. The final queue fence binds the v4 proof to the
+selected connection itself, so a capability learned on a surviving fabric
+cannot authorize an unproven preferred replacement. The preflight records the
+peer snapshot-protocol generation and connection epoch; a disconnect/reconnect
+or capability change between preflight and queueing withholds the config and
+leaves the `(peer-epoch, config-generation)` push marker unclaimed. A capable
+reconnect reconciles the active config; an incapable or still-unlearned peer
+leaves a CRITICAL `show system alarms` entry (local CLI and gRPC) and a Config
+Sync cluster-history event. Deferral reports recheck their captured peer epoch
+and selected capability under the alarm lock, so a delayed v3 report cannot
+re-arm a same-text alarm after v4 recovery. A stale authorization that finds a
+currently capable or disconnected peer does not re-anchor a CRITICAL report to
+the new observation; only a currently connected incompatible peer reports a
+deferral. Successful clears carry the epoch and capability of the authorizing
+write; a delayed clear from an old connection cannot erase a same-text alarm for
+its replacement. A successful push of the current active config clears an
+older deferral too; an in-flight stale config cannot clear the alarm for a
+newer active config. The same guarded push path is used after a later
+`ConfirmCommitAs` clears the commit-confirmed timer.
+
 `rollbackTargetAppliablePreflight` (`rollback_target_appliable_6707.go`) adds
 the missing property: the target must be **appliable at all**. The predicate is
 `dpuserspace.PolicyContentRejectionReasons`, the Go single source of truth for
@@ -226,9 +253,8 @@ UNCONFIRMED B while the store and the tail subsystems say A, with the rollback
 announced as successful. The recovery mechanism has failed to recover, which is
 the #1960 no-brick concern in its concrete form.
 
-The refusal is deliberately narrow, and only the CONFIRMED variant is gated. A
-plain `commit` of B is untouched and remains the way forward — it makes B
-permanent, which is what an operator correcting a broken active config wants.
+The rollback-target refusal is deliberately narrow: only `commit confirmed` is
+subject to it. Plain `commit` remains available to make a correction permanent.
 Gating the plain path would remove the only route OFF a poisoned active config.
 A nil rollback target (the first commit on a fresh store) is also unaffected:
 that timeout path reverts to bootstrap mode (#1922 Item 1b) rather than to a
@@ -237,6 +263,8 @@ compiled config, so there is nothing to validate.
 Regression coverage: `rollback_target_appliable_6707_test.go` (gate behaviour
 plus an AST wiring guard that the call is reached from `commitConfirmedAndApply`
 and absent from the plain-commit entry points),
+`peer_snapshot_commit_confirmed_10782_test.go` (incompatible-peer refusal
+before promotion plus capable-peer and disconnected-peer controls),
 `rollback_target_mirror_9588_test.go` (one tolerant-compiled row per refusal
 class, each first confirmed to be a strict reject; a feed-backed target that
 arms with the live overlay and is refused without it; the unready-feed refusal;

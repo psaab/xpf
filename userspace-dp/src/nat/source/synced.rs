@@ -114,6 +114,7 @@ pub(crate) fn reserve_synced_source_nat_allocation(
     synced_zones: SyncedNatZones<'_>,
     now_ns: u64,
 ) {
+    let mut previous_holders = None;
     reserve_synced_source_nat_allocation_with_holder(
         iface_allocs,
         rules,
@@ -123,6 +124,8 @@ pub(crate) fn reserve_synced_source_nat_allocation(
         synced_zones,
         now_ns,
         NatHolder::Untracked,
+        false,
+        &mut previous_holders,
     );
 }
 
@@ -148,6 +151,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_for_worker(
     now_ns: u64,
     worker_id: u32,
 ) -> bool {
+    let mut previous_holders = None;
     reserve_synced_source_nat_allocation_with_holder(
         iface_allocs,
         rules,
@@ -157,6 +161,8 @@ pub(crate) fn reserve_synced_source_nat_allocation_for_worker(
         synced_zones,
         now_ns,
         NatHolder::Worker(worker_id),
+        false,
+        &mut previous_holders,
     )
 }
 
@@ -178,6 +184,7 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked(
     synced_zones: SyncedNatZones<'_>,
     now_ns: u64,
 ) -> bool {
+    let mut previous_holders = None;
     reserve_synced_source_nat_allocation_with_holder(
         iface_allocs,
         rules,
@@ -187,8 +194,37 @@ pub(crate) fn reserve_synced_source_nat_allocation_untracked(
         synced_zones,
         now_ns,
         NatHolder::Untracked,
+        false,
+        &mut previous_holders,
     )
 }
+/// Coordinator twin that also captures the incumbent holder mask before a
+/// same-flow translated-tuple replacement can retire it.
+pub(crate) fn reserve_synced_source_nat_allocation_untracked_with_holder_snapshot(
+    iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    key: &crate::session::SessionKey,
+    nat: NatDecision,
+    is_reverse: bool,
+    synced_zones: SyncedNatZones<'_>,
+    now_ns: u64,
+) -> (bool, Option<u128>) {
+    let mut previous_holders = None;
+    let reserved = reserve_synced_source_nat_allocation_with_holder(
+        iface_allocs,
+        rules,
+        key,
+        nat,
+        is_reverse,
+        synced_zones,
+        now_ns,
+        NatHolder::Untracked,
+        true,
+        &mut previous_holders,
+    );
+    (reserved, previous_holders)
+}
+
 
 /// Returns whether this node can own a peer-synced source-NAT translation.
 /// `true` means a source-NAT reservation was taken or is unnecessary (a reverse
@@ -221,6 +257,8 @@ fn reserve_synced_source_nat_allocation_with_holder(
     synced_zones: SyncedNatZones<'_>,
     now_ns: u64,
     holder: NatHolder,
+    capture_previous_holders: bool,
+    previous_holders: &mut Option<u128>,
 ) -> bool {
     // NAT64's translated source belongs exclusively to its NAT64 allocator.
     // Reserving it in a peer source-NAT pool first makes the NAT64 leg's
@@ -290,6 +328,8 @@ fn reserve_synced_source_nat_allocation_with_holder(
             nat.rewrite_src_port,
             now_ns,
             holder,
+            capture_previous_holders,
+            previous_holders,
         ) {
             SyncedReserveOutcome::Reserved => return true,
             // #6979 F1: a PASS 1 REFUSAL is final. It does NOT fall through.
@@ -368,12 +408,23 @@ fn reserve_synced_source_nat_allocation_with_holder(
         nat.rewrite_src_port,
         now_ns,
         holder,
+        capture_previous_holders,
+        previous_holders,
     ) {
         // #6751: no rule's pool owns the translated address. #7581 established
         // that this is NOT a refusal; it is the shape interface-mode SNAT
         // ALWAYS produces, and this is where it acquires a domain of its own.
         SyncedReserveOutcome::NothingToReserve => {
-            reserve_synced_interface_identity(iface_allocs, flow, rewrite_src, nat, now_ns, holder)
+            reserve_synced_interface_identity(
+                iface_allocs,
+                flow,
+                rewrite_src,
+                nat,
+                now_ns,
+                holder,
+                capture_previous_holders,
+                previous_holders,
+            )
         }
         // `Reserved` publishes; `Refused` (a pool-owning candidate DECLINED —
         // a different live allocation owns the identity, #6600) does NOT, and
@@ -409,6 +460,8 @@ fn reserve_synced_interface_identity(
     nat: NatDecision,
     now_ns: u64,
     holder: NatHolder,
+    capture_previous_holders: bool,
+    previous_holders: &mut Option<u128>,
 ) -> bool {
     if nat.nat64 {
         return true;
@@ -420,13 +473,27 @@ fn reserve_synced_interface_identity(
         crate::nat::INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION.fetch_add(1, Ordering::Relaxed);
         return false;
     };
+    let translated_port = nat.rewrite_src_port.unwrap_or(flow.src_port);
     // The active's decision names the translated port: `rewrite_src_port` when
     // it PAT'd the flow, the flow's own source port when it preserved it —
     // the same reconstruction `release_source_nat_allocation_with_mode` uses,
     // so the reservation and its eventual release name one tuple.
-    let translated_port = nat.rewrite_src_port.unwrap_or(flow.src_port);
-    match alloc.reserve_interface_identity(flow, rewrite_src, translated_port, now_ns, holder) {
-        InterfaceDomainReserve::Owned => true,
+    #[cfg(test)]
+    crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);
+    let mut incumbent_holders = None;
+    match alloc.reserve_interface_identity(
+        flow,
+        rewrite_src,
+        translated_port,
+        now_ns,
+        holder,
+        capture_previous_holders,
+        &mut incumbent_holders,
+    ) {
+        InterfaceDomainReserve::Owned => {
+            *previous_holders = incumbent_holders;
+            true
+        }
         // An HA-fidelity loss, not a data-path drop: this synced session will
         // not survive a failover onto this node. Its OWN series, so it cannot
         // be mistaken for local admissions being dropped.
@@ -520,6 +587,8 @@ fn reserve_synced_on_first_pool_owner<'a>(
     // #6211 F2: the worker taking this reservation, so a fan-out to N workers
     // records N holders on ONE allocator record.
     holder: NatHolder,
+    capture_previous_holders: bool,
+    previous_holders: &mut Option<u128>,
 ) -> SyncedReserveOutcome {
     // #7581: `saw_candidate` records whether ANY rule's pool actually owned the
     // translated address. Without it, "no owner" and "every owner declined"
@@ -602,6 +671,9 @@ fn reserve_synced_on_first_pool_owner<'a>(
                     rule.persistent_nat_timeout_ns,
                 )
             });
+            #[cfg(test)]
+            crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);
+            let mut incumbent_holders = None;
             if let Ok(translated) = rule.pool_allocator.reserve_address_only_maybe_persistent(
                 flow,
                 rewrite_src,
@@ -609,7 +681,10 @@ fn reserve_synced_on_first_pool_owner<'a>(
                 now_ns,
                 holder,
                 persistent,
+                capture_previous_holders,
+                &mut incumbent_holders,
             ) {
+                *previous_holders = incumbent_holders;
                 // #8115 R2: the identity the ACTIVE node chose may be one a
                 // LOCAL flow already owns in a PEER pool. `reserve_address_only`
                 // checks only THIS allocator's `address_only_owners`, so the
@@ -721,6 +796,9 @@ fn reserve_synced_on_first_pool_owner<'a>(
             ip: rewrite_src,
             port: rewrite_src_port,
         };
+        #[cfg(test)]
+        crate::nat::gap_barrier_11478::fire_at_capture_gap(capture_previous_holders);
+        let mut incumbent_holders = None;
         if rule.pool_allocator.reserve_flow_maybe_persistent(
             flow,
             translated,
@@ -729,7 +807,10 @@ fn reserve_synced_on_first_pool_owner<'a>(
             now_ns,
             holder,
             persistent,
+            capture_previous_holders,
+            &mut incumbent_holders,
         ) {
+            *previous_holders = incumbent_holders;
             // #8115 R2: see the address-only arm above. `reserve_flow` checks
             // and sets only THIS allocator's bitmap, so an imported flow
             // narrowed to pool B succeeds while a LOCAL flow already owns the
