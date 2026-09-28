@@ -28,7 +28,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	oldPasswdBackups, oldHostKeys := zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath
 	oldDropins, oldVarLog := zeroizeManagedDropins, zeroizeVarLogDir
 	oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec := zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath
-	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldNetifLease, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal, oldSethostname := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeNetifLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir, zeroizeSethostname
+	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldNetifLease, oldNetifLinks, oldNetifServer, oldNetifState, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal, oldSethostname := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeNetifLeaseDir, zeroizeNetifLinksDir, zeroizeNetifServerLeaseDir, zeroizeNetifStatePath, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir, zeroizeSethostname
 	t.Cleanup(func() {
 		zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory = oldMachine, oldSSH, oldRootSSH, oldHistory
 		zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
@@ -38,7 +38,7 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 		zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath = oldPasswdBackups, oldHostKeys
 		zeroizeManagedDropins, zeroizeVarLogDir = oldDropins, oldVarLog
 		zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath = oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec
-		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeNetifLeaseDir, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir, zeroizeSethostname = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldNetifLease, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal, oldSethostname
+		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeNetifLeaseDir, zeroizeNetifLinksDir, zeroizeNetifServerLeaseDir, zeroizeNetifStatePath, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir, zeroizeSethostname = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldNetifLease, oldNetifLinks, oldNetifServer, oldNetifState, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal, oldSethostname
 	})
 
 	zeroizeMachineIDPath = filepath.Join(root, "etc", "machine-id")
@@ -83,6 +83,9 @@ func isolateZeroizeSealPaths(t *testing.T, root string) {
 	zeroizeVarBackupsDir = filepath.Join(root, "var", "backups")
 	zeroizeNetworkdLeaseDir = filepath.Join(root, "var", "lib", "systemd", "network")
 	zeroizeNetifLeaseDir = filepath.Join(root, "run", "systemd", "netif", "leases")
+	zeroizeNetifLinksDir = filepath.Join(root, "run", "systemd", "netif", "links")
+	zeroizeNetifServerLeaseDir = filepath.Join(root, "run", "systemd", "netif", "dhcp-server-lease")
+	zeroizeNetifStatePath = filepath.Join(root, "run", "systemd", "netif", "state")
 	zeroizeDHCPClientStateDirs = []string{filepath.Join(root, "var", "lib", "dhcp"), filepath.Join(root, "var", "lib", "dhclient")}
 	zeroizeTmpDirs = []string{filepath.Join(root, "tmp"), filepath.Join(root, "var", "tmp")}
 	zeroizeShmDir = filepath.Join(root, "dev", "shm")
@@ -659,6 +662,13 @@ func TestPerformZeroizeErasesRecreatedAccountBackups10769(t *testing.T) {
 	}
 }
 
+// Fixture paths/keys below are sourced from the image's systemd generation
+// (Debian 261.x source: networkd-state-file.c link_save/manager_save,
+// networkd-dhcp6.c link_serialize_dhcp6_client,
+// networkd-dhcp-server.c link_get_dhcp_server_lease_file), not guessed:
+// v261 keeps client leases in memory and serializes the derived state
+// into links/<ifindex> + state; leases/<ifindex> has no v261 writer
+// (seeded as legacy/foreign shape to pin the wholesale clear).
 func TestPerformZeroizeErasesDHCPClientIdentity10769(t *testing.T) {
 	root := t.TempDir()
 	hermeticWipe10100(t, root)
@@ -668,11 +678,22 @@ func TestPerformZeroizeErasesDHCPClientIdentity10769(t *testing.T) {
 	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
 	duid := filepath.Join(configDir, "dhcpv6-duid-ge-0-0-1")
 	mustWriteFile(t, duid, []byte("persistent client DUID"))
-	v4lease := filepath.Join(zeroizeNetworkdLeaseDir, "2-ens3.lease")
-	mustWriteFile(t, v4lease, []byte("ADDRESS=192.0.2.10\nDUID=duid-bytes\n"))
-	// networkd's runtime per-ifindex lease (no extension).
-	netifLease := filepath.Join(zeroizeNetifLeaseDir, "2")
-	mustWriteFile(t, netifLease, []byte("ADDRESS=192.0.2.10\nROUTER=192.0.2.1\n"))
+	// Per-link runtime serialization incl. DHCP-derived DNS and the
+	// DHCPv6 client IAID/DUID lines.
+	linkState := filepath.Join(zeroizeNetifLinksDir, "2")
+	mustWriteFile(t, linkState, []byte("# This is private data. Do not parse.\nADMIN_STATE=configured\nOPER_STATE=routable\nDNS=192.0.2.53\nDHCP6_CLIENT_IAID=0x1a2b3c4d\nDHCP6_CLIENT_DUID=DUID-EN:0000ab9f8a9c8e5d4c3b2a1\n"))
+	// Aggregate manager state with DHCP-derived DNS.
+	managerState := zeroizeNetifStatePath
+	mustWriteFile(t, managerState, []byte("# This is private data. Do not parse.\nOPER_STATE=routable\nDNS=192.0.2.53\n"))
+	// Legacy per-ifindex lease shape (no v261 writer; wholesale clear).
+	legacyLease := filepath.Join(zeroizeNetifLeaseDir, "2")
+	mustWriteFile(t, legacyLease, []byte("# This is private data. Do not parse.\nADDRESS=192.0.2.10\nROUTER=192.0.2.1\n"))
+	// DHCP server leases, runtime + persistent (xpf never renders
+	// [DHCPServer], but the wholesale clear owns both regardless).
+	serverRuntime := filepath.Join(zeroizeNetifServerLeaseDir, "ge-0")
+	mustWriteFile(t, serverRuntime, []byte(`{"Leases":[{"Address":"192.0.2.10","Hostname":"tenant-client"}]}`))
+	serverPersist := filepath.Join(zeroizeNetworkdLeaseDir, "dhcp-server-lease", "ge-0")
+	mustWriteFile(t, serverPersist, []byte(`{"Leases":[{"Address":"192.0.2.10","Hostname":"tenant-client"}]}`))
 	dhclientLease := filepath.Join(zeroizeDHCPClientStateDirs[0], "dhclient.leases")
 	mustWriteFile(t, dhclientLease, []byte("lease { address 192.0.2.11; }"))
 	dhclient6Lease := filepath.Join(zeroizeDHCPClientStateDirs[1], "dhclient6.leases")
@@ -684,9 +705,16 @@ func TestPerformZeroizeErasesDHCPClientIdentity10769(t *testing.T) {
 	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
 		t.Fatalf("PerformZeroizeWipe: %v", err)
 	}
-	for _, path := range []string{duid, v4lease, netifLease, dhclientLease, dhclient6Lease, extra} {
+	for _, path := range []string{duid, linkState, managerState, legacyLease, serverRuntime, serverPersist, dhclientLease, dhclient6Lease, extra} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Errorf("DHCP client identity %s survived: %v", path, err)
+		}
+	}
+	// Entries are cleared with their directories kept: the running
+	// networkd creates the subdirs at startup only.
+	for _, dir := range []string{zeroizeNetifLinksDir, zeroizeNetifServerLeaseDir, zeroizeNetifLeaseDir} {
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			t.Errorf("networkd runtime dir %s must survive as a directory: %v", dir, err)
 		}
 	}
 }

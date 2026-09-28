@@ -57,6 +57,9 @@ var (
 	zeroizeVarBackupsDir       = "/var/backups"
 	zeroizeNetworkdLeaseDir    = "/var/lib/systemd/network"
 	zeroizeNetifLeaseDir       = "/run/systemd/netif/leases"
+	zeroizeNetifLinksDir       = "/run/systemd/netif/links"
+	zeroizeNetifServerLeaseDir = "/run/systemd/netif/dhcp-server-lease"
+	zeroizeNetifStatePath      = "/run/systemd/netif/state"
 	zeroizeDHCPClientStateDirs = []string{"/var/lib/dhcp", "/var/lib/dhclient"}
 	zeroizeTmpDirs             = []string{"/tmp", "/var/tmp"}
 	zeroizeShmDir              = "/dev/shm"
@@ -172,19 +175,44 @@ func zeroizeImageSealResidue() error {
 		fail(zeroizeSweepOwnedBackups(target.dir, target.owned))
 	}
 
-	// DHCP client identity (#10769 d05-F6): xpf's own per-interface DUIDs
-	// live in the config root (erased with it). systemd-networkd keeps
-	// runtime per-ifindex leases under /run/systemd/netif/leases/ and
-	// persistent state under /var/lib/systemd/network/ (both literals
-	// present in the shipped systemd 261 networkd binary, which the image
-	// enables with DHCP clients). Both directories are networkd-exclusive
-	// and empty on a fresh install, so both are cleared wholesale rather
-	// than by filename shape; legacy dhclient state likewise. Acquired
-	// addresses, DNS, and client DUID/IAIDs regenerate on the next lease
-	// acquisition. A DHCP renew racing the sweep can only rewrite inside
-	// the pre-reboot window the handoff gate already holds for N+1.
+	// DHCP client identity (#10769 d05-F6), sourced from the image's exact
+	// systemd generation (Debian 261.x; paths below verified against the
+	// 261.2 source and the shipped 261 networkd binary, which the image
+	// enables with DHCP clients on bootstrap fxp0):
+	//   - Client leases live in memory (link->dhcp_lease/dhcp6_lease);
+	//     v261 writes NO per-ifindex file under /run/systemd/netif/leases/
+	//     (the directory is created at startup in networkd.c but has no
+	//     writer left in the tree — the leases/<ifindex> shape is legacy).
+	//     The leases dir is still cleared wholesale as defense.
+	//   - The live client serialization IS per-link /run/systemd/netif/
+	//     links/<ifindex> (link_save in networkd-state-file.c, embedding
+	//     DHCP-derived DNS/NTP/domains plus DHCP6_CLIENT_IAID/DUID from
+	//     link_serialize_dhcp6_client) and the aggregate
+	//     /run/systemd/netif/state (manager_save). Both are cleared.
+	//   - DUID is runtime-derived, never persisted: the default vendor
+	//     DUID is EN 43793 + hashed machine-id (networkd.conf(5)
+	//     DUIDType=vendor; sd-dhcp-duid.c performs no file I/O), so the
+	//     machine-id truncation above rotates it. IAID defaults to a
+	//     siphash of the persistent ifname/MAC (dhcp_identifier_set_iaid),
+	//     i.e. hardware-derived, likewise unpersisted.
+	//   - Persistent /var/lib/systemd/network/ holds only DHCP SERVER
+	//     leases (dhcp-server-lease/<ifname>), which xpf never renders
+	//     (no [DHCPServer] in 10-xpf-*; Kea serves DHCP), plus the
+	//     runtime server mirror under netif/dhcp-server-lease/. Both are
+	//     cleared wholesale regardless.
+	// xpf's own per-interface DUIDs live in the config root (erased with
+	// it); legacy dhclient state likewise. The running networkd (which the
+	// wipe deliberately does not stop — SSH) can only re-serialize
+	// prior-tenant bytes pre-reboot; the mandatory reboot gate clears
+	// /run and restarts networkd, so post-reboot state derives from the
+	// new config with a rotated machine-id/DUID. Entries are cleared with
+	// their directories kept: networkd creates the subdirs at startup
+	// only, while files are rewritten via temp+rename on every save.
 	fail(zeroizeClearDir(zeroizeNetworkdLeaseDir))
 	fail(zeroizeClearDir(zeroizeNetifLeaseDir))
+	fail(zeroizeClearDir(zeroizeNetifLinksDir))
+	fail(zeroizeClearDir(zeroizeNetifServerLeaseDir))
+	fail(zeroizeRemovePath(zeroizeNetifStatePath))
 	for _, dir := range zeroizeDHCPClientStateDirs {
 		fail(zeroizeClearDir(dir))
 	}
