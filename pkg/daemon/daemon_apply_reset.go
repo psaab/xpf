@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -273,6 +274,31 @@ func verifyKeaLeasesErasedForReset() error {
 	return nil
 }
 
+// eraseKeaLeasesForReset removes any Kea lease files present, syncing their
+// parents. It runs only to repair a post-wipe reappearance before the reset
+// reports failure: with the pending markers already cleared and the config
+// wiped, leaving the rows would hand prior leases to the next tenant's Kea
+// with no boot gate left to force another pass.
+func eraseKeaLeasesForReset() error {
+	var errs []error
+	synced := make(map[string]bool)
+	for _, current := range resetKeaLeaseCurrents {
+		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Errorf("factory reset: re-erase Kea lease file %s: %w", path, err))
+				continue
+			}
+			synced[filepath.Dir(path)] = true
+		}
+	}
+	for dir := range synced {
+		if err := fsatomic.SyncDir(dir); err != nil {
+			errs = append(errs, fmt.Errorf("factory reset: sync Kea lease directory %s: %w", dir, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // factoryReset runs a gRPC-initiated zeroize under the SAME global writer gate
 // (d.applySem) that commit / apply / HA-sync serialize on, then enters the
 // terminal reset generation so no concurrent or subsequent config writer can
@@ -412,6 +438,20 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	if wipeErr == nil {
 		wipeSucceeded = true
 		verifyErr = verifyKeaLeasesErasedForReset()
+		if verifyErr != nil {
+			// The wipe already cleared the pending markers, so a bare
+			// failure here would strand reappeared leases with no boot
+			// gate and a wiped config. Re-erase under the still-held
+			// fence and re-verify: the reset still reports failure
+			// (a reappearance is a fence-escaper bug signal, never a
+			// clean outcome) but every leg stays idempotent, so a retry
+			// — or a reboot into the day-0 path — converges cleanly.
+			if rerr := eraseKeaLeasesForReset(); rerr != nil {
+				verifyErr = errors.Join(verifyErr, rerr)
+			} else if rerr := verifyKeaLeasesErasedForReset(); rerr != nil {
+				verifyErr = errors.Join(verifyErr, rerr)
+			}
+		}
 	}
 	d.ddnsResetMu.Unlock()
 	if wipeErr != nil {

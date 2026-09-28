@@ -112,9 +112,12 @@ func TestFactoryResetSurfacesIdentityRestoreFailure10769(t *testing.T) {
 
 // TestFactoryResetFailsWhenKeaLeasesReappear10769 pins the post-wipe lease
 // re-verification: a wipe that reports success while a lease file is present
-// (a writer racing the unlink) must fail the reset closed. The completed
-// wipe's fresh identity is NOT rolled back — the config is gone, so the
-// prior identity is meaningless.
+// (a writer racing the unlink) must fail the reset closed. The reappeared
+// rows are re-erased under the fence before the failure returns — the wipe
+// already cleared the pending markers, so leaving them would strand prior
+// leases with no boot gate — and a retry converges. The completed wipe's
+// fresh identity is NOT rolled back: the config is gone, so the prior
+// identity is meaningless.
 func TestFactoryResetFailsWhenKeaLeasesReappear10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
@@ -138,8 +141,14 @@ func TestFactoryResetFailsWhenKeaLeasesReappear10769(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "reappeared") {
 		t.Fatalf("recreated lease must fail the reset, got %v", err)
 	}
+	if _, serr := os.Lstat(lease); !os.IsNotExist(serr) {
+		t.Fatalf("reappeared lease must be re-erased before the failure returns: %v", serr)
+	}
 	if got, _ := os.ReadFile(hostnamePath); string(got) != "xpf\n" {
 		t.Fatalf("completed-wipe identity must stand after a verify failure, got %q", got)
+	}
+	if err := d.factoryReset(context.Background(), func() error { return nil }); err != nil {
+		t.Fatalf("retry after a repaired verify failure must converge: %v", err)
 	}
 }
 
