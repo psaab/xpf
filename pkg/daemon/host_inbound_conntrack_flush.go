@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -134,17 +135,24 @@ type hostInboundConntrackFlushFilter struct {
 	ingressAllowsAll bool
 	ephemLo          uint16
 	ephemHi          uint16
-	// keptSuspicious counts box-oriented covered flows the sweep deliberately
-	// kept that look like tightening-with-service-running staleness: TCP/UDP,
-	// denied by owner+ingress, outside the catalog and the client-role exempt
-	// sets, and either outside the ephemeral range or (TCP only) backed by a
-	// local LISTEN socket. keptSamples holds the first few tuple descriptions
-	// for the WARN. MatchConntrackFlow may run on the sweeper's goroutine(s),
-	// hence atomic + mutex rather than plain fields.
-	keptSuspicious atomic.Uint64
-	keptMu         sync.Mutex
-	keptSamples    []string
-	tcpListeners   map[uint16]bool
+	// keptCustom counts box-oriented covered flows the sweep deliberately kept
+	// that look like tightening-with-service-running staleness: TCP/UDP,
+	// owner-denied, outside the catalog and the client-role exempt sets, and
+	// either outside the ephemeral range or (TCP only) backed by a local
+	// LISTEN socket. keptCustomSamples holds the first few tuple descriptions.
+	// keptOther counts the same shape for exempt control-plane/client ports
+	// and bare IP protocols (also owner-denied, never flushed, never
+	// guarded). keptAddrs is every recorded flow's box address, for
+	// intersecting evidence with tightened zones at commit-projection time.
+	// MatchConntrackFlow may run on the sweeper's goroutine(s), hence atomic
+	// counters + mutex rather than plain fields.
+	keptCustom    atomic.Uint64
+	keptOther     atomic.Uint64
+	keptMu        sync.Mutex
+	keptSamples   []string
+	keptOtherDesc []string
+	keptAddrs     map[netip.Addr]bool
+	tcpListeners  map[uint16]bool
 }
 
 // readEphemeralPortRange returns the kernel's ephemeral source-port range for
@@ -213,10 +221,18 @@ func (f *hostInboundConntrackFlushFilter) boxOrientedDenied(addr netip.Addr, flo
 			return false
 		}
 	default:
+		// Bare IP protocols are never flushed (live-vs-stale
+		// indistinguishable) but denied ones are evidence for the
+		// transition-gated commit warning.
+		f.noteKeptOther(addr, flow)
 		return false
 	}
 	if _, ok := guard[port]; !ok {
-		f.noteKeptSuspicious(addr, flow)
+		if xnft.HostInboundStaleReplyIsExempt(flow.Forward.Protocol, port) {
+			f.noteKeptOther(addr, flow)
+		} else {
+			f.noteKeptSuspicious(addr, flow)
+		}
 		return false
 	}
 	if f.flowAdmitted(a, flow.Forward.Protocol, port) {
@@ -244,61 +260,98 @@ func (f *hostInboundConntrackFlushFilter) boxOrientedDenied(addr netip.Addr, flo
 }
 
 // noteKeptSuspicious records a box-oriented covered flow the sweep kept on a
-// catalog miss that is NOT convincingly legitimate egress: TCP/UDP, denied by
-// owner+ingress, outside the client-role exempt sets, and either outside the
-// ephemeral range or (TCP only) backed by a local LISTEN socket — a listener
-// distinguishes a bound custom service sport inside the range from ordinary
-// egress, which never LISTENs. UDP has no listen state (bound ephemeral
-// clients are indistinguishable from bound services), so in-range UDP stays
-// silent by design; see the matrix residual. Exempt control-plane/client
-// ports and WireGuard (filtered by the caller) are never recorded.
-// Bare-protocol and ranged flows are likewise excluded: live-vs-stale is
-// indistinguishable there too, so they stay matrix-only and this WARN keeps a
-// tight false-positive budget (explicit-bind low-sport clients and bound-UDP
-// customs, verified with ss).
+// non-exempt catalog miss that is NOT convincingly legitimate egress: TCP/UDP,
+// owner-denied, and either outside the ephemeral range or (TCP only) backed
+// by a local LISTEN socket — a listener distinguishes a bound custom service
+// sport inside the range from ordinary egress, which never LISTENs. UDP has
+// no listen state (bound ephemeral clients are indistinguishable from bound
+// services), so in-range UDP stays silent by design; see the matrix residual.
+// Unlike the flush path, evidence deliberately ignores ingress permission:
+// the flush intersection is safe only because a per-ingress nft guard judges
+// each reply packet — and custom tuples have no guard anywhere, so an
+// ingress-permitted custom still bypasses on every denying ingress.
 func (f *hostInboundConntrackFlushFilter) noteKeptSuspicious(addr netip.Addr, flow *netlink.ConntrackFlow) {
 	port := flow.Forward.SrcPort
 	inEphem := port >= f.ephemLo && port <= f.ephemHi
 	if inEphem && (flow.Forward.Protocol != config.HostInboundProtoTCP || !f.tcpListeners[port]) {
 		return
 	}
-	if xnft.HostInboundStaleReplyIsExempt(flow.Forward.Protocol, port) {
-		return
-	}
 	a := f.admit[addr.Unmap()]
 	if a == nil || f.flowAdmitted(a, flow.Forward.Protocol, port) {
 		return
 	}
-	if f.ingressAllowsAll {
-		return
-	}
-	switch flow.Forward.Protocol {
-	case config.HostInboundProtoTCP:
-		if portInRanges(port, f.ingressTCP) {
-			return
-		}
-	case config.HostInboundProtoUDP:
-		if portInRanges(port, f.ingressUDP) {
-			return
-		}
-	default:
-		return
-	}
-	f.keptSuspicious.Add(1)
+	f.keptCustom.Add(1)
 	f.keptMu.Lock()
 	defer f.keptMu.Unlock()
+	if f.keptAddrs == nil {
+		f.keptAddrs = map[netip.Addr]bool{}
+	}
+	f.keptAddrs[addr.Unmap()] = true
 	if len(f.keptSamples) < 5 {
-		f.keptSamples = append(f.keptSamples, fmt.Sprintf("%s %s:%d→%s:%d",
-			protoName10752(flow.Forward.Protocol), ipString10752(flow.Forward.SrcIP), port,
-			ipString10752(flow.Forward.DstIP), flow.Forward.DstPort))
+		f.keptSamples = append(f.keptSamples, keptFlowSample10752(flow))
 	}
 }
 
-// keptSuspiciousReport returns the recorded keep count and sample tuples.
+// noteKeptOther records a box-oriented covered flow kept on an exempt
+// control-plane/client tuple or a bare IP protocol that the owner denies.
+// Like customs, evidence ignores ingress permission (no per-packet guard
+// exists for these classes either). Unlike customs, this class surfaces ONLY
+// through the transition-gated commit warning — per-apply journal WARNs
+// would fire on legitimate steady-state control-plane traffic (DHCP
+// renewals, NTP polls, OSPF hellos in zones that never admitted them).
+func (f *hostInboundConntrackFlushFilter) noteKeptOther(addr netip.Addr, flow *netlink.ConntrackFlow) {
+	a := f.admit[addr.Unmap()]
+	if a == nil {
+		return
+	}
+	switch flow.Forward.Protocol {
+	case config.HostInboundProtoTCP, config.HostInboundProtoUDP:
+		if f.flowAdmitted(a, flow.Forward.Protocol, flow.Forward.SrcPort) {
+			return
+		}
+	default:
+		if f.flowAdmitted(a, flow.Forward.Protocol, 0) {
+			return
+		}
+	}
+	f.keptOther.Add(1)
+	f.keptMu.Lock()
+	defer f.keptMu.Unlock()
+	if f.keptAddrs == nil {
+		f.keptAddrs = map[netip.Addr]bool{}
+	}
+	f.keptAddrs[addr.Unmap()] = true
+	if len(f.keptOtherDesc) < 3 {
+		f.keptOtherDesc = append(f.keptOtherDesc, keptFlowSample10752(flow))
+	}
+}
+
+func keptFlowSample10752(flow *netlink.ConntrackFlow) string {
+	return fmt.Sprintf("%s %s:%d→%s:%d",
+		protoName10752(flow.Forward.Protocol), ipString10752(flow.Forward.SrcIP), flow.Forward.SrcPort,
+		ipString10752(flow.Forward.DstIP), flow.Forward.DstPort)
+}
+
+// keptSuspiciousReport returns the recorded custom-keep count and sample
+// tuples (the journal WARN class).
 func (f *hostInboundConntrackFlushFilter) keptSuspiciousReport() (uint64, []string) {
 	f.keptMu.Lock()
 	defer f.keptMu.Unlock()
-	return f.keptSuspicious.Load(), append([]string(nil), f.keptSamples...)
+	return f.keptCustom.Load(), append([]string(nil), f.keptSamples...)
+}
+
+// keptEvidenceReport returns the full evidence for commit projection: custom
+// and exempt/bare counts with samples, plus every recorded box address
+// (sorted) for intersecting with tightened zones.
+func (f *hostInboundConntrackFlushFilter) keptEvidenceReport() (custom uint64, customSamples []string, other uint64, otherSamples []string, addrs []netip.Addr) {
+	f.keptMu.Lock()
+	defer f.keptMu.Unlock()
+	for addr := range f.keptAddrs {
+		addrs = append(addrs, addr)
+	}
+	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Less(addrs[j]) })
+	return f.keptCustom.Load(), append([]string(nil), f.keptSamples...),
+		f.keptOther.Load(), append([]string(nil), f.keptOtherDesc...), addrs
 }
 
 func protoName10752(proto uint8) string {
@@ -570,17 +623,19 @@ func (d *Daemon) flushDeniedHostInboundConntrack(views []dpuserspace.ZoneHostInb
 	// 2222 after an any-service→named tightening). Unlike the #6802 debt this
 	// is not a failure — nothing failed — so it must not join the commit
 	// error; but unlike a clean sweep it leaves authorization the new rules
-	// no longer grant, so it must not pass silently either. Journal WARN with
-	// count + samples + the procedure pointer, only when such flows exist.
-	// The same report is stashed for the commit funnel's transition-aware
-	// warning (which additionally requires a lost full-admit scope).
-	kept, samples := filter.keptSuspiciousReport()
+	// no longer grant, so it must not pass silently either. The full report
+	// (customs + exempt/bare counts, samples, box addresses) is stashed for
+	// the commit funnel's transition-aware warning; the journal WARN below
+	// covers customs only, since exempt/bare steady-state traffic (DHCP
+	// renewals, NTP polls, OSPF hellos in never-admitting zones) would make
+	// a per-apply journal line pure noise.
+	custom, samples, other, otherSamples, addrs := filter.keptEvidenceReport()
 	if d != nil {
-		d.recordKeptSuspicious10752(kept, samples)
+		d.recordKeptSuspicious10752(custom, samples, other, otherSamples, addrs)
 	}
-	if kept > 0 {
-		slog.Warn("host-inbound conntrack reconcile kept box-oriented non-catalog flows to covered addresses; with active traffic they ride the broad reply accept indefinitely — delete per the non-catalog TCP HIGH-residual procedure in docs/host-inbound-service-matrix.md, or verify with ss that each is a legitimate explicit-bind client",
-			"kept", kept, "samples", samples)
+	if custom > 0 {
+		slog.Warn("host-inbound conntrack reconcile kept box-oriented non-catalog flows to covered addresses; with active traffic they ride the broad reply accept indefinitely — delete per the Removal procedures for unguarded tuples in docs/host-inbound-service-matrix.md, or verify with ss that each is a legitimate explicit-bind client",
+			"kept", custom, "samples", samples)
 	}
 	return ok
 }
