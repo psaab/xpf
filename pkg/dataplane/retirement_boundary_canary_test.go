@@ -464,6 +464,300 @@ func TestUserspaceXDPShimObjectMatchesRetainedCollectionAllowlist(t *testing.T) 
 	}
 }
 
+// TestHAWatchdogIsNotReferencedByTheUserspaceShim10791 pins the retirement
+// boundary across every shim input and embedded map name, not only Rust source.
+// TestUserspaceXDPShimObjectMatchesSourceManifest separately ensures the object
+// corresponds to source, and the retained map allowlist catches unreviewed maps.
+func TestHAWatchdogIsNotReferencedByTheUserspaceShim10791(t *testing.T) {
+	t.Parallel()
+
+	sourceRoot := filepath.Join(repoRootForBoundaryCanary, "userspace-xdp")
+	for _, path := range filesUnder(t, sourceRoot, "") {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read userspace XDP input %s: %v", path, err)
+		}
+		text := strings.ToLower(string(raw))
+		for _, token := range []string{"watchdog", "liveness", "ha_watchdog", "rg_active"} {
+			if strings.Contains(text, token) {
+				t.Errorf("userspace XDP input %s references retired HA liveness token %q", repoRelativePath(t, path), token)
+			}
+		}
+	}
+
+	spec, err := loadRustUserspaceXDP()
+	if err != nil {
+		t.Fatalf("load userspace XDP shim object: %v", err)
+	}
+	foundMaps := make(map[string]string, len(spec.Maps))
+	for name := range spec.Maps {
+		normalized := strings.ToLower(name)
+		if strings.Contains(normalized, "watchdog") || strings.Contains(normalized, "liveness") || strings.Contains(normalized, "rg_active") {
+			t.Errorf("embedded userspace XDP shim object has retired HA map %q", name)
+		}
+		foundMaps[name] = name
+	}
+	unexpectedMaps, missingMaps := compareStringSetToAllowed(foundMaps, keysOfMapTypeAllowlist(userspaceShimAllowedMapTypes))
+	if len(unexpectedMaps) != 0 || len(missingMaps) != 0 {
+		t.Errorf("embedded userspace XDP map allowlist drift: unexpected=%v missing=%v", unexpectedMaps, missingMaps)
+	}
+}
+
+var retiredHAWatchdogClaimPatterns10791 = []*regexp.Regexp{
+	regexp.MustCompile(`\bbpf watchdog\b`),
+	regexp.MustCompile(`\bkernel liveness\b`),
+	regexp.MustCompile(`\bkernel visible ((bpf )?(shim )?map )?write\b`),
+	regexp.MustCompile(`\b(bpf|kernel) checks? freshness\b`),
+	regexp.MustCompile(`\bcheck egress rg active verifies freshness\b`),
+	regexp.MustCompile(`\b(bpf|kernel|ha watchdog)( [a-z0-9]+){0,12} 2s stale\b`),
+	regexp.MustCompile(`\b(bpf|kernel|ha watchdog)( [a-z0-9]+){0,12} 2s (stale|staleness)? ?window\b`),
+	regexp.MustCompile(`\b(bpf|kernel|ha watchdog) (stops|halts|drops|blocks) forwarding (within|in) 2s\b`),
+	regexp.MustCompile(`\b10s stale lease\b`),
+	regexp.MustCompile(`\bstale lease would expire\b`),
+	regexp.MustCompile(`\bactiveuntil watchdog\b`),
+	regexp.MustCompile(`\bbpf and rust helper check freshness\b`),
+	regexp.MustCompile(`\bbpf checks this to detect userspace liveness\b`),
+}
+
+var haWatchdogParagraphSeparator10791 = regexp.MustCompile(`\n\s*\n`)
+var haWatchdogPunctuation10791 = regexp.MustCompile(`[^a-z0-9]+`)
+var haWatchdogTwoSecond10791 = regexp.MustCompile(`\b(two|2) seconds?\b`)
+var haWatchdogTwoS10791 = regexp.MustCompile(`\b2 s\b`)
+var haWatchdogGroupPattern10791 = regexp.MustCompile(`\b(rg|redundancy group)\b`)
+var haWatchdogImpactPattern10791 = regexp.MustCompile(`\b(drop|drops|dropped|dropping|inactive|stop|stops|halt|halts|block|blocks|forward|forwards|forwarding)\b`)
+var haWatchdogListItemSeparator10791 = regexp.MustCompile(`(?m)^\s*[-*]\s+`)
+var haWatchdogAgedTimestampPattern10791 = regexp.MustCompile(`\b(older?|aged?|exceed(ed|s)?|over|more than|stale)\b`)
+
+func normalizeHAWatchdogText10791(text string) string {
+	normalized := strings.ToLower(text)
+	normalized = haWatchdogPunctuation10791.ReplaceAllString(normalized, " ")
+	normalized = haWatchdogTwoSecond10791.ReplaceAllString(normalized, "2s")
+	normalized = haWatchdogTwoS10791.ReplaceAllString(normalized, "2s")
+	return strings.Join(strings.Fields(normalized), " ")
+}
+
+func retiredHAWatchdogClaims10791(text string) []string {
+	var claims []string
+	for _, paragraph := range haWatchdogParagraphSeparator10791.Split(text, -1) {
+		normalized := normalizeHAWatchdogText10791(paragraph)
+		for _, pattern := range retiredHAWatchdogClaimPatterns10791 {
+			if match := pattern.FindString(normalized); match != "" {
+				claims = append(claims, match)
+			}
+		}
+		if hasRetiredHAHeartbeatClaim10791(paragraph) {
+			claims = append(claims, "2s heartbeat/timestamp RG drop-or-forward claim")
+		}
+		if hasHAWatchdogContext10791(normalized) {
+			for _, claim := range []string{"bpf shim map", "shim map write"} {
+				if strings.Contains(normalized, claim) {
+					claims = append(claims, claim)
+				}
+			}
+		}
+	}
+	return claims
+}
+
+func hasRetiredHAHeartbeatClaim10791(text string) bool {
+	// Keep each Markdown list item isolated, but aggregate semantic evidence
+	// across every sentence in that item so split paraphrases remain detectable.
+	for _, item := range haWatchdogListItemSeparator10791.Split(text, -1) {
+		normalized := normalizeHAWatchdogText10791(item)
+		if hasRetiredHAHeartbeatClaimInNormalized10791(normalized) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRetiredHAHeartbeatClaimInNormalized10791(normalized string) bool {
+	return strings.Contains(normalized, "2s") &&
+		strings.Contains(normalized, "heartbeat") &&
+		strings.Contains(normalized, "timestamp") &&
+		haWatchdogAgedTimestampPattern10791.MatchString(normalized) &&
+		haWatchdogGroupPattern10791.MatchString(normalized) &&
+		haWatchdogImpactPattern10791.MatchString(normalized)
+}
+
+func hasHAWatchdogContext10791(normalized string) bool {
+	for _, marker := range []string{"watchdog", "liveness", "rg active", "stale"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCoLocatedHAWatchdogLeaseContract10791(text string) bool {
+	for _, paragraph := range haWatchdogParagraphSeparator10791.Split(text, -1) {
+		normalized := normalizeHAWatchdogText10791(paragraph)
+		hasReceiptAnchor := strings.Contains(normalized, "receipt anchored")
+		hasTenSeconds := strings.Contains(normalized, "10s")
+		hasLease := strings.Contains(normalized, "lease")
+		hasUpdate := strings.Contains(normalized, "update ha state")
+		hasFormula := strings.Contains(normalized, "max watchdog") || strings.Contains(normalized, "active lease until")
+		if hasReceiptAnchor && hasTenSeconds && hasLease && hasUpdate && hasFormula {
+			return true
+		}
+	}
+	return false
+}
+
+// TestHAWatchdogClaimsUseTheHelperLease10791 scans all active Go and Markdown.
+// docs/issues is generated PR/issue history (including imported old claims), so
+// it is not hand-edited active guidance; docs/archived and reviews/archive are
+// likewise immutable archives, not current contract surfaces.
+func TestHAWatchdogClaimsUseTheHelperLease10791(t *testing.T) {
+	t.Parallel()
+
+	paths := append(
+		filesWithExtensionUnder(t, filepath.Join(repoRootForBoundaryCanary, "pkg", "daemon"), ".go"),
+		filesWithExtensionUnder(t, filepath.Join(repoRootForBoundaryCanary, "pkg", "dataplane"), ".go")...,
+	)
+	paths = append(paths, activeMarkdownFilesUnder(t, filepath.Join(repoRootForBoundaryCanary, "docs"))...)
+	sort.Strings(paths)
+	canaryPath := filepath.Join(repoRootForBoundaryCanary, "pkg", "dataplane", "retirement_boundary_canary_test.go")
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		if path == canaryPath {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read active HA watchdog contract site %s: %v", path, err)
+		}
+		if claims := retiredHAWatchdogClaims10791(string(raw)); len(claims) != 0 {
+			t.Errorf("%s reintroduces retired HA watchdog claims %q", repoRelativePath(t, path), claims)
+		}
+	}
+
+	for _, rel := range []string{
+		"pkg/dataplane/maps_fabric.go",
+		"pkg/dataplane/userspace/manager_ha.go",
+		"docs/bugs.md",
+		"docs/ha-failover-status.md",
+		"docs/reth-mac.md",
+		"docs/memory.md",
+		"docs/vrrp-elimination-study.md",
+		"docs/phases.md",
+	} {
+		raw, err := os.ReadFile(filepath.Join(repoRootForBoundaryCanary, rel))
+		if err != nil {
+			t.Fatalf("read HA helper lease contract %s: %v", rel, err)
+		}
+		if !hasCoLocatedHAWatchdogLeaseContract10791(string(raw)) {
+			t.Errorf("%s must co-locate receipt anchoring, a 10s lease, update_ha_state, and its max(watchdog, now) formula in one paragraph", rel)
+		}
+	}
+}
+
+func TestHAWatchdogClaimMatcherRejectsRewordedAndFootnotedStaleClaims10791(t *testing.T) {
+	t.Parallel()
+
+	for _, stale := range []string{
+		"BPF Watchdog checks freshness if > 2 s stale, RG becomes inactive.",
+		"Kernel liveness is detected through the shim map write.",
+		"BPF checks this to detect userspace liveness.",
+		"The kernel-visible write is the forwarding signal.",
+		"The BPF shim map has a ~10s stale-lease window.",
+		"ActiveUntil(watchdog + HA_WATCHDOG_STALE_AFTER_SECS).",
+		"BPF stops forwarding within two seconds.",
+		"The dataplane drops the RG when its heartbeat timestamp is older than two seconds.",
+		"The heartbeat timestamp exceeded two seconds. The RG forwarding was suspended.",
+		"The HA heartbeat timestamp was older than two seconds. Therefore the redundancy group is inactive.",
+		"The heartbeat timestamp exceeded two seconds. This condition is unsafe. The RG therefore stops forwarding.",
+		"The heartbeat timestamp was recorded. It is now older than two seconds. The RG forwarding stays suspended.",
+		"BPF halts forwarding in ~2 seconds.",
+		"BPF ~2s staleness window.",
+		"BPF 2s stale window.",
+		"ha_watchdog 2s stale means inactive.",
+		"BPF 2s window.",
+	} {
+		if claims := retiredHAWatchdogClaims10791(stale); len(claims) == 0 {
+			t.Errorf("stale claim escaped normalized matcher: %q", stale)
+		}
+	}
+
+	doc := "The receipt-anchored 10s lease is minted by update_ha_state using ActiveUntil(max(watchdog, now) + 10s).\n\n" +
+		"Historical note: BPF Watchdog checks freshness if > 2 s stale."
+	if !hasCoLocatedHAWatchdogLeaseContract10791(doc) {
+		t.Fatal("correct helper contract should pass even with a separate stale footnote")
+	}
+	if claims := retiredHAWatchdogClaims10791(doc); len(claims) == 0 {
+		t.Fatal("correct helper prose must not hide a stale claim in another paragraph")
+	}
+	if hasCoLocatedHAWatchdogLeaseContract10791("The receipt-anchored update_ha_state is current.\n\n" +
+		"The 10s active_lease_until formula is documented separately.") {
+		t.Fatal("lease facts split across paragraphs must not satisfy the co-location gate")
+	}
+}
+
+func TestRetiredBPFWatchdogHeadersHaveNoLiveCallers10791(t *testing.T) {
+	t.Parallel()
+
+	for _, rel := range []string{"bpf/headers/xpf_maps.h", "bpf/headers/xpf_helpers.h"} {
+		raw, err := os.ReadFile(filepath.Join(repoRootForBoundaryCanary, rel))
+		if err != nil {
+			t.Fatalf("read retired BPF header %s: %v", rel, err)
+		}
+		normalized := normalizeHAWatchdogText10791(string(raw))
+		for _, required := range []string{"retired 1476 10791", "receipt anchored", "10s"} {
+			if !strings.Contains(normalized, required) {
+				t.Errorf("%s retirement marker must include %q", rel, required)
+			}
+		}
+		if !strings.Contains(normalized, "no live") || !strings.Contains(normalized, "caller") {
+			t.Errorf("%s must state that the legacy liveness check has no live caller", rel)
+		}
+	}
+
+	callPattern := regexp.MustCompile(`\bcheck_egress_rg_active\s*\(`)
+	for _, path := range filesWithExtensionUnder(t, filepath.Join(repoRootForBoundaryCanary, "bpf"), ".c") {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read BPF C source %s: %v", path, err)
+		}
+		if callPattern.Match(raw) {
+			t.Errorf("live BPF C source %s calls retired check_egress_rg_active", repoRelativePath(t, path))
+		}
+	}
+	docRel := "docs/next-features/ha-session-ownership-and-fabric-failover.md"
+	docRaw, err := os.ReadFile(filepath.Join(repoRootForBoundaryCanary, docRel))
+	if err != nil {
+		t.Fatalf("read legacy caller design note %s: %v", docRel, err)
+	}
+	doc := normalizeHAWatchdogText10791(string(docRaw))
+	historicalLabel := strings.Index(doc, "historical diagnosis not a current call path")
+	documentedCaller := strings.Index(doc, "check egress rg active")
+	if historicalLabel < 0 || documentedCaller < 0 || historicalLabel > documentedCaller {
+		t.Errorf("%s must label its legacy check_egress_rg_active callsite as historical before describing it", docRel)
+	}
+	if !strings.Contains(doc, "no c caller") {
+		t.Errorf("%s must explain there is no current C caller", docRel)
+	}
+}
+
+func TestArchivedHAWatchdogInventoryHasRetirementBanner10791(t *testing.T) {
+	t.Parallel()
+
+	rel := "docs/archived/ha-forwarding-state-inventory.md"
+	raw, err := os.ReadFile(filepath.Join(repoRootForBoundaryCanary, rel))
+	if err != nil {
+		t.Fatalf("read archived HA watchdog inventory: %v", err)
+	}
+	text := strings.ToLower(string(raw))
+	banner := strings.Index(text, "retired (#1476/#10791)")
+	historicalClaim := strings.Index(text, "bpf and rust helper check freshness")
+	if banner < 0 || historicalClaim < 0 || banner > historicalClaim {
+		t.Fatalf("%s must put its retirement banner before the historical BPF watchdog claim", rel)
+	}
+}
+
 func TestUserspaceDegradedPathCounterStatusStructAvoidsFallbackField(t *testing.T) {
 	t.Parallel()
 
@@ -2586,6 +2880,14 @@ func assertCanaryViolationContains(t *testing.T, violations []string, needles ..
 }
 
 func rustSourceFilesUnder(t *testing.T, root string) []string {
+	return filesWithExtensionUnder(t, root, ".rs")
+}
+
+func filesWithExtensionUnder(t *testing.T, root, extension string) []string {
+	return filesUnder(t, root, extension)
+}
+
+func filesUnder(t *testing.T, root, extension string) []string {
 	t.Helper()
 
 	var files []string
@@ -2594,15 +2896,50 @@ func rustSourceFilesUnder(t *testing.T, root string) []string {
 			return err
 		}
 		if d.IsDir() {
+			// Cargo build output is not shim input and may contain large binaries.
+			if d.Name() == "target" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		if strings.HasSuffix(path, ".rs") {
+		if extension == "" || strings.EqualFold(filepath.Ext(path), extension) {
 			files = append(files, path)
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk Rust source under %s: %v", root, err)
+		t.Fatalf("walk files under %s: %v", root, err)
+	}
+	sort.Strings(files)
+	return files
+}
+
+func activeMarkdownFilesUnder(t *testing.T, root string) []string {
+	t.Helper()
+
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && path != root {
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			switch filepath.ToSlash(rel) {
+			case "archived", "reviews/archive", "issues":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.IsDir() && strings.EqualFold(filepath.Ext(path), ".md") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk active Markdown under %s: %v", root, err)
 	}
 	sort.Strings(files)
 	return files

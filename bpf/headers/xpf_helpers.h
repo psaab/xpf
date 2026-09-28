@@ -2379,9 +2379,10 @@ check_egress_rg_active(__u32 ifindex, __u16 vlan_id)
 	if (!active || !*active)
 		return 0;
 
-	/* Userspace liveness watchdog: if Go daemon hasn't written a
-	 * heartbeat within 2 seconds, treat RG as inactive (fail-closed
-	 * on SIGKILL/panic).  Value 0 = standalone/uninit → skip. */
+	/* RETIRED (#1476/#10791): this legacy per-RG >2s check has no live caller.
+	 * The current daemon-loss backstop is the helper's receipt-anchored 10s
+	 * update_ha_state lease; this header definition is retained as history.
+	 */
 	__u64 *last_ts = bpf_map_lookup_elem(&ha_watchdog, &rg_key);
 	if (last_ts && *last_ts != 0) {
 		__u64 now_ns = bpf_ktime_get_ns();
