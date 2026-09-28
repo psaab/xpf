@@ -92,3 +92,50 @@ func TestDynamicAddressShrinkGuardInvalidConfigRejected11059(t *testing.T) {
 		}
 	}
 }
+func TestDynamicAddressShrinkGuardCompactTailMatchesBlock11059(t *testing.T) {
+	parse := func(t *testing.T, text string) *ConfigTree {
+		t.Helper()
+		tree, errs := NewParser(text).Parse()
+		if len(errs) != 0 {
+			t.Fatalf("parse compact feed-server config: %v", errs)
+		}
+		return tree
+	}
+	compact := `security { dynamic-address { feed-server threat { url https://feeds.example/list; } feed-server threat shrink-guard-min-old-count 128 shrink-guard-min-retain-percent 65 shrink-guard-min-drop 24; } }`
+	block := `security { dynamic-address { feed-server threat { url https://feeds.example/list; shrink-guard-min-old-count 128; shrink-guard-min-retain-percent 65; shrink-guard-min-drop 24; } } }`
+	compile := func(t *testing.T, text string) *FeedServer {
+		t.Helper()
+		tree := parse(t, text)
+		if err := SchemaValidate(tree, nil); err != nil {
+			t.Fatalf("SchemaValidate rejected valid config: %v", err)
+		}
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("CompileConfig rejected valid config: %v", err)
+		}
+		if cfg.Security.DynamicAddress.FeedServers["threat"] == nil {
+			t.Fatal("compiled config omitted feed-server threat")
+		}
+		return cfg.Security.DynamicAddress.FeedServers["threat"]
+	}
+	compactFS := compile(t, compact)
+	blockFS := compile(t, block)
+	if compactFS.ShrinkGuardMinOldCount != blockFS.ShrinkGuardMinOldCount ||
+		compactFS.ShrinkGuardMinRetainPercent != blockFS.ShrinkGuardMinRetainPercent ||
+		compactFS.ShrinkGuardMinDrop != blockFS.ShrinkGuardMinDrop {
+		t.Fatalf("compact thresholds (%d,%d,%d) differ from block thresholds (%d,%d,%d)",
+			compactFS.ShrinkGuardMinOldCount, compactFS.ShrinkGuardMinRetainPercent, compactFS.ShrinkGuardMinDrop,
+			blockFS.ShrinkGuardMinOldCount, blockFS.ShrinkGuardMinRetainPercent, blockFS.ShrinkGuardMinDrop)
+	}
+
+	for _, invalid := range []string{
+		`security { dynamic-address { feed-server threat shrink-guard-min-old-count 0; } }`,
+		`security { dynamic-address { feed-server threat shrink-guard-min-retain-percent 101; } }`,
+		`security { dynamic-address { feed-server threat shrink-guard-min-drop 1048576; } }`,
+	} {
+		tree := parse(t, invalid)
+		if err := SchemaValidate(tree, nil); err == nil {
+			t.Errorf("SchemaValidate accepted invalid compact feed-server tail: %s", invalid)
+		}
+	}
+}

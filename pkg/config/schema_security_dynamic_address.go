@@ -43,3 +43,22 @@ func dynamicAddressSchema() *schemaNode {
 		}},
 	}}
 }
+
+// dynamicAddressShrinkGuardCompactProps returns only the shrink-guard leaves
+// consumed from a compact feed-server instance tail. Keep this narrow rather
+// than opting the whole legacy feed-server tail into packedTail validation:
+// compileDynamicAddress intentionally leaves other tail behavior unchanged.
+func dynamicAddressShrinkGuardCompactProps(tail []string) []*Node {
+	if len(tail) == 0 {
+		return nil
+	}
+	expanded := expandFlatRun([]*Node{{Keys: tail, IsLeaf: true}}, feedServerSchema9792())
+	var props []*Node
+	for _, prop := range expanded {
+		switch prop.Name() {
+		case "shrink-guard-min-old-count", "shrink-guard-min-retain-percent", "shrink-guard-min-drop":
+			props = append(props, prop)
+		}
+	}
+	return props
+}

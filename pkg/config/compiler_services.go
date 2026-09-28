@@ -815,18 +815,9 @@ func compileDynamicAddress(node *Node, sec *SecurityConfig) error {
 		// #9792: a packed one-line run reaches this reader on the lenient path
 		// (Store.Load / Store.SyncApply); expand it as #9235 does. Lenient path only.
 		feedServerSchema := feedServerSchema9792()
-		var inlineProps []*Node
-		if tail := instanceValueTail(inst.node, inst.name); len(tail) > 0 {
-			// The new runtime shrink knobs must survive compact named-instance
-			// configuration. Keep legacy feed-server tail handling unchanged;
-			// only these new leaves are read from that shape (#11059).
-			for _, prop := range expandFlatRun([]*Node{{Keys: tail, IsLeaf: true}}, feedServerSchema) {
-				switch prop.Name() {
-				case "shrink-guard-min-old-count", "shrink-guard-min-retain-percent", "shrink-guard-min-drop":
-					inlineProps = append(inlineProps, prop)
-				}
-			}
-		}
+		// Compile the same three compact shrink-guard leaves the schema walker
+		// validates; legacy feed-server key tails remain intentionally unchanged.
+		inlineProps := dynamicAddressShrinkGuardCompactProps(instanceValueTail(inst.node, inst.name))
 		props := append(inlineProps, expandResolvingRuns9792(inst.node.Children, feedServerSchema)...)
 		for _, prop := range props {
 			switch prop.Name() {

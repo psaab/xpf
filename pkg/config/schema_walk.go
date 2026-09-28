@@ -801,18 +801,28 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// `packedBodyChildren` hands that compiler, so the gate and the compiler
 	// cannot disagree about what the tokens mean.
 	//
-	// Default-off is deliberate and is the compiler-faithful contract above:
-	// for every other container the tail is not compiled, so validating it
-	// would reject a configuration that behaves identically either way.
+	// Default-off is deliberate: validating a tail that no compiler reads would
+	// reject configuration that behaves identically either way. The feed-server
+	// shrink-guard exception below validates only the three newly consumed
+	// leaves, without widening the legacy tail contract.
 	walkChildren := node.Children
 	if childSchema.packedTail && len(node.Keys) > consumed {
 		// The packed body is authored on the container line.
 		walkChildren = packedBodyChildren(node, childSchema)
-	} else if childSchema.packedFlatRun && len(node.Children) > 0 {
-		// `stream s1 port 5514 category policy` as a child chain
-		// (`port` -> `category`). Use the same expansion as compileLog
-		// before walking under the inherited closed-world arm.
-		walkChildren = expandFlatRun(node.Children, childSchema)
+	} else {
+		if childSchema.packedFlatRun && len(node.Children) > 0 {
+			// `stream s1 port 5514 category policy` as a child chain
+			// (`port` -> `category`). Use the same expansion as compileLog
+			// before walking under the inherited closed-world arm.
+			walkChildren = expandFlatRun(node.Children, childSchema)
+		}
+		// #11059: compileDynamicAddress reads only these three fields from a
+		// compact feed-server tail. Validate exactly that consumed subset, not
+		// the unrelated legacy tail that remains intentionally uncompiled.
+		if childSchema == feedServerSchema9792() && len(node.Keys) > consumed {
+			inlineProps := dynamicAddressShrinkGuardCompactProps(node.Keys[consumed:])
+			walkChildren = append(inlineProps, walkChildren...)
+		}
 	}
 	return walkSchemaChildren(walkChildren, descendSchema, newPath, vc, childClosed)
 }
