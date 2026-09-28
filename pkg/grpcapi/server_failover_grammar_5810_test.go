@@ -66,9 +66,10 @@ func TestSystemActionFailoverAccepts_5810(t *testing.T) {
 }
 
 // TestFailoverParseAgreement_5810 mechanically compares the shared parser, the
-// loopback handler's routing, and the fabric gate so they cannot drift: the
-// fabric allowlist admits an action iff the shared parser accepts it AND it
-// names a target node (Targeted). Every reject vector is denied at the gate.
+// loopback handler's routing, and the fabric gate so they cannot drift: for
+// failover actions the fabric gate admits iff the shared parser accepts it AND
+// it names a target node (Targeted). The fabric gate also admits the separately
+// authorized exact persistent-NAT clear action. Every reject vector is denied.
 func TestFailoverParseAgreement_5810(t *testing.T) {
 	for _, tc := range grammarvectors.ActionAccepts {
 		op, err := clusterfailover.ParseAction(tc.Action)
