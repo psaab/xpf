@@ -335,6 +335,11 @@ type xpfCollector struct {
 	// a forwarding/durability emergency.
 	rollbackHistoryDegraded *prometheus.Desc
 
+	// #10751: 0/1 gauge — 1 while the latest bootstrap lifeline-guard swap
+	// failed (global barrier retained; remote recovery may be blocked).
+	// Alert on == 1. Emitted pre-dataplane-gate: bootstrap has no dataplane.
+	earlyInputGuardSwapFailed *prometheus.Desc
+
 	// #9898 F-113: 0/1 gauge — 1 while journal permission repair is
 	// degraded (a pre-existing segment could not be tightened to
 	// owner-only 0600 and world-readable history may still be exposed).
@@ -609,10 +614,10 @@ type xpfCollector struct {
 	userspaceSessionInstallStaleIgnored       *prometheus.Desc
 	userspaceSessionDeleteStaleIgnored        *prometheus.Desc
 	userspaceSyncedImportReserveRefused       *prometheus.Desc
-	userspaceSyncedImportMirrorRefused  *prometheus.Desc
-	userspaceMirrorRestoreRepublished   *prometheus.Desc
-	userspaceMirrorRestoreDeleted       *prometheus.Desc
-	userspaceMirrorRestoreFailed        *prometheus.Desc
+	userspaceSyncedImportMirrorRefused        *prometheus.Desc
+	userspaceMirrorRestoreRepublished         *prometheus.Desc
+	userspaceMirrorRestoreDeleted             *prometheus.Desc
+	userspaceMirrorRestoreFailed              *prometheus.Desc
 	userspaceSyncedImportUnknownRoutingDomain *prometheus.Desc
 	userspaceSyncedImportIncompleteKey        *prometheus.Desc
 	// #10512: policy-delete micro-batch gate-lease holds (count, total and
@@ -1065,6 +1070,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.ipsecCaptureDeliveredTotal
 	ch <- c.configPersistDegraded
 	ch <- c.rollbackHistoryDegraded
+	ch <- c.earlyInputGuardSwapFailed
 	ch <- c.journalPermsDegraded
 	ch <- c.userspacePolicyContentRejected
 	ch <- c.userspaceZoneIDCollision
@@ -1466,6 +1472,17 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 			v = 1
 		}
 		ch <- prometheus.MustNewConstMetric(c.rollbackHistoryDegraded,
+			prometheus.GaugeValue, v)
+	}
+
+	// #10751: bootstrap lifeline-guard swap failure. Control-plane health:
+	// stays visible even when the dataplane is not loaded.
+	if c.srv.earlyInputGuardSwapFailedFn != nil {
+		v := 0.0
+		if c.srv.earlyInputGuardSwapFailedFn() {
+			v = 1
+		}
+		ch <- prometheus.MustNewConstMetric(c.earlyInputGuardSwapFailed,
 			prometheus.GaugeValue, v)
 	}
 

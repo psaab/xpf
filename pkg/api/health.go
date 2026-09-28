@@ -82,6 +82,13 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 	if s.rollbackHistoryDegradedFn != nil {
 		payload["rollback_history_degraded"] = s.rollbackHistoryDegradedFn()
 	}
+
+	// #10751: bootstrap lifeline-guard swap failure is likewise a non-fatal
+	// field. The daemon is up and fail-closed (global barrier retained);
+	// only remote recovery may be blocked.
+	if s.earlyInputGuardSwapFailedFn != nil {
+		payload["early_input_guard_swap_failed"] = s.earlyInputGuardSwapFailedFn()
+	}
 	// #9898 F-113: journal permission-repair degradation is likewise a
 	// non-fatal field. Appends continue and the journal is intact; only
 	// the owner-only posture of pre-existing history failed to establish,

@@ -1049,12 +1049,20 @@ type Daemon struct {
 
 	// earlyInputHandoffDone reports that the #10751 pre-networkd input barrier
 	// has been handed off (removed after host-inbound enforcement, a scoped
-	// fallback, a no-enforcement teardown, or bootstrap recovery). Before the
+	// fallback, or a no-enforcement teardown). Bootstrap installs a guard
+	// without marking handoff. Before the
 	// first handoff the barrier is EXPECTED present, so pre-apply attestation
 	// reinstalls it when missing; after handoff it is EXPECTED absent and must
 	// never be reinstalled. Serialized under applySem with the handoff sites
 	// (plus the single-threaded bootstrap path, which runs before applies).
 	earlyInputHandoffDone atomic.Bool
+
+	// earlyInputGuardSwapFailed latches a failed bootstrap lifeline-guard
+	// swap (the global barrier was retained instead). Surfaced via the
+	// xpf_early_input_guard_swap_failed gauge and /health (non-fatal),
+	// cleared by the next successful swap. Without it an indefinite
+	// bootstrap with blocked remote recovery is invisible to monitoring.
+	earlyInputGuardSwapFailed atomic.Bool
 	// hostInboundDataplaneFresh is the #9637-D1 pre-landing fail-closed gate:
 	// true iff the dataplane runs this generation's snapshot. applyHostInboundFilter
 	// consults it to decide whether the reinject accept may be installed; a #5679

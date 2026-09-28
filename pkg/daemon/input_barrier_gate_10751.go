@@ -178,10 +178,12 @@ func (d *Daemon) ensureEarlyInputBootstrapGuard() {
 	clearEarlyInputHandoffMarker()
 
 	if err := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(lifelines); err != nil {
+		d.earlyInputGuardSwapFailed.Store(true)
 		slog.Error("bootstrap cannot install lifeline-admitting input guard; global barrier retained — use the console if management is unreachable",
 			"lifelines", lifelines, "err", tagNftInstallErr(err))
 		return
 	}
+	d.earlyInputGuardSwapFailed.Store(false)
 	slog.Warn("bootstrap swapped the global input barrier for a lifeline-admitting guard; data-interface services stay closed until the first commit",
 		"lifelines", lifelines)
 }
@@ -283,4 +285,14 @@ func EarlyInputHandoffMarked() bool {
 // marker only makes the CLI conservative until the next handoff).
 func clearEarlyInputHandoffMarker() {
 	_ = os.Remove(EarlyInputHandoffMarkerPath)
+}
+
+// EarlyInputGuardSwapFailed reports whether the latest bootstrap
+// lifeline-guard swap failed (global barrier retained instead). Feeds the
+// xpf_early_input_guard_swap_failed gauge and /health.
+func (d *Daemon) EarlyInputGuardSwapFailed() bool {
+	if d == nil {
+		return false
+	}
+	return d.earlyInputGuardSwapFailed.Load()
 }

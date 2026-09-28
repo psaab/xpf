@@ -1330,3 +1330,27 @@ func TestEarlyInputHandoffMarker10751(t *testing.T) {
 		}
 	})
 }
+
+func TestEarlyInputGuardSwapFailedSignal10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	withFailClosedBootDetect(t, func() (string, bool, error) { return "hb0", true, nil })
+
+	d := &Daemon{}
+	d.bootstrapMode.Store(true)
+	if d.EarlyInputGuardSwapFailed() {
+		t.Fatal("fresh daemon reports swap failure")
+	}
+	nftInstaller = &fakeNftInstaller{
+		earlyInputBarrierLifelineInstall: func([]string) error { return errors.New("nope") },
+	}
+	d.ensureEarlyInputBootstrapGuard()
+	if !d.EarlyInputGuardSwapFailed() {
+		t.Fatal("failed swap did not latch the signal")
+	}
+	nftInstaller = &fakeNftInstaller{}
+	d.ensureEarlyInputBootstrapGuard()
+	if d.EarlyInputGuardSwapFailed() {
+		t.Fatal("successful swap did not clear the signal")
+	}
+}
