@@ -6,10 +6,27 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/daemon"
 )
+
+// holdMarkerLock10751 simulates a live owner: it opens path and holds an
+// exclusive flock until the test ends. An unlocked-but-present marker file
+// simulates prior-process state surviving failed cleanup (stale).
+func holdMarkerLock10751(t *testing.T, path string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		t.Fatalf("flock %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+}
 
 func TestInputBarrierCommand10751(t *testing.T) {
 	if got := classifyCommand([]string{"xpfd", "input-barrier"}); got != cmdInputBarrier {
@@ -155,11 +172,13 @@ func TestInputBarrierEnsure10751(t *testing.T) {
 	if !strings.Contains(stderr.String(), installErr.Error()) {
 		t.Fatalf("failed ensure stderr = %q, want the install error", stderr.String())
 	}
-	// Post-handoff (marker): no-op success, no install.
+	// Post-handoff (live marker): no-op success, no install. The lock
+	// simulates the live owner; a merely present marker is stale (M2).
 	earlyInputBarrierInstall = func() error { installs++; return nil }
 	if err := os.WriteFile(daemon.EarlyInputHandoffMarkerPath, []byte("handed-off\n"), 0644); err != nil {
 		t.Fatalf("stage marker: %v", err)
 	}
+	holdMarkerLock10751(t, daemon.EarlyInputHandoffMarkerPath)
 	stdout.Reset()
 	stderr.Reset()
 	if code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr); code != 0 {
@@ -384,4 +403,75 @@ func TestInputBarrierEnsureInstallsStalePreFirstApply10751(t *testing.T) {
 	if installs != 1 {
 		t.Fatalf("installs = %d, want 1: DROP-ful but unapplied must install", installs)
 	}
+}
+
+// TestInputBarrierEnsureRejectsStaleOwnership10751 (Opus8 R4-4a): a
+// same-boot restart whose markers survive failed best-effort removal
+// (prior-process files, no live holder) plus an old DROP-bearing table,
+// no barrier, and ACTIVE xpfd must NOT read as current ownership —
+// ensure installs fail-closed. A HELD marker (live owner) still no-ops,
+// and a live first-apply with a stale handoff trusts the live half.
+// hostInboundFirstApplied is deliberately NOT stubbed: the real
+// file-backed wiring is under test.
+func TestInputBarrierEnsureRejectsStaleOwnership10751(t *testing.T) {
+	oldInstall, oldPresent, oldHost, oldActive := earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundDropsInput, xpfdUnitActive
+	oldHandoff, oldFirst := daemon.EarlyInputHandoffMarkerPath, daemon.HostInboundFirstApplyMarkerPath
+	t.Cleanup(func() {
+		earlyInputBarrierInstall, earlyInputBarrierEnforcing, hostInboundDropsInput = oldInstall, oldPresent, oldHost
+		xpfdUnitActive = oldActive
+		daemon.EarlyInputHandoffMarkerPath, daemon.HostInboundFirstApplyMarkerPath = oldHandoff, oldFirst
+	})
+	dir := t.TempDir()
+	daemon.EarlyInputHandoffMarkerPath = filepath.Join(dir, "early-input-handoff.done")
+	daemon.HostInboundFirstApplyMarkerPath = filepath.Join(dir, "host-inbound-applied.done")
+	installs := 0
+	earlyInputBarrierInstall = func() error { installs++; return nil }
+	earlyInputBarrierEnforcing = func() (bool, error) { return false, nil }
+	hostInboundDropsInput = func() (bool, error) { return true, nil }
+	xpfdUnitActive = func() bool { return true }
+	stage := func(t *testing.T) {
+		t.Helper()
+		if err := os.WriteFile(daemon.EarlyInputHandoffMarkerPath, []byte("handed-off\n"), 0644); err != nil {
+			t.Fatalf("stage handoff: %v", err)
+		}
+		if err := os.WriteFile(daemon.HostInboundFirstApplyMarkerPath, []byte("applied\n"), 0644); err != nil {
+			t.Fatalf("stage first-apply: %v", err)
+		}
+	}
+	run := func(t *testing.T) (int, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := runInputBarrierSubcommand([]string{"ensure"}, &stdout, &stderr)
+		if stderr.Len() != 0 {
+			t.Fatalf("ensure stderr = %q, want empty", stderr.String())
+		}
+		return code, stdout.String()
+	}
+	t.Run("stale installs", func(t *testing.T) {
+		stage(t) // no locks: prior-process files surviving failed removal
+		before := installs
+		code, out := run(t)
+		if code != 0 || installs-before != 1 || !strings.Contains(out, "early input barrier installed") {
+			t.Fatalf("stale ownership: code=%d installs-delta=%d out=%q, want a fail-closed install", code, installs-before, out)
+		}
+	})
+	t.Run("live no-ops", func(t *testing.T) {
+		stage(t)
+		holdMarkerLock10751(t, daemon.EarlyInputHandoffMarkerPath)
+		holdMarkerLock10751(t, daemon.HostInboundFirstApplyMarkerPath)
+		before := installs
+		code, out := run(t)
+		if code != 0 || installs-before != 0 || !strings.Contains(out, "nothing to do") {
+			t.Fatalf("live ownership: code=%d installs-delta=%d out=%q, want a verified no-op", code, installs-before, out)
+		}
+	})
+	t.Run("mixed trusts live half", func(t *testing.T) {
+		stage(t)
+		holdMarkerLock10751(t, daemon.HostInboundFirstApplyMarkerPath)
+		before := installs
+		code, out := run(t)
+		if code != 0 || installs-before != 0 || !strings.Contains(out, "enforcement is live") {
+			t.Fatalf("mixed ownership: code=%d installs-delta=%d out=%q, want the live-enforcement no-op", code, installs-before, out)
+		}
+	})
 }

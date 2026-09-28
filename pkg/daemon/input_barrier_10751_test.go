@@ -2251,6 +2251,36 @@ func TestFirstApplyMarkerRedirectedInTests10751(t *testing.T) {
 	}
 }
 
+// TestMarkerOwnershipLifecycle10751 pins the M2 ownership binding: set/note
+// leave the marker HELD (live), clear releases it. Uses the init-redirected
+// temp paths (no redirect needed — every path through set/note/clear is
+// deterministic here whether or not an earlier test already holds the
+// slot, since all share the same init temp files).
+func TestMarkerOwnershipLifecycle10751(t *testing.T) {
+	d := &Daemon{}
+	if err := d.setEarlyInputHandoffDone(); err != nil {
+		t.Fatalf("set handoff err = %v, want nil", err)
+	}
+	if !EarlyInputHandoffLive() {
+		t.Fatal("handoff marker not live after set: the daemon must hold its markers (stale ownership would install)")
+	}
+	clearEarlyInputHandoffMarker()
+	if EarlyInputHandoffLive() {
+		t.Fatal("handoff marker still live after clear")
+	}
+	noteHostInboundInstalled()
+	if !HostInboundFirstApplyLive() {
+		t.Fatal("first-apply marker not live after note: the daemon must hold its markers")
+	}
+	clearHostInboundFirstApplyMarker()
+	if HostInboundFirstApplyLive() {
+		t.Fatal("first-apply marker still live after clear")
+	}
+	if EarlyInputHandoffMarked() || HostInboundFirstApplyMarked() {
+		t.Fatal("cleared markers must report absent by existence too")
+	}
+}
+
 // --- #10751 R7-B: unzoned DHCP interface backstop ---
 //
 // An unzoned DHCP unit with no lease has no destination for any catch-all,

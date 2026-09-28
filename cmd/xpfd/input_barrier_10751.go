@@ -28,12 +28,14 @@ var hostInboundDropsInput = func() (bool, error) {
 	return xnft.NewNetlinkInstaller().TableDropsInput(xnft.HostInboundTableName)
 }
 
-// hostInboundFirstApplied reports whether this boot's daemon installed
-// host-inbound enforcement at least once. Combined with DROP presence
-// plus xpfd active below, it proves a live table is CURRENT daemon
-// ownership — not a stale restore from before xpfd started.
+// hostInboundFirstApplied reports whether a LIVE daemon process holds the
+// first-apply marker (installed host-inbound enforcement and still owns
+// it). Combined with DROP presence plus xpfd active below, it proves a
+// live table is CURRENT daemon ownership — not a stale restore from
+// before xpfd started, and not a prior process's marker surviving a
+// failed cleanup (unlocked = stale = install, #10751 M2).
 var hostInboundFirstApplied = func() bool {
-	return daemon.HostInboundFirstApplyMarked()
+	return daemon.HostInboundFirstApplyLive()
 }
 
 // xpfdUnitActive reports whether the xpfd systemd unit is active. A package
@@ -88,14 +90,17 @@ func runInputBarrierSubcommand(args []string, stdout, stderr io.Writer) int {
 // daemon, never clobber a standing lifeline guard with the global form,
 // and never trust a stale table as live enforcement (#10751 R6-B/R7-A).
 //
-//   - marker present (handed off this boot) → verified no-op success.
-//   - marker absent but host-inbound DROPS on its input hook (not a
-//     flushed shell or admits-only zero-drop table), first-applied by
-//     this boot's daemon, with xpfd ACTIVE → no-op success: the live
+//   - marker HELD by a live process (handed off and the owner lives) →
+//     verified no-op success. A merely PRESENT but unlocked marker (a
+//     prior process's file surviving failed cleanup, or a planted one)
+//     is stale ownership and falls through to install.
+//   - handoff marker not live but host-inbound DROPS on its input hook
+//     (not a flushed shell or admits-only zero-drop table), first-applied
+//     by a LIVE daemon, with xpfd ACTIVE → no-op success: the live
 //     daemon owns host input (marker write failed or marker cleared).
-//     A stale restore reads inactive (cold boot) or unapplied
-//     (pre-first-apply, Type=simple is active-at-fork) and installs
-//     instead of trusting it.
+//     A stale restore reads inactive (cold boot), unapplied
+//     (pre-first-apply, Type=simple is active-at-fork), or unlocked
+//     (dead owner) and installs instead of trusting it.
 //   - marker absent with an ENFORCING barrier already present (global or
 //     a bootstrap lifeline guard) → no-op success: preserve, never
 //     clobber.
@@ -105,7 +110,7 @@ func runInputBarrierSubcommand(args []string, stdout, stderr io.Writer) int {
 // A readback error falls through to the next probe (an unreadable readback
 // cannot prove anything is live, so the fail-closed install still runs).
 func runInputBarrierEnsure(stdout, stderr io.Writer) int {
-	if daemon.EarlyInputHandoffMarked() {
+	if daemon.EarlyInputHandoffLive() {
 		fmt.Fprintln(stdout, "early input barrier already handed off to the daemon; nothing to do")
 		return 0
 	}

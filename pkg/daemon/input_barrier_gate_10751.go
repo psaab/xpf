@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -387,6 +389,7 @@ func (d *Daemon) setEarlyInputHandoffDone() error {
 	}
 	d.earlyInputHandoffDone.Store(true)
 	d.earlyInputGuardSwapFailed.Store(false)
+	takeMarkerLock(EarlyInputHandoffMarkerPath, &earlyInputHandoffLockFile)
 	return nil
 }
 
@@ -402,7 +405,90 @@ func EarlyInputHandoffMarked() bool {
 // off" invariant after a restart. Best-effort; failures are silent (a stale
 // marker only makes the CLI conservative until the next handoff).
 func clearEarlyInputHandoffMarker() {
+	releaseMarkerLock(&earlyInputHandoffLockFile)
 	_ = os.Remove(EarlyInputHandoffMarkerPath)
+}
+
+// Marker ownership locks (#10751 M2): a marker file proves nothing by
+// itself — a prior process's markers can survive a failed best-effort
+// cleanup, and root can plant one. The daemon therefore holds an
+// exclusive flock on each marker from its write until death; `ensure`
+// treats a marker as live ownership only while a live process holds the
+// lock (lockable = stale/orphaned = install fail-closed).
+var (
+	markerLockMu                  sync.Mutex
+	earlyInputHandoffLockFile     *os.File
+	hostInboundFirstApplyLockFile *os.File
+)
+
+// takeMarkerLock holds an exclusive non-blocking flock on an
+// already-written marker for the process lifetime. Idempotent (one fd per
+// marker — a second same-process flock would self-deny). Best-effort: a
+// failure only makes a later `ensure` conservatively install, which the
+// next apply hands off.
+func takeMarkerLock(path string, slot **os.File) {
+	markerLockMu.Lock()
+	defer markerLockMu.Unlock()
+	if *slot != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		slog.Warn("cannot lock enforcement-ownership marker; ensure stays conservative", "path", path, "err", err)
+		return
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		slog.Warn("cannot lock enforcement-ownership marker; ensure stays conservative", "path", path, "err", err)
+		_ = f.Close()
+		return
+	}
+	*slot = f
+}
+
+// releaseMarkerLock drops a held ownership lock (if any) before removing
+// the marker, so a later re-creation starts absent rather than shadowing
+// a lock on an unlinked inode.
+func releaseMarkerLock(slot **os.File) {
+	markerLockMu.Lock()
+	defer markerLockMu.Unlock()
+	if *slot != nil {
+		_ = (*slot).Close()
+		*slot = nil
+	}
+}
+
+// markerLockedByLiveProcess reports whether some process currently holds
+// an exclusive flock on path. Absent, unopenable, or lockable reads
+// false (not live-owned — `ensure` installs fail-closed). A denied
+// try-lock retries once: a racing transient holder (another concurrent
+// `ensure` probe, microseconds) must not read as a steady owner.
+func markerLockedByLiveProcess(path string) bool {
+	for i := 0; ; i++ {
+		f, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			return false
+		}
+		lerr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		_ = f.Close()
+		if lerr == nil {
+			return false
+		}
+		if i >= 1 {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// EarlyInputHandoffLive reports whether the handoff marker is held by a
+// live process (current ownership), as opposed to merely present (a stale
+// restore a later `ensure` must not trust).
+func EarlyInputHandoffLive() bool { return markerLockedByLiveProcess(EarlyInputHandoffMarkerPath) }
+
+// HostInboundFirstApplyLive reports whether the first-apply marker is held
+// by a live process. See EarlyInputHandoffLive.
+func HostInboundFirstApplyLive() bool {
+	return markerLockedByLiveProcess(HostInboundFirstApplyMarkerPath)
 }
 
 // HostInboundFirstApplyMarkerPath records that THIS boot's daemon installed
@@ -425,6 +511,7 @@ func HostInboundFirstApplyMarked() bool {
 // clearHostInboundFirstApplyMarker removes a stale first-apply marker.
 // Best-effort and silent: absence only makes `ensure` install fail-closed.
 func clearHostInboundFirstApplyMarker() {
+	releaseMarkerLock(&hostInboundFirstApplyLockFile)
 	_ = os.Remove(HostInboundFirstApplyMarkerPath)
 }
 
@@ -440,7 +527,9 @@ func noteHostInboundInstalled() {
 	}
 	if err := os.WriteFile(HostInboundFirstApplyMarkerPath, []byte("applied\n"), 0644); err != nil {
 		slog.Warn("cannot record host-inbound first-apply marker", "err", err)
+		return
 	}
+	takeMarkerLock(HostInboundFirstApplyMarkerPath, &hostInboundFirstApplyLockFile)
 }
 
 // EarlyInputGuardSwapFailed reports whether the latest bootstrap
