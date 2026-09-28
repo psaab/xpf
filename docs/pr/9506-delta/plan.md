@@ -1995,9 +1995,9 @@ all 35 design paths exist, as checked in §4.2.
   (B1–B8 with file:line@tag) + honest F-statuses
   (RECIPE-EXECUTED, never LANDED pre-P2); DRIFT FIXTURE — inject
   mode drift → revoke + fence; ASYNC-SUSPECT blocks OPEN until the
-  fence proves all old-epoch I/O final, then mark-present + same-env
-  OPEN-allowed only after fresh admission, while mutation remains
-  refused by the boot-current permutation-freeze. Assert that mark
+  fence proves all old-epoch I/O final and clears ASYNC-SUSPECT; keep the
+  boot-bound freeze mark present, then same-env OPEN is allowed only after
+  fresh admission while mutation remains refused. Assert the freeze mark
   survives helper restart and is stale-unlinked only after boot change;
   require the post-reboot mutation-allowed-again cell.
 - M2 egress oracle: before the first Permit is coded, approve a design that
