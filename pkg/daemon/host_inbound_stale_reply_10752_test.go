@@ -119,9 +119,9 @@ func TestHostInboundNonCatalogTCPStatusQuo10752(t *testing.T) {
 	// branch, so box 2222 (DstIP=peer, never in the admit map) was kept
 	// identically; post-PR the catalog miss keeps it. Peer-oriented 2222
 	// flushes in both via the unchanged destination branch. This pins the
-	// documented HIGH residual (expiry ~5d established timeout) against
-	// silent drift in either direction; same for the TCP client-role exempt
-	// 179 (tuple ambiguity with box-originated BGP).
+	// documented HIGH residual (idle-expiry, indefinite sustain under active
+	// traffic) against silent drift in either direction; same for the TCP
+	// client-role exempt 179 (tuple ambiguity with box-originated BGP).
 	cfg := hostInboundFlushTestConfig("snmp")
 	cfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"snmp"}}
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
@@ -153,6 +153,80 @@ func TestHostInboundNonCatalogTCPStatusQuo10752(t *testing.T) {
 		}
 	}
 }
+func TestHostInboundReplyDropsAreCatalogBounded10752(t *testing.T) {
+	// Structural proof for ephemeral/range WARN silence: no host-inbound
+	// chain, however tight, can drop a reply-direction non-catalog tuple —
+	// every reply-direction DROP's dports are a subset of the catalog, and
+	// the broad reply accept admits the rest unconditionally. Ephemeral
+	// replies are therefore policy-invariant authorized under every config,
+	// so warning on them would fire on ordinary egress. Rendered for both
+	// an open-ingress and a fully tightened config.
+	for _, lanServices := range [][]string{{"any-service"}, {"snmp"}} {
+		cfg := hostInboundFlushTestConfig("snmp")
+		cfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: lanServices}
+		views := dpuserspace.BuildZoneHostInboundViews(cfg)
+		unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
+		payload := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, nil, nil, true)
+		if !strings.Contains(payload, "ct state established,related ct direction reply accept") {
+			t.Fatalf("lan=%v: broad reply accept missing:\n%s", lanServices, payload)
+		}
+		guards := 0
+		for _, line := range strings.Split(payload, "\n") {
+			if !isGuardDrop(line) {
+				continue
+			}
+			guards++
+			var family, proto string
+			switch {
+			case strings.Contains(line, " ip daddr "):
+				family = "ip"
+			case strings.Contains(line, " ip6 daddr "):
+				family = "ip6"
+			default:
+				t.Fatalf("lan=%v: guard without family daddr: %s", lanServices, line)
+			}
+			switch {
+			case strings.Contains(line, " tcp dport "):
+				proto = "tcp"
+			case strings.Contains(line, " udp dport "):
+				proto = "udp"
+			default:
+				t.Fatalf("lan=%v: guard without TCP/UDP dport: %s", lanServices, line)
+			}
+			spec := line[strings.Index(line, " dport ")+len(" dport "):]
+			if end := strings.LastIndex(spec, " drop"); end >= 0 {
+				spec = spec[:end]
+			}
+			if strings.Contains(spec, "-") {
+				t.Fatalf("lan=%v: guard dport range (catalog is discrete-only): %s", lanServices, line)
+			}
+			catalog := xnft.HostInboundStaleReplyCatalog(family)
+			allowed := map[uint16]bool{}
+			ports := catalog.TCP
+			if proto == "udp" {
+				ports = catalog.UDP
+			}
+			for _, p := range ports {
+				allowed[p] = true
+			}
+			for _, token := range strings.FieldsFunc(spec, func(r rune) bool {
+				return r == ' ' || r == '{' || r == '}' || r == ','
+			}) {
+				port, err := strconv.ParseUint(token, 10, 16)
+				if err != nil {
+					t.Fatalf("lan=%v: unparsable guard dport token %q: %s", lanServices, token, line)
+				}
+				if !allowed[uint16(port)] {
+					t.Errorf("lan=%v: guard drops non-catalog %s/%d (ephemeral silence broken): %s", lanServices, proto, port, line)
+				}
+			}
+		}
+		if guards == 0 {
+			t.Fatalf("lan=%v: expected guard DROP lines to check", lanServices)
+		}
+	}
+}
+
 func TestHostInboundKeptSuspiciousWarnScope10752(t *testing.T) {
 	// The evidence-based tightening WARN must fire exactly for kept
 	// box-oriented non-catalog service-like flows: custom sports below the
@@ -219,6 +293,26 @@ func TestHostInboundKeptSuspiciousWarnScope10752(t *testing.T) {
 	got, samples = filter.keptSuspiciousReport()
 	if got != 14 || len(samples) != 5 {
 		t.Fatalf("after flood: count=%d samples=%d, want 14 and 5", got, len(samples))
+	}
+	// Flush-vs-evidence asymmetry: with another ingress still open, the
+	// flush keeps an owner-denied custom (per-ingress guard would judge a
+	// catalogued tuple, but customs have no guard anywhere), while the
+	// evidence MUST still record it — an ingress-permitted custom bypasses
+	// on every denying ingress with no per-packet backstop.
+	openCfg := hostInboundFlushTestConfig("snmp")
+	openViews := dpuserspace.BuildZoneHostInboundViews(openCfg)
+	openV4, openV6 := dpuserspace.BuildUnzonedHostInboundAddrs(openCfg)
+	openFilter := buildHostInboundConntrackFlushFilter(openViews, openV4, openV6, nil)
+	if openFilter == nil {
+		t.Fatal("expected a filter for the open-ingress configuration")
+	}
+	deniedCustom := boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 2222)
+	if openFilter.MatchConntrackFlow(deniedCustom) {
+		t.Fatal("ingress-permitted custom must not flush (would break the permitted use)")
+	}
+	evCustom, _, evOther, _, _ := openFilter.keptEvidenceReport()
+	if evCustom != 1 || evOther != 0 {
+		t.Fatalf("ingress-permitted custom must record evidence (custom=1, other=0), got %d/%d", evCustom, evOther)
 	}
 }
 
@@ -739,19 +833,26 @@ func runStaleReplyUDPPacketPath(t *testing.T, localIP, peerIP string) {
 	}
 
 	// HIGH residual pin: exempt BFD control-plane replies are NOT guarded.
-	// Box-originated BFD (sport 3784) recreates a box-oriented entry and the
-	// peer reply rides the broad accept. RIP/SAP/LDP-UDP share the exclusion.
+	// Conformant bfdd sources single-hop control from an ephemeral sport to
+	// dport 3784 (RFC 5881 §4), so the box socket binds ephemeral — NOT 3784
+	// (an explicit sport-3784 bind would manufacture an artificial ORIG
+	// box:3784 tuple no conforming peer produces). The box-originated entry
+	// recreates all the same, and the peer reply rides the broad accept.
+	// RIP/SAP/LDP-UDP share the exclusion.
 	bfdPeerAddr := &net.UDPAddr{IP: net.ParseIP(peerIP), Port: 3784}
 	bfdPeer, err := net.ListenUDP("udp", bfdPeerAddr)
 	if err != nil {
 		netnsSkipOrFail(t, "bind peer UDP/3784", err)
 	}
 	defer bfdPeer.Close()
-	bfdBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(localIP), Port: 3784})
+	bfdBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(localIP)})
 	if err != nil {
-		netnsSkipOrFail(t, "bind box UDP/3784", err)
+		netnsSkipOrFail(t, "bind box ephemeral BFD socket", err)
 	}
 	defer bfdBox.Close()
+	if sport := bfdBox.LocalAddr().(*net.UDPAddr).Port; sport == 3784 {
+		t.Fatalf("box BFD socket must source ephemeral (RFC 5881 §4), got sport %d", sport)
+	}
 	if err := bfdBox.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
