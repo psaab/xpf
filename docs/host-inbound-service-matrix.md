@@ -643,9 +643,36 @@ Properties:
 - **Global exemptions preserved.** ESP/AH (proto 50/51), ICMP ND/PMTUD/error,
   and configured WireGuard listen ports (#5582) are never flushed by the
   ordinary matcher. ICMP echo conntrack is short-lived and left to age out.
-- **Bounded client-role exceptions.** DHCPv4/6, NTP, routing/client-role ports,
-  port ranges and bare-protocol tuples remain outside the box-oriented guard;
-  the guard does not claim to revoke those indistinguishable outbound tuples.
+- **HIGH residual: exempt UDP, bare protocols, and ranges are NOT revoked
+  box-oriented.** BFD/RIP/SAP/LDP-UDP, DHCP/NTP client ports, bare IP protocols
+  (OSPF/PIM/VRRP/GRE/IGMP/RSVP/PGM/NHRP), and port ranges (traceroute) are never
+  flushed box-oriented nor guarded: the box originates control-plane datagrams
+  from those tuples, so a conntrack tuple alone cannot distinguish a stale
+  service reply from live control/client egress. After removing such a service,
+  box-originated hellos/adverts/probes recreate a box-oriented entry and peer
+  packets ride the broad reply accept. Operator advisory: after removing BFD,
+  RIP, or other control-plane host-inbound, restart the originating daemon
+  (FRR/VRRP/chrony/DHCP) or reboot to clear recreated entries; do not rely on
+  the flush/guard for these tuples. The BFD packet-path subtest pins the
+  documented allow. Closing this needs per-socket identity (mark/cgroup), not
+  tuple matching, or tying origination to host-inbound admit.
+- **Race bound: guard-first closes the catalogued Install→flush window.**
+  The guard installs atomically with the table, before the conntrack sweep, so
+  a packet arriving between install and flush still meets the guard for
+  catalogued tuples. The per-family dump+delete sweep is not atomic, but the
+  guard (not sweep atomicity) is the enforcement for catalogued flows.
+  Non-catalog tuples have no guard (HIGH residual above). Peer-oriented stale
+  on a mismatched iifname rides the residual accept only until flush deletes
+  the entry — a single-packet microsecond window; the next packet drops.
+- **Availability: admitted services survive conntrack loss flaglessly;
+  ephemeral clients must re-establish.** Admitted TCP service accepts carry no
+  `tcp flags` predicate, so SYN-less mid-stream to an admitted dport still
+  matches after conntrack eviction/timeout (loose=0 safe). Ephemeral replies
+  without conntrack miss the service accepts and the reply accept and drop at
+  ingress/destination scope: a host-originated TCP client whose conntrack is
+  evicted must reconnect (accepted risk — established timeout ~5d, only on
+  table-full/eviction; reboot/failover sockets are gone anyway). UDP is
+  unaffected (clients always send first, recreating conntrack).
 - **Not a commit failure — but it IS retried and IS visible (#6802).** The nft
   table is already applied, so enforcement for NEW connections holds regardless,
   and failing the commit would roll back correct enforcement over a transient

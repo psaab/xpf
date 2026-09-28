@@ -364,6 +364,68 @@ func payloadHasGuard(lines []string, iifsubstr string, negated bool, daddrSubstr
 	}
 	return false
 }
+func TestHostInboundAdmittedTCPAcceptsAreFlagless10752(t *testing.T) {
+	// Availability: admitted host services must accept SYN-less mid-stream
+	// TCP (no conntrack) flaglessly, so loose=0 does not break legitimate
+	// service recovery after conntrack loss. Ephemeral replies without
+	// conntrack still drop (pinned by the no-conntrack packet-path subtest);
+	// host-originated TCP clients must re-establish after eviction (accepted
+	// risk: established timeout ~5d, only on table-full/eviction; reboot and
+	// failover sockets are gone anyway).
+	cfg := hostInboundFlushTestConfig("ssh", "snmp")
+	views := dpuserspace.BuildZoneHostInboundViews(cfg)
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, false)
+	foundAdmit := false
+	for _, line := range strings.Split(payload, "\n") {
+		if !strings.Contains(line, "tcp dport 22") || !strings.HasSuffix(line, " accept") {
+			continue
+		}
+		foundAdmit = true
+		if strings.Contains(line, "tcp flags") {
+			t.Fatalf("admitted SSH accept must be flagless (SYN-less mid-stream must match): %s", line)
+		}
+	}
+	if !foundAdmit {
+		t.Fatal("expected an admitted SSH accept rule for flagless check")
+	}
+}
+
+func TestHostInboundInstallPrecedesConntrackFlush10752(t *testing.T) {
+	// Race bound: the Install→flush window is closed for catalogued tuples
+	// because the guard installs atomically WITH the table, before the
+	// conntrack sweep runs. Non-catalog tuples have no guard (HIGH residual);
+	// the peer-oriented mismatched-iifname single-packet bypass closes on the
+	// next packet after flush deletes the entry.
+	var order []string
+	origInstaller, origDelete := nftInstaller, conntrackDeleteFilters
+	defer func() { nftInstaller, conntrackDeleteFilters = origInstaller, origDelete }()
+	nftInstaller = &fakeNftInstaller{
+		hostInbound: func(xnft.HostInboundSpec) error {
+			order = append(order, "install")
+			return nil
+		},
+	}
+	conntrackDeleteFilters = func(family netlink.InetFamily, filters ...netlink.CustomConntrackFilter) (uint, error) {
+		order = append(order, "flush")
+		return 0, nil
+	}
+	d := &Daemon{}
+	if err := d.applyHostInboundFilter(hostInboundFlushTestConfig("snmp")); err != nil {
+		t.Fatalf("applyHostInboundFilter: %v", err)
+	}
+	installAt, flushAt := -1, -1
+	for i, step := range order {
+		if step == "install" && installAt < 0 {
+			installAt = i
+		}
+		if step == "flush" && flushAt < 0 {
+			flushAt = i
+		}
+	}
+	if installAt < 0 || flushAt < 0 || installAt >= flushAt {
+		t.Fatalf("guard-first ordering violated: install@%d flush@%d order=%v", installAt, flushAt, order)
+	}
+}
 
 func boxOrientedFlow(proto uint8, localIP string, sport uint16) *netlink.ConntrackFlow {
 	return &netlink.ConntrackFlow{Forward: netlink.IPTuple{
@@ -451,12 +513,31 @@ func runHostInboundStaleReplyPacketPath(t *testing.T) {
 		}
 	}()
 
+	// Loose posture is recorded, not gated: guard tests run regardless of
+	// sysctl availability (F3 decoupling). The TCP subtest uses a
+	// source-bound Dial (reply guarding), not loose mid-stream pickup; loose
+	// lifecycle is proven separately by the fault-injected unit test.
 	applyHostForwardingPosture()
-	value, err := os.ReadFile("/proc/sys/net/netfilter/nf_conntrack_tcp_loose")
-	if err != nil || strings.TrimSpace(string(value)) != "0" {
-		t.Skipf("XPF-NETNS-SKIP: runtime nf_conntrack_tcp_loose=0 unavailable (value=%q err=%v)", strings.TrimSpace(string(value)), err)
+	looseRaw, looseErr := os.ReadFile("/proc/sys/net/netfilter/nf_conntrack_tcp_loose")
+	looseVal := ""
+	if looseErr == nil {
+		looseVal = strings.TrimSpace(string(looseRaw))
 	}
+	t.Logf("loose posture in packet netns: value=%q err=%v (guard verdicts independent)", looseVal, looseErr)
 
+	t.Run("udp", func(t *testing.T) {
+		runStaleReplyUDPPacketPath(t, localIP, peerIP)
+	})
+	t.Run("tcp", func(t *testing.T) {
+		runStaleReplyTCPPacketPath(t, localIP, peerIP)
+	})
+	t.Run("availability-no-conntrack", func(t *testing.T) {
+		runStaleReplyNoConntrackPacketPath(t, localIP, peerIP)
+	})
+}
+
+func runStaleReplyUDPPacketPath(t *testing.T, localIP, peerIP string) {
+	t.Helper()
 	peerAddr := &net.UDPAddr{IP: net.ParseIP(peerIP), Port: 4500}
 	localAddr := &net.UDPAddr{IP: net.ParseIP(localIP), Port: 4500}
 	peer, err := net.ListenUDP("udp", peerAddr)
@@ -516,6 +597,43 @@ func runHostInboundStaleReplyPacketPath(t *testing.T) {
 		t.Fatalf("ephemeral UDP reply was not delivered: n=%d err=%v", n, err)
 	}
 
+	// HIGH residual pin: exempt BFD control-plane replies are NOT guarded.
+	// Box-originated BFD (sport 3784) recreates a box-oriented entry and the
+	// peer reply rides the broad accept. RIP/SAP/LDP-UDP share the exclusion.
+	bfdPeerAddr := &net.UDPAddr{IP: net.ParseIP(peerIP), Port: 3784}
+	bfdPeer, err := net.ListenUDP("udp", bfdPeerAddr)
+	if err != nil {
+		netnsSkipOrFail(t, "bind peer UDP/3784", err)
+	}
+	defer bfdPeer.Close()
+	bfdBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(localIP), Port: 3784})
+	if err != nil {
+		netnsSkipOrFail(t, "bind box UDP/3784", err)
+	}
+	defer bfdBox.Close()
+	if err := bfdBox.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bfdBox.WriteToUDP([]byte("bfd-hello"), bfdPeerAddr); err != nil {
+		t.Fatalf("send box-originated BFD hello: %v", err)
+	}
+	if err := bfdPeer.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, source, err = bfdPeer.ReadFromUDP(request)
+	if err != nil || string(request[:n]) != "bfd-hello" {
+		t.Fatalf("peer did not receive BFD hello: n=%d err=%v", n, err)
+	}
+	if _, err := bfdPeer.WriteToUDP([]byte("bfd-reply"), source); err != nil {
+		t.Fatalf("send BFD reply: %v", err)
+	}
+	if n, _, err = bfdBox.ReadFromUDP(request); err != nil || string(request[:n]) != "bfd-reply" {
+		t.Fatalf("exempt BFD reply was not delivered (HIGH residual pins allow): n=%d err=%v", n, err)
+	}
+}
+
+func runStaleReplyTCPPacketPath(t *testing.T, localIP, peerIP string) {
+	t.Helper()
 	// The same chain must stop a TCP reply sourced from a catalogued service
 	// port while continuing to accept an ordinary ephemeral-source connection.
 	listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP(peerIP), Port: 29000})
@@ -548,7 +666,13 @@ func runHostInboundStaleReplyPacketPath(t *testing.T) {
 		}
 		acceptResult <- err
 	}()
-	allowed, err := (&net.Dialer{Timeout: 2 * time.Second}).Dial("tcp", net.JoinHostPort(peerIP, "29000"))
+	// Allowed control binds the covered local address with an ephemeral source
+	// port, proving the same covered-address return path stays open.
+	allowedDialer := net.Dialer{
+		Timeout:   2 * time.Second,
+		LocalAddr: &net.TCPAddr{IP: net.ParseIP(localIP)},
+	}
+	allowed, err := allowedDialer.Dial("tcp", net.JoinHostPort(peerIP, "29000"))
 	if err != nil {
 		t.Fatalf("ordinary ephemeral TCP client connection was blocked: %v", err)
 	}
@@ -560,6 +684,54 @@ func runHostInboundStaleReplyPacketPath(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("peer did not accept ordinary TCP client")
+	}
+}
+
+func runStaleReplyNoConntrackPacketPath(t *testing.T, localIP, peerIP string) {
+	t.Helper()
+	// Availability without conntrack: an admitted service dport accepts NEW
+	// packets flaglessly, while an ephemeral dport with no conntrack drops.
+	// This is the mechanism behind the TCP-client recovery note: admitted
+	// host services survive conntrack loss; host-originated ephemeral clients
+	// must re-establish (accepted risk, documented).
+	snmpBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(localIP), Port: 161})
+	if err != nil {
+		netnsSkipOrFail(t, "bind box UDP/161", err)
+	}
+	defer snmpBox.Close()
+	if err := snmpBox.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(peerIP)})
+	if err != nil {
+		netnsSkipOrFail(t, "bind peer UDP ephemeral", err)
+	}
+	defer peer.Close()
+	snmpDst := &net.UDPAddr{IP: net.ParseIP(localIP), Port: 161}
+	if _, err := peer.WriteToUDP([]byte("snmp-new"), snmpDst); err != nil {
+		t.Fatalf("send NEW SNMP request: %v", err)
+	}
+	buf := make([]byte, 32)
+	n, _, err := snmpBox.ReadFromUDP(buf)
+	if err != nil || string(buf[:n]) != "snmp-new" {
+		t.Fatalf("NEW SNMP to admitted dport was not delivered: n=%d err=%v", n, err)
+	}
+
+	ephemeralBox, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(localIP)})
+	if err != nil {
+		t.Fatalf("bind ephemeral box socket: %v", err)
+	}
+	defer ephemeralBox.Close()
+	ephemeralPort := ephemeralBox.LocalAddr().(*net.UDPAddr).Port
+	if err := ephemeralBox.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ephemeralDst := &net.UDPAddr{IP: net.ParseIP(localIP), Port: ephemeralPort}
+	if _, err := peer.WriteToUDP([]byte("ephemeral-new"), ephemeralDst); err != nil {
+		t.Fatalf("send NEW ephemeral request: %v", err)
+	}
+	if _, _, err := ephemeralBox.ReadFromUDP(buf); !isTimeout(err) {
+		t.Fatalf("NEW ephemeral without conntrack was delivered (err %v), want DROP", err)
 	}
 }
 
