@@ -442,6 +442,9 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	for _, w := range cfg.Warnings {
 		slog.Warn("config validation", "warning", w)
 	}
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		logRIMemberDeviceConflict(conflict)
+	}
 
 	ctxErr, vrfErr := d.applyVRFReconcile(ctx, cfg)
 	if ctxErr != nil {

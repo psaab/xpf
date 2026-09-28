@@ -1,14 +1,15 @@
 package daemon
 
 import (
+	"bytes"
+	"github.com/vishvananda/netlink"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
-
-	"github.com/vishvananda/netlink"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/routing"
@@ -100,9 +101,12 @@ func riVRFDaemon9813(ops *bindRecorderOps) *Daemon {
 
 // linkWithMaster9813 makes a device exist in the fake table with a master index.
 func linkWithMaster9813(ops *bindRecorderOps, name string, index, master int) {
-	ops.links[name] = &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{
-		Name: name, Index: index, Flags: net.FlagUp, MasterIndex: master,
-	}}
+	attrs := netlink.LinkAttrs{Name: name, Index: index, Flags: net.FlagUp, MasterIndex: master}
+	if strings.HasPrefix(name, "vrf-") {
+		ops.links[name] = &netlink.Vrf{LinkAttrs: attrs}
+		return
+	}
+	ops.links[name] = &netlink.Dummy{LinkAttrs: attrs}
 }
 
 // blueCfg9813 is one vrf instance with a physical list member.
@@ -136,11 +140,155 @@ func TestRIMemberAlreadyInItsVRFIsLeftAlone_9813(t *testing.T) {
 	linkWithMaster9813(ops, "ge-0-0-5", 10, 77) // already a member
 	d := riVRFDaemon9813(ops)
 
-	d.rebindRIMembersOutsideTheirVRF(blueCfg9813())
+	// Three reassert ticks on a healthy single-RI member must not issue any
+	// LinkSetMaster calls.
+	for range 3 {
+		d.rebindRIMembersOutsideTheirVRF(blueCfg9813())
+	}
 
 	if got := ops.recorded(); len(got) != 0 {
 		t.Errorf("a member already in its VRF drew %v binds; BindInterfaceToVRF logs at Info on every "+
 			"call, so a loop that re-binds unconditionally logs on every tick of a healthy node", got)
+	}
+}
+
+// #11060: a legacy tolerant-load config can still contain one Linux device
+// claimed by two RIs. Reassert must leave the ambiguous key alone rather than
+// alternating its master between the VRFs on successive ticks.
+func TestRIMemberReassertSkipsMultiClaimedKey11060(t *testing.T) {
+	cfg := &config.Config{Interfaces: config.InterfacesConfig{
+		Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/5": {Name: "ge-0/0/5", Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0},
+			}},
+		},
+	}}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{
+		{Name: "blue", InstanceType: "vrf", TableID: 100, Interfaces: []string{"ge-0/0/5"}},
+		{Name: "red", InstanceType: "vrf", TableID: 101, Interfaces: []string{"ge-0/0/5.0"}},
+	}
+	ops := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	linkWithMaster9813(ops, "vrf-blue", 77, 0)
+	linkWithMaster9813(ops, "vrf-red", 78, 0)
+	linkWithMaster9813(ops, "ge-0-0-5", 10, 0)
+	d := riVRFDaemon9813(ops)
+
+	if got := d.riMembersOutsideTheirVRF(cfg); len(got) != 0 {
+		t.Fatalf("multi-claimed device reported as drifted: %v, want none (#11060)", got)
+	}
+	for range 3 {
+		d.rebindRIMembersOutsideTheirVRF(cfg)
+	}
+	if got := ops.recorded(); len(got) != 0 {
+		t.Fatalf("three ticks re-bound multi-claimed device: %v, want no LinkSetMaster calls (#11060)", got)
+	}
+}
+
+func compileLenientRIMemberConflict11060(t *testing.T) *config.Config {
+	t.Helper()
+	tree := &config.ConfigTree{}
+	for _, line := range []string{
+		"set interfaces ge-0/0/5 unit 0 family inet address 192.0.2.1/24",
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue interface ge-0/0/5",
+		"set routing-instances red instance-type virtual-router",
+		"set routing-instances red interface ge-0/0/5.0",
+	} {
+		path, err := config.ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if len(cfg.QuarantinedRIMemberDeviceConflicts) != 1 ||
+		cfg.QuarantinedRIMemberDeviceConflicts[0].LinuxName != "ge-0-0-5" {
+		t.Fatalf("fixture did not compile into the expected quarantine: %+v",
+			cfg.QuarantinedRIMemberDeviceConflicts)
+	}
+	return cfg
+}
+
+func TestRIMemberTolerantQuarantineDetachesPreviouslyMasteredDevice11060(t *testing.T) {
+	cfg := compileLenientRIMemberConflict11060(t)
+	ops := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	linkWithMaster9813(ops, "vrf-blue", 77, 0)
+	linkWithMaster9813(ops, "vrf-red", 78, 0)
+	linkWithMaster9813(ops, "ge-0-0-5", 10, 77)
+	d := riVRFDaemon9813(ops)
+
+	// The ordinary apply path sees only sanitized membership plus quarantine
+	// evidence; it must still remove the stale blue master.
+	d.bindRoutingInstanceMembers(cfg)
+	if got := ops.unboundRecorded(); len(got) != 1 || got[0] != "ge-0-0-5" {
+		t.Fatalf("apply detach calls = %v, want [ge-0-0-5]", got)
+	}
+	if got := ops.links["ge-0-0-5"].Attrs().MasterIndex; got != 0 {
+		t.Fatalf("apply left quarantined device mastered by %d, want default context", got)
+	}
+
+	// If networkd or another apply stage re-enslaves it, periodic reassertion
+	// must detach again rather than treating the sanitized config as unowned.
+	ops.links["ge-0-0-5"].Attrs().MasterIndex = 77
+	d.rebindRIMembersOutsideTheirVRF(cfg)
+	if got := ops.unboundRecorded(); len(got) != 2 || got[1] != "ge-0-0-5" {
+		t.Fatalf("reassert detach calls = %v, want a second [ge-0-0-5]", got)
+	}
+
+	// A quarantine must not detach an unrelated master just because its device
+	// name remains in the metadata.
+	ops.links["ge-0-0-5"].Attrs().MasterIndex = 99
+	d.bindRoutingInstanceMembers(cfg)
+	if got := ops.unboundRecorded(); len(got) != 2 {
+		t.Fatalf("quarantine detached unrelated master 99: %v", got)
+	}
+	if got := ops.links["ge-0-0-5"].Attrs().MasterIndex; got != 99 {
+		t.Fatalf("unrelated master changed to %d, want 99", got)
+	}
+	if got := ops.recorded(); len(got) != 0 {
+		t.Fatalf("quarantined device was also bound: %v", got)
+	}
+}
+func TestRIMemberApplySkipsCrossSpelledDeviceConflictAndLogsAlarm11060(t *testing.T) {
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/5": {Name: "ge-0/0/5", Units: map[int]*config.InterfaceUnit{
+				10: {Number: 10, VlanID: 100},
+			}},
+		}},
+		RoutingInstances: []*config.RoutingInstanceConfig{
+			{Name: "blue", InstanceType: "vrf", Interfaces: []string{"ge-0/0/5.10"}},
+			{Name: "red", InstanceType: "vrf", Interfaces: []string{"ge-0-0-5.10"}},
+		},
+	}
+	ops := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	addLink6805(ops, "vrf-blue")
+	addLink6805(ops, "vrf-red")
+	addLink6805(ops, "ge-0-0-5.100")
+	d := &Daemon{routing: routing.NewManagerWithLinkOpsForTest(ops)}
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	d.bindRoutingInstanceMembers(cfg)
+
+	if got := ops.recorded(); len(got) != 0 {
+		t.Fatalf("cross-spelled dual-claimed device was bound: %v", got)
+	}
+	for _, want := range []string{
+		"ERROR", "routing-instance interface device has conflicting ownership",
+		"ge-0-0-5.100", "blue", "red",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("loud conflict alarm %q omits %q", logs.String(), want)
+		}
 	}
 }
 
@@ -199,13 +347,138 @@ func TestRIMemberReassertLeavesAStanzaTunnelToTheTunnelManager_9813(t *testing.T
 	if !tunnelsWithTheirOwnRIStanza(cfg)["gr-0-0-0"] {
 		t.Fatal("fixture: the stanza tunnel was not collected, so this cell would pass with the skip removed")
 	}
+	applied := collectAppliedTunnels(cfg)
+	if len(applied) != 1 || applied[0].RoutingInstance != "blue" || applied[0].RIListMember != "" {
+		t.Fatalf("tunnel manager scope = %+v, want stanza blue and no list claim", applied)
+	}
 
+	// Step 0a and the periodic loop both leave the stanza-owned device to the
+	// tunnel manager; only that manager may record the blue claim.
+	d.bindRoutingInstanceMembers(cfg)
 	d.rebindRIMembersOutsideTheirVRF(cfg)
 
 	if got := ops.recorded(); len(got) != 0 {
 		t.Errorf("#9813: the loop bound %v, but a tunnel with its own routing-instance stanza is the "+
 			"tunnel manager's claim (reconcileVRFClaimLocked case 1, recorded in appliedRI). Binding it "+
 			"here moves the master with the claim bookkeeping left behind", got)
+	}
+}
+
+func compileLenientGREStanzaConflict11060(t *testing.T) *config.Config {
+	t.Helper()
+	tree := &config.ConfigTree{}
+	for _, line := range []string{
+		"set system dataplane-type userspace",
+		"set interfaces gr-0/0/0 tunnel source 192.0.2.1",
+		"set interfaces gr-0/0/0 tunnel destination 192.0.2.2",
+		"set interfaces gr-0/0/0 tunnel routing-instance destination blue",
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances red instance-type virtual-router",
+		"set routing-instances red interface gr-0/0/0",
+	} {
+		path, err := config.ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if len(cfg.QuarantinedRIMemberDeviceConflicts) != 1 ||
+		cfg.QuarantinedRIMemberDeviceConflicts[0].LinuxName != "gr-0-0-0" {
+		t.Fatalf("fixture did not compile into the expected quarantine: %+v",
+			cfg.QuarantinedRIMemberDeviceConflicts)
+	}
+	return cfg
+}
+
+func TestTolerantTunnelStanzaConflictMatchesKernelDefaultScope11060(t *testing.T) {
+	cfg := compileLenientGREStanzaConflict11060(t)
+	tunnels := collectAppliedTunnels(cfg)
+	if len(tunnels) != 1 || tunnels[0].RoutingInstance != "" || tunnels[0].RIListMember != "" {
+		t.Fatalf("tolerant tunnel apply scope = %+v, want unscoped stanza and list claim", tunnels)
+	}
+
+	ops := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	linkWithMaster9813(ops, "vrf-blue", 77, 0)
+	linkWithMaster9813(ops, "vrf-red", 78, 0)
+	linkWithMaster9813(ops, "gr-0-0-0", 12, 77)
+	d := riVRFDaemon9813(ops)
+
+	// Apply-time list binding detaches stale ownership, then the tunnel manager
+	// must preserve default routing because tolerant compilation removed both
+	// competing scopes from the object it receives.
+	d.bindRoutingInstanceMembers(cfg)
+	if err := d.routing.ApplyTunnels(tunnels); err != nil {
+		t.Fatalf("ApplyTunnels: %v", err)
+	}
+	if got := ops.links["gr-0-0-0"].Attrs().MasterIndex; got != 0 {
+		t.Fatalf("kernel link master = %d after apply, want default context", got)
+	}
+	if got := ops.recorded(); len(got) != 0 {
+		t.Fatalf("kernel list/tunnel managers rebound quarantined device: %v", got)
+	}
+
+	// A later re-enslavement is removed by the periodic owner as well.
+	ops.links["gr-0-0-0"].Attrs().MasterIndex = 77
+	d.rebindRIMembersOutsideTheirVRF(cfg)
+	if got := ops.links["gr-0-0-0"].Attrs().MasterIndex; got != 0 {
+		t.Fatalf("periodic reassert left quarantined link master at %d", got)
+	}
+	if got := ops.unboundRecorded(); len(got) != 2 || got[1] != "gr-0-0-0" {
+		t.Fatalf("periodic detach calls = %v, want a second gr-0-0-0", got)
+	}
+}
+
+func compileLenientTaggedTrunkConflict11060(t *testing.T) *config.Config {
+	t.Helper()
+	tree := &config.ConfigTree{}
+	for _, line := range []string{
+		"set interfaces ge-0/0/5 unit 10 vlan-id 100",
+		"set interfaces ge-0/0/5 unit 20 vlan-id 200",
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue interface ge-0/0/5",
+		"set routing-instances red instance-type virtual-router",
+		"set routing-instances red interface ge-0/0/5.10",
+	} {
+		path, err := config.ParseSetCommand(line)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", line, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", line, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if len(cfg.QuarantinedRIMemberPrimaryClaims) != 1 {
+		t.Fatalf("expected one uncontested tagged-trunk primary claim, got %+v",
+			cfg.QuarantinedRIMemberPrimaryClaims)
+	}
+	return cfg
+}
+
+func TestRIMemberApplyPreservesTaggedTrunkPrimaryAfterSiblingQuarantine11060(t *testing.T) {
+	cfg := compileLenientTaggedTrunkConflict11060(t)
+	ops := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	linkWithMaster9813(ops, "vrf-blue", 77, 0)
+	linkWithMaster9813(ops, "ge-0-0-5", 10, 0)
+	linkWithMaster9813(ops, "ge-0-0-5.200", 11, 0)
+	d := riVRFDaemon9813(ops)
+
+	d.bindRoutingInstanceMembers(cfg)
+	got := make(map[string]bool)
+	for _, bind := range ops.recorded() {
+		got[bind] = true
+	}
+	if len(got) != 2 || !got["ge-0-0-5->vrf-blue"] || !got["ge-0-0-5.200->vrf-blue"] {
+		t.Fatalf("kernel binds = %v, want uncontested primary and VLAN 200 only", ops.recorded())
 	}
 }
 
@@ -257,5 +530,28 @@ func TestRIMemberReassertTakesApplySemBeforeActing_9813(t *testing.T) {
 	if act < acq {
 		t.Errorf("reassertRIMemberVRFOnce binds BEFORE acquiring applySem; the config it acts on can be " +
 			"a pre-commit snapshot (#4001)")
+	}
+}
+
+func TestTunnelStanzaOwnerUsesCompiledModeOverrideDevice11060(t *testing.T) {
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"wg0": {
+				Name:   "wg0",
+				Tunnel: &config.TunnelConfig{Name: "wg0", Mode: "wireguard"},
+				Units: map[int]*config.InterfaceUnit{
+					3: {
+						Number: 3,
+						Tunnel: &config.TunnelConfig{
+							Name: "wg0u3", Mode: "gre", RoutingInstance: "blue",
+						},
+					},
+				},
+			},
+		}},
+	}
+	owners := tunnelsWithTheirOwnRIStanza(cfg)
+	if !owners["wg0u3"] || owners["wg0"] {
+		t.Fatalf("stanza-owned devices = %v, want only the mode-overriding unit device wg0u3", owners)
 	}
 }
