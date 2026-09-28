@@ -25,16 +25,24 @@ import (
 // that holds old and new together:
 // applyAndSyncCommittedWithPeerSnapshotAuthorization (oldActive + compiled).
 //
-// Firing requires BOTH a narrowed scope AND stranded-flow evidence observed
-// by this attempt's own conntrack sweep (stashed by
-// flushDeniedHostInboundConntrack, cleared per attempt), INTERSECTED by
-// effective scope: kept box addresses are mapped through the OLD config to
-// the effective scopes whose enforcement actually covered them, and only
-// narrowed scopes with intersecting evidence are named — with counts and
-// samples drawn ONLY from those scopes' addresses. Transition-only stays
-// silent (no stranded flows to name); evidence-only stays silent (no
-// narrowing to report); and cross-scope evidence never names, inflates, or
-// samples another scope's warning.
+// Firing has two shapes. When this attempt's own conntrack sweep (stashed by
+// flushDeniedHostInboundConntrack, cleared per attempt) observed stranded
+// box-oriented flows on box addresses the OLD config's enforcement covered
+// in a narrowed effective scope, the warning names ONLY those scopes —
+// "zone:<name>" or "zone:<name>|iface:<canonical-unit>" — with counts and
+// samples drawn ONLY from the intersecting addresses' evidence, plus a
+// silent-class pointer sentence (the sweep cannot observe in-range UDP
+// customs, ranges, post-sweep reconnects, or sweep misses). When narrowed
+// scopes exist but the sweep observed nothing in them — zero kept flows, or
+// evidence only on addresses outside every narrowed scope — the commit
+// carries a transition-only advisory naming the narrowed scopes with honest
+// zero-observed wording and a manual-procedure pointer, so silent-class
+// narrowings never pass commit-silent. The advisory is suppressed only when
+// the narrowed scopes own no address in either generation (nothing exists
+// to strand or verify). The advisory lives in the commit channel because
+// only this funnel holds old and new together: the sweep (and the journal
+// WARN it feeds) sees only the new state, so per-apply journal context
+// cannot express a transition.
 //
 // A scope narrows two ways: it loses packet-wide full-admit (custom ports
 // lose their only admission), or it loses an unguarded-relevant token (a
@@ -450,16 +458,25 @@ func hostInboundScopesForAddrs10752(oldCfg *config.Config, oldViews []dpuserspac
 	return out
 }
 
+// silentClasses10752 are the stranded-flow shapes the conntrack sweep cannot
+// observe, named identically in both commit-warning shapes.
+const silentClasses10752 = "in-range UDP customs, ranges, post-sweep reconnects, or sweep misses"
+
 // withTighteningWarningsForResponse10752 returns the config object a commit
-// response projects: respCfg itself unless this attempt both narrowed a scope
-// AND observed stranded box-oriented flows on an address the OLD config
-// covered in a narrowed effective scope, in which case a shallow copy
-// carrying the aggregated warning line(s). The copy shares every sub-object
-// (read-only post-commit) but owns its Warnings storage — the applied
-// original is never mutated. At most two lines (customs, exempt/bare), each
-// naming only narrowed scopes with intersecting evidence, counts and samples
-// drawn only from those scopes' addresses — cross-scope evidence never
-// names, inflates, or samples another scope's warning.
+// response projects: respCfg itself when nothing narrowed, else a shallow
+// copy carrying the tightening warning lines. The copy shares every
+// sub-object (read-only post-commit) but owns its Warnings storage — the
+// applied original is never mutated.
+//
+// With stranded flows observed in narrowed scopes: at most three lines — the
+// customs line, the exempt/bare line (each present only when its class was
+// observed, naming only narrowed scopes with intersecting evidence, counts
+// and samples drawn only from those scopes' addresses), plus the
+// silent-class pointer sentence. With narrowed scopes but zero intersecting
+// evidence: one transition-only advisory naming the narrowed scopes with
+// honest zero-observed wording, so silent-class narrowings never pass
+// commit-silent. The advisory is suppressed only when the narrowed scopes
+// own no address in either generation — nothing exists to strand or verify.
 func (d *Daemon) withTighteningWarningsForResponse10752(respCfg, oldActive, compiled *config.Config) *config.Config {
 	if respCfg == nil {
 		return respCfg
@@ -532,8 +549,19 @@ func (d *Daemon) withTighteningWarningsForResponse10752(respCfg, oldActive, comp
 					"stop/disable the originator per Removal procedures for unguarded tuples in docs/host-inbound-service-matrix.md",
 				scopeText, other, sampleSuffix10752(otherSamples)))
 		}
+		lines = append(lines, fmt.Sprintf(
+			"The sweep cannot observe %s — verify those per Removal procedures for unguarded tuples in docs/host-inbound-service-matrix.md",
+			silentClasses10752))
 	} else {
-		return respCfg
+		if !tightenedScopesHaveAddrs10752(scopes,
+			dpuserspace.BuildZoneHostInboundViews(oldActive),
+			dpuserspace.BuildZoneHostInboundViews(compiled)) {
+			return respCfg
+		}
+		lines = append(lines, fmt.Sprintf(
+			"host-inbound tightening (%s) observed no stranded flows in the narrowed scopes this sweep — "+
+				"the sweep cannot observe %s; verify/delete per Removal procedures for unguarded tuples in docs/host-inbound-service-matrix.md",
+			scopeText10752(scopes), silentClasses10752))
 	}
 	out := *respCfg
 	warnings := make([]string, 0, len(respCfg.Warnings)+len(lines))
@@ -541,6 +569,31 @@ func (d *Daemon) withTighteningWarningsForResponse10752(respCfg, oldActive, comp
 	warnings = append(warnings, lines...)
 	out.Warnings = warnings
 	return &out
+}
+
+// tightenedScopesHaveAddrs10752 reports whether any narrowed scope's zone owns
+// an address in either generation's views. Narrowings on addressless scopes
+// (DHCP-pending or undeclared members, emptied zones) can strand nothing and
+// offer nothing to verify, so the transition-only advisory stays silent for
+// them. Zone-granular by design: interface precision would need per-unit
+// address ownership in both generations for a one-line advisory.
+func tightenedScopesHaveAddrs10752(scopes []string, views ...[]dpuserspace.ZoneHostInboundView) bool {
+	zones := map[string]bool{}
+	for _, scope := range scopes {
+		zone := strings.TrimPrefix(scope, "zone:")
+		if i := strings.IndexByte(zone, '|'); i >= 0 {
+			zone = zone[:i]
+		}
+		zones[zone] = true
+	}
+	for _, vs := range views {
+		for _, v := range vs {
+			if zones[v.Zone] && len(v.V4Addrs)+len(v.V6Addrs) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func scopeText10752(scopes []string) string {

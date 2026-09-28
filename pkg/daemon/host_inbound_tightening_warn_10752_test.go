@@ -280,8 +280,8 @@ func TestWithTighteningWarningsProjectsCopy10752(t *testing.T) {
 	if resp == newCfg {
 		t.Fatal("firing projection must return a copy, never the applied pointer")
 	}
-	if len(resp.Warnings) != 3 || resp.Warnings[0] != "foreign advisory" {
-		t.Fatalf("response warnings = %v, want [foreign advisory, custom line, other line]", resp.Warnings)
+	if len(resp.Warnings) != 4 || resp.Warnings[0] != "foreign advisory" {
+		t.Fatalf("response warnings = %v, want [foreign advisory, custom line, other line, silent-class pointer]", resp.Warnings)
 	}
 	if !strings.Contains(resp.Warnings[1], "zone:wan") || !strings.Contains(resp.Warnings[1], "2222") ||
 		!strings.Contains(resp.Warnings[1], "custom-port") {
@@ -289,6 +289,9 @@ func TestWithTighteningWarningsProjectsCopy10752(t *testing.T) {
 	}
 	if !strings.Contains(resp.Warnings[2], "exempt/bare-protocol") || !strings.Contains(resp.Warnings[2], "179") {
 		t.Errorf("other line must name exempt/bare class + sample: %q", resp.Warnings[2])
+	}
+	if !strings.Contains(resp.Warnings[3], "cannot observe") || !strings.Contains(resp.Warnings[3], "Removal procedures") {
+		t.Errorf("third line must be the silent-class pointer: %q", resp.Warnings[3])
 	}
 	if len(newCfg.Warnings) != 1 {
 		t.Fatalf("applied warnings = %v, want the input untouched", newCfg.Warnings)
@@ -299,7 +302,6 @@ func TestWithTighteningWarningsIdentityCases10752(t *testing.T) {
 	openCfg := tighteningScopeCfg(t, []string{"any-service"}, []string{"ssh"})
 	namedCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
 	wan := netip.MustParseAddr("172.16.50.8")
-	lan := netip.MustParseAddr("10.0.61.1")
 	d := &Daemon{}
 	// No transition (identical configs) + evidence → identity.
 	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
@@ -308,26 +310,72 @@ func TestWithTighteningWarningsIdentityCases10752(t *testing.T) {
 	if resp := d.withTighteningWarningsForResponse10752(namedCfg, namedCfg, namedCfg); resp != namedCfg {
 		t.Error("no transition must return the input pointer")
 	}
-	// Transition + zero evidence → identity.
-	d.recordKeptSuspicious10752(nil)
-	if resp := d.withTighteningWarningsForResponse10752(namedCfg, openCfg, namedCfg); resp != namedCfg {
-		t.Error("zero kept must return the input pointer")
-	}
-	// Transition + evidence on an UNRELATED zone only → identity (no
-	// misattribution: a zone-B residual must not name a zone-A tightening).
-	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
-		lan: kept10752(2, []string{"tcp 10.0.61.1:2222→203.0.113.7:40000"}, 0, nil),
-	})
-	if resp := d.withTighteningWarningsForResponse10752(namedCfg, openCfg, namedCfg); resp != namedCfg {
-		t.Error("cross-scope evidence must stay silent (no intersected scope)")
-	}
 	// Nil response (failed apply) → nil.
-	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
-		wan: kept10752(3, nil, 0, nil),
-	})
 	if resp := d.withTighteningWarningsForResponse10752(nil, openCfg, namedCfg); resp != nil {
 		t.Error("nil response must stay nil")
 	}
+}
+
+// TestWithTighteningWarningsAdvisory10752 pins the transition-only advisory:
+// narrowed scopes with zero intersecting evidence (nothing observed, or
+// evidence only on addresses outside every narrowed scope) still warn —
+// exactly one line, honest zero-observed wording, no observed-flow claim,
+// and no leak of unrelated evidence into counts, samples, or scope naming.
+func TestWithTighteningWarningsAdvisory10752(t *testing.T) {
+	openCfg := tighteningScopeCfg(t, []string{"any-service"}, []string{"ssh"})
+	namedCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	lan := netip.MustParseAddr("10.0.61.1")
+	d := &Daemon{}
+
+	check := func(t *testing.T, resp *config.Config, input *config.Config) {
+		t.Helper()
+		if resp == input {
+			t.Fatal("transition with zero intersecting evidence must warn (advisory), got identity")
+		}
+		if len(resp.Warnings) != 1 {
+			t.Fatalf("advisory warnings = %v, want exactly one line", resp.Warnings)
+		}
+		line := resp.Warnings[0]
+		for _, want := range []string{"host-inbound tightening (zone:wan, zone:wan|iface:reth0.50)",
+			"observed no stranded flows", "cannot observe", "verify/delete", "Removal procedures"} {
+			if !strings.Contains(line, want) {
+				t.Errorf("advisory line missing %q: %q", want, line)
+			}
+		}
+		for _, leak := range []string{"custom-port", "exempt/bare-protocol", "10.0.61.1", "leaves 2"} {
+			if strings.Contains(line, leak) {
+				t.Errorf("advisory line must not claim observed flows or leak unrelated evidence (%q): %q", leak, line)
+			}
+		}
+		if len(input.Warnings) != 0 {
+			t.Fatalf("applied warnings = %v, want the input untouched", input.Warnings)
+		}
+	}
+
+	// Transition + zero evidence → advisory.
+	d.recordKeptSuspicious10752(nil)
+	check(t, d.withTighteningWarningsForResponse10752(namedCfg, openCfg, namedCfg), namedCfg)
+
+	// Transition + evidence on an UNRELATED zone only → advisory (the
+	// narrowing still needs manual verification for silent classes; the
+	// unrelated residual must not name it, inflate it, or sample it).
+	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
+		lan: kept10752(2, []string{"tcp 10.0.61.1:2222→203.0.113.7:40000"}, 0, nil),
+	})
+	fresh := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	check(t, d.withTighteningWarningsForResponse10752(fresh, openCfg, fresh), fresh)
+
+	// Range-only narrowing (traceroute removal) with zero kept flows →
+	// advisory. Ranges are sweep-silent by design (indistinguishable from
+	// ephemeral clients), so without the transition advisory this order
+	// would warn nowhere.
+	rangeOld := tighteningScopeCfg(t, []string{"ssh", "traceroute"}, []string{"ssh"})
+	rangeNew := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+	if got := hostInboundTightenedScopes(rangeOld, rangeNew); len(got) != 2 {
+		t.Fatalf("traceroute removal must narrow the wan scopes, got %v", got)
+	}
+	d.recordKeptSuspicious10752(nil)
+	check(t, d.withTighteningWarningsForResponse10752(rangeNew, rangeOld, rangeNew), rangeNew)
 }
 
 // TestWithTighteningWarningsFiltersMixedEvidence10752 pins per-address,
@@ -352,8 +400,8 @@ func TestWithTighteningWarningsFiltersMixedEvidence10752(t *testing.T) {
 	if resp == namedCfg {
 		t.Fatal("intersecting evidence must warn, got identity")
 	}
-	if len(resp.Warnings) != 1 {
-		t.Fatalf("warnings = %v, want [custom line]", resp.Warnings)
+	if len(resp.Warnings) != 2 {
+		t.Fatalf("warnings = %v, want [custom line, silent-class pointer]", resp.Warnings)
 	}
 	line := resp.Warnings[0]
 	if !strings.Contains(line, "leaves 2 box-oriented custom-port") {
@@ -384,8 +432,8 @@ func TestWithTighteningWarningsFiltersMixedEvidence10752(t *testing.T) {
 	if strings.Contains(joined, "exempt/bare-protocol") || strings.Contains(joined, "10.0.61.1") {
 		t.Fatalf("unrelated-zone class must be omitted entirely, got %v", resp.Warnings)
 	}
-	if len(resp.Warnings) != 1 || !strings.Contains(resp.Warnings[0], "leaves 1 box-oriented custom-port") {
-		t.Fatalf("warnings = %v, want [custom line count 1]", resp.Warnings)
+	if len(resp.Warnings) != 2 || !strings.Contains(resp.Warnings[0], "leaves 1 box-oriented custom-port") {
+		t.Fatalf("warnings = %v, want [custom line count 1, pointer]", resp.Warnings)
 	}
 }
 
@@ -417,14 +465,27 @@ func TestWithTighteningWarningsSameZoneInterfaceIsolation10752(t *testing.T) {
 	}
 	d := &Daemon{}
 
-	// Evidence solely on the UNCHANGED sibling interface stays silent: the
-	// narrowed scope must never name itself from another interface's flow.
+	// Evidence solely on the UNCHANGED sibling interface → advisory only:
+	// no evidence line, no sibling-address leak.
 	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
 		netip.MustParseAddr("172.16.60.8"): kept10752(3,
 			[]string{"tcp 172.16.60.8:2222→203.0.113.7:40000"}, 0, nil),
 	})
-	if resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg); resp != newCfg {
-		t.Fatalf("sibling-interface evidence must stay silent, got %v", resp.Warnings)
+	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
+	if resp == newCfg {
+		t.Fatal("narrowed addressed scope with zero intersecting evidence must carry the advisory")
+	}
+	if len(resp.Warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly the advisory line", resp.Warnings)
+	}
+	line := resp.Warnings[0]
+	if !strings.Contains(line, "(zone:wan|iface:reth0.50)") || !strings.Contains(line, "observed no stranded flows") {
+		t.Errorf("advisory must name exactly the narrowed interface scope with zero-observed wording: %q", line)
+	}
+	for _, leak := range []string{"172.16.60.8", "custom-port", "exempt/bare-protocol"} {
+		if strings.Contains(line, leak) {
+			t.Errorf("advisory must not leak sibling-interface evidence (%q): %q", leak, line)
+		}
 	}
 
 	// Positive control: evidence on the NARROWED interface names exactly
@@ -437,12 +498,12 @@ func TestWithTighteningWarningsSameZoneInterfaceIsolation10752(t *testing.T) {
 	fresh.Security.Zones["wan"].InterfaceHostInbound = map[string]*config.HostInboundTraffic{
 		"reth0.50": {SystemServices: []string{"ssh"}},
 	}
-	resp := d.withTighteningWarningsForResponse10752(fresh, oldCfg, fresh)
+	resp = d.withTighteningWarningsForResponse10752(fresh, oldCfg, fresh)
 	if resp == fresh {
 		t.Fatal("intersecting interface evidence must warn, got identity")
 	}
-	if len(resp.Warnings) != 1 {
-		t.Fatalf("warnings = %v, want [custom line]", resp.Warnings)
+	if len(resp.Warnings) != 2 {
+		t.Fatalf("warnings = %v, want [custom line, pointer]", resp.Warnings)
 	}
 	if !strings.Contains(resp.Warnings[0], "(zone:wan|iface:reth0.50)") {
 		t.Errorf("custom line must name exactly the narrowed interface scope: %q", resp.Warnings[0])
@@ -477,12 +538,39 @@ func TestWithTighteningWarningsOldAddressMoved10752(t *testing.T) {
 	}
 }
 
+// TestWithTighteningWarningsSilentAddressless10752 pins the advisory's
+// address gate: a real transition on scopes owning no address in either
+// generation can strand nothing and offers nothing to verify, so the
+// commit stays silent.
+func TestWithTighteningWarningsSilentAddressless10752(t *testing.T) {
+	mkCfg := func(services []string) *config.Config {
+		cfg := hostInboundTestConfig()
+		cfg.Security.Zones["ghost"] = &config.ZoneConfig{
+			Name:               "ghost",
+			Interfaces:         []string{"reth9.9"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: services},
+		}
+		return cfg
+	}
+	oldCfg := mkCfg([]string{"any-service"})
+	newCfg := mkCfg([]string{"ssh"})
+	if got := hostInboundTightenedScopes(oldCfg, newCfg); len(got) != 2 {
+		t.Fatalf("tightened = %v, want the ghost zone + iface scopes (the gate, not the transition, must silence this)", got)
+	}
+	d := &Daemon{}
+	d.recordKeptSuspicious10752(nil)
+	if resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg); resp != newCfg {
+		t.Fatalf("addressless narrowing must stay silent, got %v", resp.Warnings)
+	}
+}
+
 // TestApplyAndSyncCommittedWarnsTighteningStranded10752 drives the real
 // commit funnel: old any-service → new named, with this attempt's sweep
 // observing a stranded box-oriented custom flow (via the conntrack seam).
-// The returned response must carry the tightening line on a copy while the
-// applied object keeps only its validation warnings. A pre-seeded stale
-// stash (kept=99) must NOT leak through — the funnel clears per attempt.
+// The returned response must carry the tightening line plus the silent-class
+// pointer on a copy while the applied object keeps only its validation
+// warnings. A pre-seeded stale stash (kept=99) must NOT leak through — the
+// funnel clears per attempt.
 func TestApplyAndSyncCommittedWarnsTighteningStranded10752(t *testing.T) {
 	d, _, _ := minimalApplyCtxDaemon(t)
 	origInstaller, origDelete := nftInstaller, conntrackDeleteFilters
@@ -520,7 +608,7 @@ func TestApplyAndSyncCommittedWarnsTighteningStranded10752(t *testing.T) {
 	if got == compiled {
 		t.Fatal("response must project onto a copy when stranded flows are observed")
 	}
-	found := false
+	found, pointer := false, false
 	for _, w := range got.Warnings {
 		if strings.Contains(w, "zone:wan") && strings.Contains(w, "2222") {
 			found = true
@@ -528,20 +616,27 @@ func TestApplyAndSyncCommittedWarnsTighteningStranded10752(t *testing.T) {
 				t.Fatalf("stale pre-seeded evidence leaked into the warning: %q", w)
 			}
 		}
+		if strings.Contains(w, "cannot observe") {
+			pointer = true
+		}
 	}
 	if !found {
 		t.Fatalf("no tightening warning naming zone:wan + 2222 in %v", got.Warnings)
+	}
+	if !pointer {
+		t.Fatalf("observed evidence must append the silent-class pointer in %v", got.Warnings)
 	}
 	if len(compiled.Warnings) != 1 {
 		t.Fatalf("applied warnings = %v, want only the foreign line", compiled.Warnings)
 	}
 }
 
-// TestApplyAndSyncCommittedSilentCrossScope10752 is the funnel-level
+// TestApplyAndSyncCommittedAdvisoryCrossScope10752 is the funnel-level
 // misattribution guard: wan tightens, but the only stranded flow lives on a
-// lan address. The response must be the applied pointer itself (silent),
-// since no tightened scope intersects the stranded flow.
-func TestApplyAndSyncCommittedSilentCrossScope10752(t *testing.T) {
+// lan address. The response must carry exactly the transition-only advisory
+// (the narrowing still needs manual verification for silent classes) —
+// never an evidence line naming wan from lan's flow.
+func TestApplyAndSyncCommittedAdvisoryCrossScope10752(t *testing.T) {
 	d, _, _ := minimalApplyCtxDaemon(t)
 	origInstaller, origDelete := nftInstaller, conntrackDeleteFilters
 	origRange, origListeners := readEphemeralPortRange, readLocalTCPListenerPorts
@@ -568,8 +663,22 @@ func TestApplyAndSyncCommittedSilentCrossScope10752(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyAndSyncCommitted: %v", err)
 	}
-	if got != compiled {
-		t.Fatalf("cross-scope evidence must stay silent (identity response), got warnings %v", got.Warnings)
+	if got == compiled {
+		t.Fatal("cross-scope narrowing must carry the transition-only advisory, got identity")
+	}
+	if len(got.Warnings) != 1 {
+		t.Fatalf("warnings = %v, want exactly the advisory line", got.Warnings)
+	}
+	line := got.Warnings[0]
+	for _, want := range []string{"zone:wan", "observed no stranded flows", "Removal procedures"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("advisory line missing %q: %q", want, line)
+		}
+	}
+	for _, leak := range []string{"custom-port", "exempt/bare-protocol", "10.0.61.1", "2222"} {
+		if strings.Contains(line, leak) {
+			t.Errorf("advisory must not name wan from lan's flow (%q): %q", leak, line)
+		}
 	}
 }
 
@@ -608,7 +717,7 @@ func TestApplyAndSyncCommittedWarnsExemptRemoval10752(t *testing.T) {
 	if got == compiled {
 		t.Fatal("exempt-token removal with stranded flows must warn")
 	}
-	found := false
+	found, pointer := false, false
 	for _, w := range got.Warnings {
 		if strings.Contains(w, "zone:wan") && strings.Contains(w, "exempt/bare-protocol") && strings.Contains(w, "179") {
 			found = true
@@ -616,9 +725,15 @@ func TestApplyAndSyncCommittedWarnsExemptRemoval10752(t *testing.T) {
 		if strings.Contains(w, "custom-port") {
 			t.Fatalf("exempt-only evidence must not emit a custom clause: %q", w)
 		}
+		if strings.Contains(w, "cannot observe") {
+			pointer = true
+		}
 	}
 	if !found {
 		t.Fatalf("no exempt/bare warning naming zone:wan + 179 in %v", got.Warnings)
+	}
+	if !pointer {
+		t.Fatalf("observed evidence must append the silent-class pointer in %v", got.Warnings)
 	}
 }
 
@@ -656,13 +771,19 @@ func TestApplyAndSyncCommittedWarnsBareRemoval10752(t *testing.T) {
 	if got == compiled {
 		t.Fatal("bare-protocol removal with stranded flows must warn")
 	}
-	found := false
+	found, pointer := false, false
 	for _, w := range got.Warnings {
 		if strings.Contains(w, "zone:wan") && strings.Contains(w, "exempt/bare-protocol") {
 			found = true
 		}
+		if strings.Contains(w, "cannot observe") {
+			pointer = true
+		}
 	}
 	if !found {
 		t.Fatalf("no exempt/bare warning naming zone:wan in %v", got.Warnings)
+	}
+	if !pointer {
+		t.Fatalf("observed evidence must append the silent-class pointer in %v", got.Warnings)
 	}
 }
