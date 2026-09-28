@@ -29,10 +29,12 @@
 // static authMiddleware owns a tracker in its closure, and the live-swap
 // dynamicAuthMiddleware uses the Server's (Server.throttle, lazily built).
 // Per-instance state keeps test servers isolated without a reset hook and
-// keeps the two legs of one server under one budget. The table is bounded
-// (4096 entries; expired-first sweep, then arbitrary evict) so the key space
-// — which includes attacker-influenced usernames — cannot grow memory
-// without bound; see the denyaudit fixed-bucket rationale for the doctrine.
+// keeps the two legs of one server under one budget. Separate Server instances,
+// process restarts, and HA peers get independent, fresh budgets; this is
+// intentionally not a cluster-wide or restart-persistent attempt counter. The
+// table is bounded (4096 entries; expired-first sweep, then arbitrary evict)
+// so the key space — which includes attacker-influenced usernames — cannot grow
+// memory without bound; see the denyaudit fixed-bucket rationale for the doctrine.
 //
 // There is deliberately NO loopback exemption. The nil-auth loopback path
 // (dynamicAuthMiddleware's pass-through) never consults the tracker at all —
@@ -71,10 +73,11 @@ const (
 	// forgives failures early (fail-open on memory pressure, never fail-closed
 	// into a permanent lockout).
 	authThrottleMaxEntries = 4096
-	// Identity namespaces keep Basic usernames separate from API keys and
-	// malformed Basic presentations.
+	// Identity namespaces keep Basic usernames, Bearer presentations, API keys,
+	// and malformed Basic presentations from sharing account lockouts.
 	authThrottleBasicAccountPrefix  = "basic:"
 	authThrottleInvalidBasicAccount = "basic-invalid"
+	authThrottleBearerAccount       = "bearer"
 	authThrottleAPIKeyAccount       = "api-key"
 )
 
@@ -456,8 +459,8 @@ func (s *Server) throttle() *authFailureTracker {
 
 // throttleIdentity derives the (source, account) pair a request is budgeted
 // under. Source is the TCP peer IP (RemoteAddr without the port). Basic
-// usernames use a namespace distinct from API-key and malformed presentations,
-// preventing user-controlled names from sharing those fixed buckets.
+// usernames and Bearer presentations use namespaces distinct from API keys, so
+// an invalid Bearer cannot lock out a clean X-API-Key request.
 func throttleIdentity(r *http.Request) (source, account string) {
 	source = r.RemoteAddr
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
@@ -474,6 +477,8 @@ func throttleIdentity(r *http.Request) (source, account string) {
 			} else {
 				account = authThrottleInvalidBasicAccount
 			}
+		} else if strings.HasPrefix(auth, "Bearer ") {
+			account = authThrottleBearerAccount
 		} else {
 			account = authThrottleAPIKeyAccount
 		}

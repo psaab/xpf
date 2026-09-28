@@ -197,7 +197,7 @@ func TestInvalidAuthorizationFallsBackToValidAPIKeyIdentity10825(t *testing.T) {
 	cases := []struct {
 		name, authorization, claimed string
 	}{
-		{name: "invalid-bearer", authorization: "Bearer invalid-token", claimed: "api-key"},
+		{name: "invalid-bearer", authorization: "Bearer invalid-token", claimed: authThrottleBearerAccount},
 		{name: "invalid-basic", authorization: basicAuth("claimed-user", "wrong-password"), claimed: "basic:claimed-user"},
 	}
 	for _, tc := range cases {
@@ -341,6 +341,58 @@ func TestRESTAuthWrongBasicGuessesWithValidAPIKeyFallbackStillLockOut10825(t *te
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("clean API-key request after Basic lockout returned %d, want 204", w.Code)
+	}
+}
+
+func TestRESTAuthInvalidBearerDoesNotLockValidAPIKeyBucket10825(t *testing.T) {
+	const apiKey = "deployment-secret-key"
+	for _, tc := range []struct {
+		name          string
+		validFallback bool
+	}{
+		{name: "invalid Bearer only"},
+		{name: "invalid Bearer with valid key fallback", validFallback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := authMiddleware(AuthConfig{APIKeys: map[string]bool{apiKey: true}}, true,
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+			server := httptest.NewServer(h)
+			defer server.Close()
+
+			request := func(authorization, fallbackKey string) int {
+				req, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/config", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if authorization != "" {
+					req.Header.Set("Authorization", authorization)
+				}
+				if fallbackKey != "" {
+					req.Header.Set("X-API-Key", fallbackKey)
+				}
+				resp, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer resp.Body.Close()
+				return resp.StatusCode
+			}
+
+			for i := 0; i < authThrottleAccountFailures; i++ {
+				fallback := ""
+				want := http.StatusUnauthorized
+				if tc.validFallback {
+					fallback = apiKey
+					want = http.StatusNoContent
+				}
+				if got := request(fmt.Sprintf("Bearer invalid-%d", i), fallback); got != want {
+					t.Fatalf("invalid Bearer attempt %d returned %d, want %d", i+1, got, want)
+				}
+			}
+			if got := request("", apiKey); got != http.StatusNoContent {
+				t.Fatalf("clean API-key request after invalid Bearer guesses returned %d, want 204", got)
+			}
+		})
 	}
 }
 
