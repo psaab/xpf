@@ -808,3 +808,59 @@ func TestPerformZeroizeClearsRunState10769(t *testing.T) {
 		t.Errorf("upgrade lock must survive the run clear (later leg needs it): %v", err)
 	}
 }
+
+func TestPerformZeroizeSyncsAbsentParentOnRetry10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	mustWriteFile(t, zeroizeKeaLeasePaths[0], []byte("lease"))
+	orig := zeroizeSyncDir
+	t.Cleanup(func() { zeroizeSyncDir = orig })
+	boom := fmt.Errorf("injected seal parent fsync failure")
+	keaDir := filepath.Clean(filepath.Dir(zeroizeKeaLeasePaths[0]))
+	failBarrier := true
+	zeroizeSyncDir = func(dir string) error {
+		if failBarrier && filepath.Clean(dir) == keaDir {
+			return boom
+		}
+		return orig(dir)
+	}
+	// First attempt: the unlink lands but its barrier fails, so the wipe
+	// reports incomplete and retains the pending marker.
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); !errors.Is(err, boom) {
+		t.Fatalf("first attempt must fail on the injected barrier: %v", err)
+	}
+	if _, err := os.Lstat(zeroizeKeaLeasePaths[0]); !os.IsNotExist(err) {
+		t.Fatalf("lease file should be unlinked even though its barrier failed: %v", err)
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
+		t.Fatalf("failed wipe must retain the pending marker: %v", err)
+	}
+	// Retry with a healthy barrier: the lease path is already absent, but
+	// its parent must still be synced before the marker may complete.
+	failBarrier = false
+	var retrySynced []string
+	zeroizeSyncDir = func(dir string) error {
+		retrySynced = append(retrySynced, filepath.Clean(dir))
+		return orig(dir)
+	}
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("retry must converge: %v", err)
+	}
+	found := false
+	for _, dir := range retrySynced {
+		if dir == keaDir {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("retry never synced the absent lease path's parent %s (synced=%v)", keaDir, retrySynced)
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); !os.IsNotExist(err) {
+		t.Fatalf("converged retry must clear the pending marker: %v", err)
+	}
+}

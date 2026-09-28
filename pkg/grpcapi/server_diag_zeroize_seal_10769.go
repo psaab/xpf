@@ -683,10 +683,24 @@ func zeroizeClearDir(dir string) error {
 // is durable before the reset marker clears (#10769 d05-F6). Every seal-leg
 // removal funnels through here, so durability holds structurally rather than
 // depending on an audited sync inventory at the end of each leg. An absent
-// path is the goal (no barrier needed); a sync failure is surfaced
-// fail-closed so the reset is never reported clean on unpersisted unlinks.
+// path still syncs its parent: an earlier attempt may have unlinked it but
+// failed the barrier, and skipping the sync on retry would let a later
+// attempt complete the marker with that unlink undurable. A sync failure is
+// surfaced fail-closed so the reset is never reported clean on unpersisted
+// unlinks.
 func zeroizeRemovePath(path string) error {
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		// Retry durability: the unlink may have landed on an attempt whose
+		// barrier failed. Syncing the existing parent retires that debt; a
+		// missing parent carries none (no entry can reappear without it).
+		if _, derr := os.Lstat(filepath.Dir(path)); errors.Is(derr, os.ErrNotExist) {
+			return nil
+		} else if derr != nil {
+			return fmt.Errorf("zeroize: inspect parent of %s: %w", path, derr)
+		}
+		if err := zeroizeSyncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("zeroize: sync parent of %s: %w", path, err)
+		}
 		return nil
 	}
 	if sk, isLink := configstore.SymlinkTarget(path); isLink {
