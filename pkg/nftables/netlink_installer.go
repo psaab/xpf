@@ -408,6 +408,10 @@ func (in *netlinkInstaller) TableEnforcing(name string) (bool, error) {
 
 // TableDropsInput reports whether the named inet-family table currently
 // carries a DROP verdict on its input hook (see the interface contract).
+// Residual: only the base input chain is scanned — a program-only table
+// (DROPs solely inside junos-host subchains) reads false, so a manual
+// `ensure` over-installs the barrier fail-closed and the next apply heals
+// it. Accepted: subchain-aware verdict proof is out of scope.
 func (in *netlinkInstaller) TableDropsInput(name string) (bool, error) {
 	c, err := in.newConn()
 	if err != nil {

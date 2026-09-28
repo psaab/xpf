@@ -410,8 +410,8 @@ func clearEarlyInputHandoffMarker() {
 // The `ensure` command combines it with DROP-proof table shape plus xpfd
 // active state to prove a live table is current daemon ownership — not a
 // stale restore from before xpfd started (#10751 R7-A). /run is tmpfs and
-// the daemon clears it at startup plus on every pre-handoff apply entry,
-// so it can only exist after this process installed. A package var so
+// the daemon clears it at startup, so it can only exist after this process
+// installed. A package var so
 // tests redirect it to a temp dir.
 var HostInboundFirstApplyMarkerPath = "/run/xpf/host-inbound-applied.done"
 
