@@ -136,11 +136,47 @@ func TestRIMemberAlreadyInItsVRFIsLeftAlone_9813(t *testing.T) {
 	linkWithMaster9813(ops, "ge-0-0-5", 10, 77) // already a member
 	d := riVRFDaemon9813(ops)
 
-	d.rebindRIMembersOutsideTheirVRF(blueCfg9813())
+	// Three reassert ticks on a healthy single-RI member must not issue any
+	// LinkSetMaster calls.
+	for range 3 {
+		d.rebindRIMembersOutsideTheirVRF(blueCfg9813())
+	}
 
 	if got := ops.recorded(); len(got) != 0 {
 		t.Errorf("a member already in its VRF drew %v binds; BindInterfaceToVRF logs at Info on every "+
 			"call, so a loop that re-binds unconditionally logs on every tick of a healthy node", got)
+	}
+}
+
+// #11060: a legacy tolerant-load config can still contain one Linux device
+// claimed by two RIs. Reassert must leave the ambiguous key alone rather than
+// alternating its master between the VRFs on successive ticks.
+func TestRIMemberReassertSkipsMultiClaimedKey11060(t *testing.T) {
+	cfg := &config.Config{Interfaces: config.InterfacesConfig{
+		Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/5": {Name: "ge-0/0/5", Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0},
+			}},
+		},
+	}}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{
+		{Name: "blue", InstanceType: "vrf", TableID: 100, Interfaces: []string{"ge-0/0/5"}},
+		{Name: "red", InstanceType: "vrf", TableID: 101, Interfaces: []string{"ge-0/0/5.0"}},
+	}
+	ops := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	linkWithMaster9813(ops, "vrf-blue", 77, 0)
+	linkWithMaster9813(ops, "vrf-red", 78, 0)
+	linkWithMaster9813(ops, "ge-0-0-5", 10, 0)
+	d := riVRFDaemon9813(ops)
+
+	if got := d.riMembersOutsideTheirVRF(cfg); len(got) != 0 {
+		t.Fatalf("multi-claimed device reported as drifted: %v, want none (#11060)", got)
+	}
+	for range 3 {
+		d.rebindRIMembersOutsideTheirVRF(cfg)
+	}
+	if got := ops.recorded(); len(got) != 0 {
+		t.Fatalf("three ticks re-bound multi-claimed device: %v, want no LinkSetMaster calls (#11060)", got)
 	}
 }
 

@@ -17,7 +17,7 @@ import (
 // next apply of any kind. The fabric half of this issue fixed the same shape
 // for fab0/fab1 and vrf-mgmt.
 //
-// Two properties keep this loop from fighting the code that owns these binds:
+// Three properties keep this loop from fighting the code that owns these binds:
 //
 //   - It binds only a member whose master is NOT its VRF. BindInterfaceToVRF
 //     logs at Info on every call, so re-running the apply's bind loop on every
@@ -29,6 +29,10 @@ import (
 //     bind, so a daemon-side bind would move the master with the claim
 //     bookkeeping left behind. List members are step 0a's — the #1884 case-2
 //     veto says so in as many words — and they are what this loop re-asserts.
+//   - It skips a Linux device claimed by multiple RI list members. Strict
+//     commits reject the ambiguity (#11060), but an older persisted config
+//     must still boot on the tolerant path. There is no unique intended owner
+//     for its link, so reasserting it would alternate the master on every tick.
 
 // riMemberVRFReassertInterval paces the re-assert, matching its siblings
 // (fabricIPVLANReassertLoop, proxyARPReassertLoop, raDeadSenderReassertLoop).
@@ -79,8 +83,12 @@ func (d *Daemon) reassertRIMemberVRFOnce(ctx context.Context) {
 }
 
 // rebindRIMembersOutsideTheirVRF binds every configured list member that sits
-// outside the VRF its instance names. A failure is logged, and the next tick
+// outside the VRF its instance names, except members claimed by multiple
+// routing instances. The latter is a legacy tolerant-load shape: strict commits
+// reject it (#11060), and reasserting it here would alternate the kernel master
+// between the instances on every tick. A failure is logged, and the next tick
 // retries it.
+
 func (d *Daemon) rebindRIMembersOutsideTheirVRF(cfg *config.Config) {
 	for _, m := range d.riMembersOutsideTheirVRF(cfg) {
 		slog.Warn("routing-instance member outside its VRF — re-binding",
@@ -116,6 +124,7 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 	}
 	stanza := tunnelsWithTheirOwnRIStanza(cfg)
 	tunMap := cfg.TunnelNameMap()
+	multiClaimed := riDualClaimedLinuxNames(cfg, tunMap)
 	var out []riMember
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
@@ -127,6 +136,9 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 		}
 		for _, ifaceName := range ri.Interfaces {
 			linuxName := riMemberLinuxName(cfg, tunMap, ifaceName)
+			if multiClaimed[linuxName] {
+				continue // #11060: this device has claims in multiple instances
+			}
 			if stanza[linuxName] {
 				continue // the tunnel manager's claim, not step 0a's
 			}
@@ -141,6 +153,41 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 		}
 	}
 	return out
+}
+
+// riDualClaimedLinuxNames returns every Linux device the apply bind loop would
+// bind from more than one routing instance. The expansion is the same helper
+// used by bindRoutingInstanceMembers (bare members fan down to their units,
+// canonical unit aliases resolve identically), so a conflict cannot evade the
+// reassert guard by using different authored spellings. Same-instance repeated
+// members are harmless; forwarding and daemon-reserved instances are excluded
+// because the kernel bind loop excludes them too.
+func riDualClaimedLinuxNames(cfg *config.Config, tunMap map[string]string) map[string]bool {
+	if cfg == nil {
+		return nil
+	}
+	owner := make(map[string]string)
+	multi := make(map[string]bool)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
+			continue
+		}
+		for _, ifaceName := range ri.Interfaces {
+			for _, linuxName := range riMemberLinuxNames(cfg, tunMap, ifaceName) {
+				if linuxName == "" {
+					continue
+				}
+				if prev, exists := owner[linuxName]; exists {
+					if prev != ri.Name {
+						multi[linuxName] = true
+					}
+					continue
+				}
+				owner[linuxName] = ri.Name
+			}
+		}
+	}
+	return multi
 }
 
 // tunnelsWithTheirOwnRIStanza names the tunnel devices whose config carries a

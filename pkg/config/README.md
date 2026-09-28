@@ -709,6 +709,19 @@ split) are NOT rejected; a bare physical interface and one of its units
 across zones ARE (same logical interface). Same fail-closed-on-load
 doctrine as #3043/#2401.
 
+**An interface belongs to exactly one routing instance (#11060):**
+`validateRIDualClaimStrict11060` hard-rejects a config that assigns one
+logical interface to multiple routing instances, naming the member and both
+instances. Without the commit gate, kernel binding and userspace domain
+resolution could select different instances, while the periodic member
+reassert loop moved the kernel link between VRFs on successive ticks. The
+tolerant load/peer-sync path downgrades the rejection to a warning so a
+previously persisted config still boots; the reassert loop leaves every
+multi-claimed Linux device untouched to avoid that periodic flap. Different
+units of one physical interface may still be split across instances (a valid
+VLAN-subinterface split), and an ordinary single-instance member retains its
+existing bind/reassert behavior.
+
 **Backup-router destination family must match the next-hop (#2911):**
 `renderBackupRouter` (`pkg/frr/config_render.go`) keys the static-route
 prefix keyword (`ip` vs `ipv6`) on the NEXT-HOP family (#2891/#2907). An

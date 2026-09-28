@@ -2775,6 +2775,14 @@ type compileOpts struct {
 	// and silently conflated the two — still BOOTS, now with a deterministic
 	// warning. Same doctrine as lenientInterfaceUnitRef (#5933).
 	lenientRIMemberCollision bool
+	// lenientRIDualClaim11060 (#11060) downgrades a routing-instance
+	// interface dual-claim from a hard compile error to a cfg.Warnings entry.
+	// A strict commit must reject one logical interface assigned to two
+	// instances: kernel apply binds last-wins, reassert would otherwise flap
+	// the member between VRFs, and Go/Rust resolve the two claims in opposite
+	// orders. Tolerant load / peer-sync still boots legacy configs with a
+	// warning; the reassert loop skips every multi-claimed device key.
+	lenientRIDualClaim11060 bool
 	// lenientRoutingInstanceType9814 (#9814) downgrades the routing-instance
 	// instance-type value-domain gate (validateRoutingInstanceTypeStrict9814)
 	// from a hard compile error to a cfg.Warnings entry. A mistyped or
@@ -3041,6 +3049,7 @@ func lenientCompileOpts() compileOpts {
 		lenientAddressBookNames:                true,
 		lenientReservedAddressNames:            true,
 		lenientAddressBookNameCollision:        true,
+		lenientRIDualClaim11060:                true,
 		lenientZoneInterfaceMembership:         true,
 		lenientZoneInterfaceDefined:            true,
 		lenientZoneInterfacesNonEmpty:          true,
