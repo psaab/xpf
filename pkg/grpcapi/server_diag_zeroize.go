@@ -1506,6 +1506,16 @@ func beginZeroize(configDir, configBase, archiveDir string, inv ZeroizeLogInvent
 }
 
 func completeZeroize(record zeroizePendingRecord) error {
+	// Record the handoff FIRST: N+1 provisioning is refused until a reboot,
+	// and a crash before the marker removals below must leave the markers
+	// (not a lone clean flag) gating the retry.
+	bootID, err := configstore.CurrentBootID()
+	if err != nil {
+		return fmt.Errorf("zeroize: snapshot boot id for reset handoff: %w", err)
+	}
+	if err := configstore.WriteResetHandoff(bootID, ""); err != nil {
+		return fmt.Errorf("zeroize: %w", err)
+	}
 	loaderMarker := configstore.FactoryResetPendingPath
 	configMarker := filepath.Join(record.ConfigDir, configstore.FactoryResetPendingBase)
 	if filepath.Clean(configMarker) != filepath.Clean(loaderMarker) {

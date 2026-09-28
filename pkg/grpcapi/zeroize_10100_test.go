@@ -382,6 +382,9 @@ func hermeticWipe10100(t *testing.T, root string) (versionsDir string) {
 	origPendingPath := configstore.FactoryResetPendingPath
 	configstore.FactoryResetPendingPath = filepath.Join(root, "etc", "xpf", configstore.Day0ConfigAppliedBase)
 	t.Cleanup(func() { configstore.FactoryResetPendingPath = origPendingPath })
+	origHandoff := configstore.ResetHandoffPath
+	configstore.ResetHandoffPath = filepath.Join(root, "etc", "xpf", ".reset-handoff")
+	t.Cleanup(func() { configstore.ResetHandoffPath = origHandoff })
 	origFRR, origSwan, origK4, origK6 := zeroizeFRRConf, zeroizeSwanctlSnippet, zeroizeKea4Conf, zeroizeKea6Conf
 	origBPF, origND, origVer := zeroizeBPFPinDir, zeroizeNetworkdDir, zeroizeVersionsDir
 	t.Cleanup(func() {

@@ -215,6 +215,15 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 		return nil, errDaemonResetting
 	}
 
+	// #10769 d05-F6: refuse N+1 provisioning while the reset handoff flag
+	// demands a reboot (volatile tenant state clears on reboot) or reports
+	// residue (only another factory reset clears it). Checked under
+	// applySem, before any persistence — same placement as the reset
+	// generation above.
+	if err := configstore.CheckResetHandoff(); err != nil {
+		return nil, err
+	}
+
 	// #5848 generation-bound commit transaction. The #1956 R-8 device-map
 	// pre-flight (reject a candidate whose device-map would strand management on
 	// next boot, while the operator is still connected) and the store promotion
@@ -547,6 +556,13 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		return nil, errDaemonResetting
 	}
 
+	// #10769 d05-F6: refuse N+1 provisioning while the reset handoff flag
+	// demands a reboot or reports residue (same placement as the reset
+	// generation above).
+	if err := configstore.CheckResetHandoff(); err != nil {
+		return nil, err
+	}
+
 	// Pre-sync active config for the #4234 deletion-clear (see commitAndApply).
 	// A peer-pushed config that deletes a policy must drop that policy's synced
 	// sessions on THIS node too; the standby is not primary, so its own clear
@@ -818,6 +834,13 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	// and arms a rollback timer that would re-apply after the wipe).
 	if d.isResetting() {
 		return nil, errDaemonResetting
+	}
+
+	// #10769 d05-F6: refuse N+1 provisioning while the reset handoff flag
+	// demands a reboot or reports residue (same placement as the reset
+	// generation above).
+	if err := configstore.CheckResetHandoff(); err != nil {
+		return nil, err
 	}
 
 	// #5848 generation-bound commit transaction (commit-confirmed variant).

@@ -2,15 +2,14 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
-	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 // applyCloseoutDrainTimeout bounds how long runShutdownSequence waits for an
@@ -479,25 +478,25 @@ func (d *Daemon) runShutdownSequence(wg *sync.WaitGroup, stop func(), runErr err
 	return runErr
 }
 
-// removeResetHelperStateAfterStop unlinks the userspace helper's effective
+// removeResetHelperStateAfterStop sweeps the userspace helper's effective
 // state file after a factory-reset shutdown stopped the helper. The helper
 // writes that file unconditionally on loop exit — after the wipe already
 // erased it — so without this sweep the shutdown recreates the just-erased
 // tenant snapshot. The path resolves exactly as at spawn (operator override
-// or default), so a configured path outside /run/xpf is covered too.
+// or default), so a configured path outside /run/xpf is covered too. Any
+// sweep/verify failure marks the handoff dirty (never a silent warn): the
+// RPC already reported success, so residue must gate N+1 provisioning.
 func (d *Daemon) removeResetHelperStateAfterStop(cfg *config.Config) {
 	path := dpuserspace.StateFilePathForConfig(cfg)
 	if path == "" {
 		return
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		slog.Warn("reset shutdown: cannot remove helper state file; tenant snapshot may survive",
+	if err := sweepHelperStateVerified(path); err != nil {
+		slog.Error("reset shutdown: helper state sweep failed; marking reset handoff dirty",
 			"path", path, "err", err)
-		return
-	}
-	if err := fsatomic.SyncDir(filepath.Dir(path)); err != nil {
-		slog.Warn("reset shutdown: cannot sync helper state directory",
-			"dir", filepath.Dir(path), "err", err)
+		if derr := configstore.MarkResetHandoffDirty(fmt.Sprintf("helper state sweep failed: %v", err)); derr != nil {
+			slog.Error("reset shutdown: cannot mark reset handoff dirty", "err", derr)
+		}
 	}
 }
 

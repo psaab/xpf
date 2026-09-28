@@ -171,6 +171,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		{"manager-init", func(context.Context) error {
 			return d.initManagers(configFailClosed)
 		}},
+		// Converge the reset handoff flag before the dataplane (and helper)
+		// starts: a dirty flag gets a repair sweep while no live writer
+		// exists yet, and a clean post-reboot flag clears. Never fails boot;
+		// enforcement happens at provisioning time.
+		{"reset-handoff-reconcile", func(context.Context) error {
+			d.reconcileResetHandoffAtBoot()
+			return nil
+		}},
 		// #9615: after manager-init so the feed manager exists; an alarm only,
 		// never a refusal to keep the recovered window armed.
 		{"recovered-confirm-preflight", func(context.Context) error {

@@ -99,26 +99,24 @@ func tempInstanceAlive(inst tempWriterInstance) bool {
 	return now == inst.startTime && inst.startTime != 0
 }
 
-// SweepStaleStateTemps removes crash-orphaned state-writer temps for dest,
-// mirroring sweep_stale_temps in userspace-dp/src/state_writer.rs: only
-// siblings named "<dest>.<pid>_<starttime>.<seq>.tmp" whose writer instance
-// is dead are removed; live writers' in-flight temps are returned (never
-// removed) so the caller can fail closed on genuine ambiguity.
-func SweepStaleStateTemps(dest string) (live []string, err error) {
+// ListStaleStateTemps censuses the state-writer temps for dest without
+// removing anything, splitting them into dead-writer orphans and live
+// writers' in-flight files. Backs both the sweep and post-sweep
+// verification so the match rule has one definition.
+func ListStaleStateTemps(dest string) (dead, live []string, err error) {
 	dir := filepath.Dir(dest)
 	base := filepath.Base(dest)
 	if base == "" || base == "." || base == string(filepath.Separator) {
-		return nil, fmt.Errorf("sweep state temps: invalid destination %q", dest)
+		return nil, nil, fmt.Errorf("list state temps: invalid destination %q", dest)
 	}
 	prefix := base + "."
 	entries, rerr := os.ReadDir(dir)
 	if rerr != nil {
 		if os.IsNotExist(rerr) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("sweep state temps in %s: %w", dir, rerr)
+		return nil, nil, fmt.Errorf("list state temps in %s: %w", dir, rerr)
 	}
-	var errs []error
 	for _, entry := range entries {
 		name := entry.Name()
 		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tmp") {
@@ -131,14 +129,30 @@ func SweepStaleStateTemps(dest string) (live []string, err error) {
 		full := filepath.Join(dir, name)
 		if tempInstanceAlive(inst) {
 			live = append(live, full)
-			continue
+		} else {
+			dead = append(dead, full)
 		}
+	}
+	return dead, live, nil
+}
+
+// SweepStaleStateTemps removes crash-orphaned state-writer temps for dest,
+// mirroring sweep_stale_temps in userspace-dp/src/state_writer.rs: only
+// dead-writer orphans are removed; live writers' in-flight temps are
+// returned (never removed) so the caller can fail closed on genuine
+// ambiguity.
+func SweepStaleStateTemps(dest string) (live []string, err error) {
+	dead, live, err := ListStaleStateTemps(dest)
+	if err != nil {
+		return nil, err
+	}
+	var errs []error
+	for _, full := range dead {
 		if rerr := os.Remove(full); rerr != nil && !os.IsNotExist(rerr) {
 			errs = append(errs, fmt.Errorf("sweep stale state temp %s: %w", full, rerr))
 			continue
 		}
-		slog.Info("swept stale orphan helper state temp (dead writer instance)",
-			"temp", full, "pid", inst.pid, "start_time", inst.startTime)
+		slog.Info("swept stale orphan helper state temp (dead writer instance)", "temp", full)
 	}
 	return live, errors.Join(errs...)
 }

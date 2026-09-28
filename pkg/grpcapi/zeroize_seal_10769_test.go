@@ -1073,3 +1073,26 @@ func TestZeroizeRemovePathSyncsSurvivingAncestor10769(t *testing.T) {
 		t.Fatalf("retry never synced surviving ancestor %s (synced=%v)", grandparent, synced)
 	}
 }
+
+func TestPerformZeroizeWritesHandoffFlag10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
+		t.Fatalf("PerformZeroizeWipe: %v", err)
+	}
+	boot, dirty, present, err := configstore.ReadResetHandoff()
+	if err != nil || !present {
+		t.Fatalf("successful wipe must write the handoff flag: present=%v err=%v", present, err)
+	}
+	current, err := configstore.CurrentBootID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boot != current || dirty != "" {
+		t.Fatalf("handoff = boot %q dirty %q, want current boot and clean", boot, dirty)
+	}
+}
