@@ -1764,8 +1764,8 @@ func TestZeroizeEraseHelperStateRefusesReserved10769(t *testing.T) {
 			if !strings.Contains(err.Error(), "aliases reserved") || !strings.Contains(err.Error(), canonical) {
 				t.Fatalf("sweep error must name the reserved alias, got %v", err)
 			}
-			if !strings.Contains(err.Error(), "rerun the reset") {
-				t.Fatalf("sweep error must document the fix-and-rerun recovery, got %v", err)
+			if !strings.Contains(err.Error(), "delete /etc/xpf/.reset-handoff") || !strings.Contains(err.Error(), "rerun the reset") {
+				t.Fatalf("sweep error must document the verify/delete-flag/commit/rerun recovery, got %v", err)
 			}
 			if got, err := os.ReadFile(canonical); err != nil || string(got) != string(body) {
 				t.Fatalf("reserved canonical must survive byte-identical: %q err=%v", got, err)

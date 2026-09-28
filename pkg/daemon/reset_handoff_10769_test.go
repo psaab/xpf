@@ -842,8 +842,8 @@ func TestSweepHelperStateVerifiedRefusesReserved10769(t *testing.T) {
 			if !strings.Contains(err.Error(), "aliases reserved") || !strings.Contains(err.Error(), canonical) {
 				t.Fatalf("sweep error must name the reserved alias, got %v", err)
 			}
-			if !strings.Contains(err.Error(), "rerun the reset") {
-				t.Fatalf("sweep error must document the fix-and-rerun recovery, got %v", err)
+			if !strings.Contains(err.Error(), "delete /etc/xpf/.reset-handoff") || !strings.Contains(err.Error(), "rerun the reset") {
+				t.Fatalf("sweep error must document the verify/delete-flag/commit/rerun recovery, got %v", err)
 			}
 			if got, err := os.ReadFile(canonical); err != nil || string(got) != string(body) {
 				t.Fatalf("reserved canonical must survive byte-identical: %q err=%v", got, err)
@@ -920,8 +920,9 @@ func TestVerifyHelperStateErasedRefusesReserved10769(t *testing.T) {
 
 // RED on revert: reconcile over a flag recording a reserved helper path
 // must keep the handoff dirty — a dirty flag stays dirty and a clean
-// flag re-marks dirty — until the operator fixes state-file and reruns.
-// The reserved file itself is never unlinked by the repair.
+// flag re-marks dirty — until the operator completes the manual
+// recovery (verify, delete the flag, commit a non-reserved state-file)
+// and reruns. The reserved file itself is never unlinked by the repair.
 func TestReconcileKeepsReservedHelperPathDirty10769(t *testing.T) {
 	setup := func(t *testing.T, dirty string) (string, string) {
 		t.Helper()
@@ -1244,4 +1245,182 @@ func TestShutdownRacePathlessFlagStaysGated10769(t *testing.T) {
 			t.Fatalf("gate after manual recovery = %v, want open", err)
 		}
 	})
+}
+
+// End-to-end proof for the SUPPORTED reserved-alias recovery (round-8):
+// in-band commit of the fix is structurally refused while dirty, and no
+// lineage-based path (rescue/rollback/confirm-rollback) can converge
+// since every one carries the same smuggled value - so the operator
+// verifies the reserved file, removes temp residue, deletes the flag
+// file, commits the fix in-band (gate open), and reruns the reset.
+// Phases: legacy-reserved ingress via tolerant SyncApply (real HA-sync
+// provenance) -> first wipe fails recording reserved -> in-band fix
+// refused (dead-end proof) -> manual verify/remove/delete -> in-band
+// commit promotes the fix -> rerun converges clean -> reboot sim clears
+// the gate. The fake wipes preserve the DB (production's real wipe
+// erases it, in which case the fix commit authors the same leaf onto
+// the empty candidate - the gate/delete/rerun mechanics pinned here
+// are identical).
+func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
+	isolateHandoffFlag(t)
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	root := t.TempDir()
+	gateDir := filepath.Join(root, "gates")
+	if err := os.MkdirAll(gateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	reserved := filepath.Join(gateDir, ".reset-handoff")
+	gateBytes := []byte("gate bytes must survive")
+	if err := os.WriteFile(reserved, gateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixed := filepath.Join(root, "run", "xpf", "userspace-dp.json")
+	dbPath := filepath.Join(root, "xpf.conf")
+	store, err := configstore.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Phase 0: legacy ingress. A strict commit of the reserved value
+	// fails (new configs cannot create this state); the tolerant HA-sync
+	// ingress keeps it with a warning (the stranded population).
+	legacy := "system {\n    host-name legacy-reserved;\n    dataplane-type userspace;\n" +
+		"    dataplane {\n        state-file " + reserved + ";\n    }\n}\n"
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadSet("set system dataplane-type userspace\nset system dataplane state-file " + reserved + "\n"); err != nil {
+		t.Fatalf("LoadSet: %v", err)
+	}
+	if _, err := store.Commit(); err == nil {
+		t.Fatal("strict commit of a reserved state-file must fail")
+	} else if !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("strict rejection must name the reserved alias, got %v", err)
+	}
+	store.ExitConfigure()
+	synced, err := store.SyncApply(legacy, nil)
+	if err != nil {
+		t.Fatalf("tolerant ingress must keep the legacy value: %v", err)
+	}
+	if got := synced.System.UserspaceDataplane.StateFile; got != reserved {
+		t.Fatalf("tolerated StateFile = %q, want the legacy reserved path %q", got, reserved)
+	}
+	if joined := strings.Join(synced.Warnings, "\n"); !strings.Contains(joined, "state-file") {
+		t.Fatalf("tolerant ingress must warn about the state-file, got %q", joined)
+	}
+	// Phase 1: the first wipe fails recording the reserved path.
+	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1)}
+	straggler := reserved + ".4250000000.1.tmp"
+	if err := os.WriteFile(straggler, []byte(`{"orphan":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	firstWipe := func() error {
+		boot, err := configstore.CurrentBootID()
+		if err != nil {
+			return err
+		}
+		return configstore.WriteResetHandoff(boot, configstore.ResetHandoffPending, dpuserspace.StateFilePathForConfig(store.ActiveConfig()))
+	}
+	if err := d.factoryReset(context.Background(), firstWipe); err == nil {
+		t.Fatal("first wipe over a reserved alias must fail, got nil")
+	} else if !strings.Contains(err.Error(), "aliases reserved") {
+		t.Fatalf("wipe error must name the reserved alias, got %v", err)
+	}
+	if _, dirty, gotPath, present, err := configstore.ReadResetHandoff(); err != nil || !present || dirty == "" || gotPath != reserved {
+		t.Fatalf("failed wipe must leave dirty recording reserved: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+	}
+	if got, err := os.ReadFile(reserved); err != nil || string(got) != string(gateBytes) {
+		t.Fatalf("reserved file must survive byte-identical: %q err=%v", got, err)
+	}
+	if _, err := os.Lstat(straggler); !os.IsNotExist(err) {
+		t.Fatalf("failed wipe must still sweep temps beside the alias: %v", err)
+	}
+	// Phase 2: in-band fix refused while dirty (the dead end).
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadSet("set system dataplane state-file " + fixed + "\n"); err != nil {
+		t.Fatalf("LoadSet fix: %v", err)
+	}
+	if _, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+		t.Fatalf("in-band fix while dirty = %v, want incomplete", err)
+	}
+	if got := store.ActiveConfig().System.UserspaceDataplane.StateFile; got != reserved {
+		t.Fatalf("refused fix must promote nothing, active StateFile = %q", got)
+	}
+	// Phase 3: manual recovery - verify, remove residue, delete the flag.
+	if got, err := os.ReadFile(reserved); err != nil || string(got) != string(gateBytes) {
+		t.Fatalf("operator must verify correct reserved contents first: %q err=%v", got, err)
+	}
+	fresh := reserved + ".4250000001.1.tmp"
+	if err := os.WriteFile(fresh, []byte(`{"orphan":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(fresh); err != nil {
+		t.Fatalf("operator removes temp residue before deleting the flag: %v", err)
+	}
+	if _, err := os.Lstat(fresh); !os.IsNotExist(err) {
+		t.Fatalf("residue must be gone before flag deletion: %v", err)
+	}
+	if err := os.Remove(configstore.ResetHandoffPath); err != nil {
+		t.Fatalf("delete flag file: %v", err)
+	}
+	if err := configstore.CheckResetHandoff(); err != nil {
+		t.Fatalf("gate after manual flag deletion = %v, want open", err)
+	}
+	// Phase 4: the same in-band commit now promotes the fix.
+	if _, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); errors.Is(err, configstore.ErrResetHandoffDirty) || errors.Is(err, configstore.ErrResetHandoffRebootRequired) {
+		t.Fatalf("fix commit with the gate open must pass the handoff gate, got %v", err)
+	}
+	if got := store.ActiveConfig().System.UserspaceDataplane.StateFile; got != fixed {
+		t.Fatalf("fix commit must promote the fixed path, active = %q", got)
+	}
+	// Phase 5: rerun converges clean recording the fixed path.
+	if err := os.MkdirAll(filepath.Dir(fixed), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixed, []byte(`{"flows":["prior"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rerunWipe := func() error {
+		boot, err := configstore.CurrentBootID()
+		if err != nil {
+			return err
+		}
+		return configstore.WriteResetHandoff(boot, configstore.ResetHandoffPending, dpuserspace.StateFilePathForConfig(store.ActiveConfig()))
+	}
+	if err := d.factoryReset(context.Background(), rerunWipe); err != nil {
+		t.Fatalf("rerun after the fix must converge: %v", err)
+	}
+	if _, dirty, gotPath, present, err := configstore.ReadResetHandoff(); err != nil || !present || dirty != "" || gotPath != fixed {
+		t.Fatalf("rerun must flip clean recording fixed: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+	}
+	if _, err := os.Lstat(fixed); !os.IsNotExist(err) {
+		t.Fatalf("rerun must sweep the recorded fixed path: %v", err)
+	}
+	if got, err := os.ReadFile(reserved); err != nil || string(got) != string(gateBytes) {
+		t.Fatalf("reserved file must survive the rerun byte-identical: %q err=%v", got, err)
+	}
+	// Phase 6: reboot simulation converges the gate on a fresh handle.
+	if err := configstore.WriteResetHandoff("other-boot", "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	freshStore, err := configstore.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := freshStore.Load(); err != nil {
+		t.Fatalf("fresh handle must load the fixed DB: %v", err)
+	}
+	if got := freshStore.ActiveConfig().System.UserspaceDataplane.StateFile; got != fixed {
+		t.Fatalf("fix must be durable across restart, active = %q", got)
+	}
+	d2 := &Daemon{store: freshStore, applySem: semaphore.NewWeighted(1)}
+	d2.reconcileResetHandoffAtBoot()
+	if _, err := os.Lstat(configstore.ResetHandoffPath); !os.IsNotExist(err) {
+		t.Fatalf("converged flag must be cleared: %v", err)
+	}
+	if err := configstore.CheckResetHandoff(); err != nil {
+		t.Fatalf("gate after convergence = %v, want open", err)
+	}
 }

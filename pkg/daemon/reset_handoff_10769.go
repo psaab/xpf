@@ -24,10 +24,12 @@ import (
 // unlinked (unlinking it would delete a gate or identity file, the
 // original bypass), but the sweep FAILS CLOSED: exact-shape temps beside
 // it are still swept, then an error naming the reserved alias fails the
-// wipe and keeps the handoff dirty. Recovery is operator-side: fix
-// `system dataplane state-file` to a non-reserved path, commit, and rerun
-// the reset (the rerun records the fixed path); verify the reserved file
-// still holds its correct contents before clearing anything by hand.
+// wipe and keeps the handoff dirty. Recovery is operator-side (in-band
+// commit is refused while dirty): verify the reserved file holds its
+// correct contents with no helper temps beside it, delete
+// /etc/xpf/.reset-handoff, commit a non-reserved system dataplane
+// state-file, and rerun the reset (the rerun records the fixed path);
+// then reboot as the clean flag requires.
 // Symlinked or hardlinked canonicals fail closed before unlinking
 // (FactoryResetHardlinkError with the inode scan), retry-persistent.
 func sweepHelperStateVerified(path string) error {
@@ -44,7 +46,7 @@ func sweepHelperStateVerified(path string) error {
 	}
 	var errs []error
 	if skipCanonical {
-		errs = append(errs, fmt.Errorf("reset handoff: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); fix system dataplane state-file to a non-reserved path, commit, and rerun the reset", path))
+		errs = append(errs, fmt.Errorf("reset handoff: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); recovery: verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, commit a non-reserved system dataplane state-file, and rerun the reset", path))
 	}
 	// A missing state directory means no helper state was ever written
 	// here: nothing to remove, verify, or sync. A reserved alias still
@@ -121,13 +123,14 @@ const legacyHelperPathRecovery = "reset handoff flag records no helper path (nor
 // anything: the state file plus dead/live temp siblings (legacy included).
 // A reserved canonical FAILS verification: the sweep never unlinks gates
 // or identity, so erasure of that class is unprovable and the handoff
-// must stay dirty until the operator fixes system dataplane state-file
-// to a non-reserved path and reruns the reset. Temp siblings are still
-// checked and joined below.
+// must stay dirty until the operator verifies the reserved file, deletes
+// the flag file, commits a non-reserved state-file, and reruns the
+// reset (in-band commit is refused while dirty). Temp siblings are
+// still checked and joined below.
 func verifyHelperStateErased(path string) error {
 	var errs []error
 	if config.HelperStatePathTouchesReserved(path) {
-		errs = append(errs, fmt.Errorf("helper state path %s aliases reserved reset-gate/identity state: helper-state erasure cannot be verified (the reserved file is never unlinked); fix system dataplane state-file to a non-reserved path, commit, and rerun the reset", path))
+		errs = append(errs, fmt.Errorf("helper state path %s aliases reserved reset-gate/identity state: helper-state erasure cannot be verified (the reserved file is never unlinked); recovery: verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, commit a non-reserved system dataplane state-file, and rerun the reset", path))
 	} else if _, err := os.Lstat(path); err == nil {
 		errs = append(errs, fmt.Errorf("helper state %s present", path))
 	} else if !os.IsNotExist(err) {
