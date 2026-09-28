@@ -675,19 +675,27 @@ Properties:
   these entries identically (peer DstIP never in the admit map); peer-oriented
   2222 flushes in BOTH generations via the unchanged destination branch. The
   only behavior delta is the intended catalogued revocation. `loose=0` stops
-  NEW box-oriented pickup, so only upgrade-time entries linger. Same holds for
-  the TCP client-role exempts excluded by tuple ambiguity with box-originated
+  NEW box-oriented pickup of mid-stream traffic, so passive/listener-only
+  cases linger only as upgrade-time entries — but active TCP originators (FTP
+  active from 20, rsh/explicit-bind clients, anything sourcing fresh SYNs from
+  a fixed sport) form NEW box-oriented entries despite `loose=0`, which blocks
+  mid-stream pickup, not new connections. Same holds for the TCP client-role
+  exempts excluded by tuple ambiguity with box-originated
   control-plane/client traffic: FTP-data 20, BGP 179, rexec/rlogin/rsh
   512/513/514, MSDP 639, LDP-TCP 646. Removal requires stopping/disable the
   ORIGINATOR — not just the listener: established children and client sockets
   originate without listening (FTP-data 20 never listens at all), so verify NO
-  socket (`ss -ltn` AND any-state `ss -tn`), then delete + filtered-verify +
+  socket (`ss -ltn` AND any-state `ss -tan`), then delete + filtered-verify +
   commit per the procedure below. Tightening while the service keeps running
   has its own procedure below (restrict, not decommission). Matcher pins:
   peer-oriented 2222 flushes, box-oriented 2222 and TCP/179 are kept; neither
   appears in any guard DROP. The any-service breadth advisory names this
-  consequence while the stanza is open, and the daemon warns in the journal
-  (count + samples) on any apply that actually keeps such flows.
+  consequence while the stanza is open; the tightening commit itself carries a
+  commit-output warning naming the narrowed scopes whenever stranded flows are
+  observed; and the daemon warns in the journal on applies that keep denied
+  non-catalog customs below the ephemeral floor (TCP also when listener-backed
+  — ephemeral egress, exempts, bare, ranges, WireGuard, and ingress-permitted
+  tuples stay journal-silent).
 - **Race bound: guard-first closes the catalogued Install→flush window; the
   peer-oriented uncovered window is bounded by sweep duration, not packets.**
   The guard installs atomically with the table, before the conntrack sweep, so
@@ -735,14 +743,20 @@ host-inbound. Restart/reboot alone is never sufficient: a restarted daemon
 re-originates the same tuple.
 
 Delete/verify command shapes (run for BOTH `-f ipv4` and `-f ipv6` unless the
-class is single-family; conntrack-tools accepts numeric protos):
+class is single-family; conntrack-tools accepts numeric protos). Stops below
+go through xpf config plus a stopping commit FIRST — every full apply
+regenerates managed daemon configs and reloads, so direct daemon-CLI edits
+are diagnostic-only and temporary (details per row):
 
 - UDP tuple: `conntrack -D -p udp -s <box-ip> --sport <port> -f <fam>`; verify
   `conntrack -L -p udp -s <box-ip> --sport <port> -f <fam>` shows nothing.
+  Socket discovery uses all-state `ss -uan` (never `-lun`: `-l` misses
+  connected UDP senders); add `p` for process attribution.
 - TCP tuple/exempt: `conntrack -D -p tcp -s <box-ip> --sport <port> -f <fam>`;
   verify likewise. Additionally verify NO socket on the port: listeners via
   `ss -ltn sport = :<port>`, any-state (established children, clients) via
-  `ss -tn '( sport = :<port> or dport = :<port> )'` — both must be empty.
+  `ss -tan '( sport = :<port> or dport = :<port> )'` — both must be empty
+  (`-t` alone misses listeners; `-l` alone misses established).
 - Bare IP protocol (no ports; `--sport` does not apply): `conntrack -D -p
   <num> -s <box-ip> -f <fam>` with 89 OSPF, 103 PIM, 112 VRRP, 47 GRE, 2 IGMP
   (covers DVMRP, carried inside IGMP), 46 RSVP, 113 PGM, 54 NHRP; verify with
@@ -757,31 +771,31 @@ Per-class originators, stop actions, and recurrence timers:
 
 | Class | Tuple | Originator on this appliance | Stop/disable action | Recurrence timer |
 |---|---|---|---|---|
-| BFD | UDP 3784/3785/4784 | FRR bfdd (one global daemon; every peer shares the sports) | remove/disable EVERY BFD peer on the tuple, or shutdown bfdd — one peer is not enough | sub-second hellos (300ms x3 detect default) |
-| RIP | UDP 520, mcast 224.0.0.9 | FRR ripd | `no router rip` / remove neighbors | 30s updates |
-| RIPng | UDP 521, mcast ff02::9 | no xpf-managed ripngd in-tree | stop any third-party ripngd (identify via `ss -lun sport = :521`) | 30s if present |
-| SAP | UDP 9875 | none in-tree | identify via `ss -lun sport = :9875`, stop the announcer | announce interval (minutes) if present |
+| BFD | UDP 3784/3785/4784 | FRR bfdd (one global daemon; every peer shares the sports) | remove `bfd-liveness-detection` from EVERY xpf interface/group stanza + stopping commit — one peer is not enough; direct vtysh peer removal is temporary (next commit regenerates) | sub-second hellos (300ms x3 detect default) |
+| RIP | UDP 520, mcast 224.0.0.9 | FRR ripd | delete/deactivate `protocols rip` (or the neighbor/interface) + stopping commit; direct `no router rip` in vtysh is temporary (next commit regenerates) | 30s updates |
+| RIPng | UDP 521, mcast ff02::9 | no xpf-managed ripngd in-tree | stop any third-party ripngd (identify via `ss -uan sport = :521`) | 30s if present |
+| SAP | UDP 9875 | none in-tree | identify via `ss -uan sport = :9875`, stop the announcer | announce interval (minutes) if present |
 | LDP-UDP | UDP 646 | none in-tree (no FRR ldpd render) | identify via socket/conntrack, stop it | 5s/15s hellos if present |
-| DHCPv4 | UDP 67/68 | xpfd native dhcp.Manager client; Kea server/relay roles | delete the `dhcp` stanza (commit stops the client); disable Kea server/relay if configured | T1 renewals (lease-dependent, typically hours) |
-| DHCPv6 | UDP 546/547 | xpfd native dhcp.Manager | delete the `dhcpv6` stanza | T1/rebind (hours) |
-| NTP | UDP 123 | chrony (appliance NTP; `system ntp server` renders its sources) | remove `system ntp server` lines (commit reloads chrony) and/or stop chronyd; confirm no sport-123 socket (`ss -lun sport = :123`) to catch any non-chrony sender | polls 64–1024s |
-| OSPF/OSPFv3 | proto 89, mcast .5/.6 + ff02::5/6 | FRR ospfd/ospf6d | remove the area/interface, set `passive`, or down the protocol | 10s hellos |
+| DHCPv4 | UDP 67/68 | xpfd native dhcp.Manager client; Kea DHCP server; xpfd-native dhcprelay relay | delete the interface `dhcp` stanza (commit stops the client); disable `system services dhcp-local-server` groups and `forwarding-options dhcp-relay` + stopping commit | T1 renewals (lease-dependent, typically hours) |
+| DHCPv6 | UDP 546/547 | xpfd native dhcp.Manager client; Kea `system services dhcpv6-local-server`; xpfd-native relay (`forwarding-options dhcp-relay dhcpv6`, binds 547) | delete the `dhcpv6` stanza AND disable the local-server groups AND the relay + stopping commit — the stanza alone leaves server/relay sockets originating | T1/rebind (hours) |
+| NTP | UDP 123 | chrony (appliance NTP; `system ntp server` renders its sources) | remove `system ntp server` lines (commit reloads chrony) and/or stop chronyd; confirm no sport-123 socket in any state (`ss -uan sport = :123`) to catch any non-chrony sender | polls 64–1024s |
+| OSPF/OSPFv3 | proto 89, mcast .5/.6 + ff02::5/6 | FRR ospfd/ospf6d | delete/deactivate `protocols ospf`/`ospf3` (area/interface, or `passive`) + stopping commit; direct vtysh removal is temporary | 10s hellos |
 | PIM | proto 103, mcast .13 + ff02::d | none in-tree | identify + stop | 30s hellos if present |
-| VRRP | proto 112, mcast .18 + ff02::12 | xpfd native VRRP instances | delete/down the vrrp-group (VIP) | 1s adverts |
-| GRE | proto 47 | gr- tunnel units | delete/disable the tunnel unit | data-driven (no hello to quote) |
-| IGMP | proto 2 | kernel reports on group joins (no daemon) | leave groups (`ip maddr del <group> dev <if>` for manual joins; stopping the joining socket/daemon leaves the rest) | query-driven |
+| VRRP | proto 112, mcast .18 + ff02::12 | xpfd native VRRP instances | delete/down the vrrp-group (VIP) + stopping commit | 1s adverts |
+| GRE | proto 47 | gr- tunnel units | delete/disable the tunnel unit + stopping commit | data-driven (no hello to quote) |
+| IGMP | proto 2 | kernel reports on group joins (no daemon) | leave via the joining owner: stop the daemon/socket that joined (manual IP joins always have an owning socket — `ip maddr del` manages only static L2 entries and canNOT drop IP membership); verify `ip maddr show dev <if>` shows no group | query-driven |
 | DVMRP | proto 2 (in IGMP), mcast .4 | none in-tree | same as IGMP + identify | — |
 | RSVP | proto 46 | none in-tree | identify + stop | 30s refresh if present |
 | PGM | proto 113 | none in-tree | identify + stop | — |
 | NHRP | proto 54 | none in-tree | identify + stop | registration timers if present |
 | traceroute range | UDP 33434–33523 | operator-initiated probes (no daemon) | stop probing | N/A (manual) |
 | custom UDP | UDP \<port\> | listener / explicit-bind client | stop both; any NEW box datagram from the sport recreates the entry | app-driven |
-| custom TCP | TCP \<port\> | listener / explicit-bind client | stop listener + verify no socket (`ss -ltn` AND `ss -tn`); no reformation after delete (`loose=0`) | — (close/timeout only) |
-| FTP-data 20 | TCP 20 | FTP server active transfers (never listens) | disable active FTP / stop transfers; verify `ss -tn sport = :20` empty | transfer-driven |
-| BGP 179 | TCP 179 | FRR bgpd sessions + listener | shut down BGP sessions (`neighbor <peer> shutdown`) or stop bgpd — listener-stop alone leaves established children originating | 60s keepalives / 180s hold |
-| rsh 512–514 | TCP 512/513/514 | rshd servers + rsh clients (privileged sport bind) | stop server AND clients | session-driven |
-| MSDP 639 | TCP 639 | none in-tree | identify + stop | 60s keepalives if present |
-| LDP-TCP 646 | TCP 646 | none in-tree (no FRR ldpd render) | identify + stop | session-driven if present |
+| custom TCP | TCP \<port\> | listener / explicit-bind client | stop listener + verify no socket (`ss -ltn` AND `ss -tan`); no reformation ONLY if nothing originates new SYNs from the sport (`loose=0` blocks mid-stream pickup, not new SYNs) — re-verify after one app interval, hunt reformers via `ss -tnp` | — (close/idle-timeout only if truly passive) |
+| FTP-data 20 | TCP 20 | FTP server active transfers (never listens) | disable active FTP / stop transfers; verify `ss -tan sport = :20` empty; re-verify (active originators reform on next transfer) | transfer-driven |
+| BGP 179 | TCP 179 | FRR bgpd sessions + listener | delete/deactivate the `protocols bgp` neighbor/group + stopping commit (direct `neighbor shutdown` in vtysh is temporary); standard sessions use ephemeral source so fixed-sport entries are pickup/upgrade artifacts — still re-verify after one hold interval, hunt reformers via `ss -tnp` | 60s keepalives / 180s hold |
+| rsh 512–514 | TCP 512/513/514 | rshd servers + rsh clients (privileged sport bind) | stop server AND clients (clients reform on every new connection); verify `ss -tan` empty both directions | session-driven |
+| MSDP 639 | TCP 639 | none in-tree | identify + stop; re-verify (session-driven reformers possible) | 60s keepalives if present |
+| LDP-TCP 646 | TCP 646 | none in-tree (no FRR ldpd render) | identify + stop; re-verify | session-driven if present |
 
 Why this holds. Unicast: with no origination there is no box-oriented entry
 to ride, and a peer-only packet afterwards is NEW (or briefly UNREPLIED) and
@@ -804,12 +818,22 @@ the flush and, with active traffic, rides the reply accept indefinitely to
 the still-listening service. Per affected (box, proto, port): list
 box-oriented entries (`conntrack -L -p <tcp|udp> -s <box-ip> --sport <port>
 -f <fam>`), delete them (`conntrack -D` with the same filters), verify empty,
-then commit. TCP cannot reform afterwards (`loose=0` blocks mid-stream
-pickup); UDP/bare WILL reform on the next box-originated datagram, so for
-those either stop the originator too or keep the host-inbound. The
-any-service breadth advisory names this consequence while the stanza is open,
-and the daemon warns in the journal (count + samples) on any apply that
-actually keeps such flows.
+then commit. Durability after delete depends on origination, not on TCP-vs-UDP
+alone: a passive/listener-only custom TCP service with no socket left (`ss
+-ltn` AND `ss -tan` empty) cannot reform — `loose=0` blocks mid-stream pickup
+and nothing sends new SYNs. But any TCP originator that sends fresh SYNs from
+a fixed sport reforms immediately despite `loose=0` (which blocks only
+mid-stream pickup, not new connections): FTP active transfers from 20,
+explicit-bind clients, rsh clients binding 512–514, and any process `ss -tnp`
+shows sourcing the port. For those, stop/disable the outbound origination
+through commit (same disjunction as UDP/bare: stop it or keep the
+host-inbound), then delete + verify + re-verify after one app interval. The
+any-service breadth advisory names this consequence while the stanza is open;
+the tightening commit itself carries a commit-output warning naming the
+narrowed scopes whenever stranded flows are observed; and the daemon warns in
+the journal on applies that keep denied non-catalog customs below the
+ephemeral floor (TCP also when listener-backed — ephemeral egress, exempts,
+bare, ranges, WireGuard, and ingress-permitted tuples stay journal-silent).
 
 
 ### Revocation failure is retried, counted, and published (#6802)

@@ -24,8 +24,10 @@ func hostInboundFullAdmitWarnings(cfg *Config) []string {
 // on the breadth advisory: an any-service stanza warns not only about current
 // breadth but about the later-tightening consequence (custom-port box-oriented
 // flows linger until close/timeout) with a pointer to the procedure. RED if
-// the sentence is dropped; the tightened (named-services) stanza stays quiet
-// since commit validation sees only the new config, never the transition.
+// the sentence is dropped. Validation itself stays quiet on the tightened
+// stanza (new-config-only, never the transition) — the tightening commit's
+// own warning is projected by the daemon funnel instead (see
+// TestApplyAndSyncCommittedWarnsTighteningStranded10752).
 func TestAnyServiceAdvisoryNamesTighteningStaleness10752(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24",
