@@ -821,6 +821,11 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		slog.Warn("failed to delete obsolete host-inbound gap fence after successful real install",
 			"err", err)
 	}
+	// #10752: the nft install guarantees conntrack is loaded, so re-establish
+	// loose=0 here to close the early-boot race where the boot-time write hit
+	// an unloaded module. Verified + counted; a manual revert converges on
+	// the next successful apply.
+	d.reassertTCPloosePosture()
 	// #5566: reconcile Linux netfilter conntrack against the just-applied
 	// host-inbound set. The early reply-direction established accept precedes
 	// the per-zone coarse drops, while original-direction established traffic
