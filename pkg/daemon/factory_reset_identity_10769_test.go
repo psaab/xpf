@@ -330,3 +330,39 @@ func TestFactoryResetSkipsKernelRestoreWhenSnapshotFails10769(t *testing.T) {
 		t.Fatal("no kernel restore may run without a snapshot")
 	}
 }
+
+// TestFactoryResetFailsWhenStateTempsReappear10769 pins the post-wipe temp
+// re-verification: exact-shape fsatomic temps recreated in the
+// erase→verify window must fail the reset (never silent success), be
+// repaired by re-running the idempotent erasures, and converge on retry.
+func TestFactoryResetFailsWhenStateTempsReappear10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	temps := []string{
+		filepath.Join(filepath.Dir(resetDDNSLeaseStatePath), "."+filepath.Base(resetDDNSLeaseStatePath)+".tmp-1"),
+		filepath.Join(filepath.Dir(resetIPsecStatePath), "."+filepath.Base(resetIPsecStatePath)+".tmp-1"),
+	}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	err := d.factoryReset(context.Background(), func() error {
+		for _, temp := range temps {
+			if err := os.MkdirAll(filepath.Dir(temp), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(temp, []byte("recreated temp"), 0o600); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "reappeared") {
+		t.Fatalf("recreated temps must fail the reset, got %v", err)
+	}
+	for _, temp := range temps {
+		if _, serr := os.Lstat(temp); !os.IsNotExist(serr) {
+			t.Fatalf("reappeared temp %s must be re-erased before the failure returns: %v", temp, serr)
+		}
+	}
+	if err := d.factoryReset(context.Background(), func() error { return nil }); err != nil {
+		t.Fatalf("retry after a repaired temp failure must converge: %v", err)
+	}
+}

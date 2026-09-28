@@ -276,6 +276,47 @@ func verifyKeaLeasesErasedForReset() error {
 	return nil
 }
 
+// verifyStateTempsErasedForReset re-checks the DDNS/IPsec crash-temp sets
+// after the wipe reports success, mirroring the Kea lease re-verification:
+// a temp recreated in the sweep→success window must fail the reset, not
+// survive silently beside a clean receipt.
+func verifyStateTempsErasedForReset() error {
+	var errs []error
+	if temps, err := ddns.ListCrashTemps(resetDDNSLeaseStatePath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("factory reset: DDNS crash temps reappeared after the wipe: %v", temps))
+	}
+	if temps, err := ddns.ListCrashTemps(resetDDNSSurfaceAPath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("factory reset: DDNS crash temps reappeared after the wipe: %v", temps))
+	}
+	if temps, err := ipsec.ListCrashTemps(resetIPsecStatePath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("factory reset: IPsec crash temps reappeared after the wipe: %v", temps))
+	}
+	return errors.Join(errs...)
+}
+
+// eraseStateTempsForReset re-runs the idempotent state erasures to repair a
+// temp reappearance. A reappeared RECORD (not just a temp) fails the erase
+// check loudly — that is a fence breach, not a repairable race.
+func eraseStateTempsForReset() error {
+	var errs []error
+	if err := ddns.EraseStateIfEmpty(resetDDNSLeaseStatePath); err != nil {
+		errs = append(errs, err)
+	}
+	if err := ddns.EraseStateIfEmpty(resetDDNSSurfaceAPath); err != nil {
+		errs = append(errs, err)
+	}
+	if err := ipsec.EraseConnStateIfEmpty(resetIPsecStatePath); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
 // eraseKeaLeasesForReset removes any Kea lease files present, syncing their
 // parents. It runs only to repair a post-wipe reappearance before the reset
 // reports failure: with the pending markers already cleared and the config
@@ -500,6 +541,21 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 				markResetHandoffDirtyQuiet("kea leases reappeared after re-erase: " + rerr.Error())
 			} else {
 				verifyErr = errors.Join(verifyErr, kerr)
+			}
+		}
+		if terr := verifyStateTempsErasedForReset(); terr != nil {
+			// Same marker-gone reasoning as Kea: re-run the idempotent
+			// state erasures (which re-sweep temps) and re-verify. The
+			// reset still reports failure; unrepaired residue marks the
+			// handoff dirty.
+			if rerr := eraseStateTempsForReset(); rerr != nil {
+				verifyErr = errors.Join(verifyErr, terr, rerr)
+				markResetHandoffDirtyQuiet("state temp re-erase failed: " + rerr.Error())
+			} else if rerr := verifyStateTempsErasedForReset(); rerr != nil {
+				verifyErr = errors.Join(verifyErr, terr, rerr)
+				markResetHandoffDirtyQuiet("state temps reappeared after re-erase: " + rerr.Error())
+			} else {
+				verifyErr = errors.Join(verifyErr, terr)
 			}
 		}
 	}
