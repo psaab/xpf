@@ -21,18 +21,16 @@ func TestBuildSSHDConfigKeyExchange(t *testing.T) {
 		ssh  *config.SSHServiceConfig
 		want []string // substrings that must be present
 		not  []string // substrings that must be absent
-		// empty=true means buildSSHDConfig must return ""
-		empty bool
 	}{
 		{
-			name:  "nil",
-			ssh:   nil,
-			empty: true,
+			name: "nil",
+			ssh:  nil,
+			want: []string{"MaxAuthTries 3", "LoginGraceTime 30", "PermitEmptyPasswords no"},
 		},
 		{
-			name:  "no-settings",
-			ssh:   &config.SSHServiceConfig{},
-			empty: true,
+			name: "no-settings",
+			ssh:  &config.SSHServiceConfig{},
+			want: []string{"MaxAuthTries 3", "LoginGraceTime 30", "PermitEmptyPasswords no"},
 		},
 		{
 			name: "key-exchange-only",
@@ -66,12 +64,6 @@ func TestBuildSSHDConfigKeyExchange(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := buildSSHDConfig(tt.ssh)
-			if tt.empty {
-				if got != "" {
-					t.Fatalf("buildSSHDConfig = %q, want empty", got)
-				}
-				return
-			}
 			if got == "" {
 				t.Fatalf("buildSSHDConfig = empty, want content")
 			}
@@ -203,71 +195,74 @@ func sshConfig(ssh *config.SSHServiceConfig) *config.Config {
 	return cfg
 }
 
-// TestApplySSHConfig_RemoveOnConfigRemoved verifies that deleting the whole ssh
-// stanza removes a previously-written drop-in and reloads sshd so it reverts to
-// base-image defaults (#2062 gap 1). Fails pre-fix: the old applySSHConfig
-// returned early on a nil ssh stanza, leaving the drop-in in place.
-func TestApplySSHConfig_RemoveOnConfigRemoved(t *testing.T) {
+// TestApplySSHConfig_ConfigRemovedKeepsAuthBounds verifies that removing the
+// SSH stanza withdraws operator choices but does not withdraw the mandatory
+// attempt limits (#10825).
+func TestApplySSHConfig_ConfigRemovedKeepsAuthBounds(t *testing.T) {
 	r := &sshdSeamRecorder{present: []byte("# Managed by xpf\nPermitRootLogin no\n")}
-	installSSHDSeam(t, r)
-
-	d := &Daemon{}
-	d.applySSHConfig(sshConfig(nil)) // ssh stanza gone
-
-	if r.present != nil {
-		t.Fatalf("drop-in still present after config removed: %q", r.present)
-	}
-	if r.removed != 1 {
-		t.Errorf("Remove called %d times, want 1", r.removed)
-	}
-	if r.reloads != 1 {
-		t.Errorf("reload called %d times, want 1", r.reloads)
-	}
-	if len(r.writes) != 0 {
-		t.Errorf("unexpected writes on removal: %v", r.writes)
-	}
-}
-
-// TestApplySSHConfig_RemoveOnConfigEmptied verifies that an ssh stanza with no
-// recognised leaves (buildSSHDConfig == "") removes the existing drop-in and
-// reloads (#2062 gap 1). Fails pre-fix: the old code returned early when
-// content=="" without touching the drop-in.
-func TestApplySSHConfig_RemoveOnConfigEmptied(t *testing.T) {
-	r := &sshdSeamRecorder{present: []byte("# Managed by xpf\nKexAlgorithms curve25519-sha256\n")}
-	installSSHDSeam(t, r)
-
-	d := &Daemon{}
-	d.applySSHConfig(sshConfig(&config.SSHServiceConfig{})) // no leaves
-
-	if r.present != nil {
-		t.Fatalf("drop-in still present after config emptied: %q", r.present)
-	}
-	if r.removed != 1 {
-		t.Errorf("Remove called %d times, want 1", r.removed)
-	}
-	if r.reloads != 1 {
-		t.Errorf("reload called %d times, want 1", r.reloads)
-	}
-}
-
-// TestApplySSHConfig_NoOpWhenEmptyAndAbsent verifies that an empty config with
-// no existing drop-in does nothing: no remove, no reload (#2062). Fails if the
-// remove/reload path runs unconditionally when content=="".
-func TestApplySSHConfig_NoOpWhenEmptyAndAbsent(t *testing.T) {
-	r := &sshdSeamRecorder{present: nil} // no drop-in on disk
 	installSSHDSeam(t, r)
 
 	d := &Daemon{}
 	d.applySSHConfig(sshConfig(nil))
 
+	want := buildSSHDConfig(nil)
+	if string(r.present) != want {
+		t.Fatalf("drop-in after config removal = %q, want mandatory bounds:\n%s", r.present, want)
+	}
 	if r.removed != 0 {
-		t.Errorf("spurious Remove: %d", r.removed)
+		t.Errorf("Remove called %d times, want 0", r.removed)
 	}
-	if r.reloads != 0 {
-		t.Errorf("spurious reload: %d", r.reloads)
+	if r.reloads != 1 {
+		t.Errorf("reload called %d times, want 1", r.reloads)
 	}
-	if len(r.writes) != 0 {
-		t.Errorf("spurious writes: %v", r.writes)
+	if len(r.writes) != 1 {
+		t.Errorf("writes = %d, want one update from operator choices to baseline bounds", len(r.writes))
+	}
+}
+
+// TestApplySSHConfig_ConfigEmptiedKeepsAuthBounds verifies that an empty SSH
+// stanza removes user-selected settings but retains the mandatory attempt
+// limits (#10825).
+func TestApplySSHConfig_ConfigEmptiedKeepsAuthBounds(t *testing.T) {
+	r := &sshdSeamRecorder{present: []byte("# Managed by xpf\nKexAlgorithms curve25519-sha256\n")}
+	installSSHDSeam(t, r)
+
+	d := &Daemon{}
+	d.applySSHConfig(sshConfig(&config.SSHServiceConfig{}))
+
+	want := buildSSHDConfig(&config.SSHServiceConfig{})
+	if string(r.present) != want {
+		t.Fatalf("drop-in after config empty = %q, want mandatory bounds:\n%s", r.present, want)
+	}
+	if r.removed != 0 {
+		t.Errorf("Remove called %d times, want 0", r.removed)
+	}
+	if r.reloads != 1 {
+		t.Errorf("reload called %d times, want 1", r.reloads)
+	}
+}
+
+// TestApplySSHConfig_InstallsBoundsWhenEmptyAndAbsent ensures a base image
+// with no existing xpf drop-in still receives the limits even if the operator
+// never configured an SSH stanza (#10825).
+func TestApplySSHConfig_InstallsBoundsWhenEmptyAndAbsent(t *testing.T) {
+	r := &sshdSeamRecorder{present: nil}
+	installSSHDSeam(t, r)
+
+	d := &Daemon{}
+	d.applySSHConfig(sshConfig(nil))
+
+	if string(r.present) != buildSSHDConfig(nil) {
+		t.Fatalf("sshd drop-in = %q, want mandatory auth bounds:\n%s", r.present, buildSSHDConfig(nil))
+	}
+	if r.removed != 0 {
+		t.Errorf("Remove called %d times, want 0", r.removed)
+	}
+	if r.reloads != 1 {
+		t.Errorf("reloads = %d, want one initial baseline install", r.reloads)
+	}
+	if len(r.writes) != 1 {
+		t.Errorf("writes = %d, want one baseline install", len(r.writes))
 	}
 }
 

@@ -218,7 +218,7 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 			len(description), maxCommitDescriptionBytes)
 	}
 
-	compiled, err := s.compileTree(s.candidate)
+	committedTree, compiled, err := s.compileAuthSafeCandidate(s.candidate)
 	if err != nil {
 		return nil, fmt.Errorf("commit check failed: %w", err)
 	}
@@ -244,7 +244,7 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 	// — whereas C is already the durable content, so converging to it needs
 	// no further write to hold the invariant.
 	resolutionDrained := false
-	if err := s.writeActive(s.candidate); err != nil {
+	if err := s.writeActive(committedTree); err != nil {
 		if !isPostRenameDurabilityFailure(err) {
 			return nil, fmt.Errorf("commit failed: persist active config: %w", err)
 		}
@@ -285,7 +285,7 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 	})
 
 	// Promote candidate to active
-	s.active = s.candidate
+	s.active = committedTree
 	s.candidate = s.active.Clone()
 	s.bumpCandidatePromotionLocked() // #5848: fresh candidate retains apply lineage
 	s.compiled = compiled
@@ -517,7 +517,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 		return nil, fmt.Errorf("not in configuration mode")
 	}
 
-	compiled, err := s.compileTree(s.candidate)
+	committedTree, compiled, err := s.compileAuthSafeCandidate(s.candidate)
 	if err != nil {
 		return nil, fmt.Errorf("commit check failed: %w", err)
 	}
@@ -603,7 +603,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 			ArmedBootID:      "00000000-0000-0000-0000-000000000000",
 			PrevTree:         prevTree,
 			FirstCommit:      prevFirst,
-			GuardedHash:      guardedConfigHash(s.candidate),
+			GuardedHash:      guardedConfigHash(committedTree),
 			PreviousHash:     previousHash,
 			PreviousDeadline: widestConfirmDeadline,
 			Resolved:         true,
@@ -616,7 +616,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 			ArmedBootID:      armBootID,
 			PrevTree:         prevTree,
 			FirstCommit:      prevFirst,
-			GuardedHash:      guardedConfigHash(s.candidate),
+			GuardedHash:      guardedConfigHash(committedTree),
 			PreviousHash:     previousHash,
 			PreviousDeadline: previousDeadline,
 		}
@@ -628,7 +628,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 		}
 	}
 	runCommitConfirmedCrashHook(commitConfirmedStageRecord)
-	if err := s.writeActive(s.candidate); err != nil {
+	if err := s.writeActive(committedTree); err != nil {
 		if !isPostRenameDurabilityFailure(err) {
 			if s.confirmTimer == nil && !s.confirmResolvePendingPersist {
 				s.resolveConfirmRemovalLocked("commit_confirmed_active_reject")
@@ -697,7 +697,7 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 	})
 
 	// Promote candidate to active
-	s.active = s.candidate
+	s.active = committedTree
 	s.candidate = s.active.Clone()
 	s.bumpCandidatePromotionLocked() // #5848: fresh candidate retains apply lineage
 	s.compiled = compiled

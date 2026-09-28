@@ -891,15 +891,15 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 }
 
 // buildSSHDConfig renders the xpf-managed sshd drop-in body from the SSH
-// service config, or "" when there is nothing to manage. Each setting is an
-// independent line: root-login → PermitRootLogin, key-exchange → KexAlgorithms
-// (H5, #2008). sshd validates algorithm spellings at reload, so xpf does not
-// enum-check the key-exchange list.
+// service config. Authentication-attempt bounds are unconditional, including
+// when the SSH stanza is absent, so a base-image/default config cannot leave
+// the network login surface unbounded (#10825). User-selected settings are
+// then appended independently: root-login → PermitRootLogin, key-exchange →
+// KexAlgorithms (H5, #2008). sshd validates algorithm spellings at reload.
 // filterSSHAlgorithms drops any token that is not a safe OpenSSH algorithm
 // name (config.ValidateSSHAlgorithm), the render-side belt for #4902. Only the
 // injection/breakage shape (comma/space/control char) is filtered; sshd still
-// owns the actual algorithm-spelling check at reload. A dropped token is logged
-// so an operator can see why a leniently-loaded value did not take effect.
+// owns the actual algorithm-spelling check at reload.
 func filterSSHAlgorithms(in []string) []string {
 	out := in[:0:0]
 	for _, tok := range in {
@@ -914,9 +914,16 @@ func filterSSHAlgorithms(in []string) []string {
 
 func buildSSHDConfig(ssh *config.SSHServiceConfig) string {
 	if ssh == nil {
-		return ""
+		ssh = &config.SSHServiceConfig{}
 	}
-	var lines []string
+	// These bounds are not operator knobs: leaving them absent would restore
+	// OpenSSH/base-image defaults on an appliance that never configured
+	// `system services ssh`.
+	lines := []string{
+		"MaxAuthTries 3",
+		"LoginGraceTime 30",
+		"PermitEmptyPasswords no",
+	}
 	if ssh.RootLogin != "" {
 		var permitRoot string
 		switch ssh.RootLogin {

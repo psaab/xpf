@@ -61,5 +61,9 @@ xpf (0.0.0) unstable; urgency=medium
     capability changes, and clear superseded alarms only after current active
     config succeeds; preserve local convergence after peer-only push failures
     (#10782).
+  * Throttle REST authentication failures per source and account, harden SSH
+    password login, and hash configured API-auth secrets (#10825).
+  * Scope API-auth identities by login class and UTC expiry, require HTTPS for
+    credentials, and migrate persisted credentials to bcrypt verifiers (#10826).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

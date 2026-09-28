@@ -161,9 +161,14 @@ func TestSetRepeatedArchiveSites(t *testing.T) {
 // distinct siblings and the compiler reads every one. RED on revert:
 // collapsed to the last key.
 func TestSetRepeatedAPIKeys(t *testing.T) {
+	const (
+		alpha = "machine-generated-key-alpha"
+		bravo = "machine-generated-key-bravo"
+	)
 	tree := buildTree(t, []string{
-		"set system services web-management api-auth api-key key-alpha",
-		"set system services web-management api-auth api-key key-bravo",
+		"set system services web-management api-auth expires 2099-01-01",
+		"set system services web-management api-auth api-key " + alpha,
+		"set system services web-management api-auth api-key " + bravo,
 	})
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -175,10 +180,10 @@ func TestSetRepeatedAPIKeys(t *testing.T) {
 	}
 	keys := cfg.System.Services.WebManagement.APIAuth.APIKeys
 	if len(keys) != 2 {
-		t.Fatalf("APIKeys = %v, want 2 (SetPath collapsed the repeated leaf)", keys)
+		t.Fatalf("APIKeys has %d rows, want 2 (SetPath collapsed the repeated leaf)", len(keys))
 	}
-	if string(keys[0]) != "key-alpha" || string(keys[1]) != "key-bravo" {
-		t.Errorf("APIKeys = [%q %q], want [key-alpha key-bravo]", keys[0], keys[1])
+	if !VerifyAPIAuthSecret(keys[0].Reveal(), alpha) || !VerifyAPIAuthSecret(keys[1].Reveal(), bravo) {
+		t.Errorf("repeated keys compiled without usable verifier for each slot")
 	}
 }
 

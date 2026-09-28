@@ -41,7 +41,7 @@ func TestAuthorizeDecisionMatrix_5561(t *testing.T) {
 		name     string
 		p        Principal
 		required config.LoginClassPermission
-		wantErr  string // "" = authorized; otherwise a substring of the denial
+		wantDeny bool // require a denial without pinning the reason's wording
 	}{
 		{
 			name:     "root is authorized for the destructive tier",
@@ -49,15 +49,21 @@ func TestAuthorizeDecisionMatrix_5561(t *testing.T) {
 			required: config.PermMaint,
 		},
 		{
-			name:     "api-auth credential is authorized for the destructive tier",
-			p:        CredentialPrincipal("webadmin"),
+			name:     "API credential defaults to read-only",
+			p:        CredentialPrincipal("view-key", "read-only"),
+			required: config.PermMaint,
+			wantDeny: true,
+		},
+		{
+			name:     "API credential can receive explicit maintenance class",
+			p:        CredentialPrincipal("maint-key", "super-user"),
 			required: config.PermMaint,
 		},
 		{
 			name:     "no identity is denied even for the view tier",
 			p:        Unauthenticated("connection carries no local peer identity"),
 			required: config.PermView,
-			wantErr:  "could not establish who is calling",
+			wantDeny: true,
 		},
 		{
 			name:     "read-only holds view",
@@ -68,13 +74,13 @@ func TestAuthorizeDecisionMatrix_5561(t *testing.T) {
 			name:     "read-only does not hold configure",
 			p:        Principal{Source: SourcePeerUID, UID: 4242, Username: "opsuser", Class: "read-only"},
 			required: config.PermConfig,
-			wantErr:  "lacks the configure permission",
+			wantDeny: true,
 		},
 		{
 			name:     "operator does not hold maintenance",
 			p:        Principal{Source: SourcePeerUID, UID: 4245, Username: "op", Class: "operator"},
 			required: config.PermMaint,
-			wantErr:  "lacks the maintenance permission",
+			wantDeny: true,
 		},
 		{
 			name:     "operator holds clear",
@@ -95,41 +101,35 @@ func TestAuthorizeDecisionMatrix_5561(t *testing.T) {
 			name:     "a custom class is denied a permission it was not mapped",
 			p:        Principal{Source: SourcePeerUID, UID: 4246, Username: "customuser", Class: "netops"},
 			required: config.PermConfig,
-			wantErr:  "lacks the configure permission",
+			wantDeny: true,
 		},
 		{
 			name:     "an unknown class is denied rather than treated as empty",
 			p:        Principal{Source: SourcePeerUID, UID: 4247, Username: "ghostclass", Class: "does-not-exist"},
 			required: config.PermView,
-			wantErr:  "unknown login class",
+			wantDeny: true,
 		},
 		{
 			name:     "a peer with no class is denied",
 			p:        Principal{Source: SourcePeerUID, UID: 4244, Username: "stranger"},
 			required: config.PermView,
-			wantErr:  "not a configured `system login user`",
+			wantDeny: true,
 		},
 		{
 			name:     "the unauthorized class holds nothing",
 			p:        Principal{Source: SourcePeerUID, UID: 4248, Username: "u", Class: "unauthorized"},
 			required: config.PermView,
-			wantErr:  "lacks the view permission",
+			wantDeny: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := Authorize(cfg, tc.p, tc.required)
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("Authorize denied an authorized principal: %v", err)
-				}
-				return
+			if err == nil && tc.wantDeny {
+				t.Fatalf("Authorize admitted %s for %s; want a denial",
+					tc.p, PermissionName(tc.required))
 			}
-			if err == nil {
-				t.Fatalf("Authorize ADMITTED %s for %s — expected a denial containing %q",
-					tc.p, PermissionName(tc.required), tc.wantErr)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("denial %q does not contain %q", err, tc.wantErr)
+			if err != nil && !tc.wantDeny {
+				t.Fatalf("Authorize denied an authorized principal: %v", err)
 			}
 		})
 	}

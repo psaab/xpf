@@ -7,42 +7,37 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/denyaudit"
 )
 
-// AuthConfig holds authentication credentials for the API middleware.
+// AuthConfig holds hashed REST credentials plus their authorization scope.
 type AuthConfig struct {
-	Users   map[string]string // username -> password
-	APIKeys map[string]bool   // valid API key tokens
+	Users         map[string]string // username -> tagged bcrypt verifier
+	UserClasses   map[string]string
+	UserExpires   map[string]time.Time
+	APIKeys       map[string]bool // tagged bcrypt verifier -> enabled
+	APIKeyNames   map[string]string
+	APIKeyClasses map[string]string
+	APIKeyExpires map[string]time.Time
 }
+
+var dummyAPIAuthVerifier = func() string {
+	hash, _ := config.HashAPIAuthSecret("xpf-internal-dummy-api-auth-value")
+	return hash
+}()
 
 // AuthForRetainedListener returns the credential set that may be published while
 // some live listener is RETAINED at an address the committed config does not
 // name — the fail-safe state a failed (re)bind leaves behind, and the window a
 // make-before-break rebind passes through (#5561 round 12).
 //
-// It is the intersection: a credential survives only if the SAME value was
-// already accepted on that listener AND the committed config still carries it.
-// Both halves matter and they close opposite holes:
-//
-//   - Dropping what the committed config no longer carries is the REVOCATION
-//     half (#5561 round 7). The retained listener must stop honouring a secret
-//     the operator replaced, and it must stop immediately rather than whenever
-//     some later reconcile happens to bind — that deferral was not a race window
-//     but a permanent one.
-//
-//   - Withholding what was NOT already accepted there is the GRANT half. The
-//     credential set the operator committed is authorized in the context of the
-//     endpoint committed alongside it; when that endpoint fails to bind,
-//     publishing the whole set hands a credential to a listener the config never
-//     asked to keep serving. The sharp case is a commit that moves management
-//     from an off-box address to loopback AND introduces a credential: the new
-//     secret was meant to be reachable only from the box, and a failed rebind
-//     would otherwise expose it on the routable address the operator was trying
-//     to retire. Rotation is the same shape — revoking A tightens, granting B
-//     does not.
-//
+// A retained listener keeps only credentials whose secret AND authorization
+// scope are unchanged. Scope changes (class or expiry) are withheld as grants;
+// once every serving leg reaches its committed address, the full next snapshot
+// can be published.
 // A nil `live` is the UNIVERSAL set, not the empty one: a nil snapshot is
 // dynamicAuthMiddleware's pass-through, so that listener already accepts every
 // caller and `next` is unambiguously a tightening. Returning `next` whole there
@@ -105,31 +100,77 @@ func AuthForRetainedListener(live, next *AuthConfig) *AuthConfig {
 	// config it came from. The universal-`live` shortcut used to return `next`
 	// itself, which made the no-alias property conditional on a branch the test
 	// for it never took (#5561 round 14).
-	out := &AuthConfig{Users: map[string]string{}, APIKeys: map[string]bool{}}
+	out := &AuthConfig{
+		Users:         map[string]string{},
+		UserClasses:   map[string]string{},
+		UserExpires:   map[string]time.Time{},
+		APIKeys:       map[string]bool{},
+		APIKeyNames:   map[string]string{},
+		APIKeyClasses: map[string]string{},
+		APIKeyExpires: map[string]time.Time{},
+	}
 	if live == nil {
 		for user, pw := range next.Users {
 			out.Users[user] = pw
+			copyAuthUserMetadata(out, next, user)
 		}
 		for key, ok := range next.APIKeys {
 			if ok {
 				out.APIKeys[key] = true
+				copyAuthKeyMetadata(out, next, key)
 			}
 		}
 		return out
 	}
 	for user, pw := range next.Users {
-		// Match on the PAIR. A same-username secret rotation is a revocation
-		// plus a grant, and the grant half is withheld like any other.
-		if was, ok := live.Users[user]; ok && was == pw {
+		// Match on the secret AND effective scope. A same-username secret
+		// rotation or scope change is a revocation plus a grant.
+		if was, ok := live.Users[user]; ok && was == pw &&
+			sameAuthUserScope(live, next, user) {
 			out.Users[user] = pw
+			copyAuthUserMetadata(out, next, user)
 		}
 	}
 	for key, ok := range next.APIKeys {
-		if ok && live.APIKeys[key] {
+		if ok && live.APIKeys[key] && sameAuthKeyScope(live, next, key) {
 			out.APIKeys[key] = true
+			copyAuthKeyMetadata(out, next, key)
 		}
 	}
 	return out
+}
+
+func sameAuthUserScope(live, next *AuthConfig, user string) bool {
+	return resolvedCredentialClass(live.UserClasses[user]) ==
+		resolvedCredentialClass(next.UserClasses[user]) &&
+		live.UserExpires[user].Equal(next.UserExpires[user])
+}
+
+func sameAuthKeyScope(live, next *AuthConfig, key string) bool {
+	return resolvedCredentialClass(live.APIKeyClasses[key]) ==
+		resolvedCredentialClass(next.APIKeyClasses[key]) &&
+		live.APIKeyExpires[key].Equal(next.APIKeyExpires[key])
+}
+
+func copyAuthUserMetadata(dst, src *AuthConfig, user string) {
+	if class := src.UserClasses[user]; class != "" {
+		dst.UserClasses[user] = class
+	}
+	if expires := src.UserExpires[user]; !expires.IsZero() {
+		dst.UserExpires[user] = expires
+	}
+}
+
+func copyAuthKeyMetadata(dst, src *AuthConfig, key string) {
+	if name := src.APIKeyNames[key]; name != "" {
+		dst.APIKeyNames[key] = name
+	}
+	if class := src.APIKeyClasses[key]; class != "" {
+		dst.APIKeyClasses[key] = class
+	}
+	if expires := src.APIKeyExpires[key]; !expires.IsZero() {
+		dst.APIKeyExpires[key] = expires
+	}
 }
 
 // CredentialCount reports how many credentials a snapshot carries. A nil
@@ -182,14 +223,39 @@ func CredentialCount(a *AuthConfig) int {
 // hostname, malformed, or otherwise unprovable bind requires credentials for
 // /metrics like every other endpoint (#4162).
 func authMiddleware(cfg AuthConfig, metricsRequireAuth bool, next http.Handler) http.Handler {
+	throttle := newAuthFailureTracker(nil)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if authCheck(cfg, metricsRequireAuth, r) {
+		authorized, retryAfter := throttledAuthCheck(throttle, cfg, metricsRequireAuth, r)
+		if authorized {
 			next.ServeHTTP(w, r)
 			return
 		}
 		logRESTAPIAuthFailure(r)
+		if retryAfter > 0 {
+			writeAuthLockedOut(w, retryAfter)
+			return
+		}
 		writeAuthChallenge(w)
 	})
+}
+
+// throttledAuthCheck applies the #10825 per-source and per-source+account
+// budgets before invoking the credential verifier. An active lockout skips
+// verification entirely, which is important once Basic checks use bcrypt.
+func throttledAuthCheck(throttle *authFailureTracker, cfg AuthConfig, metricsRequireAuth bool, r *http.Request) (authorized bool, retryAfter time.Duration) {
+	if r.URL.Path == "/health" || (r.URL.Path == "/metrics" && !metricsRequireAuth) {
+		return true, 0
+	}
+	source, account := throttleIdentity(r)
+	if locked, wait := throttle.locked(source, account); locked {
+		return false, wait
+	}
+	if authCheck(cfg, metricsRequireAuth, r) {
+		throttle.recordSuccess(source, account)
+		return true, 0
+	}
+	throttle.recordFailure(source, account)
+	return false, 0
 }
 
 // logRESTAPIAuthFailure records each failed REST credential check while
@@ -239,77 +305,76 @@ func writeAuthChallenge(w http.ResponseWriter) {
 
 // checkAuthorization validates an Authorization header value.
 func checkAuthorization(auth string, cfg AuthConfig) bool {
-	// Bearer token
 	if strings.HasPrefix(auth, "Bearer ") {
-		token := strings.TrimPrefix(auth, "Bearer ")
-		return constantTimeAPIKeyMatch(cfg, token)
+		return constantTimeAPIKeyMatch(cfg, strings.TrimPrefix(auth, "Bearer "))
 	}
-
-	// Basic auth
-	if strings.HasPrefix(auth, "Basic ") {
-		payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
-		if err != nil {
-			return false
-		}
-		user, pass, ok := strings.Cut(string(payload), ":")
-		if !ok {
-			return false
-		}
-		// Look up the expected password, but ALWAYS run the constant-time
-		// compare — even for an unknown user — so response timing does not
-		// reveal whether the username exists (#4157). Early-returning on
-		// !exists would skip the compare entirely, a large and measurable
-		// timing gap between a known and an unknown username.
-		expected, exists := cfg.Users[user]
-		passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(expected)) == 1
-		// #5636: an EMPTY configured password is not a valid credential —
-		// reject it regardless of what the request presents. A quoted-empty
-		// api-auth secret can slip through a lenient config load; without this
-		// guard `username:` (empty password) matches an empty stored secret and
-		// authenticates, an auth bypass on an off-loopback bind. The
-		// constant-time compare above still runs unconditionally, so the
-		// known/unknown-user timing profile from #4157 is preserved. The added
-		// `expected != ""` check is an O(1) length test whose cost does not
-		// vary with the secret's content or length; the attacker-supplied
-		// username does select WHICH configured `expected` is tested, but the
-		// branch reveals only whether that (already `exists`-gated) user has a
-		// non-empty configured secret — never any secret content — so it adds
-		// no request-content-dependent timing signal.
-		return exists && expected != "" && passMatch
+	if !strings.HasPrefix(auth, "Basic ") {
+		return false
 	}
-
-	return false
+	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
+	if err != nil {
+		return false
+	}
+	user, pass, ok := strings.Cut(string(payload), ":")
+	if !ok {
+		return false
+	}
+	expected, exists := cfg.Users[user]
+	verifier := expected
+	if !exists || verifier == "" {
+		// Every unknown-user attempt still pays the bcrypt cost of a known
+		// credential. The REST throttle runs first, bounding this CPU.
+		verifier = dummyAPIAuthVerifier
+	}
+	passMatch := verifyAuthSecret(verifier, pass)
+	return exists && expected != "" && credentialExpiryActive(cfg.UserExpires[user]) && passMatch
 }
 
-// constantTimeAPIKeyMatch reports whether presented equals any configured API
-// key. It compares presented against EVERY configured key with
-// crypto/subtle.ConstantTimeCompare and OR-s the per-key results, never
-// short-circuiting on the first match. This closes the timing side channel of
-// the previous plain map lookup (`cfg.APIKeys[presented]`), whose latency
-// varied with hash-bucket collisions and key presence and could leak whether a
-// submitted token/prefix was valid to a network-timing attacker on an
-// interface-bound API (#4157).
-//
-// ConstantTimeCompare returns 0 immediately when the two byte slices differ in
-// length; that reveals only length, not content, which is acceptable here. The
-// loop count is the number of configured keys — a deployment constant, not
-// attacker-controllable per request — so it does not leak the secret. Not
-// short-circuiting means WHICH key matched is not leaked by timing either.
+func verifyAuthSecret(encoded, presented string) bool {
+	if config.IsAPIAuthSecretHash(encoded) {
+		return config.VerifyAPIAuthSecret(encoded, presented)
+	}
+	// AuthConfig is also an embedding API used by tests and external callers.
+	// The daemon only populates it from compiled tagged verifiers.
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(encoded)) == 1
+}
+
+func credentialExpiryActive(expires time.Time) bool {
+	return expires.IsZero() || time.Now().Before(expires)
+}
+
+func resolvedCredentialClass(class string) string {
+	if class == "" {
+		return "read-only"
+	}
+	return class
+}
+
+// constantTimeAPIKeyMatch reports whether presented matches exactly one
+// configured API key. Every enabled key is checked; ambiguity between two key
+// identities fails closed rather than selecting a privilege class by map order.
 func constantTimeAPIKeyMatch(cfg AuthConfig, presented string) bool {
-	presentedBytes := []byte(presented)
-	match := 0
+	_, _, matched := matchAPIKeyIdentity(cfg, presented)
+	return matched
+}
+
+func matchAPIKeyIdentity(cfg AuthConfig, presented string) (name, class string, matched bool) {
+	matches := 0
 	for key, valid := range cfg.APIKeys {
-		// #5636: never match an EMPTY configured api-key. An empty api-key is
-		// not a valid credential — matching it would authenticate a request
-		// presenting an empty Bearer / X-API-Key token. The skip is keyed only
-		// on the configured key set (a deployment constant), so it does not add
-		// a request-dependent timing signal (#4157).
 		if !valid || key == "" {
 			continue
 		}
-		match |= subtle.ConstantTimeCompare(presentedBytes, []byte(key))
+		equal := verifyAuthSecret(key, presented)
+		if !equal || !credentialExpiryActive(cfg.APIKeyExpires[key]) {
+			continue
+		}
+		matches++
+		if matches == 1 {
+			name = cfg.APIKeyNames[key]
+			class = resolvedCredentialClass(cfg.APIKeyClasses[key])
+		}
 	}
-	return match == 1
+	return name, class, matches == 1
 }
 
 // isLoopbackBindAddr reports whether the API listen address binds only the

@@ -125,6 +125,9 @@ func (s *Store) Load() error {
 			s.everCommitted = true
 			s.persistMarkerCommitted = true
 			s.loadRollbackHistory()
+			if err := s.migrateRollbackAPIAuthSecrets(); err != nil {
+				return err
+			}
 			return ErrConfigAbsentWithHistory
 		}
 		// No persisted marker: this is a never-booted store. everCommitted
@@ -165,7 +168,11 @@ func (s *Store) Load() error {
 		slog.Warn("sanitized control characters in persisted config value",
 			"path", p, "issue", "#1798")
 	}
-
+	// #10826: migrate credentials and any pending rollback record as one
+	// recoverable generation transition before publishing this tree.
+	if err := s.migrateActiveAPIAuthSecrets(tree, committed); err != nil {
+		return err
+	}
 	// Tolerant compile: an already-persisted config must boot through
 	// (see compileTreeLenient for the validator downgrades).
 	compiled, err := s.compileTreeLenient(tree)
@@ -199,6 +206,12 @@ func (s *Store) Load() error {
 		// here is the same one a fresh boot already has — no new invariant.
 		s.active = tree
 		s.loadRollbackHistory()
+		if migrationErr := s.migrateRollbackAPIAuthSecrets(); migrationErr != nil {
+			return errors.Join(
+				fmt.Errorf("compile config: %w: %w", ErrConfigCompile, err),
+				migrationErr,
+			)
+		}
 		// #9884: a compile-failed Load must still resolve a pending
 		// commit-confirmed window — an expired record rolls back to the prev
 		// tree (persisted, record cleared), a live one re-arms its timer —
@@ -217,11 +230,113 @@ func (s *Store) Load() error {
 	s.compiled = compiled
 	s.publishActiveLocked() // #9905: publish the new active snapshot
 	s.loadRollbackHistory()
+	if err := s.migrateRollbackAPIAuthSecrets(); err != nil {
+		return err
+	}
 	// #6538: the recovery can leave the store with a nil compiled config (its
 	// rollback target failed even the lenient compile). Load MUST NOT report
 	// success in that state — see recoverPendingConfirmLocked.
 	s.loadUnsharedMarkLocked() // #9530
 	return s.recoverPendingConfirmLocked()
+}
+
+// migrateActiveAPIAuthSecrets hashes active credentials while preserving a
+// pending confirm record across the active.json rewrite. The temporary previous
+// hash lets recovery recognize either durable side if power is lost mid-write.
+func (s *Store) migrateActiveAPIAuthSecrets(tree *config.ConfigTree, committed bool) error {
+	hashed := tree.Clone()
+	activeChanged, err := config.HashAPIAuthSecrets(hashed)
+	if err != nil {
+		return fmt.Errorf("hash persisted api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
+	}
+
+	var rec *confirmRecord
+	if s.db != nil {
+		rec, err = s.db.ReadConfirm()
+		if err != nil {
+			if activeChanged {
+				return fmt.Errorf("read confirm record for api-auth migration: %w: %v", ErrConfigDBUnreadable, err)
+			}
+			// Preserve the existing non-fatal confirm-recovery path when no
+			// active-tree hash transition is needed. Load will report the
+			// unreadable record through recoverPendingConfirmLocked as before.
+			return nil
+		}
+	}
+	prevChanged := false
+	if rec != nil && rec.PrevTree != nil {
+		prevChanged, err = config.HashAPIAuthSecrets(rec.PrevTree)
+		if err != nil {
+			return fmt.Errorf("hash confirm rollback api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
+		}
+	}
+
+	if !activeChanged {
+		if prevChanged {
+			if err := s.writeConfirmState(rec); err != nil {
+				return fmt.Errorf("persist hashed confirm rollback credentials: %w: %v", ErrConfigDBUnreadable, err)
+			}
+		}
+		return nil
+	}
+
+	oldHash := guardedConfigHash(tree)
+	newHash := guardedConfigHash(hashed)
+	liveRecord := rec != nil && !rec.Resolved &&
+		(rec.GuardedHash == "" || rec.GuardedHash == oldHash || rec.PreviousHash == oldHash)
+	if liveRecord {
+		deadline := rec.Deadline
+		if rec.PreviousHash == oldHash && !rec.PreviousDeadline.IsZero() {
+			deadline = rec.PreviousDeadline
+			rec.Deadline = deadline
+		}
+		rec.GuardedHash = newHash
+		rec.PreviousHash = oldHash
+		rec.PreviousDeadline = deadline
+	}
+	if rec != nil && (prevChanged || liveRecord) {
+		if err := s.writeConfirmState(rec); err != nil {
+			return fmt.Errorf("persist confirm record for api-auth migration: %w: %v", ErrConfigDBUnreadable, err)
+		}
+	}
+
+	tree.Children = hashed.Children
+	if err := s.writeActiveMarker(tree, committed); err != nil {
+		return fmt.Errorf("persist hashed api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
+	}
+
+	if liveRecord {
+		rec.PreviousHash = ""
+		rec.PreviousDeadline = time.Time{}
+		if err := s.writeConfirmState(rec); err != nil {
+			return fmt.Errorf("finalize confirm record for api-auth migration: %w: %v", ErrConfigDBUnreadable, err)
+		}
+	}
+	return nil
+}
+
+// migrateRollbackAPIAuthSecrets upgrades legacy rollback text before it can be
+// exposed through rollback operations or left in a database dump.
+func (s *Store) migrateRollbackAPIAuthSecrets() error {
+	changed := false
+	for _, entry := range s.history.List() {
+		if entry == nil || entry.Config == nil {
+			continue
+		}
+		entryChanged, err := config.HashAPIAuthSecrets(entry.Config)
+		if err != nil {
+			return fmt.Errorf("hash rollback api-auth credentials: %w: %v", ErrConfigDBUnreadable, err)
+		}
+		changed = changed || entryChanged
+	}
+	if !changed {
+		return nil
+	}
+	s.saveRollbackFiles()
+	if s.rollbackPersistDegraded {
+		return fmt.Errorf("persist hashed rollback api-auth credentials: %w", ErrConfigDBUnreadable)
+	}
+	return nil
 }
 
 // absentActiveHasRecoveryMarkers reports whether an absent active.json is

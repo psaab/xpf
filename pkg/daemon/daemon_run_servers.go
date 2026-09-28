@@ -4,10 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-	"net"
-	"sync"
-
 	"github.com/psaab/xpf/pkg/api"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
@@ -22,6 +18,10 @@ import (
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/psaab/xpf/pkg/sysservices"
 	"github.com/psaab/xpf/pkg/webmgmt"
+	"log/slog"
+	"net"
+	"sync"
+	"time"
 )
 
 // effectiveListeners builds the daemon-owned snapshot of the EFFECTIVE
@@ -423,39 +423,96 @@ func (d *Daemon) resolveAPIBinds(apiCfg *api.Config, cfg *config.Config) {
 			slog.Info("HTTPS web-management bound", "interface", wm.HTTPSInterface, "addr", apiCfg.HTTPSAddr)
 		}
 		// API authentication
-		if wm.APIAuth != nil && (len(wm.APIAuth.Users) > 0 || len(wm.APIAuth.APIKeys) > 0) {
+		if wm.APIAuth != nil {
 			authCfg := &api.AuthConfig{
-				Users:   make(map[string]string),
-				APIKeys: make(map[string]bool),
+				Users:         make(map[string]string),
+				UserClasses:   make(map[string]string),
+				UserExpires:   make(map[string]time.Time),
+				APIKeys:       make(map[string]bool),
+				APIKeyNames:   make(map[string]string),
+				APIKeyClasses: make(map[string]string),
+				APIKeyExpires: make(map[string]time.Time),
 			}
-			// #5636: never wire an EMPTY Basic password or empty api-key into
-			// the runtime AuthConfig. A quoted-empty secret parses as a real
-			// credential row but is not a valid credential — wiring it would let
-			// a request presenting `username:` (no password) or an empty
-			// Bearer / X-API-Key token authenticate, an auth bypass on an
-			// off-loopback bind. The commit gate rejects such a config, but an
-			// already-persisted / peer-synced config is lenient-loaded (#1960),
-			// so drop the empty credential here too (defense in depth; the
-			// middleware also rejects an empty configured secret).
+			defaultClass := wm.APIAuth.DefaultClass
+			if defaultClass == "" {
+				defaultClass = "read-only"
+			}
+			now := time.Now()
+			addCredential := func(encoded, class string, expires time.Time) bool {
+				_, knownClass := config.ResolveClassPermissions(cfg, class)
+				return encoded != "" && config.IsAPIAuthSecretHash(encoded) &&
+					knownClass && !expires.IsZero() && now.Before(expires)
+			}
 			for _, u := range wm.APIAuth.Users {
-				if pw := u.Password.Reveal(); pw != "" {
+				if u == nil {
+					continue
+				}
+				pw := u.Password.Reveal()
+				class := u.Class
+				if class == "" {
+					class = defaultClass
+				}
+				expires := u.ExpiresAt
+				if expires.IsZero() {
+					expires = wm.APIAuth.DefaultExpiresAt
+				}
+				if addCredential(pw, class, expires) {
 					authCfg.Users[u.Username] = pw
+					authCfg.UserClasses[u.Username] = class
+					authCfg.UserExpires[u.Username] = expires
+				} else if pw != "" {
+					slog.Warn("dropping api-auth Basic credential with invalid verifier, scope, or expiry", "issue", "10826")
 				}
 			}
 			for _, k := range wm.APIAuth.APIKeys {
-				if key := k.Reveal(); key != "" {
+				key := k.Reveal()
+				if addCredential(key, defaultClass, wm.APIAuth.DefaultExpiresAt) {
 					authCfg.APIKeys[key] = true
+					authCfg.APIKeyClasses[key] = defaultClass
+					authCfg.APIKeyExpires[key] = wm.APIAuth.DefaultExpiresAt
+				} else if key != "" {
+					slog.Warn("dropping api-auth API key with invalid verifier, scope, or expiry", "issue", "10826")
 				}
 			}
-			// Only enable auth when at least one USABLE credential survived; an
-			// all-empty api-auth stanza leaves apiCfg.Auth nil so the #4047
-			// runtime clamp still pulls a non-loopback bind back to loopback.
+			for _, k := range wm.APIAuth.Keys {
+				if k == nil {
+					continue
+				}
+				key := k.Secret.Reveal()
+				class := k.Class
+				if class == "" {
+					class = defaultClass
+				}
+				expires := k.ExpiresAt
+				if expires.IsZero() {
+					expires = wm.APIAuth.DefaultExpiresAt
+				}
+				if addCredential(key, class, expires) {
+					authCfg.APIKeys[key] = true
+					authCfg.APIKeyNames[key] = k.Name
+					authCfg.APIKeyClasses[key] = class
+					authCfg.APIKeyExpires[key] = expires
+				} else if key != "" {
+					slog.Warn("dropping named api-auth key with invalid verifier, scope, or expiry", "issue", "10826")
+				}
+			}
+			// Only enable auth when at least one usable credential survived.
 			if len(authCfg.Users) > 0 || len(authCfg.APIKeys) > 0 {
 				apiCfg.Auth = authCfg
 				slog.Info("HTTP API authentication enabled", "users", len(authCfg.Users), "api_keys", len(authCfg.APIKeys))
-			} else {
-				slog.Warn("HTTP API api-auth configured with only empty secrets; ignoring (no valid credential) — #5636")
+			} else if len(wm.APIAuth.Users)+len(wm.APIAuth.APIKeys)+len(wm.APIAuth.Keys) > 0 {
+				slog.Warn("HTTP API api-auth configured with no usable credentials; ignoring (#10826)")
 			}
+		}
+		// Never publish a configured api-auth identity on a clear HTTP
+		// listener. The API server currently shares one auth snapshot across
+		// both legs, so disable the plain leg entirely; HTTPS remains enabled
+		// when configured. This also drops the default loopback HTTP leg rather
+		// than leaving credential transport dependent on the client address.
+		if apiCfg.Auth != nil && apiCfg.Addr != "" {
+			slog.Warn("api-auth is not served over clear HTTP; disabling the HTTP API leg (#10826)",
+				"addr", apiCfg.Addr)
+			apiCfg.Addr = ""
 		}
 	}
 

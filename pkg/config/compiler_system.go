@@ -947,34 +947,59 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				}
 			}
 			if authNode := wmNode.FindChild("api-auth"); authNode != nil {
-				auth := &APIAuthConfig{}
+				auth := &APIAuthConfig{DefaultClass: "read-only"}
+				if classNode := authNode.FindChild("class"); classNode != nil && nodeVal(classNode) != "" {
+					auth.DefaultClass = nodeVal(classNode)
+				}
+				if expiresNode := authNode.FindChild("expires"); expiresNode != nil {
+					auth.DefaultExpiresAt, _ = ParseAPIAuthExpiry(nodeVal(expiresNode))
+				}
 				for _, inst := range namedInstances(authNode.FindChildren("user")) {
 					if pwNode := inst.node.FindChild("password"); pwNode != nil {
+						class := auth.DefaultClass
+						if classNode := inst.node.FindChild("class"); classNode != nil && nodeVal(classNode) != "" {
+							class = nodeVal(classNode)
+						}
+						expires := auth.DefaultExpiresAt
+						if expiresNode := inst.node.FindChild("expires"); expiresNode != nil {
+							expires, _ = ParseAPIAuthExpiry(nodeVal(expiresNode))
+						}
 						auth.Users = append(auth.Users, &APIAuthUser{
-							Username: inst.name,
-							Password: Secret(nodeVal(pwNode)),
+							Username:  inst.name,
+							Password:  Secret(nodeVal(pwNode)),
+							Class:     class,
+							ExpiresAt: expires,
 						})
 					}
 				}
 				// #6692: api-key is `multi: true`, so a bracketed list
 				// collapses onto ONE node's Keys and the pre-fix nodeVal read
-				// kept slot 0 alone — a second provisioned key silently did not
-				// authenticate, and key rotation (add new, then remove old)
-				// silently failed to add the new key.
-				//
-				// multiLeafAuthoredValues rather than firewallMatchValues:
-				// this leaf's EMPTY values are load-bearing. A quoted-empty
-				// `api-key ""` must still reach APIKeys so
-				// validateAPIAuthNoEmptySecretsStrict hard-rejects it and
-				// apiAuthHasUsableCredential does not count it (#5636);
-				// dropping empties here would turn that operator-visible
-				// rejection into a silent disappearance. The
-				// multiLeafAuthoredValues(n)[0] == nodeVal(n) invariant is what
-				// makes slot 0 byte-identical to the pre-fix read.
+				// kept slot 0 alone. The values inherit class and expiry from
+				// api-auth; named keys can override both.
 				for _, ch := range authNode.FindChildren("api-key") {
 					for _, key := range multiLeafAuthoredValues(ch) {
 						auth.APIKeys = append(auth.APIKeys, Secret(key))
 					}
+				}
+				for _, inst := range namedInstances(authNode.FindChildren("key")) {
+					secretNode := inst.node.FindChild("secret")
+					if secretNode == nil {
+						continue
+					}
+					class := auth.DefaultClass
+					if classNode := inst.node.FindChild("class"); classNode != nil && nodeVal(classNode) != "" {
+						class = nodeVal(classNode)
+					}
+					expires := auth.DefaultExpiresAt
+					if expiresNode := inst.node.FindChild("expires"); expiresNode != nil {
+						expires, _ = ParseAPIAuthExpiry(nodeVal(expiresNode))
+					}
+					auth.Keys = append(auth.Keys, &APIAuthKey{
+						Name:      inst.name,
+						Secret:    Secret(nodeVal(secretNode)),
+						Class:     class,
+						ExpiresAt: expires,
+					})
 				}
 				sys.Services.WebManagement.APIAuth = auth
 			}
