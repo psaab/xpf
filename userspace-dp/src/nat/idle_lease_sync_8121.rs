@@ -38,7 +38,7 @@
 //!    the receiver resolves the index locally, refusing a lease whose address
 //!    its own pool does not contain. Same hazard class as 2, one level over.
 //!
-//! 4. **Never install a lease without claiming its port.** An idle lease still
+//! 4. **A port-bearing import must claim its port.** An idle PAT lease still
 //!    HOLDS its occupancy bit — the bit is freed on the EXPIRY path
 //!    (`free_translated_port` in `reuse_existing_lease_locked`'s expired arm),
 //!    not when the last flow closes, which is precisely why the tuple is still
@@ -47,6 +47,11 @@
 //!    allocator exists to prevent — and would then have the lease's own expiry
 //!    free a bit belonging to that other flow. So the import claims the bit and
 //!    REFUSES the lease if it cannot.
+//!
+//!    Imports check remote scopes against both live address-only and PAT
+//!    owners: `Some((host, port))` is an exact endpoint, `Some((host, 0))` is a
+//!    target-host wildcard, and `None` covers any remote. Every address-only
+//!    import also counts against the shared `max_tracked_flows` lease-table cap.
 
 #![allow(dead_code)]
 
@@ -107,9 +112,9 @@ pub(crate) struct DisplayLeaseRecord {
 }
 
 /// What an import did. Every refusal is named rather than folded into a bool,
-/// because they have different operator remedies: a busy port means the two
-/// nodes disagree about who owns an identity, while an unknown address just
-/// means config has not converged yet.
+/// because they have different operator remedies: a busy identity means the
+/// nodes disagree about who owns an identity, while capacity means this node's
+/// bounded lease table is full.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IdleLeaseImport {
     Installed,
@@ -121,9 +126,15 @@ pub(crate) enum IdleLeaseImport {
     SkippedExpired,
     /// This node's pool does not contain the translated address.
     SkippedUnknownAddress,
-    /// The occupancy bit is already held here, so installing the lease would
+    /// A PAT occupancy bit is already held here, so installing the lease would
     /// duplicate a translated identity (module note 4).
     SkippedPortBusy,
+    /// The reverse identity for the imported lease is already held by a live
+    /// PAT or address-only owner. Covers both PAT and address-only imports;
+    SkippedIdentityBusy,
+    /// Import would exceed the bounded persistent lease table after the
+    /// pressure-GC pass.
+    SkippedCapacity,
 }
 
 impl PortAllocator {
@@ -246,9 +257,29 @@ impl PortAllocator {
         {
             return IdleLeaseImport::SkippedExisting;
         }
-        // Module note 4: take the occupancy bit BEFORE installing, and refuse
-        // rather than install a lease over an identity someone else holds.
+        // Imports and local mints share the persistent-table cap. Give one
+        // bounded pressure-GC pass a chance to reclaim expired idle leases; if
+        // still full, refuse this import. A full table refuses both sides:
+        // admission is first-come-first-served, not reserved by origin.
+        if self.import_idle_lease_capacity_reached(&mut live, now_ns) {
+            return IdleLeaseImport::SkippedCapacity;
+        }
+        let translated = TranslatedTuple {
+            ip: rec.translated_ip,
+            port: rec.translated_port,
+        };
+        let identity_busy = if rec.address_only {
+            live.import_idle_address_only_contended(rec.protocol, translated, rec.remote)
+        } else {
+            live.import_idle_pat_address_only_contended(rec.protocol, translated, rec.remote)
+        };
+        if identity_busy {
+            return IdleLeaseImport::SkippedIdentityBusy;
+        }
         if !rec.address_only {
+            // Module note 4: take the occupancy bit BEFORE installing, and
+            // refuse rather than install a lease over an identity someone else
+            // holds.
             match self.try_claim_translated_port(addr_index, rec.translated_port) {
                 None => return IdleLeaseImport::SkippedUnknownAddress,
                 Some(false) => return IdleLeaseImport::SkippedPortBusy,
@@ -259,10 +290,7 @@ impl PortAllocator {
         live.persistent_by_source.insert(
             key,
             PersistentLease {
-                translated: TranslatedTuple {
-                    ip: rec.translated_ip,
-                    port: rec.translated_port,
-                },
+                translated,
                 addr_index,
                 expires_at_ns,
                 timeout_ns,

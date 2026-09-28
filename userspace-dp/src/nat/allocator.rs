@@ -494,6 +494,23 @@ impl AddressOnlyReverseKey {
         }
     }
 }
+/// Prefixes of reverse identities for wildcard imported-lease scopes. The
+/// aggregate indexes below keep host/any-remote checks O(1), not a scan over
+/// every live flow for each received lease.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct ReverseIdentityBaseKey {
+    protocol: u8,
+    translated_ip: IpAddr,
+    translated_port: u16,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct ReverseIdentityHostKey {
+    base: ReverseIdentityBaseKey,
+    dst_ip: IpAddr,
+}
+
+
 /// #10190: the exact PAT reverse identity used by the same-allocator
 /// cross-domain guard. PAT allocations normally need only the per-address
 /// bitmap, but an address-only reservation keys the full reverse tuple
@@ -911,6 +928,13 @@ pub(super) struct PortAllocatorLiveState {
     // admission. A count is required because persistent-NAT flows can share
     // one translated tuple while holding separate `live_by_flow` records.
     pat_owners: FxHashMap<PatReverseKey, u32>,
+    // #11475: prefix indexes for broad remote scopes. Keeping each ownership
+    // domain separate lets PAT imports preserve port-busy precedence while
+    // address-only imports consult both domains, all without owner-map scans.
+    address_only_owner_counts_by_base: FxHashMap<ReverseIdentityBaseKey, u32>,
+    address_only_owner_counts_by_host: FxHashMap<ReverseIdentityHostKey, u32>,
+    pat_owner_counts_by_base: FxHashMap<ReverseIdentityBaseKey, u32>,
+    pat_owner_counts_by_host: FxHashMap<ReverseIdentityHostKey, u32>,
     gc_counter: u32,
 }
 
@@ -953,16 +977,190 @@ impl PortAllocatorLiveState {
                 translated.port,
             ))
     }
+    /// #11475: address-only idle imports claim no bitmap bit, so check both
+    /// live ownership domains for their exact, target-host, or any-remote scope.
+    pub(super) fn import_idle_address_only_contended(
+        &self,
+        protocol: u8,
+        translated: TranslatedTuple,
+        remote: Option<(IpAddr, u16)>,
+    ) -> bool {
+        self.idle_import_identity_contended(protocol, translated, remote, true)
+    }
+
+    /// PAT's bitmap already reports PAT-versus-PAT contention as PortBusy.
+    /// This extra check mirrors local/synced PAT admission against address-only
+    /// owners, which hold no bitmap bit.
+    pub(super) fn import_idle_pat_address_only_contended(
+        &self,
+        protocol: u8,
+        translated: TranslatedTuple,
+        remote: Option<(IpAddr, u16)>,
+    ) -> bool {
+        self.idle_import_identity_contended(protocol, translated, remote, false)
+    }
+
+    fn idle_import_identity_contended(
+        &self,
+        protocol: u8,
+        translated: TranslatedTuple,
+        remote: Option<(IpAddr, u16)>,
+        check_pat_owners: bool,
+    ) -> bool {
+        let base = ReverseIdentityBaseKey {
+            protocol,
+            translated_ip: translated.ip,
+            translated_port: translated.port,
+        };
+        match remote {
+            Some((dst_ip, dst_port)) if dst_port != 0 => {
+                let address_key = AddressOnlyReverseKey {
+                    protocol,
+                    translated_ip: translated.ip,
+                    translated_port: translated.port,
+                    dst_ip,
+                    dst_port,
+                };
+                self.address_only_owners.contains_key(&address_key)
+                    || (check_pat_owners
+                        && self.pat_owners.contains_key(&PatReverseKey {
+                            protocol,
+                            translated_ip: translated.ip,
+                            translated_port: translated.port,
+                            dst_ip,
+                            dst_port,
+                        }))
+            }
+            Some((dst_ip, _)) => {
+                let host = ReverseIdentityHostKey { base, dst_ip };
+                self.address_only_owner_counts_by_host.contains_key(&host)
+                    || (check_pat_owners && self.pat_owner_counts_by_host.contains_key(&host))
+            }
+            None => {
+                self.address_only_owner_counts_by_base.contains_key(&base)
+                    || (check_pat_owners && self.pat_owner_counts_by_base.contains_key(&base))
+            }
+        }
+    }
+
+    fn add_live_reverse_owner_count(
+        &mut self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        dst_ip: IpAddr,
+        address_only: bool,
+    ) {
+        let base = ReverseIdentityBaseKey {
+            protocol,
+            translated_ip,
+            translated_port,
+        };
+        let host = ReverseIdentityHostKey { base, dst_ip };
+        if address_only {
+            let count = self
+                .address_only_owner_counts_by_base
+                .entry(base)
+                .or_insert(0);
+            *count = count.saturating_add(1);
+            let count = self
+                .address_only_owner_counts_by_host
+                .entry(host)
+                .or_insert(0);
+            *count = count.saturating_add(1);
+        } else {
+            let count = self.pat_owner_counts_by_base.entry(base).or_insert(0);
+            *count = count.saturating_add(1);
+            let count = self.pat_owner_counts_by_host.entry(host).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+    }
+
+    fn remove_live_reverse_owner_count(
+        &mut self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        dst_ip: IpAddr,
+        address_only: bool,
+    ) {
+        let base = ReverseIdentityBaseKey {
+            protocol,
+            translated_ip,
+            translated_port,
+        };
+        let host = ReverseIdentityHostKey { base, dst_ip };
+        if address_only {
+            if let Some(count) = self.address_only_owner_counts_by_base.get_mut(&base) {
+                if *count <= 1 {
+                    self.address_only_owner_counts_by_base.remove(&base);
+                } else {
+                    *count -= 1;
+                }
+            }
+            if let Some(count) = self.address_only_owner_counts_by_host.get_mut(&host) {
+                if *count <= 1 {
+                    self.address_only_owner_counts_by_host.remove(&host);
+                } else {
+                    *count -= 1;
+                }
+            }
+        } else {
+            if let Some(count) = self.pat_owner_counts_by_base.get_mut(&base) {
+                if *count <= 1 {
+                    self.pat_owner_counts_by_base.remove(&base);
+                } else {
+                    *count -= 1;
+                }
+            }
+            if let Some(count) = self.pat_owner_counts_by_host.get_mut(&host) {
+                if *count <= 1 {
+                    self.pat_owner_counts_by_host.remove(&host);
+                } else {
+                    *count -= 1;
+                }
+            }
+        }
+    }
+
+    fn insert_address_only_owner(&mut self, key: AddressOnlyReverseKey, flow: SourceNatFlowKey) {
+        if self.address_only_owners.insert(key, flow).is_none() {
+            self.add_live_reverse_owner_count(
+                key.protocol,
+                key.translated_ip,
+                key.translated_port,
+                key.dst_ip,
+                true,
+            );
+        }
+    }
+
+    fn remove_address_only_owner(&mut self, key: &AddressOnlyReverseKey) {
+        if self.address_only_owners.remove(key).is_some() {
+            self.remove_live_reverse_owner_count(
+                key.protocol,
+                key.translated_ip,
+                key.translated_port,
+                key.dst_ip,
+                true,
+            );
+        }
+    }
 
     /// Record one live PAT owner of an exact reverse identity. Persistent NAT
     /// can place multiple forward flows on one translated tuple, so this is a
     /// count rather than a single owner flow.
     fn record_pat_owner(&mut self, flow: &SourceNatFlowKey, translated: TranslatedTuple) {
-        let count = self
-            .pat_owners
-            .entry(PatReverseKey::for_flow(flow, translated))
-            .or_insert(0);
+        let key = PatReverseKey::for_flow(flow, translated);
+        let count = self.pat_owners.entry(key).or_insert(0);
         *count = count.saturating_add(1);
+        self.add_live_reverse_owner_count(
+            key.protocol,
+            key.translated_ip,
+            key.translated_port,
+            key.dst_ip,
+            false,
+        );
     }
 
     /// Remove one live PAT owner from the exact reverse-identity count.
@@ -976,6 +1174,13 @@ impl PortAllocatorLiveState {
         } else {
             *count -= 1;
         }
+        self.remove_live_reverse_owner_count(
+            key.protocol,
+            key.translated_ip,
+            key.translated_port,
+            key.dst_ip,
+            false,
+        );
     }
 
     /// #10190: O(1) lookup for a PAT owner of the exact reverse wire
@@ -2263,6 +2468,24 @@ impl PortAllocator {
     pub(super) fn try_claim_translated_port(&self, addr_index: usize, port: u16) -> Option<bool> {
         Some(self.shared.occupancy.get(addr_index)?.reserve(port))
     }
+    /// #11475: make room for an imported lease using the same bounded
+    /// persistent-table pressure sweep as local persistent-NAT mints.
+    ///
+    /// Called with `live` held after the caller has checked for an existing
+    /// source key. The table length is authoritative under this guard; an
+    /// import cannot race another insert past the cap.
+    pub(super) fn import_idle_lease_capacity_reached(
+        &self,
+        live: &mut PortAllocatorLiveState,
+        now_ns: u64,
+    ) -> bool {
+        if live.persistent_by_source.len() < self.shared.max_tracked_flows {
+            return false;
+        }
+        self.gc_expired_locked(live, now_ns, PRESSURE_GC_BUDGET);
+        live.persistent_by_source.len() >= self.shared.max_tracked_flows
+    }
+
 
     /// Free a translated port's occupancy bit. `recycle` pushes the port onto
     /// the FIFO reuse ring (#3011); the deterministic path passes `false`.
@@ -3013,7 +3236,7 @@ impl PortAllocator {
         // `reserve_address_only_persistent` inserted (stored translated tuple +
         // the flow's remote endpoint).
         if existing.address_only {
-            live.address_only_owners.remove(&AddressOnlyReverseKey {
+            live.remove_address_only_owner(&AddressOnlyReverseKey {
                 protocol: flow.protocol,
                 translated_ip: existing.translated.ip,
                 translated_port: existing.translated.port,
@@ -4491,7 +4714,7 @@ impl PortAllocator {
                 }
             }
         }
-        live.address_only_owners.insert(rkey, flow);
+        live.insert_address_only_owner(rkey, flow);
         // #8132: join the source's lease, or mint it on the first session for
         // that source. `active_flows` starts at 1 and is DERIVED from imports
         // that actually succeeded, never carried from the peer — the standby
@@ -4838,7 +5061,7 @@ impl PortAllocator {
         translated_port: u16,
         holder: NatHolder,
     ) {
-        live.address_only_owners.insert(
+        live.insert_address_only_owner(
             AddressOnlyReverseKey::for_flow(&flow, translated_ip, translated_port),
             flow,
         );
@@ -4979,7 +5202,7 @@ impl PortAllocator {
             if live.pat_owns_wire_identity(&flow, translated) {
                 continue;
             }
-            live.address_only_owners.insert(rkey, flow);
+            live.insert_address_only_owner(rkey, flow);
             live.live_by_flow.insert(
                 flow,
                 LiveAllocation {
@@ -5300,7 +5523,7 @@ impl PortAllocator {
         let expires_at_ns = now_ns.saturating_add(timeout_ns);
 
         // Commit this flow's reverse-identity token (freed per flow on teardown).
-        live.address_only_owners.insert(rkey, flow);
+        live.insert_address_only_owner(rkey, flow);
 
         let mut promotion_timeout_ns = None;
         if reusing {
