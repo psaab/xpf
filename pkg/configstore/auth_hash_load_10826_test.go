@@ -18,6 +18,7 @@ const legacyAPIAuthConfig10826 = `system {
     expires 2099-01-01;
     user admin { password correct-horse-battery; }
     api-key machine-generated-key-alpha;
+    key automation { secret automation-key-secret-alpha; }
    }
   }
  }
@@ -46,7 +47,11 @@ func TestLoadHashesLegacyAPIAuthSecrets10826(t *testing.T) {
 		t.Fatalf("read migrated active config: %v", err)
 	}
 	formatted := persisted.Format()
-	for _, cleartext := range []string{"correct-horse-battery", "machine-generated-key-alpha"} {
+	for _, cleartext := range []string{
+		"correct-horse-battery",
+		"machine-generated-key-alpha",
+		"automation-key-secret-alpha",
+	} {
 		if strings.Contains(formatted, cleartext) {
 			t.Errorf("active DB still contains cleartext API credential %q", cleartext)
 		}
@@ -55,11 +60,13 @@ func TestLoadHashesLegacyAPIAuthSecrets10826(t *testing.T) {
 		t.Fatalf("active DB does not contain tagged API credential verifiers:\n%s", formatted)
 	}
 	wm := s.ActiveConfig().System.Services.WebManagement
-	if wm == nil || wm.APIAuth == nil || len(wm.APIAuth.Users) != 1 || len(wm.APIAuth.APIKeys) != 1 {
+	if wm == nil || wm.APIAuth == nil || len(wm.APIAuth.Users) != 1 ||
+		len(wm.APIAuth.APIKeys) != 1 || len(wm.APIAuth.Keys) != 1 {
 		t.Fatalf("loaded API auth config is incomplete: %+v", wm)
 	}
 	if !config.VerifyAPIAuthSecret(wm.APIAuth.Users[0].Password.Reveal(), "correct-horse-battery") ||
-		!config.VerifyAPIAuthSecret(wm.APIAuth.APIKeys[0].Reveal(), "machine-generated-key-alpha") {
+		!config.VerifyAPIAuthSecret(wm.APIAuth.APIKeys[0].Reveal(), "machine-generated-key-alpha") ||
+		!config.VerifyAPIAuthSecret(wm.APIAuth.Keys[0].Secret.Reveal(), "automation-key-secret-alpha") {
 		t.Fatal("migrated API credential verifiers do not accept their original secrets")
 	}
 }
@@ -161,5 +168,42 @@ func TestLoadPreservesPendingConfirmAcrossAPIAuthMigration10826(t *testing.T) {
 	}
 	if rec, err := restarted.db.ReadConfirm(); err != nil || rec != nil {
 		t.Fatalf("confirm record after recovery = (%+v, %v), want absent", rec, err)
+	}
+}
+
+func TestSyncApplyHashesPeerAPIAuthSecrets10826(t *testing.T) {
+	s := newTestStore(t)
+	compiled, err := s.SyncApply(legacyAPIAuthConfig10826, nil)
+	if err != nil {
+		t.Fatalf("SyncApply peer config: %v", err)
+	}
+
+	persisted, _, err := s.db.ReadActiveMeta()
+	if err != nil {
+		t.Fatalf("read synced active config: %v", err)
+	}
+	formatted := persisted.Format()
+	for _, cleartext := range []string{
+		"correct-horse-battery",
+		"machine-generated-key-alpha",
+		"automation-key-secret-alpha",
+	} {
+		if strings.Contains(formatted, cleartext) {
+			t.Errorf("peer-synced active DB still contains cleartext API credential %q", cleartext)
+		}
+	}
+	if !strings.Contains(formatted, "$xpf-bcrypt$") {
+		t.Fatalf("peer-synced active DB does not contain tagged API credential verifiers:\n%s", formatted)
+	}
+
+	wm := compiled.System.Services.WebManagement
+	if wm == nil || wm.APIAuth == nil || len(wm.APIAuth.Users) != 1 ||
+		len(wm.APIAuth.APIKeys) != 1 || len(wm.APIAuth.Keys) != 1 {
+		t.Fatalf("compiled peer API auth config is incomplete: %+v", wm)
+	}
+	if !config.VerifyAPIAuthSecret(wm.APIAuth.Users[0].Password.Reveal(), "correct-horse-battery") ||
+		!config.VerifyAPIAuthSecret(wm.APIAuth.APIKeys[0].Reveal(), "machine-generated-key-alpha") ||
+		!config.VerifyAPIAuthSecret(wm.APIAuth.Keys[0].Secret.Reveal(), "automation-key-secret-alpha") {
+		t.Fatal("peer-synced API credential verifiers do not accept their original secrets")
 	}
 }

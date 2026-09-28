@@ -990,6 +990,14 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 			"path", p, "issue", "#1798")
 	}
 
+	// #10826: lenient compilers hash a private expansion clone for runtime
+	// credentials, but SyncApply persists this source tree below. Hash the
+	// peer-supplied tree itself before compile/promotion so an older primary
+	// cannot reintroduce cleartext credentials into active or rollback storage.
+	if _, err := config.HashAPIAuthSecrets(tree); err != nil {
+		return nil, fmt.Errorf("sync config api-auth hash error: %w", err)
+	}
+
 	// Tolerant compile: a config peer-synced from a possibly-un-upgraded
 	// primary must not alarm-loop HA sync (see compileTreeLenient for
 	// the validator downgrades).
