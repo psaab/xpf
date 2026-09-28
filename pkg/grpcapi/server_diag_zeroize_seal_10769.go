@@ -146,11 +146,11 @@ func zeroizeImageSealResidue() error {
 
 	// Editor backups (seal backup-files parity, #10769 d05-F6). /etc top
 	// level is stem-gated to backups of the reset-owned identity files;
-	// service-owned directories are swept for any editor backup, since a
-	// backup there is by definition a copy of service config.
+	// service directories are swept for backups of the exact basenames xpf
+	// renders there (never a bare suffix match over shared dirs).
 	fail(zeroizeSweepOwnedEtcBackups(zeroizeEtcDir))
-	for _, dir := range zeroizeServiceBackupSweepDirs() {
-		fail(zeroizeSweepEditorBackups(dir))
+	for _, target := range zeroizeServiceBackupSweepTargets() {
+		fail(zeroizeSweepOwnedBackups(target.dir, target.owned))
 	}
 
 	// DHCP client identity (#10769 d05-F6): xpf's own per-interface DUIDs
@@ -245,11 +245,17 @@ func zeroizeStopKeaAndEraseLeases() error {
 // /var/backups, rewritten on every passwd/userdel invocation.
 var zeroizeShadowBackupNames = []string{"passwd.bak", "group.bak", "shadow.bak", "gshadow.bak"}
 
+// zeroizeShadowTildeStems are the account-database basenames whose editor
+// tilde-backups the sweep owns. A bare *~ match would take unrelated
+// application/operator backups in the shared /var/backups directory.
+var zeroizeShadowTildeStems = []string{"passwd", "shadow", "group", "gshadow"}
+
 // zeroizeEraseAccountBackups removes the account-database backups AFTER the
 // login-account teardown that recreates them (#10769 d05-F6): the /etc
 // passwd-/shadow-/group-/gshadow- files plus the /var/backups shadow set and
-// any editor tilde-backup beside them. Running this in the early seal legs
-// would let userdel/passwd re-create pre-modification backups afterwards.
+// tilde-backups of the account-database basenames. Running this in the early
+// seal legs would let userdel/passwd re-create pre-modification backups
+// afterwards.
 func zeroizeEraseAccountBackups() error {
 	var errs []error
 	for _, path := range zeroizePasswdBackupPaths {
@@ -265,25 +271,39 @@ func zeroizeEraseAccountBackups() error {
 		return errors.Join(errs...)
 	}
 	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() {
+		if entry.IsDir() || !isShadowBackupEntry(entry.Name()) {
 			continue
 		}
-		shadow := false
-		for _, want := range zeroizeShadowBackupNames {
-			if name == want {
-				shadow = true
-				break
-			}
-		}
-		if !shadow && !strings.HasSuffix(name, "~") {
-			continue
-		}
-		if err := zeroizeRemovePath(filepath.Join(zeroizeVarBackupsDir, name)); err != nil {
+		if err := zeroizeRemovePath(filepath.Join(zeroizeVarBackupsDir, entry.Name())); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// isShadowBackupEntry reports whether a /var/backups entry is a shadow-tools
+// account backup: one of the exact shadow names, or a tilde-backup of an
+// account-database basename. Anything else in the shared directory (other
+// applications' backups) is left alone.
+func isShadowBackupEntry(name string) bool {
+	for _, want := range zeroizeShadowBackupNames {
+		if name == want {
+			return true
+		}
+	}
+	if !strings.HasSuffix(name, "~") {
+		return false
+	}
+	stem, ok := editorBackupStem(name)
+	if !ok {
+		return false
+	}
+	for _, want := range zeroizeShadowTildeStems {
+		if stem == want {
+			return true
+		}
+	}
+	return false
 }
 
 // zeroizeSweepNetworkdLeases removes systemd-networkd DHCP lease files
@@ -409,12 +429,10 @@ func editorBackupStem(name string) (string, bool) {
 	return "", false
 }
 
-// zeroizeSweepEditorBackups removes every editor-backup file directly inside
-// dir. Callers pass only service-owned directories (xpf drop-in dirs,
-// rendered-config dirs), never a shared root: within those, a backup is by
-// definition a copy of service config, possibly with secrets. A symlinked
-// backup fails closed for operator inspection.
-func zeroizeSweepEditorBackups(dir string) error {
+// zeroizeSweepOwnedBackups removes the editor backups inside dir whose stem
+// the owned predicate accepts. A symlinked backup fails closed for operator
+// inspection.
+func zeroizeSweepOwnedBackups(dir string, owned func(stem string) bool) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -427,7 +445,8 @@ func zeroizeSweepEditorBackups(dir string) error {
 		if entry.IsDir() {
 			continue
 		}
-		if _, ok := editorBackupStem(entry.Name()); !ok {
+		stem, ok := editorBackupStem(entry.Name())
+		if !ok || !owned(stem) {
 			continue
 		}
 		if err := zeroizeRemovePath(filepath.Join(dir, entry.Name())); err != nil {
@@ -473,34 +492,53 @@ func zeroizeSweepOwnedEtcBackups(dir string) error {
 	return errors.Join(errs...)
 }
 
-// zeroizeServiceBackupSweepDirs returns the deduplicated service-owned
-// directories whose editor backups the reset erases: the xpf drop-in dirs,
-// the rendered-config dirs, rsyslog/networkd config dirs, and the SSH
-// config dir. Derived from the seamed path vars so tests relocate the
-// whole inventory into a disposable tree.
-func zeroizeServiceBackupSweepDirs() []string {
-	candidates := []string{
-		zeroizeSSHHostKeyDir,
-		zeroizeRsyslogConfDir,
-		zeroizeNetworkdDir,
-		filepath.Dir(zeroizeFRRConf),
-		filepath.Dir(zeroizeSwanctlSnippet),
-		filepath.Dir(zeroizeKea4Conf),
-		filepath.Dir(zeroizeKea6Conf),
+// zeroizeBackupSweepTarget pairs a directory with an ownership predicate
+// over backup stems: only backups OF xpf-rendered basenames are erased.
+// These directories are NOT xpf-exclusive (an operator's sshd_config.bak
+// sits beside ssh_known_hosts), so a bare suffix sweep would take unowned
+// files.
+type zeroizeBackupSweepTarget struct {
+	dir   string
+	owned func(stem string) bool
+}
+
+// zeroizeServiceBackupSweepTargets returns the service directories whose
+// backups-of-rendered-files the reset erases: the xpf drop-in dirs (gated
+// on the drop-in basenames), the rendered-config dirs (gated on the
+// rendered basenames), the SSH config dir (known_hosts only), and the
+// rsyslog/networkd dirs (gated on the 10-xpf- ownership shape the wipe
+// legs themselves use). Derived from the seamed path vars so tests
+// relocate the whole inventory into a disposable tree.
+func zeroizeServiceBackupSweepTargets() []zeroizeBackupSweepTarget {
+	stemsByDir := make(map[string]map[string]bool)
+	add := func(dir, stem string) {
+		if stemsByDir[dir] == nil {
+			stemsByDir[dir] = make(map[string]bool)
+		}
+		stemsByDir[dir][stem] = true
 	}
 	for _, dropin := range zeroizeManagedDropins {
-		candidates = append(candidates, filepath.Dir(dropin))
+		add(filepath.Dir(dropin), filepath.Base(dropin))
 	}
-	seen := make(map[string]bool, len(candidates))
-	var out []string
-	for _, dir := range candidates {
-		clean := filepath.Clean(dir)
-		if clean == "" || seen[clean] {
-			continue
-		}
-		seen[clean] = true
-		out = append(out, dir)
+	add(zeroizeSSHHostKeyDir, filepath.Base(zeroizeManagedHostKeysPath))
+	add(filepath.Dir(zeroizeFRRConf), filepath.Base(zeroizeFRRConf))
+	add(filepath.Dir(zeroizeSwanctlSnippet), filepath.Base(zeroizeSwanctlSnippet))
+	add(filepath.Dir(zeroizeKea4Conf), filepath.Base(zeroizeKea4Conf))
+	add(filepath.Dir(zeroizeKea6Conf), filepath.Base(zeroizeKea6Conf))
+	var out []zeroizeBackupSweepTarget
+	for dir, stems := range stemsByDir {
+		out = append(out, zeroizeBackupSweepTarget{dir: dir, owned: func(stem string) bool {
+			return stems[stem]
+		}})
 	}
+	out = append(out,
+		zeroizeBackupSweepTarget{dir: zeroizeRsyslogConfDir, owned: func(stem string) bool {
+			return strings.HasPrefix(stem, "10-xpf-") && strings.HasSuffix(stem, ".conf")
+		}},
+		zeroizeBackupSweepTarget{dir: zeroizeNetworkdDir, owned: func(stem string) bool {
+			return strings.HasPrefix(stem, "10-xpf-")
+		}},
+	)
 	return out
 }
 

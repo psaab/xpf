@@ -619,6 +619,10 @@ func TestPerformZeroizeErasesRecreatedAccountBackups10769(t *testing.T) {
 	}
 	bystander := filepath.Join(zeroizeVarBackupsDir, "unrelated.txt")
 	mustWriteFile(t, bystander, []byte("not an account backup"))
+	otherTilde := filepath.Join(zeroizeVarBackupsDir, "other-app~")
+	mustWriteFile(t, otherTilde, []byte("another application's backup"))
+	shadowTilde := filepath.Join(zeroizeVarBackupsDir, "shadow~")
+	mustWriteFile(t, shadowTilde, []byte("account-db tilde backup"))
 
 	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
 		t.Fatalf("PerformZeroizeWipe: %v", err)
@@ -628,13 +632,16 @@ func TestPerformZeroizeErasesRecreatedAccountBackups10769(t *testing.T) {
 	}
 	for _, path := range append(append([]string{}, zeroizePasswdBackupPaths...),
 		filepath.Join(zeroizeVarBackupsDir, "shadow.bak"),
-		filepath.Join(zeroizeVarBackupsDir, "passwd.bak")) {
+		filepath.Join(zeroizeVarBackupsDir, "passwd.bak"),
+		shadowTilde) {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Errorf("recreated account backup %s survived: %v", path, err)
 		}
 	}
-	if _, err := os.Lstat(bystander); err != nil {
-		t.Errorf("non-backup bystander %s must survive: %v", bystander, err)
+	for _, path := range []string{bystander, otherTilde} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("unrelated backup %s must survive: %v", path, err)
+		}
 	}
 }
 
@@ -747,11 +754,16 @@ func TestPerformZeroizeSweepsEditorBackups10769(t *testing.T) {
 	}
 	etcOther := filepath.Join(zeroizeEtcDir, "motd.bak")
 	mustWriteFile(t, etcOther, []byte("not reset-owned"))
-	// Service-owned dirs: any editor backup erased, live files kept.
+	// Service dirs: backups OF xpf-rendered basenames erased; backups of
+	// operator files in the same shared dirs survive.
 	swanctlBackup := filepath.Join(filepath.Dir(zeroizeSwanctlSnippet), "xpf.conf.bak")
 	mustWriteFile(t, swanctlBackup, []byte("prior IKE PSK backup"))
 	sshdBackup := filepath.Join(filepath.Dir(zeroizeManagedDropins[0]), "00-xpf.conf~")
 	mustWriteFile(t, sshdBackup, []byte("prior sshd policy backup"))
+	operatorDropinBackup := filepath.Join(filepath.Dir(zeroizeManagedDropins[0]), "50-operator.conf.bak")
+	mustWriteFile(t, operatorDropinBackup, []byte("operator sshd policy backup"))
+	operatorSSHBackup := filepath.Join(zeroizeSSHHostKeyDir, "sshd_config.bak")
+	mustWriteFile(t, operatorSSHBackup, []byte("operator sshd config backup"))
 
 	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
 		t.Fatalf("PerformZeroizeWipe: %v", err)
@@ -761,7 +773,7 @@ func TestPerformZeroizeSweepsEditorBackups10769(t *testing.T) {
 			t.Errorf("editor backup %s survived: %v", path, err)
 		}
 	}
-	for _, path := range []string{unownedBackup, etcOther} {
+	for _, path := range []string{unownedBackup, etcOther, operatorDropinBackup, operatorSSHBackup} {
 		if _, err := os.Lstat(path); err != nil {
 			t.Errorf("unowned backup %s must survive: %v", path, err)
 		}

@@ -243,3 +243,42 @@ func TestReconcileDNSFromDHCPFencedDuringReset10769(t *testing.T) {
 		t.Fatalf("DHCP DNS reconcile during reset must not run, got %d calls", calls)
 	}
 }
+
+// TestFactoryResetRestoresIdentitySymlinkAfterFailedWipe10769 pins that a
+// foreign resolver symlink replaced by the wipe is restored as the same
+// link on a failed reset — not converted to regular bytes read through it.
+func TestFactoryResetRestoresIdentitySymlinkAfterFailedWipe10769(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	target := filepath.Join(t.TempDir(), "stub-resolv.conf")
+	if err := os.WriteFile(target, []byte("nameserver 127.0.0.53\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(resetResolvConfPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, resetResolvConfPath); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	wipeErr := errors.New("wipe failed")
+	if err := d.factoryReset(context.Background(), func() error {
+		if err := os.Remove(resetResolvConfPath); err != nil {
+			t.Fatalf("simulate resolver replacement: %v", err)
+		}
+		if err := os.WriteFile(resetResolvConfPath, []byte("header-only\n"), 0o600); err != nil {
+			t.Fatalf("simulate resolver replacement: %v", err)
+		}
+		return wipeErr
+	}); !errors.Is(err, wipeErr) {
+		t.Fatalf("factoryReset error = %v, want %v", err, wipeErr)
+	}
+	info, err := os.Lstat(resetResolvConfPath)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("resolver symlink was not restored as a link: info=%v err=%v", info, err)
+	}
+	got, err := os.Readlink(resetResolvConfPath)
+	if err != nil || got != target {
+		t.Fatalf("restored link target = %q, want %q (err=%v)", got, target, err)
+	}
+}

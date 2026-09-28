@@ -177,22 +177,27 @@ func (d *Daemon) restoreIPsecAfterFailedReset() error {
 	return d.applyIPsecTracked(cfg)
 }
 
-// resetIdentityFile records one pre-wipe identity file: its bytes and mode,
-// or its absence.
+// resetIdentityFile records one pre-wipe identity path: its bytes and mode,
+// its symlink target, or its absence.
 type resetIdentityFile struct {
 	data   []byte
 	mode   os.FileMode
 	absent bool
+	link   bool
+	target string
 }
 
-// snapshotResetIdentity reads the identity files the wipe overwrites
+// snapshotResetIdentity reads the identity paths the wipe overwrites
 // (/etc/hostname, /etc/hosts, /etc/resolv.conf, /etc/ssh/ssh_known_hosts) so
-// a failed reset can restore them byte-for-byte. A read failure fails the
-// reset BEFORE anything is wiped: without a snapshot there is no restore.
+// a failed reset can restore them byte-for-byte. Links are snapshotted as
+// links (Lstat/Readlink): reading through a foreign resolver symlink and
+// restoring regular bytes over it would convert the pre-wipe link. A read
+// failure fails the reset BEFORE anything is wiped: without a snapshot
+// there is no restore.
 func snapshotResetIdentity() (map[string]resetIdentityFile, error) {
 	snap := make(map[string]resetIdentityFile)
 	for _, path := range []string{hostnamePath, resetHostsPath, resetResolvConfPath, resetKnownHostsPath} {
-		data, err := os.ReadFile(path)
+		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			snap[path] = resetIdentityFile{absent: true}
 			continue
@@ -200,11 +205,19 @@ func snapshotResetIdentity() (map[string]resetIdentityFile, error) {
 		if err != nil {
 			return nil, fmt.Errorf("snapshot %s for factory reset: %w", path, err)
 		}
-		mode := os.FileMode(0o644)
-		if st, serr := os.Stat(path); serr == nil {
-			mode = st.Mode().Perm()
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot symlink %s for factory reset: %w", path, err)
+			}
+			snap[path] = resetIdentityFile{link: true, target: target}
+			continue
 		}
-		snap[path] = resetIdentityFile{data: data, mode: mode}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot %s for factory reset: %w", path, err)
+		}
+		snap[path] = resetIdentityFile{data: data, mode: info.Mode().Perm()}
 	}
 	return snap, nil
 }
@@ -212,14 +225,25 @@ func snapshotResetIdentity() (map[string]resetIdentityFile, error) {
 // restoreResetIdentity writes a snapshot back after a failed wipe. It writes
 // unconditionally: the previous recovery called applyHostname, which returns
 // early when the kernel name already equals the configured name and left the
-// wiped xpf value on disk (#10769 d05-F6). Removal of a file absent at
-// snapshot time restores the pre-wipe absence (e.g. no known_hosts file).
+// wiped xpf value on disk (#10769 d05-F6). Links are restored as links and
+// absences as absences, so a foreign resolver symlink the wipe replaced is
+// put back untouched rather than converted to regular bytes.
 func restoreResetIdentity(snap map[string]resetIdentityFile) error {
 	var errs []error
 	for path, file := range snap {
 		if file.absent {
 			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				errs = append(errs, fmt.Errorf("restore absence of %s after failed factory reset: %w", path, err))
+			}
+			continue
+		}
+		if file.link {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("restore symlink %s after failed factory reset: %w", path, err))
+				continue
+			}
+			if err := os.Symlink(file.target, path); err != nil {
+				errs = append(errs, fmt.Errorf("restore symlink %s after failed factory reset: %w", path, err))
 			}
 			continue
 		}
