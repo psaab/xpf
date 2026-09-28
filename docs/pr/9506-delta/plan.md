@@ -1,31 +1,26 @@
 # 9506 delta plan: ship P-MECH permits on the current master (research/9506-delta)
 
- - Review state: **v11 revision; parent re-dispatch pending; this worker assigns
-  no verdict.** Round ten at `ac6c8862d` returned NEEDS-MAJOR 3-of-3
-  (FRESH-01/P3O-01/R9O-01 FIXED; R9-SEC-01/F2/F4 CLOSED and HELD)
-  with eight evidence-retention + lifecycle/atomicity residuals,
-  plus four advisories (batching correction, timestamp bypass,
-  SHA scope, torn-recovery order). This revision closes all of
-  them + the pending artifact-path question, no slice-time
-  deferrals: RETAINED runnable F0–F9 recipes + per-boundary output
-  matrix (ALL-HERE-OK) + content hashes (`f0f9-recipes.md`),
-  blob-SHA-pinned member tree identity, bytes-verified all-four
-  deb SHAs, B7-timestamp branch (member text + phydev belt + PTP
-  cell), B8 P2-entry evidence contract (member ENOTSOCK control,
-  rx_batched drift, v4+v6 kprobe windows, no-partial-credit OPEN);
-  handshake-`Fail` stops+joins the reaper (`reaper_shutdown` +
-  `unpark`, shared `abort_construction`); third `cfg(test)` gate
-  (post-terminalize/pre-insert) with deterministic split-commit
-  mutant; flag write-side rules (stale-boot RESET on write,
-  write-failure → live-freeze + sticky daemon mirror,
-  hygiene-unlink outcome, unlink retry); Done-check-then-abandon
-  on stolen slots; sentinel-FIRST torn recovery (fsync before
-  unlink) + SIGKILL-between-steps + sick-disk fixtures. All
-  credited designs held. The parent will re-dispatch the blinded
-  gate against this committed revision.
+ - Review state: **v12 revision; parent re-dispatch pending; this worker assigns
+  no verdict.** Round eleven at `acbeb5e28` returned NEEDS-MAJOR
+  2-of-3 (Sec READY, held; Opus 2 MATERIAL + Host 3 P2 open).
+  This revision closes all five, no slice-time deferrals:
+  full-tuple retained recipes (EVERY observable field per
+  boundary — member A + coherent `-31` B + coherent same-uname B
+  + INDEPENDENT per-field mismatches, ALL-HERE-OK matrix +
+  content hashes) with canonical `kernel-source-revision`
+  serialization reconciled + per-boundary unobservables named;
+  CORRECTED ENOTSOCK positive-control procedure (TUNSETIFF-bound
+  fd + raw-syscall errno attribution + wrapper/negative controls,
+  executed with bind); sick-disk-plus-reboot STILL-FROZEN
+  disambiguation; flag flock on stale/hygiene unlinks with
+  re-read-if-stale; clean-shutdown marker barred while the daemon
+  freeze mirror is set (case-(4), never case-(3)). All credited
+  designs held. The parent will re-dispatch the blinded gate
+  against this committed revision.
 - Date: 2026-09-27. Worktree `/var/tmp/worktrees/9506-research`, branch `research/9506-delta`.
- - Pins: `origin/master = fd32d2df5` (v11; verified at `3be469bc3` +
-  NAT-only delta `fd32d2df5` audited: touches no cited file; §4 drift
+ - Pins: `origin/master = 2ccea8434` (v12; verified at `3be469bc3` +
+  deltas `fd32d2df5` (NAT-only) + `2ccea8434` (peer-snapshot) audited:
+  neither touches any cited file; §4 drift
   base stays `028c4e4e2`); Sep-20 code tip `b71c52d60`
   ("pmech: land deny-only D11 bridge (#9506) (#10483)"); Sep-20 design tip
   `ebcec7ad4` (`research/9506-pmech-design`, `docs/pr/9506-xfrm-capture/pmech-design.md`,
@@ -1035,7 +1030,23 @@ all 35 design paths exist, as checked in §4.2.
   logged at `:1660-1699`): P2 changes it to return a new
   `ShutdownFenceVerdict{ok, reason}` collected from the fence-ACK and
   divert-removal results, and the marker writer requires `ok` (a failed
-  shutdown certifies nothing — next start freezes). The shutdown proving
+  shutdown certifies nothing — next start freezes). MIRROR BAR
+  (Hostile-5 — daemon-restart evaporation): the marker writer ALSO
+  requires the daemon freeze mirror CLEAR (`fenceFlagLive` unset);
+  mirror SET (a flag write failed this run — the file CANNOT carry
+  the freeze) ⇒ NO marker, verdict-not-ok-equivalent. Otherwise a
+  failed RESET-from-absent/stale write → clean daemon stop (marker
+  written) → same-boot restart (mirror cleared, file absent/stale)
+  would take case-(3) CLEAN and admit OPEN+mutation WITHOUT the
+  reboot retirement boundary for untrackable skbs (crash re-derives
+  via case-(4); clean-stop is what evaporates). With the bar, that
+  restart takes case-(4) (no marker + authority present) → freeze;
+  the mirror clears ONLY at reboot-init, so no clean shutdown is
+  possible while a freeze is file-unrecorded. QUIESCE ORDER (no
+  post-marker flag write): event/audit loops halt BEFORE
+  `shutdownIpsecCapture` runs, so no drift/readback can land a flag
+  write after the marker write — the mirror is stable across it.
+  The shutdown proving
   fence runs UNCONDITIONALLY — even with a nil overlay (nil ≠ no
   in-flight I/O; the fence proves the negative) — so every marker write
   is preceded by a VALID authority rewrite; marker+tombstone is
@@ -1077,7 +1088,12 @@ all 35 design paths exist, as checked in §4.2.
   Crash after unlink leaves sentinel + absent → freeze via the
   sentinel (NEVER first-install: `resolve()` checks the
   sentinel BEFORE the absent+absent case and freezes while it
-  names the current boot). On boot change `resolve()` removes
+  names the current boot). SICK-DISK-PLUS-REBOOT (explicit):
+  sentinel write failed (torn intact, no sentinel) + reboot →
+  STILL FROZEN — the torn rule fires pre-case-(2); reboot never
+  clears tamper; recovery is re-run-when-healthy (disk fixed →
+  command succeeds → reboot → admit). On boot change `resolve()`
+  removes
   the sentinel and proceeds (absent+absent post-reboot →
   first-install admit — sound because the reboot retired all
   kernel obligations). Re-run with sentinel present + file
@@ -1129,6 +1145,9 @@ all 35 design paths exist, as checked in §4.2.
   AND boot-ID mismatch with current-boot authority (must freeze) AND
   crash-between-unlink-and-OPEN (must freeze) AND failed/partial clean
   shutdown (verdict-not-ok → no marker → must freeze) AND
+  mirror-set clean-stop (flag write failed → mirror SET → shutdown
+  fence+removal OK but NO marker → same-boot restart takes case-(4),
+  NEVER case-(3)) AND
   crash-after-nil-invalidation (retire nil AND ambiguous nil, each: nil
   → tombstone present → crash, no later fence, no marker → must freeze;
   authority file EXISTS — absent+absent is unreachable here) AND
@@ -1152,7 +1171,9 @@ all 35 design paths exist, as checked in §4.2.
   kill -9 after unlink → sentinel + absent → freeze via
   sentinel, NEVER first-install; re-run idempotent; SICK-DISK:
   sentinel write fails → NO unlink, torn intact, command
-  errors, still frozen; reboot then admits)) AND torn-marker
+  errors, still frozen; sick-disk-plus-reboot → STILL FROZEN
+  (torn pre-case-(2)); ONLY post-successful-reset-reboot admits;
+  re-run-when-healthy recovers)) AND torn-marker
   (→ mismatch-freeze, never consumed) AND boot_id-unreadable
   (3× retry → freeze + alarm) AND persist-failure outcomes
   (VALID-persist fail → no Store + retry; nil-persist fail →
@@ -1642,43 +1663,56 @@ all 35 design paths exist, as checked in §4.2.
   `mixed_version_matrix` precedent) — updated ONLY by reviewed
   commit alongside a new review record. The F0 recording is
   CONFIRMATION (bake rows must EQUAL these pins), never blank
-  enrollment. REVIEW RECORD (COMPLETED v11):
+  enrollment. REVIEW RECORD (COMPLETED v12):
   `docs/pr/9506-delta/kernel-allowlist-7.0.0-30.md` — instantiated
   tuple + source/tree identity + SHA-verified deb capture + member
   config capture + per-branch MEMBER-TEXT review (B1–B8 at the
   pinned tag, file:line quoted) + per-boundary MEMBERSHIP recipes
-  + executed-evidence transcript (§7) + honest limits. BINDING
-  (MEMBERSHIP at EVERY boundary — each leg checks every tuple
-  field it can see, at least uname+revision; current-code gaps
-  DEMONSTRATED executed, record §7): bake asserts
-  `ls /lib/modules` equals exactly the member AND installed
-  `linux-{image,modules,headers}-7.0.0-30-generic` dpkg rows
-  equal `7.0.0-30.30` (new run-commands beside `:645-646` /
-  `:670-671` / `:676` + hold-verify `:708-721` shape — current:
-  installs newest `linux-generic`, `:641`); `sign.py`
-  `assert_bake_set` (extends `:438-442`) requires the
-  `kernel-allowlist` + `kernel-source-revision` keys AND tuple
-  membership (current: nonempty `guest_kernel` only — SIGNS
-  `-31`, demonstrated); `publish.py` `gate_provenance` requires
-  keys + member rows in `.pkgs` equal to the PIN (current:
-  manifest↔inventory agreement only — PUBLISHES coherent `-31`,
-  demonstrated; agreement remains as tamper-evidence);
-  `validate.py` scenario A (`:1185-1230`) asserts `uname -r`
-  equals the member + guest `dpkg-query` row equality + Kconfig
-  third predicate live (current: floor only — PASSES `-31`,
-  demonstrated); LANE-1 Arm refuses non-member candidates after
-  `ValidateKernelSegment` (new check — the function itself is
-  charset/path validation, `version.go:124`); Gate 2
-  (`kernel_run.go:551-558`) extends `running==CandidateVersion`
-  with `running ∈ reviewed tuple` (current: candidate-equality
-  only — promotes unreviewed `-31` by code read);
+  (`f0f9-recipes.md`: full-tuple per boundary, ALL-HERE-OK matrix)
+  + executed-evidence transcript (§7) + artifact ledger (§8) +
+  honest limits. `kernel-source-revision` canonical form (record
+  §2 normative): sorted comma-joined `pkg=ver` of the three kernel
+  packages; `kernel-allowlist` is the member uname, EQUALITY-compared.
+  BINDING (v12 full-tuple — EVERY boundary consumes+compares EACH
+  field observable at its site vs REPO PINS; genuinely-unobservable
+  fields named with their enforcing dependency, record §5 table;
+  current-code gaps DEMONSTRATED executed alongside specified
+  verdicts, recipes matrix): bake asserts `ls /lib/modules` equals
+  exactly the member AND all three installed
+  `linux-{image,modules,headers}-7.0.0-30-generic` dpkg rows equal
+  `7.0.0-30.30` (new run-commands beside `:645-646` / `:670-671` /
+  `:676` + hold-verify `:708-721` shape — current: installs newest
+  `linux-generic`, `:641`); `sign.py` `assert_bake_set` (extends
+  `:438-442`) requires `guest_kernel`==pin AND
+  `kernel-allowlist`==pin (EQUALITY, never truthiness) AND
+  `kernel-source-revision` parsed per §2 grammar with all three
+  rows==pins AND `validated`/`base_image_pinned`/`base_image_sha256`
+  ==pins (current: nonempty `guest_kernel` only — SIGNS `-31`,
+  demonstrated); `publish.py` `gate_provenance` requires manifest
+  AND inventory EACH vs PIN (both `guest_kernel`==pin, both row
+  sets image+modules+headers==pins, `kernel-allowlist`==pin, base
+  pins, `xpf`==ver; current: manifest↔inventory agreement only —
+  PUBLISHES coherent `-31`, demonstrated; cross-agreement retained
+  as tamper-evidence); `validate.py` scenario A (`:1185-1230`)
+  asserts `uname -r`==pin + single module dir==pin + all three
+  guest `dpkg-query` rows==pins + Kconfig third predicate live
+  (current: floor only — PASSES `-31`, demonstrated); LANE-1 Arm
+  compares the FULL candidate tuple (candidate uname + 3 rows from
+  the candidate inventory vs pins) after `ValidateKernelSegment`
+  (new check — the function itself is charset/path validation,
+  `version.go:124`); Gate 2 (`kernel_run.go:551-558`) compares
+  running uname + running dpkg rows vs candidate rows vs pins
+  (current: `running==CandidateVersion` strings only — promotes
+  unreviewed `-31` by code read);
   `xpf-kernel-promote` outer gate refuses no-infer (current:
   authenticates the xpfd binary path,
   `kernel_arm_record.go:39` — gap by code read) AND non-member;
   `promotionMarkerPath`/`lastRollPath`/`ReadChannelStatus`
   (`kernel_status.go:84` — REPORTING, not enforcement) become
   EVIDENCE INPUTS to the membership check; ordinary-boot
-  admission asserts full tuple match before OPEN (booted
+  admission asserts booted uname + 3 dpkg rows + live Kconfig AND
+  manifest uname + revision-rows + allowlist, ALL vs pins, before
+  OPEN (booted
   non-member runs the system but never opens permits); rollback
   to a non-member known-good proceeds as a system function but
   P-MECH admission refuses OPEN until a member kernel runs
@@ -1715,12 +1749,22 @@ all 35 design paths exist, as checked in §4.2.
   content = `{boot_id, entries[{kind, gen/epoch?, reason, at}]}`;
   kinds: `crash-unclean` (written by case-(4) crash),
   `mode-drift` (written by drift fence), `helper-unclean`
-  (written by helper-handoff, (g)). Every read compares
-  `flag.boot` vs current boot FIRST: stale boot → best-effort
-  unlink + treat as CLEAR (post-reboot mutation allowed again
-  after fresh-init + re-admission — no re-freeze, no forever-
-  refused mutation; the unlink is RETRIED on every stale read
-  until it succeeds — best-effort, one syscall per read);
+  (written by helper-handoff, (g)). LOCKING (Hostile-4 — one
+  lock, all mutating paths): the flag flock (`withEpochFileLock`
+  on the flag path) covers read-modify-write AND stale-read
+  unlink AND case-(2) hygiene unlink — all three take the SAME
+  lock, singly held, NEVER nested with the authority flock
+  (case-(2) orders: authority rewrite → release → flag hygiene).
+  Every read compares `flag.boot` vs current boot FIRST: stale
+  boot → take the flag flock → RE-READ boot inside the hold →
+  unlink ONLY if still stale (a concurrent RESET write that won
+  first leaves current-boot entries the unlink must NOT delete —
+  this check-then-unlink-under-one-hold closes the
+  stale-unlink-vs-RESET race) → treat as CLEAR (post-reboot
+  mutation allowed again after fresh-init + re-admission — no
+  re-freeze, no forever-refused mutation; the locked unlink is
+  RETRIED on every stale read until it succeeds — best-effort,
+  one locked syscall per read);
   current boot + non-empty entries → mutation REFUSED.
   Stale-unlink failure → refuse + alarm (disk broken ⇒ deny,
   consistent with authority persist failures). Non-ENOENT read
@@ -1746,13 +1790,13 @@ all 35 design paths exist, as checked in §4.2.
   any write failure, cleared ONLY by reboot-init); the
   mutation/OPEN gates check file OR mirror (either SET →
   refuse); daemon restart re-reads the file (mirror cleared,
-  file persists). HYGIENE-UNLINK FAILURE (case-(2) belt):
-  alarm + flag treated as SET for mutation (fail-closed)
-  while OPEN proceeds iff otherwise admissible (same-env
-  reopen; mutation refused until a later stale-read unlink
-  succeeds). Case-(2) fresh-init ALSO unlinks the flag as
-  hygiene (belt; the self-clear is normative,
-  order-independent). Same-env reopen is allowed after full
+  file persists). HYGIENE-UNLINK under the SAME flag flock
+  with the same re-read-if-stale guard (case-(2) belt; never
+  unlinks a file a concurrent RESET already made current).
+  HYGIENE-UNLINK FAILURE: alarm + flag treated as SET for
+  mutation (fail-closed) while OPEN proceeds iff otherwise
+  admissible (same-env reopen; mutation refused until a later
+  stale-read unlink succeeds). Same-env reopen is allowed after full
   re-admission (fresh predicate PASS incl. mode) + zero
   old-epoch I/O outstanding, but routing-env mutation stays
   refused while boot-current entries exist.
@@ -2236,7 +2280,9 @@ slice commit's Validation section):
   — the (e) qualified form; cross-boot mismatch → fresh-init OPEN
   per the crash→reboot cell, NEVER freeze) → CLOSING/freeze AND
   crash-between-unlink-and-OPEN freezes AND failed/partial shutdown
-  (verdict-not-ok → no marker) freezes AND first-install
+  (verdict-not-ok → no marker) freezes AND mirror-set-clean-stop
+  (no marker despite ok fence → restart case-(4)) freezes AND
+  first-install
   (absent+absent → fresh init + OPEN) AND crash→reboot→re-admit
   (fresh admissible) AND clean-shutdown→reboot (stale marker
   discarded + OPEN) AND crash-after-nil-invalidation (retire-nil,
@@ -2253,7 +2299,9 @@ slice commit's Validation section):
   after sentinel → sentinel+torn → freeze; kill -9 after unlink
   → sentinel+absent → freeze via sentinel, NEVER first-install;
   re-run idempotent; SICK-DISK: sentinel write fails → NO unlink,
-  torn intact, command errors, still frozen), reboot then admits)
+  torn intact, command errors, still frozen; sick-disk-plus-reboot
+  → STILL FROZEN (torn pre-case-(2)); ONLY post-successful-reset-
+  reboot admits; re-run-when-healthy recovers)
   AND torn-marker (freeze, never consumed) AND boot_id-unreadable
   (freeze+alarm) AND persist-failure outcomes (VALID-no-Store+retry;
   nil-live-freeze; fresh-init-freeze) AND epoch-flusher (four CAS
@@ -2505,6 +2553,12 @@ docs/log/9506-observe.md tail                       # 30/30 VOID (G2 consumer un
  grep/sed member tun.c/dev.c/ip_input.c/ip6_input.c  # B1-B8 branch lines (record §7)
  python3 ENOTSOCK probe  # sendmsg on TUN char fd → errno 88 (non-socket)
  python3 sign/publish/floor/member probes  # gaps SIGN/PUBLISH/PASS -31; predicate REJECTs
+ # v12 additions (full-tuple recipes + corrected ENOTSOCK + flag/sentinel cites)
+ awk-extract f0f9-recipes.md; USE_SUDO=1 ./run_all.sh  # ALL-HERE-OK (A+B+same-uname+skews)
+ sha256sum -c <v12 pins>  # 15/15 OK (extraction stability)
+ sudo -n TUNSETIFF bind + ctypes sendmsg  # bound fd errno 88; wrapper/NULLCTL/PAIRCTL;CLEANUP
+ grep -rn callers setHostInputFenceOverlay/clear*  # conntrack :274/:280, reconcile :290 (census shut)
+ git diff --name-only fd32d2df5..2ccea8434  # 34 files, zero cited paths (audit list in §9 text)
  # v11 additions (retained recipes + member-tree deltas + lifecycle cites)
  curl -O linux-headers/linux-modules 7.0.0-30.30 debs; sha256sum  # f3be8e8d/d61aa07f MATCH
  git rev-parse 'Ubuntu-7.0.0-30.30:<f>' (6 files)  # blob SHAs (record §8)
@@ -2519,6 +2573,6 @@ docs/log/9506-observe.md tail                       # 30/30 VOID (G2 consumer un
 
  Prior-review note: the Sep-25 delta assessment comment (issue #9506) and its
  D11-clarification comment were used as the starting inventory and every load-bearing
- claim in them was re-verified; v10/v11 re-verified all load-bearing cites at
+ claim in them was re-verified; v10/v11/v12 re-verified all load-bearing cites at
  `3be469bc3` above (nil/epoch sites, helper lifecycle, spawn sites, image gates);
  the two corrections versus Sep-25 stand: (a) F1 landed (#11107), (b) v35.

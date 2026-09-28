@@ -1,6 +1,6 @@
 # Kernel allowlist member review: 7.0.0-30-generic (#9506 P-MECH receive proof)
 
-Review base: research/9506-delta at v11 (plan `docs/pr/9506-delta/plan.md`; recipes `docs/pr/9506-delta/f0f9-recipes.md`).
+Review base: research/9506-delta at v12 (plan `docs/pr/9506-delta/plan.md`; recipes `docs/pr/9506-delta/f0f9-recipes.md`).
 Purpose: this record is the completed per-member evidence the M1
 ENFORCED RECEIVE MODE invariant requires. It binds the exact guest
 kernel identity to its source revision, Kconfig posture, and the
@@ -83,16 +83,27 @@ The expected source revision is `linux 7.0.0-30.30`
   current resolute-security `Sources` shows source `linux 7.0.0-34.34`
   building binaries `7.0.0-34-*` (same suffix both sides).
 
+Canonical serialization (NORMATIVE — reconciles the sidecar contract with
+its recipe representation): `kernel-source-revision` is the sorted
+comma-joined `pkg=ver` rows of exactly the three kernel packages —
+`linux-headers-7.0.0-30-generic=7.0.0-30.30,linux-image-7.0.0-30-generic=7.0.0-30.30,linux-modules-7.0.0-30-generic=7.0.0-30.30`
+(expected value pinned verbatim in `f0f9-recipes.md`). Opacity scope,
+reconciled: the value is opaque to TRANSPORT (`parse_sidecar_fields`
+splits `key: value` only, never interprets); the MEMBERSHIP predicate
+parses it per this grammar and compares per-package (unparseable or
+wrong-set ⇒ refuse). `kernel-allowlist` is the member uname string,
+EQUALITY-compared (never truthiness).
 F0 (fixture, RECIPE-EXECUTED): at bake, `dpkg-query -W
 -f='${Package}=${Version}\n'` over installed `linux-image-*` /
-`linux-modules-*` (same installed-filter as the `:708-721` hold-verify
-fragment) records rows into required manifest key
+`linux-modules-*` / `linux-headers-*` (same installed-filter as the
+`:708-721` hold-verify fragment) records rows; the writer emits the
+canonical serialization into required manifest key
 `kernel-source-revision`; the gate asserts the rows EQUAL the §0 pins
 byte-for-byte (a bake recording any other revision FAILS — first
-recording is confirmation, never blank enrollment). Gates treat the
-value as an opaque exact-match token — agreement-checked, never parsed.
-Status: INSTANTIATED + RECIPE-EXECUTED (§7 probe matrix: member
-ACCEPT, `-31`, same-uname-revision-skew, `-22` all REJECT).
+recording is confirmation, never blank enrollment).
+Status: INSTANTIATED + RECIPE-EXECUTED (v12 `f0f9-recipes.md`
+matrix: member A + coherent `-31`/same-uname B + independent
+per-package skews, ALL-HERE-OK).
 
 ## 3. Kconfig posture (CAPTURED from the member build)
 
@@ -232,9 +243,11 @@ more`, or NAPI); `:1985-2000` (write path hardcodes `more=false`);
 `MSG_MORE`); `:2802` (`rx_batched = 0` default); `:3553-3598`
 (ethtool get/set-coalesce — runtime-tunable, hence gated, not
 assumed). xpf side ESTABLISHED + EXECUTED: all USP writes are
-char-fd `write`/`OP_Write` (never sendmsg); `sendmsg` on the USP
-char fd fails `ENOTSOCK` (errno 88 — executed probe, §7), so a
-compile-valid sendmsg mutant fails LOUDLY, never holds silently.
+char-fd `write`/`OP_Write` (never sendmsg); raw `sendmsg(2)` on a
+TUNSETIFF-bound USP-shape fd fails `ENOTSOCK` (errno 88 FROM THE
+SYSCALL — corrected v12 procedure with bind + attribution +
+controls, recipes matrix), so a compile-valid sendmsg mutant fails
+LOUDLY, never holds silently.
 Queue-empty induction: entries enter the batch queue ONLY via the
 more-path (`:1496-1498`) or the NAPI path (`:1936`, napi off) —
 under all-`!more` writes from a fresh TUN the queue is always
@@ -251,8 +264,9 @@ empty, so `(!more && empty)` dispatches inline on every write
  `tun_chr_write_iter` (`:1985-2002`, `more=false`) → `tun_get_user`
  (`:1952-53`, non-NAPI + `!4KSTACKS` arm) → `tun_rx_batched`
  (`:1482-87`, `(!more && empty)` → inline `netif_receive_skb`).
- Adversarial fixtures: ENOTSOCK probe (EXECUTED §7, re-executed on
-the member kernel by P2); rx_batched-drift fixture (ethtool-set 64
+ Adversarial fixtures: ENOTSOCK probe (EXECUTED with bind +
+attribution + negative controls, recipes matrix; member-kernel
+positive control re-executed by P2); rx_batched-drift fixture (ethtool-set 64
 while OPEN → must revoke+freeze); sendmsg-mutant cell (route USP
 writes through sendmsg → must fail loud `ENOTSOCK`, never silent
 success); kprobe sync-proof (P2 on member kernel: `ip_forward` /
@@ -265,15 +279,22 @@ timing bar).
 
 ## 5. Boundary enforcement (MEMBERSHIP at every boundary)
 
-Rule: every boundary evaluates the §0 tuple predicate (uname AND
-package rows AND Kconfig where the leg can see them — each leg
-checks every field it CAN see, and at least uname+revision; no leg
-passes coherent-B). Current-code gaps were DEMONSTRATED executed
-(§7: current sign SIGNS `-31`/`-22`; current publish PUBLISHES
-coherent agreeing `-31`; current floor PASSES `-31`/`-22`); the
-specified predicates REJECT all three (executed probe matrix, §7).
-P-MECH does not open permits until the LANDED gates (F0–F9) execute
-at P2 entry; statuses below are honest per gate.
+Rule (v12 — full-tuple, no partial coverage): every boundary consumes
++ compares EVERY tuple field observable at its site vs the REPO-PINNED
+expected values (never leg-vs-leg agreement alone). Genuinely
+unobservable fields are named per boundary below with the
+already-enforced dependency covering them; global non-observables:
+git tag/commit (no boundary reads git — enforced transitively via
+binary==source convention §2 + F9 linkage) and deb archive SHA256s
+(dpkg does not retain them post-install — enforced as archive
+identity at bake/download, §1/§8; runtime compares name=ver rows).
+Matrix (retained `f0f9-recipes.md`, ALL-HERE-OK): member A +
+coherent `-31` B + coherent same-uname B + INDEPENDENT
+image/modules/headers/config/allowlist/base mismatches per boundary.
+Current-code gaps DEMONSTRATED executed alongside (specified verdict
+vs current verdict per case). P-MECH does not open permits until the
+LANDED gates (F0–F9) execute at P2 entry; statuses below are honest
+per gate.
 
 - Bake output: virt-customize run-command beside `:645-646` /
   `:670-671` / `:676` asserts `ls /lib/modules` equals exactly
@@ -290,28 +311,41 @@ at P2 entry; statuses below are honest per gate.
   + Go consts beside the LANE-1/validate call sites + agreement
   test). Status: RECIPE-EXECUTED (pins instantiated, §7).
 - Signed manifest: `sign.py` `assert_bake_set` (extends `:438-442`)
-  requires new `kernel-allowlist` key + `kernel-source-revision`
-  key AND tuple membership (replacing nonempty-`guest_kernel`).
+  requires `guest_kernel`==pin AND `kernel-allowlist`==pin (EQUALITY)
+  AND `kernel-source-revision` parsed per §2 grammar with all three
+  rows==pins AND `validated`/`base_image_pinned`/`base_image_sha256`
+  ==pins (replacing nonempty-`guest_kernel`). Unobservable: Kconfig
+  (F8 dependency), `.pkgs` rows (F4 checks the same rows vs PIN).
   (Current: nonempty only — gap demonstrated, §7.) Fixtures F2
   (non-member `guest_kernel` → bake dies member-mismatch), F3
   (`7.0.0-22` sidecar → SignError; `-31` sidecar → SignError).
   Status: RECIPE-EXECUTED.
-- Package inventory: `publish.py` `gate_provenance` requires keys
-  present + member package rows present + versions equal to the
-  PIN (replacing manifest↔inventory agreement alone; agreement
-  remains as tamper-evidence). (Current: agreement only — gap
+- Package inventory: `publish.py` `gate_provenance` requires
+  manifest `guest_kernel`==pin AND `kernel-allowlist`==pin AND
+  manifest revision-rows==pins AND inventory `guest_kernel`==pin AND
+  inventory image+modules+headers rows==pins AND `xpf`==ver AND base
+  pins (replacing manifest↔inventory agreement alone — EACH record
+  vs PIN; cross-agreement retained as tamper-evidence).
+  Unobservable: Kconfig (F5/F8 live dependency). (Current: agreement only — gap
   demonstrated, §7.) Fixtures F4a/b/c (skew dies + lacks-member-
   package dies + coherent-agreeing-`-31` dies). Status:
   RECIPE-EXECUTED.
 - Validate/boot: scenario A (`validate.py:1185-1230` floor block)
-  asserts `uname -r` equals the member exactly (before the hold
-  assert) + package-row equality via guest `dpkg-query` + Kconfig
-  third predicate live. (Current: floor only — gap demonstrated.)
+  asserts `uname -r`==pin + single `/lib/modules` dir==pin + all
+  three guest `dpkg-query` rows==pins + Kconfig third predicate live
+  (mlx5 dir/flavor/hold retained as-is). Unobservable: base digest
+  (sign/publish-chain dependency — the booted image was verified
+  before it exists). (Current: floor only — gap demonstrated.)
   Fixture F5 (`7.0.0-22` single+held → fail; `-31` → fail).
   Status: RECIPE-EXECUTED.
-- Ordinary-boot admission: the supervisor asserts full tuple match
-  before OPEN (same gate as the mode predicate — a booted
-  non-member runs the system but never opens permits). Fixture F5b
+- Ordinary-boot admission: the supervisor asserts booted
+  `uname -r`==pin + booted 3 dpkg rows==pins + live Kconfig
+  (`/boot/config-$(uname -r)`, `_CONFIG_ASSERT` shape) AND manifest
+  `guest_kernel`==pin + manifest revision-rows==pins + manifest
+  `kernel-allowlist`==pin before OPEN (same gate as the mode
+  predicate — a booted non-member runs the system but never opens
+  permits). Unobservable: base digest (sign/publish-chain
+  dependency). Fixture F5b
   (booted `7.0.0-22` with a `7.0.0-30` manifest → system runs,
   permits stay shut). Status: RECIPE-EXECUTED.
 - Rollback admission: rollback to a non-member known-good proceeds
@@ -319,11 +353,12 @@ at P2 entry; statuses below are honest per gate.
   member kernel runs again. Fixture F5c (rollback to held
   `7.0.0-22` → system functional, P-MECH deny-only + alarm).
   Status: RECIPE-EXECUTED.
-- LANE-1: Arm refuses non-member candidates after
-  `ValidateKernelSegment` (new membership check — `ValidateKernelSegment`
-  itself is charset/path validation, `version.go:124`, not
-  membership); Gate 2 (`kernel_run.go:551-558`) extends
-  `running==CandidateVersion` with `running ∈ reviewed tuple`
+- LANE-1: Arm compares the FULL candidate tuple (candidate
+  `uname -r` + 3 rows from the candidate inventory vs pins) after
+  `ValidateKernelSegment` (charset/path only, `version.go:124`);
+  Gate 2 (`kernel_run.go:551-558`) compares running `uname -r` +
+  running dpkg rows vs candidate rows vs pins (`running==candidate`
+  on full rows, then `running ∈ reviewed tuple`)
   (current: candidate-equality only — gap by code read);
   `xpf-kernel-promote` outer gate refuses no-infer AND non-member;
   `promotionMarkerPath`/`lastRollPath`/`ReadChannelStatus`
@@ -481,7 +516,7 @@ Scope honesty: this transcript is archive/tree/code evidence +
  execution (P2) and NOT member-kernel execution (kprobe/readbacks) —
  those remain the P2-entry bar, now with exact expected values.
 
- ## 8. Artifact retention ledger (v11 — answers the gate artifact question)
+ ## 8. Artifact retention ledger (v12 — answers the gate artifact question)
 
  Lane rule permits only `docs/pr/9506-delta/*.md` writes, so durable
  retention is git-pinned .md + content hashes; `/tmp` bytes are
@@ -522,24 +557,32 @@ Scope honesty: this transcript is archive/tree/code evidence +
   extraction command + per-file sha256 pins in-file; 15/15
   verified post-extraction at v11).
  - Per-boundary outputs: RETAINED in `f0f9-recipes.md` output
-  matrix (member-ACCEPT + revision-skew/coherent-B-REJECT per
-  boundary + current-code gap verdicts; `MATRIX: ALL-HERE-OK`,
-  exit 0, 2026-09-27). The v10 aggregate probe outputs they
-  supersede remain TRANSCRIPT-ONLY (§7 v10 block).
- - ENOTSOCK probe script: RETAINED (`enotsock_probe.py` in
-  recipes file); fd/device identity RETAINED (matrix:
-  `/dev/net/tun` 10:200, build host `7.0.13+deb14-amd64`,
-  char fd O_RDWR); raw output RETAINED in the matrix
-  (`socket-op: errno=88 … [OK]`) — no separate raw-output file
-  exists (TRANSCRIPT-ONLY beyond the matrix paste). Member-
-  kernel/USP-device positive control: NOT executed (P2).
+  matrix (member A + coherent `-31` B + coherent same-uname B +
+  INDEPENDENT per-field mismatches per boundary + current-code gap
+  verdicts; `MATRIX: ALL-HERE-OK`, exit 0, 2026-09-27; v12
+  supersedes the v11 matrix). The v10 aggregate probe outputs
+  remain TRANSCRIPT-ONLY (§7 v10 block).
+ - ENOTSOCK probe script: RETAINED (`enotsock_probe.py` v12
+  corrected procedure in recipes file); fd/device identity
+  RETAINED (matrix: `/dev/net/tun` 10:200 + TUNSETIFF-bound temp
+  device `v12en*` flags `0x1001` + sysfs node, build host
+  `7.0.13+deb14-amd64` euid=0 via `sudo -n`, char fd
+  O_RDWR|O_CLOEXEC); raw output RETAINED in the matrix
+  (SETUP-bind + SEND raw-syscall errno=88 on the BOUND fd +
+  WRAPPER-fromfd errno=88 distinguished + NULLCTL + PAIRECTL +
+  CLEANUP-removed — no separate raw-output file exists,
+  TRANSCRIPT-ONLY beyond the matrix paste). Member-kernel /
+  member-USP-device positive control: NOT executed (P2, same
+  script, no `USE_SUDO` needed as root).
  - rx_batched drift / kprobe sync-proof / PTP cells: scripts
   RETAINED as specified text (recipes file, exit 3 =
   not-run-here); outputs do NOT exist (P2 member-kernel bar).
  - P2-ENTRY EVIDENCE CONTRACT (B8, airtight): permits stay
   CLOSED until ALL of the following exist as LANDED, member-
   kernel-executed evidence: (i) ENOTSOCK positive control on
-  the member USP device (same script, `$TUNDEV`, errno 88);
+  the member USP device (same corrected script: TUNSETIFF bind a
+  member-USP-shape fd + raw-sendmsg errno 88 + wrapper/negative
+  controls + cleanup);
   (ii) rx_batched set/readback/drift/revoke fixture (set 64
   → readback → revoke+fence+freeze within one audit tick);
   (iii) IPv4+IPv6 kprobe timing proof (forward entry+exit
