@@ -689,13 +689,29 @@ Properties:
   commit per the procedure below. Tightening while the service keeps running
   has its own procedure below (restrict, not decommission). Matcher pins:
   peer-oriented 2222 flushes, box-oriented 2222 and TCP/179 are kept; neither
-  appears in any guard DROP. The any-service breadth advisory names this
-  consequence while the stanza is open; the tightening commit itself carries a
-  commit-output warning naming the narrowed scopes whenever stranded flows are
-  observed; and the daemon warns in the journal on applies that keep denied
-  non-catalog customs below the ephemeral floor (TCP also when listener-backed
-  — ephemeral egress, exempts, bare, ranges, WireGuard, and ingress-permitted
-  tuples stay journal-silent).
+  appears in any guard DROP. Warning surfaces, each with exact scope. The
+  any-service breadth advisory names this consequence while the stanza is
+  open. The tightening commit itself carries a commit-output warning naming
+  the narrowed scopes (full-admit loss or unguarded-token removal, zone-level
+  only where no replacing override applies) whenever this attempt's sweep
+  observed stranded customs, exempt, or bare flows on an address in a
+  narrowed zone — cross-zone-only evidence stays silent, as do commits with
+  no transition or no observed flows. The daemon additionally warns in the
+  journal on any apply (commit or background) that keeps denied non-catalog
+  customs below the ephemeral floor, plus TCP customs inside the range when
+  backed by a local LISTEN socket. Deliberately journal-silent: exempt and
+  bare flows (steady-state control-plane traffic would warn on every apply;
+  they surface only through the transition-gated commit warning), ephemeral
+  egress and ranges (indistinguishable from ordinary clients AND
+  policy-invariant authorized — no chain can drop a non-catalog reply tuple,
+  proven by the catalog-boundedness test), WireGuard (globally admitted), and
+  ingress-permitted catalogued tuples (correctly kept: the per-ingress guard
+  judges each reply packet, so keeping them is enforcement, not residual).
+  Sweep misses (created-after-dump, per-family interleave) and post-sweep
+  reconnects surface on the NEXT apply's sweep instead — catalogued misses
+  still drop via the guard meanwhile; unguarded misses linger until observed.
+  A flap (tighten→loosen→tighten) re-evaluates transition plus evidence at
+  each commit independently.
 - **Race bound: guard-first closes the catalogued Install→flush window; the
   peer-oriented uncovered window is bounded by sweep duration, not packets.**
   The guard installs atomically with the table, before the conntrack sweep, so
@@ -748,10 +764,18 @@ go through xpf config plus a stopping commit FIRST — every full apply
 regenerates managed daemon configs and reloads, so direct daemon-CLI edits
 are diagnostic-only and temporary (details per row):
 
-- UDP tuple: `conntrack -D -p udp -s <box-ip> --sport <port> -f <fam>`; verify
+- UDP tuple with a FIXED box sport (services/exempts bound to their port):
+  `conntrack -D -p udp -s <box-ip> --sport <port> -f <fam>`; verify
   `conntrack -L -p udp -s <box-ip> --sport <port> -f <fam>` shows nothing.
   Socket discovery uses all-state `ss -uan` (never `-lun`: `-l` misses
   connected UDP senders); add `p` for process attribution.
+- Ephemeral-source UDP (BFD control, traceroute probes, and any sender the
+  rows below mark ephemeral): do NOT filter by `--sport` — discover ORIG
+  tuples by destination instead: `conntrack -L -p udp -s <box-ip> -f <fam> |
+  grep -E 'dport=<(dports)>'`, delete each full tuple (`conntrack -D -p udp
+  -s <box-ip> --sport <ephem> -d <peer> --dport <dport> -f <fam>`), and
+  verify the filtered list empty. A `--sport` filter here would miss every
+  conforming flow and prove nothing.
 - TCP tuple/exempt: `conntrack -D -p tcp -s <box-ip> --sport <port> -f <fam>`;
   verify likewise. Additionally verify NO socket on the port: listeners via
   `ss -ltn sport = :<port>`, any-state (established children, clients) via
@@ -761,24 +785,28 @@ are diagnostic-only and temporary (details per row):
   <num> -s <box-ip> -f <fam>` with 89 OSPF, 103 PIM, 112 VRRP, 47 GRE, 2 IGMP
   (covers DVMRP, carried inside IGMP), 46 RSVP, 113 PGM, 54 NHRP; verify with
   the same `-L` filters.
-- Port range (traceroute UDP 33434–33523): loop — `for p in $(seq 33434
-  33523); do conntrack -D -p udp -s <box-ip> --sport $p -f <fam>; done`,
-  verify by looping `-L` the same way. The broad alternative (`conntrack -D
-  -p udp -s <box-ip>`) also deletes legitimate box-originated ephemeral UDP
-  (DNS stub queries etc.) — they retransmit, but prefer the loop.
+- Port range (traceroute UDP dports 33434–33523): box probes source ephemeral,
+  so discover ORIG tuples by destination peer — `conntrack -L -p udp -s
+  <box-ip> -d <probed-peer> -f <fam>` (the operator knows what was probed;
+  entries show dports in range) — delete each full tuple, verify the filtered
+  list empty. Do NOT loop `--sport` over the range: those are DESTINATION
+  ports, and the loop would miss every conforming probe while reporting
+  empty. The broad alternative (`conntrack -D -p udp -s <box-ip>`) also
+  deletes legitimate box-originated ephemeral UDP (DNS stub queries etc.) —
+  they retransmit, but prefer discovery.
 
 Per-class originators, stop actions, and recurrence timers:
 
 | Class | Tuple | Originator on this appliance | Stop/disable action | Recurrence timer |
 |---|---|---|---|---|
-| BFD | UDP 3784/3785/4784 | FRR bfdd (one global daemon; every peer shares the sports) | remove `bfd-liveness-detection` from EVERY xpf interface/group stanza + stopping commit — one peer is not enough; direct vtysh peer removal is temporary (next commit regenerates) | sub-second hellos (300ms x3 detect default) |
+| BFD | UDP dports 3784/4784 (echo 3785); sources ephemeral per RFC 5881 §4/5883 | FRR bfdd (one global daemon; all peers share the dports, each session its own ephemeral sport) | remove `bfd-liveness-detection` from EVERY xpf interface/group stanza + stopping commit — one peer is not enough; direct vtysh peer removal is temporary (next commit regenerates). Discover/delete by DESTINATION (`conntrack -L -p udp -s <box-ip> -f <fam> | grep -E 'dport=(3784|4784)'`), never `--sport 3784` (matches nothing conforming) | sub-second hellos (300ms x3 detect default) |
 | RIP | UDP 520, mcast 224.0.0.9 | FRR ripd | delete/deactivate `protocols rip` (or the neighbor/interface) + stopping commit; direct `no router rip` in vtysh is temporary (next commit regenerates) | 30s updates |
 | RIPng | UDP 521, mcast ff02::9 | no xpf-managed ripngd in-tree | stop any third-party ripngd (identify via `ss -uan sport = :521`) | 30s if present |
-| SAP | UDP 9875 | none in-tree | identify via `ss -uan sport = :9875`, stop the announcer | announce interval (minutes) if present |
-| LDP-UDP | UDP 646 | none in-tree (no FRR ldpd render) | identify via socket/conntrack, stop it | 5s/15s hellos if present |
+| SAP | UDP dport 9875 (sources ephemeral) | none in-tree | identify the announcer (`ss -uanp` + conntrack dport=9875 discovery as for BFD), stop it | announce interval (minutes) if present |
+| LDP-UDP | UDP 646 (hellos carry sport 646 → dport 646, like RIP) | none in-tree (no FRR ldpd render) | identify via socket/conntrack (`--sport 646` applies here), stop it | 5s/15s hellos if present |
 | DHCPv4 | UDP 67/68 | xpfd native dhcp.Manager client; Kea DHCP server; xpfd-native dhcprelay relay | delete the interface `dhcp` stanza (commit stops the client); disable `system services dhcp-local-server` groups and `forwarding-options dhcp-relay` + stopping commit | T1 renewals (lease-dependent, typically hours) |
 | DHCPv6 | UDP 546/547 | xpfd native dhcp.Manager client; Kea `system services dhcpv6-local-server`; xpfd-native relay (`forwarding-options dhcp-relay dhcpv6`, binds 547) | delete the `dhcpv6` stanza AND disable the local-server groups AND the relay + stopping commit — the stanza alone leaves server/relay sockets originating | T1/rebind (hours) |
-| NTP | UDP 123 | chrony (appliance NTP; `system ntp server` renders its sources) | remove `system ntp server` lines (commit reloads chrony) and/or stop chronyd; confirm no sport-123 socket in any state (`ss -uan sport = :123`) to catch any non-chrony sender | polls 64–1024s |
+| NTP | UDP 123 | chrony (appliance NTP; `system ntp server` renders its sources; default sport 123, but acquisitionport/unprivileged setups source ephemeral) | remove `system ntp server` lines (commit reloads chrony) and/or stop chronyd; discover by DESTINATION (`conntrack -L -p udp -s <box-ip> -f <fam> | grep dport=123`, catches both sport shapes), delete each ORIG tuple, verify empty; confirm no sport-123 socket in any state (`ss -uan sport = :123`) | polls 64–1024s |
 | OSPF/OSPFv3 | proto 89, mcast .5/.6 + ff02::5/6 | FRR ospfd/ospf6d | delete/deactivate `protocols ospf`/`ospf3` (area/interface, or `passive`) + stopping commit; direct vtysh removal is temporary | 10s hellos |
 | PIM | proto 103, mcast .13 + ff02::d | none in-tree | identify + stop | 30s hellos if present |
 | VRRP | proto 112, mcast .18 + ff02::12 | xpfd native VRRP instances | delete/down the vrrp-group (VIP) + stopping commit | 1s adverts |
@@ -788,7 +816,7 @@ Per-class originators, stop actions, and recurrence timers:
 | RSVP | proto 46 | none in-tree | identify + stop | 30s refresh if present |
 | PGM | proto 113 | none in-tree | identify + stop | — |
 | NHRP | proto 54 | none in-tree | identify + stop | registration timers if present |
-| traceroute range | UDP 33434–33523 | operator-initiated probes (no daemon) | stop probing | N/A (manual) |
+| traceroute range | UDP dports 33434–33523 (sources ephemeral) | operator-initiated probes (no daemon) | stop probing, then dport-based discovery per the range shape above (peer filter or eyeball) — never the `--sport` loop | N/A (manual) |
 | custom UDP | UDP \<port\> | listener / explicit-bind client | stop both; any NEW box datagram from the sport recreates the entry | app-driven |
 | custom TCP | TCP \<port\> | listener / explicit-bind client | stop listener + verify no socket (`ss -ltn` AND `ss -tan`); no reformation ONLY if nothing originates new SYNs from the sport (`loose=0` blocks mid-stream pickup, not new SYNs) — re-verify after one app interval, hunt reformers via `ss -tnp` | — (close/idle-timeout only if truly passive) |
 | FTP-data 20 | TCP 20 | FTP server active transfers (never listens) | disable active FTP / stop transfers; verify `ss -tan sport = :20` empty; re-verify (active originators reform on next transfer) | transfer-driven |
@@ -829,11 +857,15 @@ shows sourcing the port. For those, stop/disable the outbound origination
 through commit (same disjunction as UDP/bare: stop it or keep the
 host-inbound), then delete + verify + re-verify after one app interval. The
 any-service breadth advisory names this consequence while the stanza is open;
-the tightening commit itself carries a commit-output warning naming the
-narrowed scopes whenever stranded flows are observed; and the daemon warns in
-the journal on applies that keep denied non-catalog customs below the
-ephemeral floor (TCP also when listener-backed — ephemeral egress, exempts,
-bare, ranges, WireGuard, and ingress-permitted tuples stay journal-silent).
+the tightening commit itself carries a commit-output warning — narrowed
+scopes (full-admit loss or unguarded-token removal, zone-level only where no
+replacing override applies) intersected with zones containing observed
+stranded customs/exempt/bare flows — and the daemon warns in the journal on
+applies that keep denied non-catalog customs below the ephemeral floor (TCP
+also when listener-backed). Ephemeral egress and ranges stay silent in both
+channels (indistinguishable from ordinary clients; proven policy-invariant
+authorized by the catalog-boundedness test), as do admitted tuples; sweep
+misses and post-sweep reconnects surface on the next apply's sweep instead.
 
 
 ### Revocation failure is retried, counted, and published (#6802)
