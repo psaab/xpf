@@ -220,13 +220,9 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 	}
 
 	// 0a. Bind routing-instance interfaces to their VRFs.
-	// Name normalization is shared with collectAppliedTunnels'
-	// RIListMember scan via riMemberLinuxName (#1884) so the tunnel
-	// manager's unbind veto can never diverge from what this loop
-	// actually binds. Tunnel list members resolve through
-	// cfg.TunnelNameMap() (#1904) so a unit>0 entry like gr-0/0/0.1
-	// binds the real per-unit device (gr-0-0-0u1), not the literal
-	// ".1" name.
+	// The config-level member resolver is shared with the tunnel manager's
+	// RIListMember scan, so tunnel unbind vetoes and this loop use identical
+	// Linux-device identities, including alias and tunnel fanout.
 	//
 	// #5700: deliberately best-effort (WARN, not surfaced). This runs BEFORE
 	// applyInterfaceReconcile creates tunnel/xfrmi devices, so a routing-instance
@@ -319,10 +315,9 @@ func (d *Daemon) rebindManagementVRFIfaces() error {
 // exactly which names they bind: the tunnel manager's unbind VETO
 // (reconcileVRFClaimLocked case 2) is written against "whatever 0a binds", and a
 // second loop that drifted from this one would make that veto guard a different
-// set than the one being bound. Name normalization goes through
-// riMemberLinuxName (#1884) and cfg.TunnelNameMap() (#1904) so a unit>0 entry
-// like gr-0/0/0.1 binds the real per-unit device (gr-0-0-0u1), not the literal
-// ".1" name.
+// set than the one being bound. Name resolution goes through the shared
+// config.RoutingInstanceMemberDeviceKeys helper and cfg.TunnelNameMap(), so
+// aliases, VLAN units, and tunnels have the same device identity everywhere.
 //
 // Best-effort at WARN in both passes. A routing-instance `interface` list can
 // legitimately name an interface that is genuinely absent on this chassis, so
@@ -333,14 +328,27 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 		return
 	}
 	tunMap := cfg.TunnelNameMap()
+	conflicts := config.RoutingInstanceMemberDeviceConflicts(cfg, tunMap)
+	conflictByDevice := make(map[string]config.RoutingInstanceMemberDeviceConflict, len(conflicts))
+	for _, conflict := range conflicts {
+		conflictByDevice[conflict.LinuxName] = conflict
+	}
+	alreadyReported := make(map[string]struct{}, len(conflicts))
 	for _, ri := range cfg.RoutingInstances {
 		if ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
 			continue
 		}
 		for _, ifaceName := range ri.Interfaces {
-			// #9754: every device the member claims, which for a BARE member is
-			// the base netdev AND each configured unit's 802.1Q child.
-			for _, linuxName := range riMemberLinuxNames(cfg, tunMap, ifaceName) {
+			// Each generated logical key resolves through the shared identity
+			// helper; deduplicate devices shared by unit zero or a tunnel.
+			for _, linuxName := range config.RoutingInstanceMemberLinuxNames(cfg, tunMap, ifaceName) {
+				if conflict, found := conflictByDevice[linuxName]; found {
+					if _, reported := alreadyReported[linuxName]; !reported {
+						logRIMemberDeviceConflict(conflict)
+						alreadyReported[linuxName] = struct{}{}
+					}
+					continue
+				}
 				if err := d.routing.BindInterfaceToVRF(linuxName, ri.Name); err != nil {
 					slog.Warn("failed to bind interface to VRF",
 						"interface", ifaceName, "linux", linuxName,
@@ -349,6 +357,15 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 			}
 		}
 	}
+}
+
+func logRIMemberDeviceConflict(conflict config.RoutingInstanceMemberDeviceConflict) {
+	claims := make([]string, 0, len(conflict.Claims))
+	for _, claim := range conflict.Claims {
+		claims = append(claims, claim.Instance+" (member "+claim.Member+")")
+	}
+	slog.Error("routing-instance interface device has conflicting ownership; leaving it unbound",
+		"linux", conflict.LinuxName, "claims", claims, "issue", "#11060")
 }
 
 // rebindRoutingInstanceMembers is the #6805 late pass: the step-0a bind, re-run

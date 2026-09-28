@@ -109,9 +109,9 @@ type riMember struct {
 // riMembersOutsideTheirVRF returns the configured list members that exist but
 // sit outside the VRF their instance names.
 //
-// Name resolution goes through riMemberLinuxName with cfg.TunnelNameMap(),
-// exactly as step 0a resolves it, so this loop and the apply reason about ONE
-// name set — the same reason #6805 gave for sharing one bind implementation.
+// Name resolution goes through the shared config.RoutingInstanceMemberLinuxNames
+// helper with cfg.TunnelNameMap(), exactly as step 0a resolves it, so this loop
+// and the apply reason about one set of Linux devices.
 // The netlink reads go through the shared fabricLinkByName seam, so a test can
 // drive this against a synthetic link table.
 //
@@ -124,7 +124,7 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 	}
 	stanza := tunnelsWithTheirOwnRIStanza(cfg)
 	tunMap := cfg.TunnelNameMap()
-	multiClaimed := riDualClaimedLinuxNames(cfg, tunMap)
+	multiClaimed := config.RoutingInstanceDualClaimedLinuxNames(cfg, tunMap)
 	var out []riMember
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
@@ -135,59 +135,25 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 			continue // no VRF device on the box: ReconcileVRFs owns creating it
 		}
 		for _, ifaceName := range ri.Interfaces {
-			linuxName := riMemberLinuxName(cfg, tunMap, ifaceName)
-			if multiClaimed[linuxName] {
-				continue // #11060: this device has claims in multiple instances
+			for _, linuxName := range config.RoutingInstanceMemberLinuxNames(cfg, tunMap, ifaceName) {
+				if multiClaimed[linuxName] {
+					continue // #11060: this device has claims in multiple instances
+				}
+				if stanza[linuxName] {
+					continue // the tunnel manager's claim, not step 0a's
+				}
+				link, err := d.fabricLinkByName(linuxName)
+				if err != nil || link == nil || link.Attrs() == nil {
+					continue // absent on this chassis
+				}
+				if link.Attrs().MasterIndex == vrf.Attrs().Index {
+					continue // already a member
+				}
+				out = append(out, riMember{linuxName: linuxName, instance: ri.Name})
 			}
-			if stanza[linuxName] {
-				continue // the tunnel manager's claim, not step 0a's
-			}
-			link, err := d.fabricLinkByName(linuxName)
-			if err != nil || link == nil || link.Attrs() == nil {
-				continue // absent on this chassis
-			}
-			if link.Attrs().MasterIndex == vrf.Attrs().Index {
-				continue // already a member
-			}
-			out = append(out, riMember{linuxName: linuxName, instance: ri.Name})
 		}
 	}
 	return out
-}
-
-// riDualClaimedLinuxNames returns every Linux device the apply bind loop would
-// bind from more than one routing instance. The expansion is the same helper
-// used by bindRoutingInstanceMembers (bare members fan down to their units,
-// canonical unit aliases resolve identically), so a conflict cannot evade the
-// reassert guard by using different authored spellings. Same-instance repeated
-// members are harmless; forwarding and daemon-reserved instances are excluded
-// because the kernel bind loop excludes them too.
-func riDualClaimedLinuxNames(cfg *config.Config, tunMap map[string]string) map[string]bool {
-	if cfg == nil {
-		return nil
-	}
-	owner := make(map[string]string)
-	multi := make(map[string]bool)
-	for _, ri := range cfg.RoutingInstances {
-		if ri == nil || ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
-			continue
-		}
-		for _, ifaceName := range ri.Interfaces {
-			for _, linuxName := range riMemberLinuxNames(cfg, tunMap, ifaceName) {
-				if linuxName == "" {
-					continue
-				}
-				if prev, exists := owner[linuxName]; exists {
-					if prev != ri.Name {
-						multi[linuxName] = true
-					}
-					continue
-				}
-				owner[linuxName] = ri.Name
-			}
-		}
-	}
-	return multi
 }
 
 // tunnelsWithTheirOwnRIStanza names the tunnel devices whose config carries a

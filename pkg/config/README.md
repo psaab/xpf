@@ -709,18 +709,23 @@ split) are NOT rejected; a bare physical interface and one of its units
 across zones ARE (same logical interface). Same fail-closed-on-load
 doctrine as #3043/#2401.
 
-**An interface belongs to exactly one routing instance (#11060):**
-`validateRIDualClaimStrict11060` hard-rejects a config that assigns one
-logical interface to multiple routing instances, naming the member and both
-instances. Without the commit gate, kernel binding and userspace domain
-resolution could select different instances, while the periodic member
-reassert loop moved the kernel link between VRFs on successive ticks. The
-tolerant load/peer-sync path downgrades the rejection to a warning so a
-previously persisted config still boots; the reassert loop leaves every
-multi-claimed Linux device untouched to avoid that periodic flap. Different
-units of one physical interface may still be split across instances (a valid
-VLAN-subinterface split), and an ordinary single-instance member retains its
-existing bind/reassert behavior.
+**A VRF-bound Linux device belongs to exactly one routing instance (#11060):**
+`RoutingInstanceMemberDeviceKeys` is the shared resolver for the strict
+validator, tolerant sanitizer, daemon VRF binding/reassertion, and userspace
+membership maps. It compares the actual Linux netdevice, not only authored
+logical spellings, so slash/dash aliases and distinct unit refs that share an
+interface-level tunnel device cannot evade the gate. Strict commits reject a
+device claimed by multiple VRF-backed instances and name every competing
+member. Forwarding instances do not bind devices and remain in the default
+routing context; separate VLAN units remain valid when their Linux names differ.
+
+On tolerant boot/peer-sync, every contested device is removed from all
+conflicting RI memberships before either dataplane is built; unaffected
+generated units from a bare member are retained as explicit references. The
+contested device is left unbound in the default routing context. The config
+warning and apply-time ERROR log name the device and competing claims, and
+`xpf_routing_instance_member_device_conflicts` remains alertable for the active
+config (`> 0` means a tolerant-load quarantine is in effect).
 
 **Backup-router destination family must match the next-hop (#2911):**
 `renderBackupRouter` (`pkg/frr/config_render.go`) keys the static-route

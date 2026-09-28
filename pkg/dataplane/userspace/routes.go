@@ -778,96 +778,53 @@ func canonicalRoutePrefix(s string) string {
 	return n.String()
 }
 
-// #9132: walk every routing-instance interface reference twice — pass 0 binds
-// the reference's runtime key, pass 1 adds the units a BARE reference fans
-// down onto, never overwriting a key pass 0 already holds.
-//
-// A member may use the operational Linux spelling while its interface stanza
-// uses the config spelling (#10173/#10174). The snapshot rows are keyed by
-// the declared stanza, so a cross-spelled unit reference needs its declared
-// key before it can scope a row. Bare fan-down aliases are handled below
-// (#10174).
-//
-// Two properties come out of that shape, and both are worth stating because
-// they are what make the change reviewable:
-//
-//   - pass 0 binds every explicit reference before pass 1 considers fanout,
-//     so an EXPLICIT unit reference always beats a unit key reached by fanning
-//     a BARE reference down, regardless of cfg.RoutingInstances order.
-//   - same-spelling refs retain the pre-alias key and fanout byte-for-byte;
-//     aliasing only changes the runtime key when LookupInterfaceByLinuxName
-//     finds a differently-spelled declared stanza.
-//
-// routingInstanceInterfaceKeysForRef maps one RI member to the snapshot keys
-// it scopes: the runtime primary plus any bare fanout. Stacking: the #10174
-// bare arm layers on the #10173 helper and call sites, so reverting #10173
-// requires reverting #10174 first (a direct revert of #10173 conflicts here).
-func routingInstanceInterfaceKeysForRef(cfg *config.Config, raw string) (primary string, fanout []string) {
-	keys := config.InterfaceUnitRefKeys(cfg, raw)
-	if len(keys) == 0 {
-		return "", nil
-	}
-	primary = keys[0]
-	fanout = keys[1:]
-	if cfg == nil {
-		return primary, fanout
-	}
-	s := cfg.SplitInterfaceUnitRef(raw)
-	stanzaKey, _, ok := config.LookupInterfaceByLinuxName(cfg, s.Base)
-	if !ok || stanzaKey == s.Base {
-		return primary, fanout
-	}
-	if s.HasUnit {
-		// #10173: unit aliases resolve against the declared stanza; the
-		// bare alias below (#10174) is the companion exception in this
-		// same helper.
-		if suffix, ok := strings.CutPrefix(s.Literal, s.Base); ok {
-			return stanzaKey + suffix, nil
-		}
-		return primary, fanout
-	}
-	// #10174: unlike unit aliases, a BARE cross-spelled member deliberately
-	// fans down here. The daemon bind has the same exception because it owns
-	// Linux-name matching; shared Config.SplitInterfaceUnitRef remains
-	// spelling-only for every other consumer.
-	declaredKeys := config.InterfaceUnitRefKeys(cfg, stanzaKey)
-	if len(declaredKeys) > 1 {
-		fanout = declaredKeys[1:]
-	} else {
-		fanout = nil
-	}
-	return stanzaKey, fanout
-}
-
+// #9132: visit every routing-instance member twice — explicit refs first, then
+// generated keys from a bare-member fanout. The shared config resolver supplies
+// both snapshot keys and kernel-device identities, preserving one alias and
+// tunnel interpretation across validation, binding, and userspace maps.
 func forEachRoutingInstanceInterfaceKey(cfg *config.Config, bind func(riName, key string)) {
 	if cfg == nil {
 		return
 	}
+	type memberKeys struct {
+		riName string
+		keys   []config.RoutingInstanceMemberDeviceKey
+	}
+	tunnelNames := cfg.TunnelNameMap()
+	dualClaimed := config.RoutingInstanceDualClaimedLinuxNames(cfg, tunnelNames)
+	members := make([]memberKeys, 0)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" {
+			continue
+		}
+		for _, member := range ri.Interfaces {
+			keys := config.RoutingInstanceMemberDeviceKeys(cfg, tunnelNames, member)
+			if len(keys) != 0 {
+				members = append(members, memberKeys{riName: ri.Name, keys: keys})
+			}
+		}
+	}
 	seen := make(map[string]struct{})
 	for pass := range 2 {
-		for _, ri := range cfg.RoutingInstances {
-			if ri == nil || ri.Name == "" {
+		for _, member := range members {
+			if pass == 0 {
+				primary := member.keys[0]
+				seen[primary.InterfaceKey] = struct{}{}
+				if !dualClaimed[primary.LinuxName] {
+					bind(member.riName, primary.InterfaceKey)
+				}
 				continue
 			}
-			for _, ifname := range ri.Interfaces {
-				if ifname == "" {
+			for _, key := range member.keys[1:] {
+				if !key.Fanout {
 					continue
 				}
-				primary, fanout := routingInstanceInterfaceKeysForRef(cfg, ifname)
-				if primary == "" {
+				if _, exists := seen[key.InterfaceKey]; exists {
 					continue
 				}
-				if pass == 0 {
-					seen[primary] = struct{}{}
-					bind(ri.Name, primary)
-					continue
-				}
-				for _, key := range fanout {
-					if _, exists := seen[key]; exists {
-						continue
-					}
-					seen[key] = struct{}{}
-					bind(ri.Name, key)
+				seen[key.InterfaceKey] = struct{}{}
+				if !dualClaimed[key.LinuxName] {
+					bind(member.riName, key.InterfaceKey)
 				}
 			}
 		}
@@ -927,6 +884,7 @@ func quarantinedInterfaceKeys(cfg *config.Config) map[string]struct{} {
 		return nil
 	}
 	out := make(map[string]struct{})
+	tunnelNames := cfg.TunnelNameMap()
 	for _, ri := range cfg.QuarantinedRoutingInstances {
 		if ri == nil || ri.Name == "" {
 			continue
@@ -935,13 +893,8 @@ func quarantinedInterfaceKeys(cfg *config.Config) map[string]struct{} {
 			if ifname == "" {
 				continue
 			}
-			primary, fanout := routingInstanceInterfaceKeysForRef(cfg, ifname)
-			if primary == "" {
-				continue
-			}
-			out[primary] = struct{}{}
-			for _, key := range fanout {
-				out[key] = struct{}{}
+			for _, key := range config.RoutingInstanceMemberDeviceKeys(cfg, tunnelNames, ifname) {
+				out[key.InterfaceKey] = struct{}{}
 			}
 		}
 	}

@@ -33,14 +33,23 @@ func TestRIDualClaimRejectedAndToleratedWithWarning11060(t *testing.T) {
 	}
 	found := false
 	for _, warning := range cfg.Warnings {
-		if strings.Contains(warning, "routing-instance interface membership (downgraded to warning on tolerant path)") &&
+		if strings.Contains(warning, "routing-instance interface membership QUARANTINED") &&
 			strings.Contains(warning, "blue") && strings.Contains(warning, "red") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected a dual-RI warning naming both instances, got %v", cfg.Warnings)
+		t.Fatalf("expected a quarantine warning naming both instances, got %v", cfg.Warnings)
+	}
+	if len(cfg.QuarantinedRIMemberDeviceConflicts) != 1 ||
+		cfg.QuarantinedRIMemberDeviceConflicts[0].LinuxName != "ge-0-0-7" {
+		t.Fatalf("tolerant conflict evidence = %+v, want the unbound ge-0-0-7 device", cfg.QuarantinedRIMemberDeviceConflicts)
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if len(ri.Interfaces) != 0 {
+			t.Fatalf("ambiguous member remained in %s after tolerant load: %v", ri.Name, ri.Interfaces)
+		}
 	}
 }
 
@@ -75,6 +84,144 @@ func TestRIDualClaimDistinctUnitsRemainValid11060(t *testing.T) {
 	}
 	if err := validateRIDualClaimStrict11060(cfg); err != nil {
 		t.Fatalf("distinct units in different instances are a valid split: %v", err)
+	}
+	blue := RoutingInstanceMemberDeviceKeys(cfg, cfg.TunnelNameMap(), "ge-0/0/7.0")
+	red := RoutingInstanceMemberDeviceKeys(cfg, cfg.TunnelNameMap(), "ge-0/0/7.1")
+	if len(blue) != 1 || blue[0].LinuxName != "ge-0-0-7.100" ||
+		len(red) != 1 || red[0].LinuxName != "ge-0-0-7.200" {
+		t.Fatalf("distinct VLAN units did not resolve to distinct Linux devices: blue=%+v red=%+v", blue, red)
+	}
+}
+func TestRIDualClaimResolvesLinuxAliasesIndependentOfInstanceOrder11060(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ris  []*RoutingInstanceConfig
+	}{
+		{
+			name: "blue-before-red",
+			ris: []*RoutingInstanceConfig{
+				{Name: "blue", Interfaces: []string{"ge-0/0/7.0"}},
+				{Name: "red", Interfaces: []string{"ge-0-0-7.00"}},
+			},
+		},
+		{
+			name: "red-before-blue",
+			ris: []*RoutingInstanceConfig{
+				{Name: "red", Interfaces: []string{"ge-0-0-7.00"}},
+				{Name: "blue", Interfaces: []string{"ge-0/0/7.0"}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+					"ge-0/0/7": {Name: "ge-0/0/7", Units: map[int]*InterfaceUnit{
+						0: {Number: 0, VlanID: 100},
+					}},
+				}},
+				RoutingInstances: tc.ris,
+			}
+			err := validateRIDualClaimStrict11060(cfg)
+			if err == nil {
+				t.Fatal("cross-spelled unit refs to the same VLAN device were accepted")
+			}
+			for _, want := range []string{"ge-0-0-7.100", "ge-0/0/7.0", "ge-0-0-7.00", "blue", "red"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("device conflict error %q does not identify %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestRIDualClaimNamesEveryOwnerAndRejectsSharedTunnelDevice11060(t *testing.T) {
+	t.Run("three owners", func(t *testing.T) {
+		cfg := &Config{
+			Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+				"ge-0/0/7": {Name: "ge-0/0/7", Units: map[int]*InterfaceUnit{
+					0: {Number: 0, VlanID: 100},
+				}},
+			}},
+			RoutingInstances: []*RoutingInstanceConfig{
+				{Name: "blue", Interfaces: []string{"ge-0/0/7.0"}},
+				{Name: "red", Interfaces: []string{"ge-0-0-7.0"}},
+				{Name: "green", Interfaces: []string{"ge-0-0-7.00"}},
+			},
+		}
+		err := validateRIDualClaimStrict11060(cfg)
+		if err == nil {
+			t.Fatal("three RIs claiming one Linux device were accepted")
+		}
+		for _, want := range []string{"blue", "red", "green"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("three-owner error %q omits %q", err, want)
+			}
+		}
+	})
+
+	t.Run("shared interface tunnel", func(t *testing.T) {
+		cfg := &Config{
+			Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+				"wg0": {
+					Name:   "wg0",
+					Tunnel: &TunnelConfig{Mode: "wireguard"},
+					Units: map[int]*InterfaceUnit{
+						0: {Number: 0},
+						1: {Number: 1},
+					},
+				},
+			}},
+			RoutingInstances: []*RoutingInstanceConfig{
+				{Name: "blue", Interfaces: []string{"wg0.0"}},
+				{Name: "red", Interfaces: []string{"wg0.1"}},
+			},
+		}
+		if got := cfg.TunnelNameMap(); got["wg0.0"] != "wg0" || got["wg0.1"] != "wg0" {
+			t.Fatalf("fixture does not model shared tunnel identity: %v", got)
+		}
+		err := validateRIDualClaimStrict11060(cfg)
+		if err == nil || !strings.Contains(err.Error(), "wg0") ||
+			!strings.Contains(err.Error(), "blue") || !strings.Contains(err.Error(), "red") {
+			t.Fatalf("shared tunnel-device conflict was not rejected with both owners: %v", err)
+		}
+	})
+}
+
+func TestRIDualClaimTolerantBareMemberKeepsOnlyUnambiguousUnits11060(t *testing.T) {
+	lines := []string{
+		"set interfaces ge-0/0/7 unit 10 vlan-id 100",
+		"set interfaces ge-0/0/7 unit 20 vlan-id 200",
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue interface ge-0/0/7",
+		"set routing-instances red instance-type virtual-router",
+		"set routing-instances red interface ge-0-0-7.10",
+	}
+	cfg, err := CompileConfigLenient(buildTree(t, lines))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	if len(cfg.QuarantinedRIMemberDeviceConflicts) != 1 ||
+		cfg.QuarantinedRIMemberDeviceConflicts[0].LinuxName != "ge-0-0-7.100" {
+		t.Fatalf("quarantined device metadata = %+v", cfg.QuarantinedRIMemberDeviceConflicts)
+	}
+	instances := make(map[string]*RoutingInstanceConfig)
+	for _, ri := range cfg.RoutingInstances {
+		instances[ri.Name] = ri
+	}
+	if got := instances["blue"].Interfaces; len(got) != 1 || got[0] != "ge-0/0/7.20" {
+		t.Fatalf("safe unit was not retained explicitly after bare-member quarantine: %v", got)
+	}
+	if got := instances["red"].Interfaces; len(got) != 0 {
+		t.Fatalf("ambiguous explicit member remained in red: %v", got)
+	}
+	for _, ri := range cfg.RoutingInstances {
+		for _, member := range ri.Interfaces {
+			for _, key := range RoutingInstanceMemberDeviceKeys(cfg, cfg.TunnelNameMap(), member) {
+				if key.LinuxName == "ge-0-0-7.100" {
+					t.Fatalf("quarantined device was still assigned to %s via %q", ri.Name, member)
+				}
+			}
+		}
 	}
 }
 

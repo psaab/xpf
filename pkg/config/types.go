@@ -475,17 +475,22 @@ type Config struct {
 	// of any vintage can observe it — the v21 STANDS entry in
 	// snapshot_shape_version_8892_test.go, not a version bump.
 	QuarantinedRoutingInstances []*RoutingInstanceConfig `json:"-"`
-	Firewall                    FirewallConfig
-	ClassOfService              *ClassOfServiceConfig
-	Services                    ServicesConfig
-	ForwardingOptions           ForwardingOptionsConfig
-	System                      SystemConfig
-	PolicyOptions               PolicyOptionsConfig
-	Schedulers                  map[string]*SchedulerConfig
-	Chassis                     ChassisConfig
-	EventOptions                []*EventPolicy
-	BridgeDomains               []*BridgeDomainConfig
-	Warnings                    []string // non-fatal validation warnings
+	// QuarantinedRIMemberDeviceConflicts records tolerant-load #11060 device
+	// ownership conflicts after every ambiguous RI membership has been removed.
+	// The active config needs this compile-time evidence for apply-time alarms
+	// and config-derived metrics; it is not part of the wire/config shape.
+	QuarantinedRIMemberDeviceConflicts []RoutingInstanceMemberDeviceConflict `json:"-"`
+	Firewall                           FirewallConfig
+	ClassOfService                     *ClassOfServiceConfig
+	Services                           ServicesConfig
+	ForwardingOptions                  ForwardingOptionsConfig
+	System                             SystemConfig
+	PolicyOptions                      PolicyOptionsConfig
+	Schedulers                         map[string]*SchedulerConfig
+	Chassis                            ChassisConfig
+	EventOptions                       []*EventPolicy
+	BridgeDomains                      []*BridgeDomainConfig
+	Warnings                           []string // non-fatal validation warnings
 
 	// LenientNATTerminalActionRules records every NAT rule the TOLERANT path
 	// admitted despite validateNATTerminalActionCardinalityStrict rejecting it

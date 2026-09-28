@@ -1,14 +1,15 @@
 package daemon
 
 import (
+	"bytes"
+	"github.com/vishvananda/netlink"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"net"
 	"strings"
 	"testing"
-
-	"github.com/vishvananda/netlink"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/routing"
@@ -177,6 +178,43 @@ func TestRIMemberReassertSkipsMultiClaimedKey11060(t *testing.T) {
 	}
 	if got := ops.recorded(); len(got) != 0 {
 		t.Fatalf("three ticks re-bound multi-claimed device: %v, want no LinkSetMaster calls (#11060)", got)
+	}
+}
+func TestRIMemberApplySkipsCrossSpelledDeviceConflictAndLogsAlarm11060(t *testing.T) {
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/5": {Name: "ge-0/0/5", Units: map[int]*config.InterfaceUnit{
+				10: {Number: 10, VlanID: 100},
+			}},
+		}},
+		RoutingInstances: []*config.RoutingInstanceConfig{
+			{Name: "blue", InstanceType: "vrf", Interfaces: []string{"ge-0/0/5.10"}},
+			{Name: "red", InstanceType: "vrf", Interfaces: []string{"ge-0-0-5.10"}},
+		},
+	}
+	ops := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	addLink6805(ops, "vrf-blue")
+	addLink6805(ops, "vrf-red")
+	addLink6805(ops, "ge-0-0-5.100")
+	d := &Daemon{routing: routing.NewManagerWithLinkOpsForTest(ops)}
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	d.bindRoutingInstanceMembers(cfg)
+
+	if got := ops.recorded(); len(got) != 0 {
+		t.Fatalf("cross-spelled dual-claimed device was bound: %v", got)
+	}
+	for _, want := range []string{
+		"ERROR", "routing-instance interface device has conflicting ownership",
+		"ge-0-0-5.100", "blue", "red",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("loud conflict alarm %q omits %q", logs.String(), want)
+		}
 	}
 }
 

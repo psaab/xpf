@@ -2,108 +2,118 @@ package config
 
 import (
 	"fmt"
-	"sort"
+	"strings"
 )
 
-// validateRIDualClaimStrict11060 hard-rejects a configuration that assigns
-// the same interface to more than one routing-instance (#11060).
-//
-// Before this gate a dual-claimed member committed clean and then flapped
-// between VRFs: the kernel bind loop (daemon bindRoutingInstanceMembers)
-// binds every RI's members in slice order, last-wins; the userspace domain
-// map (forEachRoutingInstanceInterfaceKey pass 0) likewise last-wins; and
-// the 30s reassert loop (riMembersOutsideTheirVRF) treats the non-master RI
-// as drift and re-binds the member to the other VRF on EVERY tick. The
-// table/domain flips under a fixed zone: sessions re-resolve into the other
-// VRF, return traffic goes asymmetric, and packets cross a VRF boundary the
-// operator never authorized.
-//
-// Worse, the two planes resolve the same dual membership in OPPOSITE
-// orders (F-147): Rust member-vs-member is unconditional LAST-WINS
-// (forwarding_build/interfaces.rs) while Go routingInstanceByInterface is
-// FIRST-in-sorted-wins — so NAT scope and the dataplane VRF can disagree,
-// not just flap over time.
-//
-// This validator restores the fail-CLOSED parity Junos has (an interface in
-// two routing-instances is rejected at commit). It mirrors
-// validateZoneInterfaceMembershipStrict (#3072): per RI (in sorted order
-// for a deterministic first-reported error), it expands each member to the
-// logical-interface keys the routing binders bind (InterfaceUnitRefKeys —
-// a unit ref claims its canonical literal, a bare ref claims the base plus
-// every configured unit) and rejects the first key claimed by two different
-// instances, naming the interface and BOTH conflicting instances. Listing
-// the same interface twice WITHIN one instance is harmless (a repeated
-// `set`) and is not flagged. Two distinct units of one physical interface
-// in two instances (a valid VLAN split) is NOT flagged.
-//
-// Forwarding instances are NOT exempt: the userspace snapshot and the NAT
-// egress scope index them like any other instance, so a forwarding+VRF
-// dual claim disagrees across planes the same way. (A reserved-name
-// instance never reaches this gate on the strict path — the prewalk
-// reserved-name gate fires first.)
-//
-// Strict on the commit / commit-check path (CompileConfig — hard-reject);
-// downgraded to a cfg.Warnings entry on the tolerant load / peer-sync paths
-// (CompileConfigLenient / CompileConfigForNodeLenient, flag
-// lenientRIDualClaim11060) so an already-persisted or peer-synced config
-// that an older binary accepted still BOOTS (#1960 fail-closed-on-load
-// doctrine). On that tolerant path behavior is unchanged and deterministic:
-// the apply keeps its last-wins bind, the reassert loop leaves
-// multi-claimed keys alone (daemon riDualClaimedLinuxNames, no per-tick
-// flap), and each plane keeps its deterministic resolution — just with an
-// operator-visible warning.
+// validateRIDualClaimStrict11060 rejects any Linux netdevice claimed by more
+// than one routing instance. Logical refs are expanded by
+// RoutingInstanceMemberDeviceKeys, the same resolver used by kernel binding and
+// userspace membership maps, so aliases, VLAN IDs, and shared tunnels have one
+// ownership identity.
 func validateRIDualClaimStrict11060(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
-	owner := make(map[string]string)
-	ris := make([]*RoutingInstanceConfig, 0, len(cfg.RoutingInstances))
-	for _, ri := range cfg.RoutingInstances {
-		if ri == nil {
-			continue // #3494: tolerant/HA-sync path may carry a nil routing-instance
-		}
-		ris = append(ris, ri)
+	conflicts := RoutingInstanceMemberDeviceConflicts(cfg, cfg.TunnelNameMap())
+	if len(conflicts) == 0 {
+		return nil
 	}
-	sort.Slice(ris, func(i, j int) bool { return ris[i].Name < ris[j].Name })
-	for _, ri := range ris {
-		for _, member := range ri.Interfaces {
-			if member == "" {
-				continue
-			}
-			for _, key := range InterfaceUnitRefKeys(cfg, member) {
-				prev, exists := owner[key]
-				if exists {
-					if prev != ri.Name {
-						return fmt.Errorf(
-							"interface %q is claimed by routing-instances %q and %q; an interface must belong to exactly one routing-instance (#11060: the kernel bind loop last-wins while the reassert loop re-binds the member to the other VRF on every tick, flapping traffic between VRFs, and the Go/Rust planes resolve the same dual claim in opposite orders) — remove it from one instance",
-							member, prev, ri.Name)
-					}
-					// Same instance (repeated set, or base/unit overlap within
-					// one instance): keep the first claim, not a conflict.
-					continue
-				}
-				owner[key] = ri.Name
-			}
-		}
-	}
-	return nil
+	return routingInstanceMemberConflictError(conflicts[0])
 }
 
-// runUniformGatesRIDualClaim11060 wires validateRIDualClaimStrict11060 into
-// the P6b uniform-gate phase. Strict on commit / commit-check (hard-reject
-// a dual-claimed member that would flap between VRFs); lenient on load /
-// peer-sync (downgrade to a warning so an already-persisted dual-claimed
-// config still boots — #1960 no-brick; the apply keeps its deterministic
-// last-wins bind and the reassert loop leaves multi-claimed keys alone).
-// Called DEAD-LAST from runUniformGates; see its comment.
-func runUniformGatesRIDualClaim11060(_ *ConfigTree, cfg *Config, opts compileOpts) error {
-	if err := validateRIDualClaimStrict11060(cfg); err != nil {
-		if opts.lenientRIDualClaim11060 {
-			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("routing-instance interface membership (downgraded to warning on tolerant path): %v", err))
-		} else {
-			return err
-		}
+func routingInstanceMemberConflictError(conflict RoutingInstanceMemberDeviceConflict) error {
+	return fmt.Errorf(
+		"Linux interface device %q is claimed by multiple VRF-backed routing-instances %s; an interface must belong to exactly one VRF-backed routing-instance (#11060: remove every conflicting member except one)",
+		conflict.LinuxName, formatRoutingInstanceMemberClaims(conflict.Claims))
+}
+
+func formatRoutingInstanceMemberClaims(claims []RoutingInstanceMemberClaim) string {
+	parts := make([]string, 0, len(claims))
+	for _, claim := range claims {
+		parts = append(parts, fmt.Sprintf("%q (member %q)", claim.Instance, claim.Member))
 	}
+	return strings.Join(parts, ", ")
+}
+
+func recordRIDualClaimConflicts(cfg *Config, conflicts []RoutingInstanceMemberDeviceConflict) {
+	if cfg == nil || len(conflicts) == 0 {
+		return
+	}
+	cfg.QuarantinedRIMemberDeviceConflicts = append(
+		cfg.QuarantinedRIMemberDeviceConflicts, conflicts...)
+	for _, conflict := range conflicts {
+		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+			"routing-instance interface membership QUARANTINED on tolerant path: Linux device %q is claimed by %s; conflicting memberships will be removed and the device left unbound in the default routing instance (#11060)",
+			conflict.LinuxName, formatRoutingInstanceMemberClaims(conflict.Claims)))
+	}
+}
+
+// quarantineRIDualClaimDevices runs after all compile tail gates so legacy
+// validators can still inspect the authored memberships. It removes contested
+// devices before the compiled config reaches apply or dataplane consumers.
+func quarantineRIDualClaimDevices(cfg *Config, tunnelNames map[string]string) {
+	if cfg == nil || len(cfg.QuarantinedRIMemberDeviceConflicts) == 0 {
+		return
+	}
+	quarantined := make(map[string]struct{}, len(cfg.QuarantinedRIMemberDeviceConflicts))
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		quarantined[conflict.LinuxName] = struct{}{}
+	}
+
+	// Keep unaffected generated units from a bare member as explicit refs.
+	// Retaining the original bare ref would fan back down over the quarantined
+	// device and recreate the ambiguous bind in both dataplane planes.
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		kept := make([]string, 0, len(ri.Interfaces))
+		for _, member := range ri.Interfaces {
+			if member == "" {
+				kept = append(kept, member)
+				continue
+			}
+			keys := RoutingInstanceMemberDeviceKeys(cfg, tunnelNames, member)
+			touchesConflict := false
+			for _, key := range keys {
+				if _, found := quarantined[key.LinuxName]; found {
+					touchesConflict = true
+					break
+				}
+			}
+			if !touchesConflict {
+				kept = append(kept, member)
+				continue
+			}
+			for _, key := range keys {
+				if !key.Fanout || key.LinuxName == "" {
+					continue
+				}
+				if _, found := quarantined[key.LinuxName]; !found {
+					kept = append(kept, key.InterfaceKey)
+				}
+			}
+		}
+		ri.Interfaces = kept
+	}
+}
+
+// runUniformGatesRIDualClaim11060 wires the device-identity gate into the
+// tolerant/strict uniform-gate phase. Strict commits reject the conflict;
+// tolerant loads record it now and defer membership removal until all tail
+// validators have inspected the authored config.
+func runUniformGatesRIDualClaim11060(_ *ConfigTree, cfg *Config, opts compileOpts) error {
+	if cfg == nil {
+		return nil
+	}
+	tunnelNames := cfg.TunnelNameMap()
+	conflicts := RoutingInstanceMemberDeviceConflicts(cfg, tunnelNames)
+	if len(conflicts) == 0 {
+		return nil
+	}
+	if !opts.lenientRIDualClaim11060 {
+		return routingInstanceMemberConflictError(conflicts[0])
+	}
+	recordRIDualClaimConflicts(cfg, conflicts)
 	return nil
 }

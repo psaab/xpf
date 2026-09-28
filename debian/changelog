@@ -69,5 +69,8 @@ xpf (0.0.0) unstable; urgency=medium
     capability changes, and clear superseded alarms only after current active
     config succeeds; preserve local convergence after peer-only push failures
     (#10782).
+  * Resolve routing-instance ownership by Linux device identity, reject
+    alias/tunnel dual claims, and quarantine ambiguous memberships on tolerant
+    loads with an apply alarm and alertable metric (#11060).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

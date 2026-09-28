@@ -207,14 +207,10 @@ func TestFIBQuarantineCoversCrossSpelledUnitMember10173(t *testing.T) {
 	})
 }
 
-// #10173: explicit-beats-fanout across the spelling split. tenant-a names the
-// port BARE (declared spelling, fans down onto .1); tenant-b names unit 1
-// EXPLICITLY (cross-spelled). The explicit unit must win in BOTH instance
-// orders — the alias is an explicit binding, so it takes pass 0 like the
-// as-written key. Slice order is asserted (the #9132 fixture note: position
-// is decided by the slice itself here, so varying the lines varies nothing
-// unless the slice is whats being varied).
-func TestFIBExplicitCrossSpelledUnitBeatsFannedBare10173(t *testing.T) {
+// #10173: an explicit cross-spelled unit and a bare member from different
+// VRFs resolve to the same Linux device. Userspace maps must omit that device
+// rather than preserve the old order-dependent explicit-wins behavior.
+func TestFIBCrossSpelledUnitConflictIsFiltered10173(t *testing.T) {
 	for _, stanza := range []string{"ge-0/0/0", "ge-0-0-0"} {
 		memberBase := "ge-0-0-0"
 		if stanza == "ge-0-0-0" {
@@ -252,21 +248,21 @@ func TestFIBExplicitCrossSpelledUnitBeatsFannedBare10173(t *testing.T) {
 						cfg.RoutingInstances[0].Name, cfg.RoutingInstances[1].Name)
 				}
 				ri := buildInterfaceRoutingInstances(cfg)
-				if got := ri[unitKey]; got != "tenant-b" {
-					t.Errorf("#10173: stanza %q: instance map[%q] = %q, want explicit tenant-b (order %s)",
-						stanza, unitKey, got, order.name)
-				}
-				if got, _ := buildInterfaceRouteTables(cfg); got[unitKey] != "tenant-b.inet.0" {
-					t.Errorf("#10173: stanza %q: v4 table[%q] = %q, want tenant-b.inet.0 (order %s)",
-						stanza, unitKey, got[unitKey], order.name)
+				if _, found := ri[unitKey]; found {
+					t.Errorf("#10173: stanza %q: ambiguous unit %q acquired an RI: %v",
+						stanza, unitKey, ri)
 				}
 				if got := ri[unit0Key]; got != "tenant-a" {
-					t.Errorf("#10173: stanza %q: instance map[%q] = %q, want fanned tenant-a (order %s)",
-						stanza, unit0Key, got, order.name)
+					t.Errorf("#10173: stanza %q: safe unit-zero membership = %q, want tenant-a",
+						stanza, got)
 				}
 				if got := ri[baseKey]; got != "tenant-a" {
-					t.Errorf("#10173: stanza %q: instance map[%q] = %q, want bare tenant-a (order %s)",
-						stanza, baseKey, got, order.name)
+					t.Errorf("#10173: stanza %q: safe bare primary membership = %q, want tenant-a",
+						stanza, got)
+				}
+				if got, _ := buildInterfaceRouteTables(cfg); got[unitKey] != "" {
+					t.Errorf("#10173: stanza %q: ambiguous unit %q received table %q",
+						stanza, unitKey, got[unitKey])
 				}
 			})
 		}
