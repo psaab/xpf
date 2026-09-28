@@ -46,28 +46,28 @@ var (
 		"/etc/systemd/resolved.conf.d/xpf.conf",
 		"/etc/systemd/resolved.conf.d/bpfrx.conf",
 	}
-	zeroizeHostnamePath   = "/etc/hostname"
-	zeroizeHostsPath      = "/etc/hosts"
-	zeroizeResolvConfPath = "/etc/resolv.conf"
-	zeroizeDBusMachineIDPath = "/var/lib/dbus/machine-id"
-	zeroizeIPsecStatePath = ipsec.DefaultConnStatePath
-	zeroizeKeaLeasePaths  = []string{dhcpserver.DefaultKeaLeaseFile4Path, dhcpserver.DefaultKeaLeaseFile6Path}
-	zeroizeStopKeaUnits   = stopKeaUnits
-	zeroizeVerifyKeaStopped = verifyKeaUnitsStopped
-	zeroizeVarBackupsDir    = "/var/backups"
-	zeroizeNetworkdLeaseDir = "/var/lib/systemd/network"
+	zeroizeHostnamePath        = "/etc/hostname"
+	zeroizeHostsPath           = "/etc/hosts"
+	zeroizeResolvConfPath      = "/etc/resolv.conf"
+	zeroizeDBusMachineIDPath   = "/var/lib/dbus/machine-id"
+	zeroizeIPsecStatePath      = ipsec.DefaultConnStatePath
+	zeroizeKeaLeasePaths       = []string{dhcpserver.DefaultKeaLeaseFile4Path, dhcpserver.DefaultKeaLeaseFile6Path}
+	zeroizeStopKeaUnits        = stopKeaUnits
+	zeroizeVerifyKeaStopped    = verifyKeaUnitsStopped
+	zeroizeVarBackupsDir       = "/var/backups"
+	zeroizeNetworkdLeaseDir    = "/var/lib/systemd/network"
 	zeroizeDHCPClientStateDirs = []string{"/var/lib/dhcp", "/var/lib/dhclient"}
-	zeroizeTmpDirs         = []string{"/tmp", "/var/tmp"}
-	zeroizeShmDir          = "/dev/shm"
-	zeroizeEtcDir          = "/etc"
-	zeroizeRunXPFDir       = "/run/xpf"
-	zeroizeRunJournalDir   = "/run/log/journal"
+	zeroizeTmpDirs             = []string{"/tmp", "/var/tmp"}
+	zeroizeShmDir              = "/dev/shm"
+	zeroizeEtcDir              = "/etc"
+	zeroizeRunXPFDir           = "/run/xpf"
+	zeroizeRunJournalDir       = "/run/log/journal"
 )
 
 var (
-	errZeroizeDDNSOwnership = errors.New("zeroize refused to erase config while DDNS ownership is unresolved")
+	errZeroizeDDNSOwnership  = errors.New("zeroize refused to erase config while DDNS ownership is unresolved")
 	errZeroizeIPsecOwnership = errors.New("zeroize refused to erase config while IPsec teardown is unresolved")
-	errZeroizeKeaStop = errors.New("zeroize could not stop Kea before lease-file erasure")
+	errZeroizeKeaStop        = errors.New("zeroize could not stop Kea before lease-file erasure")
 )
 
 const zeroizeManagedHostKeysHeader = "# Managed by xpfd — do not edit\n"

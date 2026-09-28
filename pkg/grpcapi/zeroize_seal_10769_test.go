@@ -120,9 +120,9 @@ func TestPerformZeroizeErasesSafeImageSealResidue10769(t *testing.T) {
 	engineID, engineBoots, randomSeed := zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed
 	plant := map[string]string{
 		machineID: "machine-id-secret\n", hostname: "prior-tenant.example\n",
-		resolver: zeroizeManagedResolvConfHeader + "nameserver 192.0.2.53\n",
-		hosts:    "127.0.0.1 localhost\n10.9.9.9 tenant-internal.example\n",
-		dbusID:   "dbus-machine-id-secret\n",
+		resolver:   zeroizeManagedResolvConfHeader + "nameserver 192.0.2.53\n",
+		hosts:      "127.0.0.1 localhost\n10.9.9.9 tenant-internal.example\n",
+		dbusID:     "dbus-machine-id-secret\n",
 		ipsecState: `{"loaded":[],"pending_terminate":[]}`,
 		sshHostKey: "private host key", sshHostPub: "public host key",
 		foreignSSH: "unmanaged ssh config", rootSSHKey: "root private key", history: "old shell commands\n",
