@@ -4,65 +4,115 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-// ErrPeerSnapshotProtocolIncompatible reports that the cluster peer cannot
-// represent a shape in the candidate config, so committing it would push the
-// peer a config it will silently NARROW (#6650).
-//
-// It is a COMMIT preflight failure, not an apply failure: the commit is refused
-// before the store promotes anything, so the two chassis are never left holding
-// different policy sets. Letting the local commit succeed and merely skipping
-// the push would trade a narrowing for a divergence — config-sync exists to
-// keep the pair identical, and on failover the peer would enforce the other
-// policy set.
+// ErrPeerSnapshotProtocolIncompatible reports that a connected cluster peer
+// cannot represent the active multi-zone policy shape without narrowing it.
+// The preflight returns it before promotion; if the learned protocol becomes
+// incompatible later, the daemon returns it while withholding the queue write
+// and retaining a deferred-config alarm.
 var ErrPeerSnapshotProtocolIncompatible = errors.New("cluster peer cannot represent this config")
 
-// peerSnapshotProtocolCommitPreflight refuses a commit whose config the cluster
-// peer cannot represent (#6650).
-//
-// This is the cross-chassis half of the #5488 gate. That gate asks "can MY
-// helper represent this?"; on a chassis cluster upgraded one node at a time —
-// which is what a rolling upgrade means on this product — the upgraded
-// primary's gate short-circuits, the commit succeeds, and the config TEXT is
-// pushed to a peer that recompiles it with an older compiler and installs a
-// narrowed policy. The peer cannot defend itself: it is the old binary.
-//
-// Four conditions must ALL hold to refuse, and each exists to avoid a worse
-// failure than the one being prevented:
-//
-//   - The node is clustered with config-sync ON. Without a push there is no
-//     way for the peer to receive, hence narrow, anything.
-//   - A peer is CONNECTED. A node whose peer is down or absent must keep being
-//     able to commit; refusing would turn a dead peer into a config freeze,
-//     and a disconnected peer receives no push to narrow. This is why the
-//     "advertises nothing" case below is safe to read as incapable — it is
-//     scoped to a peer that is demonstrably there.
-//   - The config actually carries the misrepresentable shape, decided by the
-//     SAME predicate that arms the local gate.
-//   - The peer's advertised version is below the per-feature floor.
-//
-// The floor is userspace.MinProtocolMultiZoneScopedPolicy (an immutable 4),
-// NOT userspace.ProtocolVersion. Gating on the shared constant would make
-// every future unrelated wire bump retroactively refuse multi-zone commits
-// across any version skew — the defect open #6648 describes in the local
-// gates. The question here is "can the peer represent THIS shape", and the
-// answer to that stopped changing at v4.
-func (d *Daemon) peerSnapshotProtocolCommitPreflight(cand *config.Config) error {
+// ErrPeerSnapshotProtocolAuthorizationStale reports that the peer incarnation
+// or its learned protocol changed after a config snapshot was authorized.
+var ErrPeerSnapshotProtocolAuthorizationStale = errors.New("cluster peer snapshot authorization became stale")
+
+// peerSnapshotProtocolAuthorization binds the decision to the capability
+// observation and daemon connection epoch that produced it.
+type peerSnapshotProtocolAuthorization struct {
+	session       *cluster.SessionSync
+	state         cluster.PeerSnapshotState
+	peerConnEpoch uint64
+}
+
+// peerSnapshotProtocolCommitPreflight refuses a candidate that a connected
+// peer cannot represent and returns the capability/epoch token required by the
+// later queue boundary. A disconnected peer remains a liveness exception.
+func (d *Daemon) peerSnapshotProtocolCommitPreflight(
+	cand *config.Config,
+) (*peerSnapshotProtocolAuthorization, error) {
+	return d.peerSnapshotProtocolAuthorizationForConfig(cand)
+}
+
+func (d *Daemon) peerSnapshotProtocolAuthorizationForConfig(
+	cand *config.Config,
+) (*peerSnapshotProtocolAuthorization, error) {
 	if d == nil || cand == nil {
-		return nil
+		return nil, nil
 	}
 	clustered := d.cluster != nil && cand.Chassis.Cluster != nil && cand.Chassis.Cluster.ConfigSync
-	ss := d.getSessionSync()
-	peerConnected := ss != nil && ss.IsConnected()
-	var peerProto uint16
-	if ss != nil {
-		peerProto = ss.PeerSnapshotProtocolVersion()
+	if !clustered || !userspace.ConfigHasMultiZoneScopedPolicy(cand) {
+		return nil, nil
 	}
-	return peerSnapshotProtocolDecision(
-		clustered, peerConnected, userspace.ConfigHasMultiZoneScopedPolicy(cand), peerProto)
+	ss := d.getSessionSync()
+	state := cluster.PeerSnapshotState{}
+	if ss != nil {
+		state = ss.SnapshotPeerSnapshotProtocol()
+	}
+	auth := &peerSnapshotProtocolAuthorization{
+		session:       ss,
+		state:         state,
+		peerConnEpoch: d.syncPeerConnEpoch.Load(),
+	}
+	err := peerSnapshotProtocolDecision(true, state.Connected, true, state.Version)
+	return auth, err
+}
+
+// currentPeerSnapshotObservation captures the daemon epoch and selected
+// SessionSync capability for a deferral attempt. The report path compares both
+// again under its alarm lock and discards stale observations.
+func (d *Daemon) currentPeerSnapshotObservation() (uint64, cluster.PeerSnapshotState) {
+	if d == nil {
+		return 0, cluster.PeerSnapshotState{}
+	}
+	epoch := d.syncPeerConnEpoch.Load()
+	state := cluster.PeerSnapshotState{}
+	if ss := d.getSessionSync(); ss != nil {
+		state = ss.SnapshotPeerSnapshotProtocol()
+	}
+	return epoch, state
+}
+
+// revalidatePeerSnapshotAuthorization is the daemon-side pre-queue check. The
+// SessionSync queue repeats this atomically with its final socket write; this
+// check also protects the test seam and provides an operator-facing reason.
+func (d *Daemon) revalidatePeerSnapshotAuthorization(
+	auth *peerSnapshotProtocolAuthorization,
+	configText string,
+) (bool, error) {
+	if auth == nil {
+		return true, nil
+	}
+	ss := d.getSessionSync()
+	currentEpoch := d.syncPeerConnEpoch.Load()
+	current := cluster.PeerSnapshotState{}
+	if ss != nil {
+		current = ss.SnapshotPeerSnapshotProtocol()
+	}
+	if ss != auth.session || currentEpoch != auth.peerConnEpoch || current != auth.state {
+		if current.Connected && current.Version < userspace.MinProtocolMultiZoneScopedPolicy {
+			err := peerSnapshotProtocolDecision(true, true, true, current.Version)
+			d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, current, err.Error())
+			return false, err
+		}
+		if !current.Connected {
+			return false, nil
+		}
+		reason := "peer connection or snapshot capability changed after commit preflight; reconciliation will retry against the current peer state"
+		return false, fmt.Errorf("%w: %s", ErrPeerSnapshotProtocolAuthorizationStale, reason)
+	}
+	if !current.Connected {
+		return false, nil
+	}
+	if current.Version < userspace.MinProtocolMultiZoneScopedPolicy {
+		err := peerSnapshotProtocolDecision(true, true, true, current.Version)
+		d.reportPeerSnapshotConfigSyncDeferred(configText, currentEpoch, current, err.Error())
+		return false, err
+	}
+	return true, nil
 }
 
 // peerSnapshotProtocolDecision is the gate's whole decision, split out from the

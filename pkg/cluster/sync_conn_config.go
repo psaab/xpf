@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"log/slog"
+	"net"
 	"time"
 
 	"github.com/psaab/xpf/pkg/configstore"
@@ -298,12 +299,98 @@ func (s *SessionSync) QueueConfigWithAncestryAtGeneration(
 	return s.queueConfig(configText, ancestry, gen)
 }
 
+type peerSnapshotQueueGuard struct {
+	expected              PeerSnapshotState
+	minProtocol           uint16
+	expectedPeerConnEpoch uint64
+	currentPeerConnEpoch  func() uint64
+}
+
+// writeConfigWithPeerSnapshotGuard revalidates the peer incarnation and pins
+// capability updates until the socket write completes. It runs only after
+// config-key waits and encryption, so no potentially blocking preparation
+// occurs while the capability mutex is held.
+func (s *SessionSync) writeConfigWithPeerSnapshotGuard(
+	conn net.Conn,
+	guard *peerSnapshotQueueGuard,
+	msgType uint8,
+	payload []byte,
+) (bool, error) {
+	s.mu.Lock()
+	s.peerSnapshotProtocolWriteMu.Lock()
+	current := s.peerSnapshotStateLocked()
+	valid := current.Connected && current.Version >= guard.minProtocol &&
+		current == guard.expected && s.activeConnLocked() == conn &&
+		(guard.currentPeerConnEpoch == nil ||
+			guard.currentPeerConnEpoch() == guard.expectedPeerConnEpoch)
+	s.mu.Unlock()
+	if !valid {
+		s.peerSnapshotProtocolWriteMu.Unlock()
+		return false, nil
+	}
+	s.writeMu.Lock()
+	err := writeMsg(conn, msgType, payload)
+	s.writeMu.Unlock()
+	s.peerSnapshotProtocolWriteMu.Unlock()
+	return true, err
+}
+
+// QueueConfigWithPeerSnapshotProtocolAtGeneration couples peer-capability
+// revalidation with active-connection selection. A reconnect or version change
+// after the caller's preflight invalidates the expected state and withholds the
+// text; the caller can leave reconciliation unclaimed for a fresh decision.
+//
+// currentPeerConnEpoch reads the daemon's connection epoch. It is checked while
+// s.mu is held, alongside the capability generation and the connection that
+// will receive this queued payload.
+func (s *SessionSync) QueueConfigWithPeerSnapshotProtocolAtGeneration(
+	configText string,
+	ancestry []configstore.RenameDescriptor,
+	gen uint64,
+	expected PeerSnapshotState,
+	minProtocol uint16,
+	expectedPeerConnEpoch uint64,
+	currentPeerConnEpoch func() uint64,
+) bool {
+	if s == nil || gen == 0 || !expected.Connected {
+		return false
+	}
+	s.mu.Lock()
+	current := s.peerSnapshotStateLocked()
+	if !current.Connected || current.Version < minProtocol || current != expected ||
+		(currentPeerConnEpoch != nil && currentPeerConnEpoch() != expectedPeerConnEpoch) {
+		s.mu.Unlock()
+		return false
+	}
+	conn := s.activeConnLocked()
+	s.mu.Unlock()
+	if conn == nil {
+		return false
+	}
+	guard := &peerSnapshotQueueGuard{
+		expected:              expected,
+		minProtocol:           minProtocol,
+		expectedPeerConnEpoch: expectedPeerConnEpoch,
+		currentPeerConnEpoch:  currentPeerConnEpoch,
+	}
+	return s.queueConfigOnConn(conn, configText, ancestry, gen, guard)
+}
+
 func (s *SessionSync) queueConfig(
 	configText string,
 	ancestry []configstore.RenameDescriptor,
 	reservedGen uint64,
 ) bool {
-	conn := s.getActiveConn()
+	return s.queueConfigOnConn(s.getActiveConn(), configText, ancestry, reservedGen, nil)
+}
+
+func (s *SessionSync) queueConfigOnConn(
+	conn net.Conn,
+	configText string,
+	ancestry []configstore.RenameDescriptor,
+	reservedGen uint64,
+	guard *peerSnapshotQueueGuard,
+) bool {
 	if conn == nil {
 		return false
 	}
@@ -311,6 +398,7 @@ func (s *SessionSync) queueConfig(
 	if gen == 0 {
 		gen = s.nextConfigGen()
 	}
+
 	payload := encodeConfigPayload(configText, gen)
 	if len(ancestry) > 0 && s.ConfigAncestryCapable() {
 		payload = encodeConfigPayloadWithAncestry(configText, gen, ancestry)
@@ -354,9 +442,22 @@ func (s *SessionSync) queueConfig(
 			"control_link_key_configured", len(s.authKey()) > 0,
 			"remote", connRemoteAddrString(conn), "gen", gen, "size", len(configText))
 	}
-	s.writeMu.Lock()
-	err := writeMsg(conn, msgType, payload)
-	s.writeMu.Unlock()
+	var authorized bool
+	var err error
+	if guard != nil {
+		if hook := s.testBeforePeerSnapshotConfigWrite; hook != nil {
+			s.testBeforePeerSnapshotConfigWrite = nil
+			hook()
+		}
+		authorized, err = s.writeConfigWithPeerSnapshotGuard(conn, guard, msgType, payload)
+		if !authorized {
+			return false
+		}
+	} else {
+		s.writeMu.Lock()
+		err = writeMsg(conn, msgType, payload)
+		s.writeMu.Unlock()
+	}
 	if err != nil {
 		slog.Warn("cluster sync: config send error", "err", err)
 		s.stats.Errors.Add(1)
