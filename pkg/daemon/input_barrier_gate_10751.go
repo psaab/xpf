@@ -44,3 +44,25 @@ func ensureEarlyInputProtectionForNaming() bool {
 		"err", tagNftInstallErr(err))
 	return false
 }
+
+// removeEarlyInputBarrierForBootstrap lifts the #10751 pre-networkd barrier
+// when the daemon runs in bootstrap mode (no committed configuration, or a
+// fail-closed load). Bootstrap suppresses the ordinary apply that would hand
+// the barrier off, while remote recovery itself needs management connections
+// the barrier blocks — without this handoff a bootstrap boot retains a global
+// DROP indefinitely (management lockout). Callers install any fail-closed
+// fences FIRST (see the initManagers ordering) so data addresses keep scoped
+// protection; the lifeline stays reachable throughout (established sessions
+// never drop; new management connections work once the barrier lifts).
+// Removal is idempotent (absent -> nil). A removal failure is LOUD (error
+// log) but does not stop boot — the console remains for recovery.
+func (d *Daemon) removeEarlyInputBarrierForBootstrap(reason string) {
+	if err := nftInstaller.RemoveEarlyInputBarrier(); err != nil {
+		slog.Error("bootstrap cannot lift early host-input barrier; management recovery may be blocked — use the console",
+			"reason", reason, "err", tagNftInstallErr(err))
+		return
+	}
+	d.earlyInputHandoffDone.Store(true)
+	slog.Warn("bootstrap lifted early host-input barrier without an ordinary config apply; data-interface services are unenforced until the first commit",
+		"reason", reason)
+}

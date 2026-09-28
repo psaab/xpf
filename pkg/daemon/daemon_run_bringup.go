@@ -79,6 +79,13 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		// Fence their live destinations now, preserving the management
 		// lifeline, before the daemon starts its control surfaces.
 		d.installFailClosedBootHostFences(failClosed)
+		// #10751/B10: bootstrap suppresses the ordinary apply that hands the
+		// early barrier off. Lift it here — AFTER the fail-closed fences above
+		// (when any) — so remote recovery keeps its management lifeline.
+		if d.inBootstrap() {
+			d.removeEarlyInputBarrierForBootstrap("bootstrap")
+		}
+
 		d.ipsec = ipsec.New()
 		d.ra = ra.New()
 		d.networkd = networkd.New()

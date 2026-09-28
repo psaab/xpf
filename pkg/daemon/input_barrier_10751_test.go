@@ -647,6 +647,53 @@ func TestEarlyInputGateForLinkActivation10751(t *testing.T) {
 	})
 }
 
+func TestEarlyInputBootstrapHandoff10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+
+	t.Run("bootstrap lifts the barrier", func(t *testing.T) {
+		fake := &fakeNftInstaller{}
+		nftInstaller = fake
+		d := &Daemon{}
+		d.bootstrapMode.Store(true)
+		d.removeEarlyInputBarrierForBootstrap("test-bootstrap")
+		if len(fake.earlyInputBarrierCalls) != 1 || fake.earlyInputBarrierCalls[0] != "remove" {
+			t.Fatalf("barrier calls = %v, want a single bootstrap lift", fake.earlyInputBarrierCalls)
+		}
+		if !d.earlyInputHandoffDone.Load() {
+			t.Fatal("bootstrap lift must mark the handoff done")
+		}
+	})
+
+	t.Run("bootstrap lift failure is loud but non-fatal", func(t *testing.T) {
+		nftInstaller = &fakeNftInstaller{
+			earlyInputBarrierRemove: func() error { return errors.New("kernel delete failed") },
+		}
+		d := &Daemon{}
+		d.bootstrapMode.Store(true)
+		d.removeEarlyInputBarrierForBootstrap("test-bootstrap")
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("failed bootstrap lift must not mark the handoff done")
+		}
+	})
+
+	t.Run("fail-closed fences install before the bootstrap lift", func(t *testing.T) {
+		d, fake := failClosedBootFixture(t)
+		var events []string
+		fake.coldBootFence = func(xnft.FenceSpec) error { events = append(events, "host-fence"); return nil }
+		fake.lo0ColdBootFence = func(xnft.FenceSpec) error { events = append(events, "lo0-fence"); return nil }
+		fake.earlyInputBarrierRemove = func() error { events = append(events, "lift-barrier"); return nil }
+		d.bootstrapMode.Store(true)
+		// initManagers order: fail-closed fences first, then the bootstrap lift.
+		d.installFailClosedBootHostFences(true)
+		d.removeEarlyInputBarrierForBootstrap("test-fail-closed")
+		want := "host-fence,lo0-fence,lift-barrier"
+		if got := strings.Join(events, ","); got != want {
+			t.Fatalf("bootstrap order = %q, want %q (data fences must own their scope before the global lift)", got, want)
+		}
+	})
+}
+
 func addresslessProgramOnlyConfig10751(t *testing.T) *config.Config {
 	t.Helper()
 	unit := &config.InterfaceUnit{Number: 0, DHCP: true}
