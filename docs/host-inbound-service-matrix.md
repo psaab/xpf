@@ -1081,7 +1081,13 @@ DROP (or the unzoned link-local DROP on an already-up link) and deadlock
 acquisition. The admits are scoped to the unleased netdevs of each
 family, so leased families stay under pure destination judgement; they
 sit after the #10752 stale-reply guards, whose catalog exempts DHCP
-client ports. Lifeline and VRF-enslaved units are excluded.
+client ports. Lifeline units are excluded (management must survive).
+VRF-enslaved units are excluded too — their LOCAL_IN identity is the
+shared master, where an interface DROP would shadow addressed siblings
+(and the slave name never matches) — and converge via the lease
+callback instead: any non-lifeline DHCP lease forces the full recompile
+that installs destination DROPs. Accepted window: lease-install to
+debounced re-apply (~2s plus apply time), the #3698 lag class.
 
 Two observability surfaces consume it:
 

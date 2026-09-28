@@ -1056,10 +1056,18 @@ func BuildUnzonedHostInboundAddrsFromSnapshots(cfg *config.Config, snaps []Inter
 // multicast-originated ADVERTISE is not conntrack-established, so only the
 // DHCP admit lets it through). The split keeps leased families under pure
 // destination judgement: a v4-leased/v6-pending unit gets NO v4 admit.
-// VRF-enslaved units are skipped (their LOCAL_IN identity is the shared
-// master — an iifname DROP there would shadow addressed siblings; they rely
-// on lease-callback convergence). Lifelines are skipped (management must
-// survive).
+// VRF-enslaved units are skipped: their LOCAL_IN identity is the shared
+// master, so an iifname DROP there would shadow addressed siblings sharing
+// the master, while the slave name never matches (dead rule, false
+// confidence) — and holding the barrier for VRF-pending units would strand
+// boot on a never-leasing unit (rejected for all unzoned, R7-B). They rely
+// on lease-callback convergence instead: any non-lifeline DHCP lease —
+// VRF-enslaved included — forces the full recompile that installs
+// destination DROPs (dhcpLeaseChangeRequiresRecompile, pinned by
+// TestDHCPLeaseChangeRequiresRecompile_VRFEnslavedNonLifeline10751). The
+// accepted window is lease-install to debounced re-apply (~2s debounce
+// plus apply time), the same address-appearance-to-apply lag class as
+// #3698. Lifelines are skipped (management must survive).
 func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) (v4, v6 []string) {
 	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil, nil
