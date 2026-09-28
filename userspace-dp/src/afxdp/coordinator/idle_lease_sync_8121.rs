@@ -43,6 +43,8 @@ pub(crate) struct IdleLeaseImportCounts {
     pub(crate) skipped_expired: u32,
     pub(crate) skipped_unknown_address: u32,
     pub(crate) skipped_port_busy: u32,
+    pub(crate) skipped_identity_busy: u32,
+    pub(crate) skipped_capacity: u32,
     /// No rule on this node owns a pool by that name. Distinct from
     /// `skipped_unknown_address`: the pool is missing entirely rather than
     /// present with a different address list, which is what a config that has
@@ -177,6 +179,8 @@ impl Coordinator {
                 IdleLeaseImport::SkippedExpired => counts.skipped_expired += 1,
                 IdleLeaseImport::SkippedUnknownAddress => counts.skipped_unknown_address += 1,
                 IdleLeaseImport::SkippedPortBusy => counts.skipped_port_busy += 1,
+                IdleLeaseImport::SkippedIdentityBusy => counts.skipped_identity_busy += 1,
+                IdleLeaseImport::SkippedCapacity => counts.skipped_capacity += 1,
             }
         }
         counts
