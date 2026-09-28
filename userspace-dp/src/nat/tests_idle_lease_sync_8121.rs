@@ -542,6 +542,8 @@ fn a_synced_join_does_not_promote_an_imported_idle_lease_10789_f4() {
         2_000,
         NatHolder::Untracked,
         Some((pat_key, TIMEOUT_NS)),
+        false,
+        &mut None,
     ));
     let pat_tuple = TranslatedTuple {
         ip: pat_rec.translated_ip,
@@ -579,6 +581,8 @@ fn a_synced_join_does_not_promote_an_imported_idle_lease_10789_f4() {
             2_000,
             NatHolder::Untracked,
             Some((address_key, TIMEOUT_NS)),
+            false,
+            &mut None,
         )
         .expect("synced address-only session joins the imported lease");
     assert!(address_only.release_flow(
@@ -637,6 +641,8 @@ fn a_local_active_lease_join_promotes_on_completion_10789_f4() {
         2_000,
         NatHolder::Untracked,
         Some((pat_key, TIMEOUT_NS)),
+        false,
+        &mut None,
     ));
     let local_pat_tuple = pat
         .allocate_translation(
@@ -710,6 +716,8 @@ fn a_local_active_lease_join_promotes_on_completion_10789_f4() {
             2_000,
             NatHolder::Untracked,
             Some((address_key, TIMEOUT_NS)),
+            false,
+            &mut None,
         )
         .expect("synced flow joins the imported address-only lease");
     let local_address_tuple = address_only
@@ -1244,6 +1252,8 @@ fn assert_pat_rollback_with_concurrent_synced_flow(synced_completes_first: bool)
         3_000,
         NatHolder::Untracked,
         Some((key, TIMEOUT_NS)),
+        false,
+        &mut None,
     ));
     assert_eq!(alloc.debug_live().persistent_by_source[&key].active_flows, 2);
     if synced_completes_first {
@@ -1325,6 +1335,8 @@ fn assert_address_only_rollback_with_concurrent_synced_flow(synced_completes_fir
             3_000,
             NatHolder::Untracked,
             Some((key, TIMEOUT_NS)),
+            false,
+            &mut None,
         )
         .expect("synced flow joins imported address-only lease");
     assert_eq!(synced_tuple, peer_tuple);

@@ -316,6 +316,8 @@ fn active_standby_and_release_agree_on_the_scoped_key_10018() {
             1_000,
             NatHolder::Untracked,
             Some((standby_key, TIMEOUT_NS)),
+            false,
+            &mut None,
         ),
         "the standby must reserve the synced flow into the active's lease"
     );
