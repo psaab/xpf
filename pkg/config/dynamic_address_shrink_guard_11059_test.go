@@ -103,6 +103,7 @@ func TestDynamicAddressShrinkGuardCompactTailMatchesBlock11059(t *testing.T) {
 	}
 	compact := `security { dynamic-address { feed-server threat { url https://feeds.example/list; } feed-server threat shrink-guard-min-old-count 128 shrink-guard-min-retain-percent 65 shrink-guard-min-drop 24; } }`
 	block := `security { dynamic-address { feed-server threat { url https://feeds.example/list; shrink-guard-min-old-count 128; shrink-guard-min-retain-percent 65; shrink-guard-min-drop 24; } } }`
+	nested := `security { dynamic-address { feed-server threat { url https://feeds.example/list; } feed-server { threat shrink-guard-min-old-count 128 shrink-guard-min-retain-percent 65 shrink-guard-min-drop 24; } } }`
 	compile := func(t *testing.T, text string) *FeedServer {
 		t.Helper()
 		tree := parse(t, text)
@@ -120,12 +121,17 @@ func TestDynamicAddressShrinkGuardCompactTailMatchesBlock11059(t *testing.T) {
 	}
 	compactFS := compile(t, compact)
 	blockFS := compile(t, block)
-	if compactFS.ShrinkGuardMinOldCount != blockFS.ShrinkGuardMinOldCount ||
-		compactFS.ShrinkGuardMinRetainPercent != blockFS.ShrinkGuardMinRetainPercent ||
-		compactFS.ShrinkGuardMinDrop != blockFS.ShrinkGuardMinDrop {
-		t.Fatalf("compact thresholds (%d,%d,%d) differ from block thresholds (%d,%d,%d)",
-			compactFS.ShrinkGuardMinOldCount, compactFS.ShrinkGuardMinRetainPercent, compactFS.ShrinkGuardMinDrop,
-			blockFS.ShrinkGuardMinOldCount, blockFS.ShrinkGuardMinRetainPercent, blockFS.ShrinkGuardMinDrop)
+	nestedFS := compile(t, nested)
+	want := [3]int{128, 65, 24}
+	for name, fs := range map[string]*FeedServer{
+		"flat compact tail":   compactFS,
+		"block":               blockFS,
+		"nested compact tail": nestedFS,
+	} {
+		got := [3]int{fs.ShrinkGuardMinOldCount, fs.ShrinkGuardMinRetainPercent, fs.ShrinkGuardMinDrop}
+		if got != want {
+			t.Errorf("%s thresholds = %v, want %v", name, got, want)
+		}
 	}
 
 	for _, invalid := range []string{
