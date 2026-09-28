@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/clusterfailover"
@@ -9,6 +10,8 @@ import (
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/wgkey"
 )
+
+const maxDynamicAddressShrinkAckReasonBytes = 512
 
 // confirmYes prompts the operator with `prompt`, reads a line via
 // the readline instance, and returns true when the trimmed +
@@ -369,9 +372,93 @@ func (c *ctl) handleRequestSecurity(args []string) error {
 		return c.handleRequestSecurityWireguard(args[1:])
 	case "policies":
 		return c.handleRequestSecurityPolicies(args[1:])
+	case "dynamic-address":
+		return c.handleRequestSecurityDynamicAddress(args[1:])
 	default:
 		return fmt.Errorf("unknown request security target: %s", args[0])
 	}
+}
+
+func (c *ctl) handleRequestSecurityDynamicAddress(args []string) error {
+	if len(args) == 0 || args[0] != "acknowledge-shrink" {
+		printRemoteTreeHelp("request security dynamic-address:", "request", "security", "dynamic-address")
+		return nil
+	}
+	const usage = "usage: request security dynamic-address acknowledge-shrink <feed> candidate-id <id> candidate-hash <sha256> baseline-hash <sha256> old-count <count> new-count <count> reason <reason...>"
+	if len(args) < 14 || args[2] != "candidate-id" || args[4] != "candidate-hash" ||
+		args[6] != "baseline-hash" || args[8] != "old-count" || args[10] != "new-count" || args[12] != "reason" {
+		return fmt.Errorf("%s", usage)
+	}
+	feed := args[1]
+	if feed == "" || strings.TrimSpace(feed) != feed {
+		return fmt.Errorf("%s: feed name is required", usage)
+	}
+	idText := args[3]
+	for i := range idText {
+		if idText[i] < '0' || idText[i] > '9' {
+			return fmt.Errorf("%s: candidate ID must be a positive uint64", usage)
+		}
+	}
+	candidateID, err := strconv.ParseUint(idText, 10, 64)
+	if err != nil || candidateID == 0 {
+		return fmt.Errorf("%s: candidate ID must be a positive uint64", usage)
+	}
+	candidateHash := args[5]
+	if !validDynamicAddressShrinkCandidateHash(candidateHash) {
+		return fmt.Errorf("%s: candidate hash must be a 64-character lowercase SHA-256 hex value", usage)
+	}
+	baselineHash := args[7]
+	if !validDynamicAddressShrinkCandidateHash(baselineHash) {
+		return fmt.Errorf("%s: baseline hash must be a 64-character lowercase SHA-256 hex value", usage)
+	}
+	oldCount, err := strconv.ParseUint(args[9], 10, 32)
+	if err != nil || oldCount == 0 {
+		return fmt.Errorf("%s: old count must be a positive uint32", usage)
+	}
+	newCount, err := strconv.ParseUint(args[11], 10, 32)
+	if err != nil {
+		return fmt.Errorf("%s: new count must be a uint32", usage)
+	}
+	reason := strings.TrimSpace(strings.Join(args[13:], " "))
+	if reason == "" {
+		return fmt.Errorf("%s: reason is required", usage)
+	}
+	if len(reason) > maxDynamicAddressShrinkAckReasonBytes {
+		return fmt.Errorf("%s: reason exceeds %d bytes", usage, maxDynamicAddressShrinkAckReasonBytes)
+	}
+	for _, r := range reason {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%s: reason must not contain control characters", usage)
+		}
+	}
+	resp, err := c.client.SystemAction(c.ctx(), &pb.SystemActionRequest{
+		Action:            "dynamic-address-shrink-ack",
+		Target:            feed,
+		CandidateId:       candidateID,
+		CandidateHash:     candidateHash,
+		BaselineHash:      baselineHash,
+		CandidateOldCount: uint32(oldCount),
+		CandidateNewCount: uint32(newCount),
+		Reason:            reason,
+	})
+	if err != nil {
+		return fmt.Errorf("%v", err)
+	}
+	fmt.Println(resp.Message)
+	return nil
+}
+
+func validDynamicAddressShrinkCandidateHash(candidateHash string) bool {
+	if len(candidateHash) != 64 {
+		return false
+	}
+	for i := range candidateHash {
+		if !((candidateHash[i] >= '0' && candidateHash[i] <= '9') ||
+			(candidateHash[i] >= 'a' && candidateHash[i] <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // handleRequestSecurityPolicies implements `request security policies check`

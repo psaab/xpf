@@ -242,7 +242,7 @@ func newShowGoldenServer(t *testing.T) *Server {
 		},
 		feedsFn: func() map[string]feeds.FeedInfo {
 			return map[string]feeds.FeedInfo{
-				"office": {Prefixes: 42, LastFetch: goldenFixedFetch},
+				"blocklist": {Prefixes: 42, LastFetch: goldenFixedFetch},
 			}
 		},
 		startTime: goldenFixedFetch,

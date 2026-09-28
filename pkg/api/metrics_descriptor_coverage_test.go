@@ -17,6 +17,7 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/dhcpserver"
+	"github.com/psaab/xpf/pkg/feeds"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/logging"
 )
@@ -426,6 +427,11 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		gc:        gc,
 		startTime: time.Now(),
 		eventBuf:  eventBuf,
+		feedsFn: func() map[string]feeds.FeedInfo {
+			return map[string]feeds.FeedInfo{
+				"deny-feed": {ShrinkRefusalCount: 3, ShrinkRefused: true},
+			}
+		},
 		// #1780: wire a non-nil neighbor-phase age source so the
 		// neighbor_periodic_last_success_age_seconds family emits and the
 		// canary covers its descriptor declaration.
@@ -673,6 +679,8 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		// so the canary is what keeps the reader from being deleted back to
 		// nothing without a test going red.
 		"xpf_syslog_messages_dropped_total",
+		"xpf_feed_shrink_refusals_total",             // active feed manager counter
+		"xpf_feed_shrink_refused",                    // active feed refusal alarm
 		"xpf_event_stream_subscriber_refusals_total", // shared REST SSE + gRPC admission refusals
 	}
 	if ifaceResolvable {
@@ -686,6 +694,25 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 			t.Errorf("expected metric family %q in gathered output but it was "+
 				"absent — its collect path did not emit (coverage gap)", name)
 		}
+	}
+	var refusalCounter, refusedGauge *dto.Metric
+	for _, family := range mfs {
+		switch family.GetName() {
+		case "xpf_feed_shrink_refusals_total":
+			if len(family.GetMetric()) == 1 {
+				refusalCounter = family.GetMetric()[0]
+			}
+		case "xpf_feed_shrink_refused":
+			if len(family.GetMetric()) == 1 {
+				refusedGauge = family.GetMetric()[0]
+			}
+		}
+	}
+	if refusalCounter == nil || refusalCounter.GetCounter().GetValue() != 3 {
+		t.Errorf("xpf_feed_shrink_refusals_total = %v, want per-feed counter 3", refusalCounter)
+	}
+	if refusedGauge == nil || refusedGauge.GetGauge().GetValue() != 1 {
+		t.Errorf("xpf_feed_shrink_refused = %v, want active refusal gauge 1", refusedGauge)
 	}
 }
 

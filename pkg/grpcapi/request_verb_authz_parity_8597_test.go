@@ -78,3 +78,14 @@ func TestTheNewVerbsCanonicalCommands_8597(t *testing.T) {
 		}
 	}
 }
+
+func TestDynamicAddressShrinkAcknowledgementCostsConfigure(t *testing.T) {
+	const verb = "dynamic-address-shrink-ack"
+	if got := systemActionPermission(verb); got != config.PermConfig {
+		t.Fatalf("%s costs %v, want %v", verb, got, config.PermConfig)
+	}
+	const want = "request security dynamic-address acknowledge-shrink"
+	if got := systemActionVerbCommand[verb]; got != want {
+		t.Fatalf("%s maps to %q, want %q", verb, got, want)
+	}
+}
