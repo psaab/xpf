@@ -245,14 +245,14 @@ func TestRefreshKeepsThePreviousSnapshotOnError8607(t *testing.T) {
 	table := dataplane.NewPersistentNATTable()
 	if !applyPersistentNatShowRefresh(table, []dpuserspace.IdleLeaseWire{
 		leaseWire8607("10.0.61.241", 39165, "172.16.80.7", 30000, 5*time.Minute, 5*time.Minute),
-	}, nil, now) {
+	}, nil, now, table.ClearGeneration()) {
 		t.Fatal("the success path must report that it replaced")
 	}
 	if n := len(table.All()); n != 1 {
 		t.Fatalf("precondition: %d bindings after a good refresh, want 1", n)
 	}
 
-	if applyPersistentNatShowRefresh(table, nil, errRefresh8607, now) {
+	if applyPersistentNatShowRefresh(table, nil, errRefresh8607, now, table.ClearGeneration()) {
 		t.Error("an errored refresh must NOT report a replace")
 	}
 	if n := len(table.All()); n != 1 {
@@ -263,7 +263,7 @@ func TestRefreshKeepsThePreviousSnapshotOnError8607(t *testing.T) {
 	}
 
 	// ...and a SUCCESSFUL empty export DOES empty it: "none" is an answer.
-	if !applyPersistentNatShowRefresh(table, nil, nil, now) {
+	if !applyPersistentNatShowRefresh(table, nil, nil, now, table.ClearGeneration()) {
 		t.Fatal("a successful empty export must report a replace")
 	}
 	if n := len(table.All()); n != 0 {
