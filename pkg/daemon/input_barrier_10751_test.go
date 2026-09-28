@@ -908,3 +908,179 @@ func TestEarlyInputBarrierBootUnitAndStaging10751(t *testing.T) {
 		})
 	}
 }
+
+func TestEarlyInputPendingIntentAllBranches10751(t *testing.T) {
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+
+	scenarios := []struct {
+		name        string
+		zonesSilent bool // phase-1 pending visible ONLY at interface/family granularity
+		phase1      func(*testing.T) *config.Config
+		phase2      func(*testing.T) *config.Config
+	}{
+		{"addressed-plus-addressless-zones", false,
+			func(t *testing.T) *config.Config { return pendingIntentTwoZoneConfig10751(t, nil, true) },
+			func(t *testing.T) *config.Config {
+				return pendingIntentTwoZoneConfig10751(t, []string{"10.2.0.1/24", "2001:db8:2::1/64"}, false)
+			}},
+		{"mixed-zone-sibling", true,
+			func(t *testing.T) *config.Config { return pendingIntentMixedZoneConfig10751(t, nil, true) },
+			func(t *testing.T) *config.Config {
+				return pendingIntentMixedZoneConfig10751(t, []string{"10.3.0.2/24"}, false)
+			}},
+		{"v4-then-v6", true,
+			func(t *testing.T) *config.Config {
+				return sequentialFamilyConfig10751(t, []string{"10.4.0.1/24"}, false, true)
+			},
+			func(t *testing.T) *config.Config {
+				return sequentialFamilyConfig10751(t, []string{"10.4.0.1/24", "2001:db8:4::1/64"}, false, true)
+			}},
+		{"v6-then-v4", true,
+			func(t *testing.T) *config.Config {
+				return sequentialFamilyConfig10751(t, []string{"2001:db8:5::1/64"}, true, false)
+			},
+			func(t *testing.T) *config.Config {
+				return sequentialFamilyConfig10751(t, []string{"10.5.0.1/24", "2001:db8:5::1/64"}, true, false)
+			}},
+	}
+
+	runLifecycle := func(t *testing.T, zonesSilent bool, phase1, phase2 *config.Config, failPhase1Real bool) {
+		t.Helper()
+		if !hostInboundHasPendingEnforcingIntent(phase1) {
+			t.Fatal("phase-1 fixture has no pending intent; the retention half would be vacuous")
+		}
+		if zonesSilent && len(dpuserspace.AddresslessEnforcingZones(phase1)) != 0 {
+			t.Fatal("phase-1 fixture must be zone-silent so only interface/family granularity catches it")
+		}
+		if hostInboundHasPendingEnforcingIntent(phase2) {
+			t.Fatal("phase-2 fixture still pending; the completion half would be vacuous")
+		}
+		installErr := errors.New("phase-1 real install failed")
+		calls := 0
+		fake := &fakeNftInstaller{}
+		if failPhase1Real {
+			fake.hostInbound = func(xnft.HostInboundSpec) error {
+				calls++
+				if calls == 1 {
+					return installErr
+				}
+				return nil
+			}
+		}
+		nftInstaller = fake
+		d := &Daemon{}
+		// Phase 1: pending intent — barrier retained.
+		err := d.applyHostInboundFilter(phase1)
+		if failPhase1Real {
+			if !errors.Is(err, installErr) {
+				t.Fatalf("phase-1 error = %v, want real install error", err)
+			}
+			if st := d.HostInboundApplied(); !st.Established || !st.LastApplyFailed {
+				t.Fatalf("phase-1 state = %+v, want established-but-stale fenced fallback", st)
+			}
+		} else if err != nil {
+			t.Fatalf("phase-1 real install: %v", err)
+		}
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "remove" {
+				t.Fatalf("phase-1 barrier calls = %v, pending intent must retain the barrier", fake.earlyInputBarrierCalls)
+			}
+		}
+		if d.earlyInputHandoffDone.Load() {
+			t.Fatal("phase-1 must not mark the handoff done while intent is pending")
+		}
+		// Phase 2: every scope resolved — real install hands off.
+		if err := d.applyHostInboundFilter(phase2); err != nil {
+			t.Fatalf("phase-2 real install: %v", err)
+		}
+		removes := 0
+		for _, call := range fake.earlyInputBarrierCalls {
+			if call == "remove" {
+				removes++
+			}
+		}
+		if removes != 1 {
+			t.Fatalf("barrier calls = %v, want exactly one handoff remove after all scopes resolve", fake.earlyInputBarrierCalls)
+		}
+		if !d.earlyInputHandoffDone.Load() {
+			t.Fatal("resolved handoff must mark the handoff done")
+		}
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name+"/real-success", func(t *testing.T) {
+			runLifecycle(t, sc.zonesSilent, sc.phase1(t), sc.phase2(t), false)
+		})
+		t.Run(sc.name+"/fallback-success", func(t *testing.T) {
+			runLifecycle(t, sc.zonesSilent, sc.phase1(t), sc.phase2(t), true)
+		})
+	}
+}
+
+// pendingIntentTwoZoneConfig10751 builds zone A fully addressed plus zone B
+// with the given addresses (DHCP-pending when bAddrs is nil). No junos-host
+// programs anywhere.
+func pendingIntentTwoZoneConfig10751(t *testing.T, bAddrs []string, bDHCP bool) *config.Config {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"xpfA": {Name: "xpfA", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"10.1.0.1/24", "2001:db8:1::1/64"}},
+		}},
+		"xpfB": {Name: "xpfB", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, DHCP: bDHCP, DHCPv6: bDHCP, Addresses: bAddrs},
+		}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"zoneA": {Name: "zoneA", Interfaces: []string{"xpfA.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}}},
+		"zoneB": {Name: "zoneB", Interfaces: []string{"xpfB.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}}},
+	}
+	if len(dpuserspace.BuildJunosHostPrograms(cfg)) != 0 {
+		t.Fatal("fixture unexpectedly produced a host-input deny program")
+	}
+	return cfg
+}
+
+// pendingIntentMixedZoneConfig10751 builds ONE zone with an addressed unit 0
+// and a sibling unit 1 carrying sibAddrs (DHCP-pending when nil).
+func pendingIntentMixedZoneConfig10751(t *testing.T, sibAddrs []string, sibDHCP bool) *config.Config {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"xpfM": {Name: "xpfM", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"10.3.0.1/24"}},
+			1: {Number: 1, DHCP: sibDHCP, Addresses: sibAddrs},
+		}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"mixed": {Name: "mixed", Interfaces: []string{"xpfM.0", "xpfM.1"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}}},
+	}
+	if len(dpuserspace.BuildJunosHostPrograms(cfg)) != 0 {
+		t.Fatal("fixture unexpectedly produced a host-input deny program")
+	}
+	return cfg
+}
+
+// sequentialFamilyConfig10751 builds a single-zone single-unit config with the
+// given addresses and DHCP-client flags, for v4-before-v6 and v6-before-v4
+// arrival orders.
+func sequentialFamilyConfig10751(t *testing.T, addrs []string, dhcp, dhcpv6 bool) *config.Config {
+	t.Helper()
+	unit := &config.InterfaceUnit{Number: 0, DHCP: dhcp, DHCPv6: dhcpv6, Addresses: addrs}
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"xpfS": {Name: "xpfS", Units: map[int]*config.InterfaceUnit{0: unit}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"edge": {Name: "edge", Interfaces: []string{"xpfS.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}}},
+	}
+	if len(dpuserspace.BuildJunosHostPrograms(cfg)) != 0 {
+		t.Fatal("fixture unexpectedly produced a host-input deny program")
+	}
+	return cfg
+}

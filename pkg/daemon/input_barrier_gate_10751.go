@@ -2,6 +2,9 @@ package daemon
 
 import (
 	"log/slog"
+
+	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 // ensureEarlyInputProtectionForNaming verifies the #10751 pre-networkd input
@@ -88,4 +91,19 @@ func (d *Daemon) ensureEarlyInputBootstrapGuard() {
 	}
 	slog.Warn("bootstrap swapped the global input barrier for a lifeline-admitting guard; data-interface services stay closed until the first commit",
 		"lifelines", lifelines)
+}
+
+// hostInboundHasPendingEnforcingIntent reports whether any configured
+// enforcement scope is still unresolved: a zone with interfaces but no
+// address yet (coarse, zone-level), or a specific interface-unit/family
+// with a DHCP client but no lease (fine-grained: mixed zones, sequential
+// v4/v6 acquisition). Consulted ONLY pre-handoff to retain the early
+// barrier until every intended scope installs its own protection —
+// otherwise an unrelated or first-family handoff lifts the global guard
+// while pending ingress stays unprotected until a later apply.
+func hostInboundHasPendingEnforcingIntent(cfg *config.Config) bool {
+	if len(dpuserspace.AddresslessEnforcingZones(cfg)) > 0 {
+		return true
+	}
+	return len(dpuserspace.AddresslessEnforcingInterfaces(cfg)) > 0
 }
