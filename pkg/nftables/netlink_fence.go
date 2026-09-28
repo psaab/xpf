@@ -23,6 +23,31 @@ func hostInboundFenceMandatoryAdmitsNetlink(p *nlPlan, wgListenPorts []uint16) {
 	}
 }
 
+// emitUnleasedDHCPAdmitsNetlink mirrors emitUnleasedDHCPAdmits: the per-family
+// DHCP-client admits for still-unleased netdevs — `iifname <dev> udp dport
+// <68|546> accept`, family-guarded exactly like the early-input barrier's own
+// DHCP admits (input_barrier_10751.go). Placed with the mandatory admits,
+// BEFORE every destination rule: on an already-up link the unzoned
+// link-local DROP would otherwise shadow a first ADVERTISE/OFFER (a
+// multicast-originated reply is not conntrack-established, so only the
+// DHCP admit lets it through), deadlocking acquisition behind the LAST
+// interface DROP. Scoped to the unleased netdevs of each family, so leased
+// families stay under pure destination judgement. Expression order (iifname,
+// nfproto, l4proto, dport) matches the oracle text — parity-pinned. A no-op
+// for the lo0 fence (its spec never carries unleased netdevs).
+func emitUnleasedDHCPAdmitsNetlink(p *nlPlan, unleasedV4, unleasedV6 []string) {
+	if len(unleasedV4) > 0 {
+		r := p.rule().iifname(unleasedV4)
+		r.needNfproto(famV4)
+		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv4ClientPort}), false).emit(verdictAccept()...)
+	}
+	if len(unleasedV6) > 0 {
+		r := p.rule().iifname(unleasedV6)
+		r.needNfproto(famV6)
+		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv6ClientPort}), false).emit(verdictAccept()...)
+	}
+}
+
 // buildHostInboundFenceNetlink mirrors buildHostInboundFencePayload: the
 // mandatory admits plus a catch-all DROP for every firewall-local address the
 // real ruleset would scope (per host-inbound-configured zone + the unzoned set).
@@ -53,6 +78,9 @@ func buildLo0FenceNetlink(p *nlPlan, spec FenceSpec) {
 
 func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
 	hostInboundFenceMandatoryAdmitsNetlink(p, spec.WGListenPorts)
+	// #10751 F8-A: admit the DHCP client's own replies before the
+	// destination drops (no-op for lo0 — see emitUnleasedDHCPAdmitsNetlink).
+	emitUnleasedDHCPAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6)
 	for _, v := range spec.Views {
 		if len(v.V4Addrs) > 0 {
 			p.rule().daddr(famV4, v.V4Addrs, false).emit(verdictDrop()...)
@@ -68,8 +96,11 @@ func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
 		p.rule().daddr(famV6, spec.UnzonedV6, false).emit(verdictDrop()...)
 	}
 	// #10751 R7-B: unleased-DHCP interface backstop (see the real builder).
-	if len(spec.UnleasedNetdevs) > 0 {
-		p.rule().iifname(spec.UnleasedNetdevs).emit(verdictDrop()...)
+	if len(spec.UnleasedV4) > 0 {
+		p.rule().iifname(spec.UnleasedV4).emit(verdictDrop()...)
+	}
+	if len(spec.UnleasedV6) > 0 {
+		p.rule().iifname(spec.UnleasedV6).emit(verdictDrop()...)
 	}
 }
 
@@ -82,6 +113,9 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 		nil, spec.UncoveredV4, spec.UncoveredV6, spec.WGListenPorts, false,
 	))
 	hostInboundFenceMandatoryAdmitsNetlink(p, spec.WGListenPorts)
+	// #10751 F8-A: admit the DHCP client's own replies before the
+	// destination drops (see emitUnleasedDHCPAdmitsNetlink).
+	emitUnleasedDHCPAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6)
 	if len(spec.UncoveredV4) > 0 {
 		p.rule().daddr(famV4, spec.UncoveredV4, false).emit(verdictDrop()...)
 	}
@@ -89,7 +123,10 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 		p.rule().daddr(famV6, spec.UncoveredV6, false).emit(verdictDrop()...)
 	}
 	// #10751 R7-B: unleased-DHCP interface backstop (see the real builder).
-	if len(spec.UnleasedNetdevs) > 0 {
-		p.rule().iifname(spec.UnleasedNetdevs).emit(verdictDrop()...)
+	if len(spec.UnleasedV4) > 0 {
+		p.rule().iifname(spec.UnleasedV4).emit(verdictDrop()...)
+	}
+	if len(spec.UnleasedV6) > 0 {
+		p.rule().iifname(spec.UnleasedV6).emit(verdictDrop()...)
 	}
 }

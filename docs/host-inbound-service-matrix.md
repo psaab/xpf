@@ -1070,10 +1070,18 @@ installed deny keeps covering link-local destinations — the chain is
 `policy accept`, so pending-intent is deliberately stricter than
 enforceability for DHCP-intent scopes. Unzoned DHCP units with no lease
 yet are NOT pending (no hold — a never-leasing unit must not strand the
-global barrier); instead the first apply renders LAST-placed `iifname
-<dev> drop` rules for them (#10751 R7-B), so a first lease lands
-already denied and the debounced re-apply replaces the interface rule
-with destination DROPs. Lifeline and VRF-enslaved units are excluded.
+global barrier); instead the first apply renders per-family LAST-placed
+`iifname <dev> drop` rules for them (#10751 R7-B), so a first lease lands
+already denied and the debounced re-apply replaces the interface rules
+with destination DROPs. Each still-unleased family also gets a TOP-placed
+`iifname <dev> udp dport <68|546> accept` ahead of the destination drops
+(#10751 F8-A): without it a first ADVERTISE/OFFER — not
+conntrack-established when multicast-originated — would hit the interface
+DROP (or the unzoned link-local DROP on an already-up link) and deadlock
+acquisition. The admits are scoped to the unleased netdevs of each
+family, so leased families stay under pure destination judgement; they
+sit after the #10752 stale-reply guards, whose catalog exempts DHCP
+client ports. Lifeline and VRF-enslaved units are excluded.
 
 Two observability surfaces consume it:
 

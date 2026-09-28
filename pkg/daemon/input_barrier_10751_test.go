@@ -2289,8 +2289,8 @@ func TestUnzonedDHCPHandsOffWithInterfaceDrop10751(t *testing.T) {
 	if err := d.applyHostInboundFilter(cfg); err != nil {
 		t.Fatalf("first apply err = %v, want nil (hand off WITH interface protection)", err)
 	}
-	if len(specs) != 1 || len(specs[0].UnleasedNetdevs) != 1 || specs[0].UnleasedNetdevs[0] != "ge-0-0-9" {
-		t.Fatalf("real spec unleased = %+v, want [ge-0-0-9]", specs)
+	if len(specs) != 1 || len(specs[0].UnleasedV4) != 1 || specs[0].UnleasedV4[0] != "ge-0-0-9" || len(specs[0].UnleasedV6) != 1 || specs[0].UnleasedV6[0] != "ge-0-0-9" {
+		t.Fatalf("real spec unleased v4/v6 = %+v, want [ge-0-0-9]/[ge-0-0-9]", specs)
 	}
 	if !d.earlyInputHandoffDone.Load() {
 		t.Fatal("first apply must hand off (protected by the interface rule, not held)")
@@ -2310,8 +2310,8 @@ func TestUnzonedDHCPHandsOffWithInterfaceDrop10751(t *testing.T) {
 	if len(specs) != 2 {
 		t.Fatalf("real installs = %d, want 2", len(specs))
 	}
-	if len(specs[1].UnleasedNetdevs) != 0 {
-		t.Fatalf("leased spec unleased = %v, want empty (replaced by destination DROPs)", specs[1].UnleasedNetdevs)
+	if len(specs[1].UnleasedV4) != 0 || len(specs[1].UnleasedV6) != 0 {
+		t.Fatalf("leased spec unleased v4/v6 = %v/%v, want empty/empty (replaced by destination DROPs)", specs[1].UnleasedV4, specs[1].UnleasedV6)
 	}
 	covered := false
 	for _, a := range specs[1].UnzonedV4 {
@@ -2360,8 +2360,8 @@ func TestUnzonedDHCPBlocksTeardown10751(t *testing.T) {
 			t.Fatalf("deleted tables = %v: teardown must not delete the host table (unleased blocks teardown; gap cleanup alone is fine)", deleted)
 		}
 	}
-	if len(specs) != 1 || len(specs[0].UnleasedNetdevs) != 1 {
-		t.Fatalf("real specs = %+v, want one install carrying the interface backstop", specs)
+	if len(specs) != 1 || len(specs[0].UnleasedV4) != 1 || len(specs[0].UnleasedV6) != 1 {
+		t.Fatalf("real specs = %+v, want one install carrying the interface backstop in both families", specs)
 	}
 	if !d.earlyInputHandoffDone.Load() {
 		t.Fatal("must hand off with interface protection installed")
@@ -2402,8 +2402,8 @@ func TestUnzonedDHCPFallbackKeepsInterfaceDrop10751(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), installErr.Error()) {
 		t.Fatalf("failing apply err = %v, want the real-install error (fence stands)", err)
 	}
-	if len(fenceSpecs) != 1 || len(fenceSpecs[0].UnleasedNetdevs) != 1 {
-		t.Fatalf("fence specs = %+v, want the interface backstop in the fence", fenceSpecs)
+	if len(fenceSpecs) != 1 || len(fenceSpecs[0].UnleasedV4) != 1 || len(fenceSpecs[0].UnleasedV6) != 1 {
+		t.Fatalf("fence specs = %+v, want the interface backstop in the fence in both families", fenceSpecs)
 	}
 	if !d.earlyInputHandoffDone.Load() {
 		t.Fatal("fence with interface backstop must hand off (scoped, protected)")
@@ -2411,29 +2411,52 @@ func TestUnzonedDHCPFallbackKeepsInterfaceDrop10751(t *testing.T) {
 	if err := d.applyHostInboundFilter(cfg); err != nil {
 		t.Fatalf("healed apply err = %v, want nil", err)
 	}
-	if len(realSpecs) != 2 || len(realSpecs[1].UnleasedNetdevs) != 1 {
-		t.Fatalf("healed real spec = %+v, want the backstop retained while unleased", realSpecs)
+	if len(realSpecs) != 2 || len(realSpecs[1].UnleasedV4) != 1 || len(realSpecs[1].UnleasedV6) != 1 {
+		t.Fatalf("healed real spec = %+v, want the backstop retained while unleased in both families", realSpecs)
 	}
 }
 
-// TestUnleasedOraclePlacement10751: the text oracles render the backstop
-// LAST (after every destination rule, so addressed families and explicit
-// programs win), in set form for several netdevs, and omit it when empty.
+// TestUnleasedOraclePlacement10751: the text oracles render the per-family
+// backstop LAST (after every destination rule, so addressed families and
+// explicit programs win) and the per-family DHCP admits BEFORE every
+// destination rule (so a first ADVERTISE is not shadowed by the link-local
+// DROP on an already-up link). Set form for several netdevs; omitted when
+// empty.
 func TestUnleasedOraclePlacement10751(t *testing.T) {
 	views := []dpuserspace.ZoneHostInboundView{{Zone: "trust", V4Addrs: []string{"10.0.0.1"}}}
-	unleased := []string{"ge-0-0-8", "ge-0-0-9"}
-	want := `iifname { "ge-0-0-8", "ge-0-0-9" } drop`
+	unleasedV4 := []string{"ge-0-0-8", "ge-0-0-9"}
+	unleasedV6 := []string{"ge-0-0-9"}
+	wantDropV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } drop`
+	wantDropV6 := `iifname "ge-0-0-9" drop`
+	wantAdmitV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 udp dport 68 accept`
+	wantAdmitV6 := `iifname "ge-0-0-9" meta nfproto ipv6 udp dport 546 accept`
 	for name, payload := range map[string]string{
-		"real":  buildHostInboundFilterPayloadWithOverlay(views, []string{"10.9.9.9"}, nil, nil, nil, true, nil, unleased),
-		"fence": buildHostInboundFencePayload(views, nil, nil, nil, unleased),
-		"gap":   buildHostInboundGapFencePayload([]string{"10.0.0.2"}, nil, nil, unleased),
+		"real":  buildHostInboundFilterPayloadWithOverlay(views, []string{"10.9.9.9"}, nil, nil, nil, true, nil, unleasedV4, unleasedV6),
+		"fence": buildHostInboundFencePayload(views, nil, nil, nil, unleasedV4, unleasedV6),
+		"gap":   buildHostInboundGapFencePayload([]string{"10.0.0.2"}, nil, nil, unleasedV4, unleasedV6),
 	} {
-		if !strings.Contains(payload, want) {
-			t.Errorf("%s oracle lacks %q:\n%s", name, want, payload)
-			continue
+		for _, want := range []string{wantDropV4, wantDropV6, wantAdmitV4, wantAdmitV6} {
+			if !strings.Contains(payload, want) {
+				t.Errorf("%s oracle lacks %q:\n%s", name, want, payload)
+			}
 		}
-		if strings.LastIndex(payload, "daddr") > strings.Index(payload, want) {
+		if strings.LastIndex(payload, "daddr") > strings.Index(payload, wantDropV4) {
 			t.Errorf("%s oracle places the interface backstop before a destination rule:\n%s", name, payload)
+		}
+		// Admits precede every destination DROP: the last admit must
+		// sit before the first destination drop. (The #10752
+		// stale-reply guards also carry daddr but precede the admits
+		// by design — DHCP client ports are catalog-exempt — so
+		// guard lines, marked by "ct direction reply", are skipped.)
+		lastAdmit := strings.LastIndex(payload, wantAdmitV6)
+		for _, line := range strings.Split(payload, "\n") {
+			if !strings.Contains(line, "daddr") || !strings.Contains(line, "drop") || strings.Contains(line, "ct direction reply") {
+				continue
+			}
+			if strings.Index(payload, line) < lastAdmit {
+				t.Errorf("%s oracle places a DHCP admit after destination drop %q:\n%s", name, strings.TrimSpace(line), payload)
+			}
+			break
 		}
 	}
 	plain := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)

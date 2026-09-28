@@ -57,12 +57,12 @@ func TestHostInboundPendingIntentFromSnapshots10751(t *testing.T) {
 	}
 }
 
-// TestBuildUnzonedDHCPUnleasedNetdevs10751 pins the R7-B backstop input:
-// unzoned non-lifeline DHCP units with no resolved address in an intended
-// family are listed by LOCAL_IN netdev name. Zoned, lifeline, static,
-// resolved, and VRF-enslaved units are excluded; either-family unleased
-// lists (LAST placement keeps the addressed family judging by
-// destinations).
+// TestBuildUnzonedDHCPUnleasedNetdevs10751 pins the R7-B/F8-A backstop
+// input: unzoned non-lifeline DHCP units with no resolved address in an
+// intended family are listed by LOCAL_IN netdev name, SPLIT BY FAMILY (a
+// leased family gets neither DROP nor DHCP admit — pure destination
+// judgement). Zoned, lifeline, static, resolved, and VRF-enslaved units
+// are excluded.
 func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 	link := int(netlink.SCOPE_LINK)
 	universe := int(netlink.SCOPE_UNIVERSE)
@@ -76,9 +76,9 @@ func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 		return cfg
 	}
 	t.Run("unzoned unleased listed", func(t *testing.T) {
-		got := BuildUnzonedDHCPUnleasedNetdevs(mkcfg(), nil)
-		if len(got) != 1 || got[0] != "ge-0-0-9" {
-			t.Fatalf("unleased = %v, want [ge-0-0-9]", got)
+		v4, v6 := BuildUnzonedDHCPUnleasedNetdevs(mkcfg(), nil)
+		if len(v4) != 1 || v4[0] != "ge-0-0-9" || len(v6) != 1 || v6[0] != "ge-0-0-9" {
+			t.Fatalf("unleased v4/v6 = %v/%v, want [ge-0-0-9]/[ge-0-0-9]", v4, v6)
 		}
 	})
 	t.Run("zoned excluded", func(t *testing.T) {
@@ -86,15 +86,15 @@ func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 		cfg.Security.Zones = map[string]*config.ZoneConfig{
 			"wan": {Name: "wan", Interfaces: []string{"ge-0-0-9.0"}},
 		}
-		if got := BuildUnzonedDHCPUnleasedNetdevs(cfg, nil); len(got) != 0 {
-			t.Fatalf("unleased = %v, want empty (zoned units use pending retention)", got)
+		if v4, v6 := BuildUnzonedDHCPUnleasedNetdevs(cfg, nil); len(v4) != 0 || len(v6) != 0 {
+			t.Fatalf("unleased v4/v6 = %v/%v, want empty/empty (zoned units use pending retention)", v4, v6)
 		}
 	})
 	t.Run("static excluded", func(t *testing.T) {
 		cfg := mkcfg()
 		cfg.Interfaces.Interfaces["ge-0-0-9"].Units[0] = &config.InterfaceUnit{Number: 0}
-		if got := BuildUnzonedDHCPUnleasedNetdevs(cfg, nil); len(got) != 0 {
-			t.Fatalf("unleased = %v, want empty (no DHCP intent)", got)
+		if v4, v6 := BuildUnzonedDHCPUnleasedNetdevs(cfg, nil); len(v4) != 0 || len(v6) != 0 {
+			t.Fatalf("unleased v4/v6 = %v/%v, want empty/empty (no DHCP intent)", v4, v6)
 		}
 	})
 	t.Run("resolved excluded", func(t *testing.T) {
@@ -102,17 +102,17 @@ func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 		cfg.Interfaces.Interfaces["ge-0-0-9"].Units[0] = &config.InterfaceUnit{Number: 0, DHCP: true}
 		snaps := []InterfaceSnapshot{newcomerRow10751("ge-0-0-9.0", "",
 			newcomerAddr10751("inet", "203.0.113.9/24", universe))}
-		if got := BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps); len(got) != 0 {
-			t.Fatalf("unleased = %v, want empty (leased address resolves)", got)
+		if v4, v6 := BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps); len(v4) != 0 || len(v6) != 0 {
+			t.Fatalf("unleased v4/v6 = %v/%v, want empty/empty (leased address resolves)", v4, v6)
 		}
 	})
 	t.Run("link-local only still unleased", func(t *testing.T) {
 		cfg := mkcfg()
 		snaps := []InterfaceSnapshot{newcomerRow10751("ge-0-0-9.0", "",
 			newcomerAddr10751("inet6", "fe80::9/64", link))}
-		got := BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
-		if len(got) != 1 {
-			t.Fatalf("unleased = %v, want the netdev (automatic LL never resolves intent)", got)
+		v4, v6 := BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
+		if len(v4) != 1 || len(v6) != 1 {
+			t.Fatalf("unleased v4/v6 = %v/%v, want the netdev in both (automatic LL never resolves intent)", v4, v6)
 		}
 	})
 	t.Run("partial family lists", func(t *testing.T) {
@@ -122,9 +122,9 @@ func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 		}
 		snaps := []InterfaceSnapshot{newcomerRow10751("ge-0-0-9.0", "",
 			newcomerAddr10751("inet", "10.9.9.9/24", universe))}
-		got := BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
-		if len(got) != 1 {
-			t.Fatalf("unleased = %v, want the netdev (v6 unleased; LAST placement preserves v4 destinations)", got)
+		v4, v6 := BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
+		if len(v4) != 0 || len(v6) != 1 || v6[0] != "ge-0-0-9" {
+			t.Fatalf("unleased v4/v6 = %v/%v, want empty/[ge-0-0-9] (leased v4 keeps pure destination judgement; v6 unleased)", v4, v6)
 		}
 	})
 	t.Run("lifeline excluded", func(t *testing.T) {
@@ -134,8 +134,8 @@ func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 				0: {Number: 0, DHCP: true},
 			}},
 		}
-		if got := BuildUnzonedDHCPUnleasedNetdevs(cfg, nil); len(got) != 0 {
-			t.Fatalf("unleased = %v, want empty (lifeline management must survive)", got)
+		if v4, v6 := BuildUnzonedDHCPUnleasedNetdevs(cfg, nil); len(v4) != 0 || len(v6) != 0 {
+			t.Fatalf("unleased v4/v6 = %v/%v, want empty/empty (lifeline management must survive)", v4, v6)
 		}
 	})
 	t.Run("vrf enslaved excluded", func(t *testing.T) {
@@ -143,8 +143,8 @@ func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 		cfg.RoutingInstances = []*config.RoutingInstanceConfig{
 			{Name: "vrf1", Interfaces: []string{"ge-0-0-9.0"}},
 		}
-		if got := BuildUnzonedDHCPUnleasedNetdevs(cfg, nil); len(got) != 0 {
-			t.Fatalf("unleased = %v, want empty (LOCAL_IN identity is the shared master; iifname would shadow siblings)", got)
+		if v4, v6 := BuildUnzonedDHCPUnleasedNetdevs(cfg, nil); len(v4) != 0 || len(v6) != 0 {
+			t.Fatalf("unleased v4/v6 = %v/%v, want empty/empty (LOCAL_IN identity is the shared master; iifname would shadow siblings)", v4, v6)
 		}
 	})
 }

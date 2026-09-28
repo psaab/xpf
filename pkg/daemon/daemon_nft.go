@@ -593,12 +593,13 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// the established ones. See docs/host-inbound-service-matrix.md,
 	// "Lifeline exclusion is by address VALUE, in the fence and the real table".
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrsFromSnapshots(cfg, snaps1)
-	// #10751 R7-B: unzoned DHCP units with no lease yet have no destination
-	// for any catch-all, yet a first lease would land host-reachable
-	// before the debounced re-apply installs one. Render them as
-	// LAST-placed interface DROPs (same S1 snapshot): protection that
-	// needs no hold and vanishes on lease.
-	unleased := dpuserspace.BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps1)
+	// #10751 R7-B/F8-A: unzoned DHCP units with no lease yet have no
+	// destination for any catch-all, yet a first lease would land
+	// host-reachable before the debounced re-apply installs one. Render
+	// them as LAST-placed per-family interface DROPs (same S1 snapshot):
+	// protection that needs no hold and vanishes on lease — plus
+	// TOP-placed per-family DHCP-client admits so the lease can arrive.
+	unleasedV4, unleasedV6 := dpuserspace.BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps1)
 	// #3698: surface the transient fail-open admit window. A configured
 	// host-inbound-enforcing zone whose non-lifeline interfaces have no
 	// resolvable address yet (DHCP WAN before its first lease, backup node before
@@ -633,7 +634,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// them). Only representable programs that resolve to >=1 non-lifeline netdev
 	// are returned; the un-representable remainder keeps the #4168 commit warning.
 	programs := dpuserspace.BuildJunosHostPrograms(cfg)
-	if overlay == nil && !hostInboundHasEnforceableView(views) && len(unzonedV4) == 0 && len(unzonedV6) == 0 && len(programs) == 0 && len(unleased) == 0 {
+	if overlay == nil && !hostInboundHasEnforceableView(views) && len(unzonedV4) == 0 && len(unzonedV6) == 0 && len(programs) == 0 && len(unleasedV4) == 0 && len(unleasedV6) == 0 {
 		// No host-inbound-configured zone with a resolvable address, no
 		// addressed-but-unzoned interface (#4420 HI-2), no junos-host DENY
 		// program (#4146), and no unleased DHCP interface (#10751 R7-B)
@@ -786,7 +787,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// via H7); the flag is untouched and the next call-site outcome re-drives
 	// it — see hostInboundDataplaneFresh for the full transition table.
 	spec := toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wgListenPorts, d.hostInboundDataplaneFresh.Load(), overlay)
-	spec.UnleasedNetdevs = unleased
+	spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
 	if err := nftInstaller.InstallHostInbound(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Warn("failed to apply host-inbound filter", "err", err)
@@ -855,7 +856,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				uncoveredV6 = hostInboundWithoutAddrs(uncoveredV6, withheld.WithheldV6)
 			}
 			if len(uncoveredV4) > 0 || len(uncoveredV6) > 0 {
-				if gapErr := d.installHostInboundGapFence(uncoveredV4, uncoveredV6, wgListenPorts, unleased); gapErr != nil {
+				if gapErr := d.installHostInboundGapFence(uncoveredV4, uncoveredV6, wgListenPorts, unleasedV4, unleasedV6); gapErr != nil {
 					// #7181: the apply failed AND the gap could not be installed.
 					// Record the staleness before returning -- this is the worst
 					// applied state and the one an operator most needs surfaced.
@@ -1090,10 +1091,10 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 // A load failure returns the error (joined into the commit result by the caller)
 // so a newly reachable local address is never silently left without a host-inbound
 // deny. Caller guarantees >=1 uncovered address (the payload has >=1 DROP).
-func (d *Daemon) installHostInboundGapFence(uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, unleased []string) error {
+func (d *Daemon) installHostInboundGapFence(uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, unleasedV4, unleasedV6 []string) error {
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundGapFencePayload oracle).
-	spec := xnft.GapFenceSpec{UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wgListenPorts, UnleasedNetdevs: unleased}
+	spec := xnft.GapFenceSpec{UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wgListenPorts, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
 	if err := nftInstaller.InstallGapFence(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Error("COVERAGE-GAP FAIL-OPEN GUARD: host-inbound real install failed AND the additive "+
@@ -1173,7 +1174,7 @@ func (d *Daemon) installHostInboundGapFence(uncoveredV4, uncoveredV6 []string, w
 // subsequently-appeared uncovered address.
 func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets, wgListenPorts []uint16) error {
 	views, unzonedV4, unzonedV6 := sets.Views, sets.UnzonedV4, sets.UnzonedV6
-	fenceHasScopedDrop := hostInboundHasEnforceableView(views) || len(unzonedV4) > 0 || len(unzonedV6) > 0 || len(sets.UnleasedNetdevs) > 0
+	fenceHasScopedDrop := hostInboundHasEnforceableView(views) || len(unzonedV4) > 0 || len(unzonedV6) > 0 || len(sets.UnleasedV4) > 0 || len(sets.UnleasedV6) > 0
 	logFenceWithheld(xnft.HostInboundTableName, sets)
 	// #6492: the fence's own coverage, not the real ruleset's desired-drop set.
 	// The two now differ in BOTH directions (lifeline-shared addresses withheld,
@@ -1182,7 +1183,7 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 	fenceCovered := hostInboundDesiredDropAddrs(views, unzonedV4, unzonedV6)
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundFencePayload oracle).
-	spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wgListenPorts, UnleasedNetdevs: sets.UnleasedNetdevs}
+	spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wgListenPorts, UnleasedV4: sets.UnleasedV4, UnleasedV6: sets.UnleasedV6}
 	if err := nftInstaller.InstallColdBootFence(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Error("COLD-BOOT FAIL-OPEN GUARD: host-inbound install failed AND the fail-closed "+
@@ -1218,10 +1219,10 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 // so tests can parse-check the full payload without invoking nft. A syntax error
 // on any line rejects the WHOLE payload (atomic load), retaining only the exact
 // prior generation, if one exists — exactly like the real builder.
-func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, unleased []string) string {
+func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, unleasedV4, unleasedV6 []string) string {
 	// Same hook/priority as the real host-inbound chain so the fence occupies the
 	// same evaluation slot (#3364).
-	return buildFenceTablePayload(xnft.HostInboundTableName, nftHostInboundPriority, views, unzonedV4, unzonedV6, wgListenPorts, unleased, true)
+	return buildFenceTablePayload(xnft.HostInboundTableName, nftHostInboundPriority, views, unzonedV4, unzonedV6, wgListenPorts, unleasedV4, unleasedV6, true)
 }
 
 // buildLo0FencePayload assembles the #6476 lo0 cold-boot fail-closed fence
@@ -1235,7 +1236,7 @@ func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzon
 // InstallLo0ColdBootFence is bit-equivalent. Empty address inputs intentionally
 // produce a zero-drop shell.
 func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16) string {
-	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, wgListenPorts, nil, false)
+	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, wgListenPorts, nil, nil, false)
 }
 
 // buildFenceTablePayload renders a fail-closed cold-boot fence into the named
@@ -1251,7 +1252,7 @@ func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, un
 // The same body serves the host-inbound fence (with reply guard) and lo0 fence
 // (without it), so their shared admit/deny posture cannot drift. Empty address
 // inputs intentionally produce a zero-drop table shell.
-func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, unleased []string, guardStaleReplies bool) string {
+func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, unleasedV4, unleasedV6 []string, guardStaleReplies bool) string {
 	var rules []string
 	rules = append(rules, "add table inet "+tableName)
 	rules = append(rules, "delete table inet "+tableName)
@@ -1264,6 +1265,7 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 		)...)
 	}
 	rules = append(rules, hostInboundFenceMandatoryAdmits(wgListenPorts)...)
+	emitUnleasedDHCPAdmits(&rules, unleasedV4, unleasedV6)
 	for _, v := range views {
 		if len(v.V4Addrs) > 0 {
 			rules = append(rules, "    ip daddr "+nftAddrSet(v.V4Addrs)+" drop")
@@ -1278,7 +1280,7 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 	if len(unzonedV6) > 0 {
 		rules = append(rules, "    ip6 daddr "+nftAddrSet(unzonedV6)+" drop")
 	}
-	emitUnleasedHostInboundDeny(&rules, unleased)
+	emitUnleasedHostInboundDeny(&rules, unleasedV4, unleasedV6)
 	rules = append(rules, "  }")
 	rules = append(rules, "}")
 	return strings.Join(rules, "\n") + "\n"
@@ -1447,7 +1449,7 @@ func hostInboundWithoutAddrs(addrs, drop []string) []string {
 // barrier-protected pre-handoff instead. Callers must only invoke this
 // with a non-empty uncovered set (an all-empty payload would be a pointless
 // zero-drop shell); an empty set instead deletes the table.
-func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, unleased []string) string {
+func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, unleasedV4, unleasedV6 []string) string {
 	var rules []string
 	rules = append(rules, "add table inet xpf_hostinbound_gap")
 	rules = append(rules, "delete table inet xpf_hostinbound_gap")
@@ -1458,13 +1460,14 @@ func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListen
 		xnft.HostInboundStaleReplyGuardRules(nil, uncoveredV4, uncoveredV6, wgListenPorts, false),
 	)...)
 	rules = append(rules, hostInboundFenceMandatoryAdmits(wgListenPorts)...)
+	emitUnleasedDHCPAdmits(&rules, unleasedV4, unleasedV6)
 	if len(uncoveredV4) > 0 {
 		rules = append(rules, "    ip daddr "+nftAddrSet(uncoveredV4)+" drop")
 	}
 	if len(uncoveredV6) > 0 {
 		rules = append(rules, "    ip6 daddr "+nftAddrSet(uncoveredV6)+" drop")
 	}
-	emitUnleasedHostInboundDeny(&rules, unleased)
+	emitUnleasedHostInboundDeny(&rules, unleasedV4, unleasedV6)
 	rules = append(rules, "  }")
 	rules = append(rules, "}")
 	return strings.Join(rules, "\n") + "\n"
@@ -1708,10 +1711,10 @@ func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool
 //     removes an installed accept on the next render. The F3 window is closed by
 //     construction, not by probe.
 func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgListenPorts []uint16, dataplaneFresh bool) string {
-	return buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgListenPorts, dataplaneFresh, nil, nil)
+	return buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgListenPorts, dataplaneFresh, nil, nil, nil)
 }
 
-func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgListenPorts []uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleased []string) string {
+func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgListenPorts []uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string) string {
 	// Pre-pass: collect the named DROP counters the chain will reference, so they
 	// can be declared at the top of the table body BEFORE the chain. A counter is
 	// emitted exactly when emitHostInboundZone emits a catch-all drop
@@ -1885,6 +1888,11 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		// socket regardless of which zone's address it is destined to.
 		emitHostInboundWireGuardAccept(&rules, wgListenPorts)
 	}
+	// #10751 F8-A: admit the DHCP client's own replies before the
+	// destination drops (see emitUnleasedDHCPAdmits). After the
+	// stale-reply guards — DHCP client ports are catalog-exempt (#10752),
+	// so no guard can shadow an acquisition reply.
+	emitUnleasedDHCPAdmits(&rules, unleasedV4, unleasedV6)
 	// #9637 residual: the userspace-adjudicated reinject exemption. After the
 	// global accepts and the junos-host program jumps (both chain shapes) and
 	// before the ingress-zone rules. Omitted unless the dataplane runs this
@@ -1923,7 +1931,7 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 	// unzoned interface is denied here with no service accept in front of it.
 	emitUnzonedHostInboundDeny(&rules, "ip", unzonedV4)
 	emitUnzonedHostInboundDeny(&rules, "ip6", unzonedV6)
-	emitUnleasedHostInboundDeny(&rules, unleased)
+	emitUnleasedHostInboundDeny(&rules, unleasedV4, unleasedV6)
 	rules = append(rules, "  }")
 	// #9504: the junos-host subchains the input chain jumps to.
 	for i, p := range programs {
@@ -2234,17 +2242,41 @@ func emitUnzonedHostInboundDeny(rules *[]string, family string, addrs []string) 
 	*rules = append(*rules, "    "+family+" daddr "+nftAddrSet(addrs)+" counter name \""+cn+"\" drop")
 }
 
-// emitUnleasedHostInboundDeny appends the #10751 R7-B backstop DROP for
-// unzoned DHCP units with no lease yet: one LAST-placed `iifname <dev>
-// drop` so a first lease lands already denied. After every destination
-// rule, so addressed families and explicit programs still win. No-op
-// when no unit is unleased. No named counter (transient boot-state rule,
-// like the fence).
-func emitUnleasedHostInboundDeny(rules *[]string, netdevs []string) {
-	if len(netdevs) == 0 {
-		return
+// emitUnleasedHostInboundDeny appends the #10751 R7-B backstop DROPs for
+// unzoned DHCP units with no lease yet: per-family LAST-placed `iifname
+// <dev> drop` rules so a first lease lands already denied. After every
+// destination rule, so addressed families and explicit programs still win.
+// No-op per family when no unit is unleased there. No named counter
+// (transient boot-state rule, like the fence).
+func emitUnleasedHostInboundDeny(rules *[]string, unleasedV4, unleasedV6 []string) {
+	if len(unleasedV4) > 0 {
+		*rules = append(*rules, "    iifname "+nftIifnameSet(unleasedV4)+" drop")
 	}
-	*rules = append(*rules, "    iifname "+nftIifnameSet(netdevs)+" drop")
+	if len(unleasedV6) > 0 {
+		*rules = append(*rules, "    iifname "+nftIifnameSet(unleasedV6)+" drop")
+	}
+}
+
+// emitUnleasedDHCPAdmits appends the #10751 F8-A DHCP-client admits for
+// still-unleased netdevs: per-family `iifname <dev> meta nfproto <fam> udp
+// dport <68|546> accept` (ports mirror the early-input barrier's own DHCP
+// admits, xnft earlyInputBarrierDHCPv4/v6ClientPort). Called with the
+// mandatory admits, BEFORE every destination rule: on an already-up link
+// the unzoned link-local DROP would otherwise shadow a first
+// ADVERTISE/OFFER (a multicast-originated reply is not
+// conntrack-established), deadlocking acquisition behind the LAST
+// interface DROP. Scoped to the unleased netdevs of each family, so
+// leased families stay under pure destination judgement; placed after the
+// #10752 stale-reply guards, whose catalog exempts DHCP client ports.
+// Match order (iifname, nfproto, l4proto, dport) mirrors
+// emitUnleasedDHCPAdmitsNetlink — parity-pinned.
+func emitUnleasedDHCPAdmits(rules *[]string, unleasedV4, unleasedV6 []string) {
+	if len(unleasedV4) > 0 {
+		*rules = append(*rules, "    iifname "+nftIifnameSet(unleasedV4)+" meta nfproto ipv4 udp dport 68 accept")
+	}
+	if len(unleasedV6) > 0 {
+		*rules = append(*rules, "    iifname "+nftIifnameSet(unleasedV6)+" meta nfproto ipv6 udp dport 546 accept")
+	}
 }
 
 // hostInboundEmitsDrop reports whether emitHostInboundZone will emit a catch-all

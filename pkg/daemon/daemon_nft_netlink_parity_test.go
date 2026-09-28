@@ -111,7 +111,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 	})
 
 	t.Run("cold_boot_fence", func(t *testing.T) {
-		oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, nil)
+		oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, nil, nil)
 		spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg}
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallColdBootFence(spec) })
 	})
@@ -130,31 +130,35 @@ func runNftNetlinkParityInner(t *testing.T) {
 	t.Run("gap_fence", func(t *testing.T) {
 		uncoveredV4 := []string{"10.0.1.1", "10.0.9.1"}
 		uncoveredV6 := []string{"2001:db8:1::1"}
-		oracle := buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6, wg, nil)
+		oracle := buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6, wg, nil, nil)
 		spec := xnft.GapFenceSpec{UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wg}
 		parityCheck(t, xnft.HostInboundGapTableName, oracle, func() error { return inst.InstallGapFence(spec) })
 	})
 
 	t.Run("unleased_backstop", func(t *testing.T) {
-		// #10751 R7-B: the LAST-placed `iifname <dev> drop` for unzoned
-		// DHCP units with no lease must render identically on both
-		// surfaces in all three host tables. Two netdevs pin the
-		// anonymous-set form.
-		unleased := []string{"ge-0-0-8", "ge-0-0-9"}
-		oracle := buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wg, true, nil, unleased)
-		if !strings.Contains(oracle, "iifname") {
-			t.Fatal("real oracle emitted no unleased rule; the diff below would be vacuous")
+		// #10751 R7-B/F8-A: the per-family LAST `iifname <dev> drop`
+		// plus the TOP `iifname <dev> udp dport <68|546> accept` for
+		// unzoned DHCP units with no lease must render identically on
+		// both surfaces in all three host tables. Distinct per-family
+		// lists pin the split (v4 set form + v6 singleton over a
+		// shared netdev); the per-rule iifname check pins each rule's
+		// scope.
+		unleasedV4 := []string{"ge-0-0-8", "ge-0-0-9"}
+		unleasedV6 := []string{"ge-0-0-9"}
+		oracle := buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wg, true, nil, unleasedV4, unleasedV6)
+		if !strings.Contains(oracle, "udp dport 68 accept") || !strings.Contains(oracle, "udp dport 546 accept") {
+			t.Fatal("real oracle emitted no unleased DHCP admits; the diff below would be vacuous")
 		}
 		spec := toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wg, true, nil)
-		spec.UnleasedNetdevs = unleased
+		spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
 
-		foracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, unleased)
-		fspec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg, UnleasedNetdevs: unleased}
+		foracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, unleasedV4, unleasedV6)
+		fspec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
 		parityCheck(t, xnft.HostInboundTableName, foracle, func() error { return inst.InstallColdBootFence(fspec) })
 
-		gapOracle := buildHostInboundGapFencePayload([]string{"10.0.1.1"}, nil, wg, unleased)
-		gspec := xnft.GapFenceSpec{UncoveredV4: []string{"10.0.1.1"}, WGListenPorts: wg, UnleasedNetdevs: unleased}
+		gapOracle := buildHostInboundGapFencePayload([]string{"10.0.1.1"}, nil, wg, unleasedV4, unleasedV6)
+		gspec := xnft.GapFenceSpec{UncoveredV4: []string{"10.0.1.1"}, WGListenPorts: wg, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
 		parityCheck(t, xnft.HostInboundGapTableName, gapOracle, func() error { return inst.InstallGapFence(gspec) })
 	})
 

@@ -282,10 +282,14 @@ type HostInboundSpec struct {
 	// reinject accept is omitted (byte-identical to the pre-#9637 ruleset).
 	DataplaneFresh bool
 	Overlay        *HostInputFenceOverlay
-	// UnleasedNetdevs are LOCAL_IN netdevs of unzoned DHCP units with no
-	// resolved address (#10751 R7-B), rendered LAST as `iifname <dev>
-	// drop` so a first lease lands already denied. Empty omits the rule.
-	UnleasedNetdevs []string
+	// UnleasedV4/V6 are LOCAL_IN netdevs of unzoned DHCP units with no
+	// resolved address in that family (#10751 R7-B/F8-A): per-family
+	// LAST `iifname <dev> drop` rules so a first lease lands already
+	// denied, plus per-family TOP DHCP-client admits (udp dport 68/546
+	// scoped to the same netdevs) so the lease can still arrive. Empty
+	// omits the rules.
+	UnleasedV4 []string
+	UnleasedV6 []string
 }
 
 // FenceSpec is the cold-boot fail-closed fence render request (#5644): the
@@ -295,8 +299,9 @@ type FenceSpec struct {
 	UnzonedV4     []string
 	UnzonedV6     []string
 	WGListenPorts []uint16
-	// UnleasedNetdevs, as in HostInboundSpec (fence stands pre-handoff).
-	UnleasedNetdevs []string
+	// UnleasedV4/V6, as in HostInboundSpec (fence stands pre-handoff).
+	UnleasedV4 []string
+	UnleasedV6 []string
 }
 
 // GapFenceSpec is the additive coverage-gap fence render request (#5789): the
@@ -305,6 +310,7 @@ type GapFenceSpec struct {
 	UncoveredV4   []string
 	UncoveredV6   []string
 	WGListenPorts []uint16
-	// UnleasedNetdevs, as in HostInboundSpec (uniform backstop).
-	UnleasedNetdevs []string
+	// UnleasedV4/V6, as in HostInboundSpec (uniform backstop).
+	UnleasedV4 []string
+	UnleasedV6 []string
 }

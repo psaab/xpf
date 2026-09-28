@@ -255,8 +255,8 @@ func TestHostInboundTeardownClearsCoverageAndGap_5789(t *testing.T) {
 // but not the other.
 func TestHostInboundGapFenceMirrorsColdBootAdmits_5789(t *testing.T) {
 	wg := []uint16{51820}
-	coldBoot := buildHostInboundFencePayload(buildAndCheckViews(t, hostInboundTestConfig()), nil, nil, wg, nil)
-	gap := buildHostInboundGapFencePayload([]string{"172.16.50.9"}, nil, wg, nil)
+	coldBoot := buildHostInboundFencePayload(buildAndCheckViews(t, hostInboundTestConfig()), nil, nil, wg, nil, nil)
+	gap := buildHostInboundGapFencePayload([]string{"172.16.50.9"}, nil, wg, nil, nil)
 	for _, admit := range hostInboundFenceMandatoryAdmits(wg) {
 		if !strings.Contains(coldBoot, admit) {
 			t.Errorf("cold-boot fence missing shared admit %q", strings.TrimSpace(admit))

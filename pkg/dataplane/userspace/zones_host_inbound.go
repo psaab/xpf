@@ -1042,21 +1042,27 @@ func BuildUnzonedHostInboundAddrsFromSnapshots(cfg *config.Config, snaps []Inter
 }
 
 // BuildUnzonedDHCPUnleasedNetdevs returns the sorted LOCAL_IN netdev names of
-// unzoned non-lifeline units with DHCP intent and no resolved address in
-// that family (#10751 R7-B): an unzoned DHCP unit with no lease has no
+// unzoned non-lifeline units with DHCP intent and no resolved address, SPLIT
+// BY FAMILY (#10751 R7-B/F8-A): an unzoned DHCP unit with no lease has no
 // destination for the unzoned catch-all, yet its first lease would land
 // host-reachable before the debounced re-apply installs one. The daemon
-// renders these as LAST-placed `iifname <dev> drop` rules (after every
-// destination rule, so addressed families and explicit programs still
+// renders these as LAST-placed per-family `iifname <dev> drop` rules (after
+// every destination rule, so addressed families and explicit programs still
 // win): interface-scoped protection that needs no hold and vanishes on
-// lease (the unit leaves this set the moment it resolves). VRF-enslaved
-// units are skipped (their LOCAL_IN identity is the shared master — an
-// iifname DROP there would shadow addressed siblings; they rely on
-// lease-callback convergence). Lifelines are skipped (management must
-// survive). A unit with EITHER family unleased-and-intended is listed.
-func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) []string {
+// lease (the unit leaves this set the moment it resolves). A family that is
+// STILL unleased also gets a TOP-placed `iifname <dev> udp dport <68|546>
+// accept` (F8-A) admitting the DHCP client's own replies ahead of the
+// destination drops — without it the backstop deadlocks acquisition (a
+// multicast-originated ADVERTISE is not conntrack-established, so only the
+// DHCP admit lets it through). The split keeps leased families under pure
+// destination judgement: a v4-leased/v6-pending unit gets NO v4 admit.
+// VRF-enslaved units are skipped (their LOCAL_IN identity is the shared
+// master — an iifname DROP there would shadow addressed siblings; they rely
+// on lease-callback convergence). Lifelines are skipped (management must
+// survive).
+func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) (v4, v6 []string) {
 	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
-		return nil
+		return nil, nil
 	}
 	lifelines := hostInboundLifelineSet(cfg)
 	zoneByIface := buildInterfaceZoneMap(cfg)
@@ -1081,8 +1087,8 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 			m[a.Family] = true
 		}
 	}
-	seen := map[string]bool{}
-	var out []string
+	seenV4 := map[string]bool{}
+	seenV6 := map[string]bool{}
 	ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
 	for n := range cfg.Interfaces.Interfaces {
 		ifNames = append(ifNames, n)
@@ -1120,14 +1126,19 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 			if linuxName == "" || vrfEnslaved[linuxName] {
 				continue
 			}
-			if !seen[linuxName] {
-				seen[linuxName] = true
-				out = append(out, linuxName)
+			if v4unleased && !seenV4[linuxName] {
+				seenV4[linuxName] = true
+				v4 = append(v4, linuxName)
+			}
+			if v6unleased && !seenV6[linuxName] {
+				seenV6[linuxName] = true
+				v6 = append(v6, linuxName)
 			}
 		}
 	}
-	sort.Strings(out)
-	return out
+	sort.Strings(v4)
+	sort.Strings(v6)
+	return v4, v6
 }
 
 // forEachFirewallLocalAddr visits every (interface ref, address) pair that makes
@@ -1288,10 +1299,13 @@ type FenceAddrSets struct {
 	UnzonedV6  []string
 	WithheldV4 []string
 	WithheldV6 []string
-	// UnleasedNetdevs are LOCAL_IN netdevs of unzoned DHCP units with no
-	// lease yet (#10751 R7-B), rendered as interface DROPs so a first
-	// lease lands already denied. Empty omits the rule.
-	UnleasedNetdevs []string
+	// UnleasedV4/V6 are LOCAL_IN netdevs of unzoned DHCP units with no
+	// lease yet in that family (#10751 R7-B/F8-A): per-family interface
+	// DROPs (LAST) so a first lease lands already denied, plus
+	// per-family DHCP-client admits (TOP) so it can still arrive. Empty
+	// omits the rules.
+	UnleasedV4 []string
+	UnleasedV6 []string
 }
 
 // BuildFenceAddrSets derives the cold-boot fence's drop scope from cfg and the
@@ -1375,7 +1389,7 @@ func buildFenceAddrSetsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, 
 	sort.Strings(withheld)
 	out.UnzonedV4, out.UnzonedV6 = splitFams(rest)
 	out.WithheldV4, out.WithheldV6 = splitFams(withheld)
-	out.UnleasedNetdevs = BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
+	out.UnleasedV4, out.UnleasedV6 = BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
 	return out
 }
 
