@@ -27,8 +27,8 @@ func TestEarlyInputBarrierPlanClosesHostServicesAndPreservesControl10751(t *test
 	if p.err != nil {
 		t.Fatalf("build early input barrier: %v", p.err)
 	}
-	if len(p.rules) != 9 {
-		t.Fatalf("early input barrier rule count = %d, want loopback + five mandatory L3 + three routing/HA admits", len(p.rules))
+	if len(p.rules) != 7 {
+		t.Fatalf("early input barrier rule count = %d, want loopback + five mandatory L3 + DHCP-client admits", len(p.rules))
 	}
 
 	loopback := p.rules[0]
@@ -57,28 +57,68 @@ func TestEarlyInputBarrierPlanClosesHostServicesAndPreservesControl10751(t *test
 		}
 	}
 
-	if got := inputBarrierLookupSet10751(t, p, p.rules[6]); !reflect.DeepEqual(got, [][]byte{{89}, {112}}) {
-		t.Fatalf("routing protocol set = %v, want OSPF(89) + VRRP(112)", got)
-	}
-	tcpPorts := inputBarrierLookupPorts10751(t, p, p.rules[7])
-	if !reflect.DeepEqual(tcpPorts, []uint16{4785}) {
-		t.Fatalf("early TCP admits = %v, want only HA session-sync 4785 (SSH 22 and BGP 179 must remain blocked)", tcpPorts)
-	}
-	for _, blocked := range []uint16{22, 179} {
-		for _, admitted := range tcpPorts {
-			if admitted == blocked {
-				t.Errorf("early TCP barrier admits exposed service port %d", blocked)
+	// B5: pin the complete admit surface. The only transport dports in the
+	// chain are DHCP-client 68/546 over UDP; no TCP dport rule exists at
+	// all; the only l4proto set is ESP/AH {50,51}; every exposed service
+	// port stays blocked.
+	protosSeen := map[uint8]int{}
+	var udpDports []uint16
+	udpDportRules := 0
+	for i, rule := range p.rules {
+		// l4proto values: scalar guards and set lookups following Meta L4PROTO.
+		for j, e := range rule {
+			meta, ok := e.(*expr.Meta)
+			if !ok || meta.Key != expr.MetaKeyL4PROTO || j+1 >= len(rule) {
+				continue
+			}
+			switch m := rule[j+1].(type) {
+			case *expr.Cmp:
+				if len(m.Data) != 1 {
+					t.Fatalf("rule %d l4proto compare has %d bytes, want 1", i, len(m.Data))
+				}
+				protosSeen[m.Data[0]]++
+			case *expr.Lookup:
+				elements, ok := p.sets[m.SetID]
+				if !ok {
+					t.Fatalf("rule %d references unrecorded nft set %d", i, m.SetID)
+				}
+				for _, el := range elements {
+					if len(el.Key) != 1 {
+						t.Fatalf("rule %d proto set key = %x, want 1 byte", i, el.Key)
+					}
+					protosSeen[el.Key[0]]++
+				}
+			}
+		}
+		// Transport dport matches: allowed only as a single UDP {68,546} rule.
+		if hasTransportDportMatch10751(rule) {
+			proto := scalarL4Proto10751(t, rule, i)
+			ports := inputBarrierLookupPorts10751(t, p, rule)
+			if proto != 17 {
+				t.Errorf("rule %d is an l4proto %d dport %v rule; the barrier must admit no TCP ports", i, proto, ports)
+			} else {
+				udpDportRules++
+				udpDports = append(udpDports, ports...)
 			}
 		}
 	}
-	udpPorts := inputBarrierLookupPorts10751(t, p, p.rules[8])
-	if !reflect.DeepEqual(udpPorts, []uint16{520, 521, 3784, 3785, 4784}) {
-		t.Fatalf("early UDP admits = %v, want RIP/RIPng, BFD, HA heartbeat only", udpPorts)
+	// Liveness: the scan must see the mandatory ESP/AH set, or every
+	// absence assertion below would pass vacuously.
+	if protosSeen[50] == 0 || protosSeen[51] == 0 {
+		t.Fatal("proto scan found no ESP/AH references; the walker is not seeing l4proto matches")
 	}
-	for _, blocked := range []uint16{500, 4500} {
-		for _, admitted := range udpPorts {
+	for _, banned := range []uint8{6, 89, 112} {
+		if protosSeen[banned] > 0 {
+			t.Errorf("barrier admits l4proto %d (%d reference(s)); TCP and FRR/HA protocols must stay deferred", banned, protosSeen[banned])
+		}
+	}
+	if udpDportRules != 1 || !reflect.DeepEqual(udpDports, []uint16{68, 546}) {
+		t.Fatalf("UDP dport admits = %v across %d rule(s), want exactly one {68 546} DHCP-client rule", udpDports, udpDportRules)
+	}
+	for _, blocked := range []uint16{22, 179, 500, 4500, 4785, 4784, 520, 521, 3784, 3785, 67, 547} {
+		for _, admitted := range udpDports {
 			if admitted == blocked {
-				t.Errorf("early UDP barrier admits exposed IKE service port %d", blocked)
+				t.Errorf("early UDP barrier admits blocked port %d", blocked)
 			}
 		}
 	}
@@ -93,27 +133,6 @@ func assertInputBarrierAccepts10751(t *testing.T, rule []expr.Any) {
 	if !ok || verdict.Kind != expr.VerdictAccept {
 		t.Fatalf("early input rule terminal expression = %#v, want ACCEPT", rule[len(rule)-1])
 	}
-}
-
-func inputBarrierLookupSet10751(t *testing.T, p *nlPlan, rule []expr.Any) [][]byte {
-	t.Helper()
-	for _, e := range rule {
-		lookup, ok := e.(*expr.Lookup)
-		if !ok {
-			continue
-		}
-		elements, ok := p.sets[lookup.SetID]
-		if !ok {
-			t.Fatalf("rule references unrecorded nft set %d", lookup.SetID)
-		}
-		out := make([][]byte, len(elements))
-		for i := range elements {
-			out[i] = elements[i].Key
-		}
-		return out
-	}
-	t.Fatalf("rule has no lookup set: %#v", rule)
-	return nil
 }
 
 func inputBarrierLookupPorts10751(t *testing.T, p *nlPlan, rule []expr.Any) []uint16 {
@@ -153,6 +172,34 @@ func inputBarrierLookupPorts10751(t *testing.T, p *nlPlan, rule []expr.Any) []ui
 	}
 	t.Fatalf("rule has no transport-header destination-port match: %#v", rule)
 	return nil
+}
+
+func hasTransportDportMatch10751(rule []expr.Any) bool {
+	for _, e := range rule {
+		if payload, ok := e.(*expr.Payload); ok &&
+			payload.Base == expr.PayloadBaseTransportHeader && payload.Offset == 2 && payload.Len == 2 {
+			return true
+		}
+	}
+	return false
+}
+
+func scalarL4Proto10751(t *testing.T, rule []expr.Any, i int) uint8 {
+	t.Helper()
+	for j, e := range rule {
+		meta, ok := e.(*expr.Meta)
+		if !ok || meta.Key != expr.MetaKeyL4PROTO || j+1 >= len(rule) {
+			continue
+		}
+		if cmp, ok := rule[j+1].(*expr.Cmp); ok {
+			if len(cmp.Data) != 1 {
+				t.Fatalf("rule %d l4proto compare has %d bytes, want 1", i, len(cmp.Data))
+			}
+			return cmp.Data[0]
+		}
+	}
+	t.Fatalf("rule %d has a dport match but no scalar l4proto guard", i)
+	return 0
 }
 
 func TestEarlyInputBarrierNetlinkLifecycle10751(t *testing.T) {

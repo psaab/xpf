@@ -23,23 +23,29 @@
 //  2. ct state established,related accept.
 //  3. meta l4proto { 50, 51 } accept (host-terminated ESP/AH).
 //  4. ICMPv6 errors/PMTUD and ND; ICMPv4 errors/PMTUD.
-//  5. meta l4proto { 89, 112 } accept (OSPF and VRRP control plane).
-//  6. TCP dport { 4785 } accept (xpf HA session sync only; BGP 179 is
-//     deferred until the first host-inbound handoff).
-//  7. UDP dport { 520, 521, 3784, 3785, 4784 } accept (RIP/RIPng, BFD,
-//     xpf HA heartbeat).
+//  5. UDP dport { 68, 546 } accept (DHCP/DHCPv6 client replies — without
+//     these a DHCP-pending boot could never acquire the lease that ends
+//     barrier retention).
 //
 // Rules 2-4 are hostInboundFenceMandatoryAdmitsNetlink(p, nil): the SAME shared
 // admits as the #5644 cold-boot fence and #5789 gap fence, minus configured
-// WireGuard ports (unknown before config loads). Rules 5-7 preserve the
-// config-free routing and HA protocols needed during the boot handoff. The
-// firewall service ports (including SSH 22, BGP 179, IKE UDP 500/4500, DHCP
-// server, web/API, and monitoring) are deliberately absent; no config is read
-// to authorize them, and an unconditional 179/500/4500 admit would recreate the
-// boot bypass on every data interface. No named counters, no address scoping —
-// at Before-networkd install time NO addresses exist yet, so a daddr-scoped
-// fence is unexpressable and policy DROP is the fail-closed shape. Only return
-// traffic, loopback, core L3, and the routing/HA control plane pass.
+// WireGuard ports (unknown before config loads). Rule 5 admits only DHCP
+// CLIENT ports: no firewall service listens on 68/546, so this exposes no
+// listener (the DHCP server ports 67/547 stay blocked).
+//
+// WAN-REACHABILITY DURING THE WINDOW (pre-networkd install → first handoff).
+// Loopback is local-only; established/related admits return traffic only;
+// ESP/AH without an SA is dropped by XFRM; ICMP errors/PMTUD/ND are
+// listener-less mandatory L3; DHCP client ports reach only dhclient. Every
+// other protocol is CLOSED until handoff: SSH 22, BGP 179, IKE 500/4500,
+// OSPF 89, VRRP 112, RIP 520/521, BFD 3784/3785, HA heartbeat 4784 and
+// session sync 4785, DHCP server, web/API, monitoring. FRR routing protocols
+// and HA control converge after the first host-inbound handoff (HA listeners
+// start after the first apply, so nothing is lost; FRR daemons retry). No
+// config is read to authorize anything; no named counters, no address
+// scoping — at Before-networkd install time NO addresses exist yet, so a
+// daddr-scoped fence is unexpressable and policy DROP is the fail-closed
+// shape. Only return traffic, loopback, core L3, and DHCP-client replies pass.
 //
 // PRIORITY. 12 evaluates STRICTLY AFTER the whole local-delivery cluster
 // (lo0 0 < host-inbound 10 < gap 11). Before the first apply the barrier stands
@@ -82,23 +88,17 @@ const EarlyInputBarrierTableName = "xpf_input_barrier"
 // enforcement during the handoff overlap. See the file doc comment.
 const earlyInputBarrierPriority = hostInboundGapPriority + 1
 
-// earlyInputBarrierControlTCPPorts is the config-free TCP listener port for
-// xpf's TCP session-sync control link. BGP 179 is deliberately absent: it is an
-// issue-listed exposed service and stays deferred until handoff.
-var earlyInputBarrierControlTCPPorts = []uint16{4785}
-
-// earlyInputBarrierControlUDPPorts are the config-free UDP listener ports needed
-// by xpf heartbeat, FRR RIP/RIPng and BFD.
-var earlyInputBarrierControlUDPPorts = []uint16{520, 521, 3784, 3785, 4784}
-
-// earlyInputBarrierControlIPProtocols are FRR OSPF (89) and VRRP (112).
-var earlyInputBarrierControlIPProtocols = []uint8{89, 112}
+// earlyInputBarrierDHCPClientPorts are the DHCP (68) and DHCPv6 (546) client
+// ports. Offers arrive here; without this admit a DHCP-pending boot deadlocks
+// (no lease → barrier retained → offers dropped → no lease). No service the
+// firewall runs listens on these ports.
+var earlyInputBarrierDHCPClientPorts = []uint16{68, 546}
 
 const earlyInputBarrierLoopback = "lo"
 
 // InstallEarlyInputBarrier installs the #10751 boot input barrier: an inet-only
-// input-hook chain with policy DROP and just config-free host/FRR/HA admits.
-// Replace-on-call makes boot retries converge to the same shape.
+// input-hook chain with policy DROP and just config-free loopback/L3/DHCP-client
+// admits. Replace-on-call makes boot retries converge to the same shape.
 
 func (in *netlinkInstaller) InstallEarlyInputBarrier() error {
 	c, err := in.newConn()
@@ -149,13 +149,12 @@ func earlyInputBarrierChain(tbl *nftables.Table) *nftables.Chain {
 	}
 }
 
-// emitEarlyInputBarrierAdmits queues loopback, shared mandatory L3 admits, and
-// the fixed routing/HA control-plane protocols and ports. Everything else falls
-// through to the chain's DROP policy.
+// emitEarlyInputBarrierAdmits queues loopback, the shared mandatory L3 admits,
+// and DHCP-client replies. Everything else falls through to the chain's DROP
+// policy. FRR/HA ingress is deliberately deferred until the first host-inbound
+// handoff (see the file doc comment) — no from-any service pinholes.
 func emitEarlyInputBarrierAdmits(p *nlPlan) {
 	p.rule().iifname([]string{earlyInputBarrierLoopback}).emit(verdictAccept()...)
 	hostInboundFenceMandatoryAdmitsNetlink(p, nil)
-	p.rule().l4protoSet(earlyInputBarrierControlIPProtocols).emit(verdictAccept()...)
-	p.rule().l4Port(protoTCP, "dport", portsFromUint16(earlyInputBarrierControlTCPPorts), false).emit(verdictAccept()...)
-	p.rule().l4Port(protoUDP, "dport", portsFromUint16(earlyInputBarrierControlUDPPorts), false).emit(verdictAccept()...)
+	p.rule().l4Port(protoUDP, "dport", portsFromUint16(earlyInputBarrierDHCPClientPorts), false).emit(verdictAccept()...)
 }

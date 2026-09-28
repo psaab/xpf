@@ -14,8 +14,8 @@ xpf (0.0.0) unstable; urgency=medium
     cold boots, preserving management addresses while blocking data addresses
     until a valid config can be applied (#10732).
   * Install a separate pre-networkd host-input barrier before addresses become
-    reachable; preserve only selected loopback/L3/FRR/HA control traffic, and
-    hand off after enforcement or no-enforcement teardown (#10751).
+    reachable; admit only loopback/L3/DHCP-client traffic, defer FRR/HA
+    ingress, and hand off after enforcement or no-enforcement teardown (#10751).
   * Register day-0 and Debian maintainer-script regression tests with
     `make selftest` and census both test locations (#10747).
   * Mark subscriber-overrun gaps in CLI flow and packet-drop, gRPC packet-drop,
