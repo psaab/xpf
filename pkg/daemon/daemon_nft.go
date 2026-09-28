@@ -692,7 +692,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				return nil
 			}
 		}
-		if err := nftInstaller.RemoveEarlyInputBarrier(); err != nil {
+		if err := d.removeEarlyInputBarrierAtHandoff(cfg); err != nil {
 			err = tagNftInstallErr(err)
 			slog.Warn("failed to remove early host-input barrier after no-enforcement teardown", "err", err)
 			// The tables are gone but the handoff is incomplete: record the
@@ -830,7 +830,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 				slog.Warn("retaining early host-input barrier after fenced fallback: lo0 protection failed in this apply")
 			} else if !d.earlyInputHandoffDone.Load() && hostInboundHasPendingEnforcingIntent(cfg) {
 				slog.Warn("retaining early host-input barrier after fenced fallback: enforcing scopes have no address yet")
-			} else if barrierErr := nftInstaller.RemoveEarlyInputBarrier(); barrierErr != nil {
+			} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg); barrierErr != nil {
 				barrierErr = tagNftInstallErr(barrierErr)
 				slog.Warn("failed to remove early host-input barrier after fenced fallback", "err", barrierErr)
 				barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound fallback: %w", barrierErr)
@@ -893,7 +893,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		slog.Warn("retaining early host-input barrier after real install: lo0 protection failed in this apply")
 	} else if pendingRetainsBarrier {
 		slog.Warn("retaining early host-input barrier after real install: enforcing scopes have no address yet")
-	} else if barrierErr := nftInstaller.RemoveEarlyInputBarrier(); barrierErr != nil {
+	} else if barrierErr := d.removeEarlyInputBarrierAtHandoff(cfg); barrierErr != nil {
 		barrierErr = tagNftInstallErr(barrierErr)
 		slog.Warn("failed to remove early host-input barrier after real install", "err", barrierErr)
 		barrierHandoffErr = fmt.Errorf("remove early host-input barrier after host-inbound install: %w", barrierErr)

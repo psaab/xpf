@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -188,4 +189,44 @@ func hostInboundHasPendingEnforcingIntent(cfg *config.Config) bool {
 		return true
 	}
 	return len(dpuserspace.AddresslessEnforcingInterfaces(cfg)) > 0
+}
+
+// removeEarlyInputBarrierAtHandoff removes the barrier for a first handoff
+// after re-attesting it. Entry-time attestation leaves a TOCTOU across the
+// tail: a privileged flush between enforcement install and this removal
+// wipes both the new tables and the barrier, and absent-removal success
+// would then record a handoff over wiped enforcement. Closing it:
+//
+//   - barrier present → remove (normal path).
+//   - barrier missing → reinstall the guard and FAIL WITHOUT removing (the
+//     just-installed enforcement is suspect; the restored guard keeps the
+//     box closed and the next apply retries the whole handoff).
+//   - readback error → reinstall, then remove on success (reinstall-first;
+//     observability failure alone must not brick handoff), else fail.
+//
+// Post-handoff calls remove idempotently (barrier expected absent — e.g.
+// ExecReload residue cleanup); no attestation there. Install success implies
+// exact shape: the installer flushes one atomic nf_tables batch, so success
+// leaves no partial table to verify.
+func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config) error {
+	if d.earlyInputHandoffDone.Load() {
+		return nftInstaller.RemoveEarlyInputBarrier()
+	}
+	present, err := nftInstaller.EarlyInputBarrierPresent()
+	if err == nil && present {
+		return nftInstaller.RemoveEarlyInputBarrier()
+	}
+	if err != nil {
+		slog.Warn("cannot re-attest early barrier at handoff; reinstalling guard before removal",
+			"err", tagNftInstallErr(err))
+	} else {
+		slog.Warn("early barrier missing at handoff (concurrent flush wiped enforcement?); guard reinstalled, handoff refused")
+	}
+	if installErr := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(resolveEarlyInputGuardLifelines(cfg)); installErr != nil {
+		return fmt.Errorf("reinstall early guard at handoff: %w", tagNftInstallErr(installErr))
+	}
+	if err != nil {
+		return nftInstaller.RemoveEarlyInputBarrier()
+	}
+	return errors.New("early barrier missing at handoff; guard reinstalled, handoff refused")
 }
