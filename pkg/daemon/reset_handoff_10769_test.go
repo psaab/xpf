@@ -47,6 +47,9 @@ type recoveryHostSeams struct {
 	rsyslogRestarts *int
 	dnsCalls        *int
 	linkDir         string
+	ghostMarker     string
+	provDir         string
+	provOrig        string
 }
 
 func isolateRecoveryApplyHost(t *testing.T) *recoveryHostSeams {
@@ -84,13 +87,31 @@ func isolateRecoveryApplyHost(t *testing.T) *recoveryHostSeams {
 	}
 	sudoersDir = sudoersTmp
 	t.Cleanup(func() { sudoersDir = origSudoers })
-	// Account-ownership inventory: one seam relocates all three roots;
-	// an absent tree reads as legitimately empty, so nothing on the
-	// host is enumerated and the shadow/passwd/home/root-ssh paths
-	// (touched only for enumerated names) stay unreachable.
+	// Account-ownership inventory: one seam relocates all three roots.
+	// Plant a ghost marker (account registry only, no password/key
+	// markers) for a name absent from the passwd fixture: the
+	// reconcile must enumerate it through the redirect, find no such
+	// account, and drop the stale marker — success without touching
+	// any credential. Benign by construction: the name exists
+	// nowhere (fixture passwd has only root), and even a same-named
+	// host account would mismatch the planted UID and stay untouched
+	// (UID-keyed provenance).
 	origProv := provisionedUsersDir
-	provisionedUsersDir = filepath.Join(dir, "no-such-prov", "provisioned-users")
+	provisionedUsersDir = filepath.Join(dir, "prov", "provisioned-users")
 	t.Cleanup(func() { provisionedUsersDir = origProv })
+	s.provDir, s.provOrig = provisionedUsersDir, origProv
+	const ghostUser = "xpf-test-ghost-10769"
+	if err := markProvisioned(ghostUser, 59999); err != nil {
+		t.Fatal(err)
+	}
+	s.ghostMarker = markerPathIn(provisionedUsersDir, ghostUser)
+	origPasswd := passwdPath
+	passwdFixture := filepath.Join(dir, "passwd")
+	if err := os.WriteFile(passwdFixture, []byte("root:x:0:0::/root:/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	passwdPath = passwdFixture
+	t.Cleanup(func() { passwdPath = origPasswd })
 	// Managed SSH known-hosts: plant a file the empty-config branch
 	// must remove.
 	origKH := sshKnownHostsPath
@@ -184,6 +205,21 @@ func assertRecoveryHostIsolated(t *testing.T, d *Daemon, s *recoveryHostSeams) {
 	if *s.dnsCalls == 0 {
 		t.Fatal("DNS reconcile must route to the field seam")
 	}
+	// The ghost marker's absence proves the absent-user reconcile
+	// enumerated through the redirected roots (a host inventory read
+	// would never have seen it) and converged without error. The var
+	// check proves the redirect itself is active (catches removal of
+	// the redirect, under which the plant would land on the host).
+	if provisionedUsersDir != s.provDir || s.provDir == s.provOrig {
+		t.Fatal("provisioned-users redirect must be active during the apply")
+	}
+	if _, err := os.Lstat(s.ghostMarker); !os.IsNotExist(err) {
+		t.Fatalf("ghost marker %s must be dropped from the redirect: %v", s.ghostMarker, err)
+	}
+	// Drift tripwire, NOT interception evidence: this fixture
+	// configures no interfaces, so nothing should write here. It
+	// trips if a future fixture change starts writing link files,
+	// forcing that path to be isolated deliberately.
 	if entries, _ := os.ReadDir(s.linkDir); len(entries) != 0 {
 		t.Fatalf("link dir must stay empty, got %v", entries)
 	}
