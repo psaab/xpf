@@ -46,6 +46,10 @@ Userspace dataplane helper:
   Martian drops:             1
   IPv6 ext-header drops:     4
   V4-mapped IPv6 drops:    0
+  Invalid fabric-stamp drops: 5
+  Unstamped fabric-ingress drops: 6
+  Ambiguous fabric-zone drops: 7
+  Ambiguous fabric zones:     4
   Neighbor misses:           1
   Exception packets:         3
   Flow cache hits:           40

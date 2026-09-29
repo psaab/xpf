@@ -1660,22 +1660,14 @@ pub(crate) struct PolicyState {
     /// behavior exactly (no risk of newly denying management traffic).
     has_junos_host_rules: bool,
     /// #8618: does ANY active PERMIT rule in this snapshot carry an ICMP /
-    /// ICMPv6 type-constrained application term (junos-ping and its #3348
-    /// aliases)? Indexed [0] = ICMP, [1] = ICMPv6.
-    ///
-    /// This is a WHOLE-SNAPSHOT predicate over `rules`, not a per-zone-pair one,
-    /// and that is a deliberate choice rather than laziness. Answering it per
-    /// zone pair means reproducing the five-tier applicability selection
-    /// (`zone_pair_index`, from-any, to-any, `both_any_indices`,
-    /// `global_indices`) at a second site. A tier added later and missed here
-    /// would under-report, and under-reporting is the UNSAFE direction: it lets
-    /// `policy_revalidation` act on a DENY that a type-constrained permit would
-    /// have overturned, tearing down a flow the policy allows. Scanning `rules`
-    /// wholesale cannot miss a tier, because every rule is in it. The cost of
-    /// the coarser answer is over-declining — which is exactly the behaviour
-    /// #8356 shipped for all ICMP — so the failure mode is "no worse than
-    /// today" rather than "revokes a permitted flow".
+    /// ICMPv6 type-constrained application term? A type-blind policy
+    /// re-derivation can only manufacture a false DENY when a constrained
+    /// PERMIT is skipped, so this remains the permit-only revocation gate.
     icmp_type_constrained_permit: [bool; 2],
+    /// #11064: does any active rule (PERMIT or DENY) carry an ICMP/ICMPv6
+    /// type/code-constrained term? Session hits use the packet's actual
+    /// type/code and re-evaluate whenever either action can change the verdict.
+    icmp_type_constrained_term: [bool; 2],
     /// #3363: reserved hit counter for the IMPLICIT default-policy verdict
     /// (the result returned when a flow matches no configured zone-pair,
     /// wildcard, or `junos-global` policy). Before #3363 the default path
@@ -1735,6 +1727,7 @@ impl Default for PolicyState {
             has_junos_host_rules: false,
             // #8618: armed in the rule loop; Default carries no rules.
             icmp_type_constrained_permit: [false; 2],
+            icmp_type_constrained_term: [false; 2],
             default_counter: Arc::new(PolicyRuleCounter::default()),
             default_log_session_init: false,
             default_log_session_close: false,
@@ -1769,29 +1762,34 @@ impl PolicyState {
     /// tests only for a constrained PERMIT, so a constrained DENY leaves it
     /// false and the type-blind walk SKIPS that deny.
     ///
-    /// What is actually guaranteed, and it is the property the gate exists for:
-    /// **a type-blind evaluation can never manufacture a false DENY.** Skipping a
-    /// constrained term can only make the walk fall through to a LATER rule, i.e.
-    /// more permissive. So acting on a DENY returned here is safe; acting on a
-    /// PERMIT is not an assertion that a fully-informed walk would agree.
+    /// This predicate gates frame-independent policy revalidation, which
+    /// deliberately has no packet bytes from which to recover ICMP type/code.
+    /// A skipped constrained term can only make that walk fall through to a
+    /// later, more permissive rule, so it cannot manufacture a false DENY.
+    /// Conversely, a skipped constrained PERMIT can manufacture a false
+    /// DENY, so only permits arm this conservative whole-snapshot gate.
     ///
-    /// The ACCEPTED CONSEQUENCE, pinned by
-    /// `a_type_constrained_deny_is_skipped_and_the_session_survives_9386`: on the
-    /// established-session path a type-constrained DENY placed ahead of a broader
-    /// permit is not enforced — the walk falls through to the permit and the
-    /// session survives. Arming this predicate on a constrained DENY as well
-    /// would NOT change that outcome (the derivation would decline instead of
-    /// deriving Permit, and either way the session lives); it would only give up
-    /// #8356 coverage for every ICMP flow on any box that has a constrained deny
-    /// anywhere, because the predicate is whole-snapshot. Closing the residual
-    /// means supplying the packet's type/code to that derivation, which its own
-    /// contract forbids: it is deliberately frame-INDEPENDENT, because one
-    /// packet's type is not the flow's property.
+    /// Session-hit forwarding has a separate packet-scoped check
+    /// (`icmp_packet_verdict_may_depend_on_type`) that reads the actual
+    /// type/code and enforces constrained DENYs by dropping that packet without
+    /// treating its message type as a property of the typeless session.
     pub(crate) fn icmp_verdict_may_depend_on_type(&self, protocol: u8) -> bool {
         match protocol {
             PROTO_ICMP => self.icmp_type_constrained_permit[0],
             PROTO_ICMPV6 => self.icmp_type_constrained_permit[1],
             // Not an ICMP family protocol: `packet_icmp` cannot influence it.
+            _ => false,
+        }
+    }
+
+    /// #11064: whether this policy snapshot has a type/code-constrained rule
+    /// for an ICMP-family protocol, irrespective of action. Session-hit paths
+    /// call this only when they can provide the packet's actual type/code;
+    /// unlike [`icmp_verdict_may_depend_on_type`], this must include DENYs.
+    pub(crate) fn icmp_packet_verdict_may_depend_on_type(&self, protocol: u8) -> bool {
+        match protocol {
+            PROTO_ICMP => self.icmp_type_constrained_term[0],
+            PROTO_ICMPV6 => self.icmp_type_constrained_term[1],
             _ => false,
         }
     }
@@ -2231,6 +2229,7 @@ pub(crate) fn parse_policy_state_with_counters(
         has_junos_host_rules: false,
         // #8618: armed in the same rule loop, same shape.
         icmp_type_constrained_permit: [false; 2],
+        icmp_type_constrained_term: [false; 2],
         // #3363: persistent reserved counter for the implicit default-policy
         // verdict. Re-handed from the store under the reserved rule id so the
         // Arc instance is stable across snapshot rebuilds (an in-flight
@@ -2579,18 +2578,24 @@ pub(crate) fn parse_policy_state_with_counters(
             state.has_junos_host_rules = true;
         }
 
-        // #8618: arm the ICMP type-constrained PERMIT gate. Only a PERMIT
-        // matters: the question this answers is "could a type-constrained term
-        // have ADMITTED a flow that a type-blind evaluation denies", and only a
-        // permit can overturn a deny in that direction. An `inactive` rule is
-        // excluded because it cannot match at all.
-        if !state.rules[idx].inactive && matches!(state.rules[idx].action, PolicyAction::Permit) {
+        // #8618: the permit-only gate is used by frame-independent
+        // revalidation; a type-blind skipped PERMIT can create a false DENY.
+        // #11064: the owner/foreign session-hit path separately needs to know
+        // about constrained DENYs too, because it evaluates this packet with
+        // its actual ICMP type/code. (#11070: the PERMIT-only question — "could
+        // a type-constrained term have ADMITTED a flow a type-blind eval
+        // denies" — is answered by icmp_type_constrained_permit below; the
+        // wider _term arm is correct for both consumers.)
+        if !state.rules[idx].inactive {
             for (slot, proto) in [PROTO_ICMP, PROTO_ICMPV6].into_iter().enumerate() {
                 if state.rules[idx]
                     .compiled_apps
                     .has_icmp_type_constrained_term(proto)
                 {
-                    state.icmp_type_constrained_permit[slot] = true;
+                    state.icmp_type_constrained_term[slot] = true;
+                    if matches!(state.rules[idx].action, PolicyAction::Permit) {
+                        state.icmp_type_constrained_permit[slot] = true;
+                    }
                 }
             }
         }

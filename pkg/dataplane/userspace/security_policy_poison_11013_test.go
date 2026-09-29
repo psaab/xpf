@@ -35,6 +35,11 @@ const policyPoisonStoreText11013 = `security {
                     then { permit; }
                     session-options { inactivity-timeout 60; }
                 }
+                policy conflicting-action {
+                    match { source-address any; destination-address any; application any; }
+                    then { deny; }
+                    then { permit; }
+                }
         }
     }
 }`
@@ -63,21 +68,27 @@ func assertPolicyPoisonSnapshot11013(t *testing.T, cfgWarnings []string, cfgPoli
 			poisoned[pol.Name] = true
 		}
 	}
-	for _, name := range []string{"next-term", "nested-term", "session-options"} {
+	for _, name := range []string{"next-term", "nested-term", "session-options", "conflicting-action"} {
 		if !poisoned[name] {
-			t.Errorf("policy %q was not marked LenientContentDropped", name)
+			t.Errorf("policy %q was not marked LenientContentDropped; warnings=%v", name, cfgWarnings)
 		}
 	}
 	foundNextDiagnostic := false
+	foundConflictDiagnostic := false
 	for _, warning := range cfgWarnings {
 		if strings.Contains(warning, "#11013") && strings.Contains(warning, "next term") && strings.Contains(warning, `policy "next-term"`) {
 			foundNextDiagnostic = true
+		}
+		if strings.Contains(warning, "conflicting terminal actions") && strings.Contains(warning, `policy "conflicting-action"`) {
+			foundConflictDiagnostic = true
 		}
 	}
 	if !foundNextDiagnostic {
 		t.Errorf("tolerant ingress has no named unsupported-then diagnostic: %v", cfgWarnings)
 	}
-
+	if !foundConflictDiagnostic {
+		t.Errorf("tolerant ingress has no named conflicting-terminal-actions diagnostic: %v", cfgWarnings)
+	}
 	sentinelRules := map[string]bool{}
 	for _, rule := range snap.Policies {
 		for _, term := range rule.ApplicationTerms {
@@ -86,7 +97,7 @@ func assertPolicyPoisonSnapshot11013(t *testing.T, cfgWarnings []string, cfgPoli
 			}
 		}
 	}
-	for _, name := range []string{"next-term", "nested-term", "session-options"} {
+	for _, name := range []string{"next-term", "nested-term", "session-options", "conflicting-action"} {
 		if !sentinelRules[name] {
 			t.Errorf("policy %q lowered without the __unsupported__ sentinel; snapshot would publish its direct permit", name)
 		}
@@ -111,6 +122,7 @@ func TestStoreSyncApplyAndLoadPoisonDroppedSecurityPolicyContent11013(t *testing
 		findPolicyStore11013(t, cfg, "next-term"),
 		findPolicyStore11013(t, cfg, "nested-term"),
 		findPolicyStore11013(t, cfg, "session-options"),
+		findPolicyStore11013(t, cfg, "conflicting-action"),
 	}, snap)
 
 	booted := newConfigStore(t, path)
@@ -129,5 +141,6 @@ func TestStoreSyncApplyAndLoadPoisonDroppedSecurityPolicyContent11013(t *testing
 		findPolicyStore11013(t, loaded, "next-term"),
 		findPolicyStore11013(t, loaded, "nested-term"),
 		findPolicyStore11013(t, loaded, "session-options"),
+		findPolicyStore11013(t, loaded, "conflicting-action"),
 	}, loadedSnap)
 }

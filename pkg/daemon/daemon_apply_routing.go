@@ -306,7 +306,8 @@ func (d *Daemon) applyPolicyRoutingRules(cfg *config.Config) error {
 		// pref-100 rule sits ahead of the kernel l3mdev rule (1000) and steers a
 		// packet ingressing ANY other VRF into the target instance's table.
 		ingressIfaces := routing.DefaultInstanceIngressIfaces(cfg)
-		if err := d.routing.ApplyNextTableRules(allRoutes, cfg.RoutingInstances, ingressIfaces); err != nil {
+		if err := d.routing.ApplyNextTableRules(
+			allRoutes, cfg.RoutingInstances, ingressIfaces); err != nil {
 			slog.Warn("failed to apply next-table rules", "err", err)
 			errs = append(errs, fmt.Errorf("apply next-table rules: %w", err))
 		}

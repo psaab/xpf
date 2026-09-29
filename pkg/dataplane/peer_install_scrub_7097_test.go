@@ -462,12 +462,17 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		// mean the same thing on either node. Scrubbing them would
 		// reintroduce #9752, where a PBR-steered session imports
 		// stamp-less and re-resolves in inet.0 after a failover.
-		// 42/43 since #11070 added PolicyRuleID, classified NOT node-local. It
+		//
+		// #11064's SourceNatICMPValid/Type/Code carry the active packet's typed
+		// source-NAT selection across HA reconstruction. They are cluster-
+		// stable packet identity, not node-local resources, and must remain on
+		// the synced value.
+		// 45/46 since #11070 added PolicyRuleID, classified NOT node-local. It
 		// identifies the admitting rule by stable configuration identity so the
 		// receiver can rebind its own counter; it names no local resource.
 
-		{"SessionValue", reflect.TypeOf(SessionValue{}), 42},
-		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 43},
+		{"SessionValue", reflect.TypeOf(SessionValue{}), 45},
+		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 46},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.typ.NumField(); got != tc.want {

@@ -299,6 +299,83 @@ func validateRibGroupLeakWarnings(cfg *Config) []string {
 	return warnings
 }
 
+// validateTargetReturnPathWarnings warns when next-table or PBR steers into a
+// routing instance whose return route to a main-only peer is not guaranteed.
+// The VRF miss terminator intentionally prevents an unscoped fall-through to
+// main; a target-specific static next-hop is the supported return-path remedy.
+func validateTargetReturnPathWarnings(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	targets := make(map[string]bool)
+	add := func(target string) {
+		if target != "" {
+			targets[target] = true
+		}
+	}
+	for _, route := range append(
+		append([]*StaticRoute(nil), cfg.RoutingOptions.StaticRoutes...),
+		cfg.RoutingOptions.Inet6StaticRoutes...) {
+		if route != nil {
+			add(route.NextTable)
+		}
+	}
+	addFilterTargets := func(filter *FirewallFilter) {
+		if filter == nil {
+			return
+		}
+		for _, term := range filter.Terms {
+			if term != nil {
+				add(term.RoutingInstance)
+			}
+		}
+	}
+	for _, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		for _, unit := range ifc.Units {
+			if unit == nil {
+				continue
+			}
+			addFilterTargets(cfg.Firewall.FiltersInet[unit.FilterInputV4])
+			addFilterTargets(cfg.Firewall.FiltersInet6[unit.FilterInputV6])
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	instances := make(map[string]*RoutingInstanceConfig, len(cfg.RoutingInstances))
+	for _, instance := range cfg.RoutingInstances {
+		if instance != nil && instance.Name != "" {
+			instances[instance.Name] = instance
+		}
+	}
+	names := make([]string, 0, len(targets))
+	for name := range targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var warnings []string
+	for _, name := range names {
+		instance := instances[name]
+		// Unknown targets are rejected by the strict reference gate.
+		if instance == nil || IsReservedRoutingInstanceName(name) {
+			continue
+		}
+		if instance.InstanceType == "forwarding" {
+			warnings = append(warnings, fmt.Sprintf(
+				"routing-instance %q is targeted by next-table or PBR but is type forwarding and has no Linux VRF device; return traffic to main-only peers may be terminated.",
+				name))
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"routing-instance %q is targeted by next-table or PBR; return traffic to a main-only peer may be terminated by the VRF miss rule. Add a peer route under routing-instances %s routing-options static, for example: route 198.51.100.0/24 next-hop 10.20.0.2. Per-instance next-table is unsupported.",
+			name, name))
+	}
+	return warnings
+}
+
 // validateUnhandledRibWarnings reports every `routing-options rib <name>` whose
 // static routes the compiler discarded (#7512).
 //

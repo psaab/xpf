@@ -221,24 +221,25 @@ type SecurityConfig struct {
 	PolicyRematchExtensive bool
 }
 
-// FlowConfig holds flow/session timeout configuration.
+// FlowConfig holds flow/session behavior and timeout configuration.
 type FlowConfig struct {
-	TCPSession                 *TCPSessionConfig
-	UDPSessionTimeout          int // seconds, 0 = default (60s)
-	ICMPSessionTimeout         int // seconds, 0 = default (60s — DEFAULT_ICMP_SESSION_TIMEOUT_NS, userspace-dp/src/session/mod.rs)
-	TCPMSSAllTCP               int // TCP MSS clamp for all forwarded TCP (0 = disabled) (#2486)
-	TCPMSSIPsecVPN             int // TCP MSS clamp for IPsec VPN traffic (0 = disabled) — rejected at commit (#2486: no IPsec context in the userspace forward path)
-	TCPMSSGreIn                int // TCP MSS clamp for GRE ingress traffic (0 = disabled)
-	TCPMSSGreOut               int // TCP MSS clamp for GRE egress traffic (0 = disabled)
-	AllowDNSReply              bool
-	AllowEmbeddedICMP          bool
-	GREPerformanceAcceleration bool
-	PowerModeDisable           bool
-	SynFloodProtectionMode     string // "syn-cookie" or "" (default = drop)
-	Traceoptions               *FlowTraceoptions
-	AgingEarlyAgeout           int // seconds (0 = disabled)
-	AgingHighWatermark         int // percent of max sessions (0 = disabled)
-	AgingLowWatermark          int // percent of max sessions (0 = disabled)
+	TCPSession                  *TCPSessionConfig
+	UDPSessionTimeout           int // seconds, 0 = default (60s)
+	ICMPSessionTimeout          int // seconds, 0 = default (60s — DEFAULT_ICMP_SESSION_TIMEOUT_NS, userspace-dp/src/session/mod.rs)
+	TCPMSSAllTCP                int // TCP MSS clamp for all forwarded TCP (0 = disabled) (#2486)
+	TCPMSSIPsecVPN              int // TCP MSS clamp for IPsec VPN traffic (0 = disabled) — rejected at commit (#2486: no IPsec context in the userspace forward path)
+	TCPMSSGreIn                 int // TCP MSS clamp for GRE ingress traffic (0 = disabled)
+	TCPMSSGreOut                int // TCP MSS clamp for GRE egress traffic (0 = disabled)
+	AllowDNSReply               bool
+	AllowEmbeddedICMP           bool
+	AllowUnstampedFabricIngress bool // restore legacy MAIN handling for absent fabric stamps (#11061)
+	GREPerformanceAcceleration  bool
+	PowerModeDisable            bool
+	SynFloodProtectionMode      string // "syn-cookie" or "" (default = drop)
+	Traceoptions                *FlowTraceoptions
+	AgingEarlyAgeout            int // seconds (0 = disabled)
+	AgingHighWatermark          int // percent of max sessions (0 = disabled)
+	AgingLowWatermark           int // percent of max sessions (0 = disabled)
 	// AgingUnknownLeaves records `security flow aging` child keywords the
 	// compiler does not recognize (#3440 H2). The aging subtree previously
 	// silently dropped any unknown leaf; compileFlow now records them so

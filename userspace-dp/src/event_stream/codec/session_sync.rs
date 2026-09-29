@@ -93,7 +93,12 @@ impl EventFrame {
             inactivity_timeout_secs,
             nat64,
             nat64_snat_v4,
+            source_nat_icmp,
         } = SessionSyncAttribution::from_session(decision, metadata);
+        let (source_nat_icmp_valid, source_nat_icmp_type, source_nat_icmp_code) =
+            source_nat_icmp.map_or((0, 0, 0), |(icmp_type, icmp_code)| {
+                (1, icmp_type, icmp_code)
+            });
 
         // [0] AddrFamily
         let is_v6 = key.addr_family == libc::AF_INET6 as u8;
@@ -319,9 +324,19 @@ impl EventFrame {
         pos += 4;
         buf[pos..pos + 4].copy_from_slice(&decision.install_table_check.to_le_bytes());
         pos += 4;
-        // The cluster-local ifindex/VLAN pair is the session ownership identity
-        // used by the Go RG gate; unlike a zone id it distinguishes sessions in
-        // a zone spanning multiple redundancy groups.
+        // #11064: trailing source-NAT ICMP query identity. The valid byte
+        // distinguishes absent metadata from the valid (type=0, code=0) pair.
+        buf[pos] = source_nat_icmp_valid;
+        pos += 1;
+        buf[pos] = source_nat_icmp_type;
+        pos += 1;
+        buf[pos] = source_nat_icmp_code;
+        pos += 1;
+        // #11070: the cluster-local ifindex/VLAN pair is the session ownership
+        // identity used by the Go RG gate; unlike a zone id it distinguishes
+        // sessions in a zone spanning multiple redundancy groups. Encoded
+        // after the #11064 ICMP identity (decode order in eventstream.go is
+        // authoritative for the merged layout).
         buf[pos..pos + 4].copy_from_slice(&metadata.ingress_ifindex.to_le_bytes());
         pos += 4;
         buf[pos..pos + 2].copy_from_slice(&metadata.ingress_vlan_id.to_le_bytes());

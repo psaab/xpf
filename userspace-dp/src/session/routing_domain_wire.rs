@@ -53,6 +53,32 @@ pub(crate) enum WireRoutingDomain {
 pub(crate) const DOMAIN_BAND_BASE: u32 = 100_000;
 pub(crate) const DOMAIN_BAND_SPAN: u32 = 900_000;
 
+/// #11061: synthetic NON-ROUTABLE routing domains for fabric-ingress flows
+/// whose ingress domain is unknowable. Never a real instance, never MAIN:
+/// the high band sits above every value the install-table allocator
+/// (`DOMAIN_BAND_BASE..DOMAIN_BAND_BASE+DOMAIN_BAND_SPAN`), the wire markers
+/// (`WIRE_ABSENT`/`WIRE_DEFAULT_INSTANCE`), and the quarantine sentinel can
+/// take, so no row can own one and the wire decoder reads them as
+/// `Unrecognized` (HA import refuses, same as quarantine).
+///
+/// Valid stamps for zones whose members span multiple routing instances use
+/// the per-zone `AMBIGUOUS_FABRIC_DOMAIN_BASE` band, keeping their flows
+/// isolated. `INVALID_FABRIC_STAMP_DOMAIN` is only the lower bound of the
+/// quarantine range; invalid stamp claims are dropped before they can reach
+/// PBR and are never assigned this domain.
+pub(crate) const AMBIGUOUS_FABRIC_DOMAIN_BASE: u32 = 0xffff_0000;
+pub(crate) const INVALID_FABRIC_STAMP_DOMAIN: u32 = 0xfffe_0000;
+
+/// True iff `domain` is a synthetic non-routable domain: quarantined from
+/// every mixed-zero session fallback (a sentinel reply must never borrow a
+/// MAIN session and vice versa) and unownable by any install-table row (so
+/// native resolution fails closed instead of using MAIN). A snapshot-carried
+/// domain up here is treated the same way — fail-closed, never a tenant.
+#[inline]
+pub(crate) fn is_quarantined_routing_domain(domain: u32) -> bool {
+    domain >= INVALID_FABRIC_STAMP_DOMAIN
+}
+
 /// Encode a domain for the wire. NEVER returns [`WIRE_ABSENT`]: a build that
 /// has this function always makes a statement, which is what lets the receiver
 /// read 0 as "the peer could not".

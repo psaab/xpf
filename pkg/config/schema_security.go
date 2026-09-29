@@ -1026,10 +1026,11 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			"gre-out":   {desc: "Outbound GRE MSS clamp", closedWorldOpaque: true, children: nil},
 			"all-tcp":   {desc: "All forwarded TCP MSS clamp", closedWorldOpaque: true, children: nil},
 		}},
-		"allow-dns-reply":              {desc: "Allow unsolicited DNS reply packets", children: nil},
-		"allow-embedded-icmp":          {desc: "Allow ICMP error packets for existing sessions", children: nil},
-		"gre-performance-acceleration": {desc: "Enable GRE performance acceleration", children: nil},
-		"power-mode-disable":           {desc: "Disable power mode", children: nil},
+		"allow-dns-reply":                {desc: "Allow unsolicited DNS reply packets", children: nil},
+		"allow-embedded-icmp":            {desc: "Allow ICMP error packets for existing sessions", children: nil},
+		"allow-unstamped-fabric-ingress": {desc: "ROLLING-UPGRADE WINDOW ONLY: allow absent fabric stamps to use legacy MAIN routing on routing-instance nodes (invalid stamps still drop). Remove once all peers emit zone-encoded stamps (#11061)", children: nil},
+		"gre-performance-acceleration":   {desc: "Enable GRE performance acceleration", children: nil},
+		"power-mode-disable":             {desc: "Disable power mode", children: nil},
 		// #4231 (fable-167 P-3): five `security flow` knobs previously had no
 		// schema leaf and no compiler case, so they committed clean and did
 		// nothing with zero operator signal. Typing them here makes them

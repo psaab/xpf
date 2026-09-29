@@ -273,7 +273,7 @@ fn inactive_owner_rg_redirects_established_session_to_fabric() {
         lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
     );
     assert_eq!(blocked.disposition, ForwardingDisposition::HAInactive);
-    let redirected = redirect_via_fabric_if_needed(&state, blocked, 24);
+    let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
     assert_eq!(
         redirected.disposition,
         ForwardingDisposition::FabricRedirect
@@ -311,7 +311,7 @@ fn inactive_owner_missing_neighbor_redirects_to_fabric() {
         lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
     );
     assert_eq!(blocked.disposition, ForwardingDisposition::HAInactive);
-    let redirected = redirect_via_fabric_if_needed(&state, blocked, 24);
+    let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
     assert_eq!(
         redirected.disposition,
         ForwardingDisposition::FabricRedirect
@@ -394,6 +394,36 @@ fn zone_encoded_fabric_redirect_preserves_ingress_zone() {
     );
 }
 
+#[test]
+fn fabric_redirect_requires_zone_stamp_when_routing_domains_exist_11061() {
+    let mut forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    forwarding.has_routing_domains = true;
+    assert!(
+        resolve_fabric_redirect_for_ingress_zone(&forwarding, None).is_none(),
+        "missing adjudicated zone must not produce an unstamped multi-RI redirect"
+    );
+    assert!(
+        resolve_fabric_redirect_for_ingress_zone(&forwarding, Some(0)).is_none(),
+        "zone zero is unavailable and must not produce an unstamped multi-RI redirect"
+    );
+    let stamped = resolve_fabric_redirect_for_ingress_zone(&forwarding, Some(TEST_LAN_ZONE_ID))
+        .expect("a nonzero adjudicated zone allows a stamped redirect");
+    assert_eq!(
+        stamped.src_mac,
+        Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01])
+    );
+
+    let legacy_forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let legacy = resolve_fabric_redirect_for_ingress_zone(&legacy_forwarding, None)
+        .expect("single-table deployments retain legacy redirects");
+    assert_eq!(
+        legacy.src_mac,
+        resolve_fabric_redirect(&legacy_forwarding)
+            .expect("legacy fabric redirect")
+            .src_mac
+    );
+}
+
 // #3075 fail-on-revert: the synthetic fabric zone-encoded src MAC must carry a
 // stable name-hash zone id > 255 across BOTH trailing MAC bytes (big-endian).
 // The old u8 scheme hardcoded MAC[4]=0x00 and rejected ids > 255 (returning
@@ -448,7 +478,7 @@ fn zone_encoded_fabric_redirect_round_trips_zone_id_above_255() {
             &BTreeMap::new(),
             0,
         ),
-        Some(zone_id)
+        ZoneEncodedFabricStamp::Valid(zone_id)
     );
 }
 
@@ -486,7 +516,7 @@ fn parse_zone_encoded_fabric_ingress_uses_zone_override() {
             &BTreeMap::new(),
             0,
         ),
-        Some(TEST_LAN_ZONE_ID)
+        ZoneEncodedFabricStamp::Valid(TEST_LAN_ZONE_ID)
     );
 }
 
@@ -510,10 +540,106 @@ fn zone_encoded_fabric_stamp_rejected_on_non_unicast_dst_6458() {
     };
     assert_eq!(
         parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &BTreeMap::new(), 0),
-        None,
-        "stamp with a non-fabric destination MAC must be ignored"
+        ZoneEncodedFabricStamp::Invalid,
+        "stamp with a non-fabric destination MAC must be rejected"
     );
 }
+#[test]
+fn zone_stamp_parser_distinguishes_absent_and_invalid_claims_11061() {
+    let state = build_forwarding_state(&nat_snapshot_with_fabric());
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 21,
+        ..UserspaceDpMeta::default()
+    };
+    let frame_with_stamp = |magic: u8, zone: u16| {
+        let [hi, lo] = zone.to_be_bytes();
+        let mut frame = vec![0u8; 64];
+        frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
+        frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, magic, hi, lo]);
+        frame
+    };
+    let unstamped = vec![0u8; 64];
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &unstamped,
+            meta,
+            &state,
+            &BTreeMap::new(),
+            0,
+        ),
+        ZoneEncodedFabricStamp::Absent,
+        "an ordinary fabric source MAC preserves legacy unstamped behavior"
+    );
+    for source_mac in [
+        [0x02, 0xbf, 0x72, 0x00, 0x00, 0x01],
+        [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+    ] {
+        let mut frame = vec![0u8; 64];
+        frame[6..12].copy_from_slice(&source_mac);
+        assert_eq!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                &frame,
+                meta,
+                &state,
+                &BTreeMap::new(),
+                0,
+            ),
+            ZoneEncodedFabricStamp::Absent,
+            "non-stamp fabric source {source_mac:02x?} must not be classified as invalid"
+        );
+    }
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &frame_with_stamp(0, TEST_LAN_ZONE_ID),
+            meta,
+            &state,
+            &BTreeMap::new(),
+            0,
+        ),
+        ZoneEncodedFabricStamp::Absent,
+        "the marker must match exactly before a MAC is treated as stamp-shaped"
+    );
+    let truncated_stamp = frame_with_stamp(FABRIC_ZONE_MAC_MAGIC, TEST_LAN_ZONE_ID);
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &truncated_stamp[..11],
+            meta,
+            &state,
+            &BTreeMap::new(),
+            0,
+        ),
+        ZoneEncodedFabricStamp::Invalid,
+        "a complete marker without the full zone id is malformed"
+    );
+    for (zone, reason) in [(0, "zero zone"), (u16::MAX, "unknown stale zone")] {
+        assert_eq!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                &frame_with_stamp(FABRIC_ZONE_MAC_MAGIC, zone),
+                meta,
+                &state,
+                &BTreeMap::new(),
+                0,
+            ),
+            ZoneEncodedFabricStamp::Invalid,
+            "{reason} must remain distinct from a missing stamp"
+        );
+    }
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &frame_with_stamp(FABRIC_ZONE_MAC_MAGIC, TEST_LAN_ZONE_ID),
+            meta,
+            &state,
+            &BTreeMap::new(),
+            0,
+        ),
+        ZoneEncodedFabricStamp::Valid(TEST_LAN_ZONE_ID),
+        "a valid peer stamp retains its adjudicated zone"
+    );
+}
+
 
 // #6458 fail-on-revert: the claimed zone's RG is forwarding-active LOCALLY
 // — on this node `lan` (RG 2) traffic ingresses directly, so the peer has
@@ -537,8 +663,8 @@ fn zone_encoded_fabric_stamp_rejected_when_claimed_zone_rg_local_6458() {
     };
     assert_eq!(
         parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &ha_state, now_secs),
-        None,
-        "stamp claiming a locally-primary zone must be ignored"
+        ZoneEncodedFabricStamp::Invalid,
+        "stamp claiming a locally-primary zone must be rejected"
     );
 }
 
@@ -565,8 +691,8 @@ fn zone_encoded_fabric_stamp_rejected_for_zone_without_rg_members_6458() {
     };
     assert_eq!(
         parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &BTreeMap::new(), 0),
-        None,
-        "stamp claiming a zone with no RG-bound members must be ignored"
+        ZoneEncodedFabricStamp::Invalid,
+        "stamp claiming a zone with no RG-bound members must be rejected"
     );
 }
 
@@ -590,7 +716,7 @@ fn zone_encoded_fabric_stamp_honored_for_remote_rg_zone_6458() {
     };
     assert_eq!(
         parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &ha_state, now_secs),
-        Some(TEST_LAN_ZONE_ID),
+        ZoneEncodedFabricStamp::Valid(TEST_LAN_ZONE_ID),
         "legitimate split-RG stamp must keep working"
     );
 }
@@ -626,7 +752,7 @@ fn zone_encoded_fabric_stamp_honored_for_multi_rg_zone_split_6458() {
     ]);
     assert_eq!(
         parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &split, now_secs),
-        Some(TEST_LAN_ZONE_ID),
+        ZoneEncodedFabricStamp::Valid(TEST_LAN_ZONE_ID),
         "multi-RG zone with a peer-active RG must keep the legitimate stamp"
     );
     // Every bound RG locally active → reject (the kill shape).
@@ -636,7 +762,7 @@ fn zone_encoded_fabric_stamp_honored_for_multi_rg_zone_split_6458() {
     ]);
     assert_eq!(
         parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &all_local, now_secs),
-        None,
+        ZoneEncodedFabricStamp::Invalid,
         "multi-RG zone with every RG locally active must still reject the stamp"
     );
 }
@@ -1548,7 +1674,7 @@ fn inactive_interface_snat_session_hit_redirects_to_fabric() {
     let looked_up =
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
     let blocked = enforce_ha_resolution(&state, &ha_state, looked_up);
-    let redirected = redirect_via_fabric_if_needed(&state, blocked, 12);
+    let redirected = redirect_via_fabric_if_needed(&state, blocked, 12, None);
 
     assert_eq!(
         redirected.disposition,
@@ -1847,7 +1973,7 @@ fn fabric_ingress_does_not_redirect_back_to_fabric() {
         tx_vlan_id: 80,
     };
     assert_eq!(
-        redirect_via_fabric_if_needed(&state, blocked, 21).disposition,
+        redirect_via_fabric_if_needed(&state, blocked, 21, None).disposition,
         ForwardingDisposition::HAInactive
     );
 }

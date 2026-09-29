@@ -1261,6 +1261,10 @@ pub(crate) struct ProcessStatus {
     /// distinct, non-malformed state per #3773.
     #[serde(rename = "fabric_link_unresolved_peer_total", default)]
     pub fabric_link_unresolved_peer_total: u64,
+    /// #11061: number of zones whose fabric stamp cannot select one routing
+    /// domain in the currently published forwarding snapshot.
+    #[serde(rename = "ambiguous_fabric_zone_count", default)]
+    pub ambiguous_fabric_zone_count: u64,
     /// #9654: whether the learned-route import is capped (#8355, #9054) in the
     /// forwarding state the live workers serve NOW, as projected by
     /// `Coordinator::learned_route_import_capped_now`.

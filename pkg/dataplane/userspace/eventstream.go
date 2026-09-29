@@ -1885,8 +1885,16 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 		d.InstallTableCheck = binary.LittleEndian.Uint32(payload[off+4 : off+8])
 		off += 8
 	}
+	// #11064: trailing source-NAT ICMP query identity (valid, type, code).
+	// Length-gated for peers that predate typed allocator reconstruction.
+	if off+3 <= len(payload) {
+		d.SourceNatICMPValid = payload[off] != 0
+		d.SourceNatICMPType = payload[off+1]
+		d.SourceNatICMPCode = payload[off+2]
+		off += 3
+	}
 	// #11070: ingress interface identity and stable policy rule identity are
-	// appended after the installing-table pair. Older helpers omit these fields.
+	// appended after the ICMP identity. Older helpers omit these fields.
 	if off+6 <= len(payload) {
 		d.IngressIfindex = int(binary.LittleEndian.Uint32(payload[off : off+4]))
 		d.IngressVLANID = binary.LittleEndian.Uint16(payload[off+4 : off+6])

@@ -301,9 +301,9 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 
 // logFenceWithheld reports the firewall-local addresses the #6492 Finding-A
 // lifeline guard removed from a cold-boot fence's drop set: an address that is
-// ALSO configured on a lifeline interface (fxp0 / em0 / fab* / the configured
-// control+fabric links). The fence is the real table with every per-service
-// ACCEPT stripped and its drop rule carries no `iifname`, so fencing such an
+// ALSO configured on a lifeline interface (fxp0 or an explicitly configured
+// chassis-cluster control/fabric link). The fence is the real table with every
+// per-service ACCEPT stripped and its drop rule carries no `iifname`, so fencing such an
 // address renders a bare `ip daddr <mgmt-ip> drop` that kills every NEW
 // management connection to it for the whole fence window. Withholding it trades
 // fence coverage for the lifeline, which is the standing #1960 / #3277 order of
@@ -534,9 +534,9 @@ func buildLo0FilterPayload(cfg *config.Config, filterV4, filterV6 string) string
 // Safety: #3405 — EVERY configured security zone gets a rule (Junos default-deny
 // parity). A zone with no `host-inbound-traffic` stanza is treated as an empty
 // stanza: its firewall-local addresses get a catch-all DROP, denying every
-// host-bound service/protocol not explicitly permitted. Management /
-// cluster-control lifeline interfaces (fxp0 / em0 / fab*) are excluded from the
-// address sets by BuildZoneHostInboundViews.
+// host-bound service/protocol not explicitly permitted. Lifeline interfaces
+// (fxp0 and explicitly configured chassis-cluster control/fabric links) are
+// excluded from the address sets by BuildZoneHostInboundViews.
 //
 // That exclusion is by INTERFACE, not by address VALUE, so it does NOT
 // guarantee management survives (#7284). An address that is ALSO configured on

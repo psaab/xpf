@@ -389,10 +389,10 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		addConnectedRoutes("inet6", v6Table, v6Prefixes)
 	}
 
-	// Add synthetic routes for ip rule entries that implement inter-VRF
-	// route leaking (rib-groups, next-table). These rules send traffic
-	// matching a destination prefix to a different routing table.
-	// Without these, the userspace FIB can't cross-reference VRF tables.
+	// Add synthetic routes for ip-rule entries that implement inter-VRF
+	// route leaking (rib-groups, next-table) and destination-scoped rib-group
+	// returns. These destination rules are expressible as NextTable rows in the
+	// userspace FIB.
 	//
 	// #3768 (H6): key the map on the BARE routing-instance name and derive
 	// the family-specific next-table name (".inet.0" vs ".inet6.0") per
@@ -406,9 +406,11 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// normalizeRouteSnapshotFamily canonicalizes static-route tables but is
 	// NOT applied to these synthetic ip-rule leak snapshots.
 	tableIDToInst := make(map[int]string)
+	instanceNameToTableID := make(map[string]int)
 	for _, inst := range cfg.RoutingInstances {
 		if inst != nil && inst.TableID > 0 {
 			tableIDToInst[inst.TableID] = inst.Name
+			instanceNameToTableID[inst.Name] = inst.TableID
 		}
 	}
 	for _, family := range []int{syscall.AF_INET, syscall.AF_INET6} {
@@ -420,55 +422,59 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			return nil, false, fmt.Errorf("route snapshot: list ip-rules for family %d: %w", family, err)
 		}
 		for _, rule := range rules {
-			// A Dst-less rule (`from all lookup <table>`) cannot be
-			// represented as a per-prefix NextTable leak (it would mean
-			// "leak the whole table"), so it is skipped here. The rib-group
-			// import leak installs per-prefix `to <prefix> lookup
-			// <sourceTable>` rules (pkg/routing, #3876) that DO carry a Dst,
-			// so they are auto-captured by this loop as NextTable leaks into
-			// main — no change to this skip is needed for the fix.
+			// A Dst-less rule cannot be represented as a per-prefix NextTable
+			// leak. Rib-group imports and their scoped return rules carry Dst,
+			// so each direction is expressible without widening its match.
 			if rule.Dst == nil || rule.Table <= 0 {
 				continue
 			}
 			// #4479 (opus-172 M-2): SKIP policy-based-routing / filter-based-
-			// forwarding rules. xpf installs FBF `then routing-instance`
-			// filter actions as ip rules in the PBR priority band
-			// (config.PBRRulePriorityBase, 31000-31999; pkg/routing
-			// pbrRulePriority) that carry match SELECTORS — source/dest
-			// address, DSCP, protocol, source/dest port — IN ADDITION to a
-			// Dst that happens to point at a routing-instance table. This
-			// synthetic snapshot can only express a bare per-prefix NextTable
-			// leak, so ingesting a PBR rule here would DROP every selector and
-			// widen a constrained, source-scoped steer into an unconditional
-			// dst-only VRF leak — the exact fail-open the kernel FBF path was
-			// hardened against in #3730. Fail CLOSED instead: leave the PBR
-			// rule out of the userspace FIB entirely. The kernel still applies
-			// the real, fully-qualified PBR rule (and the userspace filter
-			// path enforces the term), so the leak is not lost — it just is
-			// not wrongly widened. Only xpf's own pure per-prefix leak bands
-			// (next-table 100-199, rib-group per-prefix import 30000-30999)
-			// carry a Dst with no selectors and are safe to mirror below.
+			// forwarding rules. These carry match selectors that a bare
+			// per-prefix NextTable row cannot represent; ingesting one would
+			// widen the FBF steer.
 			if rule.Priority >= config.PBRRulePriorityBase &&
 				rule.Priority < config.PBRRulePriorityBase+config.PBRRuleWindow {
+				continue
+			}
+			familyStr := "inet"
+			mainTable := "inet.0"
+			suffix := ".inet.0"
+			if family == syscall.AF_INET6 {
+				familyStr = "inet6"
+				mainTable = "inet6.0"
+				suffix = ".inet6.0"
+			}
+			// A pref-1500 return rule looks up the peer VRF's table and is
+			// scoped to the source VRF by iif/oif. Mirror it in the reverse
+			// direction: source VRF table → peer table, for this destination
+			// prefix only. Looking up main here could select main's default.
+			if rule.Priority == routing.RibGroupReturnRulePriority {
+				sourceName, ok := ribGroupReturnRuleInstance(rule, instanceNameToTableID)
+				if !ok {
+					continue
+				}
+				peerName, ok := tableIDToInst[rule.Table]
+				if !ok || peerName == sourceName {
+					continue
+				}
+				addLiveSnapshot(RouteSnapshot{
+					Table:        sourceName + suffix,
+					Family:       familyStr,
+					Destination:  rule.Dst.String(),
+					NextTable:    peerName + suffix,
+					RulePriority: uint32(rule.Priority),
+				})
 				continue
 			}
 			instName, ok := tableIDToInst[rule.Table]
 			if !ok {
 				continue
 			}
-			familyStr := "inet"
-			mainTable := "inet.0"
-			nextTable := instName + ".inet.0"
-			if family == syscall.AF_INET6 {
-				familyStr = "inet6"
-				mainTable = "inet6.0"
-				nextTable = instName + ".inet6.0"
-			}
 			addLiveSnapshot(RouteSnapshot{
 				Table:        mainTable,
 				Family:       familyStr,
 				Destination:  rule.Dst.String(),
-				NextTable:    nextTable,
+				NextTable:    instName + suffix,
 				RulePriority: uint32(rule.Priority),
 			})
 		}
@@ -570,6 +576,28 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		return a.Preference < b.Preference
 	})
 	return out, capped, nil
+}
+
+func ribGroupReturnRuleInstance(rule netlink.Rule, instanceTableIDs map[string]int) (string, bool) {
+	instanceName := ""
+	for _, selector := range []string{rule.IifName, rule.OifName} {
+		if selector == "" {
+			continue
+		}
+		if !strings.HasPrefix(selector, "vrf-") {
+			return "", false
+		}
+		candidate := strings.TrimPrefix(selector, "vrf-")
+		if tableID, ok := instanceTableIDs[candidate]; !ok || tableID <= 0 ||
+			config.IsReservedRoutingInstanceName(candidate) {
+			return "", false
+		}
+		if instanceName != "" && instanceName != candidate {
+			return "", false
+		}
+		instanceName = candidate
+	}
+	return instanceName, instanceName != ""
 }
 
 // qualifyForwardingInstanceNextHops makes a forwarding-instance route's

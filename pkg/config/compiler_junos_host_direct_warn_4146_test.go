@@ -53,25 +53,27 @@ var junosHostBaseZones = []string{
 }
 
 // TestJunosHostDirectDeliveryWarns is the #4146 fail-on-revert guard for the
-// UN-REPRESENTABLE remainder: a `to-zone junos-host` policy the kernel nft chain
-// cannot faithfully enforce on the direct host-bound path — a source-restricted
-// PERMIT (whose implied deny-non-permitted half no path enforces) or a
-// feed-tainted source — STILL emits the commit-time parity warning. #9504 moved
-// `reject` and a `tcp-rst` ingress zone OUT of this remainder; they are pinned as
-// enforced by TestJunosHostRejectAndTCPRstAreEnforced9504 below. Reverting the suppression logic must not silence
-// these (they are a genuine, still-open gap). REPRESENTABLE denies are covered
-// by TestJunosHostDirectDeliveryEnforcedNoWarn instead (they are now enforced).
+// junos-host policy remainder: a source-restricted PERMIT still warns because
+// the userspace no-match lifeline delivers, while a feed-tainted source cannot
+// be faithfully projected into the direct-path kernel chain. #11065 adds the
+// kernel terminal deny for the permit's unmatched direct traffic, but does not
+// alter the deliberate userspace behavior. #9504 moved `reject` and a `tcp-rst`
+// ingress zone OUT of this remainder; they are pinned as enforced by
+// TestJunosHostRejectAndTCPRstAreEnforced9504 below. Representable denies are
+// covered by TestJunosHostDirectDeliveryEnforcedNoWarn instead.
 func TestJunosHostDirectDeliveryWarns(t *testing.T) {
 	cases := []struct {
 		name       string
 		policyName string
 		reason     string // substring the warning must carry
+		path       string // the enforcement path that remains relevant to the warning
 		cmds       []string
 	}{
 		{
-			name:       "zone-pair source-restricted permit (deny-non-permitted half is §6.5)",
+			name:       "zone-pair source-restricted permit (userspace no-match lifeline)",
 			policyName: `"mgmt-only"`,
 			reason:     "a source-restricted permit to-zone junos-host",
+			path:       "userspace AF_XDP",
 			cmds: append(append([]string{}, junosHostBaseZones...),
 				"set security policies from-zone untrust to-zone junos-host policy mgmt-only match source-address mgmt-net",
 				"set security policies from-zone untrust to-zone junos-host policy mgmt-only match destination-address any",
@@ -83,6 +85,7 @@ func TestJunosHostDirectDeliveryWarns(t *testing.T) {
 			name:       "deny with feed-tainted source (not commit-stable, §6.2)",
 			policyName: `"block-feed"`,
 			reason:     "a deny to-zone junos-host",
+			path:       "direct host-bound path",
 			cmds: append(append([]string{}, junosHostBaseZones...),
 				"set security dynamic-address feed-server threat url https://feeds.example/list.txt",
 				"set security dynamic-address feed-server threat feed-name malware path /malware.txt",
@@ -101,7 +104,7 @@ func TestJunosHostDirectDeliveryWarns(t *testing.T) {
 				t.Fatalf("expected exactly 1 junos-host parity warning, got %d: %v", len(got), got)
 			}
 			w := got[0]
-			for _, want := range []string{tc.policyName, tc.reason, "direct host-bound path", "docs/host-inbound-service-matrix.md"} {
+			for _, want := range []string{tc.policyName, tc.reason, tc.path, "docs/host-inbound-service-matrix.md"} {
 				if !strings.Contains(w, want) {
 					t.Errorf("warning missing substring %q:\n  %s", want, w)
 				}
@@ -496,6 +499,11 @@ func TestJunosHostIKEOverlapWarningPartialCoverage10524(t *testing.T) {
 		t.Fatalf("expected one generic #4146 warning alongside #10524 under partial coverage, got %d: %v",
 			len(got4146), got4146)
 	}
+	for _, want := range []string{"trunkzero", "ge-0-0-2", "shared by multiple zones", "over-deny sibling-zone ingress"} {
+		if !strings.Contains(got4146[0], want) {
+			t.Errorf("partial-coverage warning missing ingress-gap detail %q:\n%s", want, got4146[0])
+		}
+	}
 	if len(got10524) != 1 {
 		t.Fatalf("expected one #10524 warning despite partial coverage, got %d: %v",
 			len(got10524), got10524)
@@ -503,6 +511,43 @@ func TestJunosHostIKEOverlapWarningPartialCoverage10524(t *testing.T) {
 	for _, want := range []string{`"block-partial"`, "ge-0-0-3", "application-any"} {
 		if !strings.Contains(got10524[0], want) {
 			t.Errorf("partial-coverage warning missing %q:\n%s", want, got10524[0])
+		}
+	}
+}
+
+// TestJunosHostVRFUnscopableCoverageWarning11068 proves a VRF-enslaved direct
+// ingress path keeps its policy warning and names the exact kernel scope failure.
+func TestJunosHostVRFUnscopableCoverageWarning11068(t *testing.T) {
+	cfg := jhTestConfig()
+	cfg.RoutingInstances = []*RoutingInstanceConfig{{
+		Name: "tenant", InstanceType: "virtual-router", Interfaces: []string{"ge-0/0/1.0"},
+	}}
+	cfg.Security.Policies = []*ZonePairPolicies{{
+		FromZone: "untrust", ToZone: "junos-host",
+		Policies: []*Policy{jhDeny("block-vrf", []string{"bad-net"}, []string{"any"})},
+	}}
+	coverage := junosHostZoneNetdevCoverageMap(cfg)["untrust"]
+	if len(coverage.Scoped) != 0 || len(coverage.Unscopable) != 1 ||
+		coverage.Unscopable[0].Reason != junosHostNetdevVRFEnslaved {
+		t.Fatalf("fixture must have one VRF-unscopable ingress and no usable scope: %+v", coverage)
+	}
+	key := JunosHostZonePairPolicyKey("untrust", "block-vrf")
+	proj := BuildJunosHostDenyProjection(cfg)
+	if proj.RenderedPolicyKeys[key] {
+		t.Fatalf("VRF-unscopable deny must not suppress its warning: %+v", proj)
+	}
+	var got []string
+	for _, warning := range validateJunosHostDirectDeliveryWarnings(cfg) {
+		if strings.Contains(warning, "#4146") {
+			got = append(got, warning)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected one direct-path warning for the unscopable VRF deny, got %v", got)
+	}
+	for _, want := range []string{"block-vrf", "untrust", "ge-0-0-1", "VRF-enslaved", "LOCAL_IN iifname is the VRF master"} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("VRF coverage warning missing %q:\n%s", want, got[0])
 		}
 	}
 }

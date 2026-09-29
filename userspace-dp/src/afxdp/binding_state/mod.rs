@@ -145,6 +145,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// runs after tunnel decapsulation and before policy/session/NAT; injection
     /// and :: / ::1 are excluded. Surfaced as the V4-mapped IPv6 drops counter.
     pub(super) v4_mapped_ipv6_dropped: AtomicU64,
+    /// #11061: fabric trust-boundary drops, batched per binding and surfaced
+    /// through helper status/Prometheus.
+    pub(super) invalid_fabric_stamp_drops: AtomicU64,
+    pub(super) unstamped_fabric_ingress_drops: AtomicU64,
+    pub(super) ambiguous_fabric_zone_drops: AtomicU64,
     /// #10498: named pre-L3 drops that previously had no dedicated
     /// operator-visible telemetry.
     pub(super) umem_slice_dropped: AtomicU64,
@@ -1017,9 +1022,11 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // remains unchanged.
 // #10729 adds one AtomicBool hugepage-backing flag; padding absorbs it before
 // the first sentinel, so only the second pinned offset moves (+1).
+// #11061 adds three unconditional u64 fabric trust-drop counters before both
+// sentinels; both offsets advance by 24 bytes while the alignment unit stays.
 const _: [(); 2496] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2328] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2457] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2352] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2481] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1049,6 +1056,9 @@ impl BindingLiveState {
             martian_dropped: AtomicU64::new(0),
             ipv6_ext_header_dropped: AtomicU64::new(0),
             v4_mapped_ipv6_dropped: AtomicU64::new(0),
+            invalid_fabric_stamp_drops: AtomicU64::new(0),
+            unstamped_fabric_ingress_drops: AtomicU64::new(0),
+            ambiguous_fabric_zone_drops: AtomicU64::new(0),
             umem_slice_dropped: AtomicU64::new(0),
             unknown_vlan_dropped: AtomicU64::new(0),
             dst_mac_dropped: AtomicU64::new(0),

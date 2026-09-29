@@ -22,9 +22,9 @@ type AddresslessEnforcingZone struct {
 	Zone string
 	// Interfaces are the non-lifeline interface refs assigned to the zone
 	// (exactly as authored under `security zones <z> interfaces <ref>`), sorted.
-	// At least one is present — a zone whose only interfaces are management /
-	// cluster-control lifelines (fxp0 / em0 / fab*) is NOT reported, since
-	// lifeline traffic is intentionally never host-inbound-denied.
+	// At least one is present — a zone whose only interfaces are lifelines
+	// (fxp0 plus explicitly configured cluster-control/fabric links) is NOT
+	// reported, since lifeline traffic is intentionally never host-inbound-denied.
 	Interfaces []string
 }
 
@@ -146,8 +146,9 @@ func addresslessEnforcingZonesFromSnapshots(cfg *config.Config, snaps []Interfac
 //     VRRP VIP / configured link-local) — scoped;
 //   - link-local-only zones with no DHCP intent — installed LL deny covers
 //     all reachable addresses, nothing further expected;
-//   - zones whose only interfaces are lifelines (fxp0 / em0 / fab*) — lifeline
-//     traffic is never denied, so there is no fail-open to surface;
+//   - zones whose only interfaces are lifelines (fxp0 plus explicitly configured
+//     control/fabric links) — lifeline traffic is never denied, so there is no
+//     fail-open to surface;
 //   - zones with no interfaces assigned — nothing to protect.
 func AddresslessEnforcingZones(cfg *config.Config) []AddresslessEnforcingZone {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
@@ -411,8 +412,9 @@ type AmbiguousHostInboundAddress struct {
 // is NOT reported — it renders the same accept+drop block twice (order-
 // independent, both paths agree), so it is a deliberate-duplicate false-positive
 // the low-noise contract avoids. Management / cluster-control lifeline
-// interfaces (fxp0 / em0 / fab*) contribute no address (they are excluded from
-// deny scoping), so a shared management address never surfaces here either.
+// interfaces (fxp0 plus explicitly configured control/fabric links) contribute
+// no address (they are excluded from deny scoping), so a shared management
+// address never surfaces here either.
 func AmbiguousHostInboundAddresses(cfg *config.Config) []AmbiguousHostInboundAddress {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil

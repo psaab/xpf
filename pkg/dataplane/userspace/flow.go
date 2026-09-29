@@ -74,8 +74,9 @@ func coerceWireSessionTimeout(field string, v int) int {
 
 func buildFlowSnapshot(cfg *config.Config) FlowSnapshot {
 	snap := FlowSnapshot{
-		AllowDNSReply:     cfg.Security.Flow.AllowDNSReply,
-		AllowEmbeddedICMP: cfg.Security.Flow.AllowEmbeddedICMP,
+		AllowDNSReply:               cfg.Security.Flow.AllowDNSReply,
+		AllowEmbeddedICMP:           cfg.Security.Flow.AllowEmbeddedICMP,
+		AllowUnstampedFabricIngress: cfg.Security.Flow.AllowUnstampedFabricIngress,
 		// #2486: all-tcp now lands in its own wire field; the dataplane
 		// applies it to plain forwarded SYNs (and as the gre-in / tunnel
 		// fallback). ipsec-vpn is rejected at commit, so it is NOT sent

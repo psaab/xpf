@@ -26,22 +26,16 @@ func LifelineBaseName(name string) string {
 
 // HostInboundLifelineSet resolves the set of management / cluster-control
 // LIFELINE interface base names that must NEVER be subjected to a host-inbound
-// deny. It is the config-aware superset of the always-on defaults:
+// deny:
 //
 //   - fxp0 (out-of-band management) is always a lifeline.
-//   - The chassis-cluster control-interface and fabric interface(s) are added
-//     from config so an operator-renamed control link (e.g.
-//     `control-interface fxp1`) or a non-default fabric name is excluded too.
-//     This is the #3277 fix: the old matcher hardcoded fxp0/em0/fab* and so left
-//     a configured `control-interface fxp1` SUBJECT to host-inbound deny scoping
-//     -> potential heartbeat drop -> HA split-brain.
+//   - Chassis-cluster control and fabric interfaces are included only when
+//     configured, including operator-renamed links. Fabric-options
+//     member-interfaces also explicitly identify a cluster fabric interface.
 //
-// em0 (the canonical cluster-control default name) and the fabric prefix fab*
-// stay matched unconditionally in HostInboundLifelineInterface so the canonical
-// default-named configs remain byte-identical (#3070/#3172/#3224 behavior is
-// preserved). A standalone config (no chassis-cluster stanza) contributes no
-// extra names here, so its only lifeline is fxp0 (em0/fab* are no-ops because
-// such interfaces are not present) — #1960.
+// Bare interface names such as em0/fab0 are not proof of a management or
+// cluster role and are not implicit lifelines (#11068). A standalone config
+// therefore contributes only fxp0.
 func HostInboundLifelineSet(cfg *Config) map[string]bool {
 	set := map[string]bool{"fxp0": true}
 	if cfg != nil && cfg.Chassis.Cluster != nil {
@@ -51,49 +45,28 @@ func HostInboundLifelineSet(cfg *Config) map[string]bool {
 				set[base] = true
 			}
 		}
+		// fabric-options member-interfaces is also explicit role configuration.
+		// Include both local and peer-side fabric interfaces: both are configured
+		// cluster fabric links even though only one is local on a given node.
+		for name, ifc := range cfg.Interfaces.Interfaces {
+			if ifc != nil && len(ifc.FabricMembers) > 0 {
+				if base := LifelineBaseName(name); base != "" {
+					set[base] = true
+				}
+			}
+		}
 	}
 	return set
 }
 
 // HostInboundLifelineInterface reports whether the given logical interface name
-// is a management / cluster-control LIFELINE that must NEVER be subjected to a
-// host-inbound deny. The lifeline set is the config-derived set (fxp0 plus the
-// configured chassis-cluster control-interface / fabric interfaces, #3277) UNION
-// the always-on backward-compatible defaults em0 (cluster control plane /
-// heartbeat default name) and the fabric links (fab*). Denying host-bound
-// traffic on these would strand management or break HA. The base name (before
-// the unit suffix) is matched so "fxp0.0" / "em0.0" are caught too.
-//
-// #5250 (A3-b2 F3): the unconditional fabric fallback is an EXACT canonical-name
-// match ("fab" + one or more digits), not the old `strings.HasPrefix(base,
-// "fab")` bypass. The daemon only ever creates fab0/fab1
-// (daemon_apply_interfaces.go, daemon_ha_fabric.go) and any operator-renamed
-// fabric link is already contributed by HostInboundLifelineSet from the
-// chassis-cluster stanza, so the prefix form bought nothing while silently
-// exempting an unrelated interface literally named "fab-foo"/"fabric-uplink"
-// from host-inbound default-deny — reachable in device-map mode (#1956), where
-// a mapped NIC may be renamed to an operator-chosen name. Narrowing the
-// fallback cannot strand a real fabric or control link: those names come from
-// config, not from this prefix.
+// is an explicitly identified management / cluster-control LIFELINE that must
+// NEVER be subjected to a host-inbound deny. The set is fxp0 plus configured
+// chassis-cluster control/fabric links, including interfaces with explicit
+// fabric-options member-interfaces; interface names alone do not imply a role
+// (#11068). The base name (before the unit suffix) is matched so "fxp0.0" and
+// configured links such as "hb0.0" are caught too.
 func HostInboundLifelineInterface(name string, lifelines map[string]bool) bool {
 	base := LifelineBaseName(name)
-	if base == "" {
-		return false
-	}
-	if lifelines[base] {
-		return true
-	}
-	return base == "em0" || isCanonicalFabricName(base)
-}
-
-// isCanonicalFabricName reports whether base is one of the daemon-created
-// fabric device names — the literal "fab" followed by at least one digit and
-// nothing else ("fab0", "fab1", "fab10"). "fab", "fab-foo", "fabx0" and
-// "fabric0" are NOT canonical: a configured fabric interface with such a name
-// reaches the lifeline set through HostInboundLifelineSet instead.
-func isCanonicalFabricName(base string) bool {
-	// #7515: one formula, not two. ifNameNumericSuffix (ifname_class_6731.go) is
-	// the same "prefix followed by digits and nothing else" rule this needed, and
-	// the two drifting apart would be a bug in either direction.
-	return ifNameNumericSuffix(base, "fab")
+	return base != "" && lifelines[base]
 }

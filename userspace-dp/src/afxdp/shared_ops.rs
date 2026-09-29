@@ -677,7 +677,9 @@ pub(super) fn lookup_shared_forward_nat_match(
     // demuxes to its own tenant's entry. The zeroed second probe remains
     // available for a legitimate non-contained flow when either endpoint is
     // domain 0, but a different non-zero domain is a cross-tenant collision
-    // and must be refused before the shared entry is cloned.
+    // and must be refused before the shared entry is cloned. Synthetic fabric
+    // quarantine domains are stricter: they cannot participate in any
+    // mixed-zero fallback.
     //
     // A domain-0 reply key makes the second probe identical to the first;
     // `reverse_match_key` returns the key unchanged in that case, so a
@@ -691,6 +693,11 @@ pub(super) fn lookup_shared_forward_nat_match(
         return None;
     }
     let fallback = map.get(&probe)?;
+    if crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
+        || crate::session::is_quarantined_routing_domain(fallback.key.routing_domain)
+    {
+        return None;
+    }
     if reply_key.routing_domain != 0
         && fallback.key.routing_domain != 0
         && fallback.key.routing_domain != reply_key.routing_domain
@@ -698,6 +705,39 @@ pub(super) fn lookup_shared_forward_nat_match(
         return None;
     }
     Some(fallback.clone())
+}
+
+/// Prove that the shared reverse index contains the expected forward entry
+/// and that its domain-neutral wire alias has only ever named that entry.
+/// The bounded ambiguity history is sticky: after saturation or any collision,
+/// unstamped fabric replies fail closed rather than choosing a tenant.
+pub(super) fn shared_forward_nat_candidate_is_unique(
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    reply_key: &SessionKey,
+    expected_forward_key: &SessionKey,
+    expected_nat: crate::nat::NatDecision,
+) -> bool {
+    if reply_key.routing_domain != 0 {
+        return false;
+    }
+    let expected_alias = reverse_session_key(expected_forward_key, expected_nat);
+    let probe = crate::session::reverse_match_key(reply_key);
+    if crate::session::reverse_match_key(&expected_alias) != probe {
+        return false;
+    }
+    let map = lock_shared_recover(shared_nat_sessions);
+    let Some(entry) = map.get(&expected_alias) else {
+        return false;
+    };
+    if entry.metadata.is_reverse
+        || entry.key != *expected_forward_key
+        || entry.decision.nat != expected_nat
+    {
+        return false;
+    }
+    lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
+        .is_unique_for(&probe, expected_forward_key)
 }
 
 pub(super) fn lookup_shared_forward_wire_match(
@@ -1854,10 +1894,21 @@ pub(super) fn publish_shared_session(
         );
     }
     if !entry.metadata.is_reverse {
-        let mut sessions = lock_shared_publish(shared_nat_sessions);
         let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
+        lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
+            .observe(
+                crate::session::reverse_match_key(&reverse_wire),
+                entry.key.clone(),
+            );
+        let mut sessions = lock_shared_publish(shared_nat_sessions);
         let displaced = sessions.insert(reverse_wire.clone(), entry.clone());
         record_shared_nat_displacement(displaced.as_ref(), entry);
+        if displaced
+            .as_ref()
+            .is_some_and(|existing| existing.key != entry.key)
+        {
+            lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities).mark(reverse_wire.clone());
+        }
         let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
         update_owner_rg_index(
             &shared_owner_rg_indexes.nat_sessions,
@@ -1869,6 +1920,13 @@ pub(super) fn publish_shared_session(
         if reverse_canonical != reverse_wire {
             let displaced = sessions.insert(reverse_canonical.clone(), entry.clone());
             record_shared_nat_displacement(displaced.as_ref(), entry);
+            if displaced
+                .as_ref()
+                .is_some_and(|existing| existing.key != entry.key)
+            {
+                lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
+                    .mark(reverse_canonical.clone());
+            }
             let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
             update_owner_rg_index(
                 &shared_owner_rg_indexes.nat_sessions,

@@ -130,10 +130,10 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// #7188 TunnelDiscriminator. All length-gated: an old decoder stops after
 	// the field it knows and ignores the rest.
 	// #7239 RoutingDomain (4) and #9412 TCPCloseClass (1) ride behind the
-	// fields above, then #9752 InstallTableDomain+Check (4+4), and #10227
-	// high SessionValue.Flags (1). Over-allocating is harmless: the result is
-	// buf[:off].
-	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1+8+1)
+	// fields above, then #9752 InstallTableDomain+Check (4+4), #10227 high
+	// SessionValue.Flags (1), and #11064 source-NAT ICMP identity (3). Over-
+	// allocating is harmless: the result is buf[:off].
+	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1+8+1+3)
 	off := 0
 	copy(buf[off:], key.SrcIP[:])
 	off += 4
@@ -292,6 +292,20 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// receiver install path, while the map bit is never guessed on decode).
 	buf[off] = byte(val.Flags >> 8)
 	off++
+	// #11064: source-NAT ICMP identity follows high SessionValue.Flags.
+	// Its valid byte distinguishes absent metadata from (type=0, code=0).
+	buf[off] = 0
+	if val.SourceNatICMPValid {
+		buf[off] = 1
+	}
+	off++
+	buf[off] = val.SourceNatICMPType
+	off++
+	buf[off] = val.SourceNatICMPCode
+	off++
+	// #11070: policy rule ID follows the ICMP identity; length-gated on
+	// decode. Order is load-bearing: master already ships ICMP at this
+	// position, so the rule trailer appends after it.
 	if len(val.PolicyRuleID) != 0 && len(val.PolicyRuleID) <= int(^uint16(0)) {
 		var ruleIDLen [2]byte
 		binary.LittleEndian.PutUint16(ruleIDLen[:], uint16(len(val.PolicyRuleID)))
@@ -462,6 +476,20 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	// reading an old payload defaults the high byte to zero.
 	buf[off] = byte(val.Flags >> 8)
 	off++
+	// #11064: v6 source-NAT ICMP identity follows high SessionValue.Flags.
+	// Its valid byte distinguishes absent metadata from (type=0, code=0).
+	buf[off] = 0
+	if val.SourceNatICMPValid {
+		buf[off] = 1
+	}
+	off++
+	buf[off] = val.SourceNatICMPType
+	off++
+	buf[off] = val.SourceNatICMPCode
+	off++
+	// #11070: policy rule ID follows the ICMP identity; length-gated on
+	// decode. Order is load-bearing: master already ships ICMP at this
+	// position, so the rule trailer appends after it.
 	if len(val.PolicyRuleID) != 0 && len(val.PolicyRuleID) <= int(^uint16(0)) {
 		var ruleIDLen [2]byte
 		binary.LittleEndian.PutUint16(ruleIDLen[:], uint16(len(val.PolicyRuleID)))
@@ -843,6 +871,15 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 			off++
 		}
 	}
+	// #11064: length-gated source-NAT ICMP identity after high SessionValue.Flags.
+	if off+3 <= len(payload) {
+		val.SourceNatICMPValid = payload[off] != 0
+		val.SourceNatICMPType = payload[off+1]
+		val.SourceNatICMPCode = payload[off+2]
+		off += 3
+	}
+	// #11070: length-gated policy rule ID after the ICMP identity (encode
+	// order is authoritative; see above).
 	if off+2 <= len(payload) {
 		ruleIDLen := int(binary.LittleEndian.Uint16(payload[off : off+2]))
 		off += 2
@@ -1036,6 +1073,15 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 			off++
 		}
 	}
+	// #11064: length-gated source-NAT ICMP identity after high SessionValue.Flags.
+	if off+3 <= len(payload) {
+		val.SourceNatICMPValid = payload[off] != 0
+		val.SourceNatICMPType = payload[off+1]
+		val.SourceNatICMPCode = payload[off+2]
+		off += 3
+	}
+	// #11070: length-gated policy rule ID after the ICMP identity (encode
+	// order is authoritative; see above).
 	if off+2 <= len(payload) {
 		ruleIDLen := int(binary.LittleEndian.Uint16(payload[off : off+2]))
 		off += 2

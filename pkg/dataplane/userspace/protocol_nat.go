@@ -29,6 +29,8 @@ type NatAppTermWire struct {
 	Protocol uint16             `json:"protocol"`
 	Ports    []NatPortRangeWire `json:"ports,omitempty"`
 	SrcPorts []NatPortRangeWire `json:"src_ports,omitempty"`
+	ICMPType *uint8             `json:"icmp_type,omitempty"`
+	ICMPCode *uint8             `json:"icmp_code,omitempty"`
 }
 
 type SourceNATRuleSnapshot struct {

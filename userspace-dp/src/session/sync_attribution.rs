@@ -68,6 +68,9 @@ pub(crate) struct SessionSyncAttribution<'a> {
     /// datum the standby cannot reconstruct from the synced forward v6 key,
     /// because `allocate_source` chooses it and it is not embedded in the key.
     pub(crate) nat64_snat_v4: Option<Ipv4Addr>,
+    /// The active ICMP query identity for source-NAT rule reconstruction.
+    /// `Some` only when an ICMP packet installed a source-NAT translation.
+    pub(crate) source_nat_icmp: Option<(u8, u8)>,
 }
 
 impl<'a> SessionSyncAttribution<'a> {
@@ -94,6 +97,7 @@ impl<'a> SessionSyncAttribution<'a> {
                 (true, Some(IpAddr::V4(v4))) => Some(v4),
                 _ => None,
             },
+            source_nat_icmp: decision.nat.source_nat_icmp,
         }
     }
 }

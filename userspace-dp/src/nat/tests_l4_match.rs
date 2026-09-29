@@ -10,8 +10,8 @@ use super::allocator::{
     ALLOCATION_GC_BUDGET, NS_PER_SEC, PersistentLease, PersistentSourceKey, PoolAddressFamily,
     TranslatedTuple, sticky_pool_index,
 };
-use super::source::{PersistentNatPermit, SOURCE_NAT_PROTO_ANY, SourceNatFlowKey};
 use super::destination::{PROTO_ANY, PROTO_TCP, PROTO_UDP};
+use super::source::{PersistentNatPermit, SOURCE_NAT_PROTO_ANY, SourceNatFlowKey};
 use super::*;
 use crate::ip_proto::{PROTO_ESP, PROTO_GRE, PROTO_ICMP, PROTO_ICMPV6};
 use crate::{
@@ -21,6 +21,73 @@ use crate::{
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+#[test]
+fn source_nat_match_application_enforces_icmp_type_and_code_11064() {
+    let snapshot: SourceNATRuleSnapshot = serde_json::from_value(serde_json::json!({
+        "name": "ping-only",
+        "from_zone": "lan",
+        "to_zone": "wan",
+        "source_addresses": ["0.0.0.0/0"],
+        "interface_mode": true,
+        "match_applications": [{
+            "protocol": PROTO_ICMP,
+            "icmp_type": 8,
+            "icmp_code": 3
+        }]
+    }))
+    .expect("decode the Go SNAT application wire fields");
+    let rules = parse_source_nat_rules(&[snapshot]);
+    let src: IpAddr = "10.0.1.100".parse().unwrap();
+    let dst: IpAddr = "8.8.8.8".parse().unwrap();
+    let check = |protocol, packet_icmp| {
+        let mut counter = None;
+        match_source_nat_result_for_tuple_with_icmp(
+            &InterfaceNatAllocators::default(),
+            &rules,
+            &NatScopeCtx::default(),
+            "lan",
+            "wan",
+            src,
+            dst,
+            Some(protocol),
+            0x1234,
+            0,
+            Some("172.16.80.8".parse::<Ipv4Addr>().unwrap()),
+            None,
+            0,
+            false,
+            protocol == PROTO_ICMP,
+            packet_icmp,
+            NatHolder::Untracked,
+            &mut counter,
+        )
+    };
+
+    assert!(
+        matches!(check(PROTO_ICMP, Some((8, 3))), SourceNatLookup::Matched(_)),
+        "the configured type/code must match"
+    );
+    assert_eq!(
+        check(PROTO_ICMP, Some((8, 0))),
+        SourceNatLookup::NoMatch,
+        "a different ICMP code must not match"
+    );
+    assert_eq!(
+        check(PROTO_ICMP, Some((0, 3))),
+        SourceNatLookup::NoMatch,
+        "a different ICMP type must not match"
+    );
+    assert_eq!(
+        check(PROTO_ICMP, None),
+        SourceNatLookup::NoMatch,
+        "missing ICMP type/code must fail closed"
+    );
+    assert_eq!(
+        check(PROTO_TCP, Some((8, 3))),
+        SourceNatLookup::NoMatch,
+        "ICMP constraints must not match another protocol"
+    );
+}
 #[test]
 fn source_nat_match_destination_port_constrains_flow_3429() {
     let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
@@ -175,6 +242,8 @@ fn source_nat_fragment_sentinel_does_not_bypass_later_rule_for_scoped_off_10675(
                 protocol: PROTO_UDP as u16,
                 ports: vec![NatPortRangeWire { low: 53, high: 53 }],
                 src_ports: vec![],
+                icmp_type: None,
+                icmp_code: None,
             }],
             ..SourceNATRuleSnapshot::default()
         },
@@ -186,8 +255,13 @@ fn source_nat_fragment_sentinel_does_not_bypass_later_rule_for_scoped_off_10675(
             interface_mode: true,
             match_applications: vec![NatAppTermWire {
                 protocol: PROTO_TCP as u16,
-                ports: vec![NatPortRangeWire { low: 443, high: 443 }],
+                ports: vec![NatPortRangeWire {
+                    low: 443,
+                    high: 443,
+                }],
                 src_ports: vec![],
+                icmp_type: None,
+                icmp_code: None,
             }],
             ..SourceNATRuleSnapshot::default()
         },
@@ -234,6 +308,8 @@ fn source_nat_match_application_constrains_protocol_and_port_3429() {
                 high: 443,
             }],
             src_ports: vec![],
+            icmp_type: None,
+            icmp_code: None,
         }],
         ..SourceNATRuleSnapshot::default()
     }]);
@@ -304,6 +380,8 @@ fn source_nat_match_application_constrains_source_port_3491() {
                 low: 12345,
                 high: 12345,
             }],
+            icmp_type: None,
+            icmp_code: None,
         }],
         ..SourceNATRuleSnapshot::default()
     }]);
@@ -361,6 +439,8 @@ fn source_nat_app_source_port_never_match_sentinel_3491() {
             protocol: PROTO_TCP as u16,
             ports: vec![],
             src_ports: vec![NatPortRangeWire { low: 1, high: 0 }],
+            icmp_type: None,
+            icmp_code: None,
         }],
         ..SourceNATRuleSnapshot::default()
     }]);
@@ -404,6 +484,8 @@ fn source_nat_real_proto_255_is_not_unknown_fragment_10674() {
             protocol: PROTO_UDP as u16,
             ports: vec![],
             src_ports: vec![],
+            icmp_type: None,
+            icmp_code: None,
         }],
         ..SourceNATRuleSnapshot::default()
     }]);
@@ -595,6 +677,8 @@ fn source_nat_app_protocol_never_vs_any_3429() {
             protocol: 0xFFFF,
             ports: vec![],
             src_ports: vec![],
+            icmp_type: None,
+            icmp_code: None,
         }],
         ..SourceNATRuleSnapshot::default()
     }]);
@@ -618,6 +702,8 @@ fn source_nat_app_protocol_never_vs_any_3429() {
             protocol: SOURCE_NAT_PROTO_ANY,
             ports: vec![],
             src_ports: vec![],
+            icmp_type: None,
+            icmp_code: None,
         }],
         ..SourceNATRuleSnapshot::default()
     }]);
@@ -857,7 +943,13 @@ fn dnat_undefined_application_never_match_sentinel_fails_closed_3434() {
 
     // Post-fix shape: the same wildcard entry carrying the never-match
     // source-port sentinel matches NOTHING, for every protocol and port.
-    let fail_closed = dnat_table_with_l4("", 0, vec![NatPortRangeWire { low: 1, high: 0 }], None, None);
+    let fail_closed = dnat_table_with_l4(
+        "",
+        0,
+        vec![NatPortRangeWire { low: 1, high: 0 }],
+        None,
+        None,
+    );
     for &(proto, sp, dp) in &[
         (PROTO_TCP, 0u16, 0u16),
         (PROTO_TCP, 40000, 443),
@@ -931,4 +1023,3 @@ fn dnat_destination_port_range_3449() {
         );
     }
 }
-

@@ -71,8 +71,8 @@ func TestDHCPLeaseChangeRequiresRecompile_RequiresMgmtMap(t *testing.T) {
 // TestDHCPLeaseChangeRequiresRecompile_ZonedNonLifelineFxp1 is the #5791
 // fail-on-revert gate. A zoned, standalone (non-cluster) fxp1 DHCP client is in
 // the BROAD management-VRF name class (fxp*) but is NOT a host-inbound LIFELINE
-// (standalone lifelines are only fxp0/em0/fab*). Its learned address needs an
-// address-scoped host-inbound fence, so a lease change MUST force the full
+// (only fxp0 is fixed; cluster control/fabric roles must be explicitly configured).
+// Its learned address needs an address-scoped host-inbound fence, so a lease
 // recompile that (re)builds that fence — it must NOT take the lightweight
 // management-only skip path. Neutralizing the fix (gating the skip on the broad
 // mgmt-VRF class again, i.e. `mgmtSet[config.DHCPLeaseIfName(ifName, unit)]`)
@@ -102,20 +102,26 @@ func TestDHCPLeaseChangeRequiresRecompile_ZonedNonLifelineFxp1(t *testing.T) {
 }
 
 // TestDHCPLeaseChangeRequiresRecompile_LifelineFastPathPreserved guards the
-// lifeline fast-path (#5791 regression guard i): a lease change on a genuine
-// standalone lifeline (fxp0, em0, fab0) still takes the lightweight
-// management-only skip path — no recompile churn on routine management lease
-// renewals.
+// lifeline fast-path (#5791): fxp0 is the only implicit lifeline. Bare em0/fab0
+// names are ordinary interfaces, while configured control/fabric roles are
+// covered by TestDHCPLeaseChangeRequiresRecompile_ClusterControlFxp1.
 func TestDHCPLeaseChangeRequiresRecompile_LifelineFastPathPreserved(t *testing.T) {
-	for _, ifName := range []string{"fxp0", "em0", "fab0"} {
-		t.Run(ifName, func(t *testing.T) {
+	for _, tc := range []struct {
+		ifName        string
+		wantRecompile bool
+	}{
+		{"fxp0", false},
+		{"em0", true},
+		{"fab0", true},
+	} {
+		t.Run(tc.ifName, func(t *testing.T) {
 			d := &Daemon{}
-			d.publishMgmtVRFIfaces(map[string]bool{ifName: true})
+			d.publishMgmtVRFIfaces(map[string]bool{tc.ifName: true})
 			cfg := &config.Config{
 				Interfaces: config.InterfacesConfig{
 					Interfaces: map[string]*config.InterfaceConfig{
-						ifName: {
-							Name: ifName,
+						tc.ifName: {
+							Name: tc.ifName,
 							Units: map[int]*config.InterfaceUnit{
 								0: {DHCP: true},
 							},
@@ -124,9 +130,9 @@ func TestDHCPLeaseChangeRequiresRecompile_LifelineFastPathPreserved(t *testing.T
 				},
 			}
 
-			if d.dhcpLeaseChangeRequiresRecompile(cfg, false) {
-				t.Fatalf("lifeline %s DHCP lease refresh should keep the "+
-					"management-only fast path (no recompile churn)", ifName)
+			if got := d.dhcpLeaseChangeRequiresRecompile(cfg, false); got != tc.wantRecompile {
+				t.Fatalf("lease change recompile = %v, want %v for unconfigured %s",
+					got, tc.wantRecompile, tc.ifName)
 			}
 		})
 	}

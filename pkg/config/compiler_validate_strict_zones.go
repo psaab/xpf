@@ -188,11 +188,9 @@ func validateZoneCountStrict(cfg *Config) error {
 // zoneIfaceLogicalKeys returns the set of effective logical-interface keys a
 // single `set security zones security-zone <z> interfaces <iface>` entry
 // claims, mirroring how pkg/dataplane/userspace.buildInterfaceZoneMap expands a
-// zone-interface entry into the userspace interface->zone lookup (#3072). It is
-// the conflict-detection counterpart of that expansion: two zones whose key
-// sets intersect would map the same physical/logical interface to two zone ids,
-// which buildInterfaceZoneMap silently resolves first-writer-wins over the
-// sorted zone names.
+// zone-interface entry into the userspace interface->zone lookup (#3072).
+// Intersecting key sets are rejected by strict compilation and omitted from
+// tolerant runtime maps, so neither claimant becomes a sorted-name winner.
 //
 //   - A unit-qualified entry (`base.unit`, e.g. `ge-0/0/0.0`) claims exactly the
 //     one logical unit key `base.unit`. It deliberately does NOT claim the bare
@@ -231,61 +229,47 @@ func zoneIfaceLogicalKeys(cfg *Config, iface string) []string {
 	keys := []string{base}
 	if cfg != nil {
 		if ifCfg := cfg.Interfaces.Interfaces[base]; ifCfg != nil {
+			units := make([]int, 0, len(ifCfg.Units))
 			for unitNum := range ifCfg.Units {
+				units = append(units, unitNum)
+			}
+			sort.Ints(units)
+			for _, unitNum := range units {
 				keys = append(keys, fmt.Sprintf("%s.%d", base, unitNum))
 			}
 		}
 	}
+	sort.Strings(keys)
 	return keys
 }
 
-// validateZoneInterfaceMembershipStrict hard-rejects a configuration that
-// assigns the same interface to more than one security zone (#3072).
-//
-// pkg/dataplane/userspace.buildInterfaceZoneMap builds the interface->zone
-// lookup by iterating the zone names in SORTED order and writing each interface
-// (plus its base/unit aliases) first-writer-wins. So an interface listed under
-// two zones is silently accepted at commit and resolved to whichever zone name
-// sorts first — independent of operator intent or config order. A packet that
-// should be evaluated as `trust -> untrust` is instead evaluated as
-// `aaa -> untrust` purely because "aaa" < "trust", causing an unintended permit
-// or deny. Junos rejects an interface in two zones; a security appliance must
-// not silently choose one.
-//
-// This validator restores that fail-CLOSED parity. It computes, per zone (in
-// sorted order for a deterministic first-reported error), the logical-interface
-// keys each zone-interface entry claims (zoneIfaceLogicalKeys — the same
-// base/unit expansion buildInterfaceZoneMap performs) and rejects the first key
-// claimed by two different zones, naming the interface and BOTH conflicting
-// zones. Listing the same interface twice WITHIN one zone is harmless (a
-// repeated `set`) and is not flagged. Two distinct units of one physical
-// interface in two zones (a valid VLAN split) is NOT flagged — see
-// zoneIfaceLogicalKeys.
-//
-// Strict on the commit / commit-check path (CompileConfig — hard-reject);
-// downgraded to a cfg.Warnings entry on the tolerant load / peer-sync paths
-// (CompileConfigLenient / CompileConfigForNodeLenient, flag
-// lenientZoneInterfaceMembership) so an already-persisted or peer-synced config
-// that an older binary accepted still BOOTS (#1960 fail-closed-on-load
-// doctrine). On that tolerant path behavior is unchanged and deterministic:
-// buildInterfaceZoneMap keeps its first-writer-wins (sorted-zone) resolution, so
-// the leniently-loaded config forwards exactly as it did before this gate
-// existed — just with an operator-visible warning.
-func validateZoneInterfaceMembershipStrict(cfg *Config) error {
+type zoneInterfaceMembershipConflict struct {
+	key        string
+	iface      string
+	firstZone  string
+	secondZone string
+}
+
+func zoneInterfaceMembershipConflicts(cfg *Config) []zoneInterfaceMembershipConflict {
 	if cfg == nil {
 		return nil
 	}
 	type claim struct {
 		zone string
-		raw  string
 	}
 	owner := make(map[string]claim)
+	conflicted := make(map[string]struct{})
+	var conflicts []zoneInterfaceMembershipConflict
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	excludedZones := ZoneQuarantineExclusions(zoneNames)
 	for _, zoneName := range zoneNames {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil {
 			continue
@@ -296,19 +280,239 @@ func validateZoneInterfaceMembershipStrict(cfg *Config) error {
 			}
 			for _, key := range zoneIfaceLogicalKeys(cfg, iface) {
 				prev, exists := owner[key]
-				if exists {
-					if prev.zone != zoneName {
-						return fmt.Errorf(
-							"interface %q is assigned to security zones %q and %q; an interface must belong to exactly one security zone (the dataplane silently resolves a multi-zone interface to whichever zone name sorts first, evaluating traffic against the wrong zone's policy) — remove it from one zone",
-							iface, prev.zone, zoneName)
-					}
-					// Same zone (repeated set, or base/unit overlap within
-					// one zone): keep the first claim, not a conflict.
+				if !exists {
+					owner[key] = claim{zone: zoneName}
 					continue
 				}
-				owner[key] = claim{zone: zoneName, raw: iface}
+				if prev.zone == zoneName {
+					continue
+				}
+				if _, already := conflicted[key]; already {
+					continue
+				}
+				conflicted[key] = struct{}{}
+				conflicts = append(conflicts, zoneInterfaceMembershipConflict{
+					key:        key,
+					iface:      iface,
+					firstZone:  prev.zone,
+					secondZone: zoneName,
+				})
 			}
 		}
+	}
+	return conflicts
+}
+
+// QuarantinedZoneInterfaceKeys returns every logical interface key claimed by
+// more than one security zone. Tolerant loads omit these mappings so ambiguity
+// fails closed instead of selecting a zone by sorted-name order.
+func QuarantinedZoneInterfaceKeys(cfg *Config) map[string]struct{} {
+	conflicts := zoneInterfaceMembershipConflicts(cfg)
+	if len(conflicts) == 0 {
+		return nil
+	}
+	keys := make(map[string]struct{}, len(conflicts))
+	for _, conflict := range conflicts {
+		keys[conflict.key] = struct{}{}
+	}
+	return keys
+}
+
+// validateZoneInterfaceMembershipStrict hard-rejects a configuration that
+// assigns the same interface to more than one security zone (#3072).
+//
+// pkg/dataplane/userspace.buildInterfaceZoneMap used to write duplicate
+// interface claims first-writer-wins over sorted zone names. A packet that
+// should be evaluated as `trust -> untrust` could instead be evaluated as
+// `aaa -> untrust` purely because "aaa" < "trust", causing an unintended permit
+// or deny. Junos rejects an interface in two zones; a security appliance must
+// not silently choose one.
+
+// The strict validator rejects any logical key claimed by two zones. On
+// tolerant load / peer-sync paths the same key set is quarantined: neither
+// zone claims that interface in the runtime map, so it matches no zone policy
+// and fails closed. Listing an interface twice within one zone is harmless.
+// Two distinct units of one physical interface in two zones (a valid VLAN split)
+// are not flagged — see zoneIfaceLogicalKeys.
+//
+// Strict on the commit / commit-check path (CompileConfig — hard-reject);
+// downgraded to a cfg.Warnings entry on tolerant load / peer-sync paths
+// (CompileConfigLenient / CompileConfigForNodeLenient, flag
+// lenientZoneInterfaceMembership) so an already-persisted or peer-synced config
+// that an older binary accepted still BOOTS (#1960 fail-closed-on-load
+// doctrine).
+func validateZoneInterfaceMembershipStrict(cfg *Config) error {
+	conflicts := zoneInterfaceMembershipConflicts(cfg)
+	if len(conflicts) == 0 {
+		return nil
+	}
+	first := conflicts[0]
+	return fmt.Errorf(
+		"interface %q is assigned to security zones %q and %q; an interface must belong to exactly one security zone (the dataplane must not resolve a multi-zone interface to a zone by sorted-name order, which can evaluate traffic against the wrong zone's policy) — remove it from one zone",
+		first.iface, first.firstZone, first.secondZone)
+}
+
+// fabricZoneRoutingInstanceByInterface indexes the logical members that the
+// dataplane binds to each RI. Use the shared member resolver so bare RI refs
+// fan down onto configured units, aliases normalize identically, and tunnel
+// device keys match the runtime contract. Literal-only indexing misses bare-RI
+// fan-down and both false-rejects single-RI bare/bare zones and false-accepts
+// bare-RI/unit-zone splits with MAIN. Dual-claimed devices are omitted just as
+// in the dataplane membership map; the independent strict RI-device gate
+// reports that conflict.
+func fabricZoneRoutingInstanceByInterface(cfg *Config) map[string]string {
+	if cfg == nil || len(cfg.RoutingInstances) == 0 {
+		return nil
+	}
+	insts := make([]*RoutingInstanceConfig, 0, len(cfg.RoutingInstances))
+	insts = append(insts, cfg.RoutingInstances...)
+	sort.SliceStable(insts, func(i, j int) bool {
+		if insts[i] == nil || insts[j] == nil {
+			return insts[i] != nil
+		}
+		return insts[i].Name < insts[j].Name
+	})
+	tunnelNames := cfg.TunnelNameMap()
+	dualClaimed := RoutingInstanceDualClaimedLinuxNames(cfg, tunnelNames)
+	out := make(map[string]string)
+	for _, ri := range insts {
+		if ri == nil || ri.Name == "" {
+			continue
+		}
+		for _, member := range RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, ri) {
+			if member.InterfaceKey == "" || dualClaimed[member.LinuxName] {
+				continue
+			}
+			if _, exists := out[member.InterfaceKey]; !exists {
+				out[member.InterfaceKey] = ri.Name
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// fabricZoneTrunkParentAliasRI returns the sole RI owner of a configured
+// interface's zoned child units when the base itself has no RI owner. Runtime
+// snapshots propagate a child's zone onto its trunk parent and inherit the
+// child domain when the parent has no domain row; counting that synthetic
+// parent alias as MAIN would incorrectly reject a single-RI zone.
+func fabricZoneTrunkParentAliasRI(
+	cfg *Config,
+	baseKey string,
+	zoneKeys map[string]map[string]struct{},
+	riByInterface map[string]string,
+) (string, bool) {
+	split := cfg.SplitInterfaceUnitRef(baseKey)
+	if split.HasUnit || split.Base == "" {
+		return "", false
+	}
+	ifc := cfg.Interfaces.Interfaces[split.Base]
+	if ifc == nil || len(ifc.Units) == 0 {
+		return "", false
+	}
+	var owner string
+	found := false
+	for unitNum := range ifc.Units {
+		unitKey := fmt.Sprintf("%s.%d", split.Base, unitNum)
+		if _, inZone := zoneKeys[unitKey]; !inZone {
+			continue
+		}
+		unitOwner := ""
+		if riName, ok := riByInterface[unitKey]; ok {
+			unitOwner = riName
+		}
+		if !found {
+			owner = unitOwner
+			found = true
+		} else if owner != unitOwner {
+			return "", false
+		}
+	}
+	return owner, found && owner != ""
+}
+
+// validateFabricZoneRoutingInstanceAmbiguityStrict rejects a security zone
+// whose member interfaces are split between routing instances or an RI and
+// MAIN. Fabric ingress carries the adjudicated zone ID, not an RI identity, so
+// the dataplane cannot select one native route table for such a zone.
+func validateFabricZoneRoutingInstanceAmbiguityStrict(cfg *Config) error {
+	if cfg == nil || len(cfg.RoutingInstances) == 0 || len(cfg.Security.Zones) == 0 {
+		return nil
+	}
+	riByInterface := fabricZoneRoutingInstanceByInterface(cfg)
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	for _, zoneName := range zoneNames {
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
+			continue
+		}
+		type zoneRouteOwner struct {
+			name            string
+			defaultInstance bool
+		}
+		zoneKeys := make(map[string]map[string]struct{})
+		for _, iface := range zone.Interfaces {
+			if iface == "" {
+				continue
+			}
+			for _, key := range zoneIfaceLogicalKeys(cfg, iface) {
+				if zoneKeys[key] == nil {
+					zoneKeys[key] = make(map[string]struct{})
+				}
+				zoneKeys[key][iface] = struct{}{}
+			}
+		}
+		riInterfaces := make(map[zoneRouteOwner]map[string]struct{})
+		for key, ifaces := range zoneKeys {
+			owner := zoneRouteOwner{name: "MAIN", defaultInstance: true}
+			if riName, ok := riByInterface[key]; ok {
+				owner = zoneRouteOwner{name: riName}
+			} else if riName, ok := fabricZoneTrunkParentAliasRI(cfg, key, zoneKeys, riByInterface); ok {
+				owner = zoneRouteOwner{name: riName}
+			}
+			if riInterfaces[owner] == nil {
+				riInterfaces[owner] = make(map[string]struct{})
+			}
+			for iface := range ifaces {
+				riInterfaces[owner][iface] = struct{}{}
+			}
+		}
+		if len(riInterfaces) < 2 {
+			continue
+		}
+		owners := make([]zoneRouteOwner, 0, len(riInterfaces))
+		for owner := range riInterfaces {
+			owners = append(owners, owner)
+		}
+		sort.Slice(owners, func(i, j int) bool {
+			if owners[i].name != owners[j].name {
+				return owners[i].name < owners[j].name
+			}
+			return owners[i].defaultInstance
+		})
+		claims := make([]string, 0, len(owners))
+		for _, owner := range owners {
+			ownerName := owner.name
+			if owner.defaultInstance {
+				ownerName = "MAIN (default instance)"
+			}
+			ifaces := make([]string, 0, len(riInterfaces[owner]))
+			for iface := range riInterfaces[owner] {
+				ifaces = append(ifaces, iface)
+			}
+			sort.Strings(ifaces)
+			claims = append(claims, fmt.Sprintf("%q interfaces [%s]", ownerName, strings.Join(ifaces, ", ")))
+		}
+		return fmt.Errorf(
+			"security zone %q spans multiple routing contexts (%s); a fabric ingress zone stamp cannot identify which routing domain owns the packet",
+			zoneName, strings.Join(claims, "; "))
 	}
 	return nil
 }

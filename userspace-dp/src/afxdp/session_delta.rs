@@ -308,6 +308,7 @@ pub(in crate::afxdp) fn session_delta_info(
         inactivity_timeout_secs,
         nat64,
         nat64_snat_v4,
+        source_nat_icmp,
     } = SessionSyncAttribution::from_session(&delta.decision, &delta.metadata);
     SessionDeltaInfo {
         timestamp: Utc::now(),
@@ -418,6 +419,9 @@ pub(in crate::afxdp) fn session_delta_info(
         // cannot derive it from the synced forward v6 key.
         nat64,
         nat64_snat_v4: nat64_snat_v4_string(nat64_snat_v4),
+        source_nat_icmp_valid: source_nat_icmp.is_some(),
+        source_nat_icmp_type: source_nat_icmp.map_or(0, |icmp| icmp.0),
+        source_nat_icmp_code: source_nat_icmp.map_or(0, |icmp| icmp.1),
         // #7188: carry the session key's tunnel discriminator on the JSON leg.
         // Read from `delta.key`, the SAME key the binary open frame encodes, so
         // the two legs cannot describe one session's identity differently. A

@@ -124,8 +124,13 @@ type SessionSyncRequest struct {
 	NATDstIP         string `json:"nat_dst_ip,omitempty"`
 	NATSrcPort       uint16 `json:"nat_src_port,omitempty"`
 	NATDstPort       uint16 `json:"nat_dst_port,omitempty"`
-	FabricIngress    bool   `json:"fabric_ingress,omitempty"`
-	IsReverse        bool   `json:"is_reverse,omitempty"`
+	// #11064: ICMP type/code the active used to select its stateful SNAT rule.
+	// Valid distinguishes absent metadata from the valid (0,0) pair.
+	SourceNatICMPValid bool  `json:"source_nat_icmp_valid,omitempty"`
+	SourceNatICMPType  uint8 `json:"source_nat_icmp_type,omitempty"`
+	SourceNatICMPCode  uint8 `json:"source_nat_icmp_code,omitempty"`
+	FabricIngress      bool  `json:"fabric_ingress,omitempty"`
+	IsReverse          bool  `json:"is_reverse,omitempty"`
 	// #2785: the admitting policy's per-policy `then log` selection, carried
 	// so a session synced to the peer logs the same RT_FLOW
 	// SESSION_CREATE/CLOSE records after failover. omitempty is safe — an old
@@ -332,8 +337,13 @@ type SessionDeltaInfo struct {
 	NATDstIP         string `json:"nat_dst_ip,omitempty"`
 	NATSrcPort       uint16 `json:"nat_src_port,omitempty"`
 	NATDstPort       uint16 `json:"nat_dst_port,omitempty"`
-	FabricRedirect   bool   `json:"fabric_redirect,omitempty"`
-	FabricIngress    bool   `json:"fabric_ingress,omitempty"`
+	// #11064: original packet type/code used for stateful source-NAT rule
+	// selection, carried on binary and JSON delta legs for standby reservation.
+	SourceNatICMPValid bool  `json:"source_nat_icmp_valid,omitempty"`
+	SourceNatICMPType  uint8 `json:"source_nat_icmp_type,omitempty"`
+	SourceNatICMPCode  uint8 `json:"source_nat_icmp_code,omitempty"`
+	FabricRedirect     bool  `json:"fabric_redirect,omitempty"`
+	FabricIngress      bool  `json:"fabric_ingress,omitempty"`
 	// #2785: the admitting policy's per-policy `then log` selection. Decoded
 	// from the binary open-frame flags byte (bits 1<<3/1<<4) AND mirrored on
 	// the JSON RPC-fallback delta; stamped onto the synced session's

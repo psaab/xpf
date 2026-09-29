@@ -54,10 +54,9 @@ import (
 // (M03), and the cross-zone subset of same-address-across-routing-instances
 // (M04) — a zone is not VRF-scoped in xpf, so overlapping-VRF address reuse
 // surfaces as the cross-zone case here (intentional overlap needs Option C to
-// be SUPPORTED; Option B rejects it fail-closed). Management / cluster-control
-// lifeline interfaces (fxp0 / em0 / fab* / configured control+fabric) are
-// excluded, mirroring the runtime deny-scoping, so a shared management address
-// is never flagged.
+// be SUPPORTED; Option B rejects it fail-closed). Lifeline interfaces (fxp0 plus
+// explicitly configured control/fabric links) are excluded, mirroring the runtime
+// deny-scoping, so a shared management address is never flagged.
 //
 // Strict on the commit / commit-check path (CompileConfig — hard-reject);
 // downgraded to a cfg.Warnings entry on the tolerant load / peer-sync paths
@@ -118,11 +117,9 @@ func hostLocalAddrFamily(s string) (host, family string) {
 	return ip.String(), "inet6"
 }
 
-// buildZoneInterfaceMapLocal builds the logical-interface-key -> zone lookup the
-// same way pkg/dataplane/userspace.buildInterfaceZoneMap does (first-writer-wins
-// over the SORTED zone names, base/unit expansion via zoneIfaceLogicalKeys).
-// pkg/config cannot import pkg/dataplane, so it is rebuilt locally here; the
-// key-expansion SSOT (zoneIfaceLogicalKeys) is shared, so the two stay aligned.
+// buildZoneInterfaceMapLocal builds the logical-interface-key -> zone lookup
+// using zoneIfaceLogicalKeys. The key-expansion SSOT is shared with runtime;
+// ambiguous keys are omitted instead of resolved first-writer-wins.
 func buildZoneInterfaceMapLocal(cfg *Config) map[string]string {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
@@ -133,7 +130,12 @@ func buildZoneInterfaceMapLocal(cfg *Config) map[string]string {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zn := range zoneNames {
+		if _, excluded := excludedZones[zn]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zn]
 		if zone == nil {
 			continue
@@ -143,6 +145,9 @@ func buildZoneInterfaceMapLocal(cfg *Config) map[string]string {
 				continue
 			}
 			for _, key := range zoneIfaceLogicalKeys(cfg, iface) {
+				if _, conflicted := conflictedInterfaces[key]; conflicted {
+					continue
+				}
 				if _, ok := out[key]; !ok {
 					out[key] = zn
 				}

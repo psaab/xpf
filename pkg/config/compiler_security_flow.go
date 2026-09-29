@@ -717,6 +717,9 @@ func compileFlow(node *Node, sec *SecurityConfig) error {
 	if node.FindChild("allow-embedded-icmp") != nil {
 		sec.Flow.AllowEmbeddedICMP = true
 	}
+	if node.FindChild("allow-unstamped-fabric-ingress") != nil {
+		sec.Flow.AllowUnstampedFabricIngress = true
+	}
 
 	// gre-performance-acceleration
 	if node.FindChild("gre-performance-acceleration") != nil {

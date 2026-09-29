@@ -69,17 +69,12 @@ func junosHost6705Permit(src string) []string {
 	}
 }
 
-// junosHost6705Warned reports whether the junos-host enforcement advisory was
-// emitted for this policy. It keys on the policy name plus the advisory's
-// SUBJECT ("cannot enforce on the direct host-bound path"), not on an issue
-// number: the projection's suppression bookkeeping is described as the "#4168
-// warning" throughout junos_host_deny.go, but the emitted string cites #4146.
-// Matching the number from the code comments would have made this predicate
-// permanently false and the assertion vacuous.
+// junosHost6705Warned reports whether the direct-host enforcement advisory was
+// emitted for this policy.
 func junosHost6705Warned(cfg *Config, policy string) bool {
 	for _, w := range cfg.Warnings {
 		if strings.Contains(w, `"`+policy+`"`) &&
-			strings.Contains(w, "cannot enforce on the direct host-bound path") {
+			strings.Contains(w, "not fully enforced") {
 			return true
 		}
 	}
@@ -141,14 +136,17 @@ func TestJunosHostRenderedDenyStaysSuppressed6705(t *testing.T) {
 	if got == nil {
 		t.Fatal("no program projected for zone trust")
 	}
-	if len(got.RulesV4) != 2 {
-		t.Fatalf("expected the permit's return then the p2 drop in v4, got %+v", got.RulesV4)
+	if len(got.RulesV4) != 3 {
+		t.Fatalf("expected permit return, p2 drop, and terminal default deny in v4, got %+v", got.RulesV4)
 	}
 	if r := got.RulesV4[0]; r.Verdict != JunosHostReturn || len(r.Src) != 1 || r.Src[0] != "10.0.1.50/32" {
 		t.Errorf("first v4 rule = %+v, want the permit's return for [10.0.1.50/32]", r)
 	}
 	if r := got.RulesV4[1]; r.Verdict != JunosHostDrop || len(r.Src) != 1 || r.Src[0] != "10.0.9.0/24" {
-		t.Errorf("deny rule = %+v, want a drop for [10.0.9.0/24]", r)
+		t.Errorf("second v4 rule = %+v, want a drop for [10.0.9.0/24]", r)
+	}
+	if r := got.RulesV4[2]; r.Verdict != JunosHostDrop || !r.SrcAny || !r.DstAny {
+		t.Errorf("third v4 rule = %+v, want the terminal default deny (#11065)", r)
 	}
 	if !proj.RenderedPolicyKeys[key] {
 		t.Errorf("deny p2 projected a real DROP rule but is NOT marked rendered — the #4168 suppression "+

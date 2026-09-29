@@ -427,9 +427,17 @@ type SessionValue struct {
 	// today's behaviour.
 	InstallTableDomain uint32
 	InstallTableCheck  uint32
-	// PolicyRuleID is the helper's stable admitting-rule identity. It crosses
-	// the cluster wire and resolves against the current policy on import.
-	// Unlike the positional counter index, it is safe across rule reordering.
+	// SourceNatICMP* (#11064) preserves the active packet's ICMP query identity
+	// for stateful source-NAT rule reconstruction on the peer. Sync-only; not
+	// part of the BPF/C conntrack ABI. Valid distinguishes an absent identity
+	// from the valid (type=0, code=0) pair.
+	SourceNatICMPValid bool
+	SourceNatICMPType  uint8
+	SourceNatICMPCode  uint8
+	// PolicyRuleID (#11070) is the helper's stable admitting-rule identity. It
+	// crosses the cluster wire and resolves against the current policy on
+	// import. Unlike the positional counter index, it is safe across rule
+	// reordering.
 	PolicyRuleID string `json:"-"`
 }
 
@@ -815,7 +823,11 @@ type SessionValueV6 struct {
 	// after TCPCloseClass on the v6 cluster payload).
 	InstallTableDomain uint32
 	InstallTableCheck  uint32
-	// PolicyRuleID is sync-only metadata; never part of the BPF/C ABI.
+	// SourceNatICMP* (#11064): v6 analogue of the v4 sync-only metadata above.
+	SourceNatICMPValid bool
+	SourceNatICMPType  uint8
+	SourceNatICMPCode  uint8
+	// PolicyRuleID (#11070) is sync-only metadata; never part of the BPF/C ABI.
 	PolicyRuleID string `json:"-"`
 }
 

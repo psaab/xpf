@@ -126,6 +126,10 @@ func (m *Manager) buildSessionSyncRequestV4(op string, key dataplane.SessionKey,
 		// a PBR-steered session with the table its steer installed.
 		req.InstallTableDomain = val.InstallTableDomain
 		req.InstallTableCheck = val.InstallTableCheck
+		// #11064: preserve typed source-NAT rule identity on the install leg.
+		req.SourceNatICMPValid = val.SourceNatICMPValid
+		req.SourceNatICMPType = val.SourceNatICMPType
+		req.SourceNatICMPCode = val.SourceNatICMPCode
 		if val.Flags&dataplane.SessFlagSNAT == 0 {
 			req.NATSrcIP = ""
 			req.NATSrcPort = 0
@@ -235,6 +239,10 @@ func (m *Manager) buildSessionSyncRequestV6(op string, key dataplane.SessionKeyV
 		// a PBR-steered session with the table its steer installed.
 		req.InstallTableDomain = val.InstallTableDomain
 		req.InstallTableCheck = val.InstallTableCheck
+		// #11064: preserve typed source-NAT rule identity on the install leg.
+		req.SourceNatICMPValid = val.SourceNatICMPValid
+		req.SourceNatICMPType = val.SourceNatICMPType
+		req.SourceNatICMPCode = val.SourceNatICMPCode
 		if val.Flags&dataplane.SessFlagSNAT == 0 {
 			req.NATSrcIP = ""
 			req.NATSrcPort = 0

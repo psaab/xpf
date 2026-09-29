@@ -107,6 +107,7 @@ fn test_close_delta(kind: crate::session::SessionDeltaKind) -> crate::session::S
                 rewrite_dst: None,
                 rewrite_src_port: Some(40000),
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },

@@ -180,8 +180,8 @@ func TestJunosHostDstScopedPermitRendersAReturn9504(t *testing.T) {
 		t.Fatalf("#9504: a destination-scoped permit renders as a return carrying its own "+
 			"daddr, so the program is representable: %+v", p)
 	}
-	if len(p.RulesV4) != 2 {
-		t.Fatalf("want the permit's return then the deny's drop in v4, got %+v", p.RulesV4)
+	if len(p.RulesV4) != 3 {
+		t.Fatalf("want the permit's return, deny's drop, and terminal default deny in v4, got %+v", p.RulesV4)
 	}
 	if r := p.RulesV4[0]; r.Verdict != JunosHostReturn || r.DstAny || len(r.Dst) != 1 {
 		t.Errorf("first v4 rule = %+v, want a return scoped to the permit's destination — "+
@@ -190,13 +190,40 @@ func TestJunosHostDstScopedPermitRendersAReturn9504(t *testing.T) {
 	if r := p.RulesV4[1]; r.Verdict != JunosHostDrop || !r.DstAny {
 		t.Errorf("second v4 rule = %+v, want the deny's drop for every destination", r)
 	}
-	// The deny is enforced; the permit is NEVER suppressed, because the half that
-	// would refuse what it does not match is enforced on no path (#9504).
+	if r := p.RulesV4[2]; r.Verdict != JunosHostDrop || !r.SrcAny || !r.DstAny {
+		t.Errorf("third v4 rule = %+v, want the terminal default deny (#11065)", r)
+	}
+	// The deny is enforced; the permit's direct-path remainder has a terminal
+	// deny too, but its userspace no-match lifeline still retains the warning.
 	if !proj.RenderedPolicyKeys[JunosHostZonePairPolicyKey("untrust", "blk")] {
 		t.Errorf("the deny renders a rule yet is not marked rendered: %+v", proj.RenderedPolicyKeys)
 	}
 	if proj.RenderedPolicyKeys[JunosHostZonePairPolicyKey("untrust", "ok")] {
-		t.Errorf("a permit must never be marked rendered: %+v", proj.RenderedPolicyKeys)
+		t.Errorf("a permit must not be marked rendered while its userspace no-match path remains: %+v", proj.RenderedPolicyKeys)
+	}
+}
+
+// TestJunosHostV4OnlyPermitAddsV6TerminalDrop11065 guards the sibling-family
+// default. A representable IPv4-only permit must not leave IPv6 packets on the
+// coarse host-inbound fallback just because its address match emits no v6 rule.
+func TestJunosHostV4OnlyPermitAddsV6TerminalDrop11065(t *testing.T) {
+	proj := jh4146DstProjection(t,
+		"set security policies from-zone untrust to-zone junos-host policy ok match source-address bad-host",
+		"set security policies from-zone untrust to-zone junos-host policy ok match destination-address any",
+		"set security policies from-zone untrust to-zone junos-host policy ok match application any",
+		"set security policies from-zone untrust to-zone junos-host policy ok then permit",
+	)
+	p := jh4146OneProgram(t, proj)
+	if !p.Representable {
+		t.Fatalf("IPv4-only permit should remain representable: %+v", p)
+	}
+	if len(p.RulesV4) != 2 || p.RulesV4[0].Verdict != JunosHostReturn ||
+		p.RulesV4[1].Verdict != JunosHostDrop || !p.RulesV4[1].SrcAny || !p.RulesV4[1].DstAny {
+		t.Fatalf("IPv4 rules = %+v, want the scoped permit return followed by terminal deny", p.RulesV4)
+	}
+	if len(p.RulesV6) != 1 || p.RulesV6[0].Verdict != JunosHostDrop ||
+		!p.RulesV6[0].SrcAny || !p.RulesV6[0].DstAny {
+		t.Fatalf("IPv6 rules = %+v, want terminal deny despite no emitted v6 permit", p.RulesV6)
 	}
 }
 

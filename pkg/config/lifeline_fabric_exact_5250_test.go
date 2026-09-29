@@ -1,45 +1,38 @@
-// #5250 (A3-b2 F3): the host-inbound LIFELINE fallback matched ANY interface
-// whose base name started with "fab", so an interface literally named
-// "fab-foo" / "fabric-uplink" was silently exempted from host-inbound
-// default-deny with no configured management or cluster role. The daemon only
-// ever creates fab0/fab1, and an operator-renamed fabric link already reaches
-// the lifeline set through HostInboundLifelineSet, so the prefix bought
-// nothing. Reachable in device-map mode (#1956), where a mapped NIC carries an
-// operator-chosen name.
+// #11068: a bare interface name does not establish a management or cluster
+// role. Only fxp0 is an unconditional host-inbound lifeline; em0 and fab<N>
+// names are exempt only when the chassis-cluster config assigns that role.
 //
-// FAIL-ON-REVERT: restore `strings.HasPrefix(base, "fab")` and the
-// non-canonical names below become lifelines again — the "want false"
-// assertions go RED.
+// FAIL-ON-REVERT: restore the implicit em0/fab<N> matcher and the unconfigured
+// names below become lifelines again, so their "want false" assertions go RED.
 package config
 
 import "testing"
 
-func TestLifelineFabricMatchIsExact_5250(t *testing.T) {
+func TestLifelineInterfacesRequireConfiguredRole11068(t *testing.T) {
 	def := HostInboundLifelineSet(nil)
 
-	// Canonical daemon-created fabric devices stay exempt (#3070/#3172/#3224
-	// behavior preserved), with and without a unit suffix.
-	for _, name := range []string{"fab0", "fab1", "fab0.0", "fab1.0", "fab10", "em0", "em0.0", "fxp0"} {
+	// fxp0 alone is an unconditional lifeline, with or without a unit suffix.
+	for _, name := range []string{"fxp0", "fxp0.0"} {
 		if !HostInboundLifelineInterface(name, def) {
-			t.Errorf("HostInboundLifelineInterface(%q) = false, want true (canonical lifeline)", name)
+			t.Errorf("HostInboundLifelineInterface(%q) = false, want true (fxp0 default lifeline)", name)
 		}
 	}
 
-	// Non-canonical "fab"-prefixed names are NOT lifelines by default: an
-	// unrelated interface must not gain a silent host-inbound deny bypass.
-	for _, name := range []string{"fab", "fab-foo", "fab-foo.0", "fabric0", "fabx0", "fabulous", "fab0x", "fab_1"} {
+	// Canonical-looking names do not establish a role; neither do other
+	// "fab"-prefixed names.
+	for _, name := range []string{"em0", "em0.0", "fab0", "fab0.0", "fab1", "fab1.0", "fab10",
+		"fab", "fab-foo", "fab-foo.0", "fabric0", "fabx0", "fabulous", "fab0x", "fab_1"} {
 		if HostInboundLifelineInterface(name, def) {
-			t.Errorf("HostInboundLifelineInterface(%q) = true, want false (prefix bypass must be gone)", name)
+			t.Errorf("HostInboundLifelineInterface(%q) = true, want false (no configured lifeline role)", name)
 		}
 	}
 
-	// A CONFIGURED fabric/control interface with a non-canonical name is still
-	// exempt — it comes from the chassis-cluster stanza, not from the prefix.
-	// This is the #3277 contract and must survive the narrowing.
+	// Configured names, including the canonical spellings, remain lifelines
+	// because the chassis-cluster stanza explicitly assigns those roles.
 	cfg := &Config{}
-	cfg.Chassis.Cluster = &ClusterConfig{ControlInterface: "hb0", FabricInterface: "fabx0", Fabric1Interface: "fab-foo"}
+	cfg.Chassis.Cluster = &ClusterConfig{ControlInterface: "em0", FabricInterface: "fab0", Fabric1Interface: "fab1"}
 	set := HostInboundLifelineSet(cfg)
-	for _, name := range []string{"hb0", "hb0.0", "fabx0", "fabx0.0", "fab-foo", "fab-foo.0"} {
+	for _, name := range []string{"em0", "em0.0", "fab0", "fab0.0", "fab1", "fab1.0"} {
 		if !HostInboundLifelineInterface(name, set) {
 			t.Errorf("configured lifeline %q not matched — narrowing the fallback must not strand a configured link", name)
 		}

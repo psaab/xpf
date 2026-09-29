@@ -148,10 +148,11 @@ func TestBuildZoneSnapshotsNilZoneDefaultDenies(t *testing.T) {
 // TestBuildZoneHostInboundViews verifies the per-zone enforcement view used by
 // the kernel-nftables primary path (#3070): every configured zone resolves its
 // firewall-local host addresses (including no-stanza zones, which default-deny
-// per #3405), and management/cluster-control lifeline interfaces (fxp0/em0/fab*)
-// are excluded from the address sets.
+// per #3405), and configured management/cluster-control lifeline interfaces are
+// excluded from the address sets.
 func TestBuildZoneHostInboundViews(t *testing.T) {
 	cfg := &config.Config{}
+	cfg.Chassis.Cluster = &config.ClusterConfig{ControlInterface: "em0"}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
 		"reth0": {Name: "reth0", Units: map[int]*config.InterfaceUnit{
 			50: {Number: 50, VlanID: 50, Addresses: []string{"172.16.50.8/24", "2001:db8:50::8/64"}},
@@ -301,6 +302,7 @@ func TestNoStanzaZoneDefaultDeniesBothSurfaces(t *testing.T) {
 // interface (em0) is still excluded.
 func TestBuildZoneHostInboundViewsIncludesVRRPVIP(t *testing.T) {
 	cfg := &config.Config{}
+	cfg.Chassis.Cluster = &config.ClusterConfig{ControlInterface: "em0"}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
 		"reth0": {Name: "reth0", Units: map[int]*config.InterfaceUnit{
 			50: {
@@ -317,8 +319,8 @@ func TestBuildZoneHostInboundViewsIncludesVRRPVIP(t *testing.T) {
 		"reth1": {Name: "reth1", Units: map[int]*config.InterfaceUnit{
 			0: {Number: 0, Addresses: []string{"10.0.61.1/24"}},
 		}},
-		// lifeline (cluster control plane) with a VRRP group — its VIP must NOT
-		// be scoped (denying on em0 could break HA).
+		// configured lifeline (cluster control plane) with a VRRP group — its VIP
+		// must NOT be scoped (denying on em0 could break HA).
 		"em0": {Name: "em0", Units: map[int]*config.InterfaceUnit{
 			0: {
 				Number:    0,
@@ -492,25 +494,24 @@ func liveZoneHostInboundAddrsForIface(t *testing.T, linuxName string) []string {
 }
 
 func TestHostInboundLifelineInterface(t *testing.T) {
-	// Standalone (no chassis-cluster stanza): only fxp0 is config-derived, but
-	// the em0/fab* backward-compatible defaults still match unconditionally.
+	// Only fxp0 is unconditional; bare em0/fab* names are ordinary interfaces.
 	def := hostInboundLifelineSet(nil)
-	for _, name := range []string{"fxp0", "fxp0.0", "em0", "em0.0", "fab0", "fab1", "fab1.0"} {
+	for _, name := range []string{"fxp0", "fxp0.0"} {
 		if !hostInboundLifelineInterface(name, def) {
 			t.Errorf("%q should be a lifeline interface", name)
 		}
 	}
-	for _, name := range []string{"reth0.50", "reth1", "ge-0/0/0.0", "gr-0/0/0.0", "fxp1", "fxp1.0"} {
+	for _, name := range []string{"em0", "em0.0", "fab0", "fab1", "fab1.0",
+		"reth0.50", "reth1", "ge-0/0/0.0", "gr-0/0/0.0", "fxp1", "fxp1.0"} {
 		if hostInboundLifelineInterface(name, def) {
-			t.Errorf("%q must NOT be a lifeline interface (no cluster config)", name)
+			t.Errorf("%q must NOT be a lifeline interface without a configured role", name)
 		}
 	}
 }
 
 // TestHostInboundLifelineFromControlInterface is the #3277 fail-on-revert proof
-// at the predicate level: a configured chassis-cluster `control-interface fxp1`
-// (an operator-renamed control link) is treated as a lifeline. Reverting to the
-// hardcoded fxp0/em0/fab* set leaves fxp1 NOT a lifeline -> this goes RED.
+// at the predicate level: configured control/fabric links remain lifelines,
+// while bare em0/fab* spellings do not establish a role.
 func TestHostInboundLifelineFromControlInterface(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Chassis.Cluster = &config.ClusterConfig{
@@ -518,9 +519,14 @@ func TestHostInboundLifelineFromControlInterface(t *testing.T) {
 		FabricInterface:  "xe-0/0/9",
 	}
 	set := hostInboundLifelineSet(cfg)
-	for _, name := range []string{"fxp1", "fxp1.0", "xe-0/0/9", "xe-0/0/9.0", "fxp0", "em0", "fab0"} {
+	for _, name := range []string{"fxp1", "fxp1.0", "xe-0/0/9", "xe-0/0/9.0", "fxp0"} {
 		if !hostInboundLifelineInterface(name, set) {
-			t.Errorf("%q should be a lifeline with control-interface fxp1 configured", name)
+			t.Errorf("%q should be a lifeline with configured roles", name)
+		}
+	}
+	for _, name := range []string{"em0", "fab0"} {
+		if hostInboundLifelineInterface(name, set) {
+			t.Errorf("%q must not be a lifeline without a configured role", name)
 		}
 	}
 	if hostInboundLifelineInterface("reth0.50", set) {

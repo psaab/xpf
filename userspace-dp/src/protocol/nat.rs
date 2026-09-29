@@ -16,12 +16,10 @@ pub(crate) struct NatPortRangeWire {
 
 /// #3429: one resolved source-NAT `match application` term — an L4 protocol
 /// (IANA number; 256 = any, 0xFFFF = never/fail-closed sentinel) and optional
-/// destination-port ranges. `src_ports` (#3491) carries the application's
-/// `source-port` constraint; empty = source-port-unconstrained (match any source
-/// port). Additive wire field (#1961 skew-safe): an older control plane omits it
-/// and `#[serde(default)]` leaves it empty, so version skew degrades to the
-/// pre-#3491 source-port over-match rather than failing to decode. Mirrors the
-/// Go NatAppTermWire.
+/// destination-port, source-port, and ICMP type/code constraints (#11064).
+/// Empty ranges / `None` ICMP fields are unconstrained. Additive serde defaults
+/// preserve compatibility with older control planes. Mirrors the Go
+/// NatAppTermWire.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct NatAppTermWire {
     #[serde(default)]
@@ -30,6 +28,10 @@ pub(crate) struct NatAppTermWire {
     pub ports: Vec<NatPortRangeWire>,
     #[serde(default)]
     pub src_ports: Vec<NatPortRangeWire>,
+    #[serde(default)]
+    pub icmp_type: Option<u8>,
+    #[serde(default)]
+    pub icmp_code: Option<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

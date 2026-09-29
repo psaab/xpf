@@ -366,7 +366,7 @@ func (r *addressBookExpansionResolver) expand(name string, visiting map[string]b
 	if r.book != nil {
 		if addr, ok := r.book.Addresses[name]; ok {
 			if addr != nil {
-				r.appendValue(&out, addr.Value)
+				r.appendValue(&out, addr.UsableValue())
 			}
 		} else if set, ok := r.book.AddressSets[name]; ok {
 			for _, member := range set.Addresses {
@@ -447,8 +447,8 @@ func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]st
 		return out
 	}
 	if addr, ok := ab.Addresses[name]; ok {
-		if addr != nil {
-			out = append(out, addr.Value)
+		if value := addr.UsableValue(); value != "" {
+			out = append(out, value)
 		}
 		return out
 	}

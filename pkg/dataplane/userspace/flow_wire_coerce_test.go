@@ -61,6 +61,26 @@ func TestBuildFlowSnapshotCoercesOutOfRange_1977(t *testing.T) {
 	}
 }
 
+func TestBuildFlowSnapshotCarriesUnstampedFabricCompatibility(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Flow.AllowUnstampedFabricIngress = true
+	snap := buildFlowSnapshot(cfg)
+	if !snap.AllowUnstampedFabricIngress {
+		t.Fatal("flow snapshot dropped allow-unstamped-fabric-ingress")
+	}
+	wire, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal flow snapshot: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(wire, &fields); err != nil {
+		t.Fatalf("decode flow snapshot JSON: %v", err)
+	}
+	if fields["allow_unstamped_fabric_ingress"] != true {
+		t.Fatalf("flow snapshot wire field = %v, want true", fields["allow_unstamped_fabric_ingress"])
+	}
+}
+
 func TestBuildFlowExportSnapshotCoercesOutOfRange_1977(t *testing.T) {
 	mk := func(port int) *config.Config {
 		cfg := &config.Config{}

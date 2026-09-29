@@ -44,12 +44,73 @@ pub(super) type FastMap<K, V> = FxHashMap<K, V>;
 pub(super) type FastSet<T> = FxHashSet<T>;
 pub(super) type OwnerRgSessionIndex = FastMap<i32, FastSet<SessionKey>>;
 
+/// Bounded history of reverse aliases. Domain-neutral owners let an unstamped
+/// fabric reply reject a tuple that exists in multiple routing instances.
+/// Once the bound is reached, every such exception fails closed.
+pub(super) struct SharedNatAmbiguityIndex {
+    aliases: FastMap<SessionKey, Option<SessionKey>>,
+    saturated: bool,
+}
+
+impl Default for SharedNatAmbiguityIndex {
+    fn default() -> Self {
+        Self {
+            aliases: FastMap::default(),
+            saturated: false,
+        }
+    }
+}
+
+impl SharedNatAmbiguityIndex {
+    const MAX_KEYS: usize = 16_384;
+
+    fn remember(&mut self, key: SessionKey, owner: Option<SessionKey>) {
+        if self.saturated {
+            return;
+        }
+        if let Some(existing) = self.aliases.get(&key) {
+            if existing != &owner {
+                self.aliases.insert(key, None);
+            }
+            return;
+        }
+        if self.aliases.len() == Self::MAX_KEYS {
+            self.saturated = true;
+        } else {
+            self.aliases.insert(key, owner);
+        }
+    }
+
+    pub(super) fn mark(&mut self, key: SessionKey) {
+        self.remember(key, None);
+    }
+
+    pub(super) fn observe(&mut self, key: SessionKey, owner: SessionKey) {
+        self.remember(key, Some(owner));
+    }
+
+    pub(super) fn contains(&self, key: &SessionKey) -> bool {
+        self.saturated || matches!(self.aliases.get(key), Some(None))
+    }
+
+    pub(super) fn is_unique_for(&self, key: &SessionKey, owner: &SessionKey) -> bool {
+        !self.saturated
+            && matches!(self.aliases.get(key), Some(Some(candidate)) if candidate == owner)
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.aliases.clear();
+        self.saturated = false;
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct SharedSessionOwnerRgIndexes {
     pub(super) sessions: Arc<Mutex<OwnerRgSessionIndex>>,
     pub(super) nat_sessions: Arc<Mutex<OwnerRgSessionIndex>>,
     pub(super) forward_wire_sessions: Arc<Mutex<OwnerRgSessionIndex>>,
     pub(super) reverse_prewarm_sessions: Arc<Mutex<OwnerRgSessionIndex>>,
+    pub(super) nat_ambiguities: Arc<Mutex<SharedNatAmbiguityIndex>>,
 }
 
 impl Default for SharedSessionOwnerRgIndexes {
@@ -59,9 +120,11 @@ impl Default for SharedSessionOwnerRgIndexes {
             nat_sessions: Arc::new(Mutex::new(FastMap::default())),
             forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
             reverse_prewarm_sessions: Arc::new(Mutex::new(FastMap::default())),
+            nat_ambiguities: Arc::new(Mutex::new(SharedNatAmbiguityIndex::default())),
         }
     }
 }
+
 
 impl SharedSessionOwnerRgIndexes {
     /// #6653: RECOVERING locks, for the same reason as the session maps this
@@ -74,6 +137,7 @@ impl SharedSessionOwnerRgIndexes {
         crate::afxdp::shared_ops::lock_shared_recover(&self.nat_sessions).clear();
         crate::afxdp::shared_ops::lock_shared_recover(&self.forward_wire_sessions).clear();
         crate::afxdp::shared_ops::lock_shared_recover(&self.reverse_prewarm_sessions).clear();
+        crate::afxdp::shared_ops::lock_shared_recover(&self.nat_ambiguities).clear();
     }
 }
 
@@ -99,6 +163,12 @@ pub(super) struct PendingNeighPacket {
 // Compile-time size guard: pending-neighbor retry carries the session key so
 // runtime TX-selection policers still meter packets after ARP/NDP resolution.
 //
+// 288 -> 296 (#11064). `SessionDecision` gained the typed source-NAT ICMP
+// fingerprint; this struct embeds one, and alignment rounds the 4-byte
+// decision growth to 8 bytes. At the `MAX_PENDING_NEIGH` cap of ~4096, that is
+// ~32 KB more for the bounded queue. The metadata must stay with the decision:
+// retries retain the translated mapping's protocol application identity.
+//
 // 280 -> 288 (#9752). `SessionDecision` gained the installing-table identity
 // (`install_table_domain` + `install_table_check`), and this struct embeds
 // one, so it grew by 8 bytes (~32 KB more at the `MAX_PENDING_NEIGH` cap of
@@ -121,13 +191,12 @@ pub(super) struct PendingNeighPacket {
 // ~4096 that is ~32 KB more for the bounded queue — accepted deliberately
 // rather than bumped silently, because the discriminator is part of session
 // IDENTITY and this queue carries the key precisely so post-resolution policing
-// meters the right session. Dropping it here to save the bytes would mean a
-// retried packet metered against a DIFFERENT tunnel's session than the one it
-// belongs to.
-// #10917: the fabric stamp uses the existing tail padding, so this packet
-// remains 288 B and the bounded queue's maximum memory does not grow.
+// meters the right tunnel's session. Dropping it here to save the bytes would
+// mean a retried packet metered against a DIFFERENT tunnel's session than the
+// one it belongs to.
+// #10917: the fabric stamp uses the existing tail padding, so added no size.
 const _: () = assert!(
-    core::mem::size_of::<PendingNeighPacket>() == 288,
+    core::mem::size_of::<PendingNeighPacket>() == 296,
     "PendingNeighPacket size changed — update afxdp.rs MAX_PENDING_NEIGH commentary",
 );
 

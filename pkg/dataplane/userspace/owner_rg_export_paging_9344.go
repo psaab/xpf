@@ -16,10 +16,10 @@ import (
 // on every attempt, on a busy cluster.
 //
 // Why "raise the cap" is not the fix. A worst-case `SessionDeltaInfo` measures
-// 1605 bytes of JSON in the current wire schema (every string field a full-width
+// 1688 bytes of JSON in the current wire schema (every string field a full-width
 // IPv6 literal, every numeric at its maximum), and the theoretical maximum
-// answer is `workers * DEFAULT_MAX_SESSIONS(131072) * 1605`. That is roughly
-// 201 MiB per worker before response framing, so even one worker can exceed the
+// answer is `workers * DEFAULT_MAX_SESSIONS(131072) * 1688`. That is roughly
+// 211 MiB per worker before response framing, so even one worker can exceed the
 // 64 MiB response cap; sizing from a helper-supplied worker count would still
 // make the allocation bound untrusted.
 //
@@ -44,7 +44,7 @@ const (
 	// worst-case JSON sizing (the test reflects the current wire schema). The
 	// daemon's snapshot API still receives one complete slice, so cap that
 	// retained slice rather than retaining an unbounded number of pages.
-	ownerRGExportEstimatedDeltaBytes = 1800
+	ownerRGExportEstimatedDeltaBytes = 1856 // #11064 ICMP keys + #11070 ingress/rule-ID keys; reflected worst-case 1809 (TestOwnerRGExportPageFitsTheResponseCap9344)
 	ownerRGExportMaxAccumulatorBytes = 256 * 1024 * 1024
 	// maxOwnerRGExportDataPages is the structural data-page bound. Each
 	// kick-visible session can produce one open plus one terminal tombstone

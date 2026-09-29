@@ -526,16 +526,20 @@ func resolveStaticNATThenPrefixName(ab *AddressBook, name string) (string, bool)
 	if ab == nil || name == "" {
 		return "", false
 	}
-	if a, ok := ab.Addresses[name]; ok && a != nil && a.Value != "" {
-		return a.Value, true
+	if a, ok := ab.Addresses[name]; ok && a != nil {
+		if value := a.UsableValue(); value != "" {
+			return value, true
+		}
 	}
 	if _, ok := ab.AddressSets[name]; ok {
 		members, err := ExpandAddressSet(name, ab)
 		if err != nil || len(members) != 1 {
 			return "", false
 		}
-		if a, ok := ab.Addresses[members[0]]; ok && a != nil && a.Value != "" {
-			return a.Value, true
+		if a, ok := ab.Addresses[members[0]]; ok && a != nil {
+			if value := a.UsableValue(); value != "" {
+				return value, true
+			}
 		}
 	}
 	return "", false
