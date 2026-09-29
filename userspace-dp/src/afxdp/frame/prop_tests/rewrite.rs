@@ -37,6 +37,7 @@ fn undo_of(nat: NatDecision, pkt: &ValidPacket) -> NatDecision {
         rewrite_dst: nat.rewrite_dst.map(|_| pkt.dst_ip),
         rewrite_src_port: nat.rewrite_src_port.map(|_| pkt.src_port),
         rewrite_dst_port: nat.rewrite_dst_port.map(|_| pkt.dst_port),
+        source_nat_icmp: None,
         nat64: false,
         nptv6: false,
     }

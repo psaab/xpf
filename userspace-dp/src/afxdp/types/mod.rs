@@ -163,6 +163,12 @@ pub(super) struct PendingNeighPacket {
 // Compile-time size guard: pending-neighbor retry carries the session key so
 // runtime TX-selection policers still meter packets after ARP/NDP resolution.
 //
+// 288 -> 296 (#11064). `SessionDecision` gained the typed source-NAT ICMP
+// fingerprint; this struct embeds one, and alignment rounds the 4-byte
+// decision growth to 8 bytes. At the `MAX_PENDING_NEIGH` cap of ~4096, that is
+// ~32 KB more for the bounded queue. The metadata must stay with the decision:
+// retries retain the translated mapping's protocol application identity.
+//
 // 280 -> 288 (#9752). `SessionDecision` gained the installing-table identity
 // (`install_table_domain` + `install_table_check`), and this struct embeds
 // one, so it grew by 8 bytes (~32 KB more at the `MAX_PENDING_NEIGH` cap of
@@ -185,13 +191,12 @@ pub(super) struct PendingNeighPacket {
 // ~4096 that is ~32 KB more for the bounded queue — accepted deliberately
 // rather than bumped silently, because the discriminator is part of session
 // IDENTITY and this queue carries the key precisely so post-resolution policing
-// meters the right session. Dropping it here to save the bytes would mean a
-// retried packet metered against a DIFFERENT tunnel's session than the one it
-// belongs to.
-// #10917: the fabric stamp uses the existing tail padding, so this packet
-// remains 288 B and the bounded queue's maximum memory does not grow.
+// meters the right tunnel's session. Dropping it here to save the bytes would
+// mean a retried packet metered against a DIFFERENT tunnel's session than the
+// one it belongs to.
+// #10917: the fabric stamp uses the existing tail padding, so added no size.
 const _: () = assert!(
-    core::mem::size_of::<PendingNeighPacket>() == 288,
+    core::mem::size_of::<PendingNeighPacket>() == 296,
     "PendingNeighPacket size changed — update afxdp.rs MAX_PENDING_NEIGH commentary",
 );
 

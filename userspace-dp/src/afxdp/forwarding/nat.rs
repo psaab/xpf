@@ -69,8 +69,13 @@ pub(in crate::afxdp) fn match_source_nat_for_flow(
     flow: &SessionFlow,
 ) -> Option<NatDecision> {
     let egress = forwarding.egress.get(&egress_ifindex)?;
-    let scope = nat_scope_ctx_for_flow(forwarding, ingress_ifindex, ingress_vlan_id,
-        egress_ifindex, flow.forward_key.routing_domain);
+    let scope = nat_scope_ctx_for_flow(
+        forwarding,
+        ingress_ifindex,
+        ingress_vlan_id,
+        egress_ifindex,
+        flow.forward_key.routing_domain,
+    );
     match_source_nat(
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
@@ -106,6 +111,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result(
         flow,
         0,
         false,
+        None,
         // #6522: no worker context in this `#[cfg_attr(not(test),
         // allow(dead_code))]` helper — keep the untracked contract.
         crate::nat::NatHolder::Untracked,
@@ -125,6 +131,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result_at(
     now_ns: u64,
     // #1852: gate pool-mode SNAT allocation for non-first fragments.
     non_first_fragment: bool,
+    packet_icmp: Option<(u8, u8)>,
     // #6522: the worker whose packet path is allocating, recorded as the
     // allocation's own holder so a sibling worker's replica of the resulting
     // session cannot free a `(pool_addr, port)` this worker still forwards
@@ -137,9 +144,14 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result_at(
         return SourceNatLookup::NoMatch;
     };
     // #3096: resolve the interface / routing-instance scope for this flow.
-    let scope = nat_scope_ctx_for_flow(forwarding, ingress_ifindex, ingress_vlan_id,
-        egress_ifindex, flow.forward_key.routing_domain);
-    crate::nat::match_source_nat_result_for_tuple(
+    let scope = nat_scope_ctx_for_flow(
+        forwarding,
+        ingress_ifindex,
+        ingress_vlan_id,
+        egress_ifindex,
+        flow.forward_key.routing_domain,
+    );
+    crate::nat::match_source_nat_result_for_tuple_with_icmp(
         // #6751: interface-mode SNAT mints its translated identity here.
         &forwarding.iface_nat_allocators,
         &forwarding.source_nat_rules,
@@ -170,6 +182,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result_at(
             flow.forward_key.protocol,
             crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
         ),
+        packet_icmp,
         holder,
         matched_counter,
     )

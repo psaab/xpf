@@ -102,14 +102,7 @@ fn test_close_delta(kind: crate::session::SessionDeltaKind) -> crate::session::S
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_dst: None,
-        rewrite_src_port: Some(40000),
-        rewrite_dst_port: None,
-        nat64: false,
-        nptv6: false,
-    }, install_table_domain: 0, install_table_check: 0 },
+    }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))), rewrite_dst: None, rewrite_src_port: Some(40000), rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
     metadata: SessionMetadata {
         ingress_zone: 1,
         egress_zone: 2,

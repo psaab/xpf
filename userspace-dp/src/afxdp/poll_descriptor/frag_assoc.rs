@@ -4,9 +4,9 @@
 // The four association helpers keep their #[inline]; flowless_requires_nat_translation
 // keeps its deliberate #[cold] #[inline(never)].
 
-use super::*;
 use super::nat_exception::source_nat_would_translate_flowless;
 use super::prerouting_scope::prerouting_ingress_scope;
+use super::*;
 
 use crate::nat64::Nat64ReverseInfo;
 /// #5798: resolve the INGRESS SECURITY AUTHORITY for a fragment, i.e. the
@@ -33,9 +33,8 @@ pub(in crate::afxdp) fn frag_ingress_authority(
     ingress_zone_override: Option<u16>,
 ) -> crate::fragment_assoc::FragAuthority {
     let physical = meta.ingress_ifindex as i32;
-    let logical =
-        resolve_ingress_logical_ifindex(forwarding, physical, meta.ingress_vlan_id)
-            .unwrap_or(physical);
+    let logical = resolve_ingress_logical_ifindex(forwarding, physical, meta.ingress_vlan_id)
+        .unwrap_or(physical);
     // Zone precedence mirrors prerouting_ingress_scope: a fabric-encoded
     // override wins, else the LOGICAL unit's configured zone (#5802). An
     // unzoned ingress resolves to 0, which is itself a distinct authority —
@@ -828,6 +827,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         flow,
         now_ns,
         true,
+        None,
         worker_id,
         &mut counter,
     ) {
@@ -864,4 +864,3 @@ pub(super) fn session_gated_reverse_fragment_requires_nat_translation(
         now_ns,
     )
 }
-

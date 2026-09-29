@@ -5652,6 +5652,7 @@ fn synthesized_synced_reverse_entry_inherits_nat64_reverse_4565() {
             rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))),
             rewrite_src_port: Some(40000),
             rewrite_dst_port: None,
+            source_nat_icmp: None,
             nat64: true,
             nptv6: false,
         }, install_table_domain: 0, install_table_check: 0 },
@@ -13525,9 +13526,9 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     let sync: Vec<_> = update.iter().filter(|f| f.as_bytes()[4] == 3 /* MSG_SESSION_UPDATE; the #9412 golden lockstep pins this byte in both languages */).collect();
     assert_eq!(sync.len(), 1, "#9412: the Update must be queued to the peer exactly once as MSG_SESSION_UPDATE");
     assert_eq!(
-        sync[0].as_bytes()[sync[0].as_bytes().len() - 9],
+        sync[0].as_bytes()[sync[0].as_bytes().len() - 12], // #11064: +3 source-NAT ICMP identity behind the #9752 tail
         2,
-        "#9412: the queued Update must carry its close class 8 bytes from the end (#9752 tail follows)"
+        "#9412/#11064: the queued Update must carry its close class 11 bytes from the end (#9752 tail + 3-byte source-NAT ICMP identity follow)"
     );
 }
 

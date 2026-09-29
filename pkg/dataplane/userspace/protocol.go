@@ -356,9 +356,11 @@ const (
 	// helper ignores them, which is benign today, but the shape moved and
 	// the version must agree with it so a future helper-side consumer can
 	// never silently misread a mixed pairing.
-	// v35 -> v36 (#11061): `allow_unstamped_fabric_ingress` restores legacy
-	// routing only when explicitly enabled on RI nodes. A v35 helper would ignore
-	// the security setting and silently use MAIN; exact equality fences it.
+	// v35 -> v36 (#11061 + #11064): `allow_unstamped_fabric_ingress` restores
+	// legacy routing only when explicitly enabled on RI nodes, and source-NAT
+	// application terms carry ICMP type/code. A v35 helper would ignore both
+	// the security setting (silently using MAIN) and the nested fields
+	// (widening the typed match); exact equality fences the mixed version.
 	ProtocolVersion = 36
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version

@@ -825,11 +825,10 @@ var builderTierAxisExemptions6812 = mergeAxisExemptions6812(
 		"Snapshot.FromZone", "Snapshot.FromInterface",
 	),
 	fixtureConstantAxes6812(
-		"the fixture gives every rule exactly one match prefix and no destination, "+
-			"port or application constraint, so these list shapes never move. `.all` is "+
-			"the round-11 TOTAL column over a list's contents — constant here because the "+
-			"contents are constant — and `.nil` distinguishes an unset list from an empty "+
-			"one, which this fixture also never varies.",
+		"the fixture gives every rule one source prefix, no destination address or "+
+			"destination-port constraint, and exactly one application term. These list "+
+			"shapes therefore stay constant; `.all` is the round-11 TOTAL column over a "+
+			"list's contents and `.nil` distinguishes an unset list from an empty one.",
 		"Snapshot.SourceAddresses.len", "Snapshot.SourceAddresses.nil",
 		"Snapshot.DestinationAddresses.len", "Snapshot.DestinationAddresses.nil",
 		"Snapshot.DestinationAddresses.all", "Snapshot.DestinationAddresses[0]",
@@ -837,17 +836,12 @@ var builderTierAxisExemptions6812 = mergeAxisExemptions6812(
 		"Snapshot.MatchDestinationPorts.len", "Snapshot.MatchDestinationPorts.nil",
 		"Snapshot.MatchDestinationPorts.all",
 		"Snapshot.MatchApplications.len", "Snapshot.MatchApplications.nil",
-		"Snapshot.MatchApplications.all",
 	),
 	fixtureConstantAxes6812(
-		"round-11 SCHEMA columns: the fixture leaves these lists EMPTY in every slot, so "+
-			"the collector walks the element TYPE with absent keys rather than skipping "+
-			"it. That is the point — a field added to NatAppTermWire or NatPortRangeWire "+
-			"produces a new unregistered column here even though no fixture rule carries "+
-			"an application or port term. The columns are constant because the lists are "+
-			"empty, and a comparator keying on a populated term is unguarded.",
+		"the fixture gives each application term no destination or source port ranges. "+
+			"Those wire lists and the absent MatchDestinationPorts element remain empty; "+
+			"protocol and ICMP type/code fields vary across the real app terms.",
 		"Snapshot.MatchDestinationPorts[0].Low", "Snapshot.MatchDestinationPorts[0].High",
-		"Snapshot.MatchApplications[0].Protocol",
 		"Snapshot.MatchApplications[0].Ports.len", "Snapshot.MatchApplications[0].Ports.nil",
 		"Snapshot.MatchApplications[0].Ports.all",
 		"Snapshot.MatchApplications[0].Ports[0].Low", "Snapshot.MatchApplications[0].Ports[0].High",
@@ -936,11 +930,9 @@ var builderRuleSetAxisExemptions6812 = mergeAxisExemptions6812(
 		"Snapshot.ToInterface", "Snapshot.FromRoutingInstance", "Snapshot.ToRoutingInstance",
 	),
 	fixtureConstantAxes6812(
-		"same list-shape and modifier gaps as the per-tier table, one level in — "+
-			"including the round-11 `.nil`, `.all` and empty-list SCHEMA columns, which "+
-			"exist here for the same reason: a field added to NatAppTermWire or "+
-			"NatPortRangeWire must produce a column even though this fixture carries no "+
-			"application or port term.",
+		"same list-shape and modifier gaps as the per-tier table, one level in. "+
+			"Each rule has one application term, while destination/source port lists "+
+			"remain empty; protocol and ICMP type/code values vary within the block.",
 		"Snapshot.SourceAddresses.len", "Snapshot.SourceAddresses.nil",
 		"Snapshot.DestinationAddresses.len", "Snapshot.DestinationAddresses.nil",
 		"Snapshot.DestinationAddresses.all", "Snapshot.DestinationAddresses[0]",
@@ -948,7 +940,6 @@ var builderRuleSetAxisExemptions6812 = mergeAxisExemptions6812(
 		"Snapshot.MatchDestinationPorts.all",
 		"Snapshot.MatchDestinationPorts[0].Low", "Snapshot.MatchDestinationPorts[0].High",
 		"Snapshot.MatchApplications.len", "Snapshot.MatchApplications.nil",
-		"Snapshot.MatchApplications.all", "Snapshot.MatchApplications[0].Protocol",
 		"Snapshot.MatchApplications[0].Ports.len", "Snapshot.MatchApplications[0].Ports.nil",
 		"Snapshot.MatchApplications[0].Ports.all",
 		"Snapshot.MatchApplications[0].Ports[0].Low", "Snapshot.MatchApplications[0].Ports[0].High",

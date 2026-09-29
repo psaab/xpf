@@ -1326,14 +1326,7 @@ mod tests {
         // RED-on-revert: pre-only checking forwards both (downstream reassembly).
         let pool = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
         let ext = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
-        let nat = NatDecision {
-            rewrite_src: Some(pool),
-            rewrite_dst: None,
-            rewrite_src_port: None,
-            rewrite_dst_port: None,
-            nat64: false,
-            nptv6: false,
-        };
+        let nat = NatDecision { rewrite_src: Some(pool), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false };
         let mut a = v4_key();
         a.src = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100));
         a.dst = ext;
@@ -1378,14 +1371,7 @@ mod tests {
         // translated addrs: distinct pre-keys, one post-key, overlapping post-ranges drop.
         let v4src = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 50));
         let v4dst = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
-        let nat = NatDecision {
-            rewrite_src: Some(v4src),
-            rewrite_dst: Some(v4dst),
-            rewrite_src_port: None,
-            rewrite_dst_port: None,
-            nat64: true,
-            nptv6: false,
-        };
+        let nat = NatDecision { rewrite_src: Some(v4src), rewrite_dst: Some(v4dst), rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: true, nptv6: false };
         let mk = |ident: u32| OverlapKey {
             addr_family: libc::AF_INET6 as u8,
             src: IpAddr::V6(Ipv6Addr::LOCALHOST),
@@ -1427,14 +1413,7 @@ mod tests {
         let dst: Ipv6Addr = "64:ff9b::808:808".parse().unwrap();
         let pool_v4 = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 50));
         let dst_v4 = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
-        let nat = NatDecision {
-            rewrite_src: Some(pool_v4),
-            rewrite_dst: Some(dst_v4),
-            rewrite_src_port: None,
-            rewrite_dst_port: None,
-            nat64: true,
-            nptv6: false,
-        };
+        let nat = NatDecision { rewrite_src: Some(pool_v4), rewrite_dst: Some(dst_v4), rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: true, nptv6: false };
         let mut tcp_segment = [0u8; 72];
         tcp_segment[0..2].copy_from_slice(&12345u16.to_be_bytes());
         tcp_segment[2..4].copy_from_slice(&443u16.to_be_bytes());

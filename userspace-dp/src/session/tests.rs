@@ -3652,14 +3652,7 @@ fn dnat_plus_snat_ports_in_reverse_key() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let nat = NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
-        rewrite_src_port: None,
-        rewrite_dst_port: Some(8080),
-        nat64: false,
-        nptv6: false,
-    };
+    let nat = NatDecision { rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))), rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))), rewrite_src_port: None, rewrite_dst_port: Some(8080), source_nat_icmp: None, nat64: false, nptv6: false };
     // Reply: internal:8080 -> egress:54321
     let expected_reply = SessionKey {
         addr_family: 2,
@@ -9642,27 +9635,26 @@ fn counters_with_replica_flag_separates_not_held_from_held_and_idle_7919() {
     );
 }
 
-/// #9752: the installing-table identity costs exactly 8 bytes on the
-/// decision (two `u32`, no padding surprises) at known offsets, and the
-/// decision stays `Copy` (no heap, no atomics on the per-packet copy).
-/// A layout change fails here first, with the numbers, instead of as a
-/// mysterious `PendingNeighPacket` size-assert message two modules away.
+/// #11064: `NatDecision` carries a 4-byte aligned source-NAT ICMP
+/// `(type, code)` fingerprint (44 -> 48 bytes). This layout guard keeps
+/// `SessionDecision` `Copy` without surprises and pins the install-table
+/// identity after the expanded NAT decision.
 #[test]
-fn session_decision_table_identity_layout_9752() {
+fn session_decision_typed_snat_layout_11064() {
     fn assert_copy<T: Copy>() {}
     assert_copy::<crate::session::SessionDecision>();
     assert_eq!(
         std::mem::size_of::<crate::session::SessionDecision>(),
-        100,
-        "SessionDecision = 48 (resolution) + 44 (nat) + 8 (table identity)"
+        104,
+        "SessionDecision = 48 (resolution) + 48 (nat) + 8 (table identity)"
     );
     assert_eq!(
         core::mem::offset_of!(crate::session::SessionDecision, install_table_domain),
-        92
+        96
     );
     assert_eq!(
         core::mem::offset_of!(crate::session::SessionDecision, install_table_check),
-        96
+        100
     );
 }
 

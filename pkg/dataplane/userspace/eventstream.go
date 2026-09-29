@@ -1885,6 +1885,13 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 		d.InstallTableCheck = binary.LittleEndian.Uint32(payload[off+4 : off+8])
 		off += 8
 	}
+	// #11064: trailing source-NAT ICMP query identity (valid, type, code).
+	// Length-gated for peers that predate typed allocator reconstruction.
+	if off+3 <= len(payload) {
+		d.SourceNatICMPValid = payload[off] != 0
+		d.SourceNatICMPType = payload[off+1]
+		d.SourceNatICMPCode = payload[off+2]
+	}
 
 	return d, true
 }

@@ -6,6 +6,7 @@
 #![allow(unused_imports)]
 
 use super::test_fixtures::*;
+use super::tests_support::*;
 use super::worker::WorkerTxPipeline;
 use super::*;
 use crate::test_zone_ids::*;
@@ -19,7 +20,6 @@ use crate::{
     SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
 use crate::{NatAppTermWire, NatPortRangeWire};
-use super::tests_support::*;
 
 #[test]
 fn non_first_fragment_v4_not_dropped_by_port_matching_output_filter() {
@@ -77,7 +77,6 @@ fn non_first_fragment_v4_not_dropped_by_port_matching_output_filter() {
         "fragment must not carry payload-derived expected ports"
     );
 }
-
 
 #[test]
 fn control_icmp_v4_installs_no_synthesized_tx_flow_key() {
@@ -160,7 +159,11 @@ fn slack_tcp_v4_installs_no_synthesized_tx_flow_key_9894() {
     // forward_request arm synthesizes Some((33333, 443)) -> the filter drops
     // -> expect RED; reverting only the authoritative_forward_ports gate
     // leaves expected_ports Some -> assert RED.
-    let mut frame = eth_ipv4_frag_frame(0x0000, &[0x82, 0x35, 0x01, 0xbb], crate::afxdp::tests_support::TEST_LAN_MAC);
+    let mut frame = eth_ipv4_frag_frame(
+        0x0000,
+        &[0x82, 0x35, 0x01, 0xbb],
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     frame[16] = 0x00;
     frame[17] = 20; // total_len=20: the 4 port bytes are slack, not datagram
     assert_eq!(&frame[34..38], &[0x82, 0x35, 0x01, 0xbb]);
@@ -221,7 +224,6 @@ fn slack_tcp_v4_installs_no_synthesized_tx_flow_key_9894() {
     );
 }
 
-
 #[test]
 fn flowless_non_fragmented_tcp_still_hits_port_matching_output_filter() {
     // Same meta (dst port 443) but a FIRST/atomic fragment (offset 0) — a
@@ -277,7 +279,6 @@ fn flowless_non_fragmented_tcp_still_hits_port_matching_output_filter() {
     );
 }
 
-
 #[test]
 fn fabric_queue_hash_non_first_fragment_is_port_independent_3tuple() {
     // Two non-first fragments of one datagram differ only in payload bytes
@@ -330,7 +331,6 @@ fn fabric_queue_hash_non_first_fragment_is_port_independent_3tuple() {
 // the gate flips the deny / input-filter / PBR cases from drop back to forward,
 // turning the asserts RED.
 
-
 #[test]
 fn flowless_non_first_fragment_transit_dropped_by_deny_all_3291() {
     // lan->wan is denied (default-deny; only dmz->wan permitted). A non-first
@@ -365,7 +365,6 @@ fn flowless_non_first_fragment_transit_dropped_by_deny_all_3291() {
         "#3291: the fragment must NOT forward under deny-all (RED on revert)"
     );
 }
-
 
 #[test]
 fn flowless_non_first_fragment_transit_permitted_by_any_policy_3291() {
@@ -412,7 +411,6 @@ fn flowless_non_first_fragment_transit_permitted_by_any_policy_3291() {
     );
 }
 
-
 /// eth(14) + IPv4(20, proto=UDP) + UDP(8). `frag_off` carries the IPv4
 /// flags+offset word (0x2000 => MF, offset 0 == first fragment; 0x0001 =>
 /// offset 1 == non-first). `id` is the 16-bit IPv4 Identification shared by
@@ -420,9 +418,7 @@ fn flowless_non_first_fragment_transit_permitted_by_any_policy_3291() {
 /// (wan), matching `frag_transit_wan_neighbor`.
 fn udp_frag_frame_5689(frag_off: u16, id: u16) -> Vec<u8> {
     let mut f = crate::afxdp::tests_support::TEST_LAN_MAC.to_vec();
-    f.extend_from_slice(&[
-        0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x08, 0x00,
-    ]);
+    f.extend_from_slice(&[0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5, 0x08, 0x00]);
     // For a first fragment the 8 bytes at l4 are a real UDP header (sport
     // 33333, dport 443); for a non-first fragment they are payload (never read
     // as ports — the fragment is flowless per #2344).
@@ -500,7 +496,6 @@ fn udp_reply_frag_frame_10130(frag_off: u16, id: u16) -> Vec<u8> {
     f.extend_from_slice(&udp_or_payload);
     f
 }
-
 
 #[test]
 fn flowless_non_first_fragment_inherits_ordinary_snat_translation_5689() {
@@ -847,7 +842,6 @@ fn flowless_snat_egress_output_filter_matches_the_postnat_tuple_8367() {
     }
 }
 
-
 #[test]
 fn nat_nonfirst_fragment_assoc_miss_fails_closed_6122() {
     // #6122: a NON-first fragment of an ORDINARY-NAT (interface SNAT lan->wan)
@@ -937,6 +931,8 @@ fn app_scoped_snat_nonfirst_fragment_assoc_miss_fails_closed_10675() {
                 high: 443,
             }],
             src_ports: vec![],
+            icmp_type: None,
+            icmp_code: None,
         }],
         ..Default::default()
     }];
@@ -954,7 +950,11 @@ fn app_scoped_snat_nonfirst_fragment_assoc_miss_fails_closed_10675() {
     );
     for (id, label, meta) in [
         (0xbeef, "native-255", udp_native_frag_meta_5689()),
-        (0xcafe, "decapped-real-protocol", udp_decapped_frag_meta_5689()),
+        (
+            0xcafe,
+            "decapped-real-protocol",
+            udp_decapped_frag_meta_5689(),
+        ),
     ] {
         let non_first = udp_frag_frame_5689(0x0001, id);
         let (batch, dbg) = txn_run_descriptor_checked(
@@ -980,8 +980,6 @@ fn app_scoped_snat_nonfirst_fragment_assoc_miss_fails_closed_10675() {
         );
     }
 }
-
-
 
 #[test]
 fn nat_nonfirst_fragment_assoc_miss_neighbor_miss_drops_not_parked_10660() {
@@ -1091,7 +1089,6 @@ fn nat_nonfirst_fragment_assoc_miss_neighbor_miss_drops_not_parked_10660() {
     );
 }
 
-
 #[test]
 fn nonnat_nonfirst_fragment_assoc_miss_still_forwards_6122() {
     // #6122 no-regression: a NON-NAT'd (plain-forwarded) non-first fragment that
@@ -1140,7 +1137,6 @@ fn nonnat_nonfirst_fragment_assoc_miss_still_forwards_6122() {
         "#6122: a plain fragment must NOT be counted as a NAT'd-fragment drop"
     );
 }
-
 
 #[test]
 fn flowless_non_first_fragment_dropped_by_is_fragment_input_filter_3291() {
@@ -1230,8 +1226,6 @@ fn flowless_protocol_filter_matches_native_255_and_decapped_udp_fragments_10676(
     }
 }
 
-
-
 #[test]
 fn flowless_non_first_fragment_steered_by_pbr_routing_instance_3291() {
     // Firewall-filter PBR `from is-fragment then routing-instance scrub` must
@@ -1306,7 +1300,11 @@ fn flowless_non_first_fragment_steered_by_pbr_routing_instance_3291() {
 /// Addrs match the frag-transit fixtures (10.0.61.100 -> 172.16.80.200) so
 /// the base table forwards it.
 fn slack_tcp_transit_frame_9894() -> Vec<u8> {
-    let mut frame = eth_ipv4_frag_frame(0x0000, &[0x04, 0x57, 0x01, 0xbb], crate::afxdp::tests_support::TEST_LAN_MAC);
+    let mut frame = eth_ipv4_frag_frame(
+        0x0000,
+        &[0x04, 0x57, 0x01, 0xbb],
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     frame[16] = 0x00;
     frame[17] = 20; // total_len=20: the L4 bytes are slack, not datagram
     frame
@@ -1346,7 +1344,10 @@ fn wellformed_tcp_transit_meta_9894(src_port: u16, dst_port: u16) -> UserspaceDp
     meta
 }
 
-fn permit_all_with_input_filter_9894(filter_name: &str, terms: Vec<FirewallTermSnapshot>) -> ForwardingState {
+fn permit_all_with_input_filter_9894(
+    filter_name: &str,
+    terms: Vec<FirewallTermSnapshot>,
+) -> ForwardingState {
     let mut snapshot = policy_deny_snapshot();
     snapshot.default_policy = "permit".to_string();
     snapshot.policies.clear();
@@ -1477,7 +1478,6 @@ fn flowless_slack_tcp_not_dropped_by_port_except_input_filter_9894() {
 // policy-deny drop back to a buffered-and-reinjected forward, turning the
 // asserts RED.
 
-
 #[test]
 fn flowless_non_first_fragment_missing_neighbor_dropped_by_deny_all_4024() {
     // lan->wan is default-deny (policy_deny_snapshot only permits dmz->wan).
@@ -1524,7 +1524,6 @@ fn flowless_non_first_fragment_missing_neighbor_dropped_by_deny_all_4024() {
          for neighbor retry (RED on revert: buffered before the reinject leak)"
     );
 }
-
 
 #[test]
 fn flowless_non_first_fragment_missing_neighbor_permitted_forwards_4024() {
@@ -1579,7 +1578,6 @@ fn flowless_non_first_fragment_missing_neighbor_permitted_forwards_4024() {
 
 // ---- #2364: seeded fabric queue hash ------------------------------------
 
-
 #[test]
 fn fabric_queue_hash_is_stable_within_one_seed() {
     // Intra-process invariant: every fragment/packet of one datagram must
@@ -1602,7 +1600,6 @@ fn fabric_queue_hash_is_stable_within_one_seed() {
         );
     }
 }
-
 
 #[test]
 fn fabric_queue_hash_distribution_depends_on_seed() {
@@ -1639,7 +1636,6 @@ fn fabric_queue_hash_distribution_depends_on_seed() {
     );
 }
 
-
 #[test]
 fn fabric_queue_hash_seed_reshuffles_modular_target_buckets() {
     // The production consumer is `flow_hash % local_fabric_binding_count`.
@@ -1665,7 +1661,6 @@ fn fabric_queue_hash_seed_reshuffles_modular_target_buckets() {
          reseed does not break a precomputed single-worker pin (#2364)"
     );
 }
-
 
 #[test]
 fn non_first_fragment_v6_not_dropped_by_port_matching_output_filter() {
@@ -1748,10 +1743,15 @@ fn non_first_fragment_v6_not_dropped_by_port_matching_output_filter() {
     );
 
     let req = req.expect("a non-first IPv6 fragment must NOT be dropped by a port filter");
-    assert_eq!(req.flow_key, None, "v6 fragment TX selection must use no flow_key");
-    assert_eq!(req.expected_ports, None, "v6 fragment must not carry payload ports");
+    assert_eq!(
+        req.flow_key, None,
+        "v6 fragment TX selection must use no flow_key"
+    );
+    assert_eq!(
+        req.expected_ports, None,
+        "v6 fragment must not carry payload ports"
+    );
 }
-
 
 #[test]
 fn pending_neigh_fragment_buffers_no_flow_key() {
@@ -1764,7 +1764,11 @@ fn pending_neigh_fragment_buffers_no_flow_key() {
 
     // Non-first fragment frame; meta claims a ported tuple (the shim stamps
     // payload bytes). The gate must suppress the meta fallback.
-    let frag_frame = eth_ipv4_frag_frame(0x0001, &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0], crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frag_frame = eth_ipv4_frag_frame(
+        0x0001,
+        &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0],
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let frag_meta = frag_test_meta(14);
     let frag_key = flow
         .as_ref()
@@ -1782,7 +1786,11 @@ fn pending_neigh_fragment_buffers_no_flow_key() {
     );
 
     // First/atomic fragment (real L4 header) — same meta — keeps its ports.
-    let ok_frame = eth_ipv4_frag_frame(0x0000, &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0], crate::afxdp::tests_support::TEST_LAN_MAC);
+    let ok_frame = eth_ipv4_frag_frame(
+        0x0000,
+        &[0x82, 0x35, 0x01, 0xbb, 0, 0, 0, 0],
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let ok_meta = frag_test_meta(14);
     let ok_key = flow
         .as_ref()
@@ -1795,9 +1803,11 @@ fn pending_neigh_fragment_buffers_no_flow_key() {
             }
         });
     let ok_key = ok_key.expect("a flowless non-fragmented TCP packet keeps its meta flow_key");
-    assert_eq!(ok_key.dst_port, 443, "legit flowless packet keeps its dst port");
+    assert_eq!(
+        ok_key.dst_port, 443,
+        "legit flowless packet keeps its dst port"
+    );
 }
-
 
 // #3534 fail-on-revert: build_forwarding_state must thread the snapshot's
 // implicit-default-policy RT_FLOW log selection
@@ -1981,7 +1991,6 @@ fn nat_ordinary_association_hit_still_runs_interface_input_filter_5798() {
 // filtering. The #7890 NoRoute control remains: NoRoute is outside the
 // transit-source gate, so its ordinary policy adjudication still applies.
 
-
 /// The unspecified-source witness, read as a delta the way the #7055 cells do.
 fn unspecified_witness_7890() -> u64 {
     crate::afxdp::frame::L3_CTX_NONE_UNSPECIFIED_ADDR.load(std::sync::atomic::Ordering::Relaxed)
@@ -2029,7 +2038,9 @@ fn unspecified_source_noroute_fragment_still_policy_denied_7890() {
     let ha_state = BTreeMap::new();
     // 203.0.113.9 is in no route table in the fixture => NoRoute.
     let frame = set_v4_dst_7890(
-        zero_v4_src_7890(frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC)),
+        zero_v4_src_7890(frag_v4_transit_frame(
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        )),
         [203, 0, 113, 9],
     );
     let meta = UserspaceDpMeta {
@@ -2066,7 +2077,6 @@ fn unspecified_source_noroute_fragment_still_policy_denied_7890() {
          is caught with `policy_deny`."
     );
 }
-
 
 #[test]
 fn flowless_fragment_bytes_are_charged_to_no_session_9956() {

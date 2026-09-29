@@ -67,6 +67,7 @@ fn test_decision() -> SessionDecision {
         rewrite_dst_port: None,
         nat64: false,
         nptv6: false,
+        source_nat_icmp: None,
     }, install_table_domain: 0, install_table_check: 0 }
 }
 
@@ -839,7 +840,7 @@ fn test_encode_session_open_carries_nat64_flag_and_snat_v4() {
     // first: #7239 routing_domain 4, #7188 discriminator 8, #5212 session_id 8
     // — so snat_v4 is three fields from the end. Every append behind it moves
     // this window, which is why the total is spelled out rather than assumed.
-    let n = payload.len() - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
+    let n = payload.len() - 12; // #9412 + #9752: discount the trailing close-class byte and install-table pair + #11064 3-byte source-NAT ICMP identity; the reads below are end-relative
     assert_eq!(
         &payload[n - 24..n - 20],
         &[203, 0, 113, 5],
@@ -852,7 +853,7 @@ fn test_encode_session_open_carries_nat64_flag_and_snat_v4() {
         EventFrame::encode_session_open(2, &test_key_v4(), &test_decision(), &md, &zones, false, 0, 0);
     let pp = &frame_plain.data[FRAME_HEADER_SIZE..frame_plain.len as usize];
     assert_eq!(pp[26] & FLAG_NAT64, 0, "non-nat64 must leave the flag clear");
-    let m = pp.len() - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
+    let m = pp.len() - 12; // #9412 + #9752: discount the trailing close-class byte and install-table pair + #11064 3-byte source-NAT ICMP identity; the reads below are end-relative
     assert_eq!(&pp[m - 20..m - 16], &[0, 0, 0, 0], "non-nat64 snat is zero");
 }
 
@@ -880,7 +881,7 @@ fn test_encode_session_open_carries_session_id_5212() {
         0, // #9412: tcp_close_class
     );
     let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
-    let n = payload.len() - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
+    let n = payload.len() - 12; // #9412 + #9752: discount the trailing close-class byte and install-table pair + #11064 3-byte source-NAT ICMP identity; the reads below are end-relative
     // The session id is now THIRD from last: #7188 appended an 8-byte
     // discriminator behind it and #7239 a 4-byte routing domain behind that, so
     // it sits at [n-20 .. n-12]. The 4 bytes before it are the #4565 snat_v4
@@ -910,7 +911,7 @@ fn test_encode_session_open_carries_session_id_5212() {
         0, // #9412: tcp_close_class
     );
     let p0 = &frame0.data[FRAME_HEADER_SIZE..frame0.len as usize];
-    let n0 = p0.len() - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair
+    let n0 = p0.len() - 12; // #9412 + #9752: discount the trailing close-class byte and install-table pair + #11064 3-byte source-NAT ICMP identity
     assert_eq!(
         u64::from_le_bytes(p0[n0 - 20..n0 - 12].try_into().unwrap()),
         0,
@@ -939,7 +940,7 @@ fn test_encode_session_open_carries_policy_fields_3301() {
     // routing_domain 4 = 24 trailing bytes. So the policy block is at
     // [n-36 .. n-24], snat_v4 = [n-24 .. n-20], id = [n-20 .. n-12],
     // discriminator = [n-12 .. n-4], routing_domain = last 4.
-    let n = p.len() - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
+    let n = p.len() - 12; // #9412 + #9752: discount the trailing close-class byte and install-table pair + #11064 3-byte source-NAT ICMP identity; the reads below are end-relative
     let policy_id = u32::from_le_bytes(p[n - 36..n - 32].try_into().unwrap());
     let counter_idx = u32::from_le_bytes(p[n - 32..n - 28].try_into().unwrap());
     let inact_secs = u32::from_le_bytes(p[n - 28..n - 24].try_into().unwrap());
@@ -959,7 +960,7 @@ fn test_encode_session_open_carries_policy_fields_3301() {
         0, // #9412: tcp_close_class
     );
     let pn = &frame_none.data[FRAME_HEADER_SIZE..frame_none.len as usize];
-    let m = pn.len() - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
+    let m = pn.len() - 12; // #9412 + #9752: discount the trailing close-class byte and install-table pair + #11064 3-byte source-NAT ICMP identity; the reads below are end-relative
     // Shifted by the #4565 snat_v4 (4) + #5212 session_id (8) + #7188 tunnel
     // discriminator (8) trailing fields.
     assert_eq!(u32::from_le_bytes(pn[m - 32..m - 28].try_into().unwrap()), 0);
@@ -1198,13 +1199,13 @@ fn session_open_frames_carry_distinct_tunnel_discriminators_7188() {
     let second = encode(200);
 
     let tail = |frame: &EventFrame| {
-        let end = frame.len as usize - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
+        let end = frame.len as usize - 12; // #11064: +3 source-NAT ICMP identity // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
         u64::from_le_bytes(frame.data[end - 12..end - 4].try_into().unwrap())
     };
     assert_eq!(
         tail(&first),
         crate::session::TunnelDiscriminator::Keyed(100).to_wire(),
-        "the open frame's LAST field must be the encoded discriminator"
+        "the open frame must carry the encoded discriminator at its pinned offset"
     );
     assert_ne!(
         tail(&first),
@@ -1214,10 +1215,10 @@ fn session_open_frames_carry_distinct_tunnel_discriminators_7188() {
          one key for both and the second install would evict the first (#7188)"
     );
     // The field is APPENDED: everything before it is unchanged, so the two
-    // frames differ ONLY in these 8 bytes. #7239 appended a further 4 behind
-    // it, so the common prefix now stops 12 from the end.
+    // frames differ ONLY in these 8 bytes. #7239/#9412/#9752/#11064 appended
+    // 4+1+8+3 behind it, so the common prefix now stops 24 from the end.
     let body =
-        |frame: &EventFrame| frame.data[FRAME_HEADER_SIZE..frame.len as usize - 21] /* #9412 + #9752: + the close-class byte and install-table pair */.to_vec();
+        |frame: &EventFrame| frame.data[FRAME_HEADER_SIZE..frame.len as usize - 24] /* #9412 + #9752 + #11064: + close-class byte, install-table pair, 3-byte source-NAT ICMP identity */.to_vec();
     assert_eq!(
         body(&first),
         body(&second),
@@ -1249,7 +1250,7 @@ fn session_open_frames_carry_the_routing_domain_7239() {
         0,
         0, // #9412: tcp_close_class
     );
-    let end = frame.len as usize - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
+    let end = frame.len as usize - 12; // #11064: +3 source-NAT ICMP identity // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
     assert_eq!(
         u32::from_le_bytes(frame.data[end - 4..end].try_into().unwrap()),
         100_007,
@@ -1309,7 +1310,7 @@ fn session_open_frames_state_none_explicitly_for_non_tunnel_protocols_7188() {
         0,
         0, // #9412: tcp_close_class
     );
-    let end = frame.len as usize - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
+    let end = frame.len as usize - 12; // #11064: +3 source-NAT ICMP identity // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
     let tail = u64::from_le_bytes(frame.data[end - 12..end - 4].try_into().unwrap());
     assert_ne!(
         tail, 0,
@@ -1353,12 +1354,12 @@ fn v6_session_open_frame_still_fits_the_buffer_7188() {
 #[test]
 fn test_encode_session_update_matches_the_shared_golden_9412() {
     let zones = test_zone_map();
-    // #9752: the golden fixture carries a REAL stamp, so the shared bytes pin
-    // the full tail (class + identity) and every downstream consumer test that
-    // reads this file exercises a stamped record, never a (0,0) one.
+    // #9752/#11064: the golden fixture carries a real installing-table stamp
+    // and a typed source-NAT identity, so downstream consumers exercise both.
     let mut decision = test_decision();
     decision.install_table_domain = 525_590;
     decision.install_table_check = 3_318_534_811;
+    decision.nat.source_nat_icmp = Some((13, 0));
     let frame = EventFrame::encode_session_update(
         42,
         &test_key_v4(),
@@ -1371,16 +1372,21 @@ fn test_encode_session_update_matches_the_shared_golden_9412() {
     );
     assert_eq!(frame.data[4], MSG_SESSION_UPDATE);
     let bytes = &frame.data[..frame.len as usize];
-    assert_eq!(bytes[bytes.len() - 9], 2, "#9412: the close class sits 8 bytes from the end (#9752 tail follows)");
+    assert_eq!(bytes[bytes.len() - 12], 2, "#9412: the close class precedes the #9752/#11064 trailer");
     assert_eq!(
-        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()),
+        u32::from_le_bytes(bytes[bytes.len() - 11..bytes.len() - 7].try_into().unwrap()),
         525_590,
         "#9752: the golden tail carries the domain"
     );
     assert_eq!(
-        u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().unwrap()),
+        u32::from_le_bytes(bytes[bytes.len() - 7..bytes.len() - 3].try_into().unwrap()),
         3_318_534_811,
         "#9752: the golden tail carries the check"
+    );
+    assert_eq!(
+        &bytes[bytes.len() - 3..],
+        &[1, 13, 0],
+        "#11064: the golden tail carries a valid ICMP type/code pair"
     );
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let path = concat!(
@@ -1406,7 +1412,7 @@ fn test_encode_session_open_carries_the_close_class_9412() {
     let frame =
         EventFrame::encode_session_open(7, &test_key_v4(), &test_decision(), &test_metadata(), &zones, false, 0, 1);
     assert_eq!(frame.data[4], MSG_SESSION_OPEN);
-    assert_eq!(frame.data[frame.len as usize - 9], 1); // #9752: 8 install-table bytes now trail the class
+    assert_eq!(frame.data[frame.len as usize - 12], 1); // #9752 + #11064: 8 install-table bytes + 3 source-NAT ICMP identity bytes now trail the class
 }
 
 /// #9752: open AND update frames carry the installing-table identity as the
@@ -1426,15 +1432,17 @@ fn session_frames_carry_the_install_table_identity_9752() {
     .enumerate()
     {
         let end = frame.len as usize;
+        // #11064: install_table sits ahead of the trailing 3-byte source-NAT
+        // ICMP identity (valid, type, code).
         assert_eq!(
-            u32::from_le_bytes(frame.data[end - 8..end - 4].try_into().unwrap()),
+            u32::from_le_bytes(frame.data[end - 11..end - 7].try_into().unwrap()),
             525_590,
             "frame {i}: domain must trail the close class"
         );
         assert_eq!(
-            u32::from_le_bytes(frame.data[end - 4..end].try_into().unwrap()),
+            u32::from_le_bytes(frame.data[end - 7..end - 3].try_into().unwrap()),
             3_318_534_811,
-            "frame {i}: check must be the final word"
+            "frame {i}: check must precede the 3-byte source-NAT ICMP tail"
         );
     }
     // Zero-stamped decisions encode (0,0): an old Go decoder length-skipping

@@ -8,6 +8,7 @@
 package userspace
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -309,6 +310,50 @@ func TestBuildSourceNATSnapshotsCarriesApplicationMatch(t *testing.T) {
 	}
 	if len(apps[0].Ports) != 1 || apps[0].Ports[0] != (NatPortRangeWire{Low: 443, High: 443}) {
 		t.Fatalf("term ports = %+v, want [{443 443}]", apps[0].Ports)
+	}
+}
+
+func TestBuildSourceNATSnapshotsCarriesApplicationICMPTypeAndCode11064(t *testing.T) {
+	icmpType, icmpCode := uint8(8), uint8(3)
+	cfg := &config.Config{}
+	cfg.Applications.Applications = map[string]*config.Application{
+		"icmp-numeric": {
+			Name:     "icmp-numeric",
+			Protocol: "1",
+			ICMPType: &icmpType,
+			ICMPCode: &icmpCode,
+		},
+	}
+	cfg.Security.NAT.Source = []*config.NATRuleSet{{
+		Name:     "rs",
+		FromZone: "lan",
+		ToZone:   "wan",
+		Rules: []*config.NATRule{{
+			Name:  "ping-only",
+			Match: config.NATMatch{Application: "icmp-numeric"},
+			Then:  config.NATThen{Type: config.NATSource, Interface: true},
+		}},
+	}}
+
+	snaps := buildSourceNATSnapshots(cfg, nil)
+	if len(snaps) != 1 || len(snaps[0].MatchApplications) != 1 {
+		t.Fatalf("source NAT applications = %+v, want one numeric ICMP term", snaps)
+	}
+	term := snaps[0].MatchApplications[0]
+	if term.Protocol != 1 || term.ICMPType == nil || *term.ICMPType != 8 ||
+		term.ICMPCode == nil || *term.ICMPCode != 3 {
+		t.Fatalf("SNAT application term = %+v, want proto=1 icmp-type=8 icmp-code=3", term)
+	}
+	wireJSON, err := json.Marshal(term)
+	if err != nil {
+		t.Fatalf("marshal SNAT application term: %v", err)
+	}
+	var wire map[string]uint8
+	if err := json.Unmarshal(wireJSON, &wire); err != nil {
+		t.Fatalf("decode SNAT application wire fields: %v", err)
+	}
+	if wire["icmp_type"] != 8 || wire["icmp_code"] != 3 {
+		t.Fatalf("SNAT application JSON = %s, want icmp_type=8 icmp_code=3", wireJSON)
 	}
 }
 

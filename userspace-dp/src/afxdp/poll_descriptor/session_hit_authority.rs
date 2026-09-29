@@ -42,10 +42,9 @@
 //! zone-stamped arrival (#6458) names the peer-ingress zone; #10670 treats a
 //! matching session zone as the owner case (the same authority as a normal
 //! session hit), and a different stamp as foreign (including a peer-miss punt
-//! forwarded without any peer policy verdict). An UNSTAMPED fabric arrival —
-//! overlay ingress, which has no stamp — keeps the #9519 exemption: it
-//! arrives on the fabric link, whose zone is structurally not the flow's,
-//! and there is nothing to judge it by.
+//! forwarded without any peer policy verdict). An unstamped arrival on the
+//! configured overlay has no validated stamp, but its owner-hit ICMP packet is
+//! still checked using the session's recorded zone pair and its own ICMP type.
 //!
 //! An owner is the ONLY packet that re-derives the entry (#8356), which is what
 //! makes the generation-only policy stamp sound: every packet that can consult
@@ -181,7 +180,7 @@ pub(super) fn session_hit_authority(
                 return HitAuthority::Foreign {
                     arrival_zone: zone,
                     on_admitting_interface: false,
-                }
+                };
             }
             // Unstamped overlay: no arrival identity to judge. The #9519
             // exemption stands, as at the #7169/#9384 sibling sites.
@@ -260,18 +259,15 @@ pub(super) fn owner_hit_icmp_verdict(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     packet_frame: &[u8],
-    packet_fabric_ingress: bool,
 ) -> Option<OwnerHitIcmpVerdict> {
-    // Host-bound packets have a different authority plane (`junos-host`). This
-    // helper is reached only for Owner hits: a stamped fabric arrival has
-    // already matched the session's ingress zone, while an unstamped overlay
-    // retains the #9519 exemption. A foreign stamp exits through the foreign
-    // path first.
+    // Host-bound packets have a different authority plane (`junos-host`).
+    // Transit owners can be judged from the session's recorded zone pair and
+    // this packet's ICMP type; an absent fabric stamp does not disable that
+    // packet-scoped check.
     if decision.resolution.disposition == ForwardingDisposition::LocalDelivery
-        || packet_fabric_ingress
         || !forwarding
             .policy
-            .icmp_verdict_may_depend_on_type(meta.protocol)
+            .icmp_packet_verdict_may_depend_on_type(meta.protocol)
     {
         return None;
     }
@@ -393,7 +389,7 @@ pub(super) fn foreign_hit_verdict(
         || metadata.is_reverse
         || forwarding
             .policy
-            .icmp_verdict_may_depend_on_type(meta.protocol)
+            .icmp_packet_verdict_may_depend_on_type(meta.protocol)
     {
         return ForeignHitVerdict::Drop(deny);
     }
