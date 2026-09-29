@@ -1,6 +1,9 @@
 package config
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 // WireGuardListenPorts returns the sorted, de-duplicated set of non-zero
 // WireGuard UDP listen ports configured across every interface-level and
@@ -56,5 +59,105 @@ func (c *Config) WireGuardListenPorts() []uint16 {
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// WireGuardZonePorts maps each security zone to the sorted WireGuard UDP
+// listen ports of the tunnels bound to that zone's interfaces (#11076). It is
+// the compile-time SSOT for SCOPED host-inbound WG admission: each zone's
+// ports render as a `daddr <zone-addrs> udp dport <ports> accept` inside that
+// zone's host-inbound section — ordered with zone policy, never above it —
+// instead of the former global bare accept.
+//
+// Zone resolution reuses InterfaceZoneMap (same fan-up/fan-down +
+// quarantine rules the host-inbound views enforce). A tunnel whose interface
+// binds no zone contributes nothing: its handshake cannot arrive (fail
+// closed), and the compile tailgate warns. Ports within a zone are
+// sorted+deduped; zones with no WG tunnels are absent (not empty). Returns
+// nil when no zoned WG tunnel exists.
+func (c *Config) WireGuardZonePorts() map[string][]uint16 {
+	cfg := c
+	if cfg == nil {
+		return nil
+	}
+	zones := InterfaceZoneMap(cfg)
+	byZone := make(map[string]map[uint16]bool)
+	add := func(ifaceKey string, tc *TunnelConfig) {
+		if tc == nil || tc.Mode != "wireguard" || tc.WgListenPort == 0 {
+			return
+		}
+		zone, ok := zones[ifaceKey]
+		if !ok || zone == "" {
+			return
+		}
+		if byZone[zone] == nil {
+			byZone[zone] = make(map[uint16]bool)
+		}
+		byZone[zone][tc.WgListenPort] = true
+	}
+	for ifName, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		add(ifName, ifc.Tunnel)
+		for unitNum, unit := range ifc.Units {
+			if unit == nil {
+				continue
+			}
+			add(fmt.Sprintf("%s.%d", ifName, unitNum), unit.Tunnel)
+		}
+	}
+	if len(byZone) == 0 {
+		return nil
+	}
+	out := make(map[string][]uint16, len(byZone))
+	for zone, ports := range byZone {
+		list := make([]uint16, 0, len(ports))
+		for p := range ports {
+			list = append(list, p)
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i] < list[j] })
+		out[zone] = list
+	}
+	return out
+}
+
+// WireGuardUnzonedInterfaces lists "interface-or-unit" refs carrying a
+// WireGuard tunnel that bind no security zone (#11076). Sorted, deduped, nil
+// when empty. The validator warns on these: without a zone the tunnel's
+// listen port gets no host-inbound accept.
+func (c *Config) WireGuardUnzonedInterfaces() []string {
+	cfg := c
+	if cfg == nil {
+		return nil
+	}
+	zones := InterfaceZoneMap(cfg)
+	seen := make(map[string]bool)
+	var out []string
+	add := func(ifaceKey string, tc *TunnelConfig) {
+		if tc == nil || tc.Mode != "wireguard" || tc.WgListenPort == 0 {
+			return
+		}
+		if zone, ok := zones[ifaceKey]; ok && zone != "" {
+			return
+		}
+		if !seen[ifaceKey] {
+			seen[ifaceKey] = true
+			out = append(out, ifaceKey)
+		}
+	}
+	for ifName, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		add(ifName, ifc.Tunnel)
+		for unitNum, unit := range ifc.Units {
+			if unit == nil {
+				continue
+			}
+			add(fmt.Sprintf("%s.%d", ifName, unitNum), unit.Tunnel)
+		}
+	}
+	sort.Strings(out)
 	return out
 }

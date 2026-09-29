@@ -111,16 +111,17 @@ func toNftViews(views []dpuserspace.ZoneHostInboundView) []xnft.HostInboundZoneV
 	return out
 }
 
-func toNftHostInboundSpec(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16, dataplaneFresh bool) xnft.HostInboundSpec {
-	return toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wg, dataplaneFresh, nil)
+func toNftHostInboundSpec(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16, wgZonePorts map[string][]uint16, dataplaneFresh bool) xnft.HostInboundSpec {
+	return toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wg, wgZonePorts, dataplaneFresh, nil)
 }
 
-func toNftHostInboundSpecWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay) xnft.HostInboundSpec {
+func toNftHostInboundSpecWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay) xnft.HostInboundSpec {
 	spec := xnft.HostInboundSpec{
 		Views:          toNftViews(views),
 		UnzonedV4:      unzonedV4,
 		UnzonedV6:      unzonedV6,
 		WGListenPorts:  wg,
+		WGZonePorts:    wgZonePorts,
 		DataplaneFresh: dataplaneFresh,
 		Overlay:        overlay,
 	}

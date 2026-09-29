@@ -274,6 +274,15 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	// refused ports; it does not remove the bound.
 	cfg.Warnings = append(cfg.Warnings, validateWireguardSteeredPortSet(cfg)...)
 
+	// #11076: WireGuard host-inbound admission is scoped to the tunnel's
+	// ingress zone. A tunnel whose interface binds no zone gets NO accept —
+	// its handshake cannot arrive. Warn (never reject): the tunnel is
+	// otherwise valid, and zoning the interface is the remedy.
+	for _, iface := range cfg.WireGuardUnzonedInterfaces() {
+		cfg.Warnings = append(cfg.Warnings,
+			"wireguard tunnel on unzoned interface "+iface+" has no host-inbound accept; add the interface to a security zone or inbound handshakes are dropped (#11076)")
+	}
+
 	// #5162: non-WireGuard tunnel outer-family cross-field gate. A GRE/IPIP
 	// tunnel whose OUTER source and destination are different address
 	// families (v4 source + v6 destination, or the reverse) passes per-leaf

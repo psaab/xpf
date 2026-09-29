@@ -277,6 +277,12 @@ type HostInboundSpec struct {
 	UnzonedV6     []string
 	Programs      []JunosHostProgram
 	WGListenPorts []uint16
+	// WGZonePorts (#11076) scopes WireGuard admission per zone: zone name ->
+	// sorted listen ports of that zone's tunnels. Rendered as daddr-scoped
+	// accepts inside each zone's section (ordered with zone policy). Zones
+	// absent from the map get no WG accept; WGListenPorts remains for the
+	// stale-reply guards, which are scope-independent.
+	WGZonePorts map[string][]uint16
 	// DataplaneFresh is the #9637-D1 pre-landing fail-closed gate: true iff
 	// the userspace dataplane runs this generation's snapshot. When false the
 	// reinject accept is omitted (byte-identical to the pre-#9637 ruleset).

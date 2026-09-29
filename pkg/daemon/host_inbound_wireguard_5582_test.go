@@ -17,6 +17,10 @@ import (
 // must admit it or the fresh handshake is dropped by wan's catch-all (#5582).
 func hostInboundWireGuardTestConfig() *config.Config {
 	cfg := hostInboundTestConfig()
+	// #11076: the tunnel's ingress zone is wan — WG admission scopes to
+	// wan's addresses. (An unzoned tunnel gets no accept; see the
+	// unzoned-warning test.)
+	cfg.Security.Zones["wan"].Interfaces = append(cfg.Security.Zones["wan"].Interfaces, "wg0")
 	cfg.Interfaces.Interfaces["wg0"] = &config.InterfaceConfig{
 		Name: "wg0",
 		Tunnel: &config.TunnelConfig{
@@ -34,31 +38,45 @@ func hostInboundWireGuardTestConfig() *config.Config {
 }
 
 // TestHostInboundFilterAdmitsWireGuardListenPort is the #5582 fail-on-revert
-// proof. With a WireGuard listener configured, buildHostInboundFilterPayload
-// emits a coarse `udp dport <listen-port> accept` on the input hook, admitting a
-// fresh passive handshake (conntrack NEW) to a RESTRICTED zoned address that
-// would otherwise hit the per-zone catch-all drop. The WG accept precedes the
-// wan catch-all drop, so the handshake to the wan address:51820 is admitted, not
-// dropped. Reverting the emitHostInboundWireGuardAccept emission removes the
-// accept -> a NEW WG handshake falls to the drop -> this goes RED.
+// proof, re-scoped by #11076. With a WireGuard listener in wan,
+// buildHostInboundFilterPayload emits a DADDR-SCOPED `udp dport <port> accept`
+// inside wan's own section (v4+v6), admitting a fresh passive handshake
+// (conntrack NEW) to a RESTRICTED zoned address that would otherwise hit the
+// per-zone catch-all drop. The scoped accept precedes the wan catch-all drop.
+// No bare (daddr-less) accept may exist: unzoned/untrust addresses must not
+// reach the socket.
 func TestHostInboundFilterAdmitsWireGuardListenPort(t *testing.T) {
 	cfg := hostInboundWireGuardTestConfig()
 	wgPorts := cfg.WireGuardListenPorts()
 	if len(wgPorts) != 1 || wgPorts[0] != 51820 {
 		t.Fatalf("WireGuardListenPorts() = %v, want [51820]", wgPorts)
 	}
+	wgZones := cfg.WireGuardZonePorts()
+	if len(wgZones) != 1 || len(wgZones["wan"]) != 1 || wgZones["wan"][0] != 51820 {
+		t.Fatalf("WireGuardZonePorts() = %v, want map[wan:[51820]]", wgZones)
+	}
 	views := buildAndCheckViews(t, cfg)
-	payload := buildHostInboundFilterPayload(views, nil, nil, nil, wgPorts, true)
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, wgZones, true)
 
-	wgAccept := "udp dport 51820 accept"
-	if !strings.Contains(payload, wgAccept) {
-		t.Fatalf("payload missing WireGuard listen-port admission %q\n---\n%s", wgAccept, payload)
+	// Scoped accepts (v4+v6) inside wan's section.
+	for _, want := range []string{
+		"ip daddr 172.16.50.8 udp dport 51820 accept",
+		"ip6 daddr 2001:db8:50::8 udp dport 51820 accept",
+	} {
+		if !strings.Contains(payload, want) {
+			t.Fatalf("payload missing scoped WG admission %q\n---\n%s", want, payload)
+		}
+	}
+	// No bare accept anywhere.
+	for _, line := range strings.Split(payload, "\n") {
+		if strings.Contains(line, "udp dport") && strings.Contains(line, "51820") && !strings.Contains(line, "daddr") {
+			t.Fatalf("bare WG accept leaked: %s\n---\n%s", line, payload)
+		}
 	}
 
-	// The WG accept must precede the wan v4 catch-all drop: a NEW inbound
-	// handshake to the wan address on 51820 is admitted, not dropped.
+	// The scoped accept must precede the wan v4 catch-all drop.
 	wanDropV4 := hiDrop("ip", "172.16.50.8", "wan")
-	idxAccept := strings.Index(payload, wgAccept)
+	idxAccept := strings.Index(payload, "udp dport 51820 accept")
 	idxDrop := strings.Index(payload, wanDropV4)
 	if idxDrop < 0 {
 		t.Fatalf("payload missing wan v4 catch-all drop %q\n---\n%s", wanDropV4, payload)
@@ -69,18 +87,12 @@ func TestHostInboundFilterAdmitsWireGuardListenPort(t *testing.T) {
 	}
 
 	// Restricted-default posture preserved: the wan catch-all drop still exists
-	// (both families), and an unlisted service (telnet tcp/23) is NOT admitted —
-	// only the WG port was opened.
+	// (both families), and an unlisted service (telnet tcp/23) is NOT admitted.
 	if !strings.Contains(payload, hiDrop("ip6", "2001:db8:50::8", "wan")) {
 		t.Errorf("wan v6 catch-all drop must remain (restricted posture):\n%s", payload)
 	}
 	if strings.Contains(payload, "tcp dport 23") {
 		t.Errorf("WG admission must not widen the zone to other services (telnet leaked):\n%s", payload)
-	}
-	// Only ONE WG accept rule is emitted (a single coarse global rule), not one
-	// per zone/family.
-	if n := strings.Count(payload, wgAccept); n != 1 {
-		t.Errorf("expected exactly one global WG accept rule, got %d:\n%s", n, payload)
 	}
 }
 
@@ -98,16 +110,16 @@ func TestHostInboundFilterWireGuardPayloadParses(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name  string
-		ports []uint16
+		zones map[string][]uint16
 		want  string
 	}{
-		{"single", []uint16{51820}, "udp dport 51820 accept"},
-		{"set", []uint16{51820, 51821}, "udp dport { 51820, 51821 } accept"},
+		{"single", map[string][]uint16{"wan": {51820}}, "udp dport 51820 accept"},
+		{"set", map[string][]uint16{"wan": {51820, 51821}}, "udp dport { 51820, 51821 } accept"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := hostInboundWireGuardTestConfig()
 			views := buildAndCheckViews(t, cfg)
-			payload := buildHostInboundFilterPayload(views, nil, nil, nil, tc.ports, true)
+			payload := buildHostInboundFilterPayload(views, nil, nil, nil, tc.zones, true)
 			if !strings.Contains(payload, tc.want) {
 				t.Fatalf("payload missing %q:\n%s", tc.want, payload)
 			}
@@ -134,7 +146,7 @@ func TestHostInboundFilterNoWireGuardNoAccept(t *testing.T) {
 		t.Fatalf("fixture unexpectedly has WG ports: %v", ports)
 	}
 	views := buildAndCheckViews(t, cfg)
-	payload := buildHostInboundFilterPayload(views, nil, nil, nil, cfg.WireGuardListenPorts(), true)
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, cfg.WireGuardZonePorts(), true)
 	if strings.Contains(payload, "udp dport") && strings.Contains(payload, "51820") {
 		t.Errorf("no WG accept must be emitted when WireGuard is unconfigured:\n%s", payload)
 	}
