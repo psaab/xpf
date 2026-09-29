@@ -324,13 +324,24 @@ forward-direction collision.
   and HA-refused on import (wire 2 decodes Unrecognized, fail-closed).
 
 - **Ambiguous fabric zones fail closed (#11061).** The builder intentionally
-  omits a zone-to-domain row when its member interfaces span routing
-  instances. An encoded fabric ingress for that zone gets a per-zone
-  synthetic nonzero session domain outside the stable routing-instance ID
-  band, so it cannot alias MAIN's domain 0 or another ambiguous zone. Native
-  table resolution has no owner row for that synthetic domain and drops the
-  packet rather than using the main-table default; the builder also warns
-  about the cross-instance zone at commit.
+  omits a zone-to-domain row when its member interfaces span multiple routing
+  contexts, including MAIN and named routing instances. The Go compiler rejects
+  this configuration at commit, naming the zone, member interfaces, and
+  competing contexts; tolerant boot and peer-sync keep it loadable but warn. A
+  recognized but invalid zone stamp is terminally dropped, while a valid
+  ambiguous-zone stamp receives a synthetic nonzero session domain outside the
+  stable routing-instance ID band. Native table resolution cannot map that
+  domain to MAIN, so it fails closed unless an explicit PBR rule deliberately
+  selects a routing instance.
+  Domain-0 sessions created before this fix in an ambiguous zone will no longer
+  match the newly quarantined replies after upgrade; those flows fail closed
+  until re-established under an unambiguous zone/domain mapping. Quarantine
+  domains are local-only: HA session-wire decoding rejects their reserved ID
+  band, so they are never synchronized as ordinary routing domains. Fabric
+  redirects in routing-domain deployments are emitted only with an adjudicated
+  nonzero ingress-zone stamp; without one, the redirect is refused. Legacy
+  single-table deployments retain unstamped redirects and absent legacy stamps
+  retain their existing MAIN behavior.
 
 - **Why the ingress interface and nothing else.** The reverse key is built
   by swapping the forward key's fields and never observes the reply, so the

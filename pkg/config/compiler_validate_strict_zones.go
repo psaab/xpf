@@ -313,6 +313,78 @@ func validateZoneInterfaceMembershipStrict(cfg *Config) error {
 	return nil
 }
 
+// validateFabricZoneRoutingInstanceAmbiguityStrict rejects a security zone
+// whose member interfaces are split between routing instances or an RI and
+// MAIN. Fabric ingress carries the adjudicated zone ID, not an RI identity, so
+// the dataplane cannot select one native route table for such a zone.
+func validateFabricZoneRoutingInstanceAmbiguityStrict(cfg *Config) error {
+	if cfg == nil || len(cfg.RoutingInstances) == 0 || len(cfg.Security.Zones) == 0 {
+		return nil
+	}
+	riByInterface := routingInstanceByInterface(cfg)
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	for _, zoneName := range zoneNames {
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
+			continue
+		}
+		type zoneRouteOwner struct {
+			name            string
+			defaultInstance bool
+		}
+		riInterfaces := make(map[zoneRouteOwner]map[string]struct{})
+		for _, iface := range zone.Interfaces {
+			if iface == "" {
+				continue
+			}
+			for _, key := range zoneIfaceLogicalKeys(cfg, iface) {
+				owner := zoneRouteOwner{name: "MAIN", defaultInstance: true}
+				if riName, ok := riByInterface[key]; ok {
+					owner = zoneRouteOwner{name: riName}
+				}
+				if riInterfaces[owner] == nil {
+					riInterfaces[owner] = make(map[string]struct{})
+				}
+				riInterfaces[owner][iface] = struct{}{}
+			}
+		}
+		if len(riInterfaces) < 2 {
+			continue
+		}
+		owners := make([]zoneRouteOwner, 0, len(riInterfaces))
+		for owner := range riInterfaces {
+			owners = append(owners, owner)
+		}
+		sort.Slice(owners, func(i, j int) bool {
+			if owners[i].name != owners[j].name {
+				return owners[i].name < owners[j].name
+			}
+			return owners[i].defaultInstance
+		})
+		claims := make([]string, 0, len(owners))
+		for _, owner := range owners {
+			ownerName := owner.name
+			if owner.defaultInstance {
+				ownerName = "MAIN (default instance)"
+			}
+			ifaces := make([]string, 0, len(riInterfaces[owner]))
+			for iface := range riInterfaces[owner] {
+				ifaces = append(ifaces, iface)
+			}
+			sort.Strings(ifaces)
+			claims = append(claims, fmt.Sprintf("%q interfaces [%s]", ownerName, strings.Join(ifaces, ", ")))
+		}
+		return fmt.Errorf(
+			"security zone %q spans multiple routing contexts (%s); a fabric ingress zone stamp cannot identify which routing domain owns the packet",
+			zoneName, strings.Join(claims, "; "))
+	}
+	return nil
+}
+
 // zoneReferenceableInterfaceBases returns the set of interface BASE names a
 // `security zones security-zone <z> interfaces <if>` entry may legitimately
 // reference. It is the union validateZoneInterfaceDefinedStrict checks a zone

@@ -1826,6 +1826,56 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
 }
 
 #[test]
+fn shared_nat_fallback_does_not_borrow_main_for_quarantined_domain_11061() {
+    let sessions = SessionTable::new();
+    let mut key = test_key();
+    key.routing_domain = 0;
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let canonical_reply = reverse_canonical_key(&key, decision.nat);
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    shared_nat_sessions
+        .lock()
+        .expect("shared NAT lock")
+        .insert(canonical_reply.clone(), entry);
+    let quarantined_reply = SessionKey {
+        routing_domain: crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
+        ..canonical_reply
+    };
+    assert!(
+        lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_nat_sessions,
+            &quarantined_reply,
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+        )
+        .is_none(),
+        "the shared canonical-index fallback must not clone a MAIN session for \
+         an ambiguous fabric-zone reply"
+    );
+}
+
+#[test]
 fn publish_and_remove_shared_session_tracks_forward_wire_alias() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));

@@ -721,7 +721,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 let FabricIngressOutcome {
                     ingress_zone_override,
                     packet_fabric_ingress,
+                    invalid_zone_stamp,
                 } = stage_classify_fabric_ingress(packet_frame, &mut meta, now_secs, worker_ctx);
+                // #11061: an invalid zone stamp is not the legacy "unstamped"
+                // case. Drop it before session/cache lookup so stale or forged
+                // identity cannot collapse to routing domain 0 / MAIN.
+                if invalid_zone_stamp {
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 // #10670: preserve the validated #6458 stamp for session-hit
                 // authority. New-flow policy uses a separate RG-gated copy;
                 // a session hit must still judge the peer's claimed arrival
@@ -5337,12 +5345,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // (always in scope) rather than going through the debug
                             // struct which may not have been populated.
                             // #919/#922: ID-keyed redirect — no name lookup.
-                            if let Some(redirect) = resolve_zone_encoded_fabric_redirect_by_id(
+                            if let Some(redirect) = resolve_fabric_redirect_for_ingress_zone(
                                 worker_ctx.forwarding,
-                                from_zone_id,
-                            )
-                            .or_else(|| resolve_fabric_redirect(worker_ctx.forwarding))
-                            {
+                                Some(from_zone_id),
+                            ) {
                                 decision.resolution = redirect;
                             }
                         } else if should_seed_fabric_punt(
@@ -6066,13 +6072,28 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ),
                         ),
                     };
-                    // For non-flow packets (no L4 ports), also attempt fabric
-                    // redirect when the egress RG is inactive.
                     let final_resolution = if base_resolution.disposition
                         == ForwardingDisposition::HAInactive
                         && !fabric_link_ingress
                     {
-                        resolve_fabric_redirect(worker_ctx.forwarding).unwrap_or(base_resolution)
+                        let arrival_logical = resolve_ingress_logical_ifindex(
+                            worker_ctx.forwarding,
+                            meta.ingress_ifindex as i32,
+                            meta.ingress_vlan_id,
+                        )
+                        .unwrap_or(meta.ingress_ifindex as i32);
+                        let ingress_zone_id = ingress_zone_override.or_else(|| {
+                            worker_ctx
+                                .forwarding
+                                .ifindex_to_zone_id
+                                .get(&arrival_logical)
+                                .copied()
+                        });
+                        resolve_fabric_redirect_for_ingress_zone(
+                            worker_ctx.forwarding,
+                            ingress_zone_id,
+                        )
+                        .unwrap_or(base_resolution)
                     } else {
                         base_resolution
                     };
@@ -6539,11 +6560,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             .get(&arrival_logical)
                             .copied()
                     });
-                    if let Some(redirect) = zone_id
-                        .and_then(|id| {
-                            resolve_zone_encoded_fabric_redirect_by_id(worker_ctx.forwarding, id)
-                        })
-                        .or_else(|| resolve_fabric_redirect(worker_ctx.forwarding))
+                    if let Some(redirect) =
+                        resolve_fabric_redirect_for_ingress_zone(worker_ctx.forwarding, zone_id)
                     {
                         decision.resolution = redirect;
                     }

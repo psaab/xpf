@@ -7,6 +7,9 @@ xpf (0.0.0) unstable; urgency=medium
     in-place upgrade cut-over mechanism is a separate increment.
   * The version field above is a placeholder; `make deb` rewrites it
     from `git describe` before building.
+  * Quarantine ambiguous fabric zones away from MAIN routing/session fallback,
+    require adjudicated zone stamps for multi-RI redirects, and reject
+    cross-context zones at strict config commit (#11061).
   * Keep transit forwarding closed when the armed bridge-family barrier
     leg is unsupported; reject malformed SSH authorized_keys entries at
     apply (#10725).

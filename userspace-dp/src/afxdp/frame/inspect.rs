@@ -2464,7 +2464,13 @@ pub(in crate::afxdp) fn parse_ipv4_session_flow_from_frame(
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum ZoneEncodedFabricStamp {
+    Absent,
+    Invalid,
+    Valid(u16),
+}
+
 pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress(
     area: &MmapArea,
     desc: XdpDesc,
@@ -2472,66 +2478,57 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     now_secs: u64,
-) -> Option<u16> {
-    let frame = area.slice(desc.addr as usize, desc.len as usize)?;
+) -> ZoneEncodedFabricStamp {
+    let Some(frame) = area.slice(desc.addr as usize, desc.len as usize) else {
+        return ZoneEncodedFabricStamp::Absent;
+    };
     parse_zone_encoded_fabric_ingress_from_frame(frame, meta, forwarding, ha_state, now_secs)
 }
 
 /// #919/#922: returns the encoded zone ID directly, no `zone_id_to_name`
-/// lookup or `String` clone. Callers that need a name resolve via
-/// `forwarding.zone_id_to_name` on the slow path. #3075: the id is a u16
-/// carried big-endian across frame[10]/frame[11] of the synthetic fabric MAC.
+/// lookup or `String` clone. #3075: the id is a u16 carried big-endian across
+/// frame[10]/frame[11] of the synthetic fabric MAC.
 ///
-/// #6458: the magic + zone-existence decode is necessary but NOT
-/// sufficient — an L2-adjacent host on the fabric segment can forge both
-/// (`StableZoneID` is a public name hash). The decoded zone is returned
-/// only when `zone_encoded_fabric_stamp_valid` ALSO accepts the frame
-/// (unicast dst == our fabric link MAC + the claimed zone is RG-bound and
-/// not locally forwarding-active); otherwise the stamp is ignored and the
-/// frame is treated as an ordinary unstamped fabric-ingress packet.
+/// Absent means the peer did not provide a stamp, preserving legacy fabric
+/// ingress behavior. A stamp-shaped source MAC that fails identity, zone, or
+/// RG validation is Invalid and must be dropped by the packet path; treating
+/// that state as absent would erase evidence of a stale or forged claim.
 pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     now_secs: u64,
-) -> Option<u16> {
-    if !ingress_is_fabric(forwarding, meta.ingress_ifindex as i32) {
-        return None;
-    }
-    if frame.len() < 12 {
-        return None;
-    }
-    if frame[6] != 0x02
-        || frame[7] != 0xbf
-        || frame[8] != 0x72
-        || frame[9] != FABRIC_ZONE_MAC_MAGIC
+) -> ZoneEncodedFabricStamp {
+    if !ingress_is_fabric(forwarding, meta.ingress_ifindex as i32)
+        || frame.len() < 9
+        || frame[6..9] != [0x02, 0xbf, 0x72]
     {
-        return None;
+        return ZoneEncodedFabricStamp::Absent;
+    }
+    if frame.len() < 12 || frame[9] != FABRIC_ZONE_MAC_MAGIC {
+        return ZoneEncodedFabricStamp::Invalid;
     }
     // #3075: zone id is a u16 carried big-endian in frame[10] (high) /
     // frame[11] (low). The old u8 scheme hardcoded frame[10]=0x00, which still
     // decodes correctly here (id < 256 has a 0 high byte).
     let id = u16::from_be_bytes([frame[10], frame[11]]);
-    if id == 0 {
-        return None;
-    }
-    // Validate the encoded ID exists in the configured zone map; an
-    // unknown id is a stale or hostile frame. Single hash lookup —
-    // the value isn't needed, just presence.
-    if !forwarding.zone_id_to_name.contains_key(&id) {
-        return None;
+    if id == 0 || !forwarding.zone_id_to_name.contains_key(&id) {
+        return ZoneEncodedFabricStamp::Invalid;
     }
     // #6458: fabric-link identity + RG-ownership validation (V1a/V1b).
-    zone_encoded_fabric_stamp_valid(
+    if zone_encoded_fabric_stamp_valid(
         forwarding,
         ha_state,
         now_secs,
         &frame[0..6],
         meta.ingress_ifindex as i32,
         id,
-    )
-    .then_some(id)
+    ) {
+        ZoneEncodedFabricStamp::Valid(id)
+    } else {
+        ZoneEncodedFabricStamp::Invalid
+    }
 }
 
 pub(in crate::afxdp) fn parse_packet_destination_from_frame(

@@ -656,6 +656,15 @@ impl SessionTable {
             {
                 continue;
             }
+            let forward_domain = record.key.routing_domain;
+            if forward_domain != reply_key.routing_domain
+                && (crate::session::is_quarantined_routing_domain(forward_domain)
+                    || crate::session::is_quarantined_routing_domain(reply_key.routing_domain))
+            {
+                // A synthetic/quarantined identity may match an exact peer
+                // domain, but it must never borrow a mixed-zero session.
+                continue;
+            }
             if record.key.routing_domain == reply_key.routing_domain {
                 return Some(ForwardSessionMatch {
                     key: record.key.clone(),
@@ -723,10 +732,15 @@ impl SessionTable {
             }
             live_candidate = true;
             let forward_domain = record.key.routing_domain;
-            if forward_domain == reply_routing_domain
-                || forward_domain == 0
-                || reply_routing_domain == 0
+            if forward_domain == reply_routing_domain {
+                return true;
+            }
+            if crate::session::is_quarantined_routing_domain(forward_domain)
+                || crate::session::is_quarantined_routing_domain(reply_routing_domain)
             {
+                continue;
+            }
+            if forward_domain == 0 || reply_routing_domain == 0 {
                 return true;
             }
         }

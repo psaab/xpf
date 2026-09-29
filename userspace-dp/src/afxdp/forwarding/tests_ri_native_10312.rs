@@ -508,3 +508,54 @@ fn ambiguous_fabric_zone_does_not_fall_back_to_main_11061() {
         "FIXTURE: unresolved fabric domain must not select an install table"
     );
 }
+
+/// #11061 control: ambiguity quarantines native fallback, not an explicit PBR
+/// assignment. A matching policy filter still selects its configured instance.
+#[test]
+fn explicit_pbr_still_routes_ambiguous_fabric_zone_11061() {
+    let mut snapshot = pbr_snapshot_for("10.0.0.99/32", "tenant-a");
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "ge-0/0/2.0".to_string(),
+        zone: "za".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 102,
+        hardware_addr: "02:00:00:00:00:a2".to_string(),
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        !state.zone_routing_domain.contains_key(&TEST_TRUST_ZONE_ID),
+        "fixture zone must be ambiguous across tenant-a and MAIN"
+    );
+    let domain = crate::afxdp::forwarding::ingress_routing_domain(
+        &state,
+        TENANT_IFINDEX,
+        0,
+        Some(TEST_TRUST_ZONE_ID),
+    );
+    assert_ne!(domain, 0, "ambiguous zone must keep its synthetic domain");
+    let flow = v4_flow(
+        Ipv4Addr::new(10, 0, 0, 42),
+        Ipv4Addr::new(10, 0, 0, 99),
+        domain,
+    );
+    let RouteOverride::Table {
+        table,
+        domain: pbr_domain,
+        check,
+    } = ingress_route_table_override(
+        &state,
+        &[],
+        v4_meta(TENANT_IFINDEX),
+        &flow,
+        Some(TEST_TRUST_ZONE_ID),
+        None,
+        0,
+        None,
+    )
+    else {
+        panic!("explicit PBR must remain available for an ambiguous fabric zone");
+    };
+    assert_eq!(table, "tenant-a.inet.0");
+    assert_eq!((pbr_domain, check), install_table_identity("tenant-a"));
+}

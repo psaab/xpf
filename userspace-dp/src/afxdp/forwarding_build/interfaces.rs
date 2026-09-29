@@ -1306,27 +1306,46 @@ pub(super) fn populate_interfaces(
         }
     }
 
-    // #7160 (#2387): zone -> routing DOMAIN, for the fabric-ingress path where
-    // the arriving interface is the fabric link and the peer's zone encoding is
-    // the only ingress identity available. Derived AFTER the walk from the two
-    // per-ifindex maps it is a join of, so it cannot disagree with either.
+    // #7160 (#2387): zone -> routing DOMAIN, for fabric-ingress packets where
+    // the peer's encoded zone is the only ingress identity available. A zone
+    // is recorded only when its real member interfaces agree on one domain.
     //
-    // A zone is only recorded when EVERY member interface with a zone agrees on
-    // one domain; a zone spanning routing instances is left ABSENT. Its absence
-    // must not mean MAIN: `ingress_routing_domain` gives an encoded ambiguous
-    // zone a per-zone nonzero sentinel, for which native table resolution has no
-    // owner row and drops instead of falling through to the main-table default
-    // (#11061). Assigning the first-seen domain would be confidently wrong.
+    // `ifindex_to_zone_id` also carries zoned trunk-parent aliases propagated
+    // from VLAN children. When a parent has no routing-domain entry of its own,
+    // attribute that alias to its child contributors instead of inventing a
+    // default-domain member; the child rows are independently walked below.
     if state.has_routing_domains {
+        let mut parent_zone_domains: FastMap<(i32, u16), FastSet<u32>> = FastMap::default();
+        for iface in &snapshot.interfaces {
+            if iface.parent_ifindex <= 0 || iface.zone.is_empty() {
+                continue;
+            }
+            let Some(zone_id) = state.zone_name_to_id.get(&iface.zone).copied() else {
+                continue;
+            };
+            if zone_id != 0 {
+                parent_zone_domains
+                    .entry((iface.parent_ifindex, zone_id))
+                    .or_default()
+                    .insert(iface.routing_domain);
+            }
+        }
+
         let mut ambiguous: FastSet<u16> = FastSet::default();
         for (ifindex, zone_id) in state.ifindex_to_zone_id.iter() {
             if *zone_id == 0 {
                 continue;
             }
+            let parent_domain = parent_zone_domains
+                .get(&(*ifindex, *zone_id))
+                .filter(|domains| domains.len() == 1)
+                .and_then(|domains| domains.iter().next())
+                .copied();
             let domain = state
                 .ifindex_to_routing_domain
                 .get(ifindex)
                 .copied()
+                .or(parent_domain)
                 .unwrap_or(0);
             match state.zone_routing_domain.get(zone_id).copied() {
                 Some(seen) if seen == domain => {}
@@ -1340,18 +1359,6 @@ pub(super) fn populate_interfaces(
         }
         for zone_id in ambiguous {
             state.zone_routing_domain.remove(&zone_id);
-            let zone_name = state
-                .zone_id_to_name
-                .get(&zone_id)
-                .map(String::as_str)
-                .unwrap_or("<unknown>");
-            eprintln!(
-                "xpf-userspace-dp: WARNING zone {zone_name} (id {zone_id}) has \
-                 member interfaces in multiple routing instances; fabric-ingress \
-                 packets with that zone have no native route domain and will \
-                 fail closed (#11061). Keep a zone within one instance or use \
-                 explicit PBR where the intended cross-instance route is known."
-            );
         }
     }
 
@@ -1752,9 +1759,42 @@ mod routing_domain_7160_tests {
         );
         assert_ne!(ambiguous_domain, DOMAIN_A);
         assert_ne!(ambiguous_domain, DOMAIN_B);
-        assert!(
-            !state.install_tables.contains_key(&ambiguous_domain),
-            "the synthetic zone domain must have no route-table owner"
+        assert_eq!(
+            ingress_routing_domain(&state, 10, 0, Some(0)),
+            DOMAIN_A,
+            "zone id 0 is not a validated fabric stamp and must not produce a sentinel"
+        );
+    }
+    /// A zone inherited onto a trunk parent from a single-RI VLAN child keeps
+    /// that child's domain; the propagated parent alias is not a second default
+    /// instance member.
+    #[test]
+    fn a_single_ri_trunk_parent_alias_does_not_make_its_zone_ambiguous_11061() {
+        let mut parent = iface("ge-0-0-5", 10, "tenant-a-lan", "", 0);
+        parent.unit_count = 1;
+        let mut child = iface("ge-0-0-5.50", 11, "tenant-a-lan", "tenant-a", DOMAIN_A);
+        child.parent_ifindex = 10;
+        let snapshot = ConfigSnapshot {
+            interfaces: vec![parent, child],
+            zones: vec![zone("tenant-a-lan", 1)],
+            ..Default::default()
+        };
+        let state = build(&snapshot);
+        assert_eq!(
+            state.ifindex_to_zone_id.get(&10).copied(),
+            Some(1),
+            "the zone must be propagated to the trunk parent"
+        );
+        assert_eq!(
+            state.zone_routing_domain.get(&1).copied(),
+            Some(DOMAIN_A),
+            "a parent alias must inherit its sole member's domain, not invent a \
+             default-domain member"
+        );
+        assert_eq!(
+            ingress_routing_domain(&state, 21, 0, Some(1)),
+            DOMAIN_A,
+            "fabric ingress must retain the unambiguous zone domain"
         );
     }
 

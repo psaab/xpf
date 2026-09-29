@@ -677,7 +677,9 @@ pub(super) fn lookup_shared_forward_nat_match(
     // demuxes to its own tenant's entry. The zeroed second probe remains
     // available for a legitimate non-contained flow when either endpoint is
     // domain 0, but a different non-zero domain is a cross-tenant collision
-    // and must be refused before the shared entry is cloned.
+    // and must be refused before the shared entry is cloned. Synthetic fabric
+    // quarantine domains are stricter: they cannot participate in any
+    // mixed-zero fallback.
     //
     // A domain-0 reply key makes the second probe identical to the first;
     // `reverse_match_key` returns the key unchanged in that case, so a
@@ -691,6 +693,11 @@ pub(super) fn lookup_shared_forward_nat_match(
         return None;
     }
     let fallback = map.get(&probe)?;
+    if crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
+        || crate::session::is_quarantined_routing_domain(fallback.key.routing_domain)
+    {
+        return None;
+    }
     if reply_key.routing_domain != 0
         && fallback.key.routing_domain != 0
         && fallback.key.routing_domain != reply_key.routing_domain

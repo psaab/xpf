@@ -117,6 +117,55 @@ fn forged_fabric_stamp_denied_when_claimed_zone_rg_is_local_6458() {
     );
 }
 
+#[test]
+fn invalid_fabric_stamp_drops_instead_of_falling_back_to_main_11061() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    for interface in &mut snapshot.interfaces {
+        if interface.ifindex == 21 {
+            interface.zone = "lan".to_string();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert_eq!(
+        forwarding.ifindex_to_zone_id.get(&21).copied(),
+        Some(TEST_LAN_ZONE_ID),
+        "the physical-ingress fallback has a configured zone"
+    );
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let mut frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
+    frame[10..12].copy_from_slice(&0x1234u16.to_be_bytes());
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    assert_eq!(dbg.rx, 1, "the invalid frame must reach the poll body");
+    assert_eq!(batch.validated_packets, 1, "the invalid frame must validate");
+    assert_eq!(
+        dbg.session_miss, 0,
+        "an invalid stamp must be dropped before session/cache lookup"
+    );
+
+    assert_eq!(
+        sessions.len(),
+        0,
+        "an unknown zone ID in a recognized fabric stamp must not reach MAIN fallback"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "an invalid fabric stamp must not forward under the physical ingress zone"
+    );
+}
+
 /// #6458 fail-on-revert (V2 owner binding), host-inbound variant: the
 /// fabric parent sits in a RESTRICTIVE `control` zone (ping-only), so an
 /// UNSTAMPED fabric-ingress packet to the firewall's own reth address is
@@ -688,9 +737,9 @@ fn frag_assoc_authority_binds_the_fabric_zone_stamp_5798() {
                 &ha_state,
                 now_secs,
             ),
-            Some(id),
+            ZoneEncodedFabricStamp::Valid(id),
             "precondition: the {zone} stamp must be HONORED at stage 9, else the refusals \
-             below prove only that an INVALID stamp is ignored"
+             below prove only the terminal invalid-stamp drop"
         );
     }
 
@@ -1918,7 +1967,7 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
             &ha_state,
             now_secs,
         ),
-        Some(TEST_WAN_ZONE_ID),
+        ZoneEncodedFabricStamp::Valid(TEST_WAN_ZONE_ID),
         "the matching remote-RG stamp must be validated"
     );
     let mut binding = fabric_binding();
@@ -1961,7 +2010,7 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
             &ha_state,
             now_secs,
         ),
-        Some(TEST_DMZ_ZONE_ID),
+        ZoneEncodedFabricStamp::Valid(TEST_DMZ_ZONE_ID),
         "the foreign peer-miss stamp must also be validated"
     );
     let (_batch, foreign) = txn_run_descriptor_checked(

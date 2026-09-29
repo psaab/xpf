@@ -446,8 +446,7 @@ pub(super) fn redirect_session_resolution_for_metadata(
     if resolution.disposition != ForwardingDisposition::HAInactive || metadata.fabric_ingress {
         return resolution;
     }
-    resolve_zone_encoded_fabric_redirect_by_id(forwarding, metadata.ingress_zone)
-        .or_else(|| resolve_fabric_redirect(forwarding))
+    resolve_fabric_redirect_for_ingress_zone(forwarding, Some(metadata.ingress_zone))
         .unwrap_or(resolution)
 }
 
@@ -3048,6 +3047,12 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         });
     }
 
+    // #11061: a synthetic/quarantined reply domain cannot be reinterpreted
+    // through a mixed-zero NAT candidate. Let policy/native routing handle it;
+    // building a reverse decision here could borrow a domain-0 MAIN session.
+    if crate::session::is_quarantined_routing_domain(flow.forward_key.routing_domain) {
+        return None;
+    }
     // #7169: the main packet path — the one that INSTALLS a reverse session
     // from the match, making the adjudication durable. Revalidate the arrival
     // zone against the session being synthesized.
@@ -3208,8 +3213,7 @@ pub(super) fn redirect_session_via_fabric_if_needed(
     if fabric_ingress {
         return resolution;
     }
-    resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone)
-        .or_else(|| resolve_fabric_redirect(forwarding))
+    resolve_fabric_redirect_for_ingress_zone(forwarding, Some(ingress_zone))
         .unwrap_or(resolution)
 }
 

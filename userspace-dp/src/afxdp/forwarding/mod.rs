@@ -1,9 +1,4 @@
 use super::*;
-/// Synthetic per-zone domain IDs for fabric zones whose member interfaces
-/// span routing instances. Native instance IDs are confined to
-/// `100_000..1_000_000`, so this reserved high band cannot alias an install
-/// table; the zone ID in the low bits keeps ambiguous zones session-isolated.
-const AMBIGUOUS_FABRIC_DOMAIN_BASE: u32 = 0xffff_0000;
 
 mod host_inbound;
 mod fib;
@@ -350,10 +345,11 @@ pub(in crate::afxdp) fn unknown_ingress_vlan(
 /// identity the rest of the fabric-ingress path already adjudicates on. An
 /// unencoded fabric frame has nothing to resolve and stays domain 0.
 ///
-/// A missing entry is a cross-instance ambiguity, not the default instance:
-/// return a reserved, per-zone nonzero session domain. Native table resolution
-/// has no owner row for it and therefore fails closed instead of using MAIN
-/// (#11061); distinct ambiguous zones also cannot alias MAIN or each other.
+/// A missing entry for a validated, nonzero zone is a cross-instance ambiguity,
+/// not the default instance: return the reserved per-zone session domain.
+/// Invalid stamps are rejected earlier by stage 9 and never reach this helper.
+/// Native table resolution has no owner row for the synthetic domain and
+/// therefore fails closed instead of using MAIN (#11061).
 #[inline]
 pub(in crate::afxdp) fn ingress_routing_domain(
     forwarding: &ForwardingState,
@@ -367,12 +363,12 @@ pub(in crate::afxdp) fn ingress_routing_domain(
     if !forwarding.has_routing_domains {
         return 0;
     }
-    if let Some(zone) = fabric_ingress_zone {
+    if let Some(zone) = fabric_ingress_zone.filter(|zone| *zone != 0) {
         return forwarding
             .zone_routing_domain
             .get(&zone)
             .copied()
-            .unwrap_or(AMBIGUOUS_FABRIC_DOMAIN_BASE | u32::from(zone));
+            .unwrap_or(crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | u32::from(zone));
     }
     let logical = resolve_ingress_logical_ifindex(forwarding, ingress_ifindex, ingress_vlan_id)
         .unwrap_or(ingress_ifindex);

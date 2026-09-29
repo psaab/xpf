@@ -712,6 +712,19 @@ split) are NOT rejected; a bare physical interface and one of its units
 across zones ARE (same logical interface). Same fail-closed-on-load
 doctrine as #3043/#2401.
 
+
+**A security zone cannot span routing contexts for fabric ingress (#11061):**
+fabric redirect stamps identify the adjudicated security zone, not its
+routing-instance owner. `validateFabricZoneRoutingInstanceAmbiguityStrict`
+rejects a zone whose configured member interfaces split between multiple RIs
+or between an RI and the default MAIN table, naming the zone, member interfaces,
+and competing routing contexts. Tolerant boot and
+peer-sync keep legacy configs loadable but warn; the dataplane quarantines
+ambiguous stamped ingress instead of resolving it through MAIN. Existing
+domain-0 sessions in such a zone no longer match quarantined replies after an
+upgrade, so those flows fail closed unless explicit PBR deliberately steers
+them.
+
 **A Linux device is claimed by exactly one routing instance (#11060):**
 `RoutingInstanceMemberDeviceKeys` is the shared resolver for the strict
 validator, tolerant sanitizer, daemon VRF binding/reassertion, and userspace
