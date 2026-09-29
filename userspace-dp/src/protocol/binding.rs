@@ -1445,6 +1445,16 @@ pub(crate) struct SessionDeltaInfo {
     pub nat64: bool,
     #[serde(rename = "nat64_snat_v4", default)]
     pub nat64_snat_v4: String,
+    /// #11064: the ICMP type/code that selected the active source-NAT rule.
+    /// `source_nat_icmp_valid` distinguishes absent metadata from the valid
+    /// type/code pair `(0, 0)`. Both HA delta transports carry these fields so
+    /// standby allocation reconstruction uses the same typed rule.
+    #[serde(rename = "source_nat_icmp_valid", default)]
+    pub source_nat_icmp_valid: bool,
+    #[serde(rename = "source_nat_icmp_type", default)]
+    pub source_nat_icmp_type: u8,
+    #[serde(rename = "source_nat_icmp_code", default)]
+    pub source_nat_icmp_code: u8,
     /// #7188: the session key's `TunnelDiscriminator`, encoded by
     /// `TunnelDiscriminator::to_wire` (`session/discriminator.rs`).
     ///

@@ -689,7 +689,8 @@ pub(super) fn arb_nat(v6: bool) -> impl Strategy<Value = NatDecision> {
         any::<u16>(),
         any::<u16>(),
     )
-        .prop_map(move |(mask, s4, d4, s6, d6, sp, dp)| NatDecision {
+    .prop_map(move |(mask, s4, d4, s6, d6, sp, dp)| {
+        NatDecision {
             rewrite_src: (mask & 1 != 0).then(|| {
                 if v6 {
                     IpAddr::V6(Ipv6Addr::from(s6))
@@ -706,9 +707,11 @@ pub(super) fn arb_nat(v6: bool) -> impl Strategy<Value = NatDecision> {
             }),
             rewrite_src_port: (mask & 4 != 0).then_some(sp),
             rewrite_dst_port: (mask & 8 != 0).then_some(dp),
+            source_nat_icmp: None,
             nat64: false,
             nptv6: false,
-        })
+        }
+    })
 }
 
 pub(super) fn arb_packet_with_nat() -> impl Strategy<Value = (ValidPacket, NatDecision)> {

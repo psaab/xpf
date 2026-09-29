@@ -55,12 +55,13 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 // while guard keys are forward sessions (#9915 F-044). Nothing reads it
 // directly except maxCap()'s clamp; every map goes through sentCap()/recvCap().
 //
-// FOURTEEN map families share the two side caps. The sender side bounds EIGHT maps by
+// EIGHTEEN map families share the two side caps. The sender side bounds TEN by
 // sentCap() — genSentV4/V6, closeClassSentV4/V6 (#9412),
-// installTableSentV4/V6 (#9752), genSentScopedV4/V6 (#10512) — and the
-// receiver side bounds SIX by recvCap() — recvGenV4/V6 (with their #9719
-// tombstone orders, which index the same entries rather than adding new
-// ones), installTableRecvV4/V6, and recvGenScopedV4/V6 (#10512, with their
+// installTableSentV4/V6 (#9752), sourceNatICMPSentV4/V6 (#11064), and
+// genSentScopedV4/V6 (#10512). The receiver side bounds EIGHT by recvCap() —
+// recvGenV4/V6 (with their #9719 tombstone orders, which index the same entries
+// rather than adding new ones), installTableRecvV4/V6,
+// sourceNatICMPRecvV4/V6 (#11064), and recvGenScopedV4/V6 (#10512, with their
 // own tombstone orders). Every family grows on full-of-live demand and
 // skip-records at the cap.
 //
@@ -70,21 +71,19 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 // cap down (growGuardCapSide) and every read clamps to the ceiling in force
 // (sentCap/recvCap); the receiver side is additionally reclaimed at a
 // namespace-reset bulk barrier (resetRecvGen), while sender maps self-drain on
-// delete-echo. All fourteen families are evicted on delete; the cap is a safety
+// delete-echo. All eighteen families are evicted on delete; the cap is a safety
 // valve for keys whose delete never arrives (e.g. dropped close delta).
 //
 // Heap honesty (#9915 F-044 review): the ceiling costs nothing until the table
 // genuinely fills, and per-map=wired is coverage-correct — one family can hold
 // every session (an all-v4 table fills genSentV4 alone), so each map must be
-// able to reach the full session count. The worst case is therefore ~14 maps ×
-// the effective cap: ~56B/entry measured at 1M representative keys, plus 64B
-// per tombstone order node, i.e. ≈3.9GB of guard heap plus tombstone nodes at
-// the 5M-entry absolute ceiling and 100% single-family occupancy of a full
-// 10M-entry table — see docs/log/9915.md for the measurement and budget. The
-// default 200k effective cap bounds the unwired case to ≈157MB plus
-// tombstones, and demand growth past it requires helper-attested provisioned
-// RAM via SetGenGuardSessionCap, so guard heap stays proportionate to the
-// table it protects.
+// able to reach the full session count. The existing ~56B/entry measurement
+// and 5M-entry heap estimate in docs/log/9915.md cover the original 14 maps;
+// #11064 adds four bounded source-NAT identity maps and their possible cost is
+// additional (only typed-SNAT sessions populate them). The default 200k
+// effective cap's ~157MB estimate is likewise pre-#11064, and demand growth
+// past it requires helper-attested provisioned RAM via SetGenGuardSessionCap,
+// so guard heap stays proportionate to the table it protects.
 //
 // Honesty notes the ceiling does NOT promise: fabric-redirected sessions
 // consume TWO stamps (primary plus wire alias), so alias-heavy tables past
@@ -513,6 +512,21 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 		}
 		s.recvGenMu.Unlock()
 	}
+	// #11064: typed source-NAT identity is sync-only like the table stamp; a
+	// mirror-sourced resend restores the identity last sent for this session.
+	if s.sourceNatICMPSentV4 == nil {
+		s.sourceNatICMPSentV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
+	}
+	if !stampSourceNatICMPLocked(s.sourceNatICMPSentV4, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.sentCap()) && s.growSentCap() {
+		stampSourceNatICMPLocked(s.sourceNatICMPSentV4, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.sentCap())
+	}
+	if !val.SourceNatICMPValid && val.SessionID != 0 {
+		s.recvGenMu.Lock()
+		if icmpType, icmpCode, ok := lookupSourceNatICMPLocked(s.sourceNatICMPRecvV4, key, val.SessionID); ok {
+			val.SourceNatICMPValid, val.SourceNatICMPType, val.SourceNatICMPCode = true, icmpType, icmpCode
+		}
+		s.recvGenMu.Unlock()
+	}
 	s.genSentMu.Unlock()
 }
 
@@ -569,6 +583,20 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 		s.recvGenMu.Lock()
 		if domain, check, ok := lookupRecvInstallTableLocked(s.installTableRecvV6, key, val.SessionID); ok {
 			val.InstallTableDomain, val.InstallTableCheck = domain, check
+		}
+		s.recvGenMu.Unlock()
+	}
+	// #11064: v6 twin of the typed source-NAT identity restoration above.
+	if s.sourceNatICMPSentV6 == nil {
+		s.sourceNatICMPSentV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
+	}
+	if !stampSourceNatICMPLocked(s.sourceNatICMPSentV6, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.sentCap()) && s.growSentCap() {
+		stampSourceNatICMPLocked(s.sourceNatICMPSentV6, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.sentCap())
+	}
+	if !val.SourceNatICMPValid && val.SessionID != 0 {
+		s.recvGenMu.Lock()
+		if icmpType, icmpCode, ok := lookupSourceNatICMPLocked(s.sourceNatICMPRecvV6, key, val.SessionID); ok {
+			val.SourceNatICMPValid, val.SourceNatICMPType, val.SourceNatICMPCode = true, icmpType, icmpCode
 		}
 		s.recvGenMu.Unlock()
 	}
@@ -640,10 +668,12 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 	delete(s.closeClassSentV4, key)
 	// #9752: same for its installing-table identity.
 	delete(s.installTableSentV4, key)
+	delete(s.sourceNatICMPSentV4, key)
 	// #9752 round 3: and for the identity received for it (genSentMu is a
 	// leaf, so nesting recvGenMu here cannot cycle).
 	s.recvGenMu.Lock()
 	delete(s.installTableRecvV4, key)
+	delete(s.sourceNatICMPRecvV4, key)
 	s.recvGenMu.Unlock()
 	if _, ok := s.genSentV4[key]; !ok {
 		if s.genSentOverflowV4 {
@@ -676,9 +706,11 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 	delete(s.closeClassSentV6, key)
 	// #9752: same for its installing-table identity.
 	delete(s.installTableSentV6, key)
+	delete(s.sourceNatICMPSentV6, key)
 	// #9752 round 3: and for the identity received for it (see the v4 twin).
 	s.recvGenMu.Lock()
 	delete(s.installTableRecvV6, key)
+	delete(s.sourceNatICMPRecvV6, key)
 	s.recvGenMu.Unlock()
 	if _, ok := s.genSentV6[key]; !ok {
 		if s.genSentOverflowV6 {
@@ -1194,6 +1226,10 @@ func (s *SessionSync) resetRecvSessionGen(preserve bool) {
 		s.recvGenV6 = make(map[dataplane.SessionKeyV6]uint64)
 		s.recvGenScopedV4 = make(map[scopedDeleteKeyV4]uint64)
 		s.recvGenScopedV6 = make(map[scopedDeleteKeyV6]uint64)
+		// #11064: discard typed source-NAT identities from the peer's prior
+		// namespace; its rebooted sessions may reuse old session identifiers.
+		s.sourceNatICMPRecvV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
+		s.sourceNatICMPRecvV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
 		s.recvTombV4.reset()
 		s.recvTombV6.reset()
 		s.recvTombScopedV4.reset()
@@ -1438,6 +1474,12 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
 		s.pbrAnnouncedForFence.Store(true)
 	}
+	if s.sourceNatICMPRecvV4 == nil {
+		s.sourceNatICMPRecvV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)
+	}
+	if !stampSourceNatICMPLocked(s.sourceNatICMPRecvV4, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.recvCap()) && s.growRecvCap() {
+		stampSourceNatICMPLocked(s.sourceNatICMPRecvV4, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.recvCap())
+	}
 	s.recvGenMu.Unlock()
 	if err := s.sessions.PutClusterSyncedV4(key, val); err == nil {
 		// #6368: the check above and this write are not atomic. Re-read the
@@ -1507,6 +1549,12 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	if val.InstallTableDomain != 0 || val.InstallTableCheck != 0 {
 		s.pbrAnnouncedForFence.Store(true)
 	}
+	if s.sourceNatICMPRecvV6 == nil {
+		s.sourceNatICMPRecvV6 = make(map[dataplane.SessionKeyV6]sourceNatICMPMemo)
+	}
+	if !stampSourceNatICMPLocked(s.sourceNatICMPRecvV6, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.recvCap()) && s.growRecvCap() {
+		stampSourceNatICMPLocked(s.sourceNatICMPRecvV6, key, val.SessionID, &val.SourceNatICMPValid, &val.SourceNatICMPType, &val.SourceNatICMPCode, s.recvCap())
+	}
 	s.recvGenMu.Unlock()
 	if err := s.sessions.PutClusterSyncedV6(key, val); err == nil {
 		// #6368: see the v4 twin — re-read the threshold after the write so a
@@ -1560,6 +1608,7 @@ func (s *SessionSync) deleteClusterSyncedV4(key dataplane.SessionKey, deleteGen 
 	// incarnation's record).
 	s.recvGenMu.Lock()
 	delete(s.installTableRecvV4, key)
+	delete(s.sourceNatICMPRecvV4, key)
 	s.recvGenMu.Unlock()
 	if err := s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)
@@ -1583,6 +1632,7 @@ func (s *SessionSync) deleteClusterSyncedV6(key dataplane.SessionKeyV6, deleteGe
 	// #9752 round 3: v6 twin of the received-identity eviction above.
 	s.recvGenMu.Lock()
 	delete(s.installTableRecvV6, key)
+	delete(s.sourceNatICMPRecvV6, key)
 	s.recvGenMu.Unlock()
 	if err := s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale, forwardOnly); err != nil {
 		s.stats.Errors.Add(1)

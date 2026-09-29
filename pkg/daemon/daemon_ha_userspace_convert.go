@@ -685,6 +685,9 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	// failover instead of inet.0. Opaque here. (0,0) = default table.
 	val.InstallTableDomain = delta.InstallTableDomain
 	val.InstallTableCheck = delta.InstallTableCheck
+	val.SourceNatICMPValid = delta.SourceNatICMPValid
+	val.SourceNatICMPType = delta.SourceNatICMPType
+	val.SourceNatICMPCode = delta.SourceNatICMPCode
 	// #9752: carry the purge-retirement marker for the delete sinks below.
 	// Set from the delta unconditionally; it is only ever true on closes
 	// (the helper never sets it on opens) and only ever read on the delete
@@ -832,6 +835,9 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	// #9752: v6 analogue of the installing-table mapping above.
 	val.InstallTableDomain = delta.InstallTableDomain
 	val.InstallTableCheck = delta.InstallTableCheck
+	val.SourceNatICMPValid = delta.SourceNatICMPValid
+	val.SourceNatICMPType = delta.SourceNatICMPType
+	val.SourceNatICMPCode = delta.SourceNatICMPCode
 	// #9752: v6 analogue of the purge-retirement marker bit above.
 	if delta.PurgeRetirement {
 		val.LogFlags |= dataplane.LogFlagPurgeRetirementOnly

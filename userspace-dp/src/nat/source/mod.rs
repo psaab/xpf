@@ -86,26 +86,22 @@ use std::sync::atomic::Ordering;
 // every existing `crate::nat::X`, `super::source::X` and `nat::source::X` path
 // resolves unchanged. The afxdp/forwarding/mod.rs split is the precedent.
 
-mod failure;
 mod expand;
+mod failure;
+mod match_rules;
+mod nat64_ports;
+mod overlap;
 mod release;
 mod synced;
-mod nat64_ports;
-mod match_rules;
-mod overlap;
-pub(crate) use failure::*;
 pub(crate) use expand::*;
+pub(crate) use failure::*;
+pub(crate) use match_rules::*;
+pub(crate) use nat64_ports::*;
+pub(crate) use overlap::*;
 pub(crate) use release::*;
 pub(crate) use synced::*;
-pub(crate) use nat64_ports::*;
-pub(crate) use match_rules::*;
-pub(crate) use overlap::*;
-
 
 const DEFAULT_PERSISTENT_NAT_TIMEOUT_SECS: i64 = 300;
-
-
-
 
 /// #2823: remote-endpoint scope of a persistent NAT lease, the full
 /// three-way Junos `persistent-nat permit` enum. Replaces the pre-#2823
@@ -155,7 +151,6 @@ impl PersistentNatPermit {
     }
 }
 
-
 /// #3429: source-NAT `match application` protocol wildcard. 256 is outside the
 /// 0-255 protocol range so it never aliases protocol 0 (HOPOPT); a term carrying
 /// it matches any L4 protocol. The Go builder emits it for an application whose
@@ -165,18 +160,18 @@ impl PersistentNatPermit {
 /// Go builder emits for a configured-but-unresolvable `match application`.
 pub(crate) const SOURCE_NAT_PROTO_ANY: u16 = 256;
 
-/// #3429/#3491: one resolved source-NAT `match application` term — an L4
-/// protocol (IANA number, or `SOURCE_NAT_PROTO_ANY` for any) and optional
-/// inclusive destination- and source-port ranges. The flow matches the term when
-/// its protocol equals `protocol` (or `protocol == SOURCE_NAT_PROTO_ANY`) AND,
-/// when `ports` is non-empty, its destination port falls in one of the ranges,
-/// AND, when `src_ports` is non-empty (#3491), its source port falls in one of
-/// the source ranges. An empty axis is unconstrained on that axis.
+/// #3429/#3491/#11064: one resolved source-NAT `match application` term — an
+/// L4 protocol (IANA number, or `SOURCE_NAT_PROTO_ANY` for any), inclusive
+/// destination- and source-port ranges, and optional ICMP type/code. Every
+/// configured axis is AND-ed; an empty range or absent ICMP field is
+/// unconstrained on that axis.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SourceNatAppTerm {
     pub(crate) protocol: u16,
     pub(crate) ports: Vec<(u16, u16)>,
     pub(crate) src_ports: Vec<(u16, u16)>,
+    pub(crate) icmp_type: Option<u8>,
+    pub(crate) icmp_code: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -341,17 +336,14 @@ impl SourceNatRule {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
         let total_pool = self.pool_addresses_v4.len() + self.pool_addresses_v6.len();
-        // #9874: a poisoned rule builds no allocator (no pending) and can never
-        // mint, so like a failed pool it reports no key. Multi-line closure,
-        // deliberately: the single-line shape is the #9428 parity guard's
-        // must-replace-once anchor (drain_allocator_key below owns it).
+        // #9874: leniently poisoned rules mint nothing and contribute no
+        // allocator owner. `drain_allocator_key` below deliberately ignores
+        // this marker so already-installed sessions can still release leases.
         (self.pool_mode
             && total_pool > 0
             && self.pool_failure.is_none()
             && !self.lenient_match_dropped)
-            .then(|| {
-                self.allocator_key_for(self.pool_port_low, self.pool_port_high)
-            })
+            .then(|| self.allocator_key_for(self.pool_port_low, self.pool_port_high))
     }
 
     /// #7717: the carry-over key that IGNORES `pool_failure`.
@@ -769,8 +761,12 @@ fn carry_renamed_pool_reservations(
             "xpf-dp: source-nat pool {:?} appears to be pool {:?} renamed (same addresses and \
              port range): carried {} live translation(s) across the rename; {} refused \
              (another pool already owns the identity), {} out of range, {} address-only (#7560)",
-            key.pool_name, prev_key.pool_name, outcome.reseeded, outcome.refused,
-            outcome.skipped_out_of_range, outcome.skipped_address_only,
+            key.pool_name,
+            prev_key.pool_name,
+            outcome.reseeded,
+            outcome.refused,
+            outcome.skipped_out_of_range,
+            outcome.skipped_address_only,
         );
     }
 }
@@ -945,7 +941,13 @@ fn resolve_pool_allocators(
             // #6979 F6: a pool RENAMED onto this key brings its live state with
             // it. Without this the renamed pool's allocator is dropped and its
             // translated identities become free while their sessions live.
-            carry_renamed_pool_reservations(&key, existing, previous_allocators, &live_pool_names, now_ns);
+            carry_renamed_pool_reservations(
+                &key,
+                existing,
+                previous_allocators,
+                &live_pool_names,
+                now_ns,
+            );
             pool_allocators.insert(key, existing.clone());
             rule.pool_allocator = existing.clone();
             continue;
@@ -953,11 +955,8 @@ fn resolve_pool_allocators(
         match used.admitted_with(charge, budget) {
             Some(next) => {
                 used = next;
-                let allocator = PortAllocator::new(
-                    pending.total_pool,
-                    pending.port_low,
-                    pending.port_high,
-                );
+                let allocator =
+                    PortAllocator::new(pending.total_pool, pending.port_low, pending.port_high);
                 // #6765: a FRESH allocator over a pool that RETAINS addresses
                 // would reissue `(retained_addr, port_low)` — the occupancy
                 // bitmap that was the sole ownership token is all-zero and the
@@ -968,16 +967,16 @@ fn resolve_pool_allocators(
                 // resetting are untouched by construction: an exact-key match
                 // returns above (full Arc share), and a cold start has no
                 // `previous` at all, so `previous_pools` is empty.
-                reseed_retained_pool(
-                    &key.pool_name,
-                    &allocator,
-                    previous_pools,
-                    rule,
-                    now_ns,
-                );
+                reseed_retained_pool(&key.pool_name, &allocator, previous_pools, rule, now_ns);
                 // #6979 F6: the same carry for a key with no exact predecessor —
                 // a rename onto a name that did not previously exist.
-                carry_renamed_pool_reservations(&key, &allocator, previous_allocators, &live_pool_names, now_ns);
+                carry_renamed_pool_reservations(
+                    &key,
+                    &allocator,
+                    previous_allocators,
+                    &live_pool_names,
+                    now_ns,
+                );
                 pool_allocators.insert(key, allocator.clone());
                 rule.pool_allocator = allocator;
             }
@@ -1106,16 +1105,7 @@ impl SourceNatRule {
         !self.off
             && (!self.match_dst_ports.is_empty() || !self.match_apps.is_empty())
             && self.matches(
-                scope,
-                from_zone,
-                to_zone,
-                src_ip,
-                dst_ip,
-                false,
-                protocol,
-                0,
-                0,
-                true,
+                scope, from_zone, to_zone, src_ip, dst_ip, false, protocol, 0, 0, true, None,
             ) != L4Match::NoMatch
     }
 
@@ -1134,6 +1124,7 @@ impl SourceNatRule {
     ///
     /// #3491: application source-port constraints are AND-ed with protocol and
     /// destination-port constraints within each application term.
+    #[allow(clippy::too_many_arguments)]
     fn l4_matches(
         &self,
         tuple_unknown: bool,
@@ -1141,6 +1132,8 @@ impl SourceNatRule {
         src_port: u16,
         dst_port: u16,
         non_first_fragment: bool,
+        packet_icmp: Option<(u8, u8)>,
+        icmp_type_unknown: bool,
     ) -> L4Match {
         if self.match_dst_ports.is_empty() && self.match_apps.is_empty() {
             return L4Match::Definite;
@@ -1150,8 +1143,8 @@ impl SourceNatRule {
             return L4Match::NoMatch;
         }
 
-        let protocol_unknown = non_first_fragment
-            && protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+        let protocol_unknown =
+            non_first_fragment && protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
         let ports_unknown = non_first_fragment;
         let destination_port_match =
             port_range_match(dst_port, &self.match_dst_ports, ports_unknown);
@@ -1177,9 +1170,23 @@ impl SourceNatRule {
             } else {
                 L4Match::NoMatch
             };
+            let icmp_match = match (term.icmp_type, term.icmp_code, packet_icmp) {
+                (None, None, _) => L4Match::Definite,
+                (None, Some(_), _) => L4Match::NoMatch,
+                (Some(want_type), want_code, Some((got_type, got_code))) => {
+                    if got_type == want_type && want_code.is_none_or(|want| want == got_code) {
+                        L4Match::Definite
+                    } else {
+                        L4Match::NoMatch
+                    }
+                }
+                (Some(_), _, None) if icmp_type_unknown => L4Match::Possible,
+                (Some(_), _, None) => L4Match::NoMatch,
+            };
             let term_match = protocol_match
                 .and(port_range_match(dst_port, &term.ports, ports_unknown))
-                .and(port_range_match(src_port, &term.src_ports, ports_unknown));
+                .and(port_range_match(src_port, &term.src_ports, ports_unknown))
+                .and(icmp_match);
             best.or(term_match)
         });
         destination_port_match.and(application_match)
@@ -1221,6 +1228,7 @@ impl SourceNatRule {
         src_port: u16,
         dst_port: u16,
         non_first_fragment: bool,
+        packet_icmp: Option<(u8, u8)>,
     ) -> L4Match {
         if !self.zone_matches(from_zone, to_zone) || !self.scope_matches(scope) {
             return L4Match::NoMatch;
@@ -1230,6 +1238,8 @@ impl SourceNatRule {
             protocol,
             src_port,
             dst_port,
+            non_first_fragment,
+            packet_icmp,
             non_first_fragment,
         );
         if l4_match == L4Match::NoMatch || !self.address_matches(src_ip, dst_ip) {
@@ -1270,10 +1280,18 @@ impl SourceNatRule {
         protocol: u8,
         src_port: u16,
         dst_port: u16,
+        packet_icmp: Option<(u8, u8)>,
     ) -> bool {
         self.zone_matches(from_zone, to_zone)
-            && self.l4_matches(tuple_unknown, protocol, src_port, dst_port, false)
-                != L4Match::NoMatch
+            && self.l4_matches(
+                tuple_unknown,
+                protocol,
+                src_port,
+                dst_port,
+                false,
+                packet_icmp,
+                packet_icmp.is_none(),
+            ) != L4Match::NoMatch
             && self.address_matches(src_ip, dst_ip)
     }
 }
@@ -1293,8 +1311,7 @@ pub(crate) fn flowless_source_nat_rule_possible(
 ) -> bool {
     let protocol_unknown = protocol == u8::MAX;
     rules.iter().any(|rule| {
-        let has_l4_selector =
-            !rule.match_dst_ports.is_empty() || !rule.match_apps.is_empty();
+        let has_l4_selector = !rule.match_dst_ports.is_empty() || !rule.match_apps.is_empty();
         if rule.off
             || (require_l4_selector && !has_l4_selector)
             || !rule.zone_matches(from_zone, to_zone)
@@ -1354,7 +1371,6 @@ fn port_ranges_intersect(left: &[(u16, u16)], right: &[(u16, u16)]) -> bool {
         })
     })
 }
-
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_source_nat_rules(snaps: &[SourceNATRuleSnapshot]) -> Vec<SourceNatRule> {
@@ -1583,6 +1599,8 @@ fn parse_source_nat_rules_inner(
                 protocol: term.protocol,
                 ports,
                 src_ports,
+                icmp_type: term.icmp_type,
+                icmp_code: term.icmp_code,
             });
         }
         // Parse pool addresses and port range for pool-mode SNAT.
@@ -1717,10 +1735,6 @@ fn source_nat_runtime_compatible(new_rule: &SourceNatRule, old_rule: &SourceNatR
         && new_rule.pool_port_low == old_rule.pool_port_low
         && new_rule.pool_port_high == old_rule.pool_port_high
 }
-
-
-
-
 
 /// #2398: parse one match prefix into the family-appropriate prefix vec. A CIDR
 /// (`10.0.0.0/24`) is parsed directly; a bare host IP (`10.0.0.5`) — which

@@ -416,14 +416,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 80,
-        }, nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(snat_ip)),
-            rewrite_dst: None,
-            rewrite_src_port: Some(snat_port),
-            rewrite_dst_port: None,
-            nat64: false,
-            nptv6: false,
-        }, install_table_domain: 0, install_table_check: 0 },
+        }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: Some(snat_port), rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -574,6 +567,7 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
                 rewrite_dst: None,
                 rewrite_src_port: Some(snat_port),
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -1008,14 +1002,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         discriminator: Default::default(),
         routing_domain: 0,
     };
-    let forward_nat = NatDecision {
-        rewrite_src: Some(IpAddr::V4(snat_ip)),
-        rewrite_dst: None,
-        rewrite_src_port: Some(snat_port),
-        rewrite_dst_port: None,
-        nat64: false,
-        nptv6: false,
-    };
+    let forward_nat = NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: Some(snat_port), rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false };
     assert!(sessions.install_with_protocol(
         forward_key.clone(),
         SessionDecision {
@@ -1641,14 +1628,7 @@ fn n6472_install_sessions(sessions: &mut SessionTable, now_ns: u64) {
 /// companion, so a fixture that hardcodes 0 while the forwarding state has a
 /// routing-instance membership no longer describes any real deployment.
 fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, domain: u32) {
-    let fwd_nat = NatDecision {
-        rewrite_src: Some(IpAddr::V4(n6472_pool_v4())),
-        rewrite_dst: Some(IpAddr::V4(n6472_server_v4())),
-        rewrite_src_port: Some(N6472_XLATED_PORT),
-        rewrite_dst_port: None,
-        nat64: true,
-        nptv6: false,
-    };
+    let fwd_nat = NatDecision { rewrite_src: Some(IpAddr::V4(n6472_pool_v4())), rewrite_dst: Some(IpAddr::V4(n6472_server_v4())), rewrite_src_port: Some(N6472_XLATED_PORT), rewrite_dst_port: None, source_nat_icmp: None, nat64: true, nptv6: false };
     let reverse_info = Nat64ReverseInfo {
         orig_src_v6: n6472_client_v6(),
         orig_dst_v6: n6472_pref64_server(),
@@ -2880,6 +2860,7 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
                 rewrite_dst: None,
                 rewrite_src_port: Some(snat_port),
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -3034,6 +3015,7 @@ fn n6474_install_snat_session(
                 rewrite_dst: None,
                 rewrite_src_port: Some(40000),
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -3547,6 +3529,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
                 rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 30, 50))),
                 rewrite_src_port: None,
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -5252,6 +5235,7 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
                 rewrite_dst: None,
                 rewrite_src_port: Some(snat_port),
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -5561,6 +5545,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
                 rewrite_dst: None,
                 rewrite_src_port: Some(snat_port),
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -5924,6 +5909,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
                 rewrite_dst: None,
                 rewrite_src_port: Some(snat_port),
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -6321,6 +6307,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
                 rewrite_dst: Some(IpAddr::V4(server_ip)),
                 rewrite_src_port: None,
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -6513,6 +6500,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
             rewrite_dst: None,
             rewrite_src_port: None,
             rewrite_dst_port: None,
+            source_nat_icmp: None,
             nat64: false,
             nptv6: false,
         }, install_table_domain: 0, install_table_check: 0 },
@@ -6649,14 +6637,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 80,
-        }, nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(snat_ip)),
-            rewrite_dst: None,
-            rewrite_src_port: None,
-            rewrite_dst_port: None,
-            nat64: false,
-            nptv6: false,
-        }, install_table_domain: 0, install_table_check: 0 },
+        }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -6778,6 +6759,7 @@ fn the_as_is_embedded_key_carries_the_discriminator_9031() {
                 rewrite_dst: None,
                 rewrite_src_port: None,
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -6867,6 +6849,7 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
                 rewrite_dst: None,
                 rewrite_src_port: None,
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -7006,6 +6989,7 @@ fn publish_pptp_gre_session_9298(
             rewrite_dst: None,
             rewrite_src_port: None,
             rewrite_dst_port: None,
+            source_nat_icmp: None,
             nat64: false,
             nptv6: false,
         }, install_table_domain: 0, install_table_check: 0 },
@@ -7545,6 +7529,7 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
                 rewrite_dst: None,
                 rewrite_src_port: Some(snat_port),
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -7765,6 +7750,7 @@ fn n9901_floor_fixture() -> (
                 rewrite_dst: None,
                 rewrite_src_port: Some(snat_port),
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },
@@ -7932,6 +7918,7 @@ fn n9901_install_snat_session(
                 rewrite_dst: None,
                 rewrite_src_port: Some(snat_port),
                 rewrite_dst_port: None,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },

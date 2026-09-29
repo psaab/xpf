@@ -354,14 +354,7 @@ fn build_live_forward_request_threads_nat64_reverse_info_5606() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V6(orig_server)),
-        rewrite_dst: Some(IpAddr::V6(orig_client)),
-        rewrite_src_port: None,
-        rewrite_dst_port: Some(5000),
-        nat64: true,
-        nptv6: false,
-    }, install_table_domain: 0, install_table_check: 0 };
+    }, nat: NatDecision { rewrite_src: Some(IpAddr::V6(orig_server)), rewrite_dst: Some(IpAddr::V6(orig_client)), rewrite_src_port: None, rewrite_dst_port: Some(5000), source_nat_icmp: None, nat64: true, nptv6: false }, install_table_domain: 0, install_table_check: 0 };
     let reverse_info = Nat64ReverseInfo {
         orig_src_v6: orig_client,
         orig_dst_v6: orig_server,

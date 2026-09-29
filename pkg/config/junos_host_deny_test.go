@@ -27,6 +27,58 @@ func jhPermit(name string, src []string, app []string) *Policy {
 	return &Policy{Name: name, Action: PolicyPermit, Match: PolicyMatch{SourceAddresses: src, Applications: app}}
 }
 
+func TestJunosHostNumericICMPApplicationPreservesTypeAndCode11064(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		proto       string
+		protoNumber uint8
+		typ         uint8
+		code        uint8
+	}{
+		{name: "icmp numeric", proto: "1", protoNumber: HostInboundProtoICMP, typ: 8, code: 3},
+		{name: "icmpv6 numeric", proto: "58", protoNumber: HostInboundProtoICMPv6, typ: 128, code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := jhTestConfig()
+			cfg.Applications.Applications = map[string]*Application{
+				"typed": {
+					Name:     "typed",
+					Protocol: tc.proto,
+					ICMPType: u8p(tc.typ),
+					ICMPCode: u8p(tc.code),
+				},
+			}
+			cfg.Security.Policies = []*ZonePairPolicies{
+				{FromZone: "untrust", ToZone: "junos-host", Policies: []*Policy{
+					jhDeny("typed-deny", []string{"any"}, []string{"typed"}),
+				}},
+			}
+			proj := BuildJunosHostDenyProjection(cfg)
+			if len(proj.Programs) != 1 || !proj.Programs[0].Representable {
+				t.Fatalf("numeric ICMP deny projection is not representable: %+v", proj.Programs)
+			}
+			program := proj.Programs[0]
+			rules := program.RulesV4
+			if tc.protoNumber == HostInboundProtoICMPv6 {
+				rules = program.RulesV6
+			}
+			if len(rules) != 1 || len(rules[0].L4) != 1 {
+				t.Fatalf("numeric %s projection rules = %+v, want one typed deny", tc.proto, rules)
+			}
+			got := rules[0].L4[0]
+			if got.Proto != tc.protoNumber {
+				t.Fatalf("protocol = %d, want %s (%d)", got.Proto, tc.proto, tc.protoNumber)
+			}
+			if got.ICMPType == nil || *got.ICMPType != tc.typ {
+				t.Fatalf("ICMPType = %v, want %d", got.ICMPType, tc.typ)
+			}
+			if got.ICMPCode == nil || *got.ICMPCode != tc.code {
+				t.Fatalf("ICMPCode = %v, want %d", got.ICMPCode, tc.code)
+			}
+		})
+	}
+}
+
 // TestJunosHostThreeTierComposition proves the effective program is assembled in
 // Rust's exact tier order (exact -> from-any -> global): a from-any PERMIT ahead
 // of a GLOBAL deny renders as a return BEFORE the deny's drop (#9504), and the

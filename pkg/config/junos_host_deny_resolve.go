@@ -283,6 +283,12 @@ func junosHostReduceApp(cfg *Config, name string) ([]JunosHostDenyL4, bool) {
 			return nil, false
 		}
 		frag.Proto = uint8(n)
+		// #11064(e): a NUMERIC ICMP-family protocol ('1'/'58') carries the
+		// same icmp-type/code constraint as the named form — dropping it here
+		// widens a type-scoped deny to every type of that family.
+		if n == int(HostInboundProtoICMP) || n == int(HostInboundProtoICMPv6) {
+			frag.ICMPType, frag.ICMPCode = app.ICMPType, app.ICMPCode
+		}
 	}
 	if frag.Proto == HostInboundProtoTCP || frag.Proto == HostInboundProtoUDP {
 		dp, dok := junosHostParsePorts(app.DestinationPort)
