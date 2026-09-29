@@ -617,8 +617,8 @@ func (es *EventStream) readLoop(ctx context.Context) {
 		typ := hdr[4]
 		seq := binary.LittleEndian.Uint64(hdr[8:16])
 
-		// Sanity check payload length (max 256 bytes for session events). An
-		// oversized declared length is a corrupt / framing-desynced frame. Do NOT
+		// Sanity check payload length (hard cap: 1024 bytes). An oversized
+		// declared length is a corrupt / framing-desynced frame. Do NOT
 		// drop the connection forever (the pre-#6132 bare `return`): the helper's
 		// Rust replay buffer re-sends a PRESENT frame verbatim on reconnect with no
 		// gap self-heal barrier, so a persistently-oversized frame produced the same
@@ -1891,6 +1891,21 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 		d.SourceNatICMPValid = payload[off] != 0
 		d.SourceNatICMPType = payload[off+1]
 		d.SourceNatICMPCode = payload[off+2]
+		off += 3
+	}
+	// #11070: ingress interface identity and stable policy rule identity are
+	// appended after the ICMP identity. Older helpers omit these fields.
+	if off+6 <= len(payload) {
+		d.IngressIfindex = int(binary.LittleEndian.Uint32(payload[off : off+4]))
+		d.IngressVLANID = binary.LittleEndian.Uint16(payload[off+4 : off+6])
+		off += 6
+	}
+	if off+2 <= len(payload) {
+		ruleIDLen := int(binary.LittleEndian.Uint16(payload[off : off+2]))
+		off += 2
+		if ruleIDLen <= len(payload)-off {
+			d.PolicyRuleID = string(payload[off : off+ruleIDLen])
+		}
 	}
 
 	return d, true
@@ -1982,13 +1997,20 @@ func decodeSessionCloseEvent(payload []byte) (SessionDeltaInfo, bool) {
 		d.RoutingDomain = binary.LittleEndian.Uint32(payload[off : off+4])
 		off += 4
 	}
-	// #9752: trailing purge-retirement marker (u8), length-gated. A close that
-	// retires exactly its key must not make downstream retractions derive
-	// companions the purge preserved. Absent (old helper) keeps the historical
-	// derive-and-retract behavior.
+	// #9752: trailing purge-retirement marker (u8), length-gated. It keeps its
+	// legacy offset before the additive ingress identity so older helpers remain
+	// compatible. A close that retires exactly its key must not make downstream
+	// retractions derive companions the purge preserved.
 	if len(payload) >= off+1 {
 		d.PurgeRetirement = payload[off] != 0
 		off++
+	}
+	// #11070: new close frames append ingress identity after the legacy marker.
+	// Length-gating preserves older helpers that do not carry this pair.
+	if len(payload) >= off+6 {
+		d.IngressIfindex = int(binary.LittleEndian.Uint32(payload[off : off+4]))
+		d.IngressVLANID = binary.LittleEndian.Uint16(payload[off+4 : off+6])
+		off += 6
 	}
 
 	return d, true

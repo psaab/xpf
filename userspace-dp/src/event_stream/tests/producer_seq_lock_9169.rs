@@ -208,7 +208,10 @@ fn refresh_status_publishes_the_producer_seq_lock_pair_9169() {
         quarantined_after_panic: false,
     };
     assert_eq!(
-        state.status.event_stream_producer_seq_lock_acquisitions_total, 0,
+        state
+            .status
+            .event_stream_producer_seq_lock_acquisitions_total,
+        0,
         "PROBE-pre: a default ProcessStatus reports nothing, so a non-zero \
          reading below cannot be a pre-existing value",
     );
@@ -216,7 +219,10 @@ fn refresh_status_publishes_the_producer_seq_lock_pair_9169() {
     crate::server::helpers::status::refresh_status(&mut state);
 
     assert_eq!(
-        state.status.event_stream_producer_seq_lock_acquisitions_total, 9_169,
+        state
+            .status
+            .event_stream_producer_seq_lock_acquisitions_total,
+        9_169,
         "refresh_status must publish the site-4 DENOMINATOR onto ProcessStatus \
          — delete that assignment and every event_stream cell above still \
          passes while the operator surface reports a mutex nobody takes \

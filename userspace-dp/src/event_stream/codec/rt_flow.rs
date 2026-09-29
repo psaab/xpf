@@ -233,7 +233,7 @@ impl EventFrame {
         // the "unknown" sentinel (a synthesized close with no live entry).
         session_id: u64,
     ) -> Self {
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; super::EVENT_FRAME_CAPACITY];
         let base = FRAME_HEADER_SIZE;
         let wire_af = rt_flow_addr_family(addr_family, src_ip);
 
@@ -403,7 +403,7 @@ impl EventFrame {
         // matching SESSION_CLOSE will, letting a SIEM join the two.
         session_id: u64,
     ) -> Self {
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; super::EVENT_FRAME_CAPACITY];
         let base = FRAME_HEADER_SIZE;
         let wire_af = rt_flow_addr_family(addr_family, src_ip);
 
@@ -485,7 +485,7 @@ impl EventFrame {
     /// extended ingress-ifindex/application fields.
     #[allow(dead_code)]
     pub(crate) fn encode_dataplane_event(seq: u64, event: &DataplaneEventPayload) -> Self {
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; super::EVENT_FRAME_CAPACITY];
         let base = FRAME_HEADER_SIZE;
         let wire_af = rt_flow_addr_family(event.addr_family, event.src_ip);
         let policy_or_reason_id = match event.kind {

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
 )
@@ -19,10 +20,10 @@ import (
 //     rows while a row promoted to local ownership during failover survives.
 
 var (
-	staleUnmapped9655 = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 7, 50}, DstIP: [4]byte{172, 16, 80, 200}, Protocol: 6, SrcPort: 42000, DstPort: 5201}
-	ownRG1Local9655   = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 1, 1}, DstIP: [4]byte{10, 0, 2, 1}, Protocol: 6, SrcPort: 3001, DstPort: 22}
+	staleUnmapped9655    = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 7, 50}, DstIP: [4]byte{172, 16, 80, 200}, Protocol: 6, SrcPort: 42000, DstPort: 5201}
+	ownRG1Local9655      = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 1, 1}, DstIP: [4]byte{10, 0, 2, 1}, Protocol: 6, SrcPort: 3001, DstPort: 22}
 	promotedUnmapped9655 = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 7, 51}, DstIP: [4]byte{172, 16, 80, 200}, Protocol: 6, SrcPort: 42001, DstPort: 5201}
-	stalePeerRG9655   = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 5, 77}, DstIP: [4]byte{172, 16, 80, 200}, Protocol: 6, SrcPort: 43000, DstPort: 5201}
+	stalePeerRG9655      = dataplane.SessionKey{SrcIP: [4]byte{10, 0, 5, 77}, DstIP: [4]byte{172, 16, 80, 200}, Protocol: 6, SrcPort: 43000, DstPort: 5201}
 )
 
 const unmappedZone9655 = 7
@@ -144,9 +145,9 @@ func TestAZoneMapNamingNoZoneSkipsTheReconcile_9655(t *testing.T) {
 			if tc.nilSnap {
 				for what, key := range map[string]dataplane.SessionKey{
 					"the peer-synced row in an RG-unmapped zone": staleUnmapped9655,
-					"the promoted row in an RG-unmapped zone":     promotedUnmapped9655,
-					"the session in the mapped zone 5":            stalePeerRG9655,
-					"this node's own RG 1 session":                ownRG1Local9655,
+					"the promoted row in an RG-unmapped zone":    promotedUnmapped9655,
+					"the session in the mapped zone 5":           stalePeerRG9655,
+					"this node's own RG 1 session":               ownRG1Local9655,
 				} {
 					if _, ok := dp.v4sessions[key]; !ok {
 						t.Errorf("#9655: %s was reconciled away without a zone snapshot", what)
@@ -158,8 +159,8 @@ func TestAZoneMapNamingNoZoneSkipsTheReconcile_9655(t *testing.T) {
 				}
 				for what, key := range map[string]dataplane.SessionKey{
 					"the promoted row in an RG-unmapped zone": promotedUnmapped9655,
-					"the session in the mapped zone 5":         stalePeerRG9655,
-					"this node's own RG 1 session":             ownRG1Local9655,
+					"the session in the mapped zone 5":        stalePeerRG9655,
+					"this node's own RG 1 session":            ownRG1Local9655,
 				} {
 					if _, ok := dp.v4sessions[key]; !ok {
 						t.Errorf("#10227: empty all-unmapped snapshot deleted %s", what)
@@ -189,5 +190,27 @@ func TestReconcileIsSkippedOnlyWhenTheZoneMapChangedDuringTheBulk_9655(t *testin
 	if _, ok := same.v4sessions[stalePeerRG9655]; ok {
 		t.Errorf("re-setting an IDENTICAL zone map during the bulk skipped the reconcile. The daemon re-sets the map " +
 			"on every config apply, so any commit during a bulk would cost it its reconcile")
+	}
+}
+
+func TestZoneMapChangeDuringBulkWithholdsCompletion9655(t *testing.T) {
+	rx, _ := receiver9655(t, false, map[uint16]int{1: 1, 5: 5})
+	released := make(chan struct{}, 1)
+	rx.OnBulkSyncReceived = func() { released <- struct{}{} }
+
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+
+	if rx.BulkEverCompleted() {
+		t.Fatal("#11070: a bulk whose reconcile was voided by a zone-map generation change was marked complete")
+	}
+	if got := rx.stats.BulkSyncEndTime.Load(); got != 0 {
+		t.Fatalf("#11070: a nonauthoritative bulk recorded end time %d", got)
+	}
+	select {
+	case <-released:
+		t.Fatal("#11070: a nonauthoritative bulk released the failover gate")
+	case <-time.After(50 * time.Millisecond):
 	}
 }

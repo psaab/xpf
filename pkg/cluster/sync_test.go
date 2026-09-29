@@ -1140,7 +1140,8 @@ func TestSyncSweepSkipsWhenDisconnected(t *testing.T) {
 }
 
 func TestBulkEndTriggersCallback(t *testing.T) {
-	ss := NewSessionSync(":4785", "10.0.0.2:4785", nil)
+	ss := NewSessionSync(":4785", "10.0.0.2:4785", &mockSweepDP{})
+	ss.SetZoneRGMap(map[uint16]int{})
 
 	called := make(chan struct{}, 1)
 	ss.OnBulkSyncReceived = func() {

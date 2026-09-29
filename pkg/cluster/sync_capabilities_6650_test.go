@@ -263,6 +263,7 @@ func liveSyncMessageTypesExcept(under int) []syncMessageType {
 		{syncMsgDHCPLeaseV4, "DHCPLeaseV4"}, {syncMsgDHCPLeaseV6, "DHCPLeaseV6"},
 		{syncMsgAuthHello, "AuthHello"}, {syncMsgAuthProof, "AuthProof"},
 		{syncMsgConfigApplyNack, "ConfigApplyNack"},
+		{syncMsgConfigApplyAck, "ConfigApplyAck"},
 		{syncMsgPeerCapabilities, "PeerCapabilities"},
 		{syncMsgConfigKeyExchange, "ConfigKeyExchange"},
 		{syncMsgConfigEncrypted, "ConfigEncrypted"},

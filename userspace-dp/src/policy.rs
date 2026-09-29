@@ -189,17 +189,25 @@ pub(crate) const UNATTRIBUTED_POLICY_ID: u32 = 0;
 /// Junos does not forward transit on an unzoned interface at all, so the
 /// disposition is a deny rather than a default.
 ///
-/// It is counted HERE rather than on `default_counter` so the two causes stay
-/// distinguishable: a rising default-deny count means policy is working as
-/// configured, whereas a rising count here means an interface fell out of its
-/// zone, which is a configuration fault the operator wants to see.
-///
-/// The RT_FLOW `policy_id` carries `UNATTRIBUTED_POLICY_ID`, so the deny
-/// LOGS as `unattributed` rather than `default-policy`. The dedicated
-/// `UNZONED_INGRESS_DENIED` counter remains the aggregate-cause signal; this
-/// attribution is intentionally separate from the implicit default sentinel.
-/// A distinct log reason is worth doing on its own, not folded in here.
+/// It is counted separately from `default_counter` so the deny does not inflate
+/// ordinary default-policy hit-counts. The direction-specific atomic is an
+/// in-process diagnostic only: it is not exported through `ProcessStatus`,
+/// Prometheus, or policy counter snapshots. In production the deny is visible
+/// as `policy=unattributed` in RT_FLOW and in aggregate
+/// `xpf_policy_denies_total`; exporting the cause counters is tracked in #11503.
 pub(crate) static UNZONED_INGRESS_DENIED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+///
+/// #11067: the EGRESS twin of `UNZONED_INGRESS_DENIED`. A transit flow whose
+/// egress interface is in no zone (to-zone id 0 on a RESOLVED egress) is
+/// denied rather than defaulted, for the same Junos-parity reason: an
+/// operator asking for permit-all is asking what to do with traffic that
+/// matched no policy, not asking to forward traffic that had no zone to be
+/// adjudicated in. It increments a separate in-process diagnostic atomic, not
+/// `default_counter`; the RT_FLOW denial is `unattributed`, with aggregate
+/// `xpf_policy_denies_total` visibility. Exporting the cause counters is
+/// tracked in #11503.
+pub(crate) static UNZONED_EGRESS_DENIED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// #3363: stable rule identity under which the IMPLICIT default-policy hit
@@ -624,7 +632,7 @@ impl PolicyRuleCounter {
     /// creation; the store re-hands the same `Arc` for a surviving id across
     /// snapshot rebuilds, so the id stays valid for the life of any session
     /// that bound the handle.
-    fn with_rule_id(rule_id: &str) -> Self {
+    pub(crate) fn with_rule_id(rule_id: &str) -> Self {
         Self {
             packets: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
@@ -1877,6 +1885,18 @@ impl PolicyState {
         let counter_idx = u32::try_from(index + 1).ok()?;
         Some((counter_idx, self.rules.get(index)?))
     }
+    /// Resolve a stable rule ID to the CURRENT snapshot's counter and index.
+    /// Unknown identities never fall back to a positional index.
+    pub(crate) fn hit_counter_binding_by_stable_id(
+        &self,
+        rule_id: &str,
+    ) -> Option<(u32, &Arc<PolicyRuleCounter>)> {
+        if rule_id == DEFAULT_POLICY_COUNTER_RULE_ID {
+            return Some((DEFAULT_POLICY_COUNTER_IDX, &self.default_counter));
+        }
+        let (idx, rule) = self.rule_binding_by_stable_id(rule_id)?;
+        Some((idx, &rule.hit_counter))
+    }
 
     /// #3395: re-resolve the CURRENT positional `policy_id` (#3056) for an
     /// ESTABLISHED session at a local publish surface (the ~1s live-row refresh
@@ -2570,7 +2590,10 @@ pub(crate) fn parse_policy_state_with_counters(
         // revalidation; a type-blind skipped PERMIT can create a false DENY.
         // #11064: the owner/foreign session-hit path separately needs to know
         // about constrained DENYs too, because it evaluates this packet with
-        // its actual ICMP type/code.
+        // its actual ICMP type/code. (#11070: the PERMIT-only question — "could
+        // a type-constrained term have ADMITTED a flow a type-blind eval
+        // denies" — is answered by icmp_type_constrained_permit below; the
+        // wider _term arm is correct for both consumers.)
         if !state.rules[idx].inactive {
             for (slot, proto) in [PROTO_ICMP, PROTO_ICMPV6].into_iter().enumerate() {
                 if state.rules[idx]
@@ -3104,9 +3127,46 @@ pub(crate) fn evaluate_policy_result_l3_aware(
         packet_len,
         l4_present,
         PolicyHitCount::Count,
+        true,
     )
 }
 
+/// Evaluate a flow whose route lookup found no egress interface.
+///
+/// Unlike a resolved egress in no zone, a NoRoute flow has no egress zone to
+/// adjudicate. Preserve its existing default-policy decision so default-permit
+/// can delegate the packet to the kernel; resolved egress zone 0 is denied by
+/// `evaluate_policy_result_l3_aware`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    l4_present: bool,
+) -> PolicyEvaluationResult {
+    evaluate_policy_result_counted(
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        PolicyHitCount::Count,
+        false,
+    )
+}
 /// #9385: evaluate WITHOUT bumping any hit counter.
 ///
 /// The entry point for #8356's established-session zone-policy re-derivation,
@@ -3145,6 +3205,7 @@ pub(crate) fn evaluate_policy_result_without_counting(
         0,
         true,
         PolicyHitCount::Never,
+        true,
     )
 }
 
@@ -3162,19 +3223,16 @@ fn evaluate_policy_result_counted(
     packet_len: u64,
     l4_present: bool,
     hit_count: PolicyHitCount,
+    egress_resolved: bool,
 ) -> PolicyEvaluationResult {
     // #3110: zone id 0 is the reserved "unknown / no zone" sentinel
     // (assigned to interfaces not bound to any security zone, and to the
     // over-cap-zone collapse-to-0 path, #2391). A flow whose ingress OR
-    // egress zone is unknown does not belong to any DEFINED zone pair, so
-    // it must NOT be eligible for zone-pair policies OR `junos-global`
-    // policies — global rules apply to all *defined* zone pairs, never to
-    // unzoned transit. Fall straight through to the default action so an
-    // operator's permit-global cannot leak transit on an unzoned
-    // ingress/egress interface. Composes with the default-policy
-    // fail-closed (#3065) and wildcard-zone work (#3018); the
-    // `junos-global` sentinel (u16::MAX) is a DEFINED global zone, distinct
-    // from 0 (unknown), and is unaffected by this guard.
+    // egress zone is unknown does not belong to any DEFINED zone pair, so it
+    // must NOT be eligible for zone-pair policies OR `junos-global` policies.
+    // The gates after the tier walk reject an unzoned ingress or a resolved
+    // unzoned egress; a NoRoute flow has no egress identity and retains its
+    // default-policy decision.
     //
     // #4569: fragment-association fail-closed. On the FLOWLESS path
     // (l4_present == false) a non-first fragment's post-IP bytes are payload,
@@ -3361,43 +3419,45 @@ fn evaluate_policy_result_counted(
             }
         }
     }
-    // #6682: an unzoned INGRESS must not reach the implicit default policy.
+    // #6682/#11067: after the #3110 tier gate, a resolved zone-0 ingress or
+    // egress must not reach the implicit default policy. With default-policy
+    // permit-all that default is a PERMIT, forwarding transit for which the
+    // dataplane has no zone policy to adjudicate.
     //
-    // The #3110 block above is skipped entirely when either zone id is 0, which
-    // correctly stops every rule tier — zone-pair, from-any, to-any, both-any
-    // and junos-global — from matching. The flow then landed on the implicit
-    // default, and `default-policy permit-all` made that a PERMIT: transit
-    // forwarded on an interface in no zone, with screens already skipped. An
-    // operator asking for permit-all is asking what to do with traffic that
-    // matched no policy, not asking to forward traffic that had no zone to be
-    // adjudicated in.
-    //
-    // Scoped to the INGRESS side deliberately. An unzoned ingress is
-    // unambiguous — Junos does not pass transit on an interface that is in no
-    // zone. A zero EGRESS zone has historically had causes that were bugs
-    // elsewhere rather than genuine unzoned-ness (#6713: an xfrmi tunnel egress
-    // resolved to 0 because `populate_egress` needed a link-layer address a
-    // MAC-less interface does not have), so denying on `to_id` would risk
-    // black-holing a correctly-configured path to fix a case that has not been
-    // shown to occur. It still falls through to the default below.
-    //
-    // Host-inbound is NOT affected by THIS arm: the LocalDelivery arm
+    // #6713's MAC-less tunnel regression was caused by using the egress-row
+    // table as the zone SSOT; `egress_zone_id` now reads the unambiguous zone
+    // ledger instead, so correctly configured tunnels resolve to their actual
+    // zone. The dedicated NoRoute entry point is the distinct no-egress case:
+    // it preserves the default decision because no egress interface exists.
+    // Host-inbound is NOT affected by these transit gates: LocalDelivery
     // adjudicates through `evaluate_junos_host_policy_l3_aware`, which for
     // `from_id == 0` consults only the from-any/global tiers (#10644) — an
-    // unmatched zone-0 host-bound flow still delivers — and both production
-    // callers of this function are transit (`ForwardCandidate` and the
-    // flowless MissingNeighbor arm). Lifelines (fxp0/em0/fab*/lo0) are
-    // unaffected throughout: `userspace_unbindable_netdev` excludes them by
-    // name, so they never bind and their host traffic never reaches either
-    // gate. UPGRADE NOTE (#10644 host-inbound half): a configured
-    // from-any/global `to-zone junos-host` DENY now fires for zone-0
-    // host-bound ingress, so management on NON-LIFELINE unzoned ingress
-    // (e.g. SSH to an unzoned ge-* data port) under a from-any deny-all
-    // flips deliver -> deny on upgrade. Intended explicit-deny semantics
-    // (default configs unaffected); recourse is to zone the port or order
-    // permits above the deny. Release-note worthy.
+    // unmatched zone-0 host-bound flow still delivers. Lifelines (fxp0/em0/
+    // fab*/lo0) are unaffected throughout: `userspace_unbindable_netdev`
+    // excludes them by name, so they never bind and their host traffic never
+    // reaches either transit gate. UPGRADE NOTE (#10644 host-inbound half): a
+    // configured from-any/global `to-zone junos-host` DENY now fires for
+    // zone-0 host-bound ingress; intended explicit-deny semantics.
     if from_id == 0 {
-        UNZONED_INGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // #9385: the unzoned cause counters obey the same count policy as the
+        // per-rule and implicit-default counters — a side-effect-free
+        // re-derivation (`PolicyHitCount::Never`) reports the deny without
+        // bumping them.
+        if hit_count.enabled() {
+            UNZONED_INGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return PolicyEvaluationResult {
+            action: PolicyAction::Deny,
+            policy_id: UNATTRIBUTED_POLICY_ID,
+            ..PolicyEvaluationResult::default()
+        };
+    }
+    if egress_resolved && to_id == 0 {
+        // #9385: as above — the egress twin must not pollute the cause count
+        // from a derivation that counts nothing.
+        if hit_count.enabled() {
+            UNZONED_EGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         return PolicyEvaluationResult {
             action: PolicyAction::Deny,
             policy_id: UNATTRIBUTED_POLICY_ID,

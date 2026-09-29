@@ -319,12 +319,12 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	}
 	if !res.Matched {
 		return &pb.MatchPoliciesResponse{
-			Matched:     false,
-			Action:      res.DisplayAction(),
-			DefaultUsed: res.DefaultUsed,
-			// #3627 M06: echo the queried zone pair on the no-match/default path
-			// so a stored default-deny diagnostic proves which zone pair was
-			// tested (from_zone/to_zone carry matched-policy scope, unset here).
+			Matched:       false,
+			Action:        res.DisplayAction(),
+			DefaultUsed:   res.DefaultUsed,
+			UnzonedEgress: res.UnzonedEgress,
+			// #3627 M06: echo the queried zone pair on no-match/default and
+			// unzoned paths, which carry no matched-policy scope.
 			QueriedFromZone: req.FromZone,
 			QueriedToZone:   req.ToZone,
 			// #4373 (E4/H2/H7): a multicast/broadcast/unspecified/loopback

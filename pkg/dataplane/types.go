@@ -434,6 +434,11 @@ type SessionValue struct {
 	SourceNatICMPValid bool
 	SourceNatICMPType  uint8
 	SourceNatICMPCode  uint8
+	// PolicyRuleID (#11070) is the helper's stable admitting-rule identity. It
+	// crosses the cluster wire and resolves against the current policy on
+	// import. Unlike the positional counter index, it is safe across rule
+	// reordering.
+	PolicyRuleID string `json:"-"`
 }
 
 // SessionKeyV6 mirrors the C struct session_key_v6 (5-tuple with 128-bit IPs).
@@ -822,6 +827,8 @@ type SessionValueV6 struct {
 	SourceNatICMPValid bool
 	SourceNatICMPType  uint8
 	SourceNatICMPCode  uint8
+	// PolicyRuleID (#11070) is sync-only metadata; never part of the BPF/C ABI.
+	PolicyRuleID string `json:"-"`
 }
 
 // ZoneConfig mirrors the C struct zone_config.

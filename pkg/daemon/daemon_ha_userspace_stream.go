@@ -112,20 +112,27 @@ func (d *Daemon) shouldSyncUserspaceDelta(ss *cluster.SessionSync, delta dpusers
 	// fresh #2170 install generation and overwrote the owner's authoritative
 	// session family under latest-generation-wins.
 	//
-	// The fence is ownership of the INGRESS side: sync the handoff only when
-	// this node is primary for the RG the flow's ingress zone belongs to, i.e.
-	// only when it actually owns the traffic it is handing off. That keeps the
-	// split-RG handoff (ingress RG is local) and drops the fabrication (ingress
-	// RG is the peer's — a node that owns neither side of the flow has no
-	// authority to install anything on the peer). ShouldSyncZone is the same
-	// predicate the non-fabric fallback below already uses, so the two branches
-	// now agree on what "this node owns this flow's ingress" means.
+	// The fence is ownership of the ingress session, not the zone's aggregate
+	// RG membership: a multi-RG zone can span ownership boundaries.
 	if delta.FabricRedirect && !delta.FabricIngress {
-		ok := ss != nil && ss.ShouldSyncZone(ingressZone)
+		ok := false
+		if ss != nil && delta.AddrFamily == dataplane.AFInet6 {
+			session := dataplane.SessionValueV6{IngressZone: ingressZone, IngressVlanID: delta.IngressVLANID}
+			if delta.IngressIfindex > 0 {
+				session.IngressIfindex = uint32(delta.IngressIfindex)
+			}
+			ok = ss.ShouldSyncSessionV6(session)
+		} else if ss != nil {
+			session := dataplane.SessionValue{IngressZone: ingressZone, IngressVlanID: delta.IngressVLANID}
+			if delta.IngressIfindex > 0 {
+				session.IngressIfindex = uint32(delta.IngressIfindex)
+			}
+			ok = ss.ShouldSyncSessionV4(session)
+		}
 		if !ok {
 			if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 				src, dst := userspaceDeltaFlowStrings(delta)
-				slog.Debug("userspace delta: filtered (fabric redirect from a zone this node does not own)", "zone", ingressZone, "rg", delta.OwnerRGID, "src", src, "dst", dst)
+				slog.Debug("userspace delta: filtered (fabric redirect from an ingress session this node does not own)", "zone", ingressZone, "rg", delta.OwnerRGID, "src", src, "dst", dst)
 			}
 		}
 		return ok

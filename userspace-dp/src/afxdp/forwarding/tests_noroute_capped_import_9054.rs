@@ -16,8 +16,8 @@
 //! policy denial — downgraded to `PolicyDenied` by the arm, counted in
 //! `policy_denied_packets` (`xpf_policy_denies_total`), and visible against
 //! the capped state in `xpf_learned_route_import_capped` — not forwarded. A
-//! default-permit box still delegates either way, so the availability cost
-//! lands only where the operator's own default says deny.
+//! zero-identity NoRoute on a default-permit box still delegates; a NoRoute
+//! retaining a logical egress identity is adjudicated against that egress zone.
 //!
 //! The cells below are written against `noroute_policy_denial_gated`, the same
 //! function the arm calls. The arm itself is not drivable from this crate (it
@@ -32,8 +32,8 @@ use rustc_hash::FxHashMap;
 use std::net::IpAddr;
 
 const LAN: u16 = 11;
-/// The #3110 "unknown / no zone" sentinel. Every NoRoute resolution carries
-/// `egress_ifindex: 0`, so the caller always resolves this as the to-zone.
+/// A base NoRoute has `egress_ifindex: 0` and resolves this as the to-zone.
+/// A tunnel NoRoute may retain a logical egress ifindex.
 const UNZONED: u16 = 0;
 
 fn src() -> IpAddr {
@@ -64,6 +64,7 @@ fn verdict(state: &ForwardingState) -> Option<crate::policy::PolicyEvaluationRes
         state,
         LAN,
         UNZONED,
+        0,
         src(),
         dst(),
         6,

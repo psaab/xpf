@@ -50,6 +50,9 @@ type incEnv struct {
 func newIncEnv(t *testing.T, fabrics int) *incEnv {
 	t.Helper()
 	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	// Bulk completion now requires an authoritative snapshot; an explicit empty
+	// map is a valid all-unmapped snapshot for these session-free fixtures.
+	s.SetZoneRGMap(map[uint16]int{})
 	e := &incEnv{s: s, applied: make(chan string, 16), entered: make(chan string, 16)}
 	s.OnConfigReceived = func(text string) error {
 		e.mu.Lock()

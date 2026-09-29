@@ -56,12 +56,9 @@ func TestMatchEmptyZoneFallsToDefault(t *testing.T) {
 		{"from-zone empty", "", "untrust"},
 		{"to-zone empty", "trust", ""},
 	}
-	// #8318: an empty FROM zone is the unconditional unzoned-ingress deny; an
-	// empty TO zone still falls through to default-policy, because the runtime
-	// deliberately declines to deny on to_id == 0 ("would risk black-holing a
-	// correctly-configured path"). Both are DENY under this deny-all fixture —
-	// which is why one branch could stand in for both — so the rows now assert
-	// WHICH.
+	// #8318/#11067: both unknown sides are terminal denies, attributed to their
+	// direction rather than to the configured default. The deny-all fixture
+	// makes the Action equal, so assert the direction-specific cause flags.
 	fromUnknown := func(from string) bool { return from == "" }
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -73,13 +70,13 @@ func TestMatchEmptyZoneFallsToDefault(t *testing.T) {
 				t.Fatalf("want deny for an empty-zone query, got %+v", res)
 			}
 			if fromUnknown(c.from) {
-				if !res.UnzonedIngress || res.DefaultUsed {
+				if !res.UnzonedIngress || res.DefaultUsed || res.UnzonedEgress {
 					t.Fatalf("an empty FROM zone must be the unzoned-ingress deny, "+
-						"not a default-policy verdict, got %+v", res)
+						"not a default or egress verdict, got %+v", res)
 				}
-			} else if !res.DefaultUsed || res.UnzonedIngress {
-				t.Fatalf("an empty TO zone must still fall through to default-policy "+
-					"(the runtime does not deny on to_id == 0), got %+v", res)
+			} else if !res.UnzonedEgress || res.DefaultUsed || res.UnzonedIngress {
+				t.Fatalf("an empty TO zone must be the unzoned-egress deny, "+
+					"not a default or ingress verdict, got %+v", res)
 			}
 		})
 	}

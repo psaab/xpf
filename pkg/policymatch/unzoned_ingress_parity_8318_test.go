@@ -7,25 +7,15 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #8318: the simulator must deny an unzoned INGRESS unconditionally, matching
-// the runtime, while an unzoned EGRESS still falls through to default-policy.
+// #8318/#11067: the simulator must deny an unzoned ingress and a resolved
+// unzoned egress regardless of default-policy. The simulator query has no FIB
+// input, so it cannot distinguish a zero-identity NoRoute whose dataplane
+// decision still follows the default.
 //
-// THE FIXTURE MUST USE default-policy permit-all, AND THAT IS THE WHOLE POINT.
-// Under `deny-all` — the default default — the broken code and the fixed code
-// both return Deny for an unknown FromZone, so a deny-all cell passes on the
-// BROKEN implementation and proves nothing. permit-all is the only setting on
-// which the two implementations disagree, and the disagreement is exactly what
-// this issue is.
-//
-// WHAT DIVERGED, precisely, so this does not read as undoing #3355. Eligibility
-// was already correct and is UNCHANGED: an unknown zone on either side is
-// excluded from the zone-pair, wildcard and global tiers, mirroring the
-// runtime's `from_id != 0 && to_id != 0` gate — which is what `zoneKnown`'s
-// "mirrors the runtime UNCONDITIONALLY" comment is about. It is the TERMINAL
-// ACTION after that exclusion that differed: the runtime denies on `from_id ==
-// 0` without consulting default-policy (#6682), and deliberately does NOT do
-// the same for `to_id == 0` because that "would risk black-holing a
-// correctly-configured path".
+// Both direction cells MUST use default-policy permit-all. Under `deny-all` the
+// old and new implementations both return Deny for unknown zones, so a deny-all
+// result assertion alone proves nothing; the direction-specific flags and
+// DefaultUsed assertions pin the terminal gate.
 func TestUnzonedIngressDeniesRegardlessOfDefaultPolicy8318(t *testing.T) {
 	permitAll := func() *config.Config {
 		return &config.Config{Security: config.SecurityConfig{
@@ -62,25 +52,22 @@ func TestUnzonedIngressDeniesRegardlessOfDefaultPolicy8318(t *testing.T) {
 		}
 	})
 
-	// THE OVER-CORRECTION CASE. The runtime explicitly declined to deny on the
-	// egress side; denying here would reintroduce the black-holing risk its
-	// comment names (#6713: a MAC-less xfrmi egress resolves to 0 for an
-	// unrelated reason). If this row ever reports Deny, the fix has been
-	// widened past the runtime.
-	t.Run("unknown ToZone still uses default-policy under permit-all", func(t *testing.T) {
+	// A resolved unknown TO zone is the egress deny, not the default-policy.
+	t.Run("unknown ToZone denies as unzoned egress under permit-all", func(t *testing.T) {
 		res := Match(permitAll(), Query{
 			FromZone: "trust", ToZone: "not-a-zone", Protocol: "tcp", DstPort: 80,
 		})
-		if res.Action != config.PolicyPermit {
-			t.Fatalf("unknown ToZone must fall through to default-policy (permit-all) — "+
-				"the runtime falls through on to_id == 0 on purpose; got %v",
+		if res.Action != config.PolicyDeny {
+			t.Fatalf("unknown ToZone must DENY under default-policy permit-all "+
+				"(the runtime denies resolved to_id == 0, #11067); got %v",
 				ActionString(res.Action))
 		}
-		if !res.DefaultUsed {
-			t.Error("the egress arm IS a default-policy verdict and must say so")
+		if !res.UnzonedEgress || res.UnzonedIngress || res.DefaultUsed {
+			t.Fatalf("unknown ToZone must carry only UnzonedEgress and not use "+
+				"default-policy, got %+v", res)
 		}
-		if res.UnzonedIngress {
-			t.Error("UnzonedIngress is the FROM side only")
+		if got := res.DisplayAction(); !strings.Contains(got, "egress zone unknown") {
+			t.Errorf("DisplayAction must name the egress cause, got %q", got)
 		}
 	})
 
@@ -97,20 +84,19 @@ func TestUnzonedIngressDeniesRegardlessOfDefaultPolicy8318(t *testing.T) {
 		}
 	})
 
-	// The deny-all rows are the CONTROL that the deny above is not an artifact
-	// of the fixture: both sides deny here on broken and fixed code alike, so
-	// these rows must stay green throughout and prove nothing on their own.
-	// They are here to show the fix did not change the deny-all behaviour.
-	t.Run("deny-all unchanged on both sides", func(t *testing.T) {
+	// The deny-all rows are controls for unchanged action behavior. They cannot
+	// distinguish a default deny from the two unzoned gates, so assert the cause
+	// flags on each side as well.
+	t.Run("deny-all still attributes each unzoned direction", func(t *testing.T) {
 		denyAll := &config.Config{Security: config.SecurityConfig{
 			DefaultPolicy: config.PolicyDeny,
 			Zones:         zones("trust", "untrust"),
 		}}
-		if res := Match(denyAll, Query{FromZone: "nope", ToZone: "untrust", Protocol: "tcp", DstPort: 80}); res.Action != config.PolicyDeny {
-			t.Errorf("unknown FromZone under deny-all must still deny, got %v", ActionString(res.Action))
+		if res := Match(denyAll, Query{FromZone: "nope", ToZone: "untrust", Protocol: "tcp", DstPort: 80}); !res.UnzonedIngress || res.DefaultUsed {
+			t.Errorf("unknown FromZone must remain an ingress deny under deny-all, got %+v", res)
 		}
-		if res := Match(denyAll, Query{FromZone: "trust", ToZone: "nope", Protocol: "tcp", DstPort: 80}); res.Action != config.PolicyDeny {
-			t.Errorf("unknown ToZone under deny-all must still deny (via the default), got %v", ActionString(res.Action))
+		if res := Match(denyAll, Query{FromZone: "trust", ToZone: "nope", Protocol: "tcp", DstPort: 80}); !res.UnzonedEgress || res.DefaultUsed {
+			t.Errorf("unknown ToZone must be an egress deny under deny-all, got %+v", res)
 		}
 	})
 

@@ -44,6 +44,30 @@ security {
 	}
 	return store
 }
+func unzonedEgressStore(t *testing.T) *configstore.Store {
+	t.Helper()
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure() error = %v", err)
+	}
+	if err := store.LoadOverride(`
+security {
+    zones {
+        security-zone trust;
+        security-zone untrust;
+    }
+    policies {
+        default-policy permit-all;
+    }
+}
+`); err != nil {
+		t.Fatalf("LoadOverride() error = %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	return store
+}
 
 // TestMatchPoliciesHostInboundActionNonBlank pins #3375 on the gRPC surface: a
 // `to-zone junos-host` query that matched no host-bound policy must return a
@@ -78,6 +102,24 @@ func TestMatchPoliciesHostInboundActionNonBlank(t *testing.T) {
 	}
 	if resp.DefaultUsed {
 		t.Errorf("DefaultUsed = true, want false (host path has no default fallback)")
+	}
+}
+
+// TestMatchPoliciesUnzonedEgress exposes the #11067 cause as a typed gRPC
+// field and does not misattribute the deny to permit-all.
+func TestMatchPoliciesUnzonedEgress(t *testing.T) {
+	s := &Server{store: unzonedEgressStore(t)}
+	resp, err := s.MatchPolicies(context.Background(), &pb.MatchPoliciesRequest{
+		FromZone: "trust", ToZone: "nowhere",
+	})
+	if err != nil {
+		t.Fatalf("MatchPolicies error = %v", err)
+	}
+	if resp.Matched || resp.Action != policymatch.UnzonedEgressActionString {
+		t.Fatalf("unknown ToZone must report the unzoned-egress deny, got %+v", resp)
+	}
+	if !resp.UnzonedEgress || resp.DefaultUsed {
+		t.Fatalf("UnzonedEgress=%v DefaultUsed=%v, want true/false", resp.UnzonedEgress, resp.DefaultUsed)
 	}
 }
 

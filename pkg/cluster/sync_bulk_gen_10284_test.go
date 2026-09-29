@@ -163,6 +163,7 @@ func TestBulkSnapshotCloseAfterReadDeletesOnReceiver10284(t *testing.T) {
 		t.Fatalf("#10284: session closed after BulkStart survived on the receiver (frame types %v)", types)
 	}
 }
+
 // TestBulkSnapshotCloseDuringSourceReadDeletesOnReceiver10284 closes the
 // session after the source has captured its row but before the source returns.
 // The source/delete generation critical section must defer that close draw
@@ -279,13 +280,14 @@ func TestBulkSnapshotCloseDuringSourceReadDeletesOnReceiver10284(t *testing.T) {
 		t.Fatal("#10284: source-race close left the session installed on the receiver")
 	}
 }
+
 // TestBulkSnapshotCloseAfterReadDeletesOnReceiverV6_10284 pins the independent
 // v6 bulk iterator. Its row must be stamped before the post-BulkStart close,
 // just like v4, so the receiver's tombstone wins the reordered arrival.
 func TestBulkSnapshotCloseAfterReadDeletesOnReceiverV6_10284(t *testing.T) {
 	key := dataplane.SessionKeyV6{
-		SrcIP: [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15},
-		DstIP: [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x25},
+		SrcIP:   [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15},
+		DstIP:   [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x25},
 		SrcPort: 42106, DstPort: 5201, Protocol: 6,
 	}
 	live := dataplane.SessionValueV6{State: dataplane.SessStateEstablished, IngressZone: 5}
@@ -370,8 +372,6 @@ func TestBulkSnapshotCloseAfterReadDeletesOnReceiverV6_10284(t *testing.T) {
 	}
 }
 
-
-
 // TestSameBootReprimePreservesDeleteTombstone10284 is the #10284 cell 2
 // fail-on-revert: a same-incarnation bulk re-prime must NOT wipe the
 // receiver's delete tombstones. Snapshot-time stamping alone cannot close the
@@ -425,6 +425,7 @@ func TestSameBootReprimePreservesDeleteTombstone10284(t *testing.T) {
 		t.Fatalf("#10284: live high-water after same-boot re-prime = %d, want re-prime's 150", liveStored)
 	}
 }
+
 // TestSameNamespaceResetRetainsTombstoneCap10284 pins the #9915 cap invariant:
 // a same-namespace reset may preserve a tombstone map that was grown to its
 // effective cap, so it must preserve enough cap metadata for that map.
@@ -525,6 +526,50 @@ func TestRebootReprimeStillResetsSessionGens10284(t *testing.T) {
 		t.Fatal("#10284 regression: rebooted peer's lower-generation re-prime was refused as stale (#2198 F2)")
 	}
 	receiver.handleMessage(nil, syncMsgBulkEnd, bulkEndPayload(1, &incB))
+}
+
+func TestFirstKnownIncarnationPrimePreservesConfigBarriers11070(t *testing.T) {
+	receiver, _ := receiver10284(t)
+	receiver.lastAppliedConfigGen.Store(500)
+	receiver.lastRecvConfigGen.Store(700)
+	receiver.applyingConfigGen.Store(600)
+	receiver.configEpochRoleMu.Lock()
+	receiver.configEpochReverseFloor = 800
+	receiver.configEpochRoleMu.Unlock()
+
+	receiver.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, &incA))
+	if got := receiver.lastAppliedConfigGen.Load(); got != 500 {
+		t.Fatalf("#11070: first known incarnation reset applied generation to %d, want 500", got)
+	}
+	if got := receiver.lastRecvConfigGen.Load(); got != 700 {
+		t.Fatalf("#11070: first known incarnation reset received generation to %d, want 700", got)
+	}
+	if got := receiver.applyingConfigGen.Load(); got != 600 {
+		t.Fatalf("#11070: first known incarnation cleared apply fence to %d, want 600", got)
+	}
+	receiver.configEpochRoleMu.Lock()
+	floor := receiver.configEpochReverseFloor
+	receiver.configEpochRoleMu.Unlock()
+	if floor != 800 {
+		t.Fatalf("#11070: first known incarnation cleared reverse epoch floor to %d, want 800", floor)
+	}
+
+	receiver.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, &incB))
+	if got := receiver.lastAppliedConfigGen.Load(); got != 0 {
+		t.Errorf("#11070: genuine reboot retained applied config barrier %d", got)
+	}
+	if got := receiver.lastRecvConfigGen.Load(); got != 0 {
+		t.Errorf("#11070: genuine reboot retained received config barrier %d", got)
+	}
+	if got := receiver.applyingConfigGen.Load(); got != 0 {
+		t.Errorf("#11070: genuine reboot retained apply fence %d", got)
+	}
+	receiver.configEpochRoleMu.Lock()
+	floor = receiver.configEpochReverseFloor
+	receiver.configEpochRoleMu.Unlock()
+	if floor != 0 {
+		t.Errorf("#11070: genuine reboot retained reverse epoch floor %d", floor)
+	}
 }
 
 // TestLegacyBulkStartStillResetsSessionGens10284 pins the fail-open half: a

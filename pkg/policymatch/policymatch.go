@@ -752,17 +752,14 @@ type Result struct {
 	// UnzonedIngress is true when the query's FROM zone is not a known zone, so
 	// the runtime denies it unconditionally (#6682) rather than falling through
 	// to default-policy (#8318).
-	//
-	// It exists because the verdict is otherwise indistinguishable from a
-	// default-deny, and on a `permit-all` box that misattribution is actively
-	// false: `DisplayAction` would render "deny (default)" and the show surfaces
-	// "Default deny (no matching policy ...)" for a deny the default did not
-	// produce. Modelled on HostInboundUnmatched, which carries a different
-	// terminal condition out of the matcher for the same reason.
-	//
-	// The EGRESS side has no such flag on purpose — an unknown ToZone really
-	// does fall through to default-policy in the runtime.
 	UnzonedIngress bool
+
+	// UnzonedEgress is true when the query's TO zone is not a known zone, so a
+	// resolved transit egress is denied rather than falling through to
+	// default-policy (#11067). Match has no FIB input and cannot distinguish a
+	// zero-identity NoRoute (which preserves the default in the dataplane);
+	// callers use this result as the conservative resolved-egress verdict.
+	UnzonedEgress bool
 
 	// ContentRejected is true when the simulated config references policy
 	// content the userspace snapshot builder fails the WHOLE snapshot closed on
@@ -1151,6 +1148,17 @@ const UnzonedIngressActionString = "deny (ingress zone unknown — transit on an
 // HostInboundShowLine is.
 const UnzonedIngressShowLine = "unzoned ingress: an interface in no zone resolves to the reserved zone id 0, which is ineligible for zone-pair, wildcard and junos-global policies; the dataplane denies rather than falling through to default-policy (#6682)"
 
+// UnzonedEgressActionString is the operator-facing verdict for a query whose
+// TO zone is unknown. A resolved zone-0 egress is denied before the configured
+// default-policy (#11067). The Match query has no FIB identity, so this string
+// describes the resolved-egress verdict, not zero-identity NoRoute handling.
+const UnzonedEgressActionString = "deny (egress zone unknown — resolved transit to an interface in no zone is denied unconditionally; default-policy NOT applied)"
+
+// UnzonedEgressShowLine is the human-readable one-line explanation shared by
+// CLI surfaces for an unknown TO zone. Match cannot distinguish a resolved
+// egress from zero-identity NoRoute without a FIB input.
+const UnzonedEgressShowLine = "unzoned egress: a resolved transit egress in no security zone is denied before default-policy (#11067); a NoRoute with no logical egress identity is not modeled by this simulator"
+
 const HostInboundShowLine = "host-inbound: local delivery subject to host-inbound-traffic service admission (a zone with no host-inbound-traffic stanza denies by default; transit global/default-policy NOT applied)"
 
 // ContentRejectedActionString is the operator-facing verdict rendered for a
@@ -1182,6 +1190,7 @@ const ContentRejectedShowLine = "policy content rejected: the dataplane fails th
 //     (#9993); this is the primary operator posture on every surface.
 //   - UnsupportedTupleFamily -> UnsupportedTupleFamilyActionString
 //   - HostInboundUnmatched -> HostInboundActionString
+//   - UnzonedIngress / UnzonedEgress -> their direction-specific deny strings
 //   - no match (default-policy verdict) -> "<action> (default)"
 //   - concrete policy match -> "<action>"
 func (r Result) DisplayAction() string {
@@ -1194,6 +1203,8 @@ func (r Result) DisplayAction() string {
 		return HostInboundActionString
 	case r.UnzonedIngress:
 		return UnzonedIngressActionString
+	case r.UnzonedEgress:
+		return UnzonedEgressActionString
 	case !r.Matched:
 		return ActionString(r.Action) + " (default)"
 	default:
@@ -1357,48 +1368,18 @@ func Match(cfg *config.Config, q Query) (res Result) {
 		return matchJunosHostWithMemo(cfg, q, ids, addressMemoPtr)
 	}
 
-	// #3355: the runtime gates the ENTIRE transit block — exact zone-pair, the
-	// #3090 from-any/to-any/both-any wildcard tiers, AND the #3148 global tier —
-	// on `from_id != 0 && to_id != 0` (policy.rs evaluate_policy_result_with_icmp).
-	// Zone id 0 is the reserved "unknown / no zone" sentinel an unconfigured
-	// zone name resolves to; a flow whose ingress OR egress zone is unknown
-	// belongs to no DEFINED zone pair and is ineligible for zone-pair, wildcard,
-	// or junos-global policies. A query naming an UNDEFINED zone is the simulator
-	// analogue of id 0, so it must fall straight through to the configured
-	// default-policy rather than wrongly matching a `from-zone any` / `to-zone
-	// any` / global rule.
-	// #8318: the two sides are NOT symmetric at the terminal action, and this
-	// branch used to collapse them. Eligibility IS symmetric — that is what the
-	// paragraph above describes, and it is unchanged: an unknown zone on either
-	// side is excluded from the zone-pair, wildcard and global tiers, exactly as
-	// the runtime's `from_id != 0 && to_id != 0` gate does. What differs is what
-	// happens AFTER that exclusion.
-	//
-	// The runtime denies an unzoned INGRESS unconditionally (#6682,
-	// policy.rs `if from_id == 0`), without consulting default-policy: Junos does
-	// not pass transit on an interface that is in no zone, and screens were
-	// already skipped for it. It deliberately does NOT do the same for the
-	// EGRESS side — its comment says denying on `to_id` "would risk
-	// black-holing a correctly-configured path to fix a case that has not been
-	// shown to occur. It still falls through to the default below" (#6713 is the
-	// cited precedent: a MAC-less xfrmi egress resolving to 0 for an unrelated
-	// reason).
-	//
-	// Collapsing both into `DefaultUsed: true` agreed with the runtime only
-	// because `deny-all` is the default default-policy, so both sides denied and
-	// the divergence was invisible. Under `permit-all` the simulator said PERMIT
-	// where the dataplane drops — on the surface an operator uses to VERIFY
-	// policy before trusting it, which is the worst place for it: they conclude
-	// the policy is right and look elsewhere.
+	// #3355: zone id 0 makes a query ineligible for every transit tier, on
+	// either side. An undefined query zone is the simulator analogue of id 0.
+	// #8318/#11067: after that shared eligibility gate, BOTH unzoned directions
+	// are terminal denies in the dataplane: #6682 denies an unknown ingress,
+	// and #11067 denies a resolved egress. The Go query has no FIB or logical
+	// egress identity, so it cannot recognize the narrower zero-identity NoRoute
+	// case that preserves the dataplane's default-policy decision.
 	if !zoneKnown(cfg, q.FromZone) {
-		// DefaultUsed is deliberately FALSE: its own contract is "Action is the
-		// configured default-policy", and this Deny is not — it overrides the
-		// default. Reporting true here would tell an operator on a permit-all
-		// box that their default produced a deny.
 		return Result{UnzonedIngress: true, Action: config.PolicyDeny}
 	}
 	if !zoneKnown(cfg, q.ToZone) {
-		return Result{DefaultUsed: true, Action: cfg.Security.DefaultPolicy}
+		return Result{UnzonedEgress: true, Action: config.PolicyDeny}
 	}
 
 	// #5572: while walking the transit tiers in first-match precedence order,

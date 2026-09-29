@@ -3649,19 +3649,24 @@ outside the monitor loop:
   refused the newer config the old primary pushed, and pushed its own older
   config back over the committed one.
   - The demoting node cannot read the peer's `ConfigStale`: heartbeats carry only
-    per-RG priority, weight and state. It does hold the one signal that covers the
-    reachable windows. A standby whose stored config is still older either failed
-    to apply the newest push or dropped it from a full apply queue, and both send a
-    config-apply nack for that generation (#7328).
-    `SessionSync.PeerConfigStale` is true while the last nack matches
-    `lastSentConfigGen`; a newer successful push supersedes it.
-  - `ManualFailover`, `ManualFailoverBatch` and `ForceSecondary` evaluate the
-    predicate (`SetPeerConfigStaleFunc`, wired by the daemon) outside `m.mu` and
-    refuse with `ErrPeerConfigStale`. A refusal clears the in-progress mark.
-  - A push the standby is still applying sends no nack and is not refused. That is
-    safe, because `SyncApply` makes the new tree active before applying it. With no
-    session sync there is no push that could have failed, so the handover proceeds
-    as before. Crash takeover stays ungated by design.
+    per-RG priority, weight and state. The sender tracks the newest config
+    generation it put on the wire and the highest generation the peer positively
+    acknowledged as applied (`syncMsgConfigApplyAck`). `SessionSync.PeerConfigStale`
+    remains true while the applied mark trails the newest sent generation.
+  - `syncMsgConfigApplyNack` still reports apply failures and queue-full drops,
+    but a NACK is diagnostic only; it cannot establish the peer's applied state.
+    Re-pushing a newer config therefore does NOT clear the gate before the
+    standby has actually applied it.
+  - The standby sends the positive ACK only after the ordered apply callback
+    succeeds and its applied high-water advances. A duplicate of the already
+    applied generation re-ACKs it, recovering a lost response. While a config
+    is in flight the sender remains fail-closed; only its matching ACK clears
+    the gate.
+  - Older peers do not send apply ACKs; once a config is pushed to one, handover
+    remains refused until an upgraded peer reconnects and positively
+    acknowledges the current generation. Reconnection alone does not clear the
+    gate. With no session sync there is no push that could have failed, so
+    handover proceeds as before. Crash takeover stays ungated.
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
 - **A committed requested transfer wins over `preempt` (#10776).** Once the
@@ -4453,6 +4458,11 @@ outside the monitor loop:
     when its contents change. Reconcile skips a bulk whose ownership snapshot
     generation is stale, because old answers could delete a session this node
     now owns.
+  - When the bulk-start ownership snapshot is absent or its generation changes
+    before reconcile, the receiver keeps sessions and withholds `BulkAck`,
+    `bulkEverCompleted`, and `OnBulkSyncReceived`. The failover sync hold therefore
+    stays armed until a later complete bulk is reconciled instead of treating a
+    keep-all fallback as authoritative.
   - `snapshotZoneOwnership` captures each RG's primary answer, the zone-level
     answers and RG 0 fallback at BulkStart; per-session reconcile uses only
     those captured answers, never re-querying ownership at BulkEnd.

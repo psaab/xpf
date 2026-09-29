@@ -200,12 +200,8 @@ func TestBuildSessionSyncRequestCarriesLogFlags(t *testing.T) {
 	}
 }
 
-// #3301: buildSessionSyncRequest must copy the admitting policy's firewall
-// metadata (PolicyID, PolicyCounterIdx, AppTimeout->InactivityTimeout) from the
-// SessionValue onto the wire so a peer-PROMOTED session is correctly
-// attributed/counted/aged after failover. Reverting the manager_ha.go
-// population fails this RED. A JSON round-trip pins the wire keys against the
-// Rust SessionSyncRequest serde tags.
+// Stable policy rule identity travels with policy attribution so the receiver
+// can bind a counter against its current rule ordering.
 func TestBuildSessionSyncRequestCarriesPolicyFields3301(t *testing.T) {
 	m := &Manager{bpfShim: dataplane.New()}
 	keyV4 := dataplane.SessionKey{
@@ -214,12 +210,11 @@ func TestBuildSessionSyncRequestCarriesPolicyFields3301(t *testing.T) {
 	}
 	valV4 := &dataplane.SessionValue{
 		IngressZone: 1, EgressZone: 2,
-		PolicyID: 42, PolicyCounterIdx: 7, AppTimeout: 30,
+		PolicyID: 42, PolicyCounterIdx: 7, PolicyRuleID: "lan->wan/allow-web", AppTimeout: 30,
 	}
 	reqV4 := m.buildSessionSyncRequestV4("upsert", keyV4, valV4)
-	if reqV4.PolicyID != 42 || reqV4.PolicyCounterIdx != 7 || reqV4.InactivityTimeout != 30 {
-		t.Fatalf("v4: policy=%d counter=%d inact=%d, want 42/7/30",
-			reqV4.PolicyID, reqV4.PolicyCounterIdx, reqV4.InactivityTimeout)
+	if reqV4.PolicyID != 42 || reqV4.PolicyCounterIdx != 7 || reqV4.PolicyRuleID != "lan->wan/allow-web" || reqV4.InactivityTimeout != 30 {
+		t.Fatalf("v4: policy=%d counter=%d rule=%q inact=%d", reqV4.PolicyID, reqV4.PolicyCounterIdx, reqV4.PolicyRuleID, reqV4.InactivityTimeout)
 	}
 
 	// JSON wire keys must match the Rust SessionSyncRequest serde(rename).
@@ -232,16 +227,26 @@ func TestBuildSessionSyncRequestCarriesPolicyFields3301(t *testing.T) {
 			t.Fatalf("wire JSON missing %s: %s", want, js)
 		}
 	}
+	var wireFields map[string]json.RawMessage
+	if err := json.Unmarshal(js, &wireFields); err != nil {
+		t.Fatalf("unmarshal request JSON: %v", err)
+	}
+	var gotRuleID string
+	if err := json.Unmarshal(wireFields["policy_rule_id"], &gotRuleID); err != nil {
+		t.Fatalf("decode policy_rule_id: %v", err)
+	}
+	if gotRuleID != "lan->wan/allow-web" {
+		t.Fatalf("wire policy_rule_id = %q, want %q", gotRuleID, "lan->wan/allow-web")
+	}
 
 	keyV6 := dataplane.SessionKeyV6{Protocol: 6}
 	valV6 := &dataplane.SessionValueV6{
 		IngressZone: 1, EgressZone: 2,
-		PolicyID: 99, PolicyCounterIdx: 11, AppTimeout: 45,
+		PolicyID: 99, PolicyCounterIdx: 11, PolicyRuleID: "lan->wan/allow-web", AppTimeout: 45,
 	}
 	reqV6 := m.buildSessionSyncRequestV6("upsert", keyV6, valV6)
-	if reqV6.PolicyID != 99 || reqV6.PolicyCounterIdx != 11 || reqV6.InactivityTimeout != 45 {
-		t.Fatalf("v6: policy=%d counter=%d inact=%d, want 99/11/45",
-			reqV6.PolicyID, reqV6.PolicyCounterIdx, reqV6.InactivityTimeout)
+	if reqV6.PolicyID != 99 || reqV6.PolicyCounterIdx != 11 || reqV6.PolicyRuleID != "lan->wan/allow-web" || reqV6.InactivityTimeout != 45 {
+		t.Fatalf("v6: policy=%d counter=%d rule=%q inact=%d", reqV6.PolicyID, reqV6.PolicyCounterIdx, reqV6.PolicyRuleID, reqV6.InactivityTimeout)
 	}
 }
 

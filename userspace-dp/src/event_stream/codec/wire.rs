@@ -3,8 +3,7 @@
 //! Split out of the former single-file `codec.rs` (#4651): the message-type
 //! and flag constants, the RT_FLOW event/action/disposition byte values, the
 //! header/address write helpers, and the header-only stream-control frame
-//! encoders. All frame construction happens on a stack-allocated `[u8; 256]`
-//! buffer.
+//! encoders. Event frames use a fixed stack-allocated 512-byte buffer.
 
 use crate::afxdp::ForwardingDisposition;
 use std::net::IpAddr;
@@ -172,14 +171,14 @@ pub(crate) const FLAG_NAT64: u8 = 1 << 5;
 // Header / address write helpers
 // ---------------------------------------------------------------------------
 
-pub(super) fn write_header(buf: &mut [u8; 256], payload_len: u32, msg_type: u8, seq: u64) {
+pub(super) fn write_header(buf: &mut [u8], payload_len: u32, msg_type: u8, seq: u64) {
     buf[0..4].copy_from_slice(&payload_len.to_le_bytes());
     buf[4] = msg_type;
     // buf[5..8] reserved (already zeroed)
     buf[8..16].copy_from_slice(&seq.to_le_bytes());
 }
 
-pub(super) fn write_ip(buf: &mut [u8; 256], pos: usize, ip: IpAddr, is_v6: bool) -> usize {
+pub(super) fn write_ip(buf: &mut [u8], pos: usize, ip: IpAddr, is_v6: bool) -> usize {
     match ip {
         IpAddr::V4(v4) => {
             buf[pos..pos + 4].copy_from_slice(&v4.octets());
@@ -198,12 +197,7 @@ pub(super) fn write_ip(buf: &mut [u8; 256], pos: usize, ip: IpAddr, is_v6: bool)
     }
 }
 
-pub(super) fn write_ip_opt(
-    buf: &mut [u8; 256],
-    pos: usize,
-    ip: Option<IpAddr>,
-    is_v6: bool,
-) -> usize {
+pub(super) fn write_ip_opt(buf: &mut [u8], pos: usize, ip: Option<IpAddr>, is_v6: bool) -> usize {
     match ip {
         Some(addr) => write_ip(buf, pos, addr, is_v6),
         None => {
@@ -215,7 +209,7 @@ pub(super) fn write_ip_opt(
 }
 
 #[allow(dead_code)]
-pub(super) fn write_ip_16(buf: &mut [u8; 256], pos: usize, ip: IpAddr) -> usize {
+pub(super) fn write_ip_16(buf: &mut [u8], pos: usize, ip: IpAddr) -> usize {
     match ip {
         IpAddr::V4(v4) => buf[pos..pos + 4].copy_from_slice(&v4.octets()),
         IpAddr::V6(v6) => buf[pos..pos + 16].copy_from_slice(&v6.octets()),
@@ -224,7 +218,7 @@ pub(super) fn write_ip_16(buf: &mut [u8; 256], pos: usize, ip: IpAddr) -> usize 
 }
 
 #[allow(dead_code)]
-pub(super) fn write_ip_opt_16(buf: &mut [u8; 256], pos: usize, ip: Option<IpAddr>) -> usize {
+pub(super) fn write_ip_opt_16(buf: &mut [u8], pos: usize, ip: Option<IpAddr>) -> usize {
     if let Some(addr) = ip {
         write_ip_16(buf, pos, addr)
     } else {
@@ -263,7 +257,7 @@ pub(super) fn encode_disposition(d: ForwardingDisposition) -> u8 {
 impl EventFrame {
     /// Encode a DrainComplete (type 8) frame -- header only, no payload.
     pub(crate) fn encode_drain_complete(seq: u64) -> Self {
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; super::EVENT_FRAME_CAPACITY];
         write_header(&mut buf, 0, MSG_DRAIN_COMPLETE, seq);
         EventFrame {
             data: buf,
@@ -274,7 +268,7 @@ impl EventFrame {
 
     /// Encode a FullResync (type 9) frame -- header only, no payload.
     pub(crate) fn encode_full_resync(seq: u64) -> Self {
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; super::EVENT_FRAME_CAPACITY];
         write_header(&mut buf, 0, MSG_FULL_RESYNC, seq);
         EventFrame {
             data: buf,

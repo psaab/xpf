@@ -233,6 +233,34 @@ func TestUserspaceSessionFromDeltaCarriesRTFlowSessionID5212(t *testing.T) {
 	}
 }
 
+// A revert loses the only information needed for session-specific fabric
+// ownership and stable hit-counter rebinding.
+func TestUserspaceSessionFromDeltaCarriesIngressAndPolicyRuleID11070(t *testing.T) {
+	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	for _, af := range []uint8{dataplane.AFInet, dataplane.AFInet6} {
+		delta := dpuserspace.SessionDeltaInfo{
+			Event: "open", AddrFamily: af, Protocol: 6,
+			SrcIP: "10.0.0.1", DstIP: "172.16.0.1", SrcPort: 12345, DstPort: 443,
+			IngressZone: "lan", EgressZone: "wan",
+			IngressIfindex: 42, IngressVLANID: 51, PolicyRuleID: "lan->wan/allow-web",
+		}
+		if af == dataplane.AFInet6 {
+			delta.SrcIP, delta.DstIP = "2001:db8::1", "2001:db8::2"
+		}
+		if af == dataplane.AFInet {
+			_, val, ok := userspaceSessionFromDeltaV4(delta, zoneIDs)
+			if !ok || val.IngressIfindex != 42 || val.IngressVlanID != 51 || val.PolicyRuleID != delta.PolicyRuleID {
+				t.Fatalf("v4 delta lost ingress/rule identity: ok=%v value=%+v", ok, val)
+			}
+		} else {
+			_, val, ok := userspaceSessionFromDeltaV6(delta, zoneIDs)
+			if !ok || val.IngressIfindex != 42 || val.IngressVlanID != 51 || val.PolicyRuleID != delta.PolicyRuleID {
+				t.Fatalf("v6 delta lost ingress/rule identity: ok=%v value=%+v", ok, val)
+			}
+		}
+	}
+}
+
 func TestUserspaceSessionFromDeltaV4(t *testing.T) {
 	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
 	delta := dpuserspace.SessionDeltaInfo{
@@ -1222,42 +1250,57 @@ func (c *captureDeltaSink) deleteV6(key dataplane.SessionKeyV6, _ dataplane.Sess
 	c.deletesV6 = append(c.deletesV6, key)
 }
 
-// #6599: the fabric-redirect carve-out must still require that THIS node owns
-// the RG the flow's INGRESS zone belongs to.
+// #6599/#11070: a fabric-redirect carve-out must still require that THIS node
+// owns the session's actual ingress redundancy group, not merely any RG in the
+// ingress zone.
 //
 // A fabric redirect means "the peer owns the EGRESS side", so judging the delta
-// by delta.OwnerRGID would refuse every legitimate split-RG handoff — that is
-// what the carve-out exists for. But bypassing ownership ENTIRELY lets a node
-// that owns neither side emit an Open for a session it fabricated on a
-// peer-owned tuple: the transient-purge re-entry class. The ingress-zone RG is
-// the predicate that keeps the handoff and drops the fabrication.
-func TestShouldSyncUserspaceDeltaFabricRedirectRequiresIngressOwnership6599(t *testing.T) {
+// by delta.OwnerRGID would refuse every legitimate split-RG handoff. But
+// bypassing ownership ENTIRELY lets a node that owns neither side emit an Open
+// for a session it fabricated on a peer-owned tuple. Because a zone can span
+// multiple RGs, only the ingress interface identity distinguishes that
+// handoff from the transient-purge re-entry case.
+func TestShouldSyncUserspaceDeltaFabricRedirectUsesSessionIngressOwnership11070(t *testing.T) {
+	const (
+		zoneFold     uint32 = 0xabc001
+		localFold    uint32 = 0xabc002
+		peerIfindex  uint32 = 101
+		localIfindex uint32 = 202
+	)
 	ss := &cluster.SessionSync{
-		IsPrimaryFn: func() bool { return false },
-		// Split-RG: this node is primary for RG 2 only. RG 1 is the peer's.
+		IsPrimaryFn:      func() bool { return false },
 		IsPrimaryForRGFn: func(rgID int) bool { return rgID == 2 },
 	}
-	// Zone 1 lives on RG 1 (peer-owned); zone 5 lives on RG 2 (locally owned).
-	ss.SetZoneRGMap(map[uint16]int{1: 1, 5: 2})
+	// Both ingress interfaces share zone 1 but belong to different RGs.
+	// Zone-level ownership would accept BOTH because this node owns RG 2.
+	ss.SetZoneOwnership(
+		cluster.ZoneRGMap{1: {1, 2}},
+		map[uint32]int{zoneFold: 1, localFold: 2},
+		func(ifindex uint32, _ uint16) uint32 {
+			switch ifindex {
+			case peerIfindex:
+				return zoneFold
+			case localIfindex:
+				return localFold
+			default:
+				return 0
+			}
+		},
+	)
 	d := &Daemon{sessionSync: ss}
-
-	peerIngress := dpuserspace.SessionDeltaInfo{
-		OwnerRGID:      1,
-		FabricRedirect: true,
-		FabricIngress:  false,
-		IngressZone:    "wan",
-		EgressZone:     "lan",
+	base := dpuserspace.SessionDeltaInfo{
+		OwnerRGID: 1, FabricRedirect: true, FabricIngress: false,
+		IngressZone: "shared",
 	}
-	if d.shouldSyncUserspaceDelta(d.sessionSync, peerIngress, 1) {
-		t.Fatal("expected a fabric-redirect delta whose INGRESS RG is peer-owned to be refused (#6599)")
+	peerIngress := base
+	peerIngress.IngressIfindex = int(peerIfindex)
+	if d.shouldSyncUserspaceDelta(ss, peerIngress, 1) {
+		t.Fatal("fabric redirect from peer-owned ingress RG must not sync")
 	}
-
-	// Positive control: the legitimate split-RG handoff. The session's owner RG
-	// is the peer's (that is why it is a fabric redirect at all), but the flow
-	// ingressed on an RG this node owns, so the handoff must still sync.
-	localIngress := peerIngress
-	if !d.shouldSyncUserspaceDelta(d.sessionSync, localIngress, 5) {
-		t.Fatal("expected a fabric-redirect handoff from a locally-owned ingress RG to sync")
+	localIngress := base
+	localIngress.IngressIfindex = int(localIfindex)
+	if !d.shouldSyncUserspaceDelta(ss, localIngress, 1) {
+		t.Fatal("fabric redirect from locally-owned ingress RG must sync")
 	}
 }
 

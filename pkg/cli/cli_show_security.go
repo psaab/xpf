@@ -648,6 +648,16 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 	if note := res.FragmentDenyNote(); note != "" {
 		fmt.Printf("  %s\n", note)
 	}
+	if res.UnzonedIngress {
+		fmt.Printf("Ingress zone unknown (%s -> %s): transit denied\n", fromZone, toZone)
+		fmt.Printf("  %s\n", policymatch.UnzonedIngressShowLine)
+		return nil
+	}
+	if res.UnzonedEgress {
+		fmt.Printf("Egress zone unknown (%s -> %s): transit denied\n", fromZone, toZone)
+		fmt.Printf("  %s\n", policymatch.UnzonedEgressShowLine)
+		return nil
+	}
 	if res.UnsupportedTupleFamily {
 		// #5720 (codex-182 C-TOOLS): an IPv4 source with an IPv6 destination is
 		// an impossible tuple (NAT46 is unimplemented); the forwarding path never

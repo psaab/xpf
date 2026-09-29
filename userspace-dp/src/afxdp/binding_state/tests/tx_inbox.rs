@@ -203,6 +203,8 @@ fn enqueue_tx_owned_below_cap_does_not_touch_overflow_counter() {
 // (the production const-asserts in binding_state/mod.rs already carry
 // the new literals — this test was updated in the R3 fold to match),
 // size stays 2496, alignment stays 64.
+// #11066 adds one more unconditional u64 (flow-backed NoRoute-NAT-fence
+// counter) before both sentinels: 2352 -> 2360, 2481 -> 2489 (+8).
 fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304() {
     assert_eq!(
         std::mem::size_of::<BindingLiveState>(),
@@ -221,17 +223,17 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
     // atomics inserted before these sentinels shift pinned offsets in
     // BOTH builds. #10679 advances them by 8 while size stays 2496 and
     // alignment remains 64; #10729 advances only the second by 1; #11061
-    // advances both by 24 (three trust-boundary counters).
+    // advances both by 24 (three trust-boundary counters); #11066 by 8.
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2352,
-        "#6304/#10021/#10131/#10498/#10686/#10679/#11061: ...nor the OFFSET of the admission counter whose \
+        2360,
+        "#6304/#10021/#10131/#10498/#10686/#10679/#11061/#11066: ...nor the OFFSET of the admission counter whose \
          cacheline this is all about"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        2481,
-        "#6304/#10021/#10131/#10498/#10686/#10679/#10729/#11061: ...nor the offset of the last-declared field, which is \
+        2489,
+        "#6304/#10021/#10131/#10498/#10686/#10679/#10729/#11061/#11066: ...nor the offset of the last-declared field, which is \
          the sentinel for a cfg(test) member appended at the END of the struct"
     );
 }

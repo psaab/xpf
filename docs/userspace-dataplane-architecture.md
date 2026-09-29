@@ -556,11 +556,11 @@ populates `name_to_ifindex` / `linux_to_ifindex` only for rows with
 `ifindex > 0`, so `resolve_ifindex` missed on both maps, the interface-only next
 hop `@st0.0` collapsed to ifindex 0, and the lookup returned **`NoRoute`**.
 `NoRoute` is slow-path eligible, so on a `default-policy permit-all` box the
-frame was reinjected and the **kernel** forwarded it: no session, no NAT, no
-screen, no egress zone policy. #7480's `noroute_policy_denial` closes this on a
-deny-all default — it evaluates with to-zone 0, which falls through to the
-default action — but not on permit-all. The zone assignment committed cleanly
-and read as enforced throughout.
+zero-identity frame was reinjected and the **kernel** forwarded it: no session,
+no NAT, no screen, no egress zone policy. #7480's `noroute_policy_denial`
+preserves the default-policy decision when the egress identity is absent; this
+still permits that specific shape. A tunnel NoRoute retaining a nonzero logical
+egress is instead adjudicated against that zone (#11067).
 
 **The same tunnel written WITH a stanza (Shape A) already produced the row**, and
 has since #5619, which recorded the identical transition for the other naming
@@ -579,10 +579,10 @@ Four properties are load-bearing and each is pinned:
 
 - **The row exists only alongside an authored zone.** The synthesis iterates
   `authoredZoneRefs`, so a tunnel the operator never zoned keeps today's
-  behaviour exactly. An unzoned row would buy nothing — egress zone 0 skips
-  every rule tier, including `from-zone any to-zone any`, and falls through to
-  the default action, which is where the `NoRoute` path already lands — while
-  still moving the flow off the kernel path.
+  behaviour exactly. An unzoned row would buy nothing in this missing-row shape:
+  the tunnel lookup has no logical egress identity, so its `NoRoute` follows
+  the default action. A different `NoRoute` that retains a nonzero logical
+  egress is now adjudicated against that egress zone (#11067).
 - **`SecureTunnel` is derived, never defaulted.** A row appended outside the
   builder loop defaults both `Tunnel` and `SecureTunnel` to `false` and escapes
   BOTH `netdevExclusionClasses` entries (`Tunnel` is stanza-derived, so it is
@@ -607,13 +607,15 @@ every policy measured, including a `from-zone any to-zone any permit` wildcard �
 the tunnel goes dark", and treats that as an outage risk requiring the zone to be
 authored in the same change. The first half is right — `policy.rs` gates every
 rule tier, both-any included, behind `from_id != 0 && to_id != 0`. The conclusion
-is not: only a zero INGRESS zone is hard-denied (#6682), while a zero EGRESS zone
-falls through to `state.default_action`, and that block says why in as many words
-— *"#6713: an xfrmi tunnel egress resolved to 0 … denying on `to_id` would risk
-black-holing a correctly-configured path"*. The measurement behind R1 was taken
-with the box's default action held fixed at deny; "goes dark" is a property of
-that default, not of zone 0. The zone gate is kept anyway, as a scope decision
-rather than an outage guard.
+that this made every such flow deny was wrong: a zero egress zone reached
+`state.default_action`, so `default-policy permit-all` could still forward it.
+#11067 closes that fall-through for a resolved egress. Its earlier #6713
+motivation was the obsolete egress-row lookup; `egress_zone_id` now reads the
+unambiguous zone ledger, so a correctly configured MAC-less tunnel reaches its
+actual zone and remains policy-controlled. A zero-identity NoRoute
+(`egress_ifindex == 0`) keeps the default-policy decision. A tunnel NoRoute
+retaining a logical egress uses that zone, and a zone-0 logical egress is
+denied.
 
 `pending_neigh_admission` returns one of three outcomes, each counted
 separately so an operator can tell normal cold-start coalescing from an
@@ -1051,11 +1053,21 @@ the NAT module applies it:
   NAT decision by itself: flowless transit has no session carrying one.
   #10679 drops flowless packets before TX, missing-neighbor buffering, or a
   permitted NoRoute kernel-FIB reinjection whenever configured same-family NAT
-  may require translation. NoRoute probes each configured egress because its
-  actual egress is unknown; unresolved source-side NAT fails closed. Pref64
-  destinations retain NAT64 attribution, and raw ESP/AH non-first fragments
+  may require translation. #11066 extends the NoRoute fence to flow-backed L4
+  tuples, probing each configured egress with the exact ports while avoiding
+  allocator state; an untranslated NAT candidate is withheld from reinjection
+  and counted separately as `nat_flowbacked_no_route_untranslated_dropped`.
+  Both NoRoute probes cover every configured egress because the kernel's later
+  route has no userspace-resolved egress yet. Untranslated Pref64 destinations
+  retain NAT64 attribution; an already-applied NAT64 decision is translated to
+  its opposite IP family before it reaches the TUN. The slow-path NAT64 builder
+  preserves the ingress TTL/Hop Limit, including values <=1, leaving the kernel
+  to perform the single forwarding decrement or generate Time Exceeded.
+  Missing translation metadata fails closed with the distinct
+  `nat64_slow_path_prepare_failed` exception reason. Raw ESP/AH non-first fragments
   retain the Stage-11/reassembly park path. With no matching NAT candidate,
-  ordinary flowless forwarding remains available.
+  ordinary flowless forwarding and flow-backed NoRoute reinjection remain
+  available.
   A genuine IPv4 **protocol 0** (HOPOPT) packet is one such port-less protocol
   and is handled correctly:
   `match_source_nat_result_for_tuple` carries the L4 protocol **out-of-band** as
@@ -1761,22 +1773,19 @@ Scope of the fallback:
   operator who has one will see the difference. Pinned by cell E4 of
   `pkg/dataplane/userspace/egress_zone_identity_6722_test.go`.
 
-- **Both directions of the 0 sentinel, stated.** The sections above argue the
+- **Both directions of the 0 sentinel, stated.** The sections above discuss the
   fail-CLOSED consequence because that is what the reference cluster runs
-  (`default-policy deny-all`). Under `default-policy permit-all` the same
-  resolution is fail-OPEN: zone id 0 matches no rule in ANY tier — exact pair,
-  from-any, to-any, both-any or `junos-global` — so a DENY the operator wrote for
-  that zone pair is skipped along with everything else and the permissive default
-  decides. Refusing to guess a zone is therefore not universally "the safe
-  answer"; it is safe exactly to the extent the default policy is. (#6682 closed
-  the INGRESS half of that: `from_id == 0` no longer reaches the default at all,
-  it is an explicit counted deny. A zero EGRESS zone still falls through, so the
-  observation above still holds on that side and this paragraph is still live.) This is
-  consistent with the pre-existing #3110 decision to treat zone 0 as
-  unmatchable rather than as a wildcard, and it is why #6722 B2 is a blocker
-  rather than a cosmetic correctness fix: on a deny-all cluster the ambiguity
-  cost total LAN reachability, and on a permit-all one it would cost the
-  operator's deny rules instead.
+  (`default-policy deny-all`). Zone id 0 still matches no rule in ANY tier —
+  exact pair, from-any, to-any, both-any or `junos-global` — so a rule written
+  for a zone pair is not an answer when the dataplane has no zone to adjudicate.
+  #6682 and #11067 make unzoned transit fail closed: a zero ingress or a
+  resolved zero-zone egress cannot fall through to `default-policy permit-all`.
+  A NoRoute with no logical egress identity keeps its existing default-policy
+  decision; a tunnel NoRoute with a nonzero logical egress uses that zone, and
+  zone 0 is denied. The #6722 B2 ambiguity can therefore still blackhole transit
+  on a deny-default box through availability loss, but a resolved unzoned
+  egress no longer turns a permit-all posture into a bypass of configured
+  deny rules.
 
   **Provenance, stated so a bisect is not misled.** This ambiguity was already
   latent in the index-keyed `egress` map before #6713/#6722: on `origin/master`
@@ -2131,47 +2140,44 @@ zone" sentinel — assigned to interfaces not bound to any security zone. (The
 former #2391 over-cap collapse-to-0 path is retired: #3075 made zone ids a
 stable u16 name-hash and an interface naming an absent zone now fails the
 snapshot closed via `InterfaceUnknownZone` rather than collapsing to 0.)
-`evaluate_policy_result_with_len`
-evaluates zone-pair rules AND `junos-global` rules only when
-`from_id != 0 && to_id != 0`. A flow whose ingress OR egress zone is unknown
-does not belong to any *defined* zone pair, so it is ineligible for both
-zone-scoped and global policies.
+`evaluate_policy_result_with_len` evaluates zone-pair, wildcard, and
+`junos-global` rules only when `from_id != 0 && to_id != 0`. A flow whose
+ingress OR egress zone is unknown does not belong to any *defined* zone pair,
+so it is ineligible for all those policies.
 
-**Ingress side (#6682): an unzoned INGRESS is now an explicit deny, not a
-fall-through.** Being ineligible for every rule tier is only half of safe. The
-flow still landed on the implicit default policy, and under `default-policy
-permit-all` that default is a PERMIT — so transit on an interface the operator
-never put in a zone was forwarded, with screen/IDS checks already skipped (an
-unresolvable ingress zone returns `ScreenCheckOutcome::Pass`, there being no
-per-zone screen profile to apply). An operator asking for permit-all is saying
-what to do with traffic that matched no policy, not asking to forward traffic
-that had no zone to be adjudicated in; Junos does not pass transit on an unzoned
-interface at all. `from_id == 0` therefore returns `Deny` directly and counts it
-on `UNZONED_INGRESS_DENIED`, kept separate from `default_counter` so the two
-causes stay distinguishable — a rising default-deny means policy is working as
-configured, a rising unzoned count means an interface fell out of its zone.
+**Unzoned transit enforcement (#6682, #11067).** Being ineligible for every
+rule tier is only half of safe. With `default-policy permit-all`, falling
+through from an unknown zone to the implicit default can still forward transit
+without a zone policy. An unzoned ingress (`from_id == 0`) returns an
+unattributed `Deny`; a resolved unzoned egress (`to_id == 0`) likewise returns
+an unattributed `Deny`. Neither path increments `default_counter` or a
+configured policy counter. The `UNZONED_INGRESS_DENIED` and
+`UNZONED_EGRESS_DENIED` atomics are in-process diagnostics only; production
+visibility is the `policy=unattributed` RT_FLOW event plus aggregate
+`xpf_policy_denies_total`. Exporting cause counters is tracked in #11503.
 
-The two guards are complementary and ORDERED, not redundant: #3110 stops the
-rule tiers from matching (deleting it lets a `from-zone any to-zone any permit`
-match a zone-0 flow before the #6682 deny is ever reached), and #6682 stops the
-fall-through. `both_any_tier_already_refused_zone_zero_before_6682` pins the
-first independently so the newer deny cannot silently take over its job.
+The tier gate and these denies are complementary and ordered, not redundant:
+#3110 stops exact, wildcard, and global rules from matching a zone-0 flow
+(deleting it lets a `from-zone any to-zone any permit` match first), while
+#6682/#11067 stop the remaining default-policy fall-through. The P8 oracle adds
+a global-permit case to pin that the tier walk remains skipped for a missing
+egress zone.
 
-Scoped to the ingress side deliberately: a zero EGRESS zone has historically
-meant a bug elsewhere rather than genuine unzoned-ness (#6713 — an xfrmi tunnel
-egress resolved to 0 because `populate_egress` needed a link-layer address a
-MAC-less interface does not have), so denying on `to_id` would risk
-black-holing a correctly configured path. A zero egress zone still falls through
-to the default action.
+**NoRoute without a logical egress identity.** A base NoRoute resolution has
+`egress_ifindex == 0` and no egress zone to adjudicate; its dedicated
+`evaluate_policy_result_l3_aware_unresolved_egress` entry point preserves the
+existing default-policy decision, so a default-permit can still delegate that
+route miss to the kernel. Tunnel resolution can remap an outer NoRoute onto a
+nonzero logical egress. That shape uses the normal policy evaluator: a configured
+logical zone remains policy-controlled, and a zero-zone logical egress is denied.
+The distinction is identity-based, not disposition-based.
 
-Together these prevent a configured permit-global from leaking transit on an
-unzoned ingress/egress interface, and prevent a permissive DEFAULT from doing
-the same on an unzoned ingress. The `junos-global` sentinel
-zone-id (`u16::MAX`) is a *defined* global zone, distinct from `0` (unknown),
-and is unaffected by the guard — global policies still apply to every defined
-zone pair. The #3090 wildcard-zone tiers (from-any / to-any / both-any) live
-inside the same `from_id != 0 && to_id != 0` guard, so an unzoned flow falls
-through to the default action exactly like a global policy.
+The #6713-class configured path is unaffected: the egress-zone resolver reads
+the unambiguous configuration ledger rather than requiring a link-layer egress
+row, so configured MAC-less tunnel units resolve to their actual zone and still
+match their policy. The `junos-global` sentinel zone id (`u16::MAX`) is a
+*defined* global zone, distinct from `0` (unknown), and remains available for
+defined pairs.
 
 #### Static NAT zone scoping (`nat/static_nat.rs`)
 

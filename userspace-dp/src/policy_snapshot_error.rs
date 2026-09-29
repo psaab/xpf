@@ -26,7 +26,9 @@ pub(crate) enum SnapshotIntegrityError {
     /// family. A normal Go snapshot assigns each policy a distinct positional
     /// identity, so this guards a corrupt / hand-built / mixed-version HA
     /// peer-sync snapshot.
-    DuplicateRuleId { rule_id: String },
+    DuplicateRuleId {
+        rule_id: String,
+    },
     /// #3713: two policy rules carry the SAME positional `policy_id`. The Go
     /// builder assigns `policy_set_id * MAX_RULES_PER_POLICY + rule_index`
     /// (`walkPolicyRuleSlots`), which is unique per rule by construction, so a
@@ -41,8 +43,13 @@ pub(crate) enum SnapshotIntegrityError {
     /// FIRST-policy id AND the "unspecified" value a pre-policy_id producer or
     /// older HA peer leaves on every rule — rejecting duplicate-0 would
     /// fail-close a legitimate older-peer / hand-built (all-zero) snapshot.
-    DuplicatePolicyId { policy_id: u32 },
-    UnknownAddressBookId { rule_id: String, book_id: u32 },
+    DuplicatePolicyId {
+        policy_id: u32,
+    },
+    UnknownAddressBookId {
+        rule_id: String,
+        book_id: u32,
+    },
     /// #2124: a policy rule has at least one `application_terms` entry that
     /// failed to parse (unrepresentable protocol or malformed port). Dropping a
     /// term silently is a security fail-open: an all-dropped rule collapses to
@@ -53,7 +60,9 @@ pub(crate) enum SnapshotIntegrityError {
     /// unparseable term lands here too. Rejecting the whole snapshot (the
     /// preflight keeps the previous good state) is action-agnostic: it never
     /// turns a deny into a pass nor a permit into match-any.
-    UnrepresentableApplicationProtocol { rule_id: String },
+    UnrepresentableApplicationProtocol {
+        rule_id: String,
+    },
     /// #3712: a policy rule's application term carried a semantically-invalid
     /// ICMP field combination that the pre-fix compiled matcher silently turned
     /// into a WRONG-behaving term:
@@ -102,7 +111,9 @@ pub(crate) enum SnapshotIntegrityError {
     /// through to a later permit / default-permit — a deny fail-OPEN. Rejecting
     /// the whole snapshot (the preflight keeps the previous good state; a fresh
     /// boot keeps the default-deny `PolicyState`) is action-agnostic.
-    UnrepresentableAddress { rule_id: String },
+    UnrepresentableAddress {
+        rule_id: String,
+    },
     /// #3367: a policy rule's LEGACY (`source_addresses` / `destination_addresses`)
     /// address field carried a token that is non-empty, not the bare `any`, not a
     /// family-scoped wildcard (`any-ipv4` / `any-ipv6`), and does NOT parse as an
@@ -118,7 +129,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// against a corrupt / hand-built / version-drifted snapshot. Rejecting the
     /// WHOLE snapshot (the preflight keeps the previous good state) is
     /// action-agnostic.
-    UnrepresentableLegacyAddress { rule_id: String, address: String },
+    UnrepresentableLegacyAddress {
+        rule_id: String,
+        address: String,
+    },
     /// #3711: a policy rule's V3-shaped (`source_literals` /
     /// `destination_literals`) address field carried a token that is non-empty,
     /// not `any` / `any4` / `any6` / `any-ipv4` / `any-ipv6`, not the
@@ -135,7 +149,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// malformed literal on a corrupt / hand-built / mixed-version HA peer-sync
     /// snapshot. Rejecting the WHOLE snapshot (the preflight keeps the previous
     /// good state) is action-agnostic.
-    UnrepresentableV3Address { rule_id: String, address: String },
+    UnrepresentableV3Address {
+        rule_id: String,
+        address: String,
+    },
     /// #3711 (M02): an address-book row carried a token in its `prefixes_v4` /
     /// `prefixes_v6` array that is not a parseable IP/CIDR literal OF THE
     /// DECLARED FAMILY. The pre-fix book builder parsed BOTH family arrays with
@@ -177,7 +194,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// helper-boundary backstop, consistent with the #2124/#2142/#2173/#2212
     /// fail-closed family. Rejecting the whole snapshot keeps the previous live
     /// NPTv6 state rather than installing a silently narrower one.
-    Nptv6UnparseableRule { rule_name: String, field: String },
+    Nptv6UnparseableRule {
+        rule_name: String,
+        field: String,
+    },
     /// #2241: two NPTv6 rules have overlapping prefixes in the same direction
     /// (e.g. a /48 and a nested /64). The dataplane resolves a match by FIRST
     /// hit in insertion order with no longest-prefix-match, so a broad prefix
@@ -501,7 +521,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// wire; this is the helper-boundary backstop, consistent with the
     /// #2124/#2142/#2173/#2212/#2505 fail-closed family. An interface with NO
     /// zone (empty string) is the legitimate "unzoned" case and is NOT an error.
-    InterfaceUnknownZone { interface: String, zone: String },
+    InterfaceUnknownZone {
+        interface: String,
+        zone: String,
+    },
     /// #2410: an interface snapshot's `vlan_id` is outside the 0..=65535 range
     /// representable on the 802.1Q wire (and in the `EgressInterface.vlan_id` /
     /// `ingress_logical_ifindex` key u16). The pre-fix code narrowed it with an
@@ -515,14 +538,20 @@ pub(crate) enum SnapshotIntegrityError {
     /// #2173/#2212/#2240/#2391 fail-closed family. Rejecting the whole snapshot
     /// keeps the previous live forwarding state rather than steering traffic onto
     /// a wrapped VLAN.
-    InterfaceVlanOutOfRange { interface: String, vlan_id: i32 },
+    InterfaceVlanOutOfRange {
+        interface: String,
+        vlan_id: i32,
+    },
     /// #2410: a tunnel-endpoint snapshot's `ttl` is outside the 0..=255 range
     /// representable in the outer IP TTL/hop-limit octet (`TunnelEndpoint.ttl`,
     /// a u8). The pre-fix code narrowed it with `endpoint.ttl.max(0) as u8`, so
     /// 256 wrapped to 0 (a packet that can never leave the first hop) and 300
     /// wrapped to 44. Silently installing a wrapped TTL produces a tunnel that
     /// either blackholes (TTL 0) or has a surprising reach. Fail closed instead.
-    TunnelTtlOutOfRange { tunnel_id: u16, ttl: i32 },
+    TunnelTtlOutOfRange {
+        tunnel_id: u16,
+        ttl: i32,
+    },
     /// #5193 (A1-b7-F1): two tunnel-endpoint rows in one snapshot carried the
     /// SAME nonzero endpoint id. `populate_tunnel_endpoints` keys
     /// `tunnel_endpoints` by id and `tunnel_endpoint_by_ifindex` by ifindex,
@@ -533,7 +562,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// time (`usedIDs`, #1873), so this is the snapshot-boundary backstop for a
     /// tolerant / mixed-version / corrupt snapshot, in the same fail-closed
     /// family as the #2410 TTL gate a few lines above it.
-    TunnelEndpointDuplicateId { tunnel_id: u16, ifindex: i32 },
+    TunnelEndpointDuplicateId {
+        tunnel_id: u16,
+        ifindex: i32,
+    },
     /// #2410: a CoS forwarding-class snapshot's `queue` is outside the 0..=255
     /// range representable in the runtime `queue_id` (a u8). The pre-fix code
     /// SILENTLY DROPPED the class via a `filter_map` range check
@@ -543,7 +575,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// queue mapping (see #2409). Fail the snapshot closed rather than installing
     /// a partial CoS table. An EMPTY class name is the legitimate "unnamed /
     /// placeholder" case and is NOT an error (skipped as before).
-    CosQueueIdOutOfRange { forwarding_class: String, queue: i32 },
+    CosQueueIdOutOfRange {
+        forwarding_class: String,
+        queue: i32,
+    },
     /// #2706: an interface snapshot's `mtu` is NEGATIVE. The pre-fix code
     /// narrowed it with `iface.mtu.max(0) as usize`, so a negative value
     /// silently collapsed to 0 — and the egress MTU guard
@@ -554,7 +589,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// preserved as permissive). Fail the snapshot closed on a negative value
     /// rather than installing an interface with MTU enforcement off, consistent
     /// with the #2410/#2696 fail-closed family.
-    InterfaceMtuInvalid { interface: String, mtu: i32 },
+    InterfaceMtuInvalid {
+        interface: String,
+        mtu: i32,
+    },
     /// #2409: an interface address snapshot's `address` string did not parse as
     /// an `IpNet` CIDR. The pre-fix code `continue`d past it, so the connected
     /// route / local-address / interface-NAT material for that address silently
@@ -563,7 +601,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// In a retired-eBPF world where this helper is the only forwarding plane,
     /// that is silent connectivity loss. Fail the snapshot closed (the preflight
     /// keeps the previous good state) instead of silently dropping the address.
-    InterfaceAddressUnparseable { interface: String, address: String },
+    InterfaceAddressUnparseable {
+        interface: String,
+        address: String,
+    },
     /// #2409: a CoS scheduler-map entry references a `forwarding_class` that is
     /// not in the `class_to_queue` table — either a typo, a version-drifted
     /// snapshot, or a class dropped for an out-of-range queue id (#2410). The
@@ -584,13 +625,19 @@ pub(crate) enum SnapshotIntegrityError {
     /// drift, consistent with the #2410/#2696/#2713 fail-closed family. Fail
     /// the snapshot closed (the preflight keeps the previous live CoS state)
     /// rather than building a classifier for a different class than configured.
-    CosDscpCodePointOutOfRange { classifier: String, dscp: u8 },
+    CosDscpCodePointOutOfRange {
+        classifier: String,
+        dscp: u8,
+    },
     /// #2447: a CoS IEEE 802.1p classifier entry carried a code-point outside
     /// the 3-bit PCP domain (0..=7). The pre-fix builder clamped the index with
     /// `pcp.min(7)`, so a value of 9 silently installed the classifier for PCP
     /// 7 — a DIFFERENT traffic class — with no apply failure. Same fail-closed
     /// rationale as `CosDscpCodePointOutOfRange`.
-    CosIeee8021CodePointOutOfRange { classifier: String, pcp: u8 },
+    CosIeee8021CodePointOutOfRange {
+        classifier: String,
+        pcp: u8,
+    },
     /// #6847: a CoS inet-precedence classifier entry carried a code-point
     /// outside the 3-bit IP-precedence domain (0..=7). The Go commit-time gate
     /// (`collectCoSINetPrecedenceCodePoints`) is the primary defense; this is
@@ -598,7 +645,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// snapshot closed rather than masking the index with `& 0x7`, which would
     /// install the classifier for a DIFFERENT traffic class (9 -> 1). Same
     /// fail-closed rationale as `CosIeee8021CodePointOutOfRange`.
-    CosInetPrecedenceCodePointOutOfRange { classifier: String, precedence: u8 },
+    CosInetPrecedenceCodePointOutOfRange {
+        classifier: String,
+        precedence: u8,
+    },
     /// #5193 (A1-b7-F7): a CoS DSCP REWRITE-RULE entry carried a code-point
     /// outside the 6-bit DSCP domain (0..=63). Unlike the classifier builders
     /// (which have failed closed since #2447), the rewrite ingest stored the
@@ -669,7 +719,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// `default_policy` is the legitimate `omitempty`/unspecified wire state
     /// (decodes to the default Deny) and is NOT an error; an empty per-rule
     /// action IS rejected (every configured rule has a concrete action).
-    UnknownPolicyAction { context: String, action: String },
+    UnknownPolicyAction {
+        context: String,
+        action: String,
+    },
     /// #3402: a policy rule names a from/to zone — or a scoped-global (#3148)
     /// `match from-zone`/`match to-zone` context — that does not resolve in the
     /// snapshot's zone table (`zone_name_to_id`). The pre-fix code handled this
@@ -694,7 +747,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// a plural `match_*_zones` list DOES trip this via `build_global_zone_scope`
     /// (#6464); only the empty singular field is exempt (dropped by
     /// `effective_match_zones` as an omitted scope).
-    UnresolvableZoneReference { rule_id: String, zone: String },
+    UnresolvableZoneReference {
+        rule_id: String,
+        zone: String,
+    },
     /// #3771 (M4): a `RouteSnapshot` carried a NON-EMPTY `family` that does not
     /// match the address family of its `destination` prefix (e.g. family="inet6"
     /// with an IPv4 destination). The pre-fix `populate_routes` chose the FIB
@@ -738,7 +794,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// clean snapshot never trips this. It is the helper-boundary backstop for
     /// a corrupt / hand-built / version-drifted snapshot, consistent with the
     /// #2410/#2409 fail-closed family.
-    RouteDestinationUnparseable { table: String, destination: String },
+    RouteDestinationUnparseable {
+        table: String,
+        destination: String,
+    },
     /// #3771 (L1): a `RouteSnapshot` carried a NEGATIVE `preference`. Junos route
     /// preference is a non-negative administrative distance (default 5; lower =
     /// more preferred); the FIB tie-breaks same-prefix routes by ASCENDING
@@ -796,11 +855,17 @@ pub(crate) enum SnapshotIntegrityError {
     /// #10683: the bind-less selector-fence marker disagrees with whether
     /// selector rows are present. Ignoring mismatched rows would silently
     /// disable the cleartext fence.
-    BindlessSelectorFenceMarkerMismatch { enabled: bool, rows: usize },
+    BindlessSelectorFenceMarkerMismatch {
+        enabled: bool,
+        rows: usize,
+    },
     /// #10683: a published traffic-selector pair cannot be represented by the
     /// helper's exact IP-prefix/range matcher. Reject the snapshot rather than
     /// silently omitting a selector and forwarding matching cleartext.
-    InvalidBindlessSelector { local_ts: String, remote_ts: String },
+    InvalidBindlessSelector {
+        local_ts: String,
+        remote_ts: String,
+    },
 }
 
 impl std::fmt::Display for SnapshotIntegrityError {
@@ -1136,7 +1201,10 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 "bind-less selector-fence marker enabled={} disagrees with {} selector rows — refusing to publish an unenforced cleartext selector set (#10683)",
                 enabled, rows
             ),
-            Self::InvalidBindlessSelector { local_ts, remote_ts } => write!(
+            Self::InvalidBindlessSelector {
+                local_ts,
+                remote_ts,
+            } => write!(
                 f,
                 "bind-less IPsec selector pair local_ts={:?} remote_ts={:?} cannot be represented by the dataplane matcher — refusing to publish it without a cleartext fence (#10683)",
                 local_ts, remote_ts

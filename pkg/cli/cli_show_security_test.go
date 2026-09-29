@@ -9,6 +9,7 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/policymatch"
 )
 
 type firewallFilterUserspaceDP struct {
@@ -191,6 +192,30 @@ security {
 	}
 	return cfg
 }
+func unzonedEgressCLIStore(t *testing.T) *configstore.Store {
+	t.Helper()
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure() error = %v", err)
+	}
+	if err := store.LoadOverride(`
+security {
+    zones {
+        security-zone trust;
+        security-zone untrust;
+    }
+    policies {
+        default-policy permit-all;
+    }
+}
+`); err != nil {
+		t.Fatalf("LoadOverride() error = %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	return store
+}
 
 // TestShowMatchPoliciesValidation covers the local interactive CLI
 // simulator (which runs in-process, not via the gRPC handler): malformed
@@ -260,6 +285,37 @@ func TestShowMatchPoliciesValidation(t *testing.T) {
 				t.Fatalf("showMatchPolicies(%v) match=%v, want %v; out = %q", tt.args, gotMatch, tt.wantMatch, out)
 			}
 		})
+	}
+}
+
+// TestUnzonedEgressCLI keeps both local simulator entry points aligned with
+// runtime semantics: an unknown resolved ToZone is denied before permit-all.
+func TestUnzonedEgressCLI(t *testing.T) {
+	store := unzonedEgressCLIStore(t)
+	cfg := store.ActiveConfig()
+	c := &CLI{store: store}
+	args := []string{"from-zone", "trust", "to-zone", "nowhere"}
+
+	showOut := captureStdout(t, func() {
+		if err := c.showMatchPolicies(cfg, args); err != nil {
+			t.Fatalf("showMatchPolicies() error = %v", err)
+		}
+	})
+	if !strings.Contains(showOut, "Egress zone unknown") ||
+		!strings.Contains(showOut, policymatch.UnzonedEgressShowLine) ||
+		strings.Contains(showOut, "permit (default)") {
+		t.Fatalf("showMatchPolicies() did not display the unzoned-egress deny:\n%s", showOut)
+	}
+
+	testOut := captureStdout(t, func() {
+		if err := c.testPolicy(args); err != nil {
+			t.Fatalf("testPolicy() error = %v", err)
+		}
+	})
+	if !strings.Contains(testOut, "Egress zone unknown") ||
+		!strings.Contains(testOut, policymatch.UnzonedEgressShowLine) ||
+		strings.Contains(testOut, "permit (default)") {
+		t.Fatalf("testPolicy() did not display the unzoned-egress deny:\n%s", testOut)
 	}
 }
 

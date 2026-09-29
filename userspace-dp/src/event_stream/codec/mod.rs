@@ -1,7 +1,8 @@
 //! Wire codec for the event stream binary protocol.
 //!
 //! Pure encoding/decoding functions with zero I/O — all frame construction
-//! happens on a stack-allocated `[u8; 256]` buffer.
+//! happens on a stack-allocated fixed buffer sized for a session's stable
+//! policy-rule identity.
 
 mod decode;
 mod rt_flow;
@@ -24,10 +25,11 @@ pub(crate) use wire::*;
 // EventFrame -- zero-allocation stack-buffered wire frame
 // ---------------------------------------------------------------------------
 
+pub(super) const EVENT_FRAME_CAPACITY: usize = 512;
 /// Pre-serialized event frame ready for socket write.
 #[derive(Clone)]
 pub(crate) struct EventFrame {
-    pub(super) data: [u8; 256],
+    pub(super) data: [u8; EVENT_FRAME_CAPACITY],
     pub(super) len: u16,
     pub(crate) seq: u64,
 }

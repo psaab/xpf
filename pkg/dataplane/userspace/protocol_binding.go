@@ -322,6 +322,9 @@ type BindingStatus struct {
 	// transparency fence. Kept distinct from real non-first-fragment
 	// association misses so tunnel drops are not surfaced as fragmentation/PMTU.
 	NatFlowlessUntranslatedDropped uint64 `json:"nat_flowless_untranslated_dropped,omitempty"`
+	// #11066: permitted flow-backed NoRoute packets dropped because their NAT
+	// translation was unavailable before kernel-FIB reinjection.
+	NatFlowbackedNoRouteUntranslatedDropped uint64 `json:"nat_flowbacked_no_route_untranslated_dropped,omitempty"`
 	// #10131: fragment-overlap attribution from the binding-local batch
 	// counters. Global alert atomics remain process-wide; these fields identify
 	// the worker/binding that observed each reason. omitempty keeps old-helper

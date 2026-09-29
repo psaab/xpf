@@ -315,6 +315,7 @@ func (s *SessionSync) writeConfigWithPeerSnapshotGuard(
 	guard *peerSnapshotQueueGuard,
 	msgType uint8,
 	payload []byte,
+	gen uint64,
 ) (bool, error) {
 	s.mu.Lock()
 	s.peerSnapshotProtocolWriteMu.Lock()
@@ -328,6 +329,7 @@ func (s *SessionSync) writeConfigWithPeerSnapshotGuard(
 		s.peerSnapshotProtocolWriteMu.Unlock()
 		return false, nil
 	}
+	s.recordLastSentConfigGen(gen)
 	s.writeMu.Lock()
 	err := writeMsg(conn, msgType, payload)
 	s.writeMu.Unlock()
@@ -449,12 +451,13 @@ func (s *SessionSync) queueConfigOnConn(
 			s.testBeforePeerSnapshotConfigWrite = nil
 			hook()
 		}
-		authorized, err = s.writeConfigWithPeerSnapshotGuard(conn, guard, msgType, payload)
+		authorized, err = s.writeConfigWithPeerSnapshotGuard(conn, guard, msgType, payload, gen)
 		if !authorized {
 			return false
 		}
 	} else {
 		s.writeMu.Lock()
+		s.recordLastSentConfigGen(gen)
 		err = writeMsg(conn, msgType, payload)
 		s.writeMu.Unlock()
 	}
@@ -464,15 +467,20 @@ func (s *SessionSync) queueConfigOnConn(
 		s.handleDisconnect(conn)
 		return false
 	}
-	// #7328: record the generation actually put on the wire so a peer's
-	// config-apply nack can be matched to THIS push. Stored only after a
-	// successful write — a send that errored above disconnected, and the
-	// reconnect bumps the connection epoch and re-pushes on its own.
-	s.lastSentConfigGen.Store(gen)
+	// Record-before-write closes the response race: the receiver may apply and
+	// acknowledge immediately after the socket accepts the frame.
 	s.stats.ConfigsSent.Add(1)
 	slog.Info("cluster sync: config sent to peer", "size", len(configText), "gen", gen,
 		"encrypted", encrypted)
 	return true
+}
+func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
+	for {
+		old := s.lastSentConfigGen.Load()
+		if gen <= old || s.lastSentConfigGen.CompareAndSwap(old, gen) {
+			return
+		}
+	}
 }
 
 // errConfigApplyQueueFull is the health-debt reason recorded when a config
@@ -483,6 +491,32 @@ func (s *SessionSync) queueConfigOnConn(
 // needs the DISTINCT reason: an apply failure points at the config or the
 // store, a queue-full drop points at a saturated receive path.
 var errConfigApplyQueueFull = errors.New("config apply queue full: the newest config generation was dropped before apply")
+
+// sendConfigApplyAck positively confirms that this connection's config
+// generation has been applied successfully by the ordered apply loop. Its
+// writer runs asynchronously so a peer that stops reading cannot stall that
+// loop and strand later queued config items.
+func (s *SessionSync) sendConfigApplyAck(conn net.Conn, gen uint64) {
+	if conn == nil || gen == 0 {
+		return
+	}
+	s.mu.Lock()
+	current := s.activeConnLocked() == conn
+	s.mu.Unlock()
+	if !current {
+		return
+	}
+	var payload [8]byte
+	binary.LittleEndian.PutUint64(payload[:], gen)
+	s.writeMu.Lock()
+	err := writeMsg(conn, syncMsgConfigApplyAck, payload[:])
+	s.writeMu.Unlock()
+	if err != nil {
+		slog.Debug("cluster sync: config-apply ack send error", "gen", gen, "err", err)
+		s.stats.Errors.Add(1)
+		s.handleDisconnect(conn)
+	}
+}
 
 // sendConfigApplyNack tells the SENDER that this node did not apply the config
 // generation it pushed (#7328). Called from configApplyLoop's failure branch —
@@ -680,6 +714,9 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				s.stats.ConfigsStaleIgnored.Add(1)
 				slog.Warn("cluster sync: dropping out-of-order config sync (stale generation) — standby retains newer config",
 					"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text))
+				if item.gen != 0 && item.gen == s.lastAppliedConfigGen.Load() {
+					go s.sendConfigApplyAck(item.conn, item.gen)
+				}
 				continue
 			}
 			if s.OnConfigReceivedWithProvenance == nil &&
@@ -759,6 +796,7 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 			// fence. Advancing first keeps the effective refusal threshold
 			// max(fence, high-water) from dipping in the release window (#6284).
 			s.recordAppliedConfigGen(item.gen)
+			go s.sendConfigApplyAck(item.conn, item.gen)
 			s.endConfigApply()
 		}
 	}

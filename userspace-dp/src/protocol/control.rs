@@ -1130,6 +1130,10 @@ pub(crate) struct SessionSyncRequest {
     /// counter") on an old peer, the pre-#3301 behavior (rolling-upgrade safe).
     #[serde(rename = "policy_counter_idx", default)]
     pub policy_counter_idx: u32,
+    /// Stable admitting-rule identity. The receiver resolves this against its
+    /// current policy snapshot; missing or unknown IDs remain unattributed.
+    #[serde(rename = "policy_rule_id", default)]
+    pub policy_rule_id: String,
     /// #3301: the admitting application term's per-application inactivity (idle)
     /// timeout in SECONDS (#3227). Carried so a peer-promoted short-timeout
     /// session ages out on the app's value rather than the global per-protocol

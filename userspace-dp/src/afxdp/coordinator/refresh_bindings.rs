@@ -195,6 +195,8 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.nat_alloc_fail = snap.nat_alloc_fail;
     binding.nat_frag_untranslated_dropped = snap.nat_frag_untranslated_dropped;
     binding.nat_flowless_untranslated_dropped = snap.nat_flowless_untranslated_dropped;
+    binding.nat_flowbacked_no_route_untranslated_dropped =
+        snap.nat_flowbacked_no_route_untranslated_dropped;
     binding.frag_overlap_dropped = snap.frag_overlap_dropped;
     binding.frag_overlap_overflow_dropped = snap.frag_overlap_overflow_dropped;
     binding.frag_overlap_shard_full_dropped = snap.frag_overlap_shard_full_dropped;
@@ -442,6 +444,7 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.nat_alloc_fail = 0;
     binding.nat_frag_untranslated_dropped = 0;
     binding.nat_flowless_untranslated_dropped = 0;
+    binding.nat_flowbacked_no_route_untranslated_dropped = 0;
     binding.frag_overlap_dropped = 0;
     binding.frag_overlap_overflow_dropped = 0;
     binding.frag_overlap_shard_full_dropped = 0;

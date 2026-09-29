@@ -4,7 +4,6 @@
 
 use super::*;
 
-
 #[test]
 fn test_partial_read_accumulation() {
     // Simulate a partial Unix stream read: first 8 bytes, then the
@@ -52,7 +51,6 @@ fn test_partial_read_accumulation() {
     assert!(ctrl_buf.is_empty());
 }
 
-
 #[test]
 fn test_two_frames_in_one_read() {
     // Two complete ACK frames arrive in a single read.
@@ -79,7 +77,6 @@ fn test_two_frames_in_one_read() {
     assert_eq!(replay_buf.len(), 2);
     assert_eq!(shared.acked_seq.load(Ordering::Relaxed), 8);
 }
-
 
 #[test]
 fn test_one_and_half_frames() {
@@ -119,7 +116,6 @@ fn test_one_and_half_frames() {
     assert_eq!(replay_buf.len(), 1); // only frame 5 remains
 }
 
-
 #[test]
 fn test_future_ack_beyond_next_seq_ignored_2959() {
     // A daemon ACKs a sequence the helper never allocated (seq > next_seq).
@@ -137,18 +133,20 @@ fn test_future_ack_beyond_next_seq_ignored_2959() {
 
     let raw = build_raw_ack_frame(99);
     let (sock_a, _sock_b) = std::os::unix::net::UnixStream::pair().unwrap();
-    let (action, consumed) =
-        process_control_frames(&raw, &shared, &rx, &sock_a, &mut replay_buf);
+    let (action, consumed) = process_control_frames(&raw, &shared, &rx, &sock_a, &mut replay_buf);
 
     assert!(action.is_none());
     assert_eq!(consumed, FRAME_HEADER_SIZE, "frame is still consumed");
     // Watermark unchanged, replay buffer fully intact (no frames suppressed).
     assert_eq!(shared.acked_seq.load(Ordering::Relaxed), 2);
-    assert_eq!(replay_buf.len(), 5, "future ACK must not trim replay buffer");
+    assert_eq!(
+        replay_buf.len(),
+        5,
+        "future ACK must not trim replay buffer"
+    );
     assert_eq!(replay_buf.front().unwrap().seq, 1);
     assert_eq!(shared.frames_invalid_acks.load(Ordering::Relaxed), 1);
 }
-
 
 #[test]
 fn test_backward_ack_below_watermark_ignored_2959() {
@@ -165,17 +163,23 @@ fn test_backward_ack_below_watermark_ignored_2959() {
 
     let raw = build_raw_ack_frame(3); // below acked_seq=5
     let (sock_a, _sock_b) = std::os::unix::net::UnixStream::pair().unwrap();
-    let (action, consumed) =
-        process_control_frames(&raw, &shared, &rx, &sock_a, &mut replay_buf);
+    let (action, consumed) = process_control_frames(&raw, &shared, &rx, &sock_a, &mut replay_buf);
 
     assert!(action.is_none());
     assert_eq!(consumed, FRAME_HEADER_SIZE);
-    assert_eq!(shared.acked_seq.load(Ordering::Relaxed), 5, "watermark intact");
-    assert_eq!(replay_buf.len(), 5, "backward ACK must not trim replay buffer");
+    assert_eq!(
+        shared.acked_seq.load(Ordering::Relaxed),
+        5,
+        "watermark intact"
+    );
+    assert_eq!(
+        replay_buf.len(),
+        5,
+        "backward ACK must not trim replay buffer"
+    );
     assert_eq!(replay_buf.front().unwrap().seq, 6);
     assert_eq!(shared.frames_invalid_acks.load(Ordering::Relaxed), 1);
 }
-
 
 #[test]
 fn test_future_ack_does_not_suppress_lower_buffered_frames_2959() {
@@ -194,15 +198,13 @@ fn test_future_ack_does_not_suppress_lower_buffered_frames_2959() {
     // buffered frames (1,2,3 <= 7) and store an impossible acked_seq=7.
     let raw = build_raw_ack_frame(7);
     let (sock_a, _sock_b) = std::os::unix::net::UnixStream::pair().unwrap();
-    let (action, _consumed) =
-        process_control_frames(&raw, &shared, &rx, &sock_a, &mut replay_buf);
+    let (action, _consumed) = process_control_frames(&raw, &shared, &rx, &sock_a, &mut replay_buf);
 
     assert!(action.is_none());
     assert_eq!(replay_buf.len(), 3, "lower buffered frames must survive");
     assert_eq!(shared.acked_seq.load(Ordering::Relaxed), 0);
     assert_eq!(shared.frames_invalid_acks.load(Ordering::Relaxed), 1);
 }
-
 
 #[test]
 fn test_valid_acks_trim_as_before_no_regression_2959() {
@@ -243,7 +245,6 @@ fn test_valid_acks_trim_as_before_no_regression_2959() {
     assert_eq!(shared.frames_invalid_acks.load(Ordering::Relaxed), 0);
 }
 
-
 // ---------------------------------------------------------------------------
 // #2879 — daemon→helper control frames must have a bounded payload
 // ---------------------------------------------------------------------------
@@ -255,7 +256,6 @@ fn build_ctrl_header(payload_len: u32, msg_type: u8) -> [u8; FRAME_HEADER_SIZE] 
     buf[4] = msg_type;
     buf
 }
-
 
 // #2879 fail-on-revert guard: a daemon that declares payload_len = 1<<30 and
 // trickles bytes must be DISCONNECTED before the helper buffers the (never
@@ -274,8 +274,7 @@ fn test_oversized_control_payload_disconnects_2879() {
     // Trickle a few payload bytes — far short of 1<<30.
     ctrl.extend_from_slice(&[0u8; 8]);
 
-    let (action, _consumed) =
-        process_control_frames(&ctrl, &shared, &rx, &sock_a, &mut replay_buf);
+    let (action, _consumed) = process_control_frames(&ctrl, &shared, &rx, &sock_a, &mut replay_buf);
     assert_eq!(
         action,
         Some(true),
@@ -287,7 +286,6 @@ fn test_oversized_control_payload_disconnects_2879() {
         "an invalid oversized frame must not be applied (#2879)"
     );
 }
-
 
 // #2879: the current daemon→helper opcodes (Ack/Pause/Resume/DrainRequest) are
 // header-only; a NONZERO payload_len on any of them is invalid and must be
@@ -315,7 +313,6 @@ fn test_nonzero_payload_on_header_only_opcodes_rejected_2879() {
     }
 }
 
-
 // #2879 no-regression: a legitimate header-only control frame whose HEADER is
 // split across two reads must still parse once complete — the cap only rejects
 // an invalid payload_len, never a merely-incomplete header.
@@ -331,16 +328,17 @@ fn test_split_header_only_frame_still_parses_2879() {
 
     // First read: only the first 8 bytes of the 16-byte header.
     ctrl.extend_from_slice(&header[..8]);
-    let (action, consumed) =
-        process_control_frames(&ctrl, &shared, &rx, &sock_a, &mut replay_buf);
-    assert!(action.is_none(), "partial header must not disconnect (#2879)");
+    let (action, consumed) = process_control_frames(&ctrl, &shared, &rx, &sock_a, &mut replay_buf);
+    assert!(
+        action.is_none(),
+        "partial header must not disconnect (#2879)"
+    );
     assert_eq!(consumed, 0, "partial header must not be consumed");
     assert!(!shared.paused.load(Ordering::Acquire));
 
     // Second read: the rest of the header arrives; the PAUSE now applies.
     ctrl.extend_from_slice(&header[8..]);
-    let (action, consumed) =
-        process_control_frames(&ctrl, &shared, &rx, &sock_a, &mut replay_buf);
+    let (action, consumed) = process_control_frames(&ctrl, &shared, &rx, &sock_a, &mut replay_buf);
     assert!(action.is_none());
     assert_eq!(consumed, FRAME_HEADER_SIZE);
     assert!(

@@ -808,11 +808,14 @@ type MatchPoliciesResult struct {
 	// concrete policy match and for HostInboundUnmatched.
 	DefaultUsed bool `json:"default_used,omitempty"`
 
-	// UnzonedIngress is true when the query's FROM zone is not a known zone.
-	// The dataplane denies such a flow unconditionally (#6682) instead of
-	// consulting default-policy, so the verdict must not be attributed to the
-	// default — on a permit-all box that attribution is actively false (#8318).
+	// UnzonedIngress is true when the query's FROM zone is not known. The
+	// dataplane denies this transit flow unconditionally (#6682), not by
+	// default-policy.
 	UnzonedIngress bool `json:"unzoned_ingress,omitempty"`
+	// UnzonedEgress is true when the query's TO zone is not known. A resolved
+	// zone-0 egress is denied before default-policy (#11067); the simulator
+	// cannot distinguish the zero-identity NoRoute exception without FIB input.
+	UnzonedEgress bool `json:"unzoned_egress,omitempty"`
 	// QueriedFromZone/QueriedToZone echo the zone pair the caller ASKED about
 	// (#3627 M06). Unlike FromZone/ToZone (the SCOPE of the MATCHED policy, set
 	// only on a positive match), these are populated on EVERY response —

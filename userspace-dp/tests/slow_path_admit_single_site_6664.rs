@@ -263,12 +263,12 @@ fn noroute_arm_adjudicates_before_reinjecting_7480() {
 
     let start = lines
         .iter()
-        .position(|l| l.contains("ForwardingDisposition::NoRoute =>"))
+        .position(|l| l.trim() == "ForwardingDisposition::NoRoute => {")
         .expect("the NoRoute arm is gone from poll_descriptor");
     // The arm ends where the next disposition arm begins.
     let end = lines[start + 1..]
         .iter()
-        .position(|l| l.contains("ForwardingDisposition::MissingNeighbor =>"))
+        .position(|l| l.trim() == "ForwardingDisposition::MissingNeighbor => {")
         .map(|off| start + 1 + off)
         .expect("the MissingNeighbor arm no longer follows NoRoute; re-anchor this guard");
 
