@@ -6294,6 +6294,68 @@ fn resolved_unzoned_egress_drops_under_permit_all_11067() {
         "the zero-zone egress must increment its dedicated cause counter"
     );
 }
+/// A tunnel can keep its logical egress identity while the outer FIB lookup
+/// returns NoRoute. That is not the zero-identity NoRoute exception: zone 0
+/// must still be denied before default-policy permit-all can delegate it.
+#[test]
+fn tunnel_noroute_with_unzoned_logical_egress_denies_11067() {
+    let mut snapshot = native_gre_snapshot(false);
+    snapshot.default_policy = "permit".to_string();
+    snapshot.zones.retain(|zone| zone.name != "sfmix");
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|interface| interface.name == "gr-0/0/0.0")
+        .expect("GRE interface")
+        .zone
+        .clear();
+    snapshot.tunnel_endpoints[0].zone.clear();
+    snapshot.tunnel_endpoints[0].destination = "2001:db8:dead::7".to_string();
+
+    let state = build_forwarding_state(&snapshot);
+    assert_eq!(state.policy.default_action, PolicyAction::Permit);
+    assert_eq!(state.egress_zone_id(362), 0);
+
+    // The inner FIB selects tunnel endpoint 1, but its outer destination has
+    // no route. Tunnel resolution retains the logical ifindex in that shape.
+    let resolution = lookup_forwarding_resolution_v4(
+        &state,
+        None,
+        Ipv4Addr::new(8, 8, 8, 8),
+        "sfmix.inet.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(resolution.disposition, ForwardingDisposition::NoRoute);
+    assert_eq!(resolution.egress_ifindex, 362);
+    assert_eq!(resolution.tunnel_endpoint_id, 1);
+
+    let (from_id, to_id) = zone_pair_ids_for_flow(&state, 12, resolution.egress_ifindex);
+    assert_eq!(from_id, TEST_WAN_ZONE_ID);
+    assert_eq!(to_id, 0);
+    let before = crate::policy::UNZONED_EGRESS_DENIED.load(std::sync::atomic::Ordering::Relaxed);
+    let result = noroute_policy_denial_gated(
+        &state,
+        from_id,
+        to_id,
+        resolution.egress_ifindex,
+        "10.0.61.100".parse().expect("src"),
+        "8.8.8.8".parse().expect("dst"),
+        PROTO_TCP,
+        Some((40000, 443)),
+        None,
+        64,
+    )
+    .expect("an unzoned logical egress must deny rather than delegate");
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert_eq!(result.policy_id, crate::policy::UNATTRIBUTED_POLICY_ID);
+    assert_eq!(
+        crate::policy::UNZONED_EGRESS_DENIED.load(std::sync::atomic::Ordering::Relaxed) - before,
+        1,
+        "a tunnel NoRoute with logical egress must use the resolved-egress denial"
+    );
+}
 
 /// #6722 B1, zero sentinel FIRST with egress rows. Two unzoned rows then a
 /// zoned one: `populate_egress`'s last write is the zone, so relying on

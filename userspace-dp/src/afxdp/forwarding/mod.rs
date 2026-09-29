@@ -112,28 +112,17 @@ pub(super) fn zone_pair_for_flow_with_override(
 ///     address/protocol/`any` terms still match. Parity with the #3291 flowless
 ///     ForwardCandidate gate and the #4024 MissingNeighbor arm.
 ///
-/// WHAT THIS ACTUALLY DECIDES FOR NoRoute, stated plainly so no one reads more
-/// into the generality of the signature than is there. Both `NoRoute`
-/// constructors in `fib.rs` set `egress_ifindex: 0`, so the caller has no
-/// egress interface or zone to adjudicate. #3110 excludes the `to_zone_id = 0`
-/// sentinel from every rule tier; this helper uses the
-/// `unresolved_egress` evaluator so the implicit default still decides. #11067
-/// denies zone 0 for a RESOLVED egress; do not replace this call with the
-/// ordinary evaluator, which deliberately treats that as unzoned transit.
+/// NoRoute may still carry a logical egress identity — for example, a tunnel
+/// whose outer destination has no route. Use that identity to select the policy
+/// gate: a nonzero logical egress evaluates its configured zone (and denies
+/// zone 0), while `egress_ifindex == 0` has no zone to adjudicate and preserves
+/// the existing default-policy behavior for kernel delegation.
 ///
-///   * on a Junos-default deny box a NoRoute frame now DROPS — the intended fix,
-///     and availability-visible on upgrade;
-///   * an operator's `permit` rule for the ingress zone pair does NOT rescue it,
-///     because no zone-pair rule is even consulted;
-///   * the `ports` distinction below therefore does not change the outcome on
-///     TODAY's only call path. It is honoured anyway so the helper stays correct
-///     for a caller that supplies a resolved egress zone, and it is unit-tested
-///     as a contract rather than left as an untested claim — but do not read the
-///     port handling as load-bearing for NoRoute.
 pub(in crate::afxdp) fn noroute_policy_denial(
     policy: &crate::policy::PolicyState,
     from_zone_id: u16,
     to_zone_id: u16,
+    egress_ifindex: i32,
     src_ip: std::net::IpAddr,
     dst_ip: std::net::IpAddr,
     protocol: u8,
@@ -143,7 +132,12 @@ pub(in crate::afxdp) fn noroute_policy_denial(
 ) -> Option<crate::policy::PolicyEvaluationResult> {
     let l4_present = ports.is_some();
     let (src_port, dst_port) = ports.unwrap_or((0, 0));
-    let result = crate::policy::evaluate_policy_result_l3_aware_unresolved_egress(
+    let evaluate = if egress_ifindex != 0 {
+        crate::policy::evaluate_policy_result_l3_aware
+    } else {
+        crate::policy::evaluate_policy_result_l3_aware_unresolved_egress
+    };
+    let result = evaluate(
         policy,
         from_zone_id,
         to_zone_id,
@@ -193,17 +187,16 @@ pub(in crate::afxdp) fn noroute_policy_denial(
 ///     address/protocol/`any` terms still match. Parity with the #3291 flowless
 ///     ForwardCandidate gate and the #4024 MissingNeighbor arm.
 ///
-/// Both `NoRoute` constructors in `fib.rs` set `egress_ifindex: 0`, so the
-/// caller normally resolves `to_zone_id = 0` — the #3110 unzoned sentinel.
-/// #3110 makes a flow with an unknown egress zone ineligible for BOTH
-/// zone-pair policies and `junos-global`, so every NoRoute evaluation falls
-/// through to the DEFAULT action. A default-deny box therefore drops a capped
-/// or uncapped NoRoute frame identically; an explicit permit rule for the
-/// ingress zone pair does NOT rescue it.
+/// A base NoRoute resolution has `egress_ifindex: 0`, so it has no egress
+/// identity and preserves the default-policy decision. Tunnel resolution may
+/// remap an outer NoRoute onto a nonzero logical egress; that case evaluates
+/// the logical zone, and resolved zone 0 is denied rather than defaulted.
+/// #3110 still makes zone 0 ineligible for zone-pair and `junos-global` rules.
 pub(in crate::afxdp) fn noroute_policy_denial_gated(
     forwarding: &ForwardingState,
     from_zone_id: u16,
     to_zone_id: u16,
+    egress_ifindex: i32,
     src_ip: std::net::IpAddr,
     dst_ip: std::net::IpAddr,
     protocol: u8,
@@ -218,6 +211,7 @@ pub(in crate::afxdp) fn noroute_policy_denial_gated(
         &forwarding.policy,
         from_zone_id,
         to_zone_id,
+        egress_ifindex,
         src_ip,
         dst_ip,
         protocol,

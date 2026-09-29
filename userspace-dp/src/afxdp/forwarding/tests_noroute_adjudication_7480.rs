@@ -19,9 +19,9 @@ use std::net::IpAddr;
 
 const LAN: u16 = 11;
 const WAN: u16 = 12;
-/// The #3110 "unknown / no zone" sentinel. Every NoRoute resolution carries
-/// `egress_ifindex: 0` (both constructors in `fib.rs`), so the caller always
-/// resolves this as the to-zone.
+/// The #3110 "unknown / no zone" sentinel. A base NoRoute has no logical
+/// egress identity (`egress_ifindex: 0`), so the caller resolves this as the
+/// to-zone. A tunnel NoRoute can retain a nonzero logical identity.
 const UNZONED: u16 = 0;
 
 fn zones() -> FxHashMap<String, u16> {
@@ -86,6 +86,7 @@ fn noroute_is_denied_on_a_default_deny_box_7480() {
         &state,
         LAN,
         UNZONED,
+        0,
         src(),
         dst(),
         6,
@@ -105,10 +106,10 @@ fn noroute_is_denied_on_a_default_deny_box_7480() {
 }
 
 /// THE AVAILABILITY CELL, and the reason this is an adjudication rather than a
-/// drop. A permitted flow must still reach the kernel, because #7409's importer
-/// BOUNDS the FIB divergence without closing it: routes learned between snapshot
-/// pushes, and everything before the first push on a fresh boot, still resolve
-/// NoRoute and must still be delegated.
+/// drop. A zero-identity NoRoute must still reach the kernel, because #7409's
+/// importer BOUNDS the FIB divergence without closing it: routes learned between
+/// snapshot pushes, and everything before the first push on a fresh boot, have
+/// no logical egress identity and must still be delegated.
 ///
 /// FAIL-ON-REVERT: make the helper return `Some(..)` unconditionally and this
 /// reds — which is the black-hole #6664 was warned off.
@@ -120,6 +121,7 @@ fn noroute_is_delegated_when_the_default_permits_7480() {
         &state,
         LAN,
         UNZONED,
+        0,
         src(),
         dst(),
         6,
@@ -130,7 +132,7 @@ fn noroute_is_delegated_when_the_default_permits_7480() {
 
     assert!(
         verdict.is_none(),
-        "a NoRoute frame under a default-PERMIT policy must still be delegated to \
+        "a zero-identity NoRoute under default-PERMIT must still be delegated to \
          the kernel. Denying it black-holes every destination the kernel learned \
          since the last snapshot push, and everything on a fresh boot until the \
          first push."
@@ -139,15 +141,10 @@ fn noroute_is_delegated_when_the_default_permits_7480() {
 
 /// THE OPERATOR-SURPRISE CELL, and the one worth reading before an upgrade.
 ///
-/// A NoRoute resolution always carries `egress_ifindex: 0`, so the to-zone is the
+/// A base NoRoute resolution has `egress_ifindex: 0`, so the to-zone is the
 /// #3110 unzoned sentinel — which makes the flow ineligible for zone-pair AND
 /// `junos-global` policies. So an explicit `permit` for the ingress zone pair
-/// does NOT rescue a NoRoute frame: only the DEFAULT action decides.
-///
-/// This is not a bug to fix by relaxing #3110; #3110 exists so a permit-global
-/// cannot leak transit on an unzoned interface. It is pinned because it is
-/// surprising, and because someone will otherwise "fix" the reported drop by
-/// adding a zone-pair permit and find it changes nothing.
+/// does NOT rescue this zero-identity NoRoute frame: only the DEFAULT decides.
 #[test]
 fn a_zone_pair_permit_does_not_rescue_noroute_7480() {
     let state = parse_policy_state(
@@ -159,9 +156,9 @@ fn a_zone_pair_permit_does_not_rescue_noroute_7480() {
     // Sanity: the rule DOES permit when the egress zone actually resolves. If
     // this half ever fails the cell below proves nothing.
     assert!(
-        noroute_policy_denial(&state, LAN, WAN, src(), dst(), 6, Some((40000, 443)), None, 64)
+        noroute_policy_denial(&state, LAN, WAN, 12, src(), dst(), 6, Some((40000, 443)), None, 64)
             .is_none(),
-        "fixture premise: permit-lan-wan must permit a fully zoned lan->wan flow"
+        "fixture premise: permit-lan-wan must permit a fully zoned flow"
     );
 
     assert!(
@@ -169,6 +166,7 @@ fn a_zone_pair_permit_does_not_rescue_noroute_7480() {
             &state,
             LAN,
             UNZONED,
+            0,
             src(),
             dst(),
             6,
@@ -184,14 +182,10 @@ fn a_zone_pair_permit_does_not_rescue_noroute_7480() {
     );
 }
 
-/// The `ports` contract. This is NOT exercised by today's only call path — a
-/// NoRoute frame always has an unzoned egress, so the default action decides and
-/// the ports never change the outcome. It is pinned anyway because the helper's
-/// signature offers the distinction, and an untested option is a claim.
-///
-/// `None` means a flowless packet (non-first fragment / no L4): port-bearing
-/// application terms must fail CLOSED, matching the #3291 flowless
-/// ForwardCandidate gate and the #4024 MissingNeighbor arm.
+/// The `ports` contract. A zero-identity NoRoute has no zone pair to match, but
+/// a logical-egress NoRoute (such as a failed tunnel underlay) still evaluates
+/// its zone's rules. The flow-backed / flowless distinction must therefore be
+/// preserved whenever a logical egress identity exists.
 #[test]
 fn flowless_ports_fail_closed_against_a_port_bearing_term_7480() {
     let state = parse_policy_state(
@@ -201,13 +195,13 @@ fn flowless_ports_fail_closed_against_a_port_bearing_term_7480() {
     );
 
     assert!(
-        noroute_policy_denial(&state, LAN, WAN, src(), dst(), 6, Some((40000, 443)), None, 64)
+        noroute_policy_denial(&state, LAN, WAN, 12, src(), dst(), 6, Some((40000, 443)), None, 64)
             .is_none(),
         "fixture premise: a flow-backed 443 flow must match the junos-https term"
     );
 
     assert!(
-        noroute_policy_denial(&state, LAN, WAN, src(), dst(), 6, None, None, 64).is_some(),
+        noroute_policy_denial(&state, LAN, WAN, 12, src(), dst(), 6, None, None, 64).is_some(),
         "a FLOWLESS packet has no readable port, so a port-bearing application term \
          must fail closed rather than match on the zeroed ports"
     );

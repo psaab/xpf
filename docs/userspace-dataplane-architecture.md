@@ -556,11 +556,11 @@ populates `name_to_ifindex` / `linux_to_ifindex` only for rows with
 `ifindex > 0`, so `resolve_ifindex` missed on both maps, the interface-only next
 hop `@st0.0` collapsed to ifindex 0, and the lookup returned **`NoRoute`**.
 `NoRoute` is slow-path eligible, so on a `default-policy permit-all` box the
-frame was reinjected and the **kernel** forwarded it: no session, no NAT, no
-screen, no egress zone policy. #7480's `noroute_policy_denial` closes this on a
-deny-all default — it evaluates with to-zone 0, which falls through to the
-default action — but not on permit-all. The zone assignment committed cleanly
-and read as enforced throughout.
+zero-identity frame was reinjected and the **kernel** forwarded it: no session,
+no NAT, no screen, no egress zone policy. #7480's `noroute_policy_denial`
+preserves the default-policy decision when the egress identity is absent; this
+still permits that specific shape. A tunnel NoRoute retaining a nonzero logical
+egress is instead adjudicated against that zone (#11067).
 
 **The same tunnel written WITH a stanza (Shape A) already produced the row**, and
 has since #5619, which recorded the identical transition for the other naming
@@ -579,10 +579,10 @@ Four properties are load-bearing and each is pinned:
 
 - **The row exists only alongside an authored zone.** The synthesis iterates
   `authoredZoneRefs`, so a tunnel the operator never zoned keeps today's
-  behaviour exactly. An unzoned row would buy nothing — egress zone 0 skips
-  every rule tier, including `from-zone any to-zone any`, and falls through to
-  the default action, which is where the `NoRoute` path already lands — while
-  still moving the flow off the kernel path.
+  behaviour exactly. An unzoned row would buy nothing in this missing-row shape:
+  the tunnel lookup has no logical egress identity, so its `NoRoute` follows
+  the default action. A different `NoRoute` that retains a nonzero logical
+  egress is now adjudicated against that egress zone (#11067).
 - **`SecureTunnel` is derived, never defaulted.** A row appended outside the
   builder loop defaults both `Tunnel` and `SecureTunnel` to `false` and escapes
   BOTH `netdevExclusionClasses` entries (`Tunnel` is stanza-derived, so it is
@@ -612,8 +612,10 @@ that this made every such flow deny was wrong: a zero egress zone reached
 #11067 closes that fall-through for a resolved egress. Its earlier #6713
 motivation was the obsolete egress-row lookup; `egress_zone_id` now reads the
 unambiguous zone ledger, so a correctly configured MAC-less tunnel reaches its
-actual zone and remains policy-controlled. A true NoRoute (no egress interface)
-is kept distinct and still follows the default policy.
+actual zone and remains policy-controlled. A zero-identity NoRoute
+(`egress_ifindex == 0`) keeps the default-policy decision. A tunnel NoRoute
+retaining a logical egress uses that zone, and a zone-0 logical egress is
+denied.
 
 `pending_neigh_admission` returns one of three outcomes, each counted
 separately so an operator can tell normal cold-start coalescing from an
@@ -1766,12 +1768,14 @@ Scope of the fallback:
   (`default-policy deny-all`). Zone id 0 still matches no rule in ANY tier —
   exact pair, from-any, to-any, both-any or `junos-global` — so a rule written
   for a zone pair is not an answer when the dataplane has no zone to adjudicate.
-  #6682 and #11067 now make both directions explicit denies: a zero ingress or
-  a resolved zero-zone egress cannot fall through to `default-policy
-  permit-all`. A true NoRoute has no egress interface and keeps its existing
-  default-policy decision. The #6722 B2 ambiguity can therefore still blackhole
-  transit on a deny-default box through availability loss, but it no longer
-  turns a permit-all posture into a bypass of configured deny rules.
+  #6682 and #11067 make unzoned transit fail closed: a zero ingress or a
+  resolved zero-zone egress cannot fall through to `default-policy permit-all`.
+  A NoRoute with no logical egress identity keeps its existing default-policy
+  decision; a tunnel NoRoute with a nonzero logical egress uses that zone, and
+  zone 0 is denied. The #6722 B2 ambiguity can therefore still blackhole transit
+  on a deny-default box through availability loss, but a resolved unzoned
+  egress no longer turns a permit-all posture into a bypass of configured
+  deny rules.
 
   **Provenance, stated so a bisect is not misled.** This ambiguity was already
   latent in the index-keyed `egress` map before #6713/#6722: on `origin/master`
@@ -2148,13 +2152,14 @@ The tier gate and these denies are complementary and ordered, not redundant:
 a global-permit case to pin that the tier walk remains skipped for a missing
 egress zone.
 
-**NoRoute is not an unzoned egress.** A NoRoute resolution has no egress
-ifindex, rather than a resolved egress whose zone is 0. Its dedicated
+**NoRoute without a logical egress identity.** A base NoRoute resolution has
+`egress_ifindex == 0` and no egress zone to adjudicate; its dedicated
 `evaluate_policy_result_l3_aware_unresolved_egress` entry point preserves the
-existing default-policy decision; in particular a default-permit can still
-delegate a route miss to the kernel. A resolved egress with an unknown zone is
-denied. This distinction prevents #11067 from turning a route miss into a
-blanket drop.
+existing default-policy decision, so a default-permit can still delegate that
+route miss to the kernel. Tunnel resolution can remap an outer NoRoute onto a
+nonzero logical egress. That shape uses the normal policy evaluator: a configured
+logical zone remains policy-controlled, and a zero-zone logical egress is denied.
+The distinction is identity-based, not disposition-based.
 
 The #6713-class configured path is unaffected: the egress-zone resolver reads
 the unambiguous configuration ledger rather than requiring a link-layer egress
