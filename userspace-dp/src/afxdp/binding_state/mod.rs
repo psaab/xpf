@@ -444,6 +444,9 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// `nat_frag_untranslated_dropped` so an ESP/GRE datagram is not reported as
     /// a fragmentation/PMTU fault.
     pub(super) nat_flowless_untranslated_dropped: AtomicU64,
+    /// #11066: flow-backed NoRoute NAT-withheld drops, separate from
+    /// flowless packets and fragment-association misses.
+    pub(super) nat_flowbacked_no_route_untranslated_dropped: AtomicU64,
     /// #10131: binding-local fragment-overlap attribution, batched from each
     /// worker while the matching global atomics remain the alert path.
     pub(super) frag_overlap_dropped: AtomicU64,
@@ -1023,10 +1026,12 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // #10729 adds one AtomicBool hugepage-backing flag; padding absorbs it before
 // the first sentinel, so only the second pinned offset moves (+1).
 // #11061 adds three unconditional u64 fabric trust-drop counters before both
-// sentinels; both offsets advance by 24 bytes while the alignment unit stays.
+// sentinels; #11066 adds one unconditional u64 flow-backed NoRoute-NAT-fence
+// counter. Combined offsets advance by 32 bytes; size verified by the
+// compiler below (padding absorbed the #11061+#11066 fields).
 const _: [(); 2496] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2352] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 2481] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2360] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 2489] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
@@ -1135,6 +1140,7 @@ impl BindingLiveState {
             nat_alloc_fail: AtomicU64::new(0),
             nat_frag_untranslated_dropped: AtomicU64::new(0),
             nat_flowless_untranslated_dropped: AtomicU64::new(0),
+            nat_flowbacked_no_route_untranslated_dropped: AtomicU64::new(0),
             slow_path_packets: AtomicU64::new(0),
             slow_path_bytes: AtomicU64::new(0),
             slow_path_local_delivery_packets: AtomicU64::new(0),

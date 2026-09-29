@@ -574,6 +574,203 @@ pub(super) fn flowless_no_route_requires_nat_translation(
     false
 }
 
+/// #11066: a flow-backed NoRoute packet may be reinjected only if every NAT
+/// direction that has not already been applied is ruled out. Unlike the
+/// flowless fence, the L4 tuple is known, so scoped source-NAT rules are probed
+/// against the exact protocol and ports without minting allocator state.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn flowbacked_no_route_requires_nat_translation(
+    forwarding: &ForwardingState,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
+    ingress_zone_override: Option<u16>,
+    from_zone_id: u16,
+    nat: crate::nat::NatDecision,
+) -> bool {
+    let source_nat_dst_ip = nat.rewrite_dst.unwrap_or(flow.dst_ip);
+    let source_nat_dst_port = nat.rewrite_dst_port.unwrap_or(flow.forward_key.dst_port);
+    let source_untranslated =
+        !nat.nat64 && nat.rewrite_src.is_none() && nat.rewrite_src_port.is_none();
+    let destination_untranslated =
+        !nat.nat64 && nat.rewrite_dst.is_none() && nat.rewrite_dst_port.is_none();
+    if (!source_untranslated && !destination_untranslated)
+        || !same_family_nat_configured(forwarding)
+    {
+        return false;
+    }
+
+    let mut has_egress_identity = false;
+    for &egress_ifindex in forwarding
+        .ifindex_to_config_name
+        .keys()
+        .chain(forwarding.ifindex_to_routing_instance.keys())
+        .chain(forwarding.ifindex_to_zone_id.keys())
+        .chain(forwarding.ifindex_unambiguous_zone_id.keys())
+        .chain(forwarding.egress.keys())
+    {
+        has_egress_identity = true;
+        if flowbacked_requires_nat_translation_on_egress(
+            forwarding,
+            flow,
+            source_nat_dst_ip,
+            source_nat_dst_port,
+            meta,
+            packet_icmp,
+            ingress_zone_override,
+            from_zone_id,
+            egress_ifindex,
+            source_untranslated,
+            destination_untranslated,
+        ) {
+            return true;
+        }
+    }
+
+    if !has_egress_identity || forwarding.egress.is_empty() {
+        // As in the flowless gate, an absent egress row cannot prove that the
+        // kernel's later route won't select an interface-scoped source rule.
+        return flowbacked_requires_nat_translation_on_egress(
+            forwarding,
+            flow,
+            source_nat_dst_ip,
+            source_nat_dst_port,
+            meta,
+            packet_icmp,
+            ingress_zone_override,
+            from_zone_id,
+            0,
+            source_untranslated,
+            destination_untranslated,
+        ) || (source_untranslated
+            && (!forwarding.source_nat_rules.is_empty()
+                || !forwarding.static_nat.is_empty()
+                || !forwarding.nptv6.is_empty()));
+    }
+    false
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn flowbacked_requires_nat_translation_on_egress(
+    forwarding: &ForwardingState,
+    flow: &SessionFlow,
+    source_nat_dst_ip: IpAddr,
+    source_nat_dst_port: u16,
+    meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
+    ingress_zone_override: Option<u16>,
+    from_zone_id: u16,
+    egress_ifindex: i32,
+    source_untranslated: bool,
+    destination_untranslated: bool,
+) -> bool {
+    let from_zone = forwarding
+        .zone_id_to_name
+        .get(&from_zone_id)
+        .map_or("", String::as_str);
+    let to_zone_id = forwarding.egress_zone_id(egress_ifindex);
+    let to_zone = forwarding
+        .zone_id_to_name
+        .get(&to_zone_id)
+        .map_or("", String::as_str);
+    if source_untranslated {
+        if let IpAddr::V6(mut src_v6) = flow.src_ip {
+            if !matches!(
+                forwarding
+                    .nptv6
+                    .translate_outbound_result(&mut src_v6, to_zone),
+                crate::nptv6::Nptv6Translation::NoMatch
+            ) {
+                return true;
+            }
+        }
+        let nat_scope = crate::afxdp::forwarding::nat_scope_ctx_for_flow(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            egress_ifindex,
+            flow.forward_key.routing_domain,
+        );
+        if forwarding
+            .static_nat
+            .match_snat_with_counter_scoped(
+                flow.src_ip,
+                flow.forward_key.src_port,
+                Some(source_nat_dst_ip),
+                to_zone,
+                nat_scope.egress_ifname,
+                nat_scope.egress_routing_instance,
+            )
+            .is_some()
+            || crate::nat::source_nat_tuple_translation_possible(
+                &forwarding.source_nat_rules,
+                &nat_scope,
+                from_zone,
+                to_zone,
+                flow.src_ip,
+                source_nat_dst_ip,
+                meta.protocol,
+                flow.forward_key.src_port,
+                source_nat_dst_port,
+            )
+        {
+            return true;
+        }
+    }
+
+    if destination_untranslated {
+        let ingress = prerouting_ingress_scope(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            ingress_zone_override,
+        );
+        if let IpAddr::V6(mut dst_v6) = flow.dst_ip {
+            if !matches!(
+                forwarding
+                    .nptv6
+                    .translate_inbound_result(&mut dst_v6, ingress.zone_name),
+                crate::nptv6::Nptv6Translation::NoMatch
+            ) {
+                return true;
+            }
+        }
+        if forwarding
+            .static_nat
+            .match_dnat_with_counter_scoped(
+                flow.dst_ip,
+                flow.forward_key.dst_port,
+                Some(flow.src_ip),
+                ingress.zone_name,
+                ingress.ifname,
+                ingress.routing_instance,
+            )
+            .is_some()
+            || forwarding
+                .dnat_table
+                .lookup_with_counter_scoped(
+                    meta.protocol,
+                    flow.src_ip,
+                    flow.dst_ip,
+                    flow.forward_key.src_port,
+                    flow.forward_key.dst_port,
+                    ingress.zone_name,
+                    ingress.ifname,
+                    ingress.routing_instance,
+                    packet_icmp,
+                )
+                .is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// #10679: Identify same-family NAT rules that could match using only the
 /// known L3/scope fields. Protocol 255 is the unknown sentinel, so rule matches
 /// are treated as possible and no packet-header protocol recovery is needed.

@@ -73,6 +73,7 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.nat_alloc_fail = 0;
         binding.nat_frag_untranslated_dropped = 0;
         binding.nat_flowless_untranslated_dropped = 0;
+        binding.nat_flowbacked_no_route_untranslated_dropped = 0;
         binding.frag_overlap_dropped = 0;
         binding.frag_overlap_overflow_dropped = 0;
         binding.frag_overlap_shard_full_dropped = 0;
@@ -123,13 +124,18 @@ mod reset_9956_tests {
         );
     }
     #[test]
-    fn reset_binding_counters_clears_flowless_nat_fence_10679() {
+    fn reset_binding_counters_clears_nat_fence_counters_11066() {
         let mut binding = BindingStatus::default();
         binding.nat_flowless_untranslated_dropped = 7;
+        binding.nat_flowbacked_no_route_untranslated_dropped = 7;
         reset_binding_counters(std::slice::from_mut(&mut binding));
         assert_eq!(
             binding.nat_flowless_untranslated_dropped, 0,
             "reset_binding_counters must clear flowless NAT-fence drops"
+        );
+        assert_eq!(
+            binding.nat_flowbacked_no_route_untranslated_dropped, 0,
+            "reset_binding_counters must clear flow-backed NoRoute NAT-fence drops"
         );
     }
     #[test]

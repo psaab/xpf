@@ -753,6 +753,11 @@ pub(crate) struct BindingStatus {
     /// problem. `default` keeps the Rust/Go wire version compatible.
     #[serde(rename = "nat_flowless_untranslated_dropped", default)]
     pub nat_flowless_untranslated_dropped: u64,
+    /// #11066: permitted flow-backed NoRoute packets dropped because their
+    /// NAT translation was unavailable before kernel-FIB reinjection.
+    /// Separate from flowless and fragment-specific untranslated drops.
+    #[serde(rename = "nat_flowbacked_no_route_untranslated_dropped", default)]
+    pub nat_flowbacked_no_route_untranslated_dropped: u64,
     /// #10131: binding-local fragment-overlap attribution. The matching global
     /// atomics remain process-wide alert sources; these fields identify the
     /// worker/binding that observed each event.

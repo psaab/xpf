@@ -307,6 +307,7 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame(
         } else {
             SlowPathOutlet::Delegated
         },
+        None,
         recent_exceptions,
         reason,
         forwarding,
@@ -324,17 +325,34 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame_with_outlet(
     meta: impl Into<UserspaceDpMeta>,
     decision: SessionDecision,
     outlet: SlowPathOutlet,
+    nat64_reverse: Option<&crate::nat64::Nat64ReverseInfo>,
     recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
     reason: &'static str,
     forwarding: &ForwardingState,
 ) -> bool {
     let meta = meta.into();
-    let Some(packet) = extract_l3_packet_with_nat(frame, meta, decision.nat) else {
+    let packet = if decision.nat.nat64 {
+        crate::afxdp::frame::build_nat64_l3_packet_for_slow_path(
+            frame,
+            meta,
+            &decision,
+            nat64_reverse,
+            forwarding.nat64.no_v6_frag_header,
+        )
+    } else {
+        extract_l3_packet_with_nat(frame, meta, decision.nat)
+    };
+    let Some(packet) = packet else {
         live.slow_path_drops.fetch_add(1, Ordering::Relaxed);
+        let failure_reason = if decision.nat.nat64 {
+            "nat64_slow_path_prepare_failed"
+        } else {
+            "slow_path_prepare_failed"
+        };
         record_exception(
             recent_exceptions,
             binding,
-            "slow_path_prepare_failed",
+            failure_reason,
             frame.len() as u32,
             Some(meta),
             None,

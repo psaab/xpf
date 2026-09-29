@@ -179,6 +179,9 @@ impl BindingLiveState {
             nat_flowless_untranslated_dropped: self
                 .nat_flowless_untranslated_dropped
                 .load(Ordering::Relaxed),
+            nat_flowbacked_no_route_untranslated_dropped: self
+                .nat_flowbacked_no_route_untranslated_dropped
+                .load(Ordering::Relaxed),
             frag_overlap_dropped: self.frag_overlap_dropped.load(Ordering::Relaxed),
             frag_overlap_overflow_dropped: self
                 .frag_overlap_overflow_dropped

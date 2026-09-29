@@ -1471,6 +1471,7 @@ pub(super) fn reinject_ipsec_passthrough(
         meta,
         ipsec_decision,
         outlet,
+        None,
         worker_ctx.recent_exceptions,
         "slow_path",
         worker_ctx.forwarding,
