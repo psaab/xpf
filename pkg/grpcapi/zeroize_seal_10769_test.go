@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -2001,6 +2002,9 @@ func TestUngatedReservedAliasRecoversByRerun10769(t *testing.T) {
 	}
 	if record.Version != 1 || filepath.Clean(record.ConfigDir) != configDir || record.ConfigBase != "xpf.conf" {
 		t.Fatalf("pending record fields = %+v, want Version 1 matching the wiped root", record)
+	}
+	if record.ArchiveDir != "" || !reflect.DeepEqual(record.LogInventory, ZeroizeLogInventory{}) {
+		t.Fatalf("pending record must carry the empty archive/inventory of this fixture: %+v", record)
 	}
 	if _, _, _, present, err := configstore.ReadResetHandoff(); err != nil || present {
 		t.Fatalf("failed ungated wipe must write no handoff flag: present=%v err=%v", present, err)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1829,9 +1830,11 @@ func TestUngatedComposedRecoveryConverges10769(t *testing.T) {
 		t.Fatalf("loader pending marker must survive the failed wipe: %q err=%v", markerData, err)
 	}
 	var record struct {
-		Version    int    `json:"version"`
-		ConfigDir  string `json:"config_dir"`
-		ConfigBase string `json:"config_base"`
+		Version      int                         `json:"version"`
+		ConfigDir    string                      `json:"config_dir"`
+		ConfigBase   string                      `json:"config_base"`
+		ArchiveDir   string                      `json:"archive_dir"`
+		LogInventory grpcapi.ZeroizeLogInventory `json:"log_inventory"`
 	}
 	body := strings.TrimPrefix(string(markerData), configstore.FactoryResetPendingPrefix)
 	if err := json.Unmarshal([]byte(body), &record); err != nil {
@@ -1839,6 +1842,9 @@ func TestUngatedComposedRecoveryConverges10769(t *testing.T) {
 	}
 	if record.Version != 1 || filepath.Clean(record.ConfigDir) != configDir || record.ConfigBase != "xpf.conf" {
 		t.Fatalf("pending record fields = %+v, want Version 1 matching the wiped root", record)
+	}
+	if record.ArchiveDir != "" || !reflect.DeepEqual(record.LogInventory, grpcapi.ZeroizeLogInventory{}) {
+		t.Fatalf("pending record must carry the empty archive/inventory of this fixture: %+v", record)
 	}
 	if _, _, _, present, err := configstore.ReadResetHandoff(); err != nil || present {
 		t.Fatalf("failed ungated wipe must write no handoff flag: present=%v err=%v", present, err)
