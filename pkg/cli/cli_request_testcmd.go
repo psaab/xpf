@@ -423,7 +423,7 @@ func (c *CLI) testSecurityZone(args []string) error {
 				fmt.Printf("Interface %s belongs to zone: %s\n", ifName, zoneName)
 				if reason := config.ZoneQuarantineExcludedReason(zoneName, cfg); reason != "" {
 					id := config.StableZoneID(zoneName)
-					survivor := config.StableZoneIDOwner(allZoneNames, id)
+					survivor := config.ZoneQuarantineSurvivorName(zoneName, allZoneNames)
 					fmt.Printf("  %s\n", config.ZoneQuarantineTestZoneQualifierFor(id, survivor))
 				}
 				if zone.Description != "" {

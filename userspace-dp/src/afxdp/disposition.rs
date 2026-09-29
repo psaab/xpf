@@ -745,6 +745,16 @@ impl DispositionCounters<'_> {
             }
         }
     }
+    #[inline]
+    fn bump_ambiguous_fabric_zone_drop(&mut self) {
+        match self {
+            Self::Hot(c) => c.record_ambiguous_fabric_zone_drop(),
+            Self::Cold(live) => {
+                live.ambiguous_fabric_zone_drops
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 pub(super) fn record_disposition(
@@ -946,6 +956,11 @@ pub(super) fn record_forwarding_disposition(
         }
         ForwardingDisposition::TableUnavailable => {
             update_last_resolution(last_resolution, resolution, debug, forwarding);
+            if debug.is_some_and(|d| {
+                d.routing_domain >= crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE
+            }) {
+                counters.bump_ambiguous_fabric_zone_drop();
+            }
             counters.bump_table_unavailable();
             record_exception(
                 recent_exceptions,
@@ -1080,6 +1095,7 @@ mod tests_5289_exception_ring {
             dst_port: 2222,
             from_zone: Some(3),
             to_zone: Some(4),
+            routing_domain: 0,
         }
     }
 

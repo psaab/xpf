@@ -429,6 +429,13 @@ pub(crate) struct BindingStatus {
     /// Serde default keeps old helpers wire-compatible.
     #[serde(rename = "v4_mapped_ipv6_dropped", default)]
     pub v4_mapped_ipv6_dropped: u64,
+    /// #11061: fail-closed drops at the fabric trust boundary.
+    #[serde(rename = "invalid_fabric_stamp_drops", default)]
+    pub invalid_fabric_stamp_drops: u64,
+    #[serde(rename = "unstamped_fabric_ingress_drops", default)]
+    pub unstamped_fabric_ingress_drops: u64,
+    #[serde(rename = "ambiguous_fabric_zone_drops", default)]
+    pub ambiguous_fabric_zone_drops: u64,
     #[serde(rename = "umem_slice_dropped", default)]
     pub umem_slice_dropped: u64,
     #[serde(rename = "unknown_vlan_dropped", default)]
@@ -1445,6 +1452,16 @@ pub(crate) struct SessionDeltaInfo {
     pub nat64: bool,
     #[serde(rename = "nat64_snat_v4", default)]
     pub nat64_snat_v4: String,
+    /// #11064: the ICMP type/code that selected the active source-NAT rule.
+    /// `source_nat_icmp_valid` distinguishes absent metadata from the valid
+    /// type/code pair `(0, 0)`. Both HA delta transports carry these fields so
+    /// standby allocation reconstruction uses the same typed rule.
+    #[serde(rename = "source_nat_icmp_valid", default)]
+    pub source_nat_icmp_valid: bool,
+    #[serde(rename = "source_nat_icmp_type", default)]
+    pub source_nat_icmp_type: u8,
+    #[serde(rename = "source_nat_icmp_code", default)]
+    pub source_nat_icmp_code: u8,
     /// #7188: the session key's `TunnelDiscriminator`, encoded by
     /// `TunnelDiscriminator::to_wire` (`session/discriminator.rs`).
     ///

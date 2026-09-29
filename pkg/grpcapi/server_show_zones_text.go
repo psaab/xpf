@@ -80,7 +80,7 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 		}
 		survivor := ""
 		if reason != "" {
-			survivor = config.StableZoneIDOwner(allZoneNames, zoneID)
+			survivor = config.ZoneQuarantineSurvivorName(name, allZoneNames)
 		}
 		if zoneID > 0 {
 			if survivor != "" {
@@ -357,7 +357,7 @@ func (s *Server) showTestZone(req *pb.ShowTextRequest, cfg *config.Config, buf *
 					fmt.Fprintf(buf, "Interface %s belongs to zone: %s\n", ifName, zoneName)
 					if reason := config.ZoneQuarantineExcludedReason(zoneName, cfg); reason != "" {
 						id := config.StableZoneID(zoneName)
-						survivor := config.StableZoneIDOwner(allZoneNames, id)
+						survivor := config.ZoneQuarantineSurvivorName(zoneName, allZoneNames)
 						fmt.Fprintf(buf, "  %s\n", config.ZoneQuarantineTestZoneQualifierFor(id, survivor))
 					}
 					if zone.Description != "" {

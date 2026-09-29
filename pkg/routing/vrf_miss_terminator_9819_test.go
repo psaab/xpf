@@ -56,7 +56,7 @@ func (f *fakeVRFLinks9819) LinkDel(l netlink.Link) error {
 
 func (f *fakeVRFLinks9819) LinkSetUp(netlink.Link) error                   { return nil }
 func (f *fakeVRFLinks9819) LinkSetMaster(netlink.Link, netlink.Link) error { return nil }
-func (f *fakeVRFLinks9819) LinkSetNoMaster(netlink.Link) error         { return nil }
+func (f *fakeVRFLinks9819) LinkSetNoMaster(netlink.Link) error             { return nil }
 
 func (f *fakeVRFLinks9819) LinkList() ([]netlink.Link, error) {
 	out := make([]netlink.Link, 0, len(f.links))
@@ -241,7 +241,7 @@ func TestVRFReconcileMissTerminatorFailureSurfaces9819(t *testing.T) {
 func returnRules9819(ops *fakeRuleOps, family int) []string {
 	var out []string
 	for _, r := range ops.rules[family] {
-		if r.Priority != ribGroupReturnRulePriority {
+		if r.Priority != RibGroupReturnRulePriority {
 			continue
 		}
 		out = append(out, fmt.Sprintf("iif=%s oif=%s table=%d dst=%v src=%v",
@@ -251,10 +251,11 @@ func returnRules9819(ops *fakeRuleOps, family int) []string {
 	return out
 }
 
-// TestRibGroupReturnRules9819 pins which sources get a return path and what it
-// is. The population is the leak-into-main set, narrowed to families whose
-// leak installed a prefix and to instances that have a VRF device. The path is
-// `main`, and nothing else, via both selectors.
+// TestRibGroupReturnRules9819 pins which destinations get a return path and
+// what it is. The population is the leak-into-main set, narrowed to families
+// and exact prefixes whose leak installed, and to instances that have a VRF
+// device. Each iif/oif rule carries `to <leaked-prefix>` (#11062); no catch-all
+// may let unrelated VRF misses reach main.
 func TestRibGroupReturnRules9819(t *testing.T) {
 	ribGroups := map[string]*config.RibGroup{
 		"src-leak":  {ImportRibs: []string{"src.inet.0", "inet.0"}},
@@ -281,15 +282,16 @@ func TestRibGroupReturnRules9819(t *testing.T) {
 		"plain": {"10.80.0.0/24"},
 	}
 	wantV4 := []string{
-		"iif= oif=vrf-b table=254 dst=<nil> src=<nil>",
-		"iif= oif=vrf-src table=254 dst=<nil> src=<nil>",
-		"iif=vrf-b oif= table=254 dst=<nil> src=<nil>",
-		"iif=vrf-src oif= table=254 dst=<nil> src=<nil>",
+		"iif= oif=vrf-b table=200 dst=10.30.0.0/24 src=<nil>",
+		"iif= oif=vrf-b table=500 dst=10.60.0.0/24 src=<nil>",
+		"iif= oif=vrf-src table=300 dst=10.40.0.0/24 src=<nil>",
+		"iif= oif=vrf-src table=500 dst=10.60.0.0/24 src=<nil>",
+		"iif=vrf-b oif= table=200 dst=10.30.0.0/24 src=<nil>",
+		"iif=vrf-b oif= table=500 dst=10.60.0.0/24 src=<nil>",
+		"iif=vrf-src oif= table=300 dst=10.40.0.0/24 src=<nil>",
+		"iif=vrf-src oif= table=500 dst=10.60.0.0/24 src=<nil>",
 	}
-	wantV6 := []string{
-		"iif= oif=vrf-src table=254 dst=<nil> src=<nil>",
-		"iif=vrf-src oif= table=254 dst=<nil> src=<nil>",
-	}
+	wantV6 := []string{}
 
 	ops := newFakeRuleOps()
 	rg := &ribGroupManager{ops: ops}
@@ -412,24 +414,33 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 	vrf("vrf-a", "100", "slavea", "10.10.0.1/24", "2001:db8:10::1/64")
 	vrf("vrf-src", "200", "slavesrc", "10.30.0.1/24", "2001:db8:30::1/64")
 	vrf("vrf-b", "300", "slaveb", "10.40.0.1/24", "2001:db8:40::1/64")
-	run("route", "add", "10.77.0.0/16", "via", "10.10.0.254", "dev", "slavea", "onlink", "table", "100")
+	vrf("vrf-nt", "400", "slavent", "10.50.0.1/24", "2001:db8:50::1/64")
+	vrf("vrf-pbr", "500", "slavepbr", "10.60.0.1/24", "2001:db8:60::1/64")
 
+	// Main-table control gets omit `iif xmain`: in this private namespace,
+	// `ip route get ... iif xmain` returns EINVAL even for the default route.
 	var (
-		missSlave4     = []string{"route", "get", "10.99.0.1", "from", "10.10.0.50", "iif", "slavea"}
-		missSocket4    = []string{"route", "get", "10.99.0.1", "vrf", "vrf-a"}
-		missSlave6     = []string{"-6", "route", "get", "2001:db8:99::1", "from", "2001:db8:10::50", "iif", "slavea"}
-		missSocket6    = []string{"-6", "route", "get", "2001:db8:99::1", "vrf", "vrf-a"}
-		leakSocket4    = []string{"route", "get", "10.30.0.5", "vrf", "vrf-a"}
-		leakSlave4     = []string{"route", "get", "10.30.0.5", "from", "10.10.0.50", "iif", "slavea"}
-		srcOtherLeak4  = []string{"route", "get", "10.40.0.5", "vrf", "vrf-src"}
-		connected4     = []string{"route", "get", "10.10.0.9", "vrf", "vrf-a"}
-		static4        = []string{"route", "get", "10.77.0.1", "vrf", "vrf-a"}
-		mainToLeak4    = []string{"route", "get", "10.30.0.5", "from", "10.20.0.50", "iif", "xmain"}
-		returnSlave4   = []string{"route", "get", "10.20.0.50", "from", "10.30.0.5", "iif", "slavesrc"}
-		returnSocket4  = []string{"route", "get", "10.20.0.50", "vrf", "vrf-src"}
-		mainToLeak6    = []string{"-6", "route", "get", "2001:db8:30::5", "from", "2001:db8:20::50", "iif", "xmain"}
-		returnSocket6  = []string{"-6", "route", "get", "2001:db8:20::50", "vrf", "vrf-src"}
-		mainUntouched4 = []string{"route", "get", "10.99.0.1", "from", "10.20.0.50", "iif", "xmain"}
+		missSlave4       = []string{"route", "get", "10.99.0.1", "from", "10.10.0.50", "iif", "slavea"}
+		missSocket4      = []string{"route", "get", "10.99.0.1", "vrf", "vrf-a"}
+		missSlave6       = []string{"-6", "route", "get", "2001:db8:99::1", "from", "2001:db8:10::50", "iif", "slavea"}
+		missSocket6      = []string{"-6", "route", "get", "2001:db8:99::1", "vrf", "vrf-a"}
+		leakSocket4      = []string{"route", "get", "10.30.0.5", "vrf", "vrf-a"}
+		leakSlave4       = []string{"route", "get", "10.30.0.5", "from", "10.10.0.50", "iif", "slavea"}
+		srcOtherLeak4    = []string{"route", "get", "10.40.0.5", "vrf", "vrf-src"}
+		connected4       = []string{"route", "get", "10.10.0.9", "vrf", "vrf-a"}
+		static4          = []string{"route", "get", "10.77.0.1", "vrf", "vrf-a"}
+		mainToLeak4      = []string{"route", "get", "10.30.0.5"}
+		returnSlave4     = []string{"route", "get", "10.40.0.50", "from", "10.30.0.5", "iif", "slavesrc"}
+		returnSocket4    = []string{"route", "get", "10.40.0.50", "from", "10.30.0.1", "vrf", "vrf-src"}
+		unboundMain4     = []string{"route", "get", "10.20.0.50", "vrf", "vrf-src"}
+		foreignSource4   = []string{"route", "get", "10.20.0.50", "from", "10.10.0.50", "iif", "slavesrc"}
+		mainToLeak6      = []string{"-6", "route", "get", "2001:db8:30::5"}
+		returnSocket6    = []string{"-6", "route", "get", "2001:db8:40::50", "from", "2001:db8:30::1", "vrf", "vrf-src"}
+		unboundMain6     = []string{"-6", "route", "get", "2001:db8:20::50", "vrf", "vrf-src"}
+		mainUntouched4   = []string{"route", "get", "10.99.0.1"}
+		nextTableReturn4 = []string{"route", "get", "10.20.0.50", "from", "10.50.0.1", "vrf", "vrf-nt"}
+		nextTableReturn6 = []string{"-6", "route", "get", "2001:db8:20::50", "from", "2001:db8:50::1", "vrf", "vrf-nt"}
+		pbrReturn4       = []string{"route", "get", "10.20.0.50", "from", "10.60.0.1", "vrf", "vrf-pbr"}
 	)
 
 	m, err := New()
@@ -450,18 +461,31 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 		"src-leak":  {ImportRibs: []string{"src.inet.0", "inet.0"}},
 		"src-leak6": {ImportRibs: []string{"src.inet6.0", "inet6.0"}},
 		"b-leak":    {ImportRibs: []string{"b.inet.0", "inet.0"}},
+		"b-leak6":   {ImportRibs: []string{"b.inet6.0", "inet6.0"}},
 	}
 	instances := []*config.RoutingInstanceConfig{
 		{Name: "a", TableID: 100},
 		{Name: "src", TableID: 200, InterfaceRoutesRibGroup: "src-leak", InterfaceRoutesRibGroupV6: "src-leak6"},
-		{Name: "b", TableID: 300, InterfaceRoutesRibGroup: "b-leak"},
+		{Name: "b", TableID: 300, InterfaceRoutesRibGroup: "b-leak", InterfaceRoutesRibGroupV6: "b-leak6"},
+		{Name: "nt", TableID: 400},
+		{Name: "pbr", TableID: 500},
 	}
 	connected := map[string][]string{
 		"src": {"10.30.0.0/24", "2001:db8:30::/64"},
-		"b":   {"10.40.0.0/24"},
+		"b":   {"10.40.0.0/24", "2001:db8:40::/64"},
 	}
-	desired := []VRFSpec{{Name: "a", TableID: 100}, {Name: "src", TableID: 200}, {Name: "b", TableID: 300}}
-
+	desired := []VRFSpec{
+		{Name: "a", TableID: 100}, {Name: "src", TableID: 200},
+		{Name: "b", TableID: 300}, {Name: "nt", TableID: 400},
+		{Name: "pbr", TableID: 500},
+	}
+	nextTableRoutes := []*config.StaticRoute{
+		{Destination: "192.0.2.0/24", NextTable: "nt"},
+		{Destination: "2001:db8:ffff::/48", NextTable: "nt"},
+	}
+	pbrRules := []PBRRule{{
+		Family: unix.AF_INET, TableID: 500, Instance: "pbr", IifName: "xmain",
+	}}
 	// 1. The rib-group band alone reaches VRF lookups (SYN-RIB-03).
 	if err := m.ApplyRibGroupRules(ribGroups, instances, connected); err != nil {
 		t.Fatalf("ApplyRibGroupRules: %v", err)
@@ -471,37 +495,51 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 		t.Fatal("the band did not reach a VRF lookup, so the leak rows below would not measure the fix")
 	}
 
-	// 2. The fix.
 	if err := m.ReconcileVRFs(desired); err != nil {
 		t.Fatalf("ReconcileVRFs: %v", err)
 	}
+	// ReconcileVRFs resets the custom tables; seed fixture routes afterward.
+	run("route", "add", "192.0.2.0/24", "dev", "slavent", "table", "400")
+	run("-6", "route", "add", "2001:db8:ffff::/48", "dev", "slavent", "table", "400")
+	run("route", "add", "198.51.100.0/24", "dev", "slavepbr", "table", "500")
+	run("route", "add", "10.77.0.0/16", "via", "10.10.0.254", "dev", "slavea", "onlink", "table", "100")
+	expect("main still uses the rib-group leak", mainToLeak4, "table 200")
+	expect("IPv6 main still uses the rib-group leak", mainToLeak6, "table 200")
+	expect("main routing untouched", mainUntouched4, "via 10.20.0.254")
+	expect("next-table target miss", nextTableReturn4, "unreachable")
+	expect("PBR target miss", pbrReturn4, "unreachable")
+	if err := m.ApplyNextTableRules(nextTableRoutes, instances, []string{"xmain"}); err != nil {
+		t.Fatalf("ApplyNextTableRules: %v", err)
+	}
+	if err := m.ApplyPBRRules(pbrRules); err != nil {
+		t.Fatalf("ApplyPBRRules: %v", err)
+	}
+	expect("next-table target does not fall through to main", nextTableReturn4, "unreachable")
+	expect("next-table IPv6 target does not fall through to main", nextTableReturn6, "unreachable")
+	expect("PBR target does not fall through to main", pbrReturn4, "unreachable")
+	// #11062: a source VRF can look up another leaking instance's prefix in
+	// that peer's table. Main-only destinations still hit the terminator.
 	for _, c := range []struct {
 		label string
 		args  []string
 	}{
-		{"slave miss", missSlave4}, {"socket miss", missSocket4},
-		{"v6 slave miss", missSlave6}, {"v6 socket miss", missSocket6},
-		{"socket lookup of a leaked prefix", leakSocket4}, {"slave lookup of a leaked prefix", leakSlave4},
+		{"source-VRF miss to a main-only destination", unboundMain4},
+		{"explicit source cannot use main for an un-leaked destination", []string{"route", "get", "10.20.0.50", "from", "10.30.0.1", "vrf", "vrf-src"}},
+		{"v6 source-VRF miss to a main-only destination", unboundMain6},
+		{"v6 slave miss", missSlave6},
+		{"source outside the return-rule context", foreignSource4},
+		{"socket lookup of a non-peer leaked prefix", leakSocket4},
+		{"slave lookup of a non-peer leaked prefix", leakSlave4},
 	} {
 		expect(c.label, c.args, "unreachable")
-	}
-	// The source's return path is main, and only main: another source's
-	// leaked prefix resolves through main's default, not in that source's
-	// table.
-	expect("source miss resolves in main", srcOtherLeak4, "dev xmain")
-	if got := get(srcOtherLeak4...); strings.Contains(got, "table 300") {
-		t.Errorf("a source's miss must not reach the band: %q", got)
 	}
 	// Controls.
 	expect("VRF connected route", connected4, "table 100")
 	expect("VRF static route", static4, "table 100")
-	expect("main still uses the leak, reverse path included", mainToLeak4, "table 200")
-	expect("return lookup from the source's slave", returnSlave4, "dev xmain")
-	expect("return lookup from a source-bound socket", returnSocket4, "dev xmain")
-	expect("v6 main still uses the leak", mainToLeak6, "table 200")
-	expect("v6 return lookup from a source-bound socket", returnSocket6, "dev xmain")
-	expect("main routing untouched", mainUntouched4, "via 10.20.0.254")
-
+	expect("lookup to another instance's leaked peer prefix", srcOtherLeak4, "table 300")
+	expect("return lookup from the source's slave", returnSlave4, "table 300")
+	expect("VRF-bound socket lookup to a peer prefix", returnSocket4, "table 300")
+	expect("v6 VRF-bound socket lookup to a peer prefix", returnSocket6, "table 300")
 	// 3. A second apply of both is clean and installs nothing twice.
 	if err := m.ReconcileVRFs(desired); err != nil {
 		t.Fatalf("second ReconcileVRFs (EEXIST must be success): %v", err)
@@ -514,12 +552,18 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 			t.Errorf("ip %s rule: %d terminators after a re-apply, want 1:\n%s", fam, n, rules(fam))
 		}
 	}
-	expect("socket miss after re-apply", missSocket4, "unreachable")
-	expect("return lookup after re-apply", returnSocket4, "dev xmain")
+	expect("source socket miss after re-apply", unboundMain4, "unreachable")
+	expect("explicitly sourced return lookup after re-apply", returnSocket4, "table 300")
 
 	// 4. Removal takes everything back out.
 	if err := m.ApplyRibGroupRules(nil, instances, nil); err != nil {
 		t.Fatalf("zero-transition ApplyRibGroupRules: %v", err)
+	}
+	if err := m.ApplyNextTableRules(nil, instances, nil); err != nil {
+		t.Fatalf("clear next-table rules: %v", err)
+	}
+	if err := m.ApplyPBRRules(nil); err != nil {
+		t.Fatalf("clear PBR rules: %v", err)
 	}
 	if r := rules("-4"); strings.Contains(r, "1500:") {
 		t.Errorf("return rules must go with the last rib-group:\n%s", r)
@@ -557,9 +601,9 @@ func assertRibGroupRulesInClearedWindows9819(t *testing.T, ops *fakeRuleOps) {
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		for _, r := range ops.rules[family] {
 			inLeak := r.Priority >= ribGroupLeakRulePriority && r.Priority < ribGroupLeakRulePriority+maxRibGroupLeakRules
-			if !inLeak && r.Priority != ribGroupReturnRulePriority {
+			if !inLeak && r.Priority != RibGroupReturnRulePriority {
 				t.Errorf("rule priority %d is in no window clear() scans ([%d,%d) or %d) — would leak",
-					r.Priority, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules, ribGroupReturnRulePriority)
+					r.Priority, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules, RibGroupReturnRulePriority)
 			}
 		}
 	}

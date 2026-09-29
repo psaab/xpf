@@ -8,33 +8,19 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// junos_host_residual_6612_test.go is the coverage lock for the #4146 junos-host
-// DENY projection's WARN-ONLY REMAINDER — the classes #6612 enumerates as
-// un-representable in the kernel `xpf_hostinbound` chain.
+// junos_host_residual_6612_test.go covers the #6612 warning remainder for
+// junos-host policies, including the user-space warning that remains after
+// #11065 adds a direct-kernel terminal deny for representable scoped permits.
 //
-// #6612 closes on a single claim: "each item above is documented … and each
-// affected policy emits the #4168 commit warning naming itself." That claim was
-// prose. This file makes it a contract, because the remainder has exactly the
-// failure mode that is worst here — a policy that commits clean, renders no
-// kernel rule, and says nothing — and one member of the enumeration was in that
-// state (a destination-scoped `permit`; see the row below).
+// Each row asserts the intended enforcement shape and a policy-specific #4168
+// warning. Unrepresentable rows render no rules. A source- or destination-scoped
+// permit instead renders its authored RETURN followed by terminal DROP rules in
+// both address families; the user-space `None => deliver` path still requires
+// the warning.
 //
-// Every row asserts BOTH halves, because either alone is satisfiable by a bug:
-//
-//   1. NO kernel rule is rendered. "No partial / coarsened kernel rule is ever
-//      emitted for the remainder" — a silently-narrower-than-authored kernel
-//      deny would be a new parity gap, so zero rules is the requirement, not an
-//      accident of the fixture.
-//   2. The #4168 commit warning fires and NAMES the policy. Without this the
-//      operator's only signal that the policy is unenforced is its absence from
-//      a ruleset they have no reason to read.
-//
-// And every row carries its own FLIP — the same fixture with the residual
-// attribute neutralised — asserting that the pair actually changes state. That
-// is what pins WHICH property drove the row: a fixture that failed to compile
-// its scheduler, or named an address book entry that does not exist, would also
-// render zero rules and would also warn, and would be indistinguishable from a
-// working row without the flip.
+// Each row also carries a FLIP — the same fixture with the residual attribute
+// neutralised — so a failed compile or missing address-book entry cannot
+// masquerade as coverage.
 
 // residualBase is the minimal zone/interface/address-book scaffolding. `untrust`
 // is the ingress zone under test and owns a non-lifeline interface, so it
@@ -135,25 +121,23 @@ func policy(name, src, dst, app, action string) []string {
 // than only the rendering.
 //
 // FAIL-ON-REVERT: each row's residual attribute is the only difference from its
-// flip, so removing a representability gate in junosHostProjectTerm /
-// junosHostProjectProgram makes that row render rules (half 1 RED) and lose its
-// warning through RenderedPolicyKeys (half 2 RED); narrowing
-// junosHostPolicyStricterThanCoarseGate makes the permit rows lose their warning
-// while still rendering nothing (half 2 RED alone).
-func TestJunosHostResidualIsUnrenderedAndWarned6612(t *testing.T) {
+// flip. Unrepresentable rows must remain rule-free and warned; the scoped permit
+// rows must keep their RETURN-plus-terminal-DROP shape and userspace warning.
+// Changing those behaviors or suppressing the warning turns the assertion RED.
+func TestJunosHostResidualPathsRemainWarned6612(t *testing.T) {
 	rows := []struct {
 		name string
 		// policyName is the policy the warning must name.
 		policyName string
-		// cmds is the residual variant: no kernel rule, and a warning.
+		// cmds is the residual variant and a warning remains expected.
 		cmds []string
 		// flip is the same fixture with the residual attribute neutralised.
 		flip []string
-		// flipRules is whether the neutralised variant renders kernel rules. It
-		// is false for the permit rows: a permit is projected only as a source
-		// subtraction of LATER denies, so a lone permit renders nothing either
-		// way and its flip is about the WARNING, not the rules.
+		// flipRules is whether the neutralised variant renders kernel rules.
 		flipRules bool
+		// terminalFallback marks scoped permits whose direct kernel rules now
+		// include a terminal default deny but still retain a userspace warning.
+		terminalFallback bool
 	}{
 		{
 			name:       "scheduler-gated deny (time-windowed, cannot be a static rule)",
@@ -221,11 +205,12 @@ func TestJunosHostResidualIsUnrenderedAndWarned6612(t *testing.T) {
 			// `any` is load-bearing: with a concrete source the row would warn
 			// through junosHostPolicySourceScoped and could not tell whether the
 			// destination clause exists.
-			name:       "destination-scoped permit (a carve nft cannot express as a saddr subtraction)",
-			policyName: "dst-permit",
-			cmds:       concat(residualBase, policy("dst-permit", "any", "fw-mgmt", "any", "permit")),
-			flip:       concat(residualBase, policy("dst-permit", "any", "any", "any", "permit")),
-			flipRules:  false,
+			name:             "destination-scoped permit (return plus terminal default deny)",
+			policyName:       "dst-permit",
+			cmds:             concat(residualBase, policy("dst-permit", "any", "fw-mgmt", "any", "permit")),
+			flip:             concat(residualBase, policy("dst-permit", "any", "any", "any", "permit")),
+			flipRules:        false,
+			terminalFallback: true,
 		},
 		{
 			// The excluded form must be covered too: a fix catching the named
@@ -247,35 +232,54 @@ func TestJunosHostResidualIsUnrenderedAndWarned6612(t *testing.T) {
 			flipRules: false,
 		},
 		{
-			name:       "source-restricted permit (its implied deny-non-permitted half is unenforced)",
-			policyName: "src-permit",
-			cmds:       concat(residualBase, policy("src-permit", "bad-host", "any", "any", "permit")),
-			flip:       concat(residualBase, policy("src-permit", "any", "any", "any", "permit")),
-			flipRules:  false,
+			name:             "source-restricted permit (return plus terminal default deny)",
+			policyName:       "src-permit",
+			cmds:             concat(residualBase, policy("src-permit", "bad-host", "any", "any", "permit")),
+			flip:             concat(residualBase, policy("src-permit", "any", "any", "any", "permit")),
+			flipRules:        false,
+			terminalFallback: true,
 		},
 	}
 
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			cfg := residualCfg(t, row.cmds)
-			if n := residualRuleCount(cfg); n != 0 {
-				t.Errorf("residual variant rendered %d kernel DROP rule(s); the remainder must emit NOTHING — a partial or coarsened kernel rule is a new parity gap", n)
+			if row.terminalFallback {
+				progs := BuildJunosHostPrograms(cfg)
+				if len(progs) != 1 {
+					t.Fatalf("want one representable ingress program, got %+v", progs)
+				}
+				p := progs[0]
+				terminal := func(r config.JunosHostDenyRule) bool {
+					return r.Verdict == config.JunosHostDrop && r.SrcAny && r.DstAny
+				}
+				if len(p.RulesV4) != 2 || p.RulesV4[0].Verdict != config.JunosHostReturn ||
+					!terminal(p.RulesV4[1]) {
+					t.Errorf("v4 rules = %+v, want the authored permit return then terminal default deny", p.RulesV4)
+				}
+				if len(p.RulesV6) != 1 || !terminal(p.RulesV6[0]) {
+					t.Errorf("v6 rules = %+v, want terminal default deny for the unpermitted family", p.RulesV6)
+				}
+			} else if n := residualRuleCount(cfg); n != 0 {
+				t.Errorf("unrepresentable residual rendered %d kernel rule(s); it must emit NOTHING",
+					n)
 			}
 			if got := residualWarnings(cfg, row.policyName); len(got) != 1 {
-				t.Errorf("residual variant produced %d #4168 warnings naming %q, want exactly 1 — an unenforced junos-host policy that says nothing at commit is the silent-failure case this projection exists to avoid; got %v",
+				t.Errorf("residual variant produced %d #4168 warnings naming %q, want exactly 1 — got %v",
 					len(got), row.policyName, got)
 			}
 
 			flip := residualCfg(t, row.flip)
 			flipRules := residualRuleCount(flip)
 			if row.flipRules && flipRules == 0 {
-				t.Errorf("flip variant rendered no kernel rule, so the row proves nothing: the residual attribute is not what suppressed rendering (the fixture is un-representable for some other reason)")
+				t.Errorf("flip variant rendered no kernel rule, so the row proves nothing")
 			}
 			if !row.flipRules && flipRules != 0 {
-				t.Errorf("flip variant rendered %d rule(s); a lone permit must render none on a DROP-only projection", flipRules)
+				t.Errorf("flip variant rendered %d rule(s); the match-all permit should leave no terminal drop",
+					flipRules)
 			}
 			if got := residualWarnings(flip, row.policyName); len(got) != 0 {
-				t.Errorf("flip variant still warns for %q (%d), so the row proves nothing: the warning is not driven by the residual attribute; got %v",
+				t.Errorf("flip variant still warns for %q (%d): %v",
 					row.policyName, len(got), got)
 			}
 		})
@@ -412,8 +416,8 @@ func TestJunosHostDestinationScopedPermitDoesNotWidenALaterDeny6612(t *testing.T
 				t.Fatalf("want one program for the ingress zone, got %+v", progs)
 			}
 			v4 := progs[0].RulesV4
-			if len(v4) != 2 {
-				t.Fatalf("want the permit's return then the deny's drop in v4, got %+v", v4)
+			if len(v4) != 3 {
+				t.Fatalf("want the permit return, authored deny, and terminal default deny in v4, got %+v", v4)
 			}
 			if r := v4[0]; r.Verdict != config.JunosHostReturn || r.DstAny || len(r.Dst) != 1 {
 				t.Errorf("first v4 rule = %+v, want a return still scoped to the permit's "+
@@ -421,8 +425,10 @@ func TestJunosHostDestinationScopedPermitDoesNotWidenALaterDeny6612(t *testing.T
 					"permitted source to every other firewall address", r)
 			}
 			if r := v4[1]; r.Verdict != config.JunosHostDrop || !r.DstAny || !r.SrcAny {
-				t.Errorf("second v4 rule = %+v, want the deny unchanged for every source and "+
-					"destination", r)
+				t.Errorf("second v4 rule = %+v, want the authored deny unchanged for every source and destination", r)
+			}
+			if r := v4[2]; r.Verdict != config.JunosHostDrop || !r.SrcAny || !r.DstAny {
+				t.Errorf("third v4 rule = %+v, want the terminal default deny (#11065)", r)
 			}
 			// The deny is enforced on the direct path now, so its warning is gone. The
 			// permit keeps one: no path refuses what it does not match.

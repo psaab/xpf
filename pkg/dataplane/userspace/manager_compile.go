@@ -160,16 +160,13 @@ func (m *Manager) recordPolicyContentRejectionLocked(reasons []string) {
 	}
 }
 
-// recordZoneIDCollisionsLocked stores the #3719 zone-id-collision diagnostic
-// from the last snapshot build and fires a one-shot operator alarm on a
-// transition (per the logging rules — NOT per apply). A collision reaches this
-// only on the LENIENT path (a tolerant load, an HA sync from an un-upgraded
-// peer, or a config a pre-#3075 binary persisted); the strict commit path
-// rejects it. The builder already QUARANTINED the later-sorting colliding zone
-// (dropped from the wire, its interfaces unzoned, its policies removed), so the
-// dataplane is fail-closed and never merges two zones — but zone isolation is
-// DEGRADED (the quarantined zone forwards nothing) until an operator renames
-// one zone, so this is a loud Error naming both zones.
+// recordZoneIDCollisionsLocked stores the snapshot builder's zone-quarantine
+// diagnostics and fires a one-shot operator alarm on a transition (per the
+// logging rules — NOT per apply). Collision and reserved-name quarantines occur
+// only on the LENIENT path; strict commit rejects both. The builder excludes
+// each affected zone and unzones its interfaces, preserving default-deny
+// behavior without merging zones or letting a real zone shadow a Junos
+// sentinel. Zone isolation remains degraded until the invalid zone is renamed.
 func (m *Manager) recordZoneIDCollisionsLocked(collisions []ZoneIDCollision) {
 	had := len(m.lastZoneIDCollisions) > 0
 	msgs := make([]string, 0, len(collisions))
@@ -181,11 +178,11 @@ func (m *Manager) recordZoneIDCollisionsLocked(collisions []ZoneIDCollision) {
 	switch {
 	case now && !had:
 		slog.Error(
-			"userspace: security-zone id collision — two zone names fold to the same StableZoneID; the later-sorting zone is QUARANTINED (dropped from the dataplane, its interfaces unzoned and its traffic denied) so two zones never share an id. Zone isolation is DEGRADED until one zone is renamed and the config re-committed.",
+			"userspace: security-zone quarantine — colliding and reserved-name zones are excluded from the dataplane and their interfaces unzoned; rename the invalid zone to restore zone isolation.",
 			"collisions", msgs,
 		)
 	case had && !now:
-		slog.Info("userspace: security-zone id collision cleared; all zones install with distinct ids")
+		slog.Info("userspace: security-zone quarantine cleared; all configured zones install")
 	}
 }
 

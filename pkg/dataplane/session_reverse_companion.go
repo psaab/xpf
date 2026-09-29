@@ -108,6 +108,11 @@ func (v *SessionValue) ResetUnobservedForReverseCompanion() {
 	// table chosen for the other direction — companions stamp (0,0) (R1).
 	v.InstallTableDomain = 0
 	v.InstallTableCheck = 0
+	// #11064: the active flow's source-NAT ICMP query identity must not
+	// transfer to the reverse-direction companion.
+	v.SourceNatICMPValid = false
+	v.SourceNatICMPType = 0
+	v.SourceNatICMPCode = 0
 }
 
 // ResetUnobservedForReverseCompanion is the IPv6 twin.
@@ -126,4 +131,7 @@ func (v *SessionValueV6) ResetUnobservedForReverseCompanion() {
 	// #9752 round 5: v6 twin — see above.
 	v.InstallTableDomain = 0
 	v.InstallTableCheck = 0
+	v.SourceNatICMPValid = false
+	v.SourceNatICMPType = 0
+	v.SourceNatICMPCode = 0
 }

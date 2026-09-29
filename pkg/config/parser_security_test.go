@@ -1190,6 +1190,7 @@ func TestALGAndFlowOptions(t *testing.T) {
         }
         allow-dns-reply;
         allow-embedded-icmp;
+        allow-unstamped-fabric-ingress;
     }
     alg {
         dns { disable; }
@@ -1221,6 +1222,9 @@ func TestALGAndFlowOptions(t *testing.T) {
 	if !cfg.Security.Flow.AllowEmbeddedICMP {
 		t.Error("expected allow-embedded-icmp to be true")
 	}
+	if !cfg.Security.Flow.AllowUnstampedFabricIngress {
+		t.Error("expected allow-unstamped-fabric-ingress to be true")
+	}
 	if !cfg.Security.ALG.DNSDisable {
 		t.Error("expected ALG DNS disable")
 	}
@@ -1228,7 +1232,7 @@ func TestALGAndFlowOptions(t *testing.T) {
 		t.Error("expected ALG FTP disable")
 	}
 	tree2 := &ConfigTree{}
-	setCommands := []string{"set security flow tcp-mss all-tcp 1360", "set security flow tcp-mss gre-in 1400", "set security flow tcp-mss gre-out 1380", "set security flow allow-dns-reply", "set security flow allow-embedded-icmp", "set security alg dns disable", "set security alg ftp disable"}
+	setCommands := []string{"set security flow tcp-mss all-tcp 1360", "set security flow tcp-mss gre-in 1400", "set security flow tcp-mss gre-out 1380", "set security flow allow-dns-reply", "set security flow allow-embedded-icmp", "set security flow allow-unstamped-fabric-ingress", "set security alg dns disable", "set security alg ftp disable"}
 	for _, cmd := range setCommands {
 		path, err := ParseSetCommand(cmd)
 		if err != nil {
@@ -1241,6 +1245,9 @@ func TestALGAndFlowOptions(t *testing.T) {
 	cfg2, err := CompileConfig(tree2)
 	if err != nil {
 		t.Fatalf("set-command compile error: %v", err)
+	}
+	if !cfg2.Security.Flow.AllowUnstampedFabricIngress {
+		t.Error("set syntax: expected allow-unstamped-fabric-ingress")
 	}
 	if cfg2.Security.Flow.TCPMSSAllTCP != 1360 {
 		t.Errorf("set syntax: tcp-mss all-tcp: got %d, want 1360", cfg2.Security.Flow.TCPMSSAllTCP)

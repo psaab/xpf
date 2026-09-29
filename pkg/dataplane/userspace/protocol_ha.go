@@ -48,27 +48,27 @@ type SessionPolicyListRequest struct {
 }
 
 type SessionPolicyTuple struct {
-	AddrFamily    uint8  `json:"addr_family,omitempty"`
-	Protocol      uint8  `json:"protocol,omitempty"`
-	SrcIP         string `json:"src_ip,omitempty"`
-	DstIP         string `json:"dst_ip,omitempty"`
-	SrcPort       uint16 `json:"src_port,omitempty"`
-	DstPort              uint16 `json:"dst_port,omitempty"`
-	TunnelDiscriminator  uint64 `json:"tunnel_discriminator,omitempty"`
-	RoutingDomain        uint32 `json:"routing_domain,omitempty"`
+	AddrFamily          uint8  `json:"addr_family,omitempty"`
+	Protocol            uint8  `json:"protocol,omitempty"`
+	SrcIP               string `json:"src_ip,omitempty"`
+	DstIP               string `json:"dst_ip,omitempty"`
+	SrcPort             uint16 `json:"src_port,omitempty"`
+	DstPort             uint16 `json:"dst_port,omitempty"`
+	TunnelDiscriminator uint64 `json:"tunnel_discriminator,omitempty"`
+	RoutingDomain       uint32 `json:"routing_domain,omitempty"`
 }
 
 type SessionPolicyMatch struct {
-	AddrFamily                     uint8               `json:"addr_family,omitempty"`
-	RoutingDomain                  uint32              `json:"routing_domain,omitempty"`
-	Tuple                          SessionPolicyTuple  `json:"tuple"`
-	ReverseKey                     *SessionPolicyTuple `json:"reverse_key,omitempty"`
-	PolicyID                       uint32              `json:"policy_id,omitempty"`
-	CreatedSecs                    uint64              `json:"created_secs,omitempty"`
-	CreatedNS                      uint64              `json:"created_ns,omitempty"`
-	ExpectedRTFlowSessionID        uint64              `json:"expected_rt_flow_session_id,omitempty"`
-	CompanionPolicyID              uint32              `json:"companion_policy_id,omitempty"`
-	ExpectedCompanionRTFlowSessionID uint64            `json:"expected_companion_rt_flow_session_id,omitempty"`
+	AddrFamily                       uint8               `json:"addr_family,omitempty"`
+	RoutingDomain                    uint32              `json:"routing_domain,omitempty"`
+	Tuple                            SessionPolicyTuple  `json:"tuple"`
+	ReverseKey                       *SessionPolicyTuple `json:"reverse_key,omitempty"`
+	PolicyID                         uint32              `json:"policy_id,omitempty"`
+	CreatedSecs                      uint64              `json:"created_secs,omitempty"`
+	CreatedNS                        uint64              `json:"created_ns,omitempty"`
+	ExpectedRTFlowSessionID          uint64              `json:"expected_rt_flow_session_id,omitempty"`
+	CompanionPolicyID                uint32              `json:"companion_policy_id,omitempty"`
+	ExpectedCompanionRTFlowSessionID uint64              `json:"expected_companion_rt_flow_session_id,omitempty"`
 	// #10626: rename-rematch inputs, populated by the helper READ from the
 	// live session key/metadata/decision. All additive + omitempty: an older
 	// helper omits them (zero values) and the rematch fails closed to the
@@ -80,7 +80,7 @@ type SessionPolicyMatch struct {
 	NATDstPort    uint16 `json:"nat_dst_port,omitempty"`
 }
 type SessionSyncRequest struct {
-	Operation   string `json:"operation,omitempty"`
+	Operation string `json:"operation,omitempty"`
 	// #10512: every helper-first tuple mutation carries a process-generation
 	// epoch and a manager-local idempotency identity. Older helpers ignore these
 	// additive fields; the new helper uses them to quarantine stale retries.
@@ -124,8 +124,13 @@ type SessionSyncRequest struct {
 	NATDstIP         string `json:"nat_dst_ip,omitempty"`
 	NATSrcPort       uint16 `json:"nat_src_port,omitempty"`
 	NATDstPort       uint16 `json:"nat_dst_port,omitempty"`
-	FabricIngress    bool   `json:"fabric_ingress,omitempty"`
-	IsReverse        bool   `json:"is_reverse,omitempty"`
+	// #11064: ICMP type/code the active used to select its stateful SNAT rule.
+	// Valid distinguishes absent metadata from the valid (0,0) pair.
+	SourceNatICMPValid bool  `json:"source_nat_icmp_valid,omitempty"`
+	SourceNatICMPType  uint8 `json:"source_nat_icmp_type,omitempty"`
+	SourceNatICMPCode  uint8 `json:"source_nat_icmp_code,omitempty"`
+	FabricIngress      bool  `json:"fabric_ingress,omitempty"`
+	IsReverse          bool  `json:"is_reverse,omitempty"`
 	// #2785: the admitting policy's per-policy `then log` selection, carried
 	// so a session synced to the peer logs the same RT_FLOW
 	// SESSION_CREATE/CLOSE records after failover. omitempty is safe — an old
@@ -329,8 +334,13 @@ type SessionDeltaInfo struct {
 	NATDstIP         string `json:"nat_dst_ip,omitempty"`
 	NATSrcPort       uint16 `json:"nat_src_port,omitempty"`
 	NATDstPort       uint16 `json:"nat_dst_port,omitempty"`
-	FabricRedirect   bool   `json:"fabric_redirect,omitempty"`
-	FabricIngress    bool   `json:"fabric_ingress,omitempty"`
+	// #11064: original packet type/code used for stateful source-NAT rule
+	// selection, carried on binary and JSON delta legs for standby reservation.
+	SourceNatICMPValid bool  `json:"source_nat_icmp_valid,omitempty"`
+	SourceNatICMPType  uint8 `json:"source_nat_icmp_type,omitempty"`
+	SourceNatICMPCode  uint8 `json:"source_nat_icmp_code,omitempty"`
+	FabricRedirect     bool  `json:"fabric_redirect,omitempty"`
+	FabricIngress      bool  `json:"fabric_ingress,omitempty"`
 	// #2785: the admitting policy's per-policy `then log` selection. Decoded
 	// from the binary open-frame flags byte (bits 1<<3/1<<4) AND mirrored on
 	// the JSON RPC-fallback delta; stamped onto the synced session's

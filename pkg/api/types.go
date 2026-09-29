@@ -137,8 +137,9 @@ type ZoneInfo struct {
 	// InterfaceHostInbound. Before #3653 this bit was re-derived from config
 	// shape and reported false for a no-stanza zone — the pre-#3405
 	// "false = admit-all" reading, contradicting the runtime default-deny.
-	// (Note: global ICMP/ND/PMTUD accepts and lifeline interfaces fxp0/em0/fab*
-	// still bypass the per-zone host-inbound deny; see zones.go.)
+	// (Note: global ICMP/ND/PMTUD accepts still bypass the per-zone deny; lifelines
+	// are fxp0 plus explicitly configured cluster control/fabric links, not bare
+	// em0/fab* names; see zones.go.)
 	HostInboundConfigured bool `json:"host_inbound_configured"`
 	// HostInboundSystemServices / HostInboundProtocols (#3328) carry the
 	// ZONE-LEVEL admission set, kept distinct so automation can tell a

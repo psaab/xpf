@@ -359,6 +359,11 @@ impl super::Coordinator {
         // with the Go publish-boundary log to pin which layer dropped
         // or retained an endpoint in one journal capture.
         log_wg_endpoint_set_transition("snapshot-refresh", &self.forwarding, &new_forwarding);
+        log_ambiguous_fabric_zone_transition(
+            "snapshot-refresh",
+            &self.forwarding,
+            &new_forwarding,
+        );
         // #1873 R-D: compute the remap purge set BEFORE the swap, and
         // PURGE before any store (Codex code-review r1). The worker
         // loop reads the forwarding Arc, drains commands, THEN runs the

@@ -594,6 +594,11 @@ pub(super) fn apply_snapshot(
         &coord.forwarding.fabric_skips,
         &new_forwarding.fabric_skips,
     );
+    super::super::log_ambiguous_fabric_zone_transition(
+        "reconcile",
+        &coord.forwarding,
+        &new_forwarding,
+    );
     // #1873 R-D: the purge diff runs against the tunnel-owner map
     // captured BEFORE teardown (AGY code r3) — stop_inner(false) has
     // already defaulted coord.forwarding, so diffing the live state

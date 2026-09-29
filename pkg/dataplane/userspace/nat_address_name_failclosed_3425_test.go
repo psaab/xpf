@@ -93,3 +93,41 @@ func TestDNATEmptyAddressSetFailsClosed(t *testing.T) {
 			len(snaps), snaps)
 	}
 }
+func mixedAddressBook3425() *config.AddressBook {
+	return &config.AddressBook{
+		Addresses: map[string]*config.Address{
+			"MIXED": {
+				Name:               "MIXED",
+				Value:              "10.0.0.0/8",
+				UnimplementedForms: []string{"dns-name"},
+			},
+		},
+	}
+}
+
+func TestSNATMixedAddressNameFailsClosed(t *testing.T) {
+	cfg := emptySetCfgSNAT()
+	cfg.Security.AddressBook = mixedAddressBook3425()
+	cfg.Security.NAT.Source[0].Rules[0].Match.SourceAddressName = "MIXED"
+	snaps := buildSourceNATSnapshots(cfg, nil)
+	if len(snaps) == 0 {
+		t.Fatal("expected the fail-closed source NAT snapshot")
+	}
+	src := snaps[0].SourceAddresses
+	if !contains(src, "MIXED") {
+		t.Fatalf("source constraint must retain the raw unmatchable name, got %v", src)
+	}
+	if contains(src, "10.0.0.0/8") {
+		t.Fatalf("mixed address's otherwise-usable prefix leaked into NAT source constraint: %v", src)
+	}
+}
+
+func TestDNATMixedAddressNameFailsClosed(t *testing.T) {
+	cfg := emptySetCfgDNAT()
+	cfg.Security.AddressBook = mixedAddressBook3425()
+	cfg.Security.NAT.Destination.RuleSets[0].Rules[0].Match.DestinationAddressName = "MIXED"
+	snaps := buildDestinationNATSnapshots(cfg, nil)
+	if len(snaps) != 0 {
+		t.Fatalf("mixed address-name must not yield a DNAT destination prefix; got %+v", snaps)
+	}
+}

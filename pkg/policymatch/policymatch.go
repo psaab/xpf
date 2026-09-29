@@ -1754,19 +1754,11 @@ func reportedScopeZone(scope []string, flowZone string) string {
 // populates Zones; a synthetic config without zones now faithfully matches
 // nothing in transit.
 //
-// #5649 (C181-C14/C20): a lenient/HA-loaded config with a StableZoneID
-// collision keeps compiling — the LATER-sorting zone name is QUARANTINED at
-// snapshot build (config.QuarantinedZoneNames / zoneid.go) and dropped from
-// the dataplane: its interfaces are unzoned (fail to id 0) and its policies
-// are scrubbed. Before this fix, zoneKnown consulted only the raw typed
-// cfg.Security.Zones map, which STILL contains the quarantined name (typed
-// config carries the collision; only the built snapshot resolves it), so the
-// simulator reported a quarantined zone as policy-matchable — telling an
-// operator that a policy referencing the DROPPED zone permits or denies a
-// flow, when the runtime never installed that zone at all. Projecting the
-// same collision-quarantine result used by the wire builder keeps the
-// simulator's "known" predicate honest about what the dataplane actually
-// admitted.
+// #5649: a lenient/HA-loaded config with a StableZoneID collision or a reserved
+// zone name is quarantined at snapshot build and dropped from the dataplane.
+// Its interfaces are unzoned and its zone-specific policies are omitted; the
+// simulator must therefore treat it as unknown rather than claim a verdict for
+// a zone the runtime never installed.
 func zoneKnown(cfg *config.Config, zone string) bool {
 	if _, ok := cfg.Security.Zones[zone]; !ok {
 		return false
@@ -1777,21 +1769,18 @@ func zoneKnown(cfg *config.Config, zone string) bool {
 	return true
 }
 
-// quarantinedZoneNames computes the #3719 StableZoneID collision-quarantine
-// set for cfg's configured zone names — the exact projection zoneKnown needs
-// to treat a runtime-dropped zone as unknown (#5649, C181-C14/C20). This is a
-// cold config-tool path (CLI/REST/gRPC `match-policies`, not per-packet), so
-// recomputing the O(n log n) sort per zoneKnown call is not hot-path work; n
-// is the configured zone count, typically tens of entries.
+// quarantinedZoneNames computes the full runtime-exclusion set for cfg's
+// configured zone names — collision losers plus reserved dataplane/Junos
+// context names. This is a cold config-tool path, not per-packet work.
 func quarantinedZoneNames(cfg *config.Config) map[string]struct{} {
-	if len(cfg.Security.Zones) < 2 {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
 	}
 	names := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
 	}
-	return config.QuarantinedZoneNames(names)
+	return config.ZoneQuarantineExclusions(names)
 }
 
 // matchedResult builds the verdict for a concrete policy hit, stamping its zone

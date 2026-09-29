@@ -4244,14 +4244,7 @@ fn nat64_4512_non_nat64_decision_reserves_nothing() {
     let key = nat64_synced_key("2001:db8::1");
     // A source-NAT-shaped decision: nat64 == false, but it carries the same
     // translated (snat, port). The NAT64 reserve must ignore it.
-    let source_nat = NatDecision {
-        rewrite_src: Some(IpAddr::V4(snat)),
-        rewrite_dst: Some(IpAddr::V4(dst_v4)),
-        rewrite_src_port: Some(1024),
-        rewrite_dst_port: None,
-        nat64: false,
-        nptv6: false,
-    };
+    let source_nat = NatDecision { rewrite_src: Some(IpAddr::V4(snat)), rewrite_dst: Some(IpAddr::V4(dst_v4)), rewrite_src_port: Some(1024), rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false };
     reserve_synced_nat64_allocation(&state, &key, source_nat, false, 0);
     let (_, port) = nat64_probe_alloc(&state);
     assert_eq!(

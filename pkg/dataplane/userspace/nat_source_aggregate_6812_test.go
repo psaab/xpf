@@ -751,6 +751,34 @@ func TestBuilderEmittedOrderIsStableWithinATier_6812(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileConfigLenient: %v", err)
 	}
+	// #11064: exercise the newly transmitted type/code and optional-value
+	// axes rather than letting their nil defaults make this ordering fixture
+	// blind to a future ICMP-application tiebreak.
+	cfg.Applications.Applications = map[string]*config.Application{}
+	for k, rs := range cfg.Security.NAT.Source {
+		for j, rule := range rs.Rules {
+			appName := fmt.Sprintf("icmp-app-%02d-%d", k, j)
+			var icmpType, icmpCode *uint8
+			protocol := "icmp"
+			switch j {
+			case 0:
+				typ, code := uint8(k+1), uint8(k+1)
+				icmpType, icmpCode = &typ, &code
+			case 1:
+				protocol = "tcp"
+			case 2:
+				typ, code := uint8(k+2), uint8(k+2)
+				icmpType, icmpCode = &typ, &code
+			}
+			cfg.Applications.Applications[appName] = &config.Application{
+				Name:     appName,
+				Protocol: protocol,
+				ICMPType: icmpType,
+				ICMPCode: icmpCode,
+			}
+			rule.Match.Application = appName
+		}
+	}
 
 	// Precondition: the DECLARED order alternates tiers, so an unstable sort
 	// has something to permute. Without this the fixture silently decays into

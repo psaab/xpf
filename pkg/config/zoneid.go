@@ -226,6 +226,9 @@ func QuarantinedZoneNames(names []string) map[string]struct{} {
 	owner := make(map[uint16]string, len(sorted))
 	var quarantined map[string]struct{}
 	for _, name := range sorted {
+		if _, reserved := reservedZoneNames[name]; reserved {
+			continue
+		}
 		id := StableZoneID(name)
 		if existing, taken := owner[id]; taken {
 			if existing == name {
@@ -244,12 +247,22 @@ func QuarantinedZoneNames(names []string) map[string]struct{} {
 	return quarantined
 }
 
-// ZoneQuarantineExclusions returns the security-zone names that the userspace
-// builders must exclude when StableZoneID collisions occur. It is the
-// builder-facing *Exclusions spelling used by the #6534 showaudit registry;
-// QuarantinedZoneNames remains the single source of the collision decision.
+// ZoneQuarantineExclusions returns every zone name that snapshot builders must
+// omit: collision losers plus reserved dataplane/Junos context names. It is
+// the builder-facing *Exclusions spelling used by the #6534 showaudit registry;
+// QuarantinedZoneNames remains the collision-only decision.
 func ZoneQuarantineExclusions(names []string) map[string]struct{} {
-	return QuarantinedZoneNames(names)
+	excluded := QuarantinedZoneNames(names)
+	for _, name := range names {
+		if _, reserved := reservedZoneNames[name]; !reserved {
+			continue
+		}
+		if excluded == nil {
+			excluded = make(map[string]struct{})
+		}
+		excluded[name] = struct{}{}
+	}
+	return excluded
 }
 
 // ZoneQuarantineExcludedReason returns the operator-facing reason for a
@@ -257,7 +270,7 @@ func ZoneQuarantineExclusions(names []string) map[string]struct{} {
 // survivor zone, and is deliberately derived from the same cfg.Security.Zones
 // key set consumed by the snapshot builders.
 func ZoneQuarantineExcludedReason(name string, cfg *Config) string {
-	if cfg == nil || name == "" || len(cfg.Security.Zones) < 2 {
+	if cfg == nil || name == "" {
 		return ""
 	}
 	names := make([]string, 0, len(cfg.Security.Zones))
@@ -268,6 +281,11 @@ func ZoneQuarantineExcludedReason(name string, cfg *Config) string {
 	if _, excluded := quarantined[name]; !excluded {
 		return ""
 	}
+	if _, reserved := reservedZoneNames[name]; reserved {
+		return fmt.Sprintf(
+			"security zone %q is quarantined: %q is a reserved dataplane/Junos context token and cannot be installed",
+			name, name)
+	}
 	id := StableZoneID(name)
 	owner := StableZoneIDOwner(names, id)
 	return fmt.Sprintf(
@@ -275,16 +293,25 @@ func ZoneQuarantineExcludedReason(name string, cfg *Config) string {
 		name, id, owner)
 }
 
-// StableZoneIDOwner returns the security-zone name that OWNS a given numeric
-// zone id among names — the sorted-first name that folds to id, i.e. the zone
-// that survives QuarantinedZoneNames. It returns "" when no name in names folds
-// to id. Callers building an id→name reverse map (syslog RT_FLOW rendering, HA
-// session-delta naming) use this so a collision resolves deterministically to
-// the SAME surviving zone the dataplane actually installed, never to a
-// quarantined zone that the wire builder dropped (#3719).
+// ZoneQuarantineSurvivorName returns the installed zone that owns a quarantined
+// zone's stable ID, or "" when the zone was excluded for a reserved name.
+func ZoneQuarantineSurvivorName(name string, names []string) string {
+	if _, reserved := reservedZoneNames[name]; reserved {
+		return ""
+	}
+	return StableZoneIDOwner(names, StableZoneID(name))
+}
+
+// StableZoneIDOwner returns the sorted-first installed zone name that owns a
+// numeric zone id among names. Reserved context names are excluded because
+// snapshot builders quarantine them rather than installing them. It returns
+// "" when no installed name in names folds to id.
 func StableZoneIDOwner(names []string, id uint16) string {
 	owner := ""
 	for _, name := range names {
+		if _, reserved := reservedZoneNames[name]; reserved {
+			continue
+		}
 		if StableZoneID(name) != id {
 			continue
 		}

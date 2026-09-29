@@ -249,7 +249,7 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
     // #9412 + #9752: discount the trailing close-class byte and install-table
     // pair. The fields below are read end-relative, and the open frame now
     // ends nine bytes after the routing domain.
-    let n = payload.len() - 9;
+    let n = payload.len() - 12; // #11064: +3 trailing source-NAT ICMP identity bytes
     let u32_at = |off: usize| -> u32 {
         u32::from_le_bytes(payload[off..off + 4].try_into().expect("4 bytes"))
     };
@@ -462,8 +462,8 @@ fn sync_attribution_exhaustive_destructure_6949() {
     want.sort();
     assert_eq!(
         want.len(),
-        5,
-        "expected the 5 HA-carried attribution fields, parsed {want:?}"
+        6,
+        "expected the 6 HA-carried attribution fields, parsed {want:?}"
     );
 
     for producer in [
@@ -627,7 +627,7 @@ fn session_delta_json_and_binary_agree_on_the_routing_domain_7239() {
     // #9412 + #9752: discount the trailing close-class byte and install-table
     // pair. The fields below are read end-relative, and the open frame now
     // ends nine bytes after the routing domain.
-    let n = payload.len() - 9;
+    let n = payload.len() - 12; // #11064: +3 trailing source-NAT ICMP identity bytes
     let binary = u32::from_le_bytes(payload[n - 4..n].try_into().expect("4 bytes"));
 
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
@@ -709,10 +709,12 @@ fn session_delta_json_and_binary_agree_on_the_install_table_9752() {
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
     let n = payload.len();
+    // #11064: install_table sits ahead of the trailing 3-byte source-NAT
+    // ICMP identity (valid, type, code).
     let binary_domain =
-        u32::from_le_bytes(payload[n - 8..n - 4].try_into().expect("4 bytes"));
+        u32::from_le_bytes(payload[n - 11..n - 7].try_into().expect("4 bytes"));
     let binary_check =
-        u32::from_le_bytes(payload[n - 4..n].try_into().expect("4 bytes"));
+        u32::from_le_bytes(payload[n - 7..n - 3].try_into().expect("4 bytes"));
 
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
     let json = serde_json::to_value(info).expect("delta serializes");
@@ -792,6 +794,12 @@ fn producer_delta_json_matches_the_shared_golden_9752() {
     };
     delta.decision.install_table_domain = domain;
     delta.decision.install_table_check = check;
+    delta.decision.nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        rewrite_src_port: Some(20_000),
+        source_nat_icmp: Some((13, 0)),
+        ..NatDecision::default()
+    };
     delta.metadata.ingress_zone = 1;
     delta.metadata.egress_zone = 2;
     delta.metadata.owner_rg_id = 1;
@@ -808,6 +816,18 @@ fn producer_delta_json_matches_the_shared_golden_9752() {
     assert_eq!(
         json.get("install_table_check").and_then(|v| v.as_u64()),
         Some(check as u64)
+    );
+    assert_eq!(
+        json.get("source_nat_icmp_valid").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        json.get("source_nat_icmp_type").and_then(|v| v.as_u64()),
+        Some(13)
+    );
+    assert_eq!(
+        json.get("source_nat_icmp_code").and_then(|v| v.as_u64()),
+        Some(0)
     );
     assert_eq!(
         json.get("rt_flow_session_id").and_then(|v| v.as_u64()),

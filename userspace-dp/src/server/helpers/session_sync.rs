@@ -391,6 +391,8 @@ pub(crate) fn build_synced_session_entry(
             rewrite_dst,
             rewrite_src_port: nat_src_port,
             rewrite_dst_port: nat_dst_port,
+            source_nat_icmp: (!req.is_reverse && req.source_nat_icmp_valid)
+                .then_some((req.source_nat_icmp_type, req.source_nat_icmp_code)),
             // #4565: set the NAT64 cross-family bit for a promoted NAT64
             // session so tx dispatch reverse-translates and the reverse key
             // derives its v4 address family. `nptv6` stays default (false).

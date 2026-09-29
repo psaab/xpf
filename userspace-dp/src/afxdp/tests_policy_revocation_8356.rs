@@ -38,13 +38,13 @@ use super::tests_support::*;
 use super::*;
 use crate::nat::NatDecision;
 use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
+use crate::tcp_flags::TCP_ACK;
 use crate::test_zone_ids::*;
 use crate::{
-    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NeighborSnapshot,
+    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NatAppTermWire, NeighborSnapshot,
     PolicyRuleSnapshot, RouteSnapshot, SourceNATRuleSnapshot,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use crate::tcp_flags::TCP_ACK;
 
 const LAN_IFINDEX: i32 = 24;
 const WAN_IFINDEX: i32 = 12;
@@ -149,17 +149,22 @@ fn flow_key_to(dst: Ipv4Addr) -> crate::session::SessionKey {
 /// models the unresolvable case (a peer-synced import for an inactive RG keeps
 /// `NoRoute`/0).
 fn decision(egress_ifindex: i32) -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex,
-        tx_ifindex: egress_ifindex,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(DST)),
-        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 80,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex,
+            tx_ifindex: egress_ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(DST)),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// `is_reverse` and the zone pair are the two axes these cells vary. A REVERSE
@@ -214,7 +219,12 @@ fn drive_one_packet_to(
     egress_ifindex: i32,
     dst: Ipv4Addr,
 ) -> Outcome {
-    drive_one_packet_with_action(permit_lan.then_some("permit"), is_reverse, egress_ifindex, dst)
+    drive_one_packet_with_action(
+        permit_lan.then_some("permit"),
+        is_reverse,
+        egress_ifindex,
+        dst,
+    )
 }
 
 /// #9381: the same driver, taking the `lan -> wan` rule's ACTION rather than a
@@ -245,7 +255,14 @@ fn drive_one_packet_with_action(
         "the fixture must install the session, or every assertion below is vacuous"
     );
 
-    let frame = build_txn_tcp_syn_frame_v4(SRC, dst, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        dst,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -309,7 +326,14 @@ fn drive_one_packet_no_route_9513() -> Outcome {
         ),
         "the fixture must install the session, or the assertion is vacuous"
     );
-    let frame = build_txn_tcp_syn_frame_v4(SRC, dst, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        dst,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -476,12 +500,17 @@ fn owner_tcp_permit_hit_remains_admitted_10582_t3() {
         "the ordinary owner hit must retain its local session"
     );
     let observables = out.observables.expect("T3 poll observables");
-    assert!(observables.fresh, "permit hit must re-stamp the local row Fresh");
+    assert!(
+        observables.fresh,
+        "permit hit must re-stamp the local row Fresh"
+    );
 }
 /// Drive a shared-only hit through the real descriptor body. The shared-family
 /// upsert is allowed past the local cap, but the live default deny must drop the
 /// packet before `stage_flow_cache_seed`; the target row must stay absent.
-fn drive_shared_hit_10582_t1_t2(policy_generation: u64) -> (SessionTable, BindingWorker, DebugPollCounters) {
+fn drive_shared_hit_10582_t1_t2(
+    policy_generation: u64,
+) -> (SessionTable, BindingWorker, DebugPollCounters) {
     let forwarding = forwarding_with_lan_rule(None);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
@@ -543,10 +572,23 @@ fn drive_shared_hit_10582_t1_t2(policy_generation: u64) -> (SessionTable, Bindin
 #[test]
 fn at_cap_shared_hit_poll_handler_drops_without_seed_10582_t1() {
     let (sessions, binding, dbg) = drive_shared_hit_10582_t1_t2(7);
-    assert_eq!(dbg.session_hit, 1, "the real poll body must reach shared-hit handling");
-    assert_eq!(dbg.policy_revoked_sessions, 1, "live deny must drop the shared hit");
-    assert!(binding.scratch.scratch_forwards.is_empty(), "denied hit must not forward");
-    assert_eq!(txn_flow_cache_entries(&binding), 0, "denied hit must not seed flow cache");
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the real poll body must reach shared-hit handling"
+    );
+    assert_eq!(
+        dbg.policy_revoked_sessions, 1,
+        "live deny must drop the shared hit"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "denied hit must not forward"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "denied hit must not seed flow cache"
+    );
     assert!(
         sessions.entry_with_origin(&flow_key_to(DST)).is_none(),
         "the denied shared-hit target must remain absent; the filler explains the cap row"
@@ -556,16 +598,28 @@ fn at_cap_shared_hit_poll_handler_drops_without_seed_10582_t1() {
 #[test]
 fn scheduler_generation_shared_hit_poll_handler_drops_without_seed_10582_t2() {
     let (sessions, binding, dbg) = drive_shared_hit_10582_t1_t2(8);
-    assert_eq!(dbg.session_hit, 1, "the generation-bumped hit must reach handler revalidation");
-    assert_eq!(dbg.policy_revoked_sessions, 1, "generation-bumped live deny must drop");
-    assert!(binding.scratch.scratch_forwards.is_empty(), "denied hit must not forward");
-    assert_eq!(txn_flow_cache_entries(&binding), 0, "denied hit must not seed flow cache");
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the generation-bumped hit must reach handler revalidation"
+    );
+    assert_eq!(
+        dbg.policy_revoked_sessions, 1,
+        "generation-bumped live deny must drop"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "denied hit must not forward"
+    );
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        0,
+        "denied hit must not seed flow cache"
+    );
     assert!(
         sessions.entry_with_origin(&flow_key_to(DST)).is_none(),
         "the denied generation-bumped target must remain absent; the filler explains the cap row"
     );
 }
-
 
 /// The `deny` point of the same three-way axis, driven through the action-taking
 /// path rather than the bool one.
@@ -618,7 +672,12 @@ fn an_explicit_deny_rule_revokes_the_established_session_9381() {
 /// genuinely does not resolve". The arm was right.
 #[test]
 fn an_unzoned_egress_is_re_judged_rather_than_skipped_9513() {
-    let out = drive_one_packet_to(false, false, MACLESS_IFINDEX, Ipv4Addr::new(198, 51, 100, 77));
+    let out = drive_one_packet_to(
+        false,
+        false,
+        MACLESS_IFINDEX,
+        Ipv4Addr::new(198, 51, 100, 77),
+    );
     assert_eq!(
         out.revoked, 1,
         "the egress RESOLVES (to st0.0) but the box puts it in no zone, so a new \
@@ -952,6 +1011,46 @@ fn forwarding_with_icmp_type_split_9949() -> ForwardingState {
     build_forwarding_state(&snapshot)
 }
 
+fn forwarding_with_icmp_type_deny_then_any_permit_11064() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".into(),
+        zone: "dmz".into(),
+        linux_name: "ge-0-0-2".into(),
+        ifindex: DMZ_IFINDEX,
+        hardware_addr: "02:bf:72:02:00:01".into(),
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".into(),
+        ip: "172.16.80.200".into(),
+        mac: "00:11:22:33:44:66".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot
+        .policies
+        .push(icmp_type_rule_9949("echo-deny", "deny", 8));
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "icmp-any-permit".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "permit".into(),
+        ..Default::default()
+    });
+    build_forwarding_state(&snapshot)
+}
+
 fn icmp_frame_type_9949(icmp_type: u8, dst_mac: [u8; 6]) -> Vec<u8> {
     let mut frame = build_icmp_echo_frame_v4(SRC, DST, 64, dst_mac);
     frame[34] = icmp_type;
@@ -984,6 +1083,204 @@ fn drive_owner_icmp_type_9949(
         true,
     );
     dbg
+}
+
+fn forwarding_with_typed_snat_icmp_11064() -> ForwardingState {
+    let mut snapshot = nat_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.source_nat_rules = vec![
+        SourceNATRuleSnapshot {
+            name: "snat-echo".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["0.0.0.0/0".into()],
+            match_applications: vec![NatAppTermWire {
+                protocol: PROTO_ICMP as u16,
+                icmp_type: Some(8),
+                ..NatAppTermWire::default()
+            }],
+            pool_name: "pool-echo".into(),
+            pool_addresses: vec!["203.0.113.80/32".into()],
+            port_low: 20_000,
+            port_high: 20_099,
+            ..SourceNATRuleSnapshot::default()
+        },
+        SourceNATRuleSnapshot {
+            name: "snat-timestamp".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["0.0.0.0/0".into()],
+            match_applications: vec![NatAppTermWire {
+                protocol: PROTO_ICMP as u16,
+                icmp_type: Some(13),
+                ..NatAppTermWire::default()
+            }],
+            pool_name: "pool-timestamp".into(),
+            pool_addresses: vec!["203.0.113.13/32".into()],
+            port_low: 20_000,
+            port_high: 20_099,
+            ..SourceNATRuleSnapshot::default()
+        },
+    ];
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".into(),
+        ip: DST.to_string(),
+        mac: "00:11:22:33:44:66".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    build_forwarding_state(&snapshot)
+}
+
+fn icmp_snat_frame_11064(icmp_type: u8, identifier: u16) -> Vec<u8> {
+    let mut frame = icmp_frame_type_9949(icmp_type, TEST_LAN_MAC);
+    frame[38..40].copy_from_slice(&identifier.to_be_bytes());
+    frame[36..38].fill(0);
+    let checksum = checksum16(&frame[34..]);
+    frame[36..38].copy_from_slice(&checksum.to_be_bytes());
+    frame
+}
+
+fn drive_snat_icmp_11064(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    binding: &mut BindingWorker,
+    icmp_type: u8,
+    identifier: u16,
+) -> DebugPollCounters {
+    let frame = icmp_snat_frame_11064(icmp_type, identifier);
+    let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    // #11064: clustered fixture (reth RGs 1/2) needs populated HA inventory;
+    // an empty map marks every RG-owned ForwardCandidate HAInactive.
+    let ha_state = txn_ha_state();
+    let (_batch, dbg) = txn_run_descriptor_checked(
+        binding,
+        sessions,
+        forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    dbg
+}
+
+fn snat_decision_for_icmp_id_11064(sessions: &SessionTable, identifier: u16) -> NatDecision {
+    let mut result = None;
+    sessions.iter_with_origin(|key, decision, metadata, _origin| {
+        if key.protocol == PROTO_ICMP && key.src_port == identifier && !metadata.is_reverse {
+            result = Some(decision.nat);
+        }
+    });
+    result.expect("the requested ICMP identifier must have a forward session")
+}
+
+// Stateful SNAT is create-only for a session key: an established packet with
+// another ICMP type reuses the original mapping, while a distinct ICMP
+// identifier creates a separate mapping selected by its own type.
+#[test]
+fn stateful_snat_icmp_type_switch_keeps_session_mapping_11064() {
+    use crate::nat::source_nat_pool_statuses;
+
+    let forwarding = forwarding_with_typed_snat_icmp_11064();
+    let mut sessions = SessionTable::new();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+
+    let created = drive_snat_icmp_11064(&forwarding, &mut sessions, &mut binding, 8, 0x1234);
+    assert_eq!(created.session_create, 2, "the echo flow must install its pair");
+    assert_eq!(created.tx, 1, "the echo flow must translate and forward");
+    let echo_nat = snat_decision_for_icmp_id_11064(&sessions, 0x1234);
+    assert_eq!(
+        echo_nat.rewrite_src,
+        Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 80)))
+    );
+    assert_eq!(echo_nat.source_nat_icmp, Some((8, 0)));
+
+    let switched = drive_snat_icmp_11064(&forwarding, &mut sessions, &mut binding, 13, 0x1234);
+    assert_eq!(switched.session_hit, 1, "the type switch must hit the typeless key");
+    assert_eq!(switched.tx, 1, "the established flow must keep forwarding");
+    let retained_nat = snat_decision_for_icmp_id_11064(&sessions, 0x1234);
+    assert_eq!(retained_nat.rewrite_src, echo_nat.rewrite_src);
+    assert_eq!(retained_nat.rewrite_src_port, echo_nat.rewrite_src_port);
+    assert_eq!(retained_nat.source_nat_icmp, Some((8, 0)));
+    let pools = source_nat_pool_statuses(&forwarding.source_nat_rules);
+    assert_eq!(pools[0].used_ports, 1);
+    assert_eq!(pools[1].used_ports, 0, "a session hit must not rematch type 13 SNAT");
+
+    let distinct = drive_snat_icmp_11064(&forwarding, &mut sessions, &mut binding, 13, 0x5678);
+    assert_eq!(distinct.session_create, 2, "a distinct identifier creates a new pair");
+    assert_eq!(distinct.tx, 1);
+    let timestamp_nat = snat_decision_for_icmp_id_11064(&sessions, 0x5678);
+    assert_eq!(
+        timestamp_nat.rewrite_src,
+        Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 13)))
+    );
+    assert_eq!(timestamp_nat.source_nat_icmp, Some((13, 0)));
+    let pools = source_nat_pool_statuses(&forwarding.source_nat_rules);
+    assert_eq!(pools[0].used_ports, 1);
+    assert_eq!(pools[1].used_ports, 1, "a new type-13 flow selects its typed pool");
+}
+
+#[test]
+fn type_constrained_deny_is_enforced_when_icmp_type_switches_on_session_11064() {
+    let forwarding = forwarding_with_icmp_type_deny_then_any_permit_11064();
+    assert!(
+        !forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        "the frame-independent revocation gate must remain permit-only"
+    );
+    assert!(
+        forwarding
+            .policy
+            .icmp_packet_verdict_may_depend_on_type(PROTO_ICMP),
+        "the packet-scoped owner check must include type-constrained DENYs"
+    );
+    let mut sessions = SessionTable::new();
+
+    // Timestamp Request (13) is allowed by the broad permit and installs a
+    // real session. Switching only the ICMP type to Echo Request (8) reuses
+    // that typeless key but must now hit the earlier constrained DENY.
+    let admitted = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 13);
+    assert_eq!(
+        (
+            admitted.session_hit,
+            admitted.session_create,
+            admitted.tx,
+            admitted.policy_deny
+        ),
+        (0, 2, 1, 0),
+        "the non-echo ICMP query must be admitted and install the key"
+    );
+    let denied = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 8);
+    assert_eq!(
+        (denied.session_hit, denied.tx, denied.policy_deny),
+        (1, 0, 1),
+        "echo must hit the same typeless session and be denied by packet type"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "a packet-specific deny must leave the otherwise-permitted session intact"
+    );
+    let allowed_again = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 13);
+    assert_eq!(
+        (
+            allowed_again.session_hit,
+            allowed_again.tx,
+            allowed_again.policy_deny
+        ),
+        (1, 1, 0),
+        "the denied type must not poison the live session for a permitted type"
+    );
 }
 fn drive_foreign_icmp_type_9949(
     forwarding: &ForwardingState,
@@ -1025,7 +1322,12 @@ fn a_denied_icmp_type_cannot_ride_a_permitted_owner_session_9949() {
     // exercising a synthetic table entry.
     let permitted = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 8);
     assert_eq!(
-        (permitted.session_hit, permitted.session_create, permitted.tx, permitted.policy_deny),
+        (
+            permitted.session_hit,
+            permitted.session_create,
+            permitted.tx,
+            permitted.policy_deny
+        ),
         (0, 2, 1, 0),
         "the permitted echo type must miss, install, and forward before the \
          denied type is tried"
@@ -1044,7 +1346,6 @@ fn a_denied_icmp_type_cannot_ride_a_permitted_owner_session_9949() {
     assert_eq!(foreign.foreign_authority_drops, 0);
     assert_eq!(foreign.policy_deny, 0);
     assert_eq!(session_count(&sessions), 2);
-
 
     let denied = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 13);
     assert_eq!(
@@ -1067,7 +1368,11 @@ fn a_denied_icmp_type_cannot_ride_a_permitted_owner_session_9949() {
 
     let permitted_again = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 8);
     assert_eq!(
-        (permitted_again.session_hit, permitted_again.tx, permitted_again.policy_deny),
+        (
+            permitted_again.session_hit,
+            permitted_again.tx,
+            permitted_again.policy_deny
+        ),
         (1, 1, 0),
         "a denied type must not poison the permitted type's live session"
     );
@@ -1153,15 +1458,23 @@ fn forwarding_with_reverse_icmp_split_10637() -> ForwardingState {
         link_local: false,
         ..Default::default()
     });
-    snapshot
-        .policies
-        .push(icmp_type_rule_10637("echo-permit", "permit", 8, "lan", "wan"));
+    snapshot.policies.push(icmp_type_rule_10637(
+        "echo-permit",
+        "permit",
+        8,
+        "lan",
+        "wan",
+    ));
     // The reverse pair denies the REQUEST type but is silent on the ANSWER
     // type: the request must therefore drop by rule, while the answer coasts
     // as return traffic even though no rule admits it.
-    snapshot
-        .policies
-        .push(icmp_type_rule_10637("reverse-echo-deny", "deny", 8, "wan", "lan"));
+    snapshot.policies.push(icmp_type_rule_10637(
+        "reverse-echo-deny",
+        "deny",
+        8,
+        "wan",
+        "lan",
+    ));
     build_forwarding_state(&snapshot)
 }
 
@@ -1214,7 +1527,12 @@ fn a_denied_reverse_icmp_request_cannot_ride_the_query_session_10637() {
     let mut sessions = SessionTable::new();
     let admitted = drive_owner_icmp_type_9949(&forwarding, &mut sessions, 8);
     assert_eq!(
-        (admitted.session_hit, admitted.session_create, admitted.tx, admitted.policy_deny),
+        (
+            admitted.session_hit,
+            admitted.session_create,
+            admitted.tx,
+            admitted.policy_deny
+        ),
         (0, 2, 1, 0),
         "the permitted echo query must miss, install, and forward before the \
          reverse request is tried"
@@ -1279,172 +1597,6 @@ fn a_reverse_icmp_answer_coasts_past_an_unpermitted_reverse_pair_10637() {
         session_count(&sessions),
         2,
         "the coasting answer must leave the live session untouched"
-    );
-}
-
-/// A `lan -> wan` junos-ping-shaped DENY, optionally with a broader `lan -> wan`
-/// permit BEHIND it.
-///
-/// #9386: the zone pair is the load-bearing detail. The cell below used to copy
-/// its deny from `junos_ping_permit()`, which is `dmz -> wan`, while driving a
-/// `lan -> wan` session — so the deny could not participate in the walk at all
-/// and the flow revoked by DEFAULT-DENY whether or not the deny was consulted.
-/// Putting the deny on the DRIVEN pair is what makes it observable, and adding a
-/// broader permit behind it is what makes the two outcomes distinguishable.
-fn ping_deny_on_the_driven_pair_9386(with_broader_permit: bool) -> ForwardingState {
-    let mut snapshot = policy_deny_snapshot();
-    snapshot.generation = 7;
-    snapshot.fib_generation = 9;
-    let mut ping_deny = junos_ping_permit();
-    ping_deny.name = "ping-deny".into();
-    ping_deny.action = "deny".into();
-    // THE DRIVEN PAIR, not `dmz -> wan`.
-    ping_deny.from_zone = "lan".into();
-    snapshot.policies.push(ping_deny);
-    if with_broader_permit {
-        // Pushed AFTER the deny, so the deny is first in the zone-pair chain and
-        // a fully-informed walk would match it. `application any` matches every
-        // ICMP message regardless of type, so this permit is type-BLIND.
-        snapshot.policies.push(PolicyRuleSnapshot {
-            name: "lan-out-any".into(),
-            from_zone: "lan".into(),
-            to_zone: "wan".into(),
-            source_addresses: vec!["any".into()],
-            destination_addresses: vec!["any".into()],
-            applications: vec!["any".into()],
-            application_terms: Vec::new(),
-            action: "permit".into(),
-            ..Default::default()
-        });
-    }
-    build_forwarding_state(&snapshot)
-}
-
-fn drive_icmp_against_9386(forwarding: &ForwardingState) -> u64 {
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
-    binding.interface = Arc::<str>::from("reth1.0");
-    let ha_state = txn_ha_state();
-    let mut sessions = SessionTable::new();
-    assert!(sessions.install_with_protocol_with_origin(
-        icmp_flow_key(),
-        decision(WAN_IFINDEX),
-        metadata(false),
-        SessionOrigin::ForwardFlow,
-        122_000_000_000,
-        PROTO_ICMP,
-        0,
-    ));
-    // An echo REQUEST, type 8 — the type the junos-ping term constrains on, so a
-    // fully-informed evaluation WOULD match the deny.
-    let frame = build_icmp_echo_frame_v4(SRC, DST, 64, crate::afxdp::tests_support::TEST_LAN_MAC);
-    let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
-    meta.protocol = PROTO_ICMP;
-    meta.payload_offset = 42;
-    let (_batch, dbg) = txn_run_descriptor_checked(
-        &mut binding,
-        &mut sessions,
-        forwarding,
-        &ha_state,
-        &frame,
-        meta,
-        true,
-    );
-    assert_eq!(
-        dbg.session_hit, 1,
-        "the ICMP packet must HIT the installed session, or every assertion \
-         about the re-derivation is vacuous (#9386)"
-    );
-    dbg.policy_revoked_sessions
-}
-
-/// Binds the `PolicyAction::Permit` filter on the #8618 arming, which an
-/// escaped mutation showed nothing else could see.
-///
-/// Only a PERMIT can overturn a type-blind DENY. A type-constrained DENY that
-/// `packet_icmp = None` gates OFF can only make the walk fall through to a
-/// later permit — i.e. more permissive, "do not revoke". It can never manufacture
-/// the false DENY the gate exists to prevent, so arming on it would decline for
-/// no reason and leave #7323's residual open on configs that never needed it.
-///
-/// #9386 MOVED THE DENY ONTO THE DRIVEN ZONE PAIR. It used to be copied from
-/// `junos_ping_permit()`, i.e. `dmz -> wan`, while the driven session is
-/// `lan -> wan` — so the second half of this cell revoked by DEFAULT-DENY
-/// regardless of the deny, and bound nothing. Only the predicate assertion was
-/// doing work.
-///
-/// WHAT THE SECOND HALF BINDS NOW, stated so it is not over-read: it binds the
-/// ARMING, not enforcement. With no broader permit behind the deny, an ARMED gate
-/// declines (0) and an UNARMED gate runs and revokes by default-deny (1), so the
-/// two outcomes differ. It is NOT evidence that the constrained deny itself was
-/// enforced — that is the residual, and
-/// `a_type_constrained_deny_is_skipped_and_the_session_survives_9386` is where it
-/// is pinned.
-///
-/// Dropping `&& matches!(.., Permit)` from the arming loop reds BOTH halves.
-#[test]
-fn a_type_constrained_deny_does_not_suppress_the_icmp_re_derivation_8618() {
-    let forwarding = ping_deny_on_the_driven_pair_9386(false);
-    assert!(
-        !forwarding
-            .policy
-            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
-        "a type-constrained DENY cannot manufacture a false DENY, so it must \
-         NOT make the verdict type-dependent"
-    );
-    assert_eq!(
-        drive_icmp_against_9386(&forwarding),
-        1,
-        "a type-constrained DENY must not suppress the re-derivation: with the \
-         gate UNARMED the walk runs, skips the type-constrained deny, finds no \
-         other rule and revokes by default-deny. 0 here means the gate ARMED on a \
-         constrained DENY and declined, which leaves #7323's residual open for \
-         every ICMP flow on any box carrying a constrained deny anywhere — the \
-         predicate is whole-snapshot (#8618/#9386)"
-    );
-}
-
-/// THE ACCEPTED RESIDUAL, and the cell that replaces the vacuous half. Same zone
-/// pair, the type-constrained DENY FIRST, a type-blind broader permit BEHIND it.
-///
-/// A fully-informed walk matches the deny (the packet IS an echo request, type 8)
-/// and would revoke. The type-blind walk this derivation performs fails the
-/// constrained term closed for `packet_icmp = None`, falls through to the permit,
-/// and the session SURVIVES. That is the residual #9386 names, and it is accepted
-/// rather than closed — see `PolicyState::icmp_verdict_may_depend_on_type` for
-/// why, in one line: arming the gate on a constrained DENY would not change this
-/// outcome (the derivation would decline instead of deriving Permit, and either
-/// way the session lives) and would cost #8356 coverage for every ICMP flow on
-/// the box, while closing it properly needs the packet's type/code — which this
-/// derivation's frame-INDEPENDENCE contract forbids, because one packet's type is
-/// not the flow's property.
-///
-/// SO THIS IS A CHANGE DETECTOR, NOT A DEFECT GUARD, and the distinction is
-/// deliberate. Together with the cell above it is TOTAL over the three candidate
-/// contracts: accept (predicate false, 1, 0 — today), arm on any constrained term
-/// (the cell above reds twice), supply the packet type (THIS cell reds, because
-/// the deny would then match and revoke).
-#[test]
-fn a_type_constrained_deny_is_skipped_and_the_session_survives_9386() {
-    let forwarding = ping_deny_on_the_driven_pair_9386(true);
-    // Non-vacuity: the gate must be UNARMED, or the derivation declines for a
-    // different reason and this cell stops measuring the skip.
-    assert!(
-        !forwarding
-            .policy
-            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
-        "the snapshot carries no type-constrained PERMIT, so the gate must be \
-         unarmed and the re-derivation must RUN — otherwise this cell measures a \
-         decline rather than the skip (#9386)"
-    );
-    assert_eq!(
-        drive_icmp_against_9386(&forwarding),
-        0,
-        "the type-blind walk fails the constrained deny closed and falls through \
-         to the broader permit, so the session survives. This is the ACCEPTED \
-         residual: a type-constrained ICMP DENY is not enforced on the \
-         established-session path. 1 here means the derivation became \
-         frame-DEPENDENT for ICMP, which is a contract change and must be a \
-         deliberate one (#9386)"
     );
 }
 
@@ -1635,7 +1787,10 @@ fn the_poll_paths_reverse_install_releases_a_seeded_predecessors_rows_9560() {
             meta_syn,
             true,
         );
-        assert_eq!(dbg.tx, 1, "FIXTURE: pass 1 must admit the SYN to derive a reverse key");
+        assert_eq!(
+            dbg.tx, 1,
+            "FIXTURE: pass 1 must admit the SYN to derive a reverse key"
+        );
         let mut found: Option<SessionKey> = None;
         sessions.iter_with_origin(|key, _decision, metadata, _origin| {
             if metadata.is_reverse {
@@ -1665,7 +1820,9 @@ fn the_poll_paths_reverse_install_releases_a_seeded_predecessors_rows_9560() {
         binding.bpf_maps.session_map.handle(),
         &reverse_key,
         crate::nat::NatDecision {
-            rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9))),
+            rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                203, 0, 113, 9,
+            ))),
             rewrite_src_port: Some(51_001),
             ..crate::nat::NatDecision::default()
         },
@@ -1687,7 +1844,10 @@ fn the_poll_paths_reverse_install_releases_a_seeded_predecessors_rows_9560() {
         meta_syn,
         true,
     );
-    assert_eq!(dbg.tx, 1, "FIXTURE: pass 2 must admit the SYN, or nothing installs over the seed");
+    assert_eq!(
+        dbg.tx, 1,
+        "FIXTURE: pass 2 must admit the SYN, or nothing installs over the seed"
+    );
 
     assert_eq!(
         owners.held_row_count(&reverse_key, 0),
@@ -1760,7 +1920,10 @@ fn the_poll_paths_forward_install_releases_a_seeded_predecessors_unnamed_rows_95
             meta_syn,
             true,
         );
-        assert_eq!(dbg.tx, 1, "FIXTURE: pass 1 must admit the SYN to derive the forward rows");
+        assert_eq!(
+            dbg.tx, 1,
+            "FIXTURE: pass 1 must admit the SYN to derive the forward rows"
+        );
         let key = forward_key_of(&sessions).expect("FIXTURE: pass 1 must install a forward entry");
         let rows = owners.held_rows_for(&key, SteeringHolder::Worker(0));
         assert!(
@@ -1790,7 +1953,9 @@ fn the_poll_paths_forward_install_releases_a_seeded_predecessors_unnamed_rows_95
         binding.bpf_maps.session_map.handle(),
         &forward_key,
         crate::nat::NatDecision {
-            rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9))),
+            rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                203, 0, 113, 9,
+            ))),
             rewrite_src_port: Some(51_001),
             ..crate::nat::NatDecision::default()
         },
@@ -1821,7 +1986,10 @@ fn the_poll_paths_forward_install_releases_a_seeded_predecessors_unnamed_rows_95
         meta_syn,
         true,
     );
-    assert_eq!(dbg.tx, 1, "FIXTURE: pass 2 must admit the SYN, or nothing installs over the seed");
+    assert_eq!(
+        dbg.tx, 1,
+        "FIXTURE: pass 2 must admit the SYN, or nothing installs over the seed"
+    );
 
     let still_owned: Vec<_> = unnameable
         .iter()
@@ -1924,7 +2092,9 @@ fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
         binding.bpf_maps.session_map.handle(),
         &reverse_key,
         crate::nat::NatDecision {
-            rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9))),
+            rewrite_src: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                203, 0, 113, 9,
+            ))),
             rewrite_src_port: Some(51_001),
             ..crate::nat::NatDecision::default()
         },
@@ -1954,9 +2124,23 @@ fn the_poll_paths_reverse_install_releases_a_predecessors_rows_9560() {
 }
 
 fn dnat_frames() -> (Vec<u8>, UserspaceDpMeta, Vec<u8>, UserspaceDpMeta) {
-    let syn = build_txn_tcp_syn_frame_v4(DNAT_CLIENT, DNAT_VIP, 54321, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_WAN_MAC);
+    let syn = build_txn_tcp_syn_frame_v4(
+        DNAT_CLIENT,
+        DNAT_VIP,
+        54321,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
+    );
     let meta_syn = txn_meta_v4(WAN_INGRESS_IFINDEX as u32, TCP_FLAG_SYN, syn.len() as u16);
-    let ack = build_txn_tcp_syn_frame_v4(DNAT_CLIENT, DNAT_VIP, 54321, 443, TCP_ACK, crate::afxdp::tests_support::TEST_WAN_MAC);
+    let ack = build_txn_tcp_syn_frame_v4(
+        DNAT_CLIENT,
+        DNAT_VIP,
+        54321,
+        443,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
+    );
     let meta_ack = txn_meta_v4(WAN_INGRESS_IFINDEX as u32, TCP_ACK, ack.len() as u16);
     (syn, meta_syn, ack, meta_ack)
 }
@@ -2050,7 +2234,9 @@ fn a_deny_naming_the_translated_destination_revokes_9382() {
     let mut phase2 = inbound_dnat_snapshot(deny_real);
     // A trailing permit-any so the ONLY thing that can revoke is the deny
     // matching the POST-translation destination — not the default policy.
-    phase2.policies.push(wan_to_lan_permit("any", "permit-rest"));
+    phase2
+        .policies
+        .push(wan_to_lan_permit("any", "permit-rest"));
     let out = admit_then_one_more_packet(
         inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal")),
         phase2,
@@ -2122,16 +2308,36 @@ fn an_unchanged_nptv6_policy_does_not_revoke_the_established_session_9382() {
     let dst: Ipv6Addr = "2602:fd41:70:100::102"
         .parse()
         .expect("external prefix dst");
-    let syn = build_txn_tcp_frame_v6(src, dst, 54321, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_WAN_MAC);
+    let syn = build_txn_tcp_frame_v6(
+        src,
+        dst,
+        54321,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
+    );
     let mut meta_syn = txn_meta_v6(WAN_INGRESS_IFINDEX as u32, syn.len());
     meta_syn.tcp_flags = TCP_FLAG_SYN;
-    let ack = build_txn_tcp_frame_v6(src, dst, 54321, 443, TCP_ACK, crate::afxdp::tests_support::TEST_WAN_MAC);
+    let ack = build_txn_tcp_frame_v6(
+        src,
+        dst,
+        54321,
+        443,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
+    );
     let mut meta_ack = txn_meta_v6(WAN_INGRESS_IFINDEX as u32, ack.len());
     meta_ack.tcp_flags = TCP_ACK;
 
     let out = admit_then_one_more_packet(
-        inbound_nptv6_snapshot(wan_to_lan_permit("fd35:1940:27::/48", "permit-internal-prefix")),
-        inbound_nptv6_snapshot(wan_to_lan_permit("fd35:1940:27::/48", "permit-internal-prefix")),
+        inbound_nptv6_snapshot(wan_to_lan_permit(
+            "fd35:1940:27::/48",
+            "permit-internal-prefix",
+        )),
+        inbound_nptv6_snapshot(wan_to_lan_permit(
+            "fd35:1940:27::/48",
+            "permit-internal-prefix",
+        )),
         WAN_INGRESS_IFINDEX,
         "reth0.80",
         &syn,
@@ -2164,10 +2370,24 @@ fn an_unchanged_nptv6_policy_does_not_revoke_the_established_session_9382() {
 fn an_unchanged_nat64_policy_with_a_mixed_family_destination_set_does_not_revoke_9382() {
     let src: Ipv6Addr = "2001:559:8585:ef00::102".parse().expect("v6 client");
     let dst: Ipv6Addr = "64:ff9b::808:808".parse().expect("nat64 synthetic dst");
-    let syn = build_txn_tcp_frame_v6(src, dst, 12345, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let syn = build_txn_tcp_frame_v6(
+        src,
+        dst,
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let mut meta_syn = txn_meta_v6(LAN_IFINDEX as u32, syn.len());
     meta_syn.tcp_flags = TCP_FLAG_SYN;
-    let ack = build_txn_tcp_frame_v6(src, dst, 12345, 443, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let ack = build_txn_tcp_frame_v6(
+        src,
+        dst,
+        12345,
+        443,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let mut meta_ack = txn_meta_v6(LAN_IFINDEX as u32, ack.len());
     meta_ack.tcp_flags = TCP_ACK;
 
@@ -2176,8 +2396,7 @@ fn an_unchanged_nat64_policy_with_a_mixed_family_destination_set_does_not_revoke
         // The v6 member is what defeats the IPv6-match-any accident. It must
         // NOT cover 64:ff9b::/96 — if it did, the synthetic wire destination
         // would match it and the cell would pass whether the fix exists or not.
-        rule.destination_addresses
-            .push("2001:db8::/32".to_string());
+        rule.destination_addresses.push("2001:db8::/32".to_string());
         nat64_snapshot(rule)
     };
     let out = admit_then_one_more_packet(
@@ -2300,7 +2519,14 @@ fn drive_moved_interface_9384(
         "the fixture must install the session, or every assertion below is vacuous"
     );
 
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -2396,7 +2622,14 @@ fn a_move_into_a_still_permitted_zone_does_not_revoke_9384() {
         PROTO_TCP,
         0,
     ));
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -2714,8 +2947,7 @@ fn an_arrival_with_no_interface_identity_still_fails_mac_gate_9513() {
         PROTO_TCP,
         0,
     ));
-    let frame =
-        build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, TEST_LAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, TEST_LAN_MAC);
     let meta = txn_meta_v4(0, TCP_ACK, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -2810,7 +3042,14 @@ fn a_default_policy_of_reject_still_revokes_the_established_session_9381() {
         PROTO_TCP,
         0,
     ));
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -2882,7 +3121,14 @@ fn a_default_policy_of_reject_does_not_revoke_a_permitted_flow_9381() {
         PROTO_TCP,
         0,
     ));
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -2986,7 +3232,14 @@ fn the_re_derivation_records_no_hit_on_the_matched_rule_9385() {
         PROTO_TCP,
         0,
     ));
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -3067,7 +3320,14 @@ fn the_ordinary_admission_path_does_record_a_hit_9385() {
     let ha_state = txn_ha_state();
     // An EMPTY session table: this packet is a session MISS and takes admission.
     let mut sessions = SessionTable::new();
-    let frame = build_txn_tcp_syn_frame_v4(Ipv4Addr::new(198, 51, 100, 10), Ipv4Addr::new(172, 16, 80, 8), 54321, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_WAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(198, 51, 100, 10),
+        Ipv4Addr::new(172, 16, 80, 8),
+        54321,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
+    );
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -3168,15 +3428,21 @@ fn the_re_derivation_records_no_hit_on_the_implicit_default_9385() {
 /// the implicit-default exit, which is the exit whose counter this measures.
 #[test]
 fn the_ordinary_admission_path_does_record_a_default_hit_9385() {
-    let snapshot =
-        inbound_dnat_snapshot(wan_to_lan_permit("172.16.80.8/32", "permit-public-vip"));
+    let snapshot = inbound_dnat_snapshot(wan_to_lan_permit("172.16.80.8/32", "permit-public-vip"));
     let forwarding = build_forwarding_state(&snapshot);
     let default_before = forwarding.policy.default_counter.test_packet_count();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = Arc::<str>::from("reth0.80");
     let ha_state = txn_ha_state();
     let mut sessions = SessionTable::new();
-    let frame = build_txn_tcp_syn_frame_v4(Ipv4Addr::new(198, 51, 100, 10), Ipv4Addr::new(172, 16, 80, 8), 54322, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_WAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(198, 51, 100, 10),
+        Ipv4Addr::new(172, 16, 80, 8),
+        54322,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_WAN_MAC,
+    );
     let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -3361,7 +3627,14 @@ fn reverse_tcp_frame_v6_9604(
         LAN_IFINDEX => TEST_LAN_MAC,
         other => panic!("9604 v6 fixture has no destination MAC for ingress ifindex {other}"),
     };
-    let frame = build_txn_tcp_frame_v6(src, dst, rev_key.src_port, rev_key.dst_port, TCP_ACK, dst_mac);
+    let frame = build_txn_tcp_frame_v6(
+        src,
+        dst,
+        rev_key.src_port,
+        rev_key.dst_port,
+        TCP_ACK,
+        dst_mac,
+    );
     let mut meta = txn_meta_v6(arrival_ifindex as u32, frame.len());
     meta.tcp_flags = TCP_ACK;
     (frame, meta)
@@ -3443,7 +3716,15 @@ fn admit_then_reverse_9604(
     let mut sessions = SessionTable::new();
     let forwarding1 = build_forwarding_state(&snapshot_phase1);
     let mut binding1 = binding_for_9604(admit_ifindex, admit_iface);
-    let (_b1, dbg1) = txn_run_descriptor_checked(&mut binding1, &mut sessions, &forwarding1, &ha_state, frame_admit, meta_admit, true);
+    let (_b1, dbg1) = txn_run_descriptor_checked(
+        &mut binding1,
+        &mut sessions,
+        &forwarding1,
+        &ha_state,
+        frame_admit,
+        meta_admit,
+        true,
+    );
     assert_eq!(
         dbg1.tx, 1,
         "9604 phase 1 must ADMIT and forward, or the pair under test was never \
@@ -3468,7 +3749,13 @@ fn admit_then_reverse_9604(
     let forwarding2 = build_forwarding_state(&snapshot_phase2);
     let mut binding2 = binding_for_9604(rev_arrival, rev_iface);
     let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&rev_key, rev_arrival);
-    let out = drive_packet_9604(&mut sessions, &forwarding2, &mut binding2, &frame_rev, meta_rev);
+    let out = drive_packet_9604(
+        &mut sessions,
+        &forwarding2,
+        &mut binding2,
+        &frame_rev,
+        meta_rev,
+    );
     AdmitReverseOutcome {
         sessions,
         fwd_key,
@@ -3486,7 +3773,9 @@ fn forwarding_asymmetric_9604() -> ForwardingState {
     let mut snapshot = policy_deny_snapshot();
     snapshot.generation = 7;
     snapshot.fib_generation = 9;
-    snapshot.policies.push(wan_to_lan_permit("any", "rev-permit"));
+    snapshot
+        .policies
+        .push(wan_to_lan_permit("any", "rev-permit"));
     build_forwarding_state(&snapshot)
 }
 
@@ -3694,7 +3983,14 @@ fn snat_pair_reverse_triggered_deny_revokes_both_halves_9604() {
     // Via the default route (172.16.80.1 has a neighbor entry): DST sits in the
     // connected WAN subnet with no neighbor entry, so a SYN to it installs but
     // never forwards — the wrong server for an admit-then-revoke cell.
-    let syn = build_txn_tcp_syn_frame_v4(SRC, Ipv4Addr::new(8, 8, 8, 8), SPORT, DPORT, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let syn = build_txn_tcp_syn_frame_v4(
+        SRC,
+        Ipv4Addr::new(8, 8, 8, 8),
+        SPORT,
+        DPORT,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta_syn = txn_meta_v4(LAN_IFINDEX as u32, TCP_FLAG_SYN, syn.len() as u16);
     let (_b1, dbg1) = txn_run_descriptor_checked(
         &mut binding1,
@@ -3706,7 +4002,11 @@ fn snat_pair_reverse_triggered_deny_revokes_both_halves_9604() {
         true,
     );
     assert_eq!(dbg1.tx, 1, "9604 SNAT phase 1 must admit");
-    assert_eq!(session_count(&sessions), 2, "9604 phase 1 must install the pair");
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "9604 phase 1 must install the pair"
+    );
     assert_eq!(
         source_nat_pool_statuses(&forwarding1.source_nat_rules)[0].used_ports,
         1,
@@ -3730,7 +4030,13 @@ fn snat_pair_reverse_triggered_deny_revokes_both_halves_9604() {
     let forwarding2 = build_forwarding_state(&snap2);
     let mut binding2 = binding_for_9604(WAN_IFINDEX, "reth0.80");
     let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
-    let out = drive_packet_9604(&mut sessions, &forwarding2, &mut binding2, &frame_rev, meta_rev);
+    let out = drive_packet_9604(
+        &mut sessions,
+        &forwarding2,
+        &mut binding2,
+        &frame_rev,
+        meta_rev,
+    );
     assert_eq!(out.hit, 1, "the SNAT reply must hit the reverse companion");
     assert_eq!(
         out.revoked, 1,
@@ -3828,9 +4134,7 @@ fn port_constraint_enforced_on_reverse_9604() {
     snapshot.generation = 7;
     snapshot.fib_generation = 9;
     snapshot.policies.clear();
-    snapshot
-        .policies
-        .push(port_scoped_permit_9604("443", ""));
+    snapshot.policies.push(port_scoped_permit_9604("443", ""));
     let forwarding = build_forwarding_state(&snapshot);
     let mut sessions = SessionTable::new();
     let fwd_key = flow_key_port_9604(DST, SPORT, DPORT2_9604);
@@ -3989,11 +4293,15 @@ fn nat64_v6_armed_decline_keeps_flow_and_stamps_stale_9604() {
     snapshot.policies.push(junos_ping_v6_permit_9604());
     let forwarding = build_forwarding_state(&snapshot);
     assert!(
-        forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMPV6),
+        forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMPV6),
         "9604 fixture must arm the v6 predicate, or the decline is vacuous"
     );
     assert!(
-        !forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        !forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
         "9604 fixture must leave the v4 predicate unarmed"
     );
     let mut sessions = SessionTable::new();
@@ -4006,7 +4314,11 @@ fn nat64_v6_armed_decline_keeps_flow_and_stamps_stale_9604() {
          have — it must decline, exactly as the forward path does (#8618 via \
          #9604)"
     );
-    assert_eq!(session_count(&sessions), 2, "the declined pair must survive");
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the declined pair must survive"
+    );
     assert_eq!(
         sessions.policy_revalidation_target(&fwd_key),
         PolicyRevalidationTarget::Stale(fwd_key.clone()),
@@ -4018,7 +4330,11 @@ fn nat64_v6_armed_decline_keeps_flow_and_stamps_stale_9604() {
         "and the reverse half must still be stale, so the next packet re-derives"
     );
     let out2 = drive_nat64_icmp_reply_9604(&mut sessions, &forwarding);
-    assert_eq!((out2.hit, out2.revoked), (1, 0), "the re-derivation must decline again");
+    assert_eq!(
+        (out2.hit, out2.revoked),
+        (1, 0),
+        "the re-derivation must decline again"
+    );
     assert_eq!(session_count(&sessions), 2);
     assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
 }
@@ -4037,11 +4353,15 @@ fn nat64_v4_armed_nonpermit_revokes_on_reverse_9604() {
     snapshot.policies.push(junos_ping_permit());
     let forwarding = build_forwarding_state(&snapshot);
     assert!(
-        forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
         "9604 fixture must arm the v4 predicate"
     );
     assert!(
-        !forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMPV6),
+        !forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMPV6),
         "9604 fixture must leave the v6 predicate unarmed, or the walk never runs"
     );
     let mut sessions = SessionTable::new();
@@ -4080,8 +4400,7 @@ fn install_synced_pair_9604(sessions: &mut SessionTable) -> (SessionKey, Session
         ),
         "9604 fixture must import the forward half"
     );
-    let mut rev_metadata =
-        reverse_metadata_for_9604(TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID);
+    let mut rev_metadata = reverse_metadata_for_9604(TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID);
     rev_metadata.policy_id = 0;
     assert!(
         sessions.upsert_synced(
@@ -4114,7 +4433,10 @@ fn peer_synced_pair_reverse_triggered_deny_revokes_9604() {
     let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
     let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
     let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
-    assert_eq!(out.hit, 1, "the reply must hit the synced reverse companion");
+    assert_eq!(
+        out.hit, 1,
+        "the reply must hit the synced reverse companion"
+    );
     assert_eq!(
         out.revoked, 1,
         "the recorded pair lan -> wan is denied: an imported flow must revoke \
@@ -4170,7 +4492,10 @@ fn shared_promote_pair_reverse_triggered_deny_revokes_9604() {
     let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
     let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
     let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
-    assert_eq!(out.hit, 1, "the reply must hit the promoted reverse companion");
+    assert_eq!(
+        out.hit, 1,
+        "the reply must hit the promoted reverse companion"
+    );
     assert_eq!(
         out.revoked, 1,
         "the recorded pair lan -> wan is denied: a promoted flow must revoke \
@@ -4238,7 +4563,10 @@ fn shared_promote_collision_kept_on_reverse_9604() {
     let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
     let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
     let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
-    assert_eq!(out.hit, 1, "the reply must hit the promoted reverse companion");
+    assert_eq!(
+        out.hit, 1,
+        "the reply must hit the promoted reverse companion"
+    );
     assert_eq!(
         out.revoked, 0,
         "the RECORDED pair lan -> wan is permitted: a promoted identity must \
@@ -4246,7 +4574,11 @@ fn shared_promote_collision_kept_on_reverse_9604() {
          zone. A non-zero count means the provenance table resolves \
          non-locally-authored identities (#9604)"
     );
-    assert_eq!(session_count(&sessions), 2, "the promoted pair must survive");
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the promoted pair must survive"
+    );
     assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
 }
 
@@ -4300,7 +4632,11 @@ fn recorded_zone_zero_declines_on_reverse_9604() {
          it must decline, not evaluate to default-deny and revoke (#9513 via \
          #9604)"
     );
-    assert_eq!(session_count(&sessions), 2, "the pair must survive the decline");
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the pair must survive the decline"
+    );
     assert_eq!(sessions.policy_revalidation_loud_declines(), 0);
 }
 /// Snapshots for the zone-move detector: generation G leaves `reth1.0` in
@@ -4338,7 +4674,9 @@ fn zone_move_snapshots_9604(live_zone: &str) -> (ForwardingState, ForwardingStat
 
 /// Drive a forward packet (LAN arrival) then a reverse packet (WAN arrival)
 /// across a zone move, asserting the G-transition stamps in between.
-fn drive_move_then_reverse_9604(live_zone: &str) -> (SessionTable, SessionKey, SessionKey, ReverseOutcome) {
+fn drive_move_then_reverse_9604(
+    live_zone: &str,
+) -> (SessionTable, SessionKey, SessionKey, ReverseOutcome) {
     let (forwarding_g, forwarding_moved) = zone_move_snapshots_9604(live_zone);
     let mut sessions = SessionTable::new();
     let fwd_key = flow_key_to(DST);
@@ -4362,9 +4700,21 @@ fn drive_move_then_reverse_9604(live_zone: &str) -> (SessionTable, SessionKey, S
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta_fwd = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame_fwd.len() as u16);
-    let out_fwd = drive_packet_9604(&mut sessions, &forwarding_g, &mut binding_fwd, &frame_fwd, meta_fwd);
-    assert_eq!(out_fwd.hit, 1, "9604 move fixture: the forward packet must hit");
-    assert_eq!(out_fwd.revoked, 0, "9604 move fixture: G still permits lan -> wan");
+    let out_fwd = drive_packet_9604(
+        &mut sessions,
+        &forwarding_g,
+        &mut binding_fwd,
+        &frame_fwd,
+        meta_fwd,
+    );
+    assert_eq!(
+        out_fwd.hit, 1,
+        "9604 move fixture: the forward packet must hit"
+    );
+    assert_eq!(
+        out_fwd.revoked, 0,
+        "9604 move fixture: G still permits lan -> wan"
+    );
     assert_eq!(
         sessions.policy_revalidation_target(&fwd_key),
         PolicyRevalidationTarget::Fresh,
@@ -4378,7 +4728,13 @@ fn drive_move_then_reverse_9604(live_zone: &str) -> (SessionTable, SessionKey, S
     );
     let mut binding_rev = binding_for_9604(WAN_IFINDEX, "reth0.80");
     let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
-    let out = drive_packet_9604(&mut sessions, &forwarding_moved, &mut binding_rev, &frame_rev, meta_rev);
+    let out = drive_packet_9604(
+        &mut sessions,
+        &forwarding_moved,
+        &mut binding_rev,
+        &frame_rev,
+        meta_rev,
+    );
     (sessions, fwd_key, rev_key, out)
 }
 
@@ -4457,7 +4813,11 @@ fn trusted_zero_ifindex_declines_on_reverse_9604() {
          the judgment must decline, not evaluate a zero identity to \
          default-deny (#9513 via #9604)"
     );
-    assert_eq!(session_count(&sessions), 2, "the pair must survive the decline");
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the pair must survive the decline"
+    );
     assert_eq!(
         sessions.policy_revalidation_target(&fwd_key),
         PolicyRevalidationTarget::Stale(fwd_key.clone()),
@@ -4536,9 +4896,7 @@ fn port_scoped_permit_kept_on_reverse_9604() {
     snapshot.generation = 7;
     snapshot.fib_generation = 9;
     snapshot.policies.clear();
-    snapshot
-        .policies
-        .push(port_scoped_permit_9604("443", ""));
+    snapshot.policies.push(port_scoped_permit_9604("443", ""));
     let forwarding = build_forwarding_state(&snapshot);
     let mut sessions = SessionTable::new();
     let fwd_key = flow_key_to(DST);
@@ -4573,9 +4931,7 @@ fn source_port_scoped_permit_kept_on_reverse_9604() {
     snapshot.generation = 7;
     snapshot.fib_generation = 9;
     snapshot.policies.clear();
-    snapshot
-        .policies
-        .push(port_scoped_permit_9604("", "12345"));
+    snapshot.policies.push(port_scoped_permit_9604("", "12345"));
     let forwarding = build_forwarding_state(&snapshot);
     let mut sessions = SessionTable::new();
     let fwd_key = flow_key_to(DST);
@@ -4633,7 +4989,14 @@ fn snat_src_scoped_permit_kept_on_reverse_9604() {
         ..Default::default()
     });
     // Via the default route — see the deny cell: DST has no neighbor entry.
-    let syn = build_txn_tcp_syn_frame_v4(SRC, Ipv4Addr::new(8, 8, 8, 8), SPORT, DPORT, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let syn = build_txn_tcp_syn_frame_v4(
+        SRC,
+        Ipv4Addr::new(8, 8, 8, 8),
+        SPORT,
+        DPORT,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta_syn = txn_meta_v4(LAN_IFINDEX as u32, TCP_FLAG_SYN, syn.len() as u16);
     let out = admit_then_reverse_9604(
         snap.clone(),
@@ -4653,7 +5016,11 @@ fn snat_src_scoped_permit_kept_on_reverse_9604() {
          derivation. A non-zero count means the translated pool address was \
          judged as the source (#9604)"
     );
-    assert_eq!(session_count(&out.sessions), 2, "the SNAT pair must survive");
+    assert_eq!(
+        session_count(&out.sessions),
+        2,
+        "the SNAT pair must survive"
+    );
     assert_eq!(out.sessions.policy_revalidation_loud_declines(), 0);
 }
 
@@ -4699,7 +5066,11 @@ fn lone_reverse_companion_reaching_revalidation_is_declined_9604() {
          derivation must decline, not synthesize authority from swapped zones \
          (#9604)"
     );
-    assert_eq!(session_count(&sessions), 1, "the lone companion must survive");
+    assert_eq!(
+        session_count(&sessions),
+        1,
+        "the lone companion must survive"
+    );
     assert_eq!(
         sessions.policy_revalidation_target(&rev_key),
         PolicyRevalidationTarget::Stale(rev_key.clone()),
@@ -4727,7 +5098,10 @@ fn foreign_reverse_packet_neither_revokes_nor_stamps_9604() {
     let mut binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
     let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, LAN_IFINDEX);
     let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
-    assert_eq!(out.hit, 1, "the spoofed reply must still HIT the session entry");
+    assert_eq!(
+        out.hit, 1,
+        "the spoofed reply must still HIT the session entry"
+    );
     assert_eq!(
         out.foreign_drops, 1,
         "a reply arriving outside the flow's to-zone is FOREIGN and must drop \
@@ -4767,8 +5141,18 @@ fn same_generation_reverse_then_forward_kept_9604() {
     );
     let mut binding_rev = binding_for_9604(WAN_IFINDEX, "reth0.80");
     let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
-    let out_rev = drive_packet_9604(&mut sessions, &forwarding, &mut binding_rev, &frame_rev, meta_rev);
-    assert_eq!((out_rev.hit, out_rev.revoked), (1, 0), "the reverse packet must hit and keep");
+    let out_rev = drive_packet_9604(
+        &mut sessions,
+        &forwarding,
+        &mut binding_rev,
+        &frame_rev,
+        meta_rev,
+    );
+    assert_eq!(
+        (out_rev.hit, out_rev.revoked),
+        (1, 0),
+        "the reverse packet must hit and keep"
+    );
     assert_eq!(
         sessions.policy_revalidation_target(&rev_key),
         PolicyRevalidationTarget::Fresh,
@@ -4796,8 +5180,18 @@ fn same_generation_reverse_then_forward_kept_9604() {
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta_fwd = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame_fwd.len() as u16);
-    let out_fwd = drive_packet_9604(&mut sessions, &forwarding, &mut binding_fwd, &frame_fwd, meta_fwd);
-    assert_eq!((out_fwd.hit, out_fwd.revoked), (1, 0), "the forward packet must hit and keep");
+    let out_fwd = drive_packet_9604(
+        &mut sessions,
+        &forwarding,
+        &mut binding_fwd,
+        &frame_fwd,
+        meta_fwd,
+    );
+    assert_eq!(
+        (out_fwd.hit, out_fwd.revoked),
+        (1, 0),
+        "the forward packet must hit and keep"
+    );
     assert_eq!(
         sessions.policy_revalidation_target(&fwd_key),
         PolicyRevalidationTarget::Fresh,
@@ -4828,7 +5222,11 @@ fn reverse_re_derivation_records_no_hit_9604() {
     let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
     let (frame, meta) = reverse_tcp_frame_v4_9604(&rev_key, WAN_IFINDEX);
     let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
-    assert_eq!((out.hit, out.revoked), (1, 0), "the reverse packet must hit and keep");
+    assert_eq!(
+        (out.hit, out.revoked),
+        (1, 0),
+        "the reverse packet must hit and keep"
+    );
     let (rule_after, default_after) = policy_hit_counts_9385(&forwarding);
     assert_eq!(
         rule_after, rule_before,
@@ -4858,8 +5256,7 @@ fn reverse_re_derivation_records_no_hit_9604() {
 /// re-derivation, which judges the gen-8 snapshot.
 #[test]
 fn post_revoke_both_tuples_miss_and_drop_9604() {
-    let mut snap_permit =
-        inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal"));
+    let mut snap_permit = inbound_dnat_snapshot(wan_to_lan_permit(DNAT_REAL, "permit-internal"));
     snap_permit.generation = 7;
     snap_permit.fib_generation = 9;
     let forwarding_permit = build_forwarding_state(&snap_permit);
@@ -4944,8 +5341,18 @@ fn post_revoke_both_tuples_miss_and_drop_9604() {
     // (`ConfigGenerationMismatch`) before any lookup. No re-stamp is needed
     // anyway — the reverse tuple cache-misses (its 5-tuple differs from the
     // seeded forward slot) straight into the session re-derivation.
-    let kill = drive_packet_9604(&mut sessions, &forwarding_narrowed8, &mut binding, &frame_rev, meta_rev);
-    assert_eq!((kill.hit, kill.revoked, kill.tx), (1, 1, 0), "the narrowed drive must hit and revoke");
+    let kill = drive_packet_9604(
+        &mut sessions,
+        &forwarding_narrowed8,
+        &mut binding,
+        &frame_rev,
+        meta_rev,
+    );
+    assert_eq!(
+        (kill.hit, kill.revoked, kill.tx),
+        (1, 1, 0),
+        "the narrowed drive must hit and revoke"
+    );
     assert_slots_gone_9604(&sessions, &fwd_key, &rev_key);
     // The txn driver runs one descriptor per pass WITHOUT the worker loop's
     // end-of-poll drain (`drain_revoked_flow_cache_keys`), so the collected
@@ -4970,7 +5377,10 @@ fn post_revoke_both_tuples_miss_and_drop_9604() {
         evict_keys.len()
     );
     for key in &evict_keys {
-        binding.flow.flow_cache.invalidate_slot(key, binding.ifindex);
+        binding
+            .flow
+            .flow_cache
+            .invalidate_slot(key, binding.ifindex);
     }
     assert_eq!(
         txn_flow_cache_entries(&binding),
@@ -4982,15 +5392,29 @@ fn post_revoke_both_tuples_miss_and_drop_9604() {
     // evict would still match its gen-7 stamp and forward off a stale
     // descriptor with no session row (#6457). Generation invalidation cannot
     // save it — the stamps agree — so only EXPLICIT eviction passes this.
-    let again_rev = drive_packet_9604(&mut sessions, &forwarding_narrowed8, &mut binding, &frame_rev, meta_rev);
+    let again_rev = drive_packet_9604(
+        &mut sessions,
+        &forwarding_narrowed8,
+        &mut binding,
+        &frame_rev,
+        meta_rev,
+    );
     assert_eq!(
-        (again_rev.hit, again_rev.tx), (0, 0),
+        (again_rev.hit, again_rev.tx),
+        (0, 0),
         "the revoked reverse tuple must miss and drop, not forward off a \
          surviving cache slot"
     );
-    let again_fwd = drive_packet_9604(&mut sessions, &forwarding_narrowed8, &mut binding, &ack, meta_ack);
+    let again_fwd = drive_packet_9604(
+        &mut sessions,
+        &forwarding_narrowed8,
+        &mut binding,
+        &ack,
+        meta_ack,
+    );
     assert_eq!(
-        (again_fwd.hit, again_fwd.tx), (0, 0),
+        (again_fwd.hit, again_fwd.tx),
+        (0, 0),
         "the revoked forward tuple must miss and drop, not forward off a \
          surviving cache slot"
     );
@@ -5054,14 +5478,27 @@ fn ha_state_fabric_admit_9604(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
                 lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
             },
         ),
-        (2, HAGroupRuntime { active: false, ..Default::default() }),
+        (
+            2,
+            HAGroupRuntime {
+                active: false,
+                ..Default::default()
+            },
+        ),
     ])
 }
 
 /// The #7770 stamp shape, claiming `zone`: peer fabric MAC as dst (V1a),
 /// magic + zone id as src.
 fn fabric_admit_frame_9604(tcp_flags: u8) -> (Vec<u8>, UserspaceDpMeta) {
-    let mut frame = build_txn_tcp_syn_frame_v4(SRC, FABRIC_WAN_PEER_9604, SPORT, DPORT, tcp_flags, TEST_FABRIC_MAC);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        FABRIC_WAN_PEER_9604,
+        SPORT,
+        DPORT,
+        tcp_flags,
+        TEST_FABRIC_MAC,
+    );
     stamp_fabric_zone_9604(&mut frame, TEST_LAN_ZONE_ID);
     let meta = txn_meta_v4(FABRIC_PARENT_9604 as u32, tcp_flags, frame.len() as u16);
     (frame, meta)
@@ -5107,7 +5544,15 @@ fn admit_fabric_flow_9604() -> FabricAdmitOutcome {
         2,
         "phase 1 SYN must install the forward + reverse pair"
     );
-    let (batch_ack, dbg_ack) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame_ack, meta_ack, true);
+    let (batch_ack, dbg_ack) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame_ack,
+        meta_ack,
+        true,
+    );
     assert_eq!(
         (
             dbg_ack.session_hit,
@@ -5138,8 +5583,7 @@ fn admit_fabric_flow_9604() -> FabricAdmitOutcome {
     });
     let fwd_key = fwd_key.expect("admit must install a forward entry");
     let rev_key = rev_key.expect("admit must install a reverse companion");
-    let (fwd_metadata, fwd_origin) =
-        fwd_shape.expect("admit must install a forward entry");
+    let (fwd_metadata, fwd_origin) = fwd_shape.expect("admit must install a forward entry");
     assert_eq!(
         fwd_origin,
         SessionOrigin::ForwardFlow,
@@ -5224,7 +5668,10 @@ fn assert_fabric_evicted_9604(
         evict_keys.len()
     );
     for key in &evict_keys {
-        binding.flow.flow_cache.invalidate_slot(key, binding.ifindex);
+        binding
+            .flow
+            .flow_cache
+            .invalidate_slot(key, binding.ifindex);
     }
     assert_eq!(
         txn_flow_cache_entries(binding),
@@ -5258,8 +5705,7 @@ fn assert_fabric_evicted_9604(
 fn fabric_ingress_forward_flow_reverse_triggered_deny_revokes_both_halves_9604() {
     let mut outcome = admit_fabric_flow_9604();
     let forwarding = build_forwarding_state(&fabric_narrowed_snapshot_9604());
-    let (frame_rev, meta_rev) =
-        reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
+    let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
     let out = drive_packet_9604(
         &mut outcome.sessions,
         &forwarding,
@@ -5290,8 +5736,7 @@ fn fabric_ingress_forward_flow_reverse_triggered_deny_revokes_both_halves_9604()
 fn fabric_ingress_forward_flow_reverse_triggered_reject_revokes_both_halves_9604() {
     let mut outcome = admit_fabric_flow_9604();
     let forwarding = build_forwarding_state(&fabric_reject_snapshot_9604());
-    let (frame_rev, meta_rev) =
-        reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
+    let (frame_rev, meta_rev) = reverse_tcp_frame_v4_9604(&outcome.rev_key, WAN_IFINDEX);
     let out = drive_packet_9604(
         &mut outcome.sessions,
         &forwarding,
@@ -5339,20 +5784,30 @@ fn fabric_ingress_forward_flow_permit_kept_on_reverse_9604() {
          on its reverse packet"
     );
     assert!(
-        outcome.sessions.entry_with_origin(&outcome.fwd_key).is_some(),
+        outcome
+            .sessions
+            .entry_with_origin(&outcome.fwd_key)
+            .is_some(),
         "the forward half must survive a permit judgment"
     );
     assert!(
-        outcome.sessions.entry_with_origin(&outcome.rev_key).is_some(),
+        outcome
+            .sessions
+            .entry_with_origin(&outcome.rev_key)
+            .is_some(),
         "the reverse half must survive a permit judgment"
     );
     assert_eq!(
-        outcome.sessions.policy_revalidation_target(&outcome.rev_key),
+        outcome
+            .sessions
+            .policy_revalidation_target(&outcome.rev_key),
         PolicyRevalidationTarget::Fresh,
         "the reverse permit stamps the hit half"
     );
     assert_eq!(
-        outcome.sessions.policy_revalidation_target(&outcome.fwd_key),
+        outcome
+            .sessions
+            .policy_revalidation_target(&outcome.fwd_key),
         PolicyRevalidationTarget::Stale(outcome.fwd_key.clone()),
         "hit-only stamping writes NO forward stamp from the reverse path"
     );
@@ -5395,7 +5850,14 @@ fn a_revoked_session_bumps_the_release_visible_live_atomic_10021() {
         0,
         "a fresh binding starts at 0, so the increment below comes from this poll"
     );
-    let frame = build_txn_tcp_syn_frame_v4(SRC, DST, SPORT, DPORT, TCP_ACK, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -5517,17 +5979,22 @@ const DMZ_DST_10507: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 5);
 /// install. Stored only for lookup; packet-time re-resolution (standby HA
 /// + fabric) produces the FabricRedirect M2 judges.
 fn syncimport_wan_decision_10507() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: WAN_IFINDEX,
-        tx_ifindex: WAN_IFINDEX,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 80,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: WAN_IFINDEX,
+            tx_ifindex: WAN_IFINDEX,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// #10507 Cell 1 helper: recorded peer identity — lan -> wan, no
@@ -5542,17 +6009,22 @@ fn syncimport_recorded_metadata_10507() -> SessionMetadata {
 /// #10507 Cell 1 helper: live DMZ resolution after promotion (valid egress
 /// + neighbor, so an unwired fence would FORWARD here — tx RED).
 fn live_dmz_decision_10507() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: DMZ_IFINDEX,
-        tx_ifindex: DMZ_IFINDEX,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
-        neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0x05]),
-        src_mac: Some(REVOCATION_DMZ_MAC),
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: DMZ_IFINDEX,
+            tx_ifindex: DMZ_IFINDEX,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0x05]),
+            src_mac: Some(REVOCATION_DMZ_MAC),
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// #10507 Cell 1 helper: live metadata after promotion — lan -> dmz via
@@ -5598,12 +6070,22 @@ fn recorded_permit_revoked_after_activation_refresh_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the standby session");
     assert_eq!(
@@ -5611,7 +6093,8 @@ fn recorded_permit_revoked_after_activation_refresh_10507() {
         "phase 1: recorded lan -> wan Permits, nothing revoked"
     );
     assert_eq!(
-        binding.scratch.scratch_forwards.len(), 1,
+        binding.scratch.scratch_forwards.len(),
+        1,
         "phase 1: standby must punt to fabric (observable non-local)"
     );
     // NOTE: no `tx == 0` assert here — `tx` counts the fabric punt TX once
@@ -5653,12 +6136,22 @@ fn recorded_permit_revoked_after_activation_refresh_10507() {
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+        &mut binding3,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame3,
+        meta3,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "phase 3 must HIT the promoted session");
     assert_eq!(
@@ -5666,7 +6159,11 @@ fn recorded_permit_revoked_after_activation_refresh_10507() {
         "phase 3: live lan -> dmz Deny must revoke the recorded Permit (#10507)"
     );
     assert_eq!(dbg3.tx, 0, "phase 3: the revoked packet must not forward");
-    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "revocation must tear down the session"
+    );
 }
 
 /// #10507 Cell 1 (forward, hit-driven promotion): same poll-path recorded
@@ -5696,12 +6193,22 @@ fn recorded_permit_revoked_on_promoting_packet_without_refresh_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT");
     assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
@@ -5718,12 +6225,22 @@ fn recorded_permit_revoked_on_promoting_packet_without_refresh_10507() {
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+        &mut binding3,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame3,
+        meta3,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "promoting packet must HIT");
     assert_eq!(
@@ -5731,7 +6248,11 @@ fn recorded_permit_revoked_on_promoting_packet_without_refresh_10507() {
         "hit-driven promotion without Refresh must revoke on live Deny (#10507)"
     );
     assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
-    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "revocation must tear down the session"
+    );
 }
 
 /// #10507 Cell 1 ICMP helper: an ICMP flow key toward the DMZ divergence
@@ -5845,7 +6366,9 @@ fn recorded_icmp_revoked_when_type_armed_after_promotion_10507() {
         "fixture must import the standby ICMP session"
     );
     assert!(
-        !forwarding7.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        !forwarding7
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
         "fixture: generation 7 must leave the ICMP predicate unarmed, or \
          phase 1 declines instead of permitting"
     );
@@ -5854,14 +6377,22 @@ fn recorded_icmp_revoked_when_type_armed_after_promotion_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_icmp_echo_frame_v4(
-        SRC, DMZ_DST_10507, 64,
+        SRC,
+        DMZ_DST_10507,
+        64,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding7, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding7,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the standby session");
     assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
@@ -5876,7 +6407,9 @@ fn recorded_icmp_revoked_when_type_armed_after_promotion_10507() {
     // below proves it fails closed instead of Declining.
     let forwarding8 = forwarding_with_fabric_dmz_armed_10507();
     assert!(
-        forwarding8.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        forwarding8
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
         "fixture: generation 8 must arm the ICMP predicate"
     );
     sessions.set_policy_revalidation_gen(8);
@@ -5884,14 +6417,22 @@ fn recorded_icmp_revoked_when_type_armed_after_promotion_10507() {
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_icmp_echo_frame_v4(
-        SRC, DMZ_DST_10507, 64,
+        SRC,
+        DMZ_DST_10507,
+        64,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let mut meta3 = txn_meta_v4(LAN_IFINDEX as u32, 0, frame3.len() as u16);
     meta3.protocol = PROTO_ICMP;
     meta3.payload_offset = 42;
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut binding3, &mut sessions, &forwarding8, &ha_state, &frame3, meta3, true,
+        &mut binding3,
+        &mut sessions,
+        &forwarding8,
+        &ha_state,
+        &frame3,
+        meta3,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "promoting packet must HIT");
     assert_eq!(
@@ -5899,7 +6440,11 @@ fn recorded_icmp_revoked_when_type_armed_after_promotion_10507() {
         "recorded + now-local + type-armed must revoke, never Decline (#10507)"
     );
     assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
-    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "revocation must tear down the session"
+    );
 }
 
 /// #10507 Cell 6 (reverse-first, resolvable companion): the forward half
@@ -5924,8 +6469,7 @@ fn recorded_icmp_revoked_when_type_armed_after_promotion_10507() {
 fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
     let forwarding = forwarding_with_fabric_dmz_10507();
     let fwd_key = flow_key_to(DMZ_DST_10507);
-    let rev_key =
-        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
     assert!(
@@ -5943,17 +6487,22 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
     // Reverse half: stored MissingNeighbor LAN (no .102 neighbor in this
     // snapshot — still would-forward for gate intent), live DMZ ingress
     // for Owner authority on the live DMZ arrival (see doc above).
-    let rev_decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::MissingNeighbor,
-        local_ifindex: 0,
-        egress_ifindex: LAN_IFINDEX,
-        tx_ifindex: LAN_IFINDEX,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let rev_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::MissingNeighbor,
+            local_ifindex: 0,
+            egress_ifindex: LAN_IFINDEX,
+            tx_ifindex: LAN_IFINDEX,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut rev_metadata = metadata(true);
     rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
     rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
@@ -5979,12 +6528,22 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the forward half");
     assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
@@ -6001,25 +6560,38 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
     let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
     dmz_binding.interface = Arc::<str>::from("reth2.0");
     let rev_frame = build_txn_tcp_syn_frame_v4(
-        DMZ_DST_10507, SRC, DPORT, SPORT, TCP_ACK,
+        DMZ_DST_10507,
+        SRC,
+        DPORT,
+        SPORT,
+        TCP_ACK,
         REVOCATION_DMZ_MAC,
     );
     let rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, TCP_ACK, rev_frame.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut dmz_binding, &mut sessions, &forwarding, &ha_state, &rev_frame, rev_meta, true,
+        &mut dmz_binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &rev_frame,
+        rev_meta,
+        true,
     );
-    assert_eq!(dbg3.session_hit, 1, "the reverse reply must HIT the session");
+    assert_eq!(
+        dbg3.session_hit, 1,
+        "the reverse reply must HIT the session"
+    );
     assert_eq!(
         dbg3.policy_revoked_sessions, 1,
         "reverse-first with live-Deny forward must revoke the pair (#10507)"
     );
     assert_eq!(dbg3.tx, 0, "the revoked reply must not forward");
     assert_eq!(
-        session_count(&sessions), 0,
+        session_count(&sessions),
+        0,
         "pair-aware teardown must delete forward AND reverse"
     );
 }
-
 
 /// #10507 Cell 6 (reverse ICMP): recorded forward + now-local reverse +
 /// type-armed forward protocol must pair-fail-closed before the reverse
@@ -6034,8 +6606,7 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
 fn reverse_icmp_recorded_forward_pair_fails_closed_10507() {
     let forwarding7 = forwarding_with_fabric_dmz_10507();
     let fwd_key = icmp_flow_key_to_10507(DMZ_DST_10507);
-    let rev_key =
-        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
     assert!(
@@ -6050,17 +6621,22 @@ fn reverse_icmp_recorded_forward_pair_fails_closed_10507() {
         ),
         "fixture must import the forward ICMP half"
     );
-    let rev_decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::MissingNeighbor,
-        local_ifindex: 0,
-        egress_ifindex: LAN_IFINDEX,
-        tx_ifindex: LAN_IFINDEX,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let rev_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::MissingNeighbor,
+            local_ifindex: 0,
+            egress_ifindex: LAN_IFINDEX,
+            tx_ifindex: LAN_IFINDEX,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut rev_metadata = metadata(true);
     rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
     rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
@@ -6084,14 +6660,22 @@ fn reverse_icmp_recorded_forward_pair_fails_closed_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_icmp_echo_frame_v4(
-        SRC, DMZ_DST_10507, 64,
+        SRC,
+        DMZ_DST_10507,
+        64,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding7, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding7,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the forward half");
     assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
@@ -6109,15 +6693,18 @@ fn reverse_icmp_recorded_forward_pair_fails_closed_10507() {
     let ha_state = txn_ha_state();
     let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
     dmz_binding.interface = Arc::<str>::from("reth2.0");
-    let rev_frame = build_icmp_echo_frame_v4(
-        DMZ_DST_10507, SRC, 64,
-        REVOCATION_DMZ_MAC,
-    );
+    let rev_frame = build_icmp_echo_frame_v4(DMZ_DST_10507, SRC, 64, REVOCATION_DMZ_MAC);
     let mut rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, 0, rev_frame.len() as u16);
     rev_meta.protocol = PROTO_ICMP;
     rev_meta.payload_offset = 42;
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut dmz_binding, &mut sessions, &forwarding8, &ha_state, &rev_frame, rev_meta, true,
+        &mut dmz_binding,
+        &mut sessions,
+        &forwarding8,
+        &ha_state,
+        &rev_frame,
+        rev_meta,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "the reverse reply must HIT");
     assert_eq!(
@@ -6126,7 +6713,8 @@ fn reverse_icmp_recorded_forward_pair_fails_closed_10507() {
     );
     assert_eq!(dbg3.tx, 0, "the revoked reply must not forward");
     assert_eq!(
-        session_count(&sessions), 0,
+        session_count(&sessions),
+        0,
         "pair fail-closed must delete forward AND reverse"
     );
 }
@@ -6170,12 +6758,22 @@ fn unknown_owner_peer_synced_fenced_before_refresh_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT");
     assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
@@ -6190,12 +6788,22 @@ fn unknown_owner_peer_synced_fenced_before_refresh_10507() {
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+        &mut binding3,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame3,
+        meta3,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "promoting packet must HIT");
     assert_eq!(
@@ -6203,7 +6811,11 @@ fn unknown_owner_peer_synced_fenced_before_refresh_10507() {
         "unknown-owner peer-synced must be fenced before Refresh (#10507)"
     );
     assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
-    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "revocation must tear down the session"
+    );
 }
 
 /// #10507 Cell 9 GUARD (no RED expected): a locally-owned live Permit
@@ -6242,12 +6854,22 @@ fn unrelated_activation_keeps_owned_permits_stable_10507() {
             "fixture must install the RG-{owner} flow"
         );
         let frame = build_txn_tcp_syn_frame_v4(
-            SRC, dst98, sport, DPORT, TCP_ACK,
+            SRC,
+            dst98,
+            sport,
+            DPORT,
+            TCP_ACK,
             crate::afxdp::tests_support::TEST_LAN_MAC,
         );
         let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
         let (_batch, dbg) = txn_run_descriptor_checked(
-            &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
         );
         assert_eq!(dbg.session_hit, 1, "RG-{owner} setup must HIT");
         assert_eq!(dbg.policy_revoked_sessions, 0, "RG-{owner} setup Permits");
@@ -6265,12 +6887,22 @@ fn unrelated_activation_keeps_owned_permits_stable_10507() {
     binding2.interface = Arc::<str>::from("reth1.0");
     for (k, sport) in &keys {
         let frame = build_txn_tcp_syn_frame_v4(
-            SRC, dst98, *sport, DPORT, TCP_ACK,
+            SRC,
+            dst98,
+            *sport,
+            DPORT,
+            TCP_ACK,
             crate::afxdp::tests_support::TEST_LAN_MAC,
         );
         let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
         let (_batch, dbg) = txn_run_descriptor_checked(
-            &mut binding2, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+            &mut binding2,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
         );
         assert_eq!(dbg.session_hit, 1, "re-judge must HIT ({k:?})");
         assert_eq!(
@@ -6317,17 +6949,28 @@ fn seed_recorded_permit_revoked_after_activation_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the seed");
     assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
     assert_eq!(
-        binding.scratch.scratch_forwards.len(), 1,
+        binding.scratch.scratch_forwards.len(),
+        1,
         "phase 1: seed must punt (observable non-local)"
     );
     assert_eq!(
@@ -6348,12 +6991,22 @@ fn seed_recorded_permit_revoked_after_activation_10507() {
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+        &mut binding3,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame3,
+        meta3,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "phase 3 must HIT");
     assert_eq!(
@@ -6361,7 +7014,11 @@ fn seed_recorded_permit_revoked_after_activation_10507() {
         "seed transport Permit must not authorize local forwarding (#10507)"
     );
     assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
-    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "revocation must tear down the session"
+    );
 }
 
 /// #10507 shared helper: the NoRoute snapshot — same generation 7, but
@@ -6414,8 +7071,7 @@ fn forwarding_noroute_10507() -> ForwardingState {
 fn reverse_unresolvable_forward_fails_closed_10507() {
     let forwarding = forwarding_with_fabric_dmz_10507();
     let fwd_key = flow_key_to(DMZ_DST_10507);
-    let rev_key =
-        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
     assert!(
@@ -6430,17 +7086,22 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
         ),
         "fixture must import the forward half"
     );
-    let rev_decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::MissingNeighbor,
-        local_ifindex: 0,
-        egress_ifindex: LAN_IFINDEX,
-        tx_ifindex: LAN_IFINDEX,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let rev_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::MissingNeighbor,
+            local_ifindex: 0,
+            egress_ifindex: LAN_IFINDEX,
+            tx_ifindex: LAN_IFINDEX,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut rev_metadata = metadata(true);
     rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
     rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
@@ -6463,12 +7124,22 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the forward half");
     assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
@@ -6479,7 +7150,11 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
     );
     let forwarding_nr = forwarding_noroute_10507();
     assert_eq!(
-        crate::afxdp::forwarding::lookup_forwarding_resolution(&forwarding_nr, IpAddr::V4(DMZ_DST_10507)).disposition,
+        crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding_nr,
+            IpAddr::V4(DMZ_DST_10507)
+        )
+        .disposition,
         ForwardingDisposition::NoRoute,
         "fixture: forward live must be NoRoute (unresolvable companion)"
     );
@@ -6487,12 +7162,22 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
     let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
     dmz_binding.interface = Arc::<str>::from("reth2.0");
     let rev_frame = build_txn_tcp_syn_frame_v4(
-        DMZ_DST_10507, SRC, DPORT, SPORT, TCP_ACK,
+        DMZ_DST_10507,
+        SRC,
+        DPORT,
+        SPORT,
+        TCP_ACK,
         REVOCATION_DMZ_MAC,
     );
     let rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, TCP_ACK, rev_frame.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut dmz_binding, &mut sessions, &forwarding_nr, &ha_state, &rev_frame, rev_meta, true,
+        &mut dmz_binding,
+        &mut sessions,
+        &forwarding_nr,
+        &ha_state,
+        &rev_frame,
+        rev_meta,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "the reverse reply must HIT");
     assert_eq!(
@@ -6501,7 +7186,8 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
     );
     assert_eq!(dbg3.tx, 0, "the revoked reply must not forward");
     assert_eq!(
-        session_count(&sessions), 0,
+        session_count(&sessions),
+        0,
         "fail-closed must delete forward AND reverse"
     );
 }
@@ -6539,17 +7225,28 @@ fn recorded_nonlocal_noroute_retained_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT");
     assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
     assert_eq!(
-        binding.scratch.scratch_forwards.len(), 1,
+        binding.scratch.scratch_forwards.len(),
+        1,
         "phase 1: seed must punt (observable non-local)"
     );
     assert_eq!(
@@ -6559,7 +7256,11 @@ fn recorded_nonlocal_noroute_retained_10507() {
     );
     let forwarding_nr = forwarding_noroute_10507();
     assert_eq!(
-        crate::afxdp::forwarding::lookup_forwarding_resolution(&forwarding_nr, IpAddr::V4(DMZ_DST_10507)).disposition,
+        crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding_nr,
+            IpAddr::V4(DMZ_DST_10507)
+        )
+        .disposition,
         ForwardingDisposition::NoRoute,
         "fixture: live must be NoRoute (non-local retention)"
     );
@@ -6567,12 +7268,22 @@ fn recorded_nonlocal_noroute_retained_10507() {
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut binding3, &mut sessions, &forwarding_nr, &ha_state, &frame3, meta3, true,
+        &mut binding3,
+        &mut sessions,
+        &forwarding_nr,
+        &ha_state,
+        &frame3,
+        meta3,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "the NoRoute packet must HIT");
     assert_eq!(
@@ -6649,20 +7360,37 @@ fn reimported_row_judges_live_egress_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
     );
-    assert_eq!(dbg.session_hit, 1, "first packet must HIT the reimported row");
+    assert_eq!(
+        dbg.session_hit, 1,
+        "first packet must HIT the reimported row"
+    );
     assert_eq!(
         dbg.policy_revoked_sessions, 1,
         "reimported row must judge live egress (Deny → revoke, #10507)"
     );
     assert_eq!(dbg.tx, 0, "the revoked packet must not forward");
-    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "revocation must tear down the session"
+    );
 }
 
 /// #10507 Cell 8d (recorded → materialize → live): worker A earns a real
@@ -6704,15 +7432,28 @@ fn materialized_recorded_row_judges_live_10507() {
     let mut binding_a = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding_a.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding_a, &mut sessions_a, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding_a,
+        &mut sessions_a,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "worker A must HIT");
-    assert_eq!(dbg1.policy_revoked_sessions, 0, "worker A Permits (recorded)");
+    assert_eq!(
+        dbg1.policy_revoked_sessions, 0,
+        "worker A Permits (recorded)"
+    );
     assert_eq!(
         sessions_a.policy_revalidation_kind(&key),
         crate::session::PolicyRevalidationKind::RecordedEgress,
@@ -6754,12 +7495,22 @@ fn materialized_recorded_row_judges_live_10507() {
     let mut binding_b = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding_b.interface = Arc::<str>::from("reth1.0");
     let frame_b = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta_b = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame_b.len() as u16);
     let (_batch_b, dbg_b) = txn_run_descriptor_checked(
-        &mut binding_b, &mut sessions_b, &forwarding, &ha_state, &frame_b, meta_b, true,
+        &mut binding_b,
+        &mut sessions_b,
+        &forwarding,
+        &ha_state,
+        &frame_b,
+        meta_b,
+        true,
     );
     assert_eq!(dbg_b.session_hit, 1, "worker B first packet must HIT");
     assert_eq!(
@@ -6767,7 +7518,11 @@ fn materialized_recorded_row_judges_live_10507() {
         "materialized row must judge live egress (Deny → revoke, #10507)"
     );
     assert_eq!(dbg_b.tx, 0, "the revoked packet must not forward");
-    assert_eq!(session_count(&sessions_b), 0, "revocation must tear down the session");
+    assert_eq!(
+        session_count(&sessions_b),
+        0,
+        "revocation must tear down the session"
+    );
 }
 
 /// #10507 Cell 4 (lease expiry → renewal, no active edge, no commands):
@@ -6818,17 +7573,31 @@ fn lease_renewal_forces_live_policy_without_command_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_expired, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_expired,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "expired-lease standby must HIT");
-    assert_eq!(dbg1.policy_revoked_sessions, 0, "recorded Permit, nothing revoked");
     assert_eq!(
-        binding.scratch.scratch_forwards.len(), 1,
+        dbg1.policy_revoked_sessions, 0,
+        "recorded Permit, nothing revoked"
+    );
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
         "expired lease must punt (standby behavior without an active edge)"
     );
     assert_eq!(
@@ -6843,12 +7612,22 @@ fn lease_renewal_forces_live_policy_without_command_10507() {
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+        &mut binding3,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame3,
+        meta3,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "first post-renewal packet must HIT");
     assert_eq!(
@@ -6856,7 +7635,11 @@ fn lease_renewal_forces_live_policy_without_command_10507() {
         "renewal with no command must still revoke on live Deny (#10507)"
     );
     assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
-    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "revocation must tear down the session"
+    );
 }
 
 /// #10507 Cell 5a (command-driven demote → standby Permit → re-promote
@@ -6912,24 +7695,40 @@ fn demote_standby_permit_repromote_revokes_10507() {
         &mut cancelled,
         &mut cancelled_seen,
     );
-    let (_, _, demoted_origin) = sessions.entry_with_origin(&key).expect("demoted row must exist");
+    let (_, _, demoted_origin) = sessions
+        .entry_with_origin(&key)
+        .expect("demoted row must exist");
     assert_eq!(
-        demoted_origin, SessionOrigin::SyncImport,
+        demoted_origin,
+        SessionOrigin::SyncImport,
         "demote must convert local ForwardFlow to peer SyncImport"
     );
     // Standby recorded Permit through poll (RG 1 inactive → FabricRedirect).
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_demoted, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_demoted,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "standby must HIT after demote");
-    assert_eq!(dbg1.policy_revoked_sessions, 0, "standby Permits (recorded)");
+    assert_eq!(
+        dbg1.policy_revoked_sessions, 0,
+        "standby Permits (recorded)"
+    );
     assert_eq!(
         sessions.policy_revalidation_kind(&key),
         crate::session::PolicyRevalidationKind::RecordedEgress,
@@ -6956,12 +7755,22 @@ fn demote_standby_permit_repromote_revokes_10507() {
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+        &mut binding3,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame3,
+        meta3,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "promotion packet must HIT");
     assert_eq!(
@@ -6969,7 +7778,11 @@ fn demote_standby_permit_repromote_revokes_10507() {
         "re-promote must revoke on live Deny (fence authoritative, #10507)"
     );
     assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
-    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "revocation must tear down the session"
+    );
 }
 
 /// #10507 Cell 5b GUARD (HAInactive skip preserves kind, no RED — a
@@ -7005,12 +7818,22 @@ fn refresh_skips_hainactive_preserving_recorded_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT");
     assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits");
@@ -7114,20 +7937,37 @@ fn refresh_skips_hainactive_preserving_recorded_10507() {
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut binding3, &mut sessions, &forwarding_nofab_dmz, &ha_standby, &frame3, meta3, true,
+        &mut binding3,
+        &mut sessions,
+        &forwarding_nofab_dmz,
+        &ha_standby,
+        &frame3,
+        meta3,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "skipped HAInactive packet must HIT");
     assert_eq!(
         dbg3.policy_revoked_sessions, 0,
         "skipped HAInactive must coast (retention, never revoke)"
     );
-    assert_eq!(dbg3.tx, 0, "HAInactive drops (no local forward from stale Recorded)");
-    assert_eq!(session_count(&sessions), 1, "the skipped session must survive");
+    assert_eq!(
+        dbg3.tx, 0,
+        "HAInactive drops (no local forward from stale Recorded)"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        1,
+        "the skipped session must survive"
+    );
     assert_eq!(
         sessions.policy_revalidation_kind(&key),
         crate::session::PolicyRevalidationKind::RecordedEgress,
@@ -7177,15 +8017,28 @@ fn worker_local_import_backlog_flap_fenced_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT");
-    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits (recorded)");
+    assert_eq!(
+        dbg1.policy_revoked_sessions, 0,
+        "phase 1 Permits (recorded)"
+    );
     assert_eq!(
         sessions.policy_revalidation_kind(&key),
         crate::session::PolicyRevalidationKind::RecordedEgress,
@@ -7201,9 +8054,7 @@ fn worker_local_import_backlog_flap_fenced_10507() {
                 owner_rgs: vec![999],
             });
         }
-        q.push_back(crate::afxdp::WorkerCommand::RefreshOwnerRGS {
-            owner_rgs: vec![1],
-        });
+        q.push_back(crate::afxdp::WorkerCommand::RefreshOwnerRGS { owner_rgs: vec![1] });
     }
     let neighbors = std::sync::Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
     let mut scratch = std::collections::VecDeque::new();
@@ -7224,7 +8075,8 @@ fn worker_local_import_backlog_flap_fenced_10507() {
         "after one slice 513 commands (incl. Refresh) must remain queued"
     );
     assert_eq!(
-        commands.lock().expect("commands lock").len(), 513,
+        commands.lock().expect("commands lock").len(),
+        513,
         "slice 1 must drain exactly 256 (769 - 256 = 513 remain)"
     );
     // Between-slices packet (active runtime, live DMZ, Refresh still
@@ -7233,12 +8085,22 @@ fn worker_local_import_backlog_flap_fenced_10507() {
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta3 = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame3.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut binding3, &mut sessions, &forwarding, &ha_state, &frame3, meta3, true,
+        &mut binding3,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame3,
+        meta3,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "between-slices packet must HIT");
     assert_eq!(
@@ -7246,7 +8108,11 @@ fn worker_local_import_backlog_flap_fenced_10507() {
         "backlog flap with 513 queued must still revoke on live Deny (#10507)"
     );
     assert_eq!(dbg3.tx, 0, "the revoked packet must not forward");
-    assert_eq!(session_count(&sessions), 0, "revocation must tear down the session");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "revocation must tear down the session"
+    );
 }
 
 /// #10507 reverse non-seed FabricRedirect retention (GUARD, broad branch):
@@ -7266,8 +8132,7 @@ fn worker_local_import_backlog_flap_fenced_10507() {
 fn reverse_syncimport_redirect_retained_without_stamp_10507() {
     let forwarding = forwarding_with_fabric_dmz_10507();
     let fwd_key = flow_key_to(DMZ_DST_10507);
-    let rev_key =
-        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
     assert!(
@@ -7282,17 +8147,22 @@ fn reverse_syncimport_redirect_retained_without_stamp_10507() {
         ),
         "fixture must import the forward half"
     );
-    let rev_decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::MissingNeighbor,
-        local_ifindex: 0,
-        egress_ifindex: LAN_IFINDEX,
-        tx_ifindex: LAN_IFINDEX,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let rev_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::MissingNeighbor,
+            local_ifindex: 0,
+            egress_ifindex: LAN_IFINDEX,
+            tx_ifindex: LAN_IFINDEX,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let mut rev_metadata = metadata(true);
     rev_metadata.ingress_zone = TEST_DMZ_ZONE_ID;
     rev_metadata.egress_zone = TEST_LAN_ZONE_ID;
@@ -7315,15 +8185,28 @@ fn reverse_syncimport_redirect_retained_without_stamp_10507() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let frame = build_txn_tcp_syn_frame_v4(
-        SRC, DMZ_DST_10507, SPORT, DPORT, TCP_ACK,
+        SRC,
+        DMZ_DST_10507,
+        SPORT,
+        DPORT,
+        TCP_ACK,
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
     let (_batch, dbg1) = txn_run_descriptor_checked(
-        &mut binding, &mut sessions, &forwarding, &ha_standby, &frame, meta, true,
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &frame,
+        meta,
+        true,
     );
     assert_eq!(dbg1.session_hit, 1, "phase 1 must HIT the forward half");
-    assert_eq!(dbg1.policy_revoked_sessions, 0, "phase 1 Permits (recorded)");
+    assert_eq!(
+        dbg1.policy_revoked_sessions, 0,
+        "phase 1 Permits (recorded)"
+    );
     assert_eq!(
         sessions.policy_revalidation_kind(&fwd_key),
         crate::session::PolicyRevalidationKind::RecordedEgress,
@@ -7335,19 +8218,33 @@ fn reverse_syncimport_redirect_retained_without_stamp_10507() {
     let mut dmz_binding = BindingWorker::new_for_mirror_test(0, 0, DMZ_IFINDEX, 0);
     dmz_binding.interface = Arc::<str>::from("reth2.0");
     let rev_frame = build_txn_tcp_syn_frame_v4(
-        DMZ_DST_10507, SRC, DPORT, SPORT, TCP_ACK,
+        DMZ_DST_10507,
+        SRC,
+        DPORT,
+        SPORT,
+        TCP_ACK,
         REVOCATION_DMZ_MAC,
     );
     let rev_meta = txn_meta_v4(DMZ_IFINDEX as u32, TCP_ACK, rev_frame.len() as u16);
     let (_batch3, dbg3) = txn_run_descriptor_checked(
-        &mut dmz_binding, &mut sessions, &forwarding, &ha_standby, &rev_frame, rev_meta, true,
+        &mut dmz_binding,
+        &mut sessions,
+        &forwarding,
+        &ha_standby,
+        &rev_frame,
+        rev_meta,
+        true,
     );
     assert_eq!(dbg3.session_hit, 1, "the reverse reply must HIT");
     assert_eq!(
         dbg3.policy_revoked_sessions, 0,
         "non-seed FabricRedirect retention must not revoke"
     );
-    assert_eq!(session_count(&sessions), 2, "both halves must survive retention");
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "both halves must survive retention"
+    );
     assert_eq!(
         sessions.policy_revalidation_kind(&fwd_key),
         crate::session::PolicyRevalidationKind::RecordedEgress,
@@ -7369,17 +8266,22 @@ fn reverse_syncimport_redirect_retained_without_stamp_10507() {
 /// M2 must fail closed (force cold + revoke on Decline) even for a Fresh
 /// Live stamp — never coast, never Decline-and-stand.
 fn noegress_forward_decision_10507() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: 0,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 0,
+            tx_ifindex: 0,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// #10507 rule-4 M2-direct pin: a Fresh Live stamp cannot authorize
@@ -7451,7 +8353,7 @@ fn forward_noegress_m2_revokes_despite_fresh_live_10507() {
             false,
         )
         .expect(
-            "Fresh Live + no-egress must revoke (Some), never coast/Decline-None (#10507 rule 4)"
+            "Fresh Live + no-egress must revoke (Some), never coast/Decline-None (#10507 rule 4)",
         );
     assert_eq!(
         canonical_key, key,
@@ -7507,7 +8409,9 @@ fn typed_permit_local_icmp_first_reply_coasts_10635() {
     });
     let forwarding = build_forwarding_state(&snapshot);
     assert!(
-        forwarding.policy.icmp_verdict_may_depend_on_type(PROTO_ICMP),
+        forwarding
+            .policy
+            .icmp_verdict_may_depend_on_type(PROTO_ICMP),
         "the type-constrained arming must be visible box-wide or GATE 1b stamps and this cell moots itself (b03-F1)"
     );
     let mut sessions = SessionTable::new();
@@ -7516,8 +8420,7 @@ fn typed_permit_local_icmp_first_reply_coasts_10635() {
     // fixtures this cell does not need): gen-0 Unvalidated both halves at
     // table gen 7 = Stale, the prod steady-state shape.
     let fwd_key = icmp_flow_key();
-    let rev_key =
-        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
     for (key, is_rev, origin) in [
         (fwd_key.clone(), false, SessionOrigin::ForwardFlow),
         (rev_key.clone(), true, SessionOrigin::ReverseFlow),
@@ -7599,8 +8502,7 @@ fn lone_reverse_unvalidated_coasts_without_revoke_10635() {
     sessions.set_policy_revalidation_gen(7);
     // Lone reverse only (shared-materialization shape): no forward companion.
     let fwd_key = icmp_flow_key();
-    let rev_key =
-        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
     assert!(
         sessions.install_with_protocol_with_origin(
             rev_key.clone(),
@@ -7683,8 +8585,7 @@ fn lone_reverse_recorded_revokes_without_companion_10635() {
     sessions.set_policy_revalidation_gen(7);
     // Lone reverse only (Cell 6 shape, companion deleted): no forward row.
     let fwd_key = icmp_flow_key();
-    let rev_key =
-        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
     assert!(
         sessions.install_with_protocol_with_origin(
             rev_key.clone(),
@@ -7736,7 +8637,11 @@ fn lone_reverse_recorded_revokes_without_companion_10635() {
         out.revoked, 1,
         "a recorded lone reverse retains a recorded Permit — coasting it is fail-open"
     );
-    assert_eq!(session_count(&sessions), 0, "the revoked reverse must be gone");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "the revoked reverse must be gone"
+    );
 }
 
 /// #10635 (stale-Live lone reverse): a STALE LiveEgress lone reverse with no
@@ -7768,8 +8673,7 @@ fn lone_reverse_stale_live_revokes_without_companion_10635() {
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
     let fwd_key = icmp_flow_key();
-    let rev_key =
-        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
     assert!(
         sessions.install_with_protocol_with_origin(
             rev_key.clone(),
@@ -7783,10 +8687,7 @@ fn lone_reverse_stale_live_revokes_without_companion_10635() {
         "fixture must install the lone reverse half"
     );
     // Live verdict, then aged Stale (a commit moved the generation).
-    sessions.mark_policy_revalidated(
-        &rev_key,
-        crate::session::PolicyRevalidationKind::LiveEgress,
-    );
+    sessions.mark_policy_revalidated(&rev_key, crate::session::PolicyRevalidationKind::LiveEgress);
     sessions.set_policy_revalidation_gen(8);
     assert_eq!(
         sessions.policy_revalidation_kind(&rev_key),
@@ -7820,7 +8721,11 @@ fn lone_reverse_stale_live_revokes_without_companion_10635() {
         out.revoked, 1,
         "a stale-Live lone reverse retains a recorded Permit — coasting it is fail-open"
     );
-    assert_eq!(session_count(&sessions), 0, "the revoked reverse must be gone");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "the revoked reverse must be gone"
+    );
 }
 
 /// #10635 (fresh-Live lone reverse): a FRESH LiveEgress lone reverse with no
@@ -7850,8 +8755,7 @@ fn lone_reverse_fresh_live_revokes_without_companion_10635() {
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
     let fwd_key = icmp_flow_key();
-    let rev_key =
-        crate::session::reverse_session_key(&fwd_key, NatDecision::default());
+    let rev_key = crate::session::reverse_session_key(&fwd_key, NatDecision::default());
     assert!(
         sessions.install_with_protocol_with_origin(
             rev_key.clone(),
@@ -7865,10 +8769,7 @@ fn lone_reverse_fresh_live_revokes_without_companion_10635() {
         "fixture must install the lone reverse half"
     );
     // Live verdict at the CURRENT generation: Fresh.
-    sessions.mark_policy_revalidated(
-        &rev_key,
-        crate::session::PolicyRevalidationKind::LiveEgress,
-    );
+    sessions.mark_policy_revalidated(&rev_key, crate::session::PolicyRevalidationKind::LiveEgress);
     assert_eq!(
         sessions.policy_revalidation_kind(&rev_key),
         crate::session::PolicyRevalidationKind::LiveEgress,
@@ -7897,5 +8798,9 @@ fn lone_reverse_fresh_live_revokes_without_companion_10635() {
         out.revoked, 1,
         "a fresh-Live lone reverse with intent revokes (pre-fix behavior; the None-arm Live term is load-bearing here)"
     );
-    assert_eq!(session_count(&sessions), 0, "the revoked reverse must be gone");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "the revoked reverse must be gone"
+    );
 }

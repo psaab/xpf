@@ -1771,6 +1771,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		// cannot be quietly reversed.
 		"flow allow-dns-reply",
 		"flow allow-embedded-icmp",
+		"flow allow-unstamped-fabric-ingress",
 		"flow force-ip-reassembly",
 		"flow gre-performance-acceleration",
 		"flow power-mode-disable",

@@ -236,3 +236,30 @@ fn known_go_collision_pair_collides_here_too_9752() {
     );
     assert_eq!(install_table_identity("ri7").0, 957120);
 }
+
+/// #11061: fabric quarantine sentinels must remain outside the stable RI
+/// allocator band and HA-wire values; otherwise either can acquire a table
+/// owner or be imported as a normal session domain.
+#[test]
+fn fabric_quarantine_domains_are_reserved_and_disjoint_11061() {
+    let max_real_domain = DOMAIN_BAND_BASE + DOMAIN_BAND_SPAN - 1;
+    let max_ambiguous_zone_domain = AMBIGUOUS_FABRIC_DOMAIN_BASE | u32::from(u16::MAX);
+    assert!(max_real_domain < INVALID_FABRIC_STAMP_DOMAIN);
+    assert!(INVALID_FABRIC_STAMP_DOMAIN < AMBIGUOUS_FABRIC_DOMAIN_BASE);
+    assert!(AMBIGUOUS_FABRIC_DOMAIN_BASE <= max_ambiguous_zone_domain);
+    assert_eq!(max_ambiguous_zone_domain, u32::MAX);
+    assert!(!is_quarantined_routing_domain(max_real_domain));
+    assert!(is_quarantined_routing_domain(INVALID_FABRIC_STAMP_DOMAIN));
+    assert!(is_quarantined_routing_domain(AMBIGUOUS_FABRIC_DOMAIN_BASE));
+    for domain in [
+        INVALID_FABRIC_STAMP_DOMAIN,
+        AMBIGUOUS_FABRIC_DOMAIN_BASE,
+        u32::MAX,
+    ] {
+        assert_eq!(
+            routing_domain_from_wire(domain),
+            WireRoutingDomain::Unrecognized,
+            "synthetic domain {domain:#x} must never be imported over HA"
+        );
+    }
+}

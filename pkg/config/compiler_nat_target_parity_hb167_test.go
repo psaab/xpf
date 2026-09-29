@@ -131,6 +131,43 @@ func TestStaticNATThenPrefixNameUnresolvableLenientWarns(t *testing.T) {
 	}
 }
 
+func TestStaticNATThenPrefixNameMixedAddressFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		target  string
+		entries []string
+	}{
+		{name: "address", target: "INSIDEHOST"},
+		{
+			name:   "singleton address-set",
+			target: "INSIDESET",
+			entries: []string{
+				"set security address-book global address-set INSIDESET address INSIDEHOST",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmds := append([]string{
+				"set security address-book global address INSIDEHOST 10.0.0.5/32",
+				"set security address-book global address INSIDEHOST dns-name evil.example",
+				"set security nat static rule-set S rule R1 match destination-address 203.0.113.5/32",
+				"set security nat static rule-set S rule R1 then static-nat prefix-name " + tc.target,
+			}, tc.entries...)
+			cfg, err := CompileConfigLenient(buildTree(t, cmds))
+			if err != nil {
+				t.Fatalf("lenient compile should preserve the mixed address entry: %v", err)
+			}
+			rule := cfg.Security.NAT.Static[0].Rules[0]
+			if rule.Then != "" {
+				t.Fatalf("mixed/unimplemented prefix-name resolved to %q, want no translation", rule.Then)
+			}
+			if !natWarnContains(cfg, "static NAT translation target") {
+				t.Fatalf("missing fail-closed prefix-name warning: %v", cfg.Warnings)
+			}
+		})
+	}
+}
+
 // A well-formed prefix/inet/nptv6 target must NOT trip the empty-target guard.
 func TestStaticNATThenLiteralPrefixStillCompiles(t *testing.T) {
 	cmds := []string{

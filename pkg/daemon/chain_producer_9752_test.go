@@ -50,6 +50,9 @@ func TestProducerDeltaConvertsToSyncedValue9752(t *testing.T) {
 	if delta.RTFlowSessionID != 77 {
 		t.Fatalf("producer golden lost the session id: %d", delta.RTFlowSessionID)
 	}
+	if !delta.SourceNatICMPValid || delta.SourceNatICMPType != 13 || delta.SourceNatICMPCode != 0 {
+		t.Fatalf("producer golden lost typed source-NAT identity: %+v", delta)
+	}
 	d, ss := primaryForRG1Daemon9752()
 	sink := &chainSink9752{}
 	n := d.walkUserspaceSessionDeltas(ss, map[string]uint16{"lan": 1, "wan": 2}, []dpuserspace.SessionDeltaInfo{delta}, sink)
@@ -63,6 +66,9 @@ func TestProducerDeltaConvertsToSyncedValue9752(t *testing.T) {
 	}
 	if val.InstallTableDomain != 525590 || val.InstallTableCheck != 3318534811 {
 		t.Fatalf("converted value lost the stamp: (%d,%d)", val.InstallTableDomain, val.InstallTableCheck)
+	}
+	if !val.SourceNatICMPValid || val.SourceNatICMPType != 13 || val.SourceNatICMPCode != 0 {
+		t.Fatalf("converted value lost typed source-NAT identity: %+v", val)
 	}
 	if val.SessionID == 0 || val.RTFlowSessionID == 0 {
 		t.Fatalf("converted value lost session identity: %+v", val)

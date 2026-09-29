@@ -9,11 +9,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-
 
 #[path = "policy_snapshot_error.rs"]
 mod snapshot_error;
@@ -394,7 +393,7 @@ fn build_global_zone_scope(
                 return Err(SnapshotIntegrityError::UnresolvableZoneReference {
                     rule_id: rule_id.to_string(),
                     zone: name.to_string(),
-                })
+                });
             }
         }
     }
@@ -885,7 +884,6 @@ impl PolicyCounterStore {
     pub(crate) fn reset_parse_calls_for_test(&self) {
         self.parse_calls.store(0, Ordering::Relaxed);
     }
-
 }
 
 /// A validated policy state whose counter handles belong to a live counter
@@ -926,7 +924,9 @@ impl PreparedPolicyState {
     }
 
     pub(crate) fn take_state(&mut self) -> PolicyState {
-        self.state.take().expect("prepared policy state is consumed once")
+        self.state
+            .take()
+            .expect("prepared policy state is consumed once")
     }
 
     pub(crate) fn commit(&mut self) {
@@ -937,8 +937,7 @@ impl PreparedPolicyState {
 impl Drop for PreparedPolicyState {
     fn drop(&mut self) {
         if !self.committed {
-            self.counter_store
-                .retain_rule_ids(&self.tracked_ids_before);
+            self.counter_store.retain_rule_ids(&self.tracked_ids_before);
         }
     }
 }
@@ -1265,17 +1264,20 @@ impl CompiledApplications {
         // #3291: an empty-range (protocol-only) term matches regardless of L4
         // presence — we know the protocol; a port-bearing range requires a known
         // L4 port and so fails closed for a flowless packet.
-        if let Some(&(order, _, _, timeout)) = terms.range_terms.iter().find(
-            |(_, src_ranges, dst_ranges, _)| {
-                if src_ranges.is_empty() && dst_ranges.is_empty() {
-                    true
-                } else {
-                    l4_present
-                        && port_ranges_match(src_ranges, src_port)
-                        && port_ranges_match(dst_ranges, dst_port)
-                }
-            },
-        ) {
+        if let Some(&(order, _, _, timeout)) =
+            terms
+                .range_terms
+                .iter()
+                .find(|(_, src_ranges, dst_ranges, _)| {
+                    if src_ranges.is_empty() && dst_ranges.is_empty() {
+                        true
+                    } else {
+                        l4_present
+                            && port_ranges_match(src_ranges, src_port)
+                            && port_ranges_match(dst_ranges, dst_port)
+                    }
+                })
+        {
             if best.map_or(true, |(b, _)| order < b) {
                 best = Some((order, timeout));
             }
@@ -1286,9 +1288,14 @@ impl CompiledApplications {
         // non-first fragment) the constrained term does NOT match — fail closed.
         if !terms.icmp_constraints.is_empty() {
             if let Some((ptype, pcode)) = packet_icmp {
-                if let Some(&(order, _, _, timeout)) = terms.icmp_constraints.iter().find(
-                    |&&(_, ctype, ccode, _)| ctype == ptype && ccode.map_or(true, |c| c == pcode),
-                ) {
+                if let Some(&(order, _, _, timeout)) =
+                    terms
+                        .icmp_constraints
+                        .iter()
+                        .find(|&&(_, ctype, ccode, _)| {
+                            ctype == ptype && ccode.map_or(true, |c| c == pcode)
+                        })
+                {
                     if best.map_or(true, |(b, _)| order < b) {
                         best = Some((order, timeout));
                     }
@@ -1661,22 +1668,14 @@ pub(crate) struct PolicyState {
     /// behavior exactly (no risk of newly denying management traffic).
     has_junos_host_rules: bool,
     /// #8618: does ANY active PERMIT rule in this snapshot carry an ICMP /
-    /// ICMPv6 type-constrained application term (junos-ping and its #3348
-    /// aliases)? Indexed [0] = ICMP, [1] = ICMPv6.
-    ///
-    /// This is a WHOLE-SNAPSHOT predicate over `rules`, not a per-zone-pair one,
-    /// and that is a deliberate choice rather than laziness. Answering it per
-    /// zone pair means reproducing the five-tier applicability selection
-    /// (`zone_pair_index`, from-any, to-any, `both_any_indices`,
-    /// `global_indices`) at a second site. A tier added later and missed here
-    /// would under-report, and under-reporting is the UNSAFE direction: it lets
-    /// `policy_revalidation` act on a DENY that a type-constrained permit would
-    /// have overturned, tearing down a flow the policy allows. Scanning `rules`
-    /// wholesale cannot miss a tier, because every rule is in it. The cost of
-    /// the coarser answer is over-declining — which is exactly the behaviour
-    /// #8356 shipped for all ICMP — so the failure mode is "no worse than
-    /// today" rather than "revokes a permitted flow".
+    /// ICMPv6 type-constrained application term? A type-blind policy
+    /// re-derivation can only manufacture a false DENY when a constrained
+    /// PERMIT is skipped, so this remains the permit-only revocation gate.
     icmp_type_constrained_permit: [bool; 2],
+    /// #11064: does any active rule (PERMIT or DENY) carry an ICMP/ICMPv6
+    /// type/code-constrained term? Session hits use the packet's actual
+    /// type/code and re-evaluate whenever either action can change the verdict.
+    icmp_type_constrained_term: [bool; 2],
     /// #3363: reserved hit counter for the IMPLICIT default-policy verdict
     /// (the result returned when a flow matches no configured zone-pair,
     /// wildcard, or `junos-global` policy). Before #3363 the default path
@@ -1736,6 +1735,7 @@ impl Default for PolicyState {
             has_junos_host_rules: false,
             // #8618: armed in the rule loop; Default carries no rules.
             icmp_type_constrained_permit: [false; 2],
+            icmp_type_constrained_term: [false; 2],
             default_counter: Arc::new(PolicyRuleCounter::default()),
             default_log_session_init: false,
             default_log_session_close: false,
@@ -1747,9 +1747,7 @@ impl Default for PolicyState {
     }
 }
 
-
 impl PolicyState {
-
     /// #8618: may an ICMP-family zone-policy verdict for `protocol` depend on
     /// the PACKET's icmp type/code, rather than on the flow alone?
     ///
@@ -1772,29 +1770,34 @@ impl PolicyState {
     /// tests only for a constrained PERMIT, so a constrained DENY leaves it
     /// false and the type-blind walk SKIPS that deny.
     ///
-    /// What is actually guaranteed, and it is the property the gate exists for:
-    /// **a type-blind evaluation can never manufacture a false DENY.** Skipping a
-    /// constrained term can only make the walk fall through to a LATER rule, i.e.
-    /// more permissive. So acting on a DENY returned here is safe; acting on a
-    /// PERMIT is not an assertion that a fully-informed walk would agree.
+    /// This predicate gates frame-independent policy revalidation, which
+    /// deliberately has no packet bytes from which to recover ICMP type/code.
+    /// A skipped constrained term can only make that walk fall through to a
+    /// later, more permissive rule, so it cannot manufacture a false DENY.
+    /// Conversely, a skipped constrained PERMIT can manufacture a false
+    /// DENY, so only permits arm this conservative whole-snapshot gate.
     ///
-    /// The ACCEPTED CONSEQUENCE, pinned by
-    /// `a_type_constrained_deny_is_skipped_and_the_session_survives_9386`: on the
-    /// established-session path a type-constrained DENY placed ahead of a broader
-    /// permit is not enforced — the walk falls through to the permit and the
-    /// session survives. Arming this predicate on a constrained DENY as well
-    /// would NOT change that outcome (the derivation would decline instead of
-    /// deriving Permit, and either way the session lives); it would only give up
-    /// #8356 coverage for every ICMP flow on any box that has a constrained deny
-    /// anywhere, because the predicate is whole-snapshot. Closing the residual
-    /// means supplying the packet's type/code to that derivation, which its own
-    /// contract forbids: it is deliberately frame-INDEPENDENT, because one
-    /// packet's type is not the flow's property.
+    /// Session-hit forwarding has a separate packet-scoped check
+    /// (`icmp_packet_verdict_may_depend_on_type`) that reads the actual
+    /// type/code and enforces constrained DENYs by dropping that packet without
+    /// treating its message type as a property of the typeless session.
     pub(crate) fn icmp_verdict_may_depend_on_type(&self, protocol: u8) -> bool {
         match protocol {
             PROTO_ICMP => self.icmp_type_constrained_permit[0],
             PROTO_ICMPV6 => self.icmp_type_constrained_permit[1],
             // Not an ICMP family protocol: `packet_icmp` cannot influence it.
+            _ => false,
+        }
+    }
+
+    /// #11064: whether this policy snapshot has a type/code-constrained rule
+    /// for an ICMP-family protocol, irrespective of action. Session-hit paths
+    /// call this only when they can provide the packet's actual type/code;
+    /// unlike [`icmp_verdict_may_depend_on_type`], this must include DENYs.
+    pub(crate) fn icmp_packet_verdict_may_depend_on_type(&self, protocol: u8) -> bool {
+        match protocol {
+            PROTO_ICMP => self.icmp_type_constrained_term[0],
+            PROTO_ICMPV6 => self.icmp_type_constrained_term[1],
             _ => false,
         }
     }
@@ -2222,6 +2225,7 @@ pub(crate) fn parse_policy_state_with_counters(
         has_junos_host_rules: false,
         // #8618: armed in the same rule loop, same shape.
         icmp_type_constrained_permit: [false; 2],
+        icmp_type_constrained_term: [false; 2],
         // #3363: persistent reserved counter for the implicit default-policy
         // verdict. Re-handed from the store under the reserved rule id so the
         // Arc instance is stable across snapshot rebuilds (an in-flight
@@ -2297,8 +2301,8 @@ pub(crate) fn parse_policy_state_with_counters(
     for snap in rules {
         let source_is_v3_shaped =
             !snap.source_book_ids.is_empty() || !snap.source_literals.is_empty();
-        let destination_is_v3_shaped = !snap.destination_book_ids.is_empty()
-            || !snap.destination_literals.is_empty();
+        let destination_is_v3_shaped =
+            !snap.destination_book_ids.is_empty() || !snap.destination_literals.is_empty();
 
         // Build literal prefix sets per side using the appropriate
         // factory. #3367 (legacy path) / #3711 (v3 path): BOTH shapes report a
@@ -2570,20 +2574,21 @@ pub(crate) fn parse_policy_state_with_counters(
             state.has_junos_host_rules = true;
         }
 
-        // #8618: arm the ICMP type-constrained PERMIT gate. Only a PERMIT
-        // matters: the question this answers is "could a type-constrained term
-        // have ADMITTED a flow that a type-blind evaluation denies", and only a
-        // permit can overturn a deny in that direction. An `inactive` rule is
-        // excluded because it cannot match at all.
-        if !state.rules[idx].inactive
-            && matches!(state.rules[idx].action, PolicyAction::Permit)
-        {
+        // #8618: the permit-only gate is used by frame-independent
+        // revalidation; a type-blind skipped PERMIT can create a false DENY.
+        // #11064: the owner/foreign session-hit path separately needs to know
+        // about constrained DENYs too, because it evaluates this packet with
+        // its actual ICMP type/code.
+        if !state.rules[idx].inactive {
             for (slot, proto) in [PROTO_ICMP, PROTO_ICMPV6].into_iter().enumerate() {
                 if state.rules[idx]
                     .compiled_apps
                     .has_icmp_type_constrained_term(proto)
                 {
-                    state.icmp_type_constrained_permit[slot] = true;
+                    state.icmp_type_constrained_term[slot] = true;
+                    if matches!(state.rules[idx].action, PolicyAction::Permit) {
+                        state.icmp_type_constrained_permit[slot] = true;
+                    }
                 }
             }
         }
@@ -3057,8 +3062,17 @@ pub(crate) fn evaluate_policy_result_with_icmp(
     // authoritative), so delegate with `l4_present = true` — byte-identical to
     // the pre-#3291 behavior.
     evaluate_policy_result_l3_aware(
-        state, from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port, packet_icmp,
-        packet_len, true,
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        true,
     )
 }
 
@@ -3251,7 +3265,12 @@ fn evaluate_policy_result_counted(
                         return apply_frag_deny_override(result, skipped_frag_deny);
                     }
                     RuleMatchOutcome::Miss(reason) => {
-                        note_skipped_frag_deny(&mut skipped_frag_deny, &state.rules[idx], idx, reason);
+                        note_skipped_frag_deny(
+                            &mut skipped_frag_deny,
+                            &state.rules[idx],
+                            idx,
+                            reason,
+                        );
                     }
                 }
             }
@@ -3484,10 +3503,7 @@ fn evaluate_policy_result_counted(
 /// zone can never be named `junos-host` (the Go strict validator + definition
 /// gate reject it), so this never shadows a real zone. All other names resolve
 /// through `zone_name_to_id` exactly as before.
-fn resolve_policy_zone_id(
-    zone_name_to_id: &FxHashMap<String, u16>,
-    name: &str,
-) -> Option<u16> {
+fn resolve_policy_zone_id(zone_name_to_id: &FxHashMap<String, u16>, name: &str) -> Option<u16> {
     if name == JUNOS_HOST_ZONE_NAME {
         Some(JUNOS_HOST_ZONE_ID)
     } else {
@@ -3550,8 +3566,16 @@ pub(crate) fn evaluate_junos_host_policy(
     // LocalDelivery arm calls `evaluate_junos_host_policy_l3_aware` directly
     // (mirrors the #3291 `evaluate_policy_result_with_icmp` wrapper split).
     evaluate_junos_host_policy_l3_aware(
-        state, from_id, src_ip, dst_ip, protocol, src_port, dst_port, packet_icmp,
-        packet_len, true,
+        state,
+        from_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        true,
     )
 }
 
@@ -3623,7 +3647,9 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
     // anyway — no rule names the unzoned ingress) and still reaches the
     // from-any and global tiers below.
     let key = zone_pair_key(from_id, JUNOS_HOST_ZONE_ID);
-    if from_id != 0 && let Some(indices) = state.zone_pair_index.get(&key) {
+    if from_id != 0
+        && let Some(indices) = state.zone_pair_index.get(&key)
+    {
         for &idx in indices {
             match try_match_rule(
                 &state.rules[idx],

@@ -10,10 +10,11 @@ import (
 )
 
 // hostInboundUnzonedTestConfig extends the shared host-inbound fixture with an
-// addressed interface assigned to NO security zone (#4420 HI-2 fail-open) and an
-// addressed LIFELINE (fab*) also in no zone (must never be denied).
+// addressed interface assigned to NO security zone (#4420 / #11068) and an
+// addressed interface explicitly configured as a cluster fabric lifeline.
 func hostInboundUnzonedTestConfig() *config.Config {
 	cfg := hostInboundTestConfig()
+	cfg.Chassis.Cluster.FabricInterface = "fab5"
 	cfg.Interfaces.Interfaces["ge-0/0/9"] = &config.InterfaceConfig{
 		Name: "ge-0/0/9",
 		Units: map[int]*config.InterfaceUnit{
@@ -75,18 +76,17 @@ func TestHostInboundUnzonedInterfaceDenied(t *testing.T) {
 	}
 }
 
-// TestHostInboundUnzonedNoZonesNoTable asserts a config with unzoned addressed
-// interfaces but ZERO security zones emits no unzoned deny (the builder is a
-// no-op without the zone model), so a bootstrap/zoneless box is never turned
-// into deny-all host-inbound (#4420 HI-2 scope guard).
-func TestHostInboundUnzonedNoZonesNoTable(t *testing.T) {
+// TestHostInboundUnzonedNoZonesDenied asserts a zoneless config still gets an
+// unzoned default-deny entry for each addressed non-lifeline interface.
+func TestHostInboundUnzonedNoZonesDenied(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
 		"ge-0/0/9": {Name: "ge-0/0/9", Units: map[int]*config.InterfaceUnit{
 			0: {Number: 0, Addresses: []string{"192.0.2.1/24"}},
 		}},
 	}
-	if v4, v6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg); v4 != nil || v6 != nil {
-		t.Fatalf("zoneless config must yield no unzoned deny, got v4=%v v6=%v", v4, v6)
+	v4, v6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
+	if len(v4) != 1 || v4[0] != "192.0.2.1" || len(v6) != 0 {
+		t.Fatalf("zoneless non-lifeline address must be denied, got v4=%v v6=%v", v4, v6)
 	}
 }

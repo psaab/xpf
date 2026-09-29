@@ -18,6 +18,7 @@
 #![allow(unused_imports)]
 
 use super::test_fixtures::*;
+use super::tests_support::*;
 use super::worker::WorkerTxPipeline;
 use super::*;
 use crate::test_zone_ids::*;
@@ -27,10 +28,9 @@ use crate::{
     CoSForwardingClassSnapshot, CoSIEEE8021ClassifierEntrySnapshot, CoSIEEE8021ClassifierSnapshot,
     CoSSchedulerMapEntrySnapshot, CoSSchedulerMapSnapshot, CoSSchedulerSnapshot,
     DestinationNATRuleSnapshot, FirewallFilterSnapshot, FirewallTermSnapshot,
-    InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot,
-    SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
+    InterfaceAddressSnapshot, NeighborSnapshot, PolicyApplicationSnapshot, PolicyRuleSnapshot,
+    RouteSnapshot,
 };
-use super::tests_support::*;
 
 /// Control-zone id for the restrictive-fabric fixture (arbitrary test id,
 /// distinct from the `test_zone_ids` constants — lan=1, wan=2).
@@ -76,6 +76,39 @@ fn active_rg(now_secs: u64) -> HAGroupRuntime {
     }
 }
 
+fn routing_instance_fabric_snapshot_11061(
+    allow_unstamped_fabric_ingress: bool,
+) -> ConfigSnapshot {
+    let mut snapshot = nat_snapshot_with_fabric();
+    let tenant_domain = crate::session::install_table_identity("tenant-a").0;
+    for interface in &mut snapshot.interfaces {
+        if interface.ifindex == 24 {
+            interface.routing_instance = "tenant-a".to_string();
+            interface.routing_domain = tenant_domain;
+        }
+    }
+    snapshot.flow.allow_unstamped_fabric_ingress = allow_unstamped_fabric_ingress;
+    snapshot
+}
+
+fn unstamped_fabric_frame_11061(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+    tcp_flags: u8,
+) -> Vec<u8> {
+    build_txn_tcp_syn_frame_v4(
+        src,
+        dst,
+        src_port,
+        dst_port,
+        tcp_flags,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
+    )
+}
+
+
 /// #6458 fail-on-revert, single-primary node: a forged stamp claiming
 /// `lan` arrives on the fabric while lan's RG (2) is forwarding-active
 /// LOCALLY. The stage-9 RG-binding check rejects the stamp, so the new
@@ -114,6 +147,393 @@ fn forged_fabric_stamp_denied_when_claimed_zone_rg_is_local_6458() {
         binding.scratch.scratch_forwards.is_empty(),
         "forged zone-encoded stamp must not queue a forward (RED on revert: \
          the admitted flow forwards toward the WAN gateway)"
+    );
+}
+
+#[test]
+fn invalid_fabric_stamp_drops_instead_of_falling_back_to_main_11061() {
+    let snapshot = routing_instance_fabric_snapshot_11061(false);
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.has_routing_domains);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let mut frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
+    frame[10..12].copy_from_slice(&0x1234u16.to_be_bytes());
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    assert_eq!(dbg.rx, 1, "the invalid frame must reach the poll body");
+    assert_eq!(batch.validated_packets, 1, "the invalid frame must validate");
+    assert_eq!(batch.invalid_fabric_stamp_drops, 1);
+    assert_eq!(
+        dbg.session_miss, 0,
+        "an invalid stamp must be dropped before session/cache lookup"
+    );
+
+    assert_eq!(
+        sessions.len(),
+        0,
+        "an unknown zone ID in a recognized fabric stamp must not reach MAIN fallback"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "an invalid fabric stamp must not forward under the physical ingress zone"
+    );
+}
+
+#[test]
+fn unstamped_fabric_ingress_drops_before_lookup_on_routing_instance_node_11061() {
+    let snapshot = routing_instance_fabric_snapshot_11061(false);
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.has_routing_domains);
+    assert!(!forwarding.allow_unstamped_fabric_ingress);
+    let ha_state = BTreeMap::from([(1, active_rg(123)), (2, active_rg(123))]);
+    let frame = unstamped_fabric_frame_11061(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+    );
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(batch.unstamped_fabric_ingress_drops, 1);
+    assert_eq!(dbg.session_miss, 0, "drop must precede session/cache lookup");
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(dbg.no_route, 0);
+    assert_eq!(dbg.missing_neigh, 0);
+    assert_eq!(sessions.len(), 0);
+    assert!(binding.scratch.scratch_forwards.is_empty());
+}
+
+#[test]
+fn unstamped_fabric_ingress_legacy_controls_remain_explicit_11061() {
+    let frame = unstamped_fabric_frame_11061(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+    );
+    let ha_state = BTreeMap::from([(1, active_rg(123)), (2, active_rg(123))]);
+
+    let legacy_forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    assert!(!legacy_forwarding.has_routing_domains);
+    let mut legacy_binding = fabric_binding();
+    let mut legacy_sessions = SessionTable::new();
+    let (legacy_batch, legacy_dbg) = txn_run_descriptor_checked(
+        &mut legacy_binding,
+        &mut legacy_sessions,
+        &legacy_forwarding,
+        &ha_state,
+        &frame,
+        txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16),
+        true,
+    );
+    assert_eq!(legacy_dbg.rx, 1);
+    assert_eq!(legacy_batch.validated_packets, 1);
+    assert_eq!(legacy_batch.unstamped_fabric_ingress_drops, 0);
+    assert_eq!(
+        legacy_dbg.session_miss, 1,
+        "single-table absence remains on the legacy forwarding path"
+    );
+
+    let compatibility_snapshot = routing_instance_fabric_snapshot_11061(true);
+    let compatibility_forwarding = build_forwarding_state(&compatibility_snapshot);
+    assert!(compatibility_forwarding.has_routing_domains);
+    assert!(compatibility_forwarding.allow_unstamped_fabric_ingress);
+    let mut compatibility_binding = fabric_binding();
+    let mut compatibility_sessions = SessionTable::new();
+    let (compatibility_batch, compatibility_dbg) = txn_run_descriptor_checked(
+        &mut compatibility_binding,
+        &mut compatibility_sessions,
+        &compatibility_forwarding,
+        &ha_state,
+        &frame,
+        txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16),
+        true,
+    );
+    assert_eq!(compatibility_dbg.rx, 1);
+    assert_eq!(compatibility_batch.validated_packets, 1);
+    assert_eq!(compatibility_batch.unstamped_fabric_ingress_drops, 0);
+    assert_eq!(
+        compatibility_dbg.session_miss, 1,
+        "the explicit compatibility knob restores the legacy path"
+    );
+}
+
+#[test]
+fn unique_established_ri_snat_reply_is_admitted_without_stamp_11061() {
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let mut snapshot = fabric_snapshot_with_lan_neighbor_7770();
+    let (tenant_domain, tenant_check) = crate::session::install_table_identity("tenant-a");
+    for interface in &mut snapshot.interfaces {
+        if interface.ifindex == 24 {
+            interface.routing_instance = "tenant-a".to_string();
+            interface.routing_domain = tenant_domain;
+        }
+    }
+    snapshot.routes.push(RouteSnapshot {
+        table: "tenant-a.inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hops: vec!["172.16.80.1@reth0.80".to_string()],
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.has_routing_domains);
+    assert!(!forwarding.ambiguous_fabric_zone_ids.contains(&TEST_LAN_ZONE_ID));
+
+    let forward_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: tenant_domain,
+    };
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..Default::default()
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 11,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 80,
+        },
+        nat,
+        install_table_domain: tenant_domain,
+        install_table_check: tenant_check,
+    };
+    let metadata = SessionMetadata {
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 24,
+        ingress_vlan_id: 0,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    };
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        forward_key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::ForwardFlow,
+        now_ns,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+
+    let shared_entry = SyncedSessionEntry {
+        key: forward_key,
+        decision,
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    crate::afxdp::shared_ops::publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &shared_entry,
+    );
+
+    let reply_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+        src_port: 443,
+        dst_port: 12345,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    assert_eq!(
+        sessions
+            .find_unique_established_forward_nat_match_at(&reply_key, now_ns)
+            .map(|matched| matched.key),
+        Some(shared_entry.key.clone()),
+        "the local session table must prove the established reverse-NAT candidate"
+    );
+    assert!(
+        crate::afxdp::shared_ops::shared_forward_nat_candidate_is_unique(
+            &shared_nat_sessions,
+            &shared_owner_rg_indexes,
+            &reply_key,
+            &shared_entry.key,
+            decision.nat,
+        ),
+        "the published reverse-NAT alias must be unique too"
+    );
+
+    let frame = unstamped_fabric_frame_11061(
+        Ipv4Addr::new(8, 8, 8, 8),
+        Ipv4Addr::new(172, 16, 80, 8),
+        443,
+        12345,
+        TCP_FLAG_ACK,
+    );
+    let mut meta = txn_meta_v4(21, TCP_FLAG_ACK, frame.len() as u16);
+    meta.flow_src_addr[..4].copy_from_slice(&[8, 8, 8, 8]);
+    meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    meta.flow_src_port = 443;
+    meta.flow_dst_port = 12345;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let mut binding = fabric_binding();
+    let (batch, dbg) = txn_run_descriptor_with_shared_nat(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_owner_rg_indexes,
+    );
+
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(batch.unstamped_fabric_ingress_drops, 0);
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the unique established reverse-NAT candidate must reach session authority"
+    );
+    assert_eq!(dbg.missing_neigh, 0);
+    assert_eq!(
+        sessions.len(),
+        2,
+        "the admitted reply installs a reverse companion alongside the forward session"
+    );
+    // #11061 R3: the companion must carry the FORWARD's tenant domain. A
+    // MAIN-domain (0) companion would prove admission fell back instead of
+    // following the established forward.
+    assert_ne!(
+        shared_entry.key.routing_domain, 0,
+        "precondition: the forward session lives in a tenant domain"
+    );
+    let mut companion_domains = Vec::new();
+    sessions.iter_with_origin(|key, _decision, _metadata, _origin| {
+        if key != &shared_entry.key {
+            companion_domains.push(key.routing_domain);
+        }
+    });
+    assert_eq!(
+        companion_domains,
+        vec![shared_entry.key.routing_domain],
+        "the reverse companion must be keyed by the forward tenant domain"
+    );
+
+    let (other_domain, _) = crate::session::install_table_identity("tenant-b");
+    let mut competing_entry = shared_entry.clone();
+    competing_entry.key.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 103));
+    competing_entry.key.routing_domain = other_domain;
+    competing_entry.decision.install_table_domain = other_domain;
+    crate::afxdp::shared_ops::publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &competing_entry,
+    );
+    assert!(
+        !crate::afxdp::shared_ops::shared_forward_nat_candidate_is_unique(
+            &shared_nat_sessions,
+            &shared_owner_rg_indexes,
+            &reply_key,
+            &shared_entry.key,
+            decision.nat,
+        ),
+        "a second tenant with the same wire reply tuple must make the exception ambiguous"
+    );
+    let contested_frame = unstamped_fabric_frame_11061(
+        Ipv4Addr::new(8, 8, 8, 8),
+        Ipv4Addr::new(172, 16, 80, 8),
+        443,
+        12345,
+        TCP_FLAG_ACK,
+    );
+    let mut contested_meta = txn_meta_v4(21, TCP_FLAG_ACK, contested_frame.len() as u16);
+    contested_meta.flow_src_addr[..4].copy_from_slice(&[8, 8, 8, 8]);
+    contested_meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+    contested_meta.flow_src_port = 443;
+    contested_meta.flow_dst_port = 12345;
+    let mut contested_binding = fabric_binding();
+    let (contested_batch, contested_dbg) = txn_run_descriptor_with_shared_nat(
+        &mut contested_binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &contested_frame,
+        contested_meta,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_owner_rg_indexes,
+    );
+    assert_eq!(contested_dbg.rx, 1);
+    assert_eq!(contested_batch.unstamped_fabric_ingress_drops, 1);
+    assert_eq!(
+        contested_dbg.session_hit, 0,
+        "ambiguous shared reverse-NAT ownership must drop before session authority"
+    );
+    assert_eq!(
+        sessions.len(),
+        2,
+        "an ambiguous unstamped reply must not install or mutate session state"
     );
 }
 
@@ -354,7 +774,14 @@ fn fabric_ingress_syn_ack_seeds_no_reverse_session_6478() {
     let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
     let src = Ipv4Addr::new(10, 0, 61, 102);
     let dst = Ipv4Addr::new(8, 8, 8, 8);
-    let mut frame = build_txn_tcp_syn_frame_v4(src, dst, 12345, 443, TCP_FLAG_SYN | TCP_FLAG_ACK, crate::afxdp::tests_support::TEST_FABRIC_MAC);
+    let mut frame = build_txn_tcp_syn_frame_v4(
+        src,
+        dst,
+        12345,
+        443,
+        TCP_FLAG_SYN | TCP_FLAG_ACK,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
+    );
     let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
     frame[0..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]);
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
@@ -379,8 +806,8 @@ fn fabric_ingress_syn_ack_seeds_no_reverse_session_6478() {
         dst_ip: IpAddr::V4(dst),
         src_port: 12345,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let origin = sessions
         .lookup_with_origin(&key, 123_000_000_000, TCP_FLAG_SYN | TCP_FLAG_ACK)
@@ -464,8 +891,8 @@ fn fabric_ingress_icmp_echo_reply_seeds_no_reverse_session_6478() {
         // (identifier, 0); the builder stamps identifier 0x1234.
         src_port: 0x1234,
         dst_port: 0,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let origin = sessions
         .lookup_with_origin(&key, 123_000_000_000, 0)
@@ -569,9 +996,20 @@ fn frag_stamp_snapshot() -> ConfigSnapshot {
 fn stamped_fabric_frag_frame(zone_id: u16, frag_word: u16, id: u16) -> Vec<u8> {
     let [hi, lo] = zone_id.to_be_bytes();
     let mut f = vec![
-        0x02, 0xbf, 0x72, 0xff, 0x00, 0x01, // dst: our fabric link MAC (V1a)
-        0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo, // src: the zone stamp
-        0x08, 0x00, // ethertype IPv4
+        0x02,
+        0xbf,
+        0x72,
+        0xff,
+        0x00,
+        0x01, // dst: our fabric link MAC (V1a)
+        0x02,
+        0xbf,
+        0x72,
+        FABRIC_ZONE_MAC_MAGIC,
+        hi,
+        lo, // src: the zone stamp
+        0x08,
+        0x00, // ethertype IPv4
     ];
     // On a first fragment these 8 bytes are a real UDP header (sport 33333,
     // dport 443); on a non-first fragment they are payload and must never be
@@ -688,9 +1126,9 @@ fn frag_assoc_authority_binds_the_fabric_zone_stamp_5798() {
                 &ha_state,
                 now_secs,
             ),
-            Some(id),
+            ZoneEncodedFabricStamp::Valid(id),
             "precondition: the {zone} stamp must be HONORED at stage 9, else the refusals \
-             below prove only that an INVALID stamp is ignored"
+             below prove only the terminal invalid-stamp drop"
         );
     }
 
@@ -1028,7 +1466,12 @@ fn fabric_ingress_return_traffic_is_denied_on_the_lan_node_7770() {
         (
             "icmp echo reply",
             {
-                let mut f = build_icmp_echo_frame_v4(wan_peer, lan_host, 64, crate::afxdp::tests_support::TEST_FABRIC_MAC);
+                let mut f = build_icmp_echo_frame_v4(
+                    wan_peer,
+                    lan_host,
+                    64,
+                    crate::afxdp::tests_support::TEST_FABRIC_MAC,
+                );
                 let icmp_start = 34;
                 f[icmp_start] = 0; // echo REQUEST -> echo REPLY
                 f[icmp_start + 2..icmp_start + 4].copy_from_slice(&[0, 0]);
@@ -1042,7 +1485,14 @@ fn fabric_ingress_return_traffic_is_denied_on_the_lan_node_7770() {
         ),
         (
             "tcp syn-ack",
-            build_txn_tcp_syn_frame_v4(wan_peer, lan_host, 443, 12345, TCP_FLAG_SYN | TCP_FLAG_ACK, crate::afxdp::tests_support::TEST_FABRIC_MAC),
+            build_txn_tcp_syn_frame_v4(
+                wan_peer,
+                lan_host,
+                443,
+                12345,
+                TCP_FLAG_SYN | TCP_FLAG_ACK,
+                crate::afxdp::tests_support::TEST_FABRIC_MAC,
+            ),
             PROTO_TCP,
             443,
             12345,
@@ -1250,7 +1700,15 @@ fn drive_fabric_return_7770(
     let mut meta = txn_meta_v4(21, TCP_FLAG_SYN | TCP_FLAG_ACK, frame.len() as u16);
     meta.protocol = PROTO_TCP;
     let mut binding = fabric_binding();
-    let (_batch, dbg) = txn_run_descriptor_checked(&mut binding, sessions, forwarding, ha_state, &frame, meta, true);
+    let (_batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        sessions,
+        forwarding,
+        ha_state,
+        &frame,
+        meta,
+        true,
+    );
     (dbg.policy_deny, binding.scratch.scratch_forwards.len())
 }
 
@@ -1288,7 +1746,14 @@ fn fabric_punt_seed_admits_the_peers_return_7770() {
     // --- 1. PUNT ---------------------------------------------------------
     let mut sessions = SessionTable::new();
     let mut lan_binding = lan_binding_7770();
-    let out_frame = build_txn_tcp_syn_frame_v4(lan_host, wan_peer, 12345, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let out_frame = build_txn_tcp_syn_frame_v4(
+        lan_host,
+        wan_peer,
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let out_meta = txn_meta_v4(24, TCP_FLAG_SYN, out_frame.len() as u16);
     let (_batch, punt_dbg) = txn_run_descriptor_checked(
         &mut lan_binding,
@@ -1359,10 +1824,18 @@ fn fabric_punt_seed_admits_the_peers_return_7770() {
     );
 
     // --- 4. DENIED-PUNT CONTROL: no permit -> no seed -> still denied -----
-    let deny_forwarding = build_forwarding_state(&fabric_snapshot_policy_denies_the_lan_host_7770());
+    let deny_forwarding =
+        build_forwarding_state(&fabric_snapshot_policy_denies_the_lan_host_7770());
     let mut deny_sessions = SessionTable::new();
     let mut deny_binding = lan_binding_7770();
-    let deny_out = build_txn_tcp_syn_frame_v4(lan_host, wan_peer, 12345, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let deny_out = build_txn_tcp_syn_frame_v4(
+        lan_host,
+        wan_peer,
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
     let deny_meta = txn_meta_v4(24, TCP_FLAG_SYN, deny_out.len() as u16);
     txn_run_descriptor_checked(
         &mut deny_binding,
@@ -1441,7 +1914,15 @@ fn fabric_ingress_never_mints_a_punt_seed_7770() {
     let meta = txn_meta_v4(21, TCP_FLAG_SYN | TCP_FLAG_ACK, frame.len() as u16);
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
 
     let shapes = session_shapes_7770(&sessions);
     assert!(
@@ -1724,7 +2205,10 @@ fn stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670() {
         txn_meta_v4(21, TCP_FLAG_SYN, syn.len() as u16),
         true,
     );
-    assert_eq!(admitted.tx, 1, "the stamped lan -> wan SYN must be admitted");
+    assert_eq!(
+        admitted.tx, 1,
+        "the stamped lan -> wan SYN must be admitted"
+    );
     assert_eq!(sessions.len(), 2, "admission must install the session pair");
 
     let owner_ack = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_ACK);
@@ -1737,9 +2221,16 @@ fn stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670() {
         txn_meta_v4(21, TCP_FLAG_ACK, owner_ack.len() as u16),
         true,
     );
-    assert_eq!(owner.session_hit, 1, "the matching-stamp ACK must hit conntrack");
+    assert_eq!(
+        owner.session_hit, 1,
+        "the matching-stamp ACK must hit conntrack"
+    );
     assert_eq!(owner.tx, 1, "the adjudicated-hit forward remains served");
-    assert_eq!(sessions.len(), 2, "the owner session pair remains installed");
+    assert_eq!(
+        sessions.len(),
+        2,
+        "the owner session pair remains installed"
+    );
 
     let punted_miss = stamped_fabric_frame(TEST_DMZ_ZONE_ID, TCP_FLAG_ACK);
     let (_batch, foreign) = txn_run_descriptor_checked(
@@ -1760,7 +2251,10 @@ fn stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670() {
         "the owner must evaluate the punt under dmz's default-deny policy, not \
          trust it as a peer-adjudicated hit"
     );
-    assert_eq!(foreign.tx, 0, "the unadjudicated punt must not inherit lan's permit");
+    assert_eq!(
+        foreign.tx, 0,
+        "the unadjudicated punt must not inherit lan's permit"
+    );
     assert_eq!(
         foreign.policy_revoked_sessions, 0,
         "a foreign punt is dropped as a packet and cannot revoke the lan session"
@@ -1777,22 +2271,141 @@ fn stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670() {
         &forwarding,
         &ha_state,
         &owner_ack_after_foreign,
-        txn_meta_v4(
-            21,
-            TCP_FLAG_ACK,
-            owner_ack_after_foreign.len() as u16,
-        ),
+        txn_meta_v4(21, TCP_FLAG_ACK, owner_ack_after_foreign.len() as u16),
         true,
     );
     assert_eq!(
-        owner_after_foreign.session_hit,
-        1,
+        owner_after_foreign.session_hit, 1,
         "the same-zone adjudicated-hit packet still reaches its owner session"
     );
     assert_eq!(
         owner_after_foreign.tx, 1,
         "a denied foreign punt leaves the admitted owner flow usable"
     );
+}
+#[test]
+fn stamped_fabric_owner_icmp_hit_is_type_checked_without_stamp_11064() {
+    let mut snapshot = nat_snapshot_with_fabric();
+    let echo_app = PolicyApplicationSnapshot {
+        name: "echo-only".into(),
+        protocol: "icmp".into(),
+        icmp_type: Some(8),
+        ..Default::default()
+    };
+    snapshot.policies.insert(
+        0,
+        PolicyRuleSnapshot {
+            name: "deny-echo".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["echo-only".into()],
+            application_terms: vec![echo_app],
+            action: "deny".into(),
+            ..Default::default()
+        },
+    );
+    let forwarding = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let dst = Ipv4Addr::new(8, 8, 8, 8);
+    let frame_for_type = |icmp_type: u8, stamped: bool| {
+        let mut frame = build_icmp_echo_frame_v4(src, dst, 64, TEST_FABRIC_MAC);
+        frame[34] = icmp_type;
+        frame[36..38].copy_from_slice(&[0, 0]);
+        let csum = checksum16(&frame[34..]);
+        frame[36..38].copy_from_slice(&csum.to_be_bytes());
+        if stamped {
+            stamp_fabric_zone_7770(&mut frame, TEST_LAN_ZONE_ID);
+        }
+        frame
+    };
+    let meta_for = |frame: &[u8], ingress_ifindex| {
+        let mut meta = txn_meta_v4(ingress_ifindex, 0, frame.len() as u16);
+        meta.protocol = PROTO_ICMP;
+        meta.payload_offset = 42;
+        meta
+    };
+
+    // A stamped non-echo query is admitted by the later allow-all rule and
+    // creates a real owner session.
+    let timestamp = frame_for_type(13, true);
+    let (_batch, admitted) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &timestamp,
+        meta_for(&timestamp, 21),
+        true,
+    );
+    assert_eq!(
+        admitted.tx, 1,
+        "the stamped type-13 query must be admitted; rx={} forward={} hit={} miss={} create={} deny={} host_deny={} no_route={} missing_neigh={}",
+        admitted.rx,
+        admitted.forward,
+        admitted.session_hit,
+        admitted.session_miss,
+        admitted.session_create,
+        admitted.policy_deny,
+        admitted.host_inbound_deny,
+        admitted.no_route,
+        admitted.missing_neigh,
+    );
+    assert_eq!(
+        sessions.len(),
+        2,
+        "admission installs both session directions"
+    );
+
+    // Same-zone fabric stamp means the local owner must consult this packet's
+    // type instead of trusting the cached allow-all session verdict.
+    let echo = frame_for_type(8, true);
+    let (_batch, denied) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &echo,
+        meta_for(&echo, 21),
+        true,
+    );
+    assert_eq!(denied.session_hit, 1, "the stamped ICMP packet must hit");
+    assert_eq!(
+        denied.tx, 0,
+        "the type-8 packet must not inherit the cached permit"
+    );
+    assert_eq!(denied.policy_deny, 1, "the typed deny must be counted");
+    assert_eq!(
+        sessions.len(),
+        2,
+        "a packet-specific deny must not tear down the session"
+    );
+
+    // An unstamped packet from the configured overlay still belongs to the
+    // recorded owner session; its packet type is checked against that pair.
+    let overlay = frame_for_type(8, false);
+    let mut overlay_binding = BindingWorker::new_for_mirror_test(0, 0, 101, 0);
+    overlay_binding.interface = Arc::<str>::from("fab0");
+    let (_batch, overlay_hit) = txn_run_descriptor_checked(
+        &mut overlay_binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &overlay,
+        meta_for(&overlay, 101),
+        true,
+    );
+    assert_eq!(
+        (overlay_hit.session_hit, overlay_hit.policy_deny, overlay_hit.tx),
+        (1, 1, 0),
+        "the unstamped overlay packet must hit, be denied by type, and not transmit"
+    );
+    assert_eq!(sessions.len(), 2, "a packet deny must retain the session pair");
 }
 
 /// #10670 fail-on-revert for the reverse cache case: the imported reverse
@@ -1918,7 +2531,7 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
             &ha_state,
             now_secs,
         ),
-        Some(TEST_WAN_ZONE_ID),
+        ZoneEncodedFabricStamp::Valid(TEST_WAN_ZONE_ID),
         "the matching remote-RG stamp must be validated"
     );
     let mut binding = fabric_binding();
@@ -1933,7 +2546,11 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
     );
     assert_eq!(owner.session_hit, 1, "the first owner ACK hits the import");
     assert_eq!(owner.tx, 1, "the adjudicated reverse ACK forwards");
-    assert_eq!(txn_flow_cache_entries(&binding), 1, "the hit seeds its descriptor");
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        1,
+        "the hit seeds its descriptor"
+    );
 
     let (_batch, cached_owner) = txn_run_descriptor_checked(
         &mut binding,
@@ -1948,7 +2565,10 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
         cached_owner.session_hit, 0,
         "the RG-mismatched reverse companion must prove a real same-zone cache hit"
     );
-    assert_eq!(cached_owner.tx, 1, "the adjudicated cached ACK still forwards");
+    assert_eq!(
+        cached_owner.tx, 1,
+        "the adjudicated cached ACK still forwards"
+    );
     assert_eq!(binding.flow.flow_cache.hits, 1);
 
     let punted_miss = reverse_ack(TEST_DMZ_ZONE_ID);
@@ -1961,7 +2581,7 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
             &ha_state,
             now_secs,
         ),
-        Some(TEST_DMZ_ZONE_ID),
+        ZoneEncodedFabricStamp::Valid(TEST_DMZ_ZONE_ID),
         "the foreign peer-miss stamp must also be validated"
     );
     let (_batch, foreign) = txn_run_descriptor_checked(
@@ -1981,9 +2601,16 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
         foreign.foreign_authority_drops, 1,
         "the punt must be judged under dmz -> lan default-deny"
     );
-    assert_eq!(foreign.tx, 0, "the punt cannot inherit the peer-adjudicated cache permit");
+    assert_eq!(
+        foreign.tx, 0,
+        "the punt cannot inherit the peer-adjudicated cache permit"
+    );
     assert_eq!(foreign.policy_revoked_sessions, 0);
-    assert_eq!(sessions.len(), 1, "a foreign punt cannot revoke the imported entry");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "a foreign punt cannot revoke the imported entry"
+    );
     assert_eq!(
         txn_flow_cache_entries(&binding),
         1,
@@ -2037,10 +2664,7 @@ fn unstamped_parent_not_redirected_10314() {
     let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
     // Egress RG 1 (WAN default route) inactive locally -> HAInactive.
-    let ha_state = BTreeMap::from([
-        (1, inactive_rg_10314(now_secs)),
-        (2, active_rg(now_secs)),
-    ]);
+    let ha_state = BTreeMap::from([(1, inactive_rg_10314(now_secs)), (2, active_rg(now_secs))]);
     let mut frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
@@ -2056,7 +2680,15 @@ fn unstamped_parent_not_redirected_10314() {
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
         "unstamped parent arrival must not redirect (RED pre-fix: queued {})",
@@ -2070,10 +2702,7 @@ fn unstamped_parent_not_redirected_10314() {
 fn overlay_arrival_not_redirected_10314() {
     let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    let ha_state = BTreeMap::from([
-        (1, inactive_rg_10314(now_secs)),
-        (2, active_rg(now_secs)),
-    ]);
+    let ha_state = BTreeMap::from([(1, inactive_rg_10314(now_secs)), (2, active_rg(now_secs))]);
     let mut frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
@@ -2087,7 +2716,15 @@ fn overlay_arrival_not_redirected_10314() {
     let meta = txn_meta_v4(101, TCP_FLAG_SYN, frame.len() as u16);
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
         "overlay arrival must not redirect (guard: expected empty, got {})",
@@ -2121,7 +2758,15 @@ fn stamped_parent_not_redirected_10314() {
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
         "stamped parent arrival must not redirect (guard: expected empty, got {})",
@@ -2136,10 +2781,7 @@ fn stamped_parent_not_redirected_10314() {
 fn lan_good_mac_still_redirects_10314() {
     let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    let ha_state = BTreeMap::from([
-        (1, inactive_rg_10314(now_secs)),
-        (2, active_rg(now_secs)),
-    ]);
+    let ha_state = BTreeMap::from([(1, inactive_rg_10314(now_secs)), (2, active_rg(now_secs))]);
     let mut frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
@@ -2155,7 +2797,15 @@ fn lan_good_mac_still_redirects_10314() {
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let mut binding = lan_binding_10314();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
         1,
@@ -2171,10 +2821,7 @@ fn lan_good_mac_still_redirects_10314() {
 fn lan_wrong_unicast_dst_dropped_pre_l3_10314() {
     let forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    let ha_state = BTreeMap::from([
-        (1, inactive_rg_10314(now_secs)),
-        (2, active_rg(now_secs)),
-    ]);
+    let ha_state = BTreeMap::from([(1, inactive_rg_10314(now_secs)), (2, active_rg(now_secs))]);
     let mut frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(10, 0, 61, 102),
         Ipv4Addr::new(8, 8, 8, 8),
@@ -2189,7 +2836,14 @@ fn lan_wrong_unicast_dst_dropped_pre_l3_10314() {
     let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
     let mut binding = lan_binding_10314();
     let mut sessions = SessionTable::new();
-    txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
         "wrong-unicast dst must drop pre-L3 (RED pre-fix: queued {})",
@@ -2217,10 +2871,7 @@ fn unstamped_parent_session_hit_not_redirected_10314() {
     }
     let forwarding = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    let ha_state = BTreeMap::from([
-        (1, inactive_rg_10314(now_secs)),
-        (2, active_rg(now_secs)),
-    ]);
+    let ha_state = BTreeMap::from([(1, inactive_rg_10314(now_secs)), (2, active_rg(now_secs))]);
     let key = crate::session::SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
@@ -2295,13 +2946,22 @@ fn unstamped_parent_session_hit_not_redirected_10314() {
     frame[6..12].copy_from_slice(&[0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
     let meta = txn_meta_v4(21, TCP_FLAG_ACK, frame.len() as u16);
     let mut binding = fabric_binding();
-    let (_batch, dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    let (_batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
     assert_eq!(
         dbg.session_hit, 1,
         "parent frame must exercise the session-hit arm"
     );
     assert_eq!(
-        dbg.ha_inactive, 1,
+        dbg.ha_inactive,
+        1,
         "parent session hit must remain HAInactive rather than become FabricRedirect \
          (ha={}, other={}, forward={}, local={}, no_route={}, missing_neigh={}, \
           policy={}, revoked={}, foreign={})",
@@ -2320,4 +2980,290 @@ fn unstamped_parent_session_hit_not_redirected_10314() {
         "unstamped parent session hit must not redirect back onto fabric (RED pre-fix: queued {})",
         binding.scratch.scratch_forwards.len()
     );
+}
+
+/// #11061 R3: a PBR discard of a QUARANTINED-domain flow must advance the
+/// ambiguous-drop counter. Cross-RI `lan` (tenant-a on reth1.0, tenant-b on
+/// reth2.0) deletes zone 1's domain entry at build; a V1-valid LAN stamp
+/// (RG2 peer-active) then resolves to BASE|1 at stage 9b, and the matching
+/// PBR discard term drops it through the counted arm.
+#[test]
+fn pbr_discard_of_quarantined_flow_counts_ambiguous_drop_11061() {
+    let mut snapshot = routing_instance_fabric_snapshot_11061(false);
+    let (tenant_b_domain, _) = crate::session::install_table_identity("tenant-b");
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "lan".to_string(),
+        routing_instance: "tenant-b".to_string(),
+        routing_domain: tenant_b_domain,
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 14,
+        ..Default::default()
+    });
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: "pbr-discard-11061".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "t-discard".to_string(),
+            action: "discard".to_string(),
+            routing_instance: "tenant-a".to_string(),
+            count: "hits-11061".to_string(),
+            ..Default::default()
+        }],
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 21 {
+            iface.filter_input_v4 = "pbr-discard-11061".to_string();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.has_routing_domains);
+    assert!(
+        forwarding.ambiguous_fabric_zone_ids.contains(&TEST_LAN_ZONE_ID),
+        "cross-RI lan must be ambiguous"
+    );
+    assert!(
+        !forwarding.zone_routing_domain.contains_key(&TEST_LAN_ZONE_ID),
+        "the ambiguous zone entry must be deleted, not zeroed"
+    );
+    // V1b: lan is RG2-bound; RG2 peer-active (absent) keeps the stamp Valid.
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+    );
+    let term_hits = forwarding
+        .filter_state
+        .filters
+        .get("inet:pbr-discard-11061")
+        .map(|f| f.terms[0].counter.packets.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(9999);
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0, "the stamp is V1-valid");
+    assert_eq!(term_hits, 1, "the PBR discard term took the drop");
+    assert_eq!(
+        batch.ambiguous_fabric_zone_drops, 1,
+        "a PBR discard on a quarantined domain must count (RED on revert: the arm is uncounted)"
+    );
+    assert_eq!(sessions.len(), 0);
+    assert!(binding.scratch.scratch_forwards.is_empty());
+}
+
+/// #11061 R3 control: the SAME PBR discard on a domain-0 (non-quarantined)
+/// flow must drop WITHOUT counting. Discriminates the counter: it fires on
+/// quarantine, not on PBR-drop.
+#[test]
+fn pbr_discard_of_domain_zero_flow_does_not_count_ambiguous_drop_11061() {
+    let mut snapshot = routing_instance_fabric_snapshot_11061(false);
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: "pbr-discard-11061".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "t-discard".to_string(),
+            action: "discard".to_string(),
+            routing_instance: "tenant-a".to_string(),
+            count: "hits-11061".to_string(),
+            ..Default::default()
+        }],
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 21 {
+            iface.filter_input_v4 = "pbr-discard-11061".to_string();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert_eq!(
+        forwarding.zone_routing_domain.get(&TEST_WAN_ZONE_ID).copied(),
+        Some(0),
+        "precondition: unmapped wan resolves domain 0, not quarantine"
+    );
+    // V1b: wan is RG1-bound; RG1 peer-active (absent) keeps the stamp Valid.
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(2, active_rg(now_secs))]);
+    let frame = stamped_fabric_frame(TEST_WAN_ZONE_ID, TCP_FLAG_SYN);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+    );
+    let term_hits = forwarding
+        .filter_state
+        .filters
+        .get("inet:pbr-discard-11061")
+        .map(|f| f.terms[0].counter.packets.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(9999);
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0, "the stamp is V1-valid");
+    assert_eq!(term_hits, 1, "the PBR discard term took the drop");
+    assert_eq!(
+        batch.ambiguous_fabric_zone_drops, 0,
+        "a domain-0 PBR discard must not count as a quarantine drop"
+    );
+    assert_eq!(sessions.len(), 0);
+    assert!(binding.scratch.scratch_forwards.is_empty());
+}
+
+/// #11061 R3: the flowless ICMP-error PBR arm counts quarantine drops too.
+/// The l3 enforcement flow is never 9b-stamped (domain 0 by construction),
+/// so the arm resolves the effective domain through the ingress/zone
+/// fallback — a V1-valid ambiguous-zone stamp yields BASE|zone and the
+/// matching PBR discard counts. Time-Exceeded quoting a live SNAT session
+/// (the #5690 shape) over fabric ingress with an ambiguous LAN stamp.
+#[test]
+fn flowless_icmp_error_pbr_discard_on_quarantine_counts_11061() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_port: u16 = 40000;
+
+    let mut snapshot = routing_instance_fabric_snapshot_11061(false);
+    let (tenant_b_domain, _) = crate::session::install_table_identity("tenant-b");
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "lan".to_string(),
+        routing_instance: "tenant-b".to_string(),
+        routing_domain: tenant_b_domain,
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 14,
+        ..Default::default()
+    });
+    snapshot.flow.allow_embedded_icmp = true;
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: "pbr-discard-11061".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "t-discard".to_string(),
+            action: "discard".to_string(),
+            routing_instance: "tenant-a".to_string(),
+            count: "hits-11061".to_string(),
+            ..Default::default()
+        }],
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 21 {
+            iface.filter_input_v4 = "pbr-discard-11061".to_string();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.has_routing_domains);
+    assert!(
+        !forwarding.zone_routing_domain.contains_key(&TEST_LAN_ZONE_ID),
+        "precondition: cross-RI lan is quarantined"
+    );
+
+    // The quoted SNAT session, mirrored from the #5690 runner.
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(client_ip),
+            dst_ip: IpAddr::V4(server_ip),
+            src_port: 12345,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+                tx_vlan_id: 80,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(snat_ip)),
+                rewrite_src_port: Some(snat_port),
+                ..Default::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+
+    // Fabric-stamped TE: dst = fabric MAC (V1a), src = LAN zone stamp (V1b:
+    // lan is RG2-bound; RG2 peer-active keeps it Valid).
+    let mut frame = build_icmp_te_frame_v4_with_mac(
+        router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP,
+        [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+    );
+    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 21,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        config_generation: 7,
+        fib_generation: 9,
+        flow_src_addr: {
+            let mut a = [0u8; 16];
+            a[..4].copy_from_slice(&router_ip.octets());
+            a
+        },
+        flow_dst_addr: {
+            let mut a = [0u8; 16];
+            a[..4].copy_from_slice(&snat_ip.octets());
+            a
+        },
+        ..UserspaceDpMeta::default()
+    };
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let mut binding = fabric_binding();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+    );
+    let term_hits = forwarding
+        .filter_state
+        .filters
+        .get("inet:pbr-discard-11061")
+        .map(|f| f.terms[0].counter.packets.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(9999);
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0, "the stamp is V1-valid");
+    assert_eq!(term_hits, 1, "the PBR discard term took the drop");
+    assert_eq!(
+        batch.ambiguous_fabric_zone_drops, 1,
+        "a flowless PBR discard on a quarantined zone must count (RED on revert: the arm reads the unstamped l3 domain)"
+    );
+    assert!(binding.scratch.scratch_forwards.is_empty());
 }

@@ -1985,6 +1985,49 @@ fn apply_snapshot_rejects_unsupported_protocol_version() {
         .expect("handler result");
 }
 
+#[test]
+fn apply_snapshot_rejects_v35_typed_snat_before_apply_11064() {
+    let state = Arc::new(Mutex::new(ServerState {
+        status: ProcessStatus::default(),
+        snapshot: None,
+        afxdp: afxdp::Coordinator::new(),
+        state_writer: Arc::new(StateWriter::new()),
+        quarantined_after_panic: false,
+    }));
+    let response = apply_snapshot_for_test(
+        state.clone(),
+        ConfigSnapshot {
+            // Literal v35 is intentional: the receiver must reject a snapshot
+            // whose source-NAT application match carries type/code fields that
+            // a v35 helper would ignore if it attempted to apply the wire.
+            version: 35,
+            source_nat_rules: vec![crate::protocol::SourceNATRuleSnapshot {
+                name: "typed-snat".to_string(),
+                match_applications: vec![crate::protocol::NatAppTermWire {
+                    protocol: 1,
+                    icmp_type: Some(13),
+                    icmp_code: Some(0),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..ConfigSnapshot::default()
+        },
+    );
+    assert!(!response.ok, "v35 typed-SNAT snapshot was applied: {response:?}");
+    assert_eq!(
+        response.error,
+        format!(
+            "unsupported snapshot protocol version 35 (want {})",
+            CONFIG_SNAPSHOT_PROTOCOL_VERSION
+        )
+    );
+    assert!(
+        state.lock().expect("state").snapshot.is_none(),
+        "the exact-version guard must reject before storing the typed-SNAT snapshot"
+    );
+}
+
 fn apply_snapshot_for_test(
     state: Arc<Mutex<ServerState>>,
     snapshot: ConfigSnapshot,

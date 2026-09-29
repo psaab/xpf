@@ -96,6 +96,7 @@ pub(super) use inspect::{
     parse_packet_destination_from_frame, parse_session_flow_from_bytes,
     parse_session_flow_from_frame, parse_session_flow_from_meta, parse_zone_encoded_fabric_ingress,
     parse_zone_encoded_fabric_ingress_from_frame, verified_l3_or_stamp,
+    ZoneEncodedFabricStamp,
 };
 pub(in crate::afxdp) use inspect::{
     authoritative_forward_ports, decode_frame_summary, declared_l3_end, dest_is_directed_broadcast,

@@ -48,7 +48,7 @@ func (s *Server) zonesHandler(w http.ResponseWriter, _ *http.Request) {
 		if quarantined {
 			zi.Quarantine = &ZoneQuarantineInfo{
 				State:        ZoneQuarantineStateQuarantined,
-				SurvivorZone: config.StableZoneIDOwner(zoneNames, config.StableZoneID(zoneName)),
+				SurvivorZone: config.ZoneQuarantineSurvivorName(zoneName, zoneNames),
 			}
 			// Do not publish the survivor's counters under the quarantined
 			// name. The numeric counter fields remain their zero values.

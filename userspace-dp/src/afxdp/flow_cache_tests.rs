@@ -660,6 +660,7 @@ fn from_forward_decision_round_trip() {
         rewrite_dst: None,
         rewrite_src_port: Some(1024),
         rewrite_dst_port: None,
+        source_nat_icmp: None,
         nat64: false,
         nptv6: false,
     }, install_table_domain: 0, install_table_check: 0 };
@@ -824,6 +825,7 @@ fn make_v4_round_trip_inputs() -> (
         rewrite_dst: None,
         rewrite_src_port: Some(1024),
         rewrite_dst_port: None,
+        source_nat_icmp: None,
         nat64: false,
         nptv6: false,
     }, install_table_domain: 0, install_table_check: 0 };
@@ -1292,6 +1294,7 @@ fn make_v6_round_trip_inputs() -> (
         rewrite_dst: None,
         rewrite_src_port: None,
         rewrite_dst_port: None,
+        source_nat_icmp: None,
         nat64: false,
         nptv6: false,
     }, install_table_domain: 0, install_table_check: 0 };

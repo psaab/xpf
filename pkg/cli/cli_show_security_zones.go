@@ -52,7 +52,7 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 		}
 		survivor := ""
 		if reason != "" {
-			survivor = config.StableZoneIDOwner(zoneNames, zoneID)
+			survivor = config.ZoneQuarantineSurvivorName(name, zoneNames)
 		}
 
 		// Junos format: "Security zone: <name>"

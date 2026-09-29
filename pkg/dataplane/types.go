@@ -427,6 +427,13 @@ type SessionValue struct {
 	// today's behaviour.
 	InstallTableDomain uint32
 	InstallTableCheck  uint32
+	// SourceNatICMP* (#11064) preserves the active packet's ICMP query identity
+	// for stateful source-NAT rule reconstruction on the peer. Sync-only; not
+	// part of the BPF/C conntrack ABI. Valid distinguishes an absent identity
+	// from the valid (type=0, code=0) pair.
+	SourceNatICMPValid bool
+	SourceNatICMPType  uint8
+	SourceNatICMPCode  uint8
 }
 
 // SessionKeyV6 mirrors the C struct session_key_v6 (5-tuple with 128-bit IPs).
@@ -811,6 +818,10 @@ type SessionValueV6 struct {
 	// after TCPCloseClass on the v6 cluster payload).
 	InstallTableDomain uint32
 	InstallTableCheck  uint32
+	// SourceNatICMP* (#11064): v6 analogue of the v4 sync-only metadata above.
+	SourceNatICMPValid bool
+	SourceNatICMPType  uint8
+	SourceNatICMPCode  uint8
 }
 
 // ZoneConfig mirrors the C struct zone_config.

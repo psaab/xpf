@@ -1375,10 +1375,10 @@ func zoneMapCorpus6722() []struct {
 			"set interfaces ge-0/0/1 unit 1 family inet address 10.0.62.1/24",
 			"set security zones security-zone lan interfaces ge-0/0/1",
 		}, false},
-		// The shape round 11's survivor ledger reasoned about, and the reason
-		// this corpus exists. STRICT rejects a doubly-claimed reference
-		// outright, so it is reachable only on the #1960 no-brick / HA
-		// peer-sync path.
+		// Duplicate bare claims are quarantined on the tolerant path; the
+		// RETH's independent zzz claim remains a positive identity for the
+		// fail-closed egress assertion below. Strict compilation still rejects
+		// this shape, so it is reachable only on the #1960 load/peer-sync path.
 		{"member-claimed-by-two-zones", []string{
 			"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
 			"set interfaces reth1 redundant-ether-options redundancy-group 2",
@@ -1387,28 +1387,16 @@ func zoneMapCorpus6722() []struct {
 			"set security zones security-zone zzz interfaces ge-0/0/1",
 			"set security zones security-zone zzz interfaces reth1",
 		}, true},
-		// #7024: THE FALSIFYING SHAPE. A BARE reference in one zone and a
-		// DOTTED reference from a DIFFERENT zone naming the same interface.
-		// buildInterfaceZoneMap fans the dotted ref UP to the base
-		// (first-write-wins over sorted zone names, so `aaa` beats `zzz`);
-		// authoredZoneRefs deliberately does not fan up, and records the bare
-		// sentence. The two therefore give different answers for `ge-0/0/1`.
-		//
-		// This is the ONLY shape that falsifies the old unconditional
-		// agreement claim, and the corpus had nothing like it: the five strict
-		// shapes never double-claim, and `member-claimed-by-two-zones` uses TWO
-		// BARE refs, so no fan-up is involved.
+		// #7024: a bare reference in one zone and a unit reference in another
+		// overlap on the logical unit key. That unit is quarantined while the
+		// base key remains attributable to its own bare reference.
 		{"base-and-unit-claimed-by-different-zones", []string{
 			"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
 			"set security zones security-zone aaa interfaces ge-0/0/1.0",
 			"set security zones security-zone zzz interfaces ge-0/0/1",
 		}, true},
-		// ...and its MIRROR, with the zone names swapped so the fan-up winner
-		// is also the bare ref's zone. This samples the BENIGN side of the same
-		// axis: no divergence. Both are here because a fixture that picked only
-		// this order would prove nothing — the ordering is what makes the shape
-		// falsifying, and a corpus sitting on the passing point of an axis it
-		// varies is the defect this issue is about.
+		// The mirror has the same contested unit key with the zone-name order
+		// swapped; neither order may choose a runtime owner.
 		{"base-and-unit-same-zone-wins-fanup", []string{
 			"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
 			"set security zones security-zone zzz interfaces ge-0/0/1.0",
@@ -1417,140 +1405,69 @@ func zoneMapCorpus6722() []struct {
 	}
 }
 
-// P: `authoredZoneRefs` and `buildInterfaceZoneMap` must AGREE about every
-// reference the operator literally wrote.
+// P: authoredZoneRefs and buildInterfaceZoneMap must agree on every surviving
+// authored key, and both must omit ambiguous keys. They serve different
+// consumers—the first carries provenance, the second derives per-row ingress
+// attribution and fans references up/down—but must not assign a contested
+// identity to an arbitrary first claimant.
 //
-// The two maps are built by separate code for separate consumers —
-// authoredZoneRefs records PROVENANCE for stampEgressZones, buildInterfaceZoneMap
-// derives the per-row INGRESS attribution and fans a reference up to the base
-// and down onto the units — but they read the same
-// `security-zone <z> interfaces <ref>` sentences through the same canonicalizer
-// and pick a winner the same way: zone names sorted, first write wins. Round 11
-// recorded a last-write-wins mutation of authoredZoneRefs as benign, on the
-// reason that "buildInterfaceZoneMap applies the same first-write-wins, so both
-// maps pick the same winner". That reason is circular — the two agree BECAUSE of
-// the line the mutation deletes — and the agreement had no binder.
-//
-// This is deliberately an AGREEMENT test rather than a collapse of the two
-// functions into one. They may legitimately diverge later; a move toward Junos
-// per-unit zoning would want buildInterfaceZoneMap to stop fanning up to the
-// base while authoredZoneRefs went on recording the literal reference. What must
-// not happen silently is the two DISAGREEING about a reference both of them
-// hold, because stampEgressZones resolves rule 2 from one map while the Rust
-// corroboration check reads the other, and a disagreement is exactly a claim the
-// helper will corroborate against a zone the operator did not write for that
-// identity.
-//
-// FAIL-ON-REVERT, measured: authoredZoneRefs last-write-wins reds this on
-// `member-claimed-by-two-zones` (authored says `zzz`, the zone map says `aaa`);
-// dropping CanonicalInterfaceUnitRef from authoredZoneRefs reds it on
-// `noncanonical-unit-ref` (authored keys `.01`, the zone map keys `.1`).
+// The corpus includes duplicate bare claims, a base/unit overlap, and a
+// noncanonical unit ref. Quarantined logical keys are omitted from both maps;
+// the single-owner and canonicalization controls remain represented as ordinary
+// agreement cases.
 func TestAuthoredAndDerivedZoneMapsAgreeOnEveryAuthoredRef_6722(t *testing.T) {
-	// #7024 ANTI-VACUITY. The narrowing below tolerates a base-reference
-	// divergence, which is only safe to tolerate if the corpus actually
-	// CONTAINS one — otherwise the loop degrades to the old unconditional
-	// claim and the tolerance is untested prose. The old corpus had no such
-	// shape, which is exactly how the guard passed while its claim was false.
-	sawExplainedBaseDivergence := false
+	sawQuarantinedKey := false
 	for _, tc := range zoneMapCorpus6722() {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := compileWithStubbedLinks6722(t, tc.lines, map[string]int{}, map[string]string{}, tc.lenient)
 			authored := authoredZoneRefs(cfg)
 			derived := buildInterfaceZoneMap(cfg)
-
-			// Anti-vacuity: an empty authored map would make the loop below a
-			// no-op and the subtest green for the wrong reason.
 			if len(authored) == 0 {
-				t.Fatalf("precondition: authoredZoneRefs is EMPTY for %q, so the "+
-					"agreement loop asserts nothing", tc.name)
+				t.Fatalf("precondition: authoredZoneRefs is empty for %q", tc.name)
 			}
+
+			quarantined := config.QuarantinedZoneInterfaceKeys(cfg)
+			if len(quarantined) > 0 {
+				sawQuarantinedKey = true
+			}
+			quarantinedKeys := make([]string, 0, len(quarantined))
+			for key := range quarantined {
+				quarantinedKeys = append(quarantinedKeys, key)
+			}
+			sort.Strings(quarantinedKeys)
+			for _, key := range quarantinedKeys {
+				if _, ok := authored[key]; ok {
+					t.Errorf("authoredZoneRefs retained quarantined key %q: %v", key, authored)
+				}
+				if _, ok := derived[key]; ok {
+					t.Errorf("buildInterfaceZoneMap retained quarantined key %q: %v", key, derived)
+				}
+			}
+
 			refs := make([]string, 0, len(authored))
 			for ref := range authored {
 				refs = append(refs, ref)
 			}
 			sort.Strings(refs)
 			for _, ref := range refs {
-				got, want := derived[ref], authored[ref]
-				if got == want {
-					continue
-				}
-				// #7024: a UNIT reference must ALWAYS agree. Both maps record a
-				// unit ref from the operator's literal sentence and neither
-				// synthesizes one, so a disagreement here really is one of them
-				// changing its write policy or canonicalization alone.
-				if strings.Contains(ref, ".") {
-					t.Errorf("the two zone maps DISAGREE about the authored UNIT "+
-						"reference %q: authoredZoneRefs=%q buildInterfaceZoneMap=%q. "+
-						"Neither map synthesizes a unit reference, so this is one of "+
-						"them changing its write policy or its canonicalization "+
-						"alone.\n  authored=%v\n  derived =%v",
+				if got, want := derived[ref], authored[ref]; got != want {
+					t.Errorf("zone maps disagree on surviving authored key %q: authored=%q derived=%q\n  authored=%v\n  derived=%v",
 						ref, want, got, authored, derived)
-					continue
 				}
-				// A BASE reference MAY diverge, and #7024 is the record of why.
-				// buildInterfaceZoneMap fans a unit reference UP to its base;
-				// authoredZoneRefs deliberately does not, because it is
-				// PROVENANCE — what the operator literally wrote. When a bare
-				// ref in one zone and a dotted ref from an alphabetically
-				// earlier zone name the same interface, the derived map answers
-				// with the fan-up winner and the authored map answers with the
-				// bare sentence. Both are correct for their own consumer.
-				//
-				// What must hold is that the divergence is EXPLAINED by the
-				// fan-up rather than arbitrary: the derived value has to be the
-				// zone of some authored UNIT under this base. A derived value
-				// from nowhere would mean the fan-up itself had changed.
-				explained := false
-				for other, otherZone := range authored {
-					if other == ref || !strings.HasPrefix(other, ref+".") {
-						continue
-					}
-					if otherZone == got {
-						explained = true
-						break
-					}
-				}
-				if !explained {
-					t.Errorf("the two zone maps disagree about the authored BASE "+
-						"reference %q (authoredZoneRefs=%q buildInterfaceZoneMap=%q) "+
-						"and the derived value is NOT the zone of any authored unit "+
-						"under it, so the fan-up does not explain it. A base "+
-						"divergence is tolerated ONLY as the fan-up of a unit "+
-						"reference (#7024); this one came from somewhere else.\n"+
-						"  authored=%v\n  derived =%v",
-						ref, want, got, authored, derived)
-					continue
-				}
-				sawExplainedBaseDivergence = true
 			}
 		})
 	}
-	if !sawExplainedBaseDivergence {
-		t.Fatalf("no corpus shape produced a base-reference divergence, so the #7024 " +
-			"tolerance above was never exercised and this guard has silently " +
-			"reverted to the unconditional agreement claim it replaced. Restore " +
-			"`base-and-unit-claimed-by-different-zones` (a BARE ref in one zone and " +
-			"a DOTTED ref from an alphabetically EARLIER zone naming one interface) " +
-			"— note the zone ORDER is what makes it falsifying")
+	if !sawQuarantinedKey {
+		t.Fatal("zone-map corpus contains no contested key, so quarantine coverage is vacuous")
 	}
 }
 
 // Q: a member port claimed by TWO zones, one of which also holds its RETH, must
-// fail CLOSED — the OUTCOME half of cell P, on the shape that makes the
-// disagreement dangerous rather than merely untidy.
+// have no zone on its contested row. The RETH's independent zzz ownership
+// remains unambiguous and continues to provide the shared netdev's egress zone.
 //
-// `ge-0/0/1` in `aaa` and `zzz`, `reth1` in `zzz`, all three rows on one netdev.
-// Two DISTINCT authored zones resolve to that ifindex, so rule 2's conflict arm
-// fires and the device identifies no single zone. Under a last-write-wins
-// authoredZoneRefs both references resolve `zzz`, rule 2 sees a singleton, and
-// the ifindex adjudicates as `zzz` — a zone the reth was put in but the member
-// was not, and the Rust corroboration check cannot catch it because the rows
-// carry `aaa` AND `zzz` between them, so `zzz` IS corroborated.
-//
-// Strict rejects this config, so the surface it defends is the tolerant load /
-// HA peer-sync path where that rejection is a warning (#1960 no-brick) — the
-// same surface cell O defends, and the reason cell P's corpus carries a lenient
-// flag.
+// Strict rejects this config, so the surface this defends is the tolerant load /
+// HA peer-sync path where that rejection is a warning (#1960 no-brick).
 func TestMemberClaimedByTwoZonesFailsClosedOnTheLenientPath_6722(t *testing.T) {
 	lines := []string{
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
@@ -1563,55 +1480,42 @@ func TestMemberClaimedByTwoZonesFailsClosedOnTheLenientPath_6722(t *testing.T) {
 	links := map[string]int{"ge-0-0-1": 24}
 	macs := map[string]string{"ge-0-0-1": "02:bf:72:01:00:01"}
 
-	// Pinned rather than assumed: if strict ever admitted a doubly-claimed
-	// reference, "only reachable leniently" would be false and the reader would
-	// be misled about which surface this cell defends.
 	if _, err := config.CompileConfig(treeFromSet6722(t, lines)); err == nil {
-		t.Fatalf("precondition: strict CompileConfig ADMITTED an interface " +
-			"claimed by two security zones; this cell claims the shape reaches " +
-			"the builder only on the tolerant path, and that claim is now false")
+		t.Fatal("precondition: strict CompileConfig admitted an interface claimed by two zones")
 	}
 
 	cfg := compileWithStubbedLinks6722(t, lines, links, macs, true)
 	snaps := buildInterfaceSnapshots(cfg)
-
-	if got := authoredZoneRefs(cfg)["ge-0/0/1"]; got != "aaa" {
-		t.Fatalf("precondition: authoredZoneRefs[ge-0/0/1] = %q, want %q — the "+
-			"member's first-written zone is what makes TWO distinct zones resolve "+
-			"to this ifindex; if it were %q there would be only one and rule 2 "+
-			"would resolve normally", got, "aaa", "zzz")
+	if got := authoredZoneRefs(cfg)["ge-0/0/1"]; got != "" {
+		t.Fatalf("authoredZoneRefs contested member = %q, want no zone", got)
+	}
+	if got := buildInterfaceZoneMap(cfg)["ge-0/0/1"]; got != "" {
+		t.Fatalf("buildInterfaceZoneMap contested member = %q, want no zone", got)
+	}
+	if _, quarantined := config.QuarantinedZoneInterfaceKeys(cfg)["ge-0/0/1"]; !quarantined {
+		t.Fatal("contested member key was not quarantined")
 	}
 	member := snapByName6722(t, snaps, "ge-0/0/1")
-	base := snapByName6722(t, snaps, "reth1")
-	if member.Ifindex != 24 || base.Ifindex != 24 {
-		t.Fatalf("precondition: ge-0/0/1=%d reth1=%d, want 24/24 — the claims "+
-			"must land on ONE netdev", member.Ifindex, base.Ifindex)
+	reth := snapByName6722(t, snaps, "reth1")
+	if member.Ifindex != 24 || reth.Ifindex != 24 {
+		t.Fatalf("precondition: ge-0/0/1=%d reth1=%d, want 24/24 — claims must land on one netdev",
+			member.Ifindex, reth.Ifindex)
 	}
-	if member.Zone != "aaa" || base.Zone != "zzz" {
-		t.Fatalf("precondition: ge-0/0/1 Zone=%q reth1 Zone=%q, want \"aaa\" and "+
-			"\"zzz\" — BOTH zone names must be carried on this ifindex, or the "+
-			"Rust corroboration check would refuse a `zzz` answer on its own and "+
-			"this cell would not be measuring the Go conflict arm",
-			member.Zone, base.Zone)
+	if member.Zone != "" || reth.Zone != "zzz" {
+		t.Fatalf("member/reth zones = %q/%q, want contested member unzoned and reth zzz",
+			member.Zone, reth.Zone)
 	}
-	assertEgressZone6722(t, snaps, 24, "",
-		"the operator's sentences put `aaa` and `zzz` on this one netdev, so it "+
-			"identifies no single egress zone. Answering `zzz` adjudicates the "+
-			"member's transit under a zone it was never placed in — and `zzz` is "+
-			"carried by the reth rows, so the helper's corroboration check would "+
-			"honour it")
+	assertEgressZone6722(t, snaps, 24, "zzz",
+		"after the contested member key is dropped, the RETH's independent zzz claim "+
+			"is the only surviving authored zone on the shared netdev")
 
-	// CONTROL. Drop the `aaa` binding and nothing else: one authored zone on a
-	// coherent netdev, which rule 2 resolves. Without it, a mutation that broke
-	// coherence outright would red the assertion above and look like the
-	// conflict arm was bound.
+	// Positive control: removing only the aaa claim leaves one zone on the
+	// member/reth netdev, which must resolve normally.
 	ctl := compileWithStubbedLinks6722(t, []string{
 		lines[0], lines[1], lines[2], lines[4], lines[5],
 	}, links, macs, true)
 	assertEgressZone6722(t, buildInterfaceSnapshots(ctl), 24, "zzz",
-		"removing ONLY the second claim on the member leaves one authored zone "+
-			"on a coherent netdev; if this control also answers \"\" then the "+
-			"assertion above is measuring coherence, not the conflict arm")
+		"one authored zone on the coherent netdev must still resolve")
 }
 
 // R: an authored `.01` unit reference must be canonicalised the same way the
@@ -1965,20 +1869,9 @@ func TestBarePortOfADifferentRethDoesNotDeferToThisOne_6722(t *testing.T) {
 			"measuring the aliasing, not the redundant-parent match")
 }
 
-// #7024: the OUTCOME half. A base/unit divergence must resolve FAIL-CLOSED.
-//
-// Cell P now TOLERATES a base-reference divergence, which is only defensible if
-// the divergence cannot produce a wrong answer. This is the cell that shows it
-// cannot: the ifindex resolves to no zone at all, so nothing forwards under a
-// zone the operator did not write for it.
-//
-// Tolerating a divergence without pinning its outcome would be the same defect
-// this issue is about, moved one step: a claim that reads as safe with nothing
-// asserting the safety.
-//
-// Strict rejects the doubly-claimed interface, so — like cells O, P's sixth
-// shape and Q — the surface this defends is the tolerant load / HA peer-sync
-// path (#1960 no-brick).
+// #7024: a base reference in one zone and a unit reference in another quarantine
+// the overlapping unit key. The unit row is zero-zone/dropped while the
+// uncontested base identity remains in zzz.
 func TestBaseAndUnitClaimedByDifferentZonesFailsClosed_7024(t *testing.T) {
 	lines := []string{
 		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
@@ -1988,34 +1881,34 @@ func TestBaseAndUnitClaimedByDifferentZonesFailsClosed_7024(t *testing.T) {
 	links := map[string]int{"ge-0-0-1": 24}
 	macs := map[string]string{"ge-0-0-1": "02:bf:72:01:00:01"}
 
-	// Pinned rather than assumed, mirroring cell Q: if strict ever admitted
-	// this, "reachable only leniently" would be false and a reader would be
-	// misled about which surface this defends.
 	if _, err := config.CompileConfig(treeFromSet6722(t, lines)); err == nil {
-		t.Fatalf("precondition: strict CompileConfig ADMITTED an interface whose " +
-			"base and unit are claimed by different zones; this cell claims the " +
-			"shape reaches the builder only on the tolerant path")
+		t.Fatal("precondition: strict CompileConfig admitted a base/unit interface conflict")
 	}
-
 	cfg := compileWithStubbedLinks6722(t, lines, links, macs, true)
-
-	// The divergence itself, pinned here too so this cell fails for its OWN
-	// reason if the maps are ever made to agree — rather than quietly becoming
-	// a test of a shape that no longer exists.
 	authored, derived := authoredZoneRefs(cfg), buildInterfaceZoneMap(cfg)
-	if authored["ge-0/0/1"] != "zzz" || derived["ge-0/0/1"] != "aaa" {
-		t.Fatalf("precondition: authored[ge-0/0/1]=%q derived[ge-0/0/1]=%q, want "+
-			"\"zzz\" and \"aaa\" — the fan-up winner must differ from the bare "+
-			"sentence, or there is no divergence here to fail closed on",
+	if _, quarantined := config.QuarantinedZoneInterfaceKeys(cfg)["ge-0/0/1.0"]; !quarantined {
+		t.Fatal("overlapping unit key ge-0/0/1.0 was not quarantined")
+	}
+	if authored["ge-0/0/1.0"] != "" || derived["ge-0/0/1.0"] != "" {
+		t.Fatalf("contested unit maps = %q/%q, want no zone",
+			authored["ge-0/0/1.0"], derived["ge-0/0/1.0"])
+	}
+	if authored["ge-0/0/1"] != "zzz" || derived["ge-0/0/1"] != "zzz" {
+		t.Fatalf("uncontested base maps = %q/%q, want zzz",
 			authored["ge-0/0/1"], derived["ge-0/0/1"])
 	}
-
 	snaps := buildInterfaceSnapshots(cfg)
-	assertEgressZone6722(t, snaps, 24, "",
-		"the operator's sentences put `aaa` on ge-0/0/1.0 and `zzz` on ge-0/0/1, "+
-			"and both land on one netdev, so it identifies no single egress zone. "+
-			"Answering either one adjudicates transit under a zone the operator "+
-			"did not write for that identity — and cell P now TOLERATES this "+
-			"divergence, so if the outcome stops being fail-closed the tolerance "+
-			"becomes a hole rather than a documented limit (#7024)")
+	base, unit := snapByName6722(t, snaps, "ge-0/0/1"), snapByName6722(t, snaps, "ge-0/0/1.0")
+	if base.Zone != "zzz" || unit.Zone != "" {
+		t.Fatalf("base/unit snapshot zones = %q/%q, want zzz/empty", base.Zone, unit.Zone)
+	}
+	assertEgressZone6722(t, snaps, 24, "zzz",
+		"the contested unit row is unzoned, but the surviving base identity still "+
+			"authorizes zzz for this shared netdev")
+
+	// Positive control: removing only the zzz base claim leaves one owner for
+	// the unit key, which resolves to aaa.
+	ctl := compileWithStubbedLinks6722(t, []string{lines[0], lines[1]}, links, macs, true)
+	assertEgressZone6722(t, buildInterfaceSnapshots(ctl), 24, "aaa",
+		"one unit-zone claim must still resolve normally")
 }

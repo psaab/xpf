@@ -318,6 +318,7 @@ fn reserve_synced_source_nat_allocation_with_holder(
                     flow.protocol,
                     flow.src_port,
                     flow.dst_port,
+                    nat.source_nat_icmp,
                 )
             }),
             // #6979 F1: PASS 1 reproduces the active's choice, so it stops at
