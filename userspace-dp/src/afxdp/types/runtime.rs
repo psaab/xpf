@@ -518,6 +518,9 @@ pub(in crate::afxdp) struct ResolutionDebug {
     /// looks up the name via `forwarding.zone_id_to_name`.
     pub(in crate::afxdp) from_zone: Option<u16>,
     pub(in crate::afxdp) to_zone: Option<u16>,
+    /// Packet's ingress routing-domain identity, retained for attributing
+    /// fail-closed ambiguous-fabric table drops.
+    pub(in crate::afxdp) routing_domain: u32,
 }
 
 impl ResolutionDebug {
@@ -528,6 +531,7 @@ impl ResolutionDebug {
             dst_ip: Some(flow.dst_ip),
             src_port: flow.forward_key.src_port,
             dst_port: flow.forward_key.dst_port,
+            routing_domain: flow.forward_key.routing_domain,
             from_zone: None,
             to_zone: None,
         }

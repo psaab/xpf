@@ -140,8 +140,10 @@ const preSecureTunnelProtocolVersion = 4
 // contract to v32 for bind-less selector fencing; #10702 moves it to v33 so
 // post-teardown refusals cannot be mistaken for retained worker state.
 // #10703 moves it to v34 for TCP SYN-check session-miss admission; the
-// #10827 follow-up moves it to v35 for the web-management TLS credential
-// paths on the snapshot wire; #11064 moves it to v36 for source-NAT ICMP type/code.
+// #10827 moved the protocol from v34 to v35 for the web-management TLS
+// credential fields. #11061 + #11064 move it to v36: the absent-fabric
+// compatibility knob changes receive security behavior, and source-NAT
+// application terms carry ICMP type/code.
 const secureTunnelSnapshotProtocolVersion = 36
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5

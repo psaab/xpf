@@ -746,6 +746,122 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
     assert!(resolved.metadata.fabric_ingress);
 }
 
+/// #11061 R3: a quarantined (sentinel-domain) reply must not be synthesized
+/// from a MAIN forward. The reply flow carries a quarantined forward_key
+/// domain while the only published forward lives in domain 0: the resolver
+/// must return None instead of borrowing the MAIN session.
+///
+/// Outcome pin over layered enforcement (no single layer is individually
+/// necessary here — verified: disabling the :3050 gate alone, or the
+/// shared_ops mixed-zero refusal alone, keeps this GREEN): the matcher
+/// guards (lookup.rs pass-2 refusal, shared_ops mixed-zero refusal) refuse
+/// the borrow, the :3050 gate backstops the synthesis site, and the sentinel
+/// domain has no install-table row so installation fails closed. What this
+/// tripwires is DOMAIN COLLAPSE: any regression that zeroes/truncates the
+/// reply's sentinel domain (the exact 0-hole this issue closes) makes the
+/// quarantined leg behave as the control and flips this RED.
+/// Control: the identical flow with domain 0 resolves.
+#[test]
+fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
+    for (label, domain, expect_some) in [
+        (
+            "quarantined",
+            crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 7,
+            false,
+        ),
+        ("main-control", 0, true),
+    ] {
+        let mut sessions = SessionTable::new();
+        let key = test_key();
+        let mut forwarding = test_forwarding_state_with_fabric();
+        forwarding.connected_v4.push(ConnectedRouteV4 {
+            prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+            host: Ipv4Addr::new(172, 16, 80, 0),
+            ifindex: 12,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".to_string(),
+        });
+        forwarding.neighbors.insert(
+            (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+            NeighborEntry {
+                mac: [0xde, 0xad, 0xbe, 0xef, 0x80, 0x00],
+            },
+        );
+        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        let mut ha_state = BTreeMap::new();
+        ha_state.insert(1, active_ha_runtime(1));
+
+        let shared_entry = SyncedSessionEntry {
+            key: key.clone(),
+            decision: SessionDecision { resolution: resolve_fabric_redirect(&forwarding).expect("fabric redirect"), nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+                rewrite_src_port: Some(key.src_port),
+                ..NatDecision::default()
+            }, install_table_domain: 0, install_table_check: 0 },
+            metadata: SessionMetadata {
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                fabric_ingress: true,
+                ..test_metadata()
+            },
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x18,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        };
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &shared_entry,
+        );
+        let wire_key = forward_wire_key(&key, shared_entry.decision.nat);
+        let mut reply_key = wire_key;
+        reply_key.routing_domain = domain;
+        let flow = SessionFlow {
+            src_ip: reply_key.src_ip,
+            dst_ip: reply_key.dst_ip,
+            forward_key: reply_key,
+        };
+        let resolved = resolve_flow_session_decision(
+            &mut sessions,
+            SteeringMap::unshared_for_test(-1),
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &peer_worker_commands,
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            &flow,
+            1_000_000,
+            1,
+            PROTO_TCP,
+            0x18,
+            21,
+            0,
+            true,
+            0,
+            0,
+        );
+        assert_eq!(
+            resolved.is_some(),
+            expect_some,
+            "{label}: quarantined reply must not synthesize, domain-0 control must resolve"
+        );
+    }
+}
+
 #[test]
 fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
     let mut sessions = SessionTable::new();
@@ -1823,6 +1939,56 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
     assert_eq!(hit.key, entry.key);
     assert_eq!(hit.decision, entry.decision);
     assert_eq!(hit.metadata, entry.metadata);
+}
+
+#[test]
+fn shared_nat_fallback_does_not_borrow_main_for_quarantined_domain_11061() {
+    let sessions = SessionTable::new();
+    let mut key = test_key();
+    key.routing_domain = 0;
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let canonical_reply = reverse_canonical_key(&key, decision.nat);
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    shared_nat_sessions
+        .lock()
+        .expect("shared NAT lock")
+        .insert(canonical_reply.clone(), entry);
+    let quarantined_reply = SessionKey {
+        routing_domain: crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
+        ..canonical_reply
+    };
+    assert!(
+        lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_nat_sessions,
+            &quarantined_reply,
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+        )
+        .is_none(),
+        "the shared canonical-index fallback must not clone a MAIN session for \
+         an ambiguous fabric-zone reply"
+    );
 }
 
 #[test]

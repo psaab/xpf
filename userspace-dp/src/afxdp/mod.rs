@@ -1052,6 +1052,16 @@ pub(in crate::afxdp) struct BatchCounters {
     ipv6_ext_header_dropped: u64,
     // #10686: IPv6 ingress drops of v4-mapped or v4-compatible src/dst.
     v4_mapped_ipv6_dropped: u64,
+    // #11061: fabric trust-boundary drops, batched to per-binding status.
+    // Observability contract (R3 reconcile): these are AGGREGATE batch
+    // counters only — flood-correct by construction (no per-packet log,
+    // no per-zone breakout). Per-zone attribution is deliberately absent:
+    // a quarantine event's zone is visible in the packet (the stamp) for
+    // capture-based triage, not in the counter plane. Do not claim
+    // per-zone logging for these counters.
+    invalid_fabric_stamp_drops: u64,
+    unstamped_fabric_ingress_drops: u64,
+    ambiguous_fabric_zone_drops: u64,
     // #10498: named pre-L3 drops, kept distinct from downstream dispositions.
     umem_slice_dropped: u64,
     unknown_vlan_dropped: u64,
@@ -1092,6 +1102,24 @@ impl BatchCounters {
             self.screen_reason_drops[i] += 1;
         }
         crate::afxdp::flood_counters::record_zone_flood_drop(flood_slots, zone_id, reason);
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn record_invalid_fabric_stamp_drop(&mut self) {
+        self.touched = true;
+        self.invalid_fabric_stamp_drops += 1;
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn record_unstamped_fabric_ingress_drop(&mut self) {
+        self.touched = true;
+        self.unstamped_fabric_ingress_drops += 1;
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn record_ambiguous_fabric_zone_drop(&mut self) {
+        self.touched = true;
+        self.ambiguous_fabric_zone_drops += 1;
     }
 
     /// #4520: attribute a NAT64 forward-flow source-allocation failure to the
@@ -1630,6 +1658,21 @@ impl BatchCounters {
                 Ordering::Relaxed,
             );
             self.table_unavailable_packets = 0;
+        }
+        if self.invalid_fabric_stamp_drops != 0 {
+            live.invalid_fabric_stamp_drops
+                .fetch_add(self.invalid_fabric_stamp_drops, Ordering::Relaxed);
+            self.invalid_fabric_stamp_drops = 0;
+        }
+        if self.unstamped_fabric_ingress_drops != 0 {
+            live.unstamped_fabric_ingress_drops
+                .fetch_add(self.unstamped_fabric_ingress_drops, Ordering::Relaxed);
+            self.unstamped_fabric_ingress_drops = 0;
+        }
+        if self.ambiguous_fabric_zone_drops != 0 {
+            live.ambiguous_fabric_zone_drops
+                .fetch_add(self.ambiguous_fabric_zone_drops, Ordering::Relaxed);
+            self.ambiguous_fabric_zone_drops = 0;
         }
         if self.local_delivery_packets != 0 {
             live.local_delivery_packets

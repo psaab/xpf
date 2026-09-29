@@ -68,13 +68,12 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 mod routing_domain_wire;
 pub(crate) use key::*;
 pub(crate) use routing_domain_wire::{
-    QUARANTINED_ROUTING_DOMAIN,
+    AMBIGUOUS_FABRIC_DOMAIN_BASE, QUARANTINED_ROUTING_DOMAIN,
     // #9546: named at the crate level so the conntrack mirror states absence
     // with the codec's own constant rather than a bare literal.
     WIRE_ABSENT as ROUTING_DOMAIN_WIRE_ABSENT,
     WireRoutingDomain,
-    install_table_identity,
-    routing_domain_from_wire,
+    install_table_identity, is_quarantined_routing_domain, routing_domain_from_wire,
     routing_domain_to_wire,
 };
 mod entry;

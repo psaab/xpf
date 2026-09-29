@@ -236,6 +236,25 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"bindings and emitted unconditionally so 0 is a real no-drop signal.",
 		nil, nil,
 	)
+	c.userspaceFabricInvalidStampDrops = prometheus.NewDesc(
+		"xpf_userspace_fabric_invalid_stamp_drops_total",
+		"Packets dropped because a fabric ingress frame carried a complete but "+
+			"invalid zone stamp, summed across worker bindings (#11061).",
+		nil, nil,
+	)
+	c.userspaceFabricUnstampedIngressDrops = prometheus.NewDesc(
+		"xpf_userspace_fabric_unstamped_ingress_drops_total",
+		"Packets dropped because an RI-node fabric ingress had no validated "+
+			"zone stamp and no unique established reverse-NAT session, summed "+
+			"across worker bindings (#11061).",
+		nil, nil,
+	)
+	c.userspaceFabricAmbiguousZoneDrops = prometheus.NewDesc(
+		"xpf_userspace_fabric_ambiguous_zone_drops_total",
+		"Packets dropped because a stamped fabric zone spans routing instances "+
+			"and has no native routing domain, summed across worker bindings (#11061).",
+		nil, nil,
+	)
 	c.userspaceUMEMSliceDropped = prometheus.NewDesc(
 		"xpf_userspace_umem_slice_dropped_total",
 		"Packets dropped before raw-frame access because the UMEM slice "+

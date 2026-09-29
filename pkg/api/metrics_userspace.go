@@ -84,6 +84,7 @@ func (c *xpfCollector) collectUserspaceStatus(ch chan<- prometheus.Metric, statu
 	c.emitFabricSkipCounters(ch, status)
 	c.emitLearnedRouteImportCapped(ch, status)
 	c.emitDropClassCounters(ch, status)
+	c.emitFabricTrustBoundaryCounters(ch, status)
 }
 
 // emitDropClassCounters exposes per-binding drop-class counters as aggregate
@@ -128,6 +129,42 @@ func (c *xpfCollector) emitFabricSkipCounters(ch chan<- prometheus.Metric, statu
 		c.fabricLinkUnresolvedPeerTotal,
 		prometheus.CounterValue,
 		float64(status.FabricLinkUnresolvedPeerTotal),
+	)
+}
+
+// emitFabricTrustBoundaryCounters exposes packet drops attributed to the
+// fabric trust boundary plus the current forwarding snapshot's ambiguous-zone
+// count. Packet drops are summed across bindings; the configuration gauge is
+// emitted from the helper's snapshot-level status.
+func (c *xpfCollector) emitFabricTrustBoundaryCounters(
+	ch chan<- prometheus.Metric,
+	status dpuserspace.ProcessStatus,
+) {
+	var invalidStamp, unstampedIngress, ambiguousZone uint64
+	for _, binding := range status.Bindings {
+		invalidStamp += binding.InvalidFabricStampDrops
+		unstampedIngress += binding.UnstampedFabricIngressDrops
+		ambiguousZone += binding.AmbiguousFabricZoneDrops
+	}
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceFabricInvalidStampDrops,
+		prometheus.CounterValue,
+		float64(invalidStamp),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceFabricUnstampedIngressDrops,
+		prometheus.CounterValue,
+		float64(unstampedIngress),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceFabricAmbiguousZoneDrops,
+		prometheus.CounterValue,
+		float64(ambiguousZone),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceFabricAmbiguousZoneCount,
+		prometheus.GaugeValue,
+		float64(status.AmbiguousFabricZoneCount),
 	)
 }
 

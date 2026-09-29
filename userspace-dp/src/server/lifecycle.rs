@@ -610,6 +610,7 @@ pub(crate) fn run() -> Result<(), String> {
             last_cache_flush_at: 0,
             fabric_link_skipped_malformed_total: 0,
             fabric_link_unresolved_peer_total: 0,
+            ambiguous_fabric_zone_count: 0,
             learned_route_import_capped: None,
         },
         snapshot: None,

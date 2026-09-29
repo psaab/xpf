@@ -1198,7 +1198,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
                 &fabric_redirect_peer_ha_state(),
                 123,
             ),
-            Some(TEST_WAN_ZONE_ID),
+            ZoneEncodedFabricStamp::Valid(TEST_WAN_ZONE_ID),
             "inverse peer must accept the WAN zone stamp while owning LAN RG2"
         );
         assert!(binding.scratch.scratch_recycle.is_empty());
@@ -1955,7 +1955,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
                 &fabric_redirect_peer_ha_state(),
                 123,
             ),
-            Some(TEST_WAN_ZONE_ID)
+            ZoneEncodedFabricStamp::Valid(TEST_WAN_ZONE_ID)
         );
         assert!(binding.scratch.scratch_recycle.is_empty());
         assert_eq!(dbg.policy_deny, 0);

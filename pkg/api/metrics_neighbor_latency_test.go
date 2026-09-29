@@ -198,3 +198,45 @@ func TestEmitFabricSkipCounters(t *testing.T) {
 	assertCounterClose(t, got, c.fabricLinkSkippedMalformedTotal, nil, 6)
 	assertCounterClose(t, got, c.fabricLinkUnresolvedPeerTotal, nil, 2)
 }
+
+func TestEmitFabricTrustBoundaryCounters(t *testing.T) {
+	desc := func(name string) *prometheus.Desc {
+		return prometheus.NewDesc(name, name, nil, nil)
+	}
+	c := &xpfCollector{
+		userspaceFabricInvalidStampDrops: desc("xpf_userspace_fabric_invalid_stamp_drops_total"),
+		userspaceFabricUnstampedIngressDrops: desc(
+			"xpf_userspace_fabric_unstamped_ingress_drops_total",
+		),
+		userspaceFabricAmbiguousZoneDrops: desc(
+			"xpf_userspace_fabric_ambiguous_zone_drops_total",
+		),
+		userspaceFabricAmbiguousZoneCount: desc(
+			"xpf_userspace_fabric_ambiguous_zone_count",
+		),
+	}
+	status := dpuserspace.ProcessStatus{
+		AmbiguousFabricZoneCount: 2,
+		Bindings: []dpuserspace.BindingStatus{
+			{
+				InvalidFabricStampDrops: 3, UnstampedFabricIngressDrops: 5,
+				AmbiguousFabricZoneDrops: 7,
+			},
+			{
+				InvalidFabricStampDrops: 11, UnstampedFabricIngressDrops: 13,
+				AmbiguousFabricZoneDrops: 17,
+			},
+		},
+	}
+	ch := make(chan prometheus.Metric, 4)
+	c.emitFabricTrustBoundaryCounters(ch, status)
+	close(ch)
+	got := make([]prometheus.Metric, 0, 4)
+	for metric := range ch {
+		got = append(got, metric)
+	}
+	assertCounterClose(t, got, c.userspaceFabricInvalidStampDrops, nil, 14)
+	assertCounterClose(t, got, c.userspaceFabricUnstampedIngressDrops, nil, 18)
+	assertCounterClose(t, got, c.userspaceFabricAmbiguousZoneDrops, nil, 24)
+	assertGaugeClose(t, got, c.userspaceFabricAmbiguousZoneCount, nil, 2)
+}

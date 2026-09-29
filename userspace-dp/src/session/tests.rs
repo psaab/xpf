@@ -3217,6 +3217,60 @@ fn find_forward_nat_match_uses_reverse_index() {
     assert!(table.find_forward_nat_match(&reply).is_none());
 }
 
+#[test]
+fn find_forward_nat_match_does_not_borrow_main_for_quarantined_domain_11061() {
+    let mut table = SessionTable::new();
+    let forward = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: "10.0.61.102".parse().unwrap(),
+        dst_ip: "172.16.80.200".parse().unwrap(),
+        src_port: 42424,
+        dst_port: 5201,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let reply = SessionKey {
+        addr_family: forward.addr_family,
+        protocol: forward.protocol,
+        src_ip: "172.16.80.200".parse().unwrap(),
+        dst_ip: "172.16.80.8".parse().unwrap(),
+        src_port: 5201,
+        dst_port: 42424,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let nat = NatDecision {
+        rewrite_src: Some("172.16.80.8".parse().unwrap()),
+        ..NatDecision::default()
+    };
+    assert!(table.install_with_protocol(
+        forward,
+        SessionDecision {
+            resolution: resolution(),
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata(),
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    assert!(
+        table.find_forward_nat_match(&reply).is_some(),
+        "the domain-0 control reply must still match its MAIN session"
+    );
+    let quarantined_reply = SessionKey {
+        routing_domain: crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
+        ..reply
+    };
+    assert!(
+        table.find_forward_nat_match(&quarantined_reply).is_none(),
+        "a stamped ambiguous-zone reply must not borrow a domain-0 NAT session"
+    );
+}
+
 /// #10130: a reply fragment has no ports, so the discriminator must consult
 /// live forward-session NAT state through the L3 reverse index. A plain packet
 /// from the same internal address to an unrelated destination is not gated.
@@ -3299,6 +3353,14 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
     assert!(
         table.reverse_nat_fragment_requires_translation(&reply, 99, 2_000_000_000),
         "a live candidate in another non-default domain must fail closed"
+    );
+    assert!(
+        table.reverse_nat_fragment_requires_translation(
+            &reply,
+            crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
+            2_000_000_000,
+        ),
+        "an ambiguous fabric-domain fragment tail must take the live-candidate          path (TRUE): the caller drops on TRUE, so it never borrows a tenant          NAT candidate. Outcome pin, not a fence-mechanism pin."
     );
     let plain_outbound = l3_reverse_probe(
         "10.0.61.102".parse().unwrap(),

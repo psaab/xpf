@@ -356,9 +356,11 @@ const (
 	// helper ignores them, which is benign today, but the shape moved and
 	// the version must agree with it so a future helper-side consumer can
 	// never silently misread a mixed pairing.
-	// v35 -> v36 (#11064): source-NAT application terms carry ICMP type/code.
-	// Without the version gate, a v35 helper would ignore the nested fields and
-	// widen the typed match. The Rust handler rejects v35 before applying it.
+	// v35 -> v36 (#11061 + #11064): `allow_unstamped_fabric_ingress` restores
+	// legacy routing only when explicitly enabled on RI nodes, and source-NAT
+	// application terms carry ICMP type/code. A v35 helper would ignore both
+	// the security setting (silently using MAIN) and the nested fields
+	// (widening the typed match); exact equality fences the mixed version.
 	ProtocolVersion = 36
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
@@ -926,13 +928,14 @@ type AddressBookSnapshot struct {
 }
 
 type FlowSnapshot struct {
-	AllowDNSReply     bool `json:"allow_dns_reply,omitempty"`
-	AllowEmbeddedICMP bool `json:"allow_embedded_icmp,omitempty"`
-	TCPMSSAllTCP      int  `json:"tcp_mss_all_tcp,omitempty"`
-	TCPMSSIPsecVPN    int  `json:"tcp_mss_ipsec_vpn,omitempty"`
-	TCPMSSGreIn       int  `json:"tcp_mss_gre_in,omitempty"`
-	TCPMSSGreOut      int  `json:"tcp_mss_gre_out,omitempty"`
-	TCPSessionTimeout int  `json:"tcp_session_timeout,omitempty"` // seconds, 0=default
+	AllowDNSReply               bool `json:"allow_dns_reply,omitempty"`
+	AllowEmbeddedICMP           bool `json:"allow_embedded_icmp,omitempty"`
+	AllowUnstampedFabricIngress bool `json:"allow_unstamped_fabric_ingress,omitempty"`
+	TCPMSSAllTCP                int  `json:"tcp_mss_all_tcp,omitempty"`
+	TCPMSSIPsecVPN              int  `json:"tcp_mss_ipsec_vpn,omitempty"`
+	TCPMSSGreIn                 int  `json:"tcp_mss_gre_in,omitempty"`
+	TCPMSSGreOut                int  `json:"tcp_mss_gre_out,omitempty"`
+	TCPSessionTimeout           int  `json:"tcp_session_timeout,omitempty"` // seconds, 0=default
 	// #7342: the three `security flow tcp-session` windows #6539 recorded as
 	// having no wire carrier. Seconds, 0=unset (the helper keeps its default).
 	// `omitempty` + Rust `serde(default)` is the repo's skew-tolerant additive

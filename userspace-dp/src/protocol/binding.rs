@@ -429,6 +429,13 @@ pub(crate) struct BindingStatus {
     /// Serde default keeps old helpers wire-compatible.
     #[serde(rename = "v4_mapped_ipv6_dropped", default)]
     pub v4_mapped_ipv6_dropped: u64,
+    /// #11061: fail-closed drops at the fabric trust boundary.
+    #[serde(rename = "invalid_fabric_stamp_drops", default)]
+    pub invalid_fabric_stamp_drops: u64,
+    #[serde(rename = "unstamped_fabric_ingress_drops", default)]
+    pub unstamped_fabric_ingress_drops: u64,
+    #[serde(rename = "ambiguous_fabric_zone_drops", default)]
+    pub ambiguous_fabric_zone_drops: u64,
     #[serde(rename = "umem_slice_dropped", default)]
     pub umem_slice_dropped: u64,
     #[serde(rename = "unknown_vlan_dropped", default)]

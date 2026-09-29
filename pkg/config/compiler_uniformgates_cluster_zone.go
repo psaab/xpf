@@ -322,6 +322,21 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// #11061: fabric ingress zone stamps identify a security zone, not a
+	// routing instance. Reject zones whose members are split across routing
+	// instances so a valid zone stamp cannot resolve to MAIN or an arbitrary RI.
+	// Existing persisted/peer-synced configs remain bootable on the tolerant
+	// path, but are warned and the dataplane fails closed for their ambiguous
+	// fabric ingress.
+	if err := validateFabricZoneRoutingInstanceAmbiguityStrict(cfg); err != nil {
+		if opts.lenientFabricZoneRoutingInstance {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("fabric zone routing-domain ambiguity (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #8444 chassis-cluster FABRIC MEMBER-INTERFACE gate. Strict on commit /
 	// commit-check (hard-reject a `interfaces fabN fabric-options
 	// member-interfaces` entry naming an interface THIS node cannot resolve).

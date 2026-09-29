@@ -625,10 +625,10 @@ pub(in crate::afxdp::icmp_embed) fn finalize_embedded_icmp_resolution_parts(
         )
     {
         if let Some(redirect) =
-            resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone)
+            resolve_fabric_redirect_for_ingress_zone(forwarding, Some(ingress_zone))
         {
             return redirect;
         }
     }
-    redirect_via_fabric_if_needed(forwarding, enforced, ingress_ifindex)
+    redirect_via_fabric_if_needed(forwarding, enforced, ingress_ifindex, Some(ingress_zone))
 }

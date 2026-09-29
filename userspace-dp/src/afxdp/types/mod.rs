@@ -44,12 +44,73 @@ pub(super) type FastMap<K, V> = FxHashMap<K, V>;
 pub(super) type FastSet<T> = FxHashSet<T>;
 pub(super) type OwnerRgSessionIndex = FastMap<i32, FastSet<SessionKey>>;
 
+/// Bounded history of reverse aliases. Domain-neutral owners let an unstamped
+/// fabric reply reject a tuple that exists in multiple routing instances.
+/// Once the bound is reached, every such exception fails closed.
+pub(super) struct SharedNatAmbiguityIndex {
+    aliases: FastMap<SessionKey, Option<SessionKey>>,
+    saturated: bool,
+}
+
+impl Default for SharedNatAmbiguityIndex {
+    fn default() -> Self {
+        Self {
+            aliases: FastMap::default(),
+            saturated: false,
+        }
+    }
+}
+
+impl SharedNatAmbiguityIndex {
+    const MAX_KEYS: usize = 16_384;
+
+    fn remember(&mut self, key: SessionKey, owner: Option<SessionKey>) {
+        if self.saturated {
+            return;
+        }
+        if let Some(existing) = self.aliases.get(&key) {
+            if existing != &owner {
+                self.aliases.insert(key, None);
+            }
+            return;
+        }
+        if self.aliases.len() == Self::MAX_KEYS {
+            self.saturated = true;
+        } else {
+            self.aliases.insert(key, owner);
+        }
+    }
+
+    pub(super) fn mark(&mut self, key: SessionKey) {
+        self.remember(key, None);
+    }
+
+    pub(super) fn observe(&mut self, key: SessionKey, owner: SessionKey) {
+        self.remember(key, Some(owner));
+    }
+
+    pub(super) fn contains(&self, key: &SessionKey) -> bool {
+        self.saturated || matches!(self.aliases.get(key), Some(None))
+    }
+
+    pub(super) fn is_unique_for(&self, key: &SessionKey, owner: &SessionKey) -> bool {
+        !self.saturated
+            && matches!(self.aliases.get(key), Some(Some(candidate)) if candidate == owner)
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.aliases.clear();
+        self.saturated = false;
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct SharedSessionOwnerRgIndexes {
     pub(super) sessions: Arc<Mutex<OwnerRgSessionIndex>>,
     pub(super) nat_sessions: Arc<Mutex<OwnerRgSessionIndex>>,
     pub(super) forward_wire_sessions: Arc<Mutex<OwnerRgSessionIndex>>,
     pub(super) reverse_prewarm_sessions: Arc<Mutex<OwnerRgSessionIndex>>,
+    pub(super) nat_ambiguities: Arc<Mutex<SharedNatAmbiguityIndex>>,
 }
 
 impl Default for SharedSessionOwnerRgIndexes {
@@ -59,9 +120,11 @@ impl Default for SharedSessionOwnerRgIndexes {
             nat_sessions: Arc::new(Mutex::new(FastMap::default())),
             forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
             reverse_prewarm_sessions: Arc::new(Mutex::new(FastMap::default())),
+            nat_ambiguities: Arc::new(Mutex::new(SharedNatAmbiguityIndex::default())),
         }
     }
 }
+
 
 impl SharedSessionOwnerRgIndexes {
     /// #6653: RECOVERING locks, for the same reason as the session maps this
@@ -74,6 +137,7 @@ impl SharedSessionOwnerRgIndexes {
         crate::afxdp::shared_ops::lock_shared_recover(&self.nat_sessions).clear();
         crate::afxdp::shared_ops::lock_shared_recover(&self.forward_wire_sessions).clear();
         crate::afxdp::shared_ops::lock_shared_recover(&self.reverse_prewarm_sessions).clear();
+        crate::afxdp::shared_ops::lock_shared_recover(&self.nat_ambiguities).clear();
     }
 }
 

@@ -457,6 +457,23 @@ fn process_status_ndp_na_refusal_counters_roundtrip() {
     assert_eq!(legacy.ndp_na_bad_source_refused_total, 0);
 }
 
+#[test]
+fn process_status_ambiguous_fabric_zone_count_roundtrip_11061() {
+    let status = ProcessStatus {
+        ambiguous_fabric_zone_count: 4,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus");
+    assert_eq!(value["ambiguous_fabric_zone_count"], 4);
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.ambiguous_fabric_zone_count, 4);
+
+    let legacy: ProcessStatus =
+        serde_json::from_value(serde_json::json!({})).expect("decode legacy ProcessStatus");
+    assert_eq!(legacy.ambiguous_fabric_zone_count, 0);
+}
+
 // #1807: round-trip + backward-compat pin for the worker-command-queue
 // poison-recovery counter. The wire key feeds
 // pkg/dataplane/userspace/protocol.go and the Prometheus counter

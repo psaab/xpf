@@ -1661,6 +1661,11 @@ type compileOpts struct {
 	// owner claim for that key, preventing order-dependent policy selection.
 	// Same doctrine as lenientPolicyZoneRefs.
 	lenientZoneInterfaceMembership bool
+	// lenientFabricZoneRoutingInstance (#11061) downgrades the strict rejection
+	// of a security zone spanning multiple routing instances to an operator
+	// warning on tolerant load / peer-sync. The dataplane cannot infer an RI
+	// from a zone stamp, so these legacy configs fail closed for fabric ingress.
+	lenientFabricZoneRoutingInstance bool
 	// lenientZoneInterfaceDefined (ps-review-002 F6, #4515) downgrades the
 	// zone-interface DEFINED gate (validateZoneInterfaceDefinedStrict) from a
 	// hard compile error to a cfg.Warnings entry. The strict commit /
@@ -3053,6 +3058,7 @@ func lenientCompileOpts() compileOpts {
 		lenientAddressBookNameCollision:        true,
 		lenientRIDualClaim11060:                true,
 		lenientZoneInterfaceMembership:         true,
+		lenientFabricZoneRoutingInstance:       true,
 		lenientZoneInterfaceDefined:            true,
 		lenientZoneInterfacesNonEmpty:          true,
 		lenientNestedZonePair:                  true,

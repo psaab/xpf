@@ -65,6 +65,54 @@ fn flowless_counters_round_trip_batch_to_status_to_reset_9956() {
     );
 }
 
+
+#[test]
+fn fabric_trust_boundary_counters_round_trip_to_status_11061() {
+    let mut batch = crate::afxdp::BatchCounters::default();
+    batch.record_invalid_fabric_stamp_drop();
+    batch.record_unstamped_fabric_ingress_drop();
+    batch.record_ambiguous_fabric_zone_drop();
+    let live = crate::afxdp::binding_state::BindingLiveState::new();
+    batch.flush(&live);
+
+    let snap = live.snapshot();
+    assert_eq!(
+        (
+            snap.invalid_fabric_stamp_drops,
+            snap.unstamped_fabric_ingress_drops,
+            snap.ambiguous_fabric_zone_drops,
+        ),
+        (1, 1, 1),
+        "snapshot must preserve all fabric trust-boundary drop classes"
+    );
+    let mut status = crate::protocol::BindingStatus::default();
+    copy_live_snapshot(&mut status, snap);
+    assert_eq!(
+        (
+            status.invalid_fabric_stamp_drops,
+            status.unstamped_fabric_ingress_drops,
+            status.ambiguous_fabric_zone_drops,
+        ),
+        (1, 1, 1),
+        "BindingStatus must carry the per-binding fabric drop counters"
+    );
+
+    let wire = serde_json::to_value(&status).expect("serialize BindingStatus");
+    assert_eq!(wire["invalid_fabric_stamp_drops"], 1);
+    assert_eq!(wire["unstamped_fabric_ingress_drops"], 1);
+    assert_eq!(wire["ambiguous_fabric_zone_drops"], 1);
+
+    zero_unbound_slot(&mut status);
+    assert_eq!(
+        (
+            status.invalid_fabric_stamp_drops,
+            status.unstamped_fabric_ingress_drops,
+            status.ambiguous_fabric_zone_drops,
+        ),
+        (0, 0, 0),
+        "unbound slot clearing must reset all fabric trust-boundary counters"
+    );
+}
 #[test]
 fn nat_flowless_fence_counter_round_trips_to_status_10679() {
     let mut batch = crate::afxdp::BatchCounters::default();
