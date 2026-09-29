@@ -1051,11 +1051,17 @@ the NAT module applies it:
   NAT decision by itself: flowless transit has no session carrying one.
   #10679 drops flowless packets before TX, missing-neighbor buffering, or a
   permitted NoRoute kernel-FIB reinjection whenever configured same-family NAT
-  may require translation. NoRoute probes each configured egress because its
-  actual egress is unknown; unresolved source-side NAT fails closed. Pref64
-  destinations retain NAT64 attribution, and raw ESP/AH non-first fragments
+  may require translation. #11066 extends the NoRoute fence to flow-backed L4
+  tuples, probing each configured egress with the exact ports while avoiding
+  allocator state; an untranslated NAT candidate is withheld from reinjection.
+  Both NoRoute probes cover every configured egress because the kernel's later
+  route has no userspace-resolved egress yet. Untranslated Pref64 destinations
+  retain NAT64 attribution; an already-applied NAT64 decision is translated to
+  its opposite IP family before it reaches the TUN. Missing translation
+  metadata fails closed. Raw ESP/AH non-first fragments
   retain the Stage-11/reassembly park path. With no matching NAT candidate,
-  ordinary flowless forwarding remains available.
+  ordinary flowless forwarding and flow-backed NoRoute reinjection remain
+  available.
   A genuine IPv4 **protocol 0** (HOPOPT) packet is one such port-less protocol
   and is handled correctly:
   `match_source_nat_result_for_tuple` carries the L4 protocol **out-of-band** as

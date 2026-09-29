@@ -62,21 +62,21 @@ mod session_hit_authority;
 
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
 pub(in crate::afxdp) use embedded_icmp::{
-    enforce_queued_embedded_icmp_policy, EmbeddedIcmpReversal, related_forward_zones,
+    EmbeddedIcmpReversal, enforce_queued_embedded_icmp_policy, related_forward_zones,
     try_reverse_embedded_icmp_error,
 };
 use flow_cache_hit::{FlowCacheOutcome, stage_flow_cache_hit};
 use flow_cache_seed::stage_flow_cache_seed;
-use frag_assoc::{
-    flowless_nat_rule_possible, flowless_no_route_requires_nat_translation,
-    flowless_requires_nat_translation, frag_ingress_authority,
-    nat64_consult_forward_fragment_assoc, nat64_install_forward_fragment_assoc,
-    nat_consult_forward_fragment_assoc, nat_install_forward_fragment_assoc,
-    session_gated_reverse_fragment_requires_nat_translation,
-};
 use flowless_verdict::{
     FlowlessLocalVerdict, flowless_base_resolution, flowless_local_delivery_verdict,
     ipv6_ext_header_over_limit_drop,
+};
+use frag_assoc::{
+    flowbacked_no_route_requires_nat_translation, flowless_nat_rule_possible,
+    flowless_no_route_requires_nat_translation, flowless_requires_nat_translation,
+    frag_ingress_authority, nat_consult_forward_fragment_assoc, nat_install_forward_fragment_assoc,
+    nat64_consult_forward_fragment_assoc, nat64_install_forward_fragment_assoc,
+    session_gated_reverse_fragment_requires_nat_translation,
 };
 use host_inbound_policy::{
     JunosHostLocalPolicy, emit_host_inbound_deny, host_bound_policy_dst, junos_host_local_policy,
@@ -7392,44 +7392,64 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     decision.resolution.disposition =
                                         ForwardingDisposition::PolicyDenied;
                                 }
-                                // #10679: permitted flowless NoRoute packets
-                                // may still reach the kernel FIB. Attribute
-                                // Pref64 failures to NAT64 first; only then
-                                // probe same-family translation candidates.
-                                if !l4_present
-                                    && decision.resolution.disposition
-                                        == ForwardingDisposition::NoRoute
+                                // #10679/#11066: permitted NoRoute packets may
+                                // reach the kernel FIB only when no missing
+                                // NAT direction would need to translate them.
+                                // Attribute untranslated Pref64 failures first;
+                                // an already-applied NAT64 decision is safe to
+                                // reinject because the shared slow-path builder
+                                // applies that recorded translation.
+                                if decision.resolution.disposition == ForwardingDisposition::NoRoute
                                 {
-                                    if record_untranslated_pref64_drop(
-                                        packet_frame,
-                                        meta,
-                                        worker_ctx.forwarding,
-                                        telemetry.counters,
-                                    ) {
+                                    if !decision.nat.nat64
+                                        && record_untranslated_pref64_drop(
+                                            packet_frame,
+                                            meta,
+                                            worker_ctx.forwarding,
+                                            telemetry.counters,
+                                        )
+                                    {
                                         suppress_slow_path_reinject = true;
-                                    } else if flowless_no_route_requires_nat_translation(
-                                        worker_ctx.forwarding,
-                                        adj_flow,
-                                        meta,
-                                        ingress_zone_override,
-                                        from_zone_id,
-                                        now_ns,
-                                    ) {
-                                        let is_non_first =
-                                            crate::afxdp::frame::frame_is_non_first_fragment(
-                                                packet_frame,
+                                    } else {
+                                        let nat_translation_required = if l4_present {
+                                            flowbacked_no_route_requires_nat_translation(
+                                                worker_ctx.forwarding,
+                                                adj_flow,
                                                 meta,
-                                            );
-                                        if is_non_first {
-                                            telemetry
-                                                .counters
-                                                .record_nat_frag_untranslated_dropped();
+                                                policy_packet_icmp(packet_frame, meta),
+                                                ingress_zone_override,
+                                                from_zone_id,
+                                                decision.nat,
+                                            )
                                         } else {
-                                            telemetry
-                                                .counters
-                                                .record_nat_flowless_untranslated_dropped();
+                                            flowless_no_route_requires_nat_translation(
+                                                worker_ctx.forwarding,
+                                                adj_flow,
+                                                meta,
+                                                ingress_zone_override,
+                                                from_zone_id,
+                                                now_ns,
+                                            )
+                                        };
+                                        if nat_translation_required {
+                                            if !l4_present {
+                                                let is_non_first =
+                                                    crate::afxdp::frame::frame_is_non_first_fragment(
+                                                        packet_frame,
+                                                        meta,
+                                                    );
+                                                if is_non_first {
+                                                    telemetry
+                                                        .counters
+                                                        .record_nat_frag_untranslated_dropped();
+                                                } else {
+                                                    telemetry
+                                                        .counters
+                                                        .record_nat_flowless_untranslated_dropped();
+                                                }
+                                            }
+                                            suppress_slow_path_reinject = true;
                                         }
-                                        suppress_slow_path_reinject = true;
                                     }
                                 }
                             }
@@ -8909,6 +8929,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta,
                                 slow_path_decision,
                                 outlet,
+                                session_nat64_reverse.as_ref(),
                                 worker_ctx.recent_exceptions,
                                 "slow_path",
                                 worker_ctx.forwarding,

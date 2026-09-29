@@ -1278,6 +1278,44 @@ impl SourceNatRule {
     }
 }
 
+/// Whether a flow-backed tuple would be translated by source NAT, without
+/// allocating an interface identity or pool mapping. Preserve rule order and
+/// `off` semantics from the production matcher; exact ports are available, so
+/// unlike the flowless probe this does not widen L4 selectors to "possible".
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_nat_tuple_translation_possible(
+    rules: &[SourceNatRule],
+    scope: &NatScopeCtx<'_>,
+    from_zone: &str,
+    to_zone: &str,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+) -> bool {
+    for rule in rules {
+        if rule.matches(
+            scope, from_zone, to_zone, src_ip, dst_ip, false, protocol, src_port, dst_port, false,
+        ) == L4Match::NoMatch
+        {
+            continue;
+        }
+        if rule.lenient_match_dropped {
+            return true;
+        }
+        if rule.off {
+            return false;
+        }
+        if rule.interface_mode || rule.pool_mode {
+            // Allocation exhaustion, interface identity pressure, and other
+            // per-flow failures must also stay out of the kernel FIB.
+            return true;
+        }
+    }
+    false
+}
+
 /// Does a flowless packet possibly match a translating source-NAT rule using
 /// its known scope, addresses, and protocol? Protocol 255 is the non-first
 /// fragment's unknown sentinel; it means possible, never a cue to inspect bytes.

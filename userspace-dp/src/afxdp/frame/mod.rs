@@ -335,6 +335,80 @@ pub(super) fn build_nat64_forwarded_frame(
     }
 }
 
+/// Build the translated L3 packet for a permitted NAT64 NoRoute slow-path
+/// handoff. Unlike a wire-forward build, the kernel FIB does not need an
+/// egress MAC; the IP-family conversion and port mapping still must happen
+/// before handing the packet to the TUN.
+pub(super) fn build_nat64_l3_packet_for_slow_path(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    nat64_reverse: Option<&Nat64ReverseInfo>,
+    no_v6_frag_header: bool,
+) -> Option<Vec<u8>> {
+    let meta = meta.into();
+    if !decision.nat.nat64 {
+        return None;
+    }
+    let l3_offset = frame_l3_offset(frame)?;
+    let packet = frame.get(l3_offset..)?;
+    let (translated_family, translated_protocol, mut out) =
+        match meta.addr_family as i32 {
+            libc::AF_INET6 => {
+                let src_v4 = match decision.nat.rewrite_src {
+                    Some(IpAddr::V4(address)) => address,
+                    _ => return None,
+                };
+                let dst_v4 = match decision.nat.rewrite_dst {
+                    Some(IpAddr::V4(address)) => address,
+                    _ => return None,
+                };
+                let mut out = vec![0; packet.len()];
+                let written = crate::nat64::write_v6_to_v4_into(
+                    &mut out,
+                    packet,
+                    src_v4,
+                    dst_v4,
+                    no_v6_frag_header,
+                )?;
+                out.truncate(written);
+                let protocol = if meta.protocol == PROTO_ICMPV6 {
+                    PROTO_ICMP
+                } else {
+                    meta.protocol
+                };
+                (libc::AF_INET as u8, protocol, out)
+            }
+            libc::AF_INET => {
+                let reverse = nat64_reverse?;
+                let mut out = vec![0; packet.len().saturating_add(40)];
+                let written = crate::nat64::write_v4_to_v6_into(
+                    &mut out,
+                    packet,
+                    reverse.orig_dst_v6,
+                    reverse.orig_src_v6,
+                )?;
+                out.truncate(written);
+                let protocol = if meta.protocol == PROTO_ICMP {
+                    PROTO_ICMPV6
+                } else {
+                    meta.protocol
+                };
+                (libc::AF_INET6 as u8, protocol, out)
+            }
+            _ => return None,
+        };
+    let l4_offset = packet_rel_l4_offset(&out, translated_family)?;
+    apply_nat64_port_translation_at(
+        &mut out,
+        l4_offset,
+        translated_family,
+        translated_protocol,
+        decision.nat,
+    )?;
+    Some(out)
+}
+
 /// §8896: rebuild the two `ForwardPacketMeta` fields the tunnel encapsulators
 /// read, for a frame whose IP family NAT64 has just changed.
 ///
@@ -480,10 +554,20 @@ fn apply_nat64_port_translation(
     out_protocol: u8,
     nat: NatDecision,
 ) -> Option<()> {
-    let family = checksum_family_of(out_addr_family)?;
     let l4_off = frame_l4_offset(out, out_addr_family)?;
-    apply_nat_port_rewrite(out, l4_off, out_protocol, family, nat)?;
-    apply_nat_icmp_identifier_rewrite(out, l4_off, out_protocol, family, nat)?;
+    apply_nat64_port_translation_at(out, l4_off, out_addr_family, out_protocol, nat)
+}
+
+fn apply_nat64_port_translation_at(
+    packet: &mut [u8],
+    l4_offset: usize,
+    out_addr_family: u8,
+    out_protocol: u8,
+    nat: NatDecision,
+) -> Option<()> {
+    let family = checksum_family_of(out_addr_family)?;
+    apply_nat_port_rewrite(packet, l4_offset, out_protocol, family, nat)?;
+    apply_nat_icmp_identifier_rewrite(packet, l4_offset, out_protocol, family, nat)?;
     Some(())
 }
 
