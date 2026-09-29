@@ -24,6 +24,9 @@ pub(super) fn reset_binding_counters(bindings: &mut [BindingStatus]) {
         binding.flowless_forward_packets = 0;
         binding.flowless_forward_bytes = 0;
         binding.route_miss_packets = 0;
+        binding.invalid_fabric_stamp_drops = 0;
+        binding.unstamped_fabric_ingress_drops = 0;
+        binding.ambiguous_fabric_zone_drops = 0;
         binding.martian_dropped = 0;
         binding.ipv6_ext_header_dropped = 0;
         binding.v4_mapped_ipv6_dropped = 0;

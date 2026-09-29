@@ -558,6 +558,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
+                // Stage 5 is deliberately pre-L3: ARP/NDP neighbor learning is
+                // link-layer control-plane state, before fabric zone-stamp
+                // adjudication. Stage 9 gates routed payload/session identity
+                // and suppresses the later IP-source learn; moving this stage
+                // behind it would strand fabric-link neighbor discovery.
                 // #946 Phase 1 stage 5: ARP / NDP link-layer
                 // classification. ARP frames recycle without
                 // transiting; NDP NA learns and falls through.
@@ -649,6 +654,41 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         continue;
                     }
                 }
+                // #946 Phase 1 stage 9: classify fabric ingress after tunnel
+                // decapsulation, but before stage 7+8 can learn a source
+                // neighbor. Invalid claims are terminal; an absent stamp on
+                // an RI node is also gated before that pre-policy side effect.
+                let FabricIngressOutcome {
+                    ingress_zone_override,
+                    packet_fabric_ingress,
+                    invalid_zone_stamp,
+                } = stage_classify_fabric_ingress(packet_frame, &mut meta, now_secs, worker_ctx);
+                // #11061: an invalid zone stamp is not the legacy "unstamped"
+                // case. Drop it before neighbor/session/cache lookup so stale
+                // or forged identity cannot collapse to routing domain 0 / MAIN.
+                if invalid_zone_stamp {
+                    telemetry.counters.record_invalid_fabric_stamp_drop();
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
+                // #11061: a physical/overlay fabric arrival without a validated
+                // stamp has no trustworthy tenant identity on an RI deployment.
+                // The explicit flow knob is the rolling-upgrade compatibility
+                // opt-in; single-table nodes retain their pre-RI behavior.
+                let absent_fabric_ingress_suspect = worker_ctx.forwarding.has_routing_domains
+                    && !worker_ctx.forwarding.allow_unstamped_fabric_ingress
+                    && (fabric_link_ingress || packet_fabric_ingress)
+                    && ingress_zone_override.is_none();
+                // #10670: preserve the validated #6458 stamp for session-hit
+                // authority. New-flow policy uses a separate RG-gated copy;
+                // a session hit must still judge the peer's claimed arrival
+                // zone when that new-flow gate declines the stamp.
+                let fabric_arrival_zone = if packet_fabric_ingress {
+                    ingress_zone_override
+                } else {
+                    None
+                };
+                let mut fabric_ingress_for_session = packet_fabric_ingress;
                 // #946 Phase 1 stage 7+8: parse session flow and perform the
                 // pre-policy source-side neighbor learn. That learn is
                 // create-only for an existing binding; the overwrite-capable
@@ -666,7 +706,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     desc,
                     packet_frame,
                     meta,
-                    !is_injected && owned_packet_frame.is_none(),
+                    !is_injected
+                        && owned_packet_frame.is_none()
+                        && !absent_fabric_ingress_suspect,
                     &mut binding.last_learned_neighbor,
                     worker_ctx,
                 );
@@ -714,54 +756,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
-                // #946 Phase 1 stage 9: fabric-ingress
-                // classification. Mutates meta.meta_flags. MUST
-                // run before screen/IPsec/flow-cache because they
-                // read meta.meta_flags downstream.
-                let FabricIngressOutcome {
-                    ingress_zone_override,
-                    packet_fabric_ingress,
-                    invalid_zone_stamp,
-                } = stage_classify_fabric_ingress(packet_frame, &mut meta, now_secs, worker_ctx);
-                // #11061: an invalid zone stamp is not the legacy "unstamped"
-                // case. Drop it before session/cache lookup so stale or forged
-                // identity cannot collapse to routing domain 0 / MAIN.
-                if invalid_zone_stamp {
-                    binding.scratch.scratch_recycle.push(desc.addr);
-                    continue;
-                }
-                // #10670: preserve the validated #6458 stamp for session-hit
-                // authority. New-flow policy uses a separate RG-gated copy;
-                // a session hit must still judge the peer's claimed arrival
-                // zone when that new-flow gate declines the stamp.
-                let fabric_arrival_zone = if packet_fabric_ingress {
-                    ingress_zone_override
-                } else {
-                    None
-                };
                 // #7160 (#2387) stage 9b: stamp the flow's ROUTING DOMAIN.
-                //
-                // THE single site that populates `SessionKey.routing_domain`
-                // for a received frame, so every key this descriptor derives —
-                // the lookup key, the installed forward key, the reverse
-                // companion, the reverse/translated index entries, the flow
-                // cache's session handle — carries one consistent domain. Two
-                // routing instances that share a 5-tuple therefore occupy two
-                // conntrack entries, and the established-session fast path can
-                // no longer hand tenant B tenant A's cached egress, NAT and
-                // policy decision.
-                //
-                // It runs HERE, after stage 9, and not inside
-                // `stage_parse_flow_and_learn`, because the fabric-ingress
-                // classification is an INPUT: a frame that arrived over the
-                // fabric link did not arrive on the flow's real ingress
-                // interface, and the zone the peer encoded into it is the only
-                // ingress identity this node can resolve a domain from.
-                //
-                // `has_routing_domains` is false for every deployment with no
-                // routing-instance interface membership, which makes this a
-                // predictable-branch no-op there and leaves session identity
-                // bit-identical to pre-#7160.
+                // The validated peer zone is the only remote ingress identity;
+                // the unencoded case temporarily remains domain 0 until the
+                // narrow established-reverse exception below proves a unique
+                // owner from the reverse index.
                 if let Some(flow) = flow.as_mut() {
                     flow.forward_key.routing_domain =
                         crate::afxdp::forwarding::ingress_routing_domain(
@@ -774,6 +773,34 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 None
                             },
                         );
+                }
+                if absent_fabric_ingress_suspect {
+                    let Some(flow) = flow.as_mut() else {
+                        telemetry.counters.record_unstamped_fabric_ingress_drop();
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    };
+                    flow.forward_key.routing_domain = 0;
+                    let Some(matched) = sessions
+                        .find_unique_established_forward_nat_match_at(&flow.forward_key, now_ns)
+                    else {
+                        telemetry.counters.record_unstamped_fabric_ingress_drop();
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    };
+                    if !crate::afxdp::shared_ops::shared_forward_nat_candidate_is_unique(
+                        worker_ctx.shared_nat_sessions,
+                        &worker_ctx.shared_owner_rg_indexes,
+                        &flow.forward_key,
+                        &matched.key,
+                        matched.decision.nat,
+                    ) {
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        telemetry.counters.record_unstamped_fabric_ingress_drop();
+                        continue;
+                    }
+                    flow.forward_key.routing_domain = matched.key.routing_domain;
+                    fabric_ingress_for_session = true;
                 }
                 // #946 Phase 1 stage 10: screen / IDS slow-path.
                 // Caller still owns the recycle push (matches
@@ -1346,7 +1373,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         &mut owned_packet_frame,
                         meta,
                         flow,
-                        packet_fabric_ingress,
+                        fabric_ingress_for_session,
                         fabric_arrival_zone,
                         fabric_link_ingress,
                         non_host_unicast_ip,
@@ -1501,7 +1528,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 &candidate.metadata,
                                 candidate.origin,
                                 meta,
-                                packet_fabric_ingress,
+                                fabric_ingress_for_session,
                                 fabric_arrival_zone,
                             ),
                             HitAuthority::Owner
@@ -1535,7 +1562,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // synthesis can resolve the LOGICAL unit rather than
                             // keying `ifindex_to_zone_id` on the raw physical index.
                             meta.ingress_vlan_id,
-                            packet_fabric_ingress,
+                            fabric_ingress_for_session,
                             fabric_link_ingress,
                             ha_startup_grace_until_secs,
                             worker_id,
@@ -1571,7 +1598,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             &resolved.metadata,
                             resolved.origin,
                             meta,
-                            packet_fabric_ingress,
+                            fabric_ingress_for_session,
                             fabric_arrival_zone,
                         ) {
                             HitAuthority::Owner => (None, true),
@@ -2648,6 +2675,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         }
                         resolved.decision
                     } else {
+                        // The absent-stamp exception must resolve the exact
+                        // established candidate admitted above; it cannot fall
+                        // through to MAIN policy or PBR on a second miss.
+                        if absent_fabric_ingress_suspect {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         telemetry.counters.session_misses += 1;
                         telemetry.dbg.session_miss += 1;
                         match stage_screen_syn_cookie_ack_on_session_miss(

@@ -1357,6 +1357,7 @@ pub(super) fn populate_interfaces(
                 }
             }
         }
+        state.ambiguous_fabric_zone_ids = ambiguous.clone();
         for zone_id in ambiguous {
             state.zone_routing_domain.remove(&zone_id);
         }
@@ -1752,6 +1753,8 @@ mod routing_domain_7160_tests {
             None,
             "a zone straddling two routing instances must have no selected domain"
         );
+        assert_eq!(state.ambiguous_fabric_zone_ids.len(), 1);
+        assert!(state.ambiguous_fabric_zone_ids.contains(&2));
         let ambiguous_domain = ingress_routing_domain(&state, 10, 0, Some(2));
         assert_ne!(
             ambiguous_domain, 0,

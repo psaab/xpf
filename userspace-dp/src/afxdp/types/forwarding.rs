@@ -205,6 +205,11 @@ pub(in crate::afxdp) struct ForwardingState {
     /// the install-table ID band, so it cannot alias the default-domain session
     /// key; native route resolution then fails closed (#11061).
     pub(in crate::afxdp) zone_routing_domain: FastMap<u16, u32>,
+    /// Zone IDs whose member interfaces disagree on routing domain. Retained
+    /// separately from `zone_routing_domain` so status and transition logs can
+    /// report the quarantine without guessing whether an absent mapping is
+    /// ambiguous or simply has no routed member.
+    pub(in crate::afxdp) ambiguous_fabric_zone_ids: FastSet<u16>,
     /// #7160: true iff ANY interface resolves to a non-zero routing domain,
     /// i.e. iff at least one interface is a member of a named routing
     /// instance. Single-bool gate so a deployment with no routing-instance
@@ -372,6 +377,11 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) fabric_skips: Vec<FabricLinkSkip>,
     pub(in crate::afxdp) allow_dns_reply: bool,
     pub(in crate::afxdp) allow_embedded_icmp: bool,
+    /// `security flow allow-unstamped-fabric-ingress` preserves the historical
+    /// domain-0 behavior for absent fabric stamps on routing-instance nodes.
+    /// False is fail-closed; single-table deployments still retain legacy
+    /// absence behavior because the receive gate is conditional on RI presence.
+    pub(in crate::afxdp) allow_unstamped_fabric_ingress: bool,
     /// `security alg <proto> disable` bitfield (#2008 H3/H4): bit 0 DNS,
     /// bit 1 FTP, bit 2 SIP, bit 3 TFTP. Read at session-create time to
     /// suppress ALG-type tagging for a disabled ALG. Junos `alg disable`

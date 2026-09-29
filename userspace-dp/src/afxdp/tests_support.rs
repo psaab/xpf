@@ -1019,6 +1019,7 @@ pub(super) fn record_noroute_with_dst(
         dst_port: 2000,
         from_zone: None,
         to_zone: None,
+        routing_domain: 0,
     };
     record_forwarding_disposition(
         &binding,
@@ -1602,6 +1603,39 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path(
         desc_len,
         slow_path,
         None,
+        None,
+        None,
+        123_000_000_000,
+        123,
+    )
+}
+
+pub(super) fn txn_run_descriptor_with_shared_nat(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+) -> (BatchCounters, DebugPollCounters) {
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    txn_run_descriptor_inner_with_slow_path_impl(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        shared_sessions,
+        None,
+        None,
+        None,
+        Some(shared_nat_sessions),
+        Some(shared_owner_rg_indexes),
         123_000_000_000,
         123,
     )
@@ -1638,6 +1672,8 @@ pub(super) fn txn_run_descriptor_at(
         None,
         None,
         None,
+        None,
+        None,
         now_ns,
         123,
     )
@@ -1668,6 +1704,8 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
         desc_len,
         slow_path,
         Some(ike_exchanges),
+        None,
+        None,
         123_000_000_000,
         123,
     )
@@ -1685,6 +1723,8 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
     desc_len: Option<u32>,
     slow_path: Option<&Arc<crate::slowpath::SlowPathReinjector>>,
     ike_exchanges: Option<&Arc<crate::afxdp::forwarding::IkeExchangeTable>>,
+    shared_nat_sessions_override: Option<&Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>>,
+    shared_owner_rg_indexes_override: Option<&SharedSessionOwnerRgIndexes>,
     now_ns: u64,
     now_secs: u64,
 ) -> (BatchCounters, DebugPollCounters) {
@@ -1718,9 +1758,12 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(binding));
     let mirror_targets = MirrorTargetMap::default();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
-    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let default_shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = shared_nat_sessions_override.unwrap_or(&default_shared_nat_sessions);
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let default_shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let shared_owner_rg_indexes =
+        shared_owner_rg_indexes_override.unwrap_or(&default_shared_owner_rg_indexes);
     let default_ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
     let ike_exchanges = ike_exchanges.unwrap_or(&default_ike_exchanges);
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
@@ -1739,9 +1782,9 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
         dynamic_neighbors: &dynamic_neighbors,
         neighbor_resolver: None,
         shared_sessions,
-        shared_nat_sessions: &shared_nat_sessions,
+        shared_nat_sessions,
         shared_forward_wire_sessions: &shared_forward_wire_sessions,
-        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        shared_owner_rg_indexes,
         ike_exchanges: &ike_exchanges,
         slow_path,
         event_stream: None,

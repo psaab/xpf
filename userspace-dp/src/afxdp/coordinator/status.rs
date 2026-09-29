@@ -72,6 +72,17 @@ impl super::Coordinator {
     pub fn fabric_link_unresolved_peer_total(&self) -> u64 {
         crate::afxdp::forwarding::FABRIC_LINK_UNRESOLVED_PEER.load(Ordering::Relaxed)
     }
+    /// #11061: current count of zones whose fabric stamp cannot select one
+    /// routing domain. This is configuration state from the worker-published
+    /// forwarding snapshot, not a per-packet count.
+    pub fn ambiguous_fabric_zone_count(&self) -> u64 {
+        self.ha
+            .runtime
+            .load()
+            .forwarding()
+            .ambiguous_fabric_zone_ids
+            .len() as u64
+    }
 
     /// #710: sum of `no_owner_binding_drops` across every binding's
     /// `BindingLiveState`. The per-binding increment site lives in

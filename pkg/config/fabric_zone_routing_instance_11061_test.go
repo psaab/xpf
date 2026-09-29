@@ -161,6 +161,44 @@ func TestFabricZoneBareRIFanDownFindsRIAndMAINConflict11061(t *testing.T) {
 	t.Fatalf("tolerant compile omitted the bare-RI fan-down warning: %v", cfg.Warnings)
 }
 
+func TestFabricZoneTwoBareRIMembersRejected11061(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.0.1/24",
+		"set interfaces ge-0/0/2 unit 0 family inet address 10.0.1.1/24",
+		"set routing-instances RI-A instance-type virtual-router",
+		"set routing-instances RI-A interface ge-0/0/1",
+		"set routing-instances RI-B instance-type virtual-router",
+		"set routing-instances RI-B interface ge-0/0/2",
+		"set security zones security-zone shared interfaces ge-0/0/1",
+		"set security zones security-zone shared interfaces ge-0/0/2",
+	})
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("strict compile accepted a zone spanning two bare RI members")
+	}
+	for _, want := range []string{"shared", "RI-A", "ge-0/0/1", "RI-B", "ge-0/0/2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("strict error %q does not identify %q", err, want)
+		}
+	}
+
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile rejected a legacy two-bare-RI zone: %v", err)
+	}
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "fabric zone routing-domain ambiguity") {
+			for _, want := range []string{"RI-A", "ge-0/0/1", "RI-B", "ge-0/0/2"} {
+				if !strings.Contains(warning, want) {
+					t.Errorf("tolerant warning %q does not identify %q", warning, want)
+				}
+			}
+			return
+		}
+	}
+	t.Fatalf("tolerant compile omitted the two-bare-RI zone warning: %v", cfg.Warnings)
+}
+
 func TestFabricZoneTrunkParentAliasInheritsSingleRIRoutingContext11061(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set interfaces ge-0/0/5 vlan-tagging",

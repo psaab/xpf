@@ -573,15 +573,51 @@ fn zone_stamp_parser_distinguishes_absent_and_invalid_claims_11061() {
         ZoneEncodedFabricStamp::Absent,
         "an ordinary fabric source MAC preserves legacy unstamped behavior"
     );
-
-    for (magic, zone, reason) in [
-        (0, TEST_LAN_ZONE_ID, "bad magic"),
-        (FABRIC_ZONE_MAC_MAGIC, 0, "zero zone"),
-        (FABRIC_ZONE_MAC_MAGIC, u16::MAX, "unknown stale zone"),
+    for source_mac in [
+        [0x02, 0xbf, 0x72, 0x00, 0x00, 0x01],
+        [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
     ] {
+        let mut frame = vec![0u8; 64];
+        frame[6..12].copy_from_slice(&source_mac);
         assert_eq!(
             parse_zone_encoded_fabric_ingress_from_frame(
-                &frame_with_stamp(magic, zone),
+                &frame,
+                meta,
+                &state,
+                &BTreeMap::new(),
+                0,
+            ),
+            ZoneEncodedFabricStamp::Absent,
+            "non-stamp fabric source {source_mac:02x?} must not be classified as invalid"
+        );
+    }
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &frame_with_stamp(0, TEST_LAN_ZONE_ID),
+            meta,
+            &state,
+            &BTreeMap::new(),
+            0,
+        ),
+        ZoneEncodedFabricStamp::Absent,
+        "the marker must match exactly before a MAC is treated as stamp-shaped"
+    );
+    let truncated_stamp = frame_with_stamp(FABRIC_ZONE_MAC_MAGIC, TEST_LAN_ZONE_ID);
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &truncated_stamp[..11],
+            meta,
+            &state,
+            &BTreeMap::new(),
+            0,
+        ),
+        ZoneEncodedFabricStamp::Invalid,
+        "a complete marker without the full zone id is malformed"
+    );
+    for (zone, reason) in [(0, "zero zone"), (u16::MAX, "unknown stale zone")] {
+        assert_eq!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                &frame_with_stamp(FABRIC_ZONE_MAC_MAGIC, zone),
                 meta,
                 &state,
                 &BTreeMap::new(),

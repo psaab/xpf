@@ -295,6 +295,11 @@ pub(crate) struct FlowSnapshot {
     pub allow_dns_reply: bool,
     #[serde(rename = "allow_embedded_icmp", default)]
     pub allow_embedded_icmp: bool,
+    /// Allow unstamped fabric ingress to use legacy MAIN routing on RI nodes.
+    /// Missing/false is fail-closed; the v36 version fence prevents an older
+    /// helper from ignoring an enabled compatibility setting.
+    #[serde(rename = "allow_unstamped_fabric_ingress", default)]
+    pub allow_unstamped_fabric_ingress: bool,
     #[serde(rename = "tcp_mss_all_tcp", default)]
     pub tcp_mss_all_tcp: u16,
     #[serde(rename = "tcp_mss_ipsec_vpn", default)]

@@ -3354,6 +3354,14 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
         table.reverse_nat_fragment_requires_translation(&reply, 99, 2_000_000_000),
         "a live candidate in another non-default domain must fail closed"
     );
+    assert!(
+        table.reverse_nat_fragment_requires_translation(
+            &reply,
+            crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
+            2_000_000_000,
+        ),
+        "an ambiguous fabric-domain fragment must not borrow a tenant NAT candidate"
+    );
     let plain_outbound = l3_reverse_probe(
         "10.0.61.102".parse().unwrap(),
         "203.0.113.9".parse().unwrap(),

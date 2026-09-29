@@ -162,4 +162,10 @@ func (c *xpfCollector) initNeighborDescriptors() {
 		"HA cross-chassis fabric links skipped during a forwarding build/refresh because a peer or local MAC was UNRESOLVED: an EMPTY MAC field still awaiting neighbor/interface resolution (the expected late-resolution SyncFabricState transient). Briefly non-zero at startup is normal; a persistently climbing value means a fabric peer is not resolving. A distinct, non-malformed state vs xpf_userspace_fabric_link_skipped_malformed_total (#3773 M13).",
 		nil, nil,
 	)
+	c.userspaceFabricAmbiguousZoneCount = prometheus.NewDesc(
+		"xpf_userspace_fabric_ambiguous_zone_count",
+		"Number of currently published fabric zones whose member interfaces "+
+			"span routing instances and therefore have no unique routing domain (#11061).",
+		nil, nil,
+	)
 }

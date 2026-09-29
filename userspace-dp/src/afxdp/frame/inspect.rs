@@ -2471,6 +2471,7 @@ pub(in crate::afxdp) enum ZoneEncodedFabricStamp {
     Valid(u16),
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress(
     area: &MmapArea,
     desc: XdpDesc,
@@ -2489,10 +2490,11 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress(
 /// lookup or `String` clone. #3075: the id is a u16 carried big-endian across
 /// frame[10]/frame[11] of the synthetic fabric MAC.
 ///
-/// Absent means the peer did not provide a stamp, preserving legacy fabric
-/// ingress behavior. A stamp-shaped source MAC that fails identity, zone, or
-/// RG validation is Invalid and must be dropped by the packet path; treating
-/// that state as absent would erase evidence of a stale or forged claim.
+/// Absent means the source MAC lacks the complete fabric-zone marker; other
+/// local or peer fabric MACs remain ordinary unstamped ingress. A complete
+/// marker with an incomplete or invalid zone claim is Invalid and must be
+/// dropped by the packet path; treating it as absent would erase evidence of
+/// a stale or forged claim.
 pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -2501,12 +2503,12 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
     now_secs: u64,
 ) -> ZoneEncodedFabricStamp {
     if !ingress_is_fabric(forwarding, meta.ingress_ifindex as i32)
-        || frame.len() < 9
-        || frame[6..9] != [0x02, 0xbf, 0x72]
+        || frame.len() < 10
+        || frame[6..10] != [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC]
     {
         return ZoneEncodedFabricStamp::Absent;
     }
-    if frame.len() < 12 || frame[9] != FABRIC_ZONE_MAC_MAGIC {
+    if frame.len() < 12 {
         return ZoneEncodedFabricStamp::Invalid;
     }
     // #3075: zone id is a u16 carried big-endian in frame[10] (high) /

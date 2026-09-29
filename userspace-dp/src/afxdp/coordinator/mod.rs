@@ -331,6 +331,42 @@ pub(in crate::afxdp) fn log_fabric_skip_transition(
     }
 }
 
+/// #11061: a zone→routing-domain ambiguity is configuration state, not packet
+/// volume. Compare the whole set at forwarding publication so a persistent
+/// ambiguity warns once and repeated runtime refreshes remain quiet.
+fn ambiguous_fabric_zone_set_summary(forwarding: &ForwardingState) -> String {
+    let mut zones: Vec<String> = forwarding
+        .ambiguous_fabric_zone_ids
+        .iter()
+        .map(|zone_id| {
+            let name = forwarding
+                .zone_id_to_name
+                .get(zone_id)
+                .map(String::as_str)
+                .unwrap_or("?");
+            format!("{name}({zone_id})")
+        })
+        .collect();
+    zones.sort();
+    zones.join(", ")
+}
+
+pub(in crate::afxdp) fn log_ambiguous_fabric_zone_transition(
+    path: &str,
+    old: &ForwardingState,
+    new: &ForwardingState,
+) {
+    let old_set = ambiguous_fabric_zone_set_summary(old);
+    let new_set = ambiguous_fabric_zone_set_summary(new);
+    if old_set != new_set {
+        eprintln!(
+            "xpf-userspace-dp: ambiguous fabric zone set changed ({path}): \
+             [{old_set}] => [{new_set}]; stamped traffic for these zones is quarantined \
+             from native routing"
+        );
+    }
+}
+
 pub struct Coordinator {
     /// #7209: **the REFCOUNT is the guarantee, not the swap.** Do NOT simplify
     /// to a `Mutex<BpfMaps>` or a plain field — a mutex serialises access

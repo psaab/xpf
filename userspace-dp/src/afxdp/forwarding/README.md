@@ -339,9 +339,13 @@ forward-direction collision.
   domains are local-only: HA session-wire decoding rejects their reserved ID
   band, so they are never synchronized as ordinary routing domains. Fabric
   redirects in routing-domain deployments are emitted only with an adjudicated
-  nonzero ingress-zone stamp; without one, the redirect is refused. Legacy
-  single-table deployments retain unstamped redirects and absent legacy stamps
-  retain their existing MAIN behavior.
+  nonzero ingress-zone stamp; without one, redirect is refused. On receive, an
+  unstamped fabric frame is dropped before session/cache/policy lookup unless it
+  matches a unique live established forward NAT session (the reverse direction)
+  or the operator enables the compatibility setting
+  `security flow allow-unstamped-fabric-ingress` for legacy MAIN behavior.
+  A complete but invalid stamp always drops. Legacy single-table deployments
+  retain unstamped redirects and absent stamps retain their existing MAIN behavior.
 
 - **Why the ingress interface and nothing else.** The reverse key is built
   by swapping the forward key's fields and never observes the reply, so the

@@ -6,10 +6,14 @@
 //! direct semantic equivalent of the inline block it replaces.
 //!
 //! Stages owned by Phase 1:
-//! - stage 5: link-layer (ARP/NDP) classify  → [stage_link_layer_classify]
-//! - stage 6: native GRE decap               → [stage_native_gre_decap]
-//! - stage 7+8: parse flow + learn neighbor  → [stage_parse_flow_and_learn]
-//! - stage 9: fabric-ingress classification  → [stage_classify_fabric_ingress]
+//! - stage 5: link-layer (ARP/NDP) classify + neighbor learn
+//!                                               → [stage_link_layer_classify]
+//! - stage 6: native GRE/WG decap               → [stage_native_gre_decap]
+//! - stage 9: fabric-ingress trust classification
+//!              (before stage 7+8; after stage 5 by design)
+//!                                               → [stage_classify_fabric_ingress]
+//! - stage 7+8: parse flow + learn source neighbor
+//!                                               → [stage_parse_flow_and_learn]
 //! - stage 10: screen / IDS slow-path        → [stage_screen_check]
 //! - stage 11: IPsec passthrough             → [stage_ipsec_passthrough_check]
 //!
@@ -67,6 +71,11 @@ pub(super) struct FabricIngressOutcome {
 /// firewall).
 ///
 /// Plain non-link-layer packets fall through unchanged.
+/// This pre-L3 stage intentionally precedes tunnel/fabric zone trust
+/// classification: ARP/NDP learning is link-layer neighbor control-plane state,
+/// while the later fabric gate controls routed payload admission and suppresses
+/// IP-source learning for untrusted/unstamped ingress. Moving the stage behind
+/// that gate would break neighbor discovery carried over the fabric link.
 ///
 /// Side effects on `worker_ctx.dynamic_neighbors` (interior
 /// mutability behind `Arc`) and the kernel ARP/NDP table are kept
@@ -402,6 +411,10 @@ pub(super) fn stage_wg_decap(
 /// frame would record the GRE tunnel's egress MAC instead of the
 /// outer host's.
 ///
+/// The poll loop runs the stage-9 fabric trust classifier before calling this
+/// stage. An unstamped RI-node fabric packet is still parsed so the caller can
+/// attempt the narrow established-reverse-NAT exception, but it passes
+/// `learn_from_live_frame = false`; parsing cannot pre-admit its source neighbor.
 /// Side effects: `worker_ctx.dynamic_neighbors` (interior mut),
 /// `last_learned_neighbor` (caller's &mut), kernel neighbor table.
 #[inline]
@@ -556,6 +569,11 @@ pub(in crate::afxdp) fn capture_pptp_control_segment(
 /// `FABRIC_INGRESS_FLAG` is required to skip TTL decrement on
 /// fabric-traversed packets (the sending peer already decremented
 /// TTL when forwarding across the fabric link).
+///
+/// In the poll loop this runs after GRE/WG decapsulation and the pre-L3 ARP/NDP
+/// classifier, but before stage 7+8 parses a routed flow or learns its source
+/// neighbor. Invalid stamps and strict RI-node absent-stamp drops therefore
+/// precede those IP-side effects.
 #[inline]
 pub(super) fn stage_classify_fabric_ingress(
     packet_frame: &[u8],

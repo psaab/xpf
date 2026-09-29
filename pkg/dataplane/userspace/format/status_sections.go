@@ -21,12 +21,12 @@ type statusSummaryAggregates struct {
 	armedQueues int
 
 	// Binding tallies.
-	readyBindings      int
-	armedBindings      int
-	boundBindings      int
-	xskBindings        int
-	zeroCopyBindings   int
-	sharedUMEMBindings int
+	readyBindings          int
+	armedBindings          int
+	boundBindings          int
+	xskBindings            int
+	zeroCopyBindings       int
+	sharedUMEMBindings     int
 	hugepageBackedBindings int
 	// umemFallbackBytesMax is the process-wide fallback total. It arrives
 	// identical on every bound row, so the aggregate takes the max, never
@@ -43,29 +43,32 @@ type statusSummaryAggregates struct {
 	flowlessForwardBytes uint64
 	routeMisses          uint64
 	// #10498: pre-L3 admission drops with no forwarding disposition.
-	umemSliceDropped     uint64
-	unknownVLANDropped   uint64
-	dstMACDropped        uint64
+	umemSliceDropped   uint64
+	unknownVLANDropped uint64
+	dstMACDropped      uint64
 	// #4743: martian-dst NoRoute drops (a sub-breakout of routeMisses) and
 	// over-limit IPv6 ext-header fail-closed drops, summed across bindings.
-	martianDropped       uint64
-	ipv6ExtHeaderDropped uint64
-	v4MappedIPv6Dropped uint64
-	neighborMisses       uint64
-	exceptionPackets      uint64
-	flowCacheHits         uint64
-	flowCacheMisses       uint64
-	flowCacheEvictions    uint64
-	sessionHits           uint64
-	sessionMisses         uint64
-	sessionCreates        uint64
-	sessionExpires        uint64
-	sessionDeltaPending   uint64
-	sessionDeltaGenerated uint64
-	sessionDeltaDropped   uint64
-	sessionDeltaDrained   uint64
-	policyDeniedPackets   uint64
-	screenDrops           uint64
+	martianDropped              uint64
+	ipv6ExtHeaderDropped        uint64
+	v4MappedIPv6Dropped         uint64
+	invalidFabricStampDrops     uint64
+	unstampedFabricIngressDrops uint64
+	ambiguousFabricZoneDrops    uint64
+	neighborMisses              uint64
+	exceptionPackets            uint64
+	flowCacheHits               uint64
+	flowCacheMisses             uint64
+	flowCacheEvictions          uint64
+	sessionHits                 uint64
+	sessionMisses               uint64
+	sessionCreates              uint64
+	sessionExpires              uint64
+	sessionDeltaPending         uint64
+	sessionDeltaGenerated       uint64
+	sessionDeltaDropped         uint64
+	sessionDeltaDrained         uint64
+	policyDeniedPackets         uint64
+	screenDrops                 uint64
 
 	synCookieChallenges        uint64
 	synCookieSecretUnavailable uint64
@@ -222,6 +225,9 @@ func aggregateStatusSummary(status userspace.ProcessStatus) statusSummaryAggrega
 		agg.martianDropped += binding.MartianDropped
 		agg.ipv6ExtHeaderDropped += binding.IPv6ExtHeaderDropped
 		agg.v4MappedIPv6Dropped += binding.V4MappedIPv6Dropped
+		agg.invalidFabricStampDrops += binding.InvalidFabricStampDrops
+		agg.unstampedFabricIngressDrops += binding.UnstampedFabricIngressDrops
+		agg.ambiguousFabricZoneDrops += binding.AmbiguousFabricZoneDrops
 		agg.neighborMisses += binding.NeighborMissPackets
 		agg.exceptionPackets += binding.ExceptionPackets
 		agg.flowCacheHits += binding.FlowCacheHits
@@ -475,6 +481,10 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	fmt.Fprintf(b, "  Martian drops:             %d\n", agg.martianDropped)
 	fmt.Fprintf(b, "  IPv6 ext-header drops:     %d\n", agg.ipv6ExtHeaderDropped)
 	fmt.Fprintf(b, "  V4-mapped IPv6 drops:    %d\n", agg.v4MappedIPv6Dropped)
+	fmt.Fprintf(b, "  Invalid fabric-stamp drops: %d\n", agg.invalidFabricStampDrops)
+	fmt.Fprintf(b, "  Unstamped fabric-ingress drops: %d\n", agg.unstampedFabricIngressDrops)
+	fmt.Fprintf(b, "  Ambiguous fabric-zone drops: %d\n", agg.ambiguousFabricZoneDrops)
+	fmt.Fprintf(b, "  Ambiguous fabric zones:     %d\n", status.AmbiguousFabricZoneCount)
 	fmt.Fprintf(b, "  Neighbor misses:           %d\n", agg.neighborMisses)
 	fmt.Fprintf(b, "  Exception packets:         %d\n", agg.exceptionPackets)
 	fmt.Fprintf(b, "  Flow cache hits:           %d\n", agg.flowCacheHits)

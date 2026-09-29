@@ -210,9 +210,13 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // no-syn-check opt-out and continues the default SYN-first drop; exact
 // equality fences the mixed version.
 // v34 -> v35 (#10827 follow-up): `WebManagementConfig.TLSCertificate` /
-// `TLSPrivateKey` ride the snapshot wire. Mirrors the Go bump; exact
-// equality keeps version and shape in agreement.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 35;
+// `TLSPrivateKey` ride the snapshot wire. Mirrors the Go bump; exact equality
+// keeps version and shape in agreement.
+// v35 -> v36 (#11061): `allow_unstamped_fabric_ingress` is a security
+// compatibility knob consumed by the fabric receive gate. A v35 helper ignores
+// it and would continue accepting unstamped traffic into MAIN on RI nodes;
+// exact equality refuses the mixed version.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 36;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

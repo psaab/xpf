@@ -55,18 +55,17 @@ pub(crate) const DOMAIN_BAND_SPAN: u32 = 900_000;
 
 /// #11061: synthetic NON-ROUTABLE routing domains for fabric-ingress flows
 /// whose ingress domain is unknowable. Never a real instance, never MAIN:
-/// the whole high band sits above every value the install-table allocator
+/// the high band sits above every value the install-table allocator
 /// (`DOMAIN_BAND_BASE..DOMAIN_BAND_BASE+DOMAIN_BAND_SPAN`), the wire markers
 /// (`WIRE_ABSENT`/`WIRE_DEFAULT_INSTANCE`), and the quarantine sentinel can
 /// take, so no row can own one and the wire decoder reads them as
 /// `Unrecognized` (HA import refuses, same as quarantine).
 ///
-/// Two members: per-zone IDs for a validated stamp naming an AMBIGUOUS zone
-/// (members span routing instances, so no single domain exists — the low 16
-/// bits keep ambiguous zones session-isolated from each other), and one
-/// shared ID for a stamp that was PRESENT but failed validation (unknown
-/// zone, RG/identity mismatch — dropped unless explicitly PBR-steered, so
-/// per-stamp isolation buys nothing).
+/// Valid stamps for zones whose members span multiple routing instances use
+/// the per-zone `AMBIGUOUS_FABRIC_DOMAIN_BASE` band, keeping their flows
+/// isolated. `INVALID_FABRIC_STAMP_DOMAIN` is only the lower bound of the
+/// quarantine range; invalid stamp claims are dropped before they can reach
+/// PBR and are never assigned this domain.
 pub(crate) const AMBIGUOUS_FABRIC_DOMAIN_BASE: u32 = 0xffff_0000;
 pub(crate) const INVALID_FABRIC_STAMP_DOMAIN: u32 = 0xfffe_0000;
 

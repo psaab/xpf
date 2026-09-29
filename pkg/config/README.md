@@ -725,6 +725,12 @@ domain-0 sessions in such a zone no longer match quarantined replies after an
 upgrade, so those flows fail closed unless explicit PBR deliberately steers
 them.
 
+On routing-instance nodes, unstamped fabric ingress is rejected before
+session/cache/policy lookup, except for a unique live established reverse-NAT
+return. The explicit `security flow allow-unstamped-fabric-ingress` knob
+restores legacy MAIN routing for absent stamps; it does not admit a complete
+but invalid stamp. Single-table deployments keep the legacy absent-stamp path.
+
 **A Linux device is claimed by exactly one routing instance (#11060):**
 `RoutingInstanceMemberDeviceKeys` is the shared resolver for the strict
 validator, tolerant sanitizer, daemon VRF binding/reassertion, and userspace

@@ -587,6 +587,47 @@ impl SessionTable {
         self.find_forward_nat_match_inner(reply_key, Some(now_ns))
     }
 
+    /// Find the sole live, established forward session whose reverse tuple
+    /// matches an unstamped fabric reply. Unlike the ordinary reverse-NAT
+    /// matcher, this refuses a multi-candidate bucket: there is no ingress
+    /// zone with which to choose among otherwise-valid tenant sessions.
+    pub(crate) fn find_unique_established_forward_nat_match_at(
+        &self,
+        reply_key: &SessionKey,
+        now_ns: u64,
+    ) -> Option<ForwardSessionMatch> {
+        if reply_key.routing_domain != 0 {
+            return None;
+        }
+        let bucket = self.nat_reverse_index.get(reply_key)?;
+        let mut candidate = None;
+        for &handle in bucket.iter() {
+            let Some(record) = self.entries.get(handle as usize) else {
+                continue;
+            };
+            let entry = &record.entry;
+            if entry.metadata.is_reverse
+                || !entry.established
+                || entry.handshake_pending
+                || crate::session::is_quarantined_routing_domain(record.key.routing_domain)
+                || !reply_matches_forward_session(&record.key, entry.decision.nat, reply_key)
+                || now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns
+            {
+                continue;
+            }
+            if candidate.is_some() {
+                return None;
+            }
+            candidate = Some(record);
+        }
+        let record = candidate?;
+        Some(ForwardSessionMatch {
+            key: record.key.clone(),
+            decision: record.entry.decision,
+            metadata: record.entry.metadata.clone(),
+        })
+    }
+
     fn find_forward_nat_match_inner(
         &self,
         reply_key: &SessionKey,
