@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sync/semaphore"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -22,6 +23,168 @@ func isolateHandoffFlag(t *testing.T) {
 	orig := configstore.ResetHandoffPath
 	configstore.ResetHandoffPath = filepath.Join(t.TempDir(), ".reset-handoff")
 	t.Cleanup(func() { configstore.ResetHandoffPath = orig })
+}
+
+// recoveryHostSeams bundles every host-path redirect + recorder the
+// recovery e2es need so the authoring apply cannot touch the test host
+// even as root. The authoring config is minimal (host-name + userspace
+// dataplane), but several apply steps write unconditionally or sweep
+// live host state: transit sysctls (managed once EverCommitted),
+// sudoers/known-hosts/rsyslog sweeps, chrony renders + reload, DNS
+// reconcile, and the hostname rename (installed separately at each
+// test top since phase-1 restore needs it too).
+type recoveryHostSeams struct {
+	v4, v6          string
+	barrier         *fakeNftInstaller
+	sudoersStale    string
+	knownHosts      string
+	rsyslogStale    string
+	chronySources   string
+	chronyThreshold string
+	chronyReloaded  *bool
+	rsyslogRestarts *int
+	dnsCalls        *int
+	linkDir         string
+}
+
+func isolateRecoveryApplyHost(t *testing.T) *recoveryHostSeams {
+	t.Helper()
+	s := &recoveryHostSeams{}
+	dir := t.TempDir()
+	// Transit sysctls + appliance marker. Pre-seed "1" so the gated
+	// close ("0") proves the write routed here.
+	origV4, origV6 := ipv4ForwardSysctlPath, ipv6ForwardSysctlPath
+	origMarker := applianceMarkerFile
+	s.v4, s.v6 = filepath.Join(dir, "ip_forward"), filepath.Join(dir, "forwarding")
+	if err := os.WriteFile(s.v4, []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.v6, []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ipv4ForwardSysctlPath, ipv6ForwardSysctlPath = s.v4, s.v6
+	applianceMarkerFile = filepath.Join(dir, "appliance")
+	t.Cleanup(func() {
+		ipv4ForwardSysctlPath, ipv6ForwardSysctlPath = origV4, origV6
+		applianceMarkerFile = origMarker
+	})
+	// nft barrier installer.
+	s.barrier = withBarrierRecorder(t)
+	// Sudoers sweep: plant a stale grant the reconcile must remove.
+	origSudoers := sudoersDir
+	sudoersTmp := filepath.Join(dir, "sudoers.d")
+	if err := os.MkdirAll(sudoersTmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.sudoersStale = filepath.Join(sudoersTmp, "xpf-stale-evil")
+	if err := os.WriteFile(s.sudoersStale, []byte("# stale\n"), 0o440); err != nil {
+		t.Fatal(err)
+	}
+	sudoersDir = sudoersTmp
+	t.Cleanup(func() { sudoersDir = origSudoers })
+	// Account-ownership inventory: one seam relocates all three roots;
+	// an absent tree reads as legitimately empty, so nothing on the
+	// host is enumerated and the shadow/passwd/home/root-ssh paths
+	// (touched only for enumerated names) stay unreachable.
+	origProv := provisionedUsersDir
+	provisionedUsersDir = filepath.Join(dir, "no-such-prov", "provisioned-users")
+	t.Cleanup(func() { provisionedUsersDir = origProv })
+	// Managed SSH known-hosts: plant a file the empty-config branch
+	// must remove.
+	origKH := sshKnownHostsPath
+	s.knownHosts = filepath.Join(dir, "ssh_known_hosts")
+	// Managed header: the remover only deletes files xpfd owns.
+	if err := os.WriteFile(s.knownHosts, []byte("# Managed by xpfd — do not edit\nstale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sshKnownHostsPath = s.knownHosts
+	t.Cleanup(func() { sshKnownHostsPath = origKH })
+	// Rsyslog drop-ins + restart.
+	origRsyslog := rsyslogConfDir
+	rsysTmp := filepath.Join(dir, "rsyslog.d")
+	if err := os.MkdirAll(rsysTmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.rsyslogStale = filepath.Join(rsysTmp, "10-xpf-stale.conf")
+	if err := os.WriteFile(s.rsyslogStale, []byte("# stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rsyslogConfDir = rsysTmp
+	origRsRestart := rsyslogRestartFn
+	restarts := 0
+	rsyslogRestartFn = func() ([]byte, error) { restarts++; return nil, nil }
+	s.rsyslogRestarts = &restarts
+	t.Cleanup(func() { rsyslogConfDir = origRsyslog; rsyslogRestartFn = origRsRestart })
+	// Chrony renders + runtime reload. The minimal config renders empty,
+	// so plant stale content the reconcile must remove (proving the
+	// redirect is live) and the reload stub must observe.
+	origCS, origCT := chronySourcesPath, chronyThresholdPath
+	s.chronySources = filepath.Join(dir, "xpf.sources")
+	s.chronyThreshold = filepath.Join(dir, "xpf-threshold.conf")
+	for _, p := range []string{s.chronySources, s.chronyThreshold} {
+		if err := os.WriteFile(p, []byte("# stale\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	chronySourcesPath, chronyThresholdPath = s.chronySources, s.chronyThreshold
+	origChReload := chronyReloadFn
+	reloaded := false
+	chronyReloadFn = func(sourcesChanged, thresholdChanged bool) chronyReloadOutcome {
+		reloaded = true
+		return chronyReloadOutcome{}
+	}
+	s.chronyReloaded = &reloaded
+	t.Cleanup(func() { chronySourcesPath, chronyThresholdPath = origCS, origCT; chronyReloadFn = origChReload })
+	s.dnsCalls = new(int)
+	// Interface link dir: nothing in these applies configures
+	// interfaces; the redirect + emptiness assertion trip if that
+	// ever changes.
+	origLink := linkDir
+	s.linkDir = filepath.Join(dir, "network")
+	if err := os.MkdirAll(s.linkDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir = s.linkDir
+	t.Cleanup(func() { linkDir = origLink })
+	return s
+}
+
+// assertRecoveryHostIsolated proves the authoring apply wrote only
+// through the redirected seams: every plant swept or written in the
+// throwaway tree, every external command stubbed, every sysctl
+// flipped in the redirect. Call after the authoring commit.
+func assertRecoveryHostIsolated(t *testing.T, d *Daemon, s *recoveryHostSeams) {
+	t.Helper()
+	for _, p := range []string{s.v4, s.v6} {
+		if body, err := os.ReadFile(p); err != nil || strings.TrimSpace(string(body)) != "0" {
+			t.Fatalf("transit sysctl redirect %s = %q err=%v, want gated 0", p, body, err)
+		}
+	}
+	if lastBarrierCall(s.barrier) == "" {
+		t.Fatal("transit barrier must route to the fake installer")
+	}
+	for _, p := range []string{s.sudoersStale, s.knownHosts, s.rsyslogStale} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("stale plant %s must be swept from the redirect: %v", p, err)
+		}
+	}
+	for _, p := range []string{s.chronySources, s.chronyThreshold} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("stale chrony plant %s must be removed from the redirect: %v", p, err)
+		}
+	}
+	if !*s.chronyReloaded {
+		t.Fatal("chrony reload must route to the stub")
+	}
+	if *s.rsyslogRestarts == 0 {
+		t.Fatal("rsyslog restart must route to the stub")
+	}
+	if *s.dnsCalls == 0 {
+		t.Fatal("DNS reconcile must route to the field seam")
+	}
+	if entries, _ := os.ReadDir(s.linkDir); len(entries) != 0 {
+		t.Fatalf("link dir must stay empty, got %v", entries)
+	}
 }
 
 // fakePendingWipe returns a factoryReset wipe closure honoring the pending
@@ -1300,6 +1463,7 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	origNodeID := hasNodeIDFileFn
 	t.Cleanup(func() { hasNodeIDFileFn = origNodeID })
 	hasNodeIDFileFn = func() bool { return false }
+	hostSeams := isolateRecoveryApplyHost(t)
 	root := t.TempDir()
 	gateRoot := t.TempDir()
 	fixedRoot := t.TempDir()
@@ -1459,6 +1623,7 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	installSSHDSeam(t, &sshdSeamRecorder{})
 	d2 := &Daemon{store: freshStore, applySem: semaphore.NewWeighted(1), opts: Options{ConfigFile: dbPath, NoDataplane: true}, vrrpMgr: vrrp.NewManager()}
 	d2.setDataplane(&runtimeOnlyApplyTestDP{})
+	d2.reconcileDNSFn = func(*config.Config, bool) error { *hostSeams.dnsCalls++; return nil }
 	failClosed, err := d2.loadAndBootstrapConfig()
 	if err != nil || failClosed {
 		t.Fatalf("startup path must take fresh boot, failClosed=%v err=%v", failClosed, err)
@@ -1487,6 +1652,7 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	if err := freshStore.ConfirmCommit(); err != nil {
 		t.Fatalf("confirm the authored window: %v", err)
 	}
+	assertRecoveryHostIsolated(t, d2, hostSeams)
 	// Host-write isolation proof. NoDataplane skips the tunable block
 	// (daemon_apply_tail.go) so the apply captures no sysctl state; a
 	// capture here would mean a live /proc write path ran. The
@@ -1605,6 +1771,7 @@ func TestUngatedMarkersRestartAuthorRerunConverges10769(t *testing.T) {
 	origNodeID := hasNodeIDFileFn
 	t.Cleanup(func() { hasNodeIDFileFn = origNodeID })
 	hasNodeIDFileFn = func() bool { return false }
+	hostSeams := isolateRecoveryApplyHost(t)
 	origSethostname, origHostnamePath, origOsHostname := sethostname, hostnamePath, osHostname
 	t.Cleanup(func() { sethostname, hostnamePath, osHostname = origSethostname, origHostnamePath, origOsHostname })
 	hostnamePath = filepath.Join(t.TempDir(), "hostname")
@@ -1672,6 +1839,7 @@ func TestUngatedMarkersRestartAuthorRerunConverges10769(t *testing.T) {
 	installSSHDSeam(t, &sshdSeamRecorder{})
 	d := &Daemon{store: freshStore, applySem: semaphore.NewWeighted(1), opts: Options{ConfigFile: dbPath, NoDataplane: true}, vrrpMgr: vrrp.NewManager()}
 	d.setDataplane(&runtimeOnlyApplyTestDP{})
+	d.reconcileDNSFn = func(*config.Config, bool) error { *hostSeams.dnsCalls++; return nil }
 	failClosed, err := d.loadAndBootstrapConfig()
 	if err != nil || !failClosed {
 		t.Fatalf("startup path must take fail-closed bootstrap, failClosed=%v err=%v", failClosed, err)
@@ -1699,6 +1867,7 @@ func TestUngatedMarkersRestartAuthorRerunConverges10769(t *testing.T) {
 	if err := freshStore.ConfirmCommit(); err != nil {
 		t.Fatalf("confirm the authored window: %v", err)
 	}
+	assertRecoveryHostIsolated(t, d, hostSeams)
 	d.priorTunablesMu.Lock()
 	tunableCaptures := d.priorTunables != nil && (len(d.priorTunables.neighRetrans) != 0 || len(d.priorTunables.governors) != 0 || d.priorTunables.budget != "" || len(d.priorTunables.mlx5Adaptive) != 0)
 	d.priorTunablesMu.Unlock()
