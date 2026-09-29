@@ -29,6 +29,37 @@ func TestZoneInterfaceMultiZoneFailsCommit(t *testing.T) {
 	}
 }
 
+func TestZoneInterfaceConflictDiagnosticDeterministic(t *testing.T) {
+	lines := []string{
+		"set interfaces ge-0/0/0 unit 2 family inet address 10.0.0.2/24",
+		"set interfaces ge-0/0/0 unit 10 family inet address 10.0.0.10/24",
+		"set security zones security-zone aaa interfaces ge-0/0/0.2",
+		"set security zones security-zone bbb interfaces ge-0/0/0.10",
+		"set security zones security-zone trust interfaces ge-0/0/0",
+	}
+	var want string
+	for i := range 20 {
+		_, err := CompileConfig(buildTree(t, lines))
+		if err == nil {
+			t.Fatal("expected strict compile to reject conflicting unit membership")
+		}
+		got := err.Error()
+		for _, part := range []string{"bbb", "trust"} {
+			if !strings.Contains(got, part) {
+				t.Fatalf("strict diagnostic %q does not identify first conflict zone %q", got, part)
+			}
+		}
+		if strings.Contains(got, "aaa") {
+			t.Fatalf("strict diagnostic %q selected the later unit conflict instead of the .10 conflict", got)
+		}
+		if i == 0 {
+			want = got
+		} else if got != want {
+			t.Fatalf("strict diagnostic changed between compiles:\nfirst: %q\nagain: %q", want, got)
+		}
+	}
+}
+
 // TestZoneInterfaceMultiZoneLenientDowngradesToWarning asserts the tolerant
 // load / peer-sync path warns instead of failing the compile, so an already-
 // persisted or peer-synced config still boots (#3072 / #1960 no-brick). The

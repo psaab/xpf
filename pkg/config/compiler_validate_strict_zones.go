@@ -188,11 +188,9 @@ func validateZoneCountStrict(cfg *Config) error {
 // zoneIfaceLogicalKeys returns the set of effective logical-interface keys a
 // single `set security zones security-zone <z> interfaces <iface>` entry
 // claims, mirroring how pkg/dataplane/userspace.buildInterfaceZoneMap expands a
-// zone-interface entry into the userspace interface->zone lookup (#3072). It is
-// the conflict-detection counterpart of that expansion: two zones whose key
-// sets intersect would map the same physical/logical interface to two zone ids,
-// which buildInterfaceZoneMap silently resolves first-writer-wins over the
-// sorted zone names.
+// zone-interface entry into the userspace interface->zone lookup (#3072).
+// Intersecting key sets are rejected by strict compilation and omitted from
+// tolerant runtime maps, so neither claimant becomes a sorted-name winner.
 //
 //   - A unit-qualified entry (`base.unit`, e.g. `ge-0/0/0.0`) claims exactly the
 //     one logical unit key `base.unit`. It deliberately does NOT claim the bare
@@ -231,11 +229,17 @@ func zoneIfaceLogicalKeys(cfg *Config, iface string) []string {
 	keys := []string{base}
 	if cfg != nil {
 		if ifCfg := cfg.Interfaces.Interfaces[base]; ifCfg != nil {
+			units := make([]int, 0, len(ifCfg.Units))
 			for unitNum := range ifCfg.Units {
+				units = append(units, unitNum)
+			}
+			sort.Ints(units)
+			for _, unitNum := range units {
 				keys = append(keys, fmt.Sprintf("%s.%d", base, unitNum))
 			}
 		}
 	}
+	sort.Strings(keys)
 	return keys
 }
 
