@@ -54,10 +54,9 @@ import (
 // (M03), and the cross-zone subset of same-address-across-routing-instances
 // (M04) — a zone is not VRF-scoped in xpf, so overlapping-VRF address reuse
 // surfaces as the cross-zone case here (intentional overlap needs Option C to
-// be SUPPORTED; Option B rejects it fail-closed). Management / cluster-control
-// lifeline interfaces (fxp0 / em0 / fab* / configured control+fabric) are
-// excluded, mirroring the runtime deny-scoping, so a shared management address
-// is never flagged.
+// be SUPPORTED; Option B rejects it fail-closed). Lifeline interfaces (fxp0 plus
+// explicitly configured control/fabric links) are excluded, mirroring the runtime
+// deny-scoping, so a shared management address is never flagged.
 //
 // Strict on the commit / commit-check path (CompileConfig — hard-reject);
 // downgraded to a cfg.Warnings entry on the tolerant load / peer-sync paths

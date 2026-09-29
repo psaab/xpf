@@ -205,14 +205,13 @@ type HostInboundView struct {
 	ZoneProtocols      []string
 	Interfaces         []InterfaceHostInboundView
 	// LifelineInterfaces lists the zone's interfaces that are management /
-	// cluster-control LIFELINES (fxp0 / em0 / fab* / configured
-	// control-interface / fabric-interface) and are therefore EXCLUDED from
-	// host-inbound deny scoping — their host-bound traffic is always admitted
-	// regardless of this zone's host-inbound-traffic set (#3682 observability
-	// L05). Sorted, deduplicated. Empty unless the view is built with the
-	// lifeline set via HostInboundViewWithLifelines. Rendered as an explicit
-	// exemption line so the implicit management-plane exception is auditable
-	// rather than silent.
+	// cluster-control LIFELINES (fxp0 / configured control-interface /
+	// fabric-interface) and are therefore EXCLUDED from host-inbound deny
+	// scoping — their host-bound traffic is always admitted regardless of this
+	// zone's host-inbound-traffic set (#3682, #11068). Sorted, deduplicated.
+	// Empty unless the view is built with the lifeline set via
+	// HostInboundViewWithLifelines. Rendered as an explicit exemption line so the
+	// implicit management-plane exception is auditable rather than silent.
 	LifelineInterfaces []string
 }
 
@@ -227,10 +226,10 @@ func (z *ZoneConfig) HostInboundView() HostInboundView {
 // addition to HostInboundView, records which of the zone's interfaces are
 // host-inbound LIFELINES (management / cluster-control interfaces excluded from
 // host-inbound deny scoping — #3682). lifelines is the config-derived lifeline
-// base-name set from HostInboundLifelineSet(cfg); a nil set still matches the
-// always-on fxp0/em0/fab* defaults so callers that only need the defaults may
-// pass nil. Nil-safe. The recorded interfaces make the implicit exemption
-// operator-visible on every zone view that routes through this presenter.
+// base-name set from HostInboundLifelineSet(cfg); nil matches no configured
+// names (the fixed fxp0 default is supplied by that set). Nil-safe. The recorded
+// interfaces make the implicit exemption operator-visible on every zone view
+// that routes through this presenter.
 func (z *ZoneConfig) HostInboundViewWithLifelines(lifelines map[string]bool) HostInboundView {
 	v := z.hostInboundViewBase()
 	if z == nil {
@@ -412,11 +411,10 @@ func (v HostInboundView) Render(l HostInboundLabels) []string {
 		}
 	}
 	// #3682 (L05): make the implicit management/cluster-control lifeline
-	// exemption operator-visible. Any zone interface whose base name is a
-	// lifeline (fxp0 / em0 / fab* / configured control-interface / fabric) is
-	// EXCLUDED from this zone's host-inbound deny scoping — its host-bound
-	// traffic is always admitted. Rendered so the exception is auditable rather
-	// than silently dropping out of default-deny.
+	// exemption operator-visible. Only fxp0 and configured control/fabric roles
+	// are excluded from this zone's host-inbound deny scoping (#11068); their
+	// host-bound traffic is always admitted. Rendered so the exception is
+	// auditable rather than silently dropping out of default-deny.
 	if len(v.LifelineInterfaces) > 0 {
 		lines = append(lines,
 			l.Indent+"Host-inbound lifeline-exempt interfaces (management/fabric, "+

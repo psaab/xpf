@@ -83,6 +83,7 @@ func TestZoneLevelDHCPAdvisory_6519(t *testing.T) {
 
 	t.Run("silent when every member is a lifeline", func(t *testing.T) {
 		cfg := dhcpScopeCfg6519([]string{"dhcp"}, nil, "fxp0.0")
+		cfg.Chassis.Cluster = &ClusterConfig{ControlInterface: "em0"}
 		cfg.Security.Zones["trust"].Interfaces = []string{"fxp0.0", "em0.0"}
 		if got := validateHostInboundZoneLevelDHCPWarnings(cfg); len(got) != 0 {
 			t.Fatalf("lifelines are excluded from host-inbound deny scoping, so no zone token "+

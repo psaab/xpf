@@ -61,9 +61,9 @@ func buildZoneSnapshots(cfg *config.Config) []ZoneSnapshot {
 		// unconfigured (absent from the table -> `None => true` admit-all), a
 		// permit-all management-plane exposure on any zone the operator never
 		// locked down. The global ICMP/ND/PMTUD accepts (#3171) still precede the
-		// per-zone deny on the Rust path, and lifeline interfaces (fxp0/em0/fab*)
-		// never reach the AF_XDP local-delivery classifier, so the flip cannot
-		// strand management or break HA.
+		// per-zone deny on the Rust path, and lifeline interfaces (fxp0 plus
+		// explicitly configured cluster-control/fabric links) never reach the AF_XDP
+		// local-delivery classifier, so the flip cannot strand management or break HA.
 		//
 		// #3362: the zone-keyed set stays the zone-level set (possibly EMPTY ->
 		// fail-closed deny-all for any interface in the zone WITHOUT an override),
@@ -82,9 +82,9 @@ func buildZoneSnapshots(cfg *config.Config) []ZoneSnapshot {
 		// fail-open). Emitting configured=true with EMPTY token sets makes a nil zone
 		// default-DENY exactly like a no-stanza zone (#3405): the Rust classifier
 		// inserts an empty ZoneHostInbound -> `admits()` returns false for every
-		// service/protocol. Lifeline interfaces (fxp0/em0/fab*) never reach the
-		// AF_XDP local-delivery classifier (#3682), so the flip cannot strand
-		// management or break HA.
+		// service/protocol. Lifeline interfaces (fxp0 plus explicitly configured
+		// cluster-control/fabric links) never reach the AF_XDP local-delivery
+		// classifier (#3682), so the flip cannot strand management or break HA.
 		zs.HostInboundConfigured = true
 		if zone := cfg.Security.Zones[name]; zone != nil && zone.HostInboundTraffic != nil {
 			zs.HostInboundSystemServices = lowerTokens(zone.HostInboundTraffic.SystemServices)

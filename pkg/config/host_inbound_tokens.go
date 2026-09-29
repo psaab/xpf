@@ -352,9 +352,9 @@ var HostInboundNonJunosSystemServices = map[string]bool{
 //	         this token on the ICL zone. MITIGATION: xpf does not implement MNHA;
 //	         its own inter-node HA control plane (heartbeat on the cluster
 //	         control interface, session/config sync over the fabric) rides
-//	         LIFELINE interfaces — fxp0, em0, fab*, plus any configured
-//	         control-interface / fabric-interface (HostInboundLifelineSet, #3277)
-//	         — which BuildZoneHostInboundViews removes before generating
+//	         LIFELINE interfaces — fxp0 plus explicitly configured
+//	         control-interface / fabric-interface links (HostInboundLifelineSet,
+//	         #3277) — which BuildZoneHostInboundViews removes before generating
 //	         host-inbound deny sets. So an unported `high-availability` cannot
 //	         break xpf's own HA. It would bite only an operator carrying a Junos
 //	         MNHA config onto a non-lifeline zone, who gets the commit advisory.
@@ -478,8 +478,8 @@ var HostInboundNoAdmitReason = map[string]string{
 	// What makes it tolerable in xpf specifically: xpf does NOT implement MNHA.
 	// Its inter-node HA control plane is the chassis-cluster model — heartbeat on
 	// the control interface, session/config sync over the fabric — and those ride
-	// LIFELINE interfaces (fxp0, em0, fab*, plus any configured
-	// control-interface / fabric-interface; HostInboundLifelineSet, #3277) which
+	// LIFELINE interfaces (fxp0 plus explicitly configured control-interface /
+	// fabric-interface links; HostInboundLifelineSet, #3277), which
 	// BuildZoneHostInboundViews removes before generating host-inbound deny sets.
 	// So an unported `high-availability` cannot break xpf's own HA. Naming the
 	// token is, for xpf, a NO-OP: there is no MNHA ICL for it to govern. It bites

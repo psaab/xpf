@@ -87,7 +87,7 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 	// Lifeline note (#3719 review, secondary): if the operator's management zone
 	// happens to be the later-sorting collider it is quarantined and its
 	// interfaces are unzoned. This does NOT strand management, because lifeline
-	// interfaces (fxp0/em0/fab*) never reach the AF_XDP local-delivery
+	// interfaces (fxp0 plus explicitly configured control/fabric links) never reach the AF_XDP local-delivery
 	// classifier (#3682) — their host-bound traffic is served by the kernel
 	// path regardless of zone — and the loud operator alarm names both zones. We
 	// deliberately keep the quarantine loser purely a function of the sorted

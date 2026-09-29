@@ -32,16 +32,21 @@ import (
 //   - WHOLE-PROGRAM representability gate: if ANY contributing term (any tier)
 //     is un-representable, the WHOLE program emits nothing and every one of its
 //     junos-host policies keeps the #4168 warning. Never a per-term partial.
-//   - FIRST-MATCH, NEVER A FINE ACCEPT (#9504): each ingress zone's program
-//     renders, in authored order, into its own nft subchain. A `deny` drops
-//     (answering TCP with a RST on a `tcp-rst` zone), a `reject` answers (TCP
-//     RST, else ICMP administratively prohibited), and a `permit` RETURNS from
-//     the subchain so the coarse host-inbound gate still decides. A permit never
-//     emits a fine accept (that could re-admit a coarse-rejected service — Rust
-//     poll_descriptor/mod.rs:138). A packet no rule matches returns too: the
-//     runtime has no implicit junos-host default-deny (policy.rs
-//     evaluate_junos_host_policy_l3_aware, policymatch.matchJunosHost), and
-//     neither does this program.
+//   - FIRST-MATCH, NEVER A FINE ACCEPT (#9504), WITH A KERNEL TERMINAL DENY
+//     FOR PERMIT PROGRAMS (#11065): each ingress zone's program renders, in
+//     authored order, into its own nft subchain. A `deny` drops (answering TCP
+//     with a RST on a `tcp-rst` zone), a `reject` answers (TCP RST, else ICMP
+//     administratively prohibited), and a `permit` RETURNS from the subchain
+//     so the coarse host-inbound gate still decides. A permit never emits a
+//     fine accept (that could re-admit a coarse-rejected service — Rust
+//     poll_descriptor/mod.rs:138). If a permit matches a subset of one family,
+//     the kernel subchain's terminal deny refuses the non-permitted remainder
+//     on the direct host-bound path. The userspace path deliberately keeps its
+//     deliver-on-no-match lifeline (policy.rs
+//     evaluate_junos_host_policy_l3_aware, policymatch.matchJunosHost), so
+//     permit warnings remain for that residual path; host-inbound admission
+//     must suffice wherever the kernel deny-half does not reach (lifeline,
+//     lo0, unzoned-addressed, tunnel paths).
 //   - Fine-eligible metadata: ESP/AH (proto 50/51) are always exempt; the
 //     IKE subset feeds the #10524 overlap advisory, while ident-reset TCP/113
 //     is exempt only when the effective coarse verdict is the RST
@@ -155,7 +160,8 @@ type JunosHostDenyProgram struct {
 	// program then carries NO rules and the daemon emits nothing for the zone.
 	Representable bool
 	// RulesV4 / RulesV6 are the projected rules, each family in first-match
-	// order. A non-empty list never ends in a JunosHostReturn.
+	// order. If the program has any scoped PERMIT, every family without a
+	// match-all permit ends in the #11065 terminal deny, after authored returns.
 	RulesV4 []JunosHostDenyRule
 	RulesV6 []JunosHostDenyRule
 	// CoarseAdmitsIKE / CoarseIdentResets describe effective coarse metadata for
@@ -179,14 +185,15 @@ type JunosHostDenyProgram struct {
 	HasApplicationAnyDeny bool
 }
 
+type junosHostPolicyCoverageGaps map[string]map[string]string // zone -> netdev -> reason
+
 // JunosHostDenyProjection is the whole-config result: the per-zone programs the
 // daemon renders, plus policy-key and coverage bookkeeping for the #4168
-// warning. RenderedPolicyKeys is the aggregate set of DENY-class keys that have
+// warning. RenderedPolicyKeys is the aggregate set of DENY/REJECT keys that have
 // at least one applicable enforceable ordinary zone and for which every
 // applicable ordinary zone was fully scoped, representable, and emitted the key.
 // The validator suppresses only when this set contains the key and
 // LifelineOnlyZones has no entry for it.
-//
 // RenderedApplicationAnyPolicyKeysByZone is narrower provenance for #10524:
 // it records application-any DENY/REJECT keys that emitted a rule in each
 // surviving zone, even when that zone has partial netdev coverage and therefore
@@ -195,10 +202,9 @@ type JunosHostDenyProgram struct {
 // RenderedPolicyZoneKeys records the ordinary zones that emitted each aggregate
 // rendered key. LifelineOnlyZones records policy applicability on fully-scoped
 // zones with a configured lifeline ref and no non-lifeline candidates: there is
-// no kernel rule by design, so the warning is retained. Together they make
-// suppression coverage-aware for shared and per-zone applicability (#10521):
-// ordinary-zone enforcement suppresses only when complete, while configured
-// lifeline applicability retains one warning.
+// no kernel rule by design, so the warning is retained. unscopableIngressByKey
+// records candidate netdevs skipped by the iifname scope, so the retained
+// warning can name the exact uncovered path.
 type JunosHostDenyProjection struct {
 	Programs                               []JunosHostDenyProgram
 	RenderedPolicyKeys                     map[string]bool
@@ -212,6 +218,9 @@ type JunosHostDenyProjection struct {
 	// (no kernel rule by design, lifeline NEVER-deny). A rendered key with a
 	// non-empty entry keeps its warning.
 	LifelineOnlyZones map[string][]string
+	// unscopableIngressByKey maps each policy key to its direct-path ingress
+	// coverage gaps, keyed by zone then kernel netdev, with the reason.
+	unscopableIngressByKey map[string]junosHostPolicyCoverageGaps
 }
 
 // JunosHostZonePairPolicyKey / JunosHostGlobalPolicyKey are the stable identity
@@ -260,6 +269,7 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 		RenderedApplicationAnyPolicyKeysByZone: map[string]map[string]bool{},
 		RenderedPolicyZoneKeys:                 map[string]map[string]bool{},
 		LifelineOnlyZones:                      map[string][]string{},
+		unscopableIngressByKey:                 map[string]junosHostPolicyCoverageGaps{},
 	}
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return out
@@ -275,14 +285,13 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 	// and not the netdev list.
 	coverageByZone := junosHostZoneNetdevCoverageMap(cfg)
 
-	// Per-policy-key bookkeeping to decide rendered-vs-warned (§3.3): a policy
-	// is rendered at policy level iff it is a DENY or REJECT that applies to
-	// >=1 ordinary enforceable ingress zone and EVERY such zone's whole program
-	// has emitted it. A PERMIT is NEVER suppressed: its "deny non-permitted"
-	// half is enforced on no path, because the runtime has no implicit
-	// junos-host default-deny (#9504). The validator separately retains a
-	// warning when LifelineOnlyZones records uncovered configured lifeline
-	// applicability.
+	// Per-policy-key bookkeeping to decide rendered-vs-warned (§3.3): a DENY or
+	// REJECT policy is rendered at policy level iff it applies to >=1 ordinary
+	// enforceable ingress zone and EVERY such zone's whole program has emitted
+	// it. A permit's kernel deny-half is now enforced on the direct host-bound
+	// path, but the runtime's deliberate userspace no-match lifeline remains, so
+	// its warning is retained. LifelineOnlyZones also retains warnings for
+	// uncovered configured lifeline applicability.
 	appliesEnforceable := map[string]int{}
 	blockedByUnrep := map[string]bool{}
 	actionByKey := map[string]PolicyAction{}
@@ -404,10 +413,22 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 		// Bookkeeping for the warning.
 		for _, t := range terms {
 			actionByKey[t.key] = t.action
-			// A zone that tried to scope and could not use every candidate blocks
-			// suppression even when it emitted nothing at all — the policy is
-			// unenforced on that zone's ingress either way, and saying so is the
-			// whole job of the #4168 advisory.
+			// Preserve the per-policy reason for every unscopable candidate;
+			// the warning must identify the ingress gap, not imply that no
+			// kernel policy is installed anywhere.
+			if len(cov.Unscopable) > 0 {
+				if out.unscopableIngressByKey[t.key] == nil {
+					out.unscopableIngressByKey[t.key] = junosHostPolicyCoverageGaps{}
+				}
+				if out.unscopableIngressByKey[t.key][zoneName] == nil {
+					out.unscopableIngressByKey[t.key][zoneName] = map[string]string{}
+				}
+				for _, gap := range cov.Unscopable {
+					out.unscopableIngressByKey[t.key][zoneName][gap.Netdev] = gap.Reason
+				}
+			}
+			// No rule can cover every candidate when any own netdev was
+			// unscopable, even if scoped siblings still received protection.
 			if !fullyScoped {
 				blockedByUnrep[t.key] = true
 			}
@@ -599,16 +620,16 @@ func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[stri
 // first-match rule list per family (#9504). Every term keeps its authored
 // verdict (junosHostTermVerdict), so a permit ahead of a deny carves it the way
 // the runtime does, in any dimension: the permit's rule returns from the
-// subchain before the deny's rule is reached. A packet no rule matches returns
-// as well, which is the runtime's deliver-on-no-match lifeline.
+// subchain before the deny's rule is reached.
 //
-// Two refinements shorten the lists without changing any verdict:
-//   - once a permit's rule returns EVERY packet of a family (application any,
-//     every source, every destination), no later rule of that family can match
-//     and none is emitted. That is also what keeps #6705's warning on a deny the
-//     permit shadows: the deny emitted nothing, so nothing enforces it.
-//   - trailing returns are dropped: a return with nothing after it is the
-//     subchain's own end.
+// #11065: a scoped permit can leave traffic unmatched by an authored rule.
+// Append a terminal deny in every family that is not covered by a match-all
+// permit, including families where the permit did not emit a rule (e.g. an
+// IPv4-only permit must not leave IPv6 on coarse fallback). Preserve each
+// permit return ahead of the terminal; a match-all permit already returns
+// every packet in its family and makes that family's terminal unnecessary.
+// The userspace `None => deliver` lifeline is unchanged, so the existing permit
+// warning stays to describe that residual path.
 func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostTerm, tcpRst bool) (JunosHostDenyProgram, map[string]bool) {
 	prog := JunosHostDenyProgram{
 		Zone:          zone,
@@ -624,13 +645,13 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 	// counted as rendered and had its #4168 warning suppressed, so the operator
 	// got neither the enforcement nor the diagnostic (#6705).
 	emitted := map[string]bool{}
-	var doneV4, doneV6 bool
+	var doneV4, doneV6, hasPermitV4, hasPermitV6 bool
 	for _, t := range terms {
 		if t.action == PolicyPermit && t.lenientDropped {
 			continue // #9572: a #5575-poisoned permit carves nothing.
 		}
 		verdict := junosHostTermVerdict(t.action, tcpRst)
-		add := func(family string, rules *[]JunosHostDenyRule, done *bool) {
+		add := func(family string, rules *[]JunosHostDenyRule, done, hasPermit *bool) {
 			if *done {
 				return
 			}
@@ -641,16 +662,31 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 			*rules = append(*rules, r)
 			emitted[t.key] = true
 			if verdict == JunosHostReturn {
+				*hasPermit = true
 				*done = junosHostRuleMatchesFamily(r)
 			} else if t.appAny {
 				prog.HasApplicationAnyDeny = true
 			}
 		}
-		add("ip", &prog.RulesV4, &doneV4)
-		add("ip6", &prog.RulesV6, &doneV6)
+		add("ip", &prog.RulesV4, &doneV4, &hasPermitV4)
+		add("ip6", &prog.RulesV6, &doneV6, &hasPermitV6)
 	}
-	prog.RulesV4 = junosHostTrimTrailingReturns(prog.RulesV4)
-	prog.RulesV6 = junosHostTrimTrailingReturns(prog.RulesV6)
+	terminal := junosHostTermVerdict(PolicyDeny, tcpRst)
+	hasPermitProgram := hasPermitV4 || hasPermitV6
+	if hasPermitProgram && !doneV4 {
+		prog.RulesV4 = append(prog.RulesV4, JunosHostDenyRule{
+			Family: "ip", SrcAny: true, DstAny: true, Verdict: terminal,
+		})
+	} else {
+		prog.RulesV4 = junosHostTrimTrailingReturns(prog.RulesV4)
+	}
+	if hasPermitProgram && !doneV6 {
+		prog.RulesV6 = append(prog.RulesV6, JunosHostDenyRule{
+			Family: "ip6", SrcAny: true, DstAny: true, Verdict: terminal,
+		})
+	} else {
+		prog.RulesV6 = junosHostTrimTrailingReturns(prog.RulesV6)
+	}
 	return prog, emitted
 }
 

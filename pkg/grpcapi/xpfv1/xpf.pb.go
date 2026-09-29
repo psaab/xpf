@@ -2724,8 +2724,9 @@ type ZoneInfo struct {
 	// deny-all) plus any per-interface override in interface_host_inbound.
 	// Before #3653 this was re-derived from config shape and reported false for
 	// a no-stanza zone — the pre-#3405 "false = admit-all" reading, the OPPOSITE
-	// of runtime. (Global ICMP/ND/PMTUD accepts and lifeline interfaces
-	// fxp0/em0/fab* still bypass the per-zone host-inbound deny.)
+	// of runtime. Global ICMP/ND/PMTUD accepts still bypass the per-zone host-inbound
+	// deny; lifelines are fxp0 plus explicitly configured cluster control/fabric
+	// links, not bare em0/fab* spellings.
 	HostInboundConfigured bool `protobuf:"varint,12,opt,name=host_inbound_configured,json=hostInboundConfigured,proto3" json:"host_inbound_configured,omitempty"`
 	// host_inbound_system_services / host_inbound_protocols (#3328) carry the
 	// ZONE-LEVEL admission set, kept distinct so automation can tell a
@@ -2739,14 +2740,16 @@ type ZoneInfo struct {
 	// `host-inbound-traffic` stanza; the effective admission set for that
 	// interface IS the override — it REPLACES the zone-level set above (#6515).
 	InterfaceHostInbound []*InterfaceHostInbound `protobuf:"bytes,15,rep,name=interface_host_inbound,json=interfaceHostInbound,proto3" json:"interface_host_inbound,omitempty"`
-	// lifeline_interfaces (#3682) lists the zone's interfaces that are
-	// management / cluster-control LIFELINES (fxp0 / em0 / fab* / configured
-	// control-interface / fabric-interface) and are therefore EXCLUDED from this
-	// zone's host-inbound deny scoping — their host-bound traffic is always
-	// admitted regardless of the admission set above. Surfaced so the implicit
+	// lifeline_interfaces (#3682, #11068) lists interfaces assigned a management /
+	// cluster-control role (fxp0 or explicitly configured cluster control/fabric
+	// links, including fabric-options member-interfaces). Bare em0/fab* names do
+	// not establish a role. These interfaces are excluded from this zone's
+	// host-inbound deny scoping; their host-bound traffic is always admitted
+	// regardless of the admission set above. Surfaced so the implicit
 	// management-plane exception is operator-visible and auditable rather than a
-	// silent bypass. Sorted, deduplicated; empty for a zone with no lifeline
-	// member. VISIBILITY only — the exemption semantics are unchanged.
+	// silent bypass. Sorted, deduplicated; empty for a zone with no lifeline member.
+	// VISIBILITY only — the field reports the config-derived exemption; it does
+	// not itself grant one.
 	LifelineInterfaces []string `protobuf:"bytes,16,rep,name=lifeline_interfaces,json=lifelineInterfaces,proto3" json:"lifeline_interfaces,omitempty"`
 	// per_zone_counter_availability (#6895) tells the client whether the four
 	// counter fields above are a real reading or the absence of one. Before it,

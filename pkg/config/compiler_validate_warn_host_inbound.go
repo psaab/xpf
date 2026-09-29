@@ -424,11 +424,11 @@ func junosHostPolicyStricterThanCoarseGate(action PolicyAction, m PolicyMatch) (
 	// warning at all, because this predicate asked about the source alone.
 	//
 	// #9504 changed what the warning is FOR, not whether it fires. The
-	// projection now renders a destination-scoped permit (a return carrying its
-	// `daddr` predicate), so it is no longer an unrendered policy. What stays
-	// true is that no path applies an implicit junos-host default-deny, so the
-	// addresses the permit does not name are admitted everywhere, and the
-	// warning says that.
+	// projection renders a destination-scoped permit as a return carrying its
+	// `daddr` predicate, and #11065 adds the terminal deny for the non-permitted
+	// remainder on the direct host-bound kernel path. The warning stays because
+	// the userspace no-match lifeline still delivers; the permit is not fully
+	// enforced there, where the coarse host-inbound admission remains the gate.
 	if junosHostAddrScoped(m.DestinationAddresses) || m.DestinationAddressExcluded {
 		return true, "destination-restricted permit"
 	}
@@ -622,26 +622,60 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 		return "{" + strings.Join(quoted, ", ") + "}"
 	}
 	coverageReason := func(key string) string {
-		if len(projection.LifelineOnlyZones[key]) == 0 {
-			return ""
+		var extra []string
+		gaps := projection.unscopableIngressByKey[key]
+		if len(gaps) > 0 {
+			zones := make([]string, 0, len(gaps))
+			for zone := range gaps {
+				zones = append(zones, zone)
+			}
+			sort.Strings(zones)
+			var uncovered []string
+			for _, zone := range zones {
+				netdevs := make([]string, 0, len(gaps[zone]))
+				for netdev := range gaps[zone] {
+					netdevs = append(netdevs, netdev)
+				}
+				sort.Strings(netdevs)
+				for _, netdev := range netdevs {
+					reason := gaps[zone][netdev]
+					switch reason {
+					case junosHostNetdevAmbiguous:
+						reason = "shared by multiple zones; an iifname DROP here would over-deny sibling-zone ingress"
+					case junosHostNetdevVRFEnslaved:
+						reason = "VRF-enslaved; LOCAL_IN iifname is the VRF master, so a DROP scoped to this slave would miss packets"
+					}
+					uncovered = append(uncovered, fmt.Sprintf("%q on zone %q (%s)", netdev, zone, reason))
+				}
+			}
+			ordinary := make([]string, 0, len(projection.RenderedPolicyZoneKeys[key]))
+			for zone := range projection.RenderedPolicyZoneKeys[key] {
+				ordinary = append(ordinary, zone)
+			}
+			if len(ordinary) > 0 {
+				extra = append(extra, fmt.Sprintf(
+					"Scoped kernel rules remain active on ordinary zone(s) %s; direct-path ingress is not covered on %s",
+					formatZones(ordinary), strings.Join(uncovered, "; ")))
+			} else {
+				extra = append(extra, "Direct-path ingress is not covered on "+strings.Join(uncovered, "; "))
+			}
 		}
-		ordinary := make([]string, 0, len(projection.RenderedPolicyZoneKeys[key]))
-		for zone := range projection.RenderedPolicyZoneKeys[key] {
-			ordinary = append(ordinary, zone)
+		if len(projection.LifelineOnlyZones[key]) > 0 {
+			ordinary := make([]string, 0, len(projection.RenderedPolicyZoneKeys[key]))
+			for zone := range projection.RenderedPolicyZoneKeys[key] {
+				ordinary = append(ordinary, zone)
+			}
+			if len(ordinary) == 0 {
+				extra = append(extra, fmt.Sprintf(
+					"The policy is not covered on lifeline-only zone(s) %s: no kernel junos-host rule (lifeline NEVER-deny), and the coarse gate still admits",
+					formatZones(projection.LifelineOnlyZones[key])))
+			} else {
+				extra = append(extra, fmt.Sprintf(
+					"The kernel rule is enforced on ordinary zone(s) %s but not covered on lifeline-only zone(s) %s: no kernel junos-host rule (lifeline NEVER-deny), and the coarse gate still admits",
+					formatZones(ordinary), formatZones(projection.LifelineOnlyZones[key])))
+			}
 		}
-		if len(ordinary) == 0 {
-			return fmt.Sprintf(
-				"The policy is not covered on lifeline-only zone(s) %s: no "+
-					"kernel junos-host rule (lifeline NEVER-deny), and the "+
-					"coarse gate still admits",
-				formatZones(projection.LifelineOnlyZones[key]))
-		}
-		return fmt.Sprintf(
-			"The kernel rule is enforced on ordinary zone(s) %s but not covered "+
-				"on lifeline-only zone(s) %s: no kernel junos-host rule "+
-				"(lifeline NEVER-deny), and the coarse gate still admits",
-			formatZones(ordinary),
-			formatZones(projection.LifelineOnlyZones[key]))
+		return strings.Join(extra, ". ")
 	}
 	withCoverage := func(key, warning string) string {
 		if extra := coverageReason(key); extra != "" {
@@ -651,33 +685,32 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 	}
 	msg := func(who, reason string) string {
 		return fmt.Sprintf(
-			"security policy %s expresses a %s to-zone junos-host that the kernel "+
-				"host-inbound gate cannot enforce on the direct host-bound path: "+
-				"traffic to a firewall interface IP is delivered by the kernel (the "+
-				"XDP shim shunts local-destined packets to it on a session miss) and "+
-				"nft xpf_hostinbound admits configured system-services from ANY "+
-				"source with no per-source/per-application deny. The junos-host "+
-				"restriction is enforced only on the userspace AF_XDP local-delivery "+
-				"path (e.g. DNAT/static-NAT to a firewall-local address), so this "+
-				"management-plane restriction may not fully apply to the direct path "+
-				"(#4146, known vSRX-parity limitation — see "+
+			"security policy %s expresses a %s to-zone junos-host that is not "+
+				"fully enforced on the direct host-bound path. The kernel "+
+				"xpf_hostinbound chain receives packets to firewall interface IPs, "+
+				"but its coarse gate admits configured system-services from any "+
+				"source; only representable, correctly scoped junos-host rules enforce "+
+				"the finer source/application restrictions there. Unsupported policy "+
+				"content or uncovered ingress scope can therefore leave this restriction "+
+				"absent on one or more direct paths (#4146; see "+
 				"docs/host-inbound-service-matrix.md)",
 			who, reason)
 	}
-	// #9504: a restricted PERMIT has nothing to enforce on any path. The runtime
-	// applies no implicit junos-host default-deny (policy.rs
-	// evaluate_junos_host_policy_l3_aware, policymatch.matchJunosHost), so what the
-	// permit does not match is admitted by the zone's host-inbound-traffic on the
-	// userspace path exactly as on the kernel path. msg tells the operator the
-	// restriction holds on the userspace path, which is false for a permit.
+	// #11065 adds the terminal deny to the kernel's direct host-bound policy
+	// program. Keep a permit warning because the userspace
+	// evaluate_junos_host_policy_l3_aware no-match path deliberately delivers;
+	// on those flows the remainder is still governed by host-inbound admission.
 	permitMsg := func(who, reason string) string {
 		return fmt.Sprintf(
-			"security policy %s is a %s to-zone junos-host, but no path applies an "+
-				"implicit default-deny to host-bound traffic (the management lifeline): "+
-				"whatever the permit does not match is still admitted by the ingress "+
-				"zone's host-inbound-traffic, on the direct host-bound path and on the "+
-				"userspace path alike. To refuse it, follow the permit with an explicit `then deny` "+
-				"policy (#4146, #9504; see docs/host-inbound-service-matrix.md)",
+			"security policy %s is a %s to-zone junos-host. The kernel "+
+				"xpf_hostinbound path now appends a terminal deny after the permit "+
+				"program, so unmatched direct host-bound traffic is dropped (#11065). "+
+				"The userspace AF_XDP evaluator deliberately delivers when no "+
+				"junos-host policy matches, so the permit's restriction is not enforced "+
+				"on that path; host-inbound-traffic admission remains the gate there. "+
+				"Review that admission for every applicable service and zone, and use "+
+				"an explicit `then deny` if the userspace remainder must also be refused "+
+				"(#4146, #9504; see docs/host-inbound-service-matrix.md)",
 			who, reason)
 	}
 	pick := func(a PolicyAction) func(string, string) string {
@@ -874,8 +907,8 @@ func hostInboundLostTokens(zoneToks, effToks []string, protocols bool) []string 
 // Scope. Emitted per ZONE INTERFACE rather than per authored stanza, because a
 // unit that merely INHERITS a physical-parent override (#3720) also loses the
 // zone tokens and the operator needs to see the interface whose admission
-// actually changed. Lifeline interfaces (fxp0 / em0 / fab* / the configured
-// control + fabric links) are skipped: they are excluded from host-inbound deny
+// actually changed. Lifeline interfaces (fxp0 plus explicitly configured
+// control/fabric links) are skipped: they are excluded from host-inbound deny
 // scoping entirely, so nothing is lost on them and an advisory would be a false
 // alarm. An effective set that full-admits (`any-service`) loses nothing and is
 // skipped for the same reason.

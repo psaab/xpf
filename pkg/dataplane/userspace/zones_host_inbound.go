@@ -274,8 +274,8 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 // PLUS each zone's RETH VRRP virtual addresses (#3172, resolved from config
 // so they scope the deny on the backup node too, where the VIP is not yet
 // live on the kernel interface), and the deterministic stable RETH router
-// link-local (#10303), with management/cluster-control lifeline interfaces
-// (fxp0 / em0 / fab*) excluded from the address set. excludeScopeLink drops
+// link-local (#10303), with configured management/cluster-control lifeline
+// interfaces excluded from the address set. excludeScopeLink drops
 // kernel scope-link rows from the snapshot walk (pending-intent scoping,
 // #10751 R4-1); installed views pass false so link-locals stay denied.
 //
@@ -319,10 +319,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	// Configured-provenance set for the scope-link intent filter below
 	// (built once: the snapshot walk consults it per row).
 	configuredAddrs := configuredHostInboundAddrKeys(cfg)
-	// Lifeline interfaces (fxp0 + the configured chassis-cluster
-	// control-interface / fabric interfaces, plus the em0/fab* defaults) are
-	// excluded from host-inbound deny scoping so management / cluster-control
-	// traffic is never denied (#3277).
+	// Lifeline interfaces (fxp0 plus explicitly configured chassis-cluster
+	// control/fabric interfaces) are excluded from host-inbound deny scoping so
+	// management / cluster-control traffic is never denied (#3277).
 	lifelines := hostInboundLifelineSet(cfg)
 	lifelineShared := hostInboundLifelineSharedAddrsFromSnaps(cfg, snaps)
 	// #9637: netdevs that can never be an ingress scope.
@@ -406,13 +405,14 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	// denying every host-bound service/protocol not explicitly permitted. Before
 	// #3405 a no-stanza zone was skipped entirely (admit-all), a permit-all
 	// management-plane exposure on any zone the operator never locked down. The
-	// management / cluster-control lifeline interfaces (fxp0/em0/fab*) are
-	// excluded from the address sets below, and the established / ESP-AH / ND /
-	// PMTUD accepts precede every drop, so an ESTABLISHED management session and HA
-	// control traffic survive. A NEW management connection used not to be covered
-	// by that argument — a management address shared onto a non-lifeline interface
-	// was in that zone's drop set, and only a zone that ADMITS the service put an
-	// accept in front of it. Since #7284 the exclusion is by address VALUE as well
+	// management / cluster-control lifeline interfaces (fxp0 plus explicitly
+	// configured control/fabric links) are excluded from the address sets below,
+	// and the established / ESP-AH / ND / PMTUD accepts precede every drop, so an
+	// ESTABLISHED management session and HA control traffic survive. A NEW
+	// management connection used not to be covered by that argument — a management
+	// address shared onto a non-lifeline interface was in that zone's drop set,
+	// and only a zone that ADMITS the service put an accept in front of it.
+	// Since #7284 the exclusion is by address VALUE as well
 	// as by interface: an address on a lifeline is withheld from any view that
 	// would deny it with NO accept, so the no-stanza zone no longer strands it. A
 	// zone that DOES admit the service keeps the address, because its accept
@@ -557,8 +557,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	// resolving them from config (unit.VRRPGroups[*].VirtualAddresses) scopes the
 	// deny consistently regardless of mastership. The seen maps dedup against the
 	// live snapshot, so on the master node (where the VIP is already live) the
-	// result is byte-identical. Lifeline interfaces (fxp0/em0/fab*) are excluded,
-	// mirroring the static-address path; standalone (no-VRRP) zones are untouched.
+	// result is byte-identical. Lifeline interfaces (fxp0 plus explicitly
+	// configured control/fabric links) are excluded, mirroring the static-address
+	// path; standalone (no-VRRP) zones are untouched.
 	// The VIP is added to its interface's EFFECTIVE-token group (#3362), so a VIP
 	// on an overridden interface is scoped by that interface's override.
 	zoneByIface := buildInterfaceZoneMap(cfg)
@@ -883,16 +884,15 @@ const UnzonedHostInboundZoneLabel = "junos-host"
 // fail-closed posture and mirroring the #3405 per-zone default-deny.
 //
 // Scope / safety:
-//   - Only meaningful when the operator uses the zone model at all (>= 1 zone):
-//     a zone-less bootstrap / degenerate config is left untouched (nil), so this
-//     never turns a no-zones box into deny-all host-inbound.
-//   - Management / cluster-control LIFELINE INTERFACES (fxp0 / em0 / fab*, plus
-//     the configured control / fabric links) are excluded exactly as the zone
-//     path excludes them, AND (#7284) so is any address VALUE that lives on a
-//     lifeline. Both are needed. The interface check answers "is the snapshot I
-//     am walking a lifeline"; the value check answers the question a
-//     destination-only drop actually poses, since the rule carries no iifname
-//     (#3718) and so cannot tell the lifeline ingress path from any other.
+//   - Addressed interfaces outside all zones are fail-closed even when the
+//     config has no security zones; this is the zone-less addressed-interface
+//     fix for #11068. Unaddressed interfaces add no destination rule.
+//   - Management / cluster-control LIFELINE INTERFACES (fxp0 and configured
+//     control / fabric links) are excluded exactly as the zone path excludes
+//     them, AND (#7284) so is any address VALUE that lives on a lifeline. Both
+//     are needed. The interface check answers "is the snapshot I am walking a
+//     lifeline"; the value check answers the question a destination-only drop
+//     actually poses, since the rule carries no iifname (#3718).
 //     Before the value check, a management address ALSO configured on an
 //     unzoned interface was contributed by that interface's snapshot and landed
 //     in this set with an EMPTY admit set, so the real table dropped NEW
@@ -908,7 +908,7 @@ const UnzonedHostInboundZoneLabel = "junos-host"
 //     the kernel; the kernel nft deny is the sole and sufficient enforcement
 //     point and no userspace-dp (AF_XDP) change is required.
 func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot) (v4, v6 []string) {
-	if cfg == nil || len(cfg.Security.Zones) == 0 || len(cfg.Interfaces.Interfaces) == 0 {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil, nil
 	}
 	lifelines := hostInboundLifelineSet(cfg)
@@ -1022,20 +1022,21 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 }
 
 // BuildUnzonedHostInboundAddrs renders the unzoned catch-all from a FRESH
-// kernel snapshot. See buildUnzonedHostInboundAddrsFromSnaps.
+// kernel snapshot. It includes addressed configs with no security zones (#11068).
+// See buildUnzonedHostInboundAddrsFromSnaps.
 func BuildUnzonedHostInboundAddrs(cfg *config.Config) (v4, v6 []string) {
-	if cfg == nil || len(cfg.Security.Zones) == 0 || len(cfg.Interfaces.Interfaces) == 0 {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil, nil
 	}
 	return buildUnzonedHostInboundAddrsFromSnaps(cfg, buildInterfaceSnapshots(cfg))
 }
 
 // BuildUnzonedHostInboundAddrsFromSnapshots renders the unzoned catch-all
-// from ONE caller-supplied snapshot (#10751 R4-2); the zone views it
-// subtracts are rendered from the SAME snapshot so install inputs cannot
-// skew mid-apply. Include-all, like the views core it shares.
+// from ONE caller-supplied snapshot (#10751 R4-2); the zone views it subtracts
+// are rendered from the SAME snapshot so install inputs cannot skew mid-apply.
+// Includes addressed configs with no security zones (#11068).
 func BuildUnzonedHostInboundAddrsFromSnapshots(cfg *config.Config, snaps []InterfaceSnapshot) (v4, v6 []string) {
-	if cfg == nil || len(cfg.Security.Zones) == 0 || len(cfg.Interfaces.Interfaces) == 0 {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil, nil
 	}
 	return buildUnzonedHostInboundAddrsFromSnaps(cfg, snaps)
@@ -1153,29 +1154,20 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 
 // HostInboundLifelineIngressNetdevs returns the sorted linux netdev names
 // of true lifelines whose ingress must keep management reachability to
-// lifeline-shared values (#10751 M1/Opus9): the unconditional defaults
-// (fxp0/em0/fab0/fab1 — never narrowed, the withhold side does not narrow
-// either) plus the linux names of every configured unit the lifeline
-// predicate recognizes (chassis-cluster control/fabric links, fabN). This
-// MIRRORS the withhold-side interface definition
-// (HostInboundLifelineInterface): an interface whose addresses get
-// withheld must have its ingress excepted in the gap, or the exception
-// under-covers and strands management. Bound: live-but-unconfigured
-// non-default lifeline names (a hand-made fab7) are missed — the same
-// verifiable-identity bound the barrier's guard accepts (the daemon only
-// ever creates fab0/fab1; configured names arrive via the stanza).
+// lifeline-shared values (#10751 M1/Opus9): fxp0 plus the linux names of every
+// configured control/fabric unit recognized by HostInboundLifelineInterface.
+// Bare em0/fab<N> names are not exempt unless the config assigns them a
+// lifeline role (#11068). This MIRRORS the withhold-side interface definition:
+// an interface whose addresses get withheld must have its ingress excepted in
+// the gap, or the exception under-covers and strands management.
 //
 // Per-member discrimination (Opus9 round-9): the set carries NO vrf-mgmt
 // blanket. The gap renders TWO exception rules per family — iifname for
-// unenslaved lifelines plus meta sdifname for VRF-enslaved members
-// (LOCAL_IN shows the master; sdif recovers the slave, kernel 5.17+,
-// proven by the real-VRF packet test) — so a non-lifeline fxp1 member
-// stays denied while an enslaved fxp0 is admitted. sdifname is inert on
-// non-VRF traffic (unset, misses), where the iifname twin covers.
+// unenslaved lifelines plus meta sdifname for VRF-enslaved members (LOCAL_IN
+// shows the master; sdif recovers the slave, kernel 5.17+) — so a non-lifeline
+// member stays denied while an enslaved configured lifeline is admitted.
 func HostInboundLifelineIngressNetdevs(cfg *config.Config) []string {
-	set := map[string]bool{
-		"fxp0": true, "em0": true, "fab0": true, "fab1": true,
-	}
+	set := map[string]bool{"fxp0": true}
 	if cfg != nil {
 		lifelines := hostInboundLifelineSet(cfg)
 		for ifName, iface := range cfg.Interfaces.Interfaces {
@@ -1338,18 +1330,17 @@ func hostInboundLifelineSharedAddrs(cfg *config.Config) map[string]bool {
 // cover. The address stays denied by the REAL table's catch-all whenever the
 // real table loads; only the fence stands down for it.
 //
-// Finding B (zone-less fail-open). BuildZoneHostInboundViews and
-// BuildUnzonedHostInboundAddrs both return nothing when the config declares no
-// security zone, because the real host-inbound default-deny is a zone-model
-// construct. Host-inbound / lo0 filters are independently valid without zones
+// Finding B (zone-less fail-open). BuildZoneHostInboundViews has no zones to
+// render, while BuildUnzonedHostInboundAddrs carries every addressed
+// non-lifeline interface into the real-table and fence catch-all (#11068).
+// Host-inbound / lo0 filters are independently valid without zones
 // (pkg/config/compiler_filter_ref_3296_test.go), so on a zone-less-but-addressed
-// router a failed lo0 install produced a `policy accept` fence shell with ZERO
-// drops — fail-OPEN, defeating the fence. The fence's drop set is therefore
-// derived from the firewall-local ADDRESSES (every non-lifeline interface
-// address plus every configured VRRP virtual address), not from zone
-// membership. There is no "are there zones?" branch: the address walk is the
-// same in both cases and simply yields more than the zone views do when zones
-// are absent or incomplete.
+// router a failed lo0 install still needs the fence's address-derived drops.
+// The fence drop set is derived from firewall-local ADDRESSES (every
+// non-lifeline interface address plus every configured VRRP virtual address),
+// not from zone membership. There is no "are there zones?" branch: the
+// address walk is the same in both cases and simply yields more than the zone
+// views do when zones are absent or incomplete.
 //
 // Views keeps the per-zone shape (one drop rule per zone per family, and the
 // zone counts the fence logs); UnzonedV4/UnzonedV6 carry every remaining

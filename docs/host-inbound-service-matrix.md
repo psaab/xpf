@@ -634,8 +634,9 @@ Properties:
   `HostInboundProtocolMatch`). No prior-config snapshot is persisted; a
   still-permitted tuple is not flushed or dropped.
 - **Lifeline exclusion is interface-based, not address-based.** Lifeline
-  interfaces (fxp0 / em0 / fab<N>) are excluded from host-inbound views, so an
-  address reachable only there is not reconciled. Reusing that address on a
+  interfaces (fxp0 and interfaces explicitly configured as chassis-cluster
+  control/fabric links) are excluded from host-inbound views, so an address
+  reachable only there is not reconciled. Reusing that address on a
   non-lifeline default-deny attachment does not retain a blanket exemption:
   when its effective host-inbound views admit no service, the covered-address
   flush can remove an existing management SSH conntrack entry. A view that
@@ -987,7 +988,7 @@ from `zone_host_inbound` and hit the `None => true` admit-all arm in
 (a management-plane fail-open on the exact tolerant-load / HA-sync path where nil
 zones arise). `None` now means only a genuinely unknown / global ingress zone
 (id 0, never in the table), which keeps the admit default; lifeline interfaces
-(fxp0/em0/fab<N>) never reach the AF_XDP classifier (#3682).
+(fxp0 and configured chassis-cluster control/fabric links) never reach the AF_XDP classifier (#3682).
 
 ## Deliberate narrowings & the one cross-surface divergence
 
@@ -1053,8 +1054,15 @@ same builder that drives the nft payload — so the signal describes the same
 address snapshot, not whether the later nft transaction succeeded. It reports a
 zone iff it has at least one **non-lifeline**
 interface assigned yet resolves no address; zones that are scoped, whose only
-interfaces are management/cluster-control lifelines (fxp0 / em0 / fab<N>), or that
-have no interfaces are deliberately NOT reported (low-noise).
+interfaces are lifelines (fxp0 or explicitly configured chassis-cluster
+control/fabric links), or that have no interfaces are deliberately NOT reported
+(low-noise).
+
+The lifeline set is role-derived, not name-derived: `fxp0` is the fixed
+out-of-band management interface; chassis-cluster control/fabric links count
+when explicitly configured through cluster role fields or
+`fabric-options member-interfaces`. Names such as `em0` or `fab0` alone do not
+grant a host-inbound exemption.
 
 Kernel scope-link addresses (the self-assigned IPv6 link-local present from
 link-up, IPv4 169.254 fallbacks) do NOT close the window for DHCP-intent
@@ -1125,8 +1133,8 @@ Two observability surfaces consume it:
 
 **What the builders subtract.** `BuildZoneHostInboundViews` and
 `BuildUnzonedHostInboundAddrs` skip a snapshot whose *interface* is a lifeline
-(`hostInboundLifelineInterface` — fxp0 / em0 / fab<N> plus the configured
-chassis-cluster control and fabric links, #3277), **and** withhold any address
+(`hostInboundLifelineInterface` — fxp0 plus explicitly configured chassis-cluster
+control/fabric links, #3277), **and** withhold any address
 *value* that lives on a lifeline (`hostInboundLifelineSharedAddrs`, #7284). The
 value half matters because the interface check answers "is the snapshot I am
 walking a lifeline", while a destination-only drop rule poses a different
@@ -1299,12 +1307,13 @@ snapshot produces a zero-drop table shell:
   It carries **no per-service accept and no named counters** — it is strictly the
   real table with every service ACCEPT removed, so during the fence window even a
   `system-services all` zone is denied (maximally fail-closed). The address sets
-  exclude lifeline INTERFACES (fxp0 / em0 / fab<N>) via
-  `BuildZoneHostInboundViews` / `BuildUnzonedHostInboundAddrs` — but **not**
-  lifeline address VALUES. A management address also configured on a non-lifeline
-  interface IS in the fence's drop set, and the drop carries no `iifname`, so the
-  fence drops new management connections to it for the whole fence window (#6492
-  Finding A). See "Lifeline exclusion is by address VALUE, in the fence and the real table".
+  exclude lifeline INTERFACES (fxp0 and explicitly configured chassis-cluster
+  control/fabric links) via `BuildZoneHostInboundViews` /
+  `BuildUnzonedHostInboundAddrs` — but **not** lifeline address VALUES. A
+  management address also configured on a non-lifeline interface IS in the
+  fence's drop set, and the drop carries no `iifname`, so the fence drops new
+  management connections to it for the whole fence window (#6492 Finding A). See
+  "Lifeline exclusion is by address VALUE, in the fence and the real table".
 - The requested apply still **fails** (`applyHostInboundFilter` returns the
   wrapped real nft error, joined with a fallback error when fallback also fails).
   A later full apply seeing an address gets another fallback opportunity only if
@@ -1320,9 +1329,9 @@ snapshot produces a zero-drop table shell:
   authority that lifeline-excludes these address sets), not the broad
   management-VRF name class (fxp*/fab<N>/em*). So a zoned NON-lifeline DHCP interface
   (a standalone `fxp1`) is classified for the full recompile that builds its
-  address-scoped fence; only a true lifeline (fxp0/em0/fab<N>/configured
-  control-interface) keeps the management-only fast path. The skip decision and
-  this fence now share one classifier and cannot drift.
+  address-scoped fence; only a true lifeline (fxp0 or an explicitly configured
+  chassis-cluster control/fabric interface) keeps the management-only fast path.
+  The skip decision and this fence now share one classifier and cannot drift.
 - If the fence **also** fails to load (nft itself broken), both errors are joined
   and an `ERROR`-level `COLD-BOOT FAIL-OPEN GUARD` log fires; `hostInboundEnforced`
   stays false. That is the irreducible catastrophic case — the daemon has done all
@@ -1456,8 +1465,8 @@ is called by BOTH fence sites (`installHostInboundColdBootFence`,
 `BuildUnzonedHostInboundAddrs` in two directions:
 
 - **Narrower — lifeline-shared addresses are WITHHELD (Finding A).** The view
-  builders exclude lifeline INTERFACES (fxp0 / em0 / fab* / the configured
-  control+fabric links), not lifeline address VALUES. If the SAME IP is also
+  builders exclude lifeline INTERFACES (fxp0 and explicitly configured
+  control/fabric links), not lifeline address VALUES. If the same IP is also
   configured on a non-lifeline interface — a topology xpf explicitly accepts,
   `pkg/config/dup_host_local_address_3718_test.go` — that snapshot re-adds it, and
   the fence's drop rule carries **no `iifname` qualifier**, so it renders as a bare
@@ -1699,9 +1708,9 @@ views and DELETES established kernel conntrack entries to a covered
 firewall-local address that the new set no longer admits. A narrowing commit
 therefore drops LIVE sessions to a removed service, not merely refuses new ones.
 
-**What is structurally out of scope.** Lifeline interfaces (`fxp0` / `em0` /
-`fab*` and the configured control + fabric links) are excluded from host-inbound
-deny scoping by INTERFACE, so management over `fxp0` and the HA control plane are
+**What is structurally out of scope.** Lifeline interfaces (fxp0 and explicitly
+configured chassis-cluster control/fabric links) are excluded from host-inbound
+deny scoping by INTERFACE, so management over fxp0 and the HA control plane are
 unaffected by this flip. Since #7284 the exclusion is also by address VALUE: a
 management address additionally configured on a zoned or unzoned interface is
 withheld from any drop set that would deny it with no accept (see "Lifeline
@@ -2222,8 +2231,8 @@ RETH unit therefore resolves to its member netdev on the node (`reth1.0` →
   that unit claims.
 - a netdev claimed by more than one (zone, token-set) view. Whichever view's
   rules came first would decide it.
-- a lifeline netdev (fxp0 / em0 / fab*), so management and cluster control are
-  never judged by a data zone.
+- a lifeline netdev (fxp0 or an explicitly configured chassis-cluster
+  control/fabric link), so management and cluster control are never judged by a data zone.
 - a netdev enslaved to an l3mdev VRF (#6619,
   `config.HostInboundVRFEnslavedNetdevs`), because at LOCAL_IN `iifname` names
   the VRF master. A routing-instance member zone, such as `sfmix` on the loss
@@ -2317,11 +2326,11 @@ This is caught fail-closed at commit and surfaced at runtime:
   zones with different `host-inbound-traffic`, or one zone with differing #3362
   per-interface overrides) is rejected. Covers IPv4 (H01), IPv6 (M02), VRRP VIPs
   (M03), and the cross-zone subset of same-address-across-routing-instances
-  (M04). Management / cluster-control lifeline interfaces (fxp0 / em0 / fab<N>) are
-  excluded, mirroring the deny scoping. On the tolerant load / peer-sync path the
-  rejection is downgraded to a `cfg.Warnings` entry (`lenientDuplicateHostLocalAddress`)
-  so an already-persisted or peer-synced config an older binary accepted still
-  boots (#1960 no-brick).
+  (M04). Lifeline interfaces (fxp0 and explicitly configured chassis-cluster
+  control/fabric links) are excluded, mirroring the deny scoping. On the tolerant
+  load / peer-sync path the rejection is downgraded to a `cfg.Warnings` entry
+  (`lenientDuplicateHostLocalAddress`) so an already-persisted or peer-synced
+  config an older binary accepted still boots (#1960 no-brick).
 - **Runtime SSOT** `dpuserspace.AmbiguousHostInboundAddresses`
   (`pkg/dataplane/userspace/zones.go`) reads the scopes back from
   `BuildZoneHostInboundViews` (the same builder that drives nft emission), using
@@ -2367,12 +2376,13 @@ vSRX layers management-plane admission in two places: the coarse
 `host-inbound-traffic system-services <svc>` port gate above, PLUS a fine
 `security policies from-zone <z> to-zone junos-host` (or a global
 `match to-zone junos-host`) policy that can restrict the source or application
-and can `then deny`. On xpf the **representable ordered `then deny` class is now
-kernel-enforced on the direct host-bound path** (direction (b), #4146 below); an
-un-representable remainder (feed-tainted source, multi-term/ALG application,
-scheduler-gated policy, `tcp-rst` ingress zone, `reject`, and the "deny
-non-permitted" half of a source-restricted `permit`) is a documented
-partial-coverage limitation that keeps the commit warning.
+and can `then deny`. On xpf the **representable ordered `then deny` class is
+kernel-enforced on the direct host-bound path** (direction (b), #4146 below).
+#11065 also appends a family-scoped terminal deny after a representable
+source- or destination-restricted `permit`, enforcing its unmatched remainder on
+the direct kernel path. The commit warning remains because Rust's userspace
+no-match lifeline deliberately delivers; other un-representable policies
+(feed-tainted addresses, scheduler-gated policy, etc.) retain their warning.
 
 ### The gap
 
@@ -2383,16 +2393,18 @@ shunts the packet to the kernel (`cpumap_or_pass`). The nft `xpf_hostinbound`
 chain — the PRIMARY enforcement surface documented above — is **permit-by-service
 only**: it admits configured `system-services`/`protocols` to a firewall-local
 address from **any** source, with **no per-source and no per-application deny**.
-The fine `to-zone junos-host` policy runs **only** on the userspace AF_XDP
-`LocalDelivery` path (`junos_host_local_policy`), which is reached only by the
-subset of host-bound traffic that arrives on the XSK fast path (e.g. DNAT /
-static-NAT to a firewall-local address) — never by a direct-to-interface-IP
-packet, which was already shunted to the kernel. Net: a
-`from-zone X to-zone junos-host { match source-address ...; then deny; }` (or a
-source-scoped permit) on a plain interface IP is silently unenforced for the
-direct path; hit counters stay zero. This is distinct from #3019 (which wired the
-deny into the XSK `LocalDelivery` arm) and #3292 (the flowless arm): those are the
-XSK paths that DO enforce it.
+The fine `to-zone junos-host` policy also runs on the userspace AF_XDP
+`LocalDelivery` path (`junos_host_local_policy`), reached by host-bound traffic
+that arrives on the XSK fast path (e.g. DNAT/static-NAT to a firewall-local
+address). On the direct-to-interface-IP path, the kernel `xpf_hostinbound`
+projection enforces the representable ordered policy program, including its
+explicit denies and (after #11065) a terminal deny for traffic outside a
+representable restricted permit. A program that cannot be faithfully projected
+emits no partial rule and keeps its commit warning. The Rust `None => deliver`
+no-match behavior on the userspace path remains deliberate, so a restricted
+permit alone can still leave its non-permitted remainder admitted there and
+continues to warn. This is distinct from #3019 (which wired the deny into the XSK
+`LocalDelivery` arm) and #3292 (the flowless arm).
 
 ### Enforcement (direction b — shipped, #4146)
 
@@ -2420,12 +2432,14 @@ helper never sees it, so a helper crash cannot lock management out).
   `poll_descriptor/mod.rs:138`); `return` leaves the fine program without
   admitting anything.
 
-  A packet that matches no rule returns as well. **xpf applies no implicit
-  junos-host default-deny on any path** — `evaluate_junos_host_policy_l3_aware`
-  (policy.rs) and `policymatch.matchJunosHost` both deliver on no match, which is
-  the management-lifeline guarantee — so the kernel program must not invent one
-  either. The consequence for an operator is stated under the warning below: a
-  restricted `permit` alone restricts nothing, on any path.
+  A packet that matches no rule returns as well. The userspace evaluator applies
+  no implicit junos-host default-deny: `evaluate_junos_host_policy_l3_aware`
+  (policy.rs) and `policymatch.matchJunosHost` deliver on no match as the
+  management-lifeline guarantee. The kernel projection preserves that return
+  behavior for programs with no permit. When a representable permit is present,
+  however, #11065 appends a terminal family-scoped DROP after the authored
+  terms, denying unmatched direct host-bound traffic without changing the
+  userspace no-match behavior or turning a permit into a fine `accept`.
 
   Before #9504 a permit could be projected only as a `saddr !=` SUBTRACTION of
   later denies. That cannot express a carve narrowed on any other dimension, so a
@@ -2436,9 +2450,10 @@ helper never sees it, so a helper crash cannot lock management out).
 - **Ingress `iifname` scope, never `daddr` as the ZONE scope.** The DROP is scoped
   by the from-zone's kernel netdev names
   (`pkg/dataplane/userspace/BuildJunosHostPrograms`), excluding lifelines
-  (fxp0/em0/fab<N>) — a daddr-derived zone scope would both under- and over-deny
-  across zones. A global-any term renders per ingress zone with that zone's
-  netdevs, never unscoped. An EXPLICIT `match destination-address` adds a
+  (fxp0 and explicitly configured chassis-cluster control/fabric links) — a
+  daddr-derived zone scope would both under- and over-deny across zones. A
+  global-any term renders per ingress zone with that zone's netdevs, never
+  unscoped. An EXPLICIT `match destination-address` adds a
   narrowing `daddr` predicate ON TOP of that iifname scope (see the destination
   slice below); it never replaces it. Because the scope is the ingress netdev, a
   destination-scoped deny on a data zone can never suppress management ingress on
@@ -2671,11 +2686,11 @@ match destination-address <fw-ip>; then deny; }` silently unenforced — and,
 because the representability gate is whole-program, silently disabled kernel
 enforcement of **every other** junos-host deny on that ingress zone.
 
-A destination-scoped **`permit`** stays un-representable: a permit is projected
-only as a `saddr !=` SUBTRACTION of later denies (see DROP-only above), which
-cannot express a carve that is also destination-scoped. The whole program then
-emits nothing and every one of its policies keeps the warning — never a deny
-widened past the permit's destination scope.
+A destination-scoped **`permit`** now renders a RETURN narrowed by its
+destination predicate, followed by the #11065 terminal deny for the remaining
+direct-path traffic in that address family. It does not widen a return beyond
+the authored destination, and the program remains subject to the userspace
+no-match lifeline noted above, so the commit warning is retained.
 
 **Un-representable remainder (keeps the commit warning below):** feed-tainted
 source **or destination**, a **MIXED direct+term** or ALG-bearing application, an
@@ -2685,13 +2700,14 @@ own window). A zone whose ingress netdevs cannot all be scoped (#6564, #6619) an
 a lifeline-only zone keep the warning for their own reasons, above. No
 partial/coarsened kernel rule is ever emitted for the remainder.
 
-**Not in the remainder, and not enforced anywhere: the "deny non-permitted" half
-of a restricted `permit`.** It is not a kernel-vs-userspace gap — xpf has no
-implicit junos-host default-deny on either path — so the fix for an operator who
-wants it is an explicit `then deny` policy after the permit, which the kernel
-chain now enforces. The commit warning for a restricted permit says exactly that
-(#9504); it previously said the restriction held on the userspace path, which was
-false.
+**Restricted `permit` warning: kernel coverage does not remove the userspace
+residual.** The #11065 terminal deny enforces the "deny non-permitted" half on
+the direct kernel path when the ordered program is representable. Rust still
+delivers when no `to-zone junos-host` policy matches on the userspace AF_XDP path;
+therefore a restricted permit alone can leave unmatched traffic admitted there.
+Keep the commit warning so operators review the coarse host-inbound service gate
+for that path. An explicit `then deny` after the permit can express the
+non-permitted verdict in both evaluators.
 
 A **pure multi-term** application is NOT in that remainder, contrary to earlier
 revisions of this paragraph. A `term`-bearing application with no direct match
@@ -2710,11 +2726,13 @@ AND "the #4168 warning fires naming the policy" — either alone is satisfiable 
 a bug, and a policy that renders nothing while saying nothing is the silent
 failure this projection exists to avoid.
 `pkg/dataplane/userspace/junos_host_residual_6612_test.go` asserts both halves per
-class, and gives every row a FLIP (the same fixture with the residual attribute
-neutralised) so a row cannot pass because the fixture was broken in some other
-way. Covered today: scheduler-gated deny, feed-bound source, feed-bound
-destination, `reject`, `tcp-rst` zone, ALG application, IKE-exempt-tuple
-application, source-restricted permit.
+un-representable class, and gives every row a FLIP (the same fixture with the
+residual attribute neutralised) so a row cannot pass because the fixture was
+broken in some other way. Covered today: scheduler-gated deny, feed-bound source,
+feed-bound destination, `reject`, `tcp-rst` zone, ALG application, and
+IKE-exempt-tuple application. Restricted-permit kernel terminal behavior and
+the retained userspace warning are covered by the #11065 projection and warning
+tests.
 
 A destination-scoped `permit` was silent on BOTH halves until #6612: it rendered
 nothing and produced **zero warnings of any kind**. The projection correctly

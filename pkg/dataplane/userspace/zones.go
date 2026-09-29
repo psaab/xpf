@@ -12,8 +12,8 @@ import (
 // The host-inbound LIFELINE matcher is the SSOT in pkg/config (lifeline.go,
 // #3682) so the shared host-inbound presenter can render the exemption on the
 // operator-visible zone views. These thin wrappers keep the dataplane call sites
-// and the #3277 fail-on-revert tests reading against the local names while the
-// matching logic (fxp0 + configured control/fabric + em0/fab* defaults) lives in
+// and #3277 tests reading against the local names while the matching logic
+// (fxp0 + configured control/fabric roles; no bare-name defaults) lives in
 // exactly one place shared with display.
 
 func hostInboundLifelineSet(cfg *config.Config) map[string]bool {

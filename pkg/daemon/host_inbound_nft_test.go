@@ -48,6 +48,7 @@ func hostInboundTestConfig() *config.Config {
 			0: {Number: 0, DHCP: true},
 		}},
 	}
+	cfg.Chassis.Cluster = &config.ClusterConfig{ControlInterface: "em0"}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
 		"wan": {
 			Name:               "wan",
