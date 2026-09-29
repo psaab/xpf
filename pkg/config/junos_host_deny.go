@@ -301,8 +301,12 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	excludedZones := ZoneQuarantineExclusions(zoneNames)
 
 	for _, zoneName := range zoneNames {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil {
 			continue
@@ -1296,7 +1300,12 @@ func junosHostZoneByInterface(cfg *Config) map[string]string {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zoneName := range zoneNames {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil {
 			continue
@@ -1312,13 +1321,21 @@ func junosHostZoneByInterface(cfg *Config) map[string]string {
 			// the Literal (not the legacy canon) keeps a padded multi-dot
 			// spelling from stranding a `.01` key no row carries.
 			s := cfg.SplitInterfaceUnitRef(rawIface)
-			if _, exists := out[s.Literal]; !exists {
-				out[s.Literal] = zoneName
+			if _, conflicted := conflictedInterfaces[s.Literal]; !conflicted {
+				if _, exists := out[s.Literal]; !exists {
+					out[s.Literal] = zoneName
+				}
 			}
 			if s.HasUnit {
 				// Unit (or trailing-dot) reference: also bind the physical
 				// base, mirroring InterfaceZoneMap's zone-specific fan-up.
 				if s.Base != "" {
+					if _, conflicted := conflictedInterfaces[s.Literal]; conflicted {
+						continue
+					}
+					if _, conflicted := conflictedInterfaces[s.Base]; conflicted {
+						continue
+					}
 					if _, exists := out[s.Base]; !exists {
 						out[s.Base] = zoneName
 					}
@@ -1328,6 +1345,9 @@ func junosHostZoneByInterface(cfg *Config) map[string]string {
 			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
 				for unitNum := range ifCfg.Units {
 					unitName := fmt.Sprintf("%s.%d", s.Base, unitNum)
+					if _, conflicted := conflictedInterfaces[unitName]; conflicted {
+						continue
+					}
 					if _, exists := out[unitName]; !exists {
 						out[unitName] = zoneName
 					}

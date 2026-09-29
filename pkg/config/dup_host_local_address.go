@@ -118,11 +118,9 @@ func hostLocalAddrFamily(s string) (host, family string) {
 	return ip.String(), "inet6"
 }
 
-// buildZoneInterfaceMapLocal builds the logical-interface-key -> zone lookup the
-// same way pkg/dataplane/userspace.buildInterfaceZoneMap does (first-writer-wins
-// over the SORTED zone names, base/unit expansion via zoneIfaceLogicalKeys).
-// pkg/config cannot import pkg/dataplane, so it is rebuilt locally here; the
-// key-expansion SSOT (zoneIfaceLogicalKeys) is shared, so the two stay aligned.
+// buildZoneInterfaceMapLocal builds the logical-interface-key -> zone lookup
+// using zoneIfaceLogicalKeys. The key-expansion SSOT is shared with runtime;
+// ambiguous keys are omitted instead of resolved first-writer-wins.
 func buildZoneInterfaceMapLocal(cfg *Config) map[string]string {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
@@ -133,7 +131,12 @@ func buildZoneInterfaceMapLocal(cfg *Config) map[string]string {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zn := range zoneNames {
+		if _, excluded := excludedZones[zn]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zn]
 		if zone == nil {
 			continue
@@ -143,6 +146,9 @@ func buildZoneInterfaceMapLocal(cfg *Config) map[string]string {
 				continue
 			}
 			for _, key := range zoneIfaceLogicalKeys(cfg, iface) {
+				if _, conflicted := conflictedInterfaces[key]; conflicted {
+					continue
+				}
 				if _, ok := out[key]; !ok {
 					out[key] = zn
 				}

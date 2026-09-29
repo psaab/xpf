@@ -45,8 +45,8 @@ func (s *Server) GetZones(_ context.Context, _ *pb.GetZonesRequest) (*pb.GetZone
 		_, quarantined := quarantinedZones[zoneName]
 		if quarantined {
 			zi.QuarantineState = pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_QUARANTINED
-			zi.QuarantineSurvivorZone = config.StableZoneIDOwner(
-				zoneNames, config.StableZoneID(zoneName))
+			zi.QuarantineSurvivorZone =
+				config.ZoneQuarantineSurvivorName(zoneName, zoneNames)
 		} else {
 			zi.QuarantineState = pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_NOT_QUARANTINED
 		}

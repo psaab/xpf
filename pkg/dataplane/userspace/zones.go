@@ -77,10 +77,8 @@ func hostIPFromCIDR(s string) string {
 // sentinel: every transit flow out of a bare-referenced trunk's VLAN units falls
 // to the default policy. origin/master answered the operator's zone there.
 //
-// The write policy mirrors buildInterfaceZoneMap exactly — sorted zone names,
-// first-write-wins, same fan-down over the same unit set — so a reference
-// claimed by two zones resolves to the SAME zone in both maps and this function
-// introduces no second opinion about it.
+// The maps share the same logical-key expansion, but ambiguous keys are
+// omitted from both rather than silently choosing the first sorted zone.
 func authoredZoneRefs(cfg *config.Config) map[string]string {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
@@ -91,7 +89,12 @@ func authoredZoneRefs(cfg *config.Config) map[string]string {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	excludedZones := config.ZoneQuarantineExclusions(zoneNames)
+	conflictedInterfaces := config.QuarantinedZoneInterfaceKeys(cfg)
 	for _, zoneName := range zoneNames {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil {
 			continue
@@ -104,8 +107,10 @@ func authoredZoneRefs(cfg *config.Config) map[string]string {
 			// declared interface fans down even when dotted; a unit ref binds
 			// its canonical Literal so padded spellings agree.
 			s := cfg.SplitInterfaceUnitRef(rawIface)
-			if _, exists := out[s.Literal]; !exists {
-				out[s.Literal] = zoneName
+			if _, conflicted := conflictedInterfaces[s.Literal]; !conflicted {
+				if _, exists := out[s.Literal]; !exists {
+					out[s.Literal] = zoneName
+				}
 			}
 			// A unit-suffixed reference speaks for exactly that unit. Do NOT
 			// write the base (that is buildInterfaceZoneMap's fan-UP, the
@@ -120,6 +125,9 @@ func authoredZoneRefs(cfg *config.Config) map[string]string {
 			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
 				for unitNum := range ifCfg.Units {
 					unitName := fmt.Sprintf("%s.%d", s.Base, unitNum)
+					if _, conflicted := conflictedInterfaces[unitName]; conflicted {
+						continue
+					}
 					if _, exists := out[unitName]; !exists {
 						out[unitName] = zoneName
 					}
@@ -130,12 +138,10 @@ func authoredZoneRefs(cfg *config.Config) map[string]string {
 	return out
 }
 
-// quarantinedZoneNames returns the zone names the StableZoneID quarantine will
-// drop for this config (#6722). It reads the SAME name set quarantineCollidingZones
-// does — buildZoneSnapshots publishes exactly cfg.Security.Zones — so the two
-// cannot drift apart.
+// quarantinedZoneNames returns the zone names excluded from dataplane install.
+// It reads the same cfg.Security.Zones key set as quarantineCollidingZones.
 func quarantinedZoneNames(cfg *config.Config) map[string]struct{} {
-	if cfg == nil || len(cfg.Security.Zones) < 2 {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
 	}
 	names := make([]string, 0, len(cfg.Security.Zones))

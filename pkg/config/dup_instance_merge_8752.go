@@ -62,16 +62,19 @@ import "strings"
 // strength of "it has the same shape" is the family-level reasoning #8690 spent
 // a day removing.
 //
-// It returns the folded names, and separately every policy the fold merged into
-// a PERMIT although one of its statements had restrictive effective semantics
-// (#9571: explicit deny/reject; #9992: defaulted deny). The caller poisons those
-// after the compile (markFoldWidenedPolicies9571).
-func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPolicy9571) {
+// Direct conflicts are collected from each policy instance before folding.
+// The lenient entry points scan the original tree for inline conflicts and, if
+// groups apply, an expanded pre-fold clone for inherited conflicts.
+// It returns folded names, effective policy instances whose individual
+// terminal actions conflict, and policies a fold widened into PERMIT. The
+// latter are poisoned after compilation by markFoldWidenedPolicies9571.
+func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPolicy9571, []directTerminalActionConflict11063) {
 	if tree == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var merged []string
 	var widened []foldWidenedPolicy9571
+	var conflicting []directTerminalActionConflict11063
 	for _, root := range tree.Children {
 		if root.Name() != "security" && (len(root.Keys) == 0 || root.Keys[0] != "security") {
 			continue
@@ -79,26 +82,135 @@ func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPoli
 		for _, pol := range root.FindChildren("policies") {
 			// from-zone <a> to-zone <b> { policy … }
 			for _, fz := range pol.FindChildren("from-zone") {
-				m, w := mergeInstancesUnder(fz, "policy", askZonePair9571)
+				m, w, c := mergeInstancesUnder(fz, "policy", askZonePair9571)
 				merged = append(merged, m...)
 				widened = append(widened, zonePairWidened9571(fz.Keys, nil, w)...)
+				conflicting = append(conflicting, zonePairDirectConflicts11063(fz.Keys, nil, c)...)
 				for _, tz := range fz.Children {
-					m, w := mergeInstancesUnder(tz, "policy", askZonePair9571)
+					m, w, c := mergeInstancesUnder(tz, "policy", askZonePair9571)
 					merged = append(merged, m...)
 					widened = append(widened, zonePairWidened9571(fz.Keys, tz.Keys, w)...)
+					conflicting = append(conflicting, zonePairDirectConflicts11063(fz.Keys, tz.Keys, c)...)
 				}
 			}
 			// global { policy … }
 			for _, g := range pol.FindChildren("global") {
-				m, w := mergeInstancesUnder(g, "policy", askGlobal9571)
+				m, w, c := mergeInstancesUnder(g, "policy", askGlobal9571)
 				merged = append(merged, m...)
 				for _, name := range w {
 					widened = append(widened, foldWidenedPolicy9571{global: true, name: name})
 				}
+				for _, name := range c {
+					conflicting = append(conflicting, directTerminalActionConflict11063{global: true, name: name})
+				}
 			}
 		}
 	}
-	return merged, widened
+	return merged, widened, conflicting
+}
+
+// treeHasGroupApplications11063 avoids cloning and expanding configs whose
+// policy provenance cannot change through apply-groups.
+func treeHasGroupApplications11063(tree *ConfigTree) bool {
+	if tree == nil || tree.FindChild("groups") == nil {
+		return false
+	}
+	return nodesHaveGroupApplications11063(tree.Children)
+}
+
+func nodesHaveGroupApplications11063(nodes []*Node) bool {
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		if len(node.Keys) > 0 && node.Keys[0] == "apply-groups" {
+			return true
+		}
+		if nodesHaveGroupApplications11063(node.Children) {
+			return true
+		}
+	}
+	return false
+}
+
+// collectDirectTerminalActionConflictsFromExpandedTree scans each effective
+// source policy before duplicate-name folding, keeping safe mixed-action
+// fragments separate while recognizing conflicts introduced by inherited
+// group content.
+func collectDirectTerminalActionConflictsFromExpandedTree(tree *ConfigTree) []directTerminalActionConflict11063 {
+	if tree == nil {
+		return nil
+	}
+	var conflicting []directTerminalActionConflict11063
+	for _, root := range tree.Children {
+		if root.Name() != "security" && (len(root.Keys) == 0 || root.Keys[0] != "security") {
+			continue
+		}
+		for _, policies := range root.FindChildren("policies") {
+			for _, fromZone := range policies.FindChildren("from-zone") {
+				conflicting = append(conflicting,
+					zonePairDirectConflicts11063(fromZone.Keys, nil,
+						directPolicyConflictNames11063(fromZone, false))...)
+				for _, toZone := range fromZone.Children {
+					conflicting = append(conflicting,
+						zonePairDirectConflicts11063(fromZone.Keys, toZone.Keys,
+							directPolicyConflictNames11063(toZone, false))...)
+				}
+			}
+			for _, global := range policies.FindChildren("global") {
+				for _, name := range directPolicyConflictNames11063(global, true) {
+					conflicting = append(conflicting,
+						directTerminalActionConflict11063{global: true, name: name})
+				}
+			}
+		}
+	}
+	return conflicting
+}
+
+func directPolicyConflictNames11063(parent *Node, isGlobal bool) []string {
+	if parent == nil {
+		return nil
+	}
+	var conflicting []string
+	for _, child := range parent.Children {
+		if len(child.Keys) < 2 || child.Keys[0] != "policy" {
+			continue
+		}
+		name := child.Keys[1]
+		policy := compilePolicy(struct {
+			name string
+			node *Node
+		}{name, child}, isGlobal)
+		if conflictingPolicyTerminalActions(policy.terminalActions) {
+			conflicting = append(conflicting, name)
+		}
+	}
+	return conflicting
+}
+
+func mergeDirectConflicts11063(a, b []directTerminalActionConflict11063) []directTerminalActionConflict11063 {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[directTerminalActionConflict11063]struct{}, len(a)+len(b))
+	out := make([]directTerminalActionConflict11063, 0, len(a)+len(b))
+	for _, conflict := range a {
+		if _, ok := seen[conflict]; !ok {
+			seen[conflict] = struct{}{}
+			out = append(out, conflict)
+		}
+	}
+	for _, conflict := range b {
+		if _, ok := seen[conflict]; !ok {
+			seen[conflict] = struct{}{}
+			out = append(out, conflict)
+		}
+	}
+	return out
 }
 
 // mergeInstancesUnder folds repeated `<keyword> <name>` children of `parent`
@@ -109,15 +221,13 @@ func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPoli
 // brace-elided form, `policy p1 scheduler-name S;`). Carrying only Children
 // would silently drop exactly the spelling this issue is about.
 //
-// #9571: when ask names a security-policy scope, it also returns, in first-fold
-// order, every folded name whose merged statement PERMITS although at least one
-// of the statements folded into it said deny or reject on its own. Both answers
-// come from compilePolicy. The #9023 block sites pass askNone9571: their
-// keywords are not security policies (`security ipsec policy` shares the word),
-// so the question is never asked of them.
-func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) (names, widened []string) {
+// For security policies, direct terminal-action conflicts are recorded from
+// each effective policy instance before folding. Conflicts created only by
+// combining otherwise valid instances are handled by the widening classifier.
+// The #9023 block sites pass askNone9571, so they do not inspect policy actions.
+func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) (names, widened, conflicting []string) {
 	if parent == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	first := map[string]*Node{}
 	restrictive := map[string]bool{}
@@ -133,8 +243,18 @@ func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) 
 		// Asked of each statement BEFORE anything is folded into it: the first
 		// occurrence is still as authored when it is first seen, and a later one
 		// is its own node until it is appended below.
-		if ask != askNone9571 && statementRestricts9571(name, child, ask == askGlobal9571) {
-			restrictive[name] = true
+		if ask != askNone9571 {
+			isGlobal := ask == askGlobal9571
+			sourcePolicy := compilePolicy(struct {
+				name string
+				node *Node
+			}{name, child}, isGlobal)
+			if policyRestricts9571(sourcePolicy) {
+				restrictive[name] = true
+			}
+			if conflictingPolicyTerminalActions(sourcePolicy.terminalActions) {
+				conflicting = append(conflicting, name)
+			}
 		}
 		prev, seen := first[name]
 		if !seen {
@@ -179,7 +299,7 @@ func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) 
 			widened = append(widened, name)
 		}
 	}
-	return names, widened
+	return names, widened, conflicting
 }
 
 // policyActionAsk9571 says whether mergeInstancesUnder is folding security
@@ -191,6 +311,15 @@ const (
 	askZonePair9571
 	askGlobal9571
 )
+
+// directTerminalActionConflict11063 identifies a source policy whose own
+// terminal actions conflict before any duplicate-name fold occurs.
+type directTerminalActionConflict11063 struct {
+	global           bool
+	anyPair          bool
+	fromZone, toZone string
+	name             string
+}
 
 // foldWidenedPolicy9571 names a policy the tolerant fold merged into a PERMIT
 // although one of its statements had restrictive effective semantics.
@@ -239,6 +368,28 @@ func zonePairWidened9571(fzKeys, tzKeys, names []string) []foldWidenedPolicy9571
 	return out
 }
 
+// zonePairDirectConflicts11063 attaches the source zone pair to each direct
+// terminal-action conflict. Unknown shapes conservatively match every pair.
+func zonePairDirectConflicts11063(fzKeys, tzKeys, names []string) []directTerminalActionConflict11063 {
+	if len(names) == 0 {
+		return nil
+	}
+	pair := directTerminalActionConflict11063{anyPair: true}
+	switch {
+	case tzKeys == nil && len(fzKeys) >= 4 && fzKeys[2] == "to-zone":
+		pair = directTerminalActionConflict11063{fromZone: fzKeys[1], toZone: fzKeys[3]}
+	case tzKeys != nil && len(fzKeys) == 2 && len(tzKeys) == 2 && tzKeys[0] == "to-zone":
+		pair = directTerminalActionConflict11063{fromZone: fzKeys[1], toZone: tzKeys[1]}
+	}
+	out := make([]directTerminalActionConflict11063, 0, len(names))
+	for _, name := range names {
+		conflict := pair
+		conflict.name = name
+		out = append(out, conflict)
+	}
+	return out
+}
+
 // statementAction9571 compiles one policy statement the way the merged result
 // will be compiled, and reports its terminal action and whether it names one.
 // It CALLS compilePolicy rather than re-reading `then` children, so it cannot
@@ -253,14 +404,13 @@ func statementAction9571(name string, n *Node, isGlobal bool) (PolicyAction, boo
 	return p.Action, len(p.terminalActions) > 0
 }
 
-func statementRestricts9571(name string, n *Node, isGlobal bool) bool {
-	a, ok := statementAction9571(name, n, isGlobal)
-	if !ok {
+func policyRestricts9571(policy *Policy) bool {
+	if len(policy.terminalActions) == 0 {
 		// #9992: compilePolicy's effective action is DENY for an actionless
 		// statement (#3043), so empty terminalActions still restrict.
-		return a == PolicyDeny
+		return policy.Action == PolicyDeny
 	}
-	return a != PolicyPermit
+	return policy.Action != PolicyPermit
 }
 
 func statementPermits9571(name string, n *Node, isGlobal bool) bool {
@@ -276,26 +426,37 @@ func statementPermits9571(name string, n *Node, isGlobal bool) bool {
 // match-policies` agrees), and the #6707 commit-confirmed preflight reads. It
 // runs after the compile because the flag lives on the compiled policy.
 func markFoldWidenedPolicies9571(cfg *Config, widened []foldWidenedPolicy9571) {
+	for _, w := range widened {
+		markPolicyLenientContentDropped11063(cfg, w.global, w.anyPair, w.fromZone, w.toZone, w.name)
+	}
+}
+
+func markDirectTerminalActionConflicts11063(cfg *Config, conflicts []directTerminalActionConflict11063) {
+	for _, conflict := range conflicts {
+		markPolicyLenientContentDropped11063(cfg, conflict.global, conflict.anyPair,
+			conflict.fromZone, conflict.toZone, conflict.name)
+	}
+}
+
+func markPolicyLenientContentDropped11063(cfg *Config, global, anyPair bool, fromZone, toZone, name string) {
 	if cfg == nil {
 		return
 	}
-	for _, w := range widened {
-		if w.global {
-			for _, p := range cfg.Security.GlobalPolicies {
-				if p != nil && p.Name == w.name {
-					p.LenientContentDropped = true
-				}
+	if global {
+		for _, p := range cfg.Security.GlobalPolicies {
+			if p != nil && p.Name == name {
+				p.LenientContentDropped = true
 			}
+		}
+		return
+	}
+	for _, zpp := range cfg.Security.Policies {
+		if zpp == nil || (!anyPair && (zpp.FromZone != fromZone || zpp.ToZone != toZone)) {
 			continue
 		}
-		for _, zpp := range cfg.Security.Policies {
-			if zpp == nil || (!w.anyPair && (zpp.FromZone != w.fromZone || zpp.ToZone != w.toZone)) {
-				continue
-			}
-			for _, p := range zpp.Policies {
-				if p != nil && p.Name == w.name {
-					p.LenientContentDropped = true
-				}
+		for _, p := range zpp.Policies {
+			if p != nil && p.Name == name {
+				p.LenientContentDropped = true
 			}
 		}
 	}
