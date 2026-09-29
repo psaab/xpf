@@ -992,14 +992,12 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 		writeOK(w, MatchPoliciesResult{
 			Action:      res.DisplayAction(),
 			DefaultUsed: res.DefaultUsed,
-			// #8318: carried so a structured consumer can tell an unconditional
-			// unzoned-ingress deny from a default-deny without parsing Action.
-			// DefaultUsed is false on that arm, which is necessary but not
-			// sufficient — ContentRejected and the host-inbound arm share it.
+			// #8318/#11067: expose direction-specific unknown-zone denies
+			// rather than making clients infer them from Action text.
 			UnzonedIngress: res.UnzonedIngress,
-			// #3627 M06: echo the queried zone pair on the no-match/default path
-			// so a stored default-deny diagnostic proves which zone pair was
-			// tested (FromZone/ToZone carry matched-policy scope, unset here).
+			UnzonedEgress:  res.UnzonedEgress,
+			// #3627 M06: echo the queried zone pair for no-match/default and
+			// unzoned verdicts, which do not carry matched-policy scope.
 			QueriedFromZone: fromZone,
 			QueriedToZone:   toZone,
 			// #4373 (E4/H2/H7): a multicast/broadcast/unspecified/loopback

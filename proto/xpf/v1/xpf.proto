@@ -1130,6 +1130,11 @@ message MatchPoliciesResponse {
   // that a real deny matched directly or that permits with no overlapping deny.
   bool fragment_associated_deny = 25;
   string fragment_deny_note = 26;
+  // #11067: true when the query's TO zone is unknown and a resolved zone-0
+  // egress is denied before default-policy. The Match query has no FIB input
+  // and cannot distinguish the zero-logical-egress NoRoute exception; clients
+  // should use this as the conservative resolved-egress simulator verdict.
+  bool unzoned_egress = 27;
 }
 
 // HostInboundAdmissionStatus classifies how the ingress zone's

@@ -286,51 +286,38 @@ The entire transit block (tiers 1-4) is gated on BOTH query zones being
 DEFINED (#3355), mirroring the runtime's `from_id != 0 && to_id != 0` guard
 (`evaluate_policy_result_with_icmp`): an unconfigured zone name resolves to the
 reserved unknown id 0 and is ineligible for zone-pair, wildcard, or global
-policies, so a query naming an undefined zone falls straight through to the
-default-policy instead of wrongly matching a `from-zone any`/`to-zone any`/
-global rule. `zoneKnown` mirrors the runtime UNCONDITIONALLY — a zone is known
-iff it is present in `Security.Zones`, with NO empty-Zones leniency: policy.rs
-applies the `from_id/to_id != 0` gate on every evaluation, so a config with no
-defined zones resolves every name to id 0 and matches nothing in the transit
-tiers. A committed config always populates `Security.Zones`. The REST and gRPC
-surfaces additionally
+policies, so a query naming an undefined zone falls through those policy tiers.
+`zoneKnown` mirrors the runtime UNCONDITIONALLY — a zone is known iff it is
+present in `Security.Zones`, with NO empty-Zones leniency. A committed config
+always populates `Security.Zones`. The REST and gRPC surfaces additionally
 REJECT a missing from/to-zone (HTTP 400 / `InvalidArgument`) for parity with
 the CLI, which already requires both zones (#3355 H06).
 
-**#8318 — eligibility is symmetric, the TERMINAL ACTION is not.** Everything
-above is about ELIGIBILITY and is unchanged: an unknown zone on EITHER side is
-excluded from the zone-pair, wildcard and global tiers, which is what
-`zoneKnown` "mirrors the runtime UNCONDITIONALLY" means. What happens AFTER that
-exclusion differs by side, and the simulator used to collapse the two:
+**#11067 — an unzoned transit egress denies before default-policy.** An
+unknown **FromZone** or **ToZone** on the simulator's transit path produces a
+deny before policy defaults or global rules can allow it:
 
-| case | dataplane | simulator (before #8318) |
+| case | dataplane | simulator |
 |---|---|---|
-| unknown **ToZone** | falls through to default-policy | default-policy — agreed |
-| unknown **FromZone**, `deny-all` | Deny | Deny — agreed, coincidentally |
-| unknown **FromZone**, `permit-all` | **Deny** | **Permit** — DIVERGED |
+| unknown **FromZone** | Deny | Deny (`UnzonedIngress`) |
+| unknown **ToZone**, resolved transit egress | Deny | Deny (`UnzonedEgress`) |
+| `NoRoute` with no logical egress identity | default-policy | not distinguishable |
 
-The runtime denies an unzoned INGRESS unconditionally, without consulting
-default-policy (#6682, `policy.rs`: `if from_id == 0`) — Junos does not pass
-transit on an interface in no zone, and screens were already skipped for it. It
-deliberately does NOT do the same for the egress side: denying on `to_id` "would
-risk black-holing a correctly-configured path to fix a case that has not been
-shown to occur" (#6713 is the cited precedent, a MAC-less xfrmi egress resolving
-to 0 for an unrelated reason).
+The last row is an important simulator limitation: it has no FIB result or
+egress-ifindex input, so it cannot tell a resolved but unzoned egress from a
+`NoRoute` whose logical egress identity is zero. Runtime forwarding preserves
+the configured default only for that true zero-identity case; a `NoRoute` that
+retains a logical tunnel egress applies the egress-zone gate and denies if that
+zone is unknown.
 
-Because `deny-all` is the default default-policy, both sides denied and the
-divergence was invisible. It mattered on the surface an operator uses to VERIFY
-policy before trusting it: a `permit-all` box reported PERMIT for a flow the
-dataplane drops, so the operator concluded the policy was right and looked
-elsewhere.
-
-The FROM arm now returns `Result{UnzonedIngress: true, Action: PolicyDeny}`.
-`DefaultUsed` is deliberately **false** there — its contract is "Action is the
-configured default-policy", and this deny overrides it; reporting true would
-render "deny (default)" and name a default that produced no such thing.
-`UnzonedIngress` exists for the same reason `HostInboundUnmatched` does: the
-verdict is otherwise indistinguishable from a default-deny in operator-facing
-output. Pinned by `unzoned_ingress_parity_8318_test.go`, whose fixture MUST use
-`permit-all` — under `deny-all` a cell passes on the broken code.
+The simulator's `Result.UnzonedIngress` and `Result.UnzonedEgress` flags keep
+these causes distinct from a configured default-deny. `DefaultUsed` is false
+for either unzoned deny: its contract is that `Action` came from
+`default-policy`, and neither deny does. `DisplayAction` and the REST, gRPC,
+and CLI surfaces expose the unzoned-egress cause rather than misreporting
+`permit-all` as the result. Regression coverage lives in
+`unzoned_ingress_parity_8318_test.go`, `undefined_zone_3355_test.go`, and
+`empty_zone_4411_test.go`.
 
 A `to-zone junos-host` query takes the separate **host gate** (#3285,
 `matchJunosHost` ↔ `evaluate_junos_host_policy`): exact `from-zone <ingress>

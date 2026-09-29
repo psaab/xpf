@@ -417,6 +417,9 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 			// cause, which is actively wrong on a permit-all box.
 			fmt.Fprintf(buf, "Ingress zone unknown (%s -> %s): transit denied\n", fromZone, toZone)
 			fmt.Fprintf(buf, "  %s\n", policymatch.UnzonedIngressShowLine)
+		case res.UnzonedEgress:
+			fmt.Fprintf(buf, "Egress zone unknown (%s -> %s): transit denied\n", fromZone, toZone)
+			fmt.Fprintf(buf, "  %s\n", policymatch.UnzonedEgressShowLine)
 		case res.HostInboundUnmatched:
 			// #3285: host-bound traffic — the dataplane host gate returns None
 			// (local delivery; no transit global/default fallback). Do NOT

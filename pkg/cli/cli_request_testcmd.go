@@ -144,6 +144,16 @@ func (c *CLI) testPolicy(args []string) error {
 		}
 		return nil
 	}
+	if res.UnzonedIngress {
+		fmt.Printf("Ingress zone unknown (%s -> %s): transit denied\n", fromZone, toZone)
+		fmt.Printf("  %s\n", policymatch.UnzonedIngressShowLine)
+		return nil
+	}
+	if res.UnzonedEgress {
+		fmt.Printf("Egress zone unknown (%s -> %s): transit denied\n", fromZone, toZone)
+		fmt.Printf("  %s\n", policymatch.UnzonedEgressShowLine)
+		return nil
+	}
 	// #4373 (E4/H2/H7): a multicast/broadcast/unspecified/loopback destination is
 	// dropped at route lookup before policy runs — surface the advisory so the
 	// `test policy` verdict below is not read as real forwarding.
