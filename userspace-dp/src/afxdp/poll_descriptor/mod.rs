@@ -1535,8 +1535,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // policy below and may not revoke, re-stamp, tear down
                         // or cache the entry — except from the session's own
                         // admitting interface, which only a commit can have
-                        // moved (#9384). Unstamped overlay fabric has no arrival
-                        // identity and retains the #9519 exemption.
+                        // moved (#9384). An unstamped overlay has no foreign
+                        // arrival zone and remains an owner; #11064 still
+                        // checks its packet's ICMP type/code below.
                         let (foreign_arrival_zone, may_revoke) = match session_hit_authority(
                             worker_ctx.forwarding,
                             &resolved.metadata,
@@ -2021,11 +2022,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #9949/#10637/#11064: SessionKey deliberately remains
                         // typeless for ICMP, so an OWNER hit can carry a cached
                         // verdict across message types. Recheck with this
-                        // packet's type/code whenever an active permit OR deny
+                        // packet's type/code whenever an active permit or deny
                         // is type-constrained. Reverse answers still coast as
-                        // return traffic; stamped same-zone fabric arrivals
-                        // carry enough authority to be checked, while unstamped
-                        // overlays retain their no-zone exemption.
+                        // return traffic; stamped and unstamped overlay owner
+                        // hits use the session's recorded zone pair.
                         // #10637/#10507: a FORWARD denial drops here, exactly as
                         // #9949 did — but a REVERSE denial must NOT skip the
                         // re-derivation below. A stale reverse hit carries a
@@ -2043,8 +2043,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 flow,
                                 meta,
                                 packet_frame,
-                                packet_fabric_ingress,
-                                fabric_arrival_zone,
                             )
                         } else {
                             None

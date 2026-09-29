@@ -42,10 +42,9 @@
 //! zone-stamped arrival (#6458) names the peer-ingress zone; #10670 treats a
 //! matching session zone as the owner case (the same authority as a normal
 //! session hit), and a different stamp as foreign (including a peer-miss punt
-//! forwarded without any peer policy verdict). An UNSTAMPED fabric arrival —
-//! overlay ingress, which has no stamp — keeps the #9519 exemption: it
-//! arrives on the fabric link, whose zone is structurally not the flow's,
-//! and there is nothing to judge it by.
+//! forwarded without any peer policy verdict). An unstamped arrival on the
+//! configured overlay has no validated stamp, but its owner-hit ICMP packet is
+//! still checked using the session's recorded zone pair and its own ICMP type.
 //!
 //! An owner is the ONLY packet that re-derives the entry (#8356), which is what
 //! makes the generation-only policy stamp sound: every packet that can consult
@@ -260,16 +259,12 @@ pub(super) fn owner_hit_icmp_verdict(
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
     packet_frame: &[u8],
-    packet_fabric_ingress: bool,
-    fabric_arrival_zone: Option<u16>,
 ) -> Option<OwnerHitIcmpVerdict> {
     // Host-bound packets have a different authority plane (`junos-host`).
-    // Unstamped fabric arrivals retain the #9519 exemption because no arrival
-    // zone is available; a validated same-zone stamp is enough authority for
-    // this per-packet check. Foreign stamps have already left through the
-    // foreign path.
+    // Transit owners can be judged from the session's recorded zone pair and
+    // this packet's ICMP type; an absent fabric stamp does not disable that
+    // packet-scoped check.
     if decision.resolution.disposition == ForwardingDisposition::LocalDelivery
-        || (packet_fabric_ingress && fabric_arrival_zone.is_none())
         || !forwarding
             .policy
             .icmp_packet_verdict_may_depend_on_type(meta.protocol)

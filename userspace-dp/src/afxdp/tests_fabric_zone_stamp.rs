@@ -1864,7 +1864,7 @@ fn stamped_fabric_punt_miss_is_judged_after_adjudicated_hit_10670() {
     );
 }
 #[test]
-fn stamped_fabric_owner_icmp_hit_is_type_checked_but_unstamped_overlay_is_exempt_11064() {
+fn stamped_fabric_owner_icmp_hit_is_type_checked_without_stamp_11064() {
     let mut snapshot = nat_snapshot_with_fabric();
     let echo_app = PolicyApplicationSnapshot {
         name: "echo-only".into(),
@@ -1893,7 +1893,7 @@ fn stamped_fabric_owner_icmp_hit_is_type_checked_but_unstamped_overlay_is_exempt
     let mut sessions = SessionTable::new();
     let src = Ipv4Addr::new(10, 0, 61, 102);
     let dst = Ipv4Addr::new(8, 8, 8, 8);
-    let mut frame_for_type = |icmp_type: u8, stamped: bool| {
+    let frame_for_type = |icmp_type: u8, stamped: bool| {
         let mut frame = build_icmp_echo_frame_v4(src, dst, 64, TEST_FABRIC_MAC);
         frame[34] = icmp_type;
         frame[36..38].copy_from_slice(&[0, 0]);
@@ -1904,8 +1904,8 @@ fn stamped_fabric_owner_icmp_hit_is_type_checked_but_unstamped_overlay_is_exempt
         }
         frame
     };
-    let mut meta_for = |frame: &[u8]| {
-        let mut meta = txn_meta_v4(21, 0, frame.len() as u16);
+    let meta_for = |frame: &[u8], ingress_ifindex| {
+        let mut meta = txn_meta_v4(ingress_ifindex, 0, frame.len() as u16);
         meta.protocol = PROTO_ICMP;
         meta.payload_offset = 42;
         meta
@@ -1920,10 +1920,22 @@ fn stamped_fabric_owner_icmp_hit_is_type_checked_but_unstamped_overlay_is_exempt
         &forwarding,
         &ha_state,
         &timestamp,
-        meta_for(&timestamp),
+        meta_for(&timestamp, 21),
         true,
     );
-    assert_eq!(admitted.tx, 1, "the stamped type-13 query must be admitted");
+    assert_eq!(
+        admitted.tx, 1,
+        "the stamped type-13 query must be admitted; rx={} forward={} hit={} miss={} create={} deny={} host_deny={} no_route={} missing_neigh={}",
+        admitted.rx,
+        admitted.forward,
+        admitted.session_hit,
+        admitted.session_miss,
+        admitted.session_create,
+        admitted.policy_deny,
+        admitted.host_inbound_deny,
+        admitted.no_route,
+        admitted.missing_neigh,
+    );
     assert_eq!(
         sessions.len(),
         2,
@@ -1939,7 +1951,7 @@ fn stamped_fabric_owner_icmp_hit_is_type_checked_but_unstamped_overlay_is_exempt
         &forwarding,
         &ha_state,
         &echo,
-        meta_for(&echo),
+        meta_for(&echo, 21),
         true,
     );
     assert_eq!(denied.session_hit, 1, "the stamped ICMP packet must hit");
@@ -1954,24 +1966,26 @@ fn stamped_fabric_owner_icmp_hit_is_type_checked_but_unstamped_overlay_is_exempt
         "a packet-specific deny must not tear down the session"
     );
 
-    // Unstamped fabric has no arrival-zone authority and retains #9519's
-    // exemption from this owner type-check. It need not be admitted by the
-    // separate no-zone transit authority.
+    // An unstamped packet from the configured overlay still belongs to the
+    // recorded owner session; its packet type is checked against that pair.
     let overlay = frame_for_type(8, false);
+    let mut overlay_binding = BindingWorker::new_for_mirror_test(0, 0, 101, 0);
+    overlay_binding.interface = Arc::<str>::from("fab0");
     let (_batch, overlay_hit) = txn_run_descriptor_checked(
-        &mut binding,
+        &mut overlay_binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &overlay,
-        meta_for(&overlay),
+        meta_for(&overlay, 101),
         true,
     );
     assert_eq!(
-        (overlay_hit.session_hit, overlay_hit.policy_deny),
-        (1, 0),
-        "the unstamped overlay must hit without invoking the typed policy deny"
+        (overlay_hit.session_hit, overlay_hit.policy_deny, overlay_hit.tx),
+        (1, 1, 0),
+        "the unstamped overlay packet must hit, be denied by type, and not transmit"
     );
+    assert_eq!(sessions.len(), 2, "a packet deny must retain the session pair");
 }
 
 /// #10670 fail-on-revert for the reverse cache case: the imported reverse
