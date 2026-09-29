@@ -45,7 +45,7 @@ which makes each domain unit-testable with a fake (see `rules_test.go`'s
 | `tunnel_keepalive_runner.go` | (part of `tunnelManager`) | keepalive **runner** half (#5661): `KeepaliveState`/`keepaliveRunner`, `startKeepalive`/`stopAll`, `keepaliveLoop`/`keepaliveTick`, `GetKeepaliveState` |
 | `xfrm.go` | `xfrmManager` | XFRM/IPsec interface lifecycle; own `mu` + tracked `name→if_id` set. `Apply` reconciles **differentially** against the tracked set (keep unchanged / create new / delete removed / recreate on `if_id` change) — it does NOT clear-all-then-rebuild, so an unrelated config commit leaves active xfrmi interfaces untouched (#2546). Refuses to create either of two distinct devices that derive the same `if_id` — fail-closed collision guard (#2909) |
 | `rules.go` | `nextTableManager` / `ribGroupManager` / `pbrManager` | policy-routing ip-rule reconcilers (`ruleOps`, stateless) |
-| `rib_group_return_9819.go` | (part of `ribGroupManager`) | the #9819 return rules for a rib-group leak source (`iif`/`oif vrf-<instance> lookup main`, pref 1500) and the compile-time priority ordering |
+| `rib_group_return_9819.go` | routing return-rule helper | reciprocal peer-prefix-scoped return rules for rib-group sources (pref 1500); target return paths warn and use per-instance static next-hop routes (#11062/#11320) |
 | `probe_pin.go` | `probePinManager` | RPM probe next-hop pin reconciler (#1827): fwmark rules in band 50-99 + pinned host routes in reserved tables 7000-7049 (`probePinOps`, stateless). `Apply` returns per-test install failures (keyed by TestKey) and rolls back the fwmark rule when the pinned route fails (best-effort — a failed rollback is swept by the next band clear; the pin reports failed either way); callers thread the failed map into `pkg/rpm` so affected tests hold state instead of probing unpinned (#1895) |
 | `bond.go` | `bondManager` | bond (fabric/ae LAG) device lifecycle; own `mu` + tracked `name→bondSig` set. `Apply` reconciles **differentially** against the tracked set (keep unchanged / create new / delete removed / recreate on signature change) — it does NOT clear-all-then-rebuild, so an unrelated config commit no longer flaps the LAG (#5119, mirroring #2546) |
 | `reth.go` | `rethManager` | stale `reth*` bond cleanup. `Clear` scans `LinkList` for `reth*` bond devices and deletes them; a per-bond `LinkDel` failure is aggregated with `errors.Join` and returned (NOT swallowed) so a stale reth bond left in the kernel fails the commit closed (#5704 / codex-review-182 M30, the reth analog of the #4901 xfrm/bond/tunnel `Clear` fix). Idempotent: an already-absent reth device is not returned by `LinkList`, so no `LinkDel` runs and no spurious error is produced; retry is implicit via the next reconcile's re-scan (no ownership map to retain) |
@@ -433,26 +433,36 @@ delegate to the owning domain. Exported types:
   listed because the next two entries are defined relative to it, and
   because it is a LOOKUP rule: a lookup that misses the VRF's table moves on
   down this list.
-- `1500`: rib-group **return rules** (#9819). For each routing instance
-  whose interface routes leak into main, in each family whose leak
-  installs: `iif vrf-<instance> lookup main` and `oif vrf-<instance>
-  lookup main`. `ribGroupReturnRulePriority` in `rib_group_return_9819.go`;
-  added by `ribGroupManager.Apply`, removed by its `clear()`. They give a
-  leak source a return path through `main` that the terminator would
-  otherwise cut, and they reach `main` only, never the rib-group band or
-  another instance. Not installed for a forwarding instance or a reserved
-  name, which have no VRF device.
+- `1500`: rib-group **return rules** (#9819, narrowed by #11062). For each
+  family in which a source instance leaked, install an iif/oif pair per
+  prefix leaked by a different instance:
+  `to <peer-prefix> iif vrf-<instance> lookup <peer-table>` and
+  `to <peer-prefix> oif vrf-<instance> lookup <peer-table>`. Main-only
+  destinations that are not another instance's leaked peer prefix miss these
+  rules and reach the VRF miss terminator. The AF_XDP FIB mirrors the same
+  destination scopes as reverse `NextTable` routes from the source instance
+  table to the peer table.
+- Next-table and PBR target return paths (#11320) do not receive a broad
+  `lookup main` exception. The commit warns for each target because a
+  main-only peer may be unreachable from its VRF. Configure a target-specific
+  static next-hop route inside the instance; per-instance `next-table` is
+  unsupported. See `docs/rib-group-route-leaking.md` for the supported Junos
+  spelling.
+- Scoped rib-group return rules sit after the kernel's l3mdev rule at 1000 and
+  before the VRF miss terminator at 2000. They look up the peer's table only
+  for explicitly leaked peer-prefix destinations; the Dst scope prevents a
+  VRF-wide escape to unrelated main routes.
 - `2000`: the **VRF miss terminator** (#9819), `l3mdev unreachable`, once
   per family. `vrfMissTerminatorPriority` in `vrf_miss_terminator_9819.go`.
   `vrfManager.Reconcile` (and `Create`) installs it before creating any VRF
   device, re-asserts it on every reconcile (EEXIST is success), and removes
   it only once no VRF is desired or still owned. It matches exactly what
   the `1000` rule matches, so a lookup that missed a VRF table ends here
-  instead of reaching the rib-group band and `main`. netlink v1.3.1's
-  `Rule` has no l3mdev selector, so `rule_l3mdev_linux.go` builds the
-  install request. A failure is returned into the commit (#5700 `vrfErr`)
-  and never skips the VRF reconcile. The order of these three priorities
-  is checked at compile time. See `docs/rib-group-route-leaking.md`.
+  instead of reaching arbitrary main routes. netlink v1.3.1's `Rule` has no
+  l3mdev selector, so `rule_l3mdev_linux.go` builds the install request. A
+  failure is returned into the commit (#5700 `vrfErr`) and never skips the
+  VRF reconcile. The order of these priorities is checked at compile time.
+  See `docs/rib-group-route-leaking.md`.
 - `31000–31999`: PBR (firewall-filter `routing-instance` action).
   `pbrRulePriority` in `rules.go`. **Kernel FBF support matrix (#3730):**
   `BuildPBRRules` mirrors only the term `from` predicates an `ip rule` can

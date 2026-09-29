@@ -85,6 +85,7 @@ func TestRibGroupConnectedPrefixes(t *testing.T) {
 		"192.0.2.5/32",      // host route → skipped
 		"fe80::1/64",        // link-local → skipped
 	})
+	cfg.RoutingInstances = append([]*RoutingInstanceConfig{nil}, cfg.RoutingInstances...)
 	got := RibGroupConnectedPrefixes(cfg)["dmz-vr"]
 	want := map[string]bool{"10.0.30.0/24": true, "2001:db8:30::/64": true}
 	if len(got) != len(want) {
@@ -123,5 +124,41 @@ func TestConnectedNetworkPrefix(t *testing.T) {
 		if c.wantOK && family != c.wantFamily {
 			t.Errorf("ConnectedNetworkPrefix(%q) family = %q, want %q", c.in, family, c.wantFamily)
 		}
+	}
+}
+
+func TestTargetReturnPathWarningsCoverNextTableAndPBR(t *testing.T) {
+	cfg := ribGroupLeakConfig(nil, []string{"10.0.30.1/24"})
+	unit := cfg.Interfaces.Interfaces["ge-0/0/1"].Units[0]
+	unit.FilterInputV4 = "steer"
+	cfg.Firewall.FiltersInet = map[string]*FirewallFilter{
+		"steer": {Terms: []*FirewallFilterTerm{{RoutingInstance: "dmz-vr"}}},
+	}
+	cfg.RoutingOptions.Inet6StaticRoutes = []*StaticRoute{
+		{Destination: "2001:db8:ffff::/48", NextTable: "dmz-vr"},
+	}
+	targetWarnings := func(cfg *Config) []string {
+		var found []string
+		for _, warning := range ValidateConfig(cfg) {
+			if strings.Contains(warning, `routing-instance "dmz-vr" is targeted by next-table or PBR`) {
+				found = append(found, warning)
+			}
+		}
+		return found
+	}
+	warnings := targetWarnings(cfg)
+	if len(warnings) != 1 {
+		t.Fatalf("next-table and PBR references to one target should produce one warning, got: %v", warnings)
+	}
+	for _, part := range []string{"dmz-vr", "main-only peer", "routing-options static", "next-hop", "Per-instance next-table is unsupported"} {
+		if !strings.Contains(warnings[0], part) {
+			t.Errorf("target return warning missing %q: %s", part, warnings[0])
+		}
+	}
+
+	cfg.RoutingInstances[0].InstanceType = "forwarding"
+	warnings = targetWarnings(cfg)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "type forwarding") {
+		t.Fatalf("expected forwarding-instance return-path warning, got: %v", warnings)
 	}
 }
