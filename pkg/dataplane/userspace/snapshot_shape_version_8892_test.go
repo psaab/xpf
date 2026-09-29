@@ -395,7 +395,9 @@ const (
 	// compile-time conflict/ownership evidence only; neither enters ConfigSnapshot
 	// JSON. The reflection digest moves, but the transmitted field set does not.
 	// v35 -> v36 BUMPED (#11064): ICMP type/code terms now travel on source-NAT
-	// applications. Older helpers ignore those fields and broaden the rule.
+	// applications. Without the version gate, an older helper would ignore the
+	// nested fields and widen the typed match; exact equality rejects v35
+	// before applying instead.
 	snapshotShapeVersion8892 = 36
 )
 
