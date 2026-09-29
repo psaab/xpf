@@ -144,6 +144,21 @@ func (c *CLI) testPolicy(args []string) error {
 		}
 		return nil
 	}
+	// #4373 (E4/H2/H7): a multicast/broadcast/unspecified/loopback destination is
+	// dropped at route lookup before policy runs — surface the advisory so the
+	// verdict below is not read as real forwarding. Printed BEFORE the unzoned
+	// verdicts (mirroring cli_show_security.go): an unzoned query can also
+	// carry RouteDropBeforePolicy, and hiding the route stage misleads about
+	// which stage drops the packet (#11499 review).
+	if note := res.RouteDropNote(); note != "" {
+		fmt.Printf("  %s\n", note)
+	}
+	// #5572: a non-first fragment whose permit was overridden to an overlapping
+	// port-bearing deny — surface the advisory so the verdict below is not read
+	// as a first-fragment / exact-port match. Same ordering rationale as above.
+	if note := res.FragmentDenyNote(); note != "" {
+		fmt.Printf("  %s\n", note)
+	}
 	if res.UnzonedIngress {
 		fmt.Printf("Ingress zone unknown (%s -> %s): transit denied\n", fromZone, toZone)
 		fmt.Printf("  %s\n", policymatch.UnzonedIngressShowLine)
@@ -153,18 +168,6 @@ func (c *CLI) testPolicy(args []string) error {
 		fmt.Printf("Egress zone unknown (%s -> %s): transit denied\n", fromZone, toZone)
 		fmt.Printf("  %s\n", policymatch.UnzonedEgressShowLine)
 		return nil
-	}
-	// #4373 (E4/H2/H7): a multicast/broadcast/unspecified/loopback destination is
-	// dropped at route lookup before policy runs — surface the advisory so the
-	// `test policy` verdict below is not read as real forwarding.
-	if note := res.RouteDropNote(); note != "" {
-		fmt.Printf("  %s\n", note)
-	}
-	// #5572: a non-first fragment whose permit was overridden to an overlapping
-	// port-bearing deny — surface the advisory so the verdict below is not read
-	// as a first-fragment / exact-port match.
-	if note := res.FragmentDenyNote(); note != "" {
-		fmt.Printf("  %s\n", note)
 	}
 	if res.UnsupportedTupleFamily {
 		// #5720 (codex-182 C-TOOLS): an IPv4 source with an IPv6 destination is
