@@ -52,6 +52,29 @@ type recoveryHostSeams struct {
 	provOrig        string
 }
 
+// provisionedRedirectActive reports whether the account-ownership
+// inventory redirect is in effect: the live value must equal the
+// expected throwaway path and differ from the entry value. Checked
+// BEFORE planting any marker so a redirect regression fails without
+// touching host state.
+func provisionedRedirectActive(got, expected, orig string) bool {
+	return got == expected && got != orig
+}
+
+func TestProvisionedRedirectGuard10769(t *testing.T) {
+	const orig = "/var/lib/xpf/provisioned-users"
+	redir := filepath.Join(t.TempDir(), "prov", "provisioned-users")
+	if !provisionedRedirectActive(redir, redir, orig) {
+		t.Fatal("active redirect must be accepted")
+	}
+	if provisionedRedirectActive(orig, redir, orig) {
+		t.Fatal("unredirected entry value must be rejected")
+	}
+	if provisionedRedirectActive(filepath.Join(t.TempDir(), "elsewhere"), redir, orig) {
+		t.Fatal("unexpected path must be rejected")
+	}
+}
+
 func isolateRecoveryApplyHost(t *testing.T) *recoveryHostSeams {
 	t.Helper()
 	s := &recoveryHostSeams{}
@@ -97,9 +120,15 @@ func isolateRecoveryApplyHost(t *testing.T) *recoveryHostSeams {
 	// host account would mismatch the planted UID and stay untouched
 	// (UID-keyed provenance).
 	origProv := provisionedUsersDir
-	provisionedUsersDir = filepath.Join(dir, "prov", "provisioned-users")
+	expectedProv := filepath.Join(dir, "prov", "provisioned-users")
+	provisionedUsersDir = expectedProv
 	t.Cleanup(func() { provisionedUsersDir = origProv })
 	s.provDir, s.provOrig = provisionedUsersDir, origProv
+	// Guard BEFORE any marker operation: a removed redirect must stop
+	// here, never plant into or enumerate the live host inventory.
+	if !provisionedRedirectActive(provisionedUsersDir, expectedProv, origProv) {
+		t.Fatalf("provisioned-users redirect inactive: got %q want %q (orig %q); refusing to plant ghost marker", provisionedUsersDir, expectedProv, origProv)
+	}
 	const ghostUser = "xpf-test-ghost-10769"
 	if err := markProvisioned(ghostUser, 59999); err != nil {
 		t.Fatal(err)
