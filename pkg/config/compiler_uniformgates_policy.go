@@ -91,11 +91,11 @@ func runUniformGatesPolicy(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// more than one distinct action — log-only/count-only or typo'd policies
 	// otherwise used the PolicyPermit zero value, while conflicting actions
 	// resolved last-wins by parse order). Lenient on load / peer-sync: warn so
-	// persisted configs still boot (#1960); actionless policies default to DENY
-	// and conflicting-action policies are poisoned by compilePolicy so the
-	// unsupported sentinel prevents them from installing. Runs AFTER the policy
-	// zone-reference gate so a structural error, a bad match-address, and a bad
-	// zone reference still win the first-error slot.
+	// persisted configs still boot (#1960); actionless policies default to DENY.
+	// Direct conflicts are captured from source policies before folding and
+	// marked after compilation so the unsupported sentinel prevents install.
+	// Runs AFTER the policy zone-reference gate so a structural error, bad
+	// match-address, and bad zone reference still win the first-error slot.
 	if err := validatePolicyTerminalActionStrict(cfg); err != nil {
 		if opts.lenientPolicyTerminalAction {
 			cfg.Warnings = append(cfg.Warnings,

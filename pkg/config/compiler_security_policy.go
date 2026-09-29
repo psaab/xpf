@@ -360,10 +360,10 @@ func compilePolicy(polInst struct {
 	// (which only WARNS, see validatePolicyTerminalActionStrict +
 	// lenientPolicyTerminalAction) fails closed; the strict commit path rejects
 	// the actionless policy outright (terminalActions is empty). Conflicting
-	// actions still accumulate with last-wins runtime semantics, but the
-	// #11063 poison below refuses to publish that policy on tolerant load and
-	// peer-sync. For duplicate-name folds that turn an earlier deny into a
-	// permit, see #9571 / markFoldWidenedPolicies9571.
+	// actions still accumulate with last-wins runtime semantics. Lenient
+	// compilation captures direct conflicts before duplicate-name folding and
+	// marks the compiled policy afterward (#11063); for folds that turn an
+	// earlier deny into a permit, see #9571 / markFoldWidenedPolicies9571.
 	if len(pol.terminalActions) == 0 {
 		pol.Action = PolicyDeny
 	}
@@ -416,7 +416,8 @@ func compilePolicy(polInst struct {
 	// ignores. Record those invalidations so the userspace snapshot builder
 	// poisons the rule with the __unsupported__ sentinel instead of publishing
 	// incomplete policy content. Direct terminal-action conflicts are captured
-	// from source statements before duplicate-name folding.
+	// from each source policy before duplicate-name folding; lenient grouped
+	// policies are checked again on an expanded pre-fold clone.
 	//
 	// These per-policy predicates share their definitions with the strict
 	// gates where available. The unsupported-then-sibling and unsupported-

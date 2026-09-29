@@ -451,6 +451,9 @@ Distinct conflicting terminal actions on a lenient load retain the compiler's
 last-wins action only as an internal parse result; `LenientContentDropped`
 poisons the policy snapshot with the unsupported sentinel, so the partial
 policy cannot install as an allow.
+Group-inherited conflicts receive the same poison: lenient compilation checks
+an expanded pre-fold policy view, so safe mixed-action duplicate fragments
+remain subject only to #9571's widening rule.
 
 **A duplicate policy name never turns a restrictive statement into a permit on
 load (#9571, #9992):** a strict commit rejects two policies that share a name

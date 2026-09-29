@@ -62,8 +62,11 @@ import "strings"
 // strength of "it has the same shape" is the family-level reasoning #8690 spent
 // a day removing.
 //
-// It returns folded names, policies whose individual source statements have
-// conflicting terminal actions, and policies a fold widened into PERMIT. The
+// Direct conflicts are collected from each policy instance before folding.
+// The lenient entry points scan the original tree for inline conflicts and, if
+// groups apply, an expanded pre-fold clone for inherited conflicts.
+// It returns folded names, effective policy instances whose individual
+// terminal actions conflict, and policies a fold widened into PERMIT. The
 // latter are poisoned after compilation by markFoldWidenedPolicies9571.
 func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPolicy9571, []directTerminalActionConflict11063) {
 	if tree == nil {
@@ -106,6 +109,110 @@ func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPoli
 	return merged, widened, conflicting
 }
 
+// treeHasGroupApplications11063 avoids cloning and expanding configs whose
+// policy provenance cannot change through apply-groups.
+func treeHasGroupApplications11063(tree *ConfigTree) bool {
+	if tree == nil || tree.FindChild("groups") == nil {
+		return false
+	}
+	return nodesHaveGroupApplications11063(tree.Children)
+}
+
+func nodesHaveGroupApplications11063(nodes []*Node) bool {
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		if len(node.Keys) > 0 && node.Keys[0] == "apply-groups" {
+			return true
+		}
+		if nodesHaveGroupApplications11063(node.Children) {
+			return true
+		}
+	}
+	return false
+}
+
+// collectDirectTerminalActionConflictsFromExpandedTree scans each effective
+// source policy before duplicate-name folding, keeping safe mixed-action
+// fragments separate while recognizing conflicts introduced by inherited
+// group content.
+func collectDirectTerminalActionConflictsFromExpandedTree(tree *ConfigTree) []directTerminalActionConflict11063 {
+	if tree == nil {
+		return nil
+	}
+	var conflicting []directTerminalActionConflict11063
+	for _, root := range tree.Children {
+		if root.Name() != "security" && (len(root.Keys) == 0 || root.Keys[0] != "security") {
+			continue
+		}
+		for _, policies := range root.FindChildren("policies") {
+			for _, fromZone := range policies.FindChildren("from-zone") {
+				conflicting = append(conflicting,
+					zonePairDirectConflicts11063(fromZone.Keys, nil,
+						directPolicyConflictNames11063(fromZone, false))...)
+				for _, toZone := range fromZone.Children {
+					conflicting = append(conflicting,
+						zonePairDirectConflicts11063(fromZone.Keys, toZone.Keys,
+							directPolicyConflictNames11063(toZone, false))...)
+				}
+			}
+			for _, global := range policies.FindChildren("global") {
+				for _, name := range directPolicyConflictNames11063(global, true) {
+					conflicting = append(conflicting,
+						directTerminalActionConflict11063{global: true, name: name})
+				}
+			}
+		}
+	}
+	return conflicting
+}
+
+func directPolicyConflictNames11063(parent *Node, isGlobal bool) []string {
+	if parent == nil {
+		return nil
+	}
+	var conflicting []string
+	for _, child := range parent.Children {
+		if len(child.Keys) < 2 || child.Keys[0] != "policy" {
+			continue
+		}
+		name := child.Keys[1]
+		policy := compilePolicy(struct {
+			name string
+			node *Node
+		}{name, child}, isGlobal)
+		if conflictingPolicyTerminalActions(policy.terminalActions) {
+			conflicting = append(conflicting, name)
+		}
+	}
+	return conflicting
+}
+
+func mergeDirectConflicts11063(a, b []directTerminalActionConflict11063) []directTerminalActionConflict11063 {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[directTerminalActionConflict11063]struct{}, len(a)+len(b))
+	out := make([]directTerminalActionConflict11063, 0, len(a)+len(b))
+	for _, conflict := range a {
+		if _, ok := seen[conflict]; !ok {
+			seen[conflict] = struct{}{}
+			out = append(out, conflict)
+		}
+	}
+	for _, conflict := range b {
+		if _, ok := seen[conflict]; !ok {
+			seen[conflict] = struct{}{}
+			out = append(out, conflict)
+		}
+	}
+	return out
+}
+
 // mergeInstancesUnder folds repeated `<keyword> <name>` children of `parent`
 // into the first one carrying that name, and returns how many were folded.
 //
@@ -115,8 +222,8 @@ func mergeDuplicateNamedInstances(tree *ConfigTree) ([]string, []foldWidenedPoli
 // would silently drop exactly the spelling this issue is about.
 //
 // For security policies, direct terminal-action conflicts are recorded from
-// each source statement before folding. Conflicts created only by combining
-// otherwise valid statements are handled by the widening classifier instead.
+// each effective policy instance before folding. Conflicts created only by
+// combining otherwise valid instances are handled by the widening classifier.
 // The #9023 block sites pass askNone9571, so they do not inspect policy actions.
 func mergeInstancesUnder(parent *Node, keyword string, ask policyActionAsk9571) (names, widened, conflicting []string) {
 	if parent == nil {

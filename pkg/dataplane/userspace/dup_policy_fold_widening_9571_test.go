@@ -32,13 +32,20 @@ func TestFoldWidenedDuplicatePoisonsTheWire9571(t *testing.T) {
 		return `security { zones { security-zone trust; security-zone untrust; } policies { from-zone trust to-zone untrust { ` +
 			second + ` } } }`
 	}
+	groupConflict := `groups { G { security { policies { from-zone trust to-zone untrust { ` +
+		`policy p1 { then { permit; } } } } } } } apply-groups G; ` +
+		text(`policy p1 { `+anyM+` then { deny; } }`)
+	safeGroupFold := `groups { G { system { host-name grouped; } } } apply-groups G; ` +
+		text(`policy p1 { `+anyM+` then { permit; } } policy p1 { then { deny; } }`)
 	for _, tc := range []struct {
 		name     string
 		text     string
 		poisoned bool
 	}{
 		{"deny then permit", text(`policy p1 { ` + anyM + ` then { deny; } } policy p1 { ` + anyM + ` then { permit; } }`), true},
+		{"group-inherited conflict", groupConflict, true},
 		{"#8752 control: permit then a deny fragment", text(`policy p1 { ` + anyM + ` then { permit; } } policy p1 { then { deny; } }`), false},
+		{"safe mixed-action fold with apply-groups", safeGroupFold, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := lenientHier9571(t, tc.text)

@@ -337,12 +337,16 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 				"first occurrence (#9023); previously the later block replaced the earlier "+
 				"one and its configuration was discarded")
 	}
-	// #9571: poison only folds that turn a restrictive source statement into
-	// PERMIT. Direct terminal-action conflicts are captured before folding;
-	// safe duplicate folds with different actions are not direct conflicts.
+	// Keep the pre-fold tree for group conflict provenance. The main tolerant
+	// fold remains pre-expansion; the clone preserves source boundaries while
+	// the effective group-expanded policies are inspected below.
+	var expandedPolicySourceTree *ConfigTree
 	var foldWidened []foldWidenedPolicy9571
 	var directActionConflicts []directTerminalActionConflict11063
 	if opts.lenientDuplicatePolicyNames {
+		if treeHasGroupApplications11063(tree) {
+			expandedPolicySourceTree = tree.Clone()
+		}
 		var merged []string
 		merged, foldWidened, directActionConflicts = mergeDuplicateNamedInstances(tree)
 		for _, what := range merged {
@@ -540,6 +544,22 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 		}
 	}
 
+	if expandedPolicySourceTree != nil {
+		if err := expandedPolicySourceTree.ExpandGroupsTagged(); err != nil {
+			if strings.Contains(err.Error(), `undefined group "${node}"`) {
+				err = expandedPolicySourceTree.ExpandGroupsWithVarsTagged(
+					map[string]string{"node": "node0"})
+			}
+			if err != nil {
+				return nil, fmt.Errorf("apply-groups: %w", err)
+			}
+		}
+		expandedConflicts := collectDirectTerminalActionConflictsFromExpandedTree(
+			expandedPolicySourceTree)
+		directActionConflicts = mergeDirectConflicts11063(
+			directActionConflicts, expandedConflicts)
+	}
+
 	cfg, err := compileExpanded(tree, opts)
 	if err != nil {
 		return nil, err
@@ -664,12 +684,16 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 				"first occurrence (#9023); previously the later block replaced the earlier "+
 				"one and its configuration was discarded")
 	}
-	// #9571: poison only folds that turn a restrictive source statement into
-	// PERMIT. Direct terminal-action conflicts are captured before folding;
-	// safe duplicate folds with different actions are not direct conflicts.
+	// Keep the pre-fold tree for group conflict provenance. The main tolerant
+	// fold remains pre-expansion; the clone preserves source boundaries while
+	// the effective group-expanded policies are inspected below.
+	var expandedPolicySourceTree *ConfigTree
 	var foldWidened []foldWidenedPolicy9571
 	var directActionConflicts []directTerminalActionConflict11063
 	if opts.lenientDuplicatePolicyNames {
+		if treeHasGroupApplications11063(tree) {
+			expandedPolicySourceTree = tree.Clone()
+		}
 		var merged []string
 		merged, foldWidened, directActionConflicts = mergeDuplicateNamedInstances(tree)
 		for _, what := range merged {
@@ -831,6 +855,16 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	// TAGGED, as in compileConfigWithOpts (#9854 coalescing provenance).
 	if err := tree.ExpandGroupsWithVarsTagged(vars); err != nil {
 		return nil, fmt.Errorf("apply-groups: %w", err)
+	}
+
+	if expandedPolicySourceTree != nil {
+		if err := expandedPolicySourceTree.ExpandGroupsWithVarsTagged(vars); err != nil {
+			return nil, fmt.Errorf("apply-groups: %w", err)
+		}
+		expandedConflicts := collectDirectTerminalActionConflictsFromExpandedTree(
+			expandedPolicySourceTree)
+		directActionConflicts = mergeDirectConflicts11063(
+			directActionConflicts, expandedConflicts)
 	}
 
 	// #4329: thread the runtime cluster node identity into compileExpanded so

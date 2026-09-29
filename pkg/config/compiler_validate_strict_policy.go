@@ -829,9 +829,9 @@ func validatePolicyTerminalActionStrict(cfg *Config) error {
 			return nil
 		}
 		// #3850: identical duplicate terminal-action blocks merge silently.
-		// The no-allocation predicate is also used by compilePolicy's #11063
-		// tolerant-load poison so strict rejection and runtime fail-closed
-		// behavior agree on exactly which policies have conflicting actions.
+		// The same no-allocation predicate drives strict rejection and the
+		// lenient source-conflict marker (markDirectTerminalActionConflicts11063),
+		// keeping both paths aligned on which policies have conflicting actions.
 		if len(pol.terminalActions) == 0 {
 			return policyTerminalActionError(scope, pol.Name,
 				"no terminal action; every policy must specify exactly one of "+
