@@ -307,36 +307,82 @@ func TestJunosHostDstScopedPermitRendersAReturn9504(t *testing.T) {
 		t.Fatalf("want one program for the ingress zone, got %+v", programs)
 	}
 	v4 := programs[0].RulesV4
-	if len(v4) != 2 {
-		t.Fatalf("want the permit's return then the deny's drop in v4, got %+v", v4)
+	if len(v4) != 3 {
+		t.Fatalf("want the permit's return, the explicit deny, and the terminal default deny in v4, got %+v", v4)
 	}
 	if r := v4[0]; r.Verdict != config.JunosHostReturn || r.DstAny || len(r.Dst) != 1 {
 		t.Errorf("first v4 rule = %+v, want a return still scoped to the permit's destination", r)
 	}
 	if r := v4[1]; r.Verdict != config.JunosHostDrop || !r.DstAny {
-		t.Errorf("second v4 rule = %+v, want the deny's drop for every destination", r)
+		t.Errorf("second v4 rule = %+v, want the explicit deny for every destination", r)
+	}
+	if r := v4[2]; r.Verdict != config.JunosHostDrop || !r.SrcAny || !r.DstAny || len(r.L4) != 0 {
+		t.Errorf("last v4 rule = %+v, want an unconditional terminal default deny (#11065)", r)
 	}
 	// The rendered subchain must carry the permit's daddr on the return: a return
 	// that lost it would admit the permitted source to every firewall address, and
 	// one that never rendered would deny it at the address the operator permitted.
-	var sawScopedReturn bool
+	var sawScopedReturn, sawTerminalDrop bool
 	for _, l := range junosHostChainLines(payload) {
 		if strings.Contains(l, "return") && strings.Contains(l, "daddr") {
 			sawScopedReturn = true
+		}
+		if strings.Contains(l, "drop") && !strings.Contains(l, "saddr") && !strings.Contains(l, "daddr") {
+			sawTerminalDrop = true
 		}
 	}
 	if !sawScopedReturn {
 		t.Errorf("no destination-scoped return rendered in the zone's subchain:\n%s", payload)
 	}
-	// The deny is enforced, so its warning is suppressed; the permit is never
-	// suppressed, because the half that would refuse what it does not match is
-	// enforced on no path (#9504).
+	if !sawTerminalDrop {
+		t.Errorf("no unconditional terminal drop rendered after the policy terms:\n%s", payload)
+	}
+	// The explicit deny is enforced on the kernel path, while the permit's
+	// userspace no-match lifeline remains uncovered; keep its commit warning.
 	rendered := config.BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys
 	if !rendered[config.JunosHostZonePairPolicyKey("untrust", "block-net")] {
 		t.Errorf("the deny renders a rule yet is not marked rendered: %+v", rendered)
 	}
 	if rendered[config.JunosHostZonePairPolicyKey("untrust", "allow-good-to-mgmt")] {
-		t.Errorf("a permit must never be marked rendered: %+v", rendered)
+		t.Errorf("a permit must not be marked rendered while the userspace no-match lifeline remains: %+v", rendered)
+	}
+}
+
+// TestJunosHostPermitAloneAddsDefaultDeny11065 proves a restricted permit does
+// not need a following explicit deny to close its non-permitted remainder on
+// the direct host-bound kernel path.
+func TestJunosHostPermitAloneAddsDefaultDeny11065(t *testing.T) {
+	cfg := junosHostDstTestConfig()
+	cfg.Security.Policies = []*config.ZonePairPolicies{
+		{FromZone: "untrust", ToZone: "junos-host", Policies: []*config.Policy{
+			permitPolicy("allow-good-to-mgmt", "src:good-host", "dst:mgmt-ip", "app:any"),
+		}},
+	}
+	payload, programs := junosHostPayload(t, cfg)
+	if len(programs) != 1 || len(programs[0].RulesV4) != 2 {
+		t.Fatalf("a permit-only v4 program must carry its return and terminal deny, got %+v", programs)
+	}
+	rules := programs[0].RulesV4
+	if rules[0].Verdict != config.JunosHostReturn || rules[0].SrcAny || rules[0].DstAny {
+		t.Errorf("first rule = %+v, want the scoped permit return", rules[0])
+	}
+	if r := rules[1]; r.Verdict != config.JunosHostDrop || !r.SrcAny || !r.DstAny {
+		t.Errorf("last rule = %+v, want a match-all terminal deny", r)
+	}
+	lines := junosHostChainLines(payload)
+	var returnIndex, dropIndex = -1, -1
+	for i, line := range lines {
+		if strings.Contains(line, "return") && returnIndex == -1 {
+			returnIndex = i
+		}
+		if strings.Contains(line, "drop") && !strings.Contains(line, "saddr") &&
+			!strings.Contains(line, "daddr") {
+			dropIndex = i
+		}
+	}
+	if returnIndex < 0 || dropIndex <= returnIndex {
+		t.Fatalf("terminal deny must follow the permitted carve-out, return=%d drop=%d:\n%s",
+			returnIndex, dropIndex, payload)
 	}
 }
 

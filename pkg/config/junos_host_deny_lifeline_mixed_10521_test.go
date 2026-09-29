@@ -274,6 +274,7 @@ func TestJunosHostLifelinePerZoneControls10521(t *testing.T) {
 // naming when one shared policy applies to multiple lifeline-only zones.
 func TestJunosHostLifelineZonesAreSorted10521(t *testing.T) {
 	cfg := mixed10521Config(true)
+	cfg.Chassis.Cluster = &ClusterConfig{ControlInterface: "em0"}
 	cfg.Interfaces.Interfaces["em0"] = &InterfaceConfig{
 		Name: "em0",
 		Units: map[int]*InterfaceUnit{

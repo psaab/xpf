@@ -5,83 +5,85 @@ import (
 	"testing"
 )
 
-// #3682: the host-inbound LIFELINE exemption (management / cluster-control
+// #3682: host-inbound LIFELINE exemptions (management / cluster-control
 // interfaces excluded from host-inbound deny scoping) must be OPERATOR-VISIBLE.
-// Before #3682 a zone-assigned em0/fab*/fxp0 (or a configured control/fabric)
-// interface silently dropped out of the host-inbound default-deny with nothing
-// on any zone view to say so. These tests pin the visibility contract on the
-// shared presenter SSOT: the zone-view render emits a lifeline-exempt line, and
-// the per-interface diagnostic emits a lifeline-exempt marker in place of the
-// (misleading) default-deny line. They go RED if the exemption is made invisible
-// again (the render lines removed) — the exemption becomes silent once more.
+// #11068 narrows the role proof to fxp0 plus explicitly configured cluster
+// control/fabric links; bare em0/fab* names remain ordinary ingress interfaces.
+// These tests pin visibility on the shared presenter: configured exemptions
+// render their marker, and the renderer must not silently exempt unconfigured
+// names by spelling alone.
 
 func TestHostInboundLifelineInterface3682(t *testing.T) {
 	def := HostInboundLifelineSet(nil)
-	// The always-on defaults plus fxp0 are lifelines regardless of config.
-	for _, name := range []string{"fxp0", "fxp0.0", "em0", "em0.0", "fab0", "fab0.0", "fab1.0"} {
+	// Only fxp0 is an unconditional lifeline; bare em0/fab names are not roles.
+	for _, name := range []string{"fxp0", "fxp0.0"} {
 		if !HostInboundLifelineInterface(name, def) {
-			t.Errorf("HostInboundLifelineInterface(%q) = false, want true (default lifeline)", name)
+			t.Errorf("HostInboundLifelineInterface(%q) = false, want true (fxp0 default lifeline)", name)
 		}
 	}
-	// A regular data-plane interface is NOT a lifeline.
-	for _, name := range []string{"ge-0/0/0.0", "reth0.50", "xe-1/0/0.0", ""} {
+	for _, name := range []string{"em0", "em0.0", "fab0", "fab0.0", "fab1.0",
+		"ge-0/0/0.0", "reth0.50", "xe-1/0/0.0", ""} {
 		if HostInboundLifelineInterface(name, def) {
-			t.Errorf("HostInboundLifelineInterface(%q) = true, want false", name)
+			t.Errorf("HostInboundLifelineInterface(%q) = true, want false (no configured role)", name)
 		}
 	}
 	// A configured chassis-cluster control-interface is added to the set (#3277).
 	cfg := &Config{}
 	cfg.Chassis.Cluster = &ClusterConfig{ControlInterface: "hb0", FabricInterface: "fabx0"}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"fab1": {Name: "fab1", FabricMembers: []string{"ge-7/0/1"}},
+	}
 	set := HostInboundLifelineSet(cfg)
-	for _, name := range []string{"hb0", "hb0.0", "fabx0.0"} {
+	for _, name := range []string{"hb0", "hb0.0", "fabx0.0", "fab1", "fab1.0"} {
 		if !HostInboundLifelineInterface(name, set) {
 			t.Errorf("configured lifeline %q not matched", name)
 		}
 	}
 }
 
-// TestHostInboundViewLifelineExemptRendered3682 is the RED-on-revert proof: a
-// zone with an em0/fab* member must render the lifeline-exempt line in the zone
-// host-inbound view, and a zone without any lifeline member must NOT.
+// TestHostInboundViewLifelineExemptRendered3682 proves the presenter shows the
+// fixed/configured exemption and does not infer a role from em0/fab0 spelling.
 func TestHostInboundViewLifelineExemptRendered3682(t *testing.T) {
 	labels := HostInboundLabels{
 		Indent: "  ", Sep: ", ",
 		ServicesLabel: "Host-inbound system-services", ProtocolsLabel: "Host-inbound protocols",
 	}
 	const marker = "Host-inbound lifeline-exempt interfaces (management/fabric, bypass host-inbound deny):"
+	lifelines := HostInboundLifelineSet(nil)
 
-	// Zone that (mis)assigns em0 and fab0 alongside a regular data interface.
+	// A zone that also assigns the ordinary names em0/fab0 has only fxp0
+	// exempted; the names alone do not establish cluster roles.
 	z := &ZoneConfig{
+		Interfaces:         []string{"ge-0/0/0.0", "fxp0.0", "em0.0", "fab0.0"},
+		HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}},
+	}
+	lines := z.HostInboundViewWithLifelines(lifelines).Render(labels)
+	out := strings.Join(lines, "\n")
+	if !strings.Contains(out, marker) {
+		t.Fatalf("zone view missing lifeline-exempt line for fxp0\n%s", out)
+	}
+	lifelineLine := ""
+	for _, line := range lines {
+		if strings.Contains(line, marker) {
+			lifelineLine = line
+		}
+	}
+	if !strings.Contains(lifelineLine, "fxp0.0") {
+		t.Errorf("fixed lifeline missing from exemption line: %q", lifelineLine)
+	}
+	for _, ordinary := range []string{"ge-0/0/0.0", "em0.0", "fab0.0"} {
+		if strings.Contains(lifelineLine, ordinary) {
+			t.Errorf("ordinary interface %q wrongly listed as lifeline-exempt: %q", ordinary, lifelineLine)
+		}
+	}
+
+	// A zone with only ordinary interfaces must NOT render the lifeline line.
+	zd := &ZoneConfig{
 		Interfaces:         []string{"ge-0/0/0.0", "em0.0", "fab0.0"},
 		HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}},
 	}
-	out := strings.Join(z.HostInboundViewWithLifelines(nil).Render(labels), "\n")
-	if !strings.Contains(out, marker) {
-		t.Fatalf("zone view missing lifeline-exempt line (exemption is invisible)\n%s", out)
-	}
-	// The exempt line must list the lifeline members and NOT the data interface.
-	for _, want := range []string{"em0.0", "fab0.0"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("lifeline-exempt line missing %q\n%s", want, out)
-		}
-	}
-	lifelineLine := ""
-	for _, l := range z.HostInboundViewWithLifelines(nil).Render(labels) {
-		if strings.Contains(l, marker) {
-			lifelineLine = l
-		}
-	}
-	if strings.Contains(lifelineLine, "ge-0/0/0.0") {
-		t.Errorf("data interface ge-0/0/0.0 wrongly listed as lifeline-exempt: %q", lifelineLine)
-	}
-
-	// A zone with only data interfaces must NOT render the lifeline line.
-	zd := &ZoneConfig{
-		Interfaces:         []string{"ge-0/0/0.0"},
-		HostInboundTraffic: &HostInboundTraffic{SystemServices: []string{"ssh"}},
-	}
-	if out := strings.Join(zd.HostInboundViewWithLifelines(nil).Render(labels), "\n"); strings.Contains(out, marker) {
-		t.Errorf("no-lifeline zone wrongly rendered the exempt line\n%s", out)
+	if out := strings.Join(zd.HostInboundViewWithLifelines(lifelines).Render(labels), "\n"); strings.Contains(out, marker) {
+		t.Errorf("zone without an actual lifeline wrongly rendered the exempt line\n%s", out)
 	}
 }
 
@@ -108,7 +110,7 @@ func TestRenderInterfaceHostInboundLifeline3682(t *testing.T) {
 
 	z := &ZoneConfig{}
 	// lifeline=true: exempt marker, NO default-deny line.
-	out := strings.Join(z.RenderInterfaceHostInbound("em0.0", true, labels), "\n")
+	out := strings.Join(z.RenderInterfaceHostInbound("fxp0.0", true, labels), "\n")
 	if !strings.Contains(out, exempt) {
 		t.Errorf("lifeline diagnostic missing exempt marker\n%s", out)
 	}

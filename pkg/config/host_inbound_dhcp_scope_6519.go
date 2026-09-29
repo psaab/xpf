@@ -290,10 +290,10 @@ func hostInboundZoneLevelDHCPTokens(zoneSvc []string) []string {
 // interface level replace the zone level, without asserting which rule is in
 // force.
 //
-// Lifeline interfaces (fxp0 / em0 / fab* and the configured control + fabric
-// links) are skipped: they are excluded from host-inbound deny scoping entirely,
-// so no zone token decides anything on them and naming them would be a false
-// alarm. A zone whose reached-interface set is empty draws no advisory.
+// Lifeline interfaces (fxp0 plus explicitly configured control/fabric links)
+// are skipped: they are excluded from host-inbound deny scoping entirely, so no
+// zone token decides anything on them and naming them would be a false alarm.
+// A zone whose reached-interface set is empty draws no advisory.
 //
 // WARN-only. See the file header for why the enforcement flip is staged
 // separately.

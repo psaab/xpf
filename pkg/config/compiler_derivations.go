@@ -180,13 +180,11 @@ func resolveDerivedConfig(cfg *Config, opts compileOpts) {
 	// because the interface runs a DHCP server or relay and not the firewall's
 	// own client.
 	//
-	// MUST run LAST of the sub-steps here, and the reason is the lifeline set:
-	// HostInboundLifelineSet reads Chassis.Cluster's control/fabric interface
-	// names, and the fabric fixup in step 6 is what AUTO-POPULATES
-	// FabricInterface / Fabric1Interface on a vSRX-style config that names them
-	// only through fab0/fab1 member-interfaces. Stamping before step 6 would
-	// classify a fabric interface as non-lifeline on exactly the configs that
-	// use the canonical Junos spelling.
+	// MUST run LAST of the sub-steps here so the host-inbound advisories consume
+	// the final derived configuration. The fabric fixup in step 6 resolves local
+	// members and populates FabricInterface / Fabric1Interface; lifeline role
+	// recognition also reads explicit fabric-options member-interfaces (including
+	// peer-side links), so it does not infer roles from em0/fab* spelling.
 	//
 	// It runs in this phase rather than in a validator because the P6/P7
 	// advisories READ the stamp — the #6519 advisory has to distinguish a

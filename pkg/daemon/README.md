@@ -2726,8 +2726,9 @@ never lock an operator out of a remote box it manages.
   traffic to the kernel on every bound interface keyed on the DESTINATION
   being local and NOT on protocol, so SCTP, GRE and ICMP to a
   firewall-local address take that arm exactly as TCP and UDP do; and the
-  lifelines (`fxp0`, `em0`, `fab*`) are never AF_XDP-bound at all and are
-  served on the kernel path unconditionally. So an operator's
+  configured lifelines (`fxp0` and explicitly configured chassis-cluster
+  control/fabric interfaces, including `fabric-options member-interfaces`) are
+  never AF_XDP-bound and are served on the kernel path unconditionally. So an operator's
   `destination-port 22` term is evaluated against a GRE or ICMP packet,
   reading two arbitrary header bytes as a port — an `accept` term fails
   OPEN when they happen to match, a `discard` term drops traffic the
@@ -3589,16 +3590,17 @@ never lock an operator out of a remote box it manages.
   management-only skip on the config-derived host-inbound LIFELINE set
   (`config.HostInboundLifelineSet` / `HostInboundLifelineInterface`, the SAME
   authority this fence uses), NOT the broad management-VRF name class
-  (fxp*/fab*/em*). Only a TRUE lifeline (fxp0, em0, fab*, or a configured
+  (fxp*/fab*/em*). Only a TRUE lifeline (`fxp0` or an explicitly configured
   chassis-cluster control/fabric interface) takes the lightweight management-only
   branch; a zoned NON-lifeline DHCP interface (e.g. a standalone `fxp1`) now forces
   the full recompile that builds its address-scoped host-inbound fence, closing the
   addressless→addressed gap where the broad class exempted it from that reapply.
   **Lifeline exclusion — by INTERFACE and by address VALUE (#7284):**
-  management/cluster-control interfaces (fxp0 / em0 / fab*) are excluded from
-  the address sets, so an address reachable ONLY through a lifeline is never
-  denied. A management address ALSO configured on a non-lifeline interface is
-  additionally withheld by VALUE from any drop set that would deny it with no
+  management/cluster-control interfaces (`fxp0` or explicitly configured
+  chassis-cluster control/fabric links) are excluded from the address sets, so an
+  address reachable ONLY through a lifeline is never denied. A management address
+  ALSO configured on a non-lifeline interface is additionally withheld by VALUE
+  from any drop set that would deny it with no
   accept — every host-inbound drop is destination-address-only with no `iifname`
   (#3718), so arriving on the lifeline cannot exempt it and only a value
   subtraction can. Before #7284 a zone with no stanza (#3405) or an unzoned

@@ -199,10 +199,10 @@ func TestSharedDeviceUnzonedUnitAdvisoryFires7509(t *testing.T) {
 	}
 }
 
-// A contest warning still fires for a lifeline base, but #10503 deliberately
-// skips its host-inbound sentinel. The warning must describe that admit path,
-// not claim a deny that the dataplane does not install.
-func TestContestedTrunkLifelineAdvisoryDescribesHostAdmit7509(t *testing.T) {
+// A bare fabric name is not a configured cluster role under #11068. The
+// contested-parent advisory must describe the actual zone-gated host-inbound
+// path rather than claim an unconditional lifeline admit or sentinel deny.
+func TestContestedTrunkUnconfiguredFabAdvisoryDescribesZoneHostGate7509(t *testing.T) {
 	cfg := contestedCfg7509(t, map[string][]string{
 		"lan": {"fab0.100"},
 		"wan": {"fab0.200"},
@@ -211,22 +211,19 @@ func TestContestedTrunkLifelineAdvisoryDescribesHostAdmit7509(t *testing.T) {
 
 	got := warningsMentioning(cfg, "fab0")
 	if len(got) != 1 {
-		t.Fatalf("expected one lifeline contest advisory; got %d: %v", len(got), cfg.Warnings)
+		t.Fatalf("expected one contested-parent advisory; got %d: %v", len(got), cfg.Warnings)
 	}
-	for _, want := range []string{"UNTAGGED", "unattributed", "DENIED", "#6682", "#10503", "lifeline", "admitted"} {
+	for _, want := range []string{"UNTAGGED", "unattributed", "DENIED", "#6682",
+		"zone-gated by applicable zone policy", "neither an unconditional lifeline admit"} {
 		if !strings.Contains(got[0], want) {
-			t.Fatalf("lifeline advisory must name %q; got: %s", want, got[0])
+			t.Fatalf("ordinary fab0 advisory must describe %q; got: %s", want, got[0])
 		}
-	}
-	if strings.Contains(got[0], "host-inbound sentinel (#10503") {
-		t.Fatalf("lifeline advisory must not claim a sentinel deny; got: %s", got[0])
 	}
 }
 
-// A shared-device warning also has a lifeline shape: the warning still fires,
-// but the host-bound clause must describe the deliberate #5659/#10556 admit
-// path rather than claim a #5659 deny or the contested-parent #10503 sentinel.
-func TestSharedDeviceLifelineAdvisoryDescribesHostAdmit7509(t *testing.T) {
+// A shared-device warning on an unconfigured bare fab0 must use the same
+// zone-gated host-inbound description, not the former default-lifeline wording.
+func TestSharedDeviceUnconfiguredFabAdvisoryDescribesZoneHostGate7509(t *testing.T) {
 	cfg := sharedDeviceCfg7509(t, "fab0", false,
 		map[int]int{0: 0, 100: 100},
 		map[string][]string{"lan": {"fab0.100"}})
@@ -234,17 +231,14 @@ func TestSharedDeviceLifelineAdvisoryDescribesHostAdmit7509(t *testing.T) {
 
 	got := warningsMentioning(cfg, "fab0.0")
 	if len(got) != 1 {
-		t.Fatalf("expected one shared-device lifeline advisory; got %d: %v",
-			len(got), cfg.Warnings)
+		t.Fatalf("expected one shared-device advisory; got %d: %v", len(got), cfg.Warnings)
 	}
-	for _, want := range []string{"fab0", "UNZONED", "unattributed", "DENIED", "#6682", "#5659", "#10556", "lifeline", "admitted"} {
+	for _, want := range []string{"fab0", "UNZONED", "unattributed", "DENIED", "#6682",
+		"#9989", "zone-gated by applicable zone policy",
+		"neither an unconditional lifeline admit"} {
 		if !strings.Contains(got[0], want) {
-			t.Fatalf("lifeline refusal advisory must name %q; got: %s", want, got[0])
+			t.Fatalf("ordinary fab0 refusal advisory must describe %q; got: %s", want, got[0])
 		}
-	}
-	if strings.Contains(got[0], "#10503") ||
-		strings.Contains(got[0], "is denied by the #5659") {
-		t.Fatalf("lifeline advisory must not claim a host-inbound sentinel deny; got: %s", got[0])
 	}
 }
 
@@ -529,7 +523,7 @@ func TestAllZonedInterfaceTunnelDisagreeUsesRefusedHostShape10556(t *testing.T) 
 	}
 }
 
-func TestAllZonedLifelineInterfaceTunnelDisagreeUsesLifelineHostShape7509(t *testing.T) {
+func TestAllZonedUnconfiguredEm0TunnelUsesZoneHostShape7509(t *testing.T) {
 	cfg := sharedDeviceCfg7509(t, "em0", true,
 		map[int]int{0: 0, 1: 0},
 		map[string][]string{
@@ -539,18 +533,19 @@ func TestAllZonedLifelineInterfaceTunnelDisagreeUsesLifelineHostShape7509(t *tes
 	appendContestedTrunkZoneAdvisoryLocked(cfg, compileOpts{})
 	got := warningsMentioning(cfg, "em0")
 	if len(got) != 1 {
-		t.Fatalf("expected one all-zoned lifeline tunnel advisory; got %d: %v",
+		t.Fatalf("expected one all-zoned interface-tunnel advisory; got %d: %v",
 			len(got), cfg.Warnings)
 	}
 	for _, want := range []string{
-		"UNZONED", "DENIED", "#6682", "#10503", "#10556", "lifeline", "admitted",
+		"UNZONED", "DENIED", "#6682", "#9989",
+		"zone-gated by applicable zone policy", "neither an unconditional lifeline admit",
 	} {
 		if !strings.Contains(got[0], want) {
-			t.Fatalf("lifeline tunnel advisory must name %q; got: %s", want, got[0])
+			t.Fatalf("unconfigured em0 tunnel advisory must describe %q; got: %s", want, got[0])
 		}
 	}
 	if strings.Contains(got[0], "Host-bound traffic to the firewall itself is denied") {
-		t.Fatalf("lifeline tunnel advisory must not claim a refused-ifindex deny; got: %s",
+		t.Fatalf("ordinary em0 tunnel advisory must not claim a refused-ifindex deny; got: %s",
 			got[0])
 	}
 }

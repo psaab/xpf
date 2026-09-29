@@ -37,9 +37,10 @@ import (
 // view, so an operator can certify one interface's TRUE posture. Post-#3405 a
 // configured zone with no host-inbound-traffic stanza default-DENIES (its view
 // carries empty token sets), so "unmatched host policy" does NOT imply delivery.
-// Lifeline interfaces (fxp0/em0/fab*) are excluded from the views and so are
-// never classified here (their host traffic is served unconditionally); the
-// ingress-interface selector rejects a lifeline ref for the same reason.
+// Lifeline interfaces (fxp0 plus explicitly configured cluster control/fabric
+// links) are excluded from the views and so are never classified here (their
+// host traffic is served unconditionally); the ingress-interface selector
+// rejects a lifeline ref for the same reason.
 
 // HostInboundStatus classifies how the ingress zone's host-inbound-traffic
 // admission gate treats a host-bound query tuple (#3627 B1a). It is presence-safe
@@ -229,12 +230,11 @@ func verdictFor(v ZoneHostInboundView, a HostInboundAdmission) HostInboundViewVe
 // ClassifyHostInbound — which folds every view in the zone with a first-admit OR
 // — it evaluates ONLY ifaceRef's effective token set (its per-interface
 // override where declared, which REPLACES the zone-level set — #6515, #3362 —
-// with the same physical→unit inheritance the enforcement view builder uses),
-// so a mixed zone reports the interface's TRUE
-// posture (admit vs deny) instead of a zone-wide first-admit fold. ifaceRef is
-// expected to be a caller-validated interface assigned to fromZone (see
-// ResolveHostInboundIngressInterface); an unresolved zone/interface yields
-// HostInboundNotComputed defensively.
+// with the same physical→unit inheritance the enforcement view builder uses).
+// ifaceRef is expected to be a caller-validated interface assigned to fromZone
+// (see ResolveHostInboundIngressInterface); an unresolved zone/interface yields
+// HostInboundNotComputed defensively. A quarantined zone classifies as the
+// empty view used by ClassifyHostInbound, not from its raw config stanza.
 func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef string, proto uint8, hasProto bool, dstPort int, icmpType *uint8, family string) HostInboundAdmission {
 	if cfg == nil || fromZone == "" || ifaceRef == "" {
 		return HostInboundAdmission{Status: HostInboundNotComputed}
@@ -242,6 +242,11 @@ func ClassifyHostInboundForInterface(cfg *config.Config, fromZone, ifaceRef stri
 	zone := cfg.Security.Zones[fromZone]
 	if zone == nil {
 		return HostInboundAdmission{Status: HostInboundNotComputed}
+	}
+	if _, quarantined := quarantinedZoneNames(cfg)[fromZone]; quarantined {
+		return classifyOneView(ZoneHostInboundView{
+			Zone: fromZone, Interfaces: []string{ifaceRef},
+		}, proto, hasProto, dstPort, icmpType, family)
 	}
 	// Resolve THIS interface's effective host-inbound token set with the same SSOT
 	// the enforcement view builder uses (effectiveHostInboundTokens over the
@@ -315,11 +320,12 @@ func classifyOneView(v ZoneHostInboundView, proto uint8, hasProto bool, dstPort 
 // non-nil (callers skip validation during the no-config boot window, which
 // returns the default-deny verdict regardless of any interface).
 //
-// A management/cluster lifeline interface (fxp0 / em0 / fab*) is rejected: its
-// host traffic is served UNCONDITIONALLY (excluded from the host-inbound deny),
-// so per-interface host-inbound classification does not describe it — reporting a
-// token/deny verdict for a lifeline would be a fresh false answer. The error
-// tells the operator the lifeline is always served.
+// A management/cluster lifeline interface (fxp0 or an explicitly configured
+// control/fabric link) is rejected: its host traffic is served UNCONDITIONALLY
+// (excluded from the host-inbound deny), so per-interface host-inbound
+// classification does not describe it — reporting a token/deny verdict for a
+// lifeline would be a fresh false answer. The error tells the operator the lifeline
+// is always served.
 func ResolveHostInboundIngressInterface(cfg *config.Config, fromZone, ifaceRef string) error {
 	if ifaceRef == "" {
 		return nil
@@ -328,7 +334,7 @@ func ResolveHostInboundIngressInterface(cfg *config.Config, fromZone, ifaceRef s
 		return nil
 	}
 	if hostInboundLifelineInterface(ifaceRef, hostInboundLifelineSet(cfg)) {
-		return fmt.Errorf("ingress-interface %q is a management/cluster lifeline (fxp0/em0/fab*); its host traffic is served unconditionally and is not subject to per-interface host-inbound classification", ifaceRef)
+		return fmt.Errorf("ingress-interface %q is a management/cluster lifeline (fxp0 or a configured cluster control/fabric link); its host traffic is served unconditionally and is not subject to per-interface host-inbound classification", ifaceRef)
 	}
 	// The classifier (ClassifyHostInboundForInterface) keys the effective
 	// host-inbound token set on the LOGICAL-UNIT ref via
