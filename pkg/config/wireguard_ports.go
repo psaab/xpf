@@ -72,7 +72,7 @@ func (c *Config) WireGuardListenPorts() []uint16 {
 // Zone resolution reuses InterfaceZoneMap (same fan-up/fan-down +
 // quarantine rules the host-inbound views enforce). A tunnel whose interface
 // binds no zone contributes nothing: its handshake cannot arrive (fail
-// closed), and validateWireGuardZoneScope warns. Ports within a zone are
+// closed), and the compile tailgate warns. Ports within a zone are
 // sorted+deduped; zones with no WG tunnels are absent (not empty). Returns
 // nil when no zoned WG tunnel exists.
 func (c *Config) WireGuardZonePorts() map[string][]uint16 {

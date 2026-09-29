@@ -1936,10 +1936,10 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		}
 		// (4) ND/PMTUD/ICMP-error accepts for NON-denied sources.
 		emitHostInboundICMPAccepts(&rules)
-		// (4b) #5582: coarse WireGuard listen-port admission. Placed AFTER the
-		// fine junos-host DROP subchain so an explicit operator `to-zone
-		// junos-host` deny of a WG source still wins; it is a coarse admit like
-		// the ND/PMTUD accepts.
+		// #11076: no WireGuard accept here anymore. The former (4b) coarse
+		// global admit is now per-zone daddr-scoped inside each zone's own
+		// section (emitHostInboundZone), ordered with zone policy — so an
+		// explicit `to-zone junos-host` deny still wins by position.
 	} else {
 		// Raw ESP (50) / AH (51) are exempt from host-inbound enforcement so the
 		// kernel XFRM stack can decrypt host-terminated IPsec — mirroring the
@@ -1961,10 +1961,9 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		// residual accept only after the ingress-zone rules below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
 		emitHostInboundICMPAccepts(&rules)
-		// #5582: coarse WireGuard listen-port admission (see
-		// emitHostInboundWireGuardAccept). A single global accept on the input
-		// hook, so the shim-steered outer transport reaches the userspace WG
-		// socket regardless of which zone's address it is destined to.
+		// #11076: WireGuard admission is per-zone daddr-scoped in each
+		// zone's section below — the shim-steered outer transport reaches
+		// the socket only at the tunnel zone's addresses.
 	}
 	// #10751 F8-A: admit the DHCP client's own replies before the
 	// destination drops (see emitUnleasedDHCPAdmits). After the
@@ -2088,11 +2087,11 @@ func emitHostInboundICMPAccepts(rules *[]string) {
 // initiated (the chain accepts established traffic ahead of this rule), a zone
 // that admits every host-inbound service accepts the port regardless, and no
 // table is installed at all when nothing needs one. The helper's socket is the
-// one place every such record converges. No-op when WG is not configured.
+// one place every such record converges.
 // renderWireGuardPortSpec renders the WireGuard listen-port set as an nft
 // destination-port value: a single port ("51820") or an anonymous set
 // ("{ 51820, 51821 }"). Ports arrive sorted+deduped from
-// config.WireGuardListenPorts().
+// config.WireGuardZonePorts().
 func renderWireGuardPortSpec(ports []uint16) string {
 	if len(ports) == 1 {
 		return strconv.Itoa(int(ports[0]))
