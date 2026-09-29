@@ -227,7 +227,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "1ae1348ac0f224618743a0e86e962a213b3aa016554dbf9810cb9f8c25b3b390"
+	snapshotShapeGolden8892 = "44141f3343dbd1ec1396386facca3d5d9e7bf428235622eb4beb971ecba7cd3f"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -393,9 +393,10 @@ const (
 	// v35 STANDS (#11060): Config.QuarantinedRIMemberDeviceConflicts and
 	// Config.QuarantinedRIMemberPrimaryClaims are tagged `json:"-"` and carry
 	// compile-time conflict/ownership evidence only; neither enters ConfigSnapshot
-	// JSON. The reflection digest moves, but the transmitted field set and
-	// protocol contract do not.
-	snapshotShapeVersion8892 = 35
+	// JSON. The reflection digest moves, but the transmitted field set does not.
+	// v35 -> v36 BUMPED (#11064): ICMP type/code terms now travel on source-NAT
+	// applications. Older helpers ignore those fields and broaden the rule.
+	snapshotShapeVersion8892 = 36
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

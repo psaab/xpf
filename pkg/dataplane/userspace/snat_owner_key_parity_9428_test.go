@@ -819,8 +819,8 @@ func TestOwnerKeyParityIsBlindNotAgreeingWithoutTheKey9428(t *testing.T) {
 func TestOwnerKeyParityNamesARustSelfDisagreement9428(t *testing.T) {
 	src := loadOwnerKeyParitySources9428(t)
 	src.rust = mustReplaceOnce9428(t, src.rust,
-		".then(|| self.allocator_key_for(self.pool_port_low, self.pool_port_high))",
-		".then(|| self.allocator_key_for(self.pool_port_high, self.pool_port_low))",
+		"&& !self.lenient_match_dropped)\n            .then(|| self.allocator_key_for(self.pool_port_low, self.pool_port_high))",
+		"&& !self.lenient_match_dropped)\n            .then(|| self.allocator_key_for(self.pool_port_high, self.pool_port_low))",
 		"swap the port arguments at one call site")
 	_, liveness, violations := checkOwnerKeyParity9428(src)
 	if len(liveness) > 0 {
@@ -842,8 +842,8 @@ func TestOwnerKeyParityNamesARustSelfDisagreement9428(t *testing.T) {
 func TestOwnerKeyParityCannotSkipAnUnparseableCallSite9428(t *testing.T) {
 	src := loadOwnerKeyParitySources9428(t)
 	src.rust = mustReplaceOnce9428(t, src.rust,
-		".then(|| self.allocator_key_for(self.pool_port_low, self.pool_port_high))",
-		".then(|| self.allocator_key_for(self.pool_port_low + 0, self.pool_port_high))",
+		"&& !self.lenient_match_dropped)\n            .then(|| self.allocator_key_for(self.pool_port_low, self.pool_port_high))",
+		"&& !self.lenient_match_dropped)\n            .then(|| self.allocator_key_for(self.pool_port_low + 0, self.pool_port_high))",
 		"make one call site's argument unparseable")
 	_, liveness, _ := checkOwnerKeyParity9428(src)
 	found := false

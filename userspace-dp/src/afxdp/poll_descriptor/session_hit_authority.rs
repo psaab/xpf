@@ -181,7 +181,7 @@ pub(super) fn session_hit_authority(
                 return HitAuthority::Foreign {
                     arrival_zone: zone,
                     on_admitting_interface: false,
-                }
+                };
             }
             // Unstamped overlay: no arrival identity to judge. The #9519
             // exemption stands, as at the #7169/#9384 sibling sites.
@@ -261,17 +261,18 @@ pub(super) fn owner_hit_icmp_verdict(
     meta: UserspaceDpMeta,
     packet_frame: &[u8],
     packet_fabric_ingress: bool,
+    fabric_arrival_zone: Option<u16>,
 ) -> Option<OwnerHitIcmpVerdict> {
-    // Host-bound packets have a different authority plane (`junos-host`). This
-    // helper is reached only for Owner hits: a stamped fabric arrival has
-    // already matched the session's ingress zone, while an unstamped overlay
-    // retains the #9519 exemption. A foreign stamp exits through the foreign
-    // path first.
+    // Host-bound packets have a different authority plane (`junos-host`).
+    // Unstamped fabric arrivals retain the #9519 exemption because no arrival
+    // zone is available; a validated same-zone stamp is enough authority for
+    // this per-packet check. Foreign stamps have already left through the
+    // foreign path.
     if decision.resolution.disposition == ForwardingDisposition::LocalDelivery
-        || packet_fabric_ingress
+        || (packet_fabric_ingress && fabric_arrival_zone.is_none())
         || !forwarding
             .policy
-            .icmp_verdict_may_depend_on_type(meta.protocol)
+            .icmp_packet_verdict_may_depend_on_type(meta.protocol)
     {
         return None;
     }
@@ -393,7 +394,7 @@ pub(super) fn foreign_hit_verdict(
         || metadata.is_reverse
         || forwarding
             .policy
-            .icmp_verdict_may_depend_on_type(meta.protocol)
+            .icmp_packet_verdict_may_depend_on_type(meta.protocol)
     {
         return ForeignHitVerdict::Drop(deny);
     }

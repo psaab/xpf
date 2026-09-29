@@ -242,6 +242,49 @@ pub(crate) fn match_source_nat_result_for_tuple(
     holder: NatHolder,
     matched_counter: &mut Option<Arc<NatRuleCounter>>,
 ) -> SourceNatLookup {
+    match_source_nat_result_for_tuple_with_icmp(
+        iface_allocs,
+        rules,
+        scope,
+        from_zone,
+        to_zone,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        egress_v4,
+        egress_v6,
+        now_ns,
+        non_first_fragment,
+        icmp_identifier_present,
+        None,
+        holder,
+        matched_counter,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn match_source_nat_result_for_tuple_with_icmp(
+    iface_allocs: &InterfaceNatAllocators,
+    rules: &[SourceNatRule],
+    scope: &NatScopeCtx,
+    from_zone: &str,
+    to_zone: &str,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: Option<u8>,
+    src_port: u16,
+    dst_port: u16,
+    egress_v4: Option<Ipv4Addr>,
+    egress_v6: Option<Ipv6Addr>,
+    now_ns: u64,
+    non_first_fragment: bool,
+    icmp_identifier_present: bool,
+    packet_icmp: Option<(u8, u8)>,
+    holder: NatHolder,
+    matched_counter: &mut Option<Arc<NatRuleCounter>>,
+) -> SourceNatLookup {
     let out = match_source_nat_result_for_tuple_inner(
         iface_allocs,
         rules,
@@ -258,6 +301,7 @@ pub(crate) fn match_source_nat_result_for_tuple(
         now_ns,
         non_first_fragment,
         icmp_identifier_present,
+        packet_icmp,
         holder,
         matched_counter,
     );
@@ -317,6 +361,8 @@ fn match_source_nat_result_for_tuple_inner(
     // address on the reverse tuple (pool_addr, 0). The synthetic /
     // address-only (`protocol == 0`) callers pass `false`.
     icmp_identifier_present: bool,
+    // #11064: packet-scoped ICMP type/code carried by the frame being matched.
+    packet_icmp: Option<(u8, u8)>,
     // #6522: the worker whose packet path is making this allocation. The record
     // this call inserts names its own holder, so a sibling worker's replica of
     // the resulting session cannot free a `(pool_addr, port)` this worker is
@@ -363,6 +409,7 @@ fn match_source_nat_result_for_tuple_inner(
             src_port,
             dst_port,
             non_first_fragment,
+            packet_icmp,
         );
         if rule_match == L4Match::NoMatch {
             continue;
@@ -708,9 +755,9 @@ fn match_source_nat_result_for_tuple_inner(
                                 });
                             }
                             Err(reason) => {
-                                return SourceNatLookup::Unavailable(
-                                    SourceNatFailure::for_rule(rule, reason),
-                                );
+                                return SourceNatLookup::Unavailable(SourceNatFailure::for_rule(
+                                    rule, reason,
+                                ));
                             }
                         }
                     }
