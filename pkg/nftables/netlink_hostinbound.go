@@ -58,7 +58,6 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 			emitJunosHostProgramJumpNetlink(p, i, prog)
 		}
 		emitHostInboundICMPAcceptsNetlink(p)
-		emitHostInboundWireGuardAcceptNetlink(p, spec.WGListenPorts)
 	} else {
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
@@ -66,7 +65,6 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		))
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		emitHostInboundICMPAcceptsNetlink(p)
-		emitHostInboundWireGuardAcceptNetlink(p, spec.WGListenPorts)
 	}
 
 	// #10751 F8-A: admit the DHCP client's own replies before the
@@ -91,8 +89,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	}
 	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	for _, v := range spec.Views {
-		emitHostInboundZoneNetlink(p, v, famV4, v.V4Addrs)
-		emitHostInboundZoneNetlink(p, v, famV6, v.V6Addrs)
+		emitHostInboundZoneNetlink(p, v, famV4, v.V4Addrs, spec.WGZonePorts[v.Zone])
+		emitHostInboundZoneNetlink(p, v, famV6, v.V6Addrs, spec.WGZonePorts[v.Zone])
 	}
 	emitUnzonedHostInboundDenyNetlink(p, famV4, "ip", spec.UnzonedV4)
 	emitUnzonedHostInboundDenyNetlink(p, famV6, "ip6", spec.UnzonedV6)
@@ -206,17 +204,21 @@ func emitHostInboundICMPAcceptsNetlink(p *nlPlan) {
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP4Error)).emit(verdictAccept()...)
 }
 
-// emitHostInboundWireGuardAcceptNetlink mirrors emitHostInboundWireGuardAccept:
-// a single coarse `udp dport <wg-port(s)> accept` (#5582). No-op when unset.
-func emitHostInboundWireGuardAcceptNetlink(p *nlPlan, wgListenPorts []uint16) {
-	if len(wgListenPorts) == 0 {
+// emitHostInboundZoneWireGuardAcceptNetlink admits a zone's WireGuard tunnels
+// (#11076): `daddr <zone-addrs> udp dport <zone-ports> accept`, rendered inside
+// the zone's own section after its service accepts and before its catch-all
+// deny — ordered with zone policy, never above it. No-op when the zone serves
+// no WG tunnels. Unzoned addresses match no zone section and keep falling to
+// the unzoned deny.
+func emitHostInboundZoneWireGuardAcceptNetlink(p *nlPlan, f nlFamily, addrs []string, wgPorts []uint16) {
+	if len(addrs) == 0 || len(wgPorts) == 0 {
 		return
 	}
-	p.rule().l4Port(protoUDP, "dport", portsFromUint16(wgListenPorts), false).emit(verdictAccept()...)
+	p.rule().daddr(f, addrs, false).l4Port(protoUDP, "dport", portsFromUint16(wgPorts), false).emit(verdictAccept()...)
 }
 
 // emitHostInboundZoneNetlink mirrors emitHostInboundZone for one zone/family.
-func emitHostInboundZoneNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, addrs []string) {
+func emitHostInboundZoneNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, addrs []string, wgPorts []uint16) {
 	if len(addrs) == 0 {
 		return
 	}
@@ -234,6 +236,7 @@ func emitHostInboundZoneNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, ad
 			a.emit(verdictAccept()...)
 		}
 	}
+	emitHostInboundZoneWireGuardAcceptNetlink(p, f, addrs, wgPorts)
 	// Catch-all default-deny with named counter (#3361).
 	cn := HostInboundDenyCounterName(v.Zone, family)
 	p.rule().daddr(f, addrs, false).counterRef(cn).emit(verdictDrop()...)

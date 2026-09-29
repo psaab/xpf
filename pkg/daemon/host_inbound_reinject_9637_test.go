@@ -50,7 +50,7 @@ func reinjectAcceptLines(t *testing.T, payload string) []string {
 //     first ingress-zone rule.
 func TestHostInboundReinjectAcceptShape9637(t *testing.T) {
 	views, unzonedV4, unzonedV6 := reinjectViews9637()
-	_, _, _, programs, wg := parityHostInboundInputs()
+	_, _, _, programs, _, wgZones := parityHostInboundInputs()
 	for _, tc := range []struct {
 		name     string
 		programs []dpuserspace.JunosHostProgram
@@ -59,7 +59,7 @@ func TestHostInboundReinjectAcceptShape9637(t *testing.T) {
 		{"with-programs", programs},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			payload := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, tc.programs, wg, true)
+			payload := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, tc.programs, wgZones, true)
 			cn := xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptReinject)
 			wantV4 := `    iifname "xpf-usp0" ip daddr ` + nftAddrSet([]string{"10.0.61.1", "172.16.80.8"}) + ` counter name "` + cn + `" accept`
 			wantV6 := `    iifname "xpf-usp0" ip6 daddr 2001:db8:61::1 counter name "` + cn + `" accept`
@@ -839,8 +839,8 @@ func TestHostInboundReinjectVersionRefusalAbortsAcceptless9637(t *testing.T) {
 // device reference in xpf_hostinbound; xpf-usp1 must remain destination-ruled.
 func TestHostInboundDelegatedTUNMissesFineJunosHost10525(t *testing.T) {
 	views, unzonedV4, unzonedV6 := reinjectViews9637()
-	_, _, _, programs, wg := parityHostInboundInputs()
-	payload := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wg, true)
+	_, _, _, programs, _, wgZones := parityHostInboundInputs()
+	payload := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wgZones, true)
 	if strings.Contains(payload, `"xpf-usp1"`) {
 		t.Fatalf("K1: xpf_hostinbound must not match the delegated xpf-usp1 TUN with "+
 			"a junos-host or reinject accept rule:\n%s", payload)

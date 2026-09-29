@@ -75,11 +75,11 @@ func TestNftNetlinkParity(t *testing.T) {
 
 func runNftNetlinkParityInner(t *testing.T) {
 	inst := xnft.NewNetlinkInstaller()
-	views, unzonedV4, unzonedV6, programs, wg := parityHostInboundInputs()
+	views, unzonedV4, unzonedV6, programs, wg, wgZones := parityHostInboundInputs()
 
 	t.Run("host_inbound", func(t *testing.T) {
-		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wg, true)
-		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, true)
+		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wgZones, true)
+		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, wgZones, true)
 		// parityCheck compares the nft-text dump AND the PER-RULE iifname scope
 		// (read byte-for-byte via netlink, since google/nftables v0.3.0 renders
 		// anonymous string-set elements empty in `nft list`, so the TEXT cannot
@@ -92,21 +92,21 @@ func runNftNetlinkParityInner(t *testing.T) {
 		// #9637-D1: the CLOSED gate must be bit-identical on both surfaces
 		// too — a stale render is byte-identical to the pre-#9637 ruleset
 		// (no accept, no counter) on the oracle AND the netlink build.
-		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wg, false)
-		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, false)
+		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wgZones, false)
+		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, wgZones, false)
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
 	})
 	t.Run("host_inbound_no_programs", func(t *testing.T) {
 		// Both chain shapes (Codex impl r1 §2 limitation): the no-junos-host
 		// shape must also agree on both surfaces, fresh ...
-		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, nil, wg, true)
-		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, nil, wg, true)
+		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, nil, wgZones, true)
+		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, nil, wg, wgZones, true)
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
 	})
 	t.Run("host_inbound_no_programs_stale_gate_closed", func(t *testing.T) {
 		// ... and stale (closed gate, byte-identical to pre-#9637).
-		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, nil, wg, false)
-		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, nil, wg, false)
+		oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, nil, wgZones, false)
+		spec := toNftHostInboundSpec(views, unzonedV4, unzonedV6, nil, wg, wgZones, false)
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
 	})
 
@@ -145,11 +145,11 @@ func runNftNetlinkParityInner(t *testing.T) {
 		// scope.
 		unleasedV4 := []string{"ge-0-0-8", "ge-0-0-9"}
 		unleasedV6 := []string{"ge-0-0-9"}
-		oracle := buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wg, true, nil, unleasedV4, unleasedV6)
+		oracle := buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgZones, true, nil, unleasedV4, unleasedV6)
 		if !strings.Contains(oracle, "udp dport 68 accept") || !strings.Contains(oracle, "udp dport 546 accept") {
 			t.Fatal("real oracle emitted no unleased DHCP admits; the diff below would be vacuous")
 		}
-		spec := toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wg, true, nil)
+		spec := toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wg, wgZones, true, nil)
 		spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
 
@@ -423,7 +423,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 	// Mutation-sensitivity against the REAL oracle: each fail-open class must make
 	// the netlink dump DIVERGE from the oracle dump — proving the gate catches a
 	// fail-open rather than passing vacuously (§12.1).
-	oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wg, true)
+	oracle := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, programs, wgZones, true)
 	mutations := []struct {
 		name   string
 		mutate func(s *xnft.HostInboundSpec)
@@ -453,7 +453,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 			iifOracle := iifnameScopeByRule(t, xnft.HostInboundTableName)
 			nftDeleteTableBestEffort(xnft.HostInboundTableName)
 
-			mutated := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, true)
+			mutated := toNftHostInboundSpec(views, unzonedV4, unzonedV6, programs, wg, wgZones, true)
 			mc.mutate(&mutated)
 			if err := inst.InstallHostInbound(mutated); err != nil {
 				t.Fatalf("mutated install failed: %v", err)
@@ -781,7 +781,7 @@ func bytesTrimRightZero(b []byte) []byte {
 
 // --- construct-complete parity inputs ---------------------------------------
 
-func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16) {
+func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16, wgZones map[string][]uint16) {
 	views = []dpuserspace.ZoneHostInboundView{
 		// #9637: IngressNetdevs on every rendering branch the ingress-zone rules
 		// take, so T1 pins them rule-for-rule: a multi-netdev set (trust), the
@@ -804,6 +804,9 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 	unzonedV4 = []string{"10.0.99.1"}
 	unzonedV6 = []string{"2001:db8:99::1"}
 	wg = []uint16{51820, 51821}
+	// #11076: scoped admission fixture — trust (v4+v6) serves 51820,
+	// mgmt (v4-only) serves 51821; every other zone must deny both.
+	wgZones = map[string][]uint16{"trust": {51820}, "mgmt": {51821}}
 	programs = []dpuserspace.JunosHostProgram{
 		{
 			Zone:                  "untrust",
@@ -849,7 +852,7 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 			},
 		},
 	}
-	return views, unzonedV4, unzonedV6, programs, wg
+	return views, unzonedV4, unzonedV6, programs, wg, wgZones
 }
 
 func parityLo0Config() *config.Config {

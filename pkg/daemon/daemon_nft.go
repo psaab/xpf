@@ -742,6 +742,8 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// when no WG tunnel is configured — buildHostInboundFilterPayload then emits
 	// no WG accept, so the restricted-default posture is unchanged.
 	wgListenPorts := cfg.WireGuardListenPorts()
+	// #11076: per-zone WG admission scope for the host-inbound builders.
+	wgZonePorts := cfg.WireGuardZonePorts()
 	// #5789: the exact firewall-local destination set this generation wants a
 	// catch-all DROP for. Compared on failure against the retained generation's
 	// covered set to detect addresses that appeared after that generation loaded.
@@ -786,7 +788,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// the previous table (pre-existing #5789 staleness, commit fails closed
 	// via H7); the flag is untouched and the next call-site outcome re-drives
 	// it — see hostInboundDataplaneFresh for the full transition table.
-	spec := toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wgListenPorts, d.hostInboundDataplaneFresh.Load(), overlay)
+	spec := toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wgListenPorts, wgZonePorts, d.hostInboundDataplaneFresh.Load(), overlay)
 	spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
 	if err := nftInstaller.InstallHostInbound(spec); err != nil {
 		err = tagNftInstallErr(err)
@@ -1784,11 +1786,15 @@ func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool
 //     fresh address the dataplane never authorized, and a post-install failure
 //     removes an installed accept on the next render. The F3 window is closed by
 //     construction, not by probe.
-func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgListenPorts []uint16, dataplaneFresh bool) string {
-	return buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgListenPorts, dataplaneFresh, nil, nil, nil)
+func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool) string {
+	return buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgZonePorts, dataplaneFresh, nil, nil, nil)
 }
 
-func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgListenPorts []uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string) string {
+func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string) string {
+	// #11076: the stale-reply guards are scope-independent (port set only);
+	// derive the flat set from the zone map. Nothing else in this builder
+	// may use flat ports — WireGuard admission is per-zone below.
+	wgListenPorts := flatWireGuardPorts(wgZonePorts)
 	// Pre-pass: collect the named DROP counters the chain will reference, so they
 	// can be declared at the top of the table body BEFORE the chain. A counter is
 	// emitted exactly when emitHostInboundZone emits a catch-all drop
@@ -1934,7 +1940,6 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		// fine junos-host DROP subchain so an explicit operator `to-zone
 		// junos-host` deny of a WG source still wins; it is a coarse admit like
 		// the ND/PMTUD accepts.
-		emitHostInboundWireGuardAccept(&rules, wgListenPorts)
 	} else {
 		// Raw ESP (50) / AH (51) are exempt from host-inbound enforcement so the
 		// kernel XFRM stack can decrypt host-terminated IPsec — mirroring the
@@ -1960,7 +1965,6 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		// emitHostInboundWireGuardAccept). A single global accept on the input
 		// hook, so the shim-steered outer transport reaches the userspace WG
 		// socket regardless of which zone's address it is destined to.
-		emitHostInboundWireGuardAccept(&rules, wgListenPorts)
 	}
 	// #10751 F8-A: admit the DHCP client's own replies before the
 	// destination drops (see emitUnleasedDHCPAdmits). After the
@@ -1991,8 +1995,8 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 	// admitted ingress scopes while stale cross-zone sessions hit their drop.
 	rules = append(rules, "    ct state established,related accept")
 	for _, v := range views {
-		emitHostInboundZone(&rules, v, "ip", v.V4Addrs)
-		emitHostInboundZone(&rules, v, "ip6", v.V6Addrs)
+		emitHostInboundZone(&rules, v, "ip", v.V4Addrs, wgZonePorts[v.Zone])
+		emitHostInboundZone(&rules, v, "ip6", v.V6Addrs, wgZonePorts[v.Zone])
 	}
 	// #4420 HI-2: catch-all DROP for firewall-local addresses on interfaces in NO
 	// security zone. Emitted AFTER the per-zone rules and the global
@@ -2085,13 +2089,6 @@ func emitHostInboundICMPAccepts(rules *[]string) {
 // that admits every host-inbound service accepts the port regardless, and no
 // table is installed at all when nothing needs one. The helper's socket is the
 // one place every such record converges. No-op when WG is not configured.
-func emitHostInboundWireGuardAccept(rules *[]string, wgListenPorts []uint16) {
-	if len(wgListenPorts) == 0 {
-		return
-	}
-	*rules = append(*rules, "    udp dport "+renderWireGuardPortSpec(wgListenPorts)+" accept")
-}
-
 // renderWireGuardPortSpec renders the WireGuard listen-port set as an nft
 // destination-port value: a single port ("51820") or an anonymous set
 // ("{ 51820, 51821 }"). Ports arrive sorted+deduped from
@@ -2369,7 +2366,7 @@ func hostInboundEmitsDrop(v dpuserspace.ZoneHostInboundView, addrs []string) boo
 
 // emitHostInboundZone appends the accept(+drop) rules for one zone/family to
 // rules. No-op when the zone has no address in this family.
-func emitHostInboundZone(rules *[]string, v dpuserspace.ZoneHostInboundView, family string, addrs []string) {
+func emitHostInboundZone(rules *[]string, v dpuserspace.ZoneHostInboundView, family string, addrs []string, wgPorts []uint16) {
 	if len(addrs) == 0 {
 		return
 	}
@@ -2417,8 +2414,41 @@ func emitHostInboundZone(rules *[]string, v dpuserspace.ZoneHostInboundView, fam
 	// (declared at the top of the table body by buildHostInboundFilterPayload) so
 	// the kernel host-inbound drops are scrapeable per zone/family (#3361) — the
 	// drop was previously uncounted and invisible to operators.
+	emitHostInboundZoneWireGuardAccept(rules, daddr, wgPorts)
 	cn := xnft.HostInboundDenyCounterName(v.Zone, family)
 	*rules = append(*rules, "    "+daddr+" counter name \""+cn+"\" drop")
+}
+
+// emitHostInboundZoneWireGuardAccept admits a zone's WireGuard tunnels (#11076):
+// `daddr <zone-addrs> udp dport <zone-ports> accept`, inside the zone's own
+// section after its service accepts and before its catch-all deny. No-op when
+// the zone serves no WG tunnels. Unzoned addresses match no zone section and
+// keep falling to the unzoned deny.
+func emitHostInboundZoneWireGuardAccept(rules *[]string, daddr string, wgPorts []uint16) {
+	if len(wgPorts) == 0 {
+		return
+	}
+	*rules = append(*rules, "    "+daddr+" udp dport "+renderWireGuardPortSpec(wgPorts)+" accept")
+}
+
+// flatWireGuardPorts unions a zone->ports map into the sorted flat port set
+// for scope-independent consumers (stale-reply guards).
+func flatWireGuardPorts(wgZonePorts map[string][]uint16) []uint16 {
+	seen := make(map[uint16]bool)
+	for _, ports := range wgZonePorts {
+		for _, p := range ports {
+			seen[p] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]uint16, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // hostInboundAllowsAll reports whether the zone's system-services contains
