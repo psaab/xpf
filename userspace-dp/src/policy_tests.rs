@@ -1887,7 +1887,11 @@ fn unknown_ingress_zone_does_not_match_permit_global() {
         ),
         PolicyAction::Deny
     );
-    // With both unknown, the ingress gate wins before the egress gate (#6682).
+    // With both unknown, ingress must win before the egress gate (#6682).
+    // The verdict payload is identical, so pin which gate ran by its counter
+    // delta rather than by Deny/attribution fields shared by both arms.
+    let ingress_before = unzoned_denied_count_6682();
+    let egress_before = unzoned_egress_denied_count_11067();
     assert_eq!(
         evaluate_policy(
             &state,
@@ -1901,6 +1905,8 @@ fn unknown_ingress_zone_does_not_match_permit_global() {
         ),
         PolicyAction::Deny
     );
+    assert_eq!(unzoned_denied_count_6682() - ingress_before, 1);
+    assert_eq!(unzoned_egress_denied_count_11067() - egress_before, 0);
     // Sanity: both zones valid still hits the permit-global as before.
     assert_eq!(
         evaluate_policy(
@@ -8180,9 +8186,10 @@ fn unzoned_egress_is_denied_not_defaulted_11067() {
         PolicyAction::Deny,
         "a resolved unzoned egress reached default-policy permit-all (#11067)",
     );
-    assert!(
-        unzoned_egress_denied_count_11067() > before,
-        "the unzoned-egress deny uses its dedicated cause counter",
+    assert_eq!(
+        unzoned_egress_denied_count_11067() - before,
+        1,
+        "the unzoned-egress deny increments its dedicated cause counter exactly once",
     );
     assert_eq!(
         state.default_counter.test_packet_count() - default_before,
@@ -8195,6 +8202,43 @@ fn unzoned_egress_is_denied_not_defaulted_11067() {
         "the unzoned-egress deny is unattributed, not a rule or default-policy hit",
     );
     assert_eq!(result.policy_counter_idx, 0);
+}
+
+#[test]
+fn without_counting_does_not_bump_unzoned_cause_counters_9385() {
+    let state = parse_policy_state("permit", &[], &test_zone_name_to_id());
+    let ingress_before = unzoned_denied_count_6682();
+    let egress_before = unzoned_egress_denied_count_11067();
+
+    let ingress = evaluate_policy_result_without_counting(
+        &state,
+        0,
+        TEST_WAN_ZONE_ID,
+        "10.0.0.1".parse().expect("src"),
+        "8.8.8.8".parse().expect("dst"),
+        PROTO_TCP,
+        12345,
+        80,
+        None,
+    );
+    assert_eq!(ingress.action, PolicyAction::Deny);
+    assert_eq!(unzoned_denied_count_6682() - ingress_before, 0);
+    assert_eq!(unzoned_egress_denied_count_11067() - egress_before, 0);
+
+    let egress = evaluate_policy_result_without_counting(
+        &state,
+        TEST_LAN_ZONE_ID,
+        0,
+        "10.0.0.1".parse().expect("src"),
+        "8.8.8.8".parse().expect("dst"),
+        PROTO_TCP,
+        12345,
+        80,
+        None,
+    );
+    assert_eq!(egress.action, PolicyAction::Deny);
+    assert_eq!(unzoned_denied_count_6682() - ingress_before, 0);
+    assert_eq!(unzoned_egress_denied_count_11067() - egress_before, 0);
 }
 
 /// #9523: the Go builder now emits a match-all keyword as a LITERAL even when an

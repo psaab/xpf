@@ -3405,7 +3405,13 @@ fn evaluate_policy_result_counted(
     // configured from-any/global `to-zone junos-host` DENY now fires for
     // zone-0 host-bound ingress; intended explicit-deny semantics.
     if from_id == 0 {
-        UNZONED_INGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // #9385: the unzoned cause counters obey the same count policy as the
+        // per-rule and implicit-default counters — a side-effect-free
+        // re-derivation (`PolicyHitCount::Never`) reports the deny without
+        // bumping them.
+        if hit_count.enabled() {
+            UNZONED_INGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         return PolicyEvaluationResult {
             action: PolicyAction::Deny,
             policy_id: UNATTRIBUTED_POLICY_ID,
@@ -3413,7 +3419,11 @@ fn evaluate_policy_result_counted(
         };
     }
     if egress_resolved && to_id == 0 {
-        UNZONED_EGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // #9385: as above — the egress twin must not pollute the cause count
+        // from a derivation that counts nothing.
+        if hit_count.enabled() {
+            UNZONED_EGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         return PolicyEvaluationResult {
             action: PolicyAction::Deny,
             policy_id: UNATTRIBUTED_POLICY_ID,
