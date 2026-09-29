@@ -313,6 +313,88 @@ func validateZoneInterfaceMembershipStrict(cfg *Config) error {
 	return nil
 }
 
+// fabricZoneRoutingInstanceByInterface indexes the logical members that the
+// dataplane binds to each RI. Use the shared member resolver so bare RI refs
+// fan down onto configured units, aliases normalize identically, and tunnel
+// device keys match the runtime contract. Literal-only indexing misses bare-RI
+// fan-down and both false-rejects single-RI bare/bare zones and false-accepts
+// bare-RI/unit-zone splits with MAIN. Dual-claimed devices are omitted just as
+// in the dataplane membership map; the independent strict RI-device gate
+// reports that conflict.
+func fabricZoneRoutingInstanceByInterface(cfg *Config) map[string]string {
+	if cfg == nil || len(cfg.RoutingInstances) == 0 {
+		return nil
+	}
+	insts := make([]*RoutingInstanceConfig, 0, len(cfg.RoutingInstances))
+	insts = append(insts, cfg.RoutingInstances...)
+	sort.SliceStable(insts, func(i, j int) bool {
+		if insts[i] == nil || insts[j] == nil {
+			return insts[i] != nil
+		}
+		return insts[i].Name < insts[j].Name
+	})
+	tunnelNames := cfg.TunnelNameMap()
+	dualClaimed := RoutingInstanceDualClaimedLinuxNames(cfg, tunnelNames)
+	out := make(map[string]string)
+	for _, ri := range insts {
+		if ri == nil || ri.Name == "" {
+			continue
+		}
+		for _, member := range RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, ri) {
+			if member.InterfaceKey == "" || dualClaimed[member.LinuxName] {
+				continue
+			}
+			if _, exists := out[member.InterfaceKey]; !exists {
+				out[member.InterfaceKey] = ri.Name
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// fabricZoneTrunkParentAliasRI returns the sole RI owner of a configured
+// interface's zoned child units when the base itself has no RI owner. Runtime
+// snapshots propagate a child's zone onto its trunk parent and inherit the
+// child domain when the parent has no domain row; counting that synthetic
+// parent alias as MAIN would incorrectly reject a single-RI zone.
+func fabricZoneTrunkParentAliasRI(
+	cfg *Config,
+	baseKey string,
+	zoneKeys map[string]map[string]struct{},
+	riByInterface map[string]string,
+) (string, bool) {
+	split := cfg.SplitInterfaceUnitRef(baseKey)
+	if split.HasUnit || split.Base == "" {
+		return "", false
+	}
+	ifc := cfg.Interfaces.Interfaces[split.Base]
+	if ifc == nil || len(ifc.Units) == 0 {
+		return "", false
+	}
+	var owner string
+	found := false
+	for unitNum := range ifc.Units {
+		unitKey := fmt.Sprintf("%s.%d", split.Base, unitNum)
+		if _, inZone := zoneKeys[unitKey]; !inZone {
+			continue
+		}
+		unitOwner := ""
+		if riName, ok := riByInterface[unitKey]; ok {
+			unitOwner = riName
+		}
+		if !found {
+			owner = unitOwner
+			found = true
+		} else if owner != unitOwner {
+			return "", false
+		}
+	}
+	return owner, found && owner != ""
+}
+
 // validateFabricZoneRoutingInstanceAmbiguityStrict rejects a security zone
 // whose member interfaces are split between routing instances or an RI and
 // MAIN. Fabric ingress carries the adjudicated zone ID, not an RI identity, so
@@ -321,7 +403,7 @@ func validateFabricZoneRoutingInstanceAmbiguityStrict(cfg *Config) error {
 	if cfg == nil || len(cfg.RoutingInstances) == 0 || len(cfg.Security.Zones) == 0 {
 		return nil
 	}
-	riByInterface := routingInstanceByInterface(cfg)
+	riByInterface := fabricZoneRoutingInstanceByInterface(cfg)
 	zoneNames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)
@@ -336,19 +418,30 @@ func validateFabricZoneRoutingInstanceAmbiguityStrict(cfg *Config) error {
 			name            string
 			defaultInstance bool
 		}
-		riInterfaces := make(map[zoneRouteOwner]map[string]struct{})
+		zoneKeys := make(map[string]map[string]struct{})
 		for _, iface := range zone.Interfaces {
 			if iface == "" {
 				continue
 			}
 			for _, key := range zoneIfaceLogicalKeys(cfg, iface) {
-				owner := zoneRouteOwner{name: "MAIN", defaultInstance: true}
-				if riName, ok := riByInterface[key]; ok {
-					owner = zoneRouteOwner{name: riName}
+				if zoneKeys[key] == nil {
+					zoneKeys[key] = make(map[string]struct{})
 				}
-				if riInterfaces[owner] == nil {
-					riInterfaces[owner] = make(map[string]struct{})
-				}
+				zoneKeys[key][iface] = struct{}{}
+			}
+		}
+		riInterfaces := make(map[zoneRouteOwner]map[string]struct{})
+		for key, ifaces := range zoneKeys {
+			owner := zoneRouteOwner{name: "MAIN", defaultInstance: true}
+			if riName, ok := riByInterface[key]; ok {
+				owner = zoneRouteOwner{name: riName}
+			} else if riName, ok := fabricZoneTrunkParentAliasRI(cfg, key, zoneKeys, riByInterface); ok {
+				owner = zoneRouteOwner{name: riName}
+			}
+			if riInterfaces[owner] == nil {
+				riInterfaces[owner] = make(map[string]struct{})
+			}
+			for iface := range ifaces {
 				riInterfaces[owner][iface] = struct{}{}
 			}
 		}
