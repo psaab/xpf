@@ -130,10 +130,10 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// #7188 TunnelDiscriminator. All length-gated: an old decoder stops after
 	// the field it knows and ignores the rest.
 	// #7239 RoutingDomain (4) and #9412 TCPCloseClass (1) ride behind the
-	// fields above, then #9752 InstallTableDomain+Check (4+4), and #10227
-	// high SessionValue.Flags (1). Over-allocating is harmless: the result is
-	// buf[:off].
-	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1+8+1)
+	// fields above, then #9752 InstallTableDomain+Check (4+4), #10227 high
+	// SessionValue.Flags (1), and #11064 source-NAT ICMP identity (3). Over-
+	// allocating is harmless: the result is buf[:off].
+	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1+8+1+3)
 	off := 0
 	copy(buf[off:], key.SrcIP[:])
 	off += 4
@@ -291,6 +291,17 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// mixed-version-safe default (legacy rows are treated as peer-owned by the
 	// receiver install path, while the map bit is never guessed on decode).
 	buf[off] = byte(val.Flags >> 8)
+	off++
+	// #11064: source-NAT ICMP identity follows high SessionValue.Flags.
+	// Its valid byte distinguishes absent metadata from (type=0, code=0).
+	buf[off] = 0
+	if val.SourceNatICMPValid {
+		buf[off] = 1
+	}
+	off++
+	buf[off] = val.SourceNatICMPType
+	off++
+	buf[off] = val.SourceNatICMPCode
 	off++
 	return buf[:off]
 }
@@ -454,6 +465,17 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	// install-table trailer. Old decoders stop before this byte; a new decoder
 	// reading an old payload defaults the high byte to zero.
 	buf[off] = byte(val.Flags >> 8)
+	off++
+	// #11064: v6 source-NAT ICMP identity follows high SessionValue.Flags.
+	// Its valid byte distinguishes absent metadata from (type=0, code=0).
+	buf[off] = 0
+	if val.SourceNatICMPValid {
+		buf[off] = 1
+	}
+	off++
+	buf[off] = val.SourceNatICMPType
+	off++
+	buf[off] = val.SourceNatICMPCode
 	off++
 	return buf[:off]
 }
@@ -829,6 +851,12 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 			off++
 		}
 	}
+	// #11064: length-gated source-NAT ICMP identity after high SessionValue.Flags.
+	if off+3 <= len(payload) {
+		val.SourceNatICMPValid = payload[off] != 0
+		val.SourceNatICMPType = payload[off+1]
+		val.SourceNatICMPCode = payload[off+2]
+	}
 	return key, val, true
 }
 
@@ -1014,6 +1042,12 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 			val.Flags |= uint16(payload[off]) << 8
 			off++
 		}
+	}
+	// #11064: length-gated source-NAT ICMP identity after high SessionValue.Flags.
+	if off+3 <= len(payload) {
+		val.SourceNatICMPValid = payload[off] != 0
+		val.SourceNatICMPType = payload[off+1]
+		val.SourceNatICMPCode = payload[off+2]
 	}
 	return key, val, true
 }

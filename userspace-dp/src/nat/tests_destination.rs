@@ -1587,14 +1587,7 @@ fn dnat_prefix_zero_length_does_not_register_unspecified_local_v6() {
 #[test]
 fn dnat_port_aware_reverse() {
     // DNAT: rewrite dst to internal, rewrite dst_port from 80 to 8080
-    let decision = NatDecision {
-        rewrite_src: None,
-        rewrite_dst: Some("192.168.1.10".parse().unwrap()),
-        rewrite_src_port: None,
-        rewrite_dst_port: Some(8080),
-        nat64: false,
-        nptv6: false,
-    };
+    let decision = NatDecision { rewrite_src: None, rewrite_dst: Some("192.168.1.10".parse().unwrap()), rewrite_src_port: None, rewrite_dst_port: Some(8080), source_nat_icmp: None, nat64: false, nptv6: false };
     // Reverse should turn rewrite_dst -> rewrite_src and port mapping too
     let reversed = decision.reverse(
         "198.51.100.1".parse().unwrap(), // original src

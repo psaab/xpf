@@ -51,6 +51,10 @@ func TestSessionUpdateGoldenFrameDecodes9412(t *testing.T) {
 	if d.InstallTableDomain != 525590 || d.InstallTableCheck != 3318534811 {
 		t.Fatalf("golden UPDATE decoded install_table=(%d,%d), want (525590,3318534811)", d.InstallTableDomain, d.InstallTableCheck)
 	}
+	if !d.SourceNatICMPValid || d.SourceNatICMPType != 13 || d.SourceNatICMPCode != 0 {
+		t.Fatalf("#11064: golden UPDATE decoded source_nat_icmp=(%t,%d,%d), want (true,13,0)",
+			d.SourceNatICMPValid, d.SourceNatICMPType, d.SourceNatICMPCode)
+	}
 }
 
 func TestCloseClassWireKeyLockstepWithRust9412(t *testing.T) {
@@ -105,6 +109,38 @@ func TestInstallTableWireKeyLockstepWithRust9752(t *testing.T) {
 		}
 		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != c.key {
 			t.Fatalf("%s.%s json tag = %q, want the Rust key %s", c.typ.Name(), c.field, tag, c.key)
+		}
+	}
+}
+
+func TestSourceNatICMPWireKeysLockstep11064(t *testing.T) {
+	for _, c := range []struct {
+		rust  string
+		typ   reflect.Type
+		field string
+		key   string
+	}{
+		{"../../../userspace-dp/src/protocol/binding.rs", reflect.TypeOf(SessionDeltaInfo{}), "SourceNatICMPValid", "source_nat_icmp_valid"},
+		{"../../../userspace-dp/src/protocol/binding.rs", reflect.TypeOf(SessionDeltaInfo{}), "SourceNatICMPType", "source_nat_icmp_type"},
+		{"../../../userspace-dp/src/protocol/binding.rs", reflect.TypeOf(SessionDeltaInfo{}), "SourceNatICMPCode", "source_nat_icmp_code"},
+		{"../../../userspace-dp/src/protocol/control.rs", reflect.TypeOf(SessionSyncRequest{}), "SourceNatICMPValid", "source_nat_icmp_valid"},
+		{"../../../userspace-dp/src/protocol/control.rs", reflect.TypeOf(SessionSyncRequest{}), "SourceNatICMPType", "source_nat_icmp_type"},
+		{"../../../userspace-dp/src/protocol/control.rs", reflect.TypeOf(SessionSyncRequest{}), "SourceNatICMPCode", "source_nat_icmp_code"},
+	} {
+		src, err := os.ReadFile(c.rust)
+		if err != nil {
+			t.Fatalf("read %s: %v", c.rust, err)
+		}
+		decl := `#[serde(rename = "` + c.key + `", default)]`
+		if !strings.Contains(string(src), decl) {
+			t.Fatalf("%s no longer declares %s: the Rust wire key moved", c.rust, decl)
+		}
+		f, ok := c.typ.FieldByName(c.field)
+		if !ok {
+			t.Fatalf("%s has no %s field", c.typ.Name(), c.field)
+		}
+		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != c.key {
+			t.Fatalf("%s.%s json tag = %q, want %s", c.typ.Name(), c.field, tag, c.key)
 		}
 	}
 }

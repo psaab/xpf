@@ -357,8 +357,8 @@ const (
 	// the version must agree with it so a future helper-side consumer can
 	// never silently misread a mixed pairing.
 	// v35 -> v36 (#11064): source-NAT application terms carry ICMP type/code.
-	// A v35 helper ignores those fields and broadens a typed SNAT match to
-	// the whole protocol, so exact version equality must fence the pair.
+	// Without the version gate, a v35 helper would ignore the nested fields and
+	// widen the typed match. The Rust handler rejects v35 before applying it.
 	ProtocolVersion = 36
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version

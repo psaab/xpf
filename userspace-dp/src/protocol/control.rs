@@ -213,8 +213,8 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // `TLSPrivateKey` ride the snapshot wire. Mirrors the Go bump; exact
 // equality keeps version and shape in agreement.
 // v35 -> v36 (#11064): source-NAT application terms carry ICMP type/code.
-// A v35 helper ignores those fields and broadens a typed SNAT match to the
-// whole protocol, so exact equality fences the mixed pair.
+// Without the version gate, a v35 helper would ignore the nested fields and
+// widen the typed match. The handler rejects v35 before applying the snapshot.
 pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 36;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
@@ -1064,6 +1064,15 @@ pub(crate) struct SessionSyncRequest {
     pub nat_src_port: u16,
     #[serde(rename = "nat_dst_port", default)]
     pub nat_dst_port: u16,
+    /// #11064: ICMP query identity the active used to select a source-NAT
+    /// rule. The valid bit preserves type/code `(0,0)`; when absent, the
+    /// standby cannot narrow a typed application match from this request.
+    #[serde(rename = "source_nat_icmp_valid", default)]
+    pub source_nat_icmp_valid: bool,
+    #[serde(rename = "source_nat_icmp_type", default)]
+    pub source_nat_icmp_type: u8,
+    #[serde(rename = "source_nat_icmp_code", default)]
+    pub source_nat_icmp_code: u8,
     #[serde(rename = "fabric_ingress", default)]
     pub fabric_ingress: bool,
     #[serde(rename = "is_reverse", default)]

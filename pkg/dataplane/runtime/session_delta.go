@@ -30,21 +30,24 @@ type SessionIdentity struct {
 }
 
 type SessionState struct {
-	Disposition      string
-	Origin           string
-	EgressIfindex    int
-	TXIfindex        int
-	TunnelEndpointID uint16
-	TXVLANID         uint16
-	NextHop          string
-	NeighborMAC      string
-	SrcMAC           string
-	NATSrcIP         string
-	NATDstIP         string
-	NATSrcPort       uint16
-	NATDstPort       uint16
-	FabricRedirect   bool
-	FabricIngress    bool
+	Disposition        string
+	Origin             string
+	EgressIfindex      int
+	TXIfindex          int
+	TunnelEndpointID   uint16
+	TXVLANID           uint16
+	NextHop            string
+	NeighborMAC        string
+	SrcMAC             string
+	NATSrcIP           string
+	NATDstIP           string
+	NATSrcPort         uint16
+	NATDstPort         uint16
+	FabricRedirect     bool
+	FabricIngress      bool
+	SourceNatICMPValid bool
+	SourceNatICMPType  uint8
+	SourceNatICMPCode  uint8
 }
 
 type RuntimeStatus struct {

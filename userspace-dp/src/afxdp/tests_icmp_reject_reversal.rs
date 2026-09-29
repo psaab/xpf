@@ -1391,14 +1391,7 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
         tx_vlan_id: 0,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V6(external_client)),
-        rewrite_dst: None,
-        rewrite_src_port: None,
-        rewrite_dst_port: None,
-        nat64: false,
-        nptv6: true,
-    }, install_table_domain: 0, install_table_check: 0 };
+    }, nat: NatDecision { rewrite_src: Some(IpAddr::V6(external_client)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: true }, install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -1708,14 +1701,7 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
         tx_vlan_id: 80,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V6(external_client)),
-        rewrite_dst: None,
-        rewrite_src_port: None,
-        rewrite_dst_port: None,
-        nat64: false,
-        nptv6: true,
-    }, install_table_domain: 0, install_table_check: 0 };
+    }, nat: NatDecision { rewrite_src: Some(IpAddr::V6(external_client)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: true }, install_table_domain: 0, install_table_check: 0 };
     let forward_metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,

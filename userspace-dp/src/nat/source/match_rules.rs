@@ -285,7 +285,7 @@ pub(crate) fn match_source_nat_result_for_tuple_with_icmp(
     holder: NatHolder,
     matched_counter: &mut Option<Arc<NatRuleCounter>>,
 ) -> SourceNatLookup {
-    let out = match_source_nat_result_for_tuple_inner(
+    let mut out = match_source_nat_result_for_tuple_inner(
         iface_allocs,
         rules,
         scope,
@@ -305,6 +305,13 @@ pub(crate) fn match_source_nat_result_for_tuple_with_icmp(
         holder,
         matched_counter,
     );
+    if let Some(packet_icmp) = packet_icmp {
+        if let SourceNatLookup::Matched(decision) = &mut out {
+            if decision.rewrite_src.is_some() {
+                decision.source_nat_icmp = Some(packet_icmp);
+            }
+        }
+    }
     process_source_nat_match_counters().record(&out);
     out
 }

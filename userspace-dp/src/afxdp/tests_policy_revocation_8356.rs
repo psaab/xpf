@@ -41,7 +41,7 @@ use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin
 use crate::tcp_flags::TCP_ACK;
 use crate::test_zone_ids::*;
 use crate::{
-    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NeighborSnapshot,
+    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NatAppTermWire, NeighborSnapshot,
     PolicyRuleSnapshot, RouteSnapshot, SourceNATRuleSnapshot,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -1083,6 +1083,150 @@ fn drive_owner_icmp_type_9949(
         true,
     );
     dbg
+}
+
+fn forwarding_with_typed_snat_icmp_11064() -> ForwardingState {
+    let mut snapshot = nat_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.source_nat_rules = vec![
+        SourceNATRuleSnapshot {
+            name: "snat-echo".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["0.0.0.0/0".into()],
+            match_applications: vec![NatAppTermWire {
+                protocol: PROTO_ICMP as u16,
+                icmp_type: Some(8),
+                ..NatAppTermWire::default()
+            }],
+            pool_name: "pool-echo".into(),
+            pool_addresses: vec!["203.0.113.80/32".into()],
+            port_low: 20_000,
+            port_high: 20_099,
+            ..SourceNATRuleSnapshot::default()
+        },
+        SourceNATRuleSnapshot {
+            name: "snat-timestamp".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["0.0.0.0/0".into()],
+            match_applications: vec![NatAppTermWire {
+                protocol: PROTO_ICMP as u16,
+                icmp_type: Some(13),
+                ..NatAppTermWire::default()
+            }],
+            pool_name: "pool-timestamp".into(),
+            pool_addresses: vec!["203.0.113.13/32".into()],
+            port_low: 20_000,
+            port_high: 20_099,
+            ..SourceNATRuleSnapshot::default()
+        },
+    ];
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".into(),
+        ip: DST.to_string(),
+        mac: "00:11:22:33:44:66".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    build_forwarding_state(&snapshot)
+}
+
+fn icmp_snat_frame_11064(icmp_type: u8, identifier: u16) -> Vec<u8> {
+    let mut frame = icmp_frame_type_9949(icmp_type, TEST_LAN_MAC);
+    frame[38..40].copy_from_slice(&identifier.to_be_bytes());
+    frame[36..38].fill(0);
+    let checksum = checksum16(&frame[34..]);
+    frame[36..38].copy_from_slice(&checksum.to_be_bytes());
+    frame
+}
+
+fn drive_snat_icmp_11064(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    binding: &mut BindingWorker,
+    icmp_type: u8,
+    identifier: u16,
+) -> DebugPollCounters {
+    let frame = icmp_snat_frame_11064(icmp_type, identifier);
+    let mut meta = txn_meta_v4(LAN_IFINDEX as u32, 0, frame.len() as u16);
+    meta.protocol = PROTO_ICMP;
+    meta.payload_offset = 42;
+    // #11064: clustered fixture (reth RGs 1/2) needs populated HA inventory;
+    // an empty map marks every RG-owned ForwardCandidate HAInactive.
+    let ha_state = txn_ha_state();
+    let (_batch, dbg) = txn_run_descriptor_checked(
+        binding,
+        sessions,
+        forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    dbg
+}
+
+fn snat_decision_for_icmp_id_11064(sessions: &SessionTable, identifier: u16) -> NatDecision {
+    let mut result = None;
+    sessions.iter_with_origin(|key, decision, metadata, _origin| {
+        if key.protocol == PROTO_ICMP && key.src_port == identifier && !metadata.is_reverse {
+            result = Some(decision.nat);
+        }
+    });
+    result.expect("the requested ICMP identifier must have a forward session")
+}
+
+// Stateful SNAT is create-only for a session key: an established packet with
+// another ICMP type reuses the original mapping, while a distinct ICMP
+// identifier creates a separate mapping selected by its own type.
+#[test]
+fn stateful_snat_icmp_type_switch_keeps_session_mapping_11064() {
+    use crate::nat::source_nat_pool_statuses;
+
+    let forwarding = forwarding_with_typed_snat_icmp_11064();
+    let mut sessions = SessionTable::new();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+
+    let created = drive_snat_icmp_11064(&forwarding, &mut sessions, &mut binding, 8, 0x1234);
+    assert_eq!(created.session_create, 2, "the echo flow must install its pair");
+    assert_eq!(created.tx, 1, "the echo flow must translate and forward");
+    let echo_nat = snat_decision_for_icmp_id_11064(&sessions, 0x1234);
+    assert_eq!(
+        echo_nat.rewrite_src,
+        Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 80)))
+    );
+    assert_eq!(echo_nat.source_nat_icmp, Some((8, 0)));
+
+    let switched = drive_snat_icmp_11064(&forwarding, &mut sessions, &mut binding, 13, 0x1234);
+    assert_eq!(switched.session_hit, 1, "the type switch must hit the typeless key");
+    assert_eq!(switched.tx, 1, "the established flow must keep forwarding");
+    let retained_nat = snat_decision_for_icmp_id_11064(&sessions, 0x1234);
+    assert_eq!(retained_nat.rewrite_src, echo_nat.rewrite_src);
+    assert_eq!(retained_nat.rewrite_src_port, echo_nat.rewrite_src_port);
+    assert_eq!(retained_nat.source_nat_icmp, Some((8, 0)));
+    let pools = source_nat_pool_statuses(&forwarding.source_nat_rules);
+    assert_eq!(pools[0].used_ports, 1);
+    assert_eq!(pools[1].used_ports, 0, "a session hit must not rematch type 13 SNAT");
+
+    let distinct = drive_snat_icmp_11064(&forwarding, &mut sessions, &mut binding, 13, 0x5678);
+    assert_eq!(distinct.session_create, 2, "a distinct identifier creates a new pair");
+    assert_eq!(distinct.tx, 1);
+    let timestamp_nat = snat_decision_for_icmp_id_11064(&sessions, 0x5678);
+    assert_eq!(
+        timestamp_nat.rewrite_src,
+        Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 13)))
+    );
+    assert_eq!(timestamp_nat.source_nat_icmp, Some((13, 0)));
+    let pools = source_nat_pool_statuses(&forwarding.source_nat_rules);
+    assert_eq!(pools[0].used_ports, 1);
+    assert_eq!(pools[1].used_ports, 1, "a new type-13 flow selects its typed pool");
 }
 
 #[test]

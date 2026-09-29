@@ -336,10 +336,9 @@ impl SourceNatRule {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
         let total_pool = self.pool_addresses_v4.len() + self.pool_addresses_v6.len();
-        // #9874: a poisoned rule builds no allocator (no pending) and can never
-        // mint, so like a failed pool it reports no key. Multi-line closure,
-        // deliberately: the single-line shape is the #9428 parity guard's
-        // must-replace-once anchor (drain_allocator_key below owns it).
+        // #9874: leniently poisoned rules mint nothing and contribute no
+        // allocator owner. `drain_allocator_key` below deliberately ignores
+        // this marker so already-installed sessions can still release leases.
         (self.pool_mode
             && total_pool > 0
             && self.pool_failure.is_none()
@@ -1281,6 +1280,7 @@ impl SourceNatRule {
         protocol: u8,
         src_port: u16,
         dst_port: u16,
+        packet_icmp: Option<(u8, u8)>,
     ) -> bool {
         self.zone_matches(from_zone, to_zone)
             && self.l4_matches(
@@ -1289,8 +1289,8 @@ impl SourceNatRule {
                 src_port,
                 dst_port,
                 false,
-                None,
-                true,
+                packet_icmp,
+                packet_icmp.is_none(),
             ) != L4Match::NoMatch
             && self.address_matches(src_ip, dst_ip)
     }

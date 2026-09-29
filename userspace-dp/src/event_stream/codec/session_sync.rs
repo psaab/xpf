@@ -92,7 +92,12 @@ impl EventFrame {
             inactivity_timeout_secs,
             nat64,
             nat64_snat_v4,
+            source_nat_icmp,
         } = SessionSyncAttribution::from_session(decision, metadata);
+        let (source_nat_icmp_valid, source_nat_icmp_type, source_nat_icmp_code) =
+            source_nat_icmp.map_or((0, 0, 0), |(icmp_type, icmp_code)| {
+                (1, icmp_type, icmp_code)
+            });
 
         // [0] AddrFamily
         let is_v6 = key.addr_family == libc::AF_INET6 as u8;
@@ -317,6 +322,14 @@ impl EventFrame {
         pos += 4;
         buf[pos..pos + 4].copy_from_slice(&decision.install_table_check.to_le_bytes());
         pos += 4;
+        // #11064: trailing source-NAT ICMP query identity. The valid byte
+        // distinguishes absent metadata from the valid (type=0, code=0) pair.
+        buf[pos] = source_nat_icmp_valid;
+        pos += 1;
+        buf[pos] = source_nat_icmp_type;
+        pos += 1;
+        buf[pos] = source_nat_icmp_code;
+        pos += 1;
 
         // Write header
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;

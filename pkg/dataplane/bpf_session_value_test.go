@@ -521,6 +521,7 @@ func TestBPFConversionDropsExactlyTheSyncOnlyTail9752(t *testing.T) {
 		Generation: 29, PolicyCounterIdx: 30, ConfigEpoch: 31,
 		RTFlowSessionID: 32, IngressIfaceFold: 33, TunnelDiscriminator: 34,
 		TCPCloseClass: 35, InstallTableDomain: 36, InstallTableCheck: 37,
+		SourceNatICMPValid: true, SourceNatICMPType: 38, SourceNatICMPCode: 39,
 	}
 	got := full.toBPF().sessionValue()
 	// Prefix preserved field-for-field.
@@ -528,13 +529,15 @@ func TestBPFConversionDropsExactlyTheSyncOnlyTail9752(t *testing.T) {
 	wantPrefix.Generation, wantPrefix.PolicyCounterIdx, wantPrefix.ConfigEpoch = 0, 0, 0
 	wantPrefix.RTFlowSessionID, wantPrefix.IngressIfaceFold, wantPrefix.TunnelDiscriminator = 0, 0, 0
 	wantPrefix.TCPCloseClass, wantPrefix.InstallTableDomain, wantPrefix.InstallTableCheck = 0, 0, 0
+	wantPrefix.SourceNatICMPValid, wantPrefix.SourceNatICMPType, wantPrefix.SourceNatICMPCode = false, 0, 0
 	if got != wantPrefix {
 		t.Fatalf("BPF round-trip mismatch:\n got %+v\nwant %+v", got, wantPrefix)
 	}
 	// And explicitly: every sync-only field reads zero.
 	if got.Generation != 0 || got.PolicyCounterIdx != 0 || got.ConfigEpoch != 0 ||
 		got.RTFlowSessionID != 0 || got.IngressIfaceFold != 0 || got.TunnelDiscriminator != 0 ||
-		got.TCPCloseClass != 0 || got.InstallTableDomain != 0 || got.InstallTableCheck != 0 {
+		got.TCPCloseClass != 0 || got.InstallTableDomain != 0 || got.InstallTableCheck != 0 ||
+		got.SourceNatICMPValid || got.SourceNatICMPType != 0 || got.SourceNatICMPCode != 0 {
 		t.Fatalf("sync-only tail survived the BPF round-trip: %+v", got)
 	}
 }
