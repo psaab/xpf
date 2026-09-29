@@ -285,16 +285,10 @@ func ResolveInterfaceHostInbound(cfg *Config) map[string]*HostInboundTraffic {
 				// the per-unit snapshot consumer looks up, and the #5489 owner
 				// guard compares the canonical unit against the (now canonical)
 				// zone map.
-				// #5489: a unit-level override must come ONLY from the unit's
-				// authoritative zone owner. InterfaceZoneMap resolves the
-				// owner as the first sorted zone that claims the unit; on a
-				// tolerated duplicate ownership (lenient load / peer-sync retains
-				// two zones both claiming the same reth0.100) this loop visits
-				// BOTH zones, so without a guard the losing zone's tokens (e.g.
-				// SSH) would union into out[ref] and bleed into the winning zone's
-				// InterfaceSnapshot / ZoneHostInboundView. Quarantine the leak with
-				// the SAME predicate the physical-expansion branch uses (#3720
-				// M01): skip when a DIFFERENT zone owns this unit.
+				// #5489: a unit-level override is applied only when the unit has
+				// one unambiguous zone owner. QuarantinedZoneInterfaceKeys omits
+				// contested keys from InterfaceZoneMap and rejects both
+				// claimants' overrides, so no first-sorted zone becomes an owner.
 				if _, conflicted := conflictedInterfaces[s.Literal]; conflicted {
 					continue
 				}
