@@ -1655,15 +1655,11 @@ type compileOpts struct {
 	// membership gate (validateZoneInterfaceMembershipStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
 	// path hard-rejects a config that assigns the same interface to more than
-	// one security zone — pkg/dataplane/userspace.buildInterfaceZoneMap resolves
-	// such a duplicate first-writer-wins over the SORTED zone names, so the
-	// interface silently lands in whichever zone sorts first and traffic is
-	// evaluated against the wrong zone's policy. The tolerant load / peer-sync
-	// paths downgrade to a warning so an already-persisted or peer-synced config
-	// an older binary accepted still BOOTS (#1960 no-brick) — buildInterfaceZoneMap
-	// keeps its deterministic first-writer-wins resolution, so the leniently-
-	// loaded config forwards exactly as before, just with an operator-visible
-	// warning. Same doctrine as lenientPolicyZoneRefs.
+	// one security zone. Lenient load and peer-sync paths warn so an older
+	// config still BOOTS (#1960 no-brick), but the runtime omits each contested
+	// logical interface key from InterfaceZoneMap. Neither zone receives an
+	// owner claim for that key, preventing order-dependent policy selection.
+	// Same doctrine as lenientPolicyZoneRefs.
 	lenientZoneInterfaceMembership bool
 	// lenientFabricZoneRoutingInstance (#11061) downgrades the strict rejection
 	// of a security zone spanning multiple routing instances to an operator
@@ -1987,14 +1983,12 @@ type compileOpts struct {
 	// commit-check path hard-rejects a policy that does not name EXACTLY one
 	// terminal action: a log-only / count-only or typo'd policy compiled with
 	// Action == PolicyPermit (the zero value) and silently PERMITTED all
-	// matching traffic — a fail-OPEN security hole — while a policy naming
-	// more than one terminal action resolved last-wins by parse order. The
-	// tolerant load / peer-sync paths downgrade to a warning so an
-	// already-persisted or peer-synced config that an older binary accepted
-	// still BOOTS (#1960 no-brick); the runtime is independently safe because
-	// compilePolicy defaults an actionless policy's Action to PolicyDeny (NOT
-	// permit), so a leniently-loaded actionless policy DENIES rather than
-	// fails open. Same doctrine as lenientPolicyZoneRefs / lenientPolicyMatchAddress.
+	// matching traffic — a fail-OPEN security hole — while multiple DISTINCT
+	// terminal actions resolved last-wins by parse order. The tolerant load /
+	// peer-sync paths downgrade to a warning; actionless policies default to
+	// DENY, and conflicting-action policies are marked LenientContentDropped so
+	// the snapshot's unsupported sentinel prevents them from installing.
+	// Same doctrine as lenientPolicyZoneRefs / lenientPolicyMatchAddress.
 	lenientPolicyTerminalAction bool
 	// lenientPolicyLogAction (#3060) downgrades the security-policy `then log`
 	// gate (validatePolicyLogActionStrict) from a hard compile error to a

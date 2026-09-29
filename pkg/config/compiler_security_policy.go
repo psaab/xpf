@@ -197,6 +197,22 @@ func policyThenChildren(polNode *Node) []*Node {
 	return out
 }
 
+// conflictingPolicyTerminalActions reports whether a terminal-action list
+// contains more than one distinct action without allocating. Identical repeated
+// actions are legal (#3850); any different pair is a conflict.
+func conflictingPolicyTerminalActions(actions []PolicyAction) bool {
+	if len(actions) < 2 {
+		return false
+	}
+	first := actions[0]
+	for _, action := range actions[1:] {
+		if action != first {
+			return true
+		}
+	}
+	return false
+}
+
 // policyThenActionNodes returns every `then` action node named `action`
 // (permit / deny / reject) across ALL `then {}` blocks under a policy term.
 // The then-action reject gates (validatePolicyThenPermitStrict #3114,
@@ -339,18 +355,15 @@ func compilePolicy(polInst struct {
 
 	// #3043 fail-closed default: a policy with NO explicit terminal action
 	// (a log-only / count-only stanza, or a typo'd `then`) must NOT inherit
-	// PolicyPermit (the PolicyAction zero value) — that was a silent
-	// fail-OPEN. Default the runtime action to DENY so the tolerant
-	// load / HA-sync path (which only WARNS, see
-	// validatePolicyTerminalActionStrict + lenientPolicyTerminalAction)
-	// fails closed; the strict commit path rejects the actionless policy
-	// outright (terminalActions is empty). Conflicting actions keep the
-	// pre-existing last-wins runtime value so a leniently-loaded config
-	// still boots; the strict gate rejects the conflict at commit. That
-	// last-wins was decided for ONE policy with conflicting `then` blocks. When
-	// the #8752 duplicate-name fold would use it to turn an earlier statement's
-	// deny into a permit, the merged policy is poisoned instead (#9571,
-	// markFoldWidenedPolicies9571).
+	// PolicyPermit (the PolicyAction zero value) — that was a silent fail-OPEN.
+	// Default the runtime action to DENY so the tolerant load / HA-sync path
+	// (which only WARNS, see validatePolicyTerminalActionStrict +
+	// lenientPolicyTerminalAction) fails closed; the strict commit path rejects
+	// the actionless policy outright (terminalActions is empty). Conflicting
+	// actions still accumulate with last-wins runtime semantics. Lenient
+	// compilation captures direct conflicts before duplicate-name folding and
+	// marks the compiled policy afterward (#11063); for folds that turn an
+	// earlier deny into a permit, see #9571 / markFoldWidenedPolicies9571.
 	if len(pol.terminalActions) == 0 {
 		pol.Action = PolicyDeny
 	}
@@ -393,16 +406,18 @@ func compilePolicy(polInst struct {
 	pol.Match.FromZones = sortDedupZones(pol.Match.FromZones)
 	pol.Match.ToZones = sortDedupZones(pol.Match.ToZones)
 
-	// #5575 / #11013 / #11014 / #11023: fail-CLOSED on tolerant load /
-	// peer-sync. A policy the strict gates reject for dropped match/then
-	// enforcement or an unsupported then-log mode is downgraded to a warning,
-	// but the compiler silently discards that content. Empty match dimensions
-	// become match-ANY; a dropped then sibling can leave an earlier permit
-	// active; an unknown log mode drops configured session logging; and an
-	// unknown policy subtree can carry enforcement constraints the direct
-	// policy compiler ignores. Record the invalidation so the userspace
-	// snapshot builder poisons the rule with the __unsupported__ sentinel
-	// instead of publishing incomplete policy content.
+	// #5575 / #11013 / #11014 / #11023 / #11063: fail-CLOSED on tolerant
+	// load / peer-sync. A policy the strict gates reject for dropped match/then
+	// enforcement or unsupported then-log mode is downgraded to a warning, but
+	// the compiler silently discards that content. Empty match dimensions become
+	// match-ANY; a dropped then sibling can leave an earlier permit active; an
+	// unknown log mode drops configured session logging; and an unknown policy
+	// subtree can carry enforcement constraints the direct policy compiler
+	// ignores. Record those invalidations so the userspace snapshot builder
+	// poisons the rule with the __unsupported__ sentinel instead of publishing
+	// incomplete policy content. Direct terminal-action conflicts are captured
+	// from each source policy before duplicate-name folding; lenient grouped
+	// policies are checked again on an expanded pre-fold clone.
 	//
 	// These per-policy predicates share their definitions with the strict
 	// gates where available. The unsupported-then-sibling and unsupported-

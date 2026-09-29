@@ -447,6 +447,14 @@ path downgrades to a warning AND `compilePolicy` defaults an actionless
 policy's `Action` to `PolicyDeny`, so a leniently-loaded bad config fails
 closed rather than open. See `docs/config-schema.md` "#3043".
 
+Distinct conflicting terminal actions on a lenient load retain the compiler's
+last-wins action only as an internal parse result; `LenientContentDropped`
+poisons the policy snapshot with the unsupported sentinel, so the partial
+policy cannot install as an allow.
+Group-inherited conflicts receive the same poison: lenient compilation checks
+an expanded pre-fold policy view, so safe mixed-action duplicate fragments
+remain subject only to #9571's widening rule.
+
 **A duplicate policy name never turns a restrictive statement into a permit on
 load (#9571, #9992):** a strict commit rejects two policies that share a name
 in one context (#3473). The tolerant load / peer-sync / upgrade path instead
@@ -653,9 +661,10 @@ tolerant path a referencing policy fails closed exactly like the sole-value case
 (#2229, #3261): the `__unsupported_address__` sentinel then replaces the rule's
 addresses on both wire shapes, which is why the legacy expansion needs no change. A sole
 unimplemented form is valid Junos and is unchanged: warned, and strict-rejected
-only when referenced (#3149). `Value` is kept, so show surfaces still render the
-configured prefix. Not switched: static-NAT `prefix-name` resolution, which takes
-one scalar translation target and already refuses an address with no prefix.
+only when referenced (#3149). `Value` is kept so show surfaces still render the
+configured prefix. Static-NAT `prefix-name` resolution also uses `UsableValue()`
+for direct entries and singleton-set members; a mixed entry therefore remains
+unresolvable on tolerant load instead of translating to the prefix alone.
 
 **Zone-local address books (#3061):** Junos supports both the global
 `security address-book global { ... }` and a per-zone book attached inline
@@ -693,24 +702,17 @@ Junos treats an undefined reference. NAT rule address-name references
 scoped to security-policy match addresses.
 
 **An interface belongs to exactly one security zone (#3072):**
-`pkg/dataplane/userspace.buildInterfaceZoneMap` builds the interface->zone
-lookup by iterating zone names in SORTED order and writing each interface
-(plus its base/unit aliases) first-writer-wins. An interface listed under
-two zones was therefore silently accepted at commit and resolved to
-whichever zone name sorts first — independent of operator intent — so
-traffic was evaluated against the wrong zone's policy.
-`validateZoneInterfaceMembershipStrict` (`compiler_validate_strict.go`)
-hard-rejects a config that assigns the same interface to more than one
-zone, naming the interface and both conflicting zones; the tolerant
-load/peer-sync path downgrades to a warning
-(`lenientZoneInterfaceMembership`) so an already-persisted or peer-synced
-config still boots (`buildInterfaceZoneMap` keeps its deterministic
-first-writer-wins resolution, so the leniently-loaded config forwards
-exactly as before). Two DIFFERENT units of one physical interface in two
-zones (`ge-0/0/0.0` in trust, `ge-0/0/0.1` in untrust — a valid VLAN
-split) are NOT rejected; a bare physical interface and one of its units
-across zones ARE (same logical interface). Same fail-closed-on-load
-doctrine as #3043/#2401.
+`InterfaceZoneMap` and the userspace ingress/egress maps share the logical
+interface-key expansion used by the strict validator. A config assigning one
+logical key to multiple zones is hard-rejected at commit. Tolerant load/peer
+sync still boots with a warning (`lenientZoneInterfaceMembership`), but
+quarantines each contested key from the interface maps; the ambiguous interface
+is unzoned and fails closed rather than inheriting whichever zone name sorts
+first. Two DIFFERENT units of one physical interface in two zones
+(`ge-0/0/0.0` in trust, `ge-0/0/0.1` in untrust — a valid VLAN split) remain
+distinct and are not rejected; a bare physical interface and one of its units
+across zones are (same logical interface).
+
 
 
 **A security zone cannot span routing contexts for fabric ingress (#11061):**
@@ -894,10 +896,10 @@ the reference reach the dataplane, which (`policy.rs:1021`) then classifies it a
 a device-wide global rule — re-opening the exact fail-open this gate closes.
 Because the definition gate guarantees no zone named `junos-global` can exist, an
 explicit `junos-global` reference is always the bug, never a legitimate
-named-zone use. The tolerant load/peer-sync path downgrades the definition gate
-to a warning (`lenientReservedZoneNames`) so an already-persisted or peer-synced
-config an older binary accepted still boots — #1960 no-brick doctrine, same as
-#3066/#2401.
+named-zone use. The tolerant load/peer-sync path warns, and the snapshot builder
+also quarantines `junos-global`, `any`, and `junos-host` definitions, unzoning
+their interfaces while preserving `any`/`junos-host` policy sentinel references.
+This preserves the #1960 no-brick doctrine, as with #3066/#2401.
 
 **A zone-pair stanza naming `junos-global` fails closed on the tolerant path
 (#9570).** The #2401 reference gate rejects `from-zone junos-global` /

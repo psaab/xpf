@@ -972,11 +972,27 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 		addUnzoned(target.addr)
 	}
 
-	// A quarantined zone is an unzoned interface for host-inbound purposes.
-	// Preserve its config-derived VIP in the same deny set as its interface
-	// addresses; on a backup node that VIP may not yet appear in the live
-	// snapshot and therefore cannot be recovered by the address walk above.
-	if len(quarantined) > 0 {
+	// A quarantined zone or contested membership is unzoned for host-inbound
+	// purposes. InterfaceZoneMap omits those bindings, so it cannot identify
+	// the source of a configured VIP; reconstruct only the relevant keys from
+	// authored zone references and place their VIPs in the catch-all deny set.
+	quarantinedMemberships := config.QuarantinedZoneInterfaceKeys(cfg)
+	if len(quarantined) > 0 || len(quarantinedMemberships) > 0 {
+		quarantinedVIPUnits := make(map[string]struct{})
+		for zoneName, zone := range cfg.Security.Zones {
+			if zone == nil {
+				continue
+			}
+			_, zoneDropped := quarantined[zoneName]
+			for _, rawRef := range zone.Interfaces {
+				for _, key := range config.InterfaceUnitRefKeys(cfg, rawRef) {
+					_, membershipDropped := quarantinedMemberships[key]
+					if zoneDropped || membershipDropped {
+						quarantinedVIPUnits[key] = struct{}{}
+					}
+				}
+			}
+		}
 		ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
 		for name := range cfg.Interfaces.Interfaces {
 			ifNames = append(ifNames, name)
@@ -1001,7 +1017,7 @@ func buildUnzonedHostInboundAddrsFromSnaps(cfg *config.Config, snaps []Interface
 				if hostInboundLifelineInterface(unitName, lifelines) {
 					continue
 				}
-				if _, drop := quarantined[zoneByIface[unitName]]; !drop {
+				if _, drop := quarantinedVIPUnits[unitName]; !drop {
 					continue
 				}
 				for _, vg := range unit.VRRPGroups {
