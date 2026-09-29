@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 )
 
@@ -1764,8 +1766,8 @@ func TestZeroizeEraseHelperStateRefusesReserved10769(t *testing.T) {
 			if !strings.Contains(err.Error(), "aliases reserved") || !strings.Contains(err.Error(), canonical) {
 				t.Fatalf("sweep error must name the reserved alias, got %v", err)
 			}
-			if !strings.Contains(err.Error(), "delete /etc/xpf/.reset-handoff") || !strings.Contains(err.Error(), "restart xpfd") || !strings.Contains(err.Error(), "commit-confirmed") {
-				t.Fatalf("sweep error must document the verify/delete/restart/commit-confirmed/rerun recovery, got %v", err)
+			if !strings.Contains(err.Error(), "pending markers") || !strings.Contains(err.Error(), "no handoff flag") || !strings.Contains(err.Error(), "rerun zeroize") {
+				t.Fatalf("sweep error must document the ungated markers/no-flag/rerun recovery, got %v", err)
 			}
 			if got, err := os.ReadFile(canonical); err != nil || string(got) != string(body) {
 				t.Fatalf("reserved canonical must survive byte-identical: %q err=%v", got, err)
@@ -2011,5 +2013,101 @@ func TestIdentityLegsReportHardlinkError10769(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Ungated reserved-alias failure + offline recovery (round-10): the
+// ungated wipe fails BEFORE completeZeroize, so factory-reset pending
+// markers remain with NO handoff flag (unlike the gated dirty flag).
+// Recovery reruns offline: the wiped config resolves the default
+// helper path (nil active is never reserved - pinned first), the retry
+// sweeps it, clears the markers, and flips clean. The daemon-start
+// variant (restart into fail-closed bootstrap, author via
+// commit-confirmed, gated rerun clearing the same markers) is proven
+// daemon-side; the marker file asserted here is the exact file that
+// leg replants.
+func TestUngatedReservedAliasRecoversByRerun10769(t *testing.T) {
+	// The retry's convergence rests on the wiped config resolving a
+	// non-reserved path: nil active (Load refused/empty) must yield the
+	// compiled default, never a reserved alias.
+	def := dpuserspace.StateFilePathForConfig(nil)
+	if def == "" || config.HelperStatePathTouchesReserved(def) {
+		t.Fatalf("nil-active default helper path = %q, want a non-reserved default", def)
+	}
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	reserved := filepath.Join(root, "gates", ".reset-handoff")
+	gateBytes := []byte("gate bytes must survive")
+	mustWriteFile(t, reserved, gateBytes)
+	mustWriteFile(t, reserved+".4250000000.1.tmp", []byte(`{"orphan":true}`))
+	// Phase 1: the ungated wipe fails on the reserved alias.
+	err := PerformZeroizeWipeUngated(configDir, "xpf.conf", "", ZeroizeLogInventory{}, reserved)
+	if err == nil {
+		t.Fatal("ungated wipe over a reserved alias must fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "aliases reserved") {
+		t.Fatalf("wipe error must name the reserved alias, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "pending markers") || !strings.Contains(err.Error(), "no handoff flag") {
+		t.Fatalf("wipe error must give the ungated markers/no-flag guidance, got %v", err)
+	}
+	// Pending markers remain (loader copy outside the wiped root); no
+	// handoff flag was written; config is erased.
+	markerData, err := os.ReadFile(configstore.FactoryResetPendingPath)
+	if err != nil || !strings.HasPrefix(string(markerData), configstore.FactoryResetPendingPrefix) {
+		t.Fatalf("loader pending marker must survive the failed wipe: %q err=%v", markerData, err)
+	}
+	if _, _, _, present, err := configstore.ReadResetHandoff(); err != nil || present {
+		t.Fatalf("failed ungated wipe must write no handoff flag: present=%v err=%v", present, err)
+	}
+	for _, path := range []string{filepath.Join(configDir, "xpf.conf"), filepath.Join(configDir, ".configdb")} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("failed wipe must still erase config %s: %v", path, err)
+		}
+	}
+	if got, err := os.ReadFile(reserved); err != nil || string(got) != string(gateBytes) {
+		t.Fatalf("reserved file must survive byte-identical: %q err=%v", got, err)
+	}
+	if _, err := os.Lstat(reserved + ".4250000000.1.tmp"); !os.IsNotExist(err) {
+		t.Fatalf("failed wipe must still sweep temps beside the alias: %v", err)
+	}
+	// Phase 2: offline rerun converges. Production resolves `def`
+	// above; the test uses the hermetic equivalent (the destructive
+	// mechanics are path-independent, and touching the live default
+	// is forbidden).
+	retry := filepath.Join(root, "custom", "userspace-dp.json")
+	mustWriteFile(t, retry, []byte(`{"flows":["prior"]}`))
+	if err := PerformZeroizeWipeUngated(configDir, "xpf.conf", "", ZeroizeLogInventory{}, retry); err != nil {
+		t.Fatalf("offline rerun must converge: %v", err)
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); !os.IsNotExist(err) {
+		t.Fatalf("successful retry must clear the loader marker: %v", err)
+	}
+	_, dirty, gotPath, present, err := configstore.ReadResetHandoff()
+	if err != nil || !present || dirty != "" || gotPath != retry {
+		t.Fatalf("retry must flip clean recording the retried path: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+	}
+	if _, err := os.Lstat(retry); !os.IsNotExist(err) {
+		t.Fatalf("retry must sweep the recorded helper path: %v", err)
+	}
+	if got, err := os.ReadFile(reserved); err != nil || string(got) != string(gateBytes) {
+		t.Fatalf("reserved file must survive the retry byte-identical: %q err=%v", got, err)
+	}
+	// Phase 3: post-reboot gate convergence from the recorded flag.
+	if err := configstore.CheckResetHandoff(); !errors.Is(err, configstore.ErrResetHandoffRebootRequired) {
+		t.Fatalf("gate after retry = %v, want reboot-required (clean, not dirty)", err)
+	}
+	if err := configstore.WriteResetHandoff("other-boot", "", retry); err != nil {
+		t.Fatal(err)
+	}
+	if err := configstore.CheckResetHandoff(); err != nil {
+		t.Fatalf("gate after reboot simulation = %v, want open", err)
+	}
+	if _, err := os.Lstat(configstore.ResetHandoffPath); !os.IsNotExist(err) {
+		t.Fatalf("converged flag must be cleared: %v", err)
 	}
 }

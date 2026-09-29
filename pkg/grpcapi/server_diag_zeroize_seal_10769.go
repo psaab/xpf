@@ -319,16 +319,18 @@ var zeroizeStopKeaAndEraseLeases = func() error {
 // unlinked (unlinking it would delete a gate or identity file, the
 // original bypass), but the sweep FAILS CLOSED: exact-shape temps beside
 // it are still swept, then an error naming the reserved alias fails the
-// wipe. Recovery is operator-side: no commit on the still-running daemon
-// can converge (in-band paths are refused while dirty; the wipe removed
-// .configdb and the stale Store cannot persist). Verify the reserved
-// file holds its correct contents with no helper temps beside it, delete
-// /etc/xpf/.reset-handoff, restart xpfd (fresh Store/DB), author a clean
-// non-reserved system dataplane state-file via commit-confirmed (plain
-// commit refuses in bootstrap), and rerun the reset (the rerun records
-// the fixed path). Symlinked or hardlinked canonicals
-// fail closed before unlinking, retry-persistent. Callers pass a
-// non-empty path only.
+// wipe. Recovery is operator-side and UNGATED-SPECIFIC: this failure
+// returns before completeZeroize, so factory-reset pending markers
+// remain with NO handoff flag written (do not delete one — none
+// exists). Verify the reserved file holds its correct contents with no
+// helper temps beside it, restart xpfd if it is running (a stale
+// server Store would re-resolve the smuggled path), then rerun zeroize:
+// the wiped config resolves the default helper path on retry, clearing
+// the markers on success. (Authoring a clean config via commit-confirmed
+// first also converges, for operators who want a non-default helper
+// path; the daemon restart/author/rerun leg proves that shape.)
+// Symlinked or hardlinked canonicals fail closed before unlinking,
+// retry-persistent. Callers pass a non-empty path only.
 func zeroizeEraseHelperState(path string) error {
 	// Reserved alias FIRST (mirrors the daemon sweep): the
 	// missing-parent fast path below must not report clean over a
@@ -340,7 +342,7 @@ func zeroizeEraseHelperState(path string) error {
 	}
 	var errs []error
 	if skipCanonical {
-		errs = append(errs, fmt.Errorf("zeroize: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); recovery: verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, restart xpfd, author a clean non-reserved system dataplane state-file via commit-confirmed, and rerun the reset", path))
+		errs = append(errs, fmt.Errorf("zeroize: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); recovery: verify that file holds its correct contents with no helper temps beside it, restart xpfd if it is running, then rerun zeroize - this offline failure left factory-reset pending markers with no handoff flag, and the wiped config resolves the default helper path on retry, clearing the markers on success", path))
 	}
 	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
 		return errors.Join(errs...)
@@ -447,7 +449,7 @@ func zeroizeFinalEraseVerification(completion zeroizeCompletion) error {
 		// identity, so helper-state erasure is unprovable from this
 		// path. Temp siblings are still checked below.
 		if config.HelperStatePathTouchesReserved(helperPath) {
-			errs = append(errs, fmt.Errorf("zeroize: helper state path %s aliases reserved reset-gate/identity state: helper-state erasure cannot be verified (the reserved file is never unlinked); recovery: verify that file holds its correct contents with no helper temps beside it, delete /etc/xpf/.reset-handoff, restart xpfd, author a clean non-reserved system dataplane state-file via commit-confirmed, and rerun the reset", helperPath))
+			errs = append(errs, fmt.Errorf("zeroize: helper state path %s aliases reserved reset-gate/identity state: helper-state erasure cannot be verified (the reserved file is never unlinked); recovery: verify that file holds its correct contents with no helper temps beside it, restart xpfd if it is running, then rerun zeroize - this offline failure left factory-reset pending markers with no handoff flag, and the wiped config resolves the default helper path on retry, clearing the markers on success", helperPath))
 		} else if _, err := os.Lstat(helperPath); err == nil {
 			errs = append(errs, fmt.Errorf("zeroize: helper state %s present at final verification", helperPath))
 		} else if !os.IsNotExist(err) {

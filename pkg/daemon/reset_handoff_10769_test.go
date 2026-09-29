@@ -1588,3 +1588,202 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 		t.Fatalf("gate after convergence = %v, want open", err)
 	}
 }
+
+// Daemon-start recovery from ungated pending markers (round-10): after
+// an ungated reserved-alias failure (proven grpcapi-side: loader marker
+// survives, no handoff flag, config erased), starting xpfd takes the
+// fail-closed bootstrap branch (the marker Load error classifies as
+// absent-with-history). The operator authors a clean config via
+// commit-confirmed and reruns: the gated retry records pending, sweeps,
+// clears the markers, and flips clean. The planted marker is
+// beginZeroize's format (prefix + JSON record); the marker file is the
+// exact file the grpcapi leg asserts.
+func TestUngatedMarkersRestartAuthorRerunConverges10769(t *testing.T) {
+	isolateHandoffFlag(t)
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	origNodeID := hasNodeIDFileFn
+	t.Cleanup(func() { hasNodeIDFileFn = origNodeID })
+	hasNodeIDFileFn = func() bool { return false }
+	origSethostname, origHostnamePath, origOsHostname := sethostname, hostnamePath, osHostname
+	t.Cleanup(func() { sethostname, hostnamePath, osHostname = origSethostname, origHostnamePath, origOsHostname })
+	hostnamePath = filepath.Join(t.TempDir(), "hostname")
+	kernelName := "test-host-before"
+	osHostname = func() (string, error) { return kernelName, nil }
+	var hostRenames []string
+	sethostname = func(b []byte) error {
+		hostRenames = append(hostRenames, string(b))
+		kernelName = string(b)
+		return nil
+	}
+	// Redirect the loader marker (production lives at /etc/xpf) outside
+	// the config root, as in production: the config-root copy went with
+	// the wipe, the loader copy survives.
+	origPendingPath := configstore.FactoryResetPendingPath
+	loaderDir := t.TempDir()
+	configstore.FactoryResetPendingPath = filepath.Join(loaderDir, configstore.FactoryResetPendingBase)
+	t.Cleanup(func() { configstore.FactoryResetPendingPath = origPendingPath })
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "xpf.conf")
+	fixed := filepath.Join(t.TempDir(), "run", "xpf", "userspace-dp.json")
+	reserved := filepath.Join(t.TempDir(), ".reset-handoff")
+	gateBytes := []byte("gate bytes must survive")
+	if err := os.WriteFile(reserved, gateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Post-failure shape: config root wiped, loader marker surviving, no
+	// handoff flag. (The config-root marker copy went with the wipe; the
+	// reserved-path temps were swept by the failed wipe itself.) New
+	// creates the .configdb the wipe removes, so the removal below is
+	// over a real directory, not a no-op.
+	if _, err := configstore.New(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{filepath.Join(root, ".configdb"), dbPath} {
+		if err := os.RemoveAll(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := configstore.FactoryResetPendingPrefix + `{"wiped-root-test":"ungated-marker"}`
+	if err := os.MkdirAll(loaderDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configstore.FactoryResetPendingPath, []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := configstore.IsFactoryResetPending(root); err != nil || pending {
+		t.Fatalf("config-root marker must be gone with the wipe: pending=%v err=%v", pending, err)
+	}
+	if _, _, _, present, err := configstore.ReadResetHandoff(); err != nil || present {
+		t.Fatalf("no handoff flag exists in the ungated shape: present=%v err=%v", present, err)
+	}
+	// Restart: Load refuses on the loader marker, and the startup path
+	// takes fail-closed bootstrap (distinct from the fresh-boot shape).
+	freshStore, err := configstore.New(dbPath)
+	if err != nil {
+		t.Fatalf("restart must reconstruct the DB: %v", err)
+	}
+	if err := freshStore.Load(); !errors.Is(err, configstore.ErrFactoryResetPending) {
+		t.Fatalf("Load with surviving markers = %v, want the pending refusal", err)
+	} else if !errors.Is(err, configstore.ErrConfigAbsentWithHistory) {
+		t.Fatalf("pending refusal must classify absent-with-history, got %v", err)
+	}
+	installFakeNetworkctl(t)
+	installSSHDSeam(t, &sshdSeamRecorder{})
+	d := &Daemon{store: freshStore, applySem: semaphore.NewWeighted(1), opts: Options{ConfigFile: dbPath, NoDataplane: true}, vrrpMgr: vrrp.NewManager()}
+	d.setDataplane(&runtimeOnlyApplyTestDP{})
+	failClosed, err := d.loadAndBootstrapConfig()
+	if err != nil || !failClosed {
+		t.Fatalf("startup path must take fail-closed bootstrap, failClosed=%v err=%v", failClosed, err)
+	}
+	if !d.inBootstrap() {
+		t.Fatal("restart with surviving markers must enter bootstrap mode")
+	}
+	// Author the clean config via commit-confirmed (plain refuses).
+	if err := freshStore.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	clean := "set system host-name recovered\nset system dataplane-type userspace\nset system dataplane state-file " + fixed + "\n"
+	if _, err := freshStore.LoadSet(clean); err != nil {
+		t.Fatalf("LoadSet clean: %v", err)
+	}
+	if _, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); err == nil || !strings.Contains(err.Error(), "bootstrap") {
+		t.Fatalf("plain commit in bootstrap = %v, want bootstrap-mode refusal", err)
+	}
+	if _, err := d.commitConfirmedAndApply(context.Background(), configstore.InternalCommitter(), 5, peerSyncNever); err != nil {
+		t.Fatalf("commit-confirmed authoring must succeed (apply included): %v", err)
+	}
+	if got := freshStore.ActiveConfig().System.UserspaceDataplane.StateFile; got != fixed {
+		t.Fatalf("authored StateFile = %q, want the fixed path %q", got, fixed)
+	}
+	if err := freshStore.ConfirmCommit(); err != nil {
+		t.Fatalf("confirm the authored window: %v", err)
+	}
+	d.priorTunablesMu.Lock()
+	tunableCaptures := d.priorTunables != nil && (len(d.priorTunables.neighRetrans) != 0 || len(d.priorTunables.governors) != 0 || d.priorTunables.budget != "" || len(d.priorTunables.mlx5Adaptive) != 0)
+	d.priorTunablesMu.Unlock()
+	if tunableCaptures {
+		t.Fatal("authoring apply must capture no host tunables (no live sysctl writes even as root)")
+	}
+	renamed := false
+	for _, name := range hostRenames {
+		if name == "recovered" {
+			renamed = true
+		}
+	}
+	if !renamed {
+		t.Fatalf("hostname stub must intercept the authoring rename, got %q", hostRenames)
+	}
+	// Rerun: the gated retry records pending, sweeps the fixed path,
+	// clears the loader marker (mirroring completeZeroize's removal),
+	// and flips clean.
+	if err := os.MkdirAll(filepath.Dir(fixed), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixed, []byte(`{"flows":["prior"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rerunWipe := func() error {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
+				return err
+			}
+		}
+		// completeZeroize removes the loader marker once the wipe
+		// succeeds; the marker must exist here or the leg is vacuous.
+		if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
+			return errors.New("loader marker must predate the retry")
+		}
+		if err := os.Remove(configstore.FactoryResetPendingPath); err != nil {
+			return err
+		}
+		boot, err := configstore.CurrentBootID()
+		if err != nil {
+			return err
+		}
+		return configstore.WriteResetHandoff(boot, configstore.ResetHandoffPending, dpuserspace.StateFilePathForConfig(freshStore.ActiveConfig()))
+	}
+	if err := d.factoryReset(context.Background(), rerunWipe); err != nil {
+		t.Fatalf("rerun must converge: %v", err)
+	}
+	if _, err := os.Lstat(configstore.FactoryResetPendingPath); !os.IsNotExist(err) {
+		t.Fatalf("converged retry must clear the loader marker: %v", err)
+	}
+	_, dirty, gotPath, present, err := configstore.ReadResetHandoff()
+	if err != nil || !present || dirty != "" || gotPath != fixed {
+		t.Fatalf("rerun must flip clean recording fixed: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+	}
+	if _, err := os.Lstat(fixed); !os.IsNotExist(err) {
+		t.Fatalf("rerun must sweep the recorded fixed path: %v", err)
+	}
+	if got, err := os.ReadFile(reserved); err != nil || string(got) != string(gateBytes) {
+		t.Fatalf("reserved file must survive the rerun byte-identical: %q err=%v", got, err)
+	}
+	// Reboot simulation converges the gate on a fresh handle over the
+	// wiped root: no config, no markers, no flag.
+	if err := configstore.WriteResetHandoff("other-boot", "", fixed); err != nil {
+		t.Fatal(err)
+	}
+	thirdStore, err := configstore.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := thirdStore.Load(); err != nil {
+		t.Fatalf("third handle must load fresh: %v", err)
+	}
+	if thirdStore.ActiveConfig() != nil || thirdStore.EverCommitted() {
+		t.Fatal("post-reset box must be fresh (no active, no history)")
+	}
+	d3 := &Daemon{store: thirdStore, applySem: semaphore.NewWeighted(1)}
+	d3.reconcileResetHandoffAtBoot()
+	if _, err := os.Lstat(configstore.ResetHandoffPath); !os.IsNotExist(err) {
+		t.Fatalf("converged flag must be cleared: %v", err)
+	}
+	if err := configstore.CheckResetHandoff(); err != nil {
+		t.Fatalf("gate after convergence = %v, want open", err)
+	}
+}
