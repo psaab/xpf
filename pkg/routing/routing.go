@@ -153,6 +153,7 @@ func (m *Manager) VRFMissTerminatorNeedsReconcile() bool {
 func (m *Manager) BindInterfaceToVRF(ifaceName, instanceName string) error {
 	return m.vrf.BindInterfaceToVRF(ifaceName, instanceName)
 }
+
 // UnbindInterfaceFromVRFs detaches an interface only if its current master is
 // one of the named routing-instance VRFs. Unrelated masters are left intact.
 func (m *Manager) UnbindInterfaceFromVRFs(ifaceName string, instanceNames []string) (bool, error) {
@@ -242,7 +243,9 @@ func (m *Manager) ApplyRibGroupRules(ribGroups map[string]*config.RibGroup, inst
 }
 
 // ApplyPBRRules creates ip rules implementing policy-based routing.
-func (m *Manager) ApplyPBRRules(rules []PBRRule) error { return m.pbr.Apply(rules) }
+func (m *Manager) ApplyPBRRules(rules []PBRRule) error {
+	return m.pbr.Apply(rules)
+}
 
 // --- RPM probe pin domain (#1827) ---
 

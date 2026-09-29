@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -218,4 +219,61 @@ func ifaceInGroup(ifaces []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Test_5579_IngressInterfaceHonorsZoneQuarantine11068 ensures the selector
+// classifies a colliding StableZoneID zone from the same empty post-quarantine
+// view as ClassifyHostInbound, rather than granting its raw configured service.
+func Test_5579_IngressInterfaceHonorsZoneQuarantine11068(t *testing.T) {
+	var first, second string
+	owners := map[uint16]string{}
+	for i := 0; i < 300000 && second == ""; i++ {
+		name := fmt.Sprintf("host-inbound-quarantine-%d", i)
+		id := config.StableZoneID(name)
+		if previous, ok := owners[id]; ok {
+			first, second = previous, name
+		} else {
+			owners[id] = name
+		}
+	}
+	if second == "" {
+		t.Fatal("fixture: failed to find a StableZoneID collision")
+	}
+	excluded := config.ZoneQuarantineExclusions([]string{first, second})
+	if len(excluded) != 1 {
+		t.Fatalf("fixture collision quarantine = %v, want exactly one excluded zone", excluded)
+	}
+	var quarantined, surviving string
+	for _, name := range []string{first, second} {
+		if _, drop := excluded[name]; drop {
+			quarantined = name
+		} else {
+			surviving = name
+		}
+	}
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/1": {Name: "ge-0/0/1", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"192.0.2.1/24"}},
+		}},
+		"ge-0/0/2": {Name: "ge-0/0/2", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"198.51.100.1/24"}},
+		}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		quarantined: {
+			Name: quarantined, Interfaces: []string{"ge-0/0/1.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}},
+		},
+		surviving: {Name: surviving, Interfaces: []string{"ge-0/0/2.0"}},
+	}
+	zone := ClassifyHostInbound(cfg, quarantined, hi5579TCP, true, 22, nil, "ip")
+	iface := ClassifyHostInboundForInterface(cfg, quarantined, "ge-0/0/1.0", hi5579TCP, true, 22, nil, "ip")
+	if zone.Status != HostInboundDenied || iface.Status != zone.Status {
+		t.Fatalf("quarantined tcp/22 = zone %v, interface %v; both must use the empty, default-deny view",
+			zone.Status, iface.Status)
+	}
+	if global := ClassifyHostInboundForInterface(cfg, quarantined, "ge-0/0/1.0", 50, true, 0, nil, "ip"); global.Status != HostInboundGlobalAccept {
+		t.Errorf("quarantined interface must preserve the global ESP accept, got %v", global.Status)
+	}
 }

@@ -445,6 +445,7 @@ fn f035_fabric_parked_fragment_uses_encoded_zone_overlap_domain_10917() {
     forwarding
         .ifindex_to_routing_domain
         .insert(21, FABRIC_LINK_DOMAIN);
+    forwarding.zone_routing_domain.insert(TEST_LAN_ZONE_ID, 0);
     assert_eq!(
         crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 21, 0, None),
         FABRIC_LINK_DOMAIN,

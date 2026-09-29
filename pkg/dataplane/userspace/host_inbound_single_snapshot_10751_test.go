@@ -150,13 +150,12 @@ func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 }
 
 // TestHostInboundLifelineIngressNetdevs10751 pins the M1/Opus9
-// gap-exception ingress set: unconditional lifeline defaults (never
-// narrowed — the withhold side does not narrow) plus every configured
+// gap-exception ingress set: unconditional fxp0 plus every configured
 // lifeline unit's linux name, and NO vrf-mgmt blanket (per-member
 // discrimination via the iifname + sdifname rule pair — a non-lifeline
-// fxp1 member must stay deniable). It must MIRROR the withhold-side
-// interface definition; an interface missing here while its addresses
-// are withheld would strand management on the gap's bare DROP.
+// member must stay deniable). It must MIRROR the withhold-side definition;
+// an interface missing here while its addresses are withheld would strand
+// management on the gap's bare DROP.
 func TestHostInboundLifelineIngressNetdevs10751(t *testing.T) {
 	has := func(list []string, want string) bool {
 		for _, n := range list {
@@ -166,20 +165,23 @@ func TestHostInboundLifelineIngressNetdevs10751(t *testing.T) {
 		}
 		return false
 	}
-	t.Run("defaults always, no master blanket", func(t *testing.T) {
+	t.Run("only fxp0 is unconditional, no master blanket", func(t *testing.T) {
 		got := HostInboundLifelineIngressNetdevs(&config.Config{})
-		for _, want := range []string{"fxp0", "em0", "fab0", "fab1"} {
-			if !has(got, want) {
-				t.Errorf("ingress = %v, want default %q listed", got, want)
+		if !has(got, "fxp0") {
+			t.Errorf("ingress = %v, want fixed fxp0 lifeline listed", got)
+		}
+		for _, ordinary := range []string{"em0", "fab0", "fab1"} {
+			if has(got, ordinary) {
+				t.Errorf("ingress = %v, bare %q must not be an implicit lifeline (#11068)", got, ordinary)
 			}
 		}
 		if has(got, "vrf-mgmt") {
 			t.Errorf("ingress = %v, want NO vrf-mgmt blanket (non-lifeline members must stay deniable)", got)
 		}
 	})
-	t.Run("configured control link included, data excluded, no narrowing", func(t *testing.T) {
+	t.Run("configured control/fabric links included, data excluded, no narrowing", func(t *testing.T) {
 		cfg := &config.Config{}
-		cfg.Chassis.Cluster = &config.ClusterConfig{ControlInterface: "ge-0/0/5"}
+		cfg.Chassis.Cluster = &config.ClusterConfig{ControlInterface: "ge-0/0/5", FabricInterface: "fab0"}
 		cfg.System.ManagementInterface = "ge-0/0/1"
 		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
 			"ge-0/0/5": {Name: "ge-0/0/5", Units: map[int]*config.InterfaceUnit{
@@ -188,10 +190,16 @@ func TestHostInboundLifelineIngressNetdevs10751(t *testing.T) {
 			"ge-0/0/6": {Name: "ge-0/0/6", Units: map[int]*config.InterfaceUnit{
 				0: {Number: 0},
 			}},
+			"fab0": {Name: "fab0", Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0},
+			}},
 		}
 		got := HostInboundLifelineIngressNetdevs(cfg)
 		if !has(got, "ge-0-0-5") {
 			t.Errorf("ingress = %v, want the control link's linux name listed", got)
+		}
+		if !has(got, "fab0") {
+			t.Errorf("ingress = %v, want configured fabric link listed", got)
 		}
 		if has(got, "ge-0-0-6") {
 			t.Errorf("ingress = %v, want the data unit excluded", got)

@@ -142,6 +142,8 @@ func Test_3226_SystemServicesAllEmitsFullAdmitAdvisory(t *testing.T) {
 func Test_3226_AllScopingAdvisorySilentOnLifelineOnlyZone(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster authentication-key \"xpf-test-cluster-authentication-key-1234567890\"",
 		"set security zones security-zone control interfaces em0.0",
 		"set security zones security-zone control host-inbound-traffic system-services all",
 	})

@@ -94,14 +94,10 @@ func TestFenceWithholdsLifelineSharedAddress6492(t *testing.T) {
 	}
 }
 
-// TestFenceCoversZonelessRouter6492 is the Finding B proof. A router with an
-// lo0 input filter but NO security zones is a valid config
-// (compiler_filter_ref_3296_test): host-inbound / lo0 filters do not require
-// the zone model. BuildZoneHostInboundViews and BuildUnzonedHostInboundAddrs
-// both return nothing without zones, so a failed cold-boot lo0 install produced
-// an accept-policy fence shell with ZERO drops — fail-OPEN, exactly what the
-// fence exists to prevent. The fence's drop set must come from the
-// firewall-local ADDRESSES, not from zone membership.
+// TestFenceCoversZonelessRouter6492 proves the fail-closed cold-boot fence also
+// covers a valid lo0-filter config with no security zones. The zone-view builder
+// is empty, but #11068 keeps the addressed non-lifeline interfaces in the
+// unzoned default-deny set, so the fence still gets real drops.
 func TestFenceCoversZonelessRouter6492(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -127,8 +123,9 @@ func TestFenceCoversZonelessRouter6492(t *testing.T) {
 	if v := dpuserspace.BuildZoneHostInboundViews(cfg); len(v) != 0 {
 		t.Fatalf("precondition: the zone-model builder yields nothing without zones, got %+v", v)
 	}
-	if v4, v6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg); len(v4)+len(v6) != 0 {
-		t.Fatalf("precondition: the unzoned builder yields nothing without zones, got %v %v", v4, v6)
+	if v4, v6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg); !sliceContains(v4, "192.0.2.1") ||
+		!sliceContains(v6, "2001:db8:6492::1") {
+		t.Fatalf("the unzoned builder must include both zoneless firewall-local addresses, got %v %v", v4, v6)
 	}
 
 	spec, calls := fenceScopeInstaller(t, cfg)

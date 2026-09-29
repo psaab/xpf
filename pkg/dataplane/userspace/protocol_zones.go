@@ -18,7 +18,8 @@ type ZoneSnapshot struct {
 	// EMPTY set and thus deny-all. (Pre-#3405 a false here preserved the
 	// historical admit-all for a no-stanza zone; that no-opt-in admit-all was a
 	// management-plane exposure and is gone.) Global ICMP/ND/PMTUD accepts
-	// (#3171) and lifeline interfaces (fxp0/em0/fab*) still bypass this deny.
+	// (#3171) and lifeline interfaces (fxp0 plus explicitly configured
+	// control/fabric links) still bypass this deny.
 	//
 	// The token slices mirror config.HostInboundTraffic verbatim (lower-cased,
 	// order-preserved). The Rust side classifies the tokens to L4 signatures

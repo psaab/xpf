@@ -632,6 +632,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.fabric_link_skipped_malformed_total();
     state.status.fabric_link_unresolved_peer_total =
         state.afxdp.fabric_link_unresolved_peer_total();
+    state.status.ambiguous_fabric_zone_count = state.afxdp.ambiguous_fabric_zone_count();
     // #9654: capped NOW, from the published runtime view and only while a live
     // worker serves it. None (key omitted) when no worker is live.
     state.status.learned_route_import_capped = state.afxdp.learned_route_import_capped_now();

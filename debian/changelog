@@ -7,6 +7,10 @@ xpf (0.0.0) unstable; urgency=medium
     in-place upgrade cut-over mechanism is a separate increment.
   * The version field above is a placeholder; `make deb` rewrites it
     from `git describe` before building.
+  * Quarantine ambiguous fabric zones away from MAIN routing/session fallback,
+    require adjudicated zone stamps for multi-RI redirects, and fail closed on
+    unstamped RI-node fabric ingress unless explicit legacy compatibility is
+    enabled; reject cross-context zones at strict config commit (#11061).
   * Keep transit forwarding closed when the armed bridge-family barrier
     leg is unsupported; reject malformed SSH authorized_keys entries at
     apply (#10725).
@@ -103,5 +107,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Resolve routing-instance ownership by Linux device identity, reject
     alias/tunnel dual claims, and quarantine ambiguous memberships on tolerant
     loads with an apply alarm and alertable metric (#11060).
+  * Scope rib-group return paths to peer prefixes and peer tables so unrelated
+    VRF misses cannot fall through to main; warn when next-table/PBR targets
+    may lack a return route (#11062/#11320).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

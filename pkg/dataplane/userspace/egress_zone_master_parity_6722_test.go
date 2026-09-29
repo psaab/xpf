@@ -3,41 +3,30 @@ package userspace
 import (
 	"sort"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
-// #6722, FINAL-GATE regression guards. Both cells below were MEASURED failing
-// at 451c0b8bc and are the two shapes on which that head lost an egress zone
-// origin/master resolved. Neither is a fail-open: both are silent transit
-// blackholes under `default-policy deny-all`, which is the same class of defect
-// as #6713 itself — a to-zone of 0 matches no rule, so no operator permit can
-// apply and the drop is attributed to the default policy.
-//
-// The oracle both cells use is MASTER'S OWN ANSWER, not a hand-picked constant.
-// Before this PR, `populate_egress` sourced `EgressInterface::zone_id` from the
-// snapshot ROW's `zone` field, last-write-wins per ifindex over the rows that
-// pass its `src_mac` gate, and `egress_zone_id` read only that map. So master's
-// egress zone for an ifindex is computable from the same snapshot rows this PR
-// still emits — `masterEgressZoneOfIfindex6722` below — and any ifindex where
-// master answered a zone and this tree answers "" is a regression by
-// construction rather than by opinion.
+// #6722 final-gate regression guards. The master-parity oracle is retained for
+// unambiguous identities; it is intentionally not the oracle for the contested
+// key in TestGoNeverNamesAZoneNoRowOnTheIfindexCarries_6722, where master chose
+// an arbitrary sorted-name owner and the required tolerant result is no zone.
+// The remaining cells pin the independently measured egress behaviors below.
 //
 // FAIL-ON-REVERT, measured with each hunk reverted ALONE:
-//
+
 //	drop the bare-ref fan-down in authoredZoneRefs (zones.go)
 //	  -> RED: TestBareInterfaceZoneRefReachesItsOwnNetdevUnits_6722, all 3 cells;
-//	     TestBareRefFanDownAgreesWithTheDerivedMap_6722;
-//	     TestGoNeverNamesAZoneNoRowOnTheIfindexCarries_6722
-//	  -> GREEN: TestOneOwnersAgreeingUnitsStillResolveOneZone_6722 (dotted refs)
+//	     TestBareRefFanDownAgreesWithTheDerivedMap_6722
 //	drop the egressOneOwnerUnitsAgree arm (interfaces.go, rule 1)
 //	  -> RED: TestOneOwnersAgreeingUnitsStillResolveOneZone_6722/agreeing
-//	  -> GREEN: TestBareInterfaceZoneRefReachesItsOwnNetdevUnits_6722
 //	let egressOneOwnerUnitsAgree ignore the OWNER test (accept identities of two
 //	  different interfaces)
 //	  -> RED: TestContestedNetdevOwnershipFailsClosed_6722 (3 of 5 cells),
 //	     TestUnitlessRethNamedAsAMemberFailsClosedOnTheLenientPath_6722,
 //	     TestNilUnitSlotOnARethMemberIsNotAnL3Identity_6722,
 //	     TestBarePortOfADifferentRethDoesNotDeferToThisOne_6722
-//
+
 // One clause of egressOneOwnerUnitsAgree is a MEASURED SURVIVOR — the `z != ""`
 // test on the agreed value — and the structural reason it cannot fire is
 // recorded on the function itself rather than papered over with a fixture. The
@@ -45,6 +34,21 @@ import (
 // what makes /one-unit-unzoned and the E5 cell of
 // TestContestedNetdevOwnershipFailsClosed_6722 fail closed, since it takes the
 // set to size two.
+//
+// #6722 final-gate regression guards. A bare `aaa` reference and a dotted `zzz`
+// reference both claim ge-0/0/1.100: the bare ref fans down to every configured
+// unit. The strict compiler rejects this ambiguity; tolerant loads quarantine
+// that logical key in both zone maps, so neither sorted name wins and the unit
+// has no zone. An unambiguous single-zone control below still resolves `aaa`.
+//
+// The Rust corroboration remains relevant: `populate_interfaces` (userspace-dp/
+// src/afxdp/forwarding_build/interfaces.rs) honors `egress_zone` only when some
+// row on that ifindex carries that zone name. Quarantining the contested key
+// leaves no uncorroborated answer for Rust to silently turn into the 0 sentinel.
+//
+// FAIL-ON-REVERT: restoring any first-writer ownership for a contested logical
+// key makes the zero-zone assertions below RED.
+//
 
 // masterEgressZoneOfIfindex6722 replays origin/master's egress-zone answer for
 // one ifindex from the rows this builder emits: the LAST row on that ifindex
@@ -262,12 +266,12 @@ func TestOneOwnersAgreeingUnitsStillResolveOneZone_6722(t *testing.T) {
 }
 
 // R: authoredZoneRefs' fan-down must not introduce a SECOND OPINION about a
-// reference buildInterfaceZoneMap also holds. Both maps fan a bare reference
-// down over the same unit set with the same sorted-zone first-write-wins, so
-// every key authoredZoneRefs holds must carry the same value in the derived map
-// — otherwise the Rust corroboration (a claim is honoured only when some row on
-// the ifindex literally carries that zone NAME) would start refusing answers the
-// Go side decided, i.e. failing closed for a disagreement rather than a conflict.
+// reference buildInterfaceZoneMap also holds. For unambiguous keys both maps
+// fan a bare reference down over the same unit set and retain its owner; keys
+// claimed by multiple zones are omitted from both. Otherwise the Rust
+// corroboration (a claim is honoured only when some row on the ifindex literally
+// carries that zone NAME) could refuse a disagreement the Go side decided,
+// failing closed without identifying the underlying conflict.
 func TestBareRefFanDownAgreesWithTheDerivedMap_6722(t *testing.T) {
 	lines := []string{
 		"set interfaces ge-0/0/1 vlan-tagging",
@@ -311,35 +315,18 @@ func TestBareRefFanDownAgreesWithTheDerivedMap_6722(t *testing.T) {
 	}
 }
 
-// S: the sharpest form of the same defect — the Go builder naming a zone NO row
-// on the ifindex carries, which the Rust corroboration then refuses.
+// S: a bare `aaa` reference and a dotted `zzz` reference both claim the same
+// logical VLAN unit. The strict path rejects the conflict; tolerant loads
+// quarantine the unit in both the derived and authored zone maps. Neither map
+// may retain a sorted-name winner, and the snapshot/egress views must stay
+// unzoned for that unit.
 //
-// `populate_interfaces` (userspace-dp/src/afxdp/forwarding_build/interfaces.rs)
-// honours `egress_zone` only when some row on that ifindex literally carries
-// that zone NAME. That check exists to stop a drifted or hostile snapshot
-// conjuring a zone; it also means a Go-side answer the ROWS do not corroborate
-// silently becomes the 0 sentinel. So an `EgressZone` that no row's `Zone`
-// names is not a cosmetic disagreement — it is a blackhole with no error
-// anywhere.
+// The parent's bare interface key remains unambiguous and keeps `aaa`. A
+// single-zone control below verifies the ordinary fan-down still reaches the
+// VLAN unit and produces a usable egress zone.
 //
-// A bare reference in one zone and a dotted reference to one of that
-// interface's VLAN units in ANOTHER produced exactly that at 451c0b8bc. The
-// derived map's first-write-wins over SORTED zone names hands the unit row
-// `aaa` (the bare reference's zone, written by its fan-down); the authored map
-// had no fan-down, so it kept only the literal dotted `zzz`:
-//
-//	451c0b8bc   authored[ge-0/0/1.100]="zzz"  derived[...]="aaa"
-//	            row ge-0/0/1.100  Zone="aaa"  EgressZone="zzz"  -> UNCORROBORATED
-//	origin/master                              egress zone "aaa"
-//	here        both maps "aaa"; EgressZone == Zone; corroborated
-//
-// Measured on the LENIENT path — strict CompileConfig rejects the doubly-claimed
-// interface with a multi-zone error — so this is the tolerant load / HA
-// config-sync shape (#1960 no-brick), which is where a grandfathered config
-// arrives.
-//
-// FAIL-ON-REVERT: drop the fan-down in authoredZoneRefs and this goes RED on the
-// EgressZone/Zone comparison, not merely on the map comparison.
+// FAIL-ON-REVERT: restoring any first-writer owner for the contested unit makes
+// its zero-zone assertions RED.
 func TestGoNeverNamesAZoneNoRowOnTheIfindexCarries_6722(t *testing.T) {
 	lines := []string{
 		"set interfaces ge-0/0/1 vlan-tagging",
@@ -352,49 +339,46 @@ func TestGoNeverNamesAZoneNoRowOnTheIfindexCarries_6722(t *testing.T) {
 		map[string]int{"ge-0-0-1": 24, "ge-0-0-1.100": 25},
 		map[string]string{"ge-0-0-1": "02:bf:72:01:00:01", "ge-0-0-1.100": "02:bf:72:01:00:01"},
 		true)
-	snaps := buildInterfaceSnapshots(cfg)
 
-	// Precondition: the config really does claim ge-0/0/1.100 from two zones, so
-	// this cell is exercising the divergence and not a trivially-agreeing map.
+	// Precondition: ge-0/0/1.100 is claimed by both zones and therefore belongs
+	// to the quarantined logical-key set.
 	if len(cfg.Security.Zones) != 2 {
 		t.Fatalf("precondition: expected 2 zones, got %d", len(cfg.Security.Zones))
 	}
+	if _, conflicted := config.QuarantinedZoneInterfaceKeys(cfg)["ge-0/0/1.100"]; !conflicted {
+		t.Fatalf("precondition: ge-0/0/1.100 is not marked as a contested key")
+	}
+	if got := buildInterfaceZoneMap(cfg)["ge-0/0/1.100"]; got != "" {
+		t.Fatalf("contested derived map key ge-0/0/1.100 = %q, want no zone", got)
+	}
+	if got := authoredZoneRefs(cfg)["ge-0/0/1.100"]; got != "" {
+		t.Fatalf("contested authored map key ge-0/0/1.100 = %q, want no zone", got)
+	}
 
-	// The corroboration property, stated per ifindex: every nonempty EgressZone
-	// must be named by SOME row on that ifindex, or the helper drops it to 0.
-	carried := map[int]map[string]bool{}
-	for _, s := range snaps {
-		if s.Ifindex <= 0 {
-			continue
-		}
-		if carried[s.Ifindex] == nil {
-			carried[s.Ifindex] = map[string]bool{}
-		}
-		carried[s.Ifindex][s.Zone] = true
+	snaps := buildInterfaceSnapshots(cfg)
+	unit := snapByName6722(t, snaps, "ge-0/0/1.100")
+	if unit.Zone != "" {
+		t.Fatalf("contested unit Zone = %q, want no zone", unit.Zone)
 	}
-	checked := 0
-	for _, s := range snaps {
-		if s.Ifindex <= 0 || s.EgressZone == "" {
-			continue
-		}
-		checked++
-		if !carried[s.Ifindex][s.EgressZone] {
-			t.Errorf("row %q: EgressZone=%q but no row on ifindex %d carries that "+
-				"zone (rows carry %v). populate_interfaces refuses an "+
-				"uncorroborated claim, so this ifindex resolves the 0 sentinel and "+
-				"every transit flow out of it falls to the default policy — with "+
-				"nothing logged anywhere, because the Go side believes it answered",
-				s.Name, s.EgressZone, s.Ifindex, carried[s.Ifindex])
-		}
+	if unit.EgressZone != "" {
+		t.Fatalf("contested unit EgressZone = %q, want no zone", unit.EgressZone)
 	}
-	if checked == 0 {
-		t.Fatalf("precondition: no row carries a nonempty EgressZone, so the " +
-			"corroboration loop asserted nothing")
+	// The unrelated physical/base key remains a valid owner and retains its
+	// egress zone; this guards against quarantining an entire interface family.
+	assertNoEgressZoneLostVsMaster6722(t, snaps, 24,
+		"the bare physical key itself is not contested")
+	assertEgressZone6722(t, snaps, 24, "aaa",
+		"the bare physical key remains owned by aaa")
+
+	// Positive control: removing only the dotted zzz claim restores one owner.
+	controlLines := lines[:4]
+	control := compileWithStubbedLinks6722(t, controlLines,
+		map[string]int{"ge-0-0-1": 24, "ge-0-0-1.100": 25},
+		map[string]string{"ge-0-0-1": "02:bf:72:01:00:01", "ge-0-0-1.100": "02:bf:72:01:00:01"},
+		false)
+	if got := buildInterfaceZoneMap(control)["ge-0/0/1.100"]; got != "aaa" {
+		t.Fatalf("single-owner control derived map key ge-0/0/1.100 = %q, want aaa", got)
 	}
-	assertNoEgressZoneLostVsMaster6722(t, snaps, 25,
-		"the VLAN unit's zone is whatever the derived map gave its row; the "+
-			"authored map must not name a different one")
-	assertEgressZone6722(t, snaps, 25, "aaa",
-		"first-write-wins over sorted zone names put `aaa` on the row, and the "+
-			"egress answer must be the zone the row carries")
+	assertEgressZone6722(t, buildInterfaceSnapshots(control), 25, "aaa",
+		"the ordinary single-owner bare-ref fan-down still zones the VLAN egress")
 }

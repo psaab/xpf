@@ -589,10 +589,27 @@ pub(in crate::afxdp) fn resolve_zone_encoded_fabric_redirect_by_id(
     Some(resolution)
 }
 
+/// Resolves a fabric redirect using the ingress zone adjudicated for this
+/// packet. Routing-domain deployments must have a nonzero zone to stamp;
+/// legacy single-table deployments retain the unstamped redirect.
+pub(in crate::afxdp) fn resolve_fabric_redirect_for_ingress_zone(
+    forwarding: &ForwardingState,
+    ingress_zone_id: Option<u16>,
+) -> Option<ForwardingResolution> {
+    if let Some(zone_id) = ingress_zone_id.filter(|zone_id| *zone_id != 0) {
+        return resolve_zone_encoded_fabric_redirect_by_id(forwarding, zone_id);
+    }
+    if forwarding.has_routing_domains {
+        return None;
+    }
+    resolve_fabric_redirect(forwarding)
+}
+
 pub(in crate::afxdp) fn redirect_via_fabric_if_needed(
     forwarding: &ForwardingState,
     resolution: ForwardingResolution,
     ingress_ifindex: i32,
+    ingress_zone_id: Option<u16>,
 ) -> ForwardingResolution {
     if resolution.disposition != ForwardingDisposition::HAInactive {
         return resolution;
@@ -600,7 +617,7 @@ pub(in crate::afxdp) fn redirect_via_fabric_if_needed(
     if ingress_is_fabric(forwarding, ingress_ifindex) {
         return resolution;
     }
-    resolve_fabric_redirect(forwarding).unwrap_or(resolution)
+    resolve_fabric_redirect_for_ingress_zone(forwarding, ingress_zone_id).unwrap_or(resolution)
 }
 
 pub(in crate::afxdp) fn prefer_local_forward_candidate_for_fabric_ingress(

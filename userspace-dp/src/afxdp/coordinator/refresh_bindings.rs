@@ -115,6 +115,9 @@ fn copy_live_snapshot(binding: &mut BindingStatus, snap: BindingLiveSnapshot) {
     binding.forward_candidate_packets = snap.forward_candidate_packets;
     binding.flowless_forward_packets = snap.flowless_forward_packets;
     binding.flowless_forward_bytes = snap.flowless_forward_bytes;
+    binding.invalid_fabric_stamp_drops = snap.invalid_fabric_stamp_drops;
+    binding.unstamped_fabric_ingress_drops = snap.unstamped_fabric_ingress_drops;
+    binding.ambiguous_fabric_zone_drops = snap.ambiguous_fabric_zone_drops;
     binding.route_miss_packets = snap.route_miss_packets;
     binding.martian_dropped = snap.martian_dropped;
     binding.ipv6_ext_header_dropped = snap.ipv6_ext_header_dropped;
@@ -362,6 +365,9 @@ fn zero_unbound_slot(binding: &mut BindingStatus) {
     binding.flowless_forward_packets = 0;
     binding.flowless_forward_bytes = 0;
     binding.route_miss_packets = 0;
+    binding.invalid_fabric_stamp_drops = 0;
+    binding.unstamped_fabric_ingress_drops = 0;
+    binding.ambiguous_fabric_zone_drops = 0;
     // #5190 (A1-b8-F6): both drop counters are copied by
     // `copy_live_snapshot` but were missed here when they were added, so
     // an unbound slot reported a frozen non-zero drop count alongside

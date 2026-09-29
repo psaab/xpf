@@ -1430,6 +1430,7 @@ impl Nat64State {
             rewrite_dst: Some(IpAddr::V4(dst_v4)),
             rewrite_src_port: Some(translated_port),
             rewrite_dst_port: None,
+            source_nat_icmp: None,
             nat64: true,
             nptv6: false,
         }

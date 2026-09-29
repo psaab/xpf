@@ -396,18 +396,16 @@ func natAppProtoNumber(proto string) uint16 {
 }
 
 // buildSourceNATAppTerms resolves a source-NAT `match application [ <name>... ]`
-// into (protocol, destination-port range, source-port range) terms for the
-// dataplane match (#3429, #3491). A single user/predefined application yields
-// one term; an application-set yields one term per resolved member; #3431 a
-// multi-value list yields the UNION of every member's terms (match ANY). The
-// empty list (or a sole "any") is unconstrained and yields no terms. A term's
-// Ports are the application's destination-port spec coalesced to ranges and
-// SrcPorts its source-port spec; an application with no destination (resp.
-// source) port leaves that axis empty (unconstrained on it). When EVERY
-// configured reference resolves to nothing, a single never-match term is
-// emitted so the rule fails closed (see natProtoNever); an unresolvable member
-// in a list that has at least one good member just contributes nothing (the
-// strict commit gate rejects the typo — this is the lenient/peer-sync path).
+// into (protocol, destination-port, source-port, and ICMP type/code) terms for
+// the dataplane match (#3429, #3491, #11064). A single user/predefined
+// application yields one term; an application-set yields one term per resolved
+// member; #3431 a multi-value list yields the UNION of every member's terms
+// (match ANY). The empty list (or a sole "any") is unconstrained and yields no
+// terms. When EVERY configured reference resolves to nothing, a single
+// never-match term is emitted so the rule fails closed (see natProtoNever); an
+// unresolvable member in a list that has at least one good member just
+// contributes nothing (the strict commit gate rejects the typo — this is the
+// lenient/peer-sync path).
 func buildSourceNATAppTerms(cfg *config.Config, appNames []string) []NatAppTermWire {
 	if cfg == nil {
 		return nil
@@ -454,6 +452,8 @@ func buildSourceNATAppTerms(cfg *config.Config, appNames []string) []NatAppTermW
 			Protocol: natAppProtoNumber(a.Protocol),
 			Ports:    ports,
 			SrcPorts: srcPorts,
+			ICMPType: a.ICMPType,
+			ICMPCode: a.ICMPCode,
 		})
 	}
 	for _, appName := range appNames {

@@ -492,10 +492,9 @@ func TestJunosHostDenyNftParses(t *testing.T) {
 }
 
 // TestJunosHostNftMatchesRustOracle is the #4146 cross-language parity fixture:
-// for the representable ordered DENY class, the kernel nft projection must DROP
-// exactly the sources the authoritative Rust junos-host semantics
-// (policymatch.Match, the oracle pinned to userspace-dp evaluate_junos_host_
-// policy) evaluate to a DENY, and never a permitted-exception source.
+// explicit permit and deny matches must agree with the Rust oracle. The separate
+// unmatched source demonstrates #11065's intentional direct-kernel default deny:
+// the oracle's `None => deliver` residual remains user-space-only and warned.
 func TestJunosHostNftMatchesRustOracle(t *testing.T) {
 	cfg := junosHostDenyTestConfig()
 	cfg.Security.Policies = []*config.ZonePairPolicies{
@@ -510,13 +509,14 @@ func TestJunosHostNftMatchesRustOracle(t *testing.T) {
 	}
 
 	cases := []struct {
-		ip       string
-		wantDrop bool // nft drop == Rust deny
+		ip             string
+		wantDrop       bool
+		wantOracleDeny bool
 	}{
-		{"10.0.0.6", false},    // permitted exception (good-host) — carved out
-		{"10.0.0.5", true},     // in bad-net, not the permitted host — denied
-		{"10.1.2.3", true},     // in bad-net — denied
-		{"192.168.1.1", false}, // outside bad-net — no host rule matches
+		{"10.0.0.6", false, false},   // permitted exception (good-host) — carved out
+		{"10.0.0.5", true, true},     // in bad-net, not the permitted host — denied
+		{"10.1.2.3", true, true},     // in bad-net — denied
+		{"192.168.1.1", true, false}, // no policy match: kernel terminal DROP, oracle None=>deliver
 	}
 	for _, tc := range cases {
 		ip := net.ParseIP(tc.ip)
@@ -529,9 +529,9 @@ func TestJunosHostNftMatchesRustOracle(t *testing.T) {
 		oracleDeny := res.Matched && res.Action == config.PolicyDeny
 		// nft projection verdict.
 		nftDrop := junosHostProgramDrops(programs[0], ip)
-		if oracleDeny != tc.wantDrop || nftDrop != tc.wantDrop {
-			t.Errorf("src %s: nftDrop=%v oracleDeny=%v want=%v (res=%+v)",
-				tc.ip, nftDrop, oracleDeny, tc.wantDrop, res)
+		if oracleDeny != tc.wantOracleDeny || nftDrop != tc.wantDrop {
+			t.Errorf("src %s: nftDrop=%v wantDrop=%v oracleDeny=%v wantOracleDeny=%v (res=%+v)",
+				tc.ip, nftDrop, tc.wantDrop, oracleDeny, tc.wantOracleDeny, res)
 		}
 	}
 }

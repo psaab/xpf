@@ -100,16 +100,20 @@ type BindingStatus struct {
 	// #10686: IPv6 ingress drops for IPv4-mapped or IPv4-compatible addresses.
 	// Surfaced as "V4-mapped IPv6 drops" in userspace status.
 	V4MappedIPv6Dropped uint64 `json:"v4_mapped_ipv6_dropped,omitempty"`
-	NeighborMissPackets uint64 `json:"neighbor_miss_packets,omitempty"`
-	DiscardRoutePackets uint64 `json:"discard_route_packets,omitempty"`
-	NextTablePackets    uint64 `json:"next_table_packets,omitempty"`
-	ExceptionPackets    uint64 `json:"exception_packets,omitempty"`
-	ConfigGenMismatches uint64 `json:"config_gen_mismatches,omitempty"`
-	FIBGenMismatches    uint64 `json:"fib_gen_mismatches,omitempty"`
-	UnsupportedPackets  uint64 `json:"unsupported_packets,omitempty"`
-	FlowCacheHits       uint64 `json:"flow_cache_hits,omitempty"`
-	FlowCacheMisses     uint64 `json:"flow_cache_misses,omitempty"`
-	FlowCacheEvictions  uint64 `json:"flow_cache_evictions,omitempty"`
+	// #11061: fail-closed packet drops at the fabric trust boundary.
+	InvalidFabricStampDrops     uint64 `json:"invalid_fabric_stamp_drops,omitempty"`
+	UnstampedFabricIngressDrops uint64 `json:"unstamped_fabric_ingress_drops,omitempty"`
+	AmbiguousFabricZoneDrops    uint64 `json:"ambiguous_fabric_zone_drops,omitempty"`
+	NeighborMissPackets         uint64 `json:"neighbor_miss_packets,omitempty"`
+	DiscardRoutePackets         uint64 `json:"discard_route_packets,omitempty"`
+	NextTablePackets            uint64 `json:"next_table_packets,omitempty"`
+	ExceptionPackets            uint64 `json:"exception_packets,omitempty"`
+	ConfigGenMismatches         uint64 `json:"config_gen_mismatches,omitempty"`
+	FIBGenMismatches            uint64 `json:"fib_gen_mismatches,omitempty"`
+	UnsupportedPackets          uint64 `json:"unsupported_packets,omitempty"`
+	FlowCacheHits               uint64 `json:"flow_cache_hits,omitempty"`
+	FlowCacheMisses             uint64 `json:"flow_cache_misses,omitempty"`
+	FlowCacheEvictions          uint64 `json:"flow_cache_evictions,omitempty"`
 	// #918: collision-driven subset of flow_cache_evictions (full-set
 	// LRU displacement vs stale-on-lookup eviction). Acceptance gate
 	// watches collision_evictions / hits under load.

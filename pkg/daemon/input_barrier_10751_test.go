@@ -2658,6 +2658,11 @@ func TestUnleasedOraclePlacement10751(t *testing.T) {
 func sharedLifelineDataConfig10751() *config.Config {
 	cfg := newcomerCfg10751("trust", map[string]*config.InterfaceUnit{"ge-0/0/0": {Number: 0}})
 	cfg.Security.Zones["trust"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"ssh"}}
+	cfg.Chassis.Cluster = &config.ClusterConfig{ControlInterface: "em0"}
+	cfg.Interfaces.Interfaces["em0"] = &config.InterfaceConfig{
+		Name:  "em0",
+		Units: map[int]*config.InterfaceUnit{0: {Number: 0}},
+	}
 	return cfg
 }
 

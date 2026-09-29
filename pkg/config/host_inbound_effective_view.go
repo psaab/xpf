@@ -108,7 +108,12 @@ func InterfaceZoneMap(cfg *Config) map[string]string {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zoneName := range zoneNames {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil {
 			continue
@@ -124,12 +129,13 @@ func InterfaceZoneMap(cfg *Config) map[string]string {
 			// "%s.%d" unit name, so a raw ".01" key would miss and the unit would
 			// bind to NO zone. A bare ref or a malformed suffix is unchanged.
 			//
-			// #9132: the bare-ref fan-down moved into InterfaceUnitRefKeys, the
-			// shared rule the two routing binders now use too. Byte-for-byte the
-			// same keys in the same order as the loop it replaced — the ordering
-			// matters because this map is FIRST-writer-wins over sorted zone
-			// names.
+			// #9132: the bare-ref fan-down uses InterfaceUnitRefKeys, shared with
+			// routing binders. Ordinary repeated references stay deterministic;
+			// keys claimed by multiple zones are omitted below.
 			for _, key := range InterfaceUnitRefKeys(cfg, rawIface) {
+				if _, conflicted := conflictedInterfaces[key]; conflicted {
+					continue
+				}
 				if _, exists := out[key]; !exists {
 					out[key] = zoneName
 				}
@@ -144,6 +150,12 @@ func InterfaceZoneMap(cfg *Config) map[string]string {
 			// declared-unit `p.0.1` binds base `p.0` (was bogus `p`), and a
 			// declared bare `p.0` skips this (the fan-down already bound it).
 			if s := cfg.SplitInterfaceUnitRef(rawIface); s.HasUnit && s.Base != "" {
+				if _, conflicted := conflictedInterfaces[s.Literal]; conflicted {
+					continue
+				}
+				if _, conflicted := conflictedInterfaces[s.Base]; conflicted {
+					continue
+				}
 				if _, exists := out[s.Base]; !exists {
 					out[s.Base] = zoneName
 				}
@@ -223,8 +235,8 @@ func MergeHostInboundTraffic(a, b *HostInboundTraffic) *HostInboundTraffic {
 // filled out["ifN.M"] first, so the later exact unit override was skipped and
 // the less-specific physical ref silently decided the unit (fail-open or
 // fail-closed). Zones are still walked in sorted order and the bare physical key
-// itself stays first-writer-wins across zones (deterministic), so single-level
-// (physical-only or unit-only) configs are bit-identical to before.
+// itself stays first-writer-wins across ordinary single-owner refs, while
+// contested logical keys are omitted from the effective view.
 func ResolveInterfaceHostInbound(cfg *Config) map[string]*HostInboundTraffic {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
@@ -238,7 +250,12 @@ func ResolveInterfaceHostInbound(cfg *Config) map[string]*HostInboundTraffic {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
+	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
+	excludedZones := ZoneQuarantineExclusions(zoneNames)
 	for _, zn := range zoneNames {
+		if _, excluded := excludedZones[zn]; excluded {
+			continue
+		}
 		zone := cfg.Security.Zones[zn]
 		if zone == nil || len(zone.InterfaceHostInbound) == 0 {
 			continue
@@ -268,16 +285,13 @@ func ResolveInterfaceHostInbound(cfg *Config) map[string]*HostInboundTraffic {
 				// the per-unit snapshot consumer looks up, and the #5489 owner
 				// guard compares the canonical unit against the (now canonical)
 				// zone map.
-				// #5489: a unit-level override must come ONLY from the unit's
-				// authoritative zone owner. InterfaceZoneMap resolves the
-				// owner as the first sorted zone that claims the unit; on a
-				// tolerated duplicate ownership (lenient load / peer-sync retains
-				// two zones both claiming the same reth0.100) this loop visits
-				// BOTH zones, so without a guard the losing zone's tokens (e.g.
-				// SSH) would union into out[ref] and bleed into the winning zone's
-				// InterfaceSnapshot / ZoneHostInboundView. Quarantine the leak with
-				// the SAME predicate the physical-expansion branch uses (#3720
-				// M01): skip when a DIFFERENT zone owns this unit.
+				// #5489: a unit-level override is applied only when the unit has
+				// one unambiguous zone owner. QuarantinedZoneInterfaceKeys omits
+				// contested keys from InterfaceZoneMap and rejects both
+				// claimants' overrides, so no first-sorted zone becomes an owner.
+				if _, conflicted := conflictedInterfaces[s.Literal]; conflicted {
+					continue
+				}
 				if z := zoneByIface[s.Literal]; z != "" && z != zn {
 					continue
 				}
@@ -289,16 +303,21 @@ func ResolveInterfaceHostInbound(cfg *Config) map[string]*HostInboundTraffic {
 				out[s.Literal] = MergeHostInboundTraffic(out[s.Literal], hib)
 				continue
 			}
-			// Bare physical ref: first-writer-wins across zones for the bare key
-			// itself (preserves the lenient cross-zone quarantine).
-			if _, ok := out[s.Literal]; !ok {
-				out[s.Literal] = hib
+			// Bare physical ref: keep the ordinary first-writer-wins behavior,
+			// but do not expose an ambiguous physical key.
+			if _, conflicted := conflictedInterfaces[s.Literal]; !conflicted {
+				if _, ok := out[s.Literal]; !ok {
+					out[s.Literal] = hib
+				}
 			}
 			if ifCfg := cfg.Interfaces.Interfaces[s.Base]; ifCfg != nil {
 				for unitNum := range ifCfg.Units {
 					un := fmt.Sprintf("%s.%d", s.Base, unitNum)
 					// #3720 M01: do not leak a physical override onto a unit that
 					// resolves to a different zone.
+					if _, conflicted := conflictedInterfaces[un]; conflicted {
+						continue
+					}
 					if z := zoneByIface[un]; z != "" && z != zn {
 						continue
 					}

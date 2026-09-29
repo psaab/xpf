@@ -1069,8 +1069,9 @@ contract.
   #3653 the bit was re-derived from config shape and reported `false` for a
   no-stanza zone — the pre-#3405 "false = admit-all" reading, the OPPOSITE
   of the runtime default-deny, so a controller read the management plane as
-  open when it is fail-closed. (Global ICMP/ND/PMTUD accepts and lifeline
-  interfaces fxp0/em0/fab* still bypass the per-zone host-inbound deny.)
+  open when it is fail-closed. Global ICMP/ND/PMTUD accepts still bypass the
+  per-zone deny; lifelines are fxp0 plus explicitly configured cluster
+  control/fabric links, not bare em0/fab* names.
   Before #3328 this RPC exposed only the flattened list and no `configured`
   flag at all.
 - `GetScreen` enumerates the configured screen profiles. `ScreenInfo`

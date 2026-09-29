@@ -684,6 +684,10 @@ type xpfCollector struct {
 	userspaceIPv6ExtHeaderDropped *prometheus.Desc
 	// #10686: RFC 4291 / RFC 4038 embedded-v4 IPv6 ingress drops.
 	userspaceV4MappedIPv6Dropped *prometheus.Desc
+	// #11061: per-binding fabric trust-boundary drops, summed across bindings.
+	userspaceFabricInvalidStampDrops     *prometheus.Desc
+	userspaceFabricUnstampedIngressDrops *prometheus.Desc
+	userspaceFabricAmbiguousZoneDrops    *prometheus.Desc
 	// #10498: pre-L3 admission counters, summed across bindings.
 	userspaceUMEMSliceDropped     *prometheus.Desc
 	userspaceUnknownVLANDropped   *prometheus.Desc
@@ -882,8 +886,9 @@ type xpfCollector struct {
 	ipsecSANetlinkRedumpUpsertsTotal  *prometheus.Desc
 	// #3773 (M13): fabric-link skip diagnostics — malformed value vs
 	// unresolved (empty) peer/local MAC.
-	fabricLinkSkippedMalformedTotal *prometheus.Desc
-	fabricLinkUnresolvedPeerTotal   *prometheus.Desc
+	fabricLinkSkippedMalformedTotal   *prometheus.Desc
+	fabricLinkUnresolvedPeerTotal     *prometheus.Desc
+	userspaceFabricAmbiguousZoneCount *prometheus.Desc
 	// #1865: operator-visible WireGuard telemetry — per-tunnel
 	// handshake/encap/decap counters + drop reasons from the helper's
 	// wg_tunnels status rows. Label sets: {tunnel} (+ role / direction
@@ -1269,6 +1274,9 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceMartianDropped
 	ch <- c.userspaceIPv6ExtHeaderDropped
 	ch <- c.userspaceV4MappedIPv6Dropped
+	ch <- c.userspaceFabricInvalidStampDrops
+	ch <- c.userspaceFabricUnstampedIngressDrops
+	ch <- c.userspaceFabricAmbiguousZoneDrops
 	ch <- c.userspaceUMEMSliceDropped
 	ch <- c.userspaceUnknownVLANDropped
 	ch <- c.userspaceDstMACDropped
@@ -1393,6 +1401,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.negNeighKeys
 	ch <- c.fabricLinkSkippedMalformedTotal
 	ch <- c.fabricLinkUnresolvedPeerTotal
+	ch <- c.userspaceFabricAmbiguousZoneCount
 	ch <- c.wgHandshakesCompletedTotal
 	ch <- c.wgHandshakeInitiationsCreatedTotal
 	ch <- c.wgHandshakeInitiationBuildFailuresTotal

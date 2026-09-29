@@ -66,6 +66,11 @@ impl BindingLiveState {
             flowless_forward_packets: self.flowless_forward_packets.load(Ordering::Relaxed),
             flowless_forward_bytes: self.flowless_forward_bytes.load(Ordering::Relaxed),
             route_miss_packets: self.route_miss_packets.load(Ordering::Relaxed),
+            invalid_fabric_stamp_drops: self.invalid_fabric_stamp_drops.load(Ordering::Relaxed),
+            unstamped_fabric_ingress_drops: self
+                .unstamped_fabric_ingress_drops
+                .load(Ordering::Relaxed),
+            ambiguous_fabric_zone_drops: self.ambiguous_fabric_zone_drops.load(Ordering::Relaxed),
             martian_dropped: self.martian_dropped.load(Ordering::Relaxed),
             ipv6_ext_header_dropped: self.ipv6_ext_header_dropped.load(Ordering::Relaxed),
             v4_mapped_ipv6_dropped: self.v4_mapped_ipv6_dropped.load(Ordering::Relaxed),

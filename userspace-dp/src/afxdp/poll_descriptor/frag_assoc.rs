@@ -33,9 +33,8 @@ pub(in crate::afxdp) fn frag_ingress_authority(
     ingress_zone_override: Option<u16>,
 ) -> crate::fragment_assoc::FragAuthority {
     let physical = meta.ingress_ifindex as i32;
-    let logical =
-        resolve_ingress_logical_ifindex(forwarding, physical, meta.ingress_vlan_id)
-            .unwrap_or(physical);
+    let logical = resolve_ingress_logical_ifindex(forwarding, physical, meta.ingress_vlan_id)
+        .unwrap_or(physical);
     // Zone precedence mirrors prerouting_ingress_scope: a fabric-encoded
     // override wins, else the LOGICAL unit's configured zone (#5802). An
     // unzoned ingress resolves to 0, which is itself a distinct authority —
@@ -1025,6 +1024,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         flow,
         now_ns,
         true,
+        None,
         worker_id,
         &mut counter,
     ) {
@@ -1061,4 +1061,3 @@ pub(super) fn session_gated_reverse_fragment_requires_nat_translation(
         now_ns,
     )
 }
-

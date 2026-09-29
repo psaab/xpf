@@ -5462,6 +5462,147 @@ fn synced_reservation_narrows_on_l4_match_6211() {
     );
 }
 
+// #11064 FAIL-ON-REVERT: overlapping pool addresses are disambiguated by the
+// active ICMP application type. Losing that identity makes the standby reserve
+// type 13's translated tuple in the first (type 8) allocator instead, allowing
+// a local type 13 flow to reuse the still-live public tuple.
+#[test]
+fn synced_reservation_narrows_on_icmp_application_type_11064() {
+    let snapshots = || {
+        vec![
+            SourceNATRuleSnapshot {
+                name: "snat-echo".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                match_applications: vec![NatAppTermWire {
+                    protocol: PROTO_ICMP as u16,
+                    icmp_type: Some(8),
+                    ..NatAppTermWire::default()
+                }],
+                pool_name: "pool-echo".to_string(),
+                pool_addresses: vec!["203.0.113.10/32".to_string()],
+                port_low: 20_000,
+                port_high: 20_099,
+                ..SourceNATRuleSnapshot::default()
+            },
+            SourceNATRuleSnapshot {
+                name: "snat-timestamp".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                match_applications: vec![NatAppTermWire {
+                    protocol: PROTO_ICMP as u16,
+                    icmp_type: Some(13),
+                    ..NatAppTermWire::default()
+                }],
+                pool_name: "pool-timestamp".to_string(),
+                pool_addresses: vec!["203.0.113.10/32".to_string()],
+                port_low: 20_000,
+                port_high: 20_099,
+                ..SourceNATRuleSnapshot::default()
+            },
+        ]
+    };
+    let active_rules = parse_source_nat_rules(&snapshots());
+    let standby_rules = parse_source_nat_rules(&snapshots());
+    let src: IpAddr = "10.0.61.50".parse().unwrap();
+    let dst: IpAddr = "8.8.8.8".parse().unwrap();
+    let pool_ip: Ipv4Addr = "203.0.113.10".parse().unwrap();
+    let mut active_counter = None;
+    let active_nat = match_source_nat_result_for_tuple_with_icmp(
+        &InterfaceNatAllocators::default(),
+        &active_rules,
+        &NatScopeCtx::default(),
+        "lan",
+        "wan",
+        src,
+        dst,
+        Some(PROTO_ICMP),
+        0x1234,
+        0,
+        Some(pool_ip),
+        None,
+        0,
+        false,
+        true,
+        Some((13, 0)),
+        NatHolder::Untracked,
+        &mut active_counter,
+    );
+    let active_nat = match active_nat {
+        SourceNatLookup::Matched(nat) => nat,
+        other => panic!("type 13 must match the timestamp rule, got {other:?}"),
+    };
+    assert_eq!(active_nat.source_nat_icmp, Some((13, 0)));
+    let translated_port = active_nat
+        .rewrite_src_port
+        .expect("the active pool allocation must carry the translated identifier");
+
+    let synced_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        src_ip: src,
+        dst_ip: dst,
+        src_port: 0x1234,
+        dst_port: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    reserve_synced_source_nat_allocation(
+        &InterfaceNatAllocators::default(),
+        &standby_rules,
+        &synced_key,
+        active_nat,
+        false,
+        Some(("lan", "wan")),
+        0,
+    );
+    assert!(
+        standby_rules[1]
+            .pool_allocator
+            .debug_is_port_occupied(0, translated_port),
+        "the type-13 allocator must reserve the active node's translated identifier"
+    );
+    assert!(
+        !standby_rules[0]
+            .pool_allocator
+            .debug_is_port_occupied(0, translated_port),
+        "the overlapping type-8 allocator must not own the type-13 reservation"
+    );
+
+    let mut local_counter = None;
+    let local_nat = match_source_nat_result_for_tuple_with_icmp(
+        &InterfaceNatAllocators::default(),
+        &standby_rules,
+        &NatScopeCtx::default(),
+        "lan",
+        "wan",
+        "10.0.61.51".parse().unwrap(),
+        dst,
+        Some(PROTO_ICMP),
+        0x5678,
+        0,
+        Some(pool_ip),
+        None,
+        0,
+        false,
+        true,
+        Some((13, 0)),
+        NatHolder::Untracked,
+        &mut local_counter,
+    );
+    let local_nat = match local_nat {
+        SourceNatLookup::Matched(nat) => nat,
+        other => panic!("the standby must have another type-13 allocation, got {other:?}"),
+    };
+    assert_ne!(
+        local_nat.rewrite_src_port,
+        Some(translated_port),
+        "a post-failover local type-13 flow must not reuse the live synced tuple"
+    );
+}
+
 // #6211 GUARD on the destination axis being POST-DNAT: the active matches
 // source NAT against the post-DNAT destination (`nat_match_flow =
 // flow.with_destination(effective_resolution_target)` in `poll_descriptor`),

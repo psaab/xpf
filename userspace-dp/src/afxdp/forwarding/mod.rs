@@ -344,6 +344,12 @@ pub(in crate::afxdp) fn unknown_ingress_vlan(
 /// resolved from that zone instead (`zone_routing_domain`), which is the same
 /// identity the rest of the fabric-ingress path already adjudicates on. An
 /// unencoded fabric frame has nothing to resolve and stays domain 0.
+///
+/// A missing entry for a validated, nonzero zone is a cross-instance ambiguity,
+/// not the default instance: return the reserved per-zone session domain.
+/// Invalid stamps are rejected earlier by stage 9 and never reach this helper.
+/// Native table resolution has no owner row for the synthetic domain and
+/// therefore fails closed instead of using MAIN (#11061).
 #[inline]
 pub(in crate::afxdp) fn ingress_routing_domain(
     forwarding: &ForwardingState,
@@ -357,12 +363,12 @@ pub(in crate::afxdp) fn ingress_routing_domain(
     if !forwarding.has_routing_domains {
         return 0;
     }
-    if let Some(zone) = fabric_ingress_zone {
+    if let Some(zone) = fabric_ingress_zone.filter(|zone| *zone != 0) {
         return forwarding
             .zone_routing_domain
             .get(&zone)
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | u32::from(zone));
     }
     let logical = resolve_ingress_logical_ifindex(forwarding, ingress_ifindex, ingress_vlan_id)
         .unwrap_or(ingress_ifindex);
@@ -373,11 +379,12 @@ pub(in crate::afxdp) fn ingress_routing_domain(
         .unwrap_or(0)
 }
 
-/// #10312: native routing-instance table resolution has three outcomes.
+/// #10312/#11061: native routing-table resolution has three outcomes.
 ///
 /// `Default` is the real unscoped/main instance; `Table` is a validated
 /// per-family registry row; `Unresolvable` means a nonzero flow domain has no
-/// current owner or family table. Callers MUST NOT turn the last state into
+/// current owner or family table. This includes the synthetic nonzero domain
+/// for an ambiguous fabric zone. Callers MUST NOT turn the last state into
 /// MAIN, because that recreates the RI-to-WAN leak.
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::afxdp) enum NativeRouteTable {
@@ -390,6 +397,33 @@ pub(in crate::afxdp) enum NativeRouteTable {
     Unresolvable {
         domain: u32,
     },
+}
+
+/// #11061 R3: the effective routing domain for one flow, shared by the
+/// native-table resolver and the ambiguous-drop counter arms. A 9b-stamped
+/// nonzero flow domain wins; otherwise (flowless/L3-only contexts carry
+/// domain 0 by construction) fall back to the ingress/zone resolution, which
+/// yields the synthetic quarantine domain for an ambiguous fabric zone.
+/// The counter arms MUST use this helper — reading the raw flow domain
+/// undercounts flowless quarantine drops (their flow is never 9b-stamped).
+#[inline]
+pub(in crate::afxdp) fn effective_routing_domain_for_flow(
+    forwarding: &ForwardingState,
+    flow_domain: u32,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    fabric_ingress_zone: Option<u16>,
+) -> u32 {
+    if flow_domain != 0 {
+        flow_domain
+    } else {
+        ingress_routing_domain(
+            forwarding,
+            ingress_ifindex,
+            ingress_vlan_id,
+            fabric_ingress_zone,
+        )
+    }
 }
 
 /// #10312: resolve a native routing-instance member's destination table.
@@ -409,16 +443,13 @@ pub(in crate::afxdp) fn native_route_table_for_flow_target(
     fabric_ingress_zone: Option<u16>,
     target: IpAddr,
 ) -> NativeRouteTable {
-    let domain = if flow_domain != 0 {
-        flow_domain
-    } else {
-        ingress_routing_domain(
-            forwarding,
-            ingress_ifindex,
-            ingress_vlan_id,
-            fabric_ingress_zone,
-        )
-    };
+    let domain = effective_routing_domain_for_flow(
+        forwarding,
+        flow_domain,
+        ingress_ifindex,
+        ingress_vlan_id,
+        fabric_ingress_zone,
+    );
     if domain == 0 {
         return NativeRouteTable::Default;
     }

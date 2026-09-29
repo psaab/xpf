@@ -27,6 +27,58 @@ func jhPermit(name string, src []string, app []string) *Policy {
 	return &Policy{Name: name, Action: PolicyPermit, Match: PolicyMatch{SourceAddresses: src, Applications: app}}
 }
 
+func TestJunosHostNumericICMPApplicationPreservesTypeAndCode11064(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		proto       string
+		protoNumber uint8
+		typ         uint8
+		code        uint8
+	}{
+		{name: "icmp numeric", proto: "1", protoNumber: HostInboundProtoICMP, typ: 8, code: 3},
+		{name: "icmpv6 numeric", proto: "58", protoNumber: HostInboundProtoICMPv6, typ: 128, code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := jhTestConfig()
+			cfg.Applications.Applications = map[string]*Application{
+				"typed": {
+					Name:     "typed",
+					Protocol: tc.proto,
+					ICMPType: u8p(tc.typ),
+					ICMPCode: u8p(tc.code),
+				},
+			}
+			cfg.Security.Policies = []*ZonePairPolicies{
+				{FromZone: "untrust", ToZone: "junos-host", Policies: []*Policy{
+					jhDeny("typed-deny", []string{"any"}, []string{"typed"}),
+				}},
+			}
+			proj := BuildJunosHostDenyProjection(cfg)
+			if len(proj.Programs) != 1 || !proj.Programs[0].Representable {
+				t.Fatalf("numeric ICMP deny projection is not representable: %+v", proj.Programs)
+			}
+			program := proj.Programs[0]
+			rules := program.RulesV4
+			if tc.protoNumber == HostInboundProtoICMPv6 {
+				rules = program.RulesV6
+			}
+			if len(rules) != 1 || len(rules[0].L4) != 1 {
+				t.Fatalf("numeric %s projection rules = %+v, want one typed deny", tc.proto, rules)
+			}
+			got := rules[0].L4[0]
+			if got.Proto != tc.protoNumber {
+				t.Fatalf("protocol = %d, want %s (%d)", got.Proto, tc.proto, tc.protoNumber)
+			}
+			if got.ICMPType == nil || *got.ICMPType != tc.typ {
+				t.Fatalf("ICMPType = %v, want %d", got.ICMPType, tc.typ)
+			}
+			if got.ICMPCode == nil || *got.ICMPCode != tc.code {
+				t.Fatalf("ICMPCode = %v, want %d", got.ICMPCode, tc.code)
+			}
+		})
+	}
+}
+
 // TestJunosHostThreeTierComposition proves the effective program is assembled in
 // Rust's exact tier order (exact -> from-any -> global): a from-any PERMIT ahead
 // of a GLOBAL deny renders as a return BEFORE the deny's drop (#9504), and the
@@ -48,8 +100,8 @@ func TestJunosHostThreeTierComposition(t *testing.T) {
 		t.Fatalf("want 1 representable program, got %+v", proj.Programs)
 	}
 	p := proj.Programs[0]
-	if len(p.RulesV4) != 2 {
-		t.Fatalf("want the from-any return then the global drop, got %+v", p.RulesV4)
+	if len(p.RulesV4) != 3 {
+		t.Fatalf("want the from-any return, the global drop, then the terminal default deny, got %+v", p.RulesV4)
 	}
 	if r := p.RulesV4[0]; r.Verdict != JunosHostReturn || len(r.Src) != 1 || r.Src[0] != "10.0.0.6/32" {
 		t.Errorf("first v4 rule = %+v, want a return for [10.0.0.6/32] (the from-any carve, in tier order)", r)
@@ -57,12 +109,16 @@ func TestJunosHostThreeTierComposition(t *testing.T) {
 	if r := p.RulesV4[1]; r.Verdict != JunosHostDrop || len(r.Src) != 1 || r.Src[0] != "10.0.0.0/8" {
 		t.Errorf("second v4 rule = %+v, want a drop for [10.0.0.0/8]", r)
 	}
+	if r := p.RulesV4[2]; r.Verdict != JunosHostDrop || !r.SrcAny || !r.DstAny {
+		t.Errorf("third v4 rule = %+v, want an unconditional terminal default deny", r)
+	}
 	if !proj.RenderedPolicyKeys[JunosHostGlobalPolicyKey("g-block")] {
 		t.Errorf("global deny g-block should be rendered (warning suppressed)")
 	}
-	// The from-any PERMIT is never suppressed (it is not a deny).
+	// The from-any permit stays warned because userspace retains its deliberate
+	// deliver-on-no-match lifeline (the kernel terminal covers direct delivery).
 	if proj.RenderedPolicyKeys[JunosHostZonePairPolicyKey("any", "allow-good")] {
-		t.Errorf("a permit must never be marked rendered")
+		t.Errorf("a permit must remain warned while userspace no-match is still deliver")
 	}
 }
 
@@ -257,9 +313,9 @@ func TestJunosHostCrossZoneAmbiguousTrunkKeepsWarning(t *testing.T) {
 	}
 }
 
-// TestJunosHostCrossDimensionPermitUnrepresentable proves a narrow-application
-// permit ahead of a deny is a cross-dimension carve nft cannot express — the
-// whole program is un-representable.
+// TestJunosHostCrossDimensionPermitRendersAReturn9504 proves a narrow-application
+// permit ahead of a deny is represented as a first-match return, followed by the
+// explicit drop and the #11065 terminal default deny.
 func TestJunosHostCrossDimensionPermitRendersAReturn9504(t *testing.T) {
 	cfg := jhTestConfig()
 	cfg.Security.Policies = []*ZonePairPolicies{
@@ -274,8 +330,8 @@ func TestJunosHostCrossDimensionPermitRendersAReturn9504(t *testing.T) {
 			"first-match order, so the program is representable: %+v", proj.Programs)
 	}
 	rules := proj.Programs[0].RulesV4
-	if len(rules) != 2 {
-		t.Fatalf("want the permit's return then the deny's drop, got %+v", rules)
+	if len(rules) != 3 {
+		t.Fatalf("want the permit's return, explicit deny, and terminal default deny, got %+v", rules)
 	}
 	if r := rules[0]; r.Verdict != JunosHostReturn || len(r.Src) != 1 || r.Src[0] != "10.0.0.6/32" || len(r.L4) == 0 {
 		t.Errorf("first rule = %+v, want a return for good-host carrying the permit's own "+
@@ -284,6 +340,9 @@ func TestJunosHostCrossDimensionPermitRendersAReturn9504(t *testing.T) {
 	}
 	if r := rules[1]; r.Verdict != JunosHostDrop || len(r.Src) != 1 || r.Src[0] != "10.0.0.0/8" {
 		t.Errorf("second rule = %+v, want the deny's drop for bad-net", r)
+	}
+	if r := rules[2]; r.Verdict != JunosHostDrop || !r.SrcAny || !r.DstAny {
+		t.Errorf("third rule = %+v, want the terminal default deny (#11065)", r)
 	}
 	if !proj.RenderedPolicyKeys[JunosHostZonePairPolicyKey("untrust", "block-net")] {
 		t.Errorf("the deny renders and must be marked rendered: %+v", proj.RenderedPolicyKeys)

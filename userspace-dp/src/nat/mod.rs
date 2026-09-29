@@ -232,7 +232,8 @@ pub(crate) use source::{
     SourceNatFailure, SourceNatFailureReason, SourceNatFlowKey, SourceNatLookup, SourceNatRule,
     flowless_source_nat_rule_possible,
     SyncedNatZones, allocate_nat64_pool_port, allocate_nat64_pool_port_deterministic_v6,
-    match_source_nat_result_for_tuple, parse_source_nat_rules,
+    match_source_nat_result_for_tuple, match_source_nat_result_for_tuple_with_icmp,
+    parse_source_nat_rules,
     parse_source_nat_rules_with_previous, release_nat64_pool_port,
     release_source_nat_allocation_for_worker, release_synced_source_nat_allocation_untracked,
     reserve_nat64_pool_port, reserve_nat64_pool_port_capture_and_replace,
@@ -281,6 +282,10 @@ pub(crate) struct NatDecision {
     pub(crate) rewrite_dst: Option<IpAddr>,
     pub(crate) rewrite_src_port: Option<u16>,
     pub(crate) rewrite_dst_port: Option<u16>,
+    /// Original ICMP type/code for a stateful source-NAT allocation. The
+    /// standby uses this packet identity to select the same typed rule
+    /// allocator when reserving the synced translation.
+    pub(crate) source_nat_icmp: Option<(u8, u8)>,
     /// When true, this is a NAT64 cross-address-family translation.
     /// The forward session key is IPv6 and the reverse session key is IPv4
     /// (or vice versa for the return direction).
@@ -303,6 +308,7 @@ impl NatDecision {
             rewrite_dst: self.rewrite_src.map(|_| original_src),
             rewrite_src_port: self.rewrite_dst_port.map(|_| original_dst_port),
             rewrite_dst_port: self.rewrite_src_port.map(|_| original_src_port),
+            source_nat_icmp: None,
             nat64: self.nat64,
             nptv6: self.nptv6,
         }
@@ -316,6 +322,7 @@ impl NatDecision {
             rewrite_dst: self.rewrite_dst.or(other.rewrite_dst),
             rewrite_src_port: self.rewrite_src_port.or(other.rewrite_src_port),
             rewrite_dst_port: self.rewrite_dst_port.or(other.rewrite_dst_port),
+            source_nat_icmp: self.source_nat_icmp.or(other.source_nat_icmp),
             nat64: self.nat64 || other.nat64,
             nptv6: self.nptv6 || other.nptv6,
         }

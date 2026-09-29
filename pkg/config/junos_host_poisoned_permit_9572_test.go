@@ -194,11 +194,14 @@ func TestJunosHostAuthoredPermitStillCarvesTheDeny9572(t *testing.T) {
 			t.Fatalf("strict compile: %v", err)
 		}
 		prog := junosHost9572Program(BuildJunosHostDenyProjection(cfg))
-		if prog == nil || len(prog.RulesV4) != 2 {
-			t.Fatalf("want the p0 return then the p1 drop in v4, got %+v", prog)
+		if prog == nil || len(prog.RulesV4) != 3 {
+			t.Fatalf("want the p0 return, the p1 drop, and terminal default deny in v4, got %+v", prog)
 		}
 		if r := prog.RulesV4[0]; r.Verdict != JunosHostReturn || len(r.Src) != 1 || r.Src[0] != "10.0.9.0/24" {
 			t.Errorf("first v4 rule = %+v, want the authored p0 permit's return for [10.0.9.0/24]", r)
+		}
+		if r := prog.RulesV4[2]; r.Verdict != JunosHostDrop || !r.SrcAny || !r.DstAny {
+			t.Errorf("third v4 rule = %+v, want the terminal default deny (#11065)", r)
 		}
 	})
 

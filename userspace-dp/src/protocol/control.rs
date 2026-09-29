@@ -210,9 +210,14 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // no-syn-check opt-out and continues the default SYN-first drop; exact
 // equality fences the mixed version.
 // v34 -> v35 (#10827 follow-up): `WebManagementConfig.TLSCertificate` /
-// `TLSPrivateKey` ride the snapshot wire. Mirrors the Go bump; exact
-// equality keeps version and shape in agreement.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 35;
+// `TLSPrivateKey` ride the snapshot wire. Mirrors the Go bump; exact equality
+// keeps version and shape in agreement.
+// v35 -> v36 (#11061 + #11064): `allow_unstamped_fabric_ingress` is a security
+// compatibility knob consumed by the fabric receive gate, and source-NAT
+// application terms carry ICMP type/code. A v35 helper ignores the knob (keeps
+// accepting unstamped traffic into MAIN on RI nodes) and the nested fields
+// (widens the typed match); exact equality refuses the mixed version on both.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 36;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
@@ -843,7 +848,11 @@ pub(crate) struct ControlResponse {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub session_policy_per_worker_errors: Vec<String>,
-    #[serde(rename = "session_deltas", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "session_deltas",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub session_deltas: Vec<SessionDeltaInfo>,
     /// #9344/#9856: `true` when an export answer is capped by `max` and
     /// the helper still holds entries from the same tokenized window.
@@ -889,7 +898,11 @@ pub(crate) struct ControlResponse {
     pub policy_delete_outcomes: Vec<String>,
     #[serde(rename = "policy_delete_complete", default)]
     pub policy_delete_complete: bool,
-    #[serde(rename = "policy_delete_errors", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "policy_delete_errors",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub policy_delete_errors: Vec<String>,
     /// #10784: authoritative persistent-lease bindings revoked by clear.
     #[serde(rename = "persistent_nat_lease_count", default)]
@@ -1053,6 +1066,15 @@ pub(crate) struct SessionSyncRequest {
     pub nat_src_port: u16,
     #[serde(rename = "nat_dst_port", default)]
     pub nat_dst_port: u16,
+    /// #11064: ICMP query identity the active used to select a source-NAT
+    /// rule. The valid bit preserves type/code `(0,0)`; when absent, the
+    /// standby cannot narrow a typed application match from this request.
+    #[serde(rename = "source_nat_icmp_valid", default)]
+    pub source_nat_icmp_valid: bool,
+    #[serde(rename = "source_nat_icmp_type", default)]
+    pub source_nat_icmp_type: u8,
+    #[serde(rename = "source_nat_icmp_code", default)]
+    pub source_nat_icmp_code: u8,
     #[serde(rename = "fabric_ingress", default)]
     pub fabric_ingress: bool,
     #[serde(rename = "is_reverse", default)]
@@ -1081,7 +1103,11 @@ pub(crate) struct SessionSyncRequest {
     /// stated) and family tags compact 4/6. Set only with operation
     /// `mirror_delete_policy_batch`; `None` for every other verb. Additive:
     /// an old helper rejects the unknown verb.
-    #[serde(rename = "policy_matches", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "policy_matches",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub policy_matches: Option<Vec<SessionPolicyMatch>>,
     /// #3301: the admitting policy's ID (#3056 namespace), carried so a
     /// peer-PROMOTED session resolves the admitting policy on its live-session
@@ -1286,7 +1312,11 @@ pub(crate) struct SessionPolicyMatch {
     pub routing_domain: u32,
     #[serde(default)]
     pub tuple: SessionPolicyTuple,
-    #[serde(rename = "reverse_key", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "reverse_key",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub reverse_key: Option<SessionPolicyTuple>,
     #[serde(rename = "policy_id", default)]
     pub policy_id: u32,

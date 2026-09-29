@@ -47,6 +47,7 @@ pub(super) fn source_nat_decision_for_flow(
     flow: &SessionFlow,
     now_ns: u64,
     non_first_fragment: bool,
+    packet_icmp: Option<(u8, u8)>,
     worker_id: u32,
     matched_counter: &mut Option<std::sync::Arc<crate::nat::NatRuleCounter>>,
 ) -> Result<NatDecision, SourceNatFailure> {
@@ -60,6 +61,7 @@ pub(super) fn source_nat_decision_for_flow(
         flow,
         now_ns,
         non_first_fragment,
+        packet_icmp,
         crate::nat::NatHolder::Worker(worker_id),
         matched_counter,
     )
@@ -86,6 +88,7 @@ fn source_nat_decision_with_holder(
     // static-NAT (address-only) match below is NOT gated — it rewrites
     // the IP on every fragment, which is correct.
     non_first_fragment: bool,
+    packet_icmp: Option<(u8, u8)>,
     // #6522: THIS worker's id, recorded as the holder of any pool allocation
     // this decision mints. A locally-born session is replicated to every
     // SIBLING worker and each sibling reserves against the same allocator
@@ -140,6 +143,7 @@ fn source_nat_decision_with_holder(
         flow,
         now_ns,
         non_first_fragment,
+        packet_icmp,
         holder,
         matched_counter,
     ) {
@@ -196,6 +200,7 @@ pub(super) fn source_nat_would_translate_flowless(
         // before allocating, so this remains a read-only probe for any
         // flowless packet.
         true,
+        None,
         // #6522: side-effect-free by the contract above — it mints no pool
         // mapping, so there is no allocation to record a holder on.
         crate::nat::NatHolder::Untracked,

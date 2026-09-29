@@ -923,6 +923,9 @@ type ProcessStatus struct {
 	// compat with older helpers (default 0).
 	FabricLinkSkippedMalformedTotal uint64 `json:"fabric_link_skipped_malformed_total,omitempty"`
 	FabricLinkUnresolvedPeerTotal   uint64 `json:"fabric_link_unresolved_peer_total,omitempty"`
+	// #11061: current count of zones whose fabric stamps cannot select one
+	// routing domain in the helper's published forwarding snapshot.
+	AmbiguousFabricZoneCount uint64 `json:"ambiguous_fabric_zone_count,omitempty"`
 	// #9654: whether the learned-route import is capped in the forwarding state
 	// the helper's live workers serve NOW. A pointer because absence must read
 	// as UNKNOWN. The helper omits the key when no worker is live. A helper that

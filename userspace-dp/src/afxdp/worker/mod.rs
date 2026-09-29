@@ -1413,6 +1413,10 @@ pub(crate) struct BindingLiveSnapshot {
     /// BindingLiveState (the session-uncharged share of forward candidates).
     pub(crate) flowless_forward_packets: u64,
     pub(crate) flowless_forward_bytes: u64,
+    /// #11061: trust-boundary drop counters from the packet poll path.
+    pub(crate) invalid_fabric_stamp_drops: u64,
+    pub(crate) unstamped_fabric_ingress_drops: u64,
+    pub(crate) ambiguous_fabric_zone_drops: u64,
     pub(crate) route_miss_packets: u64,
     /// #4743: martian-dst NoRoute drops snapshotted from BindingLiveState (a
     /// sub-breakout of route_miss_packets).

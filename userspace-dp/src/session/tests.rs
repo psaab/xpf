@@ -3217,6 +3217,60 @@ fn find_forward_nat_match_uses_reverse_index() {
     assert!(table.find_forward_nat_match(&reply).is_none());
 }
 
+#[test]
+fn find_forward_nat_match_does_not_borrow_main_for_quarantined_domain_11061() {
+    let mut table = SessionTable::new();
+    let forward = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: "10.0.61.102".parse().unwrap(),
+        dst_ip: "172.16.80.200".parse().unwrap(),
+        src_port: 42424,
+        dst_port: 5201,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let reply = SessionKey {
+        addr_family: forward.addr_family,
+        protocol: forward.protocol,
+        src_ip: "172.16.80.200".parse().unwrap(),
+        dst_ip: "172.16.80.8".parse().unwrap(),
+        src_port: 5201,
+        dst_port: 42424,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let nat = NatDecision {
+        rewrite_src: Some("172.16.80.8".parse().unwrap()),
+        ..NatDecision::default()
+    };
+    assert!(table.install_with_protocol(
+        forward,
+        SessionDecision {
+            resolution: resolution(),
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata(),
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    assert!(
+        table.find_forward_nat_match(&reply).is_some(),
+        "the domain-0 control reply must still match its MAIN session"
+    );
+    let quarantined_reply = SessionKey {
+        routing_domain: crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
+        ..reply
+    };
+    assert!(
+        table.find_forward_nat_match(&quarantined_reply).is_none(),
+        "a stamped ambiguous-zone reply must not borrow a domain-0 NAT session"
+    );
+}
+
 /// #10130: a reply fragment has no ports, so the discriminator must consult
 /// live forward-session NAT state through the L3 reverse index. A plain packet
 /// from the same internal address to an unrelated destination is not gated.
@@ -3299,6 +3353,14 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
     assert!(
         table.reverse_nat_fragment_requires_translation(&reply, 99, 2_000_000_000),
         "a live candidate in another non-default domain must fail closed"
+    );
+    assert!(
+        table.reverse_nat_fragment_requires_translation(
+            &reply,
+            crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
+            2_000_000_000,
+        ),
+        "an ambiguous fabric-domain fragment tail must take the live-candidate          path (TRUE): the caller drops on TRUE, so it never borrows a tenant          NAT candidate. Outcome pin, not a fence-mechanism pin."
     );
     let plain_outbound = l3_reverse_probe(
         "10.0.61.102".parse().unwrap(),
@@ -3590,14 +3652,7 @@ fn dnat_plus_snat_ports_in_reverse_key() {
             discriminator: Default::default(),
             routing_domain: 0,
     };
-    let nat = NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
-        rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
-        rewrite_src_port: None,
-        rewrite_dst_port: Some(8080),
-        nat64: false,
-        nptv6: false,
-    };
+    let nat = NatDecision { rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))), rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))), rewrite_src_port: None, rewrite_dst_port: Some(8080), source_nat_icmp: None, nat64: false, nptv6: false };
     // Reply: internal:8080 -> egress:54321
     let expected_reply = SessionKey {
         addr_family: 2,
@@ -9580,27 +9635,26 @@ fn counters_with_replica_flag_separates_not_held_from_held_and_idle_7919() {
     );
 }
 
-/// #9752: the installing-table identity costs exactly 8 bytes on the
-/// decision (two `u32`, no padding surprises) at known offsets, and the
-/// decision stays `Copy` (no heap, no atomics on the per-packet copy).
-/// A layout change fails here first, with the numbers, instead of as a
-/// mysterious `PendingNeighPacket` size-assert message two modules away.
+/// #11064: `NatDecision` carries a 4-byte aligned source-NAT ICMP
+/// `(type, code)` fingerprint (44 -> 48 bytes). This layout guard keeps
+/// `SessionDecision` `Copy` without surprises and pins the install-table
+/// identity after the expanded NAT decision.
 #[test]
-fn session_decision_table_identity_layout_9752() {
+fn session_decision_typed_snat_layout_11064() {
     fn assert_copy<T: Copy>() {}
     assert_copy::<crate::session::SessionDecision>();
     assert_eq!(
         std::mem::size_of::<crate::session::SessionDecision>(),
-        100,
-        "SessionDecision = 48 (resolution) + 44 (nat) + 8 (table identity)"
+        104,
+        "SessionDecision = 48 (resolution) + 48 (nat) + 8 (table identity)"
     );
     assert_eq!(
         core::mem::offset_of!(crate::session::SessionDecision, install_table_domain),
-        92
+        96
     );
     assert_eq!(
         core::mem::offset_of!(crate::session::SessionDecision, install_table_check),
-        96
+        100
     );
 }
 

@@ -62,14 +62,18 @@
 //! (#3020, junos-ping) — and the gate arms when an active PERMIT rule carries a
 //! type-constrained term.
 //!
-//! #9386: what the type-blind `None` guarantees is that it can never
-//! MANUFACTURE a false DENY, NOT that the verdict equals a fully-informed one.
-//! The `icmp_constraints` arm is action-BLIND, so a type-constrained DENY
-//! populates it too and is SKIPPED here; the walk then falls through to a later,
-//! more permissive rule. The accepted consequence is that a type-constrained
-//! DENY ahead of a broader permit is not enforced on the established path. See
-//! `PolicyState::icmp_verdict_may_depend_on_type` for why arming on a
-//! constrained DENY would not change that outcome and would cost coverage.
+//! #9386: what the type-blind `None` guarantees within this frame-independent
+//! derivation is that it can never MANUFACTURE a false DENY, NOT that the
+//! verdict equals a fully-informed one. The `icmp_constraints` arm is
+//! action-BLIND, so a type-constrained DENY is skipped here and the walk may
+//! fall through to a later, more permissive rule. This derivation therefore
+//! cannot use that DENY to revoke the session.
+//!
+//! That does not leave packet forwarding blind: #11064 adds an owner/foreign
+//! session-hit check that evaluates constrained rules with the current packet's
+//! type/code and drops a denied packet without confusing its type with the
+//! typeless session identity. See `PolicyState::icmp_verdict_may_depend_on_type`
+//! for why this separate, frame-independent gate remains permit-only.
 //!
 //! Where such a permit DOES exist the decline stands, and it must: a type-blind
 //! evaluation would fail to match the type-specific permit, manufacture a DENY,
@@ -414,11 +418,12 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     // Acting on a DENY here is therefore safe; a PERMIT is not a claim that a
     // fully-informed walk would agree.
     //
-    // The accepted residual: a type-constrained DENY ahead of a broader permit is
-    // not enforced on this path — the walk falls to the permit and the session
-    // survives. See `PolicyState::icmp_verdict_may_depend_on_type` for why
-    // widening the arming would not change that outcome and would cost #8356
-    // coverage, and for what closing it would actually require.
+    // #9386: this frame-independent derivation cannot use a type-constrained
+    // DENY to revoke: `packet_icmp = None` skips its application term and may
+    // fall through to a broader permit. #11064's packet-scoped owner/foreign
+    // check evaluates that message with its actual type/code and enforces the
+    // DENY per packet; the permit-only gate here remains necessary to avoid
+    // revoking a flow on a false DENY caused by a skipped constrained PERMIT.
     //
     // The predicate is whole-snapshot and therefore conservative (see
     // `PolicyState::icmp_verdict_may_depend_on_type`): one junos-ping permit
@@ -900,7 +905,9 @@ fn reverse_companion_from_source(
     fwd_metadata: &SessionMetadata,
 ) -> Option<FromZoneSource> {
     match fwd_origin {
-        SessionOrigin::ForwardFlow | SessionOrigin::LocalMiss | SessionOrigin::MissingNeighborSeed
+        SessionOrigin::ForwardFlow
+        | SessionOrigin::LocalMiss
+        | SessionOrigin::MissingNeighborSeed
             if !fwd_metadata.fabric_ingress =>
         {
             Some(FromZoneSource::LiveIfindex {
@@ -1020,9 +1027,7 @@ fn reverse_hit_zone_policy(
         ..
     } = gate;
     let rev_canonical = match &rev_target {
-        PolicyRevalidationTarget::Fresh => {
-            sessions.revalidation_canonical_key(session_key)?
-        }
+        PolicyRevalidationTarget::Fresh => sessions.revalidation_canonical_key(session_key)?,
         PolicyRevalidationTarget::NoLocalEntry => {
             // A reverse row can only be judged through an authoritative
             // FORWARD companion (#9604). Reconstruct its key with the
@@ -1056,8 +1061,7 @@ fn reverse_hit_zone_policy(
             {
                 return None;
             }
-            let from_source =
-                reverse_companion_from_source(sessions, fwd_origin, &fwd_metadata)?;
+            let from_source = reverse_companion_from_source(sessions, fwd_origin, &fwd_metadata)?;
             let fwd_flow = SessionFlow {
                 src_ip: fwd_key.src_ip,
                 dst_ip: fwd_key.dst_ip,
@@ -1142,8 +1146,7 @@ fn reverse_hit_zone_policy(
     if matches!(rev_target, PolicyRevalidationTarget::Fresh) && !force_reverse_cold {
         return None;
     }
-    let Some((mut fwd_decision, fwd_metadata, fwd_origin)) =
-        sessions.entry_with_origin(&fwd_key)
+    let Some((mut fwd_decision, fwd_metadata, fwd_origin)) = sessions.entry_with_origin(&fwd_key)
     else {
         // A locally-forwarding reverse hit with no companion is not allowed
         // to retain a recorded Permit or take the old reverse Decline arm.
@@ -1599,26 +1602,24 @@ mod tests {
         let rev_key = crate::session::reverse_session_key(&fwd_key, nat);
         assert_ne!(fwd_key, rev_key);
         let (decision, metadata, _) = marker_forward_10038();
-        let install_local = |sessions: &mut SessionTable,
-                             origin: SessionOrigin,
-                             ingress: u32,
-                             policy_idx: u32| {
-            let mut meta = metadata.clone();
-            meta.ingress_ifindex = ingress;
-            meta.policy_counter_idx = policy_idx;
-            assert!(
-                sessions.install_with_protocol_with_origin(
-                    fwd_key.clone(),
-                    decision,
-                    meta,
-                    origin,
-                    122_000_000_000,
-                    17,
-                    0,
-                ),
-                "local forward must install"
-            );
-        };
+        let install_local =
+            |sessions: &mut SessionTable, origin: SessionOrigin, ingress: u32, policy_idx: u32| {
+                let mut meta = metadata.clone();
+                meta.ingress_ifindex = ingress;
+                meta.policy_counter_idx = policy_idx;
+                assert!(
+                    sessions.install_with_protocol_with_origin(
+                        fwd_key.clone(),
+                        decision,
+                        meta,
+                        origin,
+                        122_000_000_000,
+                        17,
+                        0,
+                    ),
+                    "local forward must install"
+                );
+            };
         let shared_entry = |origin: SessionOrigin| SyncedSessionEntry {
             key: fwd_key.clone(),
             decision,
@@ -1636,20 +1637,33 @@ mod tests {
         // Local marker → exempt.
         let mut sessions = SessionTable::new();
         install_local(&mut sessions, SessionOrigin::TunOrigin, 0, 0);
-        assert!(tun_origin_reverse_exempt(&sessions, &fresh_shared(), &rev_key, nat));
+        assert!(tun_origin_reverse_exempt(
+            &sessions,
+            &fresh_shared(),
+            &rev_key,
+            nat
+        ));
 
         // Local non-marker + shared marker → DENY (local shadows shared).
         let mut sessions = SessionTable::new();
         install_local(&mut sessions, SessionOrigin::ForwardFlow, 400, 1);
         let shared = fresh_shared();
-        shared.lock().expect("shared map").insert(fwd_key.clone(), shared_entry(SessionOrigin::TunOrigin));
-        assert!(!tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat));
+        shared
+            .lock()
+            .expect("shared map")
+            .insert(fwd_key.clone(), shared_entry(SessionOrigin::TunOrigin));
+        assert!(!tun_origin_reverse_exempt(
+            &sessions, &shared, &rev_key, nat
+        ));
 
         // Shared-only marker → exempt (WG production: the forward never
         // materializes locally).
         let sessions = SessionTable::new();
         let shared = fresh_shared();
-        shared.lock().expect("shared map").insert(fwd_key.clone(), shared_entry(SessionOrigin::TunOrigin));
+        shared
+            .lock()
+            .expect("shared map")
+            .insert(fwd_key.clone(), shared_entry(SessionOrigin::TunOrigin));
         assert!(tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat));
 
         // Shared-only non-marker → deny.
@@ -1659,11 +1673,18 @@ mod tests {
             .lock()
             .expect("shared map")
             .insert(fwd_key.clone(), shared_entry(SessionOrigin::ForwardFlow));
-        assert!(!tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat));
+        assert!(!tun_origin_reverse_exempt(
+            &sessions, &shared, &rev_key, nat
+        ));
 
         // Lone reverse (no forward anywhere) → deny (fail-closed).
         let sessions = SessionTable::new();
-        assert!(!tun_origin_reverse_exempt(&sessions, &fresh_shared(), &rev_key, nat));
+        assert!(!tun_origin_reverse_exempt(
+            &sessions,
+            &fresh_shared(),
+            &rev_key,
+            nat
+        ));
 
         // Degenerate self-inverse key (src==dst, ports equal) → deny.
         let loop_key = SessionKey {
@@ -1673,9 +1694,17 @@ mod tests {
             dst_port: 5,
             ..fwd_key.clone()
         };
-        assert_eq!(crate::session::reverse_session_key(&loop_key, nat), loop_key);
+        assert_eq!(
+            crate::session::reverse_session_key(&loop_key, nat),
+            loop_key
+        );
         let sessions = SessionTable::new();
-        assert!(!tun_origin_reverse_exempt(&sessions, &fresh_shared(), &loop_key, nat));
+        assert!(!tun_origin_reverse_exempt(
+            &sessions,
+            &fresh_shared(),
+            &loop_key,
+            nat
+        ));
     }
 
     /// #10522 Cell 3: an owner-arrival reverse LocalDelivery with a

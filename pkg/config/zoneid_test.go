@@ -249,3 +249,29 @@ func TestZoneIDCollisionLenientWarningStatesQuarantine(t *testing.T) {
 		}
 	}
 }
+
+func TestReservedZoneNamesAreAlwaysExcluded(t *testing.T) {
+	names := []string{"trust", "junos-host", "any"}
+	excluded := ZoneQuarantineExclusions(names)
+	for _, name := range []string{"junos-host", "any"} {
+		if _, ok := excluded[name]; !ok {
+			t.Fatalf("reserved zone %q not excluded: %v", name, excluded)
+		}
+		if got := StableZoneIDOwner(names, StableZoneID(name)); got != "" {
+			t.Fatalf("reserved name %q claimed an installed id owner %q", name, got)
+		}
+		if got := ZoneQuarantineSurvivorName(name, names); got != "" {
+			t.Fatalf("reserved name %q reported survivor %q", name, got)
+		}
+	}
+	if got := QuarantinedZoneNames(names); len(got) != 0 {
+		t.Fatalf("reserved names were confused with an ID collision: %v", got)
+	}
+	cfg := &Config{Security: SecurityConfig{Zones: map[string]*ZoneConfig{
+		"junos-host": {},
+	}}}
+	reason := ZoneQuarantineExcludedReason("junos-host", cfg)
+	if !strings.Contains(reason, "reserved") {
+		t.Fatalf("single reserved zone has no quarantine reason: %q", reason)
+	}
+}

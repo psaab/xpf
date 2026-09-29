@@ -44,6 +44,10 @@ var companionResetFields = map[string]bool{
 	// companions resolve unstamped (R1).
 	"InstallTableDomain": true,
 	"InstallTableCheck":  true,
+	// #11064: typed SNAT selection belongs to the forward request flow.
+	"SourceNatICMPValid": true,
+	"SourceNatICMPType":  true,
+	"SourceNatICMPCode":  true,
 }
 
 // conditionallyUnobservedCompanionFields mirrors

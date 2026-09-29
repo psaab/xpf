@@ -1660,6 +1660,71 @@ func TestProcessStatusFabricSkipCountersRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBindingStatusFabricDropCountersRoundTrip11061(t *testing.T) {
+	in := BindingStatus{
+		InvalidFabricStampDrops:     3,
+		UnstampedFabricIngressDrops: 5,
+		AmbiguousFabricZoneDrops:    7,
+	}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal object: %v", err)
+	}
+	for _, key := range []string{
+		"invalid_fabric_stamp_drops",
+		"unstamped_fabric_ingress_drops",
+		"ambiguous_fabric_zone_drops",
+	} {
+		if _, ok := obj[key]; !ok {
+			t.Fatalf("wire key %q missing from BindingStatus JSON: %s", key, string(raw))
+		}
+	}
+	var back BindingStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal BindingStatus: %v", err)
+	}
+	if back.InvalidFabricStampDrops != in.InvalidFabricStampDrops ||
+		back.UnstampedFabricIngressDrops != in.UnstampedFabricIngressDrops ||
+		back.AmbiguousFabricZoneDrops != in.AmbiguousFabricZoneDrops {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", back, in)
+	}
+	var legacy BindingStatus
+	if err := json.Unmarshal([]byte(`{}`), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy BindingStatus: %v", err)
+	}
+	if legacy.InvalidFabricStampDrops != 0 ||
+		legacy.UnstampedFabricIngressDrops != 0 ||
+		legacy.AmbiguousFabricZoneDrops != 0 {
+		t.Fatalf("legacy decode must zero-default fabric drops: %+v", legacy)
+	}
+}
+
+func TestProcessStatusAmbiguousFabricZoneCountRoundTrip11061(t *testing.T) {
+	in := ProcessStatus{AmbiguousFabricZoneCount: 2}
+	raw, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("unmarshal object: %v", err)
+	}
+	if _, ok := obj["ambiguous_fabric_zone_count"]; !ok {
+		t.Fatalf("ambiguous_fabric_zone_count missing from ProcessStatus JSON: %s", string(raw))
+	}
+	var back ProcessStatus
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal ProcessStatus: %v", err)
+	}
+	if back.AmbiguousFabricZoneCount != in.AmbiguousFabricZoneCount {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", back, in)
+	}
+}
+
 // #2375: wire pin for the pending_neigh distinct-hop capacity-drop
 // counter. Mirrors the Rust
 // process_status_pending_neigh_capacity_drops_roundtrip test — a rename

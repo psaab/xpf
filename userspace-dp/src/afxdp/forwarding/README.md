@@ -322,6 +322,31 @@ forward-direction collision.
   shares the default session space, outside the stable band so it never
   collides with a tenant (the #3855 door means the stable id itself would),
   and HA-refused on import (wire 2 decodes Unrecognized, fail-closed).
+
+- **Ambiguous fabric zones fail closed (#11061).** The builder intentionally
+  omits a zone-to-domain row when its member interfaces span multiple routing
+  contexts, including MAIN and named routing instances. The Go compiler rejects
+  this configuration at commit, naming the zone, member interfaces, and
+  competing contexts; tolerant boot and peer-sync keep it loadable but warn. A
+  recognized but invalid zone stamp is terminally dropped, while a valid
+  ambiguous-zone stamp receives a synthetic nonzero session domain outside the
+  stable routing-instance ID band. Native table resolution cannot map that
+  domain to MAIN, so it fails closed unless an explicit PBR rule deliberately
+  selects a routing instance.
+  Domain-0 sessions created before this fix in an ambiguous zone will no longer
+  match the newly quarantined replies after upgrade; those flows fail closed
+  until re-established under an unambiguous zone/domain mapping. Quarantine
+  domains are local-only: HA session-wire decoding rejects their reserved ID
+  band, so they are never synchronized as ordinary routing domains. Fabric
+  redirects in routing-domain deployments are emitted only with an adjudicated
+  nonzero ingress-zone stamp; without one, redirect is refused. On receive, an
+  unstamped fabric frame is dropped before session/cache/policy lookup unless it
+  matches a unique live established forward NAT session (the reverse direction)
+  or the operator enables the compatibility setting
+  `security flow allow-unstamped-fabric-ingress` for legacy MAIN behavior.
+  A complete but invalid stamp always drops. Legacy single-table deployments
+  retain unstamped redirects and absent stamps retain their existing MAIN behavior.
+
 - **Why the ingress interface and nothing else.** The reverse key is built
   by swapping the forward key's fields and never observes the reply, so the
   domain must be a quantity a packet resolves from its own arrival. A PBR

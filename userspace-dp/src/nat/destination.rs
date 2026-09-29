@@ -881,6 +881,7 @@ impl DnatTable {
                 rewrite_dst: Some(value.new_dst_ip),
                 rewrite_src_port: None,
                 rewrite_dst_port,
+                source_nat_icmp: None,
                 nat64: false,
                 nptv6: false,
             },

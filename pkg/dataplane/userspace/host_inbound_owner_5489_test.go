@@ -6,24 +6,15 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #5489: cross-zone host-inbound admission bleed on the EXACT-UNIT branch of
-// buildInterfaceHostInboundMap. The physical-expansion branch already carries a
-// #3720 cross-zone quarantine (`zoneByIface[un] != zn`), but the logical-unit
-// branch (`strings.Contains(ref, ".")`) unconditionally UNIONed the override for
-// EVERY zone that named the unit. On a tolerated duplicate ownership (a lenient
-// `load override` / peer-sync retaining two zones both claiming the same
-// reth0.100), buildInterfaceZoneMap resolves the OWNER as the first sorted zone,
-// but the override loop visited BOTH zones and merged each into out[ref], so the
-// winning zone's InterfaceSnapshot / ZoneHostInboundView received the UNION —
-// including the LOSING zone's admission tokens (e.g. SSH). These tests are
-// fail-on-revert: drop the exact-unit guard and the losing zone's ssh bleeds
-// into the owner's effective set and the assertions go RED.
+// #5489: host-inbound must fail closed on a contested interface identity. A
+// lenient config can retain two zones both claiming the same reth0.100, but no
+// zone owns that ambiguous key at runtime. Neither zone's per-interface
+// override may stamp an admission onto the unzoned snapshot row or host-inbound
+// view. The single-owner control below proves ordinary overrides still apply.
 
-// hostInboundCfg5489 declares TWO zones both claiming reth0.100. The owner
-// (first sorted: "azone-owner") authors a unit override admitting ONLY ping. The
-// loser ("zzone-loser") authors a unit override admitting ssh that the owner
-// lacks. Neither zone declares a zone-level host-inbound stanza, so the
-// effective set is exactly the resolved per-interface override.
+// hostInboundCfg5489 declares TWO zones both claiming reth0.100. Their distinct
+// ping and ssh overrides must both be withheld because the ownership conflict
+// leaves the unit unzoned.
 func hostInboundCfg5489() *config.Config {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -59,39 +50,30 @@ func containsStr(ss []string, want string) bool {
 	return false
 }
 
-// Test_5489_OwnerZonePicksFirstSorted confirms the ownership premise: on a
-// duplicate-ownership config, buildInterfaceZoneMap resolves the unit's owner to
-// the first sorted zone, and the loser is NOT the owner.
+// Test_5489_OwnerZonePicksFirstSorted guards against restoring first-wins
+// ownership: duplicate claims must be omitted from the runtime zone map.
 func Test_5489_OwnerZonePicksFirstSorted(t *testing.T) {
 	z := buildInterfaceZoneMap(hostInboundCfg5489())
-	if got := z["reth0.100"]; got != "azone-owner" {
-		t.Fatalf("buildInterfaceZoneMap owner of reth0.100 = %q, want azone-owner (first sorted)", got)
+	if got := z["reth0.100"]; got != "" {
+		t.Fatalf("buildInterfaceZoneMap contested reth0.100 = %q, want no zone", got)
+	}
+	if _, quarantined := config.QuarantinedZoneInterfaceKeys(hostInboundCfg5489())["reth0.100"]; !quarantined {
+		t.Fatal("contested reth0.100 was not marked for quarantine")
 	}
 }
 
-// Test_5489_ExactUnitNoCrossZoneLeak is the core fail-on-revert: the resolved
-// override for reth0.100 must carry ONLY the owner zone's tokens ([ping]) — the
-// losing zone's ssh admission must NOT bleed into out[ref]. Revert the exact-unit
-// guard and out["reth0.100"] becomes [ping ssh] (the union) and this goes RED.
+// Test_5489_ExactUnitNoCrossZoneLeak asserts that neither conflicting
+// per-interface override is published for reth0.100.
 func Test_5489_ExactUnitNoCrossZoneLeak(t *testing.T) {
 	m := buildInterfaceHostInboundMap(hostInboundCfg5489())
-
-	ov := m["reth0.100"]
-	if ov == nil {
-		t.Fatal("reth0.100 must carry the owner zone's effective override")
-	}
-	if containsStr(ov.SystemServices, "ssh") {
-		t.Errorf("reth0.100 effective services = %v: losing zone's ssh admission bled into the owner's view (#5489)", ov.SystemServices)
-	}
-	if !eqStr(ov.SystemServices, []string{"ping"}) {
-		t.Errorf("reth0.100 effective services = %v, want [ping] (owner-only, no cross-zone union)", ov.SystemServices)
+	if ov := m["reth0.100"]; ov != nil {
+		t.Errorf("contested reth0.100 has an effective host-inbound override %+v; want no-zone/drop", ov)
 	}
 }
 
-// Test_5489_SnapshotNoCrossZoneLeak is the end-to-end fail-on-revert through the
-// InterfaceSnapshot stamping path (buildInterfaceSnapshots): the reth0.100
-// snapshot is stamped from its OWNER zone, so its effective host-inbound set must
-// be [ping] with no ssh from the losing zone.
+// Test_5489_SnapshotNoCrossZoneLeak is the end-to-end assertion through the
+// InterfaceSnapshot stamping path: the contested reth0.100 is unzoned and must
+// carry no host-inbound stamp from either claimant.
 func Test_5489_SnapshotNoCrossZoneLeak(t *testing.T) {
 	snaps := buildInterfaceSnapshots(hostInboundCfg5489())
 	var found bool
@@ -100,17 +82,13 @@ func Test_5489_SnapshotNoCrossZoneLeak(t *testing.T) {
 			continue
 		}
 		found = true
-		if s.Zone != "azone-owner" {
-			t.Errorf("reth0.100 snapshot Zone = %q, want azone-owner (owner)", s.Zone)
+		if s.Zone != "" {
+			t.Errorf("contested reth0.100 snapshot Zone = %q, want empty", s.Zone)
 		}
-		if !s.HostInboundConfigured {
-			t.Errorf("reth0.100 snapshot must mark HostInboundConfigured")
-		}
-		if containsStr(s.HostInboundSystemServices, "ssh") {
-			t.Errorf("reth0.100 snapshot services = %v: losing zone's ssh bled in (#5489)", s.HostInboundSystemServices)
-		}
-		if !eqStr(s.HostInboundSystemServices, []string{"ping"}) {
-			t.Errorf("reth0.100 snapshot services = %v, want [ping]", s.HostInboundSystemServices)
+		if s.HostInboundConfigured || len(s.HostInboundSystemServices) != 0 ||
+			len(s.HostInboundProtocols) != 0 {
+			t.Errorf("contested reth0.100 carries host-inbound stamp: configured=%v services=%v protocols=%v",
+				s.HostInboundConfigured, s.HostInboundSystemServices, s.HostInboundProtocols)
 		}
 	}
 	if !found {
@@ -118,33 +96,22 @@ func Test_5489_SnapshotNoCrossZoneLeak(t *testing.T) {
 	}
 }
 
-// Test_5489_ViewNoCrossZoneLeak is the end-to-end fail-on-revert through
-// BuildZoneHostInboundViews: reth0.100's address lands in the owner zone's view
-// whose effective set is [ping], never the losing zone's ssh.
+// Test_5489_ViewNoCrossZoneLeak asserts the contested unit's address appears in
+// no zone view, so neither claimant's host-inbound services are admitted.
 func Test_5489_ViewNoCrossZoneLeak(t *testing.T) {
 	views := BuildZoneHostInboundViews(hostInboundCfg5489())
-	byAddr := map[string][]string{}
-	zoneByAddr := map[string]string{}
 	for _, v := range views {
 		for _, a := range v.V4Addrs {
-			byAddr[a] = v.SystemServices
-			zoneByAddr[a] = v.Zone
+			if a == "10.0.100.1" {
+				t.Errorf("contested reth0.100 address is scoped by zone %q with services %v; want no-zone/drop",
+					v.Zone, v.SystemServices)
+			}
 		}
-	}
-	if z := zoneByAddr["10.0.100.1"]; z != "azone-owner" {
-		t.Errorf("reth0.100 address scoped to zone %q, want azone-owner", z)
-	}
-	if containsStr(byAddr["10.0.100.1"], "ssh") {
-		t.Errorf("reth0.100 view services = %v: losing zone's ssh bled into the owner's view (#5489)", byAddr["10.0.100.1"])
-	}
-	if !eqStr(byAddr["10.0.100.1"], []string{"ping"}) {
-		t.Errorf("reth0.100 view services = %v, want [ping]", byAddr["10.0.100.1"])
 	}
 }
 
-// Test_5489_SingleOwnerUnaffected proves the guard preserves the non-conflict
-// (single-owner) case bit-for-bit: when exactly ONE zone owns reth0.100, its own
-// unit override is applied normally (the guard's `z == zn` path is a no-op skip).
+// Test_5489_SingleOwnerUnaffected is the positive control: a single owner's
+// override still reaches its map, snapshot, and zone view.
 func Test_5489_SingleOwnerUnaffected(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -163,7 +130,35 @@ func Test_5489_SingleOwnerUnaffected(t *testing.T) {
 	}
 	m := buildInterfaceHostInboundMap(cfg)
 	if ov := m["reth0.100"]; ov == nil || !eqStr(ov.SystemServices, []string{"ssh"}) {
-		t.Errorf("single-owner reth0.100 effective = %v, want [ssh] (own override applied)", ov)
+		t.Errorf("single-owner reth0.100 effective = %v, want [ssh]", ov)
+	}
+	var foundSnapshot bool
+	for _, snap := range buildInterfaceSnapshots(cfg) {
+		if snap.Name != "reth0.100" {
+			continue
+		}
+		foundSnapshot = true
+		if snap.Zone != "trust" || !snap.HostInboundConfigured ||
+			!containsStr(snap.HostInboundSystemServices, "ssh") {
+			t.Errorf("single-owner snapshot = %+v, want trust with ssh stamp", snap)
+		}
+	}
+	if !foundSnapshot {
+		t.Fatal("single-owner control emitted no reth0.100 snapshot")
+	}
+	var foundView bool
+	for _, view := range BuildZoneHostInboundViews(cfg) {
+		if view.Zone != "trust" {
+			continue
+		}
+		for _, addr := range view.V4Addrs {
+			if addr == "10.0.100.1" && containsStr(view.SystemServices, "ssh") {
+				foundView = true
+			}
+		}
+	}
+	if !foundView {
+		t.Fatal("single-owner control did not scope 10.0.100.1 to trust with ssh")
 	}
 }
 
