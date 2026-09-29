@@ -16,10 +16,10 @@ import (
 // on every attempt, on a busy cluster.
 //
 // Why "raise the cap" is not the fix. A worst-case `SessionDeltaInfo` measures
-// 1605 bytes of JSON in the current wire schema (every string field a full-width
+// 1688 bytes of JSON in the current wire schema (every string field a full-width
 // IPv6 literal, every numeric at its maximum), and the theoretical maximum
-// answer is `workers * DEFAULT_MAX_SESSIONS(131072) * 1605`. That is roughly
-// 201 MiB per worker before response framing, so even one worker can exceed the
+// answer is `workers * DEFAULT_MAX_SESSIONS(131072) * 1688`. That is roughly
+// 211 MiB per worker before response framing, so even one worker can exceed the
 // 64 MiB response cap; sizing from a helper-supplied worker count would still
 // make the allocation bound untrusted.
 //

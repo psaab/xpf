@@ -1205,7 +1205,7 @@ fn session_open_frames_carry_distinct_tunnel_discriminators_7188() {
     assert_eq!(
         tail(&first),
         crate::session::TunnelDiscriminator::Keyed(100).to_wire(),
-        "the open frame's LAST field must be the encoded discriminator"
+        "the open frame must carry the encoded discriminator at its pinned offset"
     );
     assert_ne!(
         tail(&first),
@@ -1215,8 +1215,8 @@ fn session_open_frames_carry_distinct_tunnel_discriminators_7188() {
          one key for both and the second install would evict the first (#7188)"
     );
     // The field is APPENDED: everything before it is unchanged, so the two
-    // frames differ ONLY in these 8 bytes. #7239 appended a further 4 behind
-    // it, so the common prefix now stops 12 from the end.
+    // frames differ ONLY in these 8 bytes. #7239/#9412/#9752/#11064 appended
+    // 4+1+8+3 behind it, so the common prefix now stops 24 from the end.
     let body =
         |frame: &EventFrame| frame.data[FRAME_HEADER_SIZE..frame.len as usize - 24] /* #9412 + #9752 + #11064: + close-class byte, install-table pair, 3-byte source-NAT ICMP identity */.to_vec();
     assert_eq!(
