@@ -581,9 +581,8 @@ impl crate::afxdp::ha::SessionDomain {
         let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
         let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
         if let Some(snapshot) = snapshot {
-            if crate::afxdp::bpf_map::restore_bpf_conntrack_entry_under_gate(
-                v4_fd, v6_fd, snapshot,
-            ) {
+            if crate::afxdp::bpf_map::restore_bpf_conntrack_entry_under_gate(v4_fd, v6_fd, snapshot)
+            {
                 self.sessions
                     .mirror_restore_republished
                     .fetch_add(1, Ordering::Relaxed);
@@ -621,7 +620,6 @@ impl crate::afxdp::ha::SessionDomain {
             );
         }
     }
-
 
     /// Publish one synced session row to the kernel session map, or record that
     /// there was no map to publish into (#7209).
@@ -701,9 +699,7 @@ impl crate::afxdp::ha::SessionDomain {
         let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
         let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
         let snapshot = crate::afxdp::bpf_map::snapshot_bpf_conntrack_entry_under_gate(
-            v4_fd,
-            v6_fd,
-            &entry.key,
+            v4_fd, v6_fd, &entry.key,
         )?;
         let result = self.publish_mirror_only_with_maps(forwarding, entry, &maps);
         Ok((result, snapshot, Arc::clone(&*maps)))
@@ -759,15 +755,8 @@ impl crate::afxdp::ha::SessionDomain {
         let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
         let counts = crate::afxdp::bpf_map::clear_bpf_conntrack_maps(v4_fd, v6_fd)?;
         for key in keys {
-            let _ = self.delete_synced_session_gen_marked(
-                key,
-                0,
-                false,
-                false,
-                Some(&fence),
-                false,
-                0,
-            );
+            let _ =
+                self.delete_synced_session_gen_marked(key, 0, false, false, Some(&fence), false, 0);
         }
         lock_shared_recover(&self.sessions.synced).clear();
         lock_shared_recover(&self.sessions.nat).clear();
@@ -850,6 +839,23 @@ impl crate::afxdp::ha::SessionDomain {
         // the pairing defect #6592 closed, reintroduced at a different layer.
         let view = self.runtime_view();
         let forwarding = view.forwarding();
+        // #11070: a peer's positional counter index is meaningful only in its
+        // policy ordering. Rebind by stable rule ID against this snapshot, and
+        // fail closed to unattributed when absent or unresolved.
+        if let Some(sender_counter) = entry.metadata.policy_counter.take() {
+            let stable_id = sender_counter.rule_id();
+            if let Some((idx, current_counter)) = forwarding
+                .policy
+                .hit_counter_binding_by_stable_id(stable_id)
+            {
+                entry.metadata.policy_counter_idx = idx;
+                entry.metadata.policy_counter = Some(Arc::clone(current_counter));
+            } else {
+                entry.metadata.policy_counter_idx = 0;
+            }
+        } else {
+            entry.metadata.policy_counter_idx = 0;
+        }
         // #10612: refuse a stale post-purge replay before it can publish into
         // shared authority or fan out to worker queues. This is the import
         // ingress counterpart to the bring-up replay filter and worker
@@ -1002,8 +1008,7 @@ impl crate::afxdp::ha::SessionDomain {
         if let Some(reverse) = reverse_entry.as_ref() {
             gate_keys.push(reverse.key.clone());
         }
-        let _tuple_lease = match crate::afxdp::bpf_map::global_tuple_gate()
-            .acquire_lease(gate_keys)
+        let _tuple_lease = match crate::afxdp::bpf_map::global_tuple_gate().acquire_lease(gate_keys)
         {
             Ok(lease) => lease,
             Err(_) => return SyncedImportOutcome::RejectedGateBusy,
@@ -1424,9 +1429,7 @@ impl crate::afxdp::ha::SessionDomain {
         if expected_forward == 0 {
             return SyncedDeleteOutcome::RefusedIdentity;
         }
-        let candidate = lock_shared_recover(&self.sessions.synced)
-            .get(key)
-            .cloned();
+        let candidate = lock_shared_recover(&self.sessions.synced).get(key).cloned();
         let Some(entry) = candidate.as_ref() else {
             return SyncedDeleteOutcome::StaleForward;
         };
@@ -1579,12 +1582,7 @@ impl crate::afxdp::ha::SessionDomain {
     /// this helper path, so the cluster-delete path never reaches here with a
     /// non-zero delete_gen today; the seam exists for future helper-originated
     /// 0, falls back to unconditional delete (rolling-upgrade safe).
-    pub fn delete_synced_session_gen(
-        &self,
-        key: SessionKey,
-        delete_gen: u64,
-        forward_only: bool,
-    ) {
+    pub fn delete_synced_session_gen(&self, key: SessionKey, delete_gen: u64, forward_only: bool) {
         let _ = self.delete_synced_session_gen_marked(
             key,
             delete_gen,
@@ -1798,9 +1796,8 @@ impl crate::afxdp::ha::SessionDomain {
         let mut mirror_delete_ok = true;
         let mut reverse_key = if !forward_only {
             removed_entry.as_ref().and_then(|entry| {
-                (!entry.metadata.is_reverse).then(|| {
-                    reverse_session_key(&entry.key, entry.decision.nat)
-                })
+                (!entry.metadata.is_reverse)
+                    .then(|| reverse_session_key(&entry.key, entry.decision.nat))
             })
         } else {
             None
@@ -1836,13 +1833,12 @@ impl crate::afxdp::ha::SessionDomain {
                 let survivor = lock_shared_recover(&self.sessions.synced)
                     .values()
                     .find(|candidate| {
-                        candidate.key != entry.key
-                            && {
-                                let mut candidate_bare = candidate.key.clone();
-                                candidate_bare.routing_domain = 0;
-                                candidate_bare.discriminator = Default::default();
-                                candidate_bare == target_bare
-                            }
+                        candidate.key != entry.key && {
+                            let mut candidate_bare = candidate.key.clone();
+                            candidate_bare.routing_domain = 0;
+                            candidate_bare.discriminator = Default::default();
+                            candidate_bare == target_bare
+                        }
                     })
                     .cloned();
                 if let Some(survivor) = survivor {
@@ -1854,16 +1850,12 @@ impl crate::afxdp::ha::SessionDomain {
                     )
                 } else {
                     crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
-                        v4_fd,
-                        v6_fd,
-                        target,
+                        v4_fd, v6_fd, target,
                     )
                 }
             };
             mirror_delete_ok &= repair_or_delete(&entry.key);
-            if reverse_teardown
-                && let Some(reverse) = reverse_key.as_ref()
-            {
+            if reverse_teardown && let Some(reverse) = reverse_key.as_ref() {
                 mirror_delete_ok &= repair_or_delete(reverse);
             }
             if let Some(session_map_fd) = maps.session_map_fd.as_ref() {
@@ -1895,17 +1887,12 @@ impl crate::afxdp::ha::SessionDomain {
                 };
                 delete_dnat_table_entry(&dnat_fds, &entry.key, entry.decision.nat);
             }
-        }
-        else {
+        } else {
             let maps = self.bpf_maps.load();
             let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
             let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
             mirror_delete_ok =
-                crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(
-                    v4_fd,
-                    v6_fd,
-                    &key,
-                );
+                crate::afxdp::bpf_map::delete_bpf_conntrack_entry_under_gate(v4_fd, v6_fd, &key);
         }
         refresh_reverse_prewarm_owner_rg_indexes(
             &self.sessions.owner_rg_indexes.reverse_prewarm_sessions,
@@ -1983,9 +1970,10 @@ impl crate::afxdp::ha::SessionDomain {
             // standalone reverse, which would fire even when the forward
             // declines and kill a replacement's reverse.
             let reverse_queued = match &reverse_key {
-                Some(reverse_key) if expected_id == 0 => {
-                    worker_queue::push_bounded(&mut pending, WorkerCommand::DeleteSynced(reverse_key.clone()))
-                }
+                Some(reverse_key) if expected_id == 0 => worker_queue::push_bounded(
+                    &mut pending,
+                    WorkerCommand::DeleteSynced(reverse_key.clone()),
+                ),
                 _ => true,
             };
             // Release the command queue before touching allocator mutexes: the
@@ -2150,14 +2138,12 @@ mod rejected_mirror_reservation_10790_tests {
                 port_high: 65535,
                 ..crate::SourceNATRuleSnapshot::default()
             }]);
-        forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[
-            crate::NAT64RuleSnapshot {
-                name: "nat64-wkp".to_string(),
-                prefix: "64:ff9b::/96".to_string(),
-                pool_addresses: vec!["203.0.113.2".to_string()],
-                ..Default::default()
-            },
-        ]);
+        forwarding.nat64 = crate::nat64::Nat64State::from_snapshots(&[crate::NAT64RuleSnapshot {
+            name: "nat64-wkp".to_string(),
+            prefix: "64:ff9b::/96".to_string(),
+            pool_addresses: vec!["203.0.113.2".to_string()],
+            ..Default::default()
+        }]);
         forwarding.zone_name_to_id.insert("lan".to_string(), 1);
         forwarding.zone_name_to_id.insert("wan".to_string(), 2);
         forwarding
@@ -2183,8 +2169,9 @@ mod rejected_mirror_reservation_10790_tests {
         };
 
         clear_conntrack_rows_for_test();
-        coordinator.bpf_maps.store(Arc::new(
-            crate::afxdp::coordinator::BpfMaps {
+        coordinator
+            .bpf_maps
+            .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
                 conntrack_v4_fd: Some(OwnedFd {
                     fd: CONNTRACK_TEST_MAP_FD,
                 }),
@@ -2192,8 +2179,7 @@ mod rejected_mirror_reservation_10790_tests {
                     fd: CONNTRACK_TEST_MAP_FD,
                 }),
                 ..Default::default()
-            },
-        ));
+            }));
     }
 
     fn nat64_key() -> SessionKey {
@@ -2312,8 +2298,6 @@ mod rejected_mirror_reservation_10790_tests {
             routing_domain: 0,
         }
     }
-
-
 
     #[test]
     fn mirror_refusal_rolls_back_nat_reservation_and_unpublished_authority_10790() {
@@ -2565,12 +2549,7 @@ mod rejected_mirror_reservation_10790_tests {
         assert_eq!(
             coordinator
                 .session_domain
-                .upsert_synced_session_mirror(synced_entry(
-                    key.clone(),
-                    current_nat,
-                    6,
-                    511,
-                )),
+                .upsert_synced_session_mirror(synced_entry(key.clone(), current_nat, 6, 511,)),
             SyncedImportOutcome::RejectedMirrorPublish
         );
         assert!(source_allocator.debug_is_port_occupied(0, 51_010));
@@ -2612,40 +2591,36 @@ mod rejected_mirror_reservation_10790_tests {
 
     fn persistent_snat_forwarding(address_only: bool) -> ForwardingState {
         let mut forwarding = ForwardingState::default();
-        let pool_addresses = vec![
-            "203.0.113.2/32".to_string(),
-            "203.0.113.3/32".to_string(),
-        ];
-        forwarding.source_nat_rules =
-            crate::nat::parse_source_nat_rules(&[
-                crate::SourceNATRuleSnapshot {
-                    name: "persistent-snat".to_string(),
-                    from_zone: "lan".to_string(),
-                    to_zone: "wan".to_string(),
-                    source_addresses: vec!["0.0.0.0/0".to_string()],
-                    pool_name: "p".to_string(),
-                    pool_addresses: pool_addresses.clone(),
-                    port_low: 1024,
-                    port_high: 65535,
-                    pool_no_translation: address_only,
-                    persistent_nat: true,
-                    persistent_nat_permit_any_remote_host: true,
-                    persistent_nat_inactivity_timeout: 300,
-                    ..crate::SourceNATRuleSnapshot::default()
-                },
-                crate::SourceNATRuleSnapshot {
-                    name: "replacement-snat".to_string(),
-                    from_zone: "guest".to_string(),
-                    to_zone: "wan".to_string(),
-                    source_addresses: vec!["0.0.0.0/0".to_string()],
-                    pool_name: "p".to_string(),
-                    pool_addresses,
-                    port_low: 1024,
-                    port_high: 65535,
-                    pool_no_translation: address_only,
-                    ..crate::SourceNATRuleSnapshot::default()
-                },
-            ]);
+        let pool_addresses = vec!["203.0.113.2/32".to_string(), "203.0.113.3/32".to_string()];
+        forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
+            crate::SourceNATRuleSnapshot {
+                name: "persistent-snat".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_name: "p".to_string(),
+                pool_addresses: pool_addresses.clone(),
+                port_low: 1024,
+                port_high: 65535,
+                pool_no_translation: address_only,
+                persistent_nat: true,
+                persistent_nat_permit_any_remote_host: true,
+                persistent_nat_inactivity_timeout: 300,
+                ..crate::SourceNATRuleSnapshot::default()
+            },
+            crate::SourceNATRuleSnapshot {
+                name: "replacement-snat".to_string(),
+                from_zone: "guest".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string()],
+                pool_name: "p".to_string(),
+                pool_addresses,
+                port_low: 1024,
+                port_high: 65535,
+                pool_no_translation: address_only,
+                ..crate::SourceNATRuleSnapshot::default()
+            },
+        ]);
         forwarding.zone_name_to_id.insert("lan".to_string(), 1);
         forwarding.zone_name_to_id.insert("wan".to_string(), 2);
         forwarding.zone_name_to_id.insert("guest".to_string(), 3);
@@ -2716,27 +2691,32 @@ mod rejected_mirror_reservation_10790_tests {
                 .same_allocator(&coordinator.forwarding.source_nat_rules[1].pool_allocator),
             "both zone rules must share the allocator to displace the incumbent"
         );
-        let peer_port = if address_only { key.src_port } else { PEER_PORT };
+        let peer_port = if address_only {
+            key.src_port
+        } else {
+            PEER_PORT
+        };
         assert_eq!(
-            coordinator.import_idle_persistent_leases(
-                &[crate::afxdp::PoolIdleLease {
-                    pool_name: "p".to_string(),
-                    lease: crate::nat::IdleLeaseRecord {
-                        protocol: key.protocol,
-                        src_ip: key.src_ip,
-                        src_port: key.src_port,
-                        routing_scope: key.routing_domain,
-                        remote: None,
-                        translated_ip: peer_ip,
-                        translated_port: peer_port,
-                        address_only,
-                        remaining_ns: PEER_REMAINING_NS,
-                        timeout_ns: PEER_TIMEOUT_NS,
-                    },
-                }],
-                imported_at_ns,
-            )
-            .installed,
+            coordinator
+                .import_idle_persistent_leases(
+                    &[crate::afxdp::PoolIdleLease {
+                        pool_name: "p".to_string(),
+                        lease: crate::nat::IdleLeaseRecord {
+                            protocol: key.protocol,
+                            src_ip: key.src_ip,
+                            src_port: key.src_port,
+                            routing_scope: key.routing_domain,
+                            remote: None,
+                            translated_ip: peer_ip,
+                            translated_port: peer_port,
+                            address_only,
+                            remaining_ns: PEER_REMAINING_NS,
+                            timeout_ns: PEER_TIMEOUT_NS,
+                        },
+                    }],
+                    imported_at_ns,
+                )
+                .installed,
             1
         );
 
@@ -2769,7 +2749,10 @@ mod rejected_mirror_reservation_10790_tests {
         let local_flow = source_nat_flow(&key, local_nat);
         let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
         let source_allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
-        assert_eq!(source_allocator.holder_mask_for_flow(&local_flow), Some(0b11));
+        assert_eq!(
+            source_allocator.holder_mask_for_flow(&local_flow),
+            Some(0b11)
+        );
         if !address_only {
             assert!(source_allocator.debug_is_port_occupied(0, PEER_PORT));
         }
@@ -2852,7 +2835,6 @@ mod rejected_mirror_reservation_10790_tests {
             "an unchanged same-tuple lease snapshot restores without failure"
         );
 
-
         // Rolling back the re-adopted local flow after replay returns exactly
         // to the imported idle lifetime; neither holder-mask nor metadata
         // replay may consume the local promotion marker.
@@ -2866,7 +2848,10 @@ mod rejected_mirror_reservation_10790_tests {
             rollback_at_ns,
             0,
         );
-        assert_eq!(source_allocator.holder_mask_for_flow(&local_flow), Some(0b10));
+        assert_eq!(
+            source_allocator.holder_mask_for_flow(&local_flow),
+            Some(0b10)
+        );
         crate::nat::rollback_source_nat_allocation_for_worker(
             &coordinator.forwarding.iface_nat_allocators,
             &coordinator.forwarding.source_nat_rules,
@@ -2951,7 +2936,10 @@ mod rejected_mirror_reservation_10790_tests {
             release_at_ns,
             0,
         );
-        assert_eq!(source_allocator.holder_mask_for_flow(&local_flow), Some(0b10));
+        assert_eq!(
+            source_allocator.holder_mask_for_flow(&local_flow),
+            Some(0b10)
+        );
         crate::nat::release_source_nat_allocation_for_worker(
             &coordinator.forwarding.iface_nat_allocators,
             &coordinator.forwarding.source_nat_rules,
@@ -3018,7 +3006,10 @@ mod rejected_mirror_reservation_10790_tests {
         let records = conntrack_publishes();
         assert_eq!(records.len(), 2, "forward and reverse refusal only");
         assert_eq!(
-            records.iter().map(|record| record.result).collect::<Vec<_>>(),
+            records
+                .iter()
+                .map(|record| record.result)
+                .collect::<Vec<_>>(),
             vec![
                 Some(ConntrackPublishResult::Written),
                 Some(ConntrackPublishResult::KernelError),
@@ -3098,21 +3089,21 @@ mod rejected_mirror_reservation_10790_tests {
     #[test]
     fn strict_mirror_refusal_touches_no_dnat_session_map_or_prewarm_state_10788() {
         use crate::afxdp::bpf_map::{
-            RECORDER_ONLY_MAP_FD, OwnedFd, clear_session_map_writes, session_map_row,
+            OwnedFd, RECORDER_ONLY_MAP_FD, clear_session_map_writes, session_map_row,
             session_map_writes,
         };
         use crate::afxdp::checksum::dnat_steering_holder_count;
 
         let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
-        coordinator.bpf_maps.store(Arc::new(
-            crate::afxdp::coordinator::BpfMaps {
+        coordinator
+            .bpf_maps
+            .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
                 dnat_table_fd: Some(OwnedFd { fd: -1 }),
                 session_map_fd: Some(OwnedFd {
                     fd: RECORDER_ONLY_MAP_FD,
                 }),
                 ..Default::default()
-            },
-        ));
+            }));
         let key = v4_key();
         let nat = NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 2))),
@@ -3161,8 +3152,7 @@ mod rejected_mirror_reservation_10790_tests {
         )
         .clone();
         assert_eq!(
-            prewarm_after,
-            prewarm_before,
+            prewarm_after, prewarm_before,
             "a refused import must leave reverse-prewarm indexing unchanged"
         );
     }
@@ -3170,8 +3160,8 @@ mod rejected_mirror_reservation_10790_tests {
     #[test]
     fn reverse_mirror_refusal_delete_fails_when_conntrack_map_is_absent_10788() {
         use crate::afxdp::bpf_map::{
-            ConntrackPublishResult, conntrack_publishes, override_conntrack_publish_results_for_test,
-            take_conntrack_publish_guard,
+            ConntrackPublishResult, conntrack_publishes,
+            override_conntrack_publish_results_for_test, take_conntrack_publish_guard,
         };
 
         let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
@@ -3241,8 +3231,8 @@ mod rejected_mirror_reservation_10790_tests {
     fn reverse_mirror_refusal_delete_fallback_runs_after_snapshot_restore_failure_10788() {
         use crate::afxdp::bpf_map::{
             ConntrackPublishResult, conntrack_row_for_test,
-            force_conntrack_restore_failure_for_test,
-            override_conntrack_publish_results_for_test, take_conntrack_publish_guard,
+            force_conntrack_restore_failure_for_test, override_conntrack_publish_results_for_test,
+            take_conntrack_publish_guard,
         };
 
         let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
@@ -3543,5 +3533,103 @@ mod rejected_mirror_reservation_10790_tests {
         );
         assert!(!allocator.debug_is_port_occupied(0, 51_050));
     }
+    #[test]
+    fn synced_import_rebinds_policy_counter_by_stable_rule_identity11070() {
+        fn rule(name: &str, policy_id: u32) -> crate::PolicyRuleSnapshot {
+            crate::PolicyRuleSnapshot {
+                name: name.to_string(),
+                policy_id,
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                ..Default::default()
+            }
+        }
 
+        let mut zones = rustc_hash::FxHashMap::default();
+        zones.insert("lan".to_string(), 1);
+        zones.insert("wan".to_string(), 2);
+        let counter_store = crate::policy::PolicyCounterStore::default();
+        let sender_policy = crate::policy::parse_policy_state_with_counters(
+            "deny",
+            &[rule("bee", 6)],
+            &zones,
+            &[],
+            &counter_store,
+        )
+        .expect("sender policy");
+        let sender_counter = sender_policy
+            .hit_counter_by_idx(1)
+            .cloned()
+            .expect("sender rule counter");
+        let mut forwarding = ForwardingState::default();
+        forwarding.zone_name_to_id = zones.clone();
+        forwarding.policy = crate::policy::parse_policy_state_with_counters(
+            "deny",
+            &[rule("aaa", 5), rule("bee", 6)],
+            &zones,
+            &[],
+            &counter_store,
+        )
+        .expect("current policy");
+        let current_counter = forwarding
+            .policy
+            .hit_counter_binding_by_stable_id("lan->wan/bee")
+            .expect("current bee rule")
+            .1
+            .clone();
+        let (coordinator, _) = worker_registered_coordinator(forwarding);
+
+        let key = v4_key();
+        let mut imported = synced_entry(key.clone(), NatDecision::default(), 1, 7_777);
+        imported.metadata.policy_counter_idx = 1;
+        imported.metadata.policy_counter = Some(sender_counter);
+        imported.metadata.policy_id = 6;
+        assert_eq!(
+            coordinator.upsert_synced_session(imported),
+            SyncedImportOutcome::Applied
+        );
+        {
+            let sessions =
+                crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced);
+            let stored = sessions.get(&key).expect("imported session");
+            assert_eq!(
+                stored.metadata.policy_counter_idx, 2,
+                "bee moved behind aaa in the current policy ordering"
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(
+                    stored
+                        .metadata
+                        .policy_counter
+                        .as_ref()
+                        .expect("bound counter"),
+                    &current_counter,
+                ),
+                "the import must bind the current counter for bee"
+            );
+        }
+
+        let mut unresolved_key = v4_key();
+        unresolved_key.src_port += 1;
+        let mut unresolved = synced_entry(unresolved_key.clone(), NatDecision::default(), 1, 7_778);
+        unresolved.metadata.policy_counter_idx = 1;
+        unresolved.metadata.policy_counter = Some(std::sync::Arc::new(
+            crate::policy::PolicyRuleCounter::with_rule_id("lan->wan/deleted"),
+        ));
+        assert_eq!(
+            coordinator.upsert_synced_session(unresolved),
+            SyncedImportOutcome::Applied
+        );
+        let sessions = crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced);
+        let stored = sessions.get(&unresolved_key).expect("unresolved session");
+        assert_eq!(
+            stored.metadata.policy_counter_idx, 0,
+            "an unknown stable ID must not retain a positional index"
+        );
+        assert!(stored.metadata.policy_counter.is_none());
+    }
 }

@@ -43,14 +43,17 @@ use super::entry::{SessionDecision, SessionMetadata};
 /// value the Go control plane reads off BOTH legs
 /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SessionSyncAttribution {
+pub(crate) struct SessionSyncAttribution<'a> {
     /// #3056: the admitting policy's id. `0` is the legitimate "unattributed"
     /// value (no policy resolved), NOT a "field absent" marker — which is
     /// exactly why a dropped field was undetectable downstream.
     pub(crate) policy_id: u32,
-    /// #3073: the 1-based per-rule hit-counter handle. HA requires identical
-    /// config on both nodes, so the same index resolves the same rule there.
-    /// `0` = no per-rule counter.
+    /// #11070: stable identity of the admitting rule. An empty value means
+    /// the receiver must leave the hit counter unattributed rather than
+    /// resolving a stale positional index.
+    pub(crate) policy_rule_id: &'a str,
+    /// #3073: the 1-based per-rule hit-counter handle. HA carries it for
+    /// legacy metadata, but receivers bind by `policy_rule_id`.
     pub(crate) policy_counter_idx: u32,
     /// #3227: the per-application idle timeout in WHOLE SECONDS, saturating.
     /// The metadata carries nanoseconds; both cross-node wires (Go
@@ -67,16 +70,20 @@ pub(crate) struct SessionSyncAttribution {
     pub(crate) nat64_snat_v4: Option<Ipv4Addr>,
 }
 
-impl SessionSyncAttribution {
+impl<'a> SessionSyncAttribution<'a> {
     /// Derive the HA-carried attribution from a session's decision + metadata.
     ///
     /// This is the ONLY place the ns -> s timeout conversion and the
     /// `(nat64, rewrite_src)` pool-source selection are written. Both were
     /// non-trivial enough that duplicating them per producer would have been a
     /// second divergence waiting to happen even after the fields were added.
-    pub(crate) fn from_session(decision: &SessionDecision, metadata: &SessionMetadata) -> Self {
+    pub(crate) fn from_session(decision: &SessionDecision, metadata: &'a SessionMetadata) -> Self {
         Self {
             policy_id: metadata.policy_id,
+            policy_rule_id: metadata
+                .policy_counter
+                .as_ref()
+                .map_or("", |counter| counter.rule_id()),
             policy_counter_idx: metadata.policy_counter_idx,
             inactivity_timeout_secs: match metadata.inactivity_timeout_ns {
                 Some(ns) => u32::try_from(ns / 1_000_000_000).unwrap_or(u32::MAX),

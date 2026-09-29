@@ -107,32 +107,43 @@ func TestForceSecondaryRefusesAConfigStalePeer_9569(t *testing.T) {
 	drainEvents(m, 2)
 }
 
-// The sender-side signal: a nack for the newest generation this node sent is
-// stale; a newer push supersedes it; a straggler nack for an older generation
-// is ignored.
-func TestPeerConfigStaleTracksTheNackForTheNewestPush_9569(t *testing.T) {
+// A NACK is diagnostic, not proof of peer state. New sends remain stale until
+// the peer positively acknowledges successful apply of the newest generation.
+func TestPeerConfigStaleRequiresPositiveApplyAck11070(t *testing.T) {
 	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
-	nack := func(gen uint64) {
+	nack := func(typ uint8, gen uint64) {
 		var p [8]byte
 		binary.LittleEndian.PutUint64(p[:], gen)
-		s.handleMessage(nil, syncMsgConfigApplyNack, p[:])
+		s.handleMessage(nil, typ, p[:])
 	}
 
 	if stale, _ := s.PeerConfigStale(); stale {
 		t.Fatal("a SessionSync that sent nothing reports a stale peer")
 	}
 	s.lastSentConfigGen.Store(7)
-	nack(7)
+	nack(syncMsgConfigApplyNack, 7)
 	if stale, reason := s.PeerConfigStale(); !stale || reason == "" {
-		t.Errorf("#9569: the peer nacked the newest pushed generation and PeerConfigStale reports stale=%v reason=%q", stale, reason)
+		t.Fatalf("the newest sent generation without an apply ACK must be stale: stale=%v reason=%q", stale, reason)
 	}
 
-	s.lastSentConfigGen.Store(8) // a newer push reached the wire
-	if stale, _ := s.PeerConfigStale(); stale {
-		t.Errorf("a newer push superseded the nacked generation, and the peer still reads stale")
+	s.lastSentConfigGen.Store(8)
+	if stale, _ := s.PeerConfigStale(); !stale {
+		t.Fatal("a newer send cleared stale state before the standby applied it")
 	}
-	nack(7) // a straggler for the superseded generation
+	nack(syncMsgConfigApplyAck, 7)
+	if stale, _ := s.PeerConfigStale(); !stale {
+		t.Fatal("ACK of generation 7 incorrectly cleared the outstanding generation 8")
+	}
+	nack(syncMsgConfigApplyAck, 9)
+	if got := s.peerAppliedConfigGen.Load(); got != 7 {
+		t.Fatalf("ACK for an unsent generation advanced peer-applied mark to %d", got)
+	}
+	nack(syncMsgConfigApplyAck, 8)
 	if stale, _ := s.PeerConfigStale(); stale {
-		t.Errorf("a straggler nack for an older generation marked the peer stale")
+		t.Fatal("the matching positive apply ACK did not clear stale state")
+	}
+	nack(syncMsgConfigApplyAck, 7)
+	if got := s.peerAppliedConfigGen.Load(); got != 8 {
+		t.Fatalf("out-of-order ACK regressed peer-applied mark to %d", got)
 	}
 }

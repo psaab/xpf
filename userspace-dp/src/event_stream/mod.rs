@@ -11,8 +11,8 @@
 
 mod backlog;
 mod budget;
-pub(crate) mod codec;
 mod clock;
+pub(crate) mod codec;
 mod connection;
 mod control;
 mod drain;
@@ -46,12 +46,12 @@ pub(crate) use clock::{
 // `use super::*`) after the #6235 split; mod.rs no longer references them directly.
 // NS_PER_SEC is likewise consumed only by the rt_flow test module via super::*.
 #[allow(unused_imports)]
+use clock::NS_PER_SEC;
+#[allow(unused_imports)]
 use clock::read_mono_and_wall_clocks;
 #[allow(unused_imports)]
-use clock::NS_PER_SEC;
-pub(crate) use codec::{EventFrame, close_flags};
-#[allow(unused_imports)]
 use codec::DataplaneEventKind;
+pub(crate) use codec::{EventFrame, close_flags};
 #[allow(unused_imports)] // public API for later policy/screen/filter producer wiring
 pub(crate) use producer::{
     DataplaneEventDropReason, DataplaneEventEmitOutcome, DataplaneEventRateLimitConfig,
@@ -741,7 +741,7 @@ impl EventStreamWorkerHandle {
                 delta.session_id,
                 delta.tcp_close_class,
             ),
-            SessionDeltaKind::Close => EventFrame::encode_session_close(
+            SessionDeltaKind::Close => EventFrame::encode_session_close_with_ingress(
                 seq,
                 &delta.key,
                 delta.metadata.owner_rg_id,
@@ -749,6 +749,8 @@ impl EventStreamWorkerHandle {
                 delta.metadata.ingress_zone,
                 delta.metadata.egress_zone,
                 delta.purge_retirement,
+                delta.metadata.ingress_ifindex,
+                delta.metadata.ingress_vlan_id,
             ),
         }
     }

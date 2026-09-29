@@ -48,27 +48,27 @@ type SessionPolicyListRequest struct {
 }
 
 type SessionPolicyTuple struct {
-	AddrFamily    uint8  `json:"addr_family,omitempty"`
-	Protocol      uint8  `json:"protocol,omitempty"`
-	SrcIP         string `json:"src_ip,omitempty"`
-	DstIP         string `json:"dst_ip,omitempty"`
-	SrcPort       uint16 `json:"src_port,omitempty"`
-	DstPort              uint16 `json:"dst_port,omitempty"`
-	TunnelDiscriminator  uint64 `json:"tunnel_discriminator,omitempty"`
-	RoutingDomain        uint32 `json:"routing_domain,omitempty"`
+	AddrFamily          uint8  `json:"addr_family,omitempty"`
+	Protocol            uint8  `json:"protocol,omitempty"`
+	SrcIP               string `json:"src_ip,omitempty"`
+	DstIP               string `json:"dst_ip,omitempty"`
+	SrcPort             uint16 `json:"src_port,omitempty"`
+	DstPort             uint16 `json:"dst_port,omitempty"`
+	TunnelDiscriminator uint64 `json:"tunnel_discriminator,omitempty"`
+	RoutingDomain       uint32 `json:"routing_domain,omitempty"`
 }
 
 type SessionPolicyMatch struct {
-	AddrFamily                     uint8               `json:"addr_family,omitempty"`
-	RoutingDomain                  uint32              `json:"routing_domain,omitempty"`
-	Tuple                          SessionPolicyTuple  `json:"tuple"`
-	ReverseKey                     *SessionPolicyTuple `json:"reverse_key,omitempty"`
-	PolicyID                       uint32              `json:"policy_id,omitempty"`
-	CreatedSecs                    uint64              `json:"created_secs,omitempty"`
-	CreatedNS                      uint64              `json:"created_ns,omitempty"`
-	ExpectedRTFlowSessionID        uint64              `json:"expected_rt_flow_session_id,omitempty"`
-	CompanionPolicyID              uint32              `json:"companion_policy_id,omitempty"`
-	ExpectedCompanionRTFlowSessionID uint64            `json:"expected_companion_rt_flow_session_id,omitempty"`
+	AddrFamily                       uint8               `json:"addr_family,omitempty"`
+	RoutingDomain                    uint32              `json:"routing_domain,omitempty"`
+	Tuple                            SessionPolicyTuple  `json:"tuple"`
+	ReverseKey                       *SessionPolicyTuple `json:"reverse_key,omitempty"`
+	PolicyID                         uint32              `json:"policy_id,omitempty"`
+	CreatedSecs                      uint64              `json:"created_secs,omitempty"`
+	CreatedNS                        uint64              `json:"created_ns,omitempty"`
+	ExpectedRTFlowSessionID          uint64              `json:"expected_rt_flow_session_id,omitempty"`
+	CompanionPolicyID                uint32              `json:"companion_policy_id,omitempty"`
+	ExpectedCompanionRTFlowSessionID uint64              `json:"expected_companion_rt_flow_session_id,omitempty"`
 	// #10626: rename-rematch inputs, populated by the helper READ from the
 	// live session key/metadata/decision. All additive + omitempty: an older
 	// helper omits them (zero values) and the rematch fails closed to the
@@ -80,7 +80,7 @@ type SessionPolicyMatch struct {
 	NATDstPort    uint16 `json:"nat_dst_port,omitempty"`
 }
 type SessionSyncRequest struct {
-	Operation   string `json:"operation,omitempty"`
+	Operation string `json:"operation,omitempty"`
 	// #10512: every helper-first tuple mutation carries a process-generation
 	// epoch and a manager-local idempotency identity. Older helpers ignore these
 	// additive fields; the new helper uses them to quarantine stale retries.
@@ -164,6 +164,7 @@ type SessionSyncRequest struct {
 	// matching SessionValue.AppTimeout); the helper converts it to ns.
 	PolicyID          uint32 `json:"policy_id,omitempty"`
 	PolicyCounterIdx  uint32 `json:"policy_counter_idx,omitempty"`
+	PolicyRuleID      string `json:"policy_rule_id,omitempty"`
 	InactivityTimeout uint32 `json:"inactivity_timeout,omitempty"`
 	// #4565: the NAT64 translated pool SOURCE (dotted-quad IPv4). A non-empty
 	// value is the peer helper's signal that this is a NAT64 cross-family
@@ -315,6 +316,8 @@ type SessionDeltaInfo struct {
 	// the legacy strings stay populated when JSON callers fill them.
 	IngressZoneID    uint16 `json:"ingress_zone_id,omitempty"`
 	EgressZoneID     uint16 `json:"egress_zone_id,omitempty"`
+	IngressIfindex   int    `json:"ingress_ifindex,omitempty"`
+	IngressVLANID    uint16 `json:"ingress_vlan_id,omitempty"`
 	OwnerRGID        int    `json:"owner_rg_id,omitempty"`
 	Disposition      string `json:"disposition,omitempty"`
 	Origin           string `json:"origin,omitempty"`
@@ -363,6 +366,7 @@ type SessionDeltaInfo struct {
 	// struct tags to the keys that helper's JSON leg actually emits.
 	PolicyID         uint32 `json:"policy_id,omitempty"`
 	PolicyCounterIdx uint32 `json:"policy_counter_idx,omitempty"`
+	PolicyRuleID     string `json:"policy_rule_id,omitempty"`
 	AppTimeout       uint32 `json:"app_timeout,omitempty"`
 	// #4565: NAT64 cross-family marker (open-frame flags bit 1<<5) + the
 	// translated pool SOURCE (trailing 4 bytes). Stamped onto the synced

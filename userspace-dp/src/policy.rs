@@ -9,11 +9,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-
 
 #[path = "policy_snapshot_error.rs"]
 mod snapshot_error;
@@ -386,7 +385,7 @@ fn build_global_zone_scope(
                 return Err(SnapshotIntegrityError::UnresolvableZoneReference {
                     rule_id: rule_id.to_string(),
                     zone: name.to_string(),
-                })
+                });
             }
         }
     }
@@ -625,7 +624,7 @@ impl PolicyRuleCounter {
     /// creation; the store re-hands the same `Arc` for a surviving id across
     /// snapshot rebuilds, so the id stays valid for the life of any session
     /// that bound the handle.
-    fn with_rule_id(rule_id: &str) -> Self {
+    pub(crate) fn with_rule_id(rule_id: &str) -> Self {
         Self {
             packets: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
@@ -877,7 +876,6 @@ impl PolicyCounterStore {
     pub(crate) fn reset_parse_calls_for_test(&self) {
         self.parse_calls.store(0, Ordering::Relaxed);
     }
-
 }
 
 /// A validated policy state whose counter handles belong to a live counter
@@ -918,7 +916,9 @@ impl PreparedPolicyState {
     }
 
     pub(crate) fn take_state(&mut self) -> PolicyState {
-        self.state.take().expect("prepared policy state is consumed once")
+        self.state
+            .take()
+            .expect("prepared policy state is consumed once")
     }
 
     pub(crate) fn commit(&mut self) {
@@ -929,8 +929,7 @@ impl PreparedPolicyState {
 impl Drop for PreparedPolicyState {
     fn drop(&mut self) {
         if !self.committed {
-            self.counter_store
-                .retain_rule_ids(&self.tracked_ids_before);
+            self.counter_store.retain_rule_ids(&self.tracked_ids_before);
         }
     }
 }
@@ -1257,17 +1256,20 @@ impl CompiledApplications {
         // #3291: an empty-range (protocol-only) term matches regardless of L4
         // presence — we know the protocol; a port-bearing range requires a known
         // L4 port and so fails closed for a flowless packet.
-        if let Some(&(order, _, _, timeout)) = terms.range_terms.iter().find(
-            |(_, src_ranges, dst_ranges, _)| {
-                if src_ranges.is_empty() && dst_ranges.is_empty() {
-                    true
-                } else {
-                    l4_present
-                        && port_ranges_match(src_ranges, src_port)
-                        && port_ranges_match(dst_ranges, dst_port)
-                }
-            },
-        ) {
+        if let Some(&(order, _, _, timeout)) =
+            terms
+                .range_terms
+                .iter()
+                .find(|(_, src_ranges, dst_ranges, _)| {
+                    if src_ranges.is_empty() && dst_ranges.is_empty() {
+                        true
+                    } else {
+                        l4_present
+                            && port_ranges_match(src_ranges, src_port)
+                            && port_ranges_match(dst_ranges, dst_port)
+                    }
+                })
+        {
             if best.map_or(true, |(b, _)| order < b) {
                 best = Some((order, timeout));
             }
@@ -1278,9 +1280,14 @@ impl CompiledApplications {
         // non-first fragment) the constrained term does NOT match — fail closed.
         if !terms.icmp_constraints.is_empty() {
             if let Some((ptype, pcode)) = packet_icmp {
-                if let Some(&(order, _, _, timeout)) = terms.icmp_constraints.iter().find(
-                    |&&(_, ctype, ccode, _)| ctype == ptype && ccode.map_or(true, |c| c == pcode),
-                ) {
+                if let Some(&(order, _, _, timeout)) =
+                    terms
+                        .icmp_constraints
+                        .iter()
+                        .find(|&&(_, ctype, ccode, _)| {
+                            ctype == ptype && ccode.map_or(true, |c| c == pcode)
+                        })
+                {
                     if best.map_or(true, |(b, _)| order < b) {
                         best = Some((order, timeout));
                     }
@@ -1739,9 +1746,7 @@ impl Default for PolicyState {
     }
 }
 
-
 impl PolicyState {
-
     /// #8618: may an ICMP-family zone-policy verdict for `protocol` depend on
     /// the PACKET's icmp type/code, rather than on the flow alone?
     ///
@@ -1873,6 +1878,18 @@ impl PolicyState {
         let index = *self.rule_id_to_index.get(rule_id)?;
         let counter_idx = u32::try_from(index + 1).ok()?;
         Some((counter_idx, self.rules.get(index)?))
+    }
+    /// Resolve a stable rule ID to the CURRENT snapshot's counter and index.
+    /// Unknown identities never fall back to a positional index.
+    pub(crate) fn hit_counter_binding_by_stable_id(
+        &self,
+        rule_id: &str,
+    ) -> Option<(u32, &Arc<PolicyRuleCounter>)> {
+        if rule_id == DEFAULT_POLICY_COUNTER_RULE_ID {
+            return Some((DEFAULT_POLICY_COUNTER_IDX, &self.default_counter));
+        }
+        let (idx, rule) = self.rule_binding_by_stable_id(rule_id)?;
+        Some((idx, &rule.hit_counter))
     }
 
     /// #3395: re-resolve the CURRENT positional `policy_id` (#3056) for an
@@ -2289,8 +2306,8 @@ pub(crate) fn parse_policy_state_with_counters(
     for snap in rules {
         let source_is_v3_shaped =
             !snap.source_book_ids.is_empty() || !snap.source_literals.is_empty();
-        let destination_is_v3_shaped = !snap.destination_book_ids.is_empty()
-            || !snap.destination_literals.is_empty();
+        let destination_is_v3_shaped =
+            !snap.destination_book_ids.is_empty() || !snap.destination_literals.is_empty();
 
         // Build literal prefix sets per side using the appropriate
         // factory. #3367 (legacy path) / #3711 (v3 path): BOTH shapes report a
@@ -2567,9 +2584,7 @@ pub(crate) fn parse_policy_state_with_counters(
         // have ADMITTED a flow that a type-blind evaluation denies", and only a
         // permit can overturn a deny in that direction. An `inactive` rule is
         // excluded because it cannot match at all.
-        if !state.rules[idx].inactive
-            && matches!(state.rules[idx].action, PolicyAction::Permit)
-        {
+        if !state.rules[idx].inactive && matches!(state.rules[idx].action, PolicyAction::Permit) {
             for (slot, proto) in [PROTO_ICMP, PROTO_ICMPV6].into_iter().enumerate() {
                 if state.rules[idx]
                     .compiled_apps
@@ -3049,8 +3064,17 @@ pub(crate) fn evaluate_policy_result_with_icmp(
     // authoritative), so delegate with `l4_present = true` — byte-identical to
     // the pre-#3291 behavior.
     evaluate_policy_result_l3_aware(
-        state, from_id, to_id, src_ip, dst_ip, protocol, src_port, dst_port, packet_icmp,
-        packet_len, true,
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        true,
     )
 }
 
@@ -3208,7 +3232,12 @@ fn evaluate_policy_result_counted(
                         return apply_frag_deny_override(result, skipped_frag_deny);
                     }
                     RuleMatchOutcome::Miss(reason) => {
-                        note_skipped_frag_deny(&mut skipped_frag_deny, &state.rules[idx], idx, reason);
+                        note_skipped_frag_deny(
+                            &mut skipped_frag_deny,
+                            &state.rules[idx],
+                            idx,
+                            reason,
+                        );
                     }
                 }
             }
@@ -3439,10 +3468,7 @@ fn evaluate_policy_result_counted(
 /// zone can never be named `junos-host` (the Go strict validator + definition
 /// gate reject it), so this never shadows a real zone. All other names resolve
 /// through `zone_name_to_id` exactly as before.
-fn resolve_policy_zone_id(
-    zone_name_to_id: &FxHashMap<String, u16>,
-    name: &str,
-) -> Option<u16> {
+fn resolve_policy_zone_id(zone_name_to_id: &FxHashMap<String, u16>, name: &str) -> Option<u16> {
     if name == JUNOS_HOST_ZONE_NAME {
         Some(JUNOS_HOST_ZONE_ID)
     } else {
@@ -3505,8 +3531,16 @@ pub(crate) fn evaluate_junos_host_policy(
     // LocalDelivery arm calls `evaluate_junos_host_policy_l3_aware` directly
     // (mirrors the #3291 `evaluate_policy_result_with_icmp` wrapper split).
     evaluate_junos_host_policy_l3_aware(
-        state, from_id, src_ip, dst_ip, protocol, src_port, dst_port, packet_icmp,
-        packet_len, true,
+        state,
+        from_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        true,
     )
 }
 
@@ -3578,7 +3612,9 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
     // anyway — no rule names the unzoned ingress) and still reaches the
     // from-any and global tiers below.
     let key = zone_pair_key(from_id, JUNOS_HOST_ZONE_ID);
-    if from_id != 0 && let Some(indices) = state.zone_pair_index.get(&key) {
+    if from_id != 0
+        && let Some(indices) = state.zone_pair_index.get(&key)
+    {
         for &idx in indices {
             match try_match_rule(
                 &state.rules[idx],

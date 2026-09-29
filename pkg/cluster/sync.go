@@ -133,6 +133,9 @@ const (
 	// today's behaviour: the old side never nacks, so the marker is never
 	// re-armed and convergence still waits for a commit or a reconnect.
 	syncMsgConfigApplyNack = 27
+	// Positive apply result: the receiver sends the successfully applied
+	// generation (u64 LE). A newer send does not clear this gate until ACKed.
+	syncMsgConfigApplyAck = 40
 
 	// NOTE for the next author: sync_auth.go also declares syncMsgAuthHello=27
 	// and syncMsgAuthProof=28. Those are PRE-INSTALL handshake frames and
@@ -1562,9 +1565,9 @@ type SessionSync struct {
 	// draw: a nack naming an older generation is a straggler for a push already
 	// superseded and must not re-arm the marker for the current one.
 	lastSentConfigGen atomic.Uint64
-	// peerConfigNackedGen is the generation of the last config-apply nack that
-	// matched lastSentConfigGen when it arrived (#9569). See PeerConfigStale.
-	peerConfigNackedGen  atomic.Uint64
+	// Highest config generation the peer positively acknowledged as applied.
+	// PeerConfigStale compares this with lastSentConfigGen.
+	peerAppliedConfigGen atomic.Uint64
 	configGenCounter     atomic.Uint64
 	lastAppliedConfigGen atomic.Uint64
 	// applyingConfigGen is the apply-in-progress config fence (#6284, item 2).
@@ -1800,14 +1803,11 @@ type configApplyItem struct {
 	// authenticated is true only when the frame arrived with a verified
 	// session-sync authentication trailer.
 	authenticated bool
-	// incarnation is the peer boot the payload arrived under (#5084), taken
-	// from the connection that carried it. Zero = un-incarnated: the payload
-	// is never dropped on incarnation grounds (plan §6 rule 4).
-	//
-	// This field is the whole fix. Without it a payload queued from a peer's
-	// PRIOR boot can apply after resetRecvGen has zeroed the high-water, record
-	// a high mark, and then refuse the rebooted peer's lower-generation current
-	// config permanently.
+	// conn is the exact connection that delivered the payload; acknowledgements
+	// are sent only while it remains active.
+	conn net.Conn
+	// incarnation is the peer boot the payload arrived under (#5084). Zero
+	// means un-incarnated and is never dropped on incarnation grounds.
 	incarnation bootIncarnation
 }
 type failoverAck struct {
@@ -2360,11 +2360,11 @@ func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 	return snap
 }
 
-func (s *SessionSync) reconcileStaleSessions() {
+func (s *SessionSync) reconcileStaleSessions() bool {
 	s.bulkMu.Lock()
 	if !s.bulkInProgress {
 		s.bulkMu.Unlock()
-		return
+		return false
 	}
 	recvV4 := s.bulkRecvV4
 	recvV6 := s.bulkRecvV6
@@ -2392,7 +2392,7 @@ func (s *SessionSync) reconcileStaleSessions() {
 	// "empty means delete-all" heuristic, just the normal absent-key delete.
 	if s.sessions == nil {
 		slog.Info("cluster sync: reconcile stale sessions skipped (no dataplane)")
-		return
+		return false
 	}
 	// #9655: a bulk with no zone snapshot has nothing to judge ownership by, and
 	// deleting on a guess is the failure this reconcile can cause. Only a nil
@@ -2400,7 +2400,7 @@ func (s *SessionSync) reconcileStaleSessions() {
 	// all-unmapped snapshot whose rows are filtered by #10227 origin gating.
 	if zoneSnap == nil {
 		slog.Info("cluster sync: reconcile stale sessions skipped (no zone snapshot)")
-		return
+		return false
 	}
 	// #9655: the snapshot answers for the zone map it was taken from. A map with
 	// different contents installed during the bulk can move a zone to this node,
@@ -2412,7 +2412,7 @@ func (s *SessionSync) reconcileStaleSessions() {
 	if mapGen != zoneSnap.mapGen {
 		slog.Info("cluster sync: reconcile stale sessions skipped (zone map changed during the bulk)",
 			"snapshot_map_gen", zoneSnap.mapGen, "map_gen", mapGen)
-		return
+		return false
 	}
 	// #9655: judged by the zone answers this bulk started with. A zone the map
 	// does not name uses the captured RG 0 fallback.
@@ -2434,6 +2434,7 @@ func (s *SessionSync) reconcileStaleSessions() {
 	if err != nil {
 		slog.Warn("cluster sync: reconcile stale sessions failed", "err", err)
 		s.stats.Errors.Add(1)
+		return false
 	}
 	slog.Info(
 		"cluster sync: reconcile stale sessions applied",
@@ -2446,6 +2447,7 @@ func (s *SessionSync) reconcileStaleSessions() {
 		slog.Info("cluster sync: reconciled stale sessions", "deleted", deleted)
 	}
 	slog.Info("cluster sync: reconcile stale sessions complete", "deleted", deleted, "elapsed", time.Since(start))
+	return true
 }
 
 func (s *SessionSync) FormatStats() string {

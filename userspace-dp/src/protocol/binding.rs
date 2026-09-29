@@ -199,8 +199,11 @@ pub struct WorkerRuntimeStatus {
     /// #1635 wire layout version. 0/absent = pre-#1635 (old dense v1
     /// fields, no longer emitted by this daemon); 3 = sparse
     /// active-slot encoding below. Go switches emission on this.
-    #[serde(rename = "cold_path_layout_version", default,
-            skip_serializing_if = "crate::protocol::u32_is_zero")]
+    #[serde(
+        rename = "cold_path_layout_version",
+        default,
+        skip_serializing_if = "crate::protocol::u32_is_zero"
+    )]
     pub cold_path_layout_version: u32,
     /// #1635 SPARSE encoding — parallel arrays, one entry per ACTIVE
     /// zone-pair slot (samples > 0 AND a live slot-map assignment).
@@ -209,41 +212,65 @@ pub struct WorkerRuntimeStatus {
     /// readers, per feedback_wire_protocol_both_sides).
     ///
     /// Slot index (for cross-reference / debugging).
-    #[serde(rename = "cold_path_active_slot_ids", default,
-            skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "cold_path_active_slot_ids",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub cold_path_active_slot_ids: Vec<u32>,
     /// Parallel: from_zone_id per active slot.
-    #[serde(rename = "cold_path_active_zone_from", default,
-            skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "cold_path_active_zone_from",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub cold_path_active_zone_from: Vec<u32>,
     /// Parallel: to_zone_id per active slot.
-    #[serde(rename = "cold_path_active_zone_to", default,
-            skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "cold_path_active_zone_to",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub cold_path_active_zone_to: Vec<u32>,
     /// Parallel: sample count per active slot.
-    #[serde(rename = "cold_path_active_samples", default,
-            skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "cold_path_active_samples",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub cold_path_active_samples: Vec<u64>,
     /// Parallel: sum of sampled delta_ns per active slot.
-    #[serde(rename = "cold_path_active_sum_ns", default,
-            skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "cold_path_active_sum_ns",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub cold_path_active_sum_ns: Vec<u64>,
     /// Parallel: 48-bucket histogram per active slot.
-    #[serde(rename = "cold_path_active_buckets", default,
-            skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "cold_path_active_buckets",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub cold_path_active_buckets: Vec<Vec<u64>>,
     /// Parallel: builder-collision flag per active slot (should always
     /// be false with the direct slot map; true = builder bug).
-    #[serde(rename = "cold_path_active_builder_collision", default,
-            skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "cold_path_active_builder_collision",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub cold_path_active_builder_collision: Vec<bool>,
     /// True if some configured zone-pair could not be assigned a slot —
     /// either the 255-slot capacity was exhausted (slot 255 is the
     /// u8::MAX sentinel) OR the pair references a zone-id outside the
     /// 0..=64 direct-table range. Surfaced so operators see when a
     /// configured pair goes unmeasured.
-    #[serde(rename = "cold_path_overflow_active", default,
-            skip_serializing_if = "crate::protocol::bool_is_false")]
+    #[serde(
+        rename = "cold_path_overflow_active",
+        default,
+        skip_serializing_if = "crate::protocol::bool_is_false"
+    )]
     pub cold_path_overflow_active: bool,
     /// Per-worker monotonic count of eligible cold-path sampling
     /// attempts (incremented on every session-miss pass). Used by the
@@ -251,29 +278,44 @@ pub struct WorkerRuntimeStatus {
     /// sum(samples[]) / sample_phase. `u64_is_zero` skip keeps an
     /// uncalibrated worker's wire payload identical to pre-#1621
     /// daemons (AGY r1 F1).
-    #[serde(rename = "cold_path_sample_phase", default,
-            skip_serializing_if = "crate::protocol::u64_is_zero")]
+    #[serde(
+        rename = "cold_path_sample_phase",
+        default,
+        skip_serializing_if = "crate::protocol::u64_is_zero"
+    )]
     pub cold_path_sample_phase: u64,
     /// Per-worker monotonic count of samples where raw_ns <
     /// wrapper_ns_baseline (frequency scaling / OoO jitter signal).
-    #[serde(rename = "cold_path_wrapper_underflow_count", default,
-            skip_serializing_if = "crate::protocol::u64_is_zero")]
+    #[serde(
+        rename = "cold_path_wrapper_underflow_count",
+        default,
+        skip_serializing_if = "crate::protocol::u64_is_zero"
+    )]
     pub cold_path_wrapper_underflow_count: u64,
     /// Q32 fixed-point ns_per_tsc multiplier from worker startup
     /// calibration. 0 when TSC unavailable.
-    #[serde(rename = "cold_path_ns_per_tsc_q32", default,
-            skip_serializing_if = "crate::protocol::u64_is_zero")]
+    #[serde(
+        rename = "cold_path_ns_per_tsc_q32",
+        default,
+        skip_serializing_if = "crate::protocol::u64_is_zero"
+    )]
     pub cold_path_ns_per_tsc_q32: u64,
     /// Wrapper-pair baseline (cost of sample_tsc_start + sample_tsc_end
     /// itself) measured at worker startup. Subtracted from raw_ns on
     /// the hot path.
-    #[serde(rename = "cold_path_wrapper_ns_baseline", default,
-            skip_serializing_if = "crate::protocol::u64_is_zero")]
+    #[serde(
+        rename = "cold_path_wrapper_ns_baseline",
+        default,
+        skip_serializing_if = "crate::protocol::u64_is_zero"
+    )]
     pub cold_path_wrapper_ns_baseline: u64,
     /// "tsc" / "clock_gettime" / "" (empty = Unset). Harness gates
     /// Table A1/A2 publication on == "tsc" for every worker.
-    #[serde(rename = "cold_path_clock_source", default,
-            skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "cold_path_clock_source",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub cold_path_clock_source: String,
     /// #1621 plan v2 (AGY r1 F3 + Codex r1 F5): monotonic count of
     /// snapshot() calls that exhausted their retry budget at the
@@ -281,8 +323,11 @@ pub struct WorkerRuntimeStatus {
     /// `xpf_userspace_worker_cold_path_snapshot_failed_total` so
     /// operators can distinguish "no samples this window" from
     /// "transient publish-contention starvation".
-    #[serde(rename = "cold_path_snapshot_failed", default,
-            skip_serializing_if = "crate::protocol::u64_is_zero")]
+    #[serde(
+        rename = "cold_path_snapshot_failed",
+        default,
+        skip_serializing_if = "crate::protocol::u64_is_zero"
+    )]
     pub cold_path_snapshot_failed: u64,
 }
 
@@ -317,7 +362,6 @@ pub(crate) fn u64_is_zero(value: &u64) -> bool {
 pub(crate) fn u32_is_zero(value: &u32) -> bool {
     *value == 0
 }
-
 
 pub(crate) fn bool_is_false(value: &bool) -> bool {
     !*value
@@ -1328,6 +1372,11 @@ pub(crate) struct SessionDeltaInfo {
     pub ingress_zone_id: u16,
     #[serde(rename = "egress_zone_id", default)]
     pub egress_zone_id: u16,
+    /// The local ingress identity used by the session-level HA ownership gate.
+    #[serde(rename = "ingress_ifindex", default)]
+    pub ingress_ifindex: i32,
+    #[serde(rename = "ingress_vlan_id", default)]
+    pub ingress_vlan_id: u16,
     #[serde(rename = "owner_rg_id", default)]
     pub owner_rg_id: i32,
     #[serde(default)]
@@ -1430,6 +1479,10 @@ pub(crate) struct SessionDeltaInfo {
     pub policy_id: u32,
     #[serde(rename = "policy_counter_idx", default)]
     pub policy_counter_idx: u32,
+    /// Stable admitting-rule identity; never infer ownership from the
+    /// positional counter index when this identity is absent or unresolved.
+    #[serde(rename = "policy_rule_id", default)]
+    pub policy_rule_id: String,
     /// #3227 per-application idle timeout in WHOLE SECONDS. The Go field is
     /// `AppTimeout`, so the key is `app_timeout` and NOT the
     /// `inactivity_timeout` spelling `SessionSyncRequest` uses for the same
@@ -1500,7 +1553,6 @@ pub(crate) struct SessionDeltaInfo {
     #[serde(rename = "purge_retirement", default)]
     pub purge_retirement: bool,
 }
-
 
 /// #7919: `skip_serializing_if` predicate — keeps a never-observed
 /// high-water off the wire rather than emitting a 0 a reader could mistake for

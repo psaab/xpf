@@ -42,7 +42,6 @@ fn shrink_socket_buffers(reader: &UnixStream, writer: &UnixStream) {
     }
 }
 
-
 #[test]
 fn test_channel_backpressure() {
     let (tx, _rx) = mpsc::sync_channel::<EventFrame>(2);
@@ -62,7 +61,6 @@ fn test_channel_backpressure() {
     assert_eq!(shared.frames_sent.load(Ordering::Relaxed), 2);
     assert_eq!(shared.frames_dropped.load(Ordering::Relaxed), 1);
 }
-
 
 // #2381: the write-backlog cap converts a wedged daemon reader from
 // unbounded helper heap growth into bounded, counted telemetry loss at the
@@ -88,11 +86,21 @@ fn write_backlog_cap_halts_drain_and_counts_stall() {
     let mut write_buf = WriteBacklog::with_capacity(WRITE_BACKLOG_MAX_BYTES);
     write_buf.extend_from_slice(&vec![0u8; WRITE_BACKLOG_MAX_BYTES]);
 
-    let outcome = drain_channel_into_write_buf(&rx, &shared, &mut replay_buf, &mut write_buf, false, &mut None);
+    let outcome = drain_channel_into_write_buf(
+        &rx,
+        &shared,
+        &mut replay_buf,
+        &mut write_buf,
+        false,
+        &mut None,
+    );
 
     assert!(outcome.stalled, "drain must report the backlog stall");
     assert!(!outcome.disconnected);
-    assert!(!outcome.drained_any, "no frame may move into a full backlog");
+    assert!(
+        !outcome.drained_any,
+        "no frame may move into a full backlog"
+    );
     assert_eq!(
         write_buf.pending_len(),
         WRITE_BACKLOG_MAX_BYTES,
@@ -107,7 +115,6 @@ fn write_backlog_cap_halts_drain_and_counts_stall() {
     // relocated into one unbounded heap buffer.
     assert_eq!(rx.try_recv().map(|f| f.seq).ok(), Some(1));
 }
-
 
 #[test]
 fn write_backlog_stall_makes_channel_the_backpressure_surface() {
@@ -131,7 +138,14 @@ fn write_backlog_stall_makes_channel_the_backpressure_surface() {
     }
 
     // I/O thread cannot drain into the full backlog: channel stays full.
-    let outcome = drain_channel_into_write_buf(&rx, &shared, &mut replay_buf, &mut write_buf, false, &mut None);
+    let outcome = drain_channel_into_write_buf(
+        &rx,
+        &shared,
+        &mut replay_buf,
+        &mut write_buf,
+        false,
+        &mut None,
+    );
     assert!(outcome.stalled);
     assert!(!outcome.drained_any);
 
@@ -147,7 +161,6 @@ fn write_backlog_stall_makes_channel_the_backpressure_surface() {
         "the bounded channel drop must be counted"
     );
 }
-
 
 #[test]
 fn paused_drain_ignores_backlog_cap_and_never_stalls() {
@@ -165,7 +178,14 @@ fn paused_drain_ignores_backlog_cap_and_never_stalls() {
             .expect("seed channel");
     }
 
-    let outcome = drain_channel_into_write_buf(&rx, &shared, &mut replay_buf, &mut write_buf, true, &mut None);
+    let outcome = drain_channel_into_write_buf(
+        &rx,
+        &shared,
+        &mut replay_buf,
+        &mut write_buf,
+        true,
+        &mut None,
+    );
     assert!(!outcome.stalled, "paused drain must not stall on the cap");
     assert!(outcome.drained_any);
     assert_eq!(
@@ -176,7 +196,6 @@ fn paused_drain_ignores_backlog_cap_and_never_stalls() {
     assert_eq!(replay_buf.len(), 3, "paused frames go to the replay buffer");
     assert_eq!(shared.frames_write_stalled.load(Ordering::Relaxed), 0);
 }
-
 
 #[test]
 fn stalled_consumer_does_not_grow_backlog_unbounded_end_to_end() {
@@ -259,8 +278,7 @@ fn stalled_consumer_does_not_grow_backlog_unbounded_end_to_end() {
     let parallelism = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1) as u32;
-    let deadline =
-        Instant::now() + Duration::from_secs(30) + Duration::from_secs(3) * parallelism;
+    let deadline = Instant::now() + Duration::from_secs(30) + Duration::from_secs(3) * parallelism;
 
     let mut sent_ok = 0u64;
     let mut attempts = 0u64;
@@ -315,7 +333,6 @@ fn stalled_consumer_does_not_grow_backlog_unbounded_end_to_end() {
     );
     drop(daemon_side);
 }
-
 
 #[test]
 fn keeping_up_consumer_sees_full_fidelity_and_no_stalls() {
@@ -412,7 +429,6 @@ fn keeping_up_consumer_sees_full_fidelity_and_no_stalls() {
     );
 }
 
-
 #[test]
 fn test_lossless_send_waits_for_capacity() {
     let (tx, rx) = mpsc::sync_channel::<EventFrame>(1);
@@ -469,7 +485,6 @@ fn test_lossless_send_waits_for_capacity() {
     assert_eq!(shared.frames_sent.load(Ordering::Relaxed), 2);
     assert_eq!(shared.frames_dropped.load(Ordering::Relaxed), 0);
 }
-
 
 // ---------------------------------------------------------------------------
 // #5189 (A1-b10-F4) — the idle keepalive is a backlog producer and must obey

@@ -31,8 +31,8 @@ fn test_key_v4() -> SessionKey {
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 200)),
         src_port: 12345,
         dst_port: 80,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -44,30 +44,35 @@ fn test_key_v6() -> SessionKey {
         dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0xbf02, 0, 0, 0, 0x200)),
         src_port: 54321,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
 fn test_decision() -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 2,
-        egress_ifindex: 3,
-        tx_ifindex: 3,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
-        neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-        src_mac: Some([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]),
-        tx_vlan_id: 0,
-    }, nat: NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 10))),
-        rewrite_dst: None,
-        rewrite_src_port: Some(40000),
-        rewrite_dst_port: None,
-        nat64: false,
-        nptv6: false,
-    }, install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 2,
+            egress_ifindex: 3,
+            tx_ifindex: 3,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1))),
+            neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            src_mac: Some([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]),
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 10))),
+            rewrite_dst: None,
+            rewrite_src_port: Some(40000),
+            rewrite_dst_port: None,
+            nat64: false,
+            nptv6: false,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 fn test_metadata() -> SessionMetadata {
@@ -324,22 +329,22 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
         0,
         TEST_TRUST_ZONE_ID,
         TEST_UNTRUST_ZONE_ID,
-        88,              // #3056: admitting policy id (rides [136:140] on a close)
+        88, // #3056: admitting policy id (rides [136:140] on a close)
         1,
-        false,           // #2508: log_syslog gate
-        1_700_000_000,   // #2465: created Unix seconds
-        123_456_789,     // #2853: created sub-second nanos (123.456789 ms)
+        false,                     // #2508: log_syslog gate
+        1_700_000_000,             // #2465: created Unix seconds
+        123_456_789,               // #2853: created sub-second nanos (123.456789 ms)
         1_700_000_123_000_000_000, // #2465: close instant Unix ns
-        7,               // #2520: application id
-        42,              // #2615: ingress ifindex
-        111,             // #2501: fwd packets
-        222_333,         // #2501: fwd bytes
-        44,              // #2501: rev packets
-        55_666,          // #2501: rev bytes
-        0xB8,            // #2749: src ToS (DSCP EF=46 << 2)
-        0x13,            // #2749: TCP control bits (SYN|FIN|ACK)
-        9,               // #2749: egress ifindex
-        0xA1B2_C3D4_E5F6_0708, // #4915: stable session id (rides [152:160])
+        7,                         // #2520: application id
+        42,                        // #2615: ingress ifindex
+        111,                       // #2501: fwd packets
+        222_333,                   // #2501: fwd bytes
+        44,                        // #2501: rev packets
+        55_666,                    // #2501: rev bytes
+        0xB8,                      // #2749: src ToS (DSCP EF=46 << 2)
+        0x13,                      // #2749: TCP control bits (SYN|FIN|ACK)
+        9,                         // #2749: egress ifindex
+        0xA1B2_C3D4_E5F6_0708,     // #4915: stable session id (rides [152:160])
     );
 
     assert_eq!(frame.data[4], MSG_SESSION_CLOSE_RT_FLOW);
@@ -349,7 +354,10 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
         u32::from_le_bytes(frame.data[0..4].try_into().unwrap()),
         SECURITY_EVENT_PAYLOAD_SIZE as u32
     );
-    assert_eq!(frame.len as usize, FRAME_HEADER_SIZE + SECURITY_EVENT_PAYLOAD_SIZE);
+    assert_eq!(
+        frame.len as usize,
+        FRAME_HEADER_SIZE + SECURITY_EVENT_PAYLOAD_SIZE
+    );
 
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     // src/dst IP (16-byte slots, v4 left-aligned).
@@ -444,7 +452,10 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
     // for this slot; SECURITY_EVENT_PAYLOAD_SIZE pins the length above.
     assert_eq!(u32::from_le_bytes(p[136..140].try_into().unwrap()), 88);
     // [136:140] must NOT collide with the #2853 created-subsec-nanos in [44:48].
-    assert_eq!(u32::from_le_bytes(p[44..48].try_into().unwrap()), 123_456_789);
+    assert_eq!(
+        u32::from_le_bytes(p[44..48].try_into().unwrap()),
+        123_456_789
+    );
 }
 
 #[test]
@@ -463,7 +474,7 @@ fn test_encode_session_close_rt_flow_v6() {
         0,
         TEST_TRUST_ZONE_ID,
         TEST_UNTRUST_ZONE_ID,
-        0,     // #3056: admitting policy id
+        0, // #3056: admitting policy id
         0,
         false, // #2508: log_syslog gate
         0,     // #2465: created Unix seconds (unknown → fallback)
@@ -567,9 +578,9 @@ fn test_session_create_rt_flow_wire_layout() {
         0,
         TEST_TRUST_ZONE_ID,
         TEST_UNTRUST_ZONE_ID,
-        42, // #3056: admitting policy id
-        77, // #2615: ingress ifindex
-        9,  // #2615: application id
+        42,                    // #3056: admitting policy id
+        77,                    // #2615: ingress ifindex
+        9,                     // #2615: application id
         0x1122_3344_5566_7788, // #4915: stable session id (rides [152:160])
     );
     assert_eq!(frame.data[4], MSG_SESSION_CREATE_RT_FLOW);
@@ -729,8 +740,16 @@ fn test_encode_session_open_zone_id_above_255() {
     let mut md = test_metadata();
     md.ingress_zone = 300;
     md.egress_zone = 1000;
-    let frame =
-        EventFrame::encode_session_open(1, &test_key_v4(), &test_decision(), &md, &zones, false, 0, 0);
+    let frame = EventFrame::encode_session_open(
+        1,
+        &test_key_v4(),
+        &test_decision(),
+        &md,
+        &zones,
+        false,
+        0,
+        0,
+    );
     let p = &frame.data[FRAME_HEADER_SIZE..];
     assert_eq!(u16::from_le_bytes([p[27], p[28]]), 300); // IngressZoneID u16
     assert_eq!(u16::from_le_bytes([p[29], p[30]]), 1000); // EgressZoneID u16
@@ -757,8 +776,16 @@ fn test_encode_session_open_carries_log_flags() {
     let mut md = test_metadata();
     md.log_session_init = true;
     md.log_session_close = true;
-    let frame =
-        EventFrame::encode_session_open(1, &test_key_v4(), &test_decision(), &md, &zones, false, 0, 0);
+    let frame = EventFrame::encode_session_open(
+        1,
+        &test_key_v4(),
+        &test_decision(),
+        &md,
+        &zones,
+        false,
+        0,
+        0,
+    );
     let p = &frame.data[FRAME_HEADER_SIZE..];
     assert_eq!(
         p[26] & FLAG_LOG_SESSION_INIT,
@@ -825,8 +852,8 @@ fn test_encode_session_open_carries_nat64_flag_and_snat_v4() {
         dst_ip: IpAddr::V6("64:ff9b::c0a8:101".parse::<Ipv6Addr>().unwrap()),
         src_port: 5001,
         dst_port: 80,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let frame = EventFrame::encode_session_open(1, &key, &decision, &md, &zones, false, 0, 0);
     let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
@@ -848,10 +875,22 @@ fn test_encode_session_open_carries_nat64_flag_and_snat_v4() {
     );
 
     // A non-NAT64 v4 session: flag clear, snat_v4 all-zero.
-    let frame_plain =
-        EventFrame::encode_session_open(2, &test_key_v4(), &test_decision(), &md, &zones, false, 0, 0);
+    let frame_plain = EventFrame::encode_session_open(
+        2,
+        &test_key_v4(),
+        &test_decision(),
+        &md,
+        &zones,
+        false,
+        0,
+        0,
+    );
     let pp = &frame_plain.data[FRAME_HEADER_SIZE..frame_plain.len as usize];
-    assert_eq!(pp[26] & FLAG_NAT64, 0, "non-nat64 must leave the flag clear");
+    assert_eq!(
+        pp[26] & FLAG_NAT64,
+        0,
+        "non-nat64 must leave the flag clear"
+    );
     let m = pp.len() - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
     assert_eq!(&pp[m - 20..m - 16], &[0, 0, 0, 0], "non-nat64 snat is zero");
 }
@@ -930,8 +969,16 @@ fn test_encode_session_open_carries_policy_fields_3301() {
     md.policy_id = 42;
     md.policy_counter_idx = 7;
     md.inactivity_timeout_ns = Some(30 * 1_000_000_000);
-    let frame =
-        EventFrame::encode_session_open(1, &test_key_v4(), &test_decision(), &md, &zones, false, 0, 0);
+    let frame = EventFrame::encode_session_open(
+        1,
+        &test_key_v4(),
+        &test_decision(),
+        &md,
+        &zones,
+        false,
+        0,
+        0,
+    );
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     // #3301 trailing block: policy_id, policy_counter_idx, inactivity_timeout
     // (seconds), each u32 LE. Everything appended AFTER it, newest last:
@@ -944,8 +991,14 @@ fn test_encode_session_open_carries_policy_fields_3301() {
     let counter_idx = u32::from_le_bytes(p[n - 32..n - 28].try_into().unwrap());
     let inact_secs = u32::from_le_bytes(p[n - 28..n - 24].try_into().unwrap());
     assert_eq!(policy_id, 42, "policy_id must ride the open frame");
-    assert_eq!(counter_idx, 7, "policy_counter_idx must ride the open frame");
-    assert_eq!(inact_secs, 30, "inactivity_timeout (ns->s) must ride the open frame");
+    assert_eq!(
+        counter_idx, 7,
+        "policy_counter_idx must ride the open frame"
+    );
+    assert_eq!(
+        inact_secs, 30,
+        "inactivity_timeout (ns->s) must ride the open frame"
+    );
 
     // Default metadata => zeros (unattributed / no counter / global timeout).
     let frame_none = EventFrame::encode_session_open(
@@ -962,9 +1015,89 @@ fn test_encode_session_open_carries_policy_fields_3301() {
     let m = pn.len() - 9; // #9412 + #9752: discount the trailing close-class byte and install-table pair; the reads below are end-relative
     // Shifted by the #4565 snat_v4 (4) + #5212 session_id (8) + #7188 tunnel
     // discriminator (8) trailing fields.
-    assert_eq!(u32::from_le_bytes(pn[m - 32..m - 28].try_into().unwrap()), 0);
-    assert_eq!(u32::from_le_bytes(pn[m - 28..m - 24].try_into().unwrap()), 0);
-    assert_eq!(u32::from_le_bytes(pn[m - 24..m - 20].try_into().unwrap()), 0);
+    assert_eq!(
+        u32::from_le_bytes(pn[m - 32..m - 28].try_into().unwrap()),
+        0
+    );
+    assert_eq!(
+        u32::from_le_bytes(pn[m - 28..m - 24].try_into().unwrap()),
+        0
+    );
+    assert_eq!(
+        u32::from_le_bytes(pn[m - 24..m - 20].try_into().unwrap()),
+        0
+    );
+}
+
+#[test]
+fn test_encode_session_open_carries_ingress_and_stable_policy_rule_id11070() {
+    let zones = test_zone_map();
+    let mut metadata = test_metadata();
+    metadata.ingress_ifindex = 4242;
+    metadata.ingress_vlan_id = 51;
+    metadata.policy_counter = Some(std::sync::Arc::new(
+        crate::policy::PolicyRuleCounter::with_rule_id("lan->wan/allow-web"),
+    ));
+    let frame = EventFrame::encode_session_open(
+        1,
+        &test_key_v4(),
+        &test_decision(),
+        &metadata,
+        &zones,
+        false,
+        0,
+        0,
+    );
+    let end = frame.len as usize;
+    let rule_id = b"lan->wan/allow-web";
+    let id_start = end - rule_id.len();
+    let len_start = id_start - 2;
+    let ingress_start = len_start - 6;
+    assert_eq!(
+        u32::from_le_bytes(
+            frame.data[ingress_start..ingress_start + 4]
+                .try_into()
+                .unwrap()
+        ),
+        4242
+    );
+    assert_eq!(
+        u16::from_le_bytes(
+            frame.data[ingress_start + 4..ingress_start + 6]
+                .try_into()
+                .unwrap()
+        ),
+        51
+    );
+    assert_eq!(
+        u16::from_le_bytes(frame.data[len_start..id_start].try_into().unwrap()) as usize,
+        rule_id.len()
+    );
+    assert_eq!(&frame.data[id_start..end], rule_id);
+}
+
+#[test]
+fn test_encode_session_close_carries_ingress_after_legacy_marker11070() {
+    for (key, want_af, want_len) in [(test_key_v4(), 4u8, 42usize), (test_key_v6(), 6u8, 66usize)] {
+        let frame =
+            EventFrame::encode_session_close_with_ingress(7, &key, 1, 0, 300, 1000, true, 4242, 51);
+        let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+        assert_eq!(payload[0], want_af);
+        assert_eq!(payload.len(), want_len);
+        let marker = payload.len() - 7;
+        assert_eq!(
+            payload[marker], 1,
+            "the purge marker must retain its legacy position before the new identity"
+        );
+        assert_eq!(
+            u32::from_le_bytes(payload[marker + 1..marker + 5].try_into().unwrap()),
+            4242
+        );
+        assert_eq!(
+            u16::from_le_bytes(payload[marker + 5..marker + 7].try_into().unwrap()),
+            51
+        );
+    }
 }
 
 #[test]
@@ -1037,8 +1170,16 @@ fn test_encode_session_open_high_ifindex_v4() {
     let mut metadata = test_metadata();
     metadata.owner_rg_id = 40000; // > i16::MAX
 
-    let frame =
-        EventFrame::encode_session_open(1, &test_key_v4(), &decision, &metadata, &zones, false, 0, 0);
+    let frame = EventFrame::encode_session_open(
+        1,
+        &test_key_v4(),
+        &decision,
+        &metadata,
+        &zones,
+        false,
+        0,
+        0,
+    );
     let p = &frame.data[FRAME_HEADER_SIZE..];
 
     // i32 LE reads recover the exact values; an i16 encode could not.
@@ -1092,38 +1233,41 @@ fn test_encode_full_resync() {
 
 #[test]
 fn test_close_flags() {
-    let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: crate::session::SessionDeltaKind::Close,
-    key: test_key_v4(),
-    decision: test_decision(),
-    metadata: SessionMetadata {
-        ingress_zone: TEST_TRUST_ZONE_ID,
-        egress_zone: TEST_UNTRUST_ZONE_ID,
-        ingress_zone_check: 0,
-        egress_zone_check: 0,
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        owner_rg_id: 0,
-        fabric_ingress: true,
-        is_reverse: false,
-        nat64_reverse: None,
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-    },
-    origin: crate::session::SessionOrigin::ForwardFlow,
-    fabric_redirect_sync: true,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: crate::session::SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: 0,
-    bulk_resync: false,
-    tcp_close_class: 0,
-    purge_retirement: false, };
+    let delta = SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: crate::session::SessionDeltaKind::Close,
+        key: test_key_v4(),
+        decision: test_decision(),
+        metadata: SessionMetadata {
+            ingress_zone: TEST_TRUST_ZONE_ID,
+            egress_zone: TEST_UNTRUST_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: true,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        origin: crate::session::SessionOrigin::ForwardFlow,
+        fabric_redirect_sync: true,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: 0,
+        bulk_resync: false,
+        tcp_close_class: 0,
+        purge_retirement: false,
+    };
     let flags = close_flags(&delta);
     assert_eq!(flags & FLAG_FABRIC_REDIRECT, FLAG_FABRIC_REDIRECT);
     assert_eq!(flags & FLAG_FABRIC_INGRESS, FLAG_FABRIC_INGRESS);
@@ -1216,8 +1360,9 @@ fn session_open_frames_carry_distinct_tunnel_discriminators_7188() {
     // The field is APPENDED: everything before it is unchanged, so the two
     // frames differ ONLY in these 8 bytes. #7239 appended a further 4 behind
     // it, so the common prefix now stops 12 from the end.
-    let body =
-        |frame: &EventFrame| frame.data[FRAME_HEADER_SIZE..frame.len as usize - 21] /* #9412 + #9752: + the close-class byte and install-table pair */.to_vec();
+    let body = |frame: &EventFrame| {
+        frame.data[FRAME_HEADER_SIZE..frame.len as usize - 21] /* #9412 + #9752: + the close-class byte and install-table pair */.to_vec()
+    };
     assert_eq!(
         body(&first),
         body(&second),
@@ -1266,7 +1411,7 @@ fn session_close_frames_carry_the_routing_domain_7239() {
     let mut key = keyed_gre_key_7188(200);
     key.routing_domain = 100_007;
     let frame = EventFrame::encode_session_close(7, &key, 1, 0, 300, 1000, false);
-    let end = frame.len as usize - 1; // #9752: discount the trailing purge-retirement marker byte; the reads below are end-relative
+    let end = frame.len as usize - 7; // discount the legacy marker and appended ingress identity
     assert_eq!(
         u32::from_le_bytes(frame.data[end - 4..end].try_into().unwrap()),
         100_007,
@@ -1280,8 +1425,9 @@ fn session_close_frames_carry_the_routing_domain_7239() {
 /// dropped the discriminator would retract the wrong tunnel.
 #[test]
 fn session_close_frames_carry_the_tunnel_discriminator_7188() {
-    let frame = EventFrame::encode_session_close(7, &keyed_gre_key_7188(200), 1, 0, 300, 1000, false);
-    let end = frame.len as usize - 1; // #9752: discount the trailing purge-retirement marker byte; the reads below are end-relative
+    let frame =
+        EventFrame::encode_session_close(7, &keyed_gre_key_7188(200), 1, 0, 300, 1000, false);
+    let end = frame.len as usize - 7; // discount the legacy marker and appended ingress identity
     assert_eq!(
         u64::from_le_bytes(frame.data[end - 12..end - 4].try_into().unwrap()),
         crate::session::TunnelDiscriminator::Keyed(200).to_wire()
@@ -1319,8 +1465,8 @@ fn session_open_frames_state_none_explicitly_for_non_tunnel_protocols_7188() {
     assert_eq!(tail, crate::session::TunnelDiscriminator::None.to_wire());
 }
 
-/// The v6 open frame is the widest record this fixed 256-byte buffer carries.
-/// Appending 8 bytes must not run it out of headroom — an overflow here is a
+/// The v6 open frame is the widest record this fixed 512-byte buffer carries.
+/// Appending fields must not run it out of headroom — an overflow here is a
 /// panic in the HA delta producer, not a wrong value.
 #[test]
 fn v6_session_open_frame_still_fits_the_buffer_7188() {
@@ -1371,7 +1517,11 @@ fn test_encode_session_update_matches_the_shared_golden_9412() {
     );
     assert_eq!(frame.data[4], MSG_SESSION_UPDATE);
     let bytes = &frame.data[..frame.len as usize];
-    assert_eq!(bytes[bytes.len() - 9], 2, "#9412: the close class sits 8 bytes from the end (#9752 tail follows)");
+    assert_eq!(
+        bytes[bytes.len() - 9],
+        2,
+        "#9412: the close class sits 8 bytes from the end (#9752 tail follows)"
+    );
     assert_eq!(
         u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()),
         525_590,
@@ -1403,8 +1553,16 @@ fn test_encode_session_update_matches_the_shared_golden_9412() {
 #[test]
 fn test_encode_session_open_carries_the_close_class_9412() {
     let zones = test_zone_map();
-    let frame =
-        EventFrame::encode_session_open(7, &test_key_v4(), &test_decision(), &test_metadata(), &zones, false, 0, 1);
+    let frame = EventFrame::encode_session_open(
+        7,
+        &test_key_v4(),
+        &test_decision(),
+        &test_metadata(),
+        &zones,
+        false,
+        0,
+        1,
+    );
     assert_eq!(frame.data[4], MSG_SESSION_OPEN);
     assert_eq!(frame.data[frame.len as usize - 9], 1); // #9752: 8 install-table bytes now trail the class
 }
@@ -1419,8 +1577,26 @@ fn session_frames_carry_the_install_table_identity_9752() {
     decision.install_table_domain = 525_590;
     decision.install_table_check = 3_318_534_811;
     for (i, frame) in [
-        EventFrame::encode_session_open(7, &test_key_v4(), &decision, &test_metadata(), &zones, false, 0, 0),
-        EventFrame::encode_session_update(8, &test_key_v4(), &decision, &test_metadata(), &zones, false, 0, 0),
+        EventFrame::encode_session_open(
+            7,
+            &test_key_v4(),
+            &decision,
+            &test_metadata(),
+            &zones,
+            false,
+            0,
+            0,
+        ),
+        EventFrame::encode_session_update(
+            8,
+            &test_key_v4(),
+            &decision,
+            &test_metadata(),
+            &zones,
+            false,
+            0,
+            0,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -1456,111 +1632,26 @@ fn session_frames_carry_the_install_table_identity_9752() {
     );
 }
 
-/// #9752: the close frame carries the purge-retirement marker as its final
-/// byte, so every downstream retraction (Go mirror, cluster delete, helper
-/// import) can act forward-only instead of deriving companions the purge
-/// deliberately preserved.
+/// #9752: the purge-retirement marker keeps its legacy offset, immediately
+/// before the additive #11070 ingress identity.
 #[test]
 fn session_close_frame_carries_the_purge_retirement_marker_9752() {
     for (retire, want) in [(true, 1u8), (false, 0u8)] {
-        let frame = EventFrame::encode_session_close(
-            7,
-            &test_key_v4(),
-            1,
-            0,
-            300,
-            1000,
-            retire,
-        );
-        let end = frame.len as usize;
-        assert_eq!(
-            frame.data[end - 1],
-            want,
-            "retire={retire}: marker must be the frame's last byte"
-        );
+        let frame = EventFrame::encode_session_close(7, &test_key_v4(), 1, 0, 300, 1000, retire);
+        let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
+        assert_eq!(payload[payload.len() - 7], want);
     }
 }
 
-/// #10068 cell 2: v6 parity of
-/// `session_close_frame_carries_the_purge_retirement_marker_9752`. The marker
-/// must be the close frame's last byte for a v6 key too. The address-family
-/// byte and payload-length pins fail the cell on a v4-only code path (a v4
-/// layout would read AF 4 with a 36-byte payload, not AF 6 with 60).
+/// IPv6 preserves the same close trailer order: legacy purge marker followed
+/// by the new ingress identity.
 #[test]
 fn session_close_frame_carries_the_purge_retirement_marker_v6_10068() {
     for (retire, want) in [(true, 1u8), (false, 0u8)] {
-        let frame = EventFrame::encode_session_close(
-            7,
-            &test_key_v6(),
-            1,
-            0,
-            300,
-            1000,
-            retire,
-        );
+        let frame = EventFrame::encode_session_close(7, &test_key_v6(), 1, 0, 300, 1000, retire);
         let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
-        assert_eq!(
-            payload[0], 6,
-            "retire={retire}: a v6 close must carry wire AF 6"
-        );
-        assert_eq!(
-            payload.len(),
-            60,
-            "retire={retire}: v6 close payload must be 60 bytes \
-             (6 fixed + 32 addrs + 4 rg + 1 flags + 4 zones + 8 discriminator \
-             + 4 domain + 1 marker)"
-        );
-        assert_eq!(
-            payload[payload.len() - 1],
-            want,
-            "retire={retire}: marker must be the frame's last byte"
-        );
-    }
-}
-
-/// #10068 cell 1 (GW-4) KNOWN-GAP, pinned — not fixed.
-///
-/// Table 1 GW-4 row (docs/log/9752.md §Fold-2.1: "close/wire-gap sweep halves"
-/// among the 7 Go-wire legs): close frames predate the install-table tail on
-/// the event-stream binary leg. Open/update frames carry the (domain, check)
-/// pair (`session_frames_carry_the_install_table_identity_9752`); close frames
-/// end at the purge-retirement marker with no stamp after it. The gap exists
-/// on master independent of #9752 and needs the owning lane's layout change.
-///
-/// This cell pins the gap signature for both families: exact no-tail payload
-/// lengths (36 v4 / 60 v6) with the frame ending [routing_domain u32][marker
-/// u8]. When the layout change lands (an 8-byte stamp tail after the marker)
-/// the lengths grow and this cell REDs — replace it then with the
-/// close-carrying-a-stamp round-trip cell. A green cell with a longer frame
-/// would mean the gap closed silently, which is exactly what this forbids.
-#[test]
-fn close_frame_carries_no_install_table_tail_known_gap_10068() {
-    let domain_wire = crate::session::routing_domain_to_wire(0).to_le_bytes();
-    for (key, want_af, want_len) in
-        [(test_key_v4(), 4u8, 36usize), (test_key_v6(), 6u8, 60usize)]
-    {
-        let frame = EventFrame::encode_session_close(7, &key, 1, 0, 300, 1000, true);
-        let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
-        assert_eq!(
-            payload[0], want_af,
-            "AF {want_af}: close must carry its own wire family"
-        );
-        assert_eq!(
-            payload.len(),
-            want_len,
-            "AF {want_af}: close payload must be {want_len} bytes with no \
-             install-table tail; a longer frame means the owning lane's layout \
-             change landed and this KNOWN-GAP cell must become the round-trip cell"
-        );
-        assert_eq!(
-            &payload[payload.len() - 5..payload.len() - 1],
-            &domain_wire,
-            "AF {want_af}: routing domain must sit directly before the marker"
-        );
-        assert_eq!(
-            payload[payload.len() - 1],
-            1,
-            "AF {want_af}: the purge marker must still be the frame's last byte"
-        );
+        assert_eq!(payload[0], 6, "a v6 close must carry wire AF 6");
+        assert_eq!(payload.len(), 66);
+        assert_eq!(payload[payload.len() - 7], want);
     }
 }

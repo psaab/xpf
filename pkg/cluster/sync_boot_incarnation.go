@@ -220,6 +220,10 @@ func (s *SessionSync) notePeerBootIncarnation(inc bootIncarnation) (switched boo
 	if s.peerBootIncarnation == inc {
 		return false
 	}
+	if s.peerBootIncarnation.known() {
+		// A genuinely new peer boot invalidates the old boot's apply ACK.
+		s.peerAppliedConfigGen.Store(0)
+	}
 	s.peerBootIncarnation = inc
 	return true
 }

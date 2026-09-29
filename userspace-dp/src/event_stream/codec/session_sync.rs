@@ -11,8 +11,8 @@ use crate::session::{
 };
 use rustc_hash::FxHashMap;
 
-use super::EventFrame;
 use super::wire::*;
+use super::{EVENT_FRAME_CAPACITY, EventFrame};
 
 impl EventFrame {
     /// Encode a SessionOpen (type 1) or SessionUpdate (type 3) frame.
@@ -77,7 +77,7 @@ impl EventFrame {
         session_id: u64,
         tcp_close_class: u8,
     ) -> Self {
-        let mut buf = [0u8; 256];
+        let mut buf = [0u8; EVENT_FRAME_CAPACITY];
         let mut pos = FRAME_HEADER_SIZE; // skip header, fill later
 
         // #6949: the HA-carried policy attribution is derived ONCE, here, and
@@ -88,6 +88,7 @@ impl EventFrame {
         // Before #6949 the JSON leg silently carried none of these.
         let SessionSyncAttribution {
             policy_id,
+            policy_rule_id,
             policy_counter_idx,
             inactivity_timeout_secs,
             nat64,
@@ -289,8 +290,9 @@ impl EventFrame {
         // can change it. 0 is the default routing instance, which is also what
         // an old Go decoder length-skipping these 4 bytes reads, and what every
         // deployment with no routing-instance interface membership carries.
-        buf[pos..pos + 4]
-            .copy_from_slice(&crate::session::routing_domain_to_wire(key.routing_domain).to_le_bytes());
+        buf[pos..pos + 4].copy_from_slice(
+            &crate::session::routing_domain_to_wire(key.routing_domain).to_le_bytes(),
+        );
         pos += 4;
 
         // #9412: [+36] the session's TCP close class (u8), trailing and
@@ -317,6 +319,27 @@ impl EventFrame {
         pos += 4;
         buf[pos..pos + 4].copy_from_slice(&decision.install_table_check.to_le_bytes());
         pos += 4;
+        // The cluster-local ifindex/VLAN pair is the session ownership identity
+        // used by the Go RG gate; unlike a zone id it distinguishes sessions in
+        // a zone spanning multiple redundancy groups.
+        buf[pos..pos + 4].copy_from_slice(&metadata.ingress_ifindex.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 2].copy_from_slice(&metadata.ingress_vlan_id.to_le_bytes());
+        pos += 2;
+        // #11070: the peer must resolve a hit counter by stable rule identity,
+        // never by this node's potentially stale positional index. The
+        // length-gated u16 trailer is omitted when it cannot fit; the receiver
+        // then deliberately leaves that session unattributed.
+        if !policy_rule_id.is_empty()
+            && policy_rule_id.len() <= u16::MAX as usize
+            && pos + 2 + policy_rule_id.len() <= buf.len()
+        {
+            let len = policy_rule_id.len() as u16;
+            buf[pos..pos + 2].copy_from_slice(&len.to_le_bytes());
+            pos += 2;
+            buf[pos..pos + len as usize].copy_from_slice(policy_rule_id.as_bytes());
+            pos += len as usize;
+        }
 
         // Write header
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;
@@ -330,10 +353,10 @@ impl EventFrame {
     }
     /// Encode a SessionClose (type 2) frame -- minimal payload.
     /// #919/#922: extended with ingress_zone_id + egress_zone_id after the
-    /// flags byte. #3075: widened those two fields from u8 to u16 LE so a stable
-    /// name-hash zone id > 255 round-trips. They are TRAILING fields, so the Go
-    /// decoder length-gates them (a short frame degrades to "no zone ids").
-    /// #9752: trailing purge-retirement marker byte (length-gated likewise).
+    /// flags byte. #3075: widened those fields from u8 to u16 LE so stable
+    /// name-hash zone IDs > 255 round-trip. #9752 adds a length-gated
+    /// purge-retirement marker after the routing domain. #11070 appends the
+    /// ingress ifindex/VLAN pair after that marker, preserving its legacy offset.
     pub(crate) fn encode_session_close(
         seq: u64,
         key: &SessionKey,
@@ -343,7 +366,31 @@ impl EventFrame {
         egress_zone_id: u16,
         purge_retirement: bool,
     ) -> Self {
-        let mut buf = [0u8; 256];
+        Self::encode_session_close_with_ingress(
+            seq,
+            key,
+            owner_rg_id,
+            close_flags,
+            ingress_zone_id,
+            egress_zone_id,
+            purge_retirement,
+            0,
+            0,
+        )
+    }
+
+    pub(crate) fn encode_session_close_with_ingress(
+        seq: u64,
+        key: &SessionKey,
+        owner_rg_id: i32,
+        close_flags: u8,
+        ingress_zone_id: u16,
+        egress_zone_id: u16,
+        purge_retirement: bool,
+        ingress_ifindex: u32,
+        ingress_vlan_id: u16,
+    ) -> Self {
+        let mut buf = [0u8; EVENT_FRAME_CAPACITY];
         let mut pos = FRAME_HEADER_SIZE;
 
         let is_v6 = key.addr_family == libc::AF_INET6 as u8;
@@ -400,19 +447,28 @@ impl EventFrame {
         // different keys. An old Go decoder length-skips these 4 bytes and
         // retracts in the default instance, which is what it did before the
         // field existed.
-        buf[pos..pos + 4]
-            .copy_from_slice(&crate::session::routing_domain_to_wire(key.routing_domain).to_le_bytes());
+        buf[pos..pos + 4].copy_from_slice(
+            &crate::session::routing_domain_to_wire(key.routing_domain).to_le_bytes(),
+        );
         pos += 4;
 
-        // #9752: purge-retirement marker (u8: 0/1), trailing and length-gated
-        // after the routing domain. A close that retires exactly its key must
-        // not make the peer retract companions the purge deliberately
-        // preserved; the marker tells every downstream retraction (Go mirror,
-        // cluster delete, helper import) to act forward-only. An old Go
-        // decoder length-skips this byte and retracts with companions, which
-        // is what it did before the marker existed.
+        // #9752: purge-retirement marker (u8: 0/1), length-gated after the
+        // routing domain. It retains its legacy offset so older Go decoders
+        // continue to read it correctly. A close that retires exactly its key
+        // must not make the peer retract companions the purge deliberately
+        // preserved; every downstream retraction (Go mirror, cluster delete,
+        // helper import) acts forward-only when the marker is set.
         buf[pos] = u8::from(purge_retirement);
         pos += 1;
+
+        // #11070: ingress session identity lets the receiver apply RG
+        // ownership to close deltas using the same per-session predicate.
+        // It follows the legacy marker so an older Go decoder does not mistake
+        // an ifindex byte for the purge bit.
+        buf[pos..pos + 4].copy_from_slice(&ingress_ifindex.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 2].copy_from_slice(&ingress_vlan_id.to_le_bytes());
+        pos += 2;
 
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;
         write_header(&mut buf, payload_len, MSG_SESSION_CLOSE, seq);

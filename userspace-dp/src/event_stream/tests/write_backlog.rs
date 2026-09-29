@@ -120,7 +120,11 @@ fn partial_write_backlog_preserves_byte_order_4974() {
     );
     assert_eq!(consumed, produced, "bytes must emerge in order, unmodified");
     assert!(backlog.is_empty(), "backlog fully drained");
-    assert_eq!(backlog.pending_len(), 0, "pending length is zero when empty");
+    assert_eq!(
+        backlog.pending_len(),
+        0,
+        "pending length is zero when empty"
+    );
 }
 
 /// `pending_len()` (unwritten bytes), not the raw Vec length, is the value the

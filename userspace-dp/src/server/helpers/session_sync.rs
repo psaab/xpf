@@ -7,7 +7,7 @@
 // control-response reconstruction — no packet path, no allocation on the
 // worker loop. Bodies byte-for-byte identical to the pre-split source.
 
-use crate::afxdp::{self, SyncedSessionEntry, SYNCED_IMPORT_REFUSED_PREFIX};
+use crate::afxdp::{self, SYNCED_IMPORT_REFUSED_PREFIX, SyncedSessionEntry};
 use crate::ip_proto::PROTO_GRE;
 use crate::protocol::SessionSyncRequest;
 use crate::session::{TunnelDiscriminator, WireDiscriminator};
@@ -26,10 +26,14 @@ fn reject_incomplete_synced_key(
         _ => false,
     };
     if !family_matches {
-        return Err(format!("{SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX}family-mismatch"));
+        return Err(format!(
+            "{SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX}family-mismatch"
+        ));
     }
     if src_ip.is_unspecified() || dst_ip.is_unspecified() {
-        return Err(format!("{SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX}unspecified-address"));
+        return Err(format!(
+            "{SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX}unspecified-address"
+        ));
     }
     if crate::ip_proto::has_l4_ports(req.protocol) && (req.src_port == 0 || req.dst_port == 0) {
         return Err(format!("{SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX}zero-port"));
@@ -170,11 +174,9 @@ pub(crate) fn verify_synced_pptp_association(
     let TunnelDiscriminator::Pptp(handle) = discriminator else {
         return Ok(None);
     };
-    let Some(call) = crate::session::pptp::PptpCall::from_wire_call_ids(
-        req.pptp_call_ids,
-        src_ip,
-        dst_ip,
-    ) else {
+    let Some(call) =
+        crate::session::pptp::PptpCall::from_wire_call_ids(req.pptp_call_ids, src_ip, dst_ip)
+    else {
         return Err(format!(
             "{SYNCED_IMPORT_REFUSED_PREFIX}pptp-call-ids-not-carried"
         ));
@@ -369,34 +371,36 @@ pub(crate) fn build_synced_session_entry(
         // copy gets its close bits and its close window.
         tcp_close_class: req.tcp_close_class,
         key,
-        decision: crate::session::SessionDecision { resolution: afxdp::ForwardingResolution {
-            disposition: if req.egress_ifindex > 0
-                || req.tx_ifindex > 0
-                || req.tunnel_endpoint_id != 0
-            {
-                afxdp::ForwardingDisposition::ForwardCandidate
-            } else {
-                afxdp::ForwardingDisposition::NoRoute
+        decision: crate::session::SessionDecision {
+            resolution: afxdp::ForwardingResolution {
+                disposition: if req.egress_ifindex > 0
+                    || req.tx_ifindex > 0
+                    || req.tunnel_endpoint_id != 0
+                {
+                    afxdp::ForwardingDisposition::ForwardCandidate
+                } else {
+                    afxdp::ForwardingDisposition::NoRoute
+                },
+                local_ifindex: 0,
+                egress_ifindex: req.egress_ifindex,
+                tx_ifindex,
+                tunnel_endpoint_id: req.tunnel_endpoint_id,
+                next_hop,
+                neighbor_mac,
+                src_mac,
+                tx_vlan_id: req.tx_vlan_id,
             },
-            local_ifindex: 0,
-            egress_ifindex: req.egress_ifindex,
-            tx_ifindex,
-            tunnel_endpoint_id: req.tunnel_endpoint_id,
-            next_hop,
-            neighbor_mac,
-            src_mac,
-            tx_vlan_id: req.tx_vlan_id,
-        }, nat: crate::nat::NatDecision {
-            rewrite_src,
-            rewrite_dst,
-            rewrite_src_port: nat_src_port,
-            rewrite_dst_port: nat_dst_port,
-            // #4565: set the NAT64 cross-family bit for a promoted NAT64
-            // session so tx dispatch reverse-translates and the reverse key
-            // derives its v4 address family. `nptv6` stays default (false).
-            nat64: nat64_flag,
-            ..crate::nat::NatDecision::default()
-        },
+            nat: crate::nat::NatDecision {
+                rewrite_src,
+                rewrite_dst,
+                rewrite_src_port: nat_src_port,
+                rewrite_dst_port: nat_dst_port,
+                // #4565: set the NAT64 cross-family bit for a promoted NAT64
+                // session so tx dispatch reverse-translates and the reverse key
+                // derives its v4 address family. `nptv6` stays default (false).
+                nat64: nat64_flag,
+                ..crate::nat::NatDecision::default()
+            },
             // #9752: adopt the origin's installing-table identity verbatim so
             // re-resolve runs where the flow was installed. An old peer omits
             // both fields (`serde(default)` 0 = default table), the pre-#9752
@@ -406,8 +410,16 @@ pub(crate) fn build_synced_session_entry(
             // Defense-in-depth: unreachable today since Go never sends
             // stamped reverses — but a stamped reverse would re-resolve a
             // reply in a table chosen for the forward direction.
-            install_table_domain: if req.is_reverse { 0 } else { req.install_table_domain },
-            install_table_check: if req.is_reverse { 0 } else { req.install_table_check },
+            install_table_domain: if req.is_reverse {
+                0
+            } else {
+                req.install_table_domain
+            },
+            install_table_check: if req.is_reverse {
+                0
+            } else {
+                req.install_table_check
+            },
         },
         metadata: crate::session::SessionMetadata {
             // #4983/#7095: a peer-imported session now carries an ingress
@@ -515,15 +527,18 @@ pub(crate) fn build_synced_session_entry(
                     None
                 },
             ),
-            // #3301: the per-rule hit-counter handle now rides the wire
-            // (SessionSyncRequest.policy_counter_idx). HA requires identical
-            // config on both nodes, so the same #3073 idx resolves the same
-            // rule on the peer; the established fast path then increments the
-            // correct policy hit counter on every forwarded packet after
-            // failover. An old peer omits the field => serde(default) 0 ("no
-            // per-rule counter"), the pre-#3301 behavior (rolling-upgrade safe).
+            // #11070: preserve the sender's stable rule identity in a
+            // placeholder counter; import binds it to the CURRENT snapshot.
+            // A missing ID is deliberately not allowed to fall back to the
+            // sender's positional counter index.
             policy_counter_idx: req.policy_counter_idx,
-            policy_counter: None,
+            policy_counter: if req.policy_rule_id.is_empty() {
+                None
+            } else {
+                Some(std::sync::Arc::new(
+                    crate::policy::PolicyRuleCounter::with_rule_id(&req.policy_rule_id),
+                ))
+            },
         },
         leak_incarnation: 0,
         origin: crate::session::SessionOrigin::SyncImport,

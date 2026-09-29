@@ -89,11 +89,23 @@ fn corpus_cases() -> Vec<CorpusCase> {
             continue;
         }
         if let Some(name) = line.strip_prefix("case ") {
-            assert!(cur.is_none(), "line {ln}: `case` inside an unterminated case");
-            cur = Some(CorpusCase { name: name.trim().to_string(), queries: Vec::new() });
+            assert!(
+                cur.is_none(),
+                "line {ln}: `case` inside an unterminated case"
+            );
+            cur = Some(CorpusCase {
+                name: name.trim().to_string(),
+                queries: Vec::new(),
+            });
         } else if line == "end" {
-            let c = cur.take().unwrap_or_else(|| panic!("line {ln}: `end` with no open case"));
-            assert!(!c.queries.is_empty(), "line {ln}: case {} asserts nothing", c.name);
+            let c = cur
+                .take()
+                .unwrap_or_else(|| panic!("line {ln}: `end` with no open case"));
+            assert!(
+                !c.queries.is_empty(),
+                "line {ln}: case {} asserts nothing",
+                c.name
+            );
             out.push(c);
         } else if let Some(q) = line.strip_prefix("q ") {
             let f: Vec<&str> = q.split_whitespace().collect();
@@ -102,13 +114,25 @@ fn corpus_cases() -> Vec<CorpusCase> {
                 "line {ln}: a query needs 9 fields (+ optional `frag`), got {}: {line}",
                 f.len()
             );
-            let c = cur.as_mut().unwrap_or_else(|| panic!("line {ln}: `q` outside a case"));
+            let c = cur
+                .as_mut()
+                .unwrap_or_else(|| panic!("line {ln}: `q` outside a case"));
             c.queries.push(CorpusQuery {
-                from: f[0].into(), to: f[1].into(), src: f[2].into(), dst: f[3].into(),
+                from: f[0].into(),
+                to: f[1].into(),
+                src: f[2].into(),
+                dst: f[3].into(),
                 protocol: f[4].into(),
-                src_port: f[5].parse().unwrap_or_else(|_| panic!("line {ln}: bad sport")),
-                dst_port: f[6].parse().unwrap_or_else(|_| panic!("line {ln}: bad dport")),
-                want_action: f[7].into(), want_policy: f[8].into(), frag: f.len() == 10, line: ln,
+                src_port: f[5]
+                    .parse()
+                    .unwrap_or_else(|_| panic!("line {ln}: bad sport")),
+                dst_port: f[6]
+                    .parse()
+                    .unwrap_or_else(|_| panic!("line {ln}: bad dport")),
+                want_action: f[7].into(),
+                want_policy: f[8].into(),
+                frag: f.len() == 10,
+                line: ln,
             });
         } else if line.starts_with("set ") {
             // the Go generator's input; not this side's business
@@ -150,8 +174,9 @@ fn action_name(a: PolicyAction) -> &'static str {
 /// detected.
 #[test]
 fn policy_verdict_corpus_differential_9167() {
-    let file: CorpusSnapshotFile = serde_json::from_str(CORPUS_SNAPSHOTS)
-        .expect("testdata/policy_verdict_corpus_snapshots.json parses (regenerate with UPDATE_9167=1)");
+    let file: CorpusSnapshotFile = serde_json::from_str(CORPUS_SNAPSHOTS).expect(
+        "testdata/policy_verdict_corpus_snapshots.json parses (regenerate with UPDATE_9167=1)",
+    );
     let cases = corpus_cases();
 
     // The corpus must be non-trivial. A differential whose corpus emptied passes
@@ -191,16 +216,23 @@ fn policy_verdict_corpus_differential_9167() {
         });
 
         for q in &case.queries {
-            let from_id = *zone_map
-                .get(&q.from)
-                .unwrap_or_else(|| panic!("case {:?} line {}: query from-zone {:?} is not in the snapshot", case.name, q.line, q.from));
+            let from_id = *zone_map.get(&q.from).unwrap_or_else(|| {
+                panic!(
+                    "case {:?} line {}: query from-zone {:?} is not in the snapshot",
+                    case.name, q.line, q.from
+                )
+            });
             let src: IpAddr = q.src.parse().expect("corpus src ip");
             let dst: IpAddr = q.dst.parse().expect("corpus dst ip");
             let proto = protocol_number(&q.protocol);
             // A NON-FIRST FRAGMENT carries no L4 header: evaluate with
             // l4_present = false and zero ports, exactly as the flowless path does.
             let l4_present = !q.frag;
-            let (sport, dport) = if q.frag { (0, 0) } else { (q.src_port, q.dst_port) };
+            let (sport, dport) = if q.frag {
+                (0, 0)
+            } else {
+                (q.src_port, q.dst_port)
+            };
 
             // (action, fell-through-to-default, matched policy id)
             let (got_action, is_default, got_policy_id) = if q.to == JUNOS_HOST_ZONE_NAME {
@@ -212,9 +244,12 @@ fn policy_verdict_corpus_differential_9167() {
                     Some(res) => (action_name(res.action), false, res.policy_id),
                 }
             } else {
-                let to_id = *zone_map
-                    .get(&q.to)
-                    .unwrap_or_else(|| panic!("case {:?} line {}: query to-zone {:?} is not in the snapshot", case.name, q.line, q.to));
+                let to_id = *zone_map.get(&q.to).unwrap_or_else(|| {
+                    panic!(
+                        "case {:?} line {}: query to-zone {:?} is not in the snapshot",
+                        case.name, q.line, q.to
+                    )
+                });
                 let res = evaluate_policy_result_l3_aware(
                     &state, from_id, to_id, src, dst, proto, sport, dport, None, 0, l4_present,
                 );
@@ -226,13 +261,22 @@ fn policy_verdict_corpus_differential_9167() {
             };
 
             assert_eq!(
-                got_action, q.want_action,
+                got_action,
+                q.want_action,
                 "corpus line {}: case {:?} {} {}->{} {}:{}->{}:{}{}\n  \
                  Rust enforcer: {got_action}\n  corpus       : {}\n\
                  The corpus expectation is authored from the Junos semantics and produced by \
                  NEITHER implementation, so a disagreement here is a defect in policy.rs (or in \
                  the expectation, which is reviewed as part of changing it).",
-                q.line, case.name, q.protocol, q.from, q.to, q.src, q.src_port, q.dst, q.dst_port,
+                q.line,
+                case.name,
+                q.protocol,
+                q.from,
+                q.to,
+                q.src,
+                q.src_port,
+                q.dst,
+                q.dst_port,
                 if q.frag { " [non-first fragment]" } else { "" },
                 q.want_action
             );
@@ -309,5 +353,9 @@ fn policy_verdict_corpus_pins_embedded_v4_ipv6_case_10686() {
         .iter()
         .find(|c| c.name == "embedded-v4-ipv6-policy-family-10686")
         .expect("#10686 policy-core case must remain in the shared corpus");
-    assert_eq!(case.queries.len(), 5, "v4 deny + mapped/compat src/dst rows");
+    assert_eq!(
+        case.queries.len(),
+        5,
+        "v4 deny + mapped/compat src/dst rows"
+    );
 }

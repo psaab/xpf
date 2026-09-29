@@ -92,6 +92,7 @@ func (m *Manager) buildSessionSyncRequestV4(op string, key dataplane.SessionKey,
 		// pre-#3301 behavior an old helper still applies via serde(default).
 		req.PolicyID = val.PolicyID
 		req.PolicyCounterIdx = val.PolicyCounterIdx
+		req.PolicyRuleID = val.PolicyRuleID
 		req.InactivityTimeout = val.AppTimeout
 		// #5212: carry the originating node's stable RT_FLOW session id so the
 		// peer helper adopts it on import instead of minting a fresh local id.
@@ -210,6 +211,7 @@ func (m *Manager) buildSessionSyncRequestV6(op string, key dataplane.SessionKeyV
 		// #3301: carry the admitting policy's firewall metadata (see V4).
 		req.PolicyID = val.PolicyID
 		req.PolicyCounterIdx = val.PolicyCounterIdx
+		req.PolicyRuleID = val.PolicyRuleID
 		req.InactivityTimeout = val.AppTimeout
 		// #4565: carry the NAT64 translated pool SOURCE (non-zero marks a NAT64
 		// cross-family session) so the peer helper rebuilds the reverse (v4->v6)

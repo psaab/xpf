@@ -3,7 +3,6 @@
 
 use super::*;
 
-
 #[test]
 fn test_emit_session_close_rt_flow_pairs_with_ha_delta() {
     // #2460 no-double-emit contract: a single close emits exactly ONE type-2
@@ -26,9 +25,16 @@ fn test_emit_session_close_rt_flow_pairs_with_ha_delta() {
     handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id);
 
     let frames: Vec<EventFrame> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    assert_eq!(frames.len(), 2, "expected exactly one HA delta + one RT_FLOW frame");
+    assert_eq!(
+        frames.len(),
+        2,
+        "expected exactly one HA delta + one RT_FLOW frame"
+    );
 
-    let ha = frames.iter().filter(|f| f.data[4] == codec::MSG_SESSION_CLOSE).count();
+    let ha = frames
+        .iter()
+        .filter(|f| f.data[4] == codec::MSG_SESSION_CLOSE)
+        .count();
     let rt = frames
         .iter()
         .filter(|f| f.data[4] == codec::MSG_SESSION_CLOSE_RT_FLOW)
@@ -46,7 +52,6 @@ fn test_emit_session_close_rt_flow_pairs_with_ha_delta() {
     assert_eq!(&p[8..12], &[10, 0, 1, 102]);
     assert_eq!(&p[24..28], &[172, 16, 80, 200]);
 }
-
 
 #[test]
 fn test_monotonic_ns_to_unix_conversions() {
@@ -75,7 +80,6 @@ fn test_monotonic_ns_to_unix_conversions() {
     let ahead = now_mono + 5 * NS_PER_SEC;
     assert_eq!(monotonic_ns_to_unix_ns(ahead, now_mono, now_unix), now_unix);
 }
-
 
 #[test]
 fn test_monotonic_ns_to_unix_secs_subnanos() {
@@ -108,7 +112,6 @@ fn test_monotonic_ns_to_unix_secs_subnanos() {
     assert!(subnanos < NS_PER_SEC as u32);
 }
 
-
 #[test]
 fn test_emit_session_close_rt_flow_carries_real_created_stamp() {
     // #2465 fail-on-revert: a close delta with a real (non-zero) created_ns
@@ -138,7 +141,10 @@ fn test_emit_session_close_rt_flow_carries_real_created_stamp() {
 
     let created_secs = u32::from_le_bytes(p[108..112].try_into().unwrap());
     let ts_ns = u64::from_le_bytes(p[0..8].try_into().unwrap());
-    assert!(created_secs > 0, "created stamp must be populated (not the #2465 zero)");
+    assert!(
+        created_secs > 0,
+        "created stamp must be populated (not the #2465 zero)"
+    );
     assert!(ts_ns > 0, "record timestamp must be populated");
     // created is ~60s before the close timestamp (allow a few seconds of GC /
     // scheduling slack on top of the 60s age).
@@ -149,7 +155,6 @@ fn test_emit_session_close_rt_flow_carries_real_created_stamp() {
         "expected ~60s session age on the wire, got {delta_secs}s (created={created_secs}, close_secs={ts_secs})"
     );
 }
-
 
 #[test]
 fn test_emit_session_close_rt_flow_carries_app_id() {
@@ -185,7 +190,6 @@ fn test_emit_session_close_rt_flow_carries_app_id() {
         "SESSION_CLOSE RT_FLOW must carry the ingress ifindex, not N/A(0)"
     );
 }
-
 
 #[test]
 fn test_emit_session_close_rt_flow_carries_admitting_policy_id() {
@@ -224,7 +228,6 @@ fn test_emit_session_close_rt_flow_carries_admitting_policy_id() {
     assert_eq!(p[52], 2, "RT_FLOW event type must be SESSION_CLOSE (2)");
 }
 
-
 #[test]
 fn test_emit_session_close_rt_flow_zero_created_stays_zero() {
     // #2465: a close delta with an UNKNOWN (0) created_ns must keep the wire
@@ -245,7 +248,6 @@ fn test_emit_session_close_rt_flow_zero_created_stays_zero() {
     assert_eq!(u64::from_le_bytes(p[0..8].try_into().unwrap()), 0);
 }
 
-
 #[test]
 fn test_emit_session_close_rt_flow_ignores_open_delta() {
     // #2460: the RT_FLOW close emit is gated on Close — calling it for an
@@ -260,9 +262,11 @@ fn test_emit_session_close_rt_flow_ignores_open_delta() {
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Open);
     handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id);
-    assert!(rx.try_recv().is_err(), "Open delta must emit no RT_FLOW close frame");
+    assert!(
+        rx.try_recv().is_err(),
+        "Open delta must emit no RT_FLOW close frame"
+    );
 }
-
 
 #[test]
 fn test_emit_session_close_rt_flow_accounts_under_session_close_kind() {
@@ -293,7 +297,10 @@ fn test_emit_session_close_rt_flow_accounts_under_session_close_kind() {
     }
 
     let stats = handle.dataplane_event_stats();
-    assert_eq!(stats.session_close.sent, 1, "one close fits the per-kind budget");
+    assert_eq!(
+        stats.session_close.sent, 1,
+        "one close fits the per-kind budget"
+    );
     assert_eq!(
         stats.session_close.queue_full, 3,
         "three closes shed by the per-kind queue budget"
@@ -307,7 +314,6 @@ fn test_emit_session_close_rt_flow_accounts_under_session_close_kind() {
     assert_eq!(stats.policy_deny.sent, 0);
     assert_eq!(stats.policy_deny.dropped, 0);
 }
-
 
 #[test]
 fn test_emit_session_close_rt_flow_rate_limited_is_counted() {
@@ -341,7 +347,6 @@ fn test_emit_session_close_rt_flow_rate_limited_is_counted() {
     assert_eq!(frames.len(), 2);
 }
 
-
 #[test]
 fn test_emit_session_create_rt_flow_accounts_under_session_create_kind() {
     // #2512: the SESSION_CREATE (type 15) sibling of the close path also
@@ -368,7 +373,6 @@ fn test_emit_session_create_rt_flow_accounts_under_session_create_kind() {
     assert_eq!(stats.session_close.sent, 0);
     assert_eq!(stats.session_close.dropped, 0);
 }
-
 
 #[test]
 fn test_emit_session_create_rt_flow_carries_app_id_and_ifindex() {
@@ -402,7 +406,6 @@ fn test_emit_session_create_rt_flow_carries_app_id_and_ifindex() {
         "SESSION_CREATE RT_FLOW must carry the ingress ifindex, not N/A(0)"
     );
 }
-
 
 #[test]
 fn test_emit_session_create_rt_flow_carries_admitting_policy_id() {

@@ -629,6 +629,10 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		EgressZone:    egressZone,
 		ReverseKey:    userspaceReverseKeyV4(key, r),
 	}
+	if delta.IngressIfindex > 0 {
+		val.IngressIfindex = uint32(delta.IngressIfindex)
+	}
+	val.IngressVlanID = delta.IngressVLANID
 	if delta.TunnelEndpointID != 0 {
 		val.LogFlags |= dataplane.LogFlagUserspaceTunnelEndpoint
 		val.FibGen = delta.TunnelEndpointID
@@ -671,6 +675,7 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	val.PolicyID = delta.PolicyID
 	val.PolicyCounterIdx = delta.PolicyCounterIdx
 	val.AppTimeout = delta.AppTimeout
+	val.PolicyRuleID = delta.PolicyRuleID
 	// #7188: carry the helper's tunnel session-identity discriminator so the
 	// peer helper folds it back into the key it reconstructs. Opaque here.
 	// Protocol 47 has no L4 ports, so two RFC 2890 GRE tunnels between one pair
@@ -776,6 +781,10 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		EgressZone:    egressZone,
 		ReverseKey:    userspaceReverseKeyV6(key, r),
 	}
+	if delta.IngressIfindex > 0 {
+		val.IngressIfindex = uint32(delta.IngressIfindex)
+	}
+	val.IngressVlanID = delta.IngressVLANID
 	if delta.TunnelEndpointID != 0 {
 		val.LogFlags |= dataplane.LogFlagUserspaceTunnelEndpoint
 		val.FibGen = delta.TunnelEndpointID
@@ -811,6 +820,7 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	val.PolicyID = delta.PolicyID
 	val.PolicyCounterIdx = delta.PolicyCounterIdx
 	val.AppTimeout = delta.AppTimeout
+	val.PolicyRuleID = delta.PolicyRuleID
 	// #4565: stamp the NAT64 translated pool SOURCE so the cluster wire + peer
 	// helper carry it, letting a peer-PROMOTED NAT64 session rebuild its reverse
 	// (v4->v6) BIB after failover. A resolved pool source marks a NAT64

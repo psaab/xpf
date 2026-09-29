@@ -252,9 +252,7 @@ pub(super) fn handle_drain_request(
     // would complete demotion with lost sessions on the peer). Checked AFTER
     // the drain+write loops so an eviction during this drain's own
     // push_replay_frame calls is also caught.
-    let session_evicted = shared
-        .session_evicted_while_paused
-        .load(Ordering::Acquire);
+    let session_evicted = shared.session_evicted_while_paused.load(Ordering::Acquire);
 
     if session_evicted {
         // Surface the poison the same way as #2874 / the replay-gap path: emit

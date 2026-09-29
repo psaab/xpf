@@ -292,6 +292,13 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// receiver install path, while the map bit is never guessed on decode).
 	buf[off] = byte(val.Flags >> 8)
 	off++
+	if len(val.PolicyRuleID) != 0 && len(val.PolicyRuleID) <= int(^uint16(0)) {
+		var ruleIDLen [2]byte
+		binary.LittleEndian.PutUint16(ruleIDLen[:], uint16(len(val.PolicyRuleID)))
+		buf = append(buf[:off], ruleIDLen[:]...)
+		buf = append(buf, val.PolicyRuleID...)
+		return buf
+	}
 	return buf[:off]
 }
 func encodeSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
@@ -455,6 +462,13 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	// reading an old payload defaults the high byte to zero.
 	buf[off] = byte(val.Flags >> 8)
 	off++
+	if len(val.PolicyRuleID) != 0 && len(val.PolicyRuleID) <= int(^uint16(0)) {
+		var ruleIDLen [2]byte
+		binary.LittleEndian.PutUint16(ruleIDLen[:], uint16(len(val.PolicyRuleID)))
+		buf = append(buf[:off], ruleIDLen[:]...)
+		buf = append(buf, val.PolicyRuleID...)
+		return buf
+	}
 	return buf[:off]
 }
 
@@ -829,6 +843,13 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 			off++
 		}
 	}
+	if off+2 <= len(payload) {
+		ruleIDLen := int(binary.LittleEndian.Uint16(payload[off : off+2]))
+		off += 2
+		if ruleIDLen <= len(payload)-off {
+			val.PolicyRuleID = string(payload[off : off+ruleIDLen])
+		}
+	}
 	return key, val, true
 }
 
@@ -1013,6 +1034,13 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 		if off+1 <= len(payload) {
 			val.Flags |= uint16(payload[off]) << 8
 			off++
+		}
+	}
+	if off+2 <= len(payload) {
+		ruleIDLen := int(binary.LittleEndian.Uint16(payload[off : off+2]))
+		off += 2
+		if ruleIDLen <= len(payload)-off {
+			val.PolicyRuleID = string(payload[off : off+ruleIDLen])
 		}
 	}
 	return key, val, true

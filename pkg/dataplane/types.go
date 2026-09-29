@@ -427,6 +427,10 @@ type SessionValue struct {
 	// today's behaviour.
 	InstallTableDomain uint32
 	InstallTableCheck  uint32
+	// PolicyRuleID is the helper's stable admitting-rule identity. It crosses
+	// the cluster wire and resolves against the current policy on import.
+	// Unlike the positional counter index, it is safe across rule reordering.
+	PolicyRuleID string `json:"-"`
 }
 
 // SessionKeyV6 mirrors the C struct session_key_v6 (5-tuple with 128-bit IPs).
@@ -811,6 +815,8 @@ type SessionValueV6 struct {
 	// after TCPCloseClass on the v6 cluster payload).
 	InstallTableDomain uint32
 	InstallTableCheck  uint32
+	// PolicyRuleID is sync-only metadata; never part of the BPF/C ABI.
+	PolicyRuleID string `json:"-"`
 }
 
 // ZoneConfig mirrors the C struct zone_config.
