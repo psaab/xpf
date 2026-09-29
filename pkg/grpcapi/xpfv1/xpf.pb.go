@@ -7768,8 +7768,13 @@ type MatchPoliciesResponse struct {
 	// that a real deny matched directly or that permits with no overlapping deny.
 	FragmentAssociatedDeny bool   `protobuf:"varint,25,opt,name=fragment_associated_deny,json=fragmentAssociatedDeny,proto3" json:"fragment_associated_deny,omitempty"`
 	FragmentDenyNote       string `protobuf:"bytes,26,opt,name=fragment_deny_note,json=fragmentDenyNote,proto3" json:"fragment_deny_note,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// #11067: true when the query's TO zone is unknown and a resolved zone-0
+	// egress is denied before default-policy. The Match query has no FIB input
+	// and cannot distinguish the zero-logical-egress NoRoute exception; clients
+	// should use this as the conservative resolved-egress simulator verdict.
+	UnzonedEgress bool `protobuf:"varint,27,opt,name=unzoned_egress,json=unzonedEgress,proto3" json:"unzoned_egress,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MatchPoliciesResponse) Reset() {
@@ -7982,6 +7987,13 @@ func (x *MatchPoliciesResponse) GetFragmentDenyNote() string {
 		return x.FragmentDenyNote
 	}
 	return ""
+}
+
+func (x *MatchPoliciesResponse) GetUnzonedEgress() bool {
+	if x != nil {
+		return x.UnzonedEgress
+	}
+	return false
 }
 
 // HostInboundAdmission is the structured host-inbound-traffic classifier verdict
@@ -10015,7 +10027,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\n" +
 	"_icmp_typeB\f\n" +
 	"\n" +
-	"_icmp_code\"\xbe\b\n" +
+	"_icmp_code\"\xe5\b\n" +
 	"\x15MatchPoliciesResponse\x12\x1f\n" +
 	"\vpolicy_name\x18\x01 \x01(\tR\n" +
 	"policyName\x12\x16\n" +
@@ -10044,7 +10056,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\x10route_drop_class\x18\x17 \x01(\tR\x0erouteDropClass\x12&\n" +
 	"\x0froute_drop_note\x18\x18 \x01(\tR\rrouteDropNote\x128\n" +
 	"\x18fragment_associated_deny\x18\x19 \x01(\bR\x16fragmentAssociatedDeny\x12,\n" +
-	"\x12fragment_deny_note\x18\x1a \x01(\tR\x10fragmentDenyNoteB\f\n" +
+	"\x12fragment_deny_note\x18\x1a \x01(\tR\x10fragmentDenyNote\x12%\n" +
+	"\x0eunzoned_egress\x18\x1b \x01(\bR\runzonedEgressB\f\n" +
 	"\n" +
 	"_policy_id\"\x9e\x01\n" +
 	"\x14HostInboundAdmission\x12:\n" +

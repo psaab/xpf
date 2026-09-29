@@ -44,6 +44,30 @@ security {
 	}
 	return store
 }
+func unzonedEgressAPIStore(t *testing.T) *configstore.Store {
+	t.Helper()
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure() error = %v", err)
+	}
+	if err := store.LoadOverride(`
+security {
+    zones {
+        security-zone trust;
+        security-zone untrust;
+    }
+    policies {
+        default-policy permit-all;
+    }
+}
+`); err != nil {
+		t.Fatalf("LoadOverride() error = %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	return store
+}
 
 // actionResponse decodes the REST /security/match envelope including the #3375
 // default_used bit.
@@ -54,6 +78,8 @@ type actionResponse struct {
 		Action               string `json:"action"`
 		HostInboundUnmatched bool   `json:"host_inbound_unmatched"`
 		DefaultUsed          bool   `json:"default_used"`
+		UnzonedIngress       bool   `json:"unzoned_ingress"`
+		UnzonedEgress        bool   `json:"unzoned_egress"`
 	} `json:"data"`
 }
 
@@ -113,6 +139,20 @@ func TestMatchPoliciesRESTActionParity3375(t *testing.T) {
 	}
 	if !dd.Data.DefaultUsed {
 		t.Errorf("default_used = false, want true (default-policy verdict)")
+	}
+}
+
+// TestMatchPoliciesRESTUnzonedEgress verifies the REST simulator reports a
+// permit-all unknown-ToZone query as an unattributed egress deny, not default.
+func TestMatchPoliciesRESTUnzonedEgress(t *testing.T) {
+	s := &Server{store: unzonedEgressAPIStore(t)}
+	res := matchAction(t, s, url.Values{"from_zone": {"trust"}, "to_zone": {"nowhere"}})
+	if res.Data.Matched || res.Data.Action != policymatch.UnzonedEgressActionString {
+		t.Fatalf("unknown ToZone must report the unzoned-egress deny, got %+v", res.Data)
+	}
+	if !res.Data.UnzonedEgress || res.Data.UnzonedIngress || res.Data.DefaultUsed {
+		t.Fatalf("unknown ToZone cause/default flags = ingress:%v egress:%v default:%v, want false/true/false",
+			res.Data.UnzonedIngress, res.Data.UnzonedEgress, res.Data.DefaultUsed)
 	}
 }
 

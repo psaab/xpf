@@ -43,7 +43,7 @@ func undefinedZoneCfg() *config.Config {
 // typo'd/undefined one.
 //
 // FAIL-ON-REVERT: removing the zoneKnown guard in Match makes the wildcard
-// match (Matched=true, permit), failing the want-default-deny assertion.
+// match (Matched=true, permit), instead of returning the typed ingress deny.
 func TestUndefinedFromZoneNoWildcardMatch(t *testing.T) {
 	cfg := undefinedZoneCfg()
 
@@ -64,7 +64,8 @@ func TestUndefinedFromZoneNoWildcardMatch(t *testing.T) {
 	}
 }
 
-// TestUndefinedToZoneNoMatch covers the egress side of the same guard.
+// TestUndefinedToZoneNoMatch covers the resolved-egress deny and verifies the
+// simulator does not attribute it to default-policy.
 func TestUndefinedToZoneNoMatch(t *testing.T) {
 	cfg := undefinedZoneCfg()
 
@@ -72,8 +73,8 @@ func TestUndefinedToZoneNoMatch(t *testing.T) {
 	if res.Matched {
 		t.Fatalf("undefined to-zone matched (#3355); res = %+v", res)
 	}
-	if !res.DefaultUsed || res.Action != config.PolicyDeny {
-		t.Fatalf("want default-policy deny for an undefined to-zone, got %+v", res)
+	if !res.UnzonedEgress || res.DefaultUsed || res.Action != config.PolicyDeny {
+		t.Fatalf("want unzoned-egress deny for an undefined to-zone, got %+v", res)
 	}
 }
 

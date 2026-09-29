@@ -7363,12 +7363,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // already exists. That keeps ONE authority for "may this
                             // reach the kernel" (#6664) instead of two that agree today.
                             //
-                            // The egress is unresolved by definition here, so
-                            // `to_zone_id` is the #3110 unzoned sentinel 0 and the
-                            // evaluation falls through to the DEFAULT action. On a
-                            // Junos-default deny box that means a NoRoute frame now
-                            // drops. That is the intended fix and it is
-                            // availability-visible on upgrade.
+                            // The NoRoute disposition does not always mean the
+                            // logical egress identity is absent: a tunnel can
+                            // retain its logical ifindex when its outer lookup
+                            // has no route. Such a flow is adjudicated against
+                            // the logical zone (including #11067's zone-0 deny).
+                            // Only an egress ifindex of 0 has no identity and
+                            // preserves the existing default-policy decision.
                             //
                             // #9522 supersedes #9054's capped-import exception:
                             // `noroute_policy_denial_gated` no longer returns
@@ -7438,6 +7439,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         worker_ctx.forwarding,
                                         from_zone_id,
                                         to_zone_id,
+                                        decision.resolution.egress_ifindex,
                                         adj_flow.src_ip,
                                         adj_flow.dst_ip,
                                         meta.protocol,
