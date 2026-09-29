@@ -1053,6 +1053,12 @@ pub(in crate::afxdp) struct BatchCounters {
     // #10686: IPv6 ingress drops of v4-mapped or v4-compatible src/dst.
     v4_mapped_ipv6_dropped: u64,
     // #11061: fabric trust-boundary drops, batched to per-binding status.
+    // Observability contract (R3 reconcile): these are AGGREGATE batch
+    // counters only — flood-correct by construction (no per-packet log,
+    // no per-zone breakout). Per-zone attribution is deliberately absent:
+    // a quarantine event's zone is visible in the packet (the stamp) for
+    // capture-based triage, not in the counter plane. Do not claim
+    // per-zone logging for these counters.
     invalid_fabric_stamp_drops: u64,
     unstamped_fabric_ingress_drops: u64,
     ambiguous_fabric_zone_drops: u64,

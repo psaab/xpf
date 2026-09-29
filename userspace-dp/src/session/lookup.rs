@@ -776,11 +776,14 @@ impl SessionTable {
             if forward_domain == reply_routing_domain {
                 return true;
             }
-            if crate::session::is_quarantined_routing_domain(forward_domain)
-                || crate::session::is_quarantined_routing_domain(reply_routing_domain)
-            {
-                continue;
-            }
+            // NOTE (#11061 R3): no quarantine skip here on purpose. A
+            // quarantined-domain tail takes the same live-candidate path as
+            // any other domain (TRUE below): the caller drops on TRUE, so
+            // quarantined tails are dropped without borrowing a tenant
+            // candidate. An earlier revision fenced quarantined domains with
+            // `continue`, but that was unobservable (the live flag already
+            // yields TRUE) — the session/tests.rs AMBIGUOUS|2 pin below
+            // asserts this outcome, not a fence mechanism.
             if forward_domain == 0 || reply_routing_domain == 0 {
                 return true;
             }

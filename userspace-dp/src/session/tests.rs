@@ -3360,7 +3360,7 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
             crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
             2_000_000_000,
         ),
-        "an ambiguous fabric-domain fragment must not borrow a tenant NAT candidate"
+        "an ambiguous fabric-domain fragment tail must take the live-candidate          path (TRUE): the caller drops on TRUE, so it never borrows a tenant          NAT candidate. Outcome pin, not a fence-mechanism pin."
     );
     let plain_outbound = l3_reverse_probe(
         "10.0.61.102".parse().unwrap(),

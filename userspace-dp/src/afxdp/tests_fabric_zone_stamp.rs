@@ -459,6 +459,24 @@ fn unique_established_ri_snat_reply_is_admitted_without_stamp_11061() {
         2,
         "the admitted reply installs a reverse companion alongside the forward session"
     );
+    // #11061 R3: the companion must carry the FORWARD's tenant domain. A
+    // MAIN-domain (0) companion would prove admission fell back instead of
+    // following the established forward.
+    assert_ne!(
+        shared_entry.key.routing_domain, 0,
+        "precondition: the forward session lives in a tenant domain"
+    );
+    let mut companion_domains = Vec::new();
+    sessions.iter_with_origin(|key, _decision, _metadata, _origin| {
+        if key != &shared_entry.key {
+            companion_domains.push(key.routing_domain);
+        }
+    });
+    assert_eq!(
+        companion_domains,
+        vec![shared_entry.key.routing_domain],
+        "the reverse companion must be keyed by the forward tenant domain"
+    );
 
     let (other_domain, _) = crate::session::install_table_identity("tenant-b");
     let mut competing_entry = shared_entry.clone();
@@ -2962,4 +2980,290 @@ fn unstamped_parent_session_hit_not_redirected_10314() {
         "unstamped parent session hit must not redirect back onto fabric (RED pre-fix: queued {})",
         binding.scratch.scratch_forwards.len()
     );
+}
+
+/// #11061 R3: a PBR discard of a QUARANTINED-domain flow must advance the
+/// ambiguous-drop counter. Cross-RI `lan` (tenant-a on reth1.0, tenant-b on
+/// reth2.0) deletes zone 1's domain entry at build; a V1-valid LAN stamp
+/// (RG2 peer-active) then resolves to BASE|1 at stage 9b, and the matching
+/// PBR discard term drops it through the counted arm.
+#[test]
+fn pbr_discard_of_quarantined_flow_counts_ambiguous_drop_11061() {
+    let mut snapshot = routing_instance_fabric_snapshot_11061(false);
+    let (tenant_b_domain, _) = crate::session::install_table_identity("tenant-b");
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "lan".to_string(),
+        routing_instance: "tenant-b".to_string(),
+        routing_domain: tenant_b_domain,
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 14,
+        ..Default::default()
+    });
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: "pbr-discard-11061".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "t-discard".to_string(),
+            action: "discard".to_string(),
+            routing_instance: "tenant-a".to_string(),
+            count: "hits-11061".to_string(),
+            ..Default::default()
+        }],
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 21 {
+            iface.filter_input_v4 = "pbr-discard-11061".to_string();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.has_routing_domains);
+    assert!(
+        forwarding.ambiguous_fabric_zone_ids.contains(&TEST_LAN_ZONE_ID),
+        "cross-RI lan must be ambiguous"
+    );
+    assert!(
+        !forwarding.zone_routing_domain.contains_key(&TEST_LAN_ZONE_ID),
+        "the ambiguous zone entry must be deleted, not zeroed"
+    );
+    // V1b: lan is RG2-bound; RG2 peer-active (absent) keeps the stamp Valid.
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+    );
+    let term_hits = forwarding
+        .filter_state
+        .filters
+        .get("inet:pbr-discard-11061")
+        .map(|f| f.terms[0].counter.packets.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(9999);
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0, "the stamp is V1-valid");
+    assert_eq!(term_hits, 1, "the PBR discard term took the drop");
+    assert_eq!(
+        batch.ambiguous_fabric_zone_drops, 1,
+        "a PBR discard on a quarantined domain must count (RED on revert: the arm is uncounted)"
+    );
+    assert_eq!(sessions.len(), 0);
+    assert!(binding.scratch.scratch_forwards.is_empty());
+}
+
+/// #11061 R3 control: the SAME PBR discard on a domain-0 (non-quarantined)
+/// flow must drop WITHOUT counting. Discriminates the counter: it fires on
+/// quarantine, not on PBR-drop.
+#[test]
+fn pbr_discard_of_domain_zero_flow_does_not_count_ambiguous_drop_11061() {
+    let mut snapshot = routing_instance_fabric_snapshot_11061(false);
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: "pbr-discard-11061".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "t-discard".to_string(),
+            action: "discard".to_string(),
+            routing_instance: "tenant-a".to_string(),
+            count: "hits-11061".to_string(),
+            ..Default::default()
+        }],
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 21 {
+            iface.filter_input_v4 = "pbr-discard-11061".to_string();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert_eq!(
+        forwarding.zone_routing_domain.get(&TEST_WAN_ZONE_ID).copied(),
+        Some(0),
+        "precondition: unmapped wan resolves domain 0, not quarantine"
+    );
+    // V1b: wan is RG1-bound; RG1 peer-active (absent) keeps the stamp Valid.
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(2, active_rg(now_secs))]);
+    let frame = stamped_fabric_frame(TEST_WAN_ZONE_ID, TCP_FLAG_SYN);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+    );
+    let term_hits = forwarding
+        .filter_state
+        .filters
+        .get("inet:pbr-discard-11061")
+        .map(|f| f.terms[0].counter.packets.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(9999);
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0, "the stamp is V1-valid");
+    assert_eq!(term_hits, 1, "the PBR discard term took the drop");
+    assert_eq!(
+        batch.ambiguous_fabric_zone_drops, 0,
+        "a domain-0 PBR discard must not count as a quarantine drop"
+    );
+    assert_eq!(sessions.len(), 0);
+    assert!(binding.scratch.scratch_forwards.is_empty());
+}
+
+/// #11061 R3: the flowless ICMP-error PBR arm counts quarantine drops too.
+/// The l3 enforcement flow is never 9b-stamped (domain 0 by construction),
+/// so the arm resolves the effective domain through the ingress/zone
+/// fallback — a V1-valid ambiguous-zone stamp yields BASE|zone and the
+/// matching PBR discard counts. Time-Exceeded quoting a live SNAT session
+/// (the #5690 shape) over fabric ingress with an ambiguous LAN stamp.
+#[test]
+fn flowless_icmp_error_pbr_discard_on_quarantine_counts_11061() {
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_port: u16 = 40000;
+
+    let mut snapshot = routing_instance_fabric_snapshot_11061(false);
+    let (tenant_b_domain, _) = crate::session::install_table_identity("tenant-b");
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "lan".to_string(),
+        routing_instance: "tenant-b".to_string(),
+        routing_domain: tenant_b_domain,
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 14,
+        ..Default::default()
+    });
+    snapshot.flow.allow_embedded_icmp = true;
+    snapshot.filters.push(FirewallFilterSnapshot {
+        name: "pbr-discard-11061".to_string(),
+        family: "inet".to_string(),
+        terms: vec![FirewallTermSnapshot {
+            name: "t-discard".to_string(),
+            action: "discard".to_string(),
+            routing_instance: "tenant-a".to_string(),
+            count: "hits-11061".to_string(),
+            ..Default::default()
+        }],
+    });
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == 21 {
+            iface.filter_input_v4 = "pbr-discard-11061".to_string();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(forwarding.has_routing_domains);
+    assert!(
+        !forwarding.zone_routing_domain.contains_key(&TEST_LAN_ZONE_ID),
+        "precondition: cross-RI lan is quarantined"
+    );
+
+    // The quoted SNAT session, mirrored from the #5690 runner.
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol(
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(client_ip),
+            dst_ip: IpAddr::V4(server_ip),
+            src_port: 12345,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+                tx_vlan_id: 80,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(snat_ip)),
+                rewrite_src_port: Some(snat_port),
+                ..Default::default()
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata {
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+
+    // Fabric-stamped TE: dst = fabric MAC (V1a), src = LAN zone stamp (V1b:
+    // lan is RG2-bound; RG2 peer-active keeps it Valid).
+    let mut frame = build_icmp_te_frame_v4_with_mac(
+        router_ip, snat_ip, server_ip, snat_port, 80, PROTO_TCP,
+        [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+    );
+    let [hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 21,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        config_generation: 7,
+        fib_generation: 9,
+        flow_src_addr: {
+            let mut a = [0u8; 16];
+            a[..4].copy_from_slice(&router_ip.octets());
+            a
+        },
+        flow_dst_addr: {
+            let mut a = [0u8; 16];
+            a[..4].copy_from_slice(&snat_ip.octets());
+            a
+        },
+        ..UserspaceDpMeta::default()
+    };
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let mut binding = fabric_binding();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+    );
+    let term_hits = forwarding
+        .filter_state
+        .filters
+        .get("inet:pbr-discard-11061")
+        .map(|f| f.terms[0].counter.packets.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(9999);
+    assert_eq!(dbg.rx, 1);
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0, "the stamp is V1-valid");
+    assert_eq!(term_hits, 1, "the PBR discard term took the drop");
+    assert_eq!(
+        batch.ambiguous_fabric_zone_drops, 1,
+        "a flowless PBR discard on a quarantined zone must count (RED on revert: the arm reads the unstamped l3 domain)"
+    );
+    assert!(binding.scratch.scratch_forwards.is_empty());
 }

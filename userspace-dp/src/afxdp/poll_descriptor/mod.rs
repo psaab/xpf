@@ -3110,6 +3110,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         );
                         let (route_table_override, pbr_install_table) = match route_override {
                             RouteOverride::Drop => {
+                                // #11061: count ambiguous-quarantine drops (Unresolvable-sourced
+                                // PBR Drop on a quarantined domain). Effective
+                                // domain, not the raw flow stamp: the resolver
+                                // that produced this Drop consulted the same
+                                // fallback.
+                                if crate::afxdp::forwarding::effective_routing_domain_for_flow(
+                                    worker_ctx.forwarding,
+                                    flow.forward_key.routing_domain,
+                                    meta.ingress_ifindex as i32,
+                                    meta.ingress_vlan_id,
+                                    ingress_zone_override,
+                                ) >= crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE
+                                {
+                                    telemetry.counters.record_ambiguous_fabric_zone_drop();
+                                }
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
@@ -5657,6 +5672,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             None,
                         ) {
                             RouteOverride::Drop => {
+                                // #11061: count ambiguous-quarantine drops.
+                                // The flowless l3_flow is never 9b-stamped
+                                // (domain 0): resolve the effective domain
+                                // through the ingress/zone fallback, exactly
+                                // as the resolver that produced this Drop did.
+                                if crate::afxdp::forwarding::effective_routing_domain_for_flow(
+                                    worker_ctx.forwarding,
+                                    l3_flow.forward_key.routing_domain,
+                                    meta.ingress_ifindex as i32,
+                                    meta.ingress_vlan_id,
+                                    ingress_zone_override,
+                                ) >= crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE
+                                {
+                                    telemetry.counters.record_ambiguous_fabric_zone_drop();
+                                }
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
@@ -5802,6 +5832,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // identical to the flowless non-PBR input-filter deny above.
                     // On `RouteOverride::Drop` recycle the frame and skip the
                     // override/route-lookup/forward.
+                    // #11061: domain for the ambiguous-drop counter below.
+                    let l3_drop_domain = l3_ctx
+                        .as_ref()
+                        .map(|l3_flow| l3_flow.forward_key.routing_domain)
+                        .unwrap_or(0);
                     let (route_table_override, pbr_install_table) = match l3_ctx
                         .as_ref()
                         .map(|l3_flow| {
@@ -5819,6 +5854,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         .unwrap_or(RouteOverride::None)
                     {
                         RouteOverride::Drop => {
+                            // #11061: count ambiguous-quarantine drops (same
+                            // effective-domain rule as the sibling arms).
+                            if crate::afxdp::forwarding::effective_routing_domain_for_flow(
+                                worker_ctx.forwarding,
+                                l3_drop_domain,
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                                ingress_zone_override,
+                            ) >= crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE
+                            {
+                                telemetry.counters.record_ambiguous_fabric_zone_drop();
+                            }
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }

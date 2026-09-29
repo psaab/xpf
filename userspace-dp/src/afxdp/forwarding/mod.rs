@@ -399,6 +399,33 @@ pub(in crate::afxdp) enum NativeRouteTable {
     },
 }
 
+/// #11061 R3: the effective routing domain for one flow, shared by the
+/// native-table resolver and the ambiguous-drop counter arms. A 9b-stamped
+/// nonzero flow domain wins; otherwise (flowless/L3-only contexts carry
+/// domain 0 by construction) fall back to the ingress/zone resolution, which
+/// yields the synthetic quarantine domain for an ambiguous fabric zone.
+/// The counter arms MUST use this helper — reading the raw flow domain
+/// undercounts flowless quarantine drops (their flow is never 9b-stamped).
+#[inline]
+pub(in crate::afxdp) fn effective_routing_domain_for_flow(
+    forwarding: &ForwardingState,
+    flow_domain: u32,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    fabric_ingress_zone: Option<u16>,
+) -> u32 {
+    if flow_domain != 0 {
+        flow_domain
+    } else {
+        ingress_routing_domain(
+            forwarding,
+            ingress_ifindex,
+            ingress_vlan_id,
+            fabric_ingress_zone,
+        )
+    }
+}
+
 /// #10312: resolve a native routing-instance member's destination table.
 ///
 /// PBR remains an explicit override, but an interface's own routing-instance
@@ -416,16 +443,13 @@ pub(in crate::afxdp) fn native_route_table_for_flow_target(
     fabric_ingress_zone: Option<u16>,
     target: IpAddr,
 ) -> NativeRouteTable {
-    let domain = if flow_domain != 0 {
-        flow_domain
-    } else {
-        ingress_routing_domain(
-            forwarding,
-            ingress_ifindex,
-            ingress_vlan_id,
-            fabric_ingress_zone,
-        )
-    };
+    let domain = effective_routing_domain_for_flow(
+        forwarding,
+        flow_domain,
+        ingress_ifindex,
+        ingress_vlan_id,
+        fabric_ingress_zone,
+    );
     if domain == 0 {
         return NativeRouteTable::Default;
     }

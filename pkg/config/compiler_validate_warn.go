@@ -694,6 +694,16 @@ func ValidateConfig(cfg *Config) []string {
 		}
 	}
 
+	// #11061 R3: the rolling-upgrade compatibility knob is a BOUNDED window,
+	// not a steady state. While set, absent-stamp fabric arrivals on an RI
+	// node fall back to legacy MAIN handling — no tenant identity, no
+	// quarantine. Warn at every commit so the knob cannot silently persist
+	// past the upgrade window (all peers emitting zone-encoded stamps).
+	if cfg.Security.Flow.AllowUnstampedFabricIngress {
+		warnings = append(warnings,
+			"security flow allow-unstamped-fabric-ingress configured — rolling-upgrade window only: unstamped fabric arrivals bypass routing-instance tenant isolation via legacy MAIN handling; remove once all peers emit zone-encoded stamps (#11061)")
+	}
+
 	// #4233/#4234: `security policies policy-rematch [extensive]` is typed and
 	// recorded (compiler_security_policy.go). The Junos-DEFAULT deletion-clear
 	// ships (#4234): a session admitted by a policy that a commit DELETES is
