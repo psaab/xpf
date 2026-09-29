@@ -322,6 +322,16 @@ forward-direction collision.
   shares the default session space, outside the stable band so it never
   collides with a tenant (the #3855 door means the stable id itself would),
   and HA-refused on import (wire 2 decodes Unrecognized, fail-closed).
+
+- **Ambiguous fabric zones fail closed (#11061).** The builder intentionally
+  omits a zone-to-domain row when its member interfaces span routing
+  instances. An encoded fabric ingress for that zone gets a per-zone
+  synthetic nonzero session domain outside the stable routing-instance ID
+  band, so it cannot alias MAIN's domain 0 or another ambiguous zone. Native
+  table resolution has no owner row for that synthetic domain and drops the
+  packet rather than using the main-table default; the builder also warns
+  about the cross-instance zone at commit.
+
 - **Why the ingress interface and nothing else.** The reverse key is built
   by swapping the forward key's fields and never observes the reply, so the
   domain must be a quantity a packet resolves from its own arrival. A PBR

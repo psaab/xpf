@@ -1,4 +1,9 @@
 use super::*;
+/// Synthetic per-zone domain IDs for fabric zones whose member interfaces
+/// span routing instances. Native instance IDs are confined to
+/// `100_000..1_000_000`, so this reserved high band cannot alias an install
+/// table; the zone ID in the low bits keeps ambiguous zones session-isolated.
+const AMBIGUOUS_FABRIC_DOMAIN_BASE: u32 = 0xffff_0000;
 
 mod host_inbound;
 mod fib;
@@ -344,6 +349,11 @@ pub(in crate::afxdp) fn unknown_ingress_vlan(
 /// resolved from that zone instead (`zone_routing_domain`), which is the same
 /// identity the rest of the fabric-ingress path already adjudicates on. An
 /// unencoded fabric frame has nothing to resolve and stays domain 0.
+///
+/// A missing entry is a cross-instance ambiguity, not the default instance:
+/// return a reserved, per-zone nonzero session domain. Native table resolution
+/// has no owner row for it and therefore fails closed instead of using MAIN
+/// (#11061); distinct ambiguous zones also cannot alias MAIN or each other.
 #[inline]
 pub(in crate::afxdp) fn ingress_routing_domain(
     forwarding: &ForwardingState,
@@ -362,7 +372,7 @@ pub(in crate::afxdp) fn ingress_routing_domain(
             .zone_routing_domain
             .get(&zone)
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(AMBIGUOUS_FABRIC_DOMAIN_BASE | u32::from(zone));
     }
     let logical = resolve_ingress_logical_ifindex(forwarding, ingress_ifindex, ingress_vlan_id)
         .unwrap_or(ingress_ifindex);
@@ -373,11 +383,12 @@ pub(in crate::afxdp) fn ingress_routing_domain(
         .unwrap_or(0)
 }
 
-/// #10312: native routing-instance table resolution has three outcomes.
+/// #10312/#11061: native routing-table resolution has three outcomes.
 ///
 /// `Default` is the real unscoped/main instance; `Table` is a validated
 /// per-family registry row; `Unresolvable` means a nonzero flow domain has no
-/// current owner or family table. Callers MUST NOT turn the last state into
+/// current owner or family table. This includes the synthetic nonzero domain
+/// for an ambiguous fabric zone. Callers MUST NOT turn the last state into
 /// MAIN, because that recreates the RI-to-WAN leak.
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::afxdp) enum NativeRouteTable {

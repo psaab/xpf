@@ -200,8 +200,10 @@ pub(in crate::afxdp) struct ForwardingState {
     ///
     /// A zone whose interfaces span two routing instances is ABSENT rather than
     /// arbitrarily assigned — the same "identifies exactly one, or nothing"
-    /// discipline as #6722's `ifindex_unambiguous_zone_id`. Absent reads as
-    /// domain 0, which is the pre-#7160 answer.
+    /// discipline as #6722's `ifindex_unambiguous_zone_id`. `ingress_routing_domain`
+    /// maps this missing fabric identity to a per-zone nonzero sentinel outside
+    /// the install-table ID band, so it cannot alias the default-domain session
+    /// key; native route resolution then fails closed (#11061).
     pub(in crate::afxdp) zone_routing_domain: FastMap<u16, u32>,
     /// #7160: true iff ANY interface resolves to a non-zero routing domain,
     /// i.e. iff at least one interface is a member of a named routing

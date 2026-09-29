@@ -1312,12 +1312,11 @@ pub(super) fn populate_interfaces(
     // per-ifindex maps it is a join of, so it cannot disagree with either.
     //
     // A zone is only recorded when EVERY member interface with a zone agrees on
-    // one domain; a zone spanning two routing instances is left ABSENT and
-    // reads as domain 0, the pre-#7160 answer. That is the #6722
-    // `ifindex_unambiguous_zone_id` discipline: identify exactly one, or
-    // nothing. Assigning the first-seen domain to a straddling zone would hand
-    // a fabric-redirected packet a confidently wrong domain, which is strictly
-    // worse than the undifferentiated one.
+    // one domain; a zone spanning routing instances is left ABSENT. Its absence
+    // must not mean MAIN: `ingress_routing_domain` gives an encoded ambiguous
+    // zone a per-zone nonzero sentinel, for which native table resolution has no
+    // owner row and drops instead of falling through to the main-table default
+    // (#11061). Assigning the first-seen domain would be confidently wrong.
     if state.has_routing_domains {
         let mut ambiguous: FastSet<u16> = FastSet::default();
         for (ifindex, zone_id) in state.ifindex_to_zone_id.iter() {
@@ -1341,6 +1340,18 @@ pub(super) fn populate_interfaces(
         }
         for zone_id in ambiguous {
             state.zone_routing_domain.remove(&zone_id);
+            let zone_name = state
+                .zone_id_to_name
+                .get(&zone_id)
+                .map(String::as_str)
+                .unwrap_or("<unknown>");
+            eprintln!(
+                "xpf-userspace-dp: WARNING zone {zone_name} (id {zone_id}) has \
+                 member interfaces in multiple routing instances; fabric-ingress \
+                 packets with that zone have no native route domain and will \
+                 fail closed (#11061). Keep a zone within one instance or use \
+                 explicit PBR where the intended cross-instance route is known."
+            );
         }
     }
 
@@ -1699,14 +1710,12 @@ mod routing_domain_7160_tests {
     }
 
     /// A zone whose member interfaces all agree gets a domain; a zone that
-    /// STRADDLES two routing instances is left ABSENT and reads as 0.
+    /// STRADDLES two routing instances is left ABSENT. An encoded fabric ingress
+    /// for an absent zone gets a per-zone sentinel, not domain 0 / MAIN.
     ///
-    /// This map is read only on the fabric-ingress path, where the arriving
-    /// interface is the fabric link and the peer's zone encoding is the only
-    /// ingress identity available. Assigning a straddling zone the first-seen
-    /// domain would hand a fabric-redirected packet a CONFIDENTLY WRONG domain,
-    /// which is strictly worse than the undifferentiated one — the #6722
-    /// `ifindex_unambiguous_zone_id` discipline.
+    /// Assigning a straddling zone the first-seen domain would hand a
+    /// fabric-redirected packet a CONFIDENTLY WRONG domain — worse than dropping
+    /// because the correct member domain is unknowable at fabric ingress.
     ///
     /// FAIL-ON-REVERT: drop the ambiguity sweep and the straddling zone starts
     /// resolving whichever member the iteration happened to see first.
@@ -1734,13 +1743,19 @@ mod routing_domain_7160_tests {
         assert_eq!(
             state.zone_routing_domain.get(&2).copied(),
             None,
-            "a zone straddling two routing instances must resolve NOTHING; a \
-             first-seen answer is a confidently wrong domain for every \
-             fabric-redirected packet stamped with that zone"
+            "a zone straddling two routing instances must have no selected domain"
         );
-        // And that is what the fabric-ingress read produces.
-        assert_eq!(ingress_routing_domain(&state, 10, 0, Some(1)), DOMAIN_A);
-        assert_eq!(ingress_routing_domain(&state, 10, 0, Some(2)), 0);
+        let ambiguous_domain = ingress_routing_domain(&state, 10, 0, Some(2));
+        assert_ne!(
+            ambiguous_domain, 0,
+            "an ambiguous encoded zone must not alias the default session domain"
+        );
+        assert_ne!(ambiguous_domain, DOMAIN_A);
+        assert_ne!(ambiguous_domain, DOMAIN_B);
+        assert!(
+            !state.install_tables.contains_key(&ambiguous_domain),
+            "the synthetic zone domain must have no route-table owner"
+        );
     }
 
     /// A fabric-ingress frame must NOT take the arriving interface's domain.

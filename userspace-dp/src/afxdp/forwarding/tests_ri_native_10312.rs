@@ -417,3 +417,94 @@ fn unresolvable_native_domain_does_not_fall_back_to_main_10312() {
         "a nonzero domain with no v4 owner must terminate, not resolve in MAIN/WAN"
     );
 }
+
+/// An encoded fabric zone whose members span routing instances is not a MAIN
+/// table identity. The main table has a default route here, and the destination
+/// is tenant-a-only; falling back to MAIN would therefore select the WAN.
+/// RED-on-revert: making a missing zone-domain lookup resolve to 0 yields
+/// `RouteOverride::None` instead of this cell's terminal Drop.
+#[test]
+fn ambiguous_fabric_zone_does_not_fall_back_to_main_11061() {
+    const FABRIC_IFINDEX: i32 = 21;
+    let mut snapshot = base_snapshot();
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "ge-0/0/2.0".to_string(),
+        zone: "za".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: 102,
+        hardware_addr: "02:00:00:00:00:a2".to_string(),
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        state.has_routing_domains,
+        "FIXTURE: routing domains must be enabled"
+    );
+    assert!(
+        !state.zone_routing_domain.contains_key(&TEST_TRUST_ZONE_ID),
+        "FIXTURE: zone za must span tenant-a and the default instance"
+    );
+
+    assert_eq!(
+        state.zone_routing_domain.get(&TEST_LAN_ZONE_ID).copied(),
+        Some(0),
+        "FIXTURE: an unambiguous default-instance zone must retain domain 0"
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::ingress_routing_domain(
+            &state,
+            FABRIC_IFINDEX,
+            0,
+            Some(TEST_LAN_ZONE_ID),
+        ),
+        0,
+        "an unambiguous default zone must still resolve to MAIN"
+    );
+
+    let domain = crate::afxdp::forwarding::ingress_routing_domain(
+        &state,
+        FABRIC_IFINDEX,
+        0,
+        Some(TEST_TRUST_ZONE_ID),
+    );
+    let flow = v4_flow(
+        Ipv4Addr::new(10, 0, 0, 42),
+        Ipv4Addr::new(10, 0, 0, 99),
+        domain,
+    );
+    let main = lookup_forwarding_resolution_in_table_with_dynamic(
+        &state,
+        &Arc::new(ShardedNeighborMap::new()),
+        flow.dst_ip,
+        None,
+    );
+    assert_eq!(
+        main.egress_ifindex, WAN_IFINDEX,
+        "FIXTURE: an accidental MAIN lookup must select the configured WAN default"
+    );
+    assert!(
+        matches!(
+            ingress_route_table_override(
+                &state,
+                &[],
+                v4_meta(FABRIC_IFINDEX),
+                &flow,
+                Some(TEST_TRUST_ZONE_ID),
+                None,
+                0,
+                None,
+            ),
+            RouteOverride::Drop
+        ),
+        "an ambiguous fabric zone must not allow an RI-only destination to \
+         use the MAIN default route"
+    );
+    assert_ne!(
+        domain, 0,
+        "an ambiguous zone must not alias the MAIN session domain"
+    );
+    assert!(
+        !state.install_tables.contains_key(&domain),
+        "FIXTURE: unresolved fabric domain must not select an install table"
+    );
+}
