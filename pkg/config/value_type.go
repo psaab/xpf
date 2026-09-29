@@ -123,6 +123,13 @@ const (
 	// tokens reached the neighbour list past a validator that had been wired
 	// on but not typed.
 	ValueInterfaceName
+	// ValueAbsPath is an absolute filesystem path naming a managed file
+	// (`system dataplane state-file`). Validated by ValidateStateFilePath:
+	// absolute, no `.`/`..`/empty component, within PATH_MAX, and outside
+	// the reserved reset-gate/identity set. The path is unlinked by the
+	// factory-reset helper sweep, so an aliasing or traversal spelling is
+	// rejected at commit rather than resolved at reset time (#10769).
+	ValueAbsPath
 	// ValueString is an opaque single-token string whose accepted form is
 	// defined by the leaf's validator. It marks validator-backed values that
 	// are not identifiers, numbers, or another specialized type.
@@ -177,6 +184,8 @@ func (v ValueType) Placeholder() string {
 		return "<st-interface>"
 	case ValueUnixSocketPath:
 		return "<socket-path>"
+	case ValueAbsPath:
+		return "<path>"
 	case ValueString:
 		return "<value>"
 	}

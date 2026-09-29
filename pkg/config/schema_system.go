@@ -382,7 +382,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			validator:     ValidateUnixSocketPath,
 			children:      nil,
 		},
-		"state-file": {args: 1, desc: "Helper state file path", children: nil},
+		"state-file": {args: 1, desc: "Helper state file path", valueType: ValueAbsPath, valueDesc: "Absolute helper state-file path", valueExamples: []string{"/var/lib/xpf/userspace-dp.json"}, validator: ValidateStateFilePath, placeholder: "<path>", children: nil},
 		// #1319 PR 3 typed dataplane knobs. Each compiled with the
 		// Atoi error swallowed (compileUserspaceDataplane), so
 		// garbage silently fell back to the 0 zero-value, which the

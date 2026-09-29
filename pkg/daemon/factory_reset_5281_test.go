@@ -7,6 +7,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,10 +17,55 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
+func isolateFactoryResetOwnershipPaths(t *testing.T) {
+	t.Helper()
+	oldLease, oldSurfaceA, oldIPsec := resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath
+	root := t.TempDir()
+	resetDDNSLeaseStatePath = filepath.Join(root, "dhcp-ddns-state.json")
+	resetDDNSSurfaceAPath = filepath.Join(root, "interface-ddns-state.json")
+	resetIPsecStatePath = filepath.Join(root, "ipsec-conn-state.json")
+	t.Cleanup(func() {
+		resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath = oldLease, oldSurfaceA, oldIPsec
+	})
+}
+
+// isolateFactoryResetIdentityPaths redirects the identity snapshot/restore
+// files and the post-wipe lease verification into a disposable tree, and
+// stubs the kernel-hostname seams. Every factoryReset test must call it:
+// without isolation a failed-wipe test would restore into the REAL
+// /etc/hostname, /etc/hosts, /etc/resolv.conf and
+// /etc/ssh/ssh_known_hosts, rename the REAL kernel hostname, and verify
+// the REAL Kea lease paths.
+func isolateFactoryResetIdentityPaths(t *testing.T) {
+	t.Helper()
+	oldHostname, oldHosts, oldResolv, oldKnown := hostnamePath, resetHostsPath, resetResolvConfPath, resetKnownHostsPath
+	oldKea := resetKeaLeaseCurrents
+	oldOsHostname, oldSethostname := osHostname, sethostname
+	root := t.TempDir()
+	hostnamePath = filepath.Join(root, "etc", "hostname")
+	resetHostsPath = filepath.Join(root, "etc", "hosts")
+	resetResolvConfPath = filepath.Join(root, "etc", "resolv.conf")
+	resetKnownHostsPath = filepath.Join(root, "etc", "ssh", "ssh_known_hosts")
+	resetKeaLeaseCurrents = []string{
+		filepath.Join(root, "var", "lib", "kea", "kea-leases4.csv"),
+		filepath.Join(root, "var", "lib", "kea", "kea-leases6.csv"),
+	}
+	osHostname = func() (string, error) { return "test-kernel", nil }
+	sethostname = func([]byte) error { return nil }
+	t.Cleanup(func() {
+		hostnamePath, resetHostsPath, resetResolvConfPath, resetKnownHostsPath = oldHostname, oldHosts, oldResolv, oldKnown
+		resetKeaLeaseCurrents = oldKea
+		osHostname, sethostname = oldOsHostname, oldSethostname
+	})
+}
+
 // factoryReset must Acquire applySem BEFORE wiping, enter the terminal reset
 // generation on success, release the gate afterward, and thereafter REJECT new
 // config work (commit / HA-sync).
 func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 
 	// (1) Gate-first: hold applySem externally with a tight deadline. factoryReset
@@ -47,7 +93,7 @@ func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
 	// reset generation, and the gate is RELEASED (so shutdown-time work can still
 	// acquire it).
 	wiped = false
-	if err := d.factoryReset(context.Background(), func() error { wiped = true; return nil }); err != nil {
+	if err := d.factoryReset(context.Background(), func() error { wiped = true; return fakePendingWipe(t)() }); err != nil {
 		t.Fatalf("factoryReset success: %v", err)
 	}
 	if !wiped {
@@ -88,6 +134,9 @@ func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
 // resumes (the SystemAction handler then reports the reset incomplete and does
 // NOT stop the daemon).
 func TestFactoryResetFailClosedClearsResetGeneration(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 
 	wantErr := errors.New("wipe boom")

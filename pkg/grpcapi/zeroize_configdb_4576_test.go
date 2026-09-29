@@ -144,7 +144,7 @@ func TestIsTextRollbackFile(t *testing.T) {
 func TestZeroizeSurfacesWipeError(t *testing.T) {
 	orig := performZeroizeWipeWithLogInventory
 	t.Cleanup(func() { performZeroizeWipeWithLogInventory = orig })
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		return errors.New("simulated .configdb wipe failure")
 	}
 

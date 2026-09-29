@@ -15,6 +15,15 @@ import (
 // initial active configuration. This is called on first start when the DB
 // has no active config yet.
 func (d *Daemon) bootstrapFromFile() error {
+	// #10769 d05-F6 R1: refuse day-0 bootstrap promotion while the reset
+	// handoff flag demands a reboot or reports residue — the same gate
+	// the ordinary commit paths enforce. Without this, a new medium
+	// promotes N+1 over a dirty post-reset box (the factory-reset
+	// pending marker is gone on a completed wipe; only this flag
+	// remains). Checked before any read or promotion.
+	if err := configstore.CheckResetHandoff(); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(d.opts.ConfigFile)
 	if err != nil {
 		return fmt.Errorf("read config file: %w", err)
@@ -213,6 +222,15 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	// SSOT on disk and re-render secrets on apply.
 	if d.isResetting() {
 		return nil, errDaemonResetting
+	}
+
+	// #10769 d05-F6: refuse N+1 provisioning while the reset handoff flag
+	// demands a reboot (volatile tenant state clears on reboot) or reports
+	// residue (only another factory reset clears it). Checked under
+	// applySem, before any persistence — same placement as the reset
+	// generation above.
+	if err := configstore.CheckResetHandoff(); err != nil {
+		return nil, err
 	}
 
 	// #5848 generation-bound commit transaction. The #1956 R-8 device-map
@@ -559,6 +577,13 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		return nil, errDaemonResetting
 	}
 
+	// #10769 d05-F6: refuse N+1 provisioning while the reset handoff flag
+	// demands a reboot or reports residue (same placement as the reset
+	// generation above).
+	if err := configstore.CheckResetHandoff(); err != nil {
+		return nil, err
+	}
+
 	// Pre-sync active config for the #4234 deletion-clear (see commitAndApply).
 	// A peer-pushed config that deletes a policy must drop that policy's synced
 	// sessions on THIS node too; the standby is not primary, so its own clear
@@ -830,6 +855,13 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	// and arms a rollback timer that would re-apply after the wipe).
 	if d.isResetting() {
 		return nil, errDaemonResetting
+	}
+
+	// #10769 d05-F6: refuse N+1 provisioning while the reset handoff flag
+	// demands a reboot or reports residue (same placement as the reset
+	// generation above).
+	if err := configstore.CheckResetHandoff(); err != nil {
+		return nil, err
 	}
 
 	// #5848 generation-bound commit transaction (commit-confirmed variant).

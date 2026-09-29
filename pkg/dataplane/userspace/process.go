@@ -53,6 +53,12 @@ func helperReinjectSocketPaths(cfg config.UserspaceConfig) (string, string) {
 // is inconclusive here and is left to the post-stop path rather than turned into
 // a new bring-up failure on a code path that used to have none.
 func preflightHelperPaths(cfg config.UserspaceConfig) error {
+	// Deterministic fault first: a reserved state-file would have the
+	// helper overwrite a gate or identity file on save. Refusing here
+	// spares the running generation (see stopForNewGenerationLocked).
+	if err := refuseReservedHelperStateFile(cfg.StateFile); err != nil {
+		return err
+	}
 	evtPath := helperEventSocketPath(cfg)
 	reinjectSubmit, reinjectComplete := helperReinjectSocketPaths(cfg)
 	for _, pair := range []struct{ aName, a, bName, b string }{
@@ -98,6 +104,27 @@ func preflightHelperPaths(cfg config.UserspaceConfig) error {
 		}
 	}
 	return nil
+}
+
+// refuseReservedHelperStateFile rejects a helper state-file that aliases
+// reserved reset-gate/identity state (#10769 d05-F6): the helper saves its
+// snapshot to this path unconditionally (including on loop exit), so a
+// tolerant-smuggled reserved value would overwrite a gate or identity
+// file during NORMAL operation, before any wipe runs. Enforced at spawn
+// (preflight, so a restart spares the running generation, plus the top
+// of the spawn funnel for first bring-up) rather than at config
+// resolution: the reset sweeps must still resolve the smuggled path to
+// sweep the temps beside it. Empty means "default beside the control
+// socket", which is never reserved. Accepted residual (config-only
+// model): an intermediate-symlink swap between this check and the
+// Rust helper's pathname-based saves defeats it; that needs filesystem
+// write, same class as bind-mount/#9013.
+func refuseReservedHelperStateFile(stateFile string) error {
+	if stateFile == "" || !config.HelperStatePathTouchesReserved(stateFile) {
+		return nil
+	}
+	return fmt.Errorf("userspace dataplane state-file %s aliases reserved reset-gate/identity state; "+
+		"the helper would overwrite it on save: fix system dataplane state-file to a non-reserved path", stateFile)
 }
 
 // stopForNewGenerationLocked preflights the incoming path set and tears the
@@ -302,6 +329,13 @@ func (m *Manager) bootstrapNAPIQueuesAsyncForGenerationLocked(
 }
 
 func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) error {
+	// First bring-up skips the restart preflight below, so refuse a
+	// reserved state-file here too, before the runtime-dir MkdirAll and
+	// the spawn: the helper must never start with a path whose save
+	// would overwrite a gate or identity file.
+	if err := refuseReservedHelperStateFile(cfg.StateFile); err != nil {
+		return err
+	}
 	tuneSocketBuffers()
 	if m.proc != nil && m.proc.Process != nil && configEqual(m.cfg, cfg) {
 		var status ProcessStatus

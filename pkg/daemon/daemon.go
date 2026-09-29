@@ -362,6 +362,10 @@ type Daemon struct {
 	// loop) so a hung DNS server can never wedge the loop or starve the
 	// nudge channel.
 	ddnsReconcileInFlight atomic.Bool
+	// ddnsResetMu serializes launch of DDNS reconcile passes and asynchronous
+	// DHCP applies with factory-reset quiescing. Once resetting is set and this
+	// mutex has been crossed, no new writer can race withdrawal or file erasure.
+	ddnsResetMu sync.Mutex
 	// surfaceA groups the always-on Surface A (router/interface-address) DDNS
 	// manager plus its reconcile-supervision + per-warning-dedup state. This is
 	// increment 5 of the #4407 Daemon god-struct decomposition — pure field

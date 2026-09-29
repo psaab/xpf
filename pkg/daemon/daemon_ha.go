@@ -1773,6 +1773,13 @@ func (d *Daemon) reconcileBlackholeRoutes() {
 // transition — these services must only run on the primary to avoid
 // dual-router / dual-DHCP issues.
 func (d *Daemon) applyRethServicesForRG(rgID int) {
+	// The VRRP event loop holds no applySem, so a takeover racing factory
+	// reset would otherwise pre-seed prior leases and enqueue Kea applies
+	// against a half-wiped box. The enqueue is fenced itself; this guard
+	// covers the direct memfile pre-seed and the peer-seed goroutine.
+	if d.isResetting() {
+		return
+	}
 	if d.store == nil {
 		return
 	}

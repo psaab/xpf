@@ -488,6 +488,11 @@ func (d *Daemon) reconcileDNSFromDHCP() {
 		return
 	}
 	defer d.applySem.Release(1)
+	// The wipe clears /etc/resolv.conf; a lease change racing the
+	// wipe-then-stop window must not re-render prior nameservers after it.
+	if d.isResetting() {
+		return
+	}
 	cfg := d.store.ActiveConfig()
 	// #6792: no commit to fail here — this is a lease-change callback, not an
 	// operator action — so the failure is logged rather than returned. It is

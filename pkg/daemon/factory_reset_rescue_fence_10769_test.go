@@ -18,7 +18,10 @@ import (
 // applySem-bypassing rescue save during the wipe and leaves the fence latched
 // through the post-wipe stop grace. A failed wipe must instead resume saves.
 func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
+	isolateHandoffFlag(t)
 	t.Run("successful wipe remains fenced", func(t *testing.T) {
+		isolateFactoryResetOwnershipPaths(t)
+		isolateFactoryResetIdentityPaths(t)
 		dir := t.TempDir()
 		store, err := configstore.New(filepath.Join(dir, "xpf.conf"))
 		if err != nil {
@@ -34,11 +37,15 @@ func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
 		releaseWipe := func() { wipeReleaseOnce.Do(func() { close(finishWipe) }) }
 		defer releaseWipe()
 		resetDone := make(chan error, 1)
+		pending := fakePendingWipe(t)
 		go func() {
 			resetDone <- d.factoryReset(context.Background(), func() error {
 				close(wipeStarted)
 				<-finishWipe
-				return os.Remove(filepath.Join(dir, configstore.RescueConfigBase))
+				if err := os.Remove(filepath.Join(dir, configstore.RescueConfigBase)); err != nil {
+					return err
+				}
+				return pending()
 			})
 		}()
 		select {
@@ -70,6 +77,8 @@ func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
 	})
 
 	t.Run("failed wipe resumes saves", func(t *testing.T) {
+		isolateFactoryResetOwnershipPaths(t)
+		isolateFactoryResetIdentityPaths(t)
 		store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
 		if err != nil {
 			t.Fatalf("configstore.New: %v", err)

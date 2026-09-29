@@ -38,7 +38,7 @@ func TestZeroizeTargetsConfiguredRootNotHardcoded(t *testing.T) {
 
 	var gotDir, gotBase string
 	var called bool
-	performZeroizeWipeWithLogInventory = func(configDir, configBase, _ string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(configDir, configBase, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		called = true
 		gotDir, gotBase = configDir, configBase
 		return nil
@@ -86,7 +86,7 @@ func TestZeroizeFailsClosedWithoutConfigRoot(t *testing.T) {
 	})
 
 	var wiped, stopped bool
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		wiped = true
 		return nil
 	}

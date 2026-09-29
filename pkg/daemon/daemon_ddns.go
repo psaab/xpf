@@ -94,7 +94,9 @@ func (d *Daemon) runDDNSReconcileTick(ctx context.Context) {
 // overlapped, so a wedged DNS server leaks at most one goroutine and the
 // loop keeps servicing ctx + the nudge channel.
 func (d *Daemon) runGuardedDDNSReconcile(ctx context.Context) {
-	if d.ddns == nil {
+	d.ddnsResetMu.Lock()
+	defer d.ddnsResetMu.Unlock()
+	if d.ddns == nil || d.isResetting() {
 		return
 	}
 	if !d.ddnsReconcileInFlight.CompareAndSwap(false, true) {

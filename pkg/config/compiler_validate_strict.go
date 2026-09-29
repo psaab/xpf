@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -475,4 +476,37 @@ func validateVRRPVirtualAddressSubnet(cfg *Config, lenient bool) ([]string, erro
 		}
 	}
 	return warnings, nil
+}
+
+// validateHelperStateFileStrict rejects helper state-file values the
+// factory-reset sweep must never unlink (#10769 d05-F6): reserved
+// reset-gate/identity paths (belt-and-braces behind the leaf validator,
+// which tolerant load paths downgrade past), and equality with the
+// configured control socket (the sweep would unlink the live socket).
+// Strict on commit / commit-check; the call site downgrades to a warning
+// on the tolerant load / peer-sync path so an already-persisted config
+// still boots (#1960 no-brick) — the runtime sweep guard refuses
+// reserved targets regardless. SCOPE (accepted residuals): the event
+// socket is not covered (a post-stop unlink of the event socket is
+// harmless: no listener survives the helper stop), and the equality is
+// Clean-lexical, so a symlinked-parent alias (Clean-different, same
+// file) needs filesystem write, not config-only, to plant.
+func validateHelperStateFileStrict(cfg *Config) error {
+	if cfg == nil || cfg.System.UserspaceDataplane == nil {
+		return nil
+	}
+	stateFile := cfg.System.UserspaceDataplane.StateFile
+	if stateFile == "" {
+		return nil
+	}
+	if IsReservedHelperStatePath(stateFile) {
+		return fmt.Errorf("system dataplane state-file %q aliases reserved reset-gate or system-identity state; "+
+			"the factory-reset helper sweep unlinks this path and must never delete gates or identity files", stateFile)
+	}
+	if socket := cfg.System.UserspaceDataplane.ControlSocket; socket != "" &&
+		filepath.Clean(stateFile) == filepath.Clean(socket) {
+		return fmt.Errorf("system dataplane state-file %q must not equal the control-socket path: "+
+			"the factory-reset helper sweep would unlink the live control socket", stateFile)
+	}
+	return nil
 }

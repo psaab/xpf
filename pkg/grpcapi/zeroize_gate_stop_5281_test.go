@@ -3,10 +3,13 @@ package grpcapi
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/configstore"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -36,7 +39,7 @@ func TestZeroizeGoesThroughGateAndStopsDaemon(t *testing.T) {
 	// sequence is gate → wipe → stop (never stop-before-wipe, never a bypassed
 	// gate).
 	var seq []string
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		seq = append(seq, "wipe")
 		return nil
 	}
@@ -94,7 +97,7 @@ func TestZeroizeFailClosedDoesNotStopDaemon(t *testing.T) {
 	})
 
 	wantErr := errors.New("configdb not fully erased")
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		return wantErr
 	}
 	var stopped bool
@@ -136,7 +139,7 @@ func TestZeroizeFallsBackToDirectWipeWithoutGate(t *testing.T) {
 	})
 
 	var wiped, stopped bool
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, _ zeroizeCompletion) error {
 		wiped = true
 		return nil
 	}
@@ -154,5 +157,147 @@ func TestZeroizeFallsBackToDirectWipeWithoutGate(t *testing.T) {
 	}
 	if !stopped {
 		t.Fatal("zeroize fallback must still stop the daemon")
+	}
+}
+
+// RED on revert: a gated wipe that records clean instead of pending lets a
+// crash before daemon post-verification open N+1 provisioning over
+// unverified residue. The gated path must record PENDING (with the helper
+// path) and leave the clean flip to the daemon.
+func TestGatedZeroizeWipeRecordsPending10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	store := newConfigStore(t, filepath.Join(configDir, "xpf.conf"))
+	origStop := scheduleStopDaemon
+	t.Cleanup(func() { scheduleStopDaemon = origStop })
+	scheduleStopDaemon = func() {}
+	s := &Server{
+		store: store,
+		zeroizeFn: func(_ context.Context, wipe func() error) error {
+			return wipe()
+		},
+	}
+	if _, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "zeroize"}); err != nil {
+		t.Fatalf("SystemAction(zeroize): %v", err)
+	}
+	_, dirty, helperPath, present, err := configstore.ReadResetHandoff()
+	if err != nil || !present || dirty != configstore.ResetHandoffPending {
+		t.Fatalf("gated wipe must record pending: dirty=%q present=%v err=%v", dirty, present, err)
+	}
+	if helperPath == "" {
+		t.Fatal("gated wipe must record the pre-wipe helper path")
+	}
+}
+
+// RED on revert: snapshotting the helper path before the apply gate lets a
+// commit delayed at the gate move the state file first, recording a stale
+// path the boot repair then sweeps instead of the residue.
+func TestGatedZeroizeSnapshotsHelperPathInsideGate10769(t *testing.T) {
+	origWipe := performZeroizeWipeWithLogInventory
+	origStop := scheduleStopDaemon
+	t.Cleanup(func() {
+		performZeroizeWipeWithLogInventory = origWipe
+		scheduleStopDaemon = origStop
+	})
+	var got zeroizeCompletion
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, _ ZeroizeLogInventory, c zeroizeCompletion) error {
+		got = c
+		return nil
+	}
+	scheduleStopDaemon = func() {}
+	dir := t.TempDir()
+	store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))
+	commitStateFile := func(path string) {
+		t.Helper()
+		if err := store.EnterConfigure(); err != nil {
+			t.Fatal(err)
+		}
+		set := "set system dataplane-type userspace\n" +
+			"set system dataplane state-file " + path + "\n"
+		if _, err := store.LoadSet(set); err != nil {
+			t.Fatalf("LoadSet: %v", err)
+		}
+		if _, err := store.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+		store.ExitConfigure()
+	}
+	pathA := filepath.Join(dir, "a", "userspace-dp.json")
+	pathB := filepath.Join(dir, "b", "userspace-dp.json")
+	commitStateFile(pathA)
+	s := &Server{
+		store: store,
+		zeroizeFn: func(_ context.Context, wipe func() error) error {
+			// Model the commit delayed at the gate: it lands after
+			// runZeroize's entry but before the wipe runs inside it.
+			commitStateFile(pathB)
+			return wipe()
+		},
+	}
+	if _, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "zeroize"}); err != nil {
+		t.Fatalf("SystemAction(zeroize): %v", err)
+	}
+	if !got.pending || got.helperPath != pathB {
+		t.Fatalf("pending completion = %+v, want pending with helper path %q", got, pathB)
+	}
+}
+
+func commitHelperPaths(t *testing.T, store *configstore.Store, sets ...string) {
+	t.Helper()
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	for _, set := range sets {
+		if _, err := store.LoadSet(set); err != nil {
+			t.Fatalf("LoadSet: %v", err)
+		}
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	store.ExitConfigure()
+}
+
+// The ungated (no-daemon) fallback resolves the effective helper path —
+// including the derived sibling dragged out of /run/xpf by a custom
+// control-socket — erases it in-wipe, and records it on the clean flag.
+// Without this, a custom path survives while boot repair re-derives the
+// default and clears post-reboot.
+func TestUngatedFallbackErasesDerivedHelperState10769(t *testing.T) {
+	root := t.TempDir()
+	hermeticWipe10100(t, root)
+	configDir := filepath.Join(root, "etc-xpf")
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "master.key"), []byte("key"))
+	mustWriteFile(t, filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"))
+	mustWriteFile(t, filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"))
+	store := newConfigStore(t, filepath.Join(configDir, "xpf.conf"))
+	commitHelperPaths(t, store,
+		"set system dataplane-type userspace",
+		"set system dataplane control-socket "+filepath.Join(root, "custom-xpf", "control.sock"))
+	derived := dpuserspace.StateFilePathForConfig(store.ActiveConfig())
+	if derived == dpuserspace.StateFilePathForConfig(nil) {
+		t.Fatal("fixture must derive a non-default state path from the custom socket")
+	}
+	mustWriteFile(t, derived, []byte(`{"flows":["prior"]}`))
+	mustWriteFile(t, derived+".4250000000.1.tmp", []byte(`{"flows":["prior-temp"]}`))
+	origStop := scheduleStopDaemon
+	t.Cleanup(func() { scheduleStopDaemon = origStop })
+	scheduleStopDaemon = func() {}
+	s := &Server{store: store}
+	if _, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "zeroize"}); err != nil {
+		t.Fatalf("SystemAction(zeroize): %v", err)
+	}
+	for _, path := range []string{derived, derived + ".4250000000.1.tmp"} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("derived helper residue %s survived the ungated wipe: %v", path, err)
+		}
+	}
+	_, dirty, gotPath, present, err := configstore.ReadResetHandoff()
+	if err != nil || !present || dirty != "" || gotPath != derived {
+		t.Fatalf("ungated handoff = dirty %q path %q present %v err %v, want clean with the derived path", dirty, gotPath, present, err)
 	}
 }

@@ -937,14 +937,16 @@ contract.
   at the handler: `GetSystemInfo{users}` forks nothing and must not be
   throttled by the diagnostic budget (a negative-control test pins that).
 
-  Three uses stay UNBOUNDED, each named in
+  Four uses stay UNBOUNDED, each named in
   `declaredUnboundedForks`: `runTimeout`'s deferred `systemctl`
   reboot/halt/poweroff and zeroize daemon-stop (a CONFIRMED power action
   must not be refused because the diagnostic budget is busy), the
   zeroize account teardown (`userdel` / `passwd -l root` — a
   half-zeroized box that left root unlocked is worse than a slow one),
-  and the `ip -4/-6 neigh flush` pair (state-changing operator actions
-  behind `PermControl`, not diagnostics).
+  the factory-reset Kea stop/verify queries (the lease wipe cannot be
+  refused by diagnostic backpressure), and the `ip -4/-6 neigh flush`
+  pair (state-changing operator actions behind `PermControl`, not
+  diagnostics).
   `TestNoUnboundedForkOutsideTheDeclaredExemptions6552` walks every
   non-test file in the package and fails BOTH on an undeclared
   unbounded fork and on a declared exemption whose site no longer

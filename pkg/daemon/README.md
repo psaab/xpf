@@ -2381,10 +2381,14 @@ never lock an operator out of a remote box it manages.
   `ip-monitoring` probe-flap sweep cannot re-render `/etc/frr/frr.conf` and
   re-materialize the erased routing-auth keys). It fail-CLOSES: a wipe error exits the reset
   generation and releases the gate so the box stays recoverable, and the handler
-  reports the reset incomplete and does NOT stop the daemon. The other `applySem`
-  acquirers stay ungated: DNS writes `/etc/resolv.conf`, proxy-ARP writes nft,
-  the policy scheduler and NAT-pool alarm touch dataplane/in-memory state, and
-  the host-tunables restore must run on shutdown — none re-render a wiped secret.
+  reports the reset incomplete and does NOT stop the daemon. The DHCP lease
+  writers observe the generation too: the VRRP pre-seed and socket seed
+  short-circuit (the pre-seed also crosses ddnsResetMu, held across the wipe),
+  the async DHCP enqueue refuses, and the DHCP DNS reconcile refuses (the
+  wipe clears /etc/resolv.conf, #10769). The remaining `applySem` acquirers
+  stay ungated: proxy-ARP writes nft, the policy scheduler and NAT-pool alarm
+  touch dataplane/in-memory state, and the host-tunables restore must run on
+  shutdown — none re-render a wiped secret.
 - **Cancellable apply at coarse boundaries (#2926, follow-up to #2914/#2868).**
   `applyConfigLocked(ctx, cfg)` checks `ctx.Err()` at three phase boundaries and
   returns the ctx error at the next one rather than completing the netlink + FRR

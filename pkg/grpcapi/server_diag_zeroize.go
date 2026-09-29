@@ -97,6 +97,10 @@ const (
 //     tls/cert.pem. xpf-generated, not tenant config; generateSelfSignedCertAt
 //     (pkg/api) regenerates a fresh pair on absence at the next boot, so
 //     removing them is safe and hands no prior-tenant key to the next owner.
+//   - dhcpv6-duid-*             — the DHCP client's per-interface DUID files
+//     (#10769 d05-F6). The daemon persists DUIDs in Dir(configFile), i.e.
+//     this root; a surviving DUID lets the next tenant's DHCPv6 server
+//     correlate the box with the prior tenant's leases.
 //
 // Removal is KEY-FIRST and DURABLY ordered (#4576/#5197): master.key is deleted
 // before the encrypted DB body AND the key unlink is fsynced (.configdb) before
@@ -296,8 +300,9 @@ func zeroizeConfigDir(configDir, configBase string) error {
 
 	// Top-level artifacts in a single ReadDir pass. #5768: match ONLY names xpf
 	// itself created/tracks — the live config file, the rescue config, the audit
-	// journal (+ rotated segments), the numbered text rollback slots, and fsatomic
-	// crash temps. The pre-#5768 code matched a broad `*.conf` suffix and
+	// journal (+ rotated segments), the numbered text rollback slots, DUID
+	// files, editor backups OF those owned names, and fsatomic crash temps.
+	// The pre-#5768 code matched a broad `*.conf` suffix and
 	// `rollback*` prefix; when a custom -config resolved configDir to a shared or
 	// subdir location that slipped past ValidateFactoryResetRoot, those globs
 	// deleted UNOWNED siblings (a neighbor's foo.conf, xpf's own rendered
@@ -327,7 +332,9 @@ func zeroizeConfigDir(configDir, configBase string) error {
 			name == configstore.Day0ConfigAppliedBase || // allow day-0 configuration after reset (#10740)
 			name == ".config.journal" ||
 			strings.HasPrefix(name, ".config.journal.") ||
+			strings.HasPrefix(name, "dhcpv6-duid-") || // DHCPv6 DUID persistence: the daemon passes Dir(configFile) as the DHCP state dir, so every per-interface DUID lives here (#10769 d05-F6)
 			isTextRollbackFile(name, configBase) || // <configBase>.<N> text slots
+			isOwnedEditorBackup(name, configBase) || // editor backups OF owned artifacts (#10769 d05-F6)
 			isFsatomicTemp(name) {
 			found, herr := configstore.CollectHardlinkedFiles(full, "")
 			hardlinks = append(hardlinks, found...)
@@ -408,6 +415,28 @@ func isTextRollbackFile(name, configBase string) bool {
 func isFsatomicTemp(name string) bool {
 	ok, _ := filepath.Match(".*.tmp-*", name)
 	return ok
+}
+
+// isOwnedEditorBackup reports whether name is an editor backup (~, .bak,
+// .old, .orig) OF an owned config-root artifact (#10769 d05-F6): the live
+// config, rescue config, day-0 stamp, journal, a rollback slot, or a DUID
+// file. Gated on the stem (not a bare suffix match) so a backup of an
+// unowned sibling in a shared root is never touched (#5768).
+func isOwnedEditorBackup(name, configBase string) bool {
+	stem, ok := editorBackupStem(name)
+	if !ok {
+		return false
+	}
+	if stem == configBase ||
+		stem == configstore.RescueConfigBase ||
+		stem == configstore.Day0ConfigAppliedBase ||
+		stem == ".config.journal" ||
+		strings.HasPrefix(stem, ".config.journal.") ||
+		strings.HasPrefix(stem, "dhcpv6-duid-") ||
+		isTextRollbackFile(stem, configBase) {
+		return true
+	}
+	return false
 }
 
 // zeroizeRenderedConfigs erases the RENDERED service configs xpfd writes
@@ -1476,7 +1505,27 @@ func beginZeroize(configDir, configBase, archiveDir string, inv ZeroizeLogInvent
 	return record, nil
 }
 
-func completeZeroize(record zeroizePendingRecord) error {
+func completeZeroize(record zeroizePendingRecord, completion zeroizeCompletion) error {
+	// Record the handoff FIRST: N+1 provisioning is refused until a reboot,
+	// and a crash before the marker removals below must leave the markers
+	// (not a lone flag) gating the retry. Gated wipes record PENDING: the
+	// daemon flips the flag clean only after its post-verification passes,
+	// so a crash in between leaves repair-or-retry instead of a clean
+	// claim over unverified residue. The helper path is recorded on BOTH
+	// completions: ungated wipes have no daemon post-verify, so boot
+	// repair must sweep the recorded path rather than re-derive the
+	// default from the erased config.
+	bootID, err := configstore.CurrentBootID()
+	if err != nil {
+		return fmt.Errorf("zeroize: snapshot boot id for reset handoff: %w", err)
+	}
+	dirty := ""
+	if completion.pending {
+		dirty = configstore.ResetHandoffPending
+	}
+	if err := configstore.WriteResetHandoff(bootID, dirty, completion.helperPath); err != nil {
+		return fmt.Errorf("zeroize: %w", err)
+	}
 	loaderMarker := configstore.FactoryResetPendingPath
 	configMarker := filepath.Join(record.ConfigDir, configstore.FactoryResetPendingBase)
 	if filepath.Clean(configMarker) != filepath.Clean(loaderMarker) {
@@ -1520,16 +1569,90 @@ func completeZeroize(record zeroizePendingRecord) error {
 // communities, was never examined and the reset reported clean. Pass "" to mean
 // "archival disabled, nothing to erase".
 func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
-	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, ZeroizeLogInventory{})
+	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, ZeroizeLogInventory{}, zeroizeComplete)
+}
+
+// zeroizeRenderedNetworkd removes the xpf-rendered networkd drop-ins
+// (10-xpf-*) from the system network directory (#10769 d05-F6). This leg is
+// FAIL-CLOSED, not best-effort: the daemon's own apply path proves orphaned
+// 10-xpf-* snippets resurrect stale addresses, bonds, and interface renames
+// on the next reload (daemon_apply_dataplane.go), so a surviving file hands
+// prior-tenant topology to the next tenant — and a prior root can plant an
+// immutable file to force exactly that. ReadDir/unlink failures fail the
+// wipe, the directory is synced unconditionally (a retry that finds no
+// matches must still retire the barrier debt of a prior unlink), and a
+// post-sync re-list must show no 10-xpf-* entry left.
+func zeroizeRenderedNetworkd() error {
+	entries, err := os.ReadDir(zeroizeNetworkdDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	var errs []error
+	if err != nil {
+		errs = append(errs, fmt.Errorf("zeroize: read networkd directory %s: %w", zeroizeNetworkdDir, err))
+	} else {
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), "10-xpf-") {
+				continue
+			}
+			if rerr := zeroizeRemovePath(filepath.Join(zeroizeNetworkdDir, entry.Name())); rerr != nil {
+				errs = append(errs, rerr)
+			}
+		}
+	}
+	if serr := zeroizeSyncDir(zeroizeNetworkdDir); serr != nil {
+		errs = append(errs, fmt.Errorf("zeroize: sync networkd directory %s: %w", zeroizeNetworkdDir, serr))
+	}
+	verify, verr := os.ReadDir(zeroizeNetworkdDir)
+	if verr != nil {
+		if !errors.Is(verr, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("zeroize: re-list networkd directory %s: %w", zeroizeNetworkdDir, verr))
+		}
+	} else {
+		for _, entry := range verify {
+			if strings.HasPrefix(entry.Name(), "10-xpf-") {
+				errs = append(errs, fmt.Errorf("zeroize: networkd file %s survived erasure", filepath.Join(zeroizeNetworkdDir, entry.Name())))
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
+	// DDNS ownership and IPsec teardown debt are durable external-delete
+	// authorities. Refuse the on-disk wipe unless manager withdrawal has emptied
+	// both stores; otherwise the credentials needed for cleanup would be erased.
+	if err := zeroizeEraseDDNSState(); err != nil {
+		return err
+	}
+	if err := zeroizeEraseIPsecState(); err != nil {
+		return err
+	}
+
+	// Kea's lease database is live service state: stop, verify inactive, and
+	// unlink the full LFC set in one critical section (zeroizeStopKeaAndEraseLeases).
+	// A stop/verify failure aborts before any later wipe surface, retaining
+	// the rendered config for a safe retry; unlink errors join the leg result.
+	keaErr := zeroizeStopKeaAndEraseLeases()
+	if errors.Is(keaErr, errZeroizeKeaStop) {
+		return keaErr
+	}
+
+	// Factory-seal state that is safe to regenerate is removed before the other
+	// wipe legs.
+	sealErr := zeroizeImageSealResidue()
+
 	// Wipe every security-critical artifact outside the config root first. The
 	// durable pending marker lets boot fail closed if any later leg is
 	// interrupted; the config root is erased last by the shared wrapper.
 	// Every leg error is retained and joined so later diagnostics are not lost.
 	var legErrs []error
-
+	if keaErr != nil {
+		legErrs = append(legErrs, keaErr)
+	}
+	if sealErr != nil {
+		legErrs = append(legErrs, sealErr)
+	}
 	// Rendered service configs (#4585): also security-critical — routing-auth
 	// keys in a world-readable frr.conf, IKE PSKs, Kea configs. A post-zeroize
 	// boot enters bootstrap / nil-active-config normal boot and SKIPS the
@@ -1554,6 +1677,15 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	// marker, #1944) so a non-xpf admin/system/operator account is NEVER touched.
 	// Also security-critical, so its error is appended to the surfaced result.
 	if e := zeroizeLoginAccounts(); e != nil {
+		legErrs = append(legErrs, e)
+	}
+
+	// Account-database backups (#10769 d05-F6): shadow tools rewrite
+	// passwd-/shadow-/group-/gshadow- and /var/backups/shadow.bak on every
+	// userdel/passwd invocation above, so this sweep runs AFTER the account
+	// teardown — an early-seal sweep would be re-created with
+	// pre-modification account data. Security-critical like the teardown.
+	if e := zeroizeEraseAccountBackups(); e != nil {
 		legErrs = append(legErrs, e)
 	}
 
@@ -1594,20 +1726,15 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 		legErrs = append(legErrs, e)
 	}
 
-	// BPF pins + managed networkd files carry no secret material, so their
-	// removal stays best-effort (logged, never fatal — they do not gate the
-	// success/failure of the factory reset).
+	// BPF pins carry no secret material, so their removal stays best-effort
+	// (logged, never fatal). The rendered networkd drop-ins are
+	// fail-closed: surviving 10-xpf-* files resurrect prior-tenant
+	// topology on reload.
 	if e := os.RemoveAll(zeroizeBPFPinDir); e != nil {
 		slog.Warn("zeroize: remove BPF pins failed", "err", e)
 	}
-	if ndFiles, e := os.ReadDir(zeroizeNetworkdDir); e == nil {
-		for _, f := range ndFiles {
-			if strings.HasPrefix(f.Name(), "10-xpf-") {
-				if re := os.Remove(filepath.Join(zeroizeNetworkdDir, f.Name())); re != nil && !errors.Is(re, os.ErrNotExist) {
-					slog.Warn("zeroize: remove networkd file failed", "file", f.Name(), "err", re)
-				}
-			}
-		}
+	if e := zeroizeRenderedNetworkd(); e != nil {
+		legErrs = append(legErrs, e)
 	}
 	// Zero legs failed → clean wipe (nil, exactly as before). One leg failed
 	// → its error unwrapped (identity preserved). Several failed → joined in

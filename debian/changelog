@@ -65,6 +65,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Return accurate consumed-input counts from sanitizing writers on emit
     errors, permitting retries without duplicating already-emitted lines
     (#10900).
+  * Complete factory-reset image-seal cleanup for regenerable device identity,
+    managed service state, logs, and DHCP leases; refuse erasure while DDNS or
+    IPsec teardown authority remains unresolved (#10769).
   * Prevent peer-echoed idle persistent-NAT leases, defer imported-lease
     promotion until successful local flow completion, restore full lease
     metadata after strict mirror refusal, and keep rollback safe across

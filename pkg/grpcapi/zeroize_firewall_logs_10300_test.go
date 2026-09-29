@@ -56,11 +56,11 @@ func TestPerformZeroizeWipeErasesFirewallLogs10300(t *testing.T) {
 	mustWriteFile(t, filepath.Join(rsyslogDir, "10-xpf-messages.conf"), []byte("*.*\t/var/log/messages\n"))
 	mustWriteFile(t, filepath.Join(rsyslogDir, "10-xpf-audit.conf"), []byte("*.*\t/var/log/audit\n"))
 	mustWriteFile(t, filepath.Join(rsyslogDir, "50-default.conf"), []byte("*.*\t/var/log/syslog\n"))
-	// Bystanders prove the leg is not a blanket /var/log removal, including a
-	// basename the renderer rejects even if a lenient config reaches the wipe.
-	mustWriteFile(t, filepath.Join(varLog, "messages-other"), []byte("operator log"))
-	mustWriteFile(t, filepath.Join(varLog, "auth.log"), []byte("host log"))
-	mustWriteFile(t, filepath.Join(varLog, "operator log"), []byte("unmanaged log"))
+	// The image seal's `logfiles` operation clears prior-tenant host logs as
+	// well as the narrower xpf syslog/trace outputs asserted below.
+	for _, name := range []string{"messages-other", "auth.log", "operator log"} {
+		mustWriteFile(t, filepath.Join(varLog, name), []byte("prior tenant log"))
+	}
 
 	inv := ZeroizeLogInventory{SyslogFiles: []string{"messages", "audit", "operator log"}, TraceFile: "trace.log"}
 	if err := PerformZeroizeWipeWithLogInventory(configDir, "xpf.conf", "", inv); err != nil {
@@ -80,7 +80,7 @@ func TestPerformZeroizeWipeErasesFirewallLogs10300(t *testing.T) {
 	}
 	assertPresent(t, filepath.Join(rsyslogDir, "50-default.conf"))
 	for _, name := range []string{"messages-other", "auth.log", "operator log"} {
-		assertPresent(t, filepath.Join(varLog, name))
+		assertAbsent(t, filepath.Join(varLog, name))
 	}
 }
 
@@ -130,7 +130,7 @@ func TestZeroizeReceiptAttestsFirewallLogScope10300(t *testing.T) {
 		scheduleStopDaemon = origStop
 	})
 	var got ZeroizeLogInventory
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, inv ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, inv ZeroizeLogInventory, _ zeroizeCompletion) error {
 		got = inv
 		return nil
 	}
@@ -176,7 +176,7 @@ func TestZeroizeSnapshotsFirewallInventoryInsideGate10300(t *testing.T) {
 		scheduleStopDaemon = origStop
 	})
 	var got ZeroizeLogInventory
-	performZeroizeWipeWithLogInventory = func(_, _, _ string, inv ZeroizeLogInventory) error {
+	performZeroizeWipeWithLogInventory = func(_, _, _ string, inv ZeroizeLogInventory, _ zeroizeCompletion) error {
 		got = inv
 		return nil
 	}
@@ -322,7 +322,7 @@ func TestInterruptedZeroizeRemainsFailClosedAndReplaysInventory10742(t *testing.
 		return originalSync(dir)
 	}
 
-	err = performZeroizeWipeWithLogInventory(configDir, "xpf.conf", customArchive, inventory)
+	err = performZeroizeWipeWithLogInventory(configDir, "xpf.conf", customArchive, inventory, zeroizeComplete)
 	if !errors.Is(err, interrupt) || !configSyncFailed {
 		t.Fatalf("wipe error = %v, want simulated post-config interruption", err)
 	}
@@ -351,7 +351,7 @@ func TestInterruptedZeroizeRemainsFailClosedAndReplaysInventory10742(t *testing.
 	// inventory; the custom archive remains an explicit incomplete-reset error.
 	mustWriteFile(t, filepath.Join(varLog, "trace-10742.log"), []byte("late trace generation"))
 	mustWriteFile(t, filepath.Join(varLog, "syslog-10742.log"), []byte("late syslog generation"))
-	retryErr := performZeroizeWipeWithLogInventory(configDir, "xpf.conf", "", ZeroizeLogInventory{})
+	retryErr := performZeroizeWipeWithLogInventory(configDir, "xpf.conf", "", ZeroizeLogInventory{}, zeroizeComplete)
 	var archiveSkipped *configstore.ArchiveDirSkippedError
 	if !errors.As(retryErr, &archiveSkipped) {
 		t.Fatalf("retry error = %v, want persisted custom archive ownership failure", retryErr)
@@ -443,7 +443,7 @@ func TestCompleteZeroizeKeepsLoaderGateUntilConfigMarkerDurable10742(t *testing.
 		return originalSync(dir)
 	}
 
-	if err := completeZeroize(record); !errors.Is(err, syncFailure) {
+	if err := completeZeroize(record, zeroizeComplete); !errors.Is(err, syncFailure) {
 		t.Fatalf("complete zeroize error = %v, want config-marker sync failure", err)
 	}
 	if len(syncOrder) == 0 || syncOrder[0] != filepath.Clean(configDir) {

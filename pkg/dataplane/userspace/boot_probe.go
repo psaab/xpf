@@ -20,6 +20,16 @@ func DefaultControlSocketPath(cfg *config.Config) string {
 	return deriveUserspaceConfig(cfg).ControlSocket
 }
 
+// StateFilePathForConfig returns the effective helper state-file path for
+// cfg, resolved exactly the way the runtime Manager resolves it at spawn
+// (deriveUserspaceConfig): the operator-configured state-file when set,
+// else the default beside the control socket. cfg may be nil, in which
+// case the compiled default is returned. Factory-reset shutdown uses it
+// to sweep the helper's final write, which may land outside /run/xpf.
+func StateFilePathForConfig(cfg *config.Config) string {
+	return deriveUserspaceConfig(cfg).StateFile
+}
+
 // ProbeForwardingArmed performs a lightweight, one-shot status query against a
 // PRE-EXISTING userspace helper on its control socket, WITHOUT standing up a
 // Manager or starting a helper. It is used early in boot (#1993) to decide

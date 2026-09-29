@@ -3,6 +3,19 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/ddns"
+	"github.com/psaab/xpf/pkg/dhcpserver"
+	"github.com/psaab/xpf/pkg/fsatomic"
+	"github.com/psaab/xpf/pkg/ipsec"
 )
 
 // errDaemonResetting is returned by every config-write entry point once a
@@ -12,6 +25,22 @@ import (
 // job is purely to make a racing commit / HA-sync / rollback / reconcile abort
 // instead of re-creating the just-erased state.
 var errDaemonResetting = errors.New("factory reset in progress: configuration writes are rejected")
+
+// Reset ownership stores are package vars only to let reset unit tests keep
+// their proof checks inside a disposable tree.
+var (
+	resetDDNSLeaseStatePath = ddns.DefaultLeaseStatePath()
+	resetDDNSSurfaceAPath   = ddns.DefaultSurfaceAStatePath()
+	resetIPsecStatePath     = ipsec.DefaultConnStatePath
+	// Identity files the wipe overwrites and a failed reset must restore.
+	// (The hostname seam is the existing hostnamePath in daemon_system.go.)
+	// Package vars only for test isolation.
+	resetHostsPath      = "/etc/hosts"
+	resetResolvConfPath = "/etc/resolv.conf"
+	resetKnownHostsPath = "/etc/ssh/ssh_known_hosts"
+	// Canonical Kea lease files the post-wipe verification re-checks.
+	resetKeaLeaseCurrents = []string{dhcpserver.DefaultKeaLeaseFile4Path, dhcpserver.DefaultKeaLeaseFile6Path}
+)
 
 // isResetting reports whether a factory reset has entered the terminal reset
 // generation (#5281). Config writers check it under applySem to short-circuit.
@@ -27,6 +56,340 @@ func (d *Daemon) enterResetGeneration() { d.resetting.Store(true) }
 // exitResetGeneration leaves the reset generation. Called only on a FAILED wipe
 // so the box stays recoverable and normal config work resumes (#5281).
 func (d *Daemon) exitResetGeneration() { d.resetting.Store(false) }
+
+// quiesceDDNSForReset fences new reconcile launches and joins both guarded
+// manager passes. Factory reset must not race a publish/withdraw with its
+// manager-owned withdrawal or erase the durable ownership files underneath an
+// in-flight provider call.
+func (d *Daemon) quiesceDDNSForReset() error {
+	// runGuarded* holds this mutex through goroutine launch. The reset bit was
+	// set first, so crossing the mutex proves no new pass can start.
+	d.ddnsResetMu.Lock()
+	d.ddnsResetMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*ddnsReconcileTimeout)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for d.ddnsReconcileInFlight.Load() || d.surfaceA.reconcileInFlight.Load() {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("factory reset: timed out draining DDNS reconcile passes: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	return nil
+}
+
+// withdrawDDNSForReset removes every provably-owned published RR before the
+// factory-reset wipe may erase its cleanup authority. BackendFingerprint is
+// checked by each manager; any mismatch, missing endpoint, degraded store, or
+// provider failure retains the state and aborts reset before config is erased.
+func (d *Daemon) withdrawDDNSForReset() error {
+	var cfg *config.Config
+	if d.store != nil {
+		cfg = d.store.ActiveConfig()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*ddnsReconcileTimeout)
+	defer cancel()
+
+	var errs []error
+	var dhcpCfg *config.DHCPServerConfig
+	var catalog map[string]*config.DDNSProvider
+	if cfg != nil {
+		dhcpCfg = &cfg.System.DHCPServer
+		if cfg.System.Services != nil && cfg.System.Services.DynamicDNS != nil {
+			catalog = cfg.System.Services.DynamicDNS.Providers
+		}
+	}
+	if d.ddns != nil {
+		if err := d.ddns.WithdrawForReset(ctx, dhcpCfg); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if d.surfaceA.mgr != nil {
+		if err := d.surfaceA.mgr.WithdrawForReset(ctx, catalog); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	// A manager that was not constructed (NoDataplane) cannot prove or
+	// withdraw non-empty durable ownership. These checks also catch residual
+	// records left by a partial manager withdrawal, corrupt/degraded state, and
+	// quarantined ownership.
+	if err := ddns.CheckStateEmpty(resetDDNSLeaseStatePath); err != nil {
+		errs = append(errs, err)
+	}
+	if err := ddns.CheckStateEmpty(resetDDNSSurfaceAPath); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// quiesceDHCPForReset fences queued applies, then synchronously clears the
+// active Kea configuration. The reset generation blocks every later enqueue.
+func (d *Daemon) quiesceDHCPForReset() error {
+	d.ddnsResetMu.Lock()
+	defer d.ddnsResetMu.Unlock()
+	if d.dhcpServer == nil {
+		return nil
+	}
+	d.dhcpServer.SetLeaseSyncEnabled(false)
+	return d.dhcpServer.Apply(nil)
+}
+
+func (d *Daemon) restoreDHCPAfterFailedReset() error {
+	if d.dhcpServer == nil {
+		return nil
+	}
+	var cfg *config.Config
+	if d.store != nil {
+		cfg = d.store.ActiveConfig()
+	}
+	d.dhcpServer.SetLeaseSyncEnabled(d.dhcpLeaseSyncEnabled(cfg))
+	if cfg == nil {
+		return d.dhcpServer.Apply(nil)
+	}
+	masters := d.snapshotRethMasterState()
+	authority := d.nextDHCPLeaseApplyAuthority(cfg, masters)
+	if cfg.Chassis.Cluster != nil {
+		return d.dhcpServer.ApplyWithLeaseAuthority(d.desiredClusterDHCPConfigWithMasters(cfg, masters), authority)
+	}
+	desired := desiredStandaloneDHCPConfig(cfg)
+	return d.dhcpServer.ApplyWithLeaseAuthority(&desired, authority)
+}
+
+func (d *Daemon) clearIPsecForReset() error {
+	if d.ipsec != nil {
+		if err := d.ipsec.Clear(); err != nil {
+			return fmt.Errorf("clear IPsec connections for factory reset: %w", err)
+		}
+	}
+	if err := ipsec.CheckConnStateEmpty(resetIPsecStatePath); err != nil {
+		return fmt.Errorf("IPsec connection ownership remains: %w", err)
+	}
+	return nil
+}
+
+func (d *Daemon) restoreIPsecAfterFailedReset() error {
+	if d.ipsec == nil {
+		return nil
+	}
+	var cfg *config.Config
+	if d.store != nil {
+		cfg = d.store.ActiveConfig()
+	}
+	return d.applyIPsecTracked(cfg)
+}
+
+// resetIdentityFile records one pre-wipe identity path: its bytes and mode,
+// its symlink target, or its absence.
+type resetIdentityFile struct {
+	data   []byte
+	mode   os.FileMode
+	absent bool
+	link   bool
+	target string
+}
+
+// snapshotResetIdentity reads the identity paths the wipe overwrites
+// (/etc/hostname, /etc/hosts, /etc/resolv.conf, /etc/ssh/ssh_known_hosts) so
+// a failed reset can restore them byte-for-byte. Links are snapshotted as
+// links (Lstat/Readlink): reading through a foreign resolver symlink and
+// restoring regular bytes over it would convert the pre-wipe link. A read
+// failure fails the reset BEFORE anything is wiped: without a snapshot
+// there is no restore.
+func snapshotResetIdentity() (map[string]resetIdentityFile, error) {
+	snap := make(map[string]resetIdentityFile)
+	for _, path := range []string{hostnamePath, resetHostsPath, resetResolvConfPath, resetKnownHostsPath} {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			snap[path] = resetIdentityFile{absent: true}
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("snapshot %s for factory reset: %w", path, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot symlink %s for factory reset: %w", path, err)
+			}
+			snap[path] = resetIdentityFile{link: true, target: target}
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot %s for factory reset: %w", path, err)
+		}
+		snap[path] = resetIdentityFile{data: data, mode: info.Mode().Perm()}
+	}
+	return snap, nil
+}
+
+// restoreResetIdentity writes a snapshot back after a failed wipe. It writes
+// unconditionally: the previous recovery called applyHostname, which returns
+// early when the kernel name already equals the configured name and left the
+// wiped xpf value on disk (#10769 d05-F6). Links are restored as links and
+// absences as absences, so a foreign resolver symlink the wipe replaced is
+// put back untouched rather than converted to regular bytes.
+func restoreResetIdentity(snap map[string]resetIdentityFile) error {
+	var errs []error
+	for path, file := range snap {
+		if file.absent {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("restore absence of %s after failed factory reset: %w", path, err))
+			}
+			continue
+		}
+		if file.link {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("restore symlink %s after failed factory reset: %w", path, err))
+				continue
+			}
+			if err := os.Symlink(file.target, path); err != nil {
+				errs = append(errs, fmt.Errorf("restore symlink %s after failed factory reset: %w", path, err))
+			}
+			continue
+		}
+		if err := fsatomic.WriteFileDurable(path, file.data, file.mode); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s after failed factory reset: %w", path, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// verifyKeaLeasesErasedForReset re-checks the lease wipe set after the wipe
+// reports success. The wipe verifies post-unlink itself, but a lease writer
+// in flight across the reset boundary (a VRRP pre-seed that started before
+// the reset generation) could re-persist between that check and here. Any
+// reappearance fails the reset closed so a retry re-runs the erasure.
+func verifyKeaLeasesErasedForReset() error {
+	for _, current := range resetKeaLeaseCurrents {
+		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
+			if _, err := os.Lstat(path); err == nil {
+				return fmt.Errorf("factory reset: Kea lease file %s reappeared after the wipe", path)
+			} else if !os.IsNotExist(err) {
+				return fmt.Errorf("factory reset: inspect Kea lease file %s: %w", path, err)
+			}
+		}
+	}
+	return nil
+}
+
+// verifyStateTempsErasedForReset re-checks the DDNS/IPsec state files and
+// their crash-temp sets after the wipe reports success, mirroring the Kea
+// lease re-verification: state recreated in the sweep→success window must
+// fail the reset, not survive silently beside a clean receipt. Canonicals
+// are checked as well as temps: a writer that completed a full save leaves
+// a canonical with no temp behind, and temps-only verification would clear
+// over it.
+func verifyStateTempsErasedForReset() error {
+	var errs []error
+	for _, path := range []string{resetDDNSLeaseStatePath, resetDDNSSurfaceAPath, resetIPsecStatePath} {
+		if _, err := os.Lstat(path); err == nil {
+			errs = append(errs, fmt.Errorf("factory reset: state file %s reappeared after the wipe", path))
+		} else if !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("factory reset: inspect state file %s: %w", path, err))
+		}
+	}
+	if temps, err := ddns.ListCrashTemps(resetDDNSLeaseStatePath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("factory reset: DDNS crash temps reappeared after the wipe: %v", temps))
+	}
+	if temps, err := ddns.ListCrashTemps(resetDDNSSurfaceAPath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("factory reset: DDNS crash temps reappeared after the wipe: %v", temps))
+	}
+	if temps, err := ipsec.ListCrashTemps(resetIPsecStatePath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("factory reset: IPsec crash temps reappeared after the wipe: %v", temps))
+	}
+	return errors.Join(errs...)
+}
+
+// eraseStateTempsForReset re-runs the idempotent state erasures to repair a
+// temp reappearance. A reappeared RECORD (not just a temp) fails the erase
+// check loudly — that is a fence breach, not a repairable race.
+func eraseStateTempsForReset() error {
+	var errs []error
+	if err := ddns.EraseStateIfEmpty(resetDDNSLeaseStatePath); err != nil {
+		errs = append(errs, err)
+	}
+	if err := ddns.EraseStateIfEmpty(resetDDNSSurfaceAPath); err != nil {
+		errs = append(errs, err)
+	}
+	if err := ipsec.EraseConnStateIfEmpty(resetIPsecStatePath); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// eraseKeaLeasesForReset removes any Kea lease files present, syncing their
+// parents. It runs only to repair a post-wipe reappearance before the reset
+// reports failure: with the pending markers already cleared and the config
+// wiped, leaving the rows would hand prior leases to the next tenant's Kea
+// with no boot gate left to force another pass. Hardlinked lease files are
+// refused before unlinking (FactoryResetHardlinkError with the inode
+// scan), so a retry cannot succeed over rows a sibling holds. A symlink
+// is refused like the primary seal leg (zeroizeRemovePath): unlinking
+// the link would pass verification while the target rows survive.
+func eraseKeaLeasesForReset() error {
+	var errs []error
+	synced := make(map[string]bool)
+	for _, current := range resetKeaLeaseCurrents {
+		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
+			if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+				errs = append(errs, fmt.Errorf("factory reset: refusing to re-erase symlinked Kea lease file %s: link target is out of erase scope", path))
+				continue
+			} else if lerr != nil && !os.IsNotExist(lerr) {
+				errs = append(errs, fmt.Errorf("factory reset: inspect Kea lease file %s: %w", path, lerr))
+				continue
+			}
+			hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
+			if herr != nil {
+				errs = append(errs, fmt.Errorf("factory reset: inspect hard links for Kea lease file %s: %w", path, herr))
+				continue
+			}
+			if len(hardlinks) != 0 {
+				errs = append(errs, fmt.Errorf("factory reset: refusing to erase hard-linked Kea lease file %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks}))
+				continue
+			}
+			if err := os.Remove(path); err != nil {
+				if !os.IsNotExist(err) {
+					errs = append(errs, fmt.Errorf("factory reset: re-erase Kea lease file %s: %w", path, err))
+				}
+				continue
+			}
+			synced[filepath.Dir(path)] = true
+		}
+	}
+	for dir := range synced {
+		if err := fsatomic.SyncDir(dir); err != nil {
+			errs = append(errs, fmt.Errorf("factory reset: sync Kea lease directory %s: %w", dir, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// helperResetStopper is implemented by a dataplane runtime with a helper
+// process to stop before reset verification. An OPTIONAL interface like
+// controlShutdownBounder (only the userspace backend has a helper), with a
+// compile-time assertion in reset_handoff_10769_test.go so a signature drift
+// that silently disables the stop fails the build.
+type helperResetStopper interface{ StopHelperForReset() }
+
+// markResetHandoffDirtyQuiet records post-success residue durably, logging
+// when even the flag write fails (nothing else can be done: the wipe
+// already reported its own outcome and the process is stopping).
+func markResetHandoffDirtyQuiet(reason string) {
+	slog.Error("factory reset: residue remains; marking reset handoff dirty", "reason", reason)
+	if err := configstore.MarkResetHandoffDirty(reason); err != nil {
+		slog.Error("factory reset: cannot mark reset handoff dirty", "err", err)
+	}
+}
 
 // factoryReset runs a gRPC-initiated zeroize under the SAME global writer gate
 // (d.applySem) that commit / apply / HA-sync serialize on, then enters the
@@ -48,14 +411,18 @@ func (d *Daemon) exitResetGeneration() { d.resetting.Store(false) }
 //     writers that bypass applySem. Fence + JOIN them before the wipe so
 //     neither the archive directory nor rescue.conf can be recreated after
 //     it is erased.
-//  3. Run the wipe while holding applySem.
+//  3. Run the wipe while holding applySem. The wipe records a PENDING reset
+//     handoff (never clean): daemon post-verification below flips it clean
+//     only after passing, so a crash in between leaves repair-or-retry.
 //     - On FAILURE: exit the reset generation and release applySem (deferred)
 //     so the half-reset box is recoverable and a retry can run, and return
 //     the error. The caller must NOT stop the daemon — a stop here would
 //     strand a box whose secrets are still on disk.
-//     - On SUCCESS: stay in the reset generation (never cleared) and return nil;
-//     the caller stops xpfd. applySem is released on return, but the resetting
-//     flag keeps every later writer from re-rendering during the stop window.
+//     - On SUCCESS: stop the helper, sweep and re-verify its state plus the
+//     Kea leases and DDNS/IPsec temps, flip the handoff clean, stay in the
+//     reset generation (never cleared) and return nil; the caller stops
+//     xpfd. applySem is released on return, but the resetting flag keeps
+//     every later writer from re-rendering during the stop window.
 func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return err
@@ -80,17 +447,167 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 		d.store.QuiesceRescueWrites()
 		d.store.QuiesceArchival()
 	}
-	if err := wipe(); err != nil {
-		// Fail-closed recoverable path: the daemon stays up and resumes normal
-		// config work, so re-enable archival and rescue saves too (a SUCCESSFUL
-		// wipe instead stops the daemon, leaving both fences latched). #5869,
-		// #10769.
+	dhcpMayNeedRestore := false
+	ipsecMayNeedRestore := false
+	wipeStarted := false
+	wipeSucceeded := false
+	var identity map[string]resetIdentityFile
+	kernelBeforeReset := ""
+	resetFailed := func(err error) error {
+		errs := []error{err}
+		// Restore the pre-wipe identity files only when the wipe itself ran
+		// and did not complete: after a completed wipe the config is gone and
+		// the fresh identity is the correct state for the wiped box.
+		if wipeStarted && !wipeSucceeded && identity != nil {
+			if restoreErr := restoreResetIdentity(identity); restoreErr != nil {
+				errs = append(errs, restoreErr)
+			}
+		}
+		// The wipe moves the live kernel name with /etc/hostname; move it
+		// back on the same failed-wipe path (empty when the pre-wipe read
+		// failed, in which case there is nothing to restore to).
+		if wipeStarted && !wipeSucceeded && kernelBeforeReset != "" {
+			if rerr := sethostname([]byte(kernelBeforeReset)); rerr != nil {
+				errs = append(errs, fmt.Errorf("restore kernel hostname after failed factory reset: %w", rerr))
+			}
+		}
+		if ipsecMayNeedRestore {
+			if restoreErr := d.restoreIPsecAfterFailedReset(); restoreErr != nil {
+				errs = append(errs, fmt.Errorf("restore IPsec after failed factory reset: %w", restoreErr))
+			}
+		}
+		if dhcpMayNeedRestore {
+			if restoreErr := d.restoreDHCPAfterFailedReset(); restoreErr != nil {
+				errs = append(errs, fmt.Errorf("restore DHCP after failed factory reset: %w", restoreErr))
+			}
+		}
 		if d.store != nil {
 			d.store.ResumeArchival()
 			d.store.ResumeRescueWrites()
 		}
 		d.exitResetGeneration()
-		return err
+		return errors.Join(errs...)
+	}
+	// Snapshot the identity files the wipe overwrites before any destructive
+	// step. A snapshot failure aborts here, with nothing wiped.
+	snap, err := snapshotResetIdentity()
+	if err != nil {
+		return resetFailed(err)
+	}
+	identity = snap
+	// Snapshot the live kernel name the wipe moves with /etc/hostname.
+	// Best-effort: unlike the files, a failed read must not block the reset
+	// (there is simply nothing to restore to on failure).
+	if kernel, kerr := osHostname(); kerr != nil {
+		slog.Warn("factory reset: cannot snapshot kernel hostname; live name will not be restored on failure", "err", kerr)
+	} else {
+		kernelBeforeReset = kernel
+	}
+	if err := d.quiesceDDNSForReset(); err != nil {
+		return resetFailed(err)
+	}
+	// DNS RRs are external state. Withdraw them through the managers before
+	// their durable ownership records or the config containing backend
+	// credentials can be erased.
+	if err := d.withdrawDDNSForReset(); err != nil {
+		return resetFailed(err)
+	}
+	dhcpMayNeedRestore = d.dhcpServer != nil
+	if err := d.quiesceDHCPForReset(); err != nil {
+		return resetFailed(fmt.Errorf("quiesce DHCP for factory reset: %w", err))
+	}
+	ipsecMayNeedRestore = d.ipsec != nil
+	if err := d.clearIPsecForReset(); err != nil {
+		return resetFailed(err)
+	}
+	wipeStarted = true
+	// Hold ddnsResetMu across the wipe and its post-wipe lease verification.
+	// The VRRP pre-seed crosses this mutex around its direct memfile writes,
+	// so no pre-seed can land between the wipe's unlink and the verification
+	// stat: a writer ordered before the wipe has its output erased by it, and
+	// one ordered after aborts on the reset bit (or re-seeds correctly after
+	// a failed reset clears it). The DHCP enqueue and DDNS reconcile launches
+	// cross the same mutex and likewise serialize here.
+	d.ddnsResetMu.Lock()
+	wipeErr := wipe()
+	var verifyErr error
+	if wipeErr == nil {
+		wipeSucceeded = true
+		// The config is gone: stop serving the prior tenant at once rather
+		// than until the process stop ~1s later. Kernel transit is disarmed
+		// (fail-closed fence + sysctls, mirroring shutdown order); a live
+		// userspace helper is stopped so its final state write lands now,
+		// while the fence is still held, and is swept and verified below
+		// before the RPC can report success.
+		d.markDataplaneNotArmed("reset", "factory reset wiped config: closing transit before daemon stop")
+		rt := d.dataplane()
+		if rt != nil {
+			if hs, ok := rt.(helperResetStopper); ok {
+				hs.StopHelperForReset()
+			}
+		}
+		var cfg *config.Config
+		if d.store != nil {
+			cfg = d.store.ActiveConfig()
+		}
+		// Sweep only when this process manages (or may manage) a helper:
+		// no published dataplane and no config means no writer could have
+		// produced helper state. Besides scoping the work, this keeps
+		// config-less fixtures off the production default path.
+		if rt != nil || cfg != nil {
+			if serr := sweepHelperStateVerified(dpuserspace.StateFilePathForConfig(cfg)); serr != nil {
+				verifyErr = errors.Join(verifyErr, serr)
+				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonHelper + ": helper state sweep failed: " + serr.Error())
+			}
+		}
+		if kerr := verifyKeaLeasesErasedForReset(); kerr != nil {
+			// The wipe already cleared the pending markers, so a bare
+			// failure here would strand reappeared leases with no boot
+			// gate and a wiped config. Re-erase under the still-held
+			// fence and re-verify: the reset still reports failure
+			// (a reappearance is a fence-escaper bug signal, never a
+			// clean outcome) but every leg stays idempotent, so a retry
+			// — or a reboot into the day-0 path — converges cleanly.
+			// Unrepaired residue marks the handoff dirty (never silent).
+			if rerr := eraseKeaLeasesForReset(); rerr != nil {
+				verifyErr = errors.Join(verifyErr, kerr, rerr)
+				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonKea + ": kea lease re-erase failed: " + rerr.Error())
+			} else if rerr := verifyKeaLeasesErasedForReset(); rerr != nil {
+				verifyErr = errors.Join(verifyErr, kerr, rerr)
+				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonKea + ": kea leases reappeared after re-erase: " + rerr.Error())
+			} else {
+				verifyErr = errors.Join(verifyErr, kerr)
+			}
+		}
+		if terr := verifyStateTempsErasedForReset(); terr != nil {
+			// Same marker-gone reasoning as Kea: re-run the idempotent
+			// state erasures (which re-sweep temps) and re-verify. The
+			// reset still reports failure; unrepaired residue marks the
+			// handoff dirty.
+			if rerr := eraseStateTempsForReset(); rerr != nil {
+				verifyErr = errors.Join(verifyErr, terr, rerr)
+				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonTemps + ": state temp re-erase failed: " + rerr.Error())
+			} else if rerr := verifyStateTempsErasedForReset(); rerr != nil {
+				verifyErr = errors.Join(verifyErr, terr, rerr)
+				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonTemps + ": state temps reappeared after re-erase: " + rerr.Error())
+			} else {
+				verifyErr = errors.Join(verifyErr, terr)
+			}
+		}
+	}
+	d.ddnsResetMu.Unlock()
+	if wipeErr != nil {
+		return resetFailed(wipeErr)
+	}
+	if verifyErr != nil {
+		return resetFailed(verifyErr)
+	}
+	// The wipe recorded PENDING; only this passing post-verification flips
+	// the flag clean. A flip failure fails the reset closed: reporting
+	// success without the durable clean claim would leave the retry/boot
+	// logic guessing the verification outcome.
+	if ferr := configstore.FlipResetHandoffClean(); ferr != nil {
+		return resetFailed(ferr)
 	}
 	return nil
 }

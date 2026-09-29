@@ -83,13 +83,54 @@ var schedulePowerAction = func(systemctlArg string) {
 // scheduled ONLY on a fully-successful wipe (never on a fail-closed partial
 // wipe). The daemon has already entered the terminal reset generation (see
 // ZeroizeFn), so the ~1s grace cannot re-render anything.
+
+// Reset stop-verification seams. Production stops xpfd after the grace,
+// then polls until the unit is inactive; tests stub the timing, the unit
+// runner, and the active probe to drive the monitor synchronously.
+var (
+	zeroizeStopGrace        = time.Second
+	zeroizeStopVerifyBudget = 30 * time.Second
+	zeroizeStopVerifyPoll   = time.Second
+	zeroizeStopDaemonUnit   = func() error {
+		// context.Background(): a confirmed factory reset must not be cancelled
+		// by client disconnect.
+		return runTimeout(context.Background(), "systemctl", "stop", "xpfd")
+	}
+	zeroizeDaemonUnitActive = func() bool {
+		_, err := combinedOutputTimeoutUnlimited(context.Background(), "systemctl", "is-active", "--quiet", "xpfd")
+		return err == nil
+	}
+)
+
 var scheduleStopDaemon = func() {
 	go func() {
-		time.Sleep(1 * time.Second)
-		// context.Background(): a confirmed factory reset must not be cancelled
-		// by client disconnect. Error ignored (mirrors schedulePowerAction).
-		runTimeout(context.Background(), "systemctl", "stop", "xpfd")
+		if err := resetStopMonitor(); err != nil {
+			slog.Error("factory reset: stop verification failed", "err", err)
+		}
 	}()
+}
+
+// resetStopMonitor stops xpfd after the grace and verifies the unit went
+// inactive. A stop that cannot be verified leaves the daemon serving
+// pre-wipe in-memory state behind a clean receipt with the post-stop
+// helper sweep never run, so it marks the handoff dirty (gating N+1
+// provisioning until a clean reset) instead of failing silently.
+func resetStopMonitor() error {
+	time.Sleep(zeroizeStopGrace)
+	stopErr := zeroizeStopDaemonUnit()
+	deadline := time.Now().Add(zeroizeStopVerifyBudget)
+	for zeroizeDaemonUnitActive() && time.Now().Before(deadline) {
+		time.Sleep(zeroizeStopVerifyPoll)
+	}
+	if stopErr == nil && !zeroizeDaemonUnitActive() {
+		return nil
+	}
+	reason := "xpfd still active after reset stop"
+	if stopErr != nil {
+		reason = fmt.Sprintf("xpfd stop failed: %v", stopErr)
+	}
+	slog.Error("factory reset: daemon stop unverified; marking reset handoff dirty", "reason", reason)
+	return configstore.MarkResetHandoffDirty(reason)
 }
 
 // zeroizeConfigRoot resolves the CONFIGURED config root the factory-reset wipe
@@ -159,18 +200,30 @@ func (s *Server) runZeroize(ctx context.Context) error {
 			archiveDir = configuredArchiveDir
 		}
 	}
-	// Snapshot configured firewall-log names immediately before the shared wipe
-	// runs. This closure executes inside ZeroizeFn's apply gate, so a commit
-	// that was waiting for the gate cannot add a destination after the
-	// inventory snapshot and escape erasure (#10300).
+	// Snapshot configured firewall-log names and the helper state path
+	// immediately before the shared wipe runs. This closure executes
+	// inside ZeroizeFn's apply gate, so a commit that was waiting for the
+	// gate cannot add a destination (or change the helper state file)
+	// after the snapshot and escape erasure (#10300): snapshotting
+	// before the gate would let an interleaving commit move the state
+	// file first, recording a stale path the boot repair then sweeps
+	// instead of the residue. The wipe erases the config both derive
+	// from, and daemon post-verification plus boot repair need the
+	// pre-wipe path recorded in the flag.
 	wipe := func() error {
 		logInventory := ZeroizeLogInventoryFromConfig(s.store.ActiveConfig())
-		return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, logInventory)
+		helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
+		return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, logInventory, zeroizeCompletion{pending: true, helperPath: helperPath})
 	}
 	if s.zeroizeFn != nil {
 		return s.zeroizeFn(ctx, wipe)
 	}
-	return wipe()
+	// Ungated fallback (no daemon): snapshot the helper path for the
+	// wipe's own helper sweep + verification, since no post-verify
+	// follows. A custom path outside the wiped dirs would otherwise
+	// survive under a clean receipt.
+	helperPath := dpuserspace.StateFilePathForConfig(s.store.ActiveConfig())
+	return PerformZeroizeWipeUngated(configDir, configBase, archiveDir, ZeroizeLogInventoryFromConfig(s.store.ActiveConfig()), helperPath)
 }
 
 func (s *Server) acknowledgeDynamicAddressShrink(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {

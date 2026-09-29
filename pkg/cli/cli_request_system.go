@@ -10,6 +10,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/configstore"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/grpcapi"
 )
 
@@ -141,11 +142,19 @@ func (c *CLI) zeroizeConfigRoot() (configDir, configBase string, err error) {
 
 // zeroizeFullWipe is the shared factory-reset primitive the console delegates to
 // (#5890) — a package var so a test can spy the delegation without wiping real
-// system paths. It defaults to the log-aware gRPC primitive, with the
-// pre-wipe configured log inventory supplied by performConsoleZeroize (#10300).
+// system paths. It defaults to the log-aware gRPC UNGATED primitive (which
+// erases and verifies the helper state file itself), with the pre-wipe
+// configured log inventory and helper path supplied by performConsoleZeroize
+// (#10300).
 type zeroizeLogInventory = grpcapi.ZeroizeLogInventory
 
-var zeroizeFullWipe = grpcapi.PerformZeroizeWipeWithLogInventory
+var zeroizeFullWipe = grpcapi.PerformZeroizeWipeUngated
+
+// zeroizeFullWipePending is the gated-path wipe seam: records a PENDING
+// handoff (with the pre-wipe helper path) instead of completing, so the
+// daemon's post-verification flips the flag clean only after it passes
+// (#10769 d05-F6). Defaults to the pending gRPC primitive.
+var zeroizeFullWipePending = grpcapi.PerformZeroizeWipePending
 
 // cliZeroizeArchiveDir returns the archive directory the CONSOLE zeroize path
 // erases (#7173).
@@ -205,12 +214,22 @@ func (c *CLI) performConsoleZeroize() error {
 	// The shared full factory-reset wipe primitive (config state + tls/ +
 	// rendered service configs [frr/swanctl/kea] + provisioned login accounts +
 	// config archive + BPF pins + networkd + firewall logs), #5890/#10300.
+	// The gated path records PENDING (the daemon flips clean after its
+	// post-verification); the offline fallback completes, as no daemon
+	// exists to verify.
 	wipe := func() error {
 		// Capture names immediately before the wipe. When factoryResetFn is
 		// wired, this closure runs inside its apply gate, so a waiting commit
-		// cannot add a destination after the inventory snapshot.
+		// cannot add a destination after the inventory snapshot. The helper
+		// path is snapshotted here for the same reason: the wipe erases the
+		// config it derives from. Offline, the snapshot feeds the wipe's
+		// own helper sweep: no daemon follows to erase a custom path.
 		logInventory := grpcapi.ZeroizeLogInventoryFromConfig(c.store.ActiveConfig())
-		return zeroizeFullWipe(configDir, configBase, cliZeroizeArchiveDir(), logInventory)
+		helperPath := dpuserspace.StateFilePathForConfig(c.store.ActiveConfig())
+		if c.factoryResetFn != nil {
+			return zeroizeFullWipePending(configDir, configBase, cliZeroizeArchiveDir(), logInventory, helperPath)
+		}
+		return zeroizeFullWipe(configDir, configBase, cliZeroizeArchiveDir(), logInventory, helperPath)
 	}
 
 	// Route through the daemon's coordinated transaction when wired. When it is

@@ -73,6 +73,20 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 		return err
 	}
 
+	// #10769 d05-F6 — reject helper state-file values aliasing reserved
+	// reset-gate/identity paths or the control socket. Strict on commit /
+	// commit-check; tolerant load / peer-sync keep the value with a
+	// warning (#1960 no-brick) — the runtime sweep guard refuses
+	// reserved targets regardless.
+	if err := validateHelperStateFileStrict(cfg); err != nil {
+		if opts.lenientHelperStateFile {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("helper state-file (downgraded to warning on tolerant path; reset sweeps refuse reserved targets): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #3061 (narrowed in #4340) — enforce the two naming invariants that keep
 	// the synthetic zone-local/<zone>/<name> internal names minted by
 	// resolveZoneLocalAddressBooks collision-proof, BEFORE folding zone-local

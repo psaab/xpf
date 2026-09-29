@@ -160,6 +160,8 @@ var declaredUnboundedForks = []unboundedForkExemption{
 		"schedulePowerAction / scheduleStopDaemon: a CONFIRMED reboot/halt/poweroff " +
 			"or zeroize daemon-stop must not be refused because the diagnostic " +
 			"budget is busy; both are behind the maintenance authz tier"},
+	{"server_diag_system_action.go", "<package-scope>", "combinedOutputTimeoutUnlimited",
+		"reset stop verification (is-active poll): confirming the post-reset daemon stop must not be refused by diagnostic backpressure"},
 	{"server_diag_system_action.go", "SystemAction", "combinedOutputTimeoutUnlimited",
 		"ip -4/-6 neigh flush: state-changing operator actions behind PermControl, " +
 			"not diagnostics — cheap, and refusing them under diagnostic load is a regression"},
@@ -167,6 +169,10 @@ var declaredUnboundedForks = []unboundedForkExemption{
 		"zeroizeUserdel / zeroizeLockRootPassword: a factory reset must run to " +
 			"completion; a half-zeroized box that left root unlocked because the " +
 			"semaphore was busy is strictly worse than a slow one"},
+	{"server_diag_zeroize_seal_10769.go", "stopKeaUnits", "combinedOutputTimeoutUnlimited",
+		"factory reset must stop Kea before erasing tenant lease data and cannot be refused by diagnostic backpressure"},
+	{"server_diag_zeroize_seal_10769.go", "keaUnitActive", "combinedOutputTimeoutUnlimited",
+		"factory-reset Kea stop/verify queries share the stop exemption: the lease wipe cannot be refused by diagnostic backpressure"},
 }
 
 // unboundedForkCallees are the helpers that fork WITHOUT drawing a diagnostic

@@ -2,6 +2,7 @@ package grpcapi
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/ipsec"
 )
 
 // ZeroizeLogInventory is the firewall-log wipe scope for a factory reset
@@ -343,10 +345,62 @@ func zeroizeFirewallLogs(inv ZeroizeLogInventory) error {
 // completes every external secret/log leg before removing the config state,
 // and removes the marker only after every leg is durable.
 func PerformZeroizeWipeWithLogInventory(configDir, configBase, archiveDir string, inv ZeroizeLogInventory) error {
-	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, inv)
+	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, inv, zeroizeComplete)
 }
 
-var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory) error {
+// zeroizeCompletion selects what a successful wipe records in the reset
+// handoff flag. The daemon-gated paths (gRPC ZeroizeFn, console
+// factoryResetFn) run daemon post-verification AFTER the wipe returns, so
+// the wipe must record PENDING (with the pre-wipe helper path the daemon
+// post-verify and boot repair need) and let the daemon flip the flag
+// clean only after its verification passes — a crash between a clean
+// write and daemon verification would otherwise open N+1 provisioning
+// over unverified residue (#10769 d05-F6). The ungated paths (no daemon
+// to verify) complete immediately, preserving the historical behavior.
+type zeroizeCompletion struct {
+	// pending records ResetHandoffPending instead of clean, keeping the
+	// daemon-verification outcome open.
+	pending bool
+	// helperPath is the pre-wipe effective helper state path, recorded
+	// durably so boot repair sweeps it instead of re-deriving the
+	// default from the (by then erased) config. "" when unknown.
+	helperPath string
+}
+
+// zeroizeComplete is the completion for legacy/test direct wipes with no
+// known helper path: no daemon runs post-verification, so the wipe's own
+// final verification grounds clean, minus the helper class it cannot name.
+var zeroizeComplete = zeroizeCompletion{}
+
+// PerformZeroizeWipePending runs the shared wipe but records a PENDING
+// handoff (dirty until the caller flips it clean) instead of completing.
+// Gated callers (daemon factoryReset) use it with the pre-wipe effective
+// helper state path, then flip the flag clean after post-verification.
+func PerformZeroizeWipePending(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, helperPath string) error {
+	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, inv, zeroizeCompletion{pending: true, helperPath: helperPath})
+}
+
+// PerformZeroizeWipeUngated runs the shared wipe to completion for callers
+// with no daemon post-verification (offline console recovery, NoDataplane
+// gRPC fallback). Unlike the gated pending variant it must erase and verify
+// the helper state file itself: no helper stop/sweep follows, so an
+// unerased custom state file would otherwise survive under a clean
+// receipt. helperPath is the pre-wipe effective path (never "").
+func PerformZeroizeWipeUngated(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, helperPath string) error {
+	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, inv, zeroizeCompletion{pending: false, helperPath: helperPath})
+}
+
+var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir string, inv ZeroizeLogInventory, completion zeroizeCompletion) error {
+	// External cleanup authority must be proven empty before beginZeroize
+	// writes a marker or any destructive leg can remove provider credentials.
+	// Wrapped in the same sentinels as the inner erase legs so callers
+	// classifying aborts with errors.Is see one shape from either layer.
+	if err := zeroizeCheckDDNSStateEmpty(); err != nil {
+		return fmt.Errorf("%w: %w", errZeroizeDDNSOwnership, err)
+	}
+	if err := ipsec.CheckConnStateEmpty(zeroizeIPsecStatePath); err != nil {
+		return fmt.Errorf("%w: %w", errZeroizeIPsecOwnership, err)
+	}
 	record, err := beginZeroize(configDir, configBase, archiveDir, inv)
 	if err != nil {
 		return err
@@ -356,6 +410,11 @@ var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir 
 
 	var errs []error
 	if err := performZeroizeWipe(configDir, configBase, archiveDir); err != nil {
+		if errors.Is(err, errZeroizeDDNSOwnership) ||
+			errors.Is(err, errZeroizeIPsecOwnership) ||
+			errors.Is(err, errZeroizeKeaStop) {
+			return err
+		}
 		errs = append(errs, err)
 	}
 	if err := zeroizeFirewallLogs(inv); err != nil {
@@ -367,9 +426,25 @@ var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir 
 	if err := zeroizeConfigDir(configDir, configBase); err != nil {
 		errs = append(errs, err)
 	}
+	// Ungated wipes erase the helper state file themselves: no daemon
+	// post-verify follows, and the helper is not running in the offline
+	// contexts that take this path. Gated wipes skip this—the helper is
+	// live until the daemon stops it post-wipe—and the daemon sweep owns
+	// the path instead.
+	if !completion.pending && completion.helperPath != "" {
+		if err := zeroizeEraseHelperState(completion.helperPath); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	// Final verification runs after every leg and immediately before the
+	// markers may clear, so a fence-escaper write that landed after an
+	// early per-leg check fails the wipe here with the boot gate intact.
+	if err := zeroizeFinalEraseVerification(completion); err != nil {
+		errs = append(errs, err)
+	}
 	switch len(errs) {
 	case 0:
-		return completeZeroize(record)
+		return completeZeroize(record, completion)
 	case 1:
 		return errs[0]
 	default:
