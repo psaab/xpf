@@ -44,7 +44,7 @@ const (
 	// worst-case JSON sizing (the test reflects the current wire schema). The
 	// daemon's snapshot API still receives one complete slice, so cap that
 	// retained slice rather than retaining an unbounded number of pages.
-	ownerRGExportEstimatedDeltaBytes = 1605
+	ownerRGExportEstimatedDeltaBytes = 1688 // #11064: +3 source-NAT ICMP identity keys in the worst-case delta JSON
 	ownerRGExportMaxAccumulatorBytes = 256 * 1024 * 1024
 	// maxOwnerRGExportDataPages is the structural data-page bound. Each
 	// kick-visible session can produce one open plus one terminal tombstone
