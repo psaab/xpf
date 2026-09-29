@@ -5593,8 +5593,8 @@ fn secure_tunnel_without_permit_still_denies_6713() {
 /// makes `show security policies` and the RT_FLOW deny event point at the rule
 /// that actually decided.
 ///
-/// Revert the `egress_zone_id` fallback and the policy id becomes the default
-/// sentinel -- RED.
+/// Reverting the `egress_zone_id` fallback leaves a resolved egress in zone 0;
+/// #11067 denies it as unattributed with no rule-counter handle -- RED.
 #[test]
 fn secure_tunnel_operator_deny_is_attributed_to_its_rule_6713() {
     let state =
@@ -5618,10 +5618,10 @@ fn secure_tunnel_operator_deny_is_attributed_to_its_rule_6713() {
         64,
     );
     assert_eq!(result.action, PolicyAction::Deny);
-    assert_ne!(
-        result.policy_id,
-        crate::policy::DEFAULT_POLICY_SENTINEL_ID,
-        "the operator's explicit deny must be the attributed verdict, not the implicit default"
+    assert_eq!(
+        result.policy_counter_idx,
+        1,
+        "the explicit deny rule's counter handle must be selected, not the zone-0 denial",
     );
 }
 
@@ -5850,13 +5850,12 @@ fn unzoned_macless_unit_does_not_inherit_a_zoned_siblings_zone_6722() {
     assert_eq!(
         result.action,
         PolicyAction::Deny,
-        "with no to-zone, no rule matches and the deny-all default decides"
+        "a resolved to-zone 0 is rejected before the implicit default (#11067)",
     );
     assert_eq!(
         result.policy_id,
-        crate::policy::DEFAULT_POLICY_SENTINEL_ID,
-        "the verdict must come from the DEFAULT policy, not from the sibling's \
-         `from-zone lan to-zone vpnb permit`"
+        crate::policy::UNATTRIBUTED_POLICY_ID,
+        "the zero-zone egress denial is unattributed, not the sibling rule or default",
     );
 
     // The String twin used by test-only callers reads the same helper.
@@ -6087,8 +6086,8 @@ fn divergently_zoned_sibling_units_do_not_pick_a_zone_6722() {
     assert_eq!(result.action, PolicyAction::Deny);
     assert_eq!(
         result.policy_id,
-        crate::policy::DEFAULT_POLICY_SENTINEL_ID,
-        "neither `lan->vpnb` nor `lan->vpnc` may match"
+        crate::policy::UNATTRIBUTED_POLICY_ID,
+        "neither `lan->vpnb` nor `lan->vpnc` may match; zone 0 is denied before default",
     );
 
     // The sibling that DOES own its ifindex is unaffected: unit 1 is on its own
@@ -6137,8 +6136,8 @@ fn quarantine_unzoned_base_does_not_inherit_the_surviving_childs_zone_6722() {
     assert_eq!(result.action, PolicyAction::Deny);
     assert_eq!(
         result.policy_id,
-        crate::policy::DEFAULT_POLICY_SENTINEL_ID,
-        "the quarantine's fail-closed intent must survive to the policy verdict"
+        crate::policy::UNATTRIBUTED_POLICY_ID,
+        "the quarantine's zone-0 egress denial is unattributed",
     );
 }
 
@@ -6252,11 +6251,47 @@ fn unzoned_iface_tunnel_unit_does_not_inherit_a_siblings_zone_via_egress_row_672
          adjudicated under a sibling unit's zone"
     );
     assert_ne!(to_id, TEST_SIBLING_VPN_ZONE_ID_6722, "specifically NOT `vpnb`");
-    assert_eq!(result.action, PolicyAction::Deny);
     assert_eq!(
         result.policy_id,
-        crate::policy::DEFAULT_POLICY_SENTINEL_ID,
-        "the verdict must come from the DEFAULT policy, not the sibling's permit"
+        crate::policy::UNATTRIBUTED_POLICY_ID,
+        "a resolved zero-zone egress is denied before default, not by the sibling's permit",
+    );
+}
+/// A real FIB route to a separately unzoned egress must not inherit permit-all.
+///
+/// This keeps the case distinct from the ambiguous shared-ifindex cells above:
+/// after removing the configured sibling rows, ifindex 42 is still selected by
+/// the FIB but has no zone claim at all.
+#[test]
+fn resolved_unzoned_egress_drops_under_permit_all_11067() {
+    let mut snapshot = wg_iface_tunnel_unzoned_unit_snapshot_6722();
+    snapshot
+        .interfaces
+        .retain(|iface| iface.name == "reth1.0" || iface.name == "wg0.0");
+    snapshot.default_policy = "permit".to_string();
+    let state = build_forwarding_state(&snapshot);
+
+    assert_eq!(state.policy.default_action, PolicyAction::Permit);
+    assert_eq!(
+        state.egress_zone_id(SHARED_TUNNEL_IFINDEX_6722),
+        0,
+        "the configured unzoned interface resolves to the unknown-zone sentinel"
+    );
+
+    let before = crate::policy::UNZONED_EGRESS_DENIED.load(std::sync::atomic::Ordering::Relaxed);
+    let (to_id, result) =
+        adjudicate_lan_transit_6722(&state, "192.168.99.7", SHARED_TUNNEL_IFINDEX_6722);
+
+    assert_eq!(to_id, 0);
+    assert_eq!(
+        result.action,
+        PolicyAction::Deny,
+        "a resolved egress with no zone must not reach default-policy permit-all"
+    );
+    assert_eq!(result.policy_id, crate::policy::UNATTRIBUTED_POLICY_ID);
+    assert!(
+        crate::policy::UNZONED_EGRESS_DENIED.load(std::sync::atomic::Ordering::Relaxed) > before,
+        "the zero-zone egress must increment its dedicated cause counter"
     );
 }
 
@@ -6278,7 +6313,7 @@ fn iface_tunnel_egress_row_is_not_upgraded_by_a_later_zoned_unit_6722() {
          other rows name none"
     );
     assert_eq!(result.action, PolicyAction::Deny);
-    assert_eq!(result.policy_id, crate::policy::DEFAULT_POLICY_SENTINEL_ID);
+    assert_eq!(result.policy_id, crate::policy::UNATTRIBUTED_POLICY_ID);
 }
 
 /// #6722 B1 SCOPE control, and the case the gate must NOT over-tighten:
@@ -6560,7 +6595,7 @@ fn explicitly_zoned_reth_member_still_makes_the_ifindex_ambiguous_6722() {
     assert_eq!(
         result.action,
         PolicyAction::Deny,
-        "default-policy deny-all decides an ambiguous egress"
+        "a resolved zone-0 egress is denied before the default policy (#11067)"
     );
 }
 
@@ -6696,8 +6731,8 @@ fn decided_empty_egress_zone_overrides_row_agreement_6722() {
     assert_eq!(result.action, PolicyAction::Deny);
     assert_eq!(
         result.policy_id,
-        crate::policy::DEFAULT_POLICY_SENTINEL_ID,
-        "with no to-zone the default policy decides, not `wan -> lan permit`"
+        crate::policy::UNATTRIBUTED_POLICY_ID,
+        "zero-zone egress is denied before default, not by `wan -> lan permit`",
     );
 }
 

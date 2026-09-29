@@ -609,8 +609,8 @@ fn an_explicit_deny_rule_revokes_the_established_session_9381() {
 /// contested ifindex produces under `stampEgressZones` rule 1 / #7509 — so the
 /// cell is not vacuous and is not deleted. It is renamed to say what it
 /// exercises, and its expectation is INVERTED, because #9513 is precisely the
-/// decision that this state must be re-judged rather than skipped: new flows out
-/// of an unzoned egress already fall to the default policy.
+/// decision that this state must be re-judged rather than skipped: a resolved
+/// egress in zone 0 is explicitly denied before the default (#11067).
 ///
 /// The two contradictory comments in the tree are also settled by that
 /// measurement. The ARM said "the established-hit arm never sees an unresolved
@@ -622,10 +622,10 @@ fn an_unzoned_egress_is_re_judged_rather_than_skipped_9513() {
     assert_eq!(
         out.revoked, 1,
         "the egress RESOLVES (to st0.0) but the box puts it in no zone, so a new \
-         flow through it would fall to `default_policy: deny`. An established one \
-         must be judged the same way. 0 here is the #9513 defect: a de-zoned \
-         egress keeps carrying live sessions indefinitely while new ones are \
-         denied (#9513)"
+         flow is explicitly denied before default-policy evaluation (#11067). An \
+         established one must be judged the same way. 0 here is the #9513 defect: \
+         a de-zoned egress keeps carrying live sessions indefinitely while new \
+         ones are denied (#9513)"
     );
     assert_eq!(
         session_count(&out.sessions),

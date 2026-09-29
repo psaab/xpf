@@ -202,6 +202,18 @@ pub(crate) const UNATTRIBUTED_POLICY_ID: u32 = 0;
 /// A distinct log reason is worth doing on its own, not folded in here.
 pub(crate) static UNZONED_INGRESS_DENIED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+///
+/// #11067: the EGRESS twin of `UNZONED_INGRESS_DENIED`. A transit flow whose
+/// egress interface is in no zone (to-zone id 0 on a RESOLVED egress) is
+/// denied rather than defaulted, for the same Junos-parity reason: an
+/// operator asking for permit-all is asking what to do with traffic that
+/// matched no policy, not asking to forward traffic that had no zone to be
+/// adjudicated in. Counted separately from the ingress arm so the two
+/// directions stay distinguishable, and separately from `default_counter`
+/// for the same configuration-fault reason. Like the ingress arm it logs as
+/// `unattributed` (`UNATTRIBUTED_POLICY_ID`), not `default-policy`.
+pub(crate) static UNZONED_EGRESS_DENIED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// #3363: stable rule identity under which the IMPLICIT default-policy hit
 /// counter is reported in [`PolicyState::counter_snapshots`] (and persisted in
@@ -3090,9 +3102,46 @@ pub(crate) fn evaluate_policy_result_l3_aware(
         packet_len,
         l4_present,
         PolicyHitCount::Count,
+        true,
     )
 }
 
+/// Evaluate a flow whose route lookup found no egress interface.
+///
+/// Unlike a resolved egress in no zone, a NoRoute flow has no egress zone to
+/// adjudicate. Preserve its existing default-policy decision so default-permit
+/// can delegate the packet to the kernel; resolved egress zone 0 is denied by
+/// `evaluate_policy_result_l3_aware`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    l4_present: bool,
+) -> PolicyEvaluationResult {
+    evaluate_policy_result_counted(
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        PolicyHitCount::Count,
+        false,
+    )
+}
 /// #9385: evaluate WITHOUT bumping any hit counter.
 ///
 /// The entry point for #8356's established-session zone-policy re-derivation,
@@ -3131,6 +3180,7 @@ pub(crate) fn evaluate_policy_result_without_counting(
         0,
         true,
         PolicyHitCount::Never,
+        true,
     )
 }
 
@@ -3148,19 +3198,16 @@ fn evaluate_policy_result_counted(
     packet_len: u64,
     l4_present: bool,
     hit_count: PolicyHitCount,
+    egress_resolved: bool,
 ) -> PolicyEvaluationResult {
     // #3110: zone id 0 is the reserved "unknown / no zone" sentinel
     // (assigned to interfaces not bound to any security zone, and to the
     // over-cap-zone collapse-to-0 path, #2391). A flow whose ingress OR
-    // egress zone is unknown does not belong to any DEFINED zone pair, so
-    // it must NOT be eligible for zone-pair policies OR `junos-global`
-    // policies — global rules apply to all *defined* zone pairs, never to
-    // unzoned transit. Fall straight through to the default action so an
-    // operator's permit-global cannot leak transit on an unzoned
-    // ingress/egress interface. Composes with the default-policy
-    // fail-closed (#3065) and wildcard-zone work (#3018); the
-    // `junos-global` sentinel (u16::MAX) is a DEFINED global zone, distinct
-    // from 0 (unknown), and is unaffected by this guard.
+    // egress zone is unknown does not belong to any DEFINED zone pair, so it
+    // must NOT be eligible for zone-pair policies OR `junos-global` policies.
+    // The gates after the tier walk reject an unzoned ingress or a resolved
+    // unzoned egress; a NoRoute flow has no egress identity and retains its
+    // default-policy decision.
     //
     // #4569: fragment-association fail-closed. On the FLOWLESS path
     // (l4_present == false) a non-first fragment's post-IP bytes are payload,
@@ -3342,43 +3389,35 @@ fn evaluate_policy_result_counted(
             }
         }
     }
-    // #6682: an unzoned INGRESS must not reach the implicit default policy.
+    // #6682/#11067: after the #3110 tier gate, a resolved zone-0 ingress or
+    // egress must not reach the implicit default policy. With default-policy
+    // permit-all that default is a PERMIT, forwarding transit for which the
+    // dataplane has no zone policy to adjudicate.
     //
-    // The #3110 block above is skipped entirely when either zone id is 0, which
-    // correctly stops every rule tier — zone-pair, from-any, to-any, both-any
-    // and junos-global — from matching. The flow then landed on the implicit
-    // default, and `default-policy permit-all` made that a PERMIT: transit
-    // forwarded on an interface in no zone, with screens already skipped. An
-    // operator asking for permit-all is asking what to do with traffic that
-    // matched no policy, not asking to forward traffic that had no zone to be
-    // adjudicated in.
-    //
-    // Scoped to the INGRESS side deliberately. An unzoned ingress is
-    // unambiguous — Junos does not pass transit on an interface that is in no
-    // zone. A zero EGRESS zone has historically had causes that were bugs
-    // elsewhere rather than genuine unzoned-ness (#6713: an xfrmi tunnel egress
-    // resolved to 0 because `populate_egress` needed a link-layer address a
-    // MAC-less interface does not have), so denying on `to_id` would risk
-    // black-holing a correctly-configured path to fix a case that has not been
-    // shown to occur. It still falls through to the default below.
-    //
-    // Host-inbound is NOT affected by THIS arm: the LocalDelivery arm
+    // #6713's MAC-less tunnel regression was caused by using the egress-row
+    // table as the zone SSOT; `egress_zone_id` now reads the unambiguous zone
+    // ledger instead, so correctly configured tunnels resolve to their actual
+    // zone. The dedicated NoRoute entry point is the distinct no-egress case:
+    // it preserves the default decision because no egress interface exists.
+    // Host-inbound is NOT affected by these transit gates: LocalDelivery
     // adjudicates through `evaluate_junos_host_policy_l3_aware`, which for
     // `from_id == 0` consults only the from-any/global tiers (#10644) — an
-    // unmatched zone-0 host-bound flow still delivers — and both production
-    // callers of this function are transit (`ForwardCandidate` and the
-    // flowless MissingNeighbor arm). Lifelines (fxp0/em0/fab*/lo0) are
-    // unaffected throughout: `userspace_unbindable_netdev` excludes them by
-    // name, so they never bind and their host traffic never reaches either
-    // gate. UPGRADE NOTE (#10644 host-inbound half): a configured
-    // from-any/global `to-zone junos-host` DENY now fires for zone-0
-    // host-bound ingress, so management on NON-LIFELINE unzoned ingress
-    // (e.g. SSH to an unzoned ge-* data port) under a from-any deny-all
-    // flips deliver -> deny on upgrade. Intended explicit-deny semantics
-    // (default configs unaffected); recourse is to zone the port or order
-    // permits above the deny. Release-note worthy.
+    // unmatched zone-0 host-bound flow still delivers. Lifelines (fxp0/em0/
+    // fab*/lo0) are unaffected throughout: `userspace_unbindable_netdev`
+    // excludes them by name, so they never bind and their host traffic never
+    // reaches either transit gate. UPGRADE NOTE (#10644 host-inbound half): a
+    // configured from-any/global `to-zone junos-host` DENY now fires for
+    // zone-0 host-bound ingress; intended explicit-deny semantics.
     if from_id == 0 {
         UNZONED_INGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return PolicyEvaluationResult {
+            action: PolicyAction::Deny,
+            policy_id: UNATTRIBUTED_POLICY_ID,
+            ..PolicyEvaluationResult::default()
+        };
+    }
+    if egress_resolved && to_id == 0 {
+        UNZONED_EGRESS_DENIED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return PolicyEvaluationResult {
             action: PolicyAction::Deny,
             policy_id: UNATTRIBUTED_POLICY_ID,

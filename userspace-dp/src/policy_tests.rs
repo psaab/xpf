@@ -1835,13 +1835,13 @@ fn global_policy_evaluated_after_zone_specific() {
     );
 }
 
-/// #3110: a flow whose ingress OR egress zone is the reserved
-/// "unknown / no zone" sentinel (id 0 — an interface not bound to any
-/// security zone, or the over-cap-zone collapse-to-0 path) must NOT be
-/// eligible for `junos-global` policies. A configured permit-global
-/// otherwise leaks transit on an unzoned ingress/egress interface. The
-/// unknown-zone flow must fall through to the default action (deny).
-/// Reverting the `from_id != 0 && to_id != 0` guard makes these RED.
+/// #3110: a flow whose ingress OR egress zone is the reserved "unknown / no
+/// zone" sentinel (id 0 — an interface not bound to any security zone) must NOT
+/// enter the policy tier walk, so `junos-global` cannot treat it as a defined
+/// zone pair. This is independent from the later fail-closed gates: #6682
+/// rejects a zero ingress and #11067 rejects a resolved zero egress before the
+/// implicit default. Removing the tier guard lets the global permit below match
+/// and makes these RED.
 #[test]
 fn unknown_ingress_zone_does_not_match_permit_global() {
     let state = parse_policy_state(
@@ -1859,7 +1859,7 @@ fn unknown_ingress_zone_does_not_match_permit_global() {
         }],
         &test_zone_name_to_id(),
     );
-    // Unknown (0) ingress zone, valid egress zone -> default deny.
+    // Unknown (0) ingress must not match the global permit; #6682 denies it.
     assert_eq!(
         evaluate_policy(
             &state,
@@ -1873,7 +1873,7 @@ fn unknown_ingress_zone_does_not_match_permit_global() {
         ),
         PolicyAction::Deny
     );
-    // Valid ingress zone, unknown (0) egress zone -> default deny.
+    // A resolved egress in zone 0 must not match the global permit (#11067).
     assert_eq!(
         evaluate_policy(
             &state,
@@ -1887,7 +1887,7 @@ fn unknown_ingress_zone_does_not_match_permit_global() {
         ),
         PolicyAction::Deny
     );
-    // Both unknown (0) -> default deny.
+    // With both unknown, the ingress gate wins before the egress gate (#6682).
     assert_eq!(
         evaluate_policy(
             &state,
@@ -8059,6 +8059,9 @@ fn eval_6682(state: &PolicyState, from_id: u16, to_id: u16) -> PolicyEvaluationR
 fn unzoned_denied_count_6682() -> u64 {
     crate::policy::UNZONED_INGRESS_DENIED.load(std::sync::atomic::Ordering::Relaxed)
 }
+fn unzoned_egress_denied_count_11067() -> u64 {
+    crate::policy::UNZONED_EGRESS_DENIED.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 #[test]
 fn unzoned_ingress_is_denied_not_defaulted_6682() {
@@ -8153,29 +8156,45 @@ fn both_any_tier_already_refused_zone_zero_before_6682() {
 }
 
 #[test]
-fn unzoned_egress_still_falls_through_to_default_6682() {
-    // Documents the deliberate scope of the #6682 deny: INGRESS only.
-    //
-    // A zero EGRESS zone has historically meant a bug elsewhere rather than
-    // genuine unzoned-ness (#6713: an xfrmi tunnel egress resolved to 0 because
-    // populate_egress needed a link-layer address a MAC-less interface has
-    // none of), so denying on it would risk black-holing a correctly configured
-    // path. If that scope is ever widened this test is the one that should be
-    // rewritten rather than deleted — its failure means the behaviour changed,
-    // which is exactly the signal wanted.
-    let state = parse_policy_state("permit", &[], &test_zone_name_to_id());
-    let before = unzoned_denied_count_6682();
+fn unzoned_egress_is_denied_not_defaulted_11067() {
+    let state = parse_policy_state(
+        "permit",
+        &[both_any_permit_snapshot_6682()],
+        &test_zone_name_to_id(),
+    );
+
+    // The wildcard really permits a defined zone pair; zone id 0 must be
+    // denied before any policy tier can admit an unzoned egress.
     assert_eq!(
-        eval_6682(&state, TEST_LAN_ZONE_ID, 0).action,
+        eval_6682(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID).action,
         PolicyAction::Permit,
-        "the #6682 deny is scoped to the ingress zone; a zero egress zone still \
-         falls through to the default policy",
+        "setup: the both-any permit admits a zoned flow",
+    );
+
+    let before = unzoned_egress_denied_count_11067();
+    let default_before = state.default_counter.test_packet_count();
+    let result = eval_6682(&state, TEST_LAN_ZONE_ID, 0);
+
+    assert_eq!(
+        result.action,
+        PolicyAction::Deny,
+        "a resolved unzoned egress reached default-policy permit-all (#11067)",
+    );
+    assert!(
+        unzoned_egress_denied_count_11067() > before,
+        "the unzoned-egress deny uses its dedicated cause counter",
     );
     assert_eq!(
-        unzoned_denied_count_6682() - before,
+        state.default_counter.test_packet_count() - default_before,
         0,
-        "a zero EGRESS zone must not be counted as an unzoned-ingress deny",
+        "the explicit unzoned-egress deny does not count as an implicit default hit",
     );
+    assert_eq!(
+        result.policy_id,
+        crate::policy::UNATTRIBUTED_POLICY_ID,
+        "the unzoned-egress deny is unattributed, not a rule or default-policy hit",
+    );
+    assert_eq!(result.policy_counter_idx, 0);
 }
 
 /// #9523: the Go builder now emits a match-all keyword as a LITERAL even when an

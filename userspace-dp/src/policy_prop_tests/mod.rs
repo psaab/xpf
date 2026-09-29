@@ -193,9 +193,10 @@ proptest! {
         prop_assert!(row.rust_verdict.policy_name == "block-host-ssh" || row.rust_verdict.policy_name == "permit-host-all");
     }
 
-    // P8 — unknown ingress is an unattributed deny; unknown egress falls to
-    // the configured default. These are evaluated from a generated copy of a
-    // committed permit-all state, not from an authored expected verdict.
+    // P8 — unknown ingress and egress are denied before the implicit default.
+    // The second egress case carries a global permit: zone id 0 must skip the
+    // entire tier walk, so the deny remains unattributed rather than matching
+    // that otherwise-applicable rule.
     #[test]
     fn p8_unknown_zone_gates_10587(_row in seed_row_strategy()) {
         let mut ingress = row_named("default-policy-permit-all-01");
@@ -208,9 +209,31 @@ proptest! {
         let mut egress = row_named("default-policy-permit-all-01");
         egress.query.to_zone = "missing-egress".to_string();
         let egress_verdict = evaluate_row(&egress);
-        prop_assert_eq!(egress_verdict.action, "permit");
-        prop_assert!(egress_verdict.default_used);
+        prop_assert_eq!(egress_verdict.action, "deny");
+        prop_assert!(!egress_verdict.default_used);
         prop_assert!(!egress_verdict.matched);
+
+        let mut egress_with_global_permit = egress;
+        egress_with_global_permit
+            .snapshot
+            .as_mut()
+            .expect("seed snapshot")
+            .rules
+            .push(PolicyRuleSnapshot {
+                rule_id: "global-allow".to_string(),
+                name: "global-allow".to_string(),
+                from_zone: "junos-global".to_string(),
+                to_zone: "junos-global".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                ..Default::default()
+            });
+        let gated_egress_verdict = evaluate_row(&egress_with_global_permit);
+        prop_assert_eq!(gated_egress_verdict.action, "deny");
+        prop_assert!(!gated_egress_verdict.default_used);
+        prop_assert!(!gated_egress_verdict.matched);
     }
 
     // P9 — changing only the default posture changes only a fall-through row.

@@ -114,11 +114,12 @@ pub(super) fn zone_pair_for_flow_with_override(
 ///
 /// WHAT THIS ACTUALLY DECIDES FOR NoRoute, stated plainly so no one reads more
 /// into the generality of the signature than is there. Both `NoRoute`
-/// constructors in `fib.rs` set `egress_ifindex: 0`, so the caller always
-/// resolves `to_zone_id = 0` — the #3110 unzoned sentinel. #3110 makes a flow
-/// with an unknown egress zone ineligible for BOTH zone-pair policies and
-/// `junos-global`, so every NoRoute evaluation falls through to the DEFAULT
-/// action. Consequences worth knowing before changing this:
+/// constructors in `fib.rs` set `egress_ifindex: 0`, so the caller has no
+/// egress interface or zone to adjudicate. #3110 excludes the `to_zone_id = 0`
+/// sentinel from every rule tier; this helper uses the
+/// `unresolved_egress` evaluator so the implicit default still decides. #11067
+/// denies zone 0 for a RESOLVED egress; do not replace this call with the
+/// ordinary evaluator, which deliberately treats that as unzoned transit.
 ///
 ///   * on a Junos-default deny box a NoRoute frame now DROPS — the intended fix,
 ///     and availability-visible on upgrade;
@@ -142,7 +143,7 @@ pub(in crate::afxdp) fn noroute_policy_denial(
 ) -> Option<crate::policy::PolicyEvaluationResult> {
     let l4_present = ports.is_some();
     let (src_port, dst_port) = ports.unwrap_or((0, 0));
-    let result = crate::policy::evaluate_policy_result_l3_aware(
+    let result = crate::policy::evaluate_policy_result_l3_aware_unresolved_egress(
         policy,
         from_zone_id,
         to_zone_id,
