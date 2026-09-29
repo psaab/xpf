@@ -2,20 +2,21 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"golang.org/x/sync/semaphore"
-
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/dhcpserver"
+	"github.com/psaab/xpf/pkg/grpcapi"
 	"github.com/psaab/xpf/pkg/vrrp"
+	"golang.org/x/sync/semaphore"
 )
 
 func isolateHandoffFlag(t *testing.T) {
@@ -1755,23 +1756,20 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	}
 }
 
-// Daemon-start recovery from ungated pending markers (round-10): after
-// an ungated reserved-alias failure (proven grpcapi-side: loader marker
-// survives, no handoff flag, config erased), starting xpfd takes the
-// fail-closed bootstrap branch (the marker Load error classifies as
-// absent-with-history). The operator authors a clean config via
-// commit-confirmed and reruns: the gated retry records pending, sweeps,
-// clears the markers, and flips clean. The planted marker is
-// beginZeroize's format (prefix + JSON record); the marker file is the
-// exact file the grpcapi leg asserts.
-func TestUngatedMarkersRestartAuthorRerunConverges10769(t *testing.T) {
-	isolateHandoffFlag(t)
+// Composed ungated recovery (round-11): a REAL PerformZeroizeWipeUngated
+// failure over a reserved alias (hermetic via the grpcapi test seam)
+// leaves REAL pending markers with no handoff flag; restart takes
+// fail-closed bootstrap; the operator authors clean via commit-confirmed;
+// the REAL ungated retry clears those markers and converges. No
+// synthetic marker, no synthetic wipe closure: every destructive step
+// runs production code. The pure-offline direct-rerun shape (no daemon
+// at all) is proven grpcapi-side.
+func TestUngatedComposedRecoveryConverges10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
 	origNodeID := hasNodeIDFileFn
 	t.Cleanup(func() { hasNodeIDFileFn = origNodeID })
 	hasNodeIDFileFn = func() bool { return false }
-	hostSeams := isolateRecoveryApplyHost(t)
 	origSethostname, origHostnamePath, origOsHostname := sethostname, hostnamePath, osHostname
 	t.Cleanup(func() { sethostname, hostnamePath, osHostname = origSethostname, origHostnamePath, origOsHostname })
 	hostnamePath = filepath.Join(t.TempDir(), "hostname")
@@ -1783,49 +1781,81 @@ func TestUngatedMarkersRestartAuthorRerunConverges10769(t *testing.T) {
 		kernelName = string(b)
 		return nil
 	}
-	// Redirect the loader marker (production lives at /etc/xpf) outside
-	// the config root, as in production: the config-root copy went with
-	// the wipe, the loader copy survives.
-	origPendingPath := configstore.FactoryResetPendingPath
-	loaderDir := t.TempDir()
-	configstore.FactoryResetPendingPath = filepath.Join(loaderDir, configstore.FactoryResetPendingBase)
-	t.Cleanup(func() { configstore.FactoryResetPendingPath = origPendingPath })
+	hostSeams := isolateRecoveryApplyHost(t)
 	root := t.TempDir()
-	dbPath := filepath.Join(root, "xpf.conf")
-	fixed := filepath.Join(t.TempDir(), "run", "xpf", "userspace-dp.json")
-	reserved := filepath.Join(t.TempDir(), ".reset-handoff")
+	restoreWipe := grpcapi.RedirectZeroizeWipePathsForTesting(root)
+	t.Cleanup(restoreWipe)
+	configDir := filepath.Join(root, "etc-xpf")
+	if err := os.MkdirAll(filepath.Join(configDir, ".configdb"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, ".configdb", "master.key"), []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, ".configdb", "active.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "xpf.conf"), []byte("system { host-name fw; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(configDir, "xpf.conf")
+	reserved := filepath.Join(root, "gates", ".reset-handoff")
 	gateBytes := []byte("gate bytes must survive")
+	if err := os.MkdirAll(filepath.Dir(reserved), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(reserved, gateBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Post-failure shape: config root wiped, loader marker surviving, no
-	// handoff flag. (The config-root marker copy went with the wipe; the
-	// reserved-path temps were swept by the failed wipe itself.) New
-	// creates the .configdb the wipe removes, so the removal below is
-	// over a real directory, not a no-op.
-	if _, err := configstore.New(dbPath); err != nil {
+	if err := os.WriteFile(reserved+".4250000000.1.tmp", []byte(`{"orphan":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, entry := range []string{filepath.Join(root, ".configdb"), dbPath} {
-		if err := os.RemoveAll(entry); err != nil {
-			t.Fatal(err)
-		}
+	// Phase 1: the REAL ungated wipe fails on the reserved alias.
+	err := grpcapi.PerformZeroizeWipeUngated(configDir, "xpf.conf", "", grpcapi.ZeroizeLogInventory{}, reserved)
+	if err == nil {
+		t.Fatal("ungated wipe over a reserved alias must fail, got nil")
 	}
-	marker := configstore.FactoryResetPendingPrefix + `{"wiped-root-test":"ungated-marker"}`
-	if err := os.MkdirAll(loaderDir, 0o700); err != nil {
-		t.Fatal(err)
+	if !strings.Contains(err.Error(), "aliases reserved") {
+		t.Fatalf("wipe error must name the reserved alias, got %v", err)
 	}
-	if err := os.WriteFile(configstore.FactoryResetPendingPath, []byte(marker), 0o600); err != nil {
-		t.Fatal(err)
+	if !strings.Contains(err.Error(), "pending markers") || !strings.Contains(err.Error(), "no handoff flag") {
+		t.Fatalf("wipe error must give the ungated markers/no-flag guidance, got %v", err)
 	}
-	if pending, err := configstore.IsFactoryResetPending(root); err != nil || pending {
-		t.Fatalf("config-root marker must be gone with the wipe: pending=%v err=%v", pending, err)
+	// The surviving marker is a VALID production record: prefix plus a
+	// JSON body whose fields match the wiped root (the private retry
+	// reader gates on exactly this shape; grpcapi pins the reader).
+	markerData, err := os.ReadFile(configstore.FactoryResetPendingPath)
+	if err != nil || !strings.HasPrefix(string(markerData), configstore.FactoryResetPendingPrefix) {
+		t.Fatalf("loader pending marker must survive the failed wipe: %q err=%v", markerData, err)
+	}
+	var record struct {
+		Version    int    `json:"version"`
+		ConfigDir  string `json:"config_dir"`
+		ConfigBase string `json:"config_base"`
+	}
+	body := strings.TrimPrefix(string(markerData), configstore.FactoryResetPendingPrefix)
+	if err := json.Unmarshal([]byte(body), &record); err != nil {
+		t.Fatalf("pending marker body must be a valid record: %v", err)
+	}
+	if record.Version != 1 || filepath.Clean(record.ConfigDir) != configDir || record.ConfigBase != "xpf.conf" {
+		t.Fatalf("pending record fields = %+v, want Version 1 matching the wiped root", record)
 	}
 	if _, _, _, present, err := configstore.ReadResetHandoff(); err != nil || present {
-		t.Fatalf("no handoff flag exists in the ungated shape: present=%v err=%v", present, err)
+		t.Fatalf("failed ungated wipe must write no handoff flag: present=%v err=%v", present, err)
 	}
-	// Restart: Load refuses on the loader marker, and the startup path
-	// takes fail-closed bootstrap (distinct from the fresh-boot shape).
+	for _, path := range []string{filepath.Join(configDir, "xpf.conf"), filepath.Join(configDir, ".configdb")} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("failed wipe must still erase config %s: %v", path, err)
+		}
+	}
+	if got, err := os.ReadFile(reserved); err != nil || string(got) != string(gateBytes) {
+		t.Fatalf("reserved file must survive byte-identical: %q err=%v", got, err)
+	}
+	if _, err := os.Lstat(reserved + ".4250000000.1.tmp"); !os.IsNotExist(err) {
+		t.Fatalf("failed wipe must still sweep temps beside the alias: %v", err)
+	}
+	// Phase 2: restart refuses on the surviving markers and takes
+	// fail-closed bootstrap (distinct from the fresh-boot shape).
 	freshStore, err := configstore.New(dbPath)
 	if err != nil {
 		t.Fatalf("restart must reconstruct the DB: %v", err)
@@ -1847,7 +1877,9 @@ func TestUngatedMarkersRestartAuthorRerunConverges10769(t *testing.T) {
 	if !d.inBootstrap() {
 		t.Fatal("restart with surviving markers must enter bootstrap mode")
 	}
-	// Author the clean config via commit-confirmed (plain refuses).
+	// Phase 3: author the clean config via commit-confirmed (plain
+	// refuses in bootstrap).
+	fixed := filepath.Join(root, "custom", "userspace-dp.json")
 	if err := freshStore.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}
@@ -1868,12 +1900,6 @@ func TestUngatedMarkersRestartAuthorRerunConverges10769(t *testing.T) {
 		t.Fatalf("confirm the authored window: %v", err)
 	}
 	assertRecoveryHostIsolated(t, d, hostSeams)
-	d.priorTunablesMu.Lock()
-	tunableCaptures := d.priorTunables != nil && (len(d.priorTunables.neighRetrans) != 0 || len(d.priorTunables.governors) != 0 || d.priorTunables.budget != "" || len(d.priorTunables.mlx5Adaptive) != 0)
-	d.priorTunablesMu.Unlock()
-	if tunableCaptures {
-		t.Fatal("authoring apply must capture no host tunables (no live sysctl writes even as root)")
-	}
 	renamed := false
 	for _, name := range hostRenames {
 		if name == "recovered" {
@@ -1883,57 +1909,38 @@ func TestUngatedMarkersRestartAuthorRerunConverges10769(t *testing.T) {
 	if !renamed {
 		t.Fatalf("hostname stub must intercept the authoring rename, got %q", hostRenames)
 	}
-	// Rerun: the gated retry records pending, sweeps the fixed path,
-	// clears the loader marker (mirroring completeZeroize's removal),
-	// and flips clean.
+	if body, err := os.ReadFile(hostnamePath); err != nil || string(body) != "recovered\n" {
+		t.Fatalf("redirected hostname file = %q err=%v, want the authored name", body, err)
+	}
+	// Phase 4: the REAL ungated retry clears those markers and flips
+	// clean. Production resolves the compiled default (pinned
+	// non-reserved grpcapi-side); the test uses the hermetic
+	// equivalent since the destructive mechanics are
+	// path-independent and the live default is forbidden.
 	if err := os.MkdirAll(filepath.Dir(fixed), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(fixed, []byte(`{"flows":["prior"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rerunWipe := func() error {
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			return err
-		}
-		for _, e := range entries {
-			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
-				return err
-			}
-		}
-		// completeZeroize removes the loader marker once the wipe
-		// succeeds; the marker must exist here or the leg is vacuous.
-		if _, err := os.Lstat(configstore.FactoryResetPendingPath); err != nil {
-			return errors.New("loader marker must predate the retry")
-		}
-		if err := os.Remove(configstore.FactoryResetPendingPath); err != nil {
-			return err
-		}
-		boot, err := configstore.CurrentBootID()
-		if err != nil {
-			return err
-		}
-		return configstore.WriteResetHandoff(boot, configstore.ResetHandoffPending, dpuserspace.StateFilePathForConfig(freshStore.ActiveConfig()))
-	}
-	if err := d.factoryReset(context.Background(), rerunWipe); err != nil {
-		t.Fatalf("rerun must converge: %v", err)
+	if err := grpcapi.PerformZeroizeWipeUngated(configDir, "xpf.conf", "", grpcapi.ZeroizeLogInventory{}, fixed); err != nil {
+		t.Fatalf("real retry must converge: %v", err)
 	}
 	if _, err := os.Lstat(configstore.FactoryResetPendingPath); !os.IsNotExist(err) {
 		t.Fatalf("converged retry must clear the loader marker: %v", err)
 	}
 	_, dirty, gotPath, present, err := configstore.ReadResetHandoff()
 	if err != nil || !present || dirty != "" || gotPath != fixed {
-		t.Fatalf("rerun must flip clean recording fixed: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
+		t.Fatalf("retry must flip clean recording the retried path: dirty=%q path=%q present=%v err=%v", dirty, gotPath, present, err)
 	}
 	if _, err := os.Lstat(fixed); !os.IsNotExist(err) {
-		t.Fatalf("rerun must sweep the recorded fixed path: %v", err)
+		t.Fatalf("retry must sweep the recorded helper path: %v", err)
 	}
 	if got, err := os.ReadFile(reserved); err != nil || string(got) != string(gateBytes) {
-		t.Fatalf("reserved file must survive the rerun byte-identical: %q err=%v", got, err)
+		t.Fatalf("reserved file must survive the retry byte-identical: %q err=%v", got, err)
 	}
-	// Reboot simulation converges the gate on a fresh handle over the
-	// wiped root: no config, no markers, no flag.
+	// Phase 5: reboot simulation converges the gate on a fresh handle
+	// over the wiped root: no config, no markers, no flag.
 	if err := configstore.WriteResetHandoff("other-boot", "", fixed); err != nil {
 		t.Fatal(err)
 	}

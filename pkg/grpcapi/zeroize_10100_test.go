@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/upgrade/lock"
 )
 
 // R-1: interior symlinks under wiped trees survive silently (#10100).
@@ -378,40 +377,9 @@ func TestZeroizeReportsInteriorDirLink10100(t *testing.T) {
 // snapshot planting.
 func hermeticWipe10100(t *testing.T, root string) (versionsDir string) {
 	t.Helper()
-	isolateZeroizeSealPaths(t, root)
-	origPendingPath := configstore.FactoryResetPendingPath
-	configstore.FactoryResetPendingPath = filepath.Join(root, "etc", "xpf", configstore.Day0ConfigAppliedBase)
-	t.Cleanup(func() { configstore.FactoryResetPendingPath = origPendingPath })
-	origHandoff := configstore.ResetHandoffPath
-	configstore.ResetHandoffPath = filepath.Join(root, "etc", "xpf", ".reset-handoff")
-	t.Cleanup(func() { configstore.ResetHandoffPath = origHandoff })
-	origFRR, origSwan, origK4, origK6 := zeroizeFRRConf, zeroizeSwanctlSnippet, zeroizeKea4Conf, zeroizeKea6Conf
-	origBPF, origND, origVer := zeroizeBPFPinDir, zeroizeNetworkdDir, zeroizeVersionsDir
-	t.Cleanup(func() {
-		zeroizeFRRConf, zeroizeSwanctlSnippet, zeroizeKea4Conf, zeroizeKea6Conf = origFRR, origSwan, origK4, origK6
-		zeroizeBPFPinDir, zeroizeNetworkdDir, zeroizeVersionsDir = origBPF, origND, origVer
-	})
-	zeroizeFRRConf = filepath.Join(root, "rendered", "frr", "frr.conf")
-	zeroizeSwanctlSnippet = filepath.Join(root, "rendered", "swanctl", "xpf.conf")
-	zeroizeKea4Conf = filepath.Join(root, "rendered", "kea", "kea-dhcp4.conf")
-	zeroizeKea6Conf = filepath.Join(root, "rendered", "kea", "kea-dhcp6.conf")
-	zeroizeBPFPinDir = filepath.Join(root, "bpf")
-	zeroizeNetworkdDir = filepath.Join(root, "networkd")
-	versionsDir = filepath.Join(root, "versions")
-	zeroizeVersionsDir = versionsDir
-	origLock := zeroizeAcquireUpgradeLock
-	t.Cleanup(func() { zeroizeAcquireUpgradeLock = origLock })
-	lockPath := filepath.Join(root, "upgrade.lock")
-	zeroizeAcquireUpgradeLock = func() (interface{ Release() error }, error) {
-		return lock.AcquireAt(lockPath, "zeroize", "")
-	}
-	login := filepath.Join(root, "login")
-	setZeroizeLoginPaths(t, filepath.Join(login, "provisioned-users"),
-		filepath.Join(login, "sudoers.d"), filepath.Join(login, "home"),
-		filepath.Join(login, "passwd"))
-	setZeroizeRootPaths(t, filepath.Join(login, "root-ssh"), nil)
-	seamZeroizeFirewallLogPaths(t, root)
-	return versionsDir
+	restore := RedirectZeroizeWipePathsForTesting(root)
+	t.Cleanup(restore)
+	return filepath.Join(root, "versions")
 }
 
 func TestZeroizeKeepsEveryLegSkipped10100(t *testing.T) {

@@ -19,82 +19,14 @@ import (
 )
 
 // isolateZeroizeSealPaths redirects every F6 system-path leg, including the
-// DDNS ownership files and the pre-existing /var/log seam, into root.
+// DDNS ownership files and the pre-existing /var/log seam, into root. It
+// delegates to RedirectZeroizeWipePathsForTesting (full wipe set — a
+// superset of the seal legs with identical values), so cross-package
+// tests share the exact hermetic surface.
 func isolateZeroizeSealPaths(t *testing.T, root string) {
 	t.Helper()
-	oldMachine, oldSSH, oldRootSSH, oldHistory := zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory
-	oldEngineID, oldBoots, oldSeed := zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed
-	oldAptLists, oldAptArchive, oldUtmp := zeroizeAptListsDir, zeroizeAptArchiveDir, zeroizeRunUtmpPath
-	oldDay0Reject, oldRootGrown := zeroizeDay0RejectedPath, zeroizeRootGrownPath
-	oldDDNSLease, oldDDNSSurface := zeroizeDDNSLeaseStatePath, zeroizeDDNSSurfaceAPath
-	oldPasswdBackups, oldHostKeys := zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath
-	oldDropins, oldVarLog := zeroizeManagedDropins, zeroizeVarLogDir
-	oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec := zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath
-	oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldNetifLease, oldNetifLinks, oldNetifServer, oldNetifState, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal, oldSethostname := zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeNetifLeaseDir, zeroizeNetifLinksDir, zeroizeNetifServerLeaseDir, zeroizeNetifStatePath, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir, zeroizeSethostname
-	t.Cleanup(func() {
-		zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory = oldMachine, oldSSH, oldRootSSH, oldHistory
-		zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
-		zeroizeAptListsDir, zeroizeAptArchiveDir, zeroizeRunUtmpPath = oldAptLists, oldAptArchive, oldUtmp
-		zeroizeDay0RejectedPath, zeroizeRootGrownPath = oldDay0Reject, oldRootGrown
-		zeroizeDDNSLeaseStatePath, zeroizeDDNSSurfaceAPath = oldDDNSLease, oldDDNSSurface
-		zeroizePasswdBackupPaths, zeroizeManagedHostKeysPath = oldPasswdBackups, oldHostKeys
-		zeroizeManagedDropins, zeroizeVarLogDir = oldDropins, oldVarLog
-		zeroizeHostnamePath, zeroizeHostsPath, zeroizeResolvConfPath, zeroizeDBusMachineIDPath, zeroizeIPsecStatePath = oldHostname, oldHosts, oldResolv, oldDBus, oldIPsec
-		zeroizeKeaLeasePaths, zeroizeStopKeaUnits, zeroizeVerifyKeaStopped, zeroizeVarBackupsDir, zeroizeNetworkdLeaseDir, zeroizeNetifLeaseDir, zeroizeNetifLinksDir, zeroizeNetifServerLeaseDir, zeroizeNetifStatePath, zeroizeDHCPClientStateDirs, zeroizeTmpDirs, zeroizeShmDir, zeroizeEtcDir, zeroizeRunXPFDir, zeroizeRunJournalDir, zeroizeSethostname = oldKeaPaths, oldStopKea, oldVerifyKea, oldVarBackups, oldNetLease, oldNetifLease, oldNetifLinks, oldNetifServer, oldNetifState, oldDHCPClient, oldTmp, oldShm, oldEtc, oldRunXPF, oldRunJournal, oldSethostname
-	})
-
-	zeroizeMachineIDPath = filepath.Join(root, "etc", "machine-id")
-	zeroizeSSHHostKeyDir = filepath.Join(root, "etc", "ssh")
-	zeroizeRootSSHUserDir = filepath.Join(root, "root", ".ssh")
-	zeroizeRootBashHistory = filepath.Join(root, "root", ".bash_history")
-	zeroizeSNMPEngineIDPath = filepath.Join(root, "var", "lib", "xpf", "snmp-engine-id")
-	zeroizeSNMPEngineBootsPath = filepath.Join(root, "var", "lib", "xpf", "snmp-engineboots")
-	zeroizeSystemdRandomSeed = filepath.Join(root, "var", "lib", "systemd", "random-seed")
-	zeroizeAptListsDir = filepath.Join(root, "var", "lib", "apt", "lists")
-	zeroizeAptArchiveDir = filepath.Join(root, "var", "cache", "apt", "archives")
-	zeroizeRunUtmpPath = filepath.Join(root, "run", "utmp")
-	zeroizeDay0RejectedPath = filepath.Join(root, "etc", "xpf", ".day0-config-rejected")
-	zeroizeRootGrownPath = filepath.Join(root, "etc", "xpf", ".root-grown")
-	zeroizeDDNSLeaseStatePath = filepath.Join(root, "var", "lib", "xpf", "dhcp-ddns-state.json")
-	zeroizeDDNSSurfaceAPath = filepath.Join(root, "var", "lib", "xpf", "interface-ddns-state.json")
-	zeroizePasswdBackupPaths = []string{
-		filepath.Join(root, "etc", "passwd-"), filepath.Join(root, "etc", "shadow-"),
-		filepath.Join(root, "etc", "group-"), filepath.Join(root, "etc", "gshadow-"),
-	}
-	zeroizeManagedHostKeysPath = filepath.Join(root, "etc", "ssh", "ssh_known_hosts")
-	zeroizeManagedDropins = []string{
-		filepath.Join(root, "etc", "ssh", "sshd_config.d", "00-xpf.conf"),
-		filepath.Join(root, "etc", "ssh", "sshd_config.d", "xpf.conf"),
-		filepath.Join(root, "etc", "chrony", "sources.d", "xpf.sources"),
-		filepath.Join(root, "etc", "chrony", "conf.d", "xpf-threshold.conf"),
-		filepath.Join(root, "etc", "systemd", "resolved.conf.d", "xpf.conf"),
-		filepath.Join(root, "etc", "systemd", "resolved.conf.d", "bpfrx.conf"),
-	}
-	zeroizeHostnamePath = filepath.Join(root, "etc", "hostname")
-	zeroizeHostsPath = filepath.Join(root, "etc", "hosts")
-	zeroizeResolvConfPath = filepath.Join(root, "etc", "resolv.conf")
-	zeroizeDBusMachineIDPath = filepath.Join(root, "var", "lib", "dbus", "machine-id")
-	zeroizeIPsecStatePath = filepath.Join(root, "var", "lib", "xpf", "ipsec-conn-state.json")
-	zeroizeKeaLeasePaths = []string{
-		filepath.Join(root, "var", "lib", "kea", "kea-leases4.csv"),
-		filepath.Join(root, "var", "lib", "kea", "kea-leases6.csv"),
-	}
-	zeroizeStopKeaUnits = func() error { return nil }
-	zeroizeVerifyKeaStopped = func() error { return nil }
-	zeroizeSethostname = func([]byte) error { return nil }
-	zeroizeVarBackupsDir = filepath.Join(root, "var", "backups")
-	zeroizeNetworkdLeaseDir = filepath.Join(root, "var", "lib", "systemd", "network")
-	zeroizeNetifLeaseDir = filepath.Join(root, "run", "systemd", "netif", "leases")
-	zeroizeNetifLinksDir = filepath.Join(root, "run", "systemd", "netif", "links")
-	zeroizeNetifServerLeaseDir = filepath.Join(root, "run", "systemd", "netif", "dhcp-server-lease")
-	zeroizeNetifStatePath = filepath.Join(root, "run", "systemd", "netif", "state")
-	zeroizeDHCPClientStateDirs = []string{filepath.Join(root, "var", "lib", "dhcp"), filepath.Join(root, "var", "lib", "dhclient")}
-	zeroizeTmpDirs = []string{filepath.Join(root, "tmp"), filepath.Join(root, "var", "tmp")}
-	zeroizeShmDir = filepath.Join(root, "dev", "shm")
-	zeroizeEtcDir = filepath.Join(root, "etc")
-	zeroizeRunXPFDir = filepath.Join(root, "run", "xpf")
-	zeroizeRunJournalDir = filepath.Join(root, "run", "log", "journal")
-	zeroizeVarLogDir = filepath.Join(root, "var", "log")
+	restore := RedirectZeroizeWipePathsForTesting(root)
+	t.Cleanup(restore)
 }
 
 // RED on revert: dropping zeroizeImageSealResidue from performZeroizeWipe
@@ -2060,6 +1992,15 @@ func TestUngatedReservedAliasRecoversByRerun10769(t *testing.T) {
 	markerData, err := os.ReadFile(configstore.FactoryResetPendingPath)
 	if err != nil || !strings.HasPrefix(string(markerData), configstore.FactoryResetPendingPrefix) {
 		t.Fatalf("loader pending marker must survive the failed wipe: %q err=%v", markerData, err)
+	}
+	// The surviving marker must be a VALID production record (not just
+	// a prefix): the retry reader gates on Version + root match.
+	record, ok, err := readZeroizePendingRecord(configstore.FactoryResetPendingPath, configDir, "xpf.conf")
+	if err != nil || !ok {
+		t.Fatalf("surviving marker must parse as a valid pending record: ok=%v err=%v", ok, err)
+	}
+	if record.Version != 1 || filepath.Clean(record.ConfigDir) != configDir || record.ConfigBase != "xpf.conf" {
+		t.Fatalf("pending record fields = %+v, want Version 1 matching the wiped root", record)
 	}
 	if _, _, _, present, err := configstore.ReadResetHandoff(); err != nil || present {
 		t.Fatalf("failed ungated wipe must write no handoff flag: present=%v err=%v", present, err)
