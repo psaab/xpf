@@ -1655,6 +1655,10 @@ func ValidateConfig(cfg *Config) []string {
 
 	warnings = append(warnings, validateRibGroupLeakWarnings(cfg)...)
 
+	// #11320: next-table / PBR targets can lack a return route to main-only
+	// peers, so warn and point operators to the supported per-instance static route.
+	warnings = append(warnings, validateTargetReturnPathWarnings(cfg)...)
+
 	// #9405: a routing-protocol interface reference that names no configured
 	// interface renders an FRR stanza that binds nothing, silently.
 	warnings = append(warnings, validateProtocolInterfaceRefWarnings(cfg)...)

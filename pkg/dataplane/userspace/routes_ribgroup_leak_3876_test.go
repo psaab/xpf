@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
 )
 
@@ -108,5 +109,73 @@ func TestBuildRouteSnapshotsSkipsDstlessRibGroupRule(t *testing.T) {
 		if r.NextTable == "dmz-vr.inet.0" {
 			t.Fatalf("a Dst-less blanket rule must NOT produce a NextTable leak, got %+v", r)
 		}
+	}
+}
+
+// TestBuildRouteSnapshotsSkipsSourceOnlyReturnRule pins the #11062 boundary:
+// a source-only rule without a destination cannot be mirrored as a scoped
+// reverse NextTable route, so it must not become an unconditional userspace
+// leak.
+func TestBuildRouteSnapshotsSkipsSourceOnlyReturnRule(t *testing.T) {
+	orig := ruleListFn
+	t.Cleanup(func() { ruleListFn = orig })
+	ruleListFn = func(family int) ([]netlink.Rule, error) {
+		if family == syscall.AF_INET {
+			return []netlink.Rule{{
+				Src: mustCIDR(t, "10.30.0.0/24"), IifName: "vrf-src",
+				Table: 254, Priority: 1500,
+			}}, nil
+		}
+		return nil, nil
+	}
+	cfg := &config.Config{
+		RoutingInstances: []*config.RoutingInstanceConfig{{Name: "src", TableID: 200}},
+	}
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+	if len(routes) != 0 {
+		t.Fatalf("a return rule without Dst must not create a NextTable route: %+v", routes)
+	}
+}
+
+func TestBuildRouteSnapshotsMirrorsRibGroupReturnRules(t *testing.T) {
+	orig := ruleListFn
+	t.Cleanup(func() { ruleListFn = orig })
+	ruleListFn = func(family int) ([]netlink.Rule, error) {
+		if family == syscall.AF_INET {
+			dst := mustCIDR(t, "10.40.0.0/24")
+			return []netlink.Rule{
+				{
+					Dst: dst, IifName: "vrf-src",
+					Table: 300, Priority: routing.RibGroupReturnRulePriority,
+				},
+				{
+					Dst: dst, OifName: "vrf-src",
+					Table: 300, Priority: routing.RibGroupReturnRulePriority,
+				},
+			}, nil
+		}
+		return nil, nil
+	}
+	cfg := &config.Config{
+		RoutingInstances: []*config.RoutingInstanceConfig{
+			{Name: "src", TableID: 200},
+			{Name: "b", TableID: 300},
+		},
+	}
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("the iif/oif kernel pair must dedupe to one reverse leak, got %+v", routes)
+	}
+	got := routes[0]
+	if got.Table != "src.inet.0" || got.Family != "inet" ||
+		got.Destination != "10.40.0.0/24" || got.NextTable != "b.inet.0" ||
+		got.RulePriority != uint32(routing.RibGroupReturnRulePriority) {
+		t.Fatalf("reverse return snapshot = %+v, want src.inet.0 to b.inet.0 for peer prefix 10.40.0.0/24", got)
 	}
 }

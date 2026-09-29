@@ -107,5 +107,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Resolve routing-instance ownership by Linux device identity, reject
     alias/tunnel dual claims, and quarantine ambiguous memberships on tolerant
     loads with an apply alarm and alertable metric (#11060).
+  * Scope rib-group return paths to peer prefixes and peer tables so unrelated
+    VRF misses cannot fall through to main; warn when next-table/PBR targets
+    may lack a return route (#11062/#11320).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

@@ -43,58 +43,82 @@ existing `rule.Dst != nil` + table→instance loop auto-captures each as a
 `NextTable` leak into the main table (`pkg/dataplane/userspace/routes.go`) —
 putting the leak into the **userspace FIB** as well as the kernel FIB.
 
-### A VRF lookup that misses ends there; a source's return path is main (#9819)
+### VRF misses and reciprocal peer returns (#9819/#11062)
 
-The kernel's `l3mdev` rule at priority 1000 is a **lookup** rule. A lookup in
-VRF context that missed its own table used to continue down the rule list,
-first into this band and then into `main`. Measured in a private network
-namespace, and pinned by `TestVRFMissTerminatorOnRealKernel9819`:
+The kernel's `l3mdev` rule at priority 1000 is a lookup: when a VRF's own
+table misses, processing continues down the RPDB. Without the #9819
+`l3mdev unreachable` terminator, that miss can reach arbitrary routes in `main`.
+The terminator at priority 2000 makes unmatched VRF misses fail closed.
 
-| Lookup | Before #9819 | After |
-|---|---|---|
-| A miss on a VRF slave, or from a VRF-bound socket | resolved by `main` | `Network is unreachable` |
-| A VRF lookup for a prefix another instance leaked | resolved in that source's table | `Network is unreachable` |
-| `main` to a leaked prefix | the source's table | the source's table |
-| The return lookup from the leak source | `main`, by falling through | `main`, by a rule |
-| A VRF's own connected, static or default route | resolves | resolves |
+For a source instance whose own rib-group leak installed, #11062 adds
+destination-scoped return rules for prefixes leaked by **other** instances:
 
-Two rule sets produce the right-hand column:
+```
+ip rule add pref 1500 to <peer-prefix> iif vrf-<instance> lookup <peer-table>
+ip rule add pref 1500 to <peer-prefix> oif vrf-<instance> lookup <peer-table>
+```
 
-- **The miss terminator**, `ip rule add pref 2000 l3mdev unreachable`, once per
-  family. `vrfManager.Reconcile` installs it before creating any VRF device. It
-  uses the kernel rule's own `l3mdev` selector, so it matches exactly the
-  lookups that consulted a VRF table and missed. It is the rule form of the
-  per-VRF `unreachable default` route the kernel's VRF documentation
-  recommends. A rule was chosen over a route because a route would sit in each
-  VRF table, which FRR's zebra, systemd-networkd and the FBF harness all
-  enumerate.
-- **Return rules for a leak source**, `ip rule add pref 1500 iif|oif
-  vrf-<instance> lookup main`, in each family whose leak installs. A source's
-  table has no route to the hosts that use its leaked prefixes, because `main`
-  is what reaches them. With the terminator alone, `main`'s lookup of a leaked
-  address failed its reverse-path check (`EINVAL`), and the return lookup was
-  unreachable.
+The peer-prefix set comes from the existing interface-routes rib-group
+configuration and the same static connected-prefix derivation used by the
+forward leak. The destination scope is essential: traffic to a peer prefix
+that another instance leaked goes directly to that peer's table. It does not
+fall through to `main`'s default route, and a VRF miss to a main-only
+destination does not match and reaches the terminator. No `from` selector is
+used: scoping only by source would still authorize every main-only destination
+for any host in that source prefix.
 
-The return rules are a **named reliance**: *a rib-group source's misses resolve
-in `main`.* The fall-through already did that before #9819. It is now narrower,
-because `lookup main` is a table action: a lookup that also misses `main` meets
-the terminator, never this band or another instance's table. A source with its
-own covering route, such as its own default, never consults them.
+The scoped lookup runs after `l3mdev` (1000), so a peer prefix must not already
+resolve in the source VRF's own table. The kernel path and AF_XDP FIB agree:
+the FIB mirrors the Dst-scoped return pair as one reverse `NextTable` route
+from the source instance table to the peer instance table, preserving the
+exact peer destination prefix. The iif/oif pair deduplicates to one route.
 
-What an operator can observe:
+### Next-table / PBR targets (#11320)
 
-- **A management-VRF miss is unreachable.** Management traffic to a destination
-  that table 999 (`vrf-mgmt`) does not cover used to leave through `main`, that
-  is, through the data plane. That happens when there is no default route in the
-  management table, a DHCP lease carries no router, or a lease is lost. That
-  traffic now fails.
-- **A VRF-bound daemon loses a peer it could reach only through `main`.** This
-  covers FRR peering, DHCP relay, syslog, RPM probes and IPsec. Route the peer
-  inside the instance.
-- Priorities 1000-2000 are reserved for VRF-context rules that must run after
-  the VRF's table and before the terminator. Their order relative to the
-  kernel's rule and to this band is checked at compile time
-  (`pkg/routing/rib_group_return_9819.go`).
+The VRF miss terminator also makes return traffic from next-table and PBR
+targets fail closed unless the target has a route to the peer. xpf deliberately
+does not install a target-wide `lookup main` exception: it could expose every
+main-only destination, and a source-prefix selector is not a sufficient
+destination authorization. Commit emits a warning for each next-table or PBR
+target to make this limitation visible.
+
+Configure the peer route with a supported per-instance static next-hop:
+
+```
+routing-instances {
+    blue {
+        routing-options {
+            static {
+                route 198.51.100.0/24 {
+                    next-hop 10.20.0.2;
+                }
+            }
+        }
+    }
+}
+```
+
+This installs a route in `blue`'s own table, so it resolves before the miss
+terminator. The peer prefix and next-hop must match the deployment's reachable
+peer and connected topology. Per-instance `next-table` is unsupported (#5830)
+and rejected at commit; do not rely on it as a substitute.
+
+### Lookup contract
+
+| Lookup | Result |
+|---|---|
+| VRF miss to a main-only destination | `Network is unreachable` |
+| VRF miss to a prefix leaked by another instance | `main` route (for example, the main default via `xmain`) |
+| Main lookup to a leaked prefix | The leaking source instance table |
+| VRF lookup to its connected/static route | Resolves in that VRF |
+| Next-table/PBR target return with no peer route | `Network is unreachable`; commit warns |
+| Next-table/PBR target return with a matching per-instance static route | Resolves via the configured next-hop |
+
+The real-kernel regression is `TestVRFMissTerminatorOnRealKernel9819` in
+`pkg/routing/vrf_miss_terminator_9819_test.go`. It checks the positive
+other-instance peer-prefix return in IPv4/IPv6 and the negative main-only
+destination lookup in the same network namespace, alongside the ordinary
+connected/static/default and main-to-leak controls.
 
 ## Why the pre-#3876 behavior was a no-op
 

@@ -127,7 +127,7 @@ type nextTableManager struct {
 // rather than installing a global iif-less rule. The fail-safe direction is an
 // under-steer (the leak is not followed) — never a cross-VRF over-steer.
 func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*config.RoutingInstanceConfig, ingressIfaces []string) error {
-	// Build instance name → table ID map
+	// Build instance name → table ID map.
 	tableIDs := make(map[string]int)
 	for _, inst := range instances {
 		tableIDs[inst.Name] = inst.TableID
@@ -370,9 +370,7 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 			"ingress_interfaces", len(ingressIfaces))
 		prio += added
 	}
-	// Desired rules are re-added; surface any clear/add failure so a dropped
-	// leak rule (or the orphaned-rule window) is observable rather than
-	// silently nil (#3731 / #2273).
+	// Desired rules are re-added; surface any clear/add/return failure.
 	return errors.Join(errs...)
 }
 
@@ -566,9 +564,8 @@ type ribGroupManager struct {
 // Phase 2 and warned at commit (pkg/config); this applier installs nothing
 // for them.
 //
-// #9819: for each source whose leak installs, Apply also adds return rules
-// (`iif`/`oif vrf-<instance> lookup main`), so the VRF miss terminator does
-// not cut the leak's return path. See ribGroupReturnRulePriority.
+// #11062: each leaking source's return rules are destination-scoped to other
+// instances' leaked peer prefixes, so unrelated VRF misses stay terminated.
 func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instances []*config.RoutingInstanceConfig, connectedPrefixes map[string][]string) error {
 	// Clean up old rib-group rules. As with next-table, a failed per-family
 	// list does not abort the apply; the clear error is captured and
@@ -650,7 +647,7 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 			}
 		}
 
-		installed := map[int]bool{}
+		installed := map[int][]*net.IPNet{}
 		for _, lr := range toInstall {
 			// Hard-cap at the priority window clear() scans. A rule at or
 			// beyond the upper bound would never be removed on a later apply
@@ -688,21 +685,78 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 				prio++
 				continue
 			}
-			installed[lr.family] = true
+			installed[lr.family] = append(installed[lr.family], dst)
 			slog.Info("rib-group leak rule added",
 				"instance", inst.Name, "prefix", lr.prefix,
 				"table", sourceTable, "family", familyStr, "pref", prio)
 			prio++
 		}
-		// #9819: the source's return path, in each family whose leak
-		// installed. See ribGroupReturnRulePriority for why it is main, and
-		// only main.
-		errs = append(errs, rg.addRibGroupReturnRules(inst, installed)...)
+		// Return to other leaking instances through their own tables, but only
+		// for their leaked prefixes. Main-only destinations remain subject to
+		// the terminator.
+		peerPrefixes, peerErrs := ribGroupPeerReturnPrefixes(
+			inst, instances, ribGroups, tableIDs, connectedPrefixes, installed)
+		errs = append(errs, peerErrs...)
+		errs = append(errs, rg.addRibGroupReturnRules(inst, peerPrefixes)...)
 	}
 	// Desired rules are re-added; surface any clear/add failure so a dropped
 	// leak rule (or the orphaned-rule window) is observable rather than
 	// silently nil (#3731 / #2273).
 	return errors.Join(errs...)
+}
+
+// ribGroupPeerReturnPrefixes returns other instances' connected prefixes
+// that leak into main, restricted to address families in which this source
+// successfully installed its own leak.
+func ribGroupPeerReturnPrefixes(
+	instance *config.RoutingInstanceConfig,
+	instances []*config.RoutingInstanceConfig,
+	ribGroups map[string]*config.RibGroup,
+	tableIDs map[string]int,
+	connectedPrefixes map[string][]string,
+	installed map[int][]*net.IPNet,
+) (map[int][]ribGroupPeerReturnPrefix, []error) {
+	peers := map[int][]ribGroupPeerReturnPrefix{unix.AF_INET: {}, unix.AF_INET6: {}}
+	seen := make(map[string]bool)
+	var errs []error
+	for _, peer := range instances {
+		if peer == nil || peer.Name == "" || peer.Name == instance.Name || peer.TableID == instance.TableID {
+			continue
+		}
+		families := []struct {
+			family  int
+			group   string
+			enabled bool
+		}{
+			{unix.AF_INET, peer.InterfaceRoutesRibGroup, len(installed[unix.AF_INET]) > 0},
+			{unix.AF_INET6, peer.InterfaceRoutesRibGroupV6, len(installed[unix.AF_INET6]) > 0},
+		}
+		for _, candidate := range families {
+			if !candidate.enabled || !ribGroupLeaksIntoMain(candidate.group, ribGroups, tableIDs, peer.Name) {
+				continue
+			}
+			for _, raw := range connectedPrefixes[peer.Name] {
+				_, prefix, err := net.ParseCIDR(raw)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("rib-group peer prefix %q instance %s: %w", raw, peer.Name, err))
+					continue
+				}
+				isV4 := prefix.IP.To4() != nil
+				if isV4 != (candidate.family == unix.AF_INET) {
+					continue
+				}
+				key := fmt.Sprintf("%d:%s", candidate.family, prefix.String())
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				peers[candidate.family] = append(peers[candidate.family], ribGroupPeerReturnPrefix{
+					prefix: prefix, tableID: peer.TableID,
+				})
+			}
+		}
+	}
+	return peers, errs
 }
 
 // ribGroupLeaksIntoMain reports whether the named interface-routes rib-group
@@ -762,7 +816,7 @@ func splitConnectedPrefixesByFamily(prefixes []string) (v4, v6 []string) {
 //   - [200, 300): the original legacy window.
 //
 // It also removes the #9819 return rules at ribGroupReturnRulePriority, which
-// Apply re-adds for every source whose leak installs.
+// Apply re-adds per source and per connected peer prefix.
 //
 // Per-family RuleList dump failures are aggregated and returned rather
 // than swallowed; see the rationale on nextTableManager.clear (#2273).
@@ -778,7 +832,7 @@ func (rg *ribGroupManager) clear() error {
 			inCurrent := r.Priority >= ribGroupLeakRulePriority && r.Priority < ribGroupLeakRulePriority+maxRibGroupLeakRules
 			inOldBlanket := r.Priority >= ribGroupRulePriority && r.Priority < ribGroupRulePriority+100
 			inLegacy := r.Priority >= 200 && r.Priority < 300
-			inReturn := r.Priority == ribGroupReturnRulePriority // #9819
+			inReturn := r.Priority == RibGroupReturnRulePriority // #9819
 			if inCurrent || inOldBlanket || inLegacy || inReturn {
 				if err := rg.ops.RuleDel(&r); err != nil {
 					if isRuleAlreadyGone(err) {
@@ -999,7 +1053,7 @@ func (p *pbrManager) Apply(rules []PBRRule) error {
 			"table", pbr.TableID)
 		prio++
 	}
-	// Desired rules are re-added; surface any clear/parse/add/overflow failure.
+	// Desired rules are re-added; surface any clear/parse/add/return failure.
 	return errors.Join(errs...)
 }
 
@@ -1088,7 +1142,7 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	}
 	fw := &cfg.Firewall
 
-	// Build instance name → table ID map
+	// Build instance name → table ID map.
 	tableIDs := make(map[string]int)
 	for _, inst := range cfg.RoutingInstances {
 		tableIDs[inst.Name] = inst.TableID

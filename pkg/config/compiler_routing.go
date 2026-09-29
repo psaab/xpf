@@ -1560,31 +1560,20 @@ func ribTargetKind(ribName, selfInstance string, definedInstances map[string]boo
 	return "unknown"
 }
 
-// RibGroupConnectedPrefixes derives, per source routing instance carrying an
-// interface-routes rib-group, the connected network prefixes eligible for the
-// #3876 per-prefix leak. For each instance member interface (e.g.
-// "ge-0/0/1.0") it resolves the physical interface + unit and collects the
-// masked network prefix of every static address on that unit via
-// ConnectedNetworkPrefix — the SAME derivation the userspace FIB uses for
-// connected routes, so the leaked ip-rule set matches the connected routes in
-// the source table.
+// RoutingInstanceConnectedPrefixes derives the statically configured connected
+// network prefixes for every routing instance. Prefixes are masked through
+// ConnectedNetworkPrefix, the same derivation the userspace FIB uses for
+// connected routes. Callers split the mixed IPv4/IPv6 list by family.
 //
-// DHCP-only units carry no static Addresses (the lease is learned at runtime)
-// and contribute no enumerable prefix; the commit-time warn
-// (validateRibGroupLeakWarnings) surfaces that so the leak is fail-loud rather
-// than a silent no-op. The map is keyed by routing-instance name with v4 and
-// v6 prefixes mixed (the applier splits by family). Shared by the daemon
-// applier input and the config warn path so the two never drift.
-func RibGroupConnectedPrefixes(cfg *Config) map[string][]string {
+// Dynamic DHCP addresses are intentionally absent: they cannot be enumerated
+// during config apply.
+func RoutingInstanceConnectedPrefixes(cfg *Config) map[string][]string {
 	out := make(map[string][]string)
 	if cfg == nil {
 		return out
 	}
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.Name == "" {
-			continue
-		}
-		if ri.InterfaceRoutesRibGroup == "" && ri.InterfaceRoutesRibGroupV6 == "" {
 			continue
 		}
 		var prefixes []string
@@ -1600,6 +1589,25 @@ func RibGroupConnectedPrefixes(cfg *Config) map[string][]string {
 		}
 		if len(prefixes) > 0 {
 			out[ri.Name] = prefixes
+		}
+	}
+	return out
+}
+
+// RibGroupConnectedPrefixes returns the connected-prefix subset whose
+// instances configure interface-routes rib-groups. It is the #3876 per-prefix
+// leak set and the source for #11062 reciprocal peer-prefix matching.
+func RibGroupConnectedPrefixes(cfg *Config) map[string][]string {
+	out := RoutingInstanceConnectedPrefixes(cfg)
+	if cfg == nil {
+		return out
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		if ri.Name == "" || (ri.InterfaceRoutesRibGroup == "" && ri.InterfaceRoutesRibGroupV6 == "") {
+			delete(out, ri.Name)
 		}
 	}
 	return out
