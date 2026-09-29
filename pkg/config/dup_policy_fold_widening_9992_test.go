@@ -10,9 +10,10 @@ import (
 // A duplicate fold that ends in PERMIT therefore widens a defaulted deny and
 // must poison the merged policy just like an explicit deny/reject (#9571).
 //
-// RED-on-revert: restoring statementRestricts9571's old `ok && a != Permit`
-// predicate makes every defaulted-deny case below compile as an unpoisoned
-// permit. The strict assertions pin that #3473/#3043 admission is unchanged.
+// RED-on-revert: treating an actionless source statement as non-restrictive
+// instead of honoring compilePolicy's effective DENY makes each defaulted-deny
+// case below compile as an unpoisoned permit. The strict assertions pin that
+// #3473/#3043 admission is unchanged.
 func TestFoldDefaultedDenyWideningIsPoisoned9992(t *testing.T) {
 	for _, tc := range []struct {
 		name, strictDiagnostic string

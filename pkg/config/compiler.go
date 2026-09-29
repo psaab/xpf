@@ -337,14 +337,14 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 				"first occurrence (#9023); previously the later block replaced the earlier "+
 				"one and its configuration was discarded")
 	}
-	// #9571: the fold also reports every policy it merged into a PERMIT although
-	// one of the statements said deny or reject. Those are poisoned right after
-	// the compile below (markFoldWidenedPolicies9571), so the load is refused
-	// rather than admitting traffic a statement denied.
+	// #9571: poison only folds that turn a restrictive source statement into
+	// PERMIT. Direct terminal-action conflicts are captured before folding;
+	// safe duplicate folds with different actions are not direct conflicts.
 	var foldWidened []foldWidenedPolicy9571
+	var directActionConflicts []directTerminalActionConflict11063
 	if opts.lenientDuplicatePolicyNames {
 		var merged []string
-		merged, foldWidened = mergeDuplicateNamedInstances(tree)
+		merged, foldWidened, directActionConflicts = mergeDuplicateNamedInstances(tree)
 		for _, what := range merged {
 			// The wording deliberately carries "duplicate policy name" and
 			// "#3473": that is the existing contract for this diagnostic, and
@@ -547,9 +547,9 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if usedNodeFallback {
 		cfg.Warnings = append(cfg.Warnings, `apply-groups "${node}" resolved using default node0 context during generic compile`)
 	}
-	// #9571: poison what the fold widened. After the compile, because the flag
-	// lives on the compiled policy; before return, because the snapshot builder
-	// and the #6707 rollback preflight both read it from the returned cfg.
+	// Mark source-action conflicts and widening folds after compilation, when
+	// the LenientContentDropped flag lives on the compiled policy.
+	markDirectTerminalActionConflicts11063(cfg, directActionConflicts)
 	markFoldWidenedPolicies9571(cfg, foldWidened)
 	cfg.Warnings = append(cfg.Warnings, tunnelIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)
@@ -664,14 +664,14 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 				"first occurrence (#9023); previously the later block replaced the earlier "+
 				"one and its configuration was discarded")
 	}
-	// #9571: the fold also reports every policy it merged into a PERMIT although
-	// one of the statements said deny or reject. Those are poisoned right after
-	// the compile below (markFoldWidenedPolicies9571), so the load is refused
-	// rather than admitting traffic a statement denied.
+	// #9571: poison only folds that turn a restrictive source statement into
+	// PERMIT. Direct terminal-action conflicts are captured before folding;
+	// safe duplicate folds with different actions are not direct conflicts.
 	var foldWidened []foldWidenedPolicy9571
+	var directActionConflicts []directTerminalActionConflict11063
 	if opts.lenientDuplicatePolicyNames {
 		var merged []string
-		merged, foldWidened = mergeDuplicateNamedInstances(tree)
+		merged, foldWidened, directActionConflicts = mergeDuplicateNamedInstances(tree)
 		for _, what := range merged {
 			// The wording deliberately carries "duplicate policy name" and
 			// "#3473": that is the existing contract for this diagnostic, and
@@ -846,9 +846,9 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 		return nil, err
 	}
 
-	// #9571: poison what the fold widened. After the compile, because the flag
-	// lives on the compiled policy; before return, because the snapshot builder
-	// and the #6707 rollback preflight both read it from the returned cfg.
+	// Mark source-action conflicts and widening folds after compilation, when
+	// the LenientContentDropped flag lives on the compiled policy.
+	markDirectTerminalActionConflicts11063(cfg, directActionConflicts)
 	markFoldWidenedPolicies9571(cfg, foldWidened)
 	cfg.Warnings = append(cfg.Warnings, tunnelIDWarnings...)
 	cfg.Warnings = append(cfg.Warnings, dupMergeWarnings...)

@@ -408,15 +408,15 @@ func compilePolicy(polInst struct {
 
 	// #5575 / #11013 / #11014 / #11023 / #11063: fail-CLOSED on tolerant
 	// load / peer-sync. A policy the strict gates reject for dropped match/then
-	// enforcement, an unsupported then-log mode, or conflicting terminal
-	// actions is downgraded to a warning, but the compiler silently discards
-	// that content or keeps last-wins action semantics. Empty match dimensions
-	// become match-ANY; a dropped then sibling can leave an earlier permit
-	// active; an unknown log mode drops configured session logging; and an
-	// unknown policy subtree can carry enforcement constraints the direct
-	// policy compiler ignores. Record the invalidation so the userspace
-	// snapshot builder poisons the rule with the __unsupported__ sentinel
-	// instead of publishing incomplete policy content.
+	// enforcement or unsupported then-log mode is downgraded to a warning, but
+	// the compiler silently discards that content. Empty match dimensions become
+	// match-ANY; a dropped then sibling can leave an earlier permit active; an
+	// unknown log mode drops configured session logging; and an unknown policy
+	// subtree can carry enforcement constraints the direct policy compiler
+	// ignores. Record those invalidations so the userspace snapshot builder
+	// poisons the rule with the __unsupported__ sentinel instead of publishing
+	// incomplete policy content. Direct terminal-action conflicts are captured
+	// from source statements before duplicate-name folding.
 	//
 	// These per-policy predicates share their definitions with the strict
 	// gates where available. The unsupported-then-sibling and unsupported-
@@ -434,8 +434,7 @@ func compilePolicy(polInst struct {
 	// valueless permit was published to the dataplane fully widened. It
 	// covers all five value-bearing dimensions, including the scoped-global
 	// from-zone/to-zone whose empty set means "all zones".
-	if conflictingPolicyTerminalActions(pol.terminalActions) ||
-		len(policyMissingRequiredMatchDimensions(polInst.node)) > 0 ||
+	if len(policyMissingRequiredMatchDimensions(polInst.node)) > 0 ||
 		len(policyValuelessMatchDimensions(polInst.node, isGlobal)) > 0 ||
 		len(policyUnsupportedMatchLeafFindings(polInst.node, isGlobal)) > 0 ||
 		len(policyUnsupportedThenPermitModifiers(polInst.node)) > 0 ||
