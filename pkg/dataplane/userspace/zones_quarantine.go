@@ -7,19 +7,25 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// ZoneIDCollision records one StableZoneID collision the snapshot builder
-// resolved by QUARANTINING the later-sorting zone (#3719). Survivor keeps the
-// numeric ID and stays installed; Quarantined is dropped from the wire (its
-// interfaces are unzoned and its policies removed) so the dataplane never
-// receives two zones sharing an id. Both names fold to ID.
+// ZoneIDCollision records one security zone the snapshot builder excluded
+// because its stable ID collides with an earlier name or its name is a
+// reserved dataplane/Junos context token. A collision survivor remains
+// installed; a reserved-name zone has no survivor. Quarantined is omitted from
+// the wire and its interfaces are unzoned so the dataplane cannot confuse it
+// with a real zone or special context.
 type ZoneIDCollision struct {
 	ID          uint16
 	Survivor    string
 	Quarantined string
 }
 
-// String renders a ZoneIDCollision for the operator alarm and status output.
+// String renders a zone quarantine for the operator alarm and status output.
 func (c ZoneIDCollision) String() string {
+	if c.Survivor == "" {
+		return fmt.Sprintf(
+			"zone %q QUARANTINED: reserved dataplane/Junos context name — rename the zone",
+			c.Quarantined)
+	}
 	return fmt.Sprintf(
 		"zone %q QUARANTINED: StableZoneID %d collides with zone %q — rename one zone (#3719)",
 		c.Quarantined, c.ID, c.Survivor)
@@ -55,7 +61,7 @@ func (c ZoneIDCollision) String() string {
 // node resolve the identical set. Returns the collisions it resolved, sorted for
 // deterministic operator output (nil in the common no-collision case).
 func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
-	if snap == nil || len(snap.Zones) < 2 {
+	if snap == nil || len(snap.Zones) == 0 {
 		return nil
 	}
 	names := make([]string, 0, len(snap.Zones))
@@ -72,7 +78,7 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 		if _, drop := quarantined[z.Name]; drop {
 			collisions = append(collisions, ZoneIDCollision{
 				ID:          z.ID,
-				Survivor:    config.StableZoneIDOwner(names, z.ID),
+				Survivor:    config.ZoneQuarantineSurvivorName(z.Name, names),
 				Quarantined: z.Name,
 			})
 			continue
@@ -113,16 +119,15 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 		// keeps a second, weaker copy of the rule from going quietly vacuous.
 		// Pinned by TestQuarantinedMemberZoneLetsTheRethZoneResolve_6722.
 	}
-	// Scrub quarantined zones out of policies so the snapshot carries no dangling
+	// Scrub collision-loser zone references so the snapshot carries no dangling
 	// policy->zone reference (which the Rust UnresolvableZoneReference preflight
-	// would reject wholesale — a whole-snapshot brick on a fresh boot, the exact
-	// failure this quarantine exists to prevent). The scrub is shared with the
-	// scheduler-only / route-overlay republish paths (#6480) via
-	// scrubPoliciesForQuarantinedZones — whose doc comment documents the two
-	// drop/prune cases — because those paths rebuild next.Policies from raw cfg
-	// and must re-establish this SAME invariant against the already-reduced
-	// next.Zones they inherit.
-	snap.Policies = scrubPoliciesForQuarantinedZones(snap.Policies, quarantined)
+	// would reject wholesale — a whole-snapshot brick on a fresh boot). Reserved
+	// names such as `any` and `junos-host` are policy sentinels, not configured
+	// zone references, so their wildcard/host-context policies remain intact.
+	// The scrub is shared with scheduler-only / route-overlay republish paths
+	// (#6480), which rebuild policies from raw cfg against the reduced zone list.
+	policyQuarantined := config.QuarantinedZoneNames(names)
+	snap.Policies = scrubPoliciesForQuarantinedZones(snap.Policies, policyQuarantined)
 	sort.Slice(collisions, func(i, j int) bool {
 		if collisions[i].ID != collisions[j].ID {
 			return collisions[i].ID < collisions[j].ID
@@ -240,5 +245,5 @@ func quarantinedZoneNamesForConfig(cfg *config.Config) map[string]struct{} {
 	for name := range cfg.Security.Zones {
 		names = append(names, name)
 	}
-	return config.ZoneQuarantineExclusions(names)
+	return config.QuarantinedZoneNames(names)
 }

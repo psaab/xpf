@@ -178,3 +178,77 @@ func TestFoldControlsStillMergeWithoutPoison9571(t *testing.T) {
 		})
 	}
 }
+func groupPolicyPrefix11063(policy string) string {
+	return `groups { G { security { policies { from-zone trust to-zone untrust { ` +
+		policy + ` } } } } } apply-groups G; `
+}
+
+func groupConflictText11063(inlineAction, inheritedAction string) string {
+	inherited := `policy p1 { then { ` + inheritedAction + `; } }`
+	inline := `policy p1 { ` + anyMatch9571 + ` then { ` + inlineAction + `; } }`
+	return groupPolicyPrefix11063(inherited) + zonePairText9571(inline)
+}
+
+func TestGroupInheritedTerminalActionConflictPoisonsLenientCompile11063(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		inlineAction, groupAction string
+	}{
+		{"group permit after inline deny", "deny", "permit"},
+		{"group deny after inline permit", "permit", "deny"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := groupConflictText11063(tc.inlineAction, tc.groupAction)
+			if _, err := CompileConfig(parse9571(t, text)); err == nil ||
+				!strings.Contains(err.Error(), "conflicting terminal actions") {
+				t.Fatalf("strict compile must reject the effective group conflict, got %v", err)
+			}
+			for _, entry := range lenientEntries9571 {
+				cfg, err := entry.compile(parse9571(t, text))
+				if err != nil {
+					t.Fatalf("%s must load the persisted group conflict: %v", entry.label, err)
+				}
+				pols := policies9571(cfg)
+				if len(pols) != 1 {
+					t.Fatalf("%s: want one effective policy, got %d", entry.label, len(pols))
+				}
+				if !pols[0].LenientContentDropped {
+					t.Errorf("%s: group-inherited direct conflict was not quarantined", entry.label)
+				}
+				if LenientDroppedPolicyLocator(cfg) == "" {
+					t.Errorf("%s: the fail-closed policy locator is missing", entry.label)
+				}
+				if !strings.Contains(strings.Join(cfg.Warnings, "\n"), "conflicting terminal actions") {
+					t.Errorf("%s: terminal-action conflict warning is missing: %v", entry.label, cfg.Warnings)
+				}
+			}
+		})
+	}
+}
+
+func TestGroupConflictScanKeepsSafeMixedActionFoldUnpoisoned11063(t *testing.T) {
+	groupPolicy := `policy grouped { ` + anyMatch9571 + ` then { permit; } }`
+	text := groupPolicyPrefix11063(groupPolicy) + zonePairText9571(
+		`policy p1 { `+anyMatch9571+` then { permit; } } policy p1 { then { deny; } }`)
+	for _, entry := range lenientEntries9571 {
+		cfg, err := entry.compile(parse9571(t, text))
+		if err != nil {
+			t.Fatalf("%s: %v", entry.label, err)
+		}
+		var folded *Policy
+		for _, pol := range policies9571(cfg) {
+			if pol.Name == "p1" {
+				folded = pol
+			}
+			if pol.LenientContentDropped {
+				t.Errorf("%s: safe group/mixed-action fold over-poisoned policy %q", entry.label, pol.Name)
+			}
+		}
+		if folded == nil || folded.Action != PolicyDeny {
+			t.Fatalf("%s: safe duplicate fold result = %v, want deny", entry.label, folded)
+		}
+		if hasWarning9571(cfg, "#9571") {
+			t.Errorf("%s: safe group/mixed-action fold was marked as a widening: %v", entry.label, cfg.Warnings)
+		}
+	}
+}

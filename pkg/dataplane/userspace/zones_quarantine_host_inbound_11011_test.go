@@ -183,11 +183,10 @@ func TestQuarantinedZoneAddrsInUnzonedDropSet_11011(t *testing.T) {
 	}
 }
 
-// TestQuarantineClearsHostInboundStamp_11011: the published AF_XDP snapshot must
-// carry no per-interface host-inbound stamp for a quarantined-zone interface —
-// the stamp is what the Rust picker enforces first, ahead of the #5659
-// empty-zone deny sentinel, so leaving it publishes an admit for a zone the
-// quarantine says is unzoned and denied.
+// TestQuarantineClearsHostInboundStamp_11011: the published AF_XDP snapshot
+// must carry no per-interface host-inbound stamp for a quarantined-zone
+// interface. InterfaceZoneMap omits the quarantined membership before snapshot
+// construction, so the losing zone's admit cannot be stamped in the first place.
 func TestQuarantineClearsHostInboundStamp_11011(t *testing.T) {
 	cfg := quarantineHostInboundCfg11011(t)
 
@@ -199,9 +198,12 @@ func TestQuarantineClearsHostInboundStamp_11011(t *testing.T) {
 			break
 		}
 	}
-	if !foundRaw || raw.Zone != "z214" || !raw.HostInboundConfigured ||
-		!containsStr(raw.HostInboundSystemServices, "ssh") {
-		t.Fatalf("precondition: the pre-quarantine AF_XDP row must carry z214's ssh override, got %+v", raw)
+	if !foundRaw || raw.Zone != "" || raw.HostInboundConfigured ||
+		len(raw.HostInboundSystemServices) != 0 || len(raw.HostInboundProtocols) != 0 {
+		t.Fatalf("precondition: quarantined membership must already be unzoned and unstamped, got %+v", raw)
+	}
+	if !containsStr(cfg.Security.Zones["z214"].InterfaceHostInbound["ge-0/0/0.0"].SystemServices, "ssh") {
+		t.Fatal("precondition: quarantined z214 ssh override is absent from the authored config")
 	}
 
 	snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 0, 0)

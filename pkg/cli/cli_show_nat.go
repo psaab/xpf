@@ -277,7 +277,11 @@ func (c *CLI) showNATSourceSummary(cfg *config.Config) error {
 				names = append(names, name)
 			}
 			sort.Strings(names)
+			quarantined := config.ZoneQuarantineExclusions(names)
 			for _, name := range names {
+				if _, drop := quarantined[name]; drop {
+					continue
+				}
 				id := cr.ZoneIDs[name]
 				owner := config.StableZoneIDOwner(names, id)
 				if owner == "" {
@@ -853,7 +857,11 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 			names = append(names, name)
 		}
 		sort.Strings(names)
+		quarantined := config.ZoneQuarantineExclusions(names)
 		for _, name := range names {
+			if _, drop := quarantined[name]; drop {
+				continue
+			}
 			id := cr.ZoneIDs[name]
 			owner := config.StableZoneIDOwner(names, id)
 			if owner == "" {

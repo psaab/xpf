@@ -35,12 +35,12 @@ func syslogZoneNameMap(cfg *config.Config) map[uint16]string {
 		names = append(names, name)
 	}
 	// #3719: under a StableZoneID collision two zone names fold to the same id,
-	// and the dataplane installs only the sorted-first (the survivor
-	// config.QuarantinedZoneNames keeps). Skip the quarantined zone so the
-	// reverse map names the id after the zone actually installed rather than
-	// whichever name won a map-iteration overwrite race — RT_FLOW/syslog would
-	// otherwise render the wrong zone for the surviving zone's traffic.
-	quarantined := config.QuarantinedZoneNames(names)
+	// and the dataplane installs only the sorted-first survivor. Reserved
+	// dataplane/Junos context names are also excluded from installation, so
+	// neither kind of excluded zone may claim an id in the syslog reverse map.
+	// Otherwise RT_FLOW/syslog could render a real zone's traffic under the
+	// wrong name.
+	quarantined := config.ZoneQuarantineExclusions(names)
 	znMap := make(map[uint16]string, len(names))
 	for _, name := range names {
 		if _, drop := quarantined[name]; drop {

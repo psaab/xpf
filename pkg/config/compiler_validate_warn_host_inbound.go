@@ -126,28 +126,32 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 	if cfg == nil || cfg.Security.Zones == nil {
 		return nil
 	}
-	// Build interface-ref -> zone-name mirroring the dataplane's
-	// buildInterfaceZoneMap (#3072): a bare zone member (`reth0`) claims the
-	// physical key AND every configured unit (`reth0.10`), a unit-qualified entry
-	// claims exactly that unit — via the zoneIfaceLogicalKeys SSOT — with
-	// first-writer-wins over sorted zone names. This matches runtime zone
-	// attribution, so an OSPF interface `reth0.10` under a zone listing bare
-	// `reth0` resolves correctly (an exact-string map would miss it). An
-	// interface not in any zone has no host-inbound dimension, so it is not
-	// warned on (the lookup below simply misses).
+	// Build the same resolved interface-ref -> zone-name view the dataplane
+	// uses: bare zone members claim the physical key and configured units,
+	// while a unit-qualified entry claims exactly that unit. Quarantined zones
+	// and keys claimed by multiple zones are omitted, so advisories do not
+	// attribute host-inbound behavior to an arbitrary sorted-name winner.
 	ifZone := make(map[string]string)
 	znames := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		znames = append(znames, name)
 	}
 	sort.Strings(znames)
+	excludedZones := ZoneQuarantineExclusions(znames)
+	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zname := range znames {
+		if _, excluded := excludedZones[zname]; excluded {
+			continue
+		}
 		z := cfg.Security.Zones[zname]
 		if z == nil { // #3494: tolerant/HA-sync path may carry a nil zone value
 			continue
 		}
 		for _, ifEntry := range z.Interfaces {
 			for _, key := range zoneIfaceLogicalKeys(cfg, ifEntry) {
+				if _, conflicted := conflictedInterfaces[key]; conflicted {
+					continue
+				}
 				if _, seen := ifZone[key]; !seen {
 					ifZone[key] = zname
 				}

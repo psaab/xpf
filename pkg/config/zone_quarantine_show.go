@@ -29,14 +29,20 @@ const ZoneQuarantineDispositionText = "if this snapshot is applied, construction
 // Carries the two-space detail indent both text surfaces use; no trailing
 // newline so Printf and buffer callers both use it unchanged (#6895 shape).
 func ZoneQuarantineHeadlineFor(id uint16, survivor string) string {
+	if survivor == "" {
+		return fmt.Sprintf("  QUARANTINED (reserved context name; id %d omitted) — %s",
+			id, ZoneQuarantineDispositionText)
+	}
 	return fmt.Sprintf("  QUARANTINED (id %d collides with %q) — %s",
 		id, survivor, ZoneQuarantineDispositionText)
 }
 
-// ZoneQuarantineIDQualifierFor renders the parenthetical appended to a kept
-// zone-id line: the id is a stable pure function of the name (still TRUE, so
-// kept), qualified with what applying the snapshot would do.
+// ZoneQuarantineIDQualifierFor renders the parenthetical appended to a
+// quarantined zone-id line.
 func ZoneQuarantineIDQualifierFor(survivor string) string {
+	if survivor == "" {
+		return "(reserved dataplane/Junos context name — would not be installed if this snapshot is applied)"
+	}
 	return fmt.Sprintf("(collides with %q — would not be installed if this snapshot is applied)",
 		survivor)
 }
@@ -94,6 +100,10 @@ func ZoneInventoryDiffers(active []string, applied map[string]uint16) bool {
 // interface→zone match on a quarantined zone with the survivor/id the
 // interface's zone assignment would resolve against.
 func ZoneQuarantineTestZoneQualifierFor(id uint16, survivor string) string {
+	if survivor == "" {
+		return fmt.Sprintf("(quarantined: reserved context name; id %d would be unzoned if this snapshot is applied)",
+			id)
+	}
 	return fmt.Sprintf("(quarantined: id %d collides with %q — would be unzoned if this snapshot is applied)",
 		id, survivor)
 }
