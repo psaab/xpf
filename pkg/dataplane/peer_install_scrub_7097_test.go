@@ -142,6 +142,8 @@ func fillNonZero(t *testing.T, v reflect.Value) {
 			}
 		case reflect.Struct:
 			fillNonZero(t, f)
+		case reflect.String:
+			f.SetString("nonzero")
 		default:
 			// A field kind this helper cannot seed would read as "scrubbed" for
 			// free. Fail rather than quietly under-cover it.
@@ -465,8 +467,12 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		// source-NAT selection across HA reconstruction. They are cluster-
 		// stable packet identity, not node-local resources, and must remain on
 		// the synced value.
-		{"SessionValue", reflect.TypeOf(SessionValue{}), 44},
-		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 45},
+		// 45/46 since #11070 added PolicyRuleID, classified NOT node-local. It
+		// identifies the admitting rule by stable configuration identity so the
+		// receiver can rebind its own counter; it names no local resource.
+
+		{"SessionValue", reflect.TypeOf(SessionValue{}), 45},
+		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 46},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.typ.NumField(); got != tc.want {

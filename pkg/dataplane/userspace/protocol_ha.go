@@ -169,6 +169,7 @@ type SessionSyncRequest struct {
 	// matching SessionValue.AppTimeout); the helper converts it to ns.
 	PolicyID          uint32 `json:"policy_id,omitempty"`
 	PolicyCounterIdx  uint32 `json:"policy_counter_idx,omitempty"`
+	PolicyRuleID      string `json:"policy_rule_id,omitempty"`
 	InactivityTimeout uint32 `json:"inactivity_timeout,omitempty"`
 	// #4565: the NAT64 translated pool SOURCE (dotted-quad IPv4). A non-empty
 	// value is the peer helper's signal that this is a NAT64 cross-family
@@ -320,6 +321,8 @@ type SessionDeltaInfo struct {
 	// the legacy strings stay populated when JSON callers fill them.
 	IngressZoneID    uint16 `json:"ingress_zone_id,omitempty"`
 	EgressZoneID     uint16 `json:"egress_zone_id,omitempty"`
+	IngressIfindex   int    `json:"ingress_ifindex,omitempty"`
+	IngressVLANID    uint16 `json:"ingress_vlan_id,omitempty"`
 	OwnerRGID        int    `json:"owner_rg_id,omitempty"`
 	Disposition      string `json:"disposition,omitempty"`
 	Origin           string `json:"origin,omitempty"`
@@ -373,6 +376,7 @@ type SessionDeltaInfo struct {
 	// struct tags to the keys that helper's JSON leg actually emits.
 	PolicyID         uint32 `json:"policy_id,omitempty"`
 	PolicyCounterIdx uint32 `json:"policy_counter_idx,omitempty"`
+	PolicyRuleID     string `json:"policy_rule_id,omitempty"`
 	AppTimeout       uint32 `json:"app_timeout,omitempty"`
 	// #4565: NAT64 cross-family marker (open-frame flags bit 1<<5) + the
 	// translated pool SOURCE (trailing 4 bytes). Stamped onto the synced

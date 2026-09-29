@@ -632,7 +632,7 @@ impl PolicyRuleCounter {
     /// creation; the store re-hands the same `Arc` for a surviving id across
     /// snapshot rebuilds, so the id stays valid for the life of any session
     /// that bound the handle.
-    fn with_rule_id(rule_id: &str) -> Self {
+    pub(crate) fn with_rule_id(rule_id: &str) -> Self {
         Self {
             packets: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
@@ -1885,6 +1885,18 @@ impl PolicyState {
         let counter_idx = u32::try_from(index + 1).ok()?;
         Some((counter_idx, self.rules.get(index)?))
     }
+    /// Resolve a stable rule ID to the CURRENT snapshot's counter and index.
+    /// Unknown identities never fall back to a positional index.
+    pub(crate) fn hit_counter_binding_by_stable_id(
+        &self,
+        rule_id: &str,
+    ) -> Option<(u32, &Arc<PolicyRuleCounter>)> {
+        if rule_id == DEFAULT_POLICY_COUNTER_RULE_ID {
+            return Some((DEFAULT_POLICY_COUNTER_IDX, &self.default_counter));
+        }
+        let (idx, rule) = self.rule_binding_by_stable_id(rule_id)?;
+        Some((idx, &rule.hit_counter))
+    }
 
     /// #3395: re-resolve the CURRENT positional `policy_id` (#3056) for an
     /// ESTABLISHED session at a local publish surface (the ~1s live-row refresh
@@ -2578,7 +2590,10 @@ pub(crate) fn parse_policy_state_with_counters(
         // revalidation; a type-blind skipped PERMIT can create a false DENY.
         // #11064: the owner/foreign session-hit path separately needs to know
         // about constrained DENYs too, because it evaluates this packet with
-        // its actual ICMP type/code.
+        // its actual ICMP type/code. (#11070: the PERMIT-only question — "could
+        // a type-constrained term have ADMITTED a flow a type-blind eval
+        // denies" — is answered by icmp_type_constrained_permit below; the
+        // wider _term arm is correct for both consumers.)
         if !state.rules[idx].inactive {
             for (slot, proto) in [PROTO_ICMP, PROTO_ICMPV6].into_iter().enumerate() {
                 if state.rules[idx]

@@ -80,8 +80,7 @@ pub(in crate::afxdp) fn drain_session_deltas_fair(
     // Overflow only matters when the budget capped us: if we stopped because a
     // full pass drained nothing, every binding is empty and no delta was left
     // behind. The scan re-locks each buffer (cold control path only).
-    let overflow =
-        budget == 0 && bindings.iter().any(|b| b.has_pending_session_deltas());
+    let overflow = budget == 0 && bindings.iter().any(|b| b.has_pending_session_deltas());
     (out, cursor, overflow)
 }
 
@@ -195,7 +194,10 @@ pub(super) fn purge_retirement_close_is_stale(
 /// unit test): a stale purge close cancels nothing, a live one cancels
 /// exactly its key (the purge already decided the companion), an ordinary
 /// close cancels the pair.
-pub(super) fn purge_close_cancel_keys(delta: &SessionDelta, stale: bool) -> Option<(SessionKey, SessionKey)> {
+pub(super) fn purge_close_cancel_keys(
+    delta: &SessionDelta,
+    stale: bool,
+) -> Option<(SessionKey, SessionKey)> {
     if delta.kind != SessionDeltaKind::Close {
         return None;
     }
@@ -240,11 +242,7 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
         } else {
             Vec::new()
         };
-        if close_delta_is_stale_incarnation(
-            delta,
-            current_sessions.as_deref(),
-            shared_sessions,
-        ) {
+        if close_delta_is_stale_incarnation(delta, current_sessions.as_deref(), shared_sessions) {
             continue;
         }
         // Cancelled flows are DROPPED, not requeued
@@ -253,11 +251,7 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
         // valid again and its queued packets are live traffic.
         let stale = delta.kind == SessionDeltaKind::Close
             && delta.purge_retirement
-            && purge_retirement_close_is_stale(
-                shared_runtime,
-                shared_sessions,
-                delta,
-            );
+            && purge_retirement_close_is_stale(shared_runtime, shared_sessions, delta);
         let Some((forward_key, reverse_key)) = purge_close_cancel_keys(delta, stale) else {
             continue;
         };
@@ -309,6 +303,7 @@ pub(in crate::afxdp) fn session_delta_info(
     // too. Before #6949 this leg carried none of these five.
     let SessionSyncAttribution {
         policy_id,
+        policy_rule_id,
         policy_counter_idx,
         inactivity_timeout_secs,
         nat64,
@@ -333,6 +328,8 @@ pub(in crate::afxdp) fn session_delta_info(
         egress_zone: egress_name,
         ingress_zone_id: delta.metadata.ingress_zone,
         egress_zone_id: delta.metadata.egress_zone,
+        ingress_ifindex: i32::try_from(delta.metadata.ingress_ifindex).unwrap_or(i32::MAX),
+        ingress_vlan_id: delta.metadata.ingress_vlan_id,
         owner_rg_id: delta.metadata.owner_rg_id,
         disposition: match delta.decision.resolution.disposition {
             ForwardingDisposition::ForwardCandidate => "forward_candidate",
@@ -415,6 +412,7 @@ pub(in crate::afxdp) fn session_delta_info(
         // timeout instead of its per-application one.
         policy_id,
         policy_counter_idx,
+        policy_rule_id: policy_rule_id.to_string(),
         app_timeout: inactivity_timeout_secs,
         // #6949/#4565: without the pool source a NAT64 session promoted from
         // this leg cannot rebuild its reverse v4->v6 BIB at all — the standby
@@ -467,14 +465,7 @@ pub(in crate::afxdp) fn export_open_direct(
     provenance: crate::session::ExportProvenance,
 ) -> Option<SessionDeltaInfo> {
     sessions
-        .open_export_delta_with_provenance(
-            key,
-            decision,
-            metadata,
-            origin,
-            true,
-            provenance,
-        )
+        .open_export_delta_with_provenance(key, decision, metadata, origin, true, provenance)
         .map(|delta| session_delta_info(ident, &delta, zone_id_to_name))
 }
 
@@ -487,21 +478,24 @@ pub(in crate::afxdp) fn export_close_direct(
     zone_id_to_name: &FastMap<u16, String>,
     tombstone: &crate::session::ExpiredSession,
 ) -> SessionDeltaInfo {
-    let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
-    key: tombstone.key.clone(),
-    decision: tombstone.decision,
-    metadata: tombstone.metadata.clone(),
-    origin: tombstone.origin,
-    fabric_redirect_sync: false,
-    created_ns: 0,
-    last_seen_ns: 0,
-    counters: crate::session::SessionCounters::default(),
-    observed_tos: 0,
-    observed_tcp_flags: 0,
-    session_id: tombstone.session_id,
-    bulk_resync: true,
-    tcp_close_class: tombstone.close_class,
-    purge_retirement: false, };
+    let delta = SessionDelta {
+        provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Close,
+        key: tombstone.key.clone(),
+        decision: tombstone.decision,
+        metadata: tombstone.metadata.clone(),
+        origin: tombstone.origin,
+        fabric_redirect_sync: false,
+        created_ns: 0,
+        last_seen_ns: 0,
+        counters: crate::session::SessionCounters::default(),
+        observed_tos: 0,
+        observed_tcp_flags: 0,
+        session_id: tombstone.session_id,
+        bulk_resync: true,
+        tcp_close_class: tombstone.close_class,
+        purge_retirement: false,
+    };
     session_delta_info(ident, &delta, zone_id_to_name)
 }
 
@@ -639,11 +633,8 @@ pub(super) fn flush_session_deltas(
                 continue;
             }
         }
-        let stale = close_delta_is_stale_incarnation(
-            delta,
-            current_sessions.as_deref(),
-            shared_sessions,
-        );
+        let stale =
+            close_delta_is_stale_incarnation(delta, current_sessions.as_deref(), shared_sessions);
         if stale && delta.purge_retirement {
             drop(_close_install_permits);
             event_stream_out_of_sync = true;
@@ -664,26 +655,26 @@ pub(super) fn flush_session_deltas(
         // From here on, `stale` == stale-ordinary-with-identity (purge
         // continued above; non-Close deltas are never stale).
         if delta.kind == SessionDeltaKind::Close {
-        // Stale-ordinary forward FIRST (under permits): exact-key +
-        // identity-conditional. ONLY Removed authorizes the destructive
-        // local ops below (Absent proves nothing about the derived rows;
-        // Declined means a live reincarnation). Conditional replicate +
-        // scoped emit run regardless — they no-op on mismatch.
-        let teardown_ok = if stale {
-            matches!(
-                super::shared_ops::remove_shared_session_if(
-                    shared_sessions,
-                    shared_nat_sessions,
-                    shared_forward_wire_sessions,
-                    shared_owner_rg_indexes,
-                    &delta.key,
-                    |current| current.session_id == scoped_id,
-                ),
-                super::shared_ops::SharedRemoval::Removed(_)
-            )
-        } else {
-            true
-        };
+            // Stale-ordinary forward FIRST (under permits): exact-key +
+            // identity-conditional. ONLY Removed authorizes the destructive
+            // local ops below (Absent proves nothing about the derived rows;
+            // Declined means a live reincarnation). Conditional replicate +
+            // scoped emit run regardless — they no-op on mismatch.
+            let teardown_ok = if stale {
+                matches!(
+                    super::shared_ops::remove_shared_session_if(
+                        shared_sessions,
+                        shared_nat_sessions,
+                        shared_forward_wire_sessions,
+                        shared_owner_rg_indexes,
+                        &delta.key,
+                        |current| current.session_id == scoped_id,
+                    ),
+                    super::shared_ops::SharedRemoval::Removed(_)
+                )
+            } else {
+                true
+            };
             if cfg!(feature = "debug-log") {
                 debug_log!(
                     "SESS_DELETE: proto={} {}:{} -> {}:{} nat_src={:?} nat_dst={:?} bpf_entries_before={}",
@@ -876,126 +867,128 @@ pub(super) fn flush_session_deltas(
             delta.provenance,
             crate::session::ExportProvenance::CommandExport(_)
         ) {
-        if let Some(es) = event_stream {
-            // #2874: route the correctness-critical HA session open/close delta
-            // through the LOSSLESS producer instead of the lossy `push_delta`.
-            // `push_delta`'s `try_send` silently drops on a full channel AFTER
-            // burning a sequence number, leaving a hole the Go consumer then
-            // cumulatively ACKs past — permanently trimming the helper replay
-            // window over a missing open/close (silent standby session loss,
-            // the #2874 defect). `push_delta_lossless` applies the producer's
-            // bounded backpressure and PROPAGATES a genuine failure (peer
-            // disconnect / queue timeout) as an error instead of swallowing it.
-            // On failure we latch out-of-sync; the caller then re-exports the
-            // full owner-RG snapshot (the #2442 recovery path) so the peer
-            // re-derives a complete session view. The RT_FLOW telemetry frames
-            // below stay best-effort (`try_send`) — a dropped flow-export record
-            // is not a correctness loss and must not force a resync.
-            //
-            // #5468: this runs on the PACKET WORKER LOOP, so the lossless send is
-            // BOUNDED to `WORKER_LOSSLESS_QUEUE_BUDGET` (well below
-            // `HEARTBEAT_STALE_AFTER`) instead of the 5 s `LOSSLESS_QUEUE_TIMEOUT`.
-            // A connected-but-unread peer (full lossless queue) that blocked the
-            // worker for the full 5 s would stop the loop stamping its heartbeat,
-            // the peer would mark this node stale, and a spurious failover would
-            // fire. On the bounded timeout we latch out-of-sync exactly as on any
-            // other lossless failure — deliver-or-resync, never a silent drop, so
-            // the #2874 losslessness contract holds.
-            if !event_stream_out_of_sync {
-                if let Err(err) =
-                    es.push_delta_lossless_within(delta, zone_name_to_id, WORKER_LOSSLESS_QUEUE_BUDGET)
-                {
-                    event_stream_out_of_sync = true;
-                    eprintln!(
-                        "xpf-event-stream: HA session-sync delta could not be queued losslessly ({err}); latching out-of-sync to force a full owner-RG resync"
+            if let Some(es) = event_stream {
+                // #2874: route the correctness-critical HA session open/close delta
+                // through the LOSSLESS producer instead of the lossy `push_delta`.
+                // `push_delta`'s `try_send` silently drops on a full channel AFTER
+                // burning a sequence number, leaving a hole the Go consumer then
+                // cumulatively ACKs past — permanently trimming the helper replay
+                // window over a missing open/close (silent standby session loss,
+                // the #2874 defect). `push_delta_lossless` applies the producer's
+                // bounded backpressure and PROPAGATES a genuine failure (peer
+                // disconnect / queue timeout) as an error instead of swallowing it.
+                // On failure we latch out-of-sync; the caller then re-exports the
+                // full owner-RG snapshot (the #2442 recovery path) so the peer
+                // re-derives a complete session view. The RT_FLOW telemetry frames
+                // below stay best-effort (`try_send`) — a dropped flow-export record
+                // is not a correctness loss and must not force a resync.
+                //
+                // #5468: this runs on the PACKET WORKER LOOP, so the lossless send is
+                // BOUNDED to `WORKER_LOSSLESS_QUEUE_BUDGET` (well below
+                // `HEARTBEAT_STALE_AFTER`) instead of the 5 s `LOSSLESS_QUEUE_TIMEOUT`.
+                // A connected-but-unread peer (full lossless queue) that blocked the
+                // worker for the full 5 s would stop the loop stamping its heartbeat,
+                // the peer would mark this node stale, and a spurious failover would
+                // fire. On the bounded timeout we latch out-of-sync exactly as on any
+                // other lossless failure — deliver-or-resync, never a silent drop, so
+                // the #2874 losslessness contract holds.
+                if !event_stream_out_of_sync {
+                    if let Err(err) = es.push_delta_lossless_within(
+                        delta,
+                        zone_name_to_id,
+                        WORKER_LOSSLESS_QUEUE_BUDGET,
+                    ) {
+                        event_stream_out_of_sync = true;
+                        eprintln!(
+                            "xpf-event-stream: HA session-sync delta could not be queued losslessly ({err}); latching out-of-sync to force a full owner-RG resync"
+                        );
+                    }
+                }
+                // #2460: a Close delta also emits a SEPARATE RT_FLOW
+                // SESSION_CLOSE frame (type 14) on the raw dataplane-event
+                // channel. `push_delta` above already sent the type-2 HA
+                // session-sync close delta unchanged; this is ADDITIVE and
+                // feeds the Go NetFlow/IPFIX session-close exporters, which only
+                // fire on a `Type == "SESSION_CLOSE"` EventRecord (never
+                // produced in userspace mode before this). The two frames are a
+                // 1:1 pair per close — no double-counting on the HA channel.
+                if delta.kind == SessionDeltaKind::Close {
+                    // #2520: resolve the AppID for the closing 5-tuple with the
+                    // SAME app_catalog the forwarding hot path runs, so the
+                    // SESSION_CLOSE RT_FLOW record carries the application instead
+                    // of UNKNOWN. 0 (no match) keeps the prior UNKNOWN rendering.
+                    // #3321: resolve directionally off the delta's own direction
+                    // flag (service = dst forward / src reverse) so a forward flow
+                    // with a service-valued source port is not mislabeled.
+                    // #3416: resolve the FORWARD service port from the
+                    // post-translation destination (the DNAT-rewritten port the
+                    // policy admitted the session under), mirroring the deny side,
+                    // so a port-forwarded service is not mislabeled UNKNOWN/public.
+                    let app_id = forwarding.app_catalog.lookup_admitted(
+                        delta.key.protocol,
+                        delta.key.src_port,
+                        delta.key.dst_port,
+                        delta.metadata.is_reverse,
+                        delta.decision.nat.rewrite_dst_port,
+                    );
+                    // #3395: re-resolve the admitting policy's CURRENT positional id
+                    // from the session's bound rule handle against the live rule
+                    // table. A live mid-list policy insert/delete renumbers every
+                    // later rule, so the frozen `delta.metadata.policy_id` would name
+                    // the wrong policy on the close log; the close path already holds
+                    // `forwarding.policy`, so this needs no new plumbing. A deleted
+                    // admitting rule resolves to the unattributed default-policy
+                    // sentinel (never a reassigned index); an unbound (non-policy /
+                    // peer-synced) session keeps its frozen id.
+                    let reresolved_policy_id = forwarding.policy.reresolve_session_policy_id(
+                        delta.metadata.policy_counter.as_ref(),
+                        delta.metadata.policy_id,
+                    );
+                    // #2615: thread the closing binding's ingress ifindex so the
+                    // SESSION_CLOSE RT_FLOW record shows the admitting interface
+                    // (`packet-incoming-interface`) instead of "N/A". `ident` is
+                    // the binding draining this delta; its ifindex is the ingress
+                    // interface. A kernel ifindex is always positive, so the
+                    // i32 -> u32 cast is loss-free.
+                    es.emit_session_close_rt_flow(
+                        delta,
+                        app_id,
+                        ident.ifindex as u32,
+                        reresolved_policy_id,
                     );
                 }
+                // #2508: a session admitted by a policy configured with
+                // `then log session-init` emits an RT_FLOW SESSION_CREATE frame
+                // (type 15) on the same raw dataplane-event channel. Unlike the
+                // close frame this is producer-gated: there is no flowexport
+                // consumer of session opens, so we only ever send it when the
+                // admitting policy requested session-init logging. The
+                // SESSION_CLOSE syslog record is gated on the Go side (via the
+                // frame's gate byte) because flowexport still needs every close.
+                if delta.kind == SessionDeltaKind::Open && delta.metadata.log_session_init {
+                    // #2615: resolve the AppID for the new 5-tuple with the SAME
+                    // app_catalog the forwarding hot path runs (mirroring the #2520
+                    // close-side fix), so the SESSION_CREATE RT_FLOW record carries
+                    // the application instead of UNKNOWN. 0 (no match) keeps the
+                    // prior UNKNOWN rendering. The ingress ifindex comes from the
+                    // admitting binding (`ident`); a kernel ifindex is always
+                    // positive so the i32 -> u32 cast is loss-free.
+                    // #3321: directional resolution off the delta's direction flag
+                    // (service = dst forward / src reverse).
+                    // #3416: forward service port from the post-translation
+                    // (DNAT-rewritten) destination — the port the policy admitted
+                    // the session under — so a port-forwarded create record carries
+                    // the admitting application instead of UNKNOWN/the public port.
+                    let app_id = forwarding.app_catalog.lookup_admitted(
+                        delta.key.protocol,
+                        delta.key.src_port,
+                        delta.key.dst_port,
+                        delta.metadata.is_reverse,
+                        delta.decision.nat.rewrite_dst_port,
+                    );
+                    es.emit_session_create_rt_flow(delta, app_id, ident.ifindex as u32);
+                }
             }
-            // #2460: a Close delta also emits a SEPARATE RT_FLOW
-            // SESSION_CLOSE frame (type 14) on the raw dataplane-event
-            // channel. `push_delta` above already sent the type-2 HA
-            // session-sync close delta unchanged; this is ADDITIVE and
-            // feeds the Go NetFlow/IPFIX session-close exporters, which only
-            // fire on a `Type == "SESSION_CLOSE"` EventRecord (never
-            // produced in userspace mode before this). The two frames are a
-            // 1:1 pair per close — no double-counting on the HA channel.
-            if delta.kind == SessionDeltaKind::Close {
-                // #2520: resolve the AppID for the closing 5-tuple with the
-                // SAME app_catalog the forwarding hot path runs, so the
-                // SESSION_CLOSE RT_FLOW record carries the application instead
-                // of UNKNOWN. 0 (no match) keeps the prior UNKNOWN rendering.
-                // #3321: resolve directionally off the delta's own direction
-                // flag (service = dst forward / src reverse) so a forward flow
-                // with a service-valued source port is not mislabeled.
-                // #3416: resolve the FORWARD service port from the
-                // post-translation destination (the DNAT-rewritten port the
-                // policy admitted the session under), mirroring the deny side,
-                // so a port-forwarded service is not mislabeled UNKNOWN/public.
-                let app_id = forwarding.app_catalog.lookup_admitted(
-                    delta.key.protocol,
-                    delta.key.src_port,
-                    delta.key.dst_port,
-                    delta.metadata.is_reverse,
-                    delta.decision.nat.rewrite_dst_port,
-                );
-                // #3395: re-resolve the admitting policy's CURRENT positional id
-                // from the session's bound rule handle against the live rule
-                // table. A live mid-list policy insert/delete renumbers every
-                // later rule, so the frozen `delta.metadata.policy_id` would name
-                // the wrong policy on the close log; the close path already holds
-                // `forwarding.policy`, so this needs no new plumbing. A deleted
-                // admitting rule resolves to the unattributed default-policy
-                // sentinel (never a reassigned index); an unbound (non-policy /
-                // peer-synced) session keeps its frozen id.
-                let reresolved_policy_id = forwarding.policy.reresolve_session_policy_id(
-                    delta.metadata.policy_counter.as_ref(),
-                    delta.metadata.policy_id,
-                );
-                // #2615: thread the closing binding's ingress ifindex so the
-                // SESSION_CLOSE RT_FLOW record shows the admitting interface
-                // (`packet-incoming-interface`) instead of "N/A". `ident` is
-                // the binding draining this delta; its ifindex is the ingress
-                // interface. A kernel ifindex is always positive, so the
-                // i32 -> u32 cast is loss-free.
-                es.emit_session_close_rt_flow(
-                    delta,
-                    app_id,
-                    ident.ifindex as u32,
-                    reresolved_policy_id,
-                );
-            }
-            // #2508: a session admitted by a policy configured with
-            // `then log session-init` emits an RT_FLOW SESSION_CREATE frame
-            // (type 15) on the same raw dataplane-event channel. Unlike the
-            // close frame this is producer-gated: there is no flowexport
-            // consumer of session opens, so we only ever send it when the
-            // admitting policy requested session-init logging. The
-            // SESSION_CLOSE syslog record is gated on the Go side (via the
-            // frame's gate byte) because flowexport still needs every close.
-            if delta.kind == SessionDeltaKind::Open && delta.metadata.log_session_init {
-                // #2615: resolve the AppID for the new 5-tuple with the SAME
-                // app_catalog the forwarding hot path runs (mirroring the #2520
-                // close-side fix), so the SESSION_CREATE RT_FLOW record carries
-                // the application instead of UNKNOWN. 0 (no match) keeps the
-                // prior UNKNOWN rendering. The ingress ifindex comes from the
-                // admitting binding (`ident`); a kernel ifindex is always
-                // positive so the i32 -> u32 cast is loss-free.
-                // #3321: directional resolution off the delta's direction flag
-                // (service = dst forward / src reverse).
-                // #3416: forward service port from the post-translation
-                // (DNAT-rewritten) destination — the port the policy admitted
-                // the session under — so a port-forwarded create record carries
-                // the admitting application instead of UNKNOWN/the public port.
-                let app_id = forwarding.app_catalog.lookup_admitted(
-                    delta.key.protocol,
-                    delta.key.src_port,
-                    delta.key.dst_port,
-                    delta.metadata.is_reverse,
-                    delta.decision.nat.rewrite_dst_port,
-                );
-                es.emit_session_create_rt_flow(delta, app_id, ident.ifindex as u32);
-            }
-        }
         }
         if let Ok(mut recent) = recent_session_deltas.lock() {
             push_recent_session_delta(&mut recent, info);

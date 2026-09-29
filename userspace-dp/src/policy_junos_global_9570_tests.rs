@@ -72,7 +72,10 @@ fn half_sentinel_zone_pair_rule_is_refused_not_promoted_to_global_9570() {
             let rules = [any_rule_9570("p1", from, to, action)];
             match parse_9570(default_policy, &rules, &zones) {
                 Err(SnapshotIntegrityError::UnresolvableZoneReference { zone, .. }) => {
-                    assert_eq!(zone, "junos-global", "{from}->{to}: refusal names the wrong zone");
+                    assert_eq!(
+                        zone, "junos-global",
+                        "{from}->{to}: refusal names the wrong zone"
+                    );
                 }
                 Ok(state) => panic!(
                     "#9570: {from}->{to} {action} (default {default_policy}) was ACCEPTED and enforced: \
@@ -80,7 +83,9 @@ fn half_sentinel_zone_pair_rule_is_refused_not_promoted_to_global_9570() {
                     eval_9570(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
                     eval_9570(&state, TEST_UNTRUST_ZONE_ID, TEST_LAN_ZONE_ID),
                 ),
-                Err(other) => panic!("#9570: {from}->{to}: refused for the wrong reason: {other:?}"),
+                Err(other) => {
+                    panic!("#9570: {from}->{to}: refused for the wrong reason: {other:?}")
+                }
             }
         }
     }
@@ -94,12 +99,23 @@ fn both_sided_sentinel_rule_is_still_the_global_tier_9570() {
     let zones = zones_9570();
     let state = parse_9570(
         "deny",
-        &[any_rule_9570("g1", "junos-global", "junos-global", "permit")],
+        &[any_rule_9570(
+            "g1",
+            "junos-global",
+            "junos-global",
+            "permit",
+        )],
         &zones,
     )
     .expect("a real global rule must be accepted");
-    assert_eq!(eval_9570(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval_9570(&state, TEST_UNTRUST_ZONE_ID, TEST_LAN_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval_9570(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval_9570(&state, TEST_UNTRUST_ZONE_ID, TEST_LAN_ZONE_ID),
+        PolicyAction::Permit
+    );
 
     let state = parse_9570(
         "deny",
@@ -115,7 +131,10 @@ fn both_sided_sentinel_rule_is_still_the_global_tier_9570() {
         PolicyAction::Deny,
         "an exact zone-pair rule must still win over the global tier"
     );
-    assert_eq!(eval_9570(&state, TEST_UNTRUST_ZONE_ID, TEST_LAN_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval_9570(&state, TEST_UNTRUST_ZONE_ID, TEST_LAN_ZONE_ID),
+        PolicyAction::Permit
+    );
 }
 
 /// The Go builder poisons a ZONE-PAIR stanza that names the sentinel with the
@@ -155,11 +174,17 @@ fn half_sentinel_rule_against_a_zone_named_junos_global_is_scoped_to_that_zone_9
         &zones,
     )
     .expect("the name resolves, so the rule is an ordinary zone-pair rule");
-    assert_eq!(eval_9570(&state, TEST_SFMIX_ZONE_ID, TEST_TRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval_9570(&state, TEST_SFMIX_ZONE_ID, TEST_TRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
     assert_eq!(
         eval_9570(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
         PolicyAction::Deny,
         "#9570: a rule scoped to one zone pair was enforced for an unrelated pair"
     );
-    assert_eq!(eval_9570(&state, TEST_UNTRUST_ZONE_ID, TEST_LAN_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval_9570(&state, TEST_UNTRUST_ZONE_ID, TEST_LAN_ZONE_ID),
+        PolicyAction::Deny
+    );
 }

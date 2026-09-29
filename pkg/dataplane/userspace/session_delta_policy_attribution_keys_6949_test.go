@@ -116,6 +116,23 @@ func TestSessionDeltaPolicyAttributionWireKeysLockstepWithRust6949(t *testing.T)
 	}
 }
 
+func TestSessionDeltaIngressAndPolicyRuleIdentityKeys11070(t *testing.T) {
+	binding := filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "binding.rs")
+	ingressKey := rustSerdeRenameIn(t, binding, "ingress_ifindex")
+	vlanKey := rustSerdeRenameIn(t, binding, "ingress_vlan_id")
+	ruleKey := rustSerdeRenameIn(t, binding, "policy_rule_id")
+	doc := fmt.Sprintf(`{"event":"open","addr_family":2,"protocol":6,%q:42,%q:51,%q:"lan->wan/allow-web"}`,
+		ingressKey, vlanKey, ruleKey)
+	var delta SessionDeltaInfo
+	if err := json.Unmarshal([]byte(doc), &delta); err != nil {
+		t.Fatalf("unmarshal delta: %v", err)
+	}
+	if delta.IngressIfindex != 42 || delta.IngressVLANID != 51 || delta.PolicyRuleID != "lan->wan/allow-web" {
+		t.Fatalf("delta identities = ifindex %d vlan %d rule %q",
+			delta.IngressIfindex, delta.IngressVLANID, delta.PolicyRuleID)
+	}
+}
+
 // TestSessionDeltaPolicyAttributionCommentIsNotFalse6949 guards the sentence
 // this file used to tell auditors.
 //

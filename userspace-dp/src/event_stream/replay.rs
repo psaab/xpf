@@ -37,9 +37,7 @@ fn evict_replay_frame(
 ) -> Option<EventFrame> {
     let frame = pop_replay_frame(shared, replay_buf);
     if let Some(evicted) = frame.as_ref() {
-        shared
-            .frames_replay_evicted
-            .fetch_add(1, Ordering::Relaxed);
+        shared.frames_replay_evicted.fetch_add(1, Ordering::Relaxed);
         // #2875: evicting a SESSION-SYNC delta WHILE PAUSED loses a session
         // mutation the future owner needs to take over cleanly. Poison the
         // pending demotion drain so `handle_drain_request` withholds

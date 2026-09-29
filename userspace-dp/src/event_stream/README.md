@@ -458,10 +458,10 @@ cluster-scoped.
 - **Write-backlog cap (#2381).** The bounded mpsc channel
   (`CHANNEL_CAPACITY`) is the ONLY intended backpressure surface. The
   I/O thread's pending socket-write backlog (`write_buf`) is capped at
-  `WRITE_BACKLOG_MAX_BYTES` (16 MiB ≈ 8× a fully-drained 8192×256 B
+  `WRITE_BACKLOG_MAX_BYTES` (16 MiB ≈ 4× a fully-drained 8192×512 B
   channel) in `drain_channel_into_write_buf()`. The cap is checked at the
   top of the drain loop, so the effective bound is `cap + one max
-  EventFrame` (≤ 256 B) — the in-flight frame already pulled may carry
+  EventFrame` (≤ 512 B) — the in-flight frame already pulled may carry
   the backlog just past 16 MiB before the drain halts. **Every producer
   into `write_buf` is subject to the cap, the idle keepalive included
   (#5189 A1-b10-F4)** — see the keepalive bullet below; before #5189 the

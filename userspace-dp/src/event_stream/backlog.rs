@@ -19,16 +19,16 @@
 /// the existing `frames_dropped` / per-kind `queue_full` counters) instead of
 /// silently relocating bytes into one unbounded buffer.
 ///
-/// `EventFrame::data` is a fixed `[u8; 256]` (see codec.rs), so a fully
-/// drained `CHANNEL_CAPACITY` (8192) channel is at most 8192 × 256 ≈ 2 MiB of
-/// bytes. 16 MiB is therefore ≈ 8× that worst-case channel drain — generous
+/// `EventFrame::data` is a fixed `[u8; 512]` (see codec.rs), so a fully
+/// drained `CHANNEL_CAPACITY` (8192) channel is at most 8192 × 512 ≈ 4 MiB of
+/// bytes. 16 MiB is therefore ≈ 4× that worst-case channel drain — generous
 /// headroom so transient bursts (plus any in-flight replay/partial-write
 /// remainder) are absorbed losslessly, while a persistently stalled consumer
 /// stays bounded.
-///
+
 /// The cap is checked at the top of the drain loop, before the in-flight frame
 /// is appended, so the UNWRITTEN backlog can reach at most
-/// `WRITE_BACKLOG_MAX_BYTES` plus one already-pulled max `EventFrame` (≤ 256 B)
+/// `WRITE_BACKLOG_MAX_BYTES` plus one already-pulled max `EventFrame` (≤ 512 B)
 /// before the drain halts — i.e. the bound is `cap + one frame`, not a strict
 /// 16 MiB. The overshoot is bounded and accepted (simpler than a pre-reserve
 /// check); memory is bounded either way.
@@ -118,7 +118,10 @@ impl WriteBacklog {
     /// it compacts geometrically. Replaces the O(backlog) `drain(..n)` memmove.
     pub(super) fn advance(&mut self, n: usize) {
         self.start += n;
-        debug_assert!(self.start <= self.buf.len(), "write reported more than pending");
+        debug_assert!(
+            self.start <= self.buf.len(),
+            "write reported more than pending"
+        );
         if self.start >= self.buf.len() {
             // Fully drained -- reset to empty without moving any bytes.
             self.buf.clear();

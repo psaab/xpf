@@ -1898,15 +1898,16 @@ is **232 bytes per new transit session**.
 The overlap is not exact, and the difference is worth stating because it bounds
 how much of the sweep's volume is genuinely redundant. The sweep gates on
 `ShouldSyncZone(val.IngressZone)` unconditionally. The delta stream
-(`shouldSyncUserspaceDelta`, daemon_ha_userspace_stream.go:28) has THREE branches:
-a fabric-redirect arm and a fallback arm that both use
-`ShouldSyncZone(ingressZone)`, but a middle arm — taken whenever the delta
-carries `OwnerRGID > 0` — that uses `IsPrimaryForRGFn(delta.OwnerRGID)` instead.
-`ShouldSyncZone` resolves zone → RG through `zoneRGMap` and then asks the same
-primary question, so the two agree when `zoneRGMap[ingressZone] ==
-delta.OwnerRGID` and can diverge when they do not. A session the delta stream
-admits on RG ownership but whose ingress zone the sweep declines (or the
-reverse) is sent ONCE, not twice.
+(`shouldSyncUserspaceDelta`, daemon_ha_userspace_stream.go:28) has THREE
+branches: fabric redirects use `ShouldSyncSessionV4/V6` with the delta's
+ingress ifindex/VLAN, ordinary deltas with `OwnerRGID > 0` use
+`IsPrimaryForRGFn(delta.OwnerRGID)`, and the remaining deltas use
+`ShouldSyncZone(ingressZone)`. The per-session predicate resolves the ingress
+identity to its RG and falls back to zone ownership only when that identity is
+unknown. Consequently, a fabric redirect in a multi-RG zone is judged by its
+actual ingress owner rather than any locally-owned RG in the zone. The sweep
+still uses zone-level ownership, so a delta admitted by its ingress RG while the
+sweep declines (or the reverse) is sent ONCE, not twice.
 
 **Both producers increment the same `stats.SessionsSent`.** The sweep queues via
 `queueMessage(msg, &s.stats.SessionsSent, "sweep_v4")` and the delta stream via
@@ -2522,26 +2523,27 @@ These deltas are **not** blindly mirrored. Filtering in
   and overwrote the owner's authoritative session family under
   latest-generation-wins, swapping the victim's mid-flow translation.
 
-  The fence is ownership of the INGRESS side: `ShouldSyncZone(ingressZone)` —
-  the same predicate the non-fabric fallback below already uses. A node may
-  hand a flow off over the fabric only when it is primary for the RG the flow's
-  ingress zone belongs to, i.e. only when it actually owns the traffic it is
-  handing off. The split-RG handoff (ingress RG local, egress RG the peer's)
-  still syncs; a node that owns NEITHER side of a flow can no longer install
-  anything on the peer. Regression coverage:
-  `TestShouldSyncUserspaceDeltaFabricRedirectRequiresIngressOwnership6599` and
-  `TestWalkUserspaceSessionDeltasDropsUnownedFabricRedirect6599` in
-  `pkg/daemon` — the second binds the WALK, so the suppressed delta is proved
-  to contribute zero sessions, forward-wire alias included.
+  Fabric redirects use the ingress session's ownership, not the zone's
+  aggregate RG membership: the gate calls `ShouldSyncSessionV4/V6` with the
+  ingress ifindex/VLAN carried by the delta. The resolved ingress RG decides
+  whether this node owns the session; only when the ingress identity cannot be
+  resolved does the predicate fall back to zone ownership. A split-RG handoff
+  (local ingress RG, peer egress RG) still syncs, while a peer-owned ingress in
+  the same multi-RG zone no longer over-syncs. Regression coverage:
+  `TestShouldSyncUserspaceDeltaFabricRedirectUsesSessionIngressOwnership11070`
+  and `TestWalkUserspaceSessionDeltasDropsUnownedFabricRedirect6599` in
+  `pkg/daemon` — the latter binds the WALK, so the suppressed delta contributes
+  zero sessions, forward-wire alias included.
 
-  Residual (unchanged by #6599, tracked with the #6461 Phase-2 identity work):
-  the deltas that survive this gate still carry no per-flow provenance, so an
-  Open cannot prove which incarnation of a tuple it belongs to. A spoofed
-  packet arriving on an ingress zone the node DOES own still fabricates a
-  session on the victim's tuple; the ingress gate removes the unowned-emitter
-  channel, not the identity-carriage gap.
-- if the delta carries `OwnerRGID`, ownership is checked with `IsPrimaryForRGFn`
-- otherwise the fallback is `ShouldSyncZone(ingressZone)`
+  Residual (unchanged by #11070, tracked with the #6461 Phase-2 identity work):
+  deltas still do not carry a tuple-incarnation identity. Ingress identity and
+  policy-rule identity do not prove which incarnation of a reused tuple an Open
+  belongs to; the gate removes unowned emitters, not that distinct identity gap.
+
+  - `FabricRedirect && !FabricIngress`: per-session ingress ownership as above.
+  - Otherwise, positive `OwnerRGID` uses `IsPrimaryForRGFn`; without it the
+    fallback is `ShouldSyncZone(ingressZone)`.
+
 
 ## Session-delta schema identity (#7194)
 

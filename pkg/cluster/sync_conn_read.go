@@ -347,7 +347,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// takes `recvGenMu`, and pulling it inside would add a bulkMu ->
 		// recvGenMu edge to the lock graph as a side effect of a correctness
 		// fix -- a change nothing here needs and nobody would look for.
-		if !inc.known() || switched {
+		if !inc.known() || (switched && priorInc.known()) {
 			s.resetRecvGen()
 		} else {
 			s.reclaimRecvLiveGen()
@@ -517,8 +517,12 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			s.stats.BulkEndsEpochOnlyMatched.Add(1)
 		}
 		s.bulkMu.Unlock()
+		if !s.reconcileStaleSessions() {
+			slog.Warn("cluster sync: bulk reconcile did not complete; withholding BulkAck and failover release",
+				"epoch", epoch)
+			break
+		}
 		s.stats.BulkSyncEndTime.Store(time.Now().UnixNano())
-		s.reconcileStaleSessions()
 		slog.Info("cluster sync: bulk transfer complete", "epoch", epoch, "sessions", s.stats.BulkSyncSessions.Load(), "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
 		s.sendBulkAck(conn, epoch)
 		s.bulkEverCompleted.Store(true)
@@ -599,14 +603,42 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			return
 		}
 		s.stats.ConfigApplyNacksReceived.Add(1)
-		// #9569: the peer still holds an older config. A handover onto it is refused
-		// until a newer push supersedes this generation.
-		s.peerConfigNackedGen.Store(nackedGen)
+		// #9569: the peer did not apply the config generation. A handover onto it
+		// remains refused until the peer positively acknowledges a successful apply.
 		slog.Warn("cluster sync: peer did not apply the config generation we pushed — re-arming the push marker",
 			"gen", nackedGen)
 		if s.OnPeerConfigApplyFailed != nil {
 			s.OnPeerConfigApplyFailed(nackedGen)
 		}
+	case syncMsgConfigApplyAck:
+		if len(payload) < 8 {
+			slog.Debug("cluster sync: short config-apply ack ignored", "len", len(payload))
+			return
+		}
+		appliedGen := binary.LittleEndian.Uint64(payload[:8])
+		if appliedGen == 0 {
+			return
+		}
+		s.mu.Lock()
+		if conn != nil && s.activeConnLocked() != conn {
+			s.mu.Unlock()
+			return
+		}
+		lastSent := s.lastSentConfigGen.Load()
+		if lastSent == 0 || appliedGen > lastSent {
+			s.mu.Unlock()
+			slog.Debug("cluster sync: ignoring config-apply ack for an unsent generation",
+				"applied_gen", appliedGen, "last_sent_gen", lastSent)
+			return
+		}
+		for {
+			old := s.peerAppliedConfigGen.Load()
+			if appliedGen <= old || s.peerAppliedConfigGen.CompareAndSwap(old, appliedGen) {
+				break
+			}
+		}
+		s.mu.Unlock()
+		slog.Debug("cluster sync: peer acknowledged applied config", "gen", appliedGen)
 	case syncMsgHeartbeat:
 		if conn == nil {
 			return
@@ -1289,6 +1321,7 @@ func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte) {
 	item := configApplyItem{
 		gen: gen, text: configText, ancestry: ancestry,
 		incarnation: s.connBootIncarnation(conn), authenticated: authenticated,
+		conn: conn,
 	}
 	if s.configItemIncarnationStale(item) {
 		s.stats.ConfigsDeadIncarnationDropped.Add(1)

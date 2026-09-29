@@ -4,12 +4,11 @@
 
 use super::*;
 
-
 // #5267: build a header-only SESSION_OPEN wire frame carrying `seq`. Used as a
 // realistic session-sync backlog delta whose seq must be ordered below the
 // replay-gap FullResync barrier on the wire.
 fn session_open_frame(seq: u64) -> EventFrame {
-    let mut data = [0u8; 256];
+    let mut data = [0u8; super::codec::EVENT_FRAME_CAPACITY];
     data[4] = super::codec::MSG_SESSION_OPEN;
     data[8..16].copy_from_slice(&seq.to_le_bytes());
     EventFrame {
@@ -49,7 +48,6 @@ fn test_sequence_monotonicity() {
     assert_eq!(*all_seqs.last().unwrap(), 400);
 }
 
-
 #[test]
 fn test_replay_buffer_trim() {
     let mut replay_buf: VecDeque<EventFrame> = VecDeque::new();
@@ -73,7 +71,6 @@ fn test_replay_buffer_trim() {
     assert_eq!(replay_buf.front().unwrap().seq, 6);
 }
 
-
 #[test]
 fn test_replay_gap_at_zero_ack_sends_full_resync() {
     let (mut daemon_side, helper_side) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -94,8 +91,14 @@ fn test_replay_gap_at_zero_ack_sends_full_resync() {
     // socket. It allocates the barrier's seq under `producer_seq_lock` and PARKS
     // it in `pending_resync`; the connected loop's drain emits it in seq order.
     let mut pending_resync: Option<EventFrame> = None;
-    replay_buffered(&helper_side, &mut replay_buf, 0, &shared, &mut pending_resync)
-        .expect("replay gap");
+    replay_buffered(
+        &helper_side,
+        &mut replay_buf,
+        0,
+        &shared,
+        &mut pending_resync,
+    )
+    .expect("replay gap");
     {
         let barrier = pending_resync
             .as_ref()
@@ -139,7 +142,6 @@ fn test_replay_gap_at_zero_ack_sends_full_resync() {
     assert_eq!(hdr[4], MSG_FULL_RESYNC);
     assert_eq!(shared.frames_sent.load(Ordering::Relaxed), 1);
 }
-
 
 // #5267 fail-on-revert guard: a replay-gap FullResync must be written to the
 // wire AFTER every lower-seq session delta already queued in the channel — wire
@@ -187,8 +189,14 @@ fn test_full_resync_orders_after_channel_backlog_5267() {
     // direct write instead pushes seq 14 straight to the socket HERE — ahead of
     // the still-queued backlog — which is the inversion this guards.
     let mut pending_resync: Option<EventFrame> = None;
-    replay_buffered(&helper_side, &mut replay_buf, 10, &shared, &mut pending_resync)
-        .expect("replay gap");
+    replay_buffered(
+        &helper_side,
+        &mut replay_buf,
+        10,
+        &shared,
+        &mut pending_resync,
+    )
+    .expect("replay gap");
 
     // Drain the backlog. Under the fix the drain merges the parked barrier LAST,
     // so write_buf holds 11,12,13,14 in order; under a revert the barrier is not
@@ -409,7 +417,6 @@ fn dataplane_event_budget_stays_held_after_connected_loop_drains_channel() {
     );
 }
 
-
 #[test]
 fn dataplane_event_budget_releases_when_replay_eviction_drops_frame() {
     let capacity = 1;
@@ -475,7 +482,6 @@ fn dataplane_event_budget_releases_when_replay_eviction_drops_frame() {
     release_replay_dataplane_event_queue_budget(&shared, &mut replay_buf);
 }
 
-
 // #2382: replay-buffer eviction (buffer wrapped at capacity before ACK) is a
 // real telemetry loss and must be counted; ACK-trim (acknowledged-frame
 // removal) is NOT a loss and must NOT bump the eviction counter. These tests
@@ -488,7 +494,11 @@ fn replay_buffer_eviction_counts_telemetry_loss_2382() {
 
     // Fill the replay buffer exactly to capacity — no eviction yet.
     for seq in 1..=REPLAY_BUFFER_CAPACITY as u64 {
-        push_replay_frame(&shared, &mut replay_buf, EventFrame::encode_drain_complete(seq));
+        push_replay_frame(
+            &shared,
+            &mut replay_buf,
+            EventFrame::encode_drain_complete(seq),
+        );
     }
     assert_eq!(replay_buf.len(), REPLAY_BUFFER_CAPACITY);
     assert_eq!(
@@ -518,7 +528,6 @@ fn replay_buffer_eviction_counts_telemetry_loss_2382() {
     assert_eq!(replay_buf.front().map(|f| f.seq), Some(overflow + 1));
 }
 
-
 #[test]
 fn ack_trim_does_not_count_as_replay_eviction_2382() {
     let shared = Arc::new(EventStreamShared::new());
@@ -526,7 +535,11 @@ fn ack_trim_does_not_count_as_replay_eviction_2382() {
 
     // Buffer well under capacity so no wrap occurs.
     for seq in 1..=10u64 {
-        push_replay_frame(&shared, &mut replay_buf, EventFrame::encode_drain_complete(seq));
+        push_replay_frame(
+            &shared,
+            &mut replay_buf,
+            EventFrame::encode_drain_complete(seq),
+        );
     }
     assert_eq!(shared.frames_replay_evicted.load(Ordering::Relaxed), 0);
 
@@ -561,7 +574,6 @@ fn ack_trim_does_not_count_as_replay_eviction_2382() {
     );
 }
 
-
 #[test]
 fn replay_evictions_surface_in_event_stream_stats_2382() {
     let sender = EventStreamSender {
@@ -575,7 +587,6 @@ fn replay_evictions_surface_in_event_stream_stats_2382() {
         .store(42, Ordering::Relaxed);
     assert_eq!(sender.stats().replay_evictions, 42);
 }
-
 
 // #2874: the HA session-sync delta must route through the LOSSLESS producer
 // (which surfaces a queue failure) while RT_FLOW telemetry stays best-effort
@@ -614,7 +625,6 @@ fn session_delta_lossless_surfaces_failure_while_telemetry_drops() {
     );
 }
 
-
 #[test]
 fn test_lossless_send_fails_when_not_connected() {
     let (tx, _rx) = mpsc::sync_channel::<EventFrame>(1);
@@ -626,7 +636,6 @@ fn test_lossless_send_fails_when_not_connected() {
         .expect_err("lossless send should fail when disconnected");
     assert!(err.contains("not connected"));
 }
-
 
 // #3878 F-153: a full-channel drop of a lossy session delta must NOT burn a
 // sequence number. The producer allocates the seq atomically with the enqueue
@@ -673,7 +682,6 @@ fn push_delta_full_channel_drop_does_not_burn_seq_3878() {
     );
     assert!(rx.try_recv().is_err(), "no extra frame should be queued");
 }
-
 
 // #3878 F-152: seq allocation and channel enqueue are atomic under the producer
 // lock, so the seq embedded in each frame is strictly monotonic in wire
@@ -742,7 +750,6 @@ fn concurrent_push_delta_preserves_monotonic_wire_order_3878() {
         "seqs must be a contiguous 1..=N run with no gaps or burns",
     );
 }
-
 
 // #3878 F-153 (lossless path): concurrent lossless flushers that all hit a FULL
 // channel must NOT strand a sequence number. Each failed attempt's rollback

@@ -71,21 +71,45 @@ func buildZoneFoldRGMap(cfg *config.Config) map[uint32]int {
 			delete(result, fold)
 			continue
 		}
-		baseName := cfg.SplitInterfaceUnitRef(localName).Base
-		ifc := cfg.Interfaces.Interfaces[baseName]
-		if ifc == nil || ifc.RedundancyGroup <= 0 {
+		rg := configuredInterfaceRG(cfg, localName)
+		if rg <= 0 {
 			continue
 		}
-		if prior, ok := result[fold]; ok && prior != ifc.RedundancyGroup {
+		if prior, ok := result[fold]; ok && prior != rg {
 			ambiguous[fold] = struct{}{}
 			delete(result, fold)
 			continue
 		}
 		if _, bad := ambiguous[fold]; !bad {
-			result[fold] = ifc.RedundancyGroup
+			result[fold] = rg
 		}
 	}
 	return result
+}
+
+// configuredInterfaceRG follows the RETH membership chain from a resolved
+// physical interface to the redundancy group that owns it.
+func configuredInterfaceRG(cfg *config.Config, name string) int {
+	if cfg == nil {
+		return 0
+	}
+	seen := make(map[string]struct{})
+	for name != "" {
+		base := cfg.SplitInterfaceUnitRef(name).Base
+		if _, ok := seen[base]; ok {
+			return 0
+		}
+		seen[base] = struct{}{}
+		ifc := cfg.Interfaces.Interfaces[base]
+		if ifc == nil {
+			return 0
+		}
+		if ifc.RedundancyGroup > 0 {
+			return ifc.RedundancyGroup
+		}
+		name = ifc.RedundantParent
+	}
+	return 0
 }
 
 // rgHasRETH returns whether the given redundancy group has any RETH interfaces.

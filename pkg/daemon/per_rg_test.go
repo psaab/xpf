@@ -339,10 +339,13 @@ func TestBuildZoneRGMap(t *testing.T) {
 }
 func TestBuildZoneFoldRGMapResolvesEachIngressGroup11012(t *testing.T) {
 	cfg := &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
-		"reth0": {Name: "reth0", RedundancyGroup: 1},
-		"reth1": {Name: "reth1", RedundancyGroup: 2},
+		"reth0":    {Name: "reth0", RedundancyGroup: 1},
+		"ge-0/0/2": {Name: "ge-0/0/2", RedundantParent: "reth0"},
+		"reth1":    {Name: "reth1", RedundancyGroup: 2},
 	}}}
 	foldRG := buildZoneFoldRGMap(cfg)
+	// The reth0 fold resolves to its local member; ownership must follow the
+	// member's RedundantParent back to reth0 (#11070).
 	for name, want := range map[string]int{"reth0": 1, "reth1": 2} {
 		fold := config.StableIfaceID(name)
 		if got, ok := foldRG[fold]; !ok || got != want {
@@ -350,7 +353,6 @@ func TestBuildZoneFoldRGMapResolvesEachIngressGroup11012(t *testing.T) {
 		}
 	}
 }
-
 
 // TestBuildZoneRGMapSkipsNilZones asserts that a nil zone value in
 // cfg.Security.Zones (reachable on the tolerant/programmatic/HA-peer-sync
@@ -604,7 +606,7 @@ func TestBuildZoneRGMapResolvesRedundantParent11012(t *testing.T) {
 			"member-zone": {Interfaces: []string{"ge-0/0/1.0"}},
 		}},
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
-			"reth0":     {Name: "reth0", RedundancyGroup: 2},
+			"reth0":    {Name: "reth0", RedundancyGroup: 2},
 			"ge-0/0/1": {Name: "ge-0/0/1", RedundantParent: "reth0"},
 		}},
 	}

@@ -4,12 +4,11 @@
 
 use super::*;
 
-
 // Build a benign header-only replay frame (MSG_SESSION_OPEN type) carrying the
 // given seq. Used so drain replay frames are NOT mistaken for the type-8
 // DrainComplete signal under test.
 fn replay_seq_frame(seq: u64) -> EventFrame {
-    let mut data = [0u8; 256];
+    let mut data = [0u8; super::codec::EVENT_FRAME_CAPACITY];
     // payload_len = 0, msg_type = MSG_SESSION_OPEN (1)
     data[4] = super::codec::MSG_SESSION_OPEN;
     data[8..16].copy_from_slice(&seq.to_le_bytes());
@@ -20,15 +19,13 @@ fn replay_seq_frame(seq: u64) -> EventFrame {
     }
 }
 
-
 // Helper: read one wire frame header from a stream (header-only frames).
 // Returns (msg_type, seq) or None if no frame arrives within the read timeout.
 fn try_read_frame_header(stream: &mut std::os::unix::net::UnixStream) -> Option<(u8, u64)> {
     let mut hdr = [0u8; FRAME_HEADER_SIZE];
     match stream.read_exact(&mut hdr) {
         Ok(()) => {
-            let payload_len =
-                u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
+            let payload_len = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
             // Consume any payload so the next header read is aligned.
             if payload_len > 0 {
                 let mut sink = vec![0u8; payload_len];
@@ -43,7 +40,6 @@ fn try_read_frame_header(stream: &mut std::os::unix::net::UnixStream) -> Option<
         Err(_) => None,
     }
 }
-
 
 // #2876 fail-on-revert guard (Rust helper side): when the drain channel never
 // reaches the target fence, handle_drain_request must time out and WITHHOLD
@@ -89,7 +85,6 @@ fn test_drain_below_fence_withholds_drain_complete() {
     }
 }
 
-
 // #2876: when the channel reaches the fence, handle_drain_request must emit a
 // DrainComplete whose seq is >= the target.
 #[test]
@@ -112,18 +107,13 @@ fn test_drain_at_fence_emits_drain_complete() {
     let mut saw_complete = false;
     while let Some((msg_type, seq)) = try_read_frame_header(&mut daemon_side) {
         if msg_type == MSG_DRAIN_COMPLETE {
-            assert!(
-                seq >= 5,
-                "DrainComplete seq {} must be >= fence 5",
-                seq
-            );
+            assert!(seq >= 5, "DrainComplete seq {} must be >= fence 5", seq);
             saw_complete = true;
             break;
         }
     }
     assert!(saw_complete, "helper did not emit DrainComplete at fence");
 }
-
 
 // #2882 fail-on-revert guard: DrainRequest is contracted as "flush all
 // buffered events UP TO target seq". With a replay buffer holding seqs 1..=10
@@ -174,7 +164,6 @@ fn test_drain_filters_to_target_and_reports_target_2882() {
     );
 }
 
-
 // Fill a nonblocking socket's send buffer so subsequent writes return
 // WouldBlock. Used to simulate a daemon that connected but stopped reading.
 fn fill_send_buffer(stream: &std::os::unix::net::UnixStream) {
@@ -188,7 +177,6 @@ fn fill_send_buffer(stream: &std::os::unix::net::UnixStream) {
         }
     }
 }
-
 
 // #2877 fail-on-revert guard: a daemon that connects but stops reading must NOT
 // wedge the I/O thread during REPLAY. With the old blocking `write_all`
@@ -235,7 +223,6 @@ fn test_replay_does_not_wedge_on_stuck_reader_2877() {
     let _ = handle.join();
 }
 
-
 // #2877 fail-on-revert guard: a stuck daemon reader must NOT wedge the I/O
 // thread during DRAIN either. handle_drain_request used to flip the socket to
 // blocking and `write_all` all frames; on a full socket that blocks forever and
@@ -274,7 +261,6 @@ fn test_drain_does_not_wedge_on_stuck_reader_2877() {
     drop(daemon_side);
     let _ = handle.join();
 }
-
 
 // #2883 fail-on-revert guard: the idle keepalive must ride the normal write_buf
 // backpressure path. The old code called write_all directly on the nonblocking
@@ -329,7 +315,6 @@ fn test_idle_keepalive_wouldblock_is_backpressure_not_reconnect_2883() {
     drop(daemon_side);
 }
 
-
 // ---------------------------------------------------------------------------
 // #2875 — paused-demotion drain must not silently lose session-sync deltas
 // ---------------------------------------------------------------------------
@@ -339,7 +324,7 @@ fn test_idle_keepalive_wouldblock_is_backpressure_not_reconnect_2883() {
 // `replay_seq_frame` (a SESSION_OPEN), this msg_type is not a session-sync
 // delta, so `EventFrame::is_session_sync()` returns false for it.
 fn telemetry_seq_frame(seq: u64) -> EventFrame {
-    let mut data = [0u8; 256];
+    let mut data = [0u8; super::codec::EVENT_FRAME_CAPACITY];
     data[4] = super::codec::MSG_SCREEN_DROP;
     data[8..16].copy_from_slice(&seq.to_le_bytes());
     EventFrame {
@@ -348,7 +333,6 @@ fn telemetry_seq_frame(seq: u64) -> EventFrame {
         seq,
     }
 }
-
 
 // Inject a telemetry frame into the replay buffer AND seed the per-kind queue
 // budget the producer's `emit` would have charged for it (#4607). The #2875
@@ -370,7 +354,6 @@ fn push_budgeted_replay_frame(
     }
     push_replay_frame(shared, replay_buf, frame);
 }
-
 
 // #2875 fail-on-revert guard: pause the helper, overrun the bounded replay
 // buffer so a SESSION-SYNC delta is evicted, then issue DrainRequest. The drain
@@ -432,7 +415,6 @@ fn test_paused_session_eviction_poisons_drain_2875() {
     assert!(!shared.session_evicted_while_paused.load(Ordering::Acquire));
 }
 
-
 // #2875: a TELEMETRY-only eviction while paused must NOT poison the drain — the
 // drain still completes normally (no spurious FullResync / FullResync storm).
 #[test]
@@ -481,7 +463,6 @@ fn test_paused_telemetry_eviction_does_not_poison_drain_2875() {
     );
 }
 
-
 // #2875: a fresh pause window must start lossless — MSG_PAUSE clears any poison
 // left by a previous drain so a stale flag cannot withhold this window's
 // DrainComplete.
@@ -500,8 +481,7 @@ fn test_pause_start_clears_drain_poison_2875() {
     // A PAUSE control frame must clear it.
     let mut pause = [0u8; FRAME_HEADER_SIZE];
     pause[4] = MSG_PAUSE;
-    let (action, consumed) =
-        process_control_frames(&pause, &shared, &rx, &sock_a, &mut replay_buf);
+    let (action, consumed) = process_control_frames(&pause, &shared, &rx, &sock_a, &mut replay_buf);
     assert!(action.is_none());
     assert_eq!(consumed, FRAME_HEADER_SIZE);
     assert!(shared.paused.load(Ordering::Acquire));

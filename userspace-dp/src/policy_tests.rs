@@ -388,7 +388,10 @@ fn hit_counter_attributes_permit_and_deny_but_not_default_deny() {
     assert_eq!(permit_counter.bytes, 100);
 
     let deny_counter = policy_counter(&state, &deny_id);
-    assert_eq!(deny_counter.packets, 1, "explicit deny rule must record 1 hit");
+    assert_eq!(
+        deny_counter.packets, 1,
+        "explicit deny rule must record 1 hit"
+    );
     assert_eq!(deny_counter.bytes, 200);
 
     // #3363: the default-deny flow must NOT have inflated either NAMED
@@ -526,7 +529,8 @@ fn hit_counters_survive_scheduler_snapshot_rebuild() {
         &test_zone_name_to_id(),
         &[],
         &counter_store,
-    ).expect("test snapshot must not produce integrity error");
+    )
+    .expect("test snapshot must not produce integrity error");
 
     for _ in 0..2 {
         assert_eq!(
@@ -555,7 +559,8 @@ fn hit_counters_survive_scheduler_snapshot_rebuild() {
         &test_zone_name_to_id(),
         &[],
         &counter_store,
-    ).expect("test snapshot must not produce integrity error");
+    )
+    .expect("test snapshot must not produce integrity error");
     assert!(inactive.rules[0].inactive);
     assert_eq!(policy_counter(&inactive, &rule_id).packets, 2);
     assert_eq!(
@@ -582,7 +587,8 @@ fn hit_counters_survive_scheduler_snapshot_rebuild() {
         &test_zone_name_to_id(),
         &[],
         &counter_store,
-    ).expect("test snapshot must not produce integrity error");
+    )
+    .expect("test snapshot must not produce integrity error");
     assert_eq!(policy_counter(&active_again, &rule_id).packets, 2);
     assert_eq!(
         evaluate_policy(
@@ -611,7 +617,8 @@ fn hit_counters_reset_after_rule_absent_then_readded() {
         &test_zone_name_to_id(),
         &[],
         &counter_store,
-    ).expect("test snapshot must not produce integrity error");
+    )
+    .expect("test snapshot must not produce integrity error");
     assert_eq!(
         evaluate_policy_with_len(
             &active,
@@ -632,13 +639,8 @@ fn hit_counters_reset_after_rule_absent_then_readded() {
 
     counter_store.reconcile_rules(&[]);
     let deleted =
-        parse_policy_state_with_counters(
-        "deny",
-        &[],
-        &test_zone_name_to_id(),
-        &[],
-        &counter_store,
-    ).expect("test snapshot must not produce integrity error");
+        parse_policy_state_with_counters("deny", &[], &test_zone_name_to_id(), &[], &counter_store)
+            .expect("test snapshot must not produce integrity error");
     // #3363: counter_snapshots always carries the reserved default-policy
     // row, so the only surviving counter after deleting every named rule is
     // that reserved one — no NAMED rule counter remains.
@@ -656,7 +658,8 @@ fn hit_counters_reset_after_rule_absent_then_readded() {
         &test_zone_name_to_id(),
         &[],
         &counter_store,
-    ).expect("test snapshot must not produce integrity error");
+    )
+    .expect("test snapshot must not produce integrity error");
     let reset_counter = policy_counter(&active_again, &rule_id);
     assert_eq!(reset_counter.packets, 0);
     assert_eq!(reset_counter.bytes, 0);
@@ -711,6 +714,49 @@ fn policy_id_reresolves_to_current_index_after_mid_list_insert() {
         6,
         "established session must re-resolve to bee's CURRENT positional id (6), \
          not the frozen install-time id (5)"
+    );
+}
+
+#[test]
+fn synced_hit_counter_rebinds_by_stable_rule_identity11070() {
+    let store = PolicyCounterStore::default();
+    let original = parse_policy_state_with_counters(
+        "deny",
+        &[permit_snapshot("bee", 5)],
+        &test_zone_name_to_id(),
+        &[],
+        &store,
+    )
+    .expect("original");
+    let sender_counter = original
+        .hit_counter_by_idx(1)
+        .cloned()
+        .expect("sender counter");
+
+    let reordered = parse_policy_state_with_counters(
+        "deny",
+        &[permit_snapshot("aaa", 5), permit_snapshot("bee", 6)],
+        &test_zone_name_to_id(),
+        &[],
+        &store,
+    )
+    .expect("reordered");
+    let (current_idx, current_counter) = reordered
+        .hit_counter_binding_by_stable_id(sender_counter.rule_id())
+        .expect("surviving rule resolves by stable identity");
+    assert_eq!(
+        current_idx, 2,
+        "bee moved behind aaa in the current ordering"
+    );
+    assert!(
+        Arc::ptr_eq(&sender_counter, current_counter),
+        "the synced session must bind the current counter for bee, not index 1"
+    );
+    assert!(
+        reordered
+            .hit_counter_binding_by_stable_id("lan->wan/deleted")
+            .is_none(),
+        "an unresolved stable ID must remain unattributed, never use its old index"
     );
 }
 
@@ -953,14 +999,28 @@ fn named_protocol_sctp_matches_only_sctp_not_tcp() {
     let dst = "172.16.80.200".parse().expect("dst");
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_SCTP, 0, 0,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_SCTP,
+            0,
+            0,
         ),
         PolicyAction::Permit,
         "sctp must match an sctp-only rule"
     );
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_TCP, 40000, 443,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_TCP,
+            40000,
+            443,
         ),
         PolicyAction::Deny,
         "TCP must NOT match an sctp-only rule (no fail-open to match-any)"
@@ -978,13 +1038,27 @@ fn named_protocol_esp_matches_only_esp_not_tcp() {
     let dst = "172.16.80.200".parse().expect("dst");
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_ESP, 0, 0,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_ESP,
+            0,
+            0,
         ),
         PolicyAction::Permit
     );
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_TCP, 40000, 443,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_TCP,
+            40000,
+            443,
         ),
         PolicyAction::Deny
     );
@@ -1025,13 +1099,27 @@ fn numeric_protocol_still_matches() {
     let dst = "172.16.80.200".parse().expect("dst");
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_SCTP, 0, 0,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_SCTP,
+            0,
+            0,
         ),
         PolicyAction::Permit
     );
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_TCP, 40000, 443,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_TCP,
+            40000,
+            443,
         ),
         PolicyAction::Deny
     );
@@ -1263,7 +1351,10 @@ fn unknown_rule_action_rejects_whole_snapshot() {
         parse_policy_state_with_counters("deny", &[bad], &test_zone_name_to_id(), &[], &store);
     match result {
         Err(SnapshotIntegrityError::UnknownPolicyAction { context, action }) => {
-            assert!(context.contains("bad-action"), "context names the rule: {context}");
+            assert!(
+                context.contains("bad-action"),
+                "context names the rule: {context}"
+            );
             assert_eq!(action, "reject-tcp");
         }
         other => panic!("expected UnknownPolicyAction, got {other:?}"),
@@ -1290,7 +1381,10 @@ fn empty_rule_action_rejects_whole_snapshot() {
     let result =
         parse_policy_state_with_counters("deny", &[bad], &test_zone_name_to_id(), &[], &store);
     assert!(
-        matches!(result, Err(SnapshotIntegrityError::UnknownPolicyAction { .. })),
+        matches!(
+            result,
+            Err(SnapshotIntegrityError::UnknownPolicyAction { .. })
+        ),
         "an empty per-rule action must fail closed, got {result:?}"
     );
 }
@@ -1512,7 +1606,14 @@ fn fresh_boot_default_policy_state_denies_all_transit() {
     let dst = "172.16.80.200".parse().expect("dst");
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_TCP, 40000, 443,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_TCP,
+            40000,
+            443,
         ),
         PolicyAction::Deny,
         "fresh-boot default PolicyState must deny all transit"
@@ -1545,13 +1646,27 @@ fn empty_application_terms_stay_match_any() {
     // Both an arbitrary TCP flow and an SCTP flow must be permitted (match-any).
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_TCP, 40000, 443,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_TCP,
+            40000,
+            443,
         ),
         PolicyAction::Permit
     );
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_SCTP, 0, 0,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_SCTP,
+            0,
+            0,
         ),
         PolicyAction::Permit
     );
@@ -1657,21 +1772,42 @@ fn all_parseable_terms_match_each_protocol() {
     let dst = "172.16.80.200".parse().expect("dst");
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_ESP, 0, 0,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_ESP,
+            0,
+            0,
         ),
         PolicyAction::Permit,
         "esp term must match"
     );
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_TCP, 40000, 443,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_TCP,
+            40000,
+            443,
         ),
         PolicyAction::Permit,
         "tcp/443 term must match"
     );
     assert_eq!(
         evaluate_policy(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_TCP, 40000, 80,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_TCP,
+            40000,
+            80,
         ),
         PolicyAction::Deny,
         "tcp/80 must NOT match (not match-any)"
@@ -2125,8 +2261,7 @@ fn default_policy_no_match_emits_sentinel_policy_id() {
     );
     assert_eq!(default_hit.action, PolicyAction::Deny);
     assert_eq!(
-        default_hit.policy_id,
-        DEFAULT_POLICY_SENTINEL_ID,
+        default_hit.policy_id, DEFAULT_POLICY_SENTINEL_ID,
         "the implicit default-policy must emit the reserved sentinel ID, not 0"
     );
     assert_ne!(
@@ -2224,10 +2359,7 @@ fn test_book_table_dedup_by_index() {
     // Two rules cite the same book ID. After parsing, both rules
     // resolve to the same dense index → identical match path.
     let books = [book(42, "corp-net", &["10.0.0.0/8"], &[])];
-    let rules = [
-        v3_rule("rule-a", &[42], &[]),
-        v3_rule("rule-b", &[42], &[]),
-    ];
+    let rules = [v3_rule("rule-a", &[42], &[]), v3_rule("rule-b", &[42], &[])];
     let counter_store = PolicyCounterStore::default();
     let state = parse_policy_state_with_counters(
         "deny",
@@ -2238,7 +2370,10 @@ fn test_book_table_dedup_by_index() {
     )
     .expect("parse");
     assert_eq!(state.books.len(), 1);
-    assert_eq!(state.rules[0].source_book_idxs[..], state.rules[1].source_book_idxs[..]);
+    assert_eq!(
+        state.rules[0].source_book_idxs[..],
+        state.rules[1].source_book_idxs[..]
+    );
 }
 
 #[test]
@@ -2424,7 +2559,10 @@ fn test_unknown_book_id_hard_fails_snapshot() {
 
 #[test]
 fn test_duplicate_address_book_id_hard_fails_snapshot() {
-    let books = [book(5, "a", &["10.0.0.0/24"], &[]), book(5, "b", &["10.1.0.0/24"], &[])];
+    let books = [
+        book(5, "a", &["10.0.0.0/24"], &[]),
+        book(5, "b", &["10.1.0.0/24"], &[]),
+    ];
     let counter_store = PolicyCounterStore::default();
     let result = parse_policy_state_with_counters(
         "deny",
@@ -3185,7 +3323,10 @@ fn test_book_wrong_family_v6_in_v4_rejected() {
             ..
         }) => {
             assert_eq!(book_id, 78);
-            assert_eq!(family, "v4", "a v6 token in prefixes_v4 is a v4-array violation");
+            assert_eq!(
+                family, "v4",
+                "a v6 token in prefixes_v4 is a v4-array violation"
+            );
             assert_eq!(address, "2001:db8::/32");
         }
         other => panic!("expected UnrepresentableAddressBookPrefix, got {other:?}"),
@@ -3212,7 +3353,10 @@ fn test_book_wrong_family_v4_in_v6_rejected() {
             ..
         }) => {
             assert_eq!(book_id, 79);
-            assert_eq!(family, "v6", "a v4 token in prefixes_v6 is a v6-array violation");
+            assert_eq!(
+                family, "v6",
+                "a v4 token in prefixes_v6 is a v6-array violation"
+            );
             assert_eq!(address, "10.0.0.0/8");
         }
         other => panic!("expected UnrepresentableAddressBookPrefix, got {other:?}"),
@@ -4006,7 +4150,8 @@ fn app_catalog_overlap_lowest_id_wins() {
     assert_eq!(cat.lookup_forward(6, 40000, 80), 5);
 
     // Range vs exact overlap — both port-constrained, so lowest id still wins.
-    let cat = AppCatalog::from_snapshot(&[cat_entry(2, 6, 8000, 8100), cat_entry(20, 6, 8050, 8050)]);
+    let cat =
+        AppCatalog::from_snapshot(&[cat_entry(2, 6, 8000, 8100), cat_entry(20, 6, 8050, 8050)]);
     assert_eq!(cat.lookup_forward(6, 40000, 8050), 2);
 }
 
@@ -4278,8 +4423,17 @@ fn flowless_icmp_type_mismatch_deny_does_not_override_permit_10673() {
     );
     assert_eq!(
         evaluate_policy_result_l3_aware(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_ICMP, 0, 0,
-            Some((8, 0)), 64, false,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_ICMP,
+            0,
+            0,
+            Some((8, 0)),
+            64,
+            false,
         )
         .action,
         PolicyAction::Deny,
@@ -4287,8 +4441,17 @@ fn flowless_icmp_type_mismatch_deny_does_not_override_permit_10673() {
     );
     assert_eq!(
         evaluate_policy_result_l3_aware(
-            &state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, src, dst, PROTO_ICMP, 0, 0,
-            None, 64, false,
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            src,
+            dst,
+            PROTO_ICMP,
+            0,
+            0,
+            None,
+            64,
+            false,
         )
         .action,
         PolicyAction::Deny,
@@ -4319,7 +4482,10 @@ fn junos_pingv6_matches_echo_request_only() {
         &test_zone_name_to_id(),
     );
     // ICMPv6 echo-request is type 128.
-    assert_eq!(eval_icmp(&state, PROTO_ICMPV6, 128, 0), PolicyAction::Permit);
+    assert_eq!(
+        eval_icmp(&state, PROTO_ICMPV6, 128, 0),
+        PolicyAction::Permit
+    );
     // Echo-reply is 129 — must NOT match.
     assert_eq!(eval_icmp(&state, PROTO_ICMPV6, 129, 0), PolicyAction::Deny);
     // Neighbor solicitation (135) — must NOT match.
@@ -4572,7 +4738,9 @@ fn non_icmp_term_with_icmp_code_rejects_whole_snapshot() {
     let result =
         parse_policy_state_with_counters("permit", &[bad], &test_zone_name_to_id(), &[], &store);
     match result {
-        Err(SnapshotIntegrityError::InvalidApplicationIcmpFields { rule_id, reason, .. }) => {
+        Err(SnapshotIntegrityError::InvalidApplicationIcmpFields {
+            rule_id, reason, ..
+        }) => {
             assert_eq!(rule_id, "udp-icmp-code");
             assert_eq!(reason, "icmp-type/icmp-code set on a non-ICMP protocol");
         }
@@ -4629,8 +4797,15 @@ fn junos_host_deny_snapshot(action: &str) -> PolicyRuleSnapshot {
 /// so the LocalDelivery gate could never reach it.
 #[test]
 fn junos_host_rule_is_indexed_under_reserved_zone_id() {
-    let state = parse_policy_state("permit", &[junos_host_deny_snapshot("deny")], &test_zone_name_to_id());
-    assert!(state.has_junos_host_rules, "junos-host rule must arm the gate");
+    let state = parse_policy_state(
+        "permit",
+        &[junos_host_deny_snapshot("deny")],
+        &test_zone_name_to_id(),
+    );
+    assert!(
+        state.has_junos_host_rules,
+        "junos-host rule must arm the gate"
+    );
     let key = zone_pair_key(TEST_TRUST_ZONE_ID, JUNOS_HOST_ZONE_ID);
     assert!(
         state.zone_pair_index.contains_key(&key),
@@ -4643,7 +4818,11 @@ fn junos_host_rule_is_indexed_under_reserved_zone_id() {
 /// junos-host zone-pair and returns the matched Deny action.
 #[test]
 fn junos_host_policy_denies_matching_host_bound_flow() {
-    let state = parse_policy_state("permit", &[junos_host_deny_snapshot("deny")], &test_zone_name_to_id());
+    let state = parse_policy_state(
+        "permit",
+        &[junos_host_deny_snapshot("deny")],
+        &test_zone_name_to_id(),
+    );
     let result = evaluate_junos_host_policy(
         &state,
         TEST_TRUST_ZONE_ID,
@@ -4668,7 +4847,11 @@ fn junos_host_policy_denies_matching_host_bound_flow() {
 /// call order, not here.
 #[test]
 fn junos_host_policy_permits_matching_host_bound_flow() {
-    let state = parse_policy_state("deny", &[junos_host_deny_snapshot("permit")], &test_zone_name_to_id());
+    let state = parse_policy_state(
+        "deny",
+        &[junos_host_deny_snapshot("permit")],
+        &test_zone_name_to_id(),
+    );
     let result = evaluate_junos_host_policy(
         &state,
         TEST_TRUST_ZONE_ID,
@@ -4728,7 +4911,11 @@ fn junos_host_policy_no_op_without_configured_rule() {
 /// from-any/global rule the flow still delivers (#10644).
 #[test]
 fn junos_host_policy_no_match_falls_through_to_today_behavior() {
-    let state = parse_policy_state("permit", &[junos_host_deny_snapshot("deny")], &test_zone_name_to_id());
+    let state = parse_policy_state(
+        "permit",
+        &[junos_host_deny_snapshot("deny")],
+        &test_zone_name_to_id(),
+    );
     // Different ingress zone, no junos-host rule for (untrust, junos-host).
     assert!(
         evaluate_junos_host_policy(
@@ -4805,7 +4992,11 @@ fn junos_host_port_app_snapshot() -> PolicyRuleSnapshot {
 
 #[test]
 fn junos_host_l3_aware_fails_port_bearing_term_closed_for_flowless() {
-    let state = parse_policy_state("permit", &[junos_host_port_app_snapshot()], &test_zone_name_to_id());
+    let state = parse_policy_state(
+        "permit",
+        &[junos_host_port_app_snapshot()],
+        &test_zone_name_to_id(),
+    );
     let src = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 102));
     let dst = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 1));
 
@@ -4814,7 +5005,16 @@ fn junos_host_l3_aware_fails_port_bearing_term_closed_for_flowless() {
     // non-match below is attributable ONLY to l4_present being false.)
     assert_eq!(
         evaluate_junos_host_policy_l3_aware(
-            &state, TEST_TRUST_ZONE_ID, src, dst, PROTO_TCP, 12345, 22, None, 64, true,
+            &state,
+            TEST_TRUST_ZONE_ID,
+            src,
+            dst,
+            PROTO_TCP,
+            12345,
+            22,
+            None,
+            64,
+            true,
         )
         .map(|r| r.action),
         Some(PolicyAction::Deny),
@@ -4829,7 +5029,16 @@ fn junos_host_l3_aware_fails_port_bearing_term_closed_for_flowless() {
     // #6465 override this returns None (delivered) — the pre-#6465 fail-open
     // asymmetry vs the transit gate.
     let frag = evaluate_junos_host_policy_l3_aware(
-        &state, TEST_TRUST_ZONE_ID, src, dst, PROTO_TCP, 12345, 22, None, 64, false,
+        &state,
+        TEST_TRUST_ZONE_ID,
+        src,
+        dst,
+        PROTO_TCP,
+        12345,
+        22,
+        None,
+        64,
+        false,
     )
     .expect("#6465: an overlapping skipped port-bearing deny must fail the fragment closed");
     assert_eq!(
@@ -4843,12 +5052,25 @@ fn junos_host_l3_aware_fails_port_bearing_term_closed_for_flowless() {
 fn junos_host_l3_aware_any_app_matches_regardless_of_l4_presence() {
     // An `application any` junos-host deny matches a flowless host-bound packet
     // (no port required) — the L3-identity rule still enforces.
-    let state = parse_policy_state("permit", &[junos_host_deny_snapshot("deny")], &test_zone_name_to_id());
+    let state = parse_policy_state(
+        "permit",
+        &[junos_host_deny_snapshot("deny")],
+        &test_zone_name_to_id(),
+    );
     let src = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 102));
     let dst = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 1));
     assert_eq!(
         evaluate_junos_host_policy_l3_aware(
-            &state, TEST_TRUST_ZONE_ID, src, dst, PROTO_TCP, 0, 0, None, 64, false,
+            &state,
+            TEST_TRUST_ZONE_ID,
+            src,
+            dst,
+            PROTO_TCP,
+            0,
+            0,
+            None,
+            64,
+            false,
         )
         .map(|r| r.action),
         Some(PolicyAction::Deny),
@@ -4925,7 +5147,16 @@ fn junos_host_flowless_fragment_fails_closed_against_skipped_port_bearing_deny_6
     //     anchors that the deny's port term itself matches.
     assert_eq!(
         evaluate_junos_host_policy_l3_aware(
-            &state, TEST_TRUST_ZONE_ID, denied_src, dst, PROTO_TCP, 40000, 443, None, 64, true,
+            &state,
+            TEST_TRUST_ZONE_ID,
+            denied_src,
+            dst,
+            PROTO_TCP,
+            40000,
+            443,
+            None,
+            64,
+            true,
         )
         .map(|r| r.action),
         Some(PolicyAction::Deny),
@@ -4938,7 +5169,16 @@ fn junos_host_flowless_fragment_fails_closed_against_skipped_port_bearing_deny_6
     //     and that the L4 path is byte-identical.
     assert_eq!(
         evaluate_junos_host_policy_l3_aware(
-            &state, TEST_TRUST_ZONE_ID, denied_src, dst, PROTO_TCP, 40000, 80, None, 64, true,
+            &state,
+            TEST_TRUST_ZONE_ID,
+            denied_src,
+            dst,
+            PROTO_TCP,
+            40000,
+            80,
+            None,
+            64,
+            true,
         )
         .map(|r| r.action),
         Some(PolicyAction::Permit),
@@ -4951,7 +5191,16 @@ fn junos_host_flowless_fragment_fails_closed_against_skipped_port_bearing_deny_6
     //     closed). RED ON REVERT: without the guard this returns Permit
     //     (fragment delivered), bypassing the deny.
     let frag = evaluate_junos_host_policy_l3_aware(
-        &state, TEST_TRUST_ZONE_ID, denied_src, dst, PROTO_TCP, 0, 0, None, 64, false,
+        &state,
+        TEST_TRUST_ZONE_ID,
+        denied_src,
+        dst,
+        PROTO_TCP,
+        0,
+        0,
+        None,
+        64,
+        false,
     )
     .expect("#6465: an overlapping skipped port-bearing deny must fail the fragment closed");
     assert_eq!(
@@ -4972,7 +5221,16 @@ fn junos_host_flowless_fragment_fails_closed_against_skipped_port_bearing_deny_6
     //     does not over-drop unrelated fragments (the lifeline guarantee holds).
     assert_eq!(
         evaluate_junos_host_policy_l3_aware(
-            &state, TEST_TRUST_ZONE_ID, other_src, dst, PROTO_TCP, 0, 0, None, 64, false,
+            &state,
+            TEST_TRUST_ZONE_ID,
+            other_src,
+            dst,
+            PROTO_TCP,
+            0,
+            0,
+            None,
+            64,
+            false,
         )
         .map(|r| r.action),
         Some(PolicyAction::Permit),
@@ -4999,7 +5257,16 @@ fn junos_host_flowless_fragment_fails_closed_on_deliver_fall_through_6465() {
     let dst = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 1));
 
     let frag = evaluate_junos_host_policy_l3_aware(
-        &state, TEST_TRUST_ZONE_ID, denied_src, dst, PROTO_TCP, 0, 0, None, 64, false,
+        &state,
+        TEST_TRUST_ZONE_ID,
+        denied_src,
+        dst,
+        PROTO_TCP,
+        0,
+        0,
+        None,
+        64,
+        false,
     )
     .expect("#6465: the deliver fall-through must fail closed against a skipped deny");
     assert_eq!(frag.action, PolicyAction::Deny);
@@ -5008,7 +5275,16 @@ fn junos_host_flowless_fragment_fails_closed_on_deliver_fall_through_6465() {
     // No overlapping deny -> the lifeline is untouched: None (deliver).
     assert!(
         evaluate_junos_host_policy_l3_aware(
-            &state, TEST_TRUST_ZONE_ID, other_src, dst, PROTO_TCP, 0, 0, None, 64, false,
+            &state,
+            TEST_TRUST_ZONE_ID,
+            other_src,
+            dst,
+            PROTO_TCP,
+            0,
+            0,
+            None,
+            64,
+            false,
         )
         .is_none(),
         "a host-bound flowless fragment with no overlapping deny keeps the lifeline (None)",
@@ -5018,7 +5294,16 @@ fn junos_host_flowless_fragment_fails_closed_on_deliver_fall_through_6465() {
     // byte-identical lifeline (None — no rule matches, no override possible).
     assert!(
         evaluate_junos_host_policy_l3_aware(
-            &state, TEST_TRUST_ZONE_ID, denied_src, dst, PROTO_TCP, 40000, 80, None, 64, true,
+            &state,
+            TEST_TRUST_ZONE_ID,
+            denied_src,
+            dst,
+            PROTO_TCP,
+            40000,
+            80,
+            None,
+            64,
+            true,
         )
         .is_none(),
         "the L4 lifeline path must be byte-identical (no rule match -> None)",
@@ -5394,7 +5679,9 @@ fn policy_hit_count_evaluation_emits_one_based_counter_handle() {
     assert!(
         !std::sync::Arc::ptr_eq(
             state.hit_counter_by_idx(res.policy_counter_idx).unwrap(),
-            state.hit_counter_by_idx(defaulted.policy_counter_idx).unwrap(),
+            state
+                .hit_counter_by_idx(defaulted.policy_counter_idx)
+                .unwrap(),
         ),
         "the default-policy counter must be distinct from any named-rule counter"
     );
@@ -5539,26 +5826,32 @@ fn bound_hit_counter_survives_live_policy_reorder() {
 
     // Snapshot 1: a single rule B. B sits at rules[0] -> 1-based handle 1.
     let rule_b = reorder_rule_snapshot(&id_b, "permit-b");
-    let state1 =
-        parse_policy_state_with_counters("deny", std::slice::from_ref(&rule_b), &zones, &[], &store)
-            .expect("state1");
-    // Bind B's counter the way session install does (idx still valid here).
-    let bound = state1.hit_counter_by_idx(1).cloned();
-    assert!(bound.is_some(), "rule B must surface a bound counter at install");
-
-    // Operator inserts rule A ABOVE B (a live reorder) — same persistent store.
-    let rule_a = reorder_rule_snapshot(&id_a, "permit-a");
-    let state2 = parse_policy_state_with_counters(
+    let state1 = parse_policy_state_with_counters(
         "deny",
-        &[rule_a, rule_b.clone()],
+        std::slice::from_ref(&rule_b),
         &zones,
         &[],
         &store,
     )
-    .expect("state2");
+    .expect("state1");
+    // Bind B's counter the way session install does (idx still valid here).
+    let bound = state1.hit_counter_by_idx(1).cloned();
+    assert!(
+        bound.is_some(),
+        "rule B must surface a bound counter at install"
+    );
+
+    // Operator inserts rule A ABOVE B (a live reorder) — same persistent store.
+    let rule_a = reorder_rule_snapshot(&id_a, "permit-a");
+    let state2 =
+        parse_policy_state_with_counters("deny", &[rule_a, rule_b.clone()], &zones, &[], &store)
+            .expect("state2");
     // The positional handle 1 now points at the INSERTED rule A — the stale
     // index. Resolving it positionally would mis-attribute B's traffic to A.
-    assert_eq!(state2.rules[0].rule_id, id_a, "A must occupy the old slot 1");
+    assert_eq!(
+        state2.rules[0].rule_id, id_a,
+        "A must occupy the old slot 1"
+    );
     assert_eq!(state2.rules[1].rule_id, id_b, "B shifted to slot 2");
 
     // Established fast path: resolve via the BOUND handle, passing the now-stale
@@ -5689,12 +5982,24 @@ fn from_zone_any_matches_across_ingress_zones() {
         &[wildcard_rule("block-to-wan", "any", "wan", "deny")],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
-    assert_eq!(eval(&state, TEST_UNTRUST_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
+    assert_eq!(
+        eval(&state, TEST_UNTRUST_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
     // A flow into a DIFFERENT to-zone is NOT matched by the from-any-to-wan
     // rule and falls through to the default permit.
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_TRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_TRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
 }
 
 #[test]
@@ -5706,11 +6011,23 @@ fn to_zone_any_matches_across_egress_zones() {
         &[wildcard_rule("trust-out", "trust", "any", "permit")],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_LAN_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_LAN_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
     // A different ingress zone is not matched → default deny.
-    assert_eq!(eval(&state, TEST_UNTRUST_ZONE_ID, TEST_LAN_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_UNTRUST_ZONE_ID, TEST_LAN_ZONE_ID),
+        PolicyAction::Deny
+    );
 }
 
 #[test]
@@ -5722,8 +6039,14 @@ fn both_any_matches_every_pair() {
         &[wildcard_rule("all", "any", "any", "permit")],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
     // An unzoned flow (id 0) still falls through to default (the #3110 guard);
     // wildcard tiers live inside the from_id!=0 && to_id!=0 gate.
     assert_eq!(eval(&state, 0, TEST_WAN_ZONE_ID), PolicyAction::Deny);
@@ -5766,7 +6089,10 @@ fn single_wildcard_tier_honors_config_order() {
         ],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&deny_first, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&deny_first, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID),
+        PolicyAction::Deny
+    );
     // Reversed config order: the to-any permit is now first and wins.
     let permit_first = parse_policy_state(
         "deny",
@@ -5776,7 +6102,10 @@ fn single_wildcard_tier_honors_config_order() {
         ],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&permit_first, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&permit_first, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
 }
 
 #[test]
@@ -5791,9 +6120,15 @@ fn single_wildcard_beats_both_any() {
         ],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
     // A pair the single-wildcard does not cover falls to both-any permit.
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_TRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_TRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
 }
 
 #[test]
@@ -5825,7 +6160,10 @@ fn wildcard_falls_through_to_default() {
         &[wildcard_rule("from-any-wan", "any", "wan", "permit")],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_TRUST_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_TRUST_ZONE_ID),
+        PolicyAction::Deny
+    );
 }
 
 #[test]
@@ -6060,7 +6398,12 @@ fn global_policy_to_zone_junos_host_denies_host_inbound_from_any_zone() {
         state.has_junos_host_rules,
         "a global match to-zone junos-host must arm the host gate"
     );
-    for from in [TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID] {
+    for from in [
+        TEST_LAN_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        TEST_TRUST_ZONE_ID,
+    ] {
         let res = evaluate_junos_host_policy(
             &state,
             from,
@@ -6096,7 +6439,10 @@ fn global_policy_plural_only_to_zone_junos_host_is_enforced() {
     // Plural-only: match_to_zones = ["junos-host"], singular match_to_zone = "".
     let mut rule = global_zone_set_rule("host-block", &[], &["junos-host"], "deny");
     rule.match_to_zone = String::new();
-    assert_eq!(rule.match_to_zone, "", "test premise: singular must be empty");
+    assert_eq!(
+        rule.match_to_zone, "",
+        "test premise: singular must be empty"
+    );
     assert_eq!(rule.match_to_zones, vec!["junos-host".to_string()]);
 
     let state = parse_policy_state("permit", &[rule], &test_zone_name_to_id());
@@ -6184,7 +6530,12 @@ fn exact_zone_pair_junos_host_wins_over_global_to_zone_junos_host() {
 fn global_from_zone_scope_restricts_junos_host_ingress() {
     let state = parse_policy_state(
         "permit",
-        &[global_zone_rule("host-block", "trust", "junos-host", "deny")],
+        &[global_zone_rule(
+            "host-block",
+            "trust",
+            "junos-host",
+            "deny",
+        )],
         &test_zone_name_to_id(),
     );
     let trust = evaluate_junos_host_policy(
@@ -6234,7 +6585,12 @@ fn global_from_zone_scope_restricts_junos_host_ingress() {
 // RED.
 // ─────────────────────────────────────────────────────────────────────────
 
-fn global_zone_rule(name: &str, match_from: &str, match_to: &str, action: &str) -> PolicyRuleSnapshot {
+fn global_zone_rule(
+    name: &str,
+    match_from: &str,
+    match_to: &str,
+    action: &str,
+) -> PolicyRuleSnapshot {
     PolicyRuleSnapshot {
         name: name.to_string(),
         // A global policy keeps the junos-global sentinel on both structural
@@ -6267,7 +6623,10 @@ fn global_zone_set_rule(
         name: name.to_string(),
         from_zone: "junos-global".to_string(),
         to_zone: "junos-global".to_string(),
-        match_from_zone: match_from.first().map(|s| s.to_string()).unwrap_or_default(),
+        match_from_zone: match_from
+            .first()
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
         match_to_zone: match_to.first().map(|s| s.to_string()).unwrap_or_default(),
         match_from_zones: to_vec(match_from),
         match_to_zones: to_vec(match_to),
@@ -6288,16 +6647,33 @@ fn global_policy_multi_zone_scope_matches_set_membership() {
     // would fall through to the default deny.)
     let state = parse_policy_state(
         "deny",
-        &[global_zone_set_rule("g-multi", &["trust", "lan"], &["untrust"], "permit")],
+        &[global_zone_set_rule(
+            "g-multi",
+            &["trust", "lan"],
+            &["untrust"],
+            "permit",
+        )],
         &test_zone_name_to_id(),
     );
     // from ∈ set, to ∈ set → permit (both members).
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
     // from ∉ set → default deny.
-    assert_eq!(eval(&state, TEST_WAN_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_WAN_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Deny
+    );
     // to ∉ set → default deny.
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
 }
 
 #[test]
@@ -6308,7 +6684,10 @@ fn global_policy_multi_zone_scope_prefers_plural_over_singular() {
     let mut rule = global_zone_set_rule("g-multi", &["trust", "lan"], &["untrust"], "permit");
     rule.match_from_zone = "trust".to_string(); // singular = first only
     let state = parse_policy_state("deny", &[rule], &test_zone_name_to_id());
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
 }
 
 #[test]
@@ -6326,7 +6705,8 @@ fn global_zone_scope_matches_and_host_predicate() {
 
     let host = GlobalZoneScope::Zones(smallvec::smallvec![JUNOS_HOST_ZONE_ID]);
     assert!(host.is_host_scope());
-    let host_plus = GlobalZoneScope::Zones(smallvec::smallvec![JUNOS_HOST_ZONE_ID, TEST_TRUST_ZONE_ID]);
+    let host_plus =
+        GlobalZoneScope::Zones(smallvec::smallvec![JUNOS_HOST_ZONE_ID, TEST_TRUST_ZONE_ID]);
     assert!(!host_plus.is_host_scope());
 }
 
@@ -6341,10 +6721,22 @@ fn global_policy_zone_context_scopes_to_pair() {
         &[global_zone_rule("scoped", "trust", "untrust", "permit")],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
-    assert_eq!(eval(&state, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID), PolicyAction::Deny);
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
+    assert_eq!(
+        eval(&state, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID),
+        PolicyAction::Deny
+    );
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
 }
 
 #[test]
@@ -6356,9 +6748,18 @@ fn global_policy_no_zone_context_matches_all_pairs() {
         &[global_zone_rule("all", "", "", "permit")],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
 }
 
 #[test]
@@ -6370,9 +6771,18 @@ fn global_policy_single_side_zone_context() {
         &[global_zone_rule("from-trust", "trust", "", "permit")],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
 
     // to-zone-only scope (symmetric).
     let state = parse_policy_state(
@@ -6380,9 +6790,18 @@ fn global_policy_single_side_zone_context() {
         &[global_zone_rule("to-wan", "", "wan", "permit")],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Deny
+    );
 }
 
 #[test]
@@ -6400,12 +6819,21 @@ fn global_policy_evaluated_after_wildcard_tiers() {
         &test_zone_name_to_id(),
     );
     // Tier 1 wildcard permit wins over the tier 4 scoped global deny.
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
     // The wildcard also covers a different ingress into untrust.
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
     // Neither rule covers trust->wan (wildcard is to-untrust, global is
     // to-untrust) → default deny.
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
 }
 
 #[test]
@@ -6426,7 +6854,12 @@ fn global_policy_unknown_zone_context_fails_closed() {
     // Unresolvable match from-zone.
     match parse_policy_state_with_counters(
         "deny",
-        &[global_zone_rule("typo-from", "nonexistent", "untrust", "permit")],
+        &[global_zone_rule(
+            "typo-from",
+            "nonexistent",
+            "untrust",
+            "permit",
+        )],
         &zones,
         &[],
         &store,
@@ -6485,7 +6918,9 @@ fn global_policy_empty_string_scope_element_fails_closed_6464() {
             assert!(rule_id.ends_with("/empty-to"), "rule_id={rule_id}");
             assert_eq!(zone, "", "the empty element is the unresolvable reference");
         }
-        other => panic!("expected UnresolvableZoneReference (empty to-zone element), got {other:?}"),
+        other => {
+            panic!("expected UnresolvableZoneReference (empty to-zone element), got {other:?}")
+        }
     }
 
     // (b) Empty as the FIRST from-zone element (order must not matter).
@@ -6498,7 +6933,9 @@ fn global_policy_empty_string_scope_element_fails_closed_6464() {
             assert!(rule_id.ends_with("/empty-from"), "rule_id={rule_id}");
             assert_eq!(zone, "");
         }
-        other => panic!("expected UnresolvableZoneReference (empty from-zone element), got {other:?}"),
+        other => {
+            panic!("expected UnresolvableZoneReference (empty from-zone element), got {other:?}")
+        }
     }
 
     // (c) A lone empty element (no concrete sibling) also fails closed — it is
@@ -6528,13 +6965,27 @@ fn global_policy_explicit_any_matches_all_zones() {
     // ERRORS on the explicit `any`, so parse_policy_state panics here.
     let state = parse_policy_state(
         "deny",
-        &[global_zone_rule("any-to-untrust", "any", "untrust", "permit")],
+        &[global_zone_rule(
+            "any-to-untrust",
+            "any",
+            "untrust",
+            "permit",
+        )],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
     // Not into untrust → default deny (the to-zone scope still applies).
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
 
     // Symmetric: explicit `to-zone any`.
     let state = parse_policy_state(
@@ -6542,9 +6993,18 @@ fn global_policy_explicit_any_matches_all_zones() {
         &[global_zone_rule("trust-to-any", "trust", "any", "permit")],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Deny);
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_TRUST_ZONE_ID, TEST_UNTRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Deny
+    );
 
     // Explicit `any` on BOTH sides == no zone context == all zones.
     let state = parse_policy_state(
@@ -6552,8 +7012,14 @@ fn global_policy_explicit_any_matches_all_zones() {
         &[global_zone_rule("any-any", "any", "any", "permit")],
         &test_zone_name_to_id(),
     );
-    assert_eq!(eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID), PolicyAction::Permit);
-    assert_eq!(eval(&state, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID), PolicyAction::Permit);
+    assert_eq!(
+        eval(&state, TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+        PolicyAction::Permit
+    );
+    assert_eq!(
+        eval(&state, TEST_UNTRUST_ZONE_ID, TEST_TRUST_ZONE_ID),
+        PolicyAction::Permit
+    );
 }
 
 /// #4365 F2: the Rust mirror of the Go
@@ -7340,10 +7806,7 @@ fn app_term_abutting_ranges_split_at_boundary_10649() {
     // RED-on-revert (M9): without the upper check the FIRST term (80-…) also
     // matches 91-100 and 101+, so 91 returns 200 (not 300) and 101 returns 200
     // (not None).
-    let apps = vec![
-        range_app(80, 90, Some(200)),
-        range_app(91, 100, Some(300)),
-    ];
+    let apps = vec![range_app(80, 90, Some(200)), range_app(91, 100, Some(300))];
     let compiled = CompiledApplications::from_matches(&apps);
     assert_eq!(
         compiled.matches(PROTO_TCP, 12345, 90, None, true),
@@ -7376,7 +7839,10 @@ fn app_term_single_port_range_matches_only_that_port_10649() {
     // RED-on-revert (M9): drop `port <= high` and dst 81 (or src 2001) matches.
     let app = ApplicationMatch {
         protocol: PROTO_TCP,
-        source_ports: vec![PortRange { low: 1000, high: 2000 }],
+        source_ports: vec![PortRange {
+            low: 1000,
+            high: 2000,
+        }],
         destination_ports: vec![PortRange { low: 80, high: 80 }],
         icmp_type: None,
         icmp_code: None,
@@ -7410,7 +7876,6 @@ fn app_term_single_port_range_matches_only_that_port_10649() {
         "source port above the range must not match (M9: unguarded upper)"
     );
 }
-
 
 #[test]
 fn app_term_icmp_constrained_before_all_icmp_wins() {
@@ -7625,7 +8090,8 @@ fn clear_preserves_concurrent_post_clear_hit_3782() {
          post-clear increment (#3782)"
     );
     assert_eq!(
-        snap.bytes, 5 * 64,
+        snap.bytes,
+        5 * 64,
         "post-clear bytes wiped by clear (#3782)"
     );
 }
@@ -7664,7 +8130,10 @@ fn policy_rule_counter_snapshot_pairs_totals() {
     // A zero-length add still counts the packet but adds no bytes.
     counter.add(0);
     let snap = counter.snapshot("trust->untrust/allow-web");
-    assert_eq!(snap.packets, 6, "a zero-length packet still increments packets");
+    assert_eq!(
+        snap.packets, 6,
+        "a zero-length packet still increments packets"
+    );
     assert_eq!(snap.bytes, 590, "a zero-length packet adds no bytes");
 
     // reset must zero BOTH fields (a half-reset leaving one field stale would
@@ -8258,8 +8727,16 @@ fn literal_any_matches_every_address_beside_a_same_named_book_9523() {
         name: "d1".to_string(),
         from_zone: "lan".to_string(),
         to_zone: "wan".to_string(),
-        source_literals: if by_book { Vec::new() } else { vec!["any".to_string()] },
-        destination_literals: if by_book { Vec::new() } else { vec!["any".to_string()] },
+        source_literals: if by_book {
+            Vec::new()
+        } else {
+            vec!["any".to_string()]
+        },
+        destination_literals: if by_book {
+            Vec::new()
+        } else {
+            vec!["any".to_string()]
+        },
         source_book_ids: if by_book { vec![7] } else { Vec::new() },
         destination_book_ids: if by_book { vec![7] } else { Vec::new() },
         applications: vec!["any".to_string()],
@@ -8269,8 +8746,9 @@ fn literal_any_matches_every_address_beside_a_same_named_book_9523() {
     let zones = test_zone_name_to_id();
     let eval_outside = |by_book: bool| {
         let store = PolicyCounterStore::default();
-        let state = parse_policy_state_with_counters("permit", &[rule(by_book)], &zones, &books, &store)
-            .expect("well-formed snapshot");
+        let state =
+            parse_policy_state_with_counters("permit", &[rule(by_book)], &zones, &books, &store)
+                .expect("well-formed snapshot");
         evaluate_policy(
             &state,
             TEST_LAN_ZONE_ID,
@@ -8282,7 +8760,11 @@ fn literal_any_matches_every_address_beside_a_same_named_book_9523() {
             23,
         )
     };
-    assert_eq!(eval_outside(false), PolicyAction::Deny, "literal `any` must match every address");
+    assert_eq!(
+        eval_outside(false),
+        PolicyAction::Deny,
+        "literal `any` must match every address"
+    );
     assert_eq!(
         eval_outside(true),
         PolicyAction::Permit,
@@ -8301,8 +8783,14 @@ fn go_built_split_duplicate_wire_is_refused_9584() {
     const WIRE: &str = include_str!("../../testdata/policy_duplicate_rule_id_9584.json");
     let rules: Vec<PolicyRuleSnapshot> = serde_json::from_str(WIRE).expect("fixture decodes");
     assert_eq!(rules.len(), 2, "fixture premise: two rules");
-    assert_eq!(rules[0].rule_id, rules[1].rule_id, "fixture premise: one identity");
-    assert_ne!(rules[0].policy_id, rules[1].policy_id, "fixture premise: distinct policy_ids");
+    assert_eq!(
+        rules[0].rule_id, rules[1].rule_id,
+        "fixture premise: one identity"
+    );
+    assert_ne!(
+        rules[0].policy_id, rules[1].policy_id,
+        "fixture premise: distinct policy_ids"
+    );
     let store = PolicyCounterStore::default();
     match parse_policy_state_with_counters("deny", &rules, &test_zone_name_to_id(), &[], &store) {
         Err(err @ SnapshotIntegrityError::DuplicateRuleId { .. }) => {

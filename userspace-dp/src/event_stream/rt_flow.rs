@@ -64,8 +64,7 @@ impl EventStreamWorkerHandle {
         // every flow opened in the same second shared one start instant.
         let (created_unix_secs, created_subsec_nanos) =
             monotonic_ns_to_unix_secs_subnanos(delta.created_ns, now_mono_ns, now_unix_ns);
-        let close_unix_ns =
-            monotonic_ns_to_unix_ns(delta.last_seen_ns, now_mono_ns, now_unix_ns);
+        let close_unix_ns = monotonic_ns_to_unix_ns(delta.last_seen_ns, now_mono_ns, now_unix_ns);
         // #2512: route through the per-kind rate limiter + queue budget +
         // sent/dropped counters instead of a bare `try_send`. The same mono
         // clock reading anchors the limiter so a dropped close is counted

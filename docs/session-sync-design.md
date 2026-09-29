@@ -596,10 +596,10 @@ to be withheld (the daemon then times out and refuses demotion, #2876) instead
 of wedging.
 
 The bounded channel is the ONLY backpressure surface. The write backlog is
-capped at `WRITE_BACKLOG_MAX_BYTES` (16 MiB ≈ 8× a fully-drained 8192×256 B
-channel, since `EventFrame` is a fixed `[u8; 256]`; `drain_channel_into_write_buf`
+`WRITE_BACKLOG_MAX_BYTES` (16 MiB ≈ 4× a fully-drained 8192×512 B
+channel, since `EventFrame` is a fixed `[u8; 512]`; `drain_channel_into_write_buf`
 in `event_stream/mod.rs`, #2381). The cap is tested at the top of the drain
-loop, so the effective bound is `cap + one max EventFrame` (≤ 256 B) — the
+loop, so the effective bound is `cap + one max EventFrame` (≤ 512 B) — the
 in-flight frame already pulled can carry `write_buf` just past 16 MiB before the
 drain halts; the overshoot is bounded and accepted. A wedged daemon that keeps the socket open
 but stops reading (writes perpetually `WouldBlock`) would otherwise let the

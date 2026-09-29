@@ -49,8 +49,13 @@ pub(super) fn io_thread_main(
         // an ordered FullResync barrier in `pending_resync` rather than writing
         // it directly ahead of the still-queued lower-seq deltas.
         let acked = shared.acked_seq.load(Ordering::Acquire);
-        let replay_result =
-            replay_buffered(&stream, &mut replay_buf, acked, &shared, &mut pending_resync);
+        let replay_result = replay_buffered(
+            &stream,
+            &mut replay_buf,
+            acked,
+            &shared,
+            &mut pending_resync,
+        );
         if replay_result.is_err() {
             shared.connected.store(false, Ordering::Release);
             eprintln!("xpf-event-stream: replay failed, reconnecting");

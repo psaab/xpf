@@ -31,7 +31,9 @@ func TestSessionOriginFlagsCrossSessionWire10227(t *testing.T) {
 func TestLegacySessionOriginDefaultsClear10227(t *testing.T) {
 	v4Key := dataplane.SessionKey{Protocol: 6, SrcPort: 1000, DstPort: 80}
 	v4Payload := encodeSessionV4Payload(v4Key, dataplane.SessionValue{Flags: dataplane.SessFlagClusterSynced})
-	_, got4, ok := decodeSessionV4Payload(v4Payload[:len(v4Payload)-1])
+	// Legacy shape: strip high-flags plus the merged #11064 ICMP trailer
+	// (fixture encodes no #11070 rule ID).
+	_, got4, ok := decodeSessionV4Payload(v4Payload[:len(v4Payload)-4])
 	if !ok {
 		t.Fatal("legacy v4 payload did not decode")
 	}
@@ -41,7 +43,7 @@ func TestLegacySessionOriginDefaultsClear10227(t *testing.T) {
 
 	v6Key := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 1000, DstPort: 80}
 	v6Payload := encodeSessionV6Payload(v6Key, dataplane.SessionValueV6{Flags: dataplane.SessFlagClusterSynced})
-	_, got6, ok := decodeSessionV6Payload(v6Payload[:len(v6Payload)-1])
+	_, got6, ok := decodeSessionV6Payload(v6Payload[:len(v6Payload)-4])
 	if !ok {
 		t.Fatal("legacy v6 payload did not decode")
 	}
@@ -56,7 +58,9 @@ func TestPartialInstallTableTailDoesNotBecomeOriginFlags10227(t *testing.T) {
 		Flags:              dataplane.SessFlagClusterSynced,
 		InstallTableDomain: 2,
 	})
-	_, got4, ok := decodeSessionV4Payload(v4Payload[:len(v4Payload)-2])
+	// Partial-table shape: strip the ICMP trailer + high-flags + one
+	// install-table byte (fixture encodes no #11070 rule ID).
+	_, got4, ok := decodeSessionV4Payload(v4Payload[:len(v4Payload)-5])
 	if !ok {
 		t.Fatal("partial v4 payload did not decode")
 	}
@@ -69,7 +73,7 @@ func TestPartialInstallTableTailDoesNotBecomeOriginFlags10227(t *testing.T) {
 		InstallTableDomain: 2,
 		Flags:              dataplane.SessFlagClusterSynced,
 	})
-	_, got6, ok := decodeSessionV6Payload(v6Payload[:len(v6Payload)-2])
+	_, got6, ok := decodeSessionV6Payload(v6Payload[:len(v6Payload)-5])
 	if !ok {
 		t.Fatal("partial v6 payload did not decode")
 	}
