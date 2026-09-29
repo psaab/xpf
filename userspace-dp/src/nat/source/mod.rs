@@ -1315,6 +1315,7 @@ pub(crate) fn source_nat_tuple_translation_possible(
     for rule in rules {
         if rule.matches(
             scope, from_zone, to_zone, src_ip, dst_ip, false, protocol, src_port, dst_port, false,
+            None,
         ) == L4Match::NoMatch
         {
             continue;
