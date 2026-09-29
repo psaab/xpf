@@ -7447,6 +7447,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                         .counters
                                                         .record_nat_flowless_untranslated_dropped();
                                                 }
+                                            } else {
+                                                telemetry.counters
+                                                    .record_nat_flowbacked_no_route_untranslated_dropped();
                                             }
                                             suppress_slow_path_reinject = true;
                                         }

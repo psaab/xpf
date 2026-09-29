@@ -66,9 +66,10 @@ fn flowless_counters_round_trip_batch_to_status_to_reset_9956() {
 }
 
 #[test]
-fn nat_flowless_fence_counter_round_trips_to_status_10679() {
+fn nat_fence_counters_round_trip_to_status_11066() {
     let mut batch = crate::afxdp::BatchCounters::default();
     batch.record_nat_flowless_untranslated_dropped();
+    batch.record_nat_flowbacked_no_route_untranslated_dropped();
     let live = crate::afxdp::binding_state::BindingLiveState::new();
     batch.flush(&live);
     assert_eq!(
@@ -77,11 +78,21 @@ fn nat_flowless_fence_counter_round_trips_to_status_10679() {
         1,
         "flowless NAT-fence drop must flush batch → live"
     );
+    assert_eq!(
+        live.nat_flowbacked_no_route_untranslated_dropped
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "flow-backed NoRoute NAT-fence drop must flush batch → live"
+    );
 
     let snap = live.snapshot();
     assert_eq!(
         snap.nat_flowless_untranslated_dropped, 1,
         "snapshot must carry the flowless NAT-fence count"
+    );
+    assert_eq!(
+        snap.nat_flowbacked_no_route_untranslated_dropped, 1,
+        "snapshot must carry the flow-backed NoRoute NAT-fence count"
     );
     let mut status = crate::protocol::BindingStatus::default();
     copy_live_snapshot(&mut status, snap);
@@ -89,11 +100,19 @@ fn nat_flowless_fence_counter_round_trips_to_status_10679() {
         status.nat_flowless_untranslated_dropped, 1,
         "BindingStatus must expose the flowless NAT-fence count"
     );
+    assert_eq!(
+        status.nat_flowbacked_no_route_untranslated_dropped, 1,
+        "BindingStatus must expose the flow-backed NoRoute NAT-fence count"
+    );
 
     zero_unbound_slot(&mut status);
     assert_eq!(
         status.nat_flowless_untranslated_dropped, 0,
         "an unbound slot must not retain a prior binding's flowless NAT-fence count"
+    );
+    assert_eq!(
+        status.nat_flowbacked_no_route_untranslated_dropped, 0,
+        "an unbound slot must clear the flow-backed NoRoute NAT-fence count"
     );
 }
 

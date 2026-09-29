@@ -1053,12 +1053,16 @@ the NAT module applies it:
   permitted NoRoute kernel-FIB reinjection whenever configured same-family NAT
   may require translation. #11066 extends the NoRoute fence to flow-backed L4
   tuples, probing each configured egress with the exact ports while avoiding
-  allocator state; an untranslated NAT candidate is withheld from reinjection.
+  allocator state; an untranslated NAT candidate is withheld from reinjection
+  and counted separately as `nat_flowbacked_no_route_untranslated_dropped`.
   Both NoRoute probes cover every configured egress because the kernel's later
   route has no userspace-resolved egress yet. Untranslated Pref64 destinations
   retain NAT64 attribution; an already-applied NAT64 decision is translated to
-  its opposite IP family before it reaches the TUN. Missing translation
-  metadata fails closed. Raw ESP/AH non-first fragments
+  its opposite IP family before it reaches the TUN. The slow-path NAT64 builder
+  preserves the ingress TTL/Hop Limit, including values <=1, leaving the kernel
+  to perform the single forwarding decrement or generate Time Exceeded.
+  Missing translation metadata fails closed with the distinct
+  `nat64_slow_path_prepare_failed` exception reason. Raw ESP/AH non-first fragments
   retain the Stage-11/reassembly park path. With no matching NAT candidate,
   ordinary flowless forwarding and flow-backed NoRoute reinjection remain
   available.

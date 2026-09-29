@@ -21,12 +21,12 @@ type statusSummaryAggregates struct {
 	armedQueues int
 
 	// Binding tallies.
-	readyBindings      int
-	armedBindings      int
-	boundBindings      int
-	xskBindings        int
-	zeroCopyBindings   int
-	sharedUMEMBindings int
+	readyBindings          int
+	armedBindings          int
+	boundBindings          int
+	xskBindings            int
+	zeroCopyBindings       int
+	sharedUMEMBindings     int
 	hugepageBackedBindings int
 	// umemFallbackBytesMax is the process-wide fallback total. It arrives
 	// identical on every bound row, so the aggregate takes the max, never
@@ -43,15 +43,15 @@ type statusSummaryAggregates struct {
 	flowlessForwardBytes uint64
 	routeMisses          uint64
 	// #10498: pre-L3 admission drops with no forwarding disposition.
-	umemSliceDropped     uint64
-	unknownVLANDropped   uint64
-	dstMACDropped        uint64
+	umemSliceDropped   uint64
+	unknownVLANDropped uint64
+	dstMACDropped      uint64
 	// #4743: martian-dst NoRoute drops (a sub-breakout of routeMisses) and
 	// over-limit IPv6 ext-header fail-closed drops, summed across bindings.
-	martianDropped       uint64
-	ipv6ExtHeaderDropped uint64
-	v4MappedIPv6Dropped uint64
-	neighborMisses       uint64
+	martianDropped        uint64
+	ipv6ExtHeaderDropped  uint64
+	v4MappedIPv6Dropped   uint64
+	neighborMisses        uint64
 	exceptionPackets      uint64
 	flowCacheHits         uint64
 	flowCacheMisses       uint64
@@ -107,6 +107,9 @@ type statusSummaryAggregates struct {
 	// #10679: same-family NAT fence drops for unfragmented flowless packets,
 	// separate from actual fragment-association misses.
 	natFlowlessUntranslatedDropped uint64
+	// #11066: flow-backed NoRoute NAT-withheld drops, separate from flowless
+	// and fragment-association populations.
+	natFlowbackedNoRouteUntranslatedDropped uint64
 	// #10131: binding-attributed fragment-overlap reasons.
 	fragOverlapDropped              uint64
 	fragOverlapOverflowDropped      uint64
@@ -275,6 +278,7 @@ func aggregateStatusSummary(status userspace.ProcessStatus) statusSummaryAggrega
 		agg.nat64IneligibleProtocol += binding.Nat64IneligibleProtocol
 		agg.natFragUntranslatedDropped += binding.NatFragUntranslatedDropped
 		agg.natFlowlessUntranslatedDropped += binding.NatFlowlessUntranslatedDropped
+		agg.natFlowbackedNoRouteUntranslatedDropped += binding.NatFlowbackedNoRouteUntranslatedDropped
 		agg.txPackets += binding.TXPackets
 		agg.txBytes += binding.TXBytes
 		agg.txErrors += binding.TXErrors
@@ -593,6 +597,7 @@ func writeNATCountersSection(b *strings.Builder, agg statusSummaryAggregates) {
 	fmt.Fprintf(b, "  NAT64 ineligible-protocol drops:%d\n", agg.nat64IneligibleProtocol)
 	fmt.Fprintf(b, "  NAT frag untranslated drops:%d\n", agg.natFragUntranslatedDropped)
 	fmt.Fprintf(b, "  NAT flowless untranslated drops:%d\n", agg.natFlowlessUntranslatedDropped)
+	fmt.Fprintf(b, "  NAT flow-backed NoRoute untranslated drops:%d\n", agg.natFlowbackedNoRouteUntranslatedDropped)
 	fmt.Fprintf(b, "  Fragment overlap drops:    %d\n", agg.fragOverlapDropped)
 	fmt.Fprintf(b, "  Fragment overlap overflow drops:%d\n", agg.fragOverlapOverflowDropped)
 	fmt.Fprintf(b, "  Fragment overlap shard-full drops:%d\n", agg.fragOverlapShardFullDropped)

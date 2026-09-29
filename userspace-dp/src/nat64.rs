@@ -2425,7 +2425,25 @@ pub(crate) fn write_v6_to_v4_into(
     dst_v4: Ipv4Addr,
     no_v6_frag_header: bool,
 ) -> Option<usize> {
-    write_v6_to_v4_translate(dst, packet, snat_v4, dst_v4, no_v6_frag_header, None)
+    write_v6_to_v4_translate(dst, packet, snat_v4, dst_v4, no_v6_frag_header, None, false)
+}
+
+/// #11066: NoRoute slow-path entry point (v6→v4). Byte-identical to
+/// [`write_v6_to_v4_into`] except the ingress Hop Limit is PRESERVED instead
+/// of decremented, and a Hop Limit of 1 (or 0) is accepted instead of dropped
+/// as expired. The delegated TUN hands the packet to the kernel FIB, which
+/// performs the single forwarding decrement (or its normal ICMP Time Exceeded)
+/// itself; decrementing here would cost an extra hop versus the same-family
+/// NoRoute handoff (which copies L3 bytes verbatim) and would drop TTL-1
+/// packets the kernel owns. Forwarding callers keep `write_v6_to_v4_into`.
+pub(crate) fn write_v6_to_v4_into_preserve_ttl(
+    dst: &mut [u8],
+    packet: &[u8],
+    snat_v4: Ipv4Addr,
+    dst_v4: Ipv4Addr,
+    no_v6_frag_header: bool,
+) -> Option<usize> {
+    write_v6_to_v4_translate(dst, packet, snat_v4, dst_v4, no_v6_frag_header, None, true)
 }
 
 /// #6472: flowless ICMP-error translation entry point (v6→v4). Identical to
@@ -2451,13 +2469,14 @@ pub(crate) fn write_v6_to_v4_icmp_error_into(
         dst_v4,
         no_v6_frag_header,
         embedded_dst_port,
+        false,
     )
 }
 
-/// Shared core of [`write_v6_to_v4_into`] and
-/// [`write_v6_to_v4_icmp_error_into`]; `embedded_dst_port` rides
-/// [`EmbeddedV6ToV4::mapped_embedded_dst_port`] into the quoted-packet
-/// translation (`None` on every data-packet caller).
+/// Shared core of [`write_v6_to_v4_into`], [`write_v6_to_v4_into_preserve_ttl`],
+/// and [`write_v6_to_v4_icmp_error_into`]. `embedded_dst_port` rides
+/// [`EmbeddedV6ToV4::mapped_embedded_dst_port`] into quote translation;
+/// `preserve_ttl` is enabled only for kernel slow-path handoff.
 fn write_v6_to_v4_translate(
     dst: &mut [u8],
     packet: &[u8],
@@ -2465,6 +2484,7 @@ fn write_v6_to_v4_translate(
     dst_v4: Ipv4Addr,
     no_v6_frag_header: bool,
     embedded_dst_port: Option<u16>,
+    preserve_ttl: bool,
 ) -> Option<usize> {
     if packet.len() < 40 {
         return None;
@@ -2488,8 +2508,8 @@ fn write_v6_to_v4_translate(
     let payload_len = u16::from_be_bytes([packet[4], packet[5]]) as usize;
     let hop_limit = packet[7];
 
-    if hop_limit <= 1 {
-        return None; // TTL expired
+    if !preserve_ttl && hop_limit <= 1 {
+        return None; // TTL expired for forwarding; NoRoute handoff preserves it for the kernel
     }
 
     // #2290: walk the IPv6 extension-header chain to learn the terminal L4
@@ -2544,7 +2564,11 @@ fn write_v6_to_v4_translate(
         return None; // ext-header chain overran the advertised payload
     }
     let l4_payload = packet.get(l4_offset..l4_end)?;
-    let new_ttl = hop_limit - 1;
+    let new_ttl = if preserve_ttl {
+        hop_limit
+    } else {
+        hop_limit - 1
+    };
 
     // The L4 length is normally unchanged, but an ICMP *error* message embeds
     // the original (return-direction) packet, which is itself NAT64-translated
@@ -2709,7 +2733,19 @@ pub(crate) fn write_v4_to_v6_into(
     src_v6: Ipv6Addr,
     dst_v6: Ipv6Addr,
 ) -> Option<usize> {
-    write_v4_to_v6_translate(dst, packet, src_v6, dst_v6, None)
+    write_v4_to_v6_translate(dst, packet, src_v6, dst_v6, None, false)
+}
+
+/// #11066: NoRoute slow-path entry point (v4→v6), preserving ingress TTL.
+/// The delegated TUN kernel performs the single forwarding decrement (or
+/// generates its normal Time Exceeded response) after route lookup.
+pub(crate) fn write_v4_to_v6_into_preserve_ttl(
+    dst: &mut [u8],
+    packet: &[u8],
+    src_v6: Ipv6Addr,
+    dst_v6: Ipv6Addr,
+) -> Option<usize> {
+    write_v4_to_v6_translate(dst, packet, src_v6, dst_v6, None, true)
 }
 
 /// #6472: flowless ICMP-error translation entry point (v4→v6). Identical to
@@ -2727,7 +2763,7 @@ pub(crate) fn write_v4_to_v6_icmp_error_into(
     dst_v6: Ipv6Addr,
     embedded_src_port: Option<u16>,
 ) -> Option<usize> {
-    write_v4_to_v6_translate(dst, packet, src_v6, dst_v6, embedded_src_port)
+    write_v4_to_v6_translate(dst, packet, src_v6, dst_v6, embedded_src_port, false)
 }
 
 /// #10720 (N2): checked IPv6 Payload Length narrowing for the v4→v6 direction.
@@ -2749,16 +2785,17 @@ fn checked_ipv6_payload_len(frag_hdr_len: usize, l4_len: usize) -> Option<u16> {
     Some(total as u16)
 }
 
-/// Shared core of [`write_v4_to_v6_into`] and
-/// [`write_v4_to_v6_icmp_error_into`]; `embedded_src_port` rides
-/// [`EmbeddedV4ToV6::mapped_embedded_src_port`] into the quoted-packet
-/// translation (`None` on every data-packet caller).
+/// Shared core of [`write_v4_to_v6_into`], [`write_v4_to_v6_into_preserve_ttl`],
+/// and [`write_v4_to_v6_icmp_error_into`]. `embedded_src_port` rides
+/// [`EmbeddedV4ToV6::mapped_embedded_src_port`] into quote translation;
+/// `preserve_ttl` is enabled only for kernel slow-path handoff.
 fn write_v4_to_v6_translate(
     dst: &mut [u8],
     packet: &[u8],
     src_v6: Ipv6Addr,
     dst_v6: Ipv6Addr,
     embedded_src_port: Option<u16>,
+    preserve_ttl: bool,
 ) -> Option<usize> {
     if packet.len() < 20 {
         return None;
@@ -2772,8 +2809,8 @@ fn write_v4_to_v6_translate(
     // verbatim — NAT64 is stateless translation, not RFC 6040 encapsulation).
     let tos = packet[1];
     let ttl = packet[8];
-    if ttl <= 1 {
-        return None; // TTL expired
+    if !preserve_ttl && ttl <= 1 {
+        return None; // TTL expired for forwarding; NoRoute handoff preserves it for the kernel
     }
     let protocol = packet[9];
     // Trim the L4 payload to the IPv4 Total Length field rather than the end
@@ -2843,7 +2880,7 @@ fn write_v4_to_v6_translate(
     }
     let frag_hdr_len = if is_fragment { 8usize } else { 0 };
 
-    let new_hop_limit = ttl - 1;
+    let new_hop_limit = if preserve_ttl { ttl } else { ttl - 1 };
 
     // Build the 40-byte IPv6 header. The 8-bit traffic class straddles bytes
     // 0-1: TC[7:4] in the low nibble of byte 0 (alongside the version=6 nibble)

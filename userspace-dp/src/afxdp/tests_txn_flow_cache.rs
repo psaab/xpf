@@ -3076,6 +3076,10 @@ fn permitted_flowbacked_no_route_with_snat_is_not_reinjected_11066() {
         "a flow-backed NoRoute SNAT candidate must not reach the kernel FIB untranslated"
     );
     assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(
+        batch.nat_flowbacked_no_route_untranslated_dropped, 1,
+        "flow-backed NoRoute NAT drops need their own telemetry"
+    );
     assert_eq!(sessions, 0, "the NoRoute packet must not seed a session");
     assert_eq!(
         pending, 0,
@@ -3089,13 +3093,17 @@ fn permitted_flowbacked_no_route_with_snat_is_not_reinjected_11066() {
     // Control: with no applicable NAT, the same flow-backed NoRoute packet
     // must still reach the kernel FIB.
     snapshot.source_nat_rules.clear();
-    let (_, control_dbg, _, control_flow_backed, _, _, control_reinjected) =
+    let (control_batch, control_dbg, _, control_flow_backed, _, _, control_reinjected) =
         run_6837_descriptor(&snapshot, crate::ip_proto::PROTO_UDP, 0xc000, 53, 0);
     assert_eq!(control_dbg.no_route, 1);
     assert!(control_flow_backed);
     assert_eq!(
         control_reinjected, 1,
         "a no-NAT flow-backed NoRoute packet must still reach the kernel FIB"
+    );
+    assert_eq!(
+        control_batch.nat_flowbacked_no_route_untranslated_dropped, 0,
+        "an admitted no-NAT flow-backed NoRoute packet is not a NAT-withheld drop"
     );
 
     // A port-scoped NAT rule for another UDP tuple is not a reason to suppress
@@ -3115,12 +3123,16 @@ fn permitted_flowbacked_no_route_with_snat_is_not_reinjected_11066() {
         }],
         ..Default::default()
     }];
-    let (_, scoped_dbg, _, scoped_flow_backed, _, _, scoped_reinjected) =
+    let (scoped_batch, scoped_dbg, _, scoped_flow_backed, _, _, scoped_reinjected) =
         run_6837_descriptor(&scoped_snapshot, crate::ip_proto::PROTO_UDP, 0xc000, 53, 0);
     assert_eq!(scoped_dbg.no_route, 1);
     assert!(scoped_flow_backed);
     assert_eq!(
         scoped_reinjected, 1,
         "the probe must honor the packet's exact destination port"
+    );
+    assert_eq!(
+        scoped_batch.nat_flowbacked_no_route_untranslated_dropped, 0,
+        "an unmatched scoped NAT rule is not a NAT-withheld drop"
     );
 }

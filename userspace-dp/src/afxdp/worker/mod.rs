@@ -1575,6 +1575,9 @@ pub(crate) struct BindingLiveSnapshot {
     /// NAT-transparency fence, snapshotted from BindingLiveState. Separate from
     /// real non-first-fragment association misses (`nat_frag_untranslated_dropped`).
     pub(crate) nat_flowless_untranslated_dropped: u64,
+    /// #11066: cumulative flow-backed NoRoute NAT-withheld drops, snapshotted
+    /// from BindingLiveState separately from flowless/fragment populations.
+    pub(crate) nat_flowbacked_no_route_untranslated_dropped: u64,
     /// #10131: binding-local fragment-overlap attribution, copied from
     /// BindingLiveState after each worker batch flush.
     pub(crate) frag_overlap_dropped: u64,

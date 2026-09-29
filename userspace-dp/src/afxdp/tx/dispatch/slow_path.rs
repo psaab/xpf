@@ -344,10 +344,15 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame_with_outlet(
     };
     let Some(packet) = packet else {
         live.slow_path_drops.fetch_add(1, Ordering::Relaxed);
+        let failure_reason = if decision.nat.nat64 {
+            "nat64_slow_path_prepare_failed"
+        } else {
+            "slow_path_prepare_failed"
+        };
         record_exception(
             recent_exceptions,
             binding,
-            "slow_path_prepare_failed",
+            failure_reason,
             frame.len() as u32,
             Some(meta),
             None,

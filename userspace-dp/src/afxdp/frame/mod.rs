@@ -335,10 +335,11 @@ pub(super) fn build_nat64_forwarded_frame(
     }
 }
 
-/// Build the translated L3 packet for a permitted NAT64 NoRoute slow-path
-/// handoff. Unlike a wire-forward build, the kernel FIB does not need an
-/// egress MAC; the IP-family conversion and port mapping still must happen
-/// before handing the packet to the TUN.
+/// Build the translated L3 packet for a permitted NAT64 slow-path handoff.
+/// Unlike a wire-forward build, the kernel FIB does not need an egress MAC;
+/// the IP-family conversion and port mapping still must happen before handing
+/// the packet to the TUN. Preserve ingress TTL/Hop Limit so the kernel performs
+/// the single forwarding decrement or emits its usual Time Exceeded response.
 pub(super) fn build_nat64_l3_packet_for_slow_path(
     frame: &[u8],
     meta: impl Into<ForwardPacketMeta>,
@@ -364,7 +365,7 @@ pub(super) fn build_nat64_l3_packet_for_slow_path(
                     _ => return None,
                 };
                 let mut out = vec![0; packet.len()];
-                let written = crate::nat64::write_v6_to_v4_into(
+                let written = crate::nat64::write_v6_to_v4_into_preserve_ttl(
                     &mut out,
                     packet,
                     src_v4,
@@ -382,7 +383,7 @@ pub(super) fn build_nat64_l3_packet_for_slow_path(
             libc::AF_INET => {
                 let reverse = nat64_reverse?;
                 let mut out = vec![0; packet.len().saturating_add(40)];
-                let written = crate::nat64::write_v4_to_v6_into(
+                let written = crate::nat64::write_v4_to_v6_into_preserve_ttl(
                     &mut out,
                     packet,
                     reverse.orig_dst_v6,

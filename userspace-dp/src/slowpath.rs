@@ -691,6 +691,10 @@ pub struct SlowPathReinjector {
     /// successful queue send records whether its `PacketQueue` was Delegated.
     #[cfg(test)]
     test_enqueued_delegated: Mutex<Vec<bool>>,
+    #[cfg(test)]
+    test_capture_enqueued_packets: AtomicBool,
+    #[cfg(test)]
+    test_enqueued_packets: Mutex<Vec<(bool, Vec<u8>)>>,
 }
 
 /// #9637 F3 (GPT-1 form): one dual-outlet startup-handshake step as pure logic.
@@ -903,6 +907,10 @@ impl SlowPathReinjector {
             mtu: AtomicI64::new(mtu as i64),
             #[cfg(test)]
             test_enqueued_delegated: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            test_capture_enqueued_packets: AtomicBool::new(false),
+            #[cfg(test)]
+            test_enqueued_packets: Mutex::new(Vec::new()),
         })
     }
 
@@ -966,6 +974,10 @@ impl SlowPathReinjector {
             mtu: AtomicI64::new(mtu as i64),
             #[cfg(test)]
             test_enqueued_delegated: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            test_capture_enqueued_packets: AtomicBool::new(false),
+            #[cfg(test)]
+            test_enqueued_packets: Mutex::new(Vec::new()),
         }
     }
 
@@ -1205,6 +1217,11 @@ impl SlowPathReinjector {
             }
             return Ok(EnqueueOutcome::RateLimited);
         }
+        #[cfg(test)]
+        let captured_packet = self
+            .test_capture_enqueued_packets
+            .load(Ordering::Relaxed)
+            .then(|| bytes.clone());
         status.queued_packets.fetch_add(1, Ordering::Relaxed);
         match tx.try_send(PacketRequest {
             bytes,
@@ -1218,6 +1235,13 @@ impl SlowPathReinjector {
                     .lock()
                     .expect("test outlet observation")
                     .push(matches!(queue, PacketQueue::Delegated));
+                #[cfg(test)]
+                if let Some(bytes) = captured_packet {
+                    self.test_enqueued_packets
+                        .lock()
+                        .expect("test packet observation")
+                        .push((matches!(queue, PacketQueue::Delegated), bytes));
+                }
                 if let Some(class) = admission_class(queue) {
                     self.reinject_core.record_class_admitted(class);
                 }
@@ -1515,6 +1539,22 @@ impl SlowPathReinjector {
         self.test_enqueued_delegated
             .lock()
             .expect("test outlet observation")
+            .clone()
+    }
+
+    /// Enable capture of packet bytes successfully queued by the test
+    /// reinjector. Disabled by default so ordinary tests do not clone packets.
+    #[cfg(test)]
+    pub(crate) fn enable_test_packet_capture(&self) {
+        self.test_capture_enqueued_packets
+            .store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_enqueued_packets(&self) -> Vec<(bool, Vec<u8>)> {
+        self.test_enqueued_packets
+            .lock()
+            .expect("test packet observation")
             .clone()
     }
 }

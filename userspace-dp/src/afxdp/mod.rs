@@ -957,6 +957,9 @@ pub(in crate::afxdp) struct BatchCounters {
     // Bumped at the flowless fence (`record_nat_flowless_untranslated_dropped`)
     // and flushed to BindingLiveState.nat_flowless_untranslated_dropped.
     nat_flowless_untranslated_dropped: u64,
+    // #11066: permitted flow-backed NoRoute packets dropped because their
+    // recorded NAT decision was unavailable to the kernel FIB slow path.
+    nat_flowbacked_no_route_untranslated_dropped: u64,
     // #10131: fragment-overlap drops, split by the same reasons as the global
     // alerting atomics. These are owner-local batch slots; the global atomics
     // remain authoritative for process-wide alerts.
@@ -1165,6 +1168,14 @@ impl BatchCounters {
     pub(in crate::afxdp) fn record_nat_flowless_untranslated_dropped(&mut self) {
         self.touched = true;
         self.nat_flowless_untranslated_dropped += 1;
+    }
+
+    /// #11066: batch a flow-backed NoRoute drop when a matching NAT
+    /// translation cannot be applied before delegated kernel-FIB reinjection.
+    #[inline]
+    pub(in crate::afxdp) fn record_nat_flowbacked_no_route_untranslated_dropped(&mut self) {
+        self.touched = true;
+        self.nat_flowbacked_no_route_untranslated_dropped += 1;
     }
 
     /// #10131: batch one fragment-overlap result while preserving the global
@@ -1447,6 +1458,15 @@ impl BatchCounters {
             live.nat_flowless_untranslated_dropped
                 .fetch_add(self.nat_flowless_untranslated_dropped, Ordering::Relaxed);
             self.nat_flowless_untranslated_dropped = 0;
+        }
+        // #11066: flow-backed NoRoute NAT-fence drops are distinct from
+        // flowless/fragment populations and are attributed per binding.
+        if self.nat_flowbacked_no_route_untranslated_dropped != 0 {
+            live.nat_flowbacked_no_route_untranslated_dropped.fetch_add(
+                self.nat_flowbacked_no_route_untranslated_dropped,
+                Ordering::Relaxed,
+            );
+            self.nat_flowbacked_no_route_untranslated_dropped = 0;
         }
         // #1187 disposition-path counters
         if self.screen_drops != 0 {
