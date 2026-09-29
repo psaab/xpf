@@ -203,11 +203,10 @@ func validateDHCPServerHostInboundBypassWarnings(cfg *Config) []string {
 
 // dhcpHostInboundZoneMap builds interface-ref -> zone-name exactly as the #4455
 // Component B advisory does, mirroring the dataplane's buildInterfaceZoneMap
-// (#3072) through the zoneIfaceLogicalKeys SSOT: a bare zone member (`reth0`)
-// claims the physical key AND every configured unit (`reth0.80`), a
-// unit-qualified entry claims exactly that unit, first-writer-wins over sorted
-// zone names. An exact-string map would miss a `dhcp-local-server` group bound
-// to `reth0.80` under a zone listing bare `reth0`.
+// (#3072) through the zoneIfaceLogicalKeys SSOT: bare zone members claim the
+// physical key and configured units, while unit-qualified entries claim one
+// logical unit. Quarantined zones and ambiguous keys are omitted so an advisory
+// never attributes behavior to a sorted-name winner.
 func dhcpHostInboundZoneMap(cfg *Config) map[string]string {
 	ifZone := make(map[string]string)
 	znames := make([]string, 0, len(cfg.Security.Zones))
@@ -215,13 +214,21 @@ func dhcpHostInboundZoneMap(cfg *Config) map[string]string {
 		znames = append(znames, name)
 	}
 	sort.Strings(znames)
+	excludedZones := ZoneQuarantineExclusions(znames)
+	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zname := range znames {
+		if _, excluded := excludedZones[zname]; excluded {
+			continue
+		}
 		z := cfg.Security.Zones[zname]
 		if z == nil { // #3494: tolerant/HA-sync path may carry a nil zone value
 			continue
 		}
 		for _, ifEntry := range z.Interfaces {
 			for _, key := range zoneIfaceLogicalKeys(cfg, ifEntry) {
+				if _, conflicted := conflictedInterfaces[key]; conflicted {
+					continue
+				}
 				if _, seen := ifZone[key]; !seen {
 					ifZone[key] = zname
 				}

@@ -1982,14 +1982,12 @@ type compileOpts struct {
 	// commit-check path hard-rejects a policy that does not name EXACTLY one
 	// terminal action: a log-only / count-only or typo'd policy compiled with
 	// Action == PolicyPermit (the zero value) and silently PERMITTED all
-	// matching traffic — a fail-OPEN security hole — while a policy naming
-	// more than one terminal action resolved last-wins by parse order. The
-	// tolerant load / peer-sync paths downgrade to a warning so an
-	// already-persisted or peer-synced config that an older binary accepted
-	// still BOOTS (#1960 no-brick); the runtime is independently safe because
-	// compilePolicy defaults an actionless policy's Action to PolicyDeny (NOT
-	// permit), so a leniently-loaded actionless policy DENIES rather than
-	// fails open. Same doctrine as lenientPolicyZoneRefs / lenientPolicyMatchAddress.
+	// matching traffic — a fail-OPEN security hole — while multiple DISTINCT
+	// terminal actions resolved last-wins by parse order. The tolerant load /
+	// peer-sync paths downgrade to a warning; actionless policies default to
+	// DENY, and conflicting-action policies are marked LenientContentDropped so
+	// the snapshot's unsupported sentinel prevents them from installing.
+	// Same doctrine as lenientPolicyZoneRefs / lenientPolicyMatchAddress.
 	lenientPolicyTerminalAction bool
 	// lenientPolicyLogAction (#3060) downgrades the security-policy `then log`
 	// gate (validatePolicyLogActionStrict) from a hard compile error to a

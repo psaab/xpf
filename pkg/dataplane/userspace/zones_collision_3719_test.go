@@ -472,3 +472,81 @@ func TestBuildSnapshotNoCollisionPublishesAll(t *testing.T) {
 		t.Fatalf("recorded a collision on a distinct-folding set: %v", snap.zoneIDCollisions)
 	}
 }
+
+func TestBuildSnapshotQuarantinesReservedZoneNames(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust":      {Name: "trust"},
+		"junos-host": {Name: "junos-host"},
+		"any":        {Name: "any"},
+	}
+	snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 0, 0)
+	if err != nil {
+		t.Fatalf("reserved zone names must not brick snapshot construction: %v", err)
+	}
+	published := map[string]bool{}
+	for _, zone := range snap.Zones {
+		published[zone.Name] = true
+	}
+	if !published["trust"] || published["junos-host"] || published["any"] {
+		t.Fatalf("published zones = %v; want trust only", published)
+	}
+	if len(snap.zoneIDCollisions) != 2 {
+		t.Fatalf("quarantine records = %v, want both reserved names", snap.zoneIDCollisions)
+	}
+	for _, record := range snap.zoneIDCollisions {
+		if record.Survivor != "" {
+			t.Fatalf("reserved-name quarantine has a fake collision survivor: %+v", record)
+		}
+	}
+}
+
+func TestReservedZoneQuarantineKeepsSentinelPolicyReferences(t *testing.T) {
+	snap := &ConfigSnapshot{
+		Zones: []ZoneSnapshot{
+			{Name: "trust", ID: config.StableZoneID("trust")},
+			{Name: "junos-host", ID: config.StableZoneID("junos-host")},
+			{Name: "any", ID: config.StableZoneID("any")},
+		},
+		Interfaces: []InterfaceSnapshot{
+			{Name: "ge-0-0-0.0", Zone: "trust"},
+			{Name: "ge-0-0-1.0", Zone: "junos-host"},
+			{Name: "ge-0-0-2.0", Zone: "any"},
+		},
+		Policies: []PolicyRuleSnapshot{
+			{Name: "host-context", FromZone: "trust", ToZone: "junos-host"},
+			{Name: "wildcard", FromZone: "any", ToZone: "trust"},
+		},
+	}
+	collisions := quarantineCollidingZones(snap)
+	if len(snap.Zones) != 1 || snap.Zones[0].Name != "trust" {
+		t.Fatalf("reserved zones remained installed: %+v", snap.Zones)
+	}
+	if len(snap.Policies) != 2 {
+		t.Fatalf("reserved sentinel references were scrubbed from policies: %+v", snap.Policies)
+	}
+	for _, iface := range snap.Interfaces {
+		if iface.Name != "ge-0-0-0.0" && iface.Zone != "" {
+			t.Fatalf("interface in reserved zone %q remained assigned to %q", iface.Name, iface.Zone)
+		}
+	}
+	if len(collisions) != 2 {
+		t.Fatalf("quarantine records = %v, want both reserved names", collisions)
+	}
+}
+
+func TestConflictingZoneInterfaceMembershipHasNoUserspaceOwner(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"aaa":   {Name: "aaa", Interfaces: []string{"ge-0/0/0.0"}},
+		"trust": {Name: "trust", Interfaces: []string{"ge-0/0/0.0"}},
+	}
+	for _, zones := range []map[string]string{
+		buildInterfaceZoneMap(cfg),
+		authoredZoneRefs(cfg),
+	} {
+		if got := zones["ge-0/0/0.0"]; got != "" {
+			t.Fatalf("conflicting interface resolved to zone %q, want no owner", got)
+		}
+	}
+}

@@ -30,12 +30,11 @@ func TestZoneInterfaceMultiZoneFailsCommit(t *testing.T) {
 }
 
 // TestZoneInterfaceMultiZoneLenientDowngradesToWarning asserts the tolerant
-// load / peer-sync path downgrades the multi-zone rejection to a warning
-// instead of failing the compile, so an already-persisted or peer-synced config
-// an older binary accepted still boots (#3072 / #1960 no-brick). The
-// interface->zone map keeps its deterministic first-writer-wins resolution, so
-// the leniently-loaded config forwards exactly as before — just with an
-// operator-visible warning.
+// load / peer-sync path warns instead of failing the compile, so an already-
+// persisted or peer-synced config still boots (#3072 / #1960 no-brick). The
+// contested logical interface key is omitted from the runtime map, making the
+// ambiguous interface unzoned and fail-closed rather than selecting a zone by
+// sorted-name order.
 func TestZoneInterfaceMultiZoneLenientDowngradesToWarning(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set security zones security-zone aaa interfaces ge-0/0/0.0",
@@ -54,6 +53,24 @@ func TestZoneInterfaceMultiZoneLenientDowngradesToWarning(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected a downgraded zone-interface-membership warning, got warnings: %v", cfg.Warnings)
+	}
+	zoneMap := InterfaceZoneMap(cfg)
+	if got := zoneMap["ge-0/0/0.0"]; got != "" {
+		t.Fatalf("ambiguous interface resolved to zone %q, want no zone (fail closed)", got)
+	}
+	if _, quarantined := QuarantinedZoneInterfaceKeys(cfg)["ge-0/0/0.0"]; !quarantined {
+		t.Fatal("contested logical interface key was not quarantined")
+	}
+	if got := buildZoneInterfaceMapLocal(cfg)["ge-0/0/0.0"]; got != "" {
+		t.Fatalf("local host-inbound map resolved contested interface to %q", got)
+	}
+	for _, name := range []string{"aaa", "trust"} {
+		cfg.Security.Zones[name].InterfaceHostInbound = map[string]*HostInboundTraffic{
+			"ge-0/0/0.0": {Protocols: []string{"ospf"}},
+		}
+	}
+	if got := ResolveInterfaceHostInbound(cfg); got["ge-0/0/0.0"] != nil {
+		t.Fatalf("host-inbound override leaked onto contested interface: %+v", got)
 	}
 }
 

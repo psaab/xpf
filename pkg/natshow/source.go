@@ -58,7 +58,11 @@ func RenderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 			names = append(names, name)
 		}
 		sort.Strings(names)
+		quarantined := config.ZoneQuarantineExclusions(names)
 		for _, name := range names {
+			if _, drop := quarantined[name]; drop {
+				continue
+			}
 			id := cr.ZoneIDs[name]
 			owner := config.StableZoneIDOwner(names, id)
 			if owner == "" {

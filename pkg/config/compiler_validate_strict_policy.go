@@ -800,26 +800,26 @@ func policyTerminalActionError(scope, polName, detail string) error {
 // Action == PolicyPermit and silently PERMITTED every packet matching its
 // match conditions. A rule the operator wrote as an audit/drop placeholder
 // thus became a zone-pair-wide permit: a silent fail-OPEN security hole.
-// Symmetrically, a policy that named MORE than one terminal action (e.g. a
-// group-merged `then permit` + `then deny`) resolved last-wins by child
+// Symmetrically, a policy that named MORE than one DISTINCT terminal action
+// (e.g. a group-merged `then permit` + `then deny`) resolved last-wins by child
 // visitation order rather than failing the commit, so the enforced action
-// depended on parse order.
+// depended on parse order. Repeating the same terminal action is harmless.
 //
 // Junos requires every policy term to have exactly one terminal action; this
 // validator restores that fail-CLOSED parity. It checks each per-zone-pair
 // policy and each global policy: terminalActions (populated in config order by
-// compilePolicy) must have length exactly 1.
+// compilePolicy) must be nonempty and contain exactly one distinct action.
 //
 // Strict on the commit / commit-check path (CompileConfig — hard-reject);
-// downgraded to a cfg.Warnings entry on the tolerant load / peer-sync paths
+// downgraded to a cfg.Warnings entry on tolerant load / peer-sync paths
 // (CompileConfigLenient / CompileConfigForNodeLenient, flag
 // lenientPolicyTerminalAction) so an already-persisted or peer-synced config
 // that an older binary accepted still BOOTS (#1960 fail-closed-on-load
-// doctrine). On that tolerant path the runtime is independently safe:
-// compilePolicy defaults an actionless policy's Action to PolicyDeny (NOT
-// permit), so a leniently-loaded actionless policy DENIES rather than fails
-// open. Iteration order (cfg.Security.Policies, then GlobalPolicies) is
-// deterministic, so the first-reported error is stable.
+// doctrine). On that tolerant path actionless policies default to DENY, while
+// conflicting-action policies are marked LenientContentDropped and the
+// snapshot's unsupported sentinel prevents the incomplete policy from installing.
+// Iteration order (cfg.Security.Policies, then GlobalPolicies) is deterministic,
+// so the first-reported error is stable.
 func validatePolicyTerminalActionStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -828,43 +828,36 @@ func validatePolicyTerminalActionStrict(cfg *Config) error {
 		if pol == nil {
 			return nil
 		}
-		// #3850: two IDENTICAL terminal-action blocks (e.g. a `load merge` that
-		// duplicates the SAME `then { permit; }`, now both accumulated by the
-		// #3842 policyThenChildren read) are NOT a conflict — Junos merges them
-		// silently. Dedup by distinct action VALUE before the count so an
-		// identical duplicate collapses to one (commit succeeds, Junos-faithful)
-		// and only DIFFERENT terminal actions (e.g. permit + reject) trip the
-		// conflict gate. Before this the #3043 gate over-rejected `permit,permit`
-		// as "2 conflicting terminal actions (permit, permit)" — fail-closed but
-		// imprecise.
-		seen := make(map[PolicyAction]bool, len(pol.terminalActions))
-		distinct := make([]PolicyAction, 0, len(pol.terminalActions))
-		for _, a := range pol.terminalActions {
-			if !seen[a] {
-				seen[a] = true
-				distinct = append(distinct, a)
-			}
-		}
-		switch len(distinct) {
-		case 1:
-			return nil
-		case 0:
+		// #3850: identical duplicate terminal-action blocks merge silently.
+		// The no-allocation predicate is also used by compilePolicy's #11063
+		// tolerant-load poison so strict rejection and runtime fail-closed
+		// behavior agree on exactly which policies have conflicting actions.
+		if len(pol.terminalActions) == 0 {
 			return policyTerminalActionError(scope, pol.Name,
 				"no terminal action; every policy must specify exactly one of "+
 					"`then permit`, `then deny`, or `then reject` (a log-only / "+
 					"count-only or typo'd policy silently PERMITTED all matching "+
 					"traffic; it now defaults to deny on load)")
-		default:
-			names := make([]string, 0, len(distinct))
-			for _, a := range distinct {
-				names = append(names, policyActionName(a))
-			}
-			return policyTerminalActionError(scope, pol.Name, fmt.Sprintf(
-				"%d conflicting terminal actions (%s); a policy must specify "+
-					"exactly one of permit/deny/reject (the enforced action would "+
-					"otherwise depend on parse order)",
-				len(distinct), strings.Join(names, ", ")))
 		}
+		if !conflictingPolicyTerminalActions(pol.terminalActions) {
+			return nil
+		}
+		// The conflict predicate has established multiple distinct actions;
+		// collect their first-seen names for a deterministic diagnostic.
+		seen := make(map[PolicyAction]bool, len(pol.terminalActions))
+		names := make([]string, 0, len(pol.terminalActions))
+		for _, action := range pol.terminalActions {
+			if seen[action] {
+				continue
+			}
+			seen[action] = true
+			names = append(names, policyActionName(action))
+		}
+		return policyTerminalActionError(scope, pol.Name, fmt.Sprintf(
+			"%d conflicting terminal actions (%s); a policy must specify "+
+				"exactly one of permit/deny/reject (the enforced action would "+
+				"otherwise depend on parse order)",
+			len(names), strings.Join(names, ", ")))
 	}
 	for _, zpp := range cfg.Security.Policies {
 		if zpp == nil {
