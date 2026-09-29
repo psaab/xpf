@@ -190,16 +190,12 @@ pub(crate) const UNATTRIBUTED_POLICY_ID: u32 = 0;
 /// Junos does not forward transit on an unzoned interface at all, so the
 /// disposition is a deny rather than a default.
 ///
-/// It is counted HERE rather than on `default_counter` so the two causes stay
-/// distinguishable: a rising default-deny count means policy is working as
-/// configured, whereas a rising count here means an interface fell out of its
-/// zone, which is a configuration fault the operator wants to see.
-///
-/// The RT_FLOW `policy_id` carries `UNATTRIBUTED_POLICY_ID`, so the deny
-/// LOGS as `unattributed` rather than `default-policy`. The dedicated
-/// `UNZONED_INGRESS_DENIED` counter remains the aggregate-cause signal; this
-/// attribution is intentionally separate from the implicit default sentinel.
-/// A distinct log reason is worth doing on its own, not folded in here.
+/// It is counted separately from `default_counter` so the deny does not inflate
+/// ordinary default-policy hit-counts. The direction-specific atomic is an
+/// in-process diagnostic only: it is not exported through `ProcessStatus`,
+/// Prometheus, or policy counter snapshots. In production the deny is visible
+/// as `policy=unattributed` in RT_FLOW and in aggregate
+/// `xpf_policy_denies_total`; exporting the cause counters is tracked in #11503.
 pub(crate) static UNZONED_INGRESS_DENIED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 ///
@@ -208,10 +204,10 @@ pub(crate) static UNZONED_INGRESS_DENIED: std::sync::atomic::AtomicU64 =
 /// denied rather than defaulted, for the same Junos-parity reason: an
 /// operator asking for permit-all is asking what to do with traffic that
 /// matched no policy, not asking to forward traffic that had no zone to be
-/// adjudicated in. Counted separately from the ingress arm so the two
-/// directions stay distinguishable, and separately from `default_counter`
-/// for the same configuration-fault reason. Like the ingress arm it logs as
-/// `unattributed` (`UNATTRIBUTED_POLICY_ID`), not `default-policy`.
+/// adjudicated in. It increments a separate in-process diagnostic atomic, not
+/// `default_counter`; the RT_FLOW denial is `unattributed`, with aggregate
+/// `xpf_policy_denies_total` visibility. Exporting the cause counters is
+/// tracked in #11503.
 pub(crate) static UNZONED_EGRESS_DENIED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 

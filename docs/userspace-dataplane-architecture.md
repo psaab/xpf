@@ -2138,12 +2138,13 @@ so it is ineligible for all those policies.
 **Unzoned transit enforcement (#6682, #11067).** Being ineligible for every
 rule tier is only half of safe. With `default-policy permit-all`, falling
 through from an unknown zone to the implicit default can still forward transit
-without a zone policy. A resolved unzoned ingress (`from_id == 0`) returns an
-unattributed `Deny` and increments `UNZONED_INGRESS_DENIED`; a resolved
-unzoned egress (`to_id == 0`) likewise returns an unattributed `Deny` and
-increments `UNZONED_EGRESS_DENIED`. Neither path increments
-`default_counter` or a configured policy counter. Each counter distinguishes a
-zone-configuration fault from an ordinary default-policy decision.
+without a zone policy. An unzoned ingress (`from_id == 0`) returns an
+unattributed `Deny`; a resolved unzoned egress (`to_id == 0`) likewise returns
+an unattributed `Deny`. Neither path increments `default_counter` or a
+configured policy counter. The `UNZONED_INGRESS_DENIED` and
+`UNZONED_EGRESS_DENIED` atomics are in-process diagnostics only; production
+visibility is the `policy=unattributed` RT_FLOW event plus aggregate
+`xpf_policy_denies_total`. Exporting cause counters is tracked in #11503.
 
 The tier gate and these denies are complementary and ordered, not redundant:
 #3110 stops exact, wildcard, and global rules from matching a zone-0 flow
