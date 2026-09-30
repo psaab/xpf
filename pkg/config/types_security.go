@@ -488,7 +488,7 @@ type ZoneConfig struct {
 	// ResolvedInterfaceOverrides; either nil means "unstamped".
 	ResolvedInterfaceOverrides map[string]*HostInboundTraffic
 	ResolvedInterfaceDeclared  map[string]bool
-	TCPRst                     bool // send TCP RST for non-SYN packets to closed ports
+	TCPRst                     bool // send TCP RST for non-SYN TCP transit session misses
 	// AddressBook is the zone-local address book (#3061). A policy whose
 	// from-zone (source-address) or to-zone (destination-address) is this
 	// zone resolves a name against this book FIRST, then falls back to the

@@ -47,10 +47,10 @@ pub(super) fn policy_packet_icmp(packet_frame: &[u8], meta: UserspaceDpMeta) -> 
 /// #3019/#3292: evaluate the configured `to-zone junos-host` security policy for
 /// a host-bound (LocalDelivery) packet and, on a matching deny/reject, emit the
 /// policy-deny RT_FLOW. This is the reply-FREE core shared by both the
-/// flow-backed [`junos_host_local_policy`] gate (which adds the synthesized
-/// reject/tcp-rst reply on a deny/reject and surfaces a permit's metadata) and
-/// the flowless LocalDelivery arm (#3292, which can emit no reply — a fragment
-/// has no L4 header to build a RST from).
+/// flow-backed [`junos_host_local_policy`] gate (which adds a reply only for an
+/// explicit `then reject` and surfaces a permit's metadata) and the flowless
+/// LocalDelivery arm (#3292, which can emit no reply — fragments lack an L4
+/// header to build a TCP RST from).
 ///
 /// `l4_present = false` routes through the l3-aware junos-host evaluation so a
 /// port-bearing application term fails closed for a flowless packet; the
@@ -99,9 +99,9 @@ pub(super) fn junos_host_policy_eval(
 /// `to-zone junos-host then permit log` session installed with no log flags and
 /// `policy_id` 0 — unlogged and unattributable.
 pub(super) enum JunosHostLocalPolicy {
-    /// A matching junos-host `deny`/`reject` dropped the host-bound packet (the
-    /// reject/tcp-rst reply was enqueued and the policy-deny RT_FLOW emitted).
-    /// The caller recycles the frame and skips session install.
+    /// A matching junos-host `deny`/`reject` dropped the host-bound packet.
+    /// Only an explicit `then reject` may enqueue a reply; both emit the
+    /// policy-deny RT_FLOW. The caller skips session install.
     Dropped,
     /// A matching junos-host policy PERMITTED the host-bound flow. Carries the
     /// full evaluation result so the session-install path stamps the policy's
@@ -291,9 +291,9 @@ pub(super) fn junos_host_local_policy(
         }
         Some(result) => {
             let action = result.action;
-            // #3615: enqueue the reject/tcp-rst reply FIRST, then emit the
+            // #3615: enqueue an explicit reject reply FIRST, then emit the
             // junos-host deny with the ACTUAL reply outcome so a suppressed
-            // reject logs the truthful DENY.
+            // reject logs the truthful DENY; plain `deny` stays silent.
             let reject_reply_enqueued = enqueue_deny_reply(
                 tx_pipeline,
                 forwarding,
@@ -303,7 +303,6 @@ pub(super) fn junos_host_local_policy(
                 flow,
                 counters,
                 matches!(action, PolicyAction::Reject),
-                from_zone_id,
             );
             emit_junos_host_deny(
                 forwarding,

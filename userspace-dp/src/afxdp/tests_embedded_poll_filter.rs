@@ -9855,3 +9855,78 @@ fn rx_source_learn_cannot_pre_policy_overwrite_live_v6_neighbor() {
         }
     }
 }
+
+#[test]
+fn zone_tcp_rst_only_resets_tcp_session_misses_11304() {
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
+
+    let cases = [
+        ("ACK session miss", true, TCP_ACK, false, false, true),
+        ("FIN session miss", true, TCP_FIN | TCP_ACK, false, false, true),
+        ("tcp-rst disabled", false, TCP_ACK, false, false, false),
+        ("incoming RST", true, TCP_RST | TCP_ACK, false, false, false),
+        ("SYN policy deny", true, TCP_SYN, true, false, false),
+        (
+            "no-syn-check policy deny",
+            true,
+            TCP_ACK,
+            true,
+            true,
+            false,
+        ),
+    ];
+
+    for (name, tcp_rst, flags, policy_deny, no_syn_check, expect_rst) in cases {
+        let mut snapshot = nat_snapshot();
+        snapshot.zones[0].tcp_rst = tcp_rst;
+        snapshot.flow.tcp_no_syn_check = no_syn_check;
+        if policy_deny {
+            snapshot.policies[0].action = "deny".to_string();
+        }
+        let forwarding = build_forwarding_state(&snapshot);
+        let ha_state = txn_ha_state();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(198, 51, 100, 20),
+            49152,
+            443,
+            flags,
+            TEST_LAN_MAC,
+        );
+        let meta = txn_meta_v4(24, flags, frame.len() as u16);
+
+        let (batch, _) = txn_run_descriptor(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+        );
+        assert_eq!(
+            binding.tx_pipeline.pending_tx_local.len(),
+            usize::from(expect_rst),
+            "{name}: unexpected local reply count"
+        );
+        if expect_rst {
+            let reply = &binding
+                .tx_pipeline
+                .pending_tx_local
+                .front()
+                .expect("session-miss RST")
+                .bytes;
+            assert_ne!(
+                reply[14 + 20 + 13] & TCP_RST,
+                0,
+                "{name}: reply must be RST"
+            );
+        }
+        assert_eq!(
+            batch.policy_reject_sent, 0,
+            "{name}: a session-miss RST is not a policy reject"
+        );
+    }
+}

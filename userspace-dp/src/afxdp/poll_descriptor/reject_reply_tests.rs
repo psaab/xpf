@@ -936,8 +936,7 @@ fn unreplyable_non_first_fragment_reject_untouched_3656() {
     reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
 }
 
-/// #3071: an ICMP echo (non-TCP) frame for the zone-tcp-rst tests. Reused
-/// to prove tcp-rst is TCP-only (non-TCP denied traffic stays silent).
+/// An ICMP echo (non-TCP) frame for tests of non-TCP reject/deny handling.
 fn icmp_v4_echo() -> (Vec<u8>, UserspaceDpMeta, SessionFlow) {
     let client = std::net::Ipv4Addr::new(10, 0, 61, 102);
     let server = std::net::Ipv4Addr::new(1, 1, 1, 1);
@@ -977,24 +976,14 @@ fn icmp_v4_echo() -> (Vec<u8>, UserspaceDpMeta, SessionFlow) {
     (frame, meta, flow)
 }
 
-/// #3071 fail-on-revert: a plain `deny` (is_reject=false) on a TCP flow
-/// whose INGRESS (from) zone has tcp-rst enabled MUST enqueue a TCP RST.
-/// Reverting the zone-tcp-rst arm of `enqueue_deny_reply` → no RST → RED.
+/// #11304 fail-on-revert: plain policy `deny` remains a silent drop even
+/// when the ingress zone has Junos `tcp-rst`. The option applies at the
+/// transit session-miss gate, not when a policy denies traffic.
 #[test]
-fn deny_reply_zone_tcp_rst_tcp_enqueues_rst() {
-    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
-    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
-    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
-        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
-        0,
-    );
+fn deny_reply_zone_tcp_rst_policy_deny_is_silent_11304() {
     let (frame, meta, flow) = tcp_v4_syn();
-    let mut pipeline = tx_pipeline(
-        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
-        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
-    );
+    let mut pipeline = tx_pipeline(64, 64);
     let mut forwarding = ForwardingState::default();
-    // From-zone id 7 has Junos `tcp-rst`.
     forwarding.zone_tcp_rst.insert(7, true);
     let mut counters = BatchCounters::default();
     let sent = enqueue_deny_reply(
@@ -1006,25 +995,19 @@ fn deny_reply_zone_tcp_rst_tcp_enqueues_rst() {
         &flow,
         &mut counters,
         false, // plain deny, not `then reject`
-        7,     // ingress (from) zone id
     );
-    assert!(sent, "denied TCP in a tcp-rst zone must enqueue a RST");
-    assert_eq!(counters.policy_reject_sent, 1);
-    let req = pipeline
-        .pending_tx_local
-        .pop_front()
-        .expect("zone tcp-rst RST request");
-    let tcp_flags = req.bytes[14 + 20 + 13];
-    assert_ne!(tcp_flags & 0x04, 0, "RST flag must be set");
+    assert!(!sent, "zone `tcp-rst` must not answer a policy deny");
+    assert_eq!(counters.policy_reject_sent, 0);
+    assert!(pipeline.pending_tx_local.is_empty());
 }
 
-/// #3071: a plain `deny` on a TCP flow whose from-zone does NOT have
-/// tcp-rst stays a silent drop (no RST, no counter).
+/// #11304: a plain TCP `deny` stays silent when no ingress zone has
+/// `tcp-rst` enabled; explicit `then reject` remains an active reply.
 #[test]
 fn deny_reply_no_zone_tcp_rst_is_silent_drop() {
     let (frame, meta, flow) = tcp_v4_syn();
     let mut pipeline = tx_pipeline(64, 64);
-    let forwarding = ForwardingState::default(); // zone 7 not in zone_tcp_rst
+    let forwarding = ForwardingState::default();
     let mut counters = BatchCounters::default();
     let sent = enqueue_deny_reply(
         &mut pipeline,
@@ -1035,24 +1018,22 @@ fn deny_reply_no_zone_tcp_rst_is_silent_drop() {
         &flow,
         &mut counters,
         false,
-        7,
     );
     assert!(
         !sent,
-        "denied TCP without zone tcp-rst must stay a silent drop"
+        "a plain policy deny must stay a silent drop"
     );
     assert_eq!(counters.policy_reject_sent, 0);
     assert!(pipeline.pending_tx_local.is_empty());
 }
 
-/// #3071: zone tcp-rst is TCP-only — a denied NON-TCP (ICMP) flow in a
-/// tcp-rst zone is unaffected (silent drop, no ICMP unreachable).
+/// A denied non-TCP (ICMP) flow is a silent drop; explicit reject uses its
+/// separate active ICMP reply path.
 #[test]
-fn deny_reply_zone_tcp_rst_non_tcp_is_silent_drop() {
+fn deny_reply_plain_deny_non_tcp_is_silent_drop() {
     let (frame, meta, flow) = icmp_v4_echo();
     let mut pipeline = tx_pipeline(64, 64);
     let mut forwarding = ForwardingState::default();
-    forwarding.zone_tcp_rst.insert(7, true);
     let mut counters = BatchCounters::default();
     let sent = enqueue_deny_reply(
         &mut pipeline,
@@ -1063,11 +1044,10 @@ fn deny_reply_zone_tcp_rst_non_tcp_is_silent_drop() {
         &flow,
         &mut counters,
         false,
-        7,
     );
     assert!(
         !sent,
-        "non-TCP denied traffic must not get a zone tcp-rst reply"
+        "non-TCP policy deny must stay silent"
     );
     assert_eq!(counters.policy_reject_sent, 0);
     assert!(pipeline.pending_tx_local.is_empty());
@@ -1511,7 +1491,6 @@ fn deny_reply_explicit_reject_still_resets_tcp() {
         &flow,
         &mut counters,
         true, // explicit `then reject`
-        7,
     );
     assert!(
         sent,

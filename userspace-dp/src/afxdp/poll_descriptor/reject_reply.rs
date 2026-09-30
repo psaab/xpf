@@ -1,18 +1,19 @@
-// #2089 policy-`reject` reply synthesis: emit a TCP RST (for TCP) or an
-// ICMP/ICMPv6 Destination Unreachable, administratively prohibited (for
-// every other non-suppressed protocol) instead of the silent drop that
-// `then deny` produces. Lifted out of poll_descriptor/mod.rs so the hot
-// ingress loop does not carry the reject-path bodies in its codegen unit,
-// mirroring cookie_reply.rs.
+// #2089/#11304 generated-reply synthesis: explicit `then reject` emits a TCP
+// RST (for TCP) or an ICMP/ICMPv6 Destination Unreachable, administratively
+// prohibited (for every other non-suppressed protocol). Plain `then deny`
+// remains a silent drop. Junos zone `tcp-rst` separately uses the same reply
+// machinery for non-SYN TCP transit session misses, not policy denies. Lifted
+// out of poll_descriptor/mod.rs so the hot ingress loop does not carry the
+// reject-path bodies in its codegen unit, mirroring cookie_reply.rs.
 //
-// `enqueue_policy_reject_reply` is on the cold policy-deny exception arm
-// only and fires solely when the matched action is `PolicyAction::Reject`,
-// so it is a true cold/exception body — `#[cold] #[inline(never)]` places
-// it in `.text.unlikely`, away from the hot loop's cache lines. It reuses
-// the SYN-cookie TX-frame budget gate so a rejected-flow flood can never
-// starve transit TX frames; on a budget or build failure it returns false
-// and the caller still drops the packet (fail-closed — never logs a reject
-// that did not happen).
+// `enqueue_policy_reject_reply` is on the cold policy exception arm and fires
+// solely when the matched action is `PolicyAction::Reject`. The
+// `enqueue_session_miss_rst` helper is reached only from the strict-SYN miss
+// gate. Both are true cold/exception bodies — `#[cold] #[inline(never)]`
+// places them in `.text.unlikely`, away from the hot loop's cache lines. They
+// share the SYN-cookie TX-frame budget gate so a reply flood cannot starve
+// transit TX frames; on budget or build failure the caller still drops the
+// packet (fail-closed).
 
 use super::cookie_reply::syn_cookie_reply_budget_available;
 use super::worker::WorkerTxPipeline;
@@ -24,18 +25,17 @@ use crate::event_stream::EventStreamWorkerHandle;
 use crate::nat::NatDecision;
 use crate::policy::PolicyAction;
 
-/// Which `reject` source a synthesized reply is attributed to. Selects the
-/// per-source counters so a policy `then reject` and a firewall-filter `then
-/// reject` are independently observable, while both flow through the SAME
-/// reply-synthesis + output-classification machinery (#2521). The
-/// budget-exhaustion / output-filter-drop / parse-error legs are shared with
-/// policy reject so #2472's future per-reason rate limiter (which hooks the
-/// shared generated-reply path) covers filter reject automatically — there is
-/// no parallel, un-limitable emit path.
+/// Which source a generated reject/reset reply is attributed to.
+///
+/// Policy and Filter replies select their per-source reject counters.
+/// SessionMiss reuses the same synthesis, output classification, budget, and
+/// rate-limit gates for a zone `tcp-rst` reset, but is not a policy/filter
+/// rejection and therefore does not increment either source's counters.
 #[derive(Clone, Copy)]
 pub(super) enum RejectReplySource {
     Policy,
     Filter,
+    SessionMiss,
 }
 
 #[cold]
@@ -101,24 +101,14 @@ pub(in crate::afxdp) fn enqueue_filter_reject_reply(
     )
 }
 
-/// #3071: unified deny-path reply decision shared by both policy-deny call
-/// sites in `poll_descriptor`. Replaces the bare `if action == Reject` arm so
-/// the zone-level `tcp-rst` knob is honored alongside explicit `then reject`:
+/// #11304: policy-deny reply decision shared by both transit call sites and the
+/// junos-host policy path. Explicit `then reject` remains active; plain `deny`
+/// and default-deny always stay silent, regardless of the ingress zone's
+/// `tcp-rst` setting. That setting is handled only at the transit TCP
+/// session-miss drop.
 ///
-/// * `is_reject` (policy `then reject`): active reject for EVERY protocol — a
-///   TCP RST for TCP, an ICMP/ICMPv6 admin-prohibited unreachable otherwise.
-///   Unchanged from #2089.
-/// * otherwise (plain `deny` / default-deny): a silent drop UNLESS the flow is
-///   TCP AND the INGRESS (from) zone has Junos `tcp-rst` enabled, in which
-///   case a TCP RST is sent back toward the source. Junos `tcp-rst` only
-///   resets TCP; non-TCP denied traffic and a deny in a non-tcp-rst zone stay
-///   silent drops.
-///
-/// Both legs reuse `enqueue_policy_reject_reply` (the #2521/#2089 synthesis +
-/// #2238 output classification + #2472 rate limit + fail-closed budget gate),
-/// so a zone-tcp-rst RST is counted under `policy_reject_sent` — it is a
-/// policy-deny-driven reset. Returns true iff a reply was enqueued; the caller
-/// still performs the silent drop regardless (fail-closed).
+/// Returns true iff an explicit `then reject` reply was enqueued. The caller
+/// still drops the triggering packet regardless (fail-closed).
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
@@ -131,20 +121,8 @@ pub(super) fn enqueue_deny_reply(
     flow: &SessionFlow,
     counters: &mut BatchCounters,
     is_reject: bool,
-    from_zone_id: u16,
 ) -> bool {
     if is_reject {
-        return enqueue_policy_reject_reply(
-            tx_pipeline,
-            forwarding,
-            ingress_ifindex,
-            packet_frame,
-            meta,
-            flow,
-            counters,
-        );
-    }
-    if meta.protocol == PROTO_TCP && forwarding.zone_tcp_rst_enabled(from_zone_id) {
         return enqueue_policy_reject_reply(
             tx_pipeline,
             forwarding,
@@ -158,14 +136,50 @@ pub(super) fn enqueue_deny_reply(
     false
 }
 
-/// #3615: enqueue the policy deny/reject reply FIRST, THEN emit the policy-deny
-/// RT_FLOW carrying the TRUTHFUL action. `enqueue_deny_reply` returns whether a
-/// TCP RST / ICMP-unreachable was actually enqueued (an explicit `then reject`,
-/// or a plain `deny` in a zone with `tcp-rst`); that outcome is threaded into
-/// `emit_policy_deny_event` so a `reject` whose reply fail-closed
-/// (budget/rate/parse/output-filter) is logged as the truthful DENY rather than
-/// claiming an active reject that never left the box. A plain `deny` always
-/// logs DENY regardless of whether a zone-`tcp-rst` RST rode out.
+/// #11304: synthesize Junos `tcp-rst` for a non-SYN TCP transit session miss.
+/// Called from the strict-SYN fail-closed branch, before the packet is recycled;
+/// unlike a policy `reject`, this emits no policy-deny event or reject counter.
+/// Reply construction, output filtering, the TX budget, and the per-zone
+/// generated-reject limiter are shared with explicit reject replies.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn enqueue_session_miss_rst(
+    tx_pipeline: &mut WorkerTxPipeline,
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+    flow: &SessionFlow,
+    counters: &mut BatchCounters,
+    from_zone_id: u16,
+) -> bool {
+    if meta.protocol != PROTO_TCP
+        || flow.forward_key.protocol != PROTO_TCP
+        || crate::tcp_flags::has_syn(meta.tcp_flags)
+        || crate::tcp_flags::has_rst(meta.tcp_flags)
+        || !forwarding.zone_tcp_rst_enabled(from_zone_id)
+    {
+        return false;
+    }
+    enqueue_reject_reply(
+        tx_pipeline,
+        forwarding,
+        ingress_ifindex,
+        packet_frame,
+        meta,
+        flow,
+        counters,
+        RejectReplySource::SessionMiss,
+        crate::filter::RejectMessage::ADMIN_PROHIBITED,
+    )
+}
+
+/// #3615: enqueue an explicit policy `reject` reply FIRST, THEN emit the
+/// policy-deny RT_FLOW carrying the TRUTHFUL action. `enqueue_deny_reply`
+/// returns true only when a `then reject` reply was sent; plain `deny` is
+/// always silent. Zone `tcp-rst` session-miss replies use a separate path and
+/// emit no policy-deny event.
 ///
 /// Both transit deny sites and the junos-host deny route through this single
 /// helper so the poll-loop ordering (enqueue-outcome BEFORE emit) is the SAME
@@ -200,7 +214,6 @@ pub(super) fn deny_reply_and_emit(
         flow,
         counters,
         matches!(action, PolicyAction::Reject),
-        from_zone_id,
     );
     emit_policy_deny_event(
         event_stream,
@@ -307,13 +320,13 @@ fn enqueue_reject_reply(
     // reply — never a mis-attributed unreplyable frame (#3656 H12).
     if !syn_cookie_reply_budget_available(tx_pipeline) {
         counters.touched = true;
-        // #3615 (L04): attribute the TX-frame-budget suppression to the
-        // reply's SOURCE so a firewall-filter `then reject` drop is not
-        // conflated with a policy `then reject` drop. Both still share the
-        // same budget gate; only the observable counter differs.
+        // #3615 (L04): attribute policy and filter suppressions to their
+        // matching source counters. A zone `tcp-rst` session miss is already
+        // recorded as a strict-SYN drop and is not a policy/filter reject.
         match source {
             RejectReplySource::Policy => counters.policy_reject_reply_budget_drops += 1,
             RejectReplySource::Filter => counters.filter_reject_reply_budget_drops += 1,
+            RejectReplySource::SessionMiss => {}
         }
         return false;
     }
@@ -373,6 +386,7 @@ fn enqueue_reject_reply(
             match source {
                 RejectReplySource::Policy => counters.policy_reject_output_filter_drops += 1,
                 RejectReplySource::Filter => counters.filter_reject_output_filter_drops += 1,
+                RejectReplySource::SessionMiss => {}
             }
         }
         // Fail-closed to the silent drop the caller already performs. #5569:
@@ -422,21 +436,15 @@ fn enqueue_reject_reply(
     // source (`flow` is the pre-NAT session flow, so this is the true origin).
     if !allow_generated_reject(forwarding, from_zone_id, Some(flow.src_ip)) {
         counters.touched = true;
-        // #3661: attribute the rate-limit drop to the reply's SOURCE so a
-        // firewall-filter `then reject` starvation is not conflated with a
-        // policy `then reject` starvation under a rejected-flow flood. Both
-        // sources still share the SAME per-zone reject bucket for a given
-        // ingress zone (#3618); the aggregate `reject_rate_limited_total`
-        // (bumped inside `allow_generated_reject`) stays source-NEUTRAL for
-        // back-compat and is a single atomic summed across all zones, and these
-        // two per-source per-binding counters sum to it exactly (the reject
-        // bucket has this ONE consume site — #3656 proved the token is consumed
-        // only for a buildable reply, and #5569 proved it is consumed only for
-        // a filter-ADMITTED reply, so a filtered / unreplyable frame reaches
-        // neither counter). Mirrors the #3615 output-filter source split above.
+        // #3661: keep explicit policy and filter rate-limit counters distinct.
+        // Zone `tcp-rst` session misses share this per-zone bucket but stay out
+        // of both counters; their strict-SYN drop is recorded separately. The
+        // source-neutral `reject_rate_limited_total` therefore includes all
+        // three sources and need not equal the two per-source sums.
         match source {
             RejectReplySource::Policy => counters.policy_reject_rate_limit_drops += 1,
             RejectReplySource::Filter => counters.filter_reject_rate_limit_drops += 1,
+            RejectReplySource::SessionMiss => {}
         }
         return false;
     }
@@ -458,6 +466,7 @@ fn enqueue_reject_reply(
     match source {
         RejectReplySource::Policy => counters.policy_reject_sent += 1,
         RejectReplySource::Filter => counters.filter_reject_sent += 1,
+        RejectReplySource::SessionMiss => {}
     }
     true
 }

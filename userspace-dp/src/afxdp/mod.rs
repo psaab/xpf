@@ -1006,13 +1006,11 @@ pub(in crate::afxdp) struct BatchCounters {
     // from `policy_reject_reply_budget_drops` so filter-reject troubleshooting
     // is precise (both still share the same budget gate).
     filter_reject_reply_budget_drops: u64,
-    // #3661: POLICY-`reject` replies dropped because the shared per-reason
-    // REJECT_BUCKET rate-limit token bucket was empty. The aggregate
-    // `reject_rate_limited_total` (bumped inside `allow_generated_error`) stays
-    // source-neutral; this splits the SAME drop by reply source so
-    // policy-reject starvation is distinguishable from filter-reject
-    // starvation under a rejected-flow flood. Sibling of
-    // `policy_reject_reply_budget_drops`.
+    // #3661: explicit policy-`reject` replies dropped because the shared
+    // per-reason rate-limit token bucket was empty. The aggregate
+    // `reject_rate_limited_total` is source-neutral and also includes zone
+    // `tcp-rst` session-miss resets. This source split contains only explicit
+    // policy/filter rejects, so its sum may be below the aggregate.
     policy_reject_rate_limit_drops: u64,
     // #3661: FILTER-`reject` reply rate-limit drop — the source-split sibling
     // of `policy_reject_rate_limit_drops` (both share the one REJECT_BUCKET).

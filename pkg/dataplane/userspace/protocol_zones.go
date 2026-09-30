@@ -32,13 +32,11 @@ type ZoneSnapshot struct {
 	HostInboundSystemServices []string `json:"host_inbound_system_services,omitempty"`
 	HostInboundProtocols      []string `json:"host_inbound_protocols,omitempty"`
 	// TCPRst carries the Junos `security zones security-zone <z> tcp-rst`
-	// knob (#3071). When true, the userspace dataplane sends a TCP RST back
-	// toward the source for a TCP flow DENIED by policy/default-deny whose
-	// INGRESS (from) zone is this zone, instead of the silent drop `deny`
-	// otherwise produces. Non-TCP denied traffic is unaffected. Additive
-	// wire field: an old Rust helper without the field treats every zone as
-	// tcp-rst off (pre-#3071 silent-drop behavior); an old Go binary omits
-	// it (omitempty).
+	// knob (#3071). When true, a non-SYN TCP transit packet dropped for a
+	// session miss may receive a TCP RST toward its source when this is its
+	// INGRESS (from) zone. Policy `deny` remains a silent drop. Additive wire
+	// field: an old Rust helper without the field treats every zone as
+	// tcp-rst off (pre-#3071 behavior); an old Go binary omits it (omitempty).
 	TCPRst bool `json:"tcp_rst,omitempty"`
 }
 

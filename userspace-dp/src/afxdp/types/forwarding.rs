@@ -305,13 +305,13 @@ pub(in crate::afxdp) struct ForwardingState {
     /// falls back to the zone-keyed check (pre-#3362 behaviour).
     pub(in crate::afxdp) ifindex_host_inbound: FastMap<i32, ZoneHostInbound>,
     /// #3071: zone IDs (from `ZoneSnapshot.tcp_rst`) with Junos `tcp-rst`
-    /// enabled. A TCP flow DENIED by policy/default-deny whose ingress
-    /// (from) zone is present here is answered with a TCP RST toward the
-    /// source instead of a silent drop. Absent zone ⇒ tcp-rst off.
+    /// enabled. A non-SYN TCP transit packet dropped for a session miss whose
+    /// ingress (from) zone is present here may receive a TCP RST toward the
+    /// source. Policy denies stay silent. Absent zone ⇒ tcp-rst off.
     pub(in crate::afxdp) zone_tcp_rst: FastMap<u16, bool>,
-    /// #3618: per-(from-)zone rate-limit buckets for locally-generated `reject`
+    /// #3618: per-(from-)zone rate-limit buckets for locally-generated reject
     /// replies (policy `then reject`, firewall-filter / lo0 `then reject`, and
-    /// a zone `tcp-rst` deny). One GCRA `TokenBucket` per CONFIGURED zone id,
+    /// zone `tcp-rst` session-miss resets). One GCRA `TokenBucket` per CONFIGURED zone id,
     /// built in `populate_zones` from the SAME validated zone set as
     /// `zone_id_to_name` (cardinality = configured zones, Go-capped ≤ 65533 —
     /// not attacker-growable). Before #3618 a SINGLE process-global bucket
@@ -724,8 +724,8 @@ impl ZoneHostInbound {
 
 impl ForwardingState {
     /// #3071: true iff zone `zone_id` has Junos `tcp-rst` enabled. Used by the
-    /// policy-deny path to decide whether a denied TCP flow whose ingress
-    /// (from) zone is `zone_id` gets a TCP RST instead of a silent drop. An
+    /// strict-SYN transit session-miss path to decide whether a non-SYN TCP
+    /// packet whose ingress (from) zone is `zone_id` gets a TCP RST. An
     /// unconfigured / unknown zone (e.g. `0`) is always tcp-rst off.
     pub(in crate::afxdp) fn zone_tcp_rst_enabled(&self, zone_id: u16) -> bool {
         self.zone_tcp_rst.get(&zone_id).copied().unwrap_or(false)
