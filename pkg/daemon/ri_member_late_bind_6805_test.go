@@ -56,6 +56,16 @@ func (b *bindRecorderOps) LinkSetNoMaster(l netlink.Link) error {
 	return nil
 }
 
+func (b *bindRecorderOps) LinkList() ([]netlink.Link, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	links := make([]netlink.Link, 0, len(b.links))
+	for _, link := range b.links {
+		links = append(links, link)
+	}
+	return links, nil
+}
+
 func (b *bindRecorderOps) recorded() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
