@@ -38,7 +38,8 @@ import (
 //     measurement stays honest about the field that is repeated most.
 //   - ONE NEXT-HOP PER ROUTE. ECMP multiplies the next_hops array; the single
 //     next-hop case is the FLOOR, and this measurement is a floor rather than
-//     an estimate. Any real table with ECMP is larger.
+//     an estimate. The importer records the single-path weight as 1; the
+//     snapshot omits this all-default vector, and the Rust FIB reconstructs 1.
 //
 // Not modelled, deliberately: `Table` and `Family` are near-constant in a real
 // import and are left so; `NextTable` and `Discard` are absent from a learned
@@ -58,7 +59,7 @@ func bgpishRouteTable(n int) []RouteSnapshot {
 			Family:      "inet",
 			Destination: fmt.Sprintf("%d.%d.%d.0/%d", a, b, c, length),
 			// 256 distinct next-hops, cycled — JSON repeats each in full.
-			NextHops: []string{fmt.Sprintf("172.16.%d.%d", (i/256)%256, i%256)},
+			NextHops:       []string{fmt.Sprintf("172.16.%d.%d", (i/256)%256, i%256)},
 		})
 	}
 	return out
@@ -89,7 +90,7 @@ func TestLearnedRoutePublishSizeAndDeadline8355(t *testing.T) {
 		})
 	}
 
-	t.Log("#8355 learned-route publish cost (single next-hop, no ECMP — a FLOOR):")
+	t.Log("#8355 learned-route publish cost (single next-hop, default weight 1 omitted — a FLOOR):")
 	t.Logf("  %-10s %-14s %-12s %-10s", "routes", "bytes", "bytes/route", "deadline")
 	for _, r := range rows {
 		t.Logf("  %-10d %-14d %-12.1f %-10s", r.routes, r.bytes, r.perRoute, r.deadline)
@@ -113,10 +114,10 @@ func TestLearnedRoutePublishSizeAndDeadline8355(t *testing.T) {
 	//
 	// The issue frames the problem as size: "a box holding a full BGP table
 	// would push hundreds of thousands of RouteSnapshot entries". Measured,
-	// 500k routes serialize to ~56 MiB — which FITS under the 64 MiB
+	// 500k routes serialize to 56,386,908 bytes (53.8 MiB) — below the 64 MiB
 	// MaxControlRequestBytes ceiling. The size cap is not what stops it.
 	//
-	// What stops it is TIME. At 3s + 1s/MiB that publish carries a ~59 SECOND
+	// What stops it is TIME. At 3s + 1s/MiB that publish carries a 56 SECOND
 	// control-socket deadline, on a socket CLAUDE.md already flags as
 	// contended: "The userspace helper control socket is shared by status poll
 	// (1/s), HA sync, session installs, snapshot sync, and forwarding sync.

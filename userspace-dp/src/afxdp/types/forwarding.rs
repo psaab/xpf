@@ -956,16 +956,18 @@ pub(in crate::afxdp) struct MirrorRuntimeConfig {
     pub(in crate::afxdp) rate: u32,
 }
 
-/// One resolved equal-cost next-hop candidate for a static route (#2389).
-/// A route with multiple configured next-hops retains every resolved
-/// candidate so the lookup can distribute flows across them and skip a
-/// dead candidate. `next_hop == None` with a non-zero `ifindex` is an
-/// interface-only ("via <if>") candidate.
+/// One resolved weighted ECMP next-hop candidate for a route (#2389/#11402).
+/// A route retains every authored member so lookup can distribute flows in
+/// proportion to its weight and skip a dead candidate. `next_hop == None`
+/// with a non-zero `ifindex` is an interface-only ("via <if>") candidate.
+/// `weight` preserves this leg's Linux multipath weight; the selector treats
+/// zero defensively as 1.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::afxdp) struct RouteNextHopV4 {
     pub(in crate::afxdp) next_hop: Option<Ipv4Addr>,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
+    pub(in crate::afxdp) weight: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -973,6 +975,7 @@ pub(in crate::afxdp) struct RouteNextHopV6 {
     pub(in crate::afxdp) next_hop: Option<Ipv6Addr>,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
+    pub(in crate::afxdp) weight: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -1115,6 +1118,7 @@ impl RouteEntryV4 {
                 next_hop,
                 ifindex,
                 tunnel_endpoint_id,
+                weight: 1,
             }],
             discard,
             next_table,
@@ -1141,6 +1145,7 @@ impl RouteEntryV6 {
                 next_hop,
                 ifindex,
                 tunnel_endpoint_id,
+                weight: 1,
             }],
             discard,
             next_table,

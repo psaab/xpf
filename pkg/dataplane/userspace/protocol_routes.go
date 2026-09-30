@@ -1,12 +1,15 @@
 package userspace
 
 type RouteSnapshot struct {
-	Table       string   `json:"table"`
-	Family      string   `json:"family"`
-	Destination string   `json:"destination"`
-	NextHops    []string `json:"next_hops,omitempty"`
-	Discard     bool     `json:"discard"`
-	NextTable   string   `json:"next_table,omitempty"`
+	Table          string   `json:"table"`
+	Family         string   `json:"family"`
+	Destination    string   `json:"destination"`
+	NextHops       []string `json:"next_hops,omitempty"`
+	// NextHopWeights parallels NextHops when any weight differs from default 1;
+	// absent, short, and zero entries default to one in the Rust FIB.
+	NextHopWeights []uint32 `json:"next_hop_weights,omitempty"`
+	Discard        bool     `json:"discard"`
+	NextTable      string   `json:"next_table,omitempty"`
 	// RulePriority is the kernel ip-rule priority of a NextTable leak (#9955).
 	// The kernel resolves inter-VRF leaks in TWO stages: priority-ordered
 	// rules with fall-through on a target-table miss, then per-table

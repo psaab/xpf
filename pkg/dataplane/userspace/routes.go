@@ -21,10 +21,21 @@ var ruleListFn = netlink.RuleList
 // routeSnapshotDedupeKey returns the canonical identity used to suppress
 // duplicate route snapshots during route collection.
 func routeSnapshotDedupeKey(snap RouteSnapshot) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%s|%t|%d|%d",
+	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%d|%d",
 		snap.Table, snap.Family, snap.Destination,
-		strings.Join(snap.NextHops, ","), snap.NextTable,
+		strings.Join(snap.NextHops, ","), snap.NextHopWeights, snap.NextTable,
 		snap.Discard, snap.Preference, snap.RulePriority)
+}
+// nonDefaultRouteWeights omits the wire vector when all entries mean weight 1.
+// The Rust FIB defaults absent, short, and zero weights to 1; retaining the
+// full vector here would needlessly grow common single-path snapshot publishes.
+func nonDefaultRouteWeights(weights []uint32) []uint32 {
+	for _, weight := range weights {
+		if weight > 1 {
+			return weights
+		}
+	}
+	return nil
 }
 
 // routeSnapshotLeakIdentity canonicalizes only the target-table spelling and
@@ -177,12 +188,13 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				"family", snap.Family, "discard", snap.Discard)
 			return
 		}
-		// #3770 (H8): the dedupe key MUST include Discard, Preference, and
-		// RulePriority. A discard (blackhole) route and a normal route to the
-		// same prefix are DISTINCT forwarding decisions — omitting Discard let
+		// #3770 (H8): the dedupe key includes NextHopWeights, Discard,
+		// Preference, and RulePriority. An otherwise identical ECMP group with
+		// a different weight vector is a distinct forwarding decision;
+		// omitting weights would flatten it. A discard (blackhole) route and
+		// a normal route to the same prefix are distinct: omitting Discard let
 		// one silently hide the other. Two routes differing only in preference
-		// (e.g. a static next-table route at its configured preference and the
-		// kernel ip-rule mirror at preference 0) likewise remain distinct.
+		// likewise remain distinct.
 		// RulePriority is the kernel rule identity for a NextTable leak:
 		// collapsing rows that share a prefix and target but have different
 		// priorities would discard one stage-1 candidate and make the helper
@@ -559,7 +571,7 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// producing spurious snapshot-to-snapshot diffs and ECMP-member churn
 	// that re-installed the FIB for no config change. Leak rows are stage-1
 	// rules, so RulePriority is their first tie-break after table/family/
-	// destination; ordinary rows keep the existing next-hop/next-table/
+	// destination; ordinary rows keep the existing next-hop/weight/next-table/
 	// discard/preference order.
 	//
 	// A NextTable row is always a leak; an ordinary route never competes with
@@ -583,6 +595,9 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		an, bn := strings.Join(a.NextHops, ","), strings.Join(b.NextHops, ",")
 		if an != bn {
 			return an < bn
+		}
+		if weights := slices.Compare(a.NextHopWeights, b.NextHopWeights); weights != 0 {
+			return weights < 0
 		}
 		if a.NextTable != b.NextTable {
 			return a.NextTable < b.NextTable
@@ -1238,12 +1253,10 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 		}
 	}
 
-	// Deterministic emission order. The kernel dump order is not a stable
-	// function of content, and the caller's final sort tie-breaks on
-	// next-hops/next-table/discard/preference — all of which two learned
-	// routes for different prefixes share — so leaving kernel order to leak
-	// through would produce snapshot-to-snapshot diffs (and a needless FIB
-	// re-install) for an unchanged routing table.
+	// Deterministic emission order. The kernel dump order is not stable, so
+	// order by table, family, destination, metric, next-hops, and their parallel
+	// weights. This keeps lowest-metric selection and weighted snapshots stable
+	// when dump ordering changes.
 	sorted := make([]routing.LearnedRoute, len(learned))
 	copy(sorted, learned)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -1260,7 +1273,11 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 		if a.Metric != b.Metric {
 			return a.Metric < b.Metric
 		}
-		return strings.Join(a.NextHops, ",") < strings.Join(b.NextHops, ",")
+		an, bn := strings.Join(a.NextHops, ","), strings.Join(b.NextHops, ",")
+		if an != bn {
+			return an < bn
+		}
+		return slices.Compare(a.NextHopWeights, b.NextHopWeights) < 0
 	})
 
 	var lastMetricKey string
@@ -1312,11 +1329,12 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			continue
 		}
 		addSnapshot(RouteSnapshot{
-			Table:       table,
-			Family:      family,
-			Destination: dest,
-			NextHops:    lr.NextHops,
-			Preference:  routing.LearnedRouteImportPreference,
+			Table:          table,
+			Family:         family,
+			Destination:    dest,
+			NextHops:       lr.NextHops,
+			NextHopWeights: nonDefaultRouteWeights(lr.NextHopWeights),
+			Preference:     routing.LearnedRouteImportPreference,
 		})
 	}
 	return capped, nil
