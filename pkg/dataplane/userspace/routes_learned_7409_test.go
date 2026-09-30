@@ -20,9 +20,8 @@ import (
 // no zone policy, session, NAT or screen behind it, or was forwarded to a
 // static default's next-hop instead of the learned one.
 //
-// These tests pin the wiring: that a learned route arrives, that the
-// GAP-FILL rule keeps it from ever contending with an operator's route, and
-// that the overlay still wins.
+// These tests pin the importer wiring, preference-aware same-prefix behavior,
+// and the overlay's replacement of imported routes.
 
 // withLearnedRoutes installs a fake importer for the duration of a test.
 //
@@ -94,36 +93,75 @@ func TestLearnedRouteReachesTheSnapshot(t *testing.T) {
 		t.Errorf("next-hops = %v, want [192.0.2.1]", hits[0].NextHops)
 	}
 	if hits[0].Preference != routing.LearnedRouteImportPreference {
-		t.Errorf("preference = %d, want %d (worse than any config route)",
+		t.Errorf("preference = %d, want the learned-route preference %d",
 			hits[0].Preference, routing.LearnedRouteImportPreference)
 	}
 }
 
-// THE GAP-FILL RULE. The operator's route wins, always.
+// A better-preference config route remains the sole candidate when a learned
+// route carries preference 200.
 //
-// This is the property that makes the import safe to add without renegotiating
-// any existing precedence contract: because an imported route can never share
-// a (table, family, prefix) with a config route, the #3770 dedupe key and the
-// #2390 preference tie-break keep operating on exactly the routes they did
-// before. If this regressed, the Rust FIB would be handed TWO routes for one
-// prefix and would pick between them by preference — the contention the rule
-// exists to prevent.
-//
-// RED on revert: drop the `covered` check in addLearnedRouteSnapshots and the
-// count below becomes 2.
-func TestLearnedRouteNeverOverridesAConfigRoute(t *testing.T) {
+// FAIL-ON-REVERT: removing the preference comparison and always publishing
+// imported routes makes both same-prefix candidates appear here.
+func TestLearnedRouteDoesNotOverrideABetterPreferenceConfigRoute(t *testing.T) {
+	cfg := cfgWithStaticDefault("192.0.2.1")
+	cfg.RoutingOptions.StaticRoutes[0].Preference = 5
 	withLearnedRoutes(t, fixedLearned(learnedV4("0.0.0.0/0", "198.51.100.254")))
 
-	out, _, err := buildRouteSnapshots(cfgWithStaticDefault("192.0.2.1"), nil, nil)
+	out, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	hits := snapshotFor(t, "inet.0", "inet", "0.0.0.0/0", out)
 	if len(hits) != 1 {
-		t.Fatalf("the config default must be the ONLY 0.0.0.0/0 snapshot, got %d: %+v", len(hits), hits)
+		t.Fatalf("preference-5 config default must be the only candidate, got %d: %+v", len(hits), hits)
 	}
-	if !reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) {
-		t.Fatalf("the surviving default is the LEARNED one (%v) — the operator's route lost", hits[0].NextHops)
+	if hits[0].Preference != 5 || !reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) {
+		t.Fatalf("better-preference config route lost: %+v", hits[0])
+	}
+}
+
+// A floating static with preference 250 is a fallback when FRR has selected a
+// better learned route. The helper must publish both candidates so the Rust
+// FIB's ascending-preference tie-break selects the imported route at 200.
+//
+// FAIL-ON-REVERT: restoring unconditional gap-fill suppression leaves only the
+// config fallback, so helper traffic keeps taking the wrong next-hop.
+func TestLearnedRouteOutranksWorsePreferenceConfigRoute(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{{
+		Destination: "0.0.0.0/0",
+		Preference:  250,
+		NextHops:    []config.NextHopEntry{{Address: "192.0.2.1"}},
+	}}
+	withLearnedRoutes(t, fixedLearned(learnedV4("0.0.0.0/0", "198.51.100.254")))
+
+	out, _, err := buildRouteSnapshots(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	hits := snapshotFor(t, "inet.0", "inet", "0.0.0.0/0", out)
+	if len(hits) != 2 {
+		t.Fatalf("want learned route and floating-static fallback, got %d: %+v", len(hits), hits)
+	}
+
+	foundLearned, foundFallback := false, false
+	for _, route := range hits {
+		switch route.Preference {
+		case routing.LearnedRouteImportPreference:
+			foundLearned = reflect.DeepEqual(route.NextHops, []string{"198.51.100.254"})
+		case 250:
+			foundFallback = reflect.DeepEqual(route.NextHops, []string{"192.0.2.1"})
+		default:
+			t.Fatalf("unexpected same-prefix route: %+v", route)
+		}
+	}
+	if !foundLearned {
+		t.Errorf("the selected learned route at preference %d is missing: %+v",
+			routing.LearnedRouteImportPreference, hits)
+	}
+	if !foundFallback {
+		t.Errorf("the preference-250 fallback must remain available: %+v", hits)
 	}
 }
 
@@ -286,15 +324,16 @@ func TestLearnedRouteEmissionIsOrderIndependent(t *testing.T) {
 	}
 }
 
-// CANONICALISATION OF THE GAP-FILL KEY — a defect found by mutation, not by
-// review.
+// CANONICALISATION OF THE PREFERENCE-AWARE KEY — a defect found by mutation,
+// not by review.
 //
 // routeDestinationForWire passes a parseable CIDR through untouched, so a
 // config static written with host bits set reaches the snapshot as the literal
 // "10.20.30.1/24" while the kernel always reports the masked "10.20.30.0/24".
-// A raw string comparison therefore MISSES the coverage and emits the imported
-// route alongside the operator's — handing the Rust FIB two routes for one
-// prefix, which is exactly the contention the gap-fill rule exists to prevent.
+// A raw string comparison therefore misses the configured candidate's
+// preference and emits the imported route even though the config route is
+// better. The canonical key must find the preference before deciding whether
+// the learned candidate should be included.
 //
 // RED on revert: drop the canonicalRoutePrefix call in learnedRouteGapKey.
 func TestGapFillMatchesANonCanonicalConfigPrefix(t *testing.T) {

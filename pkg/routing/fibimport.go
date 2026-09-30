@@ -73,20 +73,15 @@ import (
 // on a fresh boot for the width of the first push. #7437 shrinks the
 // exposure; it does not make #6664 safe by itself.
 
-// LearnedRouteImportPreference is the Junos route preference stamped on
-// every imported route.
+// LearnedRouteImportPreference is the route preference assigned to imported
+// kernel-selected routes in the helper FIB.
 //
-// Under the gap-fill rule (ImportedRoutesForSnapshot never emits a route for
-// a (table, family, prefix) the config-derived snapshot already carries) an
-// imported route can never contend with a config route, so this value is
-// never consulted in normal operation. It is set anyway, and set to a value
-// WORSE than every config-derived preference (direct 0, static default 5),
-// as defence in depth: if a future caller ever bypasses the gap-fill rule,
-// the Rust FIB's #2390 tie-break — descending prefix length, then ASCENDING
-// preference — still selects the operator's route over the imported one
-// rather than letting insertion order decide. 200 mirrors the admin
-// distance pkg/frr already renders DHCP-learned defaults at, so the number
-// carries the same meaning it does everywhere else in the tree.
+// The snapshot builder uses it in same-prefix arbitration: a configured route
+// at this preference or better remains the sole candidate, while a worse
+// configured fallback (for example a floating static at preference 250) is
+// retained beside the imported route. The Rust FIB's #2390 ascending-
+// preference tie-break then selects the imported route at 200. The value also
+// mirrors the admin distance FRR renders for DHCP-learned defaults.
 const LearnedRouteImportPreference = 200
 
 // mgmtVRFTableID is the kernel routing table backing the management VRF

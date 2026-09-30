@@ -47,18 +47,20 @@ const (
 // and peer-pipeline paths for every static block) rejects unparseable
 // destinations ahead of it — so every counted leak is eligible; on the lenient
 // path an over-count only over-warns, the fail-safe direction.
+// Routes explicitly marked `no-install` are not counted because the applier
+// skips them.
 func nextTableRouteCount(cfg *Config) int {
 	if cfg == nil {
 		return 0
 	}
 	n := 0
 	for _, sr := range cfg.RoutingOptions.StaticRoutes {
-		if sr != nil && sr.NextTable != "" {
+		if sr != nil && !sr.NoInstall && sr.NextTable != "" {
 			n++
 		}
 	}
 	for _, sr := range cfg.RoutingOptions.Inet6StaticRoutes {
-		if sr != nil && sr.NextTable != "" {
+		if sr != nil && !sr.NoInstall && sr.NextTable != "" {
 			n++
 		}
 	}

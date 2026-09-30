@@ -9,7 +9,7 @@ import (
 //
 // #7357 items 3-5: `show route` / `show routing-options` render every
 // configured static route straight from config, while
-// buildRouteSnapshots (pkg/dataplane/userspace/routes.go) DROPS six
+// buildRouteSnapshots (pkg/dataplane/userspace/routes.go) DROPS seven
 // classes of them. A dropped route printed as configured reads as an
 // installed route, which is the #6534 archetype: the operator checks the
 // surface after committing and it confirms a forwarding decision that is
@@ -19,7 +19,7 @@ import (
 // applied-set readback: every verdict below is a deterministic function of
 // the committed config, so the renderer can reach it without runtime state.
 //
-// FIVE of the six reasons are per-route. The sixth (the next-table window)
+// Six of the seven reasons are per-route. The seventh (the next-table window)
 // is ORDER-DEPENDENT and cannot be decided from one route, which is why
 // StaticRouteExclusions exists alongside this.
 
@@ -37,6 +37,11 @@ import (
 func StaticRouteExcludedReason(sr *StaticRoute, perInstance bool, definedInstances map[string]struct{}) string {
 	if sr == nil {
 		return ""
+	}
+	// #11539: explicit operator intent takes precedence over derived
+	// zero-disposition classification below.
+	if sr.NoInstall {
+		return "route has the `no-install` option set"
 	}
 	if sr.NextTable == "" {
 		// #10000: ordinary routes still go through addSnapshot's wire
@@ -107,7 +112,7 @@ func staticRouteDestinationUsable(destination string) bool {
 // StaticRouteExclusions returns the exclusion reason for every static route in
 // `cfg` that buildRouteSnapshots drops, keyed by the route pointer.
 //
-// It exists for the ORDER-DEPENDENT sixth reason. The kernel programs global
+// It exists for the ORDER-DEPENDENT seventh reason. The kernel programs global
 // next-table leaks as ip rules capped at NextTableRuleWindow entries — one
 // slot per default-instance ingress interface per leak since #9420 (#9810) —
 // and the applier advances that counter only for an ELIGIBLE route, drawn down

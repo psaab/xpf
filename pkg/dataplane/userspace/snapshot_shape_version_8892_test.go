@@ -94,6 +94,11 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // invisible to a helper" arm the header offers, not a version bump: bumping for
 // a field nothing transmits would spend the one signal that tells a helper the
 // wire actually changed.
+// v36 STANDS (#11328): `StaticRoute.NoInstall` carries compile-time route intent.
+// It is `json:"-"`, and flagged routes are filtered before snapshot construction,
+// so no helper receives the field or the route. ConfigSnapshot embeds Config, so
+// the reflection digest still moves; the serialized shape and ProtocolVersion
+// remain unchanged.
 //
 // The digest still moved because this walk records the json TAG, deliberately:
 // adding `json:"-"` to an EXISTING wire field would be a silent removal, and
@@ -227,7 +232,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "44141f3343dbd1ec1396386facca3d5d9e7bf428235622eb4beb971ecba7cd3f"
+	snapshotShapeGolden8892 = "8f5008dd22eb5c167d41c6f774c88b59b86f791c1c77ddabf17dd38d5731232e"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not

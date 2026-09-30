@@ -232,7 +232,7 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig) error {
 // at the next clause instead of swallowing a following keyword as a gateway.
 func isRouteInlineKeyword(tok string) bool {
 	switch tok {
-	case "next-hop", "qualified-next-hop", "next-table", "discard", "reject", "preference", "metric", "interface":
+	case "next-hop", "qualified-next-hop", "next-table", "discard", "reject", "no-install", "preference", "metric", "interface":
 		return true
 	}
 	return false
@@ -327,6 +327,8 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 						}
 						route.NextHops = append(route.NextHops, nh)
 					}
+				case "no-install":
+					route.NoInstall = true
 				case "discard":
 					route.Discard = true
 				case "reject":
@@ -357,7 +359,14 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 				// child node — that egress interface applies to the gateway(s).
 				var addrs []string
 				iface := ""
+				// Compact inline normalization can leave a route-level
+				// `no-install` token in the next-hop leaf's packed keys. Keep
+				// that option out of the gateway list and apply it to the route.
 				for j := 1; j < len(prop.Keys); j++ {
+					if prop.Keys[j] == "no-install" {
+						route.NoInstall = true
+						continue
+					}
 					// Treat `interface` as the egress modifier only after ≥1
 					// gateway has been parsed (#3881). A next-hop value literally
 					// named "interface" as the FIRST token is a gateway, not the
@@ -381,8 +390,12 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 				// clean and then rendered nothing into FRR — a silently missing
 				// route rather than a refused config.
 				for _, child := range prop.Children {
-					if child.Name() == "interface" {
+					switch child.Name() {
+					case "interface":
 						iface = nodeVal(child)
+						continue
+					case "no-install":
+						route.NoInstall = true
 						continue
 					}
 					for _, k := range child.Keys {
@@ -398,6 +411,8 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 				for _, a := range addrs {
 					route.NextHops = append(route.NextHops, NextHopEntry{Address: a, Interface: iface})
 				}
+			case "no-install":
+				route.NoInstall = true
 			case "discard":
 				route.Discard = true
 			case "reject":
@@ -478,6 +493,9 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 			}
 			if route.Reject {
 				existingRoute.Reject = true
+			}
+			if route.NoInstall {
+				existingRoute.NoInstall = true
 			}
 			// #9125: HasPreference, not `!= 5`. The old test could not tell an
 			// operator who wrote `preference 5` from one who wrote nothing,
