@@ -15477,6 +15477,24 @@ packed the whole line onto one leaf node and the compiler dropped it.
   updated `pkg/scheduler/scheduler_test.go`
   (`TestIsWithinWindow_NoWindowFailsClosed`).
 
+### #11305 — Junos-native scheduler time and date-time forms
+
+Junos accepts daily and per-weekday `start-time`/`stop-time` values in
+`HH:MM` form (seconds default to `:00`) as well as the previously supported
+`HH:MM:SS` form. Absolute bounds also accept native local date-time values:
+`start-date YYYY-MM-DD.HH:MM` and `stop-date YYYY-MM-DD.HH:MM`.
+
+Both strict schema validation and tolerant `SyncApply` compilation preserve
+these values for the scheduler runtime. `HH:MM` windows retain the daily
+`[start, stop)` behavior. Date-only start bounds begin at local midnight and
+date-only stop bounds remain inclusive through that date; date-time starts
+are inclusive and date-time stops are exclusive. All boundaries use the
+committed Junos local time zone. The strict and flat-set compiler cells are
+in `pkg/config/compiler_scheduler_junos_time_11305_test.go`; tolerant policy
+permit/deny application is exercised in
+`pkg/configstore/scheduler_junos_time_11305_test.go`, with local-time boundary
+cells in `pkg/scheduler/scheduler_junos_time_11305_test.go`.
+
 ## fable-167 F-2 / F-3: CoS traffic-control-profiles + filter/CoS schema gaps
 
 **F-2 — hierarchical traffic-control-profiles (#4315).** The Junos
