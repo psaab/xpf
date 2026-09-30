@@ -566,12 +566,19 @@ sync.
     fail closed (a flowless packet's port 0 can never confirm an
     `application junos-http` or a `destination-port 80` term), while
     `application any` / address / protocol / `is-fragment` terms still
-    match — so legitimately-permitted flowless forwarding survives. KNOWN
-    LIMITATION: a flow PERMITTED only by an L4-specific term (e.g.
-    `application junos-https`) has its non-first fragments fall to the
-    default policy (fail-closed drop) until the deferred
-    fragment-association-cache stage of the #3291 plan carries the first
-    fragment's verdict; tracked as the deferred fragment-association-cache stage of #3291.
+    match — so legitimately-permitted flowless forwarding survives.
+    **Plain-session fragments (#11412):** a flow permitted only by an
+    L4-specific term used to lose its decision on the first non-first fragment
+    because that packet has no recoverable ports. A plain-forward first
+    fragment now installs the committed session decision in the shared
+    authority-keyed fragment-association cache, with a default (no-NAT)
+    `NatDecision`; later middle/last fragments inherit that decision through
+    the same session-liveness, generation, authority, and HA fences as NAT
+    associations. Installation is post-commit, so a first fragment denied by
+    a port-specific rule installs neither a session nor an association; the
+    flowless skipped-fragment-deny override keeps its tails denied. An
+    association miss still uses the existing flowless L3 policy path, where
+    an L4-only permit fails closed under default-deny.
     The #10660 MissingNeighbor gate runs before the neighbor
     probe/seed/buffer: an unassociated non-first fragment is dropped and
     counted as `nat_frag_untranslated_dropped` when a live forward NAT

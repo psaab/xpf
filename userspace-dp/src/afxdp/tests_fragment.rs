@@ -582,6 +582,137 @@ fn flowless_non_first_fragment_inherits_ordinary_snat_translation_5689() {
     );
 }
 
+fn plain_fragment_policy_snapshot_11412(
+    action: &str,
+    default_policy: &str,
+) -> ConfigSnapshot {
+    let application = "udp-443-11412";
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.default_policy = default_policy.to_string();
+    snapshot.policies = vec![PolicyRuleSnapshot {
+        name: "plain-fragment-udp-443-11412".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec![application.to_string()],
+        application_terms: vec![crate::protocol::PolicyApplicationSnapshot {
+            name: application.to_string(),
+            protocol: "udp".to_string(),
+            source_port: String::new(),
+            destination_port: "443".to_string(),
+            icmp_type: None,
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: action.to_string(),
+        ..Default::default()
+    }];
+    snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+    snapshot
+}
+
+#[test]
+fn plain_forward_three_fragment_port_permit_inherits_session_11412() {
+    let forwarding =
+        build_forwarding_state(&plain_fragment_policy_snapshot_11412("permit", "deny"));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+
+    let first = udp_frag_frame_5689(0x2000, 0x1141);
+    let (_b1, dbg1) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &first,
+        udp_frag_meta_5689(),
+        true,
+    );
+    assert_eq!(dbg1.forward, 1, "the permitted first fragment must forward");
+    assert_eq!(
+        sessions.len(),
+        2,
+        "the first fragment must install the forward/reverse session pair"
+    );
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(),
+        1,
+        "a plain-forward first fragment must install one authority-keyed association"
+    );
+
+    for (name, offset) in [("middle", 0x2001), ("last", 0x0002)] {
+        let fragment = udp_frag_frame_5689(offset, 0x1141);
+        let (_batch, dbg) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &fragment,
+            udp_native_frag_meta_5689(),
+            true,
+        );
+        assert_eq!(dbg.forward, 1, "the {name} fragment must inherit the permit");
+        assert_eq!(
+            dbg.nat_applied_none, 1,
+            "the {name} fragment must inherit a no-NAT decision"
+        );
+        assert_eq!(
+            dbg.policy_deny, 0,
+            "the {name} fragment must not fall through to default-deny"
+        );
+    }
+}
+
+#[test]
+fn plain_forward_three_fragment_port_deny_control_11412() {
+    let forwarding =
+        build_forwarding_state(&plain_fragment_policy_snapshot_11412("deny", "permit"));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let ha_state = BTreeMap::new();
+
+    let first = udp_frag_frame_5689(0x2000, 0x1142);
+    let (_b1, dbg1) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &first,
+        udp_frag_meta_5689(),
+        true,
+    );
+    assert_eq!(dbg1.forward, 0, "the denied first fragment must not forward");
+    assert!(dbg1.policy_deny >= 1, "the port-specific deny must match");
+    assert_eq!(sessions.len(), 0, "a denied first fragment must not install a session");
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(),
+        0,
+        "a denied first fragment must not install a fragment association"
+    );
+
+    for (name, offset) in [("middle", 0x2001), ("last", 0x0002)] {
+        let fragment = udp_frag_frame_5689(offset, 0x1142);
+        let (_batch, dbg) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &fragment,
+            udp_native_frag_meta_5689(),
+            true,
+        );
+        assert_eq!(dbg.forward, 0, "the {name} fragment must remain denied");
+        assert_eq!(
+            dbg.policy_deny, 1,
+            "the {name} fragment must preserve the skipped port-deny control"
+        );
+    }
+}
+
 /// #10130: a reordered interface-SNAT reply tail must be rejected even when
 /// its destination resolves to LocalDelivery. Without the session-gated L3
 /// reverse discriminator this packet reaches host-inbound handling as a plain
@@ -1862,14 +1993,12 @@ fn build_forwarding_state_threads_default_policy_log_flags() {
 // #5798 FAIL-ON-REVERT, NON-NAT64 arm: an ORDINARY same-family NAT association
 // HIT must also be subject to the per-packet interface INPUT FILTER.
 //
-// The hit-arm filter block lives on the shared `{ hit }` arm, which serves BOTH
-// consults — the NAT64 (cross-family) one and the #5689 same-family SNAT / DNAT
-// / static-NAT / NPTv6 one. `nat64_association_hit_still_runs_interface_input_filter_5798`
-// (tests_nat64_tunnel.rs) exercises only the NAT64 consult, so it would stay
-// green if the filter were gated to NAT64 associations, leaving every ordinary
-// NAT association hit unfiltered. This test closes that: an interface-SNAT
-// lan->wan datagram, whose non-first fragment inherits via
-// `nat_consult_forward_fragment_assoc`.
+// The hit-arm filter block lives on the shared `{ hit }` arm, which serves the
+// NAT64 consult and the same-family-or-plain consult. The existing
+// `nat64_association_hit_still_runs_interface_input_filter_5798`
+// (`tests_nat64_tunnel.rs`) exercises only the NAT64 consult. This test closes
+// that gap with an interface-SNAT lan->wan datagram whose non-first fragment
+// inherits via `same_family_or_plain_consult_forward_fragment_assoc`.
 //
 // Why the filter can install AND still catch the non-first fragment (no cache
 // seeding needed here): term 1 matches `destination-port 443`, which only the
