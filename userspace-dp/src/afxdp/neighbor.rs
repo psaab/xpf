@@ -52,6 +52,46 @@ pub(super) fn report_arp_overwrite_refusal(
 }
 
 
+const NA_UNSOLICITED_OVERRIDE_ALARM_INTERVAL_NS: u64 = 60_000_000_000;
+static LAST_NA_UNSOLICITED_OVERRIDE_ALARM_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// #11069: rate-limited alarm for refused unsolicited Override=1 NAs.
+/// Mirrors `report_arp_overwrite_refusal`: at most one line per 60s no
+/// matter how fast the refusals arrive.
+pub(super) fn report_na_unsolicited_override_refusal(
+    neighbors: &ShardedNeighborMap,
+    key: (i32, IpAddr),
+    mac: [u8; 6],
+    now_ns: u64,
+) {
+    let refusals = neighbors.note_na_unsolicited_override_refusal();
+    let mut previous = LAST_NA_UNSOLICITED_OVERRIDE_ALARM_NS.load(Ordering::Relaxed);
+    loop {
+        if previous != 0 && now_ns.saturating_sub(previous) < NA_UNSOLICITED_OVERRIDE_ALARM_INTERVAL_NS {
+            return;
+        }
+        match LAST_NA_UNSOLICITED_OVERRIDE_ALARM_NS.compare_exchange_weak(
+            previous,
+            now_ns.max(1),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                eprintln!(
+                    "xpf-userspace-dp: WARNING: refused unsolicited Override=1 NA for \
+                     {}/{} with MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} \
+                     (total refused={refusals})",
+                    key.0, key.1, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                );
+                return;
+            }
+            Err(observed) => previous = observed,
+        }
+    }
+}
+
+
 pub(super) fn monotonic_timestamp_to_datetime(
     last_nanos: u64,
     now_mono: u64,

@@ -307,14 +307,25 @@ fn outline_ndp_na_learn_and_program(
         .unwrap_or(meta.ingress_ifindex as i32);
         // #9893: atomic Override=0 CAS — the differing-MAC check and the
         // insert share one shard lock inside the map. `None` means the
-        // Override=0 gate refused a live differing LLA (return without
-        // learning; the NA frame still transits). `Some(changed)` feeds the
-        // #5288 limiter exactly as the old `insert_if_changed` bool did.
+        // gate refused a live differing LLA (return without learning; the
+        // NA frame still transits): either Override=0 (#9893, silent) or an
+        // unsolicited Override=1 (#11069, counted + alarmed). `Some(changed)`
+        // feeds the #5288 limiter exactly as the old `insert_if_changed`
+        // bool did.
         let Some(changed) = worker_ctx.dynamic_neighbors.insert_ndp_na_if_override_allows(
             (ifindex, na.target_ip),
             NeighborEntry { mac },
             na.override_flag,
+            na.solicited,
         ) else {
+            if na.override_flag && !na.solicited {
+                super::neighbor::report_na_unsolicited_override_refusal(
+                    worker_ctx.dynamic_neighbors,
+                    (ifindex, na.target_ip),
+                    mac,
+                    now_ns,
+                );
+            }
             return;
         };
         if neigh_limiter.should_program((ifindex, na.target_ip), mac, changed, now_ns) {

@@ -206,6 +206,10 @@ pub(crate) struct ShardedNeighborMap {
     /// #10704: cumulative count of unsolicited ARP/neighbor updates refused
     /// because they tried to replace a live differing MAC.
     arp_overwrite_refusals: AtomicU64,
+    /// #11069: cumulative count of unsolicited Override=1 NAs refused
+    /// because they tried to replace a live differing LLA (solicited
+    /// Override=1 still converges legitimate failover).
+    na_unsolicited_override_refusals: AtomicU64,
     /// #10854: cumulative count of pre-policy RX source-learns refused
     /// because they tried to overwrite a live entry's differing MAC.
     /// Source learning runs on RX before screen/policy admission, so the
@@ -302,6 +306,7 @@ impl ShardedNeighborMap {
             learn_cap_drops: AtomicU64::new(0),
             insert_generation: AtomicU64::new(0),
             arp_overwrite_refusals: AtomicU64::new(0),
+            na_unsolicited_override_refusals: AtomicU64::new(0),
             rx_learn_overwrite_refusals: AtomicU64::new(0),
         }
     }
@@ -386,6 +391,18 @@ impl ShardedNeighborMap {
     #[cfg(test)]
     pub(crate) fn arp_overwrite_refusals(&self) -> u64 {
         self.arp_overwrite_refusals.load(Ordering::Relaxed)
+    }
+
+    /// #11069: count a refused unsolicited Override=1 NA. Returns the new total.
+    pub(crate) fn note_na_unsolicited_override_refusal(&self) -> u64 {
+        self.na_unsolicited_override_refusals
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn na_unsolicited_override_refusals(&self) -> u64 {
+        self.na_unsolicited_override_refusals.load(Ordering::Relaxed)
     }
 
     /// #5673: `get` plus whether the key's shard is at the per-shard learn
@@ -555,7 +572,7 @@ impl ShardedNeighborMap {
         // variant degrades to no-change (no insert happened, so `false` is
         // accurate) instead of panicking a cold worker path. The
         // `debug_assert` keeps the invariant loud in tests.
-        let result = self.insert_ndp_na_if_override_allows(key, val, true);
+        let result = self.insert_ndp_na_if_override_allows(key, val, true, true);
         debug_assert!(
             result.is_some(),
             "override=true never refuses an NDP-NA-shaped insert"
@@ -575,7 +592,7 @@ impl ShardedNeighborMap {
         val: NeighborEntry,
         solicited: bool,
     ) -> Option<bool> {
-        self.insert_ndp_na_if_override_allows(key, val, solicited)
+        self.insert_ndp_na_if_override_allows(key, val, true, solicited)
     }
 
     /// #9893: atomic NDP Neighbor-Advertisement learn honoring RFC 4861 §7.2.5
@@ -599,13 +616,23 @@ impl ShardedNeighborMap {
         key: (i32, IpAddr),
         val: NeighborEntry,
         override_flag: bool,
+        solicited: bool,
     ) -> Option<bool> {
         let idx = shard_idx(&key);
         let mut shard = self.lock_shard(idx);
         let prior_mac = shard.get(&key).map(|existing| existing.mac);
+        // #11069: an UNSOLICITED Override=1 NA gets Override=0 semantics
+        // (ARP #10704 parity): it may create or refresh, never replace a
+        // live differing LLA — the unsolicited-NA next-hop hijack primitive.
+        let effective_override = override_flag && solicited;
         // #9893 CAS: Override=0 creates or refreshes but never replaces a
         // live differing LLA. Under the same lock as the write below.
-        if !override_flag && prior_mac.is_some_and(|old| old != val.mac) {
+        if !effective_override && prior_mac.is_some_and(|old| old != val.mac) {
+            // No counter bump here: the single counting point is the
+            // caller's report (report_na_unsolicited_override_refusal),
+            // mirroring the ARP path — bumping here AND there would count
+            // each production refusal twice, and ARP callers funneling
+            // through this gate must never inflate the NA counter.
             return None;
         }
         if prior_mac == Some(val.mac) {

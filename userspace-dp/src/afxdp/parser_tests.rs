@@ -1090,3 +1090,22 @@ fn parse_ndp_na_9893_non_na_fragment_does_not_pollute_counter() {
         "non-NA fragmented transit must not pollute the NDP series"
     );
 }
+
+/// #11069: the parser exposes the Solicited (S) flag (bit 0x40) alongside
+/// Override so unsolicited Override=1 NAs get Override=0 semantics.
+#[test]
+fn parse_ndp_na_reports_solicited_flag() {
+    let f0 = build_eth_ndp_na(false, true);
+    assert!(
+        !parse_ndp_neighbor_advert(&f0)
+            .expect("NA parses")
+            .solicited,
+        "default NA flags are zero → unsolicited"
+    );
+    let mut f1 = build_eth_ndp_na(false, true);
+    f1[14 + 40 + 4] |= 0x40;
+    stamp_icmpv6_checksum(&mut f1, 14, 14 + 40, 14 + 40 + 32);
+    let na = parse_ndp_neighbor_advert(&f1).expect("solicited NA parses");
+    assert!(na.solicited, "the S bit must be reported");
+    assert!(!na.override_flag, "S bit must not read as Override");
+}
