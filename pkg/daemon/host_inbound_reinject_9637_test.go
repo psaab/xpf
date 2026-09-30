@@ -317,18 +317,13 @@ func TestHostInboundReinjectFreshGateWiring9637(t *testing.T) {
 	}
 }
 
-// TestHostInboundReinjectDispositionMatrix9637 is the binding enumeration
-// gate (b): one row per §5.2 reinject disposition, each asserting the
-// RENDERED verdict for that disposition's kernel-observable shape — string
-// checks on the payload, nothing more. Operator narrowing: ONLY
-// userspace-gated LocalDelivery rides the trusted TUN (accept); every
-// delegation path (NoRoute incl. capped, transit MissingNeighbor,
-// ForwardCandidate fallback, synthetic IPsec) rides the delegated TUN and
-// meets the destination rules — rows for those classes pin the
-// destination-deny presence, while the outlet proof is Rust-side
-// (reinject_host_authorized mapping + per-site flags) plus lock-cell
-// wire/counter evidence. No row proves non-arrival: non-arrival claims
-// live Rust-side.
+// TestHostInboundReinjectDispositionMatrix9637 is a destination-rule shape
+// gate: its rows pin rendered verdicts, not slow-path outlet reachability.
+// #11326 Rust cells verify route-identity candidates are refused before
+// generic TUN output. Only gate-passed LocalDelivery uses the xpf-usp0 accept;
+// the separate xpf-usp1 fence admits its exact q0 mark while unmarked q1
+// remains under DROP. No Go row proves packet arrival; non-arrival claims are
+// pinned by the Rust poll-path cells.
 func TestHostInboundReinjectDispositionMatrix9637(t *testing.T) {
 	views, unzonedV4, unzonedV6 := reinjectViews9637()
 	fresh := buildHostInboundFilterPayload(views, unzonedV4, unzonedV6, nil, nil, true)
@@ -388,8 +383,8 @@ func TestHostInboundReinjectDispositionMatrix9637(t *testing.T) {
 			want:        []string{xnft.HostInboundDenyCounterName("wan", "ip")},
 		},
 		{
-			name:        "missingneighbor-nonowning/D4a-delegated",
-			disposition: "MissingNeighbor via a NON-OWNING resolving table (fib.rs:250-253) with a transit permit: DELEGATED outlet (Rust: reinject_host_authorized false for non-LocalDelivery). Kernel destination judgment applies; the owning-table path resolves LocalDelivery FIRST (gated, trusted). This row pins the destination-deny presence; the outlet proof is Rust-side.",
+			name:        "missingneighbor-nonowning/destination-deny-defense-in-depth",
+			disposition: "Destination-deny rule-shape control. #11326 rejects non-tunnel MissingNeighbor copies before generic TUN injection because ingress identity would be lost; this row pins the independent destination-deny rule only, while Rust cells verify pre-TUN refusal.",
 			payloads:    map[string]string{"fresh": fresh, "stale": stale},
 			want:        []string{xnft.HostInboundDenyCounterName("wan", "ip")},
 		},

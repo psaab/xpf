@@ -2545,15 +2545,13 @@ pub(super) fn build_gre_inner_tcp_syn_packet_v4(dst: Ipv4Addr) -> Vec<u8> {
 }
 
 
-/// #1902/#11326 driver: one GRE-to-self outer frame whose INNER packet
-/// forwards out reth1.0 toward a COLD neighbor, end-to-end through
-/// `poll_binding_process_descriptor`, then the neighbor probe/resolver path.
-/// Pre-#1902 the MissingNeighbor arm buffered `desc` (the un-decapped OUTER
-/// UMEM frame) with the post-decap INNER meta/decision, and retry TXed a corrupt
-/// outer GRE packet at inner-meta offsets. The frame is never admitted to that
-/// buffer. #11326 also refuses its q0 TUN copy because that mark would admit a
-/// MAIN lookup without the original iif; the existing resolver and
-/// retransmission path remain responsible for recovery.
+/// #1902/#11326 regression driver: one GRE-to-self outer frame whose inner
+/// packet selects MissingNeighbor, driven through `poll_binding_process_descriptor`.
+/// It verifies the mismatched decapped frame is not buffered for retry and the
+/// original packet is not copied through q0 TUN without its ingress identity.
+/// The test inserts a synthetic neighbor, then confirms retry sees nothing
+/// held: recovery after this first-packet drop requires neighbor resolution and
+/// a retransmitted packet.
 pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id: u16) {
     let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
     let ha_state = txn_ha_state();

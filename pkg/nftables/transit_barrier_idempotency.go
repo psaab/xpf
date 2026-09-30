@@ -11,10 +11,10 @@ import (
 	"github.com/google/nftables/expr"
 )
 
-// isTransitFenceWitnessMark identifies the one q0 mark conjunction whose
-// counter is a product-owned downstream-of-TUN witness. q0 is shared with the
-// transit MissingNeighbor adjudication path, so the counter remains a superset
-// and is only a valid S5 witness during a quiesced S5 window.
+// isTransitFenceWitnessMark identifies the q0 mark conjunction whose counter
+// is a product-owned downstream-of-TUN witness. It can count any mark-admitted
+// traffic on that queue, so it is only a valid S5 witness during a quiesced
+// S5 window.
 func isTransitFenceWitnessMark(mark ForwardFenceMark) bool {
 	return mark.Ifname == HostInboundDelegatedIfname &&
 		mark.Mark == AdjudicatedTransitMark &&
