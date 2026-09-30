@@ -555,12 +555,12 @@ instance default route. Full support is a feature gap requiring cross-plane
 route derivation and kernel/userspace forwarding parity, not a defect in the
 supported per-instance path.
 
-**`routing-options rib <name>` scoping (#7512).** Static routes are implemented
-in the IPv4 and IPv6 unicast tables only — bare `inet.0` / `inet6.0` at the top
-level, and `<instance>.inet.0` / `<instance>.inet6.0` inside a routing instance.
-A route scoped to any OTHER table is **not installed**, and the commit now says
-so: `validateUnhandledRibWarnings` emits a WARN naming the rib and how many
-routes were discarded.
+**`routing-options rib <name>` scoping (#7512, #11335).** Static routes are
+implemented in the IPv4 and IPv6 unicast tables only — bare `inet.0` /
+`inet6.0` at global scope, and `<instance>.inet.0` / `<instance>.inet6.0`
+inside the matching routing instance. Routes in unsupported tables or selectors
+aimed at a different scope are **not installed**; `validateUnhandledRibWarnings`
+emits a WARN naming the rib and how many routes were discarded.
 
 Before #7512 the compiler matched only the inet6 tables and every other rib name
 fell through with no branch and no `else`, so `rib inet.0 { static { route
@@ -569,6 +569,11 @@ and the natural thing to write beside a `rib inet6.0` block — compiled to
 NOTHING, committed clean and emitted no warning. An operator authoring the
 symmetric pair got their IPv6 default route and silently lost the IPv4 one, with
 `show configuration` rendering the stanza back verbatim.
+
+The scope is enforced in both directions: `rib B.inet.0` inside instance A, a
+bare `rib inet.0` inside A, and `rib A.inet.0` at global scope all warn and
+discard their routes rather than filing them into the enclosing table. Use
+`A.inet.0` / `A.inet6.0` under instance A, and the bare table names globally.
 
 The warning is deliberately WARN and not reject: `rib inet.2` is valid Junos that
 xpf does not implement, and a box may already hold a committed config containing

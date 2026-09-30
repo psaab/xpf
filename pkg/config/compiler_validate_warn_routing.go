@@ -377,14 +377,15 @@ func validateTargetReturnPathWarnings(cfg *Config) []string {
 }
 
 // validateUnhandledRibWarnings reports every `routing-options rib <name>` whose
-// static routes the compiler discarded (#7512).
+// static routes the compiler discarded (#7512), including selectors aimed at a
+// different routing scope (#11335).
 //
 // Before #7512 the rib loop matched only the inet6 tables and every other name
 // fell through with no branch and no else, so `rib inet.0 { static { route
 // 0.0.0.0/0 { next-hop ...; } } }` compiled to nothing, committed clean and said
-// nothing. `inet.0` is now implemented; this warning covers the REST of the
-// class — `inet.2`, `inet.3`, a typo'd `ient.0`, any future table name — so an
-// unimplemented rib announces itself instead of blackholing.
+// nothing. `inet.0` is now implemented; this warning covers unsupported tables
+// and table selectors that do not belong to the enclosing routing-options
+// scope, so neither case silently blackholes routes.
 //
 // WARN, NOT REJECT, and the choice is the #1960 no-brick split rather than
 // timidity. `rib inet.2 { static { ... } }` is valid Junos that xpf does not
@@ -401,11 +402,35 @@ func validateUnhandledRibWarnings(cfg *Config) []string {
 		return nil
 	}
 	var out []string
-	report := func(scope string, ribs []UnhandledRib) {
+	report := func(scope, instanceName string, ribs []UnhandledRib) {
 		for _, r := range ribs {
 			plural := "routes"
 			if r.Routes == 1 {
 				plural = "route"
+			}
+
+			targetInstance, supportedTable := "", false
+			switch {
+			case r.Name == "inet.0" || r.Name == "inet6.0":
+				supportedTable = true
+			default:
+				targetInstance, supportedTable = ribInstanceFromName(r.Name)
+			}
+			if supportedTable && targetInstance != instanceName {
+				targetScope := "the main routing table"
+				if targetInstance != "" {
+					targetScope = fmt.Sprintf("routing-instance %q", targetInstance)
+				}
+				enclosingScope := "global routing-options"
+				if instanceName != "" {
+					enclosingScope = fmt.Sprintf("routing-instance %q", instanceName)
+				}
+				out = append(out, fmt.Sprintf(
+					"%srouting-options rib %q: %d static %s DISCARDED — cross-scope rib "+
+						"selector targets %s, but this routing-options block belongs to %s; "+
+						"move the rib to that scope.",
+					scope, r.Name, r.Routes, plural, targetScope, enclosingScope))
+				continue
 			}
 			out = append(out, fmt.Sprintf(
 				"%srouting-options rib %q: %d static %s DISCARDED — xpf implements static "+
@@ -417,7 +442,7 @@ func validateUnhandledRibWarnings(cfg *Config) []string {
 				scope, r.Name, r.Routes, plural))
 		}
 	}
-	report("", cfg.RoutingOptions.UnhandledRibs)
+	report("", "", cfg.RoutingOptions.UnhandledRibs)
 	// RoutingInstances is an ordered SLICE, so the report order is already
 	// deterministic and must not be re-sorted: the instances render in
 	// configured order everywhere else.
@@ -425,7 +450,7 @@ func validateUnhandledRibWarnings(cfg *Config) []string {
 		if ri == nil {
 			continue
 		}
-		report(fmt.Sprintf("routing-instance %q ", ri.Name), ri.UnhandledRibs)
+		report(fmt.Sprintf("routing-instance %q ", ri.Name), ri.Name, ri.UnhandledRibs)
 	}
 	return out
 }
