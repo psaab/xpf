@@ -454,23 +454,25 @@ mod flowless_local_delivery_tests {
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
         let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
 
+        let flow = flowless_flow(PROTO_TCP);
+        let meta = flowless_meta(PROTO_TCP);
         let resolved = flowless_base_resolution(
             &fw,
             &dynamic_neighbors,
             &ha_state,
             0,
-            INGRESS_IF,
-            0,
-            PROTO_TCP,
-            dst,
+            &flow,
+            meta,
+            None,
+            None,
             Some("vrf-x"),
-        );
+        )
+        .expect("ordinary flowless destination resolves");
         assert_eq!(
-            resolved.disposition,
+            resolved.resolution.disposition,
             ForwardingDisposition::LocalDelivery,
             "ingress-local resolution must win over the PBR override table",
         );
-
         // The override-table lookup alone does NOT deliver this host-bound
         // packet — the bug the ordering fixes.
         let override_only = lookup_forwarding_resolution_in_table_with_dynamic(
@@ -498,19 +500,22 @@ mod flowless_local_delivery_tests {
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
         let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
 
+        let flow = flowless_flow(255);
+        let meta = flowless_meta(255);
         let resolved = flowless_base_resolution(
             &fw,
             &dynamic_neighbors,
             &ha_state,
             0,
-            INGRESS_IF,
-            0,
-            255,
-            IpAddr::V4(dst),
+            &flow,
+            meta,
             None,
-        );
+            None,
+            None,
+        )
+        .expect("ordinary flowless destination resolves");
         assert_eq!(
-            resolved.disposition,
+            resolved.resolution.disposition,
             ForwardingDisposition::LocalDelivery,
             "the helper recognizes the interface-NAT target, but not the tail's protocol",
         );
