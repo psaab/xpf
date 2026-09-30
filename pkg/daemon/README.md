@@ -2256,17 +2256,24 @@ never lock an operator out of a remote box it manages.
 
     The same table is re-rendered from the same `mark*`/apply-tail gate
     helpers. In the unarmed state it has an unconditional DROP policy. In the
-    armed state (#10302) it retains that default DROP and adds only ingress
-    ACCEPT pinholes for runtime-tracked XDP links whose live kernel names still
-    resolve, plus the daemon-owned `xpf-usp1` delegated TUN reinjection path.
-    `xpf-usp1` is a deliberate residual: it multiplexes xfrm/reinject traffic
-    and destination-judged delegated traffic, which are indistinguishable at
-    the FORWARD hook by iifname today. The `xpf-usp0` LocalDelivery/gated-only
-    TUN is not a FORWARD pinhole. A configured-but-unzoned or device-map
-    leave-alone interface, an unrelated host XDP program, and an xfrm
-    interface itself are not pinholes and remain dropped. The fence is
-    installed before the sysctls are raised; if nftables cannot install the
-    inet fence, the sysctls stay at zero. The armed gate also stays closed
+    armed state (#10302/#10391) it retains that default and adds ACCEPT
+    pinholes only for runtime-tracked XDP links whose live kernel names still
+    resolve, plus `xpf-usp1` traffic carrying the exact userspace-adjudicated
+    queue mark. The queue classifier marks only q0; delegated q1 traffic is
+    unmarked and therefore remains under the fence's DROP policy.
+    #11326 terminally drops table-stamped NoRoute and ForwardCandidate
+    build-failure fallbacks, plus every non-tunnel MissingNeighbor copy,
+    including an unstamped MAIN-table q0 decision. Native misses remain in the
+    userspace retry queue; GRE-decapped misses retain the existing probe,
+    resolver, and retransmission recovery. Other policy-adjudicated q0 traffic
+    remains admitted.
+    `iifname` alone is never an admission pinhole. `xpf-usp0` is the
+    LocalDelivery/gated-only TUN and is not a FORWARD pinhole. A
+    configured-but-unzoned or device-map leave-alone interface, an unrelated
+    host XDP program, and an xfrm interface itself are not pinholes and remain
+    dropped.
+    The inet fence is installed before the sysctls are raised; if nftables
+    cannot install it, the sysctls stay at zero. The armed gate also stays closed
     when the bridge-family barrier leg is unsupported: an inet-only fence
     cannot constrain bridged frames, and no degraded open or operator-ack
     override is available.

@@ -140,9 +140,15 @@ func TestArmedTransitFencePlanShape10302(t *testing.T) {
 		t.Fatalf("empty armed fence emitted %d ACCEPT rules, want none", len(empty.rules))
 	}
 }
+
+// #11326: only adjudicated q0 carries this exact-mark ACCEPT; q1 is unmarked
+// and must fall through to the same forward chain's DROP policy.
 func TestArmedTransitFenceMarkPinhole10391(t *testing.T) {
 	p := newBuildPlan(t, "xpf_transit_10391_mark", *gnft.ChainPriorityFilter)
 	p.chain = transitBarrierChain(p.table)
+	if p.chain.Policy == nil || *p.chain.Policy != gnft.ChainPolicyDrop {
+		t.Fatalf("marked fence policy = %v, want DROP for unmarked delegated q1", p.chain.Policy)
+	}
 	emitTransitFencePinhole(p, ForwardFenceSpec{
 		AllowedMarks: []ForwardFenceMark{{
 			Ifname: armedTransitReinjectIfname10391,

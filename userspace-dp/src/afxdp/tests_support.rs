@@ -2545,18 +2545,15 @@ pub(super) fn build_gre_inner_tcp_syn_packet_v4(dst: Ipv4Addr) -> Vec<u8> {
 }
 
 
-/// #1902 driver: one GRE-to-self outer frame whose INNER packet
+/// #1902/#11326 driver: one GRE-to-self outer frame whose INNER packet
 /// forwards out reth1.0 toward a COLD neighbor, end-to-end through
-/// `poll_binding_process_descriptor`, then neighbor resolution +
-/// `retry_pending_neigh`. Pre-#1902 the MissingNeighbor arm buffered
-/// `desc` (the un-decapped OUTER UMEM frame, VLAN-tagged on the
-/// reth0.80 underlay) paired with the post-decap INNER meta/decision,
-/// and the retry swept that entry into a prepared TX — the
-/// still-encapsulated outer GRE packet rewritten at inner-meta
-/// offsets, transmitted toward the inner next-hop. Fixed: the packet
-/// is never admitted (counted, recycled) and the retry TXes nothing;
-/// first-packet delivery rides the trailing decap-aware slow-path
-/// chokepoint (#1901), which pairs the INNER frame correctly.
+/// `poll_binding_process_descriptor`, then the neighbor probe/resolver path.
+/// Pre-#1902 the MissingNeighbor arm buffered `desc` (the un-decapped OUTER
+/// UMEM frame) with the post-decap INNER meta/decision, and retry TXed a corrupt
+/// outer GRE packet at inner-meta offsets. The frame is never admitted to that
+/// buffer. #11326 also refuses its q0 TUN copy because that mark would admit a
+/// MAIN lookup without the original iif; the existing resolver and
+/// retransmission path remain responsible for recovery.
 pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id: u16) {
     let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
     let ha_state = txn_ha_state();
@@ -2575,15 +2572,22 @@ pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id
     let inner = build_gre_inner_tcp_syn_packet_v4(inner_dst);
     let frame = build_gre_to_self_outer_frame_v4(vlan_id, &inner);
     let meta = gre_to_self_outer_meta(vlan_id, frame.len());
+    assert!(crate::afxdp::forwarding::ingress_destination_mac_accepted(
+        &forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        &frame,
+    ));
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
 
-    let (_batch, dbg) = txn_run_descriptor_checked(
+    let (_batch, dbg) = txn_run_descriptor_with_reinjector(
         &mut bindings[0],
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
         meta,
-        true,
+        &reinjector,
     );
     assert_eq!(
         dbg.missing_neigh, 1,
@@ -2606,6 +2610,13 @@ pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id
     assert!(
         bindings[0].scratch.scratch_recycle.contains(&128),
         "the refused frame must be recycled now, not pinned in pending_neigh"
+    );
+    assert_eq!(bindings[0].live.slow_path_packets.load(Ordering::Relaxed), 0);
+    assert_eq!(bindings[0].live.slow_path_drops.load(Ordering::Relaxed), 1);
+    assert!(
+        reinjector.test_enqueued_delegated().is_empty(),
+        "#11326: the default-table GRE-decap MissingNeighbor must not enqueue \
+         an adjudicated q0 TUN copy"
     );
 
     // Resolve the inner next-hop and run the retry sweep: nothing may be
