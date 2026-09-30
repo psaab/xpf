@@ -540,6 +540,14 @@ delegate to the owning domain. Exported types:
   #3308) rejects such a term at commit, but is lenient on load / peer-sync
   (#1960 no-brick), so a persisted / peer-synced contradiction can still reach
   the builder — hence the runtime skip.
+  **Term order protects carved-out traffic (#11325).** Linux ip rules cannot
+  express first-match firewall-filter precedence. A later routing-instance
+  term is dropped from the mirror, with a degraded build error, whenever a
+  preceding terminating term may match the same packet. The builder keeps a
+  later steer only when positive address, DSCP, protocol, or port selectors
+  prove the terms disjoint; unknown, unrepresentable, prefix-list, and except
+  predicates are treated as possible overlap. A non-denying earlier steer to the
+  same instance is safe because it selects the same routing table.
   **Userspace FIB snapshot skips this band (#4479).** The userspace
   route-snapshot builder (`buildRouteSnapshots`,
   `pkg/dataplane/userspace/routes.go`) mirrors kernel ip rules whose Dst maps
