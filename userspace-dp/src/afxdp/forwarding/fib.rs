@@ -708,7 +708,12 @@ fn lookup_forwarding_resolution_v4_inner(
                 nh.ifindex > 0
                     && lookup_neighbor_entry(state, dynamic_neighbors, nh.ifindex, IpAddr::V4(target))
                         .is_some()
-            });
+            },
+            // #11318: a member can drive ARP/NDP from the cold path iff it has
+            // an egress interface (direct + interface-only) or a tunnel
+            // endpoint (underlay resolution pending). ifindex-0 direct members
+            // can never resolve → excluded from the no-live fallback.
+            |nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0);
             let (next_hop, ifindex, tunnel_endpoint_id) = match selected {
                 Some(nh) => (nh.next_hop, nh.ifindex, nh.tunnel_endpoint_id),
                 None => (None, 0, 0),
@@ -946,7 +951,9 @@ fn lookup_forwarding_resolution_v6_inner(
                 nh.ifindex > 0
                     && lookup_neighbor_entry(state, dynamic_neighbors, nh.ifindex, IpAddr::V6(target))
                         .is_some()
-            });
+            },
+            // #11318: v6 twin of the v4 drivable gate above.
+            |nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0);
             let (next_hop, ifindex, tunnel_endpoint_id) = match selected {
                 Some(nh) => (nh.next_hop, nh.ifindex, nh.tunnel_endpoint_id),
                 None => (None, 0, 0),
@@ -1237,6 +1244,7 @@ pub(in crate::afxdp) fn select_route_next_hop<'a, T: Copy>(
     candidates: &'a [T],
     ip_hash: u64,
     is_live: impl Fn(&T) -> bool,
+    is_drivable: impl Fn(&T) -> bool,
 ) -> Option<&'a T> {
     if candidates.is_empty() {
         return None;
@@ -1290,6 +1298,32 @@ pub(in crate::afxdp) fn select_route_next_hop<'a, T: Copy>(
                 remaining &= remaining - 1;
             }
         }
+        // #11318: no-live fallback hashes over the ARP-DRIVABLE subset when one
+        // exists, not the full vector. The full-vector fallback (from #2922,
+        // whose intent assumed every member ARP-drivable — broken by #4446)
+        // resolves ~half the flows to ifindex-0 members → NoRoute, a partial
+        // ECMP blackhole beside a member that would drive ARP. `is_drivable`
+        // is evaluated ONLY here (never on the live path), so the common case
+        // costs nothing, and when NOTHING is drivable the legacy full-vector
+        // fallback is preserved (something selectable beats a certain drop).
+        let mut drivable_mask: u64 = 0;
+        for (i, c) in candidates.iter().enumerate() {
+            if is_drivable(c) {
+                drivable_mask |= 1u64 << i;
+            }
+        }
+        if drivable_mask.count_ones() > 0 {
+            let mut pick = ip_hash % drivable_mask.count_ones() as u64;
+            let mut remaining = drivable_mask;
+            loop {
+                let idx = remaining.trailing_zeros() as usize;
+                if pick == 0 {
+                    return candidates.get(idx);
+                }
+                pick -= 1;
+                remaining &= remaining - 1;
+            }
+        }
         let pick = (ip_hash % candidates.len() as u64) as usize;
         return candidates.get(pick);
     }
@@ -1305,7 +1339,16 @@ pub(in crate::afxdp) fn select_route_next_hop<'a, T: Copy>(
         let pick = (ip_hash % live.len() as u64) as usize;
         live.get(pick).copied()
     } else {
-        let pick = (ip_hash % candidates.len() as u64) as usize;
-        candidates.get(pick)
+        // #11318 twin of the mask path above: drivable subset first, full
+        // vector only when nothing is drivable.
+        let drivable: smallvec::SmallVec<[&'a T; 8]> =
+            candidates.iter().filter(|c| is_drivable(c)).collect();
+        if !drivable.is_empty() {
+            let pick = (ip_hash % drivable.len() as u64) as usize;
+            drivable.get(pick).copied()
+        } else {
+            let pick = (ip_hash % candidates.len() as u64) as usize;
+            candidates.get(pick)
+        }
     }
 }

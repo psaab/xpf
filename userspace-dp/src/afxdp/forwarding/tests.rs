@@ -5183,10 +5183,15 @@ fn select_route_next_hop_evaluates_liveness_once_per_candidate() {
     use std::cell::Cell;
     let candidates = [10u32, 20, 30, 40];
     let calls = Cell::new(0usize);
-    let selected = select_route_next_hop(&candidates, 1, |_c| {
-        calls.set(calls.get() + 1);
-        true // all live
-    });
+    let selected = select_route_next_hop(
+        &candidates,
+        1,
+        |_c| {
+            calls.set(calls.get() + 1);
+            true // all live
+        },
+        |_| true,
+    );
     assert_eq!(
         calls.get(),
         candidates.len(),
@@ -5218,10 +5223,15 @@ fn select_route_next_hop_consistent_under_liveness_flip_between_passes() {
     // Each candidate is "live" only the first time it is observed; any
     // subsequent observation (a second pass) reports it dead.
     let seen: RefCell<HashSet<u32>> = RefCell::new(HashSet::new());
-    let selected = select_route_next_hop(&candidates, 0, |c| {
-        let mut s = seen.borrow_mut();
-        s.insert(*c) // true on first insert, false if already present
-    });
+    let selected = select_route_next_hop(
+        &candidates,
+        0,
+        |c| {
+            let mut s = seen.borrow_mut();
+            s.insert(*c) // true on first insert, false if already present
+        },
+        |_| true,
+    );
     assert!(
         selected.is_some(),
         "single liveness snapshot must not yield a spurious no-route when \
@@ -7271,7 +7281,7 @@ fn select_route_next_hop_bitmask_matches_collect_reference_7204() {
         ];
         for (shape_idx, is_live) in shapes.iter().enumerate() {
             for ip_hash in [0u64, 1, 2, 7, 63, 64, 65, 1_000_003, u64::MAX] {
-                let got = select_route_next_hop(&candidates, ip_hash, |c| is_live(c));
+                let got = select_route_next_hop(&candidates, ip_hash, |c| is_live(c), |_| true);
                 let want = reference(&candidates, ip_hash, |c| is_live(c));
                 assert_eq!(
                     got, want,
@@ -7299,16 +7309,108 @@ fn select_route_next_hop_bitmask_evaluates_liveness_once_7204() {
     for fanout in [1usize, 8, 9, 64, 65] {
         let candidates: Vec<u32> = (0..fanout as u32).collect();
         let calls = Cell::new(0usize);
-        let _ = select_route_next_hop(&candidates, 12345, |c| {
-            calls.set(calls.get() + 1);
-            c % 3 != 0
-        });
+        let _ = select_route_next_hop(
+            &candidates,
+            12345,
+            |c| {
+                calls.set(calls.get() + 1);
+                c % 3 != 0
+            },
+            |_| true,
+        );
         assert_eq!(
             calls.get(),
             fanout,
             "fanout={fanout}: liveness must be evaluated exactly once per candidate"
         );
     }
+}
+
+/// #11318: the no-live fallback must hash over the ARP-drivable subset, not
+/// the full vector. Fixture: one ifindex-0 (off-link) member + one
+/// ARP-drivable member, NONE live (neighbors unresolved). The reverted
+/// full-vector fallback resolves ~half the 64-hash sweep to the ifindex-0
+/// member → NoRoute beside a member that would drive ARP.
+///
+/// FAIL-ON-REVERT: removing the `is_drivable` gate makes 32/64 hashes pick
+/// the undrivable member.
+#[test]
+fn select_route_next_hop_fallback_excludes_undrivable_11318() {
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    struct Nh {
+        ifindex: i32,
+        tunnel_endpoint_id: u16,
+    }
+    let candidates = [
+        Nh { ifindex: 0, tunnel_endpoint_id: 0 },
+        Nh { ifindex: 7, tunnel_endpoint_id: 0 },
+    ];
+    for ip_hash in 0u64..64 {
+        let got = select_route_next_hop(
+            &candidates,
+            ip_hash,
+            |_| false, // none live: fallback path
+            |nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0,
+        );
+        assert_eq!(
+            got,
+            Some(&candidates[1]),
+            "hash={ip_hash}: no-live fallback must pick the drivable member, \
+             never the ifindex-0 member",
+        );
+    }
+}
+
+/// #11318: when NOTHING is drivable the legacy full-vector fallback is
+/// preserved — something selectable beats a certain drop. All-undrivable
+/// fixture must still resolve every hash to a real candidate.
+#[test]
+fn select_route_next_hop_fallback_all_undrivable_keeps_legacy_pick_11318() {
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    struct Nh {
+        ifindex: i32,
+        tunnel_endpoint_id: u16,
+    }
+    let candidates = [
+        Nh { ifindex: 0, tunnel_endpoint_id: 0 },
+        Nh { ifindex: 0, tunnel_endpoint_id: 0 },
+    ];
+    for ip_hash in 0u64..64 {
+        let got = select_route_next_hop(
+            &candidates,
+            ip_hash,
+            |_| false,
+            |nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0,
+        );
+        assert!(
+            got.is_some_and(|nh| candidates.contains(nh)),
+            "hash={ip_hash}: all-undrivable fallback must still pick a member",
+        );
+    }
+}
+
+/// #11318: `is_drivable` is evaluated ONLY on the no-live fallback path —
+/// never on the live path — so the common case costs nothing extra.
+#[test]
+fn select_route_next_hop_drivable_unevaluated_on_live_path_11318() {
+    use std::cell::Cell;
+    let candidates = [10u32, 20, 30, 40];
+    let calls = Cell::new(0usize);
+    let selected = select_route_next_hop(
+        &candidates,
+        1,
+        |_| true, // all live: fallback never reached
+        |_| {
+            calls.set(calls.get() + 1);
+            true
+        },
+    );
+    assert_eq!(selected, Some(&20));
+    assert_eq!(
+        calls.get(),
+        0,
+        "drivability must not be evaluated when a live member exists",
+    );
 }
 
 /// #7204 (A1-b7-F6): the liveness mask must cover the whole supported ECMP
