@@ -581,6 +581,28 @@ func resolveRemoteAddr(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) (
 	return "", localAddr, nil, false
 }
 
+// RenderedVPNSet returns the names of VPNs renderConfig would emit into
+// connections{} — the authoritative loaded-connection set Apply diffs
+// against. The bindless-selector fence builder (#11083) gates its rows on
+// this set so a skipped/unrenderable VPN gets no fence rows (fencing a dead
+// VPN drops its selectors' cleartext for SAs that will never establish).
+// Sharing renderConfig itself (not a mirrored predicate) keeps the two from
+// drifting: any new render skip automatically removes the fence rows.
+// Returns nil when the render errors; callers must treat nil as UNKNOWN and
+// keep the current fail-closed behavior (emit for shape-valid VPNs).
+func RenderedVPNSet(ipsecCfg *config.IPsecConfig) map[string]bool {
+	if ipsecCfg == nil {
+		return nil
+	}
+	// renderConfig uses no Manager state (pure over ipsecCfg); a zero
+	// Manager suffices.
+	_, rendered, err := (&Manager{}).renderConfig(ipsecCfg)
+	if err != nil {
+		return nil
+	}
+	return rendered
+}
+
 func sortedVPNNames(vpns map[string]*config.IPsecVPN) []string {
 	names := make([]string, 0, len(vpns))
 	for name := range vpns {

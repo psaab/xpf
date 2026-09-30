@@ -279,6 +279,12 @@ func buildBindlessSelectorRows(cfg *config.Config) []IpsecBindlessSelectorSnapsh
 	if cfg == nil || len(cfg.Security.IPsec.VPNs) == 0 {
 		return nil
 	}
+	// #11083: fence only VPNs the swanctl render would load. A skipped
+	// (unrenderable gateway / unresolved IKE / malformed selectors) VPN
+	// gets no rows — fencing it would drop its selectors' cleartext for
+	// SAs that will never establish. Nil set (render error) keeps the
+	// previous fail-closed behavior: emit for shape-valid VPNs.
+	rendered := ipsec.RenderedVPNSet(&cfg.Security.IPsec)
 	names := make([]string, 0, len(cfg.Security.IPsec.VPNs))
 	for name := range cfg.Security.IPsec.VPNs {
 		names = append(names, name)
@@ -289,6 +295,13 @@ func buildBindlessSelectorRows(cfg *config.Config) []IpsecBindlessSelectorSnapsh
 		vpn := cfg.Security.IPsec.VPNs[name]
 		if vpn == nil || vpn.BindInterface != "" {
 			continue
+		}
+		if rendered != nil {
+			if !rendered[name] {
+				slog.Warn("bindless VPN skipped by swanctl render gets no fence rows; its selectors are unfenced until the render failure is fixed",
+					"vpn", name)
+				continue
+			}
 		}
 		for _, selector := range ipsec.EffectiveTrafficSelectors(name, vpn) {
 			if !config.IsTrafficSelectorShape(selector.LocalTS) ||
