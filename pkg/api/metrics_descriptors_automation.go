@@ -110,6 +110,16 @@ func (c *xpfCollector) initAutomationDescriptors() {
 			"subscriber cap across REST SSE and gRPC event streams (#10910).",
 		nil, nil,
 	)
+	c.eventStreamRingEvicted = prometheus.NewDesc(
+		"xpf_event_stream_ring_evicted_total",
+		"Total security/audit event records overwritten in the EventBuffer "+
+			"ring because it was full (#11072). Unlike subscriber drops, "+
+			"this is storage loss: Latest readers see a contiguous ring and "+
+			"would mistake truncation for complete history. The oldest "+
+			"record of every Latest read carries Overrun once this is "+
+			"nonzero, so the gap is visible in-band as well as here.",
+		nil, nil,
+	)
 	c.feedSecondsSinceSuccess = prometheus.NewDesc(
 		"xpf_feed_seconds_since_last_success",
 		"Seconds since a dynamic-address feed last fetched successfully. "+

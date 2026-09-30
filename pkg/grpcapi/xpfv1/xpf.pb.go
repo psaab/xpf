@@ -3269,8 +3269,13 @@ type PolicyRule struct {
 	// read FAILURE (the dataplane snapshot itself errored) is still fail-loud as
 	// codes.Internal (#3408), never this flag.
 	HitCountersUnavailable bool `protobuf:"varint,23,opt,name=hit_counters_unavailable,json=hitCountersUnavailable,proto3" json:"hit_counters_unavailable,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// #11072: true when either of the rule's zones is StableZoneID-collision
+	// quarantined. The text twin marks such scope (ZoneQuarantinePoliciesQualifier);
+	// without this bit a remote show presents scrubbed permits as live.
+	// Additive; false (omitted) for unquarantined scope.
+	Quarantined   bool `protobuf:"varint,24,opt,name=quarantined,proto3" json:"quarantined,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PolicyRule) Reset() {
@@ -3460,6 +3465,13 @@ func (x *PolicyRule) GetMatchToZones() []string {
 func (x *PolicyRule) GetHitCountersUnavailable() bool {
 	if x != nil {
 		return x.HitCountersUnavailable
+	}
+	return false
+}
+
+func (x *PolicyRule) GetQuarantined() bool {
+	if x != nil {
+		return x.Quarantined
 	}
 	return false
 }
@@ -9657,7 +9669,7 @@ const file_xpf_proto_rawDesc = "" +
 	"PolicyInfo\x12\x1b\n" +
 	"\tfrom_zone\x18\x01 \x01(\tR\bfromZone\x12\x17\n" +
 	"\ato_zone\x18\x02 \x01(\tR\x06toZone\x12(\n" +
-	"\x05rules\x18\x03 \x03(\v2\x12.xpf.v1.PolicyRuleR\x05rules\"\xe0\x06\n" +
+	"\x05rules\x18\x03 \x03(\v2\x12.xpf.v1.PolicyRuleR\x05rules\"\x82\a\n" +
 	"\n" +
 	"PolicyRule\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
@@ -9684,7 +9696,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\binactive\x18\x14 \x01(\bR\binactive\x12(\n" +
 	"\x10match_from_zones\x18\x15 \x03(\tR\x0ematchFromZones\x12$\n" +
 	"\x0ematch_to_zones\x18\x16 \x03(\tR\fmatchToZones\x128\n" +
-	"\x18hit_counters_unavailable\x18\x17 \x01(\bR\x16hitCountersUnavailableB\f\n" +
+	"\x18hit_counters_unavailable\x18\x17 \x01(\bR\x16hitCountersUnavailable\x12 \n" +
+	"\vquarantined\x18\x18 \x01(\bR\vquarantinedB\f\n" +
 	"\n" +
 	"_policy_id\"\x9e\x04\n" +
 	"\x12GetSessionsRequest\x12\x14\n" +
