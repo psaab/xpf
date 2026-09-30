@@ -497,10 +497,20 @@ pub(super) fn stage_flow_cache_hit(
                     )
                 }
             });
-            // Check if target is same binding (hairpin) or same-UMEM.
-            // For simplicity, only do in-place fast path when target == self.
             let is_self_target = target_bi == Some(binding_index);
-            if is_self_target && owned_packet_frame.is_none() {
+            // A direct cache-hit TX bypasses `enqueue_pending_forwards`,
+            // where PMTUD and TCP segmentation are admitted. Keep oversized
+            // packets on that path; it also derives the correct inner MTU and
+            // encapsulates native-tunnel forwards.
+            if is_self_target
+                && owned_packet_frame.is_none()
+                && !flow_cache_hit_requires_pending_forward(
+                    packet_frame,
+                    meta,
+                    &cached_decision,
+                    worker_ctx.forwarding,
+                )
+            {
                 let ingress_slot = binding_slot;
                 let flow_key = flow.forward_key.clone();
                 let mirror_config = resolve_mirror_config(
