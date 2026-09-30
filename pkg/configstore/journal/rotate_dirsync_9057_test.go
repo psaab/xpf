@@ -117,7 +117,6 @@ func TestJournalRotationSyncSurvivesPostRotateOpenFailure10723(t *testing.T) {
 	}
 }
 
-
 func mustLogJournal9057(t *testing.T, j *Journal) {
 	t.Helper()
 	if err := j.Log(&Entry{Action: "commit", Detail: "seed"}); err != nil {

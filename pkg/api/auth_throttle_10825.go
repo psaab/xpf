@@ -76,11 +76,11 @@ const (
 	// Identity namespaces keep Basic usernames, Bearer presentations, malformed
 	// Basic headers, unsupported Authorization schemes, and API keys from
 	// sharing account lockouts.
-	authThrottleBasicAccountPrefix         = "basic:"
-	authThrottleInvalidBasicAccount        = "basic-invalid"
-	authThrottleBearerAccount              = "bearer"
+	authThrottleBasicAccountPrefix          = "basic:"
+	authThrottleInvalidBasicAccount         = "basic-invalid"
+	authThrottleBearerAccount               = "bearer"
 	authThrottleInvalidAuthorizationAccount = "authorization-invalid"
-	authThrottleAPIKeyAccount              = "api-key"
+	authThrottleAPIKeyAccount               = "api-key"
 )
 
 // authFailureBucket is one lockout cell: either a (source, account) pair or a

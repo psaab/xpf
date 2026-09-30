@@ -66,6 +66,7 @@ func (s *SessionSync) SetStrictSessionAuth(on bool) {
 // StrictSessionAuth reports the legacy configured posture. It does not gate
 // the default pre-key connection eviction.
 func (s *SessionSync) StrictSessionAuth() bool { return s.strictSessionAuth.Load() }
+
 // noteStrictAuthGraceStart anchors the eviction grace for conn, once.
 //
 // Called from ReconcileConnectionAuth for every established connection at the
@@ -177,7 +178,6 @@ func (s *SessionSync) UnauthenticatedSessionConns() []string {
 	s.writeMu.Unlock()
 	return out
 }
-
 
 // strictSessionAuthLoop periodically re-evaluates established connections.
 //

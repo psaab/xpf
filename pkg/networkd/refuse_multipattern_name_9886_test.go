@@ -364,17 +364,17 @@ func TestApplyRefusesUnsafeUnitFieldsAndSweeps_10718(t *testing.T) {
 		},
 		{
 			name: "Mode", field: "Mode",
-			base: InterfaceConfig{Name: "bond0", IsBond: true, BondMode: "active-backup"},
+			base:   InterfaceConfig{Name: "bond0", IsBond: true, BondMode: "active-backup"},
 			poison: func(ifc *InterfaceConfig) { ifc.BondMode = "active-backup\nDHCP=yes" },
 		},
 		{
 			name: "ModeOnDisabledBond", field: "Mode",
-			base: InterfaceConfig{Name: "bond0", IsBond: true, Disable: true, BondMode: "active-backup"},
+			base:   InterfaceConfig{Name: "bond0", IsBond: true, Disable: true, BondMode: "active-backup"},
 			poison: func(ifc *InterfaceConfig) { ifc.BondMode = "active-backup\nDHCP=yes" },
 		},
 		{
 			name: "LACPTransmitRate", field: "LACPTransmitRate",
-			base: InterfaceConfig{Name: "bond0", IsBond: true, BondMode: "802.3ad", LACPRate: "fast"},
+			base:   InterfaceConfig{Name: "bond0", IsBond: true, BondMode: "802.3ad", LACPRate: "fast"},
 			poison: func(ifc *InterfaceConfig) { ifc.LACPRate = "fast\nDHCP=yes" },
 		},
 		{

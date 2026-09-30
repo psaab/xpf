@@ -969,7 +969,7 @@ var gateParentPrereq = map[string]string{
 	// #10826: identity-scoped class/expiry leaves are meaningful only once the
 	// credential exists. Keep that sibling independent of the leaf under test.
 	"system services web-management api-auth user <*>": "password gate-api-auth-password;",
-	"system services web-management api-auth key <*>": "secret gate-api-auth-key-0123456789;",
+	"system services web-management api-auth key <*>":  "secret gate-api-auth-key-0123456789;",
 }
 
 // gateLeafPrereq returns the parent prerequisite for this leaf as a brace body

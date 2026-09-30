@@ -238,9 +238,9 @@ func NewManager() *Manager {
 		subscribeAddrs:     netlink.AddrSubscribe,
 		resolveLinkName:    netlinkLinkName,
 		resolveIface:       net.InterfaceByName,
-		openInstanceSocket:    func(vi *vrrpInstance) error { return vi.openSocket() },
-		runInstance:           func(vi *vrrpInstance) { go vi.run() },
-		stopInstance:          func(vi *vrrpInstance) { vi.stop() },
+		openInstanceSocket: func(vi *vrrpInstance) error { return vi.openSocket() },
+		runInstance:        func(vi *vrrpInstance) { go vi.run() },
+		stopInstance:       func(vi *vrrpInstance) { vi.stop() },
 		ensureVIPFamilySockets: func(vi *vrrpInstance, vips []string) error {
 			return vi.ensureVIPFamilySockets(vips)
 		},

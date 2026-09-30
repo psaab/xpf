@@ -16,7 +16,7 @@ import (
 const (
 	socketKindControl          = "control socket"
 	socketKindEventStream      = "event stream socket"
-	socketKindReinjectSubmit  = "reinject submit socket"
+	socketKindReinjectSubmit   = "reinject submit socket"
 	socketKindReinjectComplete = "reinject complete socket"
 )
 

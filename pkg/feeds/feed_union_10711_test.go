@@ -52,7 +52,7 @@ func TestFeedPartialCoverageAcrossFamiliesAccepted10711(t *testing.T) {
 // tilings such as /1 + /2 + /2) also cover the whole space and are refused.
 func TestFeedUnionQuartersRefused10711(t *testing.T) {
 	for name, body := range map[string]string{
-		"four /2s":        "0.0.0.0/2\n64.0.0.0/2\n128.0.0.0/2\n192.0.0.0/2\n",
+		"four /2s":              "0.0.0.0/2\n64.0.0.0/2\n128.0.0.0/2\n192.0.0.0/2\n",
 		"overlapping partition": "0.0.0.0/1\n128.0.0.0/2\n192.0.0.0/2\n",
 	} {
 		if _, err := parseFeed(strings.NewReader(body)); err == nil ||

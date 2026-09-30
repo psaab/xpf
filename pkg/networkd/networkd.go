@@ -830,6 +830,7 @@ func sanitizeUnitValue(s string) string {
 	}
 	return s
 }
+
 // unitTokenError reports a render-side refusal for systemd fields whose value
 // must occupy exactly one whitespace-free token. Unlike descriptions, these
 // fields have no safe replacement byte: changing a name, address or enum can
@@ -923,7 +924,6 @@ func renderedUnitTokenError(ifc InterfaceConfig) error {
 	}
 	return nil
 }
-
 
 func (m *Manager) generateNetdev(ifc InterfaceConfig) string {
 	var b strings.Builder

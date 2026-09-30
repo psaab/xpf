@@ -36,6 +36,7 @@ func helperReinjectSocketPaths(cfg config.UserspaceConfig) (string, string) {
 	return filepath.Join(dir, "reinject-submit.sock"),
 		filepath.Join(dir, "reinject-complete.sock")
 }
+
 // preflightHelperPaths rejects a helper path set that bring-up would have to
 // refuse anyway, while the RUNNING generation can still be spared (#5839).
 //

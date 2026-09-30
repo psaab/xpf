@@ -210,7 +210,7 @@ func TestControlDeadlineHasExactlyOneSite8526(t *testing.T) {
 	want := map[string]bool{
 		"armControlIO":                         true,
 		"cutInFlightControlIOLocked":           true,
-		"requestSessionSyncResponseLocked":      true,
+		"requestSessionSyncResponseLocked":     true,
 		"requestHAWatchdogSessionLockedAtPath": true,
 		"ProbeStatus":                          true,
 	}

@@ -219,14 +219,15 @@ func TestCloudflareRenumberPatchesOnlyOwnedRow(t *testing.T) {
 		t.Fatalf("foreign A was clobbered on renumber: content=%q (want 198.51.100.20)", got)
 	}
 }
+
 // TestCloudflareExistingNewValueRemovesStalePreviousRecord is the #10715
 // fail-on-revert for a renumber whose new value already exists at Cloudflare.
 // The previous value remains stale: both the exact-content no-op and the
 // TTL-correction path must clean it up without touching a foreign record.
 func TestCloudflareExistingNewValueRemovesStalePreviousRecord10715(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		liveTTL    int
+		name        string
+		liveTTL     int
 		wantPatches int
 	}{
 		{name: "renumber with desired TTL", liveTTL: 300, wantPatches: 0},
@@ -270,7 +271,6 @@ func TestCloudflareExistingNewValueRemovesStalePreviousRecord10715(t *testing.T)
 		})
 	}
 }
-
 
 // TestCloudflareFirstPublishOntoForeignName is the #3739 H11 fail-on-revert for a
 // FIRST publish onto a name that already carries only a FOREIGN A (no xpf row,

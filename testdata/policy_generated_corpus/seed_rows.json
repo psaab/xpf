@@ -50,18 +50,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-allow",
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -132,18 +126,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-allow",
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -214,18 +202,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-allow",
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -417,18 +399,12 @@
             "applications": [
               "app-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-deny-ssh",
             "rule_id": "trust->untrust/p-deny-ssh",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -439,9 +415,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -449,9 +422,6 @@
             "name": "p-allow",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -535,18 +505,12 @@
             "applications": [
               "app-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-permit-ssh",
             "rule_id": "trust->untrust/p-permit-ssh",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -557,9 +521,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -567,9 +528,6 @@
             "name": "p-deny-rest",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-deny-rest",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -700,18 +658,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "zp-allow",
             "rule_id": "trust->untrust/zp-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -720,9 +672,6 @@
           {
             "action": "deny",
             "applications": [
-              "any"
-            ],
-            "destination_addresses": [
               "any"
             ],
             "destination_literals": [
@@ -740,9 +689,6 @@
             "name": "g-deny",
             "policy_id": 256,
             "rule_id": "junos-global->junos-global/g-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -813,18 +759,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-allow",
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -895,18 +835,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-allow",
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -988,9 +922,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -998,9 +929,6 @@
             "name": "p-nonlab",
             "rule_id": "trust->untrust/p-nonlab",
             "source_address_excluded": true,
-            "source_addresses": [
-              "10.0.1.100/32"
-            ],
             "source_book_ids": [
               3495241515
             ],
@@ -1082,9 +1010,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -1092,9 +1017,6 @@
             "name": "p-nonlab",
             "rule_id": "trust->untrust/p-nonlab",
             "source_address_excluded": true,
-            "source_addresses": [
-              "10.0.1.100/32"
-            ],
             "source_book_ids": [
               3495241515
             ],
@@ -1178,18 +1100,12 @@
             "applications": [
               "app-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-deny-ssh",
             "rule_id": "trust->untrust/p-deny-ssh",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1200,9 +1116,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -1210,9 +1123,6 @@
             "name": "p-allow",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1296,18 +1206,12 @@
             "applications": [
               "app-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-deny-ssh",
             "rule_id": "trust->untrust/p-deny-ssh",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1318,9 +1222,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -1328,9 +1229,6 @@
             "name": "p-allow",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1414,18 +1312,12 @@
             "applications": [
               "app-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-deny-ssh",
             "rule_id": "trust->untrust/p-deny-ssh",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1436,9 +1328,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -1446,9 +1335,6 @@
             "name": "p-allow",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1532,18 +1418,12 @@
             "applications": [
               "app-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-deny-ssh",
             "rule_id": "trust->untrust/p-deny-ssh",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1554,9 +1434,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -1564,9 +1441,6 @@
             "name": "p-allow",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1650,18 +1524,12 @@
             "applications": [
               "app-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-permit-ssh",
             "rule_id": "trust->untrust/p-permit-ssh",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1672,9 +1540,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -1682,9 +1547,6 @@
             "name": "p-deny-rest",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-deny-rest",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1768,18 +1630,12 @@
             "applications": [
               "app-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-permit-ssh",
             "rule_id": "trust->untrust/p-permit-ssh",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1790,9 +1646,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -1800,9 +1653,6 @@
             "name": "p-deny-rest",
             "policy_id": 1,
             "rule_id": "trust->untrust/p-deny-rest",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1880,18 +1730,12 @@
             "applications": [
               "app-icmp"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-icmp",
             "rule_id": "trust->untrust/p-icmp",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -1969,18 +1813,12 @@
             "applications": [
               "app-icmp"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-icmp",
             "rule_id": "trust->untrust/p-icmp",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -2058,18 +1896,12 @@
             "applications": [
               "app-icmp"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-icmp",
             "rule_id": "trust->untrust/p-icmp",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -2161,18 +1993,12 @@
             "applications": [
               "junos-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "block-host-ssh",
             "rule_id": "trust->junos-host/block-host-ssh",
-            "source_addresses": [
-              "10.0.0.0/8"
-            ],
             "source_book_ids": [
               488896378
             ],
@@ -2183,9 +2009,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -2193,9 +2016,6 @@
             "name": "permit-host-all",
             "policy_id": 1,
             "rule_id": "trust->junos-host/permit-host-all",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -2287,18 +2107,12 @@
             "applications": [
               "junos-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "block-host-ssh",
             "rule_id": "trust->junos-host/block-host-ssh",
-            "source_addresses": [
-              "10.0.0.0/8"
-            ],
             "source_book_ids": [
               488896378
             ],
@@ -2309,9 +2123,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -2319,9 +2130,6 @@
             "name": "permit-host-all",
             "policy_id": 1,
             "rule_id": "trust->junos-host/permit-host-all",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -2413,18 +2221,12 @@
             "applications": [
               "junos-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "block-host-ssh",
             "rule_id": "trust->junos-host/block-host-ssh",
-            "source_addresses": [
-              "10.0.0.0/8"
-            ],
             "source_book_ids": [
               488896378
             ],
@@ -2435,9 +2237,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -2445,9 +2244,6 @@
             "name": "permit-host-all",
             "policy_id": 1,
             "rule_id": "trust->junos-host/permit-host-all",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -2539,18 +2335,12 @@
             "applications": [
               "junos-ssh"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "block-host-ssh",
             "rule_id": "trust->junos-host/block-host-ssh",
-            "source_addresses": [
-              "10.0.0.0/8"
-            ],
             "source_book_ids": [
               488896378
             ],
@@ -2561,9 +2351,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -2571,9 +2358,6 @@
             "name": "permit-host-all",
             "policy_id": 1,
             "rule_id": "trust->junos-host/permit-host-all",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -2644,18 +2428,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-allow",
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -2726,18 +2504,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-reject",
             "rule_id": "trust->untrust/p-reject",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -2808,18 +2580,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-reject",
             "rule_id": "trust->untrust/p-reject",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -2893,9 +2659,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -2906,9 +2669,6 @@
             ],
             "name": "g-deny",
             "rule_id": "junos-global->junos-global/g-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -2987,9 +2747,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -3000,9 +2757,6 @@
             ],
             "name": "g-deny",
             "rule_id": "junos-global->junos-global/g-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3080,18 +2834,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
             "name": "any-to-untrust-deny",
             "rule_id": "any->any/any-to-untrust-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3167,18 +2915,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-allow",
             "rule_id": "trust->untrust/p-allow",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3251,18 +2993,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "junos-global",
             "name": "g-deny-all",
             "rule_id": "junos-global->junos-global/g-deny-all",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3340,18 +3076,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
             "name": "any-to-untrust-deny",
             "rule_id": "any->untrust/any-to-untrust-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3433,18 +3163,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
             "name": "from-any-deny",
             "rule_id": "any->trust/from-any-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3455,9 +3179,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -3465,9 +3186,6 @@
             "name": "to-any-permit",
             "policy_id": 256,
             "rule_id": "untrust->any/to-any-permit",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3549,18 +3267,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
             "name": "from-any-deny",
             "rule_id": "any->trust/from-any-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3571,9 +3283,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -3581,9 +3290,6 @@
             "name": "to-any-permit",
             "policy_id": 256,
             "rule_id": "untrust->any/to-any-permit",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3665,18 +3371,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
             "name": "from-any-deny",
             "rule_id": "any->trust/from-any-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3687,9 +3387,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -3697,9 +3394,6 @@
             "name": "to-any-permit",
             "policy_id": 256,
             "rule_id": "untrust->any/to-any-permit",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3781,18 +3475,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "untrust",
             "name": "to-any-permit",
             "rule_id": "untrust->any/to-any-permit",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3803,9 +3491,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -3813,9 +3498,6 @@
             "name": "from-any-deny",
             "policy_id": 256,
             "rule_id": "any->trust/from-any-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3897,18 +3579,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "untrust",
             "name": "to-any-permit",
             "rule_id": "untrust->any/to-any-permit",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -3919,9 +3595,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -3929,9 +3602,6 @@
             "name": "from-any-deny",
             "policy_id": 256,
             "rule_id": "any->trust/from-any-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -4013,18 +3683,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "untrust",
             "name": "to-any-permit",
             "rule_id": "untrust->any/to-any-permit",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -4035,9 +3699,6 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
@@ -4045,9 +3706,6 @@
             "name": "from-any-deny",
             "policy_id": 256,
             "rule_id": "any->trust/from-any-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -4133,18 +3791,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-lab",
             "rule_id": "trust->untrust/p-lab",
-            "source_addresses": [
-              "10.0.1.100/32"
-            ],
             "source_book_ids": [
               3495241515
             ],
@@ -4225,18 +3877,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "trust",
             "name": "p-lab",
             "rule_id": "trust->untrust/p-lab",
-            "source_addresses": [
-              "10.0.1.100/32"
-            ],
             "source_book_ids": [
               3495241515
             ],
@@ -4309,18 +3955,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "junos-global",
             "name": "g-deny-all",
             "rule_id": "junos-global->junos-global/g-deny-all",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -4398,18 +4038,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "junos-global",
             "name": "g-deny-all",
             "rule_id": "junos-global->junos-global/g-deny-all",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -4487,18 +4121,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
             "name": "any-to-untrust-deny",
             "rule_id": "any->untrust/any-to-untrust-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -4576,18 +4204,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
             "name": "any-to-untrust-deny",
             "rule_id": "any->untrust/any-to-untrust-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],
@@ -4665,18 +4287,12 @@
             "applications": [
               "any"
             ],
-            "destination_addresses": [
-              "any"
-            ],
             "destination_literals": [
               "any"
             ],
             "from_zone": "any",
             "name": "any-to-untrust-deny",
             "rule_id": "any->untrust/any-to-untrust-deny",
-            "source_addresses": [
-              "any"
-            ],
             "source_literals": [
               "any"
             ],

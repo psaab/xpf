@@ -1049,7 +1049,6 @@ func (m *Manager) ClearInterfacesWithoutGoodbye(names []string) error {
 	return errors.Join(errs...)
 }
 
-
 // claimGracefulLocked records the graceful withdrawal intent for each named
 // interface UNDER m.mu, and returns only the interfaces THIS Withdraw owns the
 // join+release for. Per interface (atomic under m.mu — #2033 MAJOR 2):

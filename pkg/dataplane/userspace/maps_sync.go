@@ -42,6 +42,7 @@ type userspaceCtrlValue struct {
 }
 
 const userspaceMetadataVersion = 4
+
 // userspaceHeartbeatTimeoutMS matches USERSPACE_DEFAULT_HEARTBEAT_TIMEOUT_MS
 // in userspace-xdp/src/lib.rs, the timeout the shim enforces for stale workers.
 const userspaceHeartbeatTimeoutMS = 5_000

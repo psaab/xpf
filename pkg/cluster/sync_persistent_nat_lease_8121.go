@@ -41,7 +41,7 @@ const (
 	// The config schema permits persistent NAT inactivity timeouts up to 24h.
 	// Refuse larger peer lifetimes before handing the record to the dataplane.
 	maxPersistentNatLeaseLifetimeNS uint64 = 86_400_000_000_000
-	minPersistentNatLeaseTimeoutNS uint64 = 1_000_000_000
+	minPersistentNatLeaseTimeoutNS  uint64 = 1_000_000_000
 	// syncMsgPersistentNatLease is the RETIRED pre-#10018 lease set. It stays
 	// reserved so a new receiver can explicitly ignore an old sender's
 	// unscoped records rather than decoding them as domain 0.

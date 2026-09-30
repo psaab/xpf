@@ -40,7 +40,7 @@ func TestUnitWireguardIdentityOverrideCaseVariantAccepted9998(t *testing.T) {
 		mixed.WriteByte(c)
 	}
 	cases := []struct {
-		name   string
+		name    string
 		privkey string
 	}{
 		{name: "upper-case restatement", privkey: upper},

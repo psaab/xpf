@@ -883,6 +883,7 @@ func (a *LegacyDataPlaneAdapter) BatchDeleteSessionsScopedV6(scoped []dataplane.
 	}
 	return m.BatchDeleteSessionsScopedV6(scoped)
 }
+
 // ListSessionsByPolicy performs the helper-owned READ phase (#10512). It is an
 // optional capability so non-userspace runtimes retain their existing
 // SessionStore surface.
@@ -894,7 +895,7 @@ func (a *LegacyDataPlaneAdapter) ListSessionsByPolicy(
 		return ControlResponse{}, err
 	}
 	return m.ListSessionsByPolicy(req)
-	}
+}
 
 // DeletePolicySessions forwards the helper-first identity-conditional policy
 // invalidation path to the published userspace adapter.

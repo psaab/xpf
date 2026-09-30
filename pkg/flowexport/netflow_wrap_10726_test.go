@@ -24,7 +24,7 @@ func TestNetflowSysUptimeWrapBoundary10726(t *testing.T) {
 func TestUptimeMsWrapsPast49Days10726(t *testing.T) {
 	now := time.Now()
 	boot50 := now.Add(-50 * 24 * time.Hour)
-	if got, want := uptimeMs(boot50, now), uint32((50*24*time.Hour).Milliseconds()); got != want {
+	if got, want := uptimeMs(boot50, now), uint32((50 * 24 * time.Hour).Milliseconds()); got != want {
 		t.Fatalf("uptimeMs(50d) = %d, want %d (wrapped mod 2^32)", got, want)
 	}
 	if got := uptimeMs(boot50, now); got >= uptimeMs(now.Add(-24*time.Hour), now) {
@@ -32,7 +32,7 @@ func TestUptimeMsWrapsPast49Days10726(t *testing.T) {
 	}
 	// Sanity: inside the window the value is exact, not wrapped.
 	boot48h := now.Add(-48 * time.Hour)
-	if got, want := uptimeMs(boot48h, now), uint32((48*time.Hour).Milliseconds()); got != want {
+	if got, want := uptimeMs(boot48h, now), uint32((48 * time.Hour).Milliseconds()); got != want {
 		t.Fatalf("uptimeMs(48h) = %d, want %d", got, want)
 	}
 }

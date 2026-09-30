@@ -67,6 +67,7 @@ type userspaceStatusProvider interface {
 type userspaceCrashProvider interface {
 	HelperCrashState() (dpuserspace.HelperCrashRecord, bool)
 }
+
 // userspaceCrashHistoryProvider is the #8397 completed-episode accessor.
 //
 // Separate from userspaceCrashProvider because current crash state and

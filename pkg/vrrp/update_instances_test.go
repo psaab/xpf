@@ -134,7 +134,7 @@ func TestUpdateInstances_BuildBeforeTeardown_KeepsOldOnSocketFailure(t *testing.
 		Interface:        "reth0.50",
 		GroupID:          101,
 		Priority:         200,
-		Preempt:           true,
+		Preempt:          true,
 		VirtualAddresses: []string{"172.16.50.1/24"},
 	}}
 	if err := m.UpdateInstances(desired); err != nil {

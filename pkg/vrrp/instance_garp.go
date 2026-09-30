@@ -153,7 +153,6 @@ func GatewayProbeTarget(ipNet *net.IPNet) (net.IP, bool) {
 // post-MAC-change reconcile GARP is always emitted. A normal send also bypasses
 // dampening when it follows a completed MASTER tenure that has since ended;
 // neighbors may have learned the peer's MAC while this node was BACKUP.
-//
 func (vi *vrrpInstance) sendGARP(force bool) {
 	vi.vipMu.Lock()
 	vips := vi.vipsSnapshot()

@@ -95,14 +95,14 @@ func TestManagerReadMergesContinuationPages10512(t *testing.T) {
 	m, controlSock := newReadOnlyManager10512(t)
 	fake := startScriptedReadFake10512(t, controlSock, []ControlResponse{
 		{
-			OK: true,
-			SessionPolicyMatches:     []SessionPolicyMatch{readMatch10512(1, 100007, 0xA1)},
+			OK:                        true,
+			SessionPolicyMatches:      []SessionPolicyMatch{readMatch10512(1, 100007, 0xA1)},
 			SessionPolicyContinuation: "c1",
 		},
 		{
-			OK: true,
-			SessionPolicyMatches:     []SessionPolicyMatch{readMatch10512(1, 100008, 0xB1)},
-			SessionPolicyComplete:    true,
+			OK:                    true,
+			SessionPolicyMatches:  []SessionPolicyMatch{readMatch10512(1, 100008, 0xB1)},
+			SessionPolicyComplete: true,
 		},
 	})
 

@@ -1262,7 +1262,7 @@ func recordSourceNATUnknownThen(rule *NATRule, thenNode *Node) {
 			// Do not descend into an unrecognised container: #7033's
 			// zero-action ordering must remain owned by NAT cardinality.
 			add(node.Name())
-	}
+		}
 	}
 
 	// Fully compact: `then source-nat <action> ...;`.

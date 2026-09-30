@@ -30,8 +30,8 @@ func (closeGuardRouteLister) RouteList(netlink.Link, int) ([]netlink.Route, erro
 func (closeGuardRouteLister) RouteListFilteredIter(int, *netlink.Route, uint64, func(netlink.Route) bool) error {
 	return nil
 }
-func (closeGuardRouteLister) LinkByIndex(int) (netlink.Link, error)                { return nil, nil }
-func (closeGuardRouteLister) LinkByName(string) (netlink.Link, error)              { return nil, nil }
+func (closeGuardRouteLister) LinkByIndex(int) (netlink.Link, error)   { return nil, nil }
+func (closeGuardRouteLister) LinkByName(string) (netlink.Link, error) { return nil, nil }
 
 // liveKeepalive is the observable state of a real keepalive goroutine planted
 // in the tunnel domain.

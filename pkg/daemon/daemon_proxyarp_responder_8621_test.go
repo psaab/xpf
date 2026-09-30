@@ -284,7 +284,7 @@ func TestResponderReconcileRefreshesVirtualMAC_10316(t *testing.T) {
 		junosRef: "reth0.80",
 		addrs:    map[string]struct{}{"172.16.80.7": {}},
 		mac:      mac1,
-		macSet:  true,
+		macSet:   true,
 	}
 	d.arpResponders.running["ge-0-0-2"] = r
 	cfg := proxyARPCfg("reth0.80", "172.16.80.7/32")
@@ -336,7 +336,7 @@ func TestResponderReconcileAndRepliesAreRaceFree_10316(t *testing.T) {
 		rgID:     2,
 		addrs:    map[string]struct{}{"172.16.80.7": {}},
 		mac:      net.HardwareAddr{0x02, 0xbf, 0x72, 0x16, 0x01, 0x00},
-		macSet:  true,
+		macSet:   true,
 	}
 	d.arpResponders.running["ge-0-0-2"] = r
 	cfg := proxyARPCfg("reth0.80", "172.16.80.7/32")

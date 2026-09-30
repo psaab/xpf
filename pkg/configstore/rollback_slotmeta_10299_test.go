@@ -125,6 +125,7 @@ func TestRollbackSlotCommentSurvivesRestart_10299(t *testing.T) {
 		}
 	}
 }
+
 // A hash alone is insufficient to reject stale metadata when a no-op commit
 // rewrites the same config bytes with a new comment. The sidecar also binds
 // each record to the rewritten file's device/inode/mtime.

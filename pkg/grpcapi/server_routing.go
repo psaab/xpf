@@ -13,22 +13,22 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/diagcmd"
 	"github.com/psaab/xpf/pkg/frr"
-	"github.com/psaab/xpf/pkg/routing"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/termsafe"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 const (
-	maxGRPCRoutes = frr.MaxBGPRoutes
-	maxGRPCBGPOutputBytes = 8 << 20
+	maxGRPCRoutes               = frr.MaxBGPRoutes
+	maxGRPCBGPOutputBytes       = 8 << 20
 	maxConcurrentGRPCRIBStreams = 2
-	bgpGRPCStreamBudget = 10 * time.Minute
+	bgpGRPCStreamBudget         = 10 * time.Minute
 )
 
 var (
-	grpcBGPStreamLimiter = diagcmd.NewLimiter(maxConcurrentGRPCRIBStreams)
+	grpcBGPStreamLimiter  = diagcmd.NewLimiter(maxConcurrentGRPCRIBStreams)
 	errGRPCBGPOutputLimit = errors.New("gRPC BGP routes response byte limit reached")
 )
 

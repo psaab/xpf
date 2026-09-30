@@ -137,9 +137,9 @@ type WgTunnelStatus struct {
 	// valid-MAC2 initiations admitted, valid-MAC2 admissions refused by
 	// the per-source pre-Noise bucket, and cookie replies suppressed by
 	// the per-window emission budget.
-	HsCookieRepliesSent      uint64 `json:"hs_cookie_replies_sent,omitempty"`
-	HsRxUnderLoadNoMac2      uint64 `json:"hs_rx_under_load_no_mac2,omitempty"`
-	HsRxUnderLoadMac2Ok      uint64 `json:"hs_rx_under_load_mac2_ok,omitempty"`
+	HsCookieRepliesSent uint64 `json:"hs_cookie_replies_sent,omitempty"`
+	HsRxUnderLoadNoMac2 uint64 `json:"hs_rx_under_load_no_mac2,omitempty"`
+	HsRxUnderLoadMac2Ok uint64 `json:"hs_rx_under_load_mac2_ok,omitempty"`
 	// #9908 valid-MAC2 initiations dropped by the per-source
 	// pre-Noise admission bucket while the responder is under load.
 	HsRxUnderLoadAdmissionDrops uint64 `json:"hs_rx_under_load_admission_drops,omitempty"`

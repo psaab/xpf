@@ -335,7 +335,6 @@ func TestPendingRollbackLegacyRecordTransitionSurvivesCrash_10696(t *testing.T) 
 	}
 }
 
-
 func TestPendingRollbackAliasPreservesPriorRecovery_10696(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	s := newTestStoreAt(t, path)

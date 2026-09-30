@@ -166,6 +166,7 @@ func containsControlBytes(s string) bool {
 func SafeInterfaceName(name string) bool {
 	return SafeUnitToken(name)
 }
+
 // SafeUnitToken is the RENDER contract for a value interpolated into a
 // single-token slot of a generated systemd unit (#10718): exactly one
 // whitespace-free token, free of control bytes, and not ending in a

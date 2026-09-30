@@ -17,6 +17,7 @@ func newTestEngine(t *testing.T, policies []*config.EventPolicy) *Engine {
 	applyPolicies9984(e, policies)
 	return e
 }
+
 // Existing matcher/remediation fixtures predate persisted planting classes.
 // Keep their trusted setup explicit without weakening production Apply, which
 // remains fail-closed for payloads with no recorded class.

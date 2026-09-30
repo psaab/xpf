@@ -225,6 +225,7 @@ func TestLoadRollbackHistory_NormalHistoryUnaffected_10296(t *testing.T) {
 		}
 	}
 }
+
 // TestSaveRollbackFiles_AllSlotsDurable_10296 pins the second half of the
 // issue: every canonical text rollback slot (not only slot 1) is routed
 // through WriteFileDurable, so a power cut cannot publish an unsynced or

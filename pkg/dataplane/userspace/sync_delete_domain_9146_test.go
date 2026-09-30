@@ -404,6 +404,7 @@ func TestDeleteSessionItselfNamesTheDomainOnTheWire9146(t *testing.T) {
 		}
 	}
 }
+
 // A helper refusal is not a successful mirror deletion.  The authoritative
 // row must remain discoverable so a retry can retract the helper session; the
 // old mirror-first order made this impossible and leaked the helper row until

@@ -43,6 +43,7 @@ func TestMTUOwnershipIsPerResolvedNetdev_9985(t *testing.T) {
 		}
 	}
 }
+
 // An unzoned tunnel still owns its configured Linux device. A separately
 // authored ordinary alias that canonicalizes to the same netdev must yield to
 // that owner; discovering ownership only from zone references misses this.
@@ -53,7 +54,7 @@ func TestUnzonedTunnelOwnerSuppressesAliasReference_9985(t *testing.T) {
 		}},
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
 			"gre-0": {
-				Name: "gre-0",
+				Name:   "gre-0",
 				Tunnel: &config.TunnelConfig{Name: "gre-0", Mode: "gre", Source: "192.0.2.1", Destination: "192.0.2.2"},
 			},
 			"gre/0": {
@@ -120,7 +121,7 @@ func TestTunneledRethPlansMemberMTU_9985(t *testing.T) {
 			"reth0": {
 				Name: "reth0", MTU: 1400, RedundancyGroup: 1,
 				Tunnel: &config.TunnelConfig{Name: "reth0", Mode: "gre", Source: "192.0.2.1", Destination: "192.0.2.2"},
-				Units: map[int]*config.InterfaceUnit{0: {Number: 0}},
+				Units:  map[int]*config.InterfaceUnit{0: {Number: 0}},
 			},
 			"ge-0/0/0": {
 				Name: "ge-0/0/0", RedundantParent: "reth0",
@@ -206,7 +207,7 @@ func TestDeletedInterfaceMTUPlansExplicitLinuxDefault_9985(t *testing.T) {
 		}},
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
 			"ge-0/0/1": {
-				Name: "ge-0/0/1",
+				Name:  "ge-0/0/1",
 				Units: map[int]*config.InterfaceUnit{0: {Number: 0}},
 			},
 		}},

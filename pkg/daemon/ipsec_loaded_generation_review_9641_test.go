@@ -177,7 +177,6 @@ func TestAttributionKeepsThePromotedConfigWhenItCannotBeCompared9641(t *testing.
 	}
 }
 
-
 // CODEX RE-CHECK, finding 2. charon runs C1, which this process loaded. A rollback's
 // reload then fails, and so do ipsecWrittenMax+1 more applies of distinct generations.
 // Their writes push C1 out of the written list, yet charon still runs C1. Unguarded, C1

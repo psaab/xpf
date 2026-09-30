@@ -321,7 +321,7 @@ type vrrpInstance struct {
 	// delta that could not be fully reflected in the kernel. The manager retries
 	// desired != stored on its next reconciliation and gates RG readiness while
 	// the divergence remains.
-	vipUpdateFailures  atomic.Uint64
+	vipUpdateFailures atomic.Uint64
 	vipUpdateDiverged atomic.Bool
 
 	// vipReconcileBackoff overrides the spacing between stale-VIP remove-reconcile

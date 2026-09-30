@@ -319,7 +319,6 @@ func (vi *vrrpInstance) removeVIPsResultLocked(vips []string) ([]string, error) 
 	return failed, firstErr
 }
 
-
 // reconcileVIP re-adds this instance's VIPs if it is currently MASTER, then
 // forces a GARP burst — but only if the instance is STILL the current-generation
 // MASTER after the netlink add completes (#5082). ReconcileVIPs runs on the

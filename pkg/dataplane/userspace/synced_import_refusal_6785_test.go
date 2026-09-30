@@ -117,7 +117,6 @@ func primeTakeoverReady10788(t *testing.T, m *Manager) {
 	m.eventStream = boundEventStream(t)
 }
 
-
 // TestSyncedImportRefusalRollsBackWithoutGatingTakeover6785 is the #6785
 // contract on the Go side, and it is a PAIRED test: the same call site, two
 // helper answers, opposite health outcomes.
