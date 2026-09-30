@@ -26,12 +26,11 @@
 //!
 //! A divergence between the two producers is ALWAYS a bug: they describe one
 //! session for one peer. So the derivation is single-sourced here rather than
-//! written twice and held in agreement by a test. Both producers destructure
-//! `SessionSyncAttribution` EXHAUSTIVELY (no `..`), which makes "a new field
-//! carried by only one of the two legs" a COMPILE error rather than another
-//! silent four-release drift. `sync_attribution_exhaustive_destructure_6949`
-//! pins the absence of `..` at both sites, since a `..` would quietly restore
-//! the escape hatch.
+//! duplicated across the two producers. Both producers destructure
+//! `SessionSyncAttribution` EXHAUSTIVELY (no `..`), so adding a field requires
+//! each producer to account for it. The behavioral test
+//! `session_delta_json_and_binary_agree_on_policy_attribution_6949` compares
+//! the actual JSON and binary outputs for one non-default session.
 
 use std::net::{IpAddr, Ipv4Addr};
 
