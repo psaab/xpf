@@ -161,11 +161,6 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 	// common path. The clear error is captured and returned at the end so
 	// the caller can observe (and a future caller retry) instead of leaving
 	// orphaned rules in an unobservable window (#2273).
-	// per-family list does NOT abort the apply — we still re-add every
-	// desired rule below so forward progress is preserved on the common
-	// path. The clear error is captured and returned at the end so the
-	// caller can observe (and a future caller retry) instead of leaving
-	// orphaned rules in an unobservable window (#2273).
 	clearErr := n.clear()
 	if clearErr != nil {
 		slog.Warn("failed to clear old next-table rules", "err", clearErr)
