@@ -1304,24 +1304,24 @@ plain `then dscp` is not applied on lo0); only the drop is enforced.
 
 ### `then reject` synthesizes an active reply (#2521)
 
-`FilterAction::Reject` (`then reject`) no longer realizes as a silent
-drop. It now synthesizes and transmits an active reject reply — a TCP
-RST for TCP, an ICMP/ICMPv6 administratively-prohibited Destination
-Unreachable otherwise — using the **same** machinery as policy
-`reject`. `FilterAction::Discard` (`then discard`) is unchanged: still
-a silent drop, no reply.
+`FilterAction::Reject` (`then reject`) synthesizes an active reply — a TCP
+RST for TCP, or the ICMP/ICMPv6 Destination Unreachable selected by the
+term's configured `then reject <message-type>` for non-TCP. A bare filter
+`then reject` defaults to administratively-prohibited. This is distinct
+from security-policy `reject` (#11303), which sends TCP RST for TCP and
+port-unreachable for UDP only; other non-TCP/UDP protocols are dropped
+silently. `FilterAction::Discard` (`then discard`) remains a silent drop.
 
-The synthesis is the shared `enqueue_reject_reply` in
-`poll_descriptor/reject_reply.rs`; `enqueue_policy_reject_reply` and
-`enqueue_filter_reject_reply` are thin wrappers over it that differ
-only in the success counter (`policy_reject_sent` vs
-`filter_reject_sent`). Filter reject is wired at every input/lo0
-filter drop site in `poll_descriptor/mod.rs` that previously recycled
-the descriptor on a terminal action: the new-flow input filter, the
+Both sources use the shared `enqueue_reject_reply` synthesis,
+output-classification, and suppression machinery. The policy wrapper
+selects Junos's protocol-specific response (#11303); the filter wrapper
+passes the configured message-type. They differ in their success counters
+(`policy_reject_sent` vs `filter_reject_sent`). Filter reject is wired at
+every input/lo0 filter drop site in `poll_descriptor/mod.rs` that previously
+recycled the descriptor on a terminal action: the new-flow input filter, the
 DSCP/L4-sensitive session-hit re-evaluation, and both lo0 local-delivery
-paths. `apply_lo0_filter_action` returns the matched `FilterAction`
-(not a bare drop `bool`) so the caller can tell `Reject` from
-`Discard`.
+paths. `apply_lo0_filter_action` returns the matched `FilterAction` (not a
+bare drop `bool`) so the caller can tell `Reject` from `Discard`.
 
 The OUTPUT-firewall-filter (interface `filter output`) `then reject` on
 the transit forward / TX/CoS path is wired the same way (#3608). The
@@ -1341,30 +1341,29 @@ outcome, so a reject whose reply fail-closes logs DENY, not REJECT
 (#3615). The builder gets the ingress TX pipeline + counters via the
 `ForwardRejectReply` context passed by its poll-loop callers.
 
-Zone-level Junos `tcp-rst` (#3071) reuses the same `enqueue_policy_reject_reply`
-machinery through the unified `enqueue_deny_reply` decision helper. Both
-policy-deny call sites in `poll_descriptor/mod.rs` now call
-`enqueue_deny_reply(..., is_reject, from_zone_id)`: when `is_reject` (policy
-`then reject`) it actively rejects every protocol as before; otherwise (plain
-`deny` / default-deny) it sends a TCP RST **only** when the flow is TCP and the
-INGRESS (from) zone has `tcp-rst` enabled (`ForwardingState::zone_tcp_rst_enabled`,
-populated from `ZoneSnapshot.tcp_rst`). Non-TCP denied traffic and a deny in a
-non-tcp-rst zone stay silent drops. A zone-tcp-rst RST is counted under
-`policy_reject_sent` — it is a policy-deny-driven reset. Junos applies `tcp-rst`
-to the source/from zone so the RST is sent back toward the connection
-initiator, whose interface is bound to the from-zone.
+Zone-level Junos `tcp-rst` (#3071) reuses the policy-reply machinery through
+the unified `enqueue_deny_reply` decision helper. Both policy-deny call sites
+in `poll_descriptor/mod.rs` call `enqueue_deny_reply(..., is_reject,
+from_zone_id)`: for policy `then reject`, TCP gets an RST, UDP gets
+port-unreachable, and other protocols are silently dropped (#11303).
+Otherwise (plain `deny` / default-deny), it sends a TCP RST only when the
+flow is TCP and the INGRESS (from) zone has `tcp-rst` enabled
+(`ForwardingState::zone_tcp_rst_enabled`, populated from
+`ZoneSnapshot.tcp_rst`). Non-TCP denied traffic and a deny in a non-tcp-rst
+zone stay silent drops. A zone-tcp-rst RST is counted under
+`policy_reject_sent` — it is a policy-deny-driven reset. Junos applies
+`tcp-rst` to the source/from zone so the RST is sent back toward the
+connection initiator, whose interface is bound to the from-zone.
 
-Because the generated reply runs through the SAME path as policy
-reject, it inherits the #2238 output-filter / CoS / DSCP
-classification (`classify_generated_reply`, keyed on the reply's OWN
-egress tuple) and the SYN-cookie TX-frame budget gate — and a future
-per-reason generated-reply rate limiter (#2472) covers filter reject
-automatically (no parallel, un-limitable emit path). Budget exhaustion,
-output-filter drops, and parse-error drops share policy reject's
-counters and its fail-closed behavior (the caller still drops the
-packet when synthesis returns `false`). The RT_FLOW filter-log action
-maps `Reject → reject` (matching policy reject and Junos), `Discard →
-deny`.
+Policy and filter replies share the downstream generated-reply path:
+#2238 output-filter / CoS / DSCP classification
+(`classify_generated_reply`, keyed on the reply's OWN egress tuple), the
+SYN-cookie TX-frame budget gate, and the future per-reason generated-reply
+rate limiter (#2472). Budget exhaustion, output-filter drops, and parse
+errors retain their existing source attribution and fail-closed behavior;
+the caller still drops the packet when synthesis returns `false`. The
+RT_FLOW filter-log action maps `Reject → reject` (matching policy reject
+and Junos), `Discard → deny`.
 
 **Scope (resolved #3608):** output-firewall-filter `then reject` on the
 TX/CoS path is now an active reject too — see the OUTPUT-filter paragraph

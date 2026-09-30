@@ -1,18 +1,15 @@
-// #2089 policy-`reject` reply synthesis: emit a TCP RST (for TCP) or an
-// ICMP/ICMPv6 Destination Unreachable, administratively prohibited (for
-// every other non-suppressed protocol) instead of the silent drop that
-// `then deny` produces. Lifted out of poll_descriptor/mod.rs so the hot
-// ingress loop does not carry the reject-path bodies in its codegen unit,
-// mirroring cookie_reply.rs.
+// #2089 policy-`reject` replies use Junos policy semantics (#11303): TCP gets
+// a RST, UDP gets ICMP/ICMPv6 port-unreachable, and other protocols are dropped.
+// Plain `deny` stays silent unless the source zone enables `tcp-rst` for TCP.
 //
-// `enqueue_policy_reject_reply` is on the cold policy-deny exception arm
-// only and fires solely when the matched action is `PolicyAction::Reject`,
-// so it is a true cold/exception body — `#[cold] #[inline(never)]` places
-// it in `.text.unlikely`, away from the hot loop's cache lines. It reuses
-// the SYN-cookie TX-frame budget gate so a rejected-flow flood can never
-// starve transit TX frames; on a budget or build failure it returns false
-// and the caller still drops the packet (fail-closed — never logs a reject
-// that did not happen).
+// `enqueue_policy_reject_reply` is on the cold policy-deny exception arm and
+// fires only for explicit `PolicyAction::Reject` or a TCP source-zone `tcp-rst`.
+// It reuses the SYN-cookie TX-frame budget gate; failures return false and the
+// caller still drops. Unsupported policy-reject protocols return false before
+// attempting to build or enqueue a reply.
+//
+// The shared filter-reject entry point retains its independent message-type
+// behavior; see `enqueue_filter_reject_reply`.
 
 use super::cookie_reply::syn_cookie_reply_budget_available;
 use super::worker::WorkerTxPipeline;
@@ -49,6 +46,11 @@ pub(super) fn enqueue_policy_reject_reply(
     flow: &SessionFlow,
     counters: &mut BatchCounters,
 ) -> bool {
+    let reject_message = match meta.protocol {
+        PROTO_TCP => crate::filter::RejectMessage::ADMIN_PROHIBITED,
+        PROTO_UDP => crate::filter::RejectMessage::PORT_UNREACHABLE,
+        _ => return false,
+    };
     enqueue_reject_reply(
         tx_pipeline,
         forwarding,
@@ -58,20 +60,20 @@ pub(super) fn enqueue_policy_reject_reply(
         flow,
         counters,
         RejectReplySource::Policy,
-        // #6854: a POLICY reject has no filter term and so no message-type;
-        // it keeps the administratively-prohibited codes it has always sent.
-        crate::filter::RejectMessage::ADMIN_PROHIBITED,
+        reject_message,
     )
 }
 
-/// #2521: firewall-filter `then reject` now synthesizes the SAME active
-/// reply as policy `reject` (TCP RST for TCP, ICMP/ICMPv6 admin-prohibited
-/// unreachable otherwise) instead of the historical silent drop. Reuses the
-/// exact synthesis + #2238 output-classification path via the shared
-/// `enqueue_reject_reply`; only the success counter differs
-/// (`filter_reject_sent` vs `policy_reject_sent`). Budget, output-filter, and
-/// parse-error drops share policy reject's counters and its fail-closed
-/// behavior (the caller still drops the packet on a `false` return).
+/// #2521: firewall-filter `then reject` synthesizes an active reply using
+/// the configured `then reject <message-type>` (admin-prohibited by default)
+/// for non-TCP traffic, unlike policy `then reject` (#11303), which sends
+/// port-unreachable only for UDP and silently drops other protocols. TCP
+/// rejects in both paths use the same RST builder. Both reuse the exact
+/// synthesis + #2238 output-classification path via `enqueue_reject_reply`;
+/// only the success counter differs (`filter_reject_sent` vs
+/// `policy_reject_sent`). Budget and output-filter drops retain source-specific
+/// counters, parse errors stay source-neutral, and every failure remains
+/// fail-closed (the caller still drops the packet on a `false` return).
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
@@ -105,9 +107,9 @@ pub(in crate::afxdp) fn enqueue_filter_reject_reply(
 /// sites in `poll_descriptor`. Replaces the bare `if action == Reject` arm so
 /// the zone-level `tcp-rst` knob is honored alongside explicit `then reject`:
 ///
-/// * `is_reject` (policy `then reject`): active reject for EVERY protocol — a
-///   TCP RST for TCP, an ICMP/ICMPv6 admin-prohibited unreachable otherwise.
-///   Unchanged from #2089.
+/// * `is_reject` (policy `then reject`): TCP RST for TCP, ICMP/ICMPv6
+///   port-unreachable for UDP, and a silent drop for every other protocol
+///   (#11303).
 /// * otherwise (plain `deny` / default-deny): a silent drop UNLESS the flow is
 ///   TCP AND the INGRESS (from) zone has Junos `tcp-rst` enabled, in which
 ///   case a TCP RST is sent back toward the source. Junos `tcp-rst` only

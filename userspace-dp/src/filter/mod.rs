@@ -88,10 +88,19 @@ pub(crate) struct RejectMessage {
 impl RejectMessage {
     /// ICMPv4 code 13 / ICMPv6 code 1 -- "communication administratively
     /// prohibited". What the dataplane hardcoded for every reject before
-    /// #6854, and what a term with no message-type still resolves to.
+    /// #6854, and what a filter term with no message-type still resolves to.
     pub(crate) const ADMIN_PROHIBITED: Self = Self {
         v4_code: 13,
         v6_code: 1,
+    };
+    /// ICMPv4 code 3 / ICMPv6 code 4 -- "port unreachable". What a POLICY
+    /// `then reject` sends for UDP (#11303: Junos answers a policy-rejected
+    /// UDP packet with port-unreachable and drops every other non-TCP
+    /// protocol silently), and what `resolve_reject_message("port-unreachable")`
+    /// returns for a filter term with that explicit message-type.
+    pub(crate) const PORT_UNREACHABLE: Self = Self {
+        v4_code: 3,
+        v6_code: 4,
     };
 }
 
