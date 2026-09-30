@@ -11891,7 +11891,7 @@ fn a_reverse_match_from_the_wrong_zone_is_rejected_7169() {
         &sessions,
         &shared,
         &ForwardingState::default(),
-        &SharedSessionOwnerRgIndexes::default(),
+        &shared_owner_rg_indexes,
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Zone(7),
     );
