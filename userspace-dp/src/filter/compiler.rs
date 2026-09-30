@@ -723,20 +723,19 @@ fn preflight_term_markers(
             term: snap.name.clone(),
         });
     }
-    // #9875: the Go control plane sets `from_unrepresentable` when the term's
-    // `from` block carried a match leaf the dataplane does NOT enforce
-    // (recorded on term.UnknownFrom, #3307) or a value-bearing leaf written
-    // with NO operand (recorded on term.ValuelessFrom, #8480). The strict
-    // commit gates (validateFilterFromMatchStrict,
-    // validateFirewallFilterValuelessFromStrict) reject both, so a committed
-    // config never sets this. The pre-fix builder emitted only the surviving
-    // match set — byte-identical to a term authored without the leaf — so an
-    // accept term over-permitted and a discard/reject term over-dropped with
-    // no signal past the boot warning. Fail the whole snapshot closed
-    // instead — not term poisoning, because poisoning a discard/reject term
-    // to match-nothing would let its traffic fall through to the implicit
-    // accept (fail-OPEN). Checked before any mutation so the preflight stays
-    // non-mutating.
+    // #9875/#11334: the Go control plane sets `from_unrepresentable` when the
+    // term's `from` block carries a constraint the dataplane does NOT enforce:
+    // an unrecognized match leaf (recorded on term.UnknownFrom, #3307), the
+    // literal-address `except` construct (also term.UnknownFrom, #11334), or
+    // a value-bearing leaf written with NO operand (term.ValuelessFrom, #8480).
+    // The strict commit gates reject these, so a committed config never sets
+    // this. The pre-fix builder emitted only the surviving match set — byte-
+    // identical to a term authored without the constraint — so an accept term
+    // over-permitted and a discard/reject term over-dropped with no signal past
+    // the boot warning. Fail the whole snapshot closed instead — not term
+    // poisoning, because poisoning a discard/reject term to match-nothing would
+    // let its traffic fall through to the implicit accept (fail-OPEN). Checked
+    // before any mutation so the preflight stays non-mutating.
     if snap.from_unrepresentable {
         return Err(SnapshotIntegrityError::UnrepresentableFilterFrom {
             family: filter_family.to_string(),

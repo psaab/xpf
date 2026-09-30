@@ -1350,6 +1350,50 @@ func firewallMatchValues(child *Node) []string {
 	return vals
 }
 
+// firewallAddressValues reads an address leaf's literal values from both AST
+// slots, while recognizing Junos's post-value `except` modifier separately.
+// Literal-address except is currently unsupported; keeping its modifier out of
+// the address list prevents the strict gate from misdiagnosing it as malformed.
+func firewallAddressValues(child *Node) (values []string, hasExcept bool) {
+	if child == nil || len(child.Keys) == 0 {
+		return nil, false
+	}
+	self := child.Keys[0]
+	for i, key := range child.Keys[1:] {
+		keyIndex := i + 1
+		if key == self && !child.KeyQuoted(keyIndex) {
+			continue
+		}
+		if key == "except" && !child.KeyQuoted(keyIndex) {
+			hasExcept = true
+			continue
+		}
+		if key != "" {
+			values = append(values, key)
+		}
+	}
+	for _, valueNode := range child.Children {
+		for i, key := range valueNode.Keys {
+			if key == "except" && !valueNode.KeyQuoted(i) {
+				hasExcept = true
+				continue
+			}
+			if key != "" {
+				values = append(values, key)
+			}
+		}
+	}
+	return values, hasExcept
+}
+
+func unsupportedLiteralAddressExcept(leaf string, values []string) string {
+	construct := leaf
+	if len(values) > 0 {
+		construct += " " + strings.Join(values, " ")
+	}
+	return construct + " except (unsupported literal-address except construct)"
+}
+
 // firewallPrefixListRefs extracts every prefix-list reference carried by a
 // firewall-filter `from source-prefix-list` / `destination-prefix-list` match
 // node, across BOTH parser AST shapes (#3843 — the prefix-list-ref instance of
@@ -1590,22 +1634,28 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 				term.CrossFamilyMatchSpellings = append(term.CrossFamilyMatchSpellings, child.Name())
 			}
 		case "source-address":
-			// Multi-value (#2419/#2545): a bracket/flat-set list collapses
-			// onto child.Keys[1:] (firewallMatchValues), a hierarchical
-			// block carries each address as a child node — handle both.
-			// #6463/#10011: record every literal classifyFilterAddrFamily rejects
-			// on term.UnknownAddresses (kept VERBATIM in SourceAddresses) so the
-			// snapshot builder can set the AddressUnrepresentable wire marker
-			// on the tolerant path — the Rust parse_address drops such a token
-			// per-token, and a partially-malformed or zone-scoped list would
-			// otherwise silently narrow a discard/reject term (fail-open).
-			srcValues := firewallMatchValues(child)
+			// Multi-value (#2419/#2545): read the bracket/flat-set and
+			// hierarchical-block shapes. #11334: literal-address `except` is
+			// not supported by the matcher; remove the modifier from the
+			// address tokens and record the exact unsupported construct on
+			// UnknownFrom, so strict commit names it and the tolerant snapshot
+			// fails closed via FromUnrepresentable instead of calling it a
+			// malformed address.
+			srcValues, srcExcept := firewallAddressValues(child)
 			recordFilterAddrTokens(term, srcValues)
 			term.SourceAddresses = append(term.SourceAddresses, srcValues...)
+			if srcExcept {
+				term.UnknownFrom = append(term.UnknownFrom,
+					unsupportedLiteralAddressExcept(child.Name(), srcValues))
+			}
 		case "destination-address":
-			dstValues := firewallMatchValues(child)
+			dstValues, dstExcept := firewallAddressValues(child)
 			recordFilterAddrTokens(term, dstValues)
 			term.DestAddresses = append(term.DestAddresses, dstValues...)
+			if dstExcept {
+				term.UnknownFrom = append(term.UnknownFrom,
+					unsupportedLiteralAddressExcept(child.Name(), dstValues))
+			}
 		case "destination-port":
 			// #3205: resolve named/service ports to numerics and record any
 			// unresolved token for the strict commit gate (fail closed).

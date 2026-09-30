@@ -195,21 +195,19 @@ type FirewallTermSnapshot struct {
 	// whole snapshot instead. omitempty + the Rust serde default keep wire
 	// parity with an older control plane that omits the field (#1961).
 	AddressUnrepresentable bool `json:"address_unrepresentable,omitempty"`
-	// FromUnrepresentable (#9875) is set true when the term's `from` block
-	// carried a match leaf the dataplane does NOT enforce (recorded on
-	// term.UnknownFrom, #3307 — ttl / source-mac-address / ip-options /
-	// fragment-offset / hop-limit / ...) or a value-bearing leaf written
-	// with NO operand (recorded on term.ValuelessFrom, #8480 — `from
-	// protocol;`). Both compile to a term missing a constraint the
-	// operator authored: the strict commit gates
-	// (validateFilterFromMatchStrict, validateFirewallFilterValuelessFromStrict)
-	// reject them, so a committed config never sets this; it is the
-	// helper-boundary fail-closed marker for the tolerant load / peer-sync
-	// path. Without it the snapshot carried only the surviving match set —
-	// byte-identical to a term authored without the leaf — so an accept
-	// term over-permitted and a discard/reject term over-dropped with no
-	// signal past the boot warning. With this flag the Rust filter
-	// compiler raises SnapshotIntegrityError::UnrepresentableFilterFrom
+	// FromUnrepresentable (#9875/#11334) is set true when the term's `from`
+	// block carries a constraint the dataplane does NOT enforce: an unrecognized
+	// leaf (recorded on term.UnknownFrom, #3307), the literal-address `except`
+	// construct (recorded on term.UnknownFrom, #11334), or a value-bearing leaf
+	// written with NO operand (recorded on term.ValuelessFrom, #8480 — `from
+	// protocol;`). Both compile to a term missing a constraint the operator
+	// authored; the strict commit gates reject them, so a committed config never
+	// sets this. It is the helper-boundary fail-closed marker for tolerant load /
+	// peer-sync. Without it the snapshot carried only the surviving match set —
+	// byte-identical to a term authored without the constraint — so an accept
+	// term over-permitted and a discard/reject term over-dropped with no signal
+	// past the boot warning. With this flag the Rust filter compiler raises
+	// SnapshotIntegrityError::UnrepresentableFilterFrom
 	// and rejects the whole snapshot instead (the reconcile preflight
 	// keeps the previous good filter state). Whole-snapshot rejection —
 	// not term poisoning — because poisoning a discard/reject term to

@@ -8312,6 +8312,22 @@ which IS the defect the marker closes. Fail-on-revert:
 `pkg/config/firewall_from_unrepresentable_9875_test.go`), and
 `from_unrepresentable_marker_*` (Rust).
 
+**Literal firewall address `except` is recognized but unsupported (#11334).**
+For example, `from source-address 10.0.0.0/8 except` used to pass `except`
+through the literal-address classifier as though it were an IP/CIDR, producing
+a misleading strict `malformed address` error and setting
+`address_unrepresentable` on tolerant load. The compiler now separates that
+modifier before address classification and records the full literal-address
+`except` construct as an unsupported `from` predicate: strict commit names it
+as unsupported, while tolerant load warns and sets the existing
+`from_unrepresentable` marker so the whole userspace snapshot and kernel lo0
+plan fail closed. This deliberately does NOT implement literal-address except
+matching; `except` on a prefix-list remains supported. The change reuses the
+existing wire marker, so no protocol-version change is needed. Covered by
+`TestFirewallLiteralAddressExceptNamedUnsupported11334` (Go config compiler)
+and `TestFilterSnapshotLiteralAddressExceptFailsClosed11334` (Go snapshot
+builder).
+
 ### `firewall ... from` cross-field satisfiability — port/tcp-flags/icmp must match the protocol (#3723)
 
 A firewall-filter `from` block can combine a `protocol` (or the inet6
