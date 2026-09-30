@@ -115,6 +115,9 @@ type LearnedRoute struct {
 	TableID int
 	// Family is netlink.FAMILY_V4 or netlink.FAMILY_V6.
 	Family int
+	// Metric is the Linux route priority (RTA_PRIORITY). Lower metrics win
+	// within one learned prefix; snapshots keep the fixed import preference.
+	Metric int
 	// Destination is the route prefix in CIDR form. A kernel default route
 	// carries a nil Dst; it is normalised here to "0.0.0.0/0" or "::/0" so
 	// the consumer never has to special-case it. Getting this wrong would
@@ -262,6 +265,7 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 	return LearnedRoute{
 		TableID:     tableID,
 		Family:      family,
+		Metric:      r.Priority,
 		Destination: dst,
 		NextHops:    nextHops,
 		Protocol:    rtProtoName(r.Protocol),

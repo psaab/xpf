@@ -791,6 +791,10 @@ routing, and only on double fault).
     first live tier by preference. A live kernel-selected route at 200
     normally wins, while a live floating-static backup can still carry
     traffic if an earlier tier is unresolved (#11316).
+  - For duplicate kernel-learned prefixes, the lowest Linux route metric
+    (`RTA_PRIORITY`) wins before the helper stamps its fixed preference 200
+    (#11388). This prevents gateway text ordering from selecting a worse
+    metric; equal-metric candidates remain available.
   - It is **BOUNDED, and refuses rather than truncates (#8355).** A
     learned route serializes to ~113 bytes — stable to within 1.5% from
     one route to 500,000, which is what makes a route COUNT derivable

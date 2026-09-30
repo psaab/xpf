@@ -1257,9 +1257,15 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 		if a.Destination != b.Destination {
 			return a.Destination < b.Destination
 		}
+		if a.Metric != b.Metric {
+			return a.Metric < b.Metric
+		}
 		return strings.Join(a.NextHops, ",") < strings.Join(b.NextHops, ",")
 	})
 
+	var lastMetricKey string
+	var lowestMetric int
+	haveMetricKey := false
 	for _, lr := range sorted {
 		family := "inet"
 		if lr.Family == netlink.FAMILY_V6 {
@@ -1284,6 +1290,19 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			continue
 		}
 		key := learnedRouteGapKey(table, family, dest)
+		// Imported destinations are canonical CIDRs, so the table/family/
+		// destination sort above keeps every same-prefix metric group adjacent.
+		// Keep equal-metric entries (including same-cost paths), but discard
+		// strictly worse kernel metrics before stamping the shared preference.
+		if haveMetricKey && key == lastMetricKey {
+			if lr.Metric > lowestMetric {
+				continue
+			}
+		} else {
+			lastMetricKey = key
+			lowestMetric = lr.Metric
+			haveMetricKey = true
+		}
 		if best, ok := configuredPreference[key]; ok &&
 			best <= routing.LearnedRouteImportPreference {
 			// The configured route is at least as preferred as the imported
