@@ -297,9 +297,9 @@ impl DnatTable {
         self.entries.values().map(|v| v.len()).sum::<usize>()
             + self.prefix_entries.values().map(|v| v.len()).sum::<usize>()
     }
-    /// Does an L4-scoped DNAT translation remain possible for a flowless
-    /// packet? Protocol 255 is the non-first-fragment unknown sentinel; it is
-    /// treated as possible without recovering protocol or ports from bytes.
+    /// Can a flowless packet match an L4-scoped DNAT translation?
+    /// Protocol 255 is the non-first-fragment unknown sentinel; it is treated
+    /// as possible without recovering protocol or ports from bytes.
     pub(crate) fn flowless_l4_translation_possible(
         &self,
         protocol: u8,
@@ -309,10 +309,54 @@ impl DnatTable {
         ingress_ifname: &str,
         ingress_routing_instance: &str,
     ) -> bool {
+        self.flowless_l4_rule_possible(
+            protocol,
+            src_ip,
+            dst_ip,
+            zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            false,
+        )
+    }
+
+    /// Could an unavailable-L4 DNAT rule, including an explicit `off`
+    /// exemption, take precedence over an address-only match?
+    pub(crate) fn flowless_l4_precedence_possible(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+    ) -> bool {
+        self.flowless_l4_rule_possible(
+            protocol,
+            src_ip,
+            dst_ip,
+            zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn flowless_l4_rule_possible(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        include_off: bool,
+    ) -> bool {
         let protocol_unknown = protocol == u8::MAX;
         let carries_ports = protocol_unknown || crate::ip_proto::has_l4_ports(protocol);
         let entry_possible = |entry: &DnatEntry, entry_protocol: u16, entry_port: u16| {
-            if entry.off
+            if (entry.off && !include_off)
                 || (!entry.from_zone.is_empty() && entry.from_zone.as_ref() != zone)
                 || !entry.scope_ok(ingress_ifname, ingress_routing_instance)
                 || !entry.source_matches(src_ip)
@@ -368,7 +412,8 @@ impl DnatTable {
                     .any(|entry| entry_possible(entry, key.protocol, key.dst_port))
         }) || self.prefix_entries.iter().any(|(key, slots)| {
             slots.iter().any(|slot| {
-                slot.contains(dst_ip) && entry_possible(&slot.entry, key.protocol, key.dst_port)
+                slot.contains(dst_ip)
+                    && entry_possible(&slot.entry, key.protocol, key.dst_port)
             })
         })
     }

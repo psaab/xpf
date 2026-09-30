@@ -586,6 +586,17 @@ sync.
     any untranslatable candidate; raw ESP/AH remains unchanged for Stage-11
     passthrough and reassembly. Plain no-NAT fragments still use the normal
     buffer-and-retry path.
+  - **#11435 — address-only DNAT/NPTv6 before flowless route and policy:** the
+    flowless base resolver now applies the flow-backed pre-routing order
+    (static DNAT, dynamic DNAT, inbound NPTv6) before local/route resolution, and
+    transit security policy sees the translated L3 destination. Ambiguous
+    L4-dependent matches are not guessed; DNAT-off precedence and the existing
+    fail-closed NAT fence remain authoritative. Applied destination rewrites
+    still run the independent source-NAT fence.
+    NoRoute and MissingNeighbor retain their drop/retry fence because those
+    slow-path dispositions cannot reapply the flowless destination rewrite.
+    Regression cells cover dynamic/static VIP DNAT, post-NAT protocol policy,
+    non-first fragments, NPTv6 and SNAT preservation.
   - **#5467 — egress `filter output` on the flowless TX path:** the #3291 gate
     above enforces the INGRESS input filter / PBR / zone policy on a flowless
     packet, but the EGRESS interface `filter output` was evaluated only on the

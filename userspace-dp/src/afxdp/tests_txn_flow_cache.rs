@@ -2853,6 +2853,426 @@ fn run_6837_descriptor(
     )
 }
 
+fn flowless_gre_ipv4_frame(dst: Ipv4Addr) -> (Vec<u8>, UserspaceDpMeta) {
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let mut frame = Vec::with_capacity(54);
+    write_eth_header(
+        &mut frame,
+        [0x02, 0xbf, 0x72, 0x01, 0x00, 0x01],
+        [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5],
+        0,
+        0x0800,
+    );
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x28, 0x00, 0x01, 0x00, 0x00, 64, crate::ip_proto::PROTO_GRE, 0x00,
+        0x00,
+    ]);
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    let ip_sum = checksum16(&frame[14..34]);
+    frame[24] = (ip_sum >> 8) as u8;
+    frame[25] = (ip_sum & 0xff) as u8;
+    frame.extend_from_slice(&[0u8; 20]);
+
+    let mut meta = txn_meta_v4(24, 0, (frame.len() - 14) as u16);
+    meta.protocol = crate::ip_proto::PROTO_GRE;
+    meta.flow_src_addr[..4].copy_from_slice(&src.octets());
+    meta.flow_dst_addr[..4].copy_from_slice(&dst.octets());
+    (frame, meta)
+}
+
+fn flowless_non_first_fragment_ipv4_frame(dst: Ipv4Addr) -> (Vec<u8>, UserspaceDpMeta) {
+    let (mut frame, mut meta) = flowless_gre_ipv4_frame(dst);
+    frame[20] = 0x20;
+    frame[21] = 0x01;
+    frame[24] = 0;
+    frame[25] = 0;
+    let ip_sum = checksum16(&frame[14..34]);
+    frame[24] = (ip_sum >> 8) as u8;
+    frame[25] = (ip_sum & 0xff) as u8;
+    meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+    meta.l4_offset = 34;
+    meta.payload_offset = 34;
+    (frame, meta)
+}
+
+fn flowless_gre_ipv6_frame(src: Ipv6Addr, dst: Ipv6Addr) -> (Vec<u8>, UserspaceDpMeta) {
+    let mut frame = Vec::with_capacity(74);
+    write_eth_header(
+        &mut frame,
+        [0x02, 0xbf, 0x72, 0x01, 0x00, 0x01],
+        [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5],
+        0,
+        0x86dd,
+    );
+    frame.extend_from_slice(&[
+        0x60, 0x00, 0x00, 0x00, 0x00, 0x14, crate::ip_proto::PROTO_GRE, 64,
+    ]);
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&dst.octets());
+    frame.extend_from_slice(&[0u8; 20]);
+
+    let mut meta = txn_meta_v6(24, frame.len());
+    meta.protocol = crate::ip_proto::PROTO_GRE;
+    meta.l4_offset = 54;
+    meta.payload_offset = 54;
+    meta.flow_src_addr = src.octets();
+    meta.flow_dst_addr = dst.octets();
+    (frame, meta)
+}
+
+fn run_flowless_nat_frame(
+    snapshot: &ConfigSnapshot,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> (
+    BatchCounters,
+    DebugPollCounters,
+    usize,
+    bool,
+    Option<(crate::nat::NatDecision, Vec<u8>)>,
+    usize,
+) {
+    let forwarding = build_forwarding_state(snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(
+        0,
+        0,
+        meta.ingress_ifindex as i32,
+        0,
+    );
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    sessions.set_max_sessions_for_test(64);
+    assert!(
+        crate::afxdp::forwarding::ingress_destination_mac_accepted(
+            &forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            frame,
+        ),
+        "fixture destination MAC must be accepted on ingress {}",
+        meta.ingress_ifindex,
+    );
+    let flow_backed = crate::afxdp::frame::parse_session_flow_from_bytes(frame, meta).is_some();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let reinjector = Arc::new(crate::slowpath::SlowPathReinjector::new_without_worker(1500));
+    let (batch, dbg) = txn_run_descriptor_inner_with_slow_path(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        Some(&reinjector),
+    );
+    let decision = binding
+        .scratch
+        .scratch_forwards
+        .first()
+        .map(|request| request.decision);
+    let non_first = crate::afxdp::frame::frame_is_non_first_fragment(frame, meta);
+    let forwarded = decision.map(|decision| {
+        let area = binding.umem.area();
+        let rewritten = crate::afxdp::frame::rewrite_forwarded_frame_in_place(
+            area,
+            crate::afxdp::XdpDesc {
+                addr: 128,
+                len: frame.len() as u32,
+                options: 0,
+            },
+            meta,
+            &decision,
+            non_first,
+            None,
+            0,
+        )
+        .expect("production flowless TX rewrite must succeed");
+        let out = area
+            .slice(rewritten.offset as usize, rewritten.len as usize)
+            .expect("rewritten flowless frame");
+        (decision.nat, out.to_vec())
+    });
+    (
+        batch,
+        dbg,
+        sessions.len(),
+        flow_backed,
+        forwarded,
+        reinjector.test_enqueued_delegated().len(),
+    )
+}
+
+fn flowless_nat_descriptor(
+    snapshot: &ConfigSnapshot,
+    dst: Ipv4Addr,
+) -> (
+    BatchCounters,
+    DebugPollCounters,
+    usize,
+    bool,
+    Option<(crate::nat::NatDecision, Vec<u8>)>,
+    usize,
+) {
+    let (frame, meta) = flowless_gre_ipv4_frame(dst);
+    run_flowless_nat_frame(snapshot, &frame, meta)
+}
+
+fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
+    let mut snapshot = nat_snapshot();
+    snapshot.routes.retain(|route| {
+        !(route.family == "inet" && route.destination == "0.0.0.0/0")
+            && !(route.family == "inet6" && route.destination == "::/0")
+    });
+    snapshot.routes.extend([
+        RouteSnapshot {
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "172.16.80.100/32".to_string(),
+            next_hops: vec!["172.16.80.1@reth0.80".to_string()],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+        },
+        RouteSnapshot {
+            table: "inet6.0".to_string(),
+            family: "inet6".to_string(),
+            destination: "fd00:100::/48".to_string(),
+            next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+        },
+    ]);
+    snapshot.source_nat_rules.clear();
+    snapshot.destination_nat_rules = vec![DestinationNATRuleSnapshot {
+        name: "flowless-gre-vip".to_string(),
+        from_zone: "lan".to_string(),
+        destination_address: "198.51.100.10".to_string(),
+        pool_address: "172.16.80.100".to_string(),
+        ..Default::default()
+    }];
+    snapshot.default_policy = "deny".to_string();
+    snapshot.policies = vec![PolicyRuleSnapshot {
+        name: "permit-flowless-gre".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec![policy_destination.to_string()],
+        applications: vec!["flowless-gre-only".to_string()],
+        application_terms: vec![crate::PolicyApplicationSnapshot {
+            name: "flowless-gre-only".to_string(),
+            protocol: "gre".to_string(),
+            ..Default::default()
+        }],
+        action: "permit".to_string(),
+        ..Default::default()
+    }];
+    snapshot
+}
+
+#[test]
+fn flowless_gre_dnat_vip_forwards_translated_with_protocol_permit_11435() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let internal = Ipv4Addr::new(172, 16, 80, 100);
+    let snapshot = flowless_dnat_snapshot("any");
+
+    let (batch, dbg, sessions, flow_backed, forwarded, _) =
+        flowless_nat_descriptor(&snapshot, vip);
+    assert!(!flow_backed, "GRE must exercise the flowless path");
+    assert_eq!(dbg.tx, 1, "protocol-only GRE permit must forward the VIP packet");
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(sessions, 0, "flowless GRE must not install a session");
+    let (nat, wire) = forwarded.expect("permitted flowless GRE must queue a forward");
+    assert_eq!(nat.rewrite_dst, Some(IpAddr::V4(internal)));
+    assert_eq!(
+        &wire[34..38],
+        &internal.octets(),
+        "TX must rewrite the VIP destination after adding the egress VLAN tag"
+    );
+}
+
+#[test]
+fn flowless_gre_static_dnat_vip_forwards_translated_11435() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let internal = Ipv4Addr::new(172, 16, 80, 100);
+    let mut snapshot = flowless_dnat_snapshot("any");
+    snapshot.destination_nat_rules.clear();
+    snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
+        source_addresses: Vec::new(),
+        counter_id: 0,
+        name: "flowless-static-dnat".to_string(),
+        from_zone: "lan".to_string(),
+        from_interface: String::new(),
+        from_routing_instance: String::new(),
+        external_ip: vip.to_string(),
+        internal_ip: internal.to_string(),
+        match_destination_port: 0,
+        mapped_port: 0,
+    }];
+
+    let (batch, dbg, sessions, flow_backed, forwarded, _) =
+        flowless_nat_descriptor(&snapshot, vip);
+    assert!(!flow_backed, "GRE must exercise the flowless path");
+    assert_eq!(dbg.tx, 1, "address-only static DNAT must route the translated VIP");
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(sessions, 0);
+    let (nat, wire) = forwarded.expect("translated static-DNAT GRE must queue a forward");
+    assert_eq!(nat.rewrite_dst, Some(IpAddr::V4(internal)));
+    assert_eq!(&wire[34..38], &internal.octets());
+}
+
+#[test]
+fn flowless_gre_dnat_policy_matches_post_translation_destination_11435() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let internal = Ipv4Addr::new(172, 16, 80, 100);
+    let snapshot = flowless_dnat_snapshot("172.16.80.100/32");
+
+    let (batch, dbg, sessions, flow_backed, forwarded, _) =
+        flowless_nat_descriptor(&snapshot, vip);
+    assert!(!flow_backed, "GRE must exercise the flowless path");
+    assert_eq!(
+        dbg.tx, 1,
+        "protocol-only GRE permit for the translated host must be evaluated post-DNAT"
+    );
+    assert_eq!(dbg.policy_deny, 0);
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(sessions, 0);
+    let (nat, wire) = forwarded.expect("post-DNAT policy permit must queue a forward");
+    assert_eq!(nat.rewrite_dst, Some(IpAddr::V4(internal)));
+    assert_eq!(&wire[34..38], &internal.octets());
+}
+
+#[test]
+fn flowless_non_first_fragment_dnat_vip_forwards_translated_11435() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let internal = Ipv4Addr::new(172, 16, 80, 100);
+    let mut snapshot = flowless_dnat_snapshot("any");
+    let base = nat_snapshot();
+    snapshot.default_policy = base.default_policy;
+    snapshot.policies = base.policies;
+    let (frame, meta) = flowless_non_first_fragment_ipv4_frame(vip);
+
+    assert!(
+        crate::afxdp::frame::frame_is_non_first_fragment(&frame, meta),
+        "fixture must exercise a real non-first fragment"
+    );
+    let (batch, dbg, sessions, flow_backed, forwarded, _) =
+        run_flowless_nat_frame(&snapshot, &frame, meta);
+    assert!(!flow_backed, "non-first fragment must remain flowless");
+    assert_eq!(dbg.tx, 1, "address-only DNAT must translate the fragment");
+    assert_eq!(batch.nat_frag_untranslated_dropped, 0);
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(sessions, 0);
+    let (nat, wire) = forwarded.expect("translated fragment must queue a forward");
+    assert_eq!(nat.rewrite_dst, Some(IpAddr::V4(internal)));
+    assert_eq!(&wire[34..38], &internal.octets());
+}
+
+#[test]
+fn flowless_non_first_fragment_dnat_off_precedence_stays_fail_closed_11435() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let mut snapshot = flowless_dnat_snapshot("any");
+    snapshot.default_policy = "permit".to_string();
+    snapshot.policies.clear();
+    snapshot
+        .destination_nat_rules
+        .push(DestinationNATRuleSnapshot {
+            name: "flowless-tcp-443-dnat-off".to_string(),
+            from_zone: "lan".to_string(),
+            destination_address: vip.to_string(),
+            destination_port: 443,
+            protocol: "tcp".to_string(),
+            off: true,
+            ..Default::default()
+        });
+
+    let (frame, meta) = flowless_non_first_fragment_ipv4_frame(vip);
+    assert!(
+        crate::afxdp::frame::frame_is_non_first_fragment(&frame, meta),
+        "fixture must exercise a real non-first fragment"
+    );
+
+    let (batch, dbg, sessions, flow_backed, forwarded, reinjected) =
+        run_flowless_nat_frame(&snapshot, &frame, meta);
+    assert!(!flow_backed, "non-first fragment must remain flowless");
+    assert_eq!(dbg.tx, 0, "unknown L4 precedence must not select broad DNAT");
+    assert_eq!(
+        batch.nat_frag_untranslated_dropped,
+        1,
+        "ambiguous DNAT must fail closed with fragment attribution (rx={}, no_route={}, missing_neighbor={}, policy_deny={}, forward={}, reinjected={})",
+        dbg.rx,
+        dbg.no_route,
+        dbg.missing_neigh,
+        dbg.policy_deny,
+        dbg.forward,
+        reinjected
+    );
+    assert_eq!(
+        reinjected,
+        0,
+        "ambiguous flowless fragments must not reach the kernel slow path"
+    );
+    assert_eq!(sessions, 0);
+    assert!(forwarded.is_none(), "ambiguous fragment must not be translated");
+}
+
+#[test]
+fn flowless_gre_inbound_nptv6_translates_before_routing_11435() {
+    let src = "2001:db8:200::102".parse().expect("IPv6 source");
+    let external = "2001:db8:100:1::99".parse().expect("external NPTv6 destination");
+    let mut snapshot = flowless_dnat_snapshot("any");
+    snapshot.destination_nat_rules.clear();
+    snapshot.nptv6_rules = vec![crate::protocol::Nptv6RuleSnapshot {
+        name: "flowless-nptv6".to_string(),
+        from_zone: "lan".to_string(),
+        internal_prefix: "fd00:100::/48".to_string(),
+        external_prefix: "2001:db8:100::/48".to_string(),
+        ..Default::default()
+    }];
+    let (frame, meta) = flowless_gre_ipv6_frame(src, external);
+
+    let (batch, dbg, sessions, flow_backed, forwarded, _) =
+        run_flowless_nat_frame(&snapshot, &frame, meta);
+    assert!(!flow_backed, "GRE must exercise the flowless path");
+    assert_eq!(dbg.tx, 1, "inbound NPTv6 GRE must forward");
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 0);
+    assert_eq!(sessions, 0);
+    let (nat, wire) = forwarded.expect("translated NPTv6 GRE must queue a forward");
+    let wire_dst = std::net::Ipv6Addr::from(
+        <[u8; 16]>::try_from(&wire[42..58]).expect("IPv6 destination"),
+    );
+    let internal_prefix = "fd00:100::".parse::<std::net::Ipv6Addr>().unwrap();
+    assert!(nat.nptv6);
+    assert_eq!(nat.rewrite_dst, Some(IpAddr::V6(wire_dst)));
+    assert_eq!(&wire_dst.octets()[..6], &internal_prefix.octets()[..6]);
+    assert_ne!(wire_dst, external, "wire destination must leave the external prefix");
+}
+
+#[test]
+fn flowless_gre_dnat_does_not_suppress_snat_fence_11435() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let mut snapshot = flowless_dnat_snapshot("any");
+    let base = nat_snapshot();
+    snapshot.source_nat_rules = base.source_nat_rules;
+    snapshot.default_policy = base.default_policy;
+    snapshot.policies = base.policies;
+
+    let (batch, dbg, sessions, flow_backed, forwarded, _) =
+        flowless_nat_descriptor(&snapshot, vip);
+    assert!(!flow_backed, "GRE must exercise the flowless path");
+    assert_eq!(dbg.tx, 0, "SNAT candidate must not leave without its rewrite");
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 1);
+    assert_eq!(sessions, 0);
+    assert!(forwarded.is_none(), "the untranslated packet must not be queued");
+}
+
 fn run_10679_fragment_descriptor(
     snapshot: &ConfigSnapshot,
     frame: &[u8],
