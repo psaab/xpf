@@ -402,6 +402,10 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 	run("-6", "addr", "add", "2001:db8:20::1/64", "dev", "xmain", "nodad")
 	run("route", "add", "default", "via", "10.20.0.254", "dev", "xmain", "onlink")
 	run("-6", "route", "add", "default", "via", "2001:db8:20::fe", "dev", "xmain", "onlink")
+	run("link", "add", "xingress", "type", "dummy")
+	run("link", "set", "xingress", "up")
+	run("addr", "add", "10.250.0.1/24", "dev", "xingress")
+	run("-6", "addr", "add", "2001:db8:250::1/64", "dev", "xingress", "nodad")
 	vrf := func(name, table, slave, v4, v6 string) {
 		run("link", "add", name, "type", "vrf", "table", table)
 		run("link", "set", name, "up")
@@ -441,6 +445,8 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 		nextTableReturn4 = []string{"route", "get", "10.20.0.50", "from", "10.50.0.1", "vrf", "vrf-nt"}
 		nextTableReturn6 = []string{"-6", "route", "get", "2001:db8:20::50", "from", "2001:db8:50::1", "vrf", "vrf-nt"}
 		pbrReturn4       = []string{"route", "get", "10.20.0.50", "from", "10.60.0.1", "vrf", "vrf-pbr"}
+		pbrIngressMiss4 = []string{"route", "get", "10.20.0.50", "from", "10.250.0.2", "iif", "xingress"}
+		pbrIngressMiss6 = []string{"-6", "route", "get", "2001:db8:20::50", "from", "2001:db8:250::2", "iif", "xingress"}
 	)
 
 	m, err := New()
@@ -449,12 +455,15 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 	}
 	defer m.Close()
 
-	// 0. The defect, before any xpf rule: a VRF miss leaves through main.
+	// 0. The defects, before any xpf rule: both VRF and PBR misses can leave
+	// through main. Each baseline must resolve so the fix rows prove termination.
 	expect("baseline slave miss", missSlave4, "dev xmain")
 	expect("baseline socket miss", missSocket4, "dev xmain")
 	expect("baseline v6 socket miss", missSocket6, "dev xmain")
+	expect("baseline IPv4 PBR ingress miss", pbrIngressMiss4, "dev xmain")
+	expect("baseline IPv6 PBR ingress miss", pbrIngressMiss6, "dev xmain")
 	if t.Failed() {
-		t.Fatal("the baseline did not reproduce #9819, so the rows below would not measure the fix")
+		t.Fatal("a baseline did not reproduce a route through main, so the fix rows would not measure the miss terminators")
 	}
 
 	ribGroups := map[string]*config.RibGroup{
@@ -483,9 +492,11 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 		{Destination: "192.0.2.0/24", NextTable: "nt"},
 		{Destination: "2001:db8:ffff::/48", NextTable: "nt"},
 	}
-	pbrRules := []PBRRule{{
-		Family: unix.AF_INET, TableID: 500, Instance: "pbr", IifName: "xmain",
-	}}
+	pbrRules := []PBRRule{
+		{Family: unix.AF_INET, TableID: 500, Instance: "pbr", IifName: "xmain"},
+		{Family: unix.AF_INET, Src: "10.250.0.0/24", TableID: 500, Instance: "pbr", IifName: "xingress"},
+		{Family: unix.AF_INET6, Src: "2001:db8:250::/64", TableID: 500, Instance: "pbr", IifName: "xingress"},
+	}
 	// 1. The rib-group band alone reaches VRF lookups (SYN-RIB-03).
 	if err := m.ApplyRibGroupRules(ribGroups, instances, connected); err != nil {
 		t.Fatalf("ApplyRibGroupRules: %v", err)
@@ -517,6 +528,13 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 	expect("next-table target does not fall through to main", nextTableReturn4, "unreachable")
 	expect("next-table IPv6 target does not fall through to main", nextTableReturn6, "unreachable")
 	expect("PBR target does not fall through to main", pbrReturn4, "unreachable")
+	expect("IPv4 PBR ingress miss does not fall through to main", pbrIngressMiss4, "unreachable")
+	expect("IPv6 PBR ingress miss does not fall through to main", pbrIngressMiss6, "unreachable")
+	if err := m.ApplyPBRRules(nil); err != nil {
+		t.Fatalf("ApplyPBRRules(nil): %v", err)
+	}
+	expect("PBR clear removes IPv4 lookup and shadow", pbrIngressMiss4, "dev xmain")
+	expect("PBR clear removes IPv6 lookup and shadow", pbrIngressMiss6, "dev xmain")
 	// #11062: a source VRF can look up another leaking instance's prefix in
 	// that peer's table. Main-only destinations still hit the terminator.
 	for _, c := range []struct {

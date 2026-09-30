@@ -13,6 +13,7 @@ import (
 	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
@@ -956,14 +957,24 @@ func (r *PBRPortRange) String() string {
 	return fmt.Sprintf("%d-%d", r.Lo, r.Hi)
 }
 
-// maxPBRRules bounds the number of ip rules the PBR builder/applier will
-// install, matching the pbrRulePriority window (clear() scans
-// [pbrRulePriority, pbrRulePriority+maxPBRRules)). A larger DSCP×src×dst expansion
-// is truncated and reported as a degraded build (#3430 M3) rather than
-// silently dropping later terms' steering. Window size is the SSOT in
-// pkg/config (PBRRuleWindow) so the install cap and the userspace snapshot
-// skip band cannot drift (#4479).
+// maxPBRRules is the size of the PBR priority window (clear() scans
+// [pbrRulePriority, pbrRulePriority+maxPBRRules)). Window size is the SSOT in
+// pkg/config (PBRRuleWindow) so the install window, the userspace snapshot
+// skip band, and the applied counter cannot drift (#4479).
 const maxPBRRules = config.PBRRuleWindow
+
+// maxPBRSteeringRules bounds the number of PBR steering (lookup) rules the
+// builder/applier will install. Each steering rule consumes TWO priorities —
+// the lookup plus its immediately-following unreachable shadow (#11394) — so
+// the steering cap is half the window. Any term exceeding the remaining cap
+// is dropped whole and reported as degraded (#3430 M3).
+const maxPBRSteeringRules = maxPBRRules / 2
+
+// pbrTerminatorAction is the fib-rule action of a PBR miss terminator: a table
+// miss in the steered VRF ends with ENETUNREACH instead of falling through to
+// main, matching the userspace terminal-drop on explicit-table NoRoute (#10467,
+// #11394). Same action as the #9819 VRF miss terminator.
+const pbrTerminatorAction = nl.FR_ACT_UNREACHABLE
 
 // pbrManager reconciles policy-based routing ip rules. Stateless apart
 // from the borrowed ruleOps.
@@ -1001,14 +1012,16 @@ func (p *pbrManager) Apply(rules []PBRRule) error {
 
 	prio := pbrRulePriority
 	for _, pbr := range rules {
-		// Cap at the priority window (defense-in-depth; BuildPBRRules already
-		// truncates). Checked at the top so exactly maxPBRRules rules install
-		// without a spurious overflow error (#3430 M3 apply leg).
-		if prio >= pbrRulePriority+maxPBRRules {
-			errs = append(errs, fmt.Errorf("PBR rule limit (%d) reached; remaining rules dropped", maxPBRRules))
+		// Every steering rule is immediately followed by an identical-selector
+		// unreachable rule, so reserve both priorities inside the cleared window.
+		if prio+1 >= pbrRulePriority+maxPBRRules {
+			errs = append(errs, fmt.Errorf(
+				"PBR rule limit (%d steering rules) reached; remaining rules dropped",
+				maxPBRSteeringRules))
 			break
 		}
 		rule := netlink.NewRule()
+		rule.Type = unix.RTN_UNICAST
 		rule.Table = pbr.TableID
 		rule.Priority = prio
 		rule.Family = pbr.Family
@@ -1059,8 +1072,28 @@ func (p *pbrManager) Apply(rules []PBRRule) error {
 			rule.Dport = netlink.NewRulePortRange(pbr.Dport.Lo, pbr.Dport.Hi)
 		}
 
-		// Emit a dscp selector iff the term actually matched a DSCP (#3430 H2).
-		addErr := error(nil)
+		// Install the shadow first so no lookup can become active before its
+		// miss terminator. If the lookup add fails, remove the shadow; a failed
+		// removal can only leave matching traffic safely unreachable.
+		terminator := *rule
+		terminator.Priority = prio + 1
+		terminator.Table = -1
+		terminator.Type = pbrTerminatorAction
+		prio += 2
+		var terminatorErr error
+		if pbr.DSCPSet {
+			terminatorErr = p.ops.RuleAddDSCP(&terminator, pbr.DSCP)
+		} else {
+			terminatorErr = p.ops.RuleAdd(&terminator)
+		}
+		if terminatorErr != nil {
+			errs = append(errs, fmt.Errorf(
+				"add PBR miss terminator instance %s table %d: %w",
+				pbr.Instance, pbr.TableID, terminatorErr))
+			continue
+		}
+
+		var addErr error
 		if pbr.DSCPSet {
 			addErr = p.ops.RuleAddDSCP(rule, pbr.DSCP)
 		} else {
@@ -1068,6 +1101,11 @@ func (p *pbrManager) Apply(rules []PBRRule) error {
 		}
 		if addErr != nil {
 			errs = append(errs, fmt.Errorf("add PBR rule instance %s table %d: %w", pbr.Instance, pbr.TableID, addErr))
+			if rollbackErr := p.ops.RuleDel(&terminator); rollbackErr != nil {
+				errs = append(errs, fmt.Errorf(
+					"remove PBR miss terminator without lookup instance %s table %d: %w",
+					pbr.Instance, pbr.TableID, rollbackErr))
+			}
 			continue
 		}
 		slog.Info("PBR rule added",
@@ -1076,7 +1114,6 @@ func (p *pbrManager) Apply(rules []PBRRule) error {
 			"src", pbr.Src, "dst", pbr.Dst, "ipproto", pbr.IPProto,
 			"sport", pbr.Sport.String(), "dport", pbr.Dport.String(),
 			"table", pbr.TableID)
-		prio++
 	}
 	// Desired rules are re-added; surface any clear/parse/add/return failure.
 	return errors.Join(errs...)
@@ -1099,15 +1136,29 @@ func (p *pbrManager) clear() error {
 			inCurrent := r.Priority >= pbrRulePriority && r.Priority < pbrRulePriority+maxPBRRules
 			inLegacy := r.Priority >= config.LegacyPBRRulePriorityBase &&
 				r.Priority < config.LegacyPBRRulePriorityBase+maxPBRRules
-			if inCurrent || inLegacy {
-				if err := p.ops.RuleDel(&r); err != nil {
-					// #3430 H3: a RuleDel failure leaves a STALE PBR rule in the
-					// kernel. Join it into the returned error so Apply does not
-					// report success after the up-front clear could not remove a
-					// stale (now-divergent) rule — the operator must see that the
-					// installed steering may still carry leftover rules.
-					errs = append(errs, fmt.Errorf("delete stale PBR rule prio %d: %w", r.Priority, err))
-				}
+			if !inCurrent && !inLegacy {
+				continue
+			}
+
+			// netlink v1.3.1 does not decode the rule action into Rule.Type.
+			// Try the action expected for this priority first, then the other
+			// PBR action on ENOENT so stale one-rule-per-priority installs from
+			// before #11394 are still removed.
+			firstAction, secondAction := uint8(unix.RTN_UNICAST), uint8(pbrTerminatorAction)
+			if inCurrent && (r.Priority-pbrRulePriority)%2 == 1 {
+				firstAction, secondAction = secondAction, firstAction
+			}
+			candidate := r
+			candidate.Type = firstAction
+			delErr := p.ops.RuleDel(&candidate)
+			if isRuleAlreadyGone(delErr) {
+				candidate.Type = secondAction
+				delErr = p.ops.RuleDel(&candidate)
+			}
+			if delErr != nil && !isRuleAlreadyGone(delErr) {
+				// #3430 H3: a RuleDel failure leaves a stale rule in the
+				// kernel, so Apply must surface it rather than report success.
+				errs = append(errs, fmt.Errorf("delete stale PBR rule prio %d: %w", r.Priority, delErr))
 			}
 		}
 	}
@@ -1164,7 +1215,7 @@ func (p *pbrManager) clear() error {
 // ip-rule-unrepresentable predicate (per the matrix above), a later steer may
 // overlap a preceding terminating term (#11325), an attachment is unresolvable
 // or on loopback with routing-instance terms (#9810 LEAD-O4), or the expansion
-// exceeds maxPBRRules. The successfully-built rules are still returned so the
+// exceeds maxPBRSteeringRules. The successfully-built rules are still returned so the
 // caller can install them and surface the degradation.
 func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	if cfg == nil {
@@ -1182,12 +1233,10 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	pls := cfg.PolicyOptions.PrefixLists
 	var rules []PBRRule
 	var errs []error
-	// #5683: once the running rule count reaches maxPBRRules no further term can
-	// be materialized (the installer's priority window addresses only that many
-	// rules), so stop feeding attachments to the expander. This is the outer half
-	// of the bounded-materialization guard — buildPBRFromFilter enforces the same
-	// budget per term so the six-dimensional Cartesian product is NEVER allocated
-	// beyond the cap.
+	// #5683: once the running steering-rule count reaches the number of
+	// lookup/terminator pairs that fit in the PBR window, no further term can
+	// be materialized. buildPBRFromFilter enforces the same remaining budget
+	// before expanding a Cartesian product.
 	overflowed := false
 	build := func(atts []pbrAttachment, filters map[string]*config.FirewallFilter, family int) {
 		for _, att := range atts {
@@ -1238,10 +1287,10 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 					att.Filter, att.Iif))
 				continue
 			}
-			// Budget the remaining priority window for this attachment so a term
-			// whose Cartesian product would overrun the cap is dropped BEFORE it
-			// is expanded (#5683), not materialized-then-truncated.
-			r, e, of := buildPBRFromFilter(filter, family, tableIDs, pls, maxPBRRules-len(rules))
+			// Budget the remaining lookup/terminator pairs so a term whose
+			// Cartesian product would overrun the PBR window is dropped before
+			// it is expanded (#5683), not materialized-then-truncated.
+			r, e, of := buildPBRFromFilter(filter, family, tableIDs, pls, maxPBRSteeringRules-len(rules))
 			// Scope every rule this attachment produced to its ingress interface.
 			for i := range r {
 				r[i].IifName = att.Iif
@@ -1258,12 +1307,12 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	build(inet6Attached, fw.FiltersInet6, unix.AF_INET6)
 
 	// #5683 defense-in-depth: buildPBRFromFilter's per-term budget guard already
-	// guarantees len(rules) <= maxPBRRules, so this truncation is a no-op belt
-	// (it can never allocate the pre-cap blow-up the guard prevents). The
+	// guarantees len(rules) <= maxPBRSteeringRules, so this truncation is a no-op
+	// belt (it can never allocate the pre-cap blow-up the guard prevents). The
 	// per-offender overflow error is emitted by buildPBRFromFilter, naming the
 	// filter and term whose product crossed the cap.
-	if len(rules) > maxPBRRules {
-		rules = rules[:maxPBRRules]
+	if len(rules) > maxPBRSteeringRules {
+		rules = rules[:maxPBRSteeringRules]
 	}
 	return rules, errors.Join(errs...)
 }
@@ -1273,11 +1322,11 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 // on the Prometheus scrape path — the same posture as the config-derived
 // host-inbound addressless collectors.
 //
-//   - installed: the number of kernel `ip rule` FBF entries the
-//     routing-instance filter terms yield (post-truncation to the maxPBRRules
-//     priority window). This is the desired-install count; ApplyPBRRules
-//     installs exactly this set (a later netlink failure there is a separate,
-//     logged concern).
+//   - installed: the number of kernel `ip rule` FBF lookup entries the
+//     routing-instance filter terms yield (post-truncation to the
+//     maxPBRSteeringRules paired-rule cap). This is the desired-install count;
+//     ApplyPBRRules installs exactly this set (a later netlink failure there is
+//     a separate, logged concern).
 //   - degraded: the number of routing-instance filter terms DROPPED from the
 //     kernel FBF mirror (fail-closed under-steer to the main table) — an
 //     unrepresentable `except` set, an unknown DSCP name, a contradictory
@@ -1285,7 +1334,7 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 //     may overlap a preceding terminator (#11325), an ip-rule-unrepresentable
 //     L4/per-packet predicate (#3730), a loopback attachment carrying
 //     routing-instance terms (#9810 LEAD-O4, one per attachment, not per term),
-//     or the maxPBRRules overflow (#3430 M3, counted as one condition). A
+//     or the maxPBRSteeringRules overflow (#3430 M3, counted as one condition). A
 //     non-zero value means the kernel slow path under-steers vs the userspace
 //     fast path (which still enforces every term exactly).
 //
@@ -1410,17 +1459,17 @@ func sortAttachments(atts []pbrAttachment) {
 // terminating term — #11325, or an ip-rule-unrepresentable L4 predicate);
 // buildable rules are still returned.
 //
-// budget is the number of ip rules the caller can still install before the
-// maxPBRRules priority window is full. Before expanding a term's six-dimensional
-// Cartesian product (DSCP × protocol × source-port × destination-port × source ×
-// destination), the term's product SIZE is computed from the resolved dimension
-// lengths — O(dimensions), not O(product) — and a term that would push the
-// running total past the remaining budget is DROPPED WHOLE (fail-safe
-// under-steer to the main table) with a degraded error rather than materialized
-// and then truncated (#5683). This makes the pre-cap memory/CPU blow-up
-// impossible: the full product is never allocated. The returned bool is true
-// when such an overflow drop occurred, signalling the caller to stop feeding
-// further attachments (the window is full).
+// budget is the number of steering rules the caller can still install before
+// the paired-rule PBR priority window is full. Before expanding a term's
+// six-dimensional Cartesian product (DSCP × protocol × source-port ×
+// destination-port × source × destination), the term's product SIZE is computed
+// from the resolved dimension lengths — O(dimensions), not O(product) — and a
+// term that would push the running total past the remaining budget is DROPPED
+// WHOLE (fail-safe under-steer to the main table) with a degraded error rather
+// than materialized and then truncated (#5683). This makes the pre-cap
+// memory/CPU blow-up impossible: the full product is never allocated. The
+// returned bool is true when such an overflow drop occurred, signalling the
+// caller to stop feeding further attachments (the window is full).
 func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[string]int, pls map[string]*config.PrefixList, budget int) ([]PBRRule, []error, bool) {
 	var rules []PBRRule
 	var errs []error
@@ -1621,13 +1670,14 @@ func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[
 		}
 
 		// #5683: cap the expansion BEFORE materializing it. The term expands to
-		// exactly len(toses)×len(protos)×len(sports)×len(dports)×len(srcs)×len(dsts)
-		// ip rules; computing that product from the dimension lengths is O(1) and
-		// cannot overflow (pbrTermProduct saturates). A term whose product would
-		// exhaust the remaining priority-window budget is dropped WHOLE (fail-safe
-		// under-steer, matching the unrepresentable/unknown-DSCP drops above) rather than
-		// allocating millions of PBRRule structs and truncating — the pre-cap
-		// memory/CPU exhaustion the 1000-rule cap was meant to bound but did not.
+		// exactly len(dscps)×len(protos)×len(sports)×len(dports)×len(srcs)×len(dsts)
+		// steering rules; computing that product from the dimension lengths is O(1)
+		// and cannot overflow (pbrTermProduct saturates). A term whose product
+		// would exhaust the remaining paired-priority budget is dropped WHOLE
+		// (fail-safe under-steer, matching the unrepresentable/unknown-DSCP drops
+		// above) rather than allocating millions of PBRRule structs and
+		// truncating — the pre-cap memory/CPU exhaustion the paired-rule limit is
+		// meant to prevent.
 		remaining := budget - len(rules)
 		product := pbrTermProduct(len(dscps), len(protos), len(sports), len(dports), len(srcs), len(dsts))
 		if remaining < 0 || product > remaining {
@@ -1640,7 +1690,7 @@ func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[
 					"destination addresses, DSCP values, protocols, or ports) so the "+
 					"total stays within %d rules",
 				filter.Name, term.Name, pbrProductString(product), max(remaining, 0),
-				maxPBRRules, maxPBRRules))
+				maxPBRSteeringRules, maxPBRSteeringRules))
 			return rules, errs, true
 		}
 
@@ -1869,14 +1919,17 @@ func pbrPortsProveDisjoint(a, b []string) bool {
 
 // pbrTermProduct returns the size of a routing-instance term's Cartesian
 // expansion (the product of its per-dimension counts) SATURATED at
-// maxPBRRules+1, so a pathological config whose dimensions multiply past the
-// int range cannot overflow — the exact magnitude past the cap is irrelevant,
-// only that it EXCEEDS the bound. Each dimension is normalized to at least 1 by
-// the caller (an unconstrained dimension still contributes one rule), but a
-// defensive floor of 1 is applied here too. O(dimensions), never O(product):
-// it multiplies the slice lengths, it never visits a tuple.
+// maxPBRSteeringRules+1, so a pathological config whose dimensions multiply
+// past the int range cannot overflow — the exact magnitude past the cap is
+// irrelevant, only that it EXCEEDS the bound. Each dimension is normalized to
+// at least 1 by the caller (an unconstrained dimension still contributes one
+// rule), but a zero is treated as one defensively.
+//
+// The product is computed by checking `product > cap/d` before multiplying;
+// it never allocates an intermediate product slice. This is O(dimensions): it
+// multiplies the slice lengths, it never visits a tuple.
 func pbrTermProduct(dims ...int) int {
-	const ceil = maxPBRRules + 1
+	const ceil = maxPBRSteeringRules + 1
 	product := 1
 	for _, d := range dims {
 		if d < 1 {
@@ -1886,7 +1939,7 @@ func pbrTermProduct(dims ...int) int {
 			return ceil
 		}
 		product *= d
-		if product > maxPBRRules {
+		if product > maxPBRSteeringRules {
 			return ceil
 		}
 	}
@@ -1897,8 +1950,8 @@ func pbrTermProduct(dims ...int) int {
 // error: an exact count under the cap, or ">N" once the product saturated at
 // the ceiling (the true magnitude was deliberately never computed).
 func pbrProductString(product int) string {
-	if product > maxPBRRules {
-		return fmt.Sprintf(">%d", maxPBRRules)
+	if product > maxPBRSteeringRules {
+		return fmt.Sprintf(">%d", maxPBRSteeringRules)
 	}
 	return strconv.Itoa(product)
 }

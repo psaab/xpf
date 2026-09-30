@@ -467,8 +467,12 @@ delegate to the owning domain. Exported types:
 - `29000–29999`: PBR (firewall-filter `routing-instance` action).
   `pbrRulePriority` in `rules.go`. It follows the #9819 VRF-miss terminator
   at 2000 and precedes both pure leak bands, matching the helper's PBR-first
-  table-override order (#11319). The former `31000–31999` range is retained
-  only for upgrade cleanup and is never assigned to new PBR rules.
+  table-override order (#11319). Each lookup is immediately followed by an
+  `iif`/family/selector-identical `unreachable` shadow (#11394), so a target
+  table miss stops here instead of falling through to main without affecting
+  packets outside the PBR match. The band fits 500 lookup/shadow pairs. The
+  former `31000–31999` range is retained only for upgrade cleanup and is never
+  assigned to new PBR rules.
   **Kernel FBF support matrix (#3730):**
   `BuildPBRRules` mirrors only the term `from` predicates an `ip rule` can
   express — source/destination address + prefix-list, DSCP (any value
@@ -560,9 +564,11 @@ delegate to the owning domain. Exported types:
   therefore SKIPS any rule in `[PBRRulePriorityBase, +PBRRuleWindow)` and
   fails closed: the userspace FIB simply omits the leak while the kernel keeps
   applying the real, fully-qualified rule. `PBRRulePriorityBase` /
-  `PBRRuleWindow` are the SSOT in `pkg/config`, shared by the install cap
-  (`maxPBRRules`) here and the snapshot skip there so the two cannot drift.
-  **The `maxPBRRules` cap is enforced DURING expansion, not after (#5683).**
+  `PBRRuleWindow` are the SSOT in `pkg/config`, shared by the priority band
+  cleanup and the snapshot skip so the two cannot drift. The effective
+  `maxPBRSteeringRules` cap here is half the window because each lookup consumes
+  a second priority for its unreachable shadow. **That cap is enforced DURING
+  expansion, not after (#5683).**
   Each `routing-instance` term expands to a six-dimensional Cartesian product —
   DSCP × protocol × source-port × destination-port × source × destination.
   Before #5683 `buildPBRFromFilter` materialized the FULL product of every term
