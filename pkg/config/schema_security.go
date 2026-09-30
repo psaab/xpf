@@ -204,7 +204,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					"host-inbound-traffic": {desc: "Per-interface host inbound traffic", children: hostInboundSchemaChildren()},
 				},
 			}},
-			"tcp-rst":              {desc: "Send TCP RST for denied traffic", children: nil},
+			"tcp-rst":              {desc: "Send TCP RST for non-SYN TCP transit session misses", children: nil},
 			"screen":               {desc: "Screen profile name", args: 1, scalar: true, placeholder: "<screen-name>", children: nil},
 			"host-inbound-traffic": {desc: "Host inbound traffic", children: hostInboundSchemaChildren()},
 			// #3061: zone-local address book. Same entry grammar as the
