@@ -110,9 +110,9 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 		// zone / policyName are explicit rather than derived: a heuristic that
 		// picks the subject from the expected values makes the row's assertions
 		// depend on the answer they are checking.
-		zone       string
-		policyName string
-		cmds       []string
+		zone           string
+		policyName     string
+		cmds           []string
 		compileLenient bool
 		// wantScoped is the zone's resolved iifname set, asserted exactly: a
 		// count would pass for the right number of wrong netdevs, and the whole
@@ -174,9 +174,9 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 				},
 				vrfScopeDeny("zoneA", "denyA")),
 			compileLenient: true,
-			wantScoped: []string{"ge-0-0-2"},
-			wantRules:  true,
-			wantWarn:   1,
+			wantScoped:     []string{"ge-0-0-2"},
+			wantRules:      true,
+			wantWarn:       1,
 		},
 		{
 			// The enslavement predicate keys on the NETDEV, not the config ref.
