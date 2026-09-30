@@ -107,8 +107,8 @@ fn view_with_policy_metadata(
         .unwrap_or(0);
     forwarding.ifindex_to_zone_id.insert(11, ingress_zone);
     let forwarding = Arc::new(forwarding);
-    let view = Arc::new(RuntimeView::new(
-        // runtime-view-canary: test-local
+    let view = Arc::new(RuntimeView::new( // runtime-view-canary: test-local
+
         ValidationState {
             snapshot_installed: true,
             config_generation: generation,

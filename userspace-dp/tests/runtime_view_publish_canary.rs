@@ -150,6 +150,21 @@ const ALLOWED_READER_LOADS: &[(&str, usize, &str)] = &[
         "load_forwarding_if_changed — the #1188 short-circuit for \
          forwarding-only readers",
     ),
+    (
+        "src/afxdp/coordinator/wg_control/mod.rs",
+        1,
+        "wireguard control loop — one load per outer iteration; BOTH \
+         halves (forwarding + validation) come from this one load, and \
+         the TUN-origin seed derives from it too (#11228 fixed the \
+         pre-loop second load)",
+    ),
+    (
+        "src/afxdp/session_delta.rs",
+        1,
+        "purge_close_table_leg_is_stale — deliberate fresh re-read under \
+         the drain (forwarding half ONLY for one stamp check, never \
+         paired with validation, so it cannot tear a pair)",
+    ),
 ];
 
 #[derive(Debug)]
