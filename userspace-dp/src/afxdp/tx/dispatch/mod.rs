@@ -166,7 +166,7 @@ fn recycle_ingress_frame(ingress_binding: &mut BindingWorker, source_offset: u64
 ///   PTB decision fired, whether or not a reply could be built). A `None`
 ///   `ptb_reply` with `mtu_signalled == true` is the fail-closed silent drop.
 #[inline]
-fn compute_forwarded_egress_ptb(
+pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
     source_frame: &[u8],
     meta: ForwardPacketMeta,
     decision: &SessionDecision,
@@ -407,6 +407,63 @@ fn compute_forwarded_egress_ptb(
         }
     }
     (ptb_reply, mtu_signalled)
+}
+/// Classify and queue a generated egress-MTU reply back out the ingress
+/// interface. Shared by the ordinary forward finalizer and resolved-neighbor
+/// replay so generated PTBs observe the same output filter, CoS rewrite, queue
+/// bounds, and counters.
+pub(in crate::afxdp) fn enqueue_forwarded_ptb_reply(
+    ingress_binding: &mut BindingWorker,
+    forwarding: &ForwardingState,
+    ingress_ident: &BindingIdentity,
+    meta: ForwardPacketMeta,
+    ptb_bytes: Vec<u8>,
+    now_ns: u64,
+    dbg: &mut DebugPollCounters,
+    counters: &mut BatchCounters,
+) {
+    let logical_ingress = resolve_ingress_logical_ifindex(
+        forwarding,
+        ingress_ident.ifindex,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(ingress_ident.ifindex);
+    let verdict = classify_generated_reply(forwarding, logical_ingress, &ptb_bytes, now_ns);
+    if verdict.drop {
+        counters.touched = true;
+        if verdict.parse_error {
+            counters.generated_reply_classify_parse_errors += 1;
+        } else {
+            counters.ptb_output_filter_drops += 1;
+        }
+        return;
+    }
+
+    let ptb_len = ptb_bytes.len();
+    ingress_binding
+        .tx_pipeline
+        .pending_tx_local
+        .push_back(TxRequest {
+            bytes: ptb_bytes,
+            expected_ports: None,
+            expected_addr_family: meta.addr_family,
+            expected_protocol: meta.protocol,
+            flow_key: None,
+            egress_ifindex: ingress_ident.ifindex,
+            cos_queue_id: verdict.cos_queue_id,
+            dscp_rewrite: verdict.dscp_rewrite,
+            mirror_clone: false,
+            overlap_admissions: None,
+            enqueue_ns: 0,
+        });
+    bound_pending_tx_local(ingress_binding);
+    dbg.enqueue_ok += 1;
+    dbg.enqueue_copy += 1;
+    ingress_binding.tx_counters.pending_copy_tx_packets += 1;
+    dbg.tx_bytes_total += ptb_len as u64;
+    if (ptb_len as u32) > dbg.tx_max_frame {
+        dbg.tx_max_frame = ptb_len as u32;
+    }
 }
 /// The immutable per-request inputs the copy fallback reads.
 ///
@@ -1451,78 +1508,20 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 post_recycles,
             );
         }
-        // #2301: enqueue the egress-MTU PTB back out the ingress interface
-        // now that the `target_binding` borrow has ended. The reply is L2-
-        // reflected (dst = inbound src), so it leaves via `ingress_binding`.
-        // The oversized original is dropped: `mtu_signalled` left
-        // `retained_source_frame` false, so the recycle below returns its
-        // descriptor to the fill ring. A None `ptb_reply` (suppressed or
-        // unbuildable) is the fail-closed silent drop.
+        // The target borrow has ended, so the generated reply can be queued
+        // on the ingress binding. `mtu_signalled` still drops the original
+        // independently of whether the reply was suppressed or unbuildable.
         if let Some(ptb_bytes) = ptb_reply.take() {
-            // #2328: classify the GENERATED egress-MTU PTB / Frag-Needed reply
-            // by its OWN egress 5-tuple + egress interface, exactly like the
-            // ICMP/ICMPv6 Time Exceeded (#2238), policy-`reject`, and
-            // SYN-cookie generators. The PTB is L2-reflected back out the
-            // ingress interface. Pre-#2328 the PTB enqueued an UNCLASSIFIED
-            // TxRequest (`cos_queue_id: None, dscp_rewrite: None`), so an output
-            // firewall filter terminal `discard`/`reject` keyed on the generated
-            // ICMP tuple never fired and CoS forwarding-class / DSCP rewrite were
-            // skipped. A parse failure of our own built bytes fails CLOSED (drop
-            // + dedicated parse-error counter, §6.2) rather than leaking past the
-            // filter.
-            //
-            // #6102: `classify_generated_reply` is keyed by the LOGICAL unit
-            // ifindex, but `ingress_ident.ifindex` is the PHYSICAL bind port
-            // (#6046, a VLAN sub-if's physical parent). Resolve the logical unit
-            // so a tagged sub-if's OWN output filter / CoS is enforced (pre-fix
-            // the parent's — or first sub-if's — filter was applied). The
-            // enqueue below stays on the PHYSICAL `ingress_ident.ifindex` (the
-            // XSK transmit device). Untagged: logical == physical (no-op).
-            let logical_ingress = resolve_ingress_logical_ifindex(
+            enqueue_forwarded_ptb_reply(
+                ingress_binding,
                 forwarding,
-                ingress_ident.ifindex,
-                request.meta.ingress_vlan_id,
-            )
-            .unwrap_or(ingress_ident.ifindex);
-            let verdict =
-                classify_generated_reply(forwarding, logical_ingress, &ptb_bytes, now_ns);
-            if verdict.drop {
-                counters.touched = true;
-                if verdict.parse_error {
-                    counters.generated_reply_classify_parse_errors += 1;
-                } else {
-                    counters.ptb_output_filter_drops += 1;
-                }
-                // Fail-closed: the oversized original is already dropped
-                // (`mtu_signalled`); dropping the PTB here leaves no frame to
-                // leak past the egress output filter.
-            } else {
-                let ptb_len = ptb_bytes.len();
-                ingress_binding
-                    .tx_pipeline
-                    .pending_tx_local
-                    .push_back(TxRequest {
-                        bytes: ptb_bytes,
-                        expected_ports: None,
-                        expected_addr_family: request.meta.addr_family,
-                        expected_protocol: request.meta.protocol,
-                        flow_key: None,
-                        egress_ifindex: ingress_ident.ifindex,
-                        cos_queue_id: verdict.cos_queue_id,
-                        dscp_rewrite: verdict.dscp_rewrite,
-                        mirror_clone: false,
-                        overlap_admissions: None,
-                        enqueue_ns: 0,
-                    });
-                bound_pending_tx_local(ingress_binding);
-                dbg.enqueue_ok += 1;
-                dbg.enqueue_copy += 1;
-                ingress_binding.tx_counters.pending_copy_tx_packets += 1;
-                dbg.tx_bytes_total += ptb_len as u64;
-                if (ptb_len as u32) > dbg.tx_max_frame {
-                    dbg.tx_max_frame = ptb_len as u32;
-                }
-            }
+                ingress_ident,
+                request.meta,
+                ptb_bytes,
+                now_ns,
+                dbg,
+                counters,
+            );
         }
         if build_failed {
             handle_forward_build_failure(

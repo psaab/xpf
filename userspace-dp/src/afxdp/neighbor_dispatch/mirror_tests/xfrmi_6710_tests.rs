@@ -83,6 +83,10 @@ fn lan_to_xfrmi_timeout_does_not_arm_the_dead_host_cache_6710() {
         let (binding, right) = rest.split_first_mut().expect("ingress binding");
 
         let now_ns = PENDING_NEIGH_TIMEOUT_NS + 1;
+        let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::afxdp::ExceptionEventRing::new(),
+        ));
+        let mut debug_counters = crate::afxdp::DebugPollCounters::default();
         retry_pending_neigh(
             binding,
             left,
@@ -103,6 +107,8 @@ fn lan_to_xfrmi_timeout_does_not_arm_the_dead_host_cache_6710() {
             &mut shared_recycles,
             None,
             &mut BatchCounters::default(),
+            &recent_exceptions,
+            &mut debug_counters,
         );
 
         assert!(

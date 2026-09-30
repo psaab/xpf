@@ -191,6 +191,10 @@ fn flush_one(
     let area = bindings[0].umem.area() as *const MmapArea;
     let (left, rest) = bindings.split_at_mut(0);
     let (binding, right) = rest.split_first_mut().expect("ingress binding");
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut retry_dbg = crate::afxdp::DebugPollCounters::default();
 
     retry_pending_neigh(
         binding,
@@ -211,11 +215,237 @@ fn flush_one(
         &mut shared_recycles,
         Some(&handle),
         &mut counters,
+        &recent_exceptions,
+        &mut retry_dbg,
     );
 
     let replies = binding.tx_pipeline.pending_tx_local.len();
     (replies, counters.filter_reject_sent, rx)
 }
+/// A 1500-byte IPv4/TCP datagram with DF set, parked before its next hop
+/// resolves. The output filter is optional so the same replay harness covers
+/// the PMTU signal and the policy-precedence counterfactual.
+fn flush_oversized_pending_tcp(
+    output_filter_action: Option<&str>,
+) -> (Vec<BindingWorker>, Vec<String>) {
+    const FRAME_LEN: usize = 14 + 1500;
+    let src_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let dst_ip = Ipv4Addr::new(10, 0, 0, 2);
+    let mut frame = vec![
+        0x02, 0xbf, 0x72, 0x00, 0x80, 0x08, // dst MAC
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, // src MAC
+        0x08, 0x00, // IPv4
+    ];
+    let l3 = frame.len();
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x05, 0xdc, // IPv4, total length 1500
+        0x12, 0x34, 0x40, 0x00, // id, DF
+        64, PROTO_TCP, 0x00, 0x00, // ttl, protocol, checksum
+    ]);
+    frame.extend_from_slice(&src_ip.octets());
+    frame.extend_from_slice(&dst_ip.octets());
+    let ip_checksum =
+        crate::afxdp::tx::test_support::compute_ipv4_header_checksum(&frame[l3..l3 + 20]);
+    frame[l3 + 10..l3 + 12].copy_from_slice(&ip_checksum.to_be_bytes());
+    frame.extend_from_slice(&12345u16.to_be_bytes());
+    frame.extend_from_slice(&443u16.to_be_bytes());
+    frame.extend_from_slice(&[
+        0, 0, 0, 1, // seq
+        0, 0, 0, 0, // ack
+        0x50, 0x02, 0xfa, 0xf0, // data offset, SYN, window
+        0, 0, 0, 0, // checksum, urgent pointer
+    ]);
+    frame.resize(FRAME_LEN, 0xab);
+
+    let mut forwarding = output_filter_action.map_or_else(ForwardingState::default, |action| {
+        forwarding_with_output_filter(action, false)
+    });
+    forwarding.egress.insert(
+        EGRESS_IFINDEX,
+        EgressInterface {
+            bind_ifindex: 22,
+            vlan_id: 0,
+            mtu: 1400,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0, 1],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    forwarding.egress.insert(
+        11,
+        EgressInterface {
+            bind_ifindex: 11,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0, 1],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: Some(Ipv4Addr::new(10, 0, 1, 1)),
+            primary_v6: None,
+        },
+    );
+    forwarding.neighbors.insert(
+        (EGRESS_IFINDEX, NEXT_HOP),
+        NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
+
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+    ];
+    // SAFETY: only this single-threaded test touches the UMEM frame.
+    let area = bindings[0].umem.area() as *const MmapArea as *mut MmapArea;
+    unsafe {
+        (*area)
+            .slice_mut(0, frame.len())
+            .expect("UMEM frame")
+            .copy_from_slice(&frame);
+    }
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 11,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 54,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        ..UserspaceDpMeta::default()
+    };
+    let flow_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(src_ip),
+        dst_ip: IpAddr::V4(dst_ip),
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: TunnelDiscriminator::default(),
+        routing_domain: 0,
+    };
+    let pkt = PendingNeighPacket {
+        addr: 0,
+        desc: XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        meta,
+        fabric_ingress_zone: None,
+        decision: deferred_decision(),
+        flow_key: Some(flow_key),
+        queued_ns: 0,
+        probe_attempts: 0,
+    };
+    bindings[0]
+        .pending_neigh
+        .insert((EGRESS_IFINDEX, NEXT_HOP), pkt);
+
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut shared_recycles = Vec::new();
+    let mut counters = BatchCounters::default();
+    let area = bindings[0].umem.area() as *const MmapArea;
+    let (left, rest) = bindings.split_at_mut(0);
+    let (binding, right) = rest.split_first_mut().expect("ingress binding");
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut dbg = crate::afxdp::DebugPollCounters::default();
+    retry_pending_neigh(
+        binding,
+        left,
+        0,
+        right,
+        &lookup,
+        &mirror_targets,
+        &forwarding,
+        &dynamic_neighbors,
+        None,
+        1,
+        // SAFETY: this points at the ingress binding's UMEM area, which
+        // remains alive for the duration of this single-threaded test call.
+        unsafe { &*area },
+        &mut shared_recycles,
+        None,
+        &mut counters,
+        &recent_exceptions,
+        &mut dbg,
+    );
+    let reasons = recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|event| event.reason().to_string())
+        .collect();
+    (bindings, reasons)
+}
+
+#[test]
+fn deferred_neighbor_replay_emits_ptb_for_1500_df_on_1400_egress_11410() {
+    let (bindings, reasons) = flush_oversized_pending_tcp(None);
+    let ingress_tx = &bindings[0].tx_pipeline.pending_tx_local;
+    assert_eq!(
+        ingress_tx.len(),
+        1,
+        "the resolved replay must emit one IPv4 Fragmentation Needed reply"
+    );
+    let ptb = &ingress_tx[0].bytes;
+    assert_eq!(ptb[23], PROTO_ICMP, "outer IPv4 protocol is ICMP");
+    assert_eq!(&ptb[34..36], &[3, 4], "ICMP Fragmentation Needed");
+    assert_eq!(
+        u16::from_be_bytes([ptb[40], ptb[41]]),
+        1400,
+        "the PTB advertises the resolved egress MTU"
+    );
+    assert!(
+        bindings[1].tx_pipeline.pending_tx_prepared.is_empty(),
+        "the oversized replay must not reach the prepared egress queue"
+    );
+    assert!(
+        bindings[1].tx_pipeline.pending_tx_local.is_empty(),
+        "the oversized replay must not be copied to the egress queue"
+    );
+    assert!(
+        reasons.iter().any(|reason| reason == "egress_mtu_exceeded"),
+        "the oversized replay must record its egress-MTU exception: {reasons:?}"
+    );
+    assert_eq!(
+        bindings[0].tx_pipeline.pending_fill_frames.len(),
+        1,
+        "the rejected original must be recycled exactly once"
+    );
+}
+
+#[test]
+fn deferred_neighbor_output_discard_preempts_ptb_11410() {
+    let (bindings, reasons) = flush_oversized_pending_tcp(Some("discard"));
+    assert!(
+        bindings[0].tx_pipeline.pending_tx_local.is_empty(),
+        "an output-filter discard must not be answered with a PTB"
+    );
+    assert!(
+        bindings[1].tx_pipeline.pending_tx_prepared.is_empty()
+            && bindings[1].tx_pipeline.pending_tx_local.is_empty(),
+        "an output-filter discard must not transmit the original"
+    );
+    assert!(
+        !reasons.iter().any(|reason| reason == "egress_mtu_exceeded"),
+        "an output-filter discard preempts the egress-MTU decision: {reasons:?}"
+    );
+    assert_eq!(
+        bindings[0].tx_pipeline.pending_fill_frames.len(),
+        1,
+        "the discarded original must be recycled exactly once"
+    );
+}
+
 
 /// An output-filter `then reject` matched at flush time must synthesize the
 /// active reply, exactly as the immediate forward path does.

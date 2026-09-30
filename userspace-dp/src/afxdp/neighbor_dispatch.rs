@@ -221,10 +221,12 @@ pub(super) fn retry_pending_neigh(
     // nowhere else, so this path owes the same `then reject` reply and `then
     // log` event the immediate forward path emits. Both need context the flush
     // did not previously carry: the event stream to publish the filter-log
-    // event on, and the batch counters `enqueue_filter_reject_reply` meters the
-    // synthesized reply against.
+    // event on, the exception ring for forwarded-egress PTB, the debug counters
+    // for generated replies, and the batch counters for synthesized replies.
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
     counters: &mut BatchCounters,
+    recent_exceptions: &Arc<Mutex<ExceptionEventRing>>,
+    dbg: &mut DebugPollCounters,
 ) {
     if binding.pending_neigh.is_empty() {
         return;
@@ -833,6 +835,39 @@ pub(super) fn retry_pending_neigh(
             pkt.flow_key.as_ref(),
         ) {
             record_mirror_clone_result(&binding.live, result, source_frame.len());
+        }
+        // #11410: match the immediate forward ordering. The replay's current
+        // egress verdict has been resolved above; a discard/reject is terminal
+        // and must not trigger a PTB. Only permitted replay candidates reach
+        // the shared PMTU decision before in-place rewrite/TX.
+        let ingress_ident = binding.identity();
+        let (ptb_reply, mtu_signalled) =
+            super::tx::dispatch::compute_forwarded_egress_ptb(
+                source_frame,
+                pkt.meta.into(),
+                &decision,
+                forwarding,
+                decision.nat.nat64,
+                decision.resolution.tunnel_endpoint_id != 0,
+                &ingress_ident,
+                recent_exceptions,
+            );
+        if let Some(ptb_bytes) = ptb_reply {
+            super::tx::dispatch::enqueue_forwarded_ptb_reply(
+                binding,
+                forwarding,
+                &ingress_ident,
+                pkt.meta.into(),
+                ptb_bytes,
+                now_ns,
+                dbg,
+                counters,
+            );
+        }
+        if mtu_signalled {
+            counters.touched = true;
+            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+            continue;
         }
         let selected_tcp_mss = select_tcp_mss(forwarding, &decision, &pkt.meta.into());
         let Some(rewrite_result) = rewrite_forwarded_frame_in_place(
