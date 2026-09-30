@@ -1626,6 +1626,12 @@ fn set_na_override(frame: &mut [u8]) {
     super::super::test_fixtures::stamp_icmpv6_checksum(frame, 14, 54, 86);
 }
 
+/// Flip the Solicited (S) bit ON alongside Override (#11069).
+fn set_na_override_solicited(frame: &mut [u8]) {
+    frame[58] |= 0x20 | 0x40;
+    super::super::test_fixtures::stamp_icmpv6_checksum(frame, 14, 54, 86);
+}
+
 /// #4475 fail-on-revert (NDP NA Override honoring). An NA with
 /// Override=0 MUST NOT overwrite a cached neighbor entry that maps to a
 /// DIFFERENT link-layer address — the unsolicited-NA next-hop hijack
@@ -1665,10 +1671,12 @@ fn ndp_na_override0_does_not_overwrite_live_differing_lla_4475() {
          different LLA (#4475 next-hop hijack gate)"
     );
 
-    // 2) Override=1 NA (legitimate §7.2.6 LLA-change announcement) —
-    //    must update the binding.
+    // 2) SOLICITED Override=1 NA (legitimate §7.2.6 LLA-change
+    //    announcement) — must update the binding. (#11069: an
+    //    UNSOLICITED Override=1 takes the Override=0 path and is refused
+    //    below; only solicited failover converges.)
     let mut frame_ov1 = frame_ov0.clone();
-    set_na_override(&mut frame_ov1);
+    set_na_override_solicited(&mut frame_ov1);
     assert!(
         parser::parse_ndp_neighbor_advert(&frame_ov1)
             .expect("override NA parses")
@@ -1682,6 +1690,50 @@ fn ndp_na_override0_does_not_overwrite_live_differing_lla_4475() {
         Some(na_mac),
         "an Override=1 NA must update the binding (legit LLA change)"
     );
+}
+
+/// #11069 stage proof: an UNSOLICITED Override=1 NA against a live
+/// differing LLA is refused AND counted exactly once through the production
+/// wiring (map gate + caller report); a SOLICITED Override=1 converges.
+#[test]
+fn ndp_na_unsolicited_override1_refused_and_counted_once_11069() {
+    let forwarding: &'static ForwardingState = Box::leak(Box::new(build_forwarding_state(
+        &super::super::test_fixtures::nat_snapshot(),
+    )));
+    let (ctx, neighbors) = neighbor_learn_ctx(forwarding);
+    let meta = link_layer_meta(24, 0);
+    let (frame_base, target, na_mac) = ndp_na_frame();
+    let live_mac = [0x02, 0x00, 0x00, 0x00, 0x0a, 0x0a];
+    assert_ne!(live_mac, na_mac);
+    neighbors.insert((24, target), NeighborEntry { mac: live_mac });
+
+    // Unsolicited Override=1 (O bit only): refused, counted once.
+    let mut frame_unsol = frame_base.clone();
+    set_na_override(&mut frame_unsol);
+    let outcome = classify(&frame_unsol, meta, ctx);
+    assert!(matches!(outcome, StageOutcome::Continue(())));
+    assert_eq!(
+        neighbors.get(&(24, target)).map(|e| e.mac),
+        Some(live_mac),
+        "unsolicited Override=1 must NOT overwrite a live differing LLA"
+    );
+    assert_eq!(
+        neighbors.na_unsolicited_override_refusals(),
+        1,
+        "exactly one count per refused packet (map + report must not double-count)"
+    );
+
+    // Solicited Override=1: converges, no further count.
+    let mut frame_sol = frame_base.clone();
+    set_na_override_solicited(&mut frame_sol);
+    let outcome = classify(&frame_sol, meta, ctx);
+    assert!(matches!(outcome, StageOutcome::Continue(())));
+    assert_eq!(
+        neighbors.get(&(24, target)).map(|e| e.mac),
+        Some(na_mac),
+        "solicited Override=1 must converge legitimate failover"
+    );
+    assert_eq!(neighbors.na_unsolicited_override_refusals(), 1);
 }
 
 /// #4475 companion: the Override honor must NOT break legitimate

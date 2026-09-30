@@ -628,10 +628,11 @@ impl ShardedNeighborMap {
         // #9893 CAS: Override=0 creates or refreshes but never replaces a
         // live differing LLA. Under the same lock as the write below.
         if !effective_override && prior_mac.is_some_and(|old| old != val.mac) {
-            if override_flag && !solicited {
-                self.na_unsolicited_override_refusals
-                    .fetch_add(1, Ordering::Relaxed);
-            }
+            // No counter bump here: the single counting point is the
+            // caller's report (report_na_unsolicited_override_refusal),
+            // mirroring the ARP path — bumping here AND there would count
+            // each production refusal twice, and ARP callers funneling
+            // through this gate must never inflate the NA counter.
             return None;
         }
         if prior_mac == Some(val.mac) {

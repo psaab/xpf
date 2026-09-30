@@ -1295,17 +1295,16 @@ fn ndp_unsolicited_override1_refused_solicited_converges_11069() {
         "unsolicited Override=1 must refuse a live differing LLA"
     );
     assert_eq!(map.get(&k), Some(entry(0xAB)), "live entry untouched");
-    assert_eq!(
-        map.na_unsolicited_override_refusals(),
-        1,
-        "the hijack refusal must count"
-    );
+    // Single counting point: the map does NOT bump on refusal (that would
+    // double-count with the caller's report); the report owns the count.
+    assert_eq!(map.na_unsolicited_override_refusals(), 0);
+    assert_eq!(map.note_na_unsolicited_override_refusal(), 1);
+    assert_eq!(map.na_unsolicited_override_refusals(), 1);
     // Same-MAC unsolicited refresh is fine (no-change, uncounted).
     assert_eq!(
         map.insert_ndp_na_if_override_allows(k, entry(0xAB), true, false),
         Some(false)
     );
-    assert_eq!(map.na_unsolicited_override_refusals(), 1);
     // Legitimate failover: solicited Override=1 converges.
     assert_eq!(
         map.insert_ndp_na_if_override_allows(k, entry(0xCD), true, true),
@@ -1313,5 +1312,4 @@ fn ndp_unsolicited_override1_refused_solicited_converges_11069() {
         "solicited Override=1 must converge"
     );
     assert_eq!(map.get(&k), Some(entry(0xCD)));
-    assert_eq!(map.na_unsolicited_override_refusals(), 1);
 }
