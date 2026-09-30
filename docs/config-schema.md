@@ -13480,19 +13480,20 @@ field); and `then next term` / `then next` (explicit fall-through) commits as
 a no-op, marked `FirewallFilterTerm.NextTerm`. A token after `reject` that is
 NOT a known message-type is still a typo and IS flagged.
 
-**(11355) Flat-set action tails after `next term` / `reject <type>` → silent
-drop.** `SetPath` nests trailing actions beneath `next` (not a declared schema
-child) or beneath the reject-message-type node. `compileFilterThen` recognized
-the outer action but did not visit that nested tail, so strict commit and
-tolerant load both accepted it without a diagnostic. The compiler now records
-the first misplaced tail action in `FirewallFilterTerm.UnknownActions`: strict
-commit rejects it through the existing filter-action gate, while tolerant load
-warns. The hierarchical nested-body spelling follows the same rule. Bare
-`next term` and a single known reject message type remain valid. Regression
-coverage:
+**(11355) Flat-set action tails after `next term` / `reject <type>` were
+silently dropped.** `SetPath` can nest recognized actions beneath `next` (not a
+declared schema child) or beneath the reject-message-type node, where the
+direct-child action walk missed them. `compileFilterThen` now feeds these tails
+back through the same action parser. Recognized modifiers populate their typed
+fields, so existing validation catches contradictions such as routing-instance
+with next-term/reject. The nested `count c1` in `reject tcp-reset count c1`
+remains effective. Unknown tails continue through `UnknownActions` and
+trigger strict rejection or tolerant warning. Flat-set and packed-line forms
+share these results. Bare `next term` and a single known reject message type
+remain valid. Regression coverage:
 `pkg/config/compiler_filter_action_test.go`
-(`TestFilterAction_FlatSetTrailingTailAfterNextOrRejectIsReported11355`,
-`TestFilterAction_HierarchicalNestedTailAfterNextOrRejectIsReported11355`).
+(`TestFilterAction_TailsAreConsistentAcrossFlatAndPacked11355`,
+`TestFilterAction_HierarchicalNestedRejectTailPreservesCount11355`).
 Defense-in-depth in the Rust filter: a NON-EMPTY unrecognized action (only
 reachable via a mixed-version snapshot now that commit rejects it) fails
 CLOSED to `Discard`, never `Accept`; the empty string keeps the
