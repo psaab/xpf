@@ -1,9 +1,9 @@
 package config_test
 
-// #10006: start==stop MEANS always-active (the runtime wraparound branch is
-// true for every clock time on equal bounds), and ValidateConfig must say so
-// at commit: a WARNING naming the scheduler, stating the always-active
-// semantic, and directing the operator to the matching explicit all-day form
+// #10006/#11089: start==stop MEANS never-active (Junos parity: an empty
+// [start, stop) range matches nothing), and ValidateConfig must say so
+// at commit: a WARNING naming the scheduler, stating the dead arm, and
+// directing the operator to the matching explicit all-day form
 // (`daily all-day` or `<weekday> all-day`).
 // Normal windows, overnight wraparound (start>stop), half-specified windows,
 // and explicit all-day/exclude windows must NOT warn. Invalid and
@@ -195,11 +195,8 @@ func TestSchedulerEqualWindowWarns(t *testing.T) {
 				if tc.wantForm != "" && !strings.Contains(joined, "`"+tc.wantForm+"`") {
 					t.Errorf("warning does not direct the operator to %q: %q", tc.wantForm, joined)
 				}
-				if !strings.Contains(joined, "always-active") {
-					t.Errorf("warning does not state the always-active semantic: %q", joined)
-				}
-				if !strings.Contains(joined, "time-of-day arm always-active") {
-					t.Errorf("warning does not scope always-active behavior to the time-of-day arm: %q", joined)
+				if !strings.Contains(joined, "match nothing") {
+					t.Errorf("warning does not state the never-active semantic: %q", joined)
 				}
 				if !strings.Contains(joined, "all-day") {
 					t.Errorf("warning does not mention the explicit all-day form: %q", joined)
