@@ -1616,13 +1616,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #9519; the arrival zone for a foreign packet.
                         let authority_zone =
                             foreign_arrival_zone.unwrap_or(resolved.metadata.ingress_zone);
-                        // #10467: a changed PBR route identity must not mutate
-                        // only this direction's cached decision.  Tear down the
-                        // pair and let the next packet take the normal miss
-                        // path, which recomputes both egress-zone policy and
-                        // forward/reverse route state.  Unchanged identities
-                        // stay on the #8114 fast path; foreign arrivals cannot
-                        // revoke the admitting session.
+                        // #10467: a changed FORWARD PBR identity must not
+                        // mutate only one cached direction. Tear down the pair
+                        // and let the next packet take the normal MISS path,
+                        // which recomputes egress-zone policy and both routes.
+                        // #11324: a REVERSE companion is different: its native
+                        // identity belongs to the FORWARD ingress. A matching
+                        // PBR term on this reply's own ingress steers this
+                        // direction in place; it must not tear down the pair.
                         // #10038 Part C / #10630: a TUN-origin forward HIT
                         // declines PBR revalidation outright. Self-originated
                         // runs no PBR admission, so there is no admitting
@@ -1656,10 +1657,36 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta,
                                 ingress_zone_override,
                                 resolved.decision,
+                                resolved.metadata.is_reverse,
                             )
                         } else {
                             None
                         };
+                        // #11324: use the reply-ingress PBR resolution for
+                        // this packet and persist it only on the reverse
+                        // companion. The route helper sets no revocation key
+                        // for this arm, and the ordinary filter evaluator
+                        // below still owns any actual discard/reject verdict.
+                        if let Some(route) =
+                            stale_pbr_route.as_ref().filter(|route| route.steer_only)
+                        {
+                            resolved.decision.resolution = route.resolution;
+                            resolved.decision.install_table_domain = route.install_table_domain;
+                            resolved.decision.install_table_check = route.install_table_check;
+                            let logical_ingress_ifindex = resolve_ingress_logical_ifindex(
+                                worker_ctx.forwarding,
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                            )
+                            .unwrap_or(meta.ingress_ifindex as i32);
+                            sessions.update_reverse_route_on_filter_hit(
+                                &route.canonical_key,
+                                logical_ingress_ifindex,
+                                route.resolution,
+                                route.install_table_domain,
+                                route.install_table_check,
+                            );
+                        }
                         // #3073: re-count this established-session packet against
                         // the admitting policy's hit counter. The cold path
                         // counts the first packet in `try_match_rule`; this
@@ -1840,7 +1867,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 Some(hit)
                                     if hit.eval.action == crate::filter::FilterAction::Accept =>
                                 {
-                                    if let Some(route) = stale_pbr_route {
+                                    if let Some(route) =
+                                        stale_pbr_route.as_ref().filter(|route| !route.steer_only)
+                                    {
                                         // The ordinary evaluator may have stamped
                                         // this entry fresh on its Accept path.
                                         if let Some(revoked_key) = route.revoked_key.as_ref() {
@@ -1852,7 +1881,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     action: crate::filter::FilterAction::Discard,
                                                     cached_log: None,
                                                 },
-                                                revoked_key: route.revoked_key,
+                                                revoked_key: route.revoked_key.clone(),
                                                 log_source: FilterLogSource::Pbr,
                                             }),
                                             // #10566: route override is synthesized
@@ -1865,19 +1894,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 }
                                 Some(hit) => (Some(hit), ordinary_input_already_counted),
                                 None => (
-                                    stale_pbr_route.map(|route| {
-                                        if let Some(revoked_key) = route.revoked_key.as_ref() {
-                                            sessions.clear_filter_revalidation(revoked_key);
-                                        }
-                                        SessionHitInputFilterEval {
-                                            eval: NonPbrInputFilterEval {
-                                                action: crate::filter::FilterAction::Discard,
-                                                cached_log: None,
-                                            },
-                                            revoked_key: route.revoked_key,
-                                            log_source: FilterLogSource::Pbr,
-                                        }
-                                    }),
+                                    stale_pbr_route
+                                        .filter(|route| !route.steer_only)
+                                        .map(|route| {
+                                            if let Some(revoked_key) = route.revoked_key.as_ref() {
+                                                sessions.clear_filter_revalidation(revoked_key);
+                                            }
+                                            SessionHitInputFilterEval {
+                                                eval: NonPbrInputFilterEval {
+                                                    action: crate::filter::FilterAction::Discard,
+                                                    cached_log: None,
+                                                },
+                                                revoked_key: route.revoked_key,
+                                                log_source: FilterLogSource::Pbr,
+                                            }
+                                        }),
                                     // #10566: neither a static ACCEPT nor a
                                     // synthesized PBR discard was counted.
                                     false,
