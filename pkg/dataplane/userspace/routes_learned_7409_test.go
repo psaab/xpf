@@ -527,3 +527,39 @@ func TestDirectAndExplicitStaticGatewaysRemainConfigured11317(t *testing.T) {
 		}
 	}
 }
+
+func TestMixedDirectAndRecursiveStaticECMPKeepsDirectPath11317(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
+		{
+			Destination: "10.10.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "192.0.2.1"}},
+		},
+		{
+			Destination: "10.20.0.0/24",
+			NextHops: []config.NextHopEntry{
+				{Address: "192.0.2.1"},
+				{Address: "10.10.0.1"},
+			},
+		},
+	}
+	interfaces := []InterfaceSnapshot{{
+		Name:    "eth0",
+		Ifindex: 42,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family:  "inet",
+			Address: "192.0.2.10/24",
+		}},
+	}}
+	withLearnedRoutes(t, fixedLearned(learnedV4("10.20.0.0/24", "192.0.2.1")))
+
+	out, _, err := buildRouteSnapshots(cfg, interfaces, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	hits := snapshotFor(t, "inet.0", "inet", "10.20.0.0/24", out)
+	if len(hits) != 1 || hits[0].Preference != 0 ||
+		!reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1", "10.10.0.1"}) {
+		t.Fatalf("mixed ECMP must retain its directly connected member, got %+v", hits)
+	}
+}

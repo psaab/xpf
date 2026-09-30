@@ -295,15 +295,14 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				continue
 			}
 			tableName, familyName := normalizeRouteSnapshotFamily(table, family, route.Destination)
-			if staticRouteHasUnresolvedBareGateway(
+			if staticRouteHasOnlyUnresolvedBareGateways(
 				route, tableName, familyName, instanceName, instanceType,
 				connectedNetworks, interfaces,
 			) {
-				// Ordinary bare gateways resolve only through a connected
-				// prefix in the same table. A recursive config next-hop would
-				// be emitted with ifindex 0, while the kernel may already have
-				// the recursively resolved copy; do not let this config row
-				// suppress that copy in the learned-route gap fill (#11317).
+				// When every bare gateway is recursive, the config row would
+				// resolve with ifindex 0 and suppress the kernel's resolved
+				// copy in the learned-route gap fill (#11317). Mixed rows stay:
+				// Rust's live selection can still use a resolvable member.
 				continue
 			}
 			base := RouteSnapshot{
@@ -1003,7 +1002,7 @@ type routeSnapshotTableFamily struct {
 	family string
 }
 
-func staticRouteHasUnresolvedBareGateway(
+func staticRouteHasOnlyUnresolvedBareGateways(
 	route *config.StaticRoute,
 	table, family, instanceName, instanceType string,
 	connectedNetworks map[routeSnapshotTableFamily][]*net.IPNet,
@@ -1017,8 +1016,15 @@ func staticRouteHasUnresolvedBareGateway(
 		return false
 	}
 	networks := connectedNetworks[routeSnapshotTableFamily{table: table, family: family}]
+	hasBare, hasDirect := false, false
 	for _, nextHop := range route.NextHops {
-		if nextHop.Address == "" || nextHop.Interface != "" {
+		if nextHop.Interface != "" {
+			// An explicit interface is already a qualified egress path. Keep
+			// mixed ECMP rows that have one alongside a recursive bare gateway.
+			hasDirect = true
+			continue
+		}
+		if nextHop.Address == "" {
 			continue
 		}
 		gateway := net.ParseIP(nextHop.Address)
@@ -1026,6 +1032,7 @@ func staticRouteHasUnresolvedBareGateway(
 			(family == "inet6" && gateway.To4() != nil) {
 			continue
 		}
+		hasBare = true
 		direct := false
 		for _, network := range networks {
 			if network.Contains(gateway) {
@@ -1039,11 +1046,9 @@ func staticRouteHasUnresolvedBareGateway(
 			// an interface in this instance or in the default instance.
 			direct = forwardingGatewayInterface(instanceName, family, gateway, interfaces) != ""
 		}
-		if !direct {
-			return true
-		}
+		hasDirect = hasDirect || direct
 	}
-	return false
+	return hasBare && !hasDirect
 }
 
 func connectedPrefixesForInterface(iface InterfaceSnapshot) ([]string, []string) {
