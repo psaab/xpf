@@ -303,12 +303,12 @@ type StaticRoute struct {
 	// FRR `ip route <p> reject`). Distinct from Discard (Junos `discard` → FRR
 	// Null0/blackhole, a silent drop). Both suppress a next-hop; Reject and
 	// Discard are mutually exclusive per route (Junos allows only one action).
-	Reject     bool
+	Reject bool
 	// NoInstall carries Junos `no-install` intent through compile-time install
 	// consumers. It is not serialized to the helper: excluded routes are
 	// omitted before snapshot construction.
 	NoInstall  bool `json:"-"`
-	Preference int // route preference (admin distance), default 5
+	Preference int  // route preference (admin distance), default 5
 	// HasPreference distinguishes an explicitly configured preference --
 	// INCLUDING one equal to the default 5 -- from an absent one (#9125).
 	//
