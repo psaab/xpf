@@ -3072,7 +3072,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyMatchAddressSetMembers:    true,
 		lenientAddressSetMembersDefined:        true,
 		lenientRibGroupRefs:                    true,
-		lenientRibGroupImportPolicy:           true,
+		lenientRibGroupImportPolicy:            true,
 		lenientGlobalInterfaceRoutesRibGroup:   true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
