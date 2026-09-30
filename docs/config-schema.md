@@ -13479,6 +13479,20 @@ on `FilterAction::Reject` today, so the type is compile-time-only (no wire
 field); and `then next term` / `then next` (explicit fall-through) commits as
 a no-op, marked `FirewallFilterTerm.NextTerm`. A token after `reject` that is
 NOT a known message-type is still a typo and IS flagged.
+
+**(11355) Flat-set action tails after `next term` / `reject <type>` → silent
+drop.** `SetPath` nests trailing actions beneath `next` (not a declared schema
+child) or beneath the reject-message-type node. `compileFilterThen` recognized
+the outer action but did not visit that nested tail, so strict commit and
+tolerant load both accepted it without a diagnostic. The compiler now records
+the first misplaced tail action in `FirewallFilterTerm.UnknownActions`: strict
+commit rejects it through the existing filter-action gate, while tolerant load
+warns. The hierarchical nested-body spelling follows the same rule. Bare
+`next term` and a single known reject message type remain valid. Regression
+coverage:
+`pkg/config/compiler_filter_action_test.go`
+(`TestFilterAction_FlatSetTrailingTailAfterNextOrRejectIsReported11355`,
+`TestFilterAction_HierarchicalNestedTailAfterNextOrRejectIsReported11355`).
 Defense-in-depth in the Rust filter: a NON-EMPTY unrecognized action (only
 reachable via a mixed-version snapshot now that commit rejects it) fails
 CLOSED to `Discard`, never `Accept`; the empty string keeps the
