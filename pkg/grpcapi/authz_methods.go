@@ -121,8 +121,13 @@ var methodPermissions = map[string]config.LoginClassPermission{
 	"GetNATRuleStats":          config.PermView,
 	"GetNATDeterministic":      config.PermView,
 	"GetVRRPStatus":            config.PermView,
-	"MatchPolicies":            config.PermView, // `show security match-policies`
-	"GetSystemInfo":            config.PermView,
+	// #11077: one price for one simulator. MatchPolicies runs the identical
+	// verdict as ShowText test-policy:, which this file prices at PermControl
+	// (policy reconnaissance gated from read-only classes + CLI `test`-family
+	// parity). Pricing this surface at PermView let a read-only caller dial
+	// past the control tier, so it costs PermControl too.
+	"MatchPolicies": config.PermControl, // `show security match-policies`
+	"GetSystemInfo": config.PermView,
 	// ShowText multiplexes ~127 topics across TWO command families. The entry
 	// here is the FLOOR for a request whose topic the gate cannot read; a
 	// decoded request is priced by showTextTopicPermission below. The floor is
