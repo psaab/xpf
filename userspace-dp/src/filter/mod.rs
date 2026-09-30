@@ -665,9 +665,9 @@ impl Eq for ThreeColorPolicerRuntime {}
 /// `CachedFilterCounters`, #2573): the common single- and dual-policer flows
 /// record with NO heap allocation, and any spill to the heap for >2 policers
 /// happens ONCE at flow-cache install, off the per-packet replay (`for_each`)
-/// hot path. Dedup is by policer `id` (`ThreeColorPolicerRuntime` carries an
-/// id) so the same policer referenced by two matched terms is metered once per
-/// packet.
+/// hot path. Dedup is by scoped runtime `id`: repeated references to one
+/// compiled term are metered once, while distinct terms using the same
+/// configured name retain separate rate-limit handles.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CachedThreeColorPolicers {
     policers: smallvec::SmallVec<[Arc<ThreeColorPolicerRuntime>; 2]>,
@@ -935,18 +935,58 @@ mod policer;
 pub(crate) use compiler::*;
 pub(crate) use engine::*;
 pub(crate) use policer::*;
+/// Identity for one live policer bucket. A compiled filter term owns one
+/// runtime regardless of how many interface hooks attach that filter; distinct
+/// family/filter/term references never share a bucket merely because their
+/// configured policer names match. Unreferenced definitions retain one
+/// name-scoped runtime so their status remains visible.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum PolicerRuntimeScope {
+    Term {
+        family: String,
+        filter: String,
+        term: String,
+        policer: String,
+    },
+    Unreferenced {
+        policer: String,
+    },
+}
+
+impl PolicerRuntimeScope {
+    pub(crate) fn for_term(family: &str, filter: &str, term: &str, policer: &str) -> Self {
+        Self::Term {
+            family: family.to_string(),
+            filter: filter.to_string(),
+            term: term.to_string(),
+            policer: policer.to_string(),
+        }
+    }
+
+    pub(crate) fn unreferenced(policer: &str) -> Self {
+        Self::Unreferenced {
+            policer: policer.to_string(),
+        }
+    }
+
+    pub(crate) fn policer_name(&self) -> &str {
+        match self {
+            Self::Term { policer, .. } | Self::Unreferenced { policer } => policer,
+        }
+    }
+}
+
 /// Aggregate filter state: all compiled filters and policers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FilterState {
     /// Named filters keyed by "family:name" (e.g. "inet:protect-RE").
     pub(crate) filters: rustc_hash::FxHashMap<String, Arc<Filter>>,
-    /// Stable three-color policer runtimes keyed by policer name. #4514:
-    /// legacy single-rate `firewall policer` token buckets are lowered into
-    /// this same set at compile so `then policer X` is metered/enforced through
-    /// the three-color runtime rather than the dead `PolicerState` map.
-    pub(crate) three_color_policer_by_name:
-        rustc_hash::FxHashMap<String, Arc<ThreeColorPolicerRuntime>>,
-    /// Name-derived ID-indexed three-color policer runtimes.
+    /// Term-scoped runtimes, plus one name-scoped runtime for each defined
+    /// policer that no term references. #4514: legacy single-rate policers
+    /// lower into the same runtime family as three-color definitions.
+    pub(crate) three_color_policer_by_scope:
+        rustc_hash::FxHashMap<PolicerRuntimeScope, Arc<ThreeColorPolicerRuntime>>,
+    /// ID-sorted live runtimes; configured names may occur more than once.
     pub(crate) three_color_policers: Vec<Arc<ThreeColorPolicerRuntime>>,
     /// Direct per-interface inet filter reference for packet hot-path evaluation.
     pub(crate) iface_filter_v4_fast: rustc_hash::FxHashMap<i32, Arc<Filter>>,
@@ -999,11 +1039,31 @@ impl FilterState {
     pub(crate) fn three_color_policer_statuses(
         &self,
     ) -> Vec<crate::protocol::ThreeColorPolicerStatus> {
-        let mut statuses = self
-            .three_color_policers
-            .iter()
-            .map(|policer| policer.status())
-            .collect::<Vec<_>>();
+        let mut indices = rustc_hash::FxHashMap::<String, usize>::default();
+        let mut statuses: Vec<crate::protocol::ThreeColorPolicerStatus> =
+            Vec::with_capacity(self.three_color_policers.len());
+        for policer in &self.three_color_policers {
+            let status = policer.status();
+            if let Some(&index) = indices.get(status.name.as_str()) {
+                let aggregate = &mut statuses[index];
+                aggregate.id = aggregate.id.min(status.id);
+                aggregate.green_packets =
+                    aggregate.green_packets.saturating_add(status.green_packets);
+                aggregate.green_bytes = aggregate.green_bytes.saturating_add(status.green_bytes);
+                aggregate.yellow_packets =
+                    aggregate.yellow_packets.saturating_add(status.yellow_packets);
+                aggregate.yellow_bytes =
+                    aggregate.yellow_bytes.saturating_add(status.yellow_bytes);
+                aggregate.red_packets = aggregate.red_packets.saturating_add(status.red_packets);
+                aggregate.red_bytes = aggregate.red_bytes.saturating_add(status.red_bytes);
+                aggregate.drop_packets =
+                    aggregate.drop_packets.saturating_add(status.drop_packets);
+                aggregate.drop_bytes = aggregate.drop_bytes.saturating_add(status.drop_bytes);
+            } else {
+                indices.insert(status.name.clone(), statuses.len());
+                statuses.push(status);
+            }
+        }
         statuses.sort_by_key(|status| status.id);
         statuses
     }

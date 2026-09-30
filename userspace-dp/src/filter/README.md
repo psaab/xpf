@@ -15,9 +15,12 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   variants — the engine applies them around the action verdict.
 - `compiler.rs` — parses the typed config's filter terms and lowers
   them to `FilterTerm`s (prefix vectors, protocol bitmap, port
-  matcher, DSCP bitmap). Three-color policer snapshots are sorted by
-  name for deterministic iteration and compiled into name-derived
-  stable runtime IDs before terms are linked.
+  matcher, DSCP bitmap). Policer definitions are lowered in stable name
+  order; every referenced term gets a stable, independent runtime keyed
+  by family, filter, term, and policer name. A compiled filter reused
+  across hooks keeps that term's runtime; another term with the same name
+  gets its own bucket. Unreferenced valid definitions retain one
+  name-scoped runtime for status.
   - **Protocol resolution (#2505)** uses the SHARED, normalizing
     resolver `crate::ip_proto::proto_number` (trim + lowercase + the
     full `appid.ProtocolNumber` acceptance set — tcp/udp/icmp/icmpv6/
@@ -176,9 +179,12 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   The same accumulate-all-fall-through-terms contract applies to
   three-color policers via `CachedThreeColorPolicers`. Every matched
   fall-through term's `then policer` runtime is folded into the cached
-  TX-selection result (deduped by policer `id`) and re-metered on each
-  cached replay (`apply_cached_three_color_policers` → `for_each`), so a
-  flow escapes NO term's committed/peak rate limit on the cached path.
+  TX-selection result (deduped by scoped runtime `id`) and re-metered on
+  each cached replay (`apply_cached_three_color_policers` → `for_each`),
+  so a flow escapes NO term's committed/peak rate limit on the cached
+  path. Different terms using the same configured name retain distinct
+  handles; duplicate references to one compiled term are still metered
+  once.
   Like `CachedFilterCounters`, the container is a `SmallVec<[_; 2]>`
   (built once at flow-cache install, only `for_each`-read on the
   per-packet replay), so the common single/dual-policer case records with
@@ -496,24 +502,24 @@ Implemented here:
 Concurrency model (#5390):
 
 - Runtime token state is a **lock-free packed-atomic** token bucket per
-  logical policer — NOT a per-packet `Mutex` (removed in #5390) and NOT a
-  per-worker shard. All workers still meter one SHARED aggregate bucket,
-  so the observable policing rate is the exact configured aggregate
-  CIR/PIR (no per-worker rate division, no RSS-distribution dependence).
+  term-scoped policer instance — NOT a per-packet `Mutex` (removed in #5390)
+  and NOT a per-worker shard. All workers meter the same bucket for a given
+  compiled term, so that term receives its configured CIR/PIR regardless of
+  RSS/workers; distinct terms get independent configured buckets by default.
   The metered hot path takes no lock: both buckets live in one `AtomicU64`
   (`ThreeColorPolicerHot`, `#[repr(align(64))]` to isolate the CAS word
   from the Relaxed per-color counters) and are refilled/consumed through
   bounded `compare_exchange_weak` loops. Removing the lock also removed
   the poison failure mode; the only fail-closed path is the
   `Unsupported`-mode Red/drop. A per-worker-shard design was rejected
-  because it would divide the observable rate by the worker count and make
-  enforcement depend on RSS flow spread — the CAS approach keeps the exact
-  aggregate contract while eliminating the futex convoy.
+  because it would divide each term's observable rate by the worker count
+  and make enforcement depend on RSS flow spread — the CAS approach keeps
+  the exact per-term contract while eliminating the futex convoy.
 
 Remaining limitations:
 
 - Equivalent snapshot replacements preserve token buckets and per-color
-  counters by reusing the same runtime handle when the name-derived runtime ID
+  counters by reusing the same runtime handle when the term-scope runtime ID
   and shape are unchanged. Shape changes intentionally create a fresh runtime
   so old tokens cannot leak across a different rate/burst contract. HA
   failover and process restart still rebuild from configured bursts until a
@@ -817,14 +823,15 @@ Dataplane backstop (Rust): `preflight_term_policer_ref` raises
 
 The predicate is DEFINEDNESS — the name appears in the `policers` or
 `three_color_policers` snapshot collection — and deliberately NOT presence in
-the compiled `three_color_policer_by_name` map. Those two differ, and the
-difference is load-bearing: `lower_single_rate_policer_runtimes` (#4514) SKIPS
-a degenerate zero-rate METER-ONLY policer because it has no action to enforce,
-so that policer is defined, absent from the map, and boots fine today. Keying
-the rejection on the map would refuse a working config. Definedness is also the
-same question the Go gate asks, so the two cannot disagree about which
-references are dangling. An EMPTY reference (no policer on the term) is the
-legitimate "unpoliced" case and is NOT an error.
+the compiled `three_color_policer_by_scope` map. Those questions differ, and
+the difference is load-bearing: `lower_single_rate_policer_templates` (#4514)
+SKIPS a degenerate zero-rate METER-ONLY policer because it has no action to
+enforce, so that policer is defined but absent from the scope map and boots
+fine today. Keying the rejection on runtime-map presence would refuse a
+working config. Definedness is also the same question the Go gate asks, so
+the two cannot disagree about which references are dangling. An EMPTY
+reference (no policer on the term) is the legitimate "unpoliced" case and is
+NOT an error.
 
 Severity is Medium, not High: a policer is a RATE control, so its absence
 over-permits bandwidth rather than admitting traffic a policy would deny.
