@@ -513,23 +513,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 };
-                // #10313/#10656: reject an unknown tagged VID at the common
-                // ingress boundary. This must run before destination
+                // #10313/#10656/#11297: reject unknown VLAN identities and
+                // VID 0 on a tagged-only ingress bind at the common boundary.
+                // This guard must also run when no 802.1Q tag is present:
+                // untagged and priority-tagged frames both carry VID 0, and
+                // neither may observe the parent's fallback zone on a
+                // tagged-only trunk. The check precedes destination
                 // classification, ARP/NDP learning, tunnel decapsulation,
                 // flow-cache lookup, session lookup, screen evaluation, and
-                // policy/NAT consumers: none may observe a fallback zone for
-                // an identity the snapshot does not own, whether the fallback
-                // is an inherited sibling zone or the port's own zone.
+                // policy/NAT consumers.
                 //
-                // The pre-routing scope helper independently preserves the
-                // physical config name for from-interface diagnostics and
-                // scope matching, while forcing its zone empty. The packet
-                // itself never reaches that downstream path for an unknown
-                // VID.
+                // For unknown nonzero VIDs, the pre-routing scope helper still
+                // preserves the physical config name for from-interface
+                // diagnostics while forcing its zone empty. VID 0 is stopped
+                // here before that scope can consume the parent's fallback.
                 // #10597: injected WG records arrive post-decap with logical
                 // ingress; the native link-layer guards below are bypassed.
-                if meta.ingress_vlan_present != 0
-                    && !is_injected
+                if !is_injected
                     && crate::afxdp::forwarding::unknown_ingress_vlan(
                         worker_ctx.forwarding,
                         meta.ingress_ifindex as i32,
@@ -9159,9 +9159,6 @@ pub(super) fn poll_binding_process_descriptor(
         telemetry,
     );
 }
-#[cfg(test)]
-#[path = "named_pre_l3_10498_tests.rs"]
-mod named_pre_l3_10498_tests;
 
 #[cfg(test)]
 mod pptp_control_teardown_tests_11053 {

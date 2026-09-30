@@ -335,6 +335,150 @@ fn unknown_vid_on_agreed_zone_trunk_is_unzoned_but_keeps_parent_ifname_10313() {
         !crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 11, 50),
         "known VID must remain admitted to the normal logical-unit path"
     );
+    assert!(
+        crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 11, 0),
+        "VID 0 must be unknown on a tagged-only trunk, even when its sibling zone is unanimous"
+    );
+}
+
+#[test]
+fn vid_zero_is_unknown_on_unanimous_and_contested_tagged_trunks_11297() {
+    let unanimous =
+        build_forwarding_state(&crate::afxdp::test_fixtures::agreed_zone_trunk_snapshot_10313());
+    assert_eq!(
+        unanimous.ifindex_to_zone_id.get(&11).copied(),
+        Some(TEST_LAN_ZONE_ID),
+        "the unanimous unit zone must reach the parent in this regression shape"
+    );
+    assert!(
+        crate::afxdp::forwarding::host_inbound_admits_iface(
+            &unanimous,
+            11,
+            0,
+            crate::ip_proto::PROTO_TCP,
+            22,
+            false,
+            0,
+        ),
+        "the inherited unit zone would admit SSH absent the VID-0 ingress gate"
+    );
+    let (from_zone, to_zone) =
+        crate::afxdp::forwarding::zone_pair_ids_for_flow(&unanimous, 11, 24);
+    assert_eq!((from_zone, to_zone), (TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID));
+    assert_eq!(
+        crate::policy::evaluate_policy(
+            &unanimous.policy,
+            from_zone,
+            to_zone,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 20)),
+            crate::ip_proto::PROTO_TCP,
+            40_000,
+            443,
+        ),
+        crate::policy::PolicyAction::Permit,
+        "the inherited unit zone would permit transit absent the VID-0 ingress gate"
+    );
+    assert!(
+        crate::afxdp::forwarding::unknown_ingress_vlan(&unanimous, 11, 0),
+        "untagged frames must not inherit the unanimous sibling zone"
+    );
+    assert!(
+        crate::afxdp::forwarding::unknown_ingress_vlan(&unanimous, 13, 0),
+        "VID 0 must also be rejected if XDP reports the tagged VLAN child directly"
+    );
+
+    let mut contested_snapshot =
+        crate::afxdp::test_fixtures::agreed_zone_trunk_snapshot_10313();
+    contested_snapshot.interfaces.push(crate::InterfaceSnapshot {
+        name: "reth0.80".to_string(),
+        zone: "wan".to_string(),
+        linux_name: "ge-0-0-0.80".to_string(),
+        ifindex: 14,
+        parent_ifindex: 11,
+        vlan_id: 80,
+        is_unit: Some(true),
+        ..Default::default()
+    });
+    let contested = build_forwarding_state(&contested_snapshot);
+    assert!(
+        !contested.ifindex_to_zone_id.contains_key(&11),
+        "contested sibling zones must leave the parent unzoned"
+    );
+    assert!(
+        crate::afxdp::forwarding::unknown_ingress_vlan(&contested, 11, 0),
+        "VID 0 must still be rejected when siblings contest the parent zone"
+    );
+}
+
+#[test]
+fn explicit_untagged_unit0_keeps_vid_zero_fallback_11297() {
+    let mut snapshot = crate::afxdp::test_fixtures::agreed_zone_trunk_snapshot_10313();
+    snapshot.interfaces.push(crate::InterfaceSnapshot {
+        name: "reth0.0".to_string(),
+        zone: "lan".to_string(),
+        linux_name: "ge-0-0-0".to_string(),
+        ifindex: 11,
+        vlan_id: 0,
+        hardware_addr: "02:bf:72:00:00:08".to_string(),
+        is_unit: Some(true),
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        !crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 11, 0),
+        "an explicit untagged unit 0 owns the parent's VID-0 fallback"
+    );
+    assert!(
+        crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 13, 0),
+        "the tagged VLAN child itself has no untagged unit-0 identity"
+    );
+}
+
+#[test]
+fn vid_zero_host_bound_frame_cannot_use_unanimous_unit_zone_11297() {
+    let forwarding =
+        build_forwarding_state(&crate::afxdp::test_fixtures::agreed_zone_trunk_snapshot_10313());
+    assert!(
+        crate::afxdp::forwarding::host_inbound_admits_iface(
+            &forwarding,
+            11,
+            0,
+            crate::ip_proto::PROTO_TCP,
+            22,
+            false,
+            0,
+        ),
+        "the inherited zone would admit host-bound SSH absent the ingress gate"
+    );
+
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(192, 0, 2, 10),
+        Ipv4Addr::new(10, 0, 50, 1),
+        40_000,
+        22,
+        TCP_FLAG_SYN,
+        TEST_VLAN50_MAC,
+    );
+    let mut meta = txn_meta_v4(11, TCP_FLAG_SYN, frame.len() as u16);
+    meta.ingress_vlan_id = 0;
+    meta.ingress_vlan_present = 0;
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    let mut sessions = SessionTable::new();
+
+    let (batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
+    assert_eq!(batch.unknown_vlan_dropped, 1);
+    assert_eq!(batch.local_delivery_packets, 0);
+    assert_eq!(dbg.local, 0);
+    assert_eq!(sessions.len(), 0);
 }
 
 
@@ -352,11 +496,20 @@ fn broadcast_arp_reply_10313(sender_ip: Ipv4Addr, sender_mac: [u8; 6]) -> Vec<u8
     frame
 }
 
-/// #10313 packet-path guard: the unknown tagged VID must be recycled before
-/// ARP learning, while the exact known VID still learns under its logical
-/// ifindex and the untagged parent retains its normal physical fallback.
+fn priority_tagged_arp_reply_11297(sender_ip: Ipv4Addr, sender_mac: [u8; 6]) -> Vec<u8> {
+    let untagged = broadcast_arp_reply_10313(sender_ip, sender_mac);
+    let mut tagged = Vec::with_capacity(untagged.len() + 4);
+    tagged.extend_from_slice(&untagged[..12]);
+    tagged.extend_from_slice(&0x8100u16.to_be_bytes());
+    tagged.extend_from_slice(&0xA000u16.to_be_bytes()); // PCP 5, VID 0.
+    tagged.extend_from_slice(&untagged[12..]);
+    tagged
+}
+
+/// #10313 packet-path guard: the unknown tagged VID and VID-0 frames must be
+/// recycled before ARP learning. The exact known VID remains admitted.
 #[test]
-fn unknown_vid_is_recycled_before_arp_learning_10313() {
+fn unknown_vid_and_vid_zero_on_tagged_trunk_are_recycled_before_arp_learning_11297() {
     let forwarding =
         build_forwarding_state(&crate::afxdp::test_fixtures::agreed_zone_trunk_snapshot_10313());
     let ha_state = txn_ha_state();
@@ -423,7 +576,7 @@ fn unknown_vid_is_recycled_before_arp_learning_10313() {
         ingress_vlan_present: 0,
         ..unknown_meta
     };
-    txn_run_descriptor_with_neighbors(
+    let (untagged_batch, _) = txn_run_descriptor_with_neighbors(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -432,9 +585,34 @@ fn unknown_vid_is_recycled_before_arp_learning_10313() {
         untagged_meta,
         &neighbors,
     );
+    assert_eq!(untagged_batch.unknown_vlan_dropped, 1);
     assert!(
-        neighbors.get(&(11, IpAddr::V4(untagged_ip))).is_some(),
-        "untagged parent traffic must retain its physical fallback"
+        neighbors.get(&(11, IpAddr::V4(untagged_ip))).is_none(),
+        "untagged VID-0 frame on a tagged-only trunk must not inherit its unit zone or learn"
+    );
+
+    let priority_ip = Ipv4Addr::new(192, 0, 2, 5);
+    let priority_frame = priority_tagged_arp_reply_11297(priority_ip, [0x02, 0x05, 0, 0, 0, 1]);
+    let priority_meta = UserspaceDpMeta {
+        ingress_vlan_id: 0,
+        ingress_vlan_present: 1,
+        l3_offset: 18,
+        pkt_len: priority_frame.len() as u16,
+        ..unknown_meta
+    };
+    let (priority_batch, _) = txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &priority_frame,
+        priority_meta,
+        &neighbors,
+    );
+    assert_eq!(priority_batch.unknown_vlan_dropped, 1);
+    assert!(
+        neighbors.get(&(11, IpAddr::V4(priority_ip))).is_none(),
+        "priority-tagged VID-0 frame on a tagged-only trunk must also be rejected"
     );
 }
 /// The parent-name half of #10313 is independent of zone adjudication: when
