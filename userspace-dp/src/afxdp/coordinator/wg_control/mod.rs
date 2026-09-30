@@ -581,16 +581,14 @@ fn run_wg_control_loop_with_kernel_path_and_forward(
     let mut next_deadline: u64 = 0;
     let mut last_timer_pass_ns: u64 = 0;
     let mut tun_fatal_reads: u32 = 0;
-    // #10038: TUN-origin session-publish state. The forwarding Arc starts as
-    // the currently-published one (the GRE loop's shape); the dedup map is
-    // thread-local (never shared — it only suppresses our own republishes).
-    let mut forwarding: Arc<ForwardingState> = shared_runtime.load().forwarding().clone();
-    let mut tun_origin_attached = tun_origin::wg_endpoint_attachment_valid(
-        &forwarding,
-        tunnel_endpoint_id,
-        spawned_logical_ifindex,
-        tunnel_name,
-    );
+    // #10038: TUN-origin session-publish state. The forwarding Arc is seeded
+    // from the loop's per-iteration view load below (not a second pre-loop
+    // load): #6592 rule 3 allows this file exactly one load site, and a
+    // pre-loop seed could pair halves across generations with the loop's
+    // first load. The dedup map is thread-local (never shared — it only
+    // suppresses our own republishes).
+    let mut forwarding: Option<Arc<ForwardingState>> = None;
+    let mut tun_origin_attached = false;
     let mut tun_origin_sessions = FastMap::<SessionKey, u64>::default();
     let mut tun_origin_last_prune_ns = 0u64;
     // Parent-review items 2+4: tombstones (last-publish memory, swept at
@@ -629,15 +627,22 @@ fn run_wg_control_loop_with_kernel_path_and_forward(
         // the datagram loop.
         let runtime_view = shared_runtime.load();
         let validation = runtime_view.validation();
-        if !std::sync::Arc::ptr_eq(&forwarding, runtime_view.forwarding()) {
-            forwarding = runtime_view.forwarding().clone();
+        if forwarding
+            .as_ref()
+            .is_none_or(|f| !std::sync::Arc::ptr_eq(f, runtime_view.forwarding()))
+        {
+            let fresh = runtime_view.forwarding().clone();
             tun_origin_attached = tun_origin::wg_endpoint_attachment_valid(
-                &forwarding,
+                &fresh,
                 tunnel_endpoint_id,
                 spawned_logical_ifindex,
                 tunnel_name,
             );
+            forwarding = Some(fresh);
         }
+        // Shadow with the owned Arc for the rest of the iteration (O(1) Arc
+        // clone; keeps every downstream use unchanged).
+        let forwarding = forwarding.clone().expect("seeded just above");
         let ha_runtime = ha_state.load();
         // Parent-review item 2: publisher-owned idle sweep (throttled
         // inside — one timestamp check per iteration when idle).

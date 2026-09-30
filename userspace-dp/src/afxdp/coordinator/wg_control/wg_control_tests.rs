@@ -316,6 +316,7 @@ fn poll_loop_wakes_on_socket_readiness() {
 /// the persistent wgN TUN through the WG control thread's local-delivery
 /// channel. This cell pins queue consumption, wakeup, attachment fencing, and
 /// byte-exact TUN delivery; publication is pinned separately below.
+#[cfg(test)]
 #[test]
 fn worker_local_delivery_reaches_wg_tun_10409() {
     let engine = Arc::new(crate::afxdp::wg::WgEngine::new(
@@ -338,7 +339,7 @@ fn worker_local_delivery_reaches_wg_tun_10409() {
         "WG delivery fixture must have the endpoint attachment fence"
     );
     let channel = crate::afxdp::types::RuntimeViewChannel::default();
-    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new( // runtime-view-canary: test-local
         crate::afxdp::types::ValidationState::default(),
         forwarding,
     )));
@@ -1561,6 +1562,7 @@ struct ForwardObservation10597 {
 /// for worker adjudication (`forwarded`), refused as transit
 /// (`degraded_drops`), or — the bypass this seam removes — written straight
 /// to the TUN (`delivered`, always expected `None` now).
+#[cfg(test)]
 fn observe_one_record_forwarded_10597(
     kernel_transport: crate::afxdp::types::WgKernelTransport,
     ingress: super::kernel_path::WgKernelPathIngress,
@@ -1594,7 +1596,7 @@ fn observe_one_record_forwarded_10597(
         "setup: the queue observer must run attached"
     );
     let channel = crate::afxdp::types::RuntimeViewChannel::default();
-    channel.publish(std::sync::Arc::new(crate::afxdp::types::RuntimeView::new(
+    channel.publish(std::sync::Arc::new(crate::afxdp::types::RuntimeView::new( // runtime-view-canary: test-local
         crate::afxdp::types::ValidationState::default(),
         forwarding,
     )));
@@ -2040,6 +2042,7 @@ fn poll_shared_for_key_10038(
 /// (proven by poisoning the published forward and showing the poison intact
 /// after a redelivery the loop provably consumed: the datagram pair is FIFO,
 /// so the later flow-B publish proves the earlier redelivery was read).
+#[cfg(test)]
 #[test]
 fn wg_tun_burst_publishes_pair_on_sent_10038() {
     use std::io::Write;
@@ -2057,7 +2060,7 @@ fn wg_tun_burst_publishes_pair_on_sent_10038() {
         &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
     ));
     let channel = crate::afxdp::types::RuntimeViewChannel::default();
-    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new( // runtime-view-canary: test-local
         crate::afxdp::types::ValidationState::default(),
         forwarding.clone(),
     )));
@@ -2223,6 +2226,7 @@ fn wg_tun_burst_publishes_pair_on_sent_10038() {
 /// session the encap takes the NoSession arm (handshake requested, packet
 /// dropped) and NOTHING is published — the shared maps stay empty. Proves the
 /// publish is gated on encap success, not merely on reaching the burst.
+#[cfg(test)]
 #[test]
 fn wg_tun_burst_skips_publish_without_session_10038() {
     use std::io::Write;
@@ -2244,7 +2248,7 @@ fn wg_tun_burst_skips_publish_without_session_10038() {
         &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
     ));
     let channel = crate::afxdp::types::RuntimeViewChannel::default();
-    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new( // runtime-view-canary: test-local
         crate::afxdp::types::ValidationState::default(),
         forwarding.clone(),
     )));
@@ -2336,6 +2340,7 @@ fn wg_tun_burst_skips_publish_without_session_10038() {
 /// fw-src'd control half then publishes, proving the loop can publish and
 /// this cell is not vacuous. RED without the `owns_configured_ip` gate (the
 /// looped flow publishes a TUN-origin pair).
+#[cfg(test)]
 #[test]
 fn wg_tun_burst_nonlocal_src_encaps_without_publish_10038() {
     use std::io::Write;
@@ -2348,7 +2353,7 @@ fn wg_tun_burst_nonlocal_src_encaps_without_publish_10038() {
         &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
     ));
     let channel = crate::afxdp::types::RuntimeViewChannel::default();
-    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new( // runtime-view-canary: test-local
         crate::afxdp::types::ValidationState::default(),
         forwarding.clone(),
     )));
@@ -2455,6 +2460,7 @@ fn wg_tun_burst_nonlocal_src_encaps_without_publish_10038() {
 /// requests); a redelivery still publishes nothing (a skip marks nothing).
 /// The echo-REQUEST control half then publishes, proving the loop can
 /// publish. Distinct idents keep the two flows keyed apart.
+#[cfg(test)]
 #[test]
 fn wg_tun_burst_response_shaped_skips_create_10038() {
     use std::io::Write;
@@ -2467,7 +2473,7 @@ fn wg_tun_burst_response_shaped_skips_create_10038() {
         &crate::afxdp::test_fixtures::wg_outer_mtu_snapshot(),
     ));
     let channel = crate::afxdp::types::RuntimeViewChannel::default();
-    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new( // runtime-view-canary: test-local
         crate::afxdp::types::ValidationState::default(),
         forwarding.clone(),
     )));
