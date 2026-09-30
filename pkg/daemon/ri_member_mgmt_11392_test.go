@@ -70,6 +70,20 @@ func TestManagementClassRIMemberReassertDoesNotBindTenant11392(t *testing.T) {
 	}
 }
 
+func TestManagementClassRIMemberIsNotDetachedByStaleReassertCleanup11392(t *testing.T) {
+	ops := mgmtRIMemberOps11392("fxp0", 77)
+	d := riVRFDaemon9813(ops)
+	cfg := &config.Config{RoutingInstances: []*config.RoutingInstanceConfig{{
+		Name: "blue", InstanceType: "vrf", TableID: 100,
+	}}}
+
+	d.rebindRIMembersOutsideTheirVRF(cfg)
+
+	if got := ops.unboundRecorded(); len(got) != 0 {
+		t.Fatalf("stale tenant cleanup detached management-class fxp0: %v", got)
+	}
+}
+
 func TestFxp0StaysInManagementVRFAcrossReassertTicks11392(t *testing.T) {
 	ops := mgmtRIMemberOps11392("fxp0", 70)
 	d := riVRFDaemon9813(ops)

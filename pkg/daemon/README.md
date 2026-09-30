@@ -2999,8 +2999,10 @@ never lock an operator out of a remote box it manages.
     the binding (#4001). Tests: `ri_member_vrf_reassert_9813_test.go`, including a kernel cell.
   - Management-class RI list members (`fxp*`, `fab*`, `em*`) remain owned by
     `vrf-mgmt` (#11392). Strict compilation rejects them and tolerant
-    load/peer-sync warns; both `bindRoutingInstanceMembers` and the periodic
-    member reassert use `config.IsManagementIfName` to skip tenant binds.
+    load/peer-sync warns while quarantining the management-class references
+    from compiled tenant memberships, so userspace route/domain and table-ID
+    maps cannot assign them to a tenant. Both `bindRoutingInstanceMembers` and
+    periodic reassert also use `config.IsManagementIfName` to skip tenant binds.
     This keeps `fxp0` in `vrf-mgmt` across ticks and prevents the RI loop from
     fighting the fabric-overlay rebind for `fab0`/`fab1`; see
     `ri_member_mgmt_11392_test.go`.

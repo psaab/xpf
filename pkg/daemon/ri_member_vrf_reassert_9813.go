@@ -253,6 +253,9 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 				"err", err)
 		}
 		for _, member := range members {
+			if config.IsManagementIfName(member.InterfaceName) {
+				continue // #11392: vrf-mgmt owns this device, not stale tenant cleanup
+			}
 			if _, wanted := desiredDevices[member.InterfaceName]; wanted {
 				continue
 			}
