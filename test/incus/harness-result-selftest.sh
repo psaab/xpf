@@ -1398,9 +1398,12 @@ wire_field_has "unknown gate says so" 0 2 "unknown gate nope_gate"
 wire_log 'WIRE_GATE wire_appmatch_twins PASS reason=-- tcp80_offered=10000 tcp80_observed=10000 tcp8080_offered=1000 tcp8080_observed=0 udp53_offered=10000 udp53_observed=10000 udp5353_offered=1000 udp5353_observed=0 deny_leaked=0 permit_missing=0\n'
 wire_field_is "appmatch PASS transcribes" 0 1 "PASS"
 wire_field_is "appmatch headline is deny_leaked" 0 3 "deny_leaked"
-wire_log 'WIRE_GATE test-host-inbound PASS reason=-- cells_passed=24 cells_failed=0\n'
+wire_log 'WIRE_GATE test-host-inbound PASS reason=-- cells_passed=24 cells_failed=0 posture_passed=9 posture_failed=0\n'
 wire_field_is "host-inbound PASS transcribes" 0 1 "PASS"
 wire_field_is "host-inbound headline is cells_failed" 0 3 "cells_failed"
+wire_field_has "host-inbound carries posture split" 0 5 "posture_passed=9"
+wire_log 'WIRE_GATE test-host-inbound PASS reason=-- cells_passed=24 cells_failed=0\n'
+wire_field_is "host-inbound without posture split voids" 0 1 "VOID"
 wire_log 'WIRE_GATE cc-rollback-arm-b PASS reason=-- mid_present=1 mid_fwd_ok=1 post_gone=1 post_blocked=1 sess_gone=1\n'
 wire_field_is "arm-b PASS transcribes" 0 1 "PASS"
 wire_field_is "arm-b headline is sess_gone" 0 3 "sess_gone"

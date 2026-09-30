@@ -581,7 +581,7 @@ harness_adapt_wire_gate() {
 		direction="lower-better"
 		;;
 	test-host-inbound | test-host-inbound-failover)
-		required="cells_passed cells_failed"
+		required="cells_passed cells_failed posture_passed posture_failed"
 		headline="cells_failed"
 		direction="lower-better"
 		;;
