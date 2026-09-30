@@ -113,5 +113,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Warn about and exclude static routes without a forwarding disposition, so
     they cannot shadow an installable less-specific route in the helper FIB
     (#11327).
+  * Reject undeclared fields in named API-auth credentials and validate
+    API-auth class references; reconcile the schema-census inventories
+    (#11544).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
