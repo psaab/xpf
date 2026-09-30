@@ -128,5 +128,16 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesForwardingInstanceMembers11312(tree, cfg, opts); err != nil {
 		return err
 	}
+	// #11313 runs after all existing tail gates so it cannot steal an
+	// established first-error diagnostic. A missing router AS is checked on
+	// the fully-derived config after routing-options inheritance is resolved.
+	if err := validateBGPRouterASStrict(cfg); err != nil {
+		if opts.lenientBGPRouterAS {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("BGP router AS (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	return nil
 }

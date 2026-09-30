@@ -56,9 +56,9 @@ func TestBGPLocalASOverridesAutonomousSystem_3870(t *testing.T) {
 	}
 }
 
-// A per-instance BGP without local-as inherits the GLOBAL routing-options
-// autonomous-system (Junos inheritance), and an instance-level
-// autonomous-system overrides the global one.
+// Per-instance BGP inherits the global routing-options autonomous-system;
+// instance routing-options overrides it, and protocols bgp local-as overrides
+// both at that instance's scope.
 func TestBGPInstanceInheritsAutonomousSystem_3870(t *testing.T) {
 	c := compileSets3870(t, []string{
 		"set routing-options autonomous-system 65001",
@@ -69,14 +69,20 @@ func TestBGPInstanceInheritsAutonomousSystem_3870(t *testing.T) {
 		"set routing-instances BLUE routing-options autonomous-system 65055",
 		"set routing-instances BLUE protocols bgp group G peer-as 65020",
 		"set routing-instances BLUE protocols bgp group G neighbor 10.2.0.2",
+		"set routing-instances GREEN instance-type virtual-router",
+		"set routing-instances GREEN routing-options autonomous-system 65056",
+		"set routing-instances GREEN protocols bgp local-as 65099",
+		"set routing-instances GREEN protocols bgp group G neighbor 10.3.0.2 peer-as 65030",
 	})
-	var red, blue *RoutingInstanceConfig
+	var red, blue, green *RoutingInstanceConfig
 	for _, ri := range c.RoutingInstances {
 		switch ri.Name {
 		case "RED":
 			red = ri
 		case "BLUE":
 			blue = ri
+		case "GREEN":
+			green = ri
 		}
 	}
 	if red == nil || red.BGP == nil {
@@ -91,15 +97,11 @@ func TestBGPInstanceInheritsAutonomousSystem_3870(t *testing.T) {
 	if got := blue.BGP.LocalAS; got != 65055 {
 		t.Fatalf("BLUE BGP LocalAS = %d, want 65055 (instance-level autonomous-system override)", got)
 	}
-}
-
-// No routing-options autonomous-system and no local-as → LocalAS stays 0
-// (no `router bgp` renders), the pre-existing behavior, unchanged.
-func TestBGPNoASLeavesLocalASZero_3870(t *testing.T) {
-	c := compileSets3870(t, []string{
-		"set protocols bgp group G neighbor 10.0.0.2 peer-as 65002",
-	})
-	if c.Protocols.BGP != nil && c.Protocols.BGP.LocalAS != 0 {
-		t.Fatalf("BGP LocalAS = %d, want 0 when neither local-as nor autonomous-system is set", c.Protocols.BGP.LocalAS)
+	if green == nil || green.BGP == nil {
+		t.Fatal("instance GREEN BGP not compiled")
+	}
+	if got := green.BGP.LocalAS; got != 65099 {
+		t.Fatalf("GREEN BGP LocalAS = %d, want 65099 (instance protocols bgp local-as overrides routing-options)", got)
 	}
 }
+
