@@ -135,45 +135,37 @@ pub(super) fn close_delta_is_stale_incarnation(
     delta: &SessionDelta,
     current_sessions: Option<&crate::session::SessionTable>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
 ) -> bool {
     if delta.kind != SessionDeltaKind::Close {
         return false;
     }
     if let Some(sessions) = current_sessions {
         let current_id = sessions.session_id_for_bare_tuple(&delta.key);
-        let current_present = sessions.contains_bare_tuple(&delta.key);
         if delta.session_id == 0 {
-            if current_present {
+            if current_id.is_some() {
                 return true;
             }
-        } else if current_id != 0 && current_id != delta.session_id {
+        } else if current_id.is_some_and(|id| id != 0 && id != delta.session_id) {
             return true;
         }
     }
-    super::shared_ops::lock_shared_recover(shared_sessions)
-        .values()
-        .any(|entry| {
-            let mut candidate = entry.key.clone();
-            let mut close_key = delta.key.clone();
-            candidate.routing_domain = 0;
-            candidate.discriminator = Default::default();
-            close_key.routing_domain = 0;
-            close_key.discriminator = Default::default();
-            if candidate != close_key {
-                return false;
-            }
-            if delta.session_id == 0 {
-                // An explicit ordinary close can carry no id while its
-                // pre-delete shared row is still present at drain time. Only
-                // a different scoped key proves a replacement here; when the
-                // worker table is available, contains_bare_tuple above also
-                // catches same-key reincarnations before this shared fallback.
-                entry.key != delta.key
-            } else {
-                entry.key != delta.key
-                    || (entry.session_id != 0 && entry.session_id != delta.session_id)
-            }
-        })
+
+    // Every writer acquires the primary map before its companion index. Keep
+    // both guards together so this check cannot combine different publish or
+    // removal generations.
+    let sessions = super::shared_ops::lock_shared_recover(shared_sessions);
+    let bare_tuple_index =
+        super::shared_ops::lock_shared_recover(&shared_owner_rg_indexes.bare_tuple_sessions);
+    if bare_tuple_index.has_other_scope(&delta.key) {
+        return true;
+    }
+    if delta.session_id == 0 {
+        return false;
+    }
+    sessions.get(&delta.key).is_some_and(|entry| {
+        entry.session_id != 0 && entry.session_id != delta.session_id
+    })
 }
 
 pub(super) fn purge_retirement_close_is_stale(
@@ -221,6 +213,7 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
     shared_recycles: &mut Vec<(u32, u64)>,
     shared_runtime: &RuntimeViewReader,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     deltas: &[SessionDelta],
     current_sessions: Option<&mut crate::session::SessionTable>,
 ) -> usize {
@@ -242,7 +235,12 @@ pub(super) fn purge_queued_flows_for_closed_deltas(
         } else {
             Vec::new()
         };
-        if close_delta_is_stale_incarnation(delta, current_sessions.as_deref(), shared_sessions) {
+        if close_delta_is_stale_incarnation(
+            delta,
+            current_sessions.as_deref(),
+            shared_sessions,
+            shared_owner_rg_indexes,
+        ) {
             continue;
         }
         // Cancelled flows are DROPPED, not requeued
@@ -633,8 +631,12 @@ pub(super) fn flush_session_deltas(
                 continue;
             }
         }
-        let stale =
-            close_delta_is_stale_incarnation(delta, current_sessions.as_deref(), shared_sessions);
+        let stale = close_delta_is_stale_incarnation(
+            delta,
+            current_sessions.as_deref(),
+            shared_sessions,
+            shared_owner_rg_indexes,
+        );
         if stale && delta.purge_retirement {
             drop(_close_install_permits);
             event_stream_out_of_sync = true;

@@ -119,7 +119,7 @@ mod prerouting_scope_tests {
 
         // Unit-A frame (VID 80): scope resolves to wan -> the wan-scoped
         // DNAT MATCHES its OWN zone's traffic.
-        let scope_a = prerouting_ingress_scope(&forwarding, 11, 80, None);
+        let scope_a = prerouting_ingress_scope(&forwarding, 11, 80, None, None);
         assert_eq!(scope_a.zone_name, "wan");
         assert_eq!(scope_a.logical_ifindex, 12);
         let dnat_a = forwarding.dnat_table.lookup_with_counter_scoped(
@@ -141,7 +141,7 @@ mod prerouting_scope_tests {
         // Unit-B frame (VID 50): scope resolves to lan -> the wan-scoped
         // DNAT is SCOPED OUT. Reverting to the physical parent makes this
         // resolve to wan and the DNAT WRONGLY matches -> RED (#5802).
-        let scope_b = prerouting_ingress_scope(&forwarding, 11, 50, None);
+        let scope_b = prerouting_ingress_scope(&forwarding, 11, 50, None, None);
         assert_eq!(
             scope_b.zone_name, "lan",
             "the VID-50 unit must scope on its OWN logical zone (lan), \
@@ -181,7 +181,7 @@ mod prerouting_scope_tests {
 
         // Unit-B frame (VID 50): ifname resolves to reth0.50 -> its OWN
         // reth0.50-scoped static DNAT MATCHES.
-        let scope_b = prerouting_ingress_scope(&forwarding, 11, 50, None);
+        let scope_b = prerouting_ingress_scope(&forwarding, 11, 50, None, None);
         assert_eq!(scope_b.ifname, "reth0.50");
         let static_b = forwarding.static_nat.match_dnat_with_counter_scoped(
             ext,
@@ -200,7 +200,7 @@ mod prerouting_scope_tests {
 
         // Unit-A frame (VID 80): ifname resolves to reth0.80 -> the
         // reth0.50-scoped rule is correctly scoped OUT.
-        let scope_a = prerouting_ingress_scope(&forwarding, 11, 80, None);
+        let scope_a = prerouting_ingress_scope(&forwarding, 11, 80, None, None);
         assert_eq!(scope_a.ifname, "reth0.80");
         let static_a = forwarding.static_nat.match_dnat_with_counter_scoped(
             ext,
@@ -229,7 +229,7 @@ mod prerouting_scope_tests {
             Some(24),
             "an untagged port resolves logical == physical"
         );
-        let scope = prerouting_ingress_scope(&forwarding, 24, 0, None);
+        let scope = prerouting_ingress_scope(&forwarding, 24, 0, None, None);
         assert_eq!(
             scope.logical_ifindex, 24,
             "an untagged port scopes on itself (logical == physical)"
@@ -273,7 +273,7 @@ fn unknown_vid_on_agreed_zone_trunk_is_unzoned_but_keeps_parent_ifname_10313() {
 
     // Known VID control: the configured unit keeps its own logical identity
     // and its `lan` zone.
-    let known = prerouting_ingress_scope(&forwarding, 11, 50, None);
+    let known = prerouting_ingress_scope(&forwarding, 11, 50, None, None);
     assert_eq!(known.zone_name, "lan");
     assert_eq!(known.ifname, "reth0.50");
     assert_eq!(known.routing_instance, "tenant-b");
@@ -286,7 +286,7 @@ fn unknown_vid_on_agreed_zone_trunk_is_unzoned_but_keeps_parent_ifname_10313() {
     );
     // XDP may be attached to the VLAN child itself. Its ingress ifindex is
     // already logical, so only the child's configured VID is known.
-    let child_match = prerouting_ingress_scope(&forwarding, 13, 50, None);
+    let child_match = prerouting_ingress_scope(&forwarding, 13, 50, None, None);
     assert_eq!(child_match.logical_ifindex, 13);
     assert_eq!(child_match.zone_name, "lan");
     assert_eq!(child_match.ifname, "reth0.50");
@@ -294,7 +294,7 @@ fn unknown_vid_on_agreed_zone_trunk_is_unzoned_but_keeps_parent_ifname_10313() {
         !crate::afxdp::forwarding::unknown_ingress_vlan(&forwarding, 13, 50),
         "a VLAN child must admit its configured VID"
     );
-    let child_wrong_vid = prerouting_ingress_scope(&forwarding, 13, 99, None);
+    let child_wrong_vid = prerouting_ingress_scope(&forwarding, 13, 99, None, None);
     assert_eq!(
         child_wrong_vid.zone_name, "",
         "a different VID on the child must not inherit its configured zone"
@@ -308,7 +308,7 @@ fn unknown_vid_on_agreed_zone_trunk_is_unzoned_but_keeps_parent_ifname_10313() {
     // for interface matching, but no configured unit owns VID 99, so the
     // ingress zone must be the unzoned sentinel and the packet is rejected
     // at the common ingress boundary.
-    let unknown = prerouting_ingress_scope(&forwarding, 11, 99, None);
+    let unknown = prerouting_ingress_scope(&forwarding, 11, 99, None, None);
     assert_eq!(
         unknown.zone_name, "",
         "unknown VID must not inherit the agreed sibling zone"
@@ -318,6 +318,7 @@ fn unknown_vid_on_agreed_zone_trunk_is_unzoned_but_keeps_parent_ifname_10313() {
         11,
         99,
         Some(TEST_WAN_ZONE_ID),
+        None,
     );
     assert_eq!(
         fabric_override.zone_name, "wan",
@@ -622,7 +623,7 @@ fn unknown_vid_and_vid_zero_on_tagged_trunk_are_recycled_before_arp_learning_112
 fn unknown_vid_scope_populates_parent_ifname_10313() {
     let forwarding =
         build_forwarding_state(&crate::afxdp::test_fixtures::agreed_zone_trunk_snapshot_10313());
-    let scope = prerouting_ingress_scope(&forwarding, 11, 99, None);
+    let scope = prerouting_ingress_scope(&forwarding, 11, 99, None, None);
     assert_eq!(
         scope.ifname, "reth0",
         "unknown VID must not leave the parent interface scope empty"
@@ -640,7 +641,7 @@ fn unknown_vid_on_unitless_zoned_port_is_unzoned_but_keeps_port_ifname_10656() {
         build_forwarding_state(&crate::afxdp::test_fixtures::unitless_zoned_port_snapshot_10656());
 
     // Untagged control: the plain port keeps its own identity and `lan` zone.
-    let untagged = prerouting_ingress_scope(&forwarding, 31, 0, None);
+    let untagged = prerouting_ingress_scope(&forwarding, 31, 0, None, None);
     assert_eq!(untagged.zone_name, "lan");
     assert_eq!(untagged.ifname, "reth2");
     let (untagged_from, _) = crate::afxdp::forwarding::zone_pair_ids_for_flow(
@@ -656,13 +657,18 @@ fn unknown_vid_on_unitless_zoned_port_is_unzoned_but_keeps_port_ifname_10656() {
     // Unknown VID regression: no unit owns VID 99 on this bind, so the
     // ingress zone must be the unzoned sentinel even though the port itself
     // is zoned `lan`.
-    let unknown = prerouting_ingress_scope(&forwarding, 31, 99, None);
+    let unknown = prerouting_ingress_scope(&forwarding, 31, 99, None, None);
     assert_eq!(
         unknown.zone_name, "",
         "unknown VID must not inherit the unit-less port's own zone"
     );
-    let fabric_override =
-        prerouting_ingress_scope(&forwarding, 31, 99, Some(TEST_WAN_ZONE_ID));
+    let fabric_override = prerouting_ingress_scope(
+        &forwarding,
+        31,
+        99,
+        Some(TEST_WAN_ZONE_ID),
+        None,
+    );
     assert_eq!(
         fabric_override.zone_name, "wan",
         "a valid fabric ingress override remains authoritative for an unknown local VID"
@@ -741,6 +747,130 @@ fn unknown_vid_on_unitless_port_is_recycled_before_arp_learning_10656() {
     assert!(
         neighbors.get(&(31, IpAddr::V4(untagged_ip))).is_some(),
         "untagged port traffic must retain its physical fallback"
+    );
+}
+/// Fabric punts must preserve the peer's interface and routing-instance
+/// identity, not just its zone. The local fabric link has neither NAT scope,
+/// so the zone stamp alone cannot make these scoped DNAT rules match.
+#[test]
+fn fabric_punt_prerouting_scope_keeps_peer_nat_identity_11337() {
+    let mut snapshot = crate::afxdp::test_fixtures::nat_snapshot_with_fabric();
+    let wan = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.name == "reth0.80")
+        .expect("WAN ingress fixture");
+    wan.routing_instance = "tenant-a".into();
+    wan.routing_domain = 100_001;
+    snapshot
+        .destination_nat_rules
+        .push(crate::DestinationNATRuleSnapshot {
+            name: "ri-scoped-dnat".into(),
+            from_routing_instance: "tenant-a".into(),
+            destination_address: "172.16.80.200".into(),
+            destination_port: 443,
+            protocol: "tcp".into(),
+            pool_address: "10.0.61.200".into(),
+            pool_port: 8443,
+            ..Default::default()
+        });
+    snapshot.static_nat_rules.push(crate::StaticNATRuleSnapshot {
+        name: "interface-scoped-vip".into(),
+        from_interface: "reth0.80".into(),
+        external_ip: "172.16.80.201".into(),
+        internal_ip: "10.0.61.201".into(),
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let peer_ingress_ifindex = forwarding
+        .ifindex_to_config_name
+        .iter()
+        .find_map(|(ifindex, name)| (name == "reth0.80").then_some(*ifindex))
+        .expect("WAN ingress logical interface");
+    let redirect = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        &forwarding,
+        Some(TEST_WAN_ZONE_ID),
+        Some(peer_ingress_ifindex),
+    )
+    .expect("fabric punt with peer NAT scope");
+    let mut frame = vec![0u8; 64];
+    frame[..6].copy_from_slice(&forwarding.fabrics[0].local_mac);
+    frame[6..12].copy_from_slice(&redirect.src_mac.expect("V2 source stamp"));
+    let mut meta = UserspaceDpMeta::default();
+    meta.ingress_ifindex = 101;
+    let (zone_override, scope_ifindex) =
+        match parse_zone_encoded_fabric_ingress_from_frame(
+            &frame,
+            meta,
+            &forwarding,
+            &std::collections::BTreeMap::new(),
+            0,
+        ) {
+            ZoneEncodedFabricStamp::ValidScoped { zone_id, ifindex } => {
+                (Some(zone_id), Some(ifindex))
+            }
+            stamp => panic!("expected validated V2 fabric scope, got {stamp:?}"),
+        };
+
+    let mut unknown_scope_frame = frame.clone();
+    unknown_scope_frame[9..12].fill(0);
+    let mut invalid_meta = UserspaceDpMeta::default();
+    invalid_meta.ingress_ifindex = 101;
+    assert!(
+        matches!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                &unknown_scope_frame,
+                invalid_meta,
+                &forwarding,
+                &std::collections::BTreeMap::new(),
+                0,
+            ),
+            ZoneEncodedFabricStamp::Invalid
+        ),
+        "#11337: an unknown V2 NAT-scope identity must fail closed"
+    );
+
+    let scope =
+        prerouting_ingress_scope(&forwarding, 101, 0, zone_override, scope_ifindex);
+    assert_eq!(scope.zone_name, "wan");
+    assert_eq!(
+        scope.ifname, "reth0.80",
+        "#11337: fabric arrival must recover the peer's ingress interface"
+    );
+    assert_eq!(
+        scope.routing_instance, "tenant-a",
+        "#11337: fabric arrival must recover the peer's ingress routing instance"
+    );
+    assert!(
+        forwarding
+            .dnat_table
+            .lookup_with_counter_scoped(
+                crate::ip_proto::PROTO_TCP,
+                "203.0.113.9".parse().unwrap(),
+                "172.16.80.200".parse().unwrap(),
+                51000,
+                443,
+                scope.zone_name,
+                scope.ifname,
+                scope.routing_instance,
+                None,
+            )
+            .is_some(),
+        "#11337: the peer's RI-scoped DNAT must match"
+    );
+    assert!(
+        forwarding
+            .static_nat
+            .match_dnat_with_counter_scoped(
+                "172.16.80.201".parse().unwrap(),
+                0,
+                Some("203.0.113.9".parse().unwrap()),
+                scope.zone_name,
+                scope.ifname,
+                scope.routing_instance,
+            )
+            .is_some(),
+        "#11337: the peer's interface-scoped static VIP must match"
     );
 }
 }

@@ -61,6 +61,10 @@ func PolicyResolvedFingerprints(cfg *config.Config) map[string]string {
 	// contributes every slot, sorted, so the fingerprint is order-independent.
 	perKey := make(map[string][]string, len(rules))
 	for _, r := range rules {
+		// PolicyID is a positional runtime slot, not resolved policy content.
+		// Inserting, deleting, or reordering earlier policies can change it
+		// without changing this policy's behavior.
+		r.PolicyID = 0
 		blob, err := json.Marshal(r)
 		if err != nil {
 			return nil

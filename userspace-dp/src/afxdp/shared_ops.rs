@@ -664,47 +664,70 @@ pub(super) fn lookup_shared_session(
     lock_shared_recover(shared_sessions).get(key).cloned()
 }
 
+#[derive(Clone, Copy)]
+enum ReverseDomainAdmission {
+    ForwardEgress,
+    QuotedTupleOnly,
+}
+
 pub(super) fn lookup_shared_forward_nat_match(
+    forwarding: &ForwardingState,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     reply_key: &SessionKey,
 ) -> Option<SyncedSessionEntry> {
+    lookup_shared_forward_nat_match_with_admission(
+        forwarding,
+        shared_nat_sessions,
+        reply_key,
+        ReverseDomainAdmission::ForwardEgress,
+    )
+}
+
+fn lookup_shared_forward_nat_match_with_admission(
+    forwarding: &ForwardingState,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    reply_key: &SessionKey,
+    domain_admission: ReverseDomainAdmission,
+) -> Option<SyncedSessionEntry> {
     // #2402: recover poison (see lookup_shared_session).
     let map = lock_shared_recover(shared_nat_sessions);
-    // #7160 (#2387): the shared NAT map is published under BOTH reverse keys —
-    // `reverse_session_key` (which PRESERVES the routing domain) and
-    // `reverse_canonical_key` (which zeroes it, being a reverse-MATCH key).
-    // Probe in that order so a reply that resolved the flow's own domain
-    // demuxes to its own tenant's entry. The zeroed second probe remains
-    // available for a legitimate non-contained flow when either endpoint is
-    // domain 0, but a different non-zero domain is a cross-tenant collision
-    // and must be refused before the shared entry is cloned. Synthetic fabric
-    // quarantine domains are stricter: they cannot participate in any
-    // mixed-zero fallback.
+    // The shared NAT map is published under both the domain-preserving reverse
+    // key and the canonical, domain-neutral reverse-match key. Probe in that
+    // order. Ordinary packet admission checks each candidate's forward egress
+    // domain; embedded quotes use this match only to recover the quoted tuple,
+    // because an off-path router may send the error from another domain.
     //
-    // A domain-0 reply key makes the second probe identical to the first;
-    // `reverse_match_key` returns the key unchanged in that case, so a
-    // deployment with no routing-instance interface membership pays one
-    // lookup, exactly as before.
-    if let Some(exact) = map.get(reply_key).cloned() {
-        return Some(exact);
+    // Synthetic fabric domains retain their exact-key-only behavior in both
+    // modes: they may use an exact matching forward key, never a canonical alias.
+    let matches_reply_domain = |entry: &SyncedSessionEntry, exact: bool| {
+        let forward_key_domain = entry.key.routing_domain;
+        if crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
+            || crate::session::is_quarantined_routing_domain(forward_key_domain)
+        {
+            return exact && forward_key_domain == reply_key.routing_domain;
+        }
+        match domain_admission {
+            ReverseDomainAdmission::ForwardEgress => {
+                crate::afxdp::forwarding::egress_routing_domain(
+                    forwarding,
+                    entry.decision.resolution.egress_ifindex,
+                ) == reply_key.routing_domain
+            }
+            ReverseDomainAdmission::QuotedTupleOnly => true,
+        }
+    };
+
+    if let Some(exact) = map.get(reply_key) {
+        if matches_reply_domain(exact, true) {
+            return Some(exact.clone());
+        }
     }
     let probe = crate::session::reverse_match_key(reply_key);
     if probe == *reply_key {
         return None;
     }
     let fallback = map.get(&probe)?;
-    if crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
-        || crate::session::is_quarantined_routing_domain(fallback.key.routing_domain)
-    {
-        return None;
-    }
-    if reply_key.routing_domain != 0
-        && fallback.key.routing_domain != 0
-        && fallback.key.routing_domain != reply_key.routing_domain
-    {
-        return None;
-    }
-    Some(fallback.clone())
+    matches_reply_domain(fallback, false).then(|| fallback.clone())
 }
 
 /// Prove that the shared reverse index contains the expected forward entry
@@ -1223,16 +1246,10 @@ pub(super) enum ReverseIngress {
     /// Distinct from `Unconstrained` precisely so an unmapped ifindex cannot
     /// reach the same outcome as a deliberate exemption.
     Unzoned,
-    /// The caller asserts no ingress constraint, and owes a reason at the call
-    /// site. Two hold today:
-    ///
-    /// * the ICMP embedded-error rewriters, which use the match only to recover
-    ///   a pre-NAT tuple and install NO session — and where an error may
-    ///   legitimately originate off-path (an intermediate router), so
-    ///   constraining the arrival zone would break PMTUD;
-    /// * a FABRIC-ingress packet, which arrives on the fabric link from the
-    ///   peer node rather than in its logical ingress zone, so its arrival zone
-    ///   is structurally not the flow's.
+    /// The caller has no arrival-zone constraint. Egress-domain admission
+    /// still applies; embedded ICMP quotes use the separate tuple-only API.
+    /// The active exemption is a FABRIC-ingress packet, which arrives on the
+    /// fabric link from the peer node rather than in its logical ingress zone.
     Unconstrained,
 }
 
@@ -1257,16 +1274,25 @@ fn revalidate_reverse_ingress(
 pub(super) fn lookup_forward_nat_across_scopes(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forwarding: &ForwardingState,
     reply_key: &SessionKey,
     ingress: ReverseIngress,
 ) -> Option<ForwardSessionMatch> {
-    let m = lookup_forward_nat_across_scopes_inner(sessions, shared_nat_sessions, reply_key, None)?;
+    let m = lookup_forward_nat_across_scopes_inner(
+        sessions,
+        shared_nat_sessions,
+        forwarding,
+        reply_key,
+        None,
+        ReverseDomainAdmission::ForwardEgress,
+    )?;
     revalidate_reverse_ingress(m, ingress)
 }
 
 pub(super) fn lookup_forward_nat_across_scopes_at(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forwarding: &ForwardingState,
     reply_key: &SessionKey,
     ingress: ReverseIngress,
     now_ns: u64,
@@ -1274,24 +1300,120 @@ pub(super) fn lookup_forward_nat_across_scopes_at(
     let m = lookup_forward_nat_across_scopes_inner(
         sessions,
         shared_nat_sessions,
+        forwarding,
         reply_key,
         Some(now_ns),
+        ReverseDomainAdmission::ForwardEgress,
     )?;
     revalidate_reverse_ingress(m, ingress)
+}
+
+/// Read-only reverse-tuple lookup for embedded ICMP quotes. Off-path routers
+/// can send an error from a routing domain other than the forward egress, so
+/// this path validates tuple identity (and the quarantine fence) without
+/// applying reverse-session admission. Local and shared candidates fail closed
+/// when multiple routing domains own the same translated tuple.
+pub(super) fn lookup_forward_nat_for_icmp_quote_at(
+    sessions: &SessionTable,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: Option<&SharedSessionOwnerRgIndexes>,
+    forwarding: &ForwardingState,
+    reply_key: &SessionKey,
+    now_ns: u64,
+) -> Option<ForwardSessionMatch> {
+    let local_match = match sessions.find_forward_nat_quote_match_at(reply_key, now_ns) {
+        crate::session::ForwardNatQuoteLookup::NoMatch => None,
+        crate::session::ForwardNatQuoteLookup::Unique(local) => Some(local),
+        crate::session::ForwardNatQuoteLookup::Ambiguous => return None,
+    };
+    if local_match.is_none()
+        && sessions
+            .find_forward_nat_match(reply_key, |_| reply_key.routing_domain)
+            .is_some()
+    {
+        // A wheel-lazy local entry was found but failed the strict age gate.
+        // Do not resurrect its shared-map clone on this worker.
+        return None;
+    }
+    let shared_match = lookup_shared_forward_nat_match_with_admission(
+        forwarding,
+        shared_nat_sessions,
+        reply_key,
+        ReverseDomainAdmission::QuotedTupleOnly,
+    )
+    .map(|entry| ForwardSessionMatch {
+        key: entry.key,
+        decision: entry.decision,
+        metadata: entry.metadata,
+    });
+    let shared_match = if let Some(shared) = shared_match {
+        if !crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
+            && !crate::session::is_quarantined_routing_domain(shared.key.routing_domain)
+        {
+            let Some(indexes) = shared_owner_rg_indexes else {
+                return None;
+            };
+            let mut canonical_reply_key = reply_key.clone();
+            canonical_reply_key.routing_domain = 0;
+            if !shared_forward_nat_candidate_is_unique(
+                shared_nat_sessions,
+                indexes,
+                &canonical_reply_key,
+                &shared.key,
+                shared.decision.nat,
+            ) {
+                return None;
+            }
+        }
+        Some(shared)
+    } else {
+        None
+    };
+    match (local_match, shared_match) {
+        (Some(local), Some(shared)) => {
+            if local.key.routing_domain != shared.key.routing_domain {
+                return None;
+            }
+            if is_fabric_wire_placeholder(
+                local.metadata.fabric_ingress,
+                local.metadata.is_reverse,
+                local.decision,
+            ) {
+                Some(shared)
+            } else {
+                Some(local)
+            }
+        }
+        (Some(local), None) => Some(local),
+        (None, Some(shared)) => Some(shared),
+        (None, None) => None,
+    }
 }
 
 fn lookup_forward_nat_across_scopes_inner(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forwarding: &ForwardingState,
     reply_key: &SessionKey,
     now_ns: Option<u64>,
+    domain_admission: ReverseDomainAdmission,
 ) -> Option<ForwardSessionMatch> {
-    let local_match = now_ns
-        .map(|now| sessions.find_forward_nat_match_at(reply_key, now))
-        .unwrap_or_else(|| sessions.find_forward_nat_match(reply_key));
+    let egress_domain = |ifindex| match domain_admission {
+        ReverseDomainAdmission::ForwardEgress => {
+            crate::afxdp::forwarding::egress_routing_domain(forwarding, ifindex)
+        }
+        ReverseDomainAdmission::QuotedTupleOnly => reply_key.routing_domain,
+    };
+    let local_match = if let Some(now) = now_ns {
+        sessions.find_forward_nat_match_at(reply_key, now, &egress_domain)
+    } else {
+        sessions.find_forward_nat_match(reply_key, &egress_domain)
+    };
     if now_ns.is_some()
         && local_match.is_none()
-        && sessions.find_forward_nat_match(reply_key).is_some()
+        && sessions
+            .find_forward_nat_match(reply_key, &egress_domain)
+            .is_some()
     {
         // A wheel-lazy local entry was found but failed the strict age gate.
         // Do not resurrect its shared-map clone on this worker.
@@ -1303,22 +1425,30 @@ fn lookup_forward_nat_across_scopes_inner(
             local.metadata.is_reverse,
             local.decision,
         ) {
-            return lookup_shared_forward_nat_match(shared_nat_sessions, reply_key).map(|entry| {
-                ForwardSessionMatch {
-                    key: entry.key,
-                    decision: entry.decision,
-                    metadata: entry.metadata,
-                }
+            return lookup_shared_forward_nat_match_with_admission(
+                forwarding,
+                shared_nat_sessions,
+                reply_key,
+                domain_admission,
+            )
+            .map(|entry| ForwardSessionMatch {
+                key: entry.key,
+                decision: entry.decision,
+                metadata: entry.metadata,
             });
         }
         return Some(local);
     }
-    lookup_shared_forward_nat_match(shared_nat_sessions, reply_key).map(|entry| {
-        ForwardSessionMatch {
-            key: entry.key,
-            decision: entry.decision,
-            metadata: entry.metadata,
-        }
+    lookup_shared_forward_nat_match_with_admission(
+        forwarding,
+        shared_nat_sessions,
+        reply_key,
+        domain_admission,
+    )
+    .map(|entry| ForwardSessionMatch {
+        key: entry.key,
+        decision: entry.decision,
+        metadata: entry.metadata,
     })
 }
 
@@ -1886,6 +2016,7 @@ pub(super) fn publish_shared_session(
         let previous_owner_rg = sessions
             .insert(entry.key.clone(), entry.clone())
             .map(|existing| existing.metadata.owner_rg_id);
+        lock_shared_recover(&shared_owner_rg_indexes.bare_tuple_sessions).insert(&entry.key);
         update_owner_rg_index(
             &shared_owner_rg_indexes.sessions,
             &entry.key,
@@ -1931,6 +2062,25 @@ pub(super) fn publish_shared_session(
             update_owner_rg_index(
                 &shared_owner_rg_indexes.nat_sessions,
                 &reverse_canonical,
+                previous_owner_rg,
+                entry.metadata.owner_rg_id,
+            );
+        }
+        let reverse_match = crate::session::reverse_match_key(&reverse_wire);
+        if reverse_match != reverse_wire && reverse_match != reverse_canonical {
+            let displaced = sessions.insert(reverse_match.clone(), entry.clone());
+            record_shared_nat_displacement(displaced.as_ref(), entry);
+            if displaced
+                .as_ref()
+                .is_some_and(|existing| existing.key != entry.key)
+            {
+                lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
+                    .mark(reverse_match.clone());
+            }
+            let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
+            update_owner_rg_index(
+                &shared_owner_rg_indexes.nat_sessions,
+                &reverse_match,
                 previous_owner_rg,
                 entry.metadata.owner_rg_id,
             );
@@ -1988,9 +2138,11 @@ pub(super) fn restamp_shared_policy_entries(
             if entry.metadata.is_reverse {
                 continue;
             }
+            let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
             let aliases = [
-                reverse_session_key(&entry.key, entry.decision.nat),
+                reverse_wire.clone(),
                 reverse_canonical_key(&entry.key, entry.decision.nat),
+                crate::session::reverse_match_key(&reverse_wire),
             ];
             for alias in aliases {
                 if let Some(stored) = sessions.get_mut(&alias)
@@ -2137,6 +2289,7 @@ pub(super) fn remove_shared_session_if(
     }
     let removed_entry = sessions.remove(key);
     if let Some(entry) = removed_entry.as_ref() {
+        lock_shared_recover(&shared_owner_rg_indexes.bare_tuple_sessions).remove(&entry.key);
         remove_owner_rg_index_entry(
             &shared_owner_rg_indexes.sessions,
             entry.metadata.owner_rg_id,
@@ -2167,6 +2320,18 @@ pub(super) fn remove_shared_session_if(
                     &shared_owner_rg_indexes.nat_sessions,
                     removed.metadata.owner_rg_id,
                     &reverse_canonical,
+                );
+            }
+            let reverse_match = crate::session::reverse_match_key(&reverse_wire);
+            if reverse_match != reverse_wire
+                && reverse_match != reverse_canonical
+                && let Some(removed) =
+                    remove_shared_alias_owned_by(&mut nat_sessions, &reverse_match, &entry.key)
+            {
+                remove_owner_rg_index_entry(
+                    &shared_owner_rg_indexes.nat_sessions,
+                    removed.metadata.owner_rg_id,
+                    &reverse_match,
                 );
             }
             {

@@ -72,15 +72,10 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         hdr.src_port,
         hdr.dst_port,
         quoted_discriminator,
-        // #9162: the SAME domain the forward `embedded_key` above carries, not
-        // a hardcoded 0. This key is probed against both kinds of index and a
-        // real domain is right for both — the exact
-        // `lookup_session_across_scopes` fallback below could not otherwise
-        // reach a session installed in a routing instance (which silently
-        // disabled the #6474 outbound-SNAT reply-key arm there), and
-        // `lookup_forward_nat_across_scopes` zeroes the probe itself before
-        // hitting its bucket, spending the domain on the two-pass tenant
-        // preference instead. See `embedded_reply_key`.
+        // #9162/#11298: retain the arriving interface's domain for exact
+        // probes. This quote-only reverse lookup is tuple-based because it
+        // creates no session and off-path routers may send errors from another
+        // routing domain. See `embedded_reply_key`.
         embedded_routing_domain,
     );
 
@@ -88,18 +83,12 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     // reply direction of a forward-NAT'd session. Recover the original
     // pre-NAT src + port from the forward key.
     if let Some(fwd) =
-        lookup_forward_nat_across_scopes_at(
+        lookup_forward_nat_for_icmp_quote_at(
             ctx.sessions,
             ctx.shared_nat_sessions,
+            ctx.shared_owner_rg_indexes,
+            ctx.forwarding,
             &reverse_key,
-            // #7169: no ingress constraint here, and the reason is not
-            // that it is inconvenient. This path installs NO session —
-            // it uses the match only to recover the pre-NAT tuple for
-            // rewriting an embedded ICMP error — so there is no durable
-            // state to endorse a spoof. And an ICMP error may legitimately
-            // originate off-path from an intermediate router, so requiring
-            // it to arrive from the flow's egress zone would break PMTUD.
-            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
             now_ns,
         )
     {

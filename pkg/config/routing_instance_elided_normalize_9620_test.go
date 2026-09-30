@@ -33,8 +33,8 @@ var elidedInstanceCells9620 = []struct {
 		`ri1 instance-type virtual-router protocols bgp group G peer-as 65001 neighbor 10.0.0.1;`,
 		`ri1 { instance-type virtual-router; protocols bgp group G peer-as 65001 neighbor 10.0.0.1; }`},
 	{"protocols ospf interface",
-		`ri2 instance-type virtual-router protocols ospf area 0.0.0.0 interface ge-0/0/1.0;`,
-		`ri2 { instance-type virtual-router; protocols ospf area 0.0.0.0 interface ge-0/0/1.0; }`},
+		`ri2 instance-type virtual-router interface ge-0/0/1.0 protocols ospf area 0.0.0.0 interface ge-0/0/1.0;`,
+		`ri2 { instance-type virtual-router; interface ge-0/0/1.0; protocols ospf area 0.0.0.0 interface ge-0/0/1.0; }`},
 	{"protocols bgp description",
 		`ri1 instance-type virtual-router protocols bgp group G description foo;`,
 		`ri1 { instance-type virtual-router; protocols bgp group G description foo; }`},
@@ -196,9 +196,9 @@ func TestElidedRoutingInstanceCompilesLikeBraced9620(t *testing.T) {
 			return ""
 		},
 		"protocols ospf interface": func(ri *RoutingInstanceConfig) string {
-			if len(ri.Interfaces) != 0 {
-				return "want no instance interfaces: the OSPF area's interface was bound as a VRF " +
-					"member, moving it out of the default table: got " + jsonString9620(ri.Interfaces)
+			if !reflect.DeepEqual(ri.Interfaces, []string{"ge-0/0/1.0"}) {
+				return "want only the explicit routing-instance member; the OSPF area's interface " +
+					"must not be parsed again as a second member: got " + jsonString9620(ri.Interfaces)
 			}
 			if ri.OSPF == nil {
 				return "want OSPF compiled, the adjacency is never configured: got nil"

@@ -100,6 +100,7 @@ pub(in crate::afxdp::icmp_embed) struct NatMatchCtx<'a> {
     pub dynamic_neighbors: &'a Arc<ShardedNeighborMap>,
     pub shared_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub shared_nat_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    pub shared_owner_rg_indexes: Option<&'a crate::afxdp::types::SharedSessionOwnerRgIndexes>,
     pub shared_forward_wire_sessions: &'a Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
 }
 
@@ -222,15 +223,16 @@ pub(super) fn try_embedded_icmp_session_match(
     area: &MmapArea,
     desc: XdpDesc,
     meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
     sessions: &mut SessionTable,
     now_ns: u64,
-    // #9162: the arriving interface's routing domain — see the child's doc.
     routing_domain: u32,
 ) -> Option<SessionLookup> {
     let frame = area.slice(desc.addr as usize, desc.len as usize)?;
     session_match::try_embedded_icmp_session_match_from_frame(
         frame,
         meta,
+        forwarding,
         sessions,
         now_ns,
         routing_domain,
@@ -241,14 +243,15 @@ pub(super) fn try_embedded_icmp_session_match(
 pub(super) fn try_embedded_icmp_session_match_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
     sessions: &mut SessionTable,
     now_ns: u64,
-    // #9162: the arriving interface's routing domain — see the child's doc.
     routing_domain: u32,
 ) -> Option<SessionLookup> {
     session_match::try_embedded_icmp_session_match_from_frame(
         frame,
         meta,
+        forwarding,
         sessions,
         now_ns,
         routing_domain,
@@ -277,6 +280,35 @@ pub(super) fn try_embedded_icmp_session_match_from_frame(
 /// frame slice. Dispatches to the v4 / v6 outer family branch. Returns
 /// `BudgetDenied` when a session matched but the F-077 budget refused it —
 /// the poll caller MUST drop the descriptor, never fall through.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub(super) fn try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &crate::afxdp::types::SharedSessionOwnerRgIndexes,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    now_ns: u64,
+) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
+    try_embedded_icmp_nat_match_from_frame_inner(
+        frame,
+        meta,
+        sessions,
+        forwarding,
+        dynamic_neighbors,
+        shared_sessions,
+        shared_nat_sessions,
+        Some(shared_owner_rg_indexes),
+        shared_forward_wire_sessions,
+        now_ns,
+    )
+}
+
+#[cfg(test)]
 #[inline]
 pub(super) fn try_embedded_icmp_nat_match_from_frame(
     frame: &[u8],
@@ -286,6 +318,33 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    now_ns: u64,
+) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
+    try_embedded_icmp_nat_match_from_frame_inner(
+        frame,
+        meta,
+        sessions,
+        forwarding,
+        dynamic_neighbors,
+        shared_sessions,
+        shared_nat_sessions,
+        None,
+        shared_forward_wire_sessions,
+        now_ns,
+    )
+}
+
+#[inline]
+fn try_embedded_icmp_nat_match_from_frame_inner(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: Option<&crate::afxdp::types::SharedSessionOwnerRgIndexes>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
@@ -302,6 +361,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame(
         dynamic_neighbors,
         shared_sessions,
         shared_nat_sessions,
+        shared_owner_rg_indexes,
         shared_forward_wire_sessions,
     };
     match meta.protocol {
@@ -339,6 +399,7 @@ pub(super) fn try_nat64_icmp_error_match_from_frame(
         dynamic_neighbors,
         shared_sessions,
         shared_nat_sessions,
+        shared_owner_rg_indexes: None,
         shared_forward_wire_sessions,
     };
     nat64_match::try_nat64_icmp_error_match(frame, meta, &mut ctx, now_ns)

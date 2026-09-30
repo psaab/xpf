@@ -3125,6 +3125,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
     let forward_match = lookup_forward_nat_across_scopes_at(
         sessions,
         shared_nat_sessions,
+        forwarding,
         &flow.forward_key,
         reverse_ingress,
         now_ns,

@@ -85,7 +85,7 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     #[cfg(feature = "debug-log")]
     let icmpv6_trace = meta.protocol == PROTO_ICMPV6
         && ICMPV6_EMBED_LOGGED.fetch_add(1, Ordering::Relaxed) < 32;
-    let mut icmp_match = match try_embedded_icmp_nat_match_from_frame(
+    let mut icmp_match = match try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         packet_frame,
         meta,
         sessions,
@@ -93,6 +93,7 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         worker_ctx.dynamic_neighbors,
         worker_ctx.shared_sessions,
         worker_ctx.shared_nat_sessions,
+        worker_ctx.shared_owner_rg_indexes,
         worker_ctx.shared_forward_wire_sessions,
         now_ns,
     ) {

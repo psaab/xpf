@@ -15,9 +15,12 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   variants — the engine applies them around the action verdict.
 - `compiler.rs` — parses the typed config's filter terms and lowers
   them to `FilterTerm`s (prefix vectors, protocol bitmap, port
-  matcher, DSCP bitmap). Three-color policer snapshots are sorted by
-  name for deterministic iteration and compiled into name-derived
-  stable runtime IDs before terms are linked.
+  matcher, DSCP bitmap). Policer definitions are lowered in stable name
+  order; every referenced term gets a stable, independent runtime keyed
+  by family, filter, term, and policer name. A compiled filter reused
+  across hooks keeps that term's runtime; another term with the same name
+  gets its own bucket. Unreferenced valid definitions retain one
+  name-scoped runtime for status.
   - **Protocol resolution (#2505)** uses the SHARED, normalizing
     resolver `crate::ip_proto::proto_number` (trim + lowercase + the
     full `appid.ProtocolNumber` acceptance set — tcp/udp/icmp/icmpv6/
@@ -176,9 +179,12 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   The same accumulate-all-fall-through-terms contract applies to
   three-color policers via `CachedThreeColorPolicers`. Every matched
   fall-through term's `then policer` runtime is folded into the cached
-  TX-selection result (deduped by policer `id`) and re-metered on each
-  cached replay (`apply_cached_three_color_policers` → `for_each`), so a
-  flow escapes NO term's committed/peak rate limit on the cached path.
+  TX-selection result (deduped by scoped runtime `id`) and re-metered on
+  each cached replay (`apply_cached_three_color_policers` → `for_each`),
+  so a flow escapes NO term's committed/peak rate limit on the cached
+  path. Different terms using the same configured name retain distinct
+  handles; duplicate references to one compiled term are still metered
+  once.
   Like `CachedFilterCounters`, the container is a `SmallVec<[_; 2]>`
   (built once at flow-cache install, only `for_each`-read on the
   per-packet replay), so the common single/dual-policer case records with
@@ -496,24 +502,24 @@ Implemented here:
 Concurrency model (#5390):
 
 - Runtime token state is a **lock-free packed-atomic** token bucket per
-  logical policer — NOT a per-packet `Mutex` (removed in #5390) and NOT a
-  per-worker shard. All workers still meter one SHARED aggregate bucket,
-  so the observable policing rate is the exact configured aggregate
-  CIR/PIR (no per-worker rate division, no RSS-distribution dependence).
+  term-scoped policer instance — NOT a per-packet `Mutex` (removed in #5390)
+  and NOT a per-worker shard. All workers meter the same bucket for a given
+  compiled term, so that term receives its configured CIR/PIR regardless of
+  RSS/workers; distinct terms get independent configured buckets by default.
   The metered hot path takes no lock: both buckets live in one `AtomicU64`
   (`ThreeColorPolicerHot`, `#[repr(align(64))]` to isolate the CAS word
   from the Relaxed per-color counters) and are refilled/consumed through
   bounded `compare_exchange_weak` loops. Removing the lock also removed
   the poison failure mode; the only fail-closed path is the
   `Unsupported`-mode Red/drop. A per-worker-shard design was rejected
-  because it would divide the observable rate by the worker count and make
-  enforcement depend on RSS flow spread — the CAS approach keeps the exact
-  aggregate contract while eliminating the futex convoy.
+  because it would divide each term's observable rate by the worker count
+  and make enforcement depend on RSS flow spread — the CAS approach keeps
+  the exact per-term contract while eliminating the futex convoy.
 
 Remaining limitations:
 
 - Equivalent snapshot replacements preserve token buckets and per-color
-  counters by reusing the same runtime handle when the name-derived runtime ID
+  counters by reusing the same runtime handle when the term-scope runtime ID
   and shape are unchanged. Shape changes intentionally create a fresh runtime
   so old tokens cannot leak across a different rate/burst contract. HA
   failover and process restart still rebuild from configured bursts until a
@@ -817,14 +823,15 @@ Dataplane backstop (Rust): `preflight_term_policer_ref` raises
 
 The predicate is DEFINEDNESS — the name appears in the `policers` or
 `three_color_policers` snapshot collection — and deliberately NOT presence in
-the compiled `three_color_policer_by_name` map. Those two differ, and the
-difference is load-bearing: `lower_single_rate_policer_runtimes` (#4514) SKIPS
-a degenerate zero-rate METER-ONLY policer because it has no action to enforce,
-so that policer is defined, absent from the map, and boots fine today. Keying
-the rejection on the map would refuse a working config. Definedness is also the
-same question the Go gate asks, so the two cannot disagree about which
-references are dangling. An EMPTY reference (no policer on the term) is the
-legitimate "unpoliced" case and is NOT an error.
+the compiled `three_color_policer_by_scope` map. Those questions differ, and
+the difference is load-bearing: `lower_single_rate_policer_templates` (#4514)
+SKIPS a degenerate zero-rate METER-ONLY policer because it has no action to
+enforce, so that policer is defined but absent from the scope map and boots
+fine today. Keying the rejection on runtime-map presence would refuse a
+working config. Definedness is also the same question the Go gate asks, so
+the two cannot disagree about which references are dangling. An EMPTY
+reference (no policer on the term) is the legitimate "unpoliced" case and is
+NOT an error.
 
 Severity is Medium, not High: a policer is a RATE control, so its absence
 over-permits bandwidth rather than admitting traffic a policy would deny.
@@ -1297,24 +1304,24 @@ plain `then dscp` is not applied on lo0); only the drop is enforced.
 
 ### `then reject` synthesizes an active reply (#2521)
 
-`FilterAction::Reject` (`then reject`) no longer realizes as a silent
-drop. It now synthesizes and transmits an active reject reply — a TCP
-RST for TCP, an ICMP/ICMPv6 administratively-prohibited Destination
-Unreachable otherwise — using the **same** machinery as policy
-`reject`. `FilterAction::Discard` (`then discard`) is unchanged: still
-a silent drop, no reply.
+`FilterAction::Reject` (`then reject`) synthesizes an active reply — a TCP
+RST for TCP, or the ICMP/ICMPv6 Destination Unreachable selected by the
+term's configured `then reject <message-type>` for non-TCP. A bare filter
+`then reject` defaults to administratively-prohibited. This is distinct
+from security-policy `reject` (#11303), which sends TCP RST for TCP and
+port-unreachable for UDP only; other non-TCP/UDP protocols are dropped
+silently. `FilterAction::Discard` (`then discard`) remains a silent drop.
 
-The synthesis is the shared `enqueue_reject_reply` in
-`poll_descriptor/reject_reply.rs`; `enqueue_policy_reject_reply` and
-`enqueue_filter_reject_reply` are thin wrappers over it that differ
-only in the success counter (`policy_reject_sent` vs
-`filter_reject_sent`). Filter reject is wired at every input/lo0
-filter drop site in `poll_descriptor/mod.rs` that previously recycled
-the descriptor on a terminal action: the new-flow input filter, the
+Both sources use the shared `enqueue_reject_reply` synthesis,
+output-classification, and suppression machinery. The policy wrapper
+selects Junos's protocol-specific response (#11303); the filter wrapper
+passes the configured message-type. They differ in their success counters
+(`policy_reject_sent` vs `filter_reject_sent`). Filter reject is wired at
+every input/lo0 filter drop site in `poll_descriptor/mod.rs` that previously
+recycled the descriptor on a terminal action: the new-flow input filter, the
 DSCP/L4-sensitive session-hit re-evaluation, and both lo0 local-delivery
-paths. `apply_lo0_filter_action` returns the matched `FilterAction`
-(not a bare drop `bool`) so the caller can tell `Reject` from
-`Discard`.
+paths. `apply_lo0_filter_action` returns the matched `FilterAction` (not a
+bare drop `bool`) so the caller can tell `Reject` from `Discard`.
 
 The OUTPUT-firewall-filter (interface `filter output`) `then reject` on
 the transit forward / TX/CoS path is wired the same way (#3608). The
@@ -1334,30 +1341,29 @@ outcome, so a reject whose reply fail-closes logs DENY, not REJECT
 (#3615). The builder gets the ingress TX pipeline + counters via the
 `ForwardRejectReply` context passed by its poll-loop callers.
 
-Zone-level Junos `tcp-rst` (#3071) reuses the same `enqueue_policy_reject_reply`
-machinery through the unified `enqueue_deny_reply` decision helper. Both
-policy-deny call sites in `poll_descriptor/mod.rs` now call
-`enqueue_deny_reply(..., is_reject, from_zone_id)`: when `is_reject` (policy
-`then reject`) it actively rejects every protocol as before; otherwise (plain
-`deny` / default-deny) it sends a TCP RST **only** when the flow is TCP and the
-INGRESS (from) zone has `tcp-rst` enabled (`ForwardingState::zone_tcp_rst_enabled`,
-populated from `ZoneSnapshot.tcp_rst`). Non-TCP denied traffic and a deny in a
-non-tcp-rst zone stay silent drops. A zone-tcp-rst RST is counted under
-`policy_reject_sent` — it is a policy-deny-driven reset. Junos applies `tcp-rst`
-to the source/from zone so the RST is sent back toward the connection
-initiator, whose interface is bound to the from-zone.
+Zone-level Junos `tcp-rst` (#3071) reuses the policy-reply machinery through
+the unified `enqueue_deny_reply` decision helper. Both policy-deny call sites
+in `poll_descriptor/mod.rs` call `enqueue_deny_reply(..., is_reject,
+from_zone_id)`: for policy `then reject`, TCP gets an RST, UDP gets
+port-unreachable, and other protocols are silently dropped (#11303).
+Otherwise (plain `deny` / default-deny), it sends a TCP RST only when the
+flow is TCP and the INGRESS (from) zone has `tcp-rst` enabled
+(`ForwardingState::zone_tcp_rst_enabled`, populated from
+`ZoneSnapshot.tcp_rst`). Non-TCP denied traffic and a deny in a non-tcp-rst
+zone stay silent drops. A zone-tcp-rst RST is counted under
+`policy_reject_sent` — it is a policy-deny-driven reset. Junos applies
+`tcp-rst` to the source/from zone so the RST is sent back toward the
+connection initiator, whose interface is bound to the from-zone.
 
-Because the generated reply runs through the SAME path as policy
-reject, it inherits the #2238 output-filter / CoS / DSCP
-classification (`classify_generated_reply`, keyed on the reply's OWN
-egress tuple) and the SYN-cookie TX-frame budget gate — and a future
-per-reason generated-reply rate limiter (#2472) covers filter reject
-automatically (no parallel, un-limitable emit path). Budget exhaustion,
-output-filter drops, and parse-error drops share policy reject's
-counters and its fail-closed behavior (the caller still drops the
-packet when synthesis returns `false`). The RT_FLOW filter-log action
-maps `Reject → reject` (matching policy reject and Junos), `Discard →
-deny`.
+Policy and filter replies share the downstream generated-reply path:
+#2238 output-filter / CoS / DSCP classification
+(`classify_generated_reply`, keyed on the reply's OWN egress tuple), the
+SYN-cookie TX-frame budget gate, and the future per-reason generated-reply
+rate limiter (#2472). Budget exhaustion, output-filter drops, and parse
+errors retain their existing source attribution and fail-closed behavior;
+the caller still drops the packet when synthesis returns `false`. The
+RT_FLOW filter-log action maps `Reject → reject` (matching policy reject
+and Junos), `Discard → deny`.
 
 **Scope (resolved #3608):** output-firewall-filter `then reject` on the
 TX/CoS path is now an active reject too — see the OUTPUT-filter paragraph

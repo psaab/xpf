@@ -2150,8 +2150,9 @@ fn purge_close_reinstall_scoped_survivor_skips_flush_10512() {
     assert!(
         super::super::session_delta::close_delta_is_stale_incarnation(
             &deltas[0],
-            Some(&sessions),
+            None,
             &shared.sessions,
+            &shared.owner_rg_indexes,
         ),
         "delayed A close must be stale after scoped B reinstall"
     );
@@ -2194,6 +2195,81 @@ fn purge_close_reinstall_scoped_survivor_skips_flush_10512() {
             .expect("lock")
             .contains_key(&replacement_key),
         "shared scoped replacement remains live after delayed close"
+    );
+    assert!(matches!(
+        super::super::shared_ops::remove_shared_session_if(
+            &shared.sessions,
+            &shared.nat_sessions,
+            &shared.forward_wire_sessions,
+            &shared.owner_rg_indexes,
+            &replacement_key,
+            |_| true,
+        ),
+        super::super::shared_ops::SharedRemoval::Removed(_)
+    ));
+    assert!(
+        !super::super::session_delta::close_delta_is_stale_incarnation(
+            &deltas[0],
+            None,
+            &shared.sessions,
+            &shared.owner_rg_indexes,
+        ),
+        "removing the replacement must remove its bare-tuple index scope"
+    );
+
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&key, decision, pbr_metadata()),
+    );
+    publish_shared_session(
+        &shared.sessions,
+        &shared.nat_sessions,
+        &shared.forward_wire_sessions,
+        &shared.owner_rg_indexes,
+        &synced_entry_for(&replacement_key, replacement_decision, pbr_metadata()),
+    );
+    assert!(
+        super::super::session_delta::close_delta_is_stale_incarnation(
+            &deltas[0],
+            None,
+            &shared.sessions,
+            &shared.owner_rg_indexes,
+        ),
+        "a second live scope must remain visible in a colliding shared bucket"
+    );
+    assert!(matches!(
+        super::super::shared_ops::remove_shared_session_if(
+            &shared.sessions,
+            &shared.nat_sessions,
+            &shared.forward_wire_sessions,
+            &shared.owner_rg_indexes,
+            &replacement_key,
+            |_| true,
+        ),
+        super::super::shared_ops::SharedRemoval::Removed(_)
+    ));
+    assert!(
+        !super::super::session_delta::close_delta_is_stale_incarnation(
+            &deltas[0],
+            None,
+            &shared.sessions,
+            &shared.owner_rg_indexes,
+        ),
+        "removing one scope must collapse the bucket to the surviving exact scope"
+    );
+
+    shared.owner_rg_indexes.clear(&shared.sessions);
+    assert!(
+        !super::super::session_delta::close_delta_is_stale_incarnation(
+            &deltas[0],
+            None,
+            &shared.sessions,
+            &shared.owner_rg_indexes,
+        ),
+        "clearing shared sessions must clear their bare-tuple index"
     );
 }
 
@@ -2807,4 +2883,191 @@ fn colliding_ordinary_close_without_identity_drops10512() {
         peer_queue.lock().expect("lock").is_empty(),
         "identity-less stale close must replicate nothing"
     );
+}
+
+/// Manual release-mode churn measurement for #11299. It keeps 100k unrelated
+/// rows in both local and shared tables while close checks and publishers
+/// contend on the shared-session mutex. Run with:
+/// `cargo test --release close_check_and_publish_churn_11299 -- --ignored --nocapture`
+#[test]
+#[ignore = "manual loaded shared-session churn measurement"]
+fn close_check_and_publish_churn_11299() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    struct PublisherDone(std::sync::Arc<AtomicUsize>);
+    impl Drop for PublisherDone {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Release);
+        }
+    }
+
+    const LIVE_ROWS: u32 = 100_000;
+    const PUBLISHERS: usize = 4;
+    const PUBLISHES_PER_WORKER: usize = 1_000;
+
+    let close_key = pbr_key();
+    let mut close_table = SessionTable::new();
+    close_table.emit_close_delta_with_origin(
+        close_key,
+        unstamped_decision(unusable_resolution()),
+        pbr_metadata(),
+        SessionOrigin::ForwardFlow,
+        false,
+        0,
+    );
+    let close_delta = std::sync::Arc::new(
+        close_table
+            .drain_deltas(1)
+            .pop()
+            .expect("close delta was queued"),
+    );
+
+    let shared = std::sync::Arc::new(shared_maps());
+    for index in 0..LIVE_ROWS {
+        let mut key = pbr_key();
+        key.src_ip = IpAddr::V4(Ipv4Addr::from(0x0a00_0000_u32 + index));
+        key.src_port = index as u16;
+        key.dst_port = 80;
+        publish_shared_session(
+            &shared.sessions,
+            &shared.nat_sessions,
+            &shared.forward_wire_sessions,
+            &shared.owner_rg_indexes,
+            &synced_entry_for(
+                &key,
+                unstamped_decision(unusable_resolution()),
+                pbr_metadata(),
+            ),
+        );
+    }
+
+    let publishers_remaining = std::sync::Arc::new(AtomicUsize::new(PUBLISHERS));
+    let publisher_mutations_inflight = std::sync::Arc::new(AtomicUsize::new(0));
+    let start_gate = std::sync::Arc::new(Barrier::new(PUBLISHERS + 2));
+    let close_shared = std::sync::Arc::clone(&shared);
+    let close_gate = std::sync::Arc::clone(&start_gate);
+    let close_delta_for_worker = std::sync::Arc::clone(&close_delta);
+    let close_remaining = std::sync::Arc::clone(&publishers_remaining);
+    let close_mutations = std::sync::Arc::clone(&publisher_mutations_inflight);
+    let close_worker = thread::spawn(move || {
+        let mut local_sessions = SessionTable::new();
+        for index in 0..LIVE_ROWS {
+            let mut key = pbr_key();
+            key.src_ip = IpAddr::V4(Ipv4Addr::from(0x0a00_0000_u32 + index));
+            key.src_port = index as u16;
+            key.dst_port = 80;
+            assert!(local_sessions.install_with_protocol_with_origin(
+                key,
+                unstamped_decision(unusable_resolution()),
+                pbr_metadata(),
+                SessionOrigin::ForwardFlow,
+                NOW_NS + u64::from(index),
+                PROTO_TCP,
+                0x18,
+            ));
+            if index % 256 == 255 {
+                local_sessions.drain_deltas(256);
+            }
+        }
+        local_sessions.drain_deltas(256);
+        close_gate.wait();
+        let started = Instant::now();
+        let mut close_checks = 0usize;
+        let mut overlapping_close_checks = 0usize;
+        while close_remaining.load(Ordering::Acquire) > 0 {
+            let overlapping_before = close_mutations.load(Ordering::Acquire) > 0;
+            assert!(!super::super::session_delta::close_delta_is_stale_incarnation(
+                &close_delta_for_worker,
+                Some(&local_sessions),
+                &close_shared.sessions,
+                &close_shared.owner_rg_indexes,
+            ));
+            let overlapping_after = close_mutations.load(Ordering::Acquire) > 0;
+            close_checks += 1;
+            if overlapping_before || overlapping_after {
+                overlapping_close_checks += 1;
+            }
+        }
+        (started.elapsed(), close_checks, overlapping_close_checks)
+    });
+
+    let mut publish_workers = Vec::with_capacity(PUBLISHERS);
+    for worker_id in 0..PUBLISHERS {
+        let publish_shared = std::sync::Arc::clone(&shared);
+        let publish_gate = std::sync::Arc::clone(&start_gate);
+        let publishers_remaining = std::sync::Arc::clone(&publishers_remaining);
+        let publisher_mutations = std::sync::Arc::clone(&publisher_mutations_inflight);
+        publish_workers.push(thread::spawn(move || {
+            let _counter_exempt = crate::afxdp::counter_test_lock::CounterExempt::new();
+            let _publisher_done = PublisherDone(publishers_remaining);
+            publish_gate.wait();
+            let mut latencies = Vec::with_capacity(PUBLISHES_PER_WORKER);
+            for sequence in 0..PUBLISHES_PER_WORKER {
+                let identity = 0x0b00_0000_u32
+                    + (worker_id * PUBLISHES_PER_WORKER + sequence) as u32;
+                let mut key = pbr_key();
+                key.src_ip = IpAddr::V4(Ipv4Addr::from(identity));
+                key.src_port = identity as u16;
+                key.dst_port = 80;
+                let entry = synced_entry_for(
+                    &key,
+                    unstamped_decision(unusable_resolution()),
+                    pbr_metadata(),
+                );
+                publisher_mutations.fetch_add(1, Ordering::AcqRel);
+                let started = Instant::now();
+                publish_shared_session(
+                    &publish_shared.sessions,
+                    &publish_shared.nat_sessions,
+                    &publish_shared.forward_wire_sessions,
+                    &publish_shared.owner_rg_indexes,
+                    &entry,
+                );
+                latencies.push(started.elapsed());
+                super::super::shared_ops::remove_shared_session(
+                    &publish_shared.sessions,
+                    &publish_shared.nat_sessions,
+                    &publish_shared.forward_wire_sessions,
+                    &publish_shared.owner_rg_indexes,
+                    &key,
+                );
+                publisher_mutations.fetch_sub(1, Ordering::Release);
+            }
+            latencies
+        }));
+    }
+
+    start_gate.wait();
+    let started = Instant::now();
+    let (close_elapsed, close_checks, overlapping_close_checks) =
+        close_worker.join().expect("close worker completed");
+    let mut publish_latencies = Vec::with_capacity(PUBLISHERS * PUBLISHES_PER_WORKER);
+    for worker in publish_workers {
+        publish_latencies.extend(worker.join().expect("publish worker completed"));
+    }
+    let elapsed = started.elapsed();
+    assert_eq!(publish_latencies.len(), PUBLISHERS * PUBLISHES_PER_WORKER);
+    assert!(close_checks > 0, "close checker did not run");
+    assert!(overlapping_close_checks > 0, "close checks did not overlap publishing");
+    publish_latencies.sort_unstable();
+    let p99 = publish_latencies[publish_latencies.len() * 99 / 100];
+    let max = *publish_latencies.last().expect("publish samples exist");
+    eprintln!(
+        "loaded close churn: rows={LIVE_ROWS} close_checks={close_checks} \
+         overlapping_close_checks={overlapping_close_checks} publishes={} elapsed_ms={} \
+         close_checks_per_s={:.0} publish_p99_us={} publish_max_us={}",
+        publish_latencies.len(),
+        elapsed.as_millis(),
+        close_checks as f64 / close_elapsed.as_secs_f64(),
+        p99.as_micros(),
+        max.as_micros(),
+    );
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "indexed close checks starved concurrent publishes: {elapsed:?}"
+    );
+
 }
