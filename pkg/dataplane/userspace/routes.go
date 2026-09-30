@@ -1206,7 +1206,7 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 		if best, ok := configuredPreference[key]; ok &&
 			best <= routing.LearnedRouteImportPreference {
 			// The configured route is at least as preferred as the imported
-			// route, so keep it as the sole candidate. A lower-preference
+			// route, so keep it as the sole candidate. A worse-preference
 			// fallback remains beside the imported route for the Rust FIB's
 			// established preference ordering to select the better path.
 			continue
