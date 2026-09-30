@@ -824,10 +824,13 @@ func canonicalRoutePrefix(s string) string {
 	return n.String()
 }
 
-// #9132: visit every routing-instance member twice — explicit refs first, then
-// generated keys from a bare-member fanout. The shared config resolver supplies
-// both snapshot keys and kernel-device identities, preserving one alias and
-// tunnel interpretation across validation, binding, and userspace maps.
+// #9132: visit each routing-instance member twice — explicit refs first, then
+// generated keys from bare-member fanout. The shared config resolver supplies
+// both snapshot keys and kernel-device identities, preserving one alias/tunnel
+// interpretation across validation, binding, and userspace maps.
+// #11312: forwarding instances have no VRF device; skip their member keys so
+// tolerant loads keep connected routes and ingress scope in the kernel's
+// default instance. Strict config commits reject the unsupported membership.
 func forEachRoutingInstanceInterfaceKey(cfg *config.Config, bind func(riName, key string)) {
 	if cfg == nil {
 		return
@@ -841,6 +844,9 @@ func forEachRoutingInstanceInterfaceKey(cfg *config.Config, bind func(riName, ke
 	members := make([]memberKeys, 0)
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.Name == "" {
+			continue
+		}
+		if ri.InstanceType == "forwarding" {
 			continue
 		}
 		for _, member := range ri.Interfaces {
@@ -904,6 +910,8 @@ func buildInterfaceRouteTables(cfg *config.Config) (map[string]string, map[strin
 // owning routing table (#2388): without it, the Rust connected store is
 // global and a per-table (VRF / next-table) FIB lookup can match a
 // connected prefix owned by a different routing-instance.
+// Forwarding-instance member keys are excluded above: the daemon leaves those
+// devices in default, so they retain the default routing domain on tolerant loads.
 func buildInterfaceRoutingInstances(cfg *config.Config) map[string]string {
 	out := make(map[string]string)
 	forEachRoutingInstanceInterfaceKey(cfg, func(riName, key string) {

@@ -97,5 +97,11 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesRIDualClaim11060(tree, cfg, opts); err != nil {
 		return err
 	}
+	// #11312 follows #11060 so a dual claim keeps its existing cross-instance
+	// diagnostic priority. The tolerant dual-claim path defers quarantine until
+	// after all gates, so forwarding members are still visible here to warn.
+	if err := runUniformGatesForwardingInstanceMembers11312(tree, cfg, opts); err != nil {
+		return err
+	}
 	return nil
 }

@@ -1380,6 +1380,10 @@ type compileOpts struct {
 	// merging them, so a leniently-loaded config is already inert. Same
 	// doctrine as lenientNextTableRefs.
 	lenientForwardingInstanceProtocols bool
+	// lenientForwardingInstanceMembers (#11312) warns for legacy or peer-synced
+	// forwarding members. The userspace maps leave those interfaces in the
+	// default domain, matching the daemon's no-VRF binding behavior.
+	lenientForwardingInstanceMembers bool
 
 	// lenientDHCPRelayDHCPv6 (#9553) downgrades validateDHCPRelayDHCPv6AST from
 	// a hard compile error to a cfg.Warnings entry. The implemented RFC 8415
@@ -3053,6 +3057,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRibGroupRefs:                    true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
+		lenientForwardingInstanceMembers:       true,
 		lenientDHCPRelayDHCPv6:                 true,
 		lenientWireguardRoutingInstance:        true,
 		lenientDHCPRelayChildTokens:            true,
