@@ -1068,8 +1068,19 @@ fn learn_dynamic_neighbor_with_mac(
         src_ip,
         src_mac,
     };
-    if last_learned_neighbor.as_ref() == Some(&learned) {
-        return;
+    if last_learned_neighbor.as_ref() == Some(&learned)
+        && neighbor_ip_is_learnable(src_ip)
+        && !forwarding.owns_configured_ip(src_ip)
+    {
+        let (keys, n) = rx_learn_keys(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            src_ip,
+        );
+        if dynamic_neighbors.refresh_rx_learned_pair(&keys[..n], src_mac, monotonic_nanos()) {
+            return;
+        }
     }
     if learn_dynamic_neighbor_with_mode(
         forwarding,
@@ -1114,6 +1125,25 @@ pub(super) fn learn_dynamic_neighbor(
 /// generation), so map-state comparison alone cannot prove elision.
 pub(super) fn pair_write_needed(current: &[Option<[u8; 6]>], src_mac: [u8; 6]) -> bool {
     current.iter().any(|mac| *mac != Some(src_mac))
+}
+
+fn rx_learn_keys(
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    src_ip: IpAddr,
+) -> ([(i32, IpAddr); 2], usize) {
+    let mut keys = [(ingress_ifindex, src_ip), (0, src_ip)];
+    let mut n = 1;
+    if let Some(logical_ifindex) =
+        resolve_ingress_logical_ifindex(forwarding, ingress_ifindex, ingress_vlan_id)
+        && logical_ifindex > 0
+        && logical_ifindex != ingress_ifindex
+    {
+        keys[1] = (logical_ifindex, src_ip);
+        n = 2;
+    }
+    (keys, n)
 }
 
 fn learn_dynamic_neighbor_with_mode(
@@ -1165,16 +1195,8 @@ fn learn_dynamic_neighbor_with_mode(
     // the physical ingress ifindex plus the resolved logical (VLAN
     // sub-) ifindex when it differs. keys[1] stays an unused
     // placeholder when n == 1.
-    let mut keys: [(i32, IpAddr); 2] = [(ingress_ifindex, src_ip), (0, src_ip)];
-    let mut n = 1usize;
-    if let Some(logical_ifindex) =
-        resolve_ingress_logical_ifindex(forwarding, ingress_ifindex, ingress_vlan_id)
-    {
-        if logical_ifindex > 0 && logical_ifindex != ingress_ifindex {
-            keys[1] = (logical_ifindex, src_ip);
-            n = 2;
-        }
-    }
+    let (keys, n) = rx_learn_keys(forwarding, ingress_ifindex, ingress_vlan_id, src_ip);
+    let now_ns = monotonic_nanos();
     // #1787 cheap-first pre-check: 1-2 single-shard reads replace the
     // unconditional 64-shard bulk acquisition in the steady state
     // (every key already maps to src_mac → return with no write, no
@@ -1188,14 +1210,13 @@ fn learn_dynamic_neighbor_with_mode(
     // that REACHES this function pre-check-misses and re-learns via
     // the bulk path below.
     //
-    // Dedup window: successful or idempotent learns set the per-binding
-    // `last_learned_neighbor` key, so identical follow-up packets may not reach
-    // this function until the dedup key changes. A create-only refusal leaves
-    // the key untouched, allowing a policy-admitted MAC move to retry in the
-    // post-admission path. After a successful learn, a remove landing behind
-    // this dedup remains suppressed as before; recovery comes from a second
-    // source key evicting the 1-entry dedup, the ARP/NDP learn stage
-    // (poll_stages.rs), and the #1769 resolver probe on forwarding miss.
+    // Dedup window: successful RX learns store one key per binding. Repeated
+    // identical packets still verify the current one/two map entries and
+    // refresh any RX-only age lease without taking the all-shard lock. If an
+    // age sweep removed a key or its MAC changed, that check fails and the
+    // normal pair-learn path repairs the entry. A create-only refusal leaves
+    // the key untouched, allowing a policy-admitted MAC move to retry through
+    // the post-admission path.
     let mut current: [Option<[u8; 6]>; 2] = [None, None];
     // #5673: track whether EVERY candidate key is a NEW learn whose shard is
     // already at the per-shard cap. `get_with_capacity` reads the MAC and the
@@ -1205,7 +1226,8 @@ fn learn_dynamic_neighbor_with_mode(
     // still has room (a learnable new key).
     let mut all_new_at_cap = n > 0;
     for (slot, key) in current.iter_mut().zip(keys[..n].iter()) {
-        let (entry, shard_full) = dynamic_neighbors.get_with_capacity(key);
+        let (entry, shard_full) =
+            dynamic_neighbors.get_with_capacity_for_rx_learn(key, src_mac, now_ns);
         *slot = entry.map(|e| e.mac);
         if entry.is_some() || !shard_full {
             all_new_at_cap = false;
@@ -1252,10 +1274,18 @@ fn learn_dynamic_neighbor_with_mode(
     // only on an actual MAC change; a first sighting or same-MAC re-learn
     // adds a single Relaxed read per key and no bump.
     if allow_mac_change {
-        dynamic_neighbors.learn_pair_if_changed(&keys[..n], NeighborEntry { mac: src_mac });
+        dynamic_neighbors.learn_pair_if_changed_at(
+            &keys[..n],
+            NeighborEntry { mac: src_mac },
+            now_ns,
+        );
         true
     } else {
-        dynamic_neighbors.learn_pair_if_absent_or_same(&keys[..n], NeighborEntry { mac: src_mac })
+        dynamic_neighbors.learn_pair_if_absent_or_same_at(
+            &keys[..n],
+            NeighborEntry { mac: src_mac },
+            now_ns,
+        )
     }
 }
 

@@ -633,6 +633,89 @@ fn mac_change_epoch_rx_learn_pair_bumps_each_key_shard() {
     assert!(map.mac_change_epoch_for(&logical) >= 1);
 }
 
+#[test]
+fn rx_source_learn_age_refresh_expires_and_invalidates_cached_macs_11406() {
+    let map = ShardedNeighborMap::new();
+    let key = key_v4(7, 42);
+    let mac = entry(0xAB);
+    map.learn_pair_if_changed_at(&[key], mac, 100);
+    let insert_generation = map.insert_generation();
+
+    assert_eq!(
+        map.get_with_capacity_for_rx_learn(&key, mac.mac, 200).0,
+        Some(mac)
+    );
+    assert!(map.refresh_rx_learned_pair(&[key], mac.mac, 300));
+    let manager_keys = FastSet::default();
+    assert_eq!(
+        map.age_rx_learned_neighbors(
+            300 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS - 1,
+            RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            &manager_keys,
+        ),
+        0,
+        "a matching RX learn must refresh its idle lease"
+    );
+    assert_eq!(map.get(&key), Some(mac));
+
+    assert_eq!(
+        map.age_rx_learned_neighbors(
+            300 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            &manager_keys,
+        ),
+        1
+    );
+    assert_eq!(map.get(&key), None);
+    assert_eq!(
+        map.mac_change_epoch_for(&key),
+        1,
+        "aging must evict cached forwarding descriptors for the removed MAC"
+    );
+    assert_eq!(
+        map.insert_generation(),
+        insert_generation,
+        "removal is not a new neighbor insertion"
+    );
+}
+
+#[test]
+fn rx_source_learn_age_preserves_manager_and_kernel_backed_neighbors_11406() {
+    let map = ShardedNeighborMap::new();
+    let rx_key = key_v4(7, 42);
+    let manager_key = key_v4(7, 43);
+    let kernel_key = key_v4(8, 44);
+    let confirmed_key = key_v4(9, 45);
+    let mac = entry(0xAB);
+    map.learn_pair_if_changed_at(&[rx_key, manager_key], mac, 100);
+    map.insert(kernel_key, mac);
+    map.learn_pair_if_changed_at(&[kernel_key], mac, 100);
+    map.learn_pair_if_changed_at(&[confirmed_key], mac, 100);
+    map.mark_kernel_backed_if_same(&confirmed_key, mac.mac);
+
+    let manager_keys = FastSet::from_iter([manager_key]);
+    assert_eq!(
+        map.age_rx_learned_neighbors(
+            100 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            &manager_keys,
+        ),
+        1
+    );
+    assert_eq!(map.get(&rx_key), None);
+    assert_eq!(map.get(&manager_key), Some(mac));
+    assert_eq!(
+        map.get(&kernel_key),
+        Some(mac),
+        "same-MAC RX traffic must not turn a kernel-backed entry into an aged entry"
+    );
+    assert_eq!(
+        map.get(&confirmed_key),
+        Some(mac),
+        "a matching kernel monitor update must stop the RX-only age lease"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // #5673 (codex-review M02): aggregate cap on dynamically learned neighbors.
 //
