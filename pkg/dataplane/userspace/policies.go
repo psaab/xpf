@@ -82,10 +82,21 @@ func (s policyRuleSlot) policyID() uint32 {
 // ID at index >= 256 — would cross into the following set's namespace; that is
 // rejected fail-closed so the apply path retains the prior good dataplane state.
 // This mirrors the legacy compiler guard (pkg/dataplane/compiler.go).
+// MaxTotalPolicyRuleExpansion caps the TOTAL expanded rule count across all
+// zone-pair sets and globals (#11081). The per-set gate (MaxRulesPerPolicy)
+// bounds ID-namespace spill, but the Rust evaluator scans pair + wildcard +
+// global tiers linearly per new flow — an unbounded set list is per-packet
+// CPU amplification under new-flow flood with no ceiling. 65536 expanded
+// rules (256 full sets) is far above legitimate configs and catches
+// runaway application expansion with a clear error instead of a silent
+// slowdown.
+const MaxTotalPolicyRuleExpansion = 65536
+
 func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error) error {
 	if cfg == nil {
 		return nil
 	}
+	var totalExpanded uint64
 	policySetID := uint32(0)
 	for _, zpp := range cfg.Security.Policies {
 		if zpp == nil {
@@ -114,6 +125,7 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 				return err
 			}
 			ruleIndex += span
+			totalExpanded += uint64(span)
 		}
 		policySetID++
 	}
@@ -140,6 +152,11 @@ func walkPolicyRuleSlots(cfg *config.Config, fn func(slot policyRuleSlot) error)
 			return err
 		}
 		globalRuleIndex += span
+		totalExpanded += uint64(span)
+	}
+	if totalExpanded > MaxTotalPolicyRuleExpansion {
+		return fmt.Errorf("policy: total expanded rules %d exceed MaxTotalPolicyRuleExpansion (%d); the dataplane evaluates tiers linearly per new flow — split, prune, or collapse application expansions",
+			totalExpanded, MaxTotalPolicyRuleExpansion)
 	}
 	return nil
 }
