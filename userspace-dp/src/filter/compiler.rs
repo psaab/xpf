@@ -1,12 +1,19 @@
 // Snapshot/AST → typed Filter compiler extracted from filter.rs (#1049 P2 structural split).
 // #6434: `parse_filter_state_with_three_color_preserving` and `parse_term`
-// are decomposed into single-responsibility phase helpers (policer runtime
-// loading / filter-table build / interface assignment / aggregate recompute /
-// lo0 resolution; marker preflight / value-range preflight / address /
-// protocol / cross-field / port / action / flex lowering + term assembly).
-// Pure code motion — the compiled `FilterState` is bit-identical.
+// are decomposed into single-responsibility phase helpers (policer template
+// loading / term-scoped runtime materialization / filter-table build /
+// interface assignment / aggregate recompute / lo0 resolution; marker
+// preflight / value-range preflight / address / protocol / cross-field / port /
+// action / flex lowering + term assembly). #11333 gives each term its own bucket.
 
 use super::*;
+struct PolicerRuntimeTemplate {
+    /// Preserve the historical name-derived ID for unreferenced definitions.
+    runtime_id: u32,
+    id_namespace: &'static [u8],
+    state: ThreeColorPolicerState,
+}
+
 
 /// Build the complete FilterState from snapshot data.
 ///
@@ -32,7 +39,7 @@ pub(crate) fn parse_filter_state(
     )
 }
 
-/// Build the complete FilterState from snapshot data, including stable
+/// Build the complete FilterState from snapshot data, including term-scoped
 /// three-color policer runtimes.
 pub(crate) fn parse_filter_state_with_three_color(
     filters: &[FirewallFilterSnapshot],
@@ -53,8 +60,8 @@ pub(crate) fn parse_filter_state_with_three_color(
     )
 }
 
-/// Build the complete FilterState while preserving compatible three-color
-/// policer token/counter state across snapshot refreshes.
+/// Build the complete FilterState while preserving compatible policer
+/// token/counter state across snapshot refreshes.
 pub(crate) fn parse_filter_state_with_three_color_preserving(
     filters: &[FirewallFilterSnapshot],
     policers: &[PolicerSnapshot],
@@ -65,27 +72,31 @@ pub(crate) fn parse_filter_state_with_three_color_preserving(
     previous: Option<&FilterState>,
 ) -> Result<FilterState, SnapshotIntegrityError> {
     let mut state = FilterState::default();
-    let mut used_runtime_ids = rustc_hash::FxHashSet::default();
-    load_three_color_policer_runtimes(
-        &mut state,
+    let mut templates = rustc_hash::FxHashMap::default();
+    let mut template_ids = rustc_hash::FxHashSet::default();
+    load_three_color_policer_templates(
+        &mut templates,
         three_color_policers,
-        previous,
-        &mut used_runtime_ids,
+        &mut template_ids,
     );
-    lower_single_rate_policer_runtimes(&mut state, policers, previous, &mut used_runtime_ids);
-    // #6540: the set of policer names this snapshot DEFINES, across both
-    // stanzas. Built from the wire slices rather than
-    // `state.three_color_policer_by_name` on purpose — the #4514 single-rate
-    // lowering above deliberately SKIPS a degenerate zero-rate meter-only
-    // policer (it has no action to enforce), so that policer is defined but
-    // absent from the runtime map. Rejecting on absence from the MAP would
-    // refuse a config that boots today; rejecting on absence from this SET is
-    // the same question the Go strict gate asks.
+    lower_single_rate_policer_templates(&mut templates, policers, &mut template_ids);
+
+    // #6540: definedness comes from both wire collections, not runtime
+    // presence. A degenerate zero-rate single-rate meter-only policer is
+    // deliberately omitted during template lowering, but remains defined.
     let defined_policers: rustc_hash::FxHashSet<&str> = policers
         .iter()
         .map(|p| p.name.as_str())
         .chain(three_color_policers.iter().map(|p| p.name.as_str()))
         .collect();
+    let mut used_runtime_ids = rustc_hash::FxHashSet::default();
+    build_term_scoped_policer_runtimes(
+        &mut state,
+        filters,
+        &templates,
+        previous,
+        &mut used_runtime_ids,
+    );
     parse_filter_table(&mut state, filters, &defined_policers)?;
     assign_interface_filters(&mut state, interfaces)?;
     recompute_fast_map_aggregates(&mut state);
@@ -95,64 +106,147 @@ pub(crate) fn parse_filter_state_with_three_color_preserving(
     Ok(state)
 }
 
-/// Parse three-color policers by stable name order. Runtime IDs are
-/// name-derived so inserting a lower-sorted policer does not reset
-/// unchanged existing runtimes.
-fn load_three_color_policer_runtimes(
-    state: &mut FilterState,
+/// Lower definitions in stable name order into temporary immutable shapes.
+/// Term-specific live token buckets are materialized after all definitions are
+/// resolved.
+fn load_three_color_policer_templates(
+    templates: &mut rustc_hash::FxHashMap<String, PolicerRuntimeTemplate>,
     three_color_policers: &[ThreeColorPolicerSnapshot],
-    previous: Option<&FilterState>,
     used_runtime_ids: &mut rustc_hash::FxHashSet<u32>,
 ) {
     let mut three_color = three_color_policers.iter().collect::<Vec<_>>();
     three_color.sort_by(|a, b| a.name.cmp(&b.name));
     for snap in three_color {
-        let id = unique_three_color_policer_runtime_id(&snap.name, used_runtime_ids);
-        let Some(runtime) = parse_three_color_policer(snap, id, previous) else {
-            continue;
-        };
-        state
-            .three_color_policer_by_name
-            .insert(runtime.name.to_string(), runtime.clone());
-        state.three_color_policers.push(runtime);
+        let runtime_id = unique_three_color_policer_runtime_id(&snap.name, used_runtime_ids);
+        let state = build_three_color_policer_state(snap)
+            .unwrap_or_else(|| ThreeColorPolicerState::fail_closed(snap.color_blind));
+        templates.insert(
+            snap.name.clone(),
+            PolicerRuntimeTemplate {
+                runtime_id,
+                id_namespace: THREE_COLOR_POLICER_RUNTIME_ID_NAMESPACE,
+                state,
+            },
+        );
     }
 }
 
-/// #4514: lower legacy single-rate `firewall policer` token buckets into the
-/// SAME metered three-color runtime the terms already resolve against, by
-/// name. Before #4514 these policers were parsed into a `state.policers`
-/// map that NOTHING consumed — `PolicerState::consume` had zero non-test
-/// call sites — so a configured `then policer X` (e.g. a DoS-mitigation
-/// rate-limit) was silently UNENFORCED (a fail-open of the rate limit) even
-/// though the capability doc claimed support. A single-rate token bucket
-/// with `then discard` is exactly an srTCM committed bucket (CIR=bandwidth,
-/// CBS=burst) where only in-rate (green) packets pass and everything above
-/// the bucket drops; reusing the three-color runtime gives it metering,
-/// drop-on-exceed, flow-cache handle+replay, and status export for free.
-/// Sorted for the same stable-ID property as the three-color loop.
-fn lower_single_rate_policer_runtimes(
-    state: &mut FilterState,
+/// #4514: lower legacy `firewall policer` definitions into the same runtime
+/// family as three-color policers. Three-color definitions take precedence for
+/// duplicate names. Sorted IDs keep unreferenced status runtimes stable.
+fn lower_single_rate_policer_templates(
+    templates: &mut rustc_hash::FxHashMap<String, PolicerRuntimeTemplate>,
     policers: &[PolicerSnapshot],
-    previous: Option<&FilterState>,
     used_runtime_ids: &mut rustc_hash::FxHashSet<u32>,
 ) {
     let mut single_rate = policers.iter().collect::<Vec<_>>();
     single_rate.sort_by(|a, b| a.name.cmp(&b.name));
     for snap in single_rate {
-        // A three-color policer of the same name already claimed this name and
-        // takes precedence (distinct config stanzas; collision only on drift).
-        if state.three_color_policer_by_name.contains_key(&snap.name) {
+        if templates.contains_key(&snap.name) {
             continue;
         }
-        let id = unique_runtime_id(single_rate_policer_runtime_id(&snap.name), used_runtime_ids);
-        let Some(runtime) = parse_single_rate_policer_runtime(snap, id, previous) else {
+        let runtime_id = unique_runtime_id(
+            single_rate_policer_runtime_id(&snap.name),
+            used_runtime_ids,
+        );
+        let state = match build_single_rate_policer_state(snap) {
+            Some(state) => state,
+            // A discard policer with zero rate/burst fails closed. A
+            // meter-only policer with that shape has no action to enforce, so
+            // it remains defined but creates no runtime.
+            None if snap.discard_excess => ThreeColorPolicerState::fail_closed(true),
+            None => continue,
+        };
+        templates.insert(
+            snap.name.clone(),
+            PolicerRuntimeTemplate {
+                runtime_id,
+                id_namespace: SINGLE_RATE_POLICER_RUNTIME_ID_NAMESPACE,
+                state,
+            },
+        );
+    }
+}
+
+/// Materialize one runtime per referenced filter term. Existing runtimes are
+/// reused only when their scope-derived ID and immutable policer shape match.
+/// Definitions with no term reference retain one name-scoped runtime for
+/// status compatibility.
+fn build_term_scoped_policer_runtimes(
+    state: &mut FilterState,
+    filters: &[FirewallFilterSnapshot],
+    templates: &rustc_hash::FxHashMap<String, PolicerRuntimeTemplate>,
+    previous: Option<&FilterState>,
+    used_runtime_ids: &mut rustc_hash::FxHashSet<u32>,
+) {
+    let mut scopes = Vec::new();
+    let mut referenced_names = rustc_hash::FxHashSet::<&str>::default();
+    for filter in filters {
+        for term in &filter.terms {
+            if term.policer.is_empty() {
+                continue;
+            }
+            referenced_names.insert(term.policer.as_str());
+            scopes.push(PolicerRuntimeScope::for_term(
+                &filter.family,
+                &filter.name,
+                &term.name,
+                &term.policer,
+            ));
+        }
+    }
+    scopes.sort();
+    scopes.dedup();
+    for scope in scopes {
+        let Some(template) = templates.get(scope.policer_name()) else {
             continue;
         };
+        let id = unique_runtime_id(
+            term_scoped_policer_runtime_id(template.id_namespace, &scope),
+            used_runtime_ids,
+        );
+        let reused = previous
+            .and_then(|previous| previous.three_color_policer_by_scope.get(&scope))
+            .filter(|runtime| runtime.reusable_for(id, &template.state))
+            .cloned();
+        let runtime = reused.unwrap_or_else(|| {
+            Arc::new(ThreeColorPolicerRuntime::new(
+                id,
+                scope.policer_name().to_string(),
+                template.state.fresh_instance(),
+            ))
+        });
         state
-            .three_color_policer_by_name
-            .insert(runtime.name.to_string(), runtime.clone());
+            .three_color_policer_by_scope
+            .insert(scope, runtime.clone());
         state.three_color_policers.push(runtime);
     }
+
+    let mut unreferenced = templates
+        .iter()
+        .filter(|(name, _)| !referenced_names.contains(name.as_str()))
+        .collect::<Vec<_>>();
+    unreferenced.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, template) in unreferenced {
+        let scope = PolicerRuntimeScope::unreferenced(name);
+        let id = unique_runtime_id(template.runtime_id, used_runtime_ids);
+        let reused = previous
+            .and_then(|previous| previous.three_color_policer_by_scope.get(&scope))
+            .filter(|runtime| runtime.reusable_for(id, &template.state))
+            .cloned();
+        let runtime = reused.unwrap_or_else(|| {
+            Arc::new(ThreeColorPolicerRuntime::new(
+                id,
+                name.clone(),
+                template.state.fresh_instance(),
+            ))
+        });
+        state
+            .three_color_policer_by_scope
+            .insert(scope, runtime.clone());
+        state.three_color_policers.push(runtime);
+    }
+    state.three_color_policers.sort_by_key(|runtime| runtime.id);
 }
 
 /// Parse every filter snapshot into a compiled `Filter` keyed by
@@ -175,7 +269,7 @@ fn parse_filter_table(
                     term_idx as u32,
                     &snap.family,
                     &snap.name,
-                    &state.three_color_policer_by_name,
+                    &state.three_color_policer_by_scope,
                     defined_policers,
                 )
             })
@@ -370,26 +464,6 @@ fn resolve_lo0_filter(
     })
 }
 
-fn parse_three_color_policer(
-    snap: &ThreeColorPolicerSnapshot,
-    id: u32,
-    previous: Option<&FilterState>,
-) -> Option<Arc<ThreeColorPolicerRuntime>> {
-    let state = build_three_color_policer_state(snap)
-        .unwrap_or_else(|| ThreeColorPolicerState::fail_closed(snap.color_blind));
-    if let Some(previous_runtime) =
-        previous.and_then(|prev| prev.three_color_policer_by_name.get(&snap.name))
-    {
-        if previous_runtime.reusable_for(id, &state) {
-            return Some(Arc::clone(previous_runtime));
-        }
-    }
-    Some(Arc::new(ThreeColorPolicerRuntime::new(
-        id,
-        snap.name.clone(),
-        state,
-    )))
-}
 
 fn unique_three_color_policer_runtime_id(
     name: &str,
@@ -399,9 +473,8 @@ fn unique_three_color_policer_runtime_id(
 }
 
 /// Ensure `id` is not already taken in `used_ids`, probing forward (skipping 0)
-/// until a free slot is found, then reserving it. Shared by the three-color and
-/// #4514 single-rate lowering loops so their name-derived runtime IDs never
-/// collide with one another.
+/// until a free slot is found, then reserving it. Shared by template and
+/// term-scoped runtime lowering loops.
 fn unique_runtime_id(mut id: u32, used_ids: &mut rustc_hash::FxHashSet<u32>) -> u32 {
     while !used_ids.insert(id) {
         id = id.wrapping_add(1);
@@ -411,6 +484,9 @@ fn unique_runtime_id(mut id: u32, used_ids: &mut rustc_hash::FxHashSet<u32>) -> 
     }
     id
 }
+
+const THREE_COLOR_POLICER_RUNTIME_ID_NAMESPACE: &[u8] = b"xpf-three-color-policer-v1:";
+const SINGLE_RATE_POLICER_RUNTIME_ID_NAMESPACE: &[u8] = b"xpf-single-rate-policer-v1:";
 
 fn fnv_runtime_id(namespace: &[u8], name: &str) -> u32 {
     const FNV_OFFSET_BASIS: u32 = 0x811c_9dc5;
@@ -424,49 +500,59 @@ fn fnv_runtime_id(namespace: &[u8], name: &str) -> u32 {
     if hash == 0 { 1 } else { hash }
 }
 
+fn fnv_runtime_id_parts(namespace: &[u8], parts: &[&str]) -> u32 {
+    const FNV_OFFSET_BASIS: u32 = 0x811c_9dc5;
+    const FNV_PRIME: u32 = 0x0100_0193;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in namespace {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for part in parts {
+        for byte in (part.len() as u64)
+            .to_le_bytes()
+            .iter()
+            .chain(part.as_bytes())
+        {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    if hash == 0 { 1 } else { hash }
+}
+
+fn term_scoped_policer_runtime_id(namespace: &[u8], scope: &PolicerRuntimeScope) -> u32 {
+    match scope {
+        PolicerRuntimeScope::Term {
+            family,
+            filter,
+            term,
+            policer,
+        } => fnv_runtime_id_parts(
+            namespace,
+            &[
+                family.as_str(),
+                filter.as_str(),
+                term.as_str(),
+                policer.as_str(),
+            ],
+        ),
+        PolicerRuntimeScope::Unreferenced { .. } => {
+            unreachable!("unreferenced policers use their name-derived template ID")
+        }
+    }
+}
+
 pub(crate) fn three_color_policer_runtime_id(name: &str) -> u32 {
-    fnv_runtime_id(b"xpf-three-color-policer-v1:", name)
+    fnv_runtime_id(THREE_COLOR_POLICER_RUNTIME_ID_NAMESPACE, name)
 }
 
 /// #4514: single-rate policers live in a DISTINCT ID namespace from
 /// three-color policers so a same-named policer of each kind (only reachable via
 /// snapshot drift) cannot alias to one runtime handle.
 fn single_rate_policer_runtime_id(name: &str) -> u32 {
-    fnv_runtime_id(b"xpf-single-rate-policer-v1:", name)
-}
-
-/// #4514: build the metered three-color runtime that enforces a legacy
-/// single-rate `firewall policer`, preserving compatible token/counter state
-/// across snapshot refreshes exactly like `parse_three_color_policer`. Returns
-/// `None` only when the policer has nothing to enforce (a degenerate non-discard
-/// meter-only policer with zero rate/burst — see `build_single_rate_policer_state`).
-fn parse_single_rate_policer_runtime(
-    snap: &PolicerSnapshot,
-    id: u32,
-    previous: Option<&FilterState>,
-) -> Option<Arc<ThreeColorPolicerRuntime>> {
-    let state = match build_single_rate_policer_state(snap) {
-        Some(state) => state,
-        // A `then discard` policer with a degenerate (zero) rate/burst admits no
-        // traffic — fail CLOSED (drop all) rather than leave the rate-limit
-        // silently unenforced, mirroring the three-color unsupported-snapshot
-        // backstop. A degenerate non-discard (meter-only) policer has no action
-        // to enforce, so skip it.
-        None if snap.discard_excess => ThreeColorPolicerState::fail_closed(true),
-        None => return None,
-    };
-    if let Some(previous_runtime) =
-        previous.and_then(|prev| prev.three_color_policer_by_name.get(&snap.name))
-    {
-        if previous_runtime.reusable_for(id, &state) {
-            return Some(Arc::clone(previous_runtime));
-        }
-    }
-    Some(Arc::new(ThreeColorPolicerRuntime::new(
-        id,
-        snap.name.clone(),
-        state,
-    )))
+    fnv_runtime_id(SINGLE_RATE_POLICER_RUNTIME_ID_NAMESPACE, name)
 }
 
 /// #4514: map a legacy single-rate token-bucket policer to an srTCM state.
@@ -597,7 +683,10 @@ fn parse_term(
     id: u32,
     filter_family: &str,
     filter_name: &str,
-    three_color_policers: &rustc_hash::FxHashMap<String, Arc<ThreeColorPolicerRuntime>>,
+    three_color_policers: &rustc_hash::FxHashMap<
+        PolicerRuntimeScope,
+        Arc<ThreeColorPolicerRuntime>,
+    >,
     defined_policers: &rustc_hash::FxHashSet<&str>,
 ) -> Result<FilterTerm, SnapshotIntegrityError> {
     // Non-mutating preflight first: every guard rejects the WHOLE snapshot
@@ -611,6 +700,17 @@ fn parse_term(
     check_cross_field_satisfiability(snap, &protocols, filter_family, filter_name)?;
     let ports = parse_term_ports(snap);
     let action = resolve_term_action(snap);
+    let policer_runtime = if snap.policer.is_empty() {
+        None
+    } else {
+        let scope = PolicerRuntimeScope::for_term(
+            filter_family,
+            filter_name,
+            &snap.name,
+            &snap.policer,
+        );
+        three_color_policers.get(&scope).cloned()
+    };
     Ok(build_filter_term(
         snap,
         id,
@@ -618,7 +718,7 @@ fn parse_term(
         addresses,
         protocols,
         ports,
-        three_color_policers,
+        policer_runtime,
     ))
 }
 
@@ -1146,7 +1246,7 @@ fn build_filter_term(
     addresses: TermAddressMatch,
     protocols: Vec<u8>,
     ports: TermPortMatch,
-    three_color_policers: &rustc_hash::FxHashMap<String, Arc<ThreeColorPolicerRuntime>>,
+    three_color_policer: Option<Arc<ThreeColorPolicerRuntime>>,
 ) -> FilterTerm {
     let flex = lower_flex_match(snap.flex_match.as_ref());
     // #3715: no `& 0x3f` mask — the preflight already rejected any
@@ -1234,7 +1334,7 @@ fn build_filter_term(
         // time (mirrors `forwarding_class`) so per-packet propagation into the
         // FilterResult accumulator is a refcount bump, not a String heap copy.
         policer_name: Arc::<str>::from(snap.policer.as_str()),
-        three_color_policer: three_color_policers.get(&snap.policer).cloned(),
+        three_color_policer,
         routing_instance: Arc::<str>::from(snap.routing_instance.as_str()),
         forwarding_class: Arc::<str>::from(snap.forwarding_class.as_str()),
         dscp_rewrite,
