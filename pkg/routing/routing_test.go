@@ -1659,6 +1659,141 @@ func TestBuildPBRRules(t *testing.T) {
 	})
 }
 
+// TestBuildPBRRules_TerminatingPrecedence pins that the kernel mirror never
+// steers packets past an earlier terminating filter term. Positive, disjoint
+// selectors may continue to use the mirror; uncertain overlap fails closed.
+func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
+	instances := []*config.RoutingInstanceConfig{
+		{Name: "ATT", TableID: 101},
+		{Name: "Comcast", TableID: 102},
+	}
+	tests := []struct {
+		name          string
+		prior         *config.FirewallFilterTerm
+		candidate     *config.FirewallFilterTerm
+		wantRules     int
+		wantDegraded  bool
+	}{
+		{
+			name: "accept destination carve-out",
+			prior: &config.FirewallFilterTerm{
+				Name: "accept-exception", Action: "accept",
+				DestAddresses: []string{"10.1.2.3/32"},
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-rest", DestAddresses: []string{"10.1.0.0/16"},
+				RoutingInstance: "ATT",
+			},
+			wantRules: 0, wantDegraded: true,
+		},
+		{
+			name: "discard destination carve-out",
+			prior: &config.FirewallFilterTerm{
+				Name: "discard-exception", Action: "discard",
+				DestAddresses: []string{"10.1.2.3/32"},
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-rest", DestAddresses: []string{"10.1.0.0/16"},
+				RoutingInstance: "ATT",
+			},
+			wantRules: 0, wantDegraded: true,
+		},
+		{
+			name: "reject destination carve-out",
+			prior: &config.FirewallFilterTerm{
+				Name: "reject-exception", Action: "reject",
+				DestAddresses: []string{"10.1.2.3/32"},
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-rest", DestAddresses: []string{"10.1.0.0/16"},
+				RoutingInstance: "ATT",
+			},
+			wantRules: 0, wantDegraded: true,
+		},
+		{
+			name: "disjoint destination remains steerable",
+			prior: &config.FirewallFilterTerm{
+				Name: "accept-other", Action: "accept",
+				DestAddresses: []string{"192.0.2.0/24"},
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-rest", DestAddresses: []string{"10.1.0.0/16"},
+				RoutingInstance: "ATT",
+			},
+			wantRules: 1,
+		},
+		{
+			name: "disjoint DSCP remains steerable",
+			prior: &config.FirewallFilterTerm{
+				Name: "accept-ef", Action: "accept", DSCPs: []string{"ef"},
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-af43", DSCPs: []string{"af43"}, RoutingInstance: "ATT",
+			},
+			wantRules: 1,
+		},
+		{
+			name: "disjoint protocol remains steerable",
+			prior: &config.FirewallFilterTerm{
+				Name: "accept-tcp", Action: "accept", Protocols: []string{"tcp"},
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-udp", Protocols: []string{"udp"}, RoutingInstance: "ATT",
+			},
+			wantRules: 1,
+		},
+		{
+			name: "disjoint source port remains steerable",
+			prior: &config.FirewallFilterTerm{
+				Name: "accept-443", Action: "accept", SourcePorts: []string{"443"},
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-80", SourcePorts: []string{"80"}, RoutingInstance: "ATT",
+			},
+			wantRules: 1,
+		},
+		{
+			name: "fall-through match does not shadow",
+			prior: &config.FirewallFilterTerm{
+				Name: "next-term", DestAddresses: []string{"10.1.2.3/32"},
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-rest", DestAddresses: []string{"10.1.0.0/16"},
+				RoutingInstance: "ATT",
+			},
+			wantRules: 1,
+		},
+		{
+			name: "earlier routing-instance term shadows later steer",
+			prior: &config.FirewallFilterTerm{
+				Name: "steer-first", DSCPs: []string{"ef"}, RoutingInstance: "ATT",
+			},
+			candidate: &config.FirewallFilterTerm{
+				Name: "steer-second", DSCPs: []string{"ef"}, RoutingInstance: "Comcast",
+			},
+			wantRules: 1, wantDegraded: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter := &config.FirewallFilter{
+				Name: "ordered-fbf",
+				Terms: []*config.FirewallFilterTerm{tt.prior, tt.candidate},
+			}
+			rules, err := BuildPBRRules(pbrTestConfig("inet", filter, instances, nil))
+			if len(rules) != tt.wantRules {
+				t.Fatalf("got %d PBR rules, want %d (err=%v)", len(rules), tt.wantRules, err)
+			}
+			if (err != nil) != tt.wantDegraded {
+				t.Errorf("degraded error = %v, want error %v", err, tt.wantDegraded)
+			}
+			if tt.wantRules > 0 && rules[0].Instance != tt.prior.RoutingInstance && tt.prior.RoutingInstance != "" {
+				t.Errorf("first rule instance = %q, want prior instance %q", rules[0].Instance, tt.prior.RoutingInstance)
+			}
+		})
+	}
+}
+
 // TestBuildPBRRules_MultiWANScoping pins per-interface FBF scoping in the
 // multi-WAN topology (#4422). Two WAN uplinks each carry their OWN input
 // filter-based-forwarding filter steering their OWN source subnet to their OWN
