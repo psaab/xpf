@@ -599,3 +599,139 @@ fn v6_noroute_no_static_routes_9522() {
 // anti-over-reject) and `forwarding/tests.rs:2746` (v6 routes emitted in
 // `inet` normalize into `inet6.0`). A trie cutover must keep both green;
 // no new cell here duplicates them.
+
+fn floating_static_snapshot_11316(
+    neighbors: Vec<crate::NeighborSnapshot>,
+) -> crate::ConfigSnapshot {
+    let mut snapshot = base_snapshot();
+    snapshot.routes = vec![
+        v4_route("203.0.113.0/24", vec!["10.99.0.2"], 5),
+        v4_route("203.0.113.0/24", vec!["192.0.2.1"], 250),
+        v6_route("2001:db8:300::/48", vec!["2001:db8:99::2"], 5),
+        v6_route("2001:db8:300::/48", vec!["2001:db8:98::2"], 250),
+    ];
+    snapshot.neighbors = neighbors;
+    snapshot
+}
+
+fn reachable_neighbor_11316(
+    interface: &str,
+    ifindex: i32,
+    family: &str,
+    ip: &str,
+    mac: &str,
+) -> crate::NeighborSnapshot {
+    crate::NeighborSnapshot {
+        interface: interface.into(),
+        ifindex,
+        family: family.into(),
+        ip: ip.into(),
+        mac: mac.into(),
+        state: "reachable".into(),
+        router: true,
+        link_local: false,
+    }
+}
+
+/// A qualified floating-static's backup is a separate preference row, so
+/// same-prefix route selection must continue to it when the primary neighbor
+/// is absent but the backup is resolved.
+///
+/// FAIL-ON-REVERT: the single `routes.iter().find(prefix.contains)` selects
+/// the primary (egress 11) and returns MissingNeighbor instead of forwarding
+/// through the live backup (egress 12), for both address families.
+#[test]
+fn floating_static_uses_live_backup_when_primary_missing_v4_v6_11316() {
+    let snapshot = floating_static_snapshot_11316(vec![
+        reachable_neighbor_11316(
+            "ge-0-0-1",
+            12,
+            "inet",
+            "192.0.2.1",
+            "00:11:22:33:44:66",
+        ),
+        reachable_neighbor_11316(
+            "ge-0-0-1",
+            12,
+            "inet6",
+            "2001:db8:98::2",
+            "00:11:22:33:44:67",
+        ),
+    ]);
+    let state = build_forwarding_state(&snapshot);
+
+    let v4 = resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5));
+    assert_eq!(v4.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(v4.egress_ifindex, 12, "v4 must use the live backup");
+    assert_eq!(v4.next_hop, Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
+    assert_eq!(v4.neighbor_mac, Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x66]));
+
+    let v6 = resolve_v6(&state, "2001:db8:300::5".parse().unwrap());
+    assert_eq!(v6.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(v6.egress_ifindex, 12, "v6 must use the live backup");
+    assert_eq!(
+        v6.next_hop,
+        Some(IpAddr::V6("2001:db8:98::2".parse().unwrap()))
+    );
+    assert_eq!(v6.neighbor_mac, Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x67]));
+}
+
+#[test]
+fn floating_static_keeps_resolved_primary_preferred_v4_v6_11316() {
+    let snapshot = floating_static_snapshot_11316(vec![
+        reachable_neighbor_11316("ge-0-0-0", 11, "inet", "10.99.0.2", "00:11:22:33:44:61"),
+        reachable_neighbor_11316("ge-0-0-1", 12, "inet", "192.0.2.1", "00:11:22:33:44:66"),
+        reachable_neighbor_11316(
+            "ge-0-0-0",
+            11,
+            "inet6",
+            "2001:db8:99::2",
+            "00:11:22:33:44:62",
+        ),
+        reachable_neighbor_11316(
+            "ge-0-0-1",
+            12,
+            "inet6",
+            "2001:db8:98::2",
+            "00:11:22:33:44:67",
+        ),
+    ]);
+    let state = build_forwarding_state(&snapshot);
+
+    let v4 = resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5));
+    assert_eq!(v4.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(
+        v4.egress_ifindex, 11,
+        "resolved v4 primary remains preferred"
+    );
+    assert_eq!(v4.next_hop, Some(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2))));
+
+    let v6 = resolve_v6(&state, "2001:db8:300::5".parse().unwrap());
+    assert_eq!(v6.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(
+        v6.egress_ifindex, 11,
+        "resolved v6 primary remains preferred"
+    );
+    assert_eq!(
+        v6.next_hop,
+        Some(IpAddr::V6("2001:db8:99::2".parse().unwrap()))
+    );
+}
+
+#[test]
+fn floating_static_keeps_unresolved_primary_for_neighbor_resolution_v4_v6_11316() {
+    let state = build_forwarding_state(&floating_static_snapshot_11316(vec![]));
+
+    let v4 = resolve_v4(&state, Ipv4Addr::new(203, 0, 113, 5));
+    assert_eq!(v4.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(v4.egress_ifindex, 11, "v4 cold path keeps primary gateway");
+    assert_eq!(v4.next_hop, Some(IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2))));
+
+    let v6 = resolve_v6(&state, "2001:db8:300::5".parse().unwrap());
+    assert_eq!(v6.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(v6.egress_ifindex, 11, "v6 cold path keeps primary gateway");
+    assert_eq!(
+        v6.next_hop,
+        Some(IpAddr::V6("2001:db8:99::2".parse().unwrap()))
+    );
+}

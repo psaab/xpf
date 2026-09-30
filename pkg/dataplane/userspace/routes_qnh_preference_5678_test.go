@@ -17,9 +17,9 @@ import (
 //
 // The fix groups next-hops by their EFFECTIVE preference (per-next-hop when
 // HasPreference, else route-level) and emits one RouteSnapshot per distinct
-// preference. The Rust FIB tie-breaks same-prefix routes by preference (#2390)
-// and first-match-selects the lowest, holding the higher-preference backup as
-// a standby entry.
+// preference. The Rust FIB prefers the lowest tier with a live next-hop and
+// falls through to a live backup when every primary member is unresolved
+// (#11316); equal-preference next-hops remain ECMP.
 //
 // FAIL-ON-REVERT: revert the preference-carry (collapse both next-hops onto one
 // route-level-preference snapshot) and the primary + backup become a single
@@ -184,5 +184,47 @@ func TestQualifiedNextHopsSamePreferenceGroupECMP_5678(t *testing.T) {
 	}
 	if nh := byPref[250]; len(nh) != 1 || nh[0] != "10.0.0.3" {
 		t.Fatalf("preference-250 group = %v, want standby [10.0.0.3]", nh)
+	}
+}
+
+// #11316 interaction: the primary preference keeps #11537's learned-route
+// gap-fill suppressed, while #5678 still publishes the qualified backup as
+// its own preference tier for the Rust FIB to select after primary failure.
+//
+// FAIL-ON-REVERT: losing the primary tier or adding an imported preference-200
+// row changes the helper FIB candidates for this floating static.
+func TestFloatingStaticKeepsStandbyWhenLearnedGapFillIsSuppressed_11316(t *testing.T) {
+	orig := ruleListFn
+	t.Cleanup(func() { ruleListFn = orig })
+	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
+	withLearnedRoutes(t, fixedLearned(learnedV4("10.5.0.0/16", "198.51.100.254")))
+
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{{
+		Destination: "10.5.0.0/16",
+		Preference:  5,
+		NextHops: []config.NextHopEntry{
+			{Address: "10.0.0.1"},
+			{Address: "10.0.0.2", Preference: 250, HasPreference: true},
+		},
+	}}
+
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+	hits := snapshotFor(t, "inet.0", "inet", "10.5.0.0/16", routes)
+	if len(hits) != 2 {
+		t.Fatalf("want primary and backup tiers only (no imported pref-200 row), got %+v", hits)
+	}
+	byPreference := make(map[int][]string, len(hits))
+	for _, route := range hits {
+		byPreference[route.Preference] = route.NextHops
+	}
+	if got := byPreference[5]; len(got) != 1 || got[0] != "10.0.0.1" {
+		t.Fatalf("primary tier = %v, want pref-5 [10.0.0.1]", got)
+	}
+	if got := byPreference[250]; len(got) != 1 || got[0] != "10.0.0.2" {
+		t.Fatalf("backup tier = %v, want pref-250 [10.0.0.2]", got)
 	}
 }

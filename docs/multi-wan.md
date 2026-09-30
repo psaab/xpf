@@ -775,10 +775,11 @@ routing, and only on double fault).
   `buildRouteSnapshots`. A DHCP uplink therefore now works as a primary
   fast-path uplink without a static default.
   - Same-prefix import is **preference-aware**: if the best configured
-    route has preference 200 or better, the imported candidate is
-    omitted. If a configured route is a worse-preference fallback (for
-    example a floating static at 250), both are published and the Rust
-    FIB selects the kernel-selected learned route at preference 200.
+    route has preference 200 or better, the imported candidate is omitted.
+    Otherwise both candidates are published and the Rust FIB selects the
+    first live tier by preference. A live kernel-selected route at 200
+    normally wins, while a live floating-static backup can still carry
+    traffic if an earlier tier is unresolved (#11316).
   - It is **BOUNDED, and refuses rather than truncates (#8355).** A
     learned route serializes to ~113 bytes — stable to within 1.5% from
     one route to 500,000, which is what makes a route COUNT derivable
