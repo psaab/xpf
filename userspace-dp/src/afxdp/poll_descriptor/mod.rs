@@ -304,8 +304,8 @@ use filter::{
     apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit, evaluate_non_pbr_input_filter,
     evaluate_non_pbr_input_filter_counters_cached, evaluate_non_pbr_input_filter_log_only,
-    filter_terminal, host_inbound_gated_lo0_action, lo0_action_for_solicited_reply,
-    revalidate_static_pbr_route_on_session_hit,
+    filter_terminal, host_inbound_gated_lo0_action, input_filter_would_deny_before_screen,
+    lo0_action_for_solicited_reply, revalidate_static_pbr_route_on_session_hit,
 };
 use policy_revalidation::{
     revalidate_zone_policy_on_session_hit, tun_origin_forward, tun_origin_reverse,
@@ -798,38 +798,53 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     flow.forward_key.routing_domain = matched.key.routing_domain;
                     fabric_ingress_for_session = true;
                 }
+                // #11332: a packet the interface input filter (including its
+                // routing-instance verdict) will reject must not update screen
+                // sketches or elicit a SYN-cookie response. The verdict-only
+                // walk has no counter/log side effects; the normal filter
+                // enforcement below remains the sole counted/logged evaluation.
+                let input_filter_denied_before_screens = screen.has_screen_state()
+                    && input_filter_would_deny_before_screen(
+                        worker_ctx.forwarding,
+                        packet_frame,
+                        flow.as_ref(),
+                        meta,
+                    );
                 // #946 Phase 1 stage 10: screen / IDS slow-path.
-                // Caller still owns the recycle push (matches
-                // original code's pattern).
-                match stage_screen_check(
-                    flow.as_ref(),
-                    packet_frame,
-                    meta,
-                    ingress_zone_override,
-                    now_ns,
-                    now_secs,
-                    screen,
-                    telemetry.counters,
-                    worker_ctx,
-                ) {
-                    StageOutcome::RecycleAndContinue => {
-                        binding.scratch.scratch_recycle.push(desc.addr);
-                        continue;
-                    }
-                    StageOutcome::Continue(ScreenCheckOutcome::Pass) => {}
-                    StageOutcome::Continue(ScreenCheckOutcome::SynCookieChallenge(challenge)) => {
-                        enqueue_syn_cookie_reply(
-                            &mut binding.tx_pipeline,
-                            worker_ctx.forwarding,
-                            binding.ifindex,
-                            packet_frame,
-                            meta,
-                            flow.as_ref(),
-                            SynCookieReply::SynAck(challenge),
-                            telemetry.counters,
-                        );
-                        binding.scratch.scratch_recycle.push(desc.addr);
-                        continue;
+                // Filter-denied packets continue to their ordinary filter
+                // enforcement site below without mutating screens or producing
+                // a challenge. Caller still owns the recycle push.
+                if !input_filter_denied_before_screens {
+                    match stage_screen_check(
+                        flow.as_ref(),
+                        packet_frame,
+                        meta,
+                        ingress_zone_override,
+                        now_ns,
+                        now_secs,
+                        screen,
+                        telemetry.counters,
+                        worker_ctx,
+                    ) {
+                        StageOutcome::RecycleAndContinue => {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        StageOutcome::Continue(ScreenCheckOutcome::Pass) => {}
+                        StageOutcome::Continue(ScreenCheckOutcome::SynCookieChallenge(challenge)) => {
+                            enqueue_syn_cookie_reply(
+                                &mut binding.tx_pipeline,
+                                worker_ctx.forwarding,
+                                binding.ifindex,
+                                packet_frame,
+                                meta,
+                                flow.as_ref(),
+                                SynCookieReply::SynAck(challenge),
+                                telemetry.counters,
+                            );
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                     }
                 }
                 // #9950 (F-035): fragment-overlap CHECK — post-screen (preserves
@@ -2664,35 +2679,37 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         }
                         telemetry.counters.session_misses += 1;
                         telemetry.dbg.session_miss += 1;
-                        match stage_screen_syn_cookie_ack_on_session_miss(
-                            Some(flow),
-                            packet_frame,
-                            meta,
-                            ingress_zone_override,
-                            now_ns,
-                            now_secs,
-                            screen,
-                            telemetry.counters,
-                            worker_ctx,
-                        ) {
-                            StageOutcome::RecycleAndContinue => {
-                                binding.scratch.scratch_recycle.push(desc.addr);
-                                continue;
-                            }
-                            StageOutcome::Continue(SynCookieAckOutcome::Pass) => {}
-                            StageOutcome::Continue(SynCookieAckOutcome::Validated) => {
-                                enqueue_syn_cookie_reply(
-                                    &mut binding.tx_pipeline,
-                                    worker_ctx.forwarding,
-                                    binding.ifindex,
-                                    packet_frame,
-                                    meta,
-                                    Some(flow),
-                                    SynCookieReply::AckRst,
-                                    telemetry.counters,
-                                );
-                                binding.scratch.scratch_recycle.push(desc.addr);
-                                continue;
+                        if !input_filter_denied_before_screens {
+                            match stage_screen_syn_cookie_ack_on_session_miss(
+                                Some(flow),
+                                packet_frame,
+                                meta,
+                                ingress_zone_override,
+                                now_ns,
+                                now_secs,
+                                screen,
+                                telemetry.counters,
+                                worker_ctx,
+                            ) {
+                                StageOutcome::RecycleAndContinue => {
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
+                                StageOutcome::Continue(SynCookieAckOutcome::Pass) => {}
+                                StageOutcome::Continue(SynCookieAckOutcome::Validated) => {
+                                    enqueue_syn_cookie_reply(
+                                        &mut binding.tx_pipeline,
+                                        worker_ctx.forwarding,
+                                        binding.ifindex,
+                                        packet_frame,
+                                        meta,
+                                        Some(flow),
+                                        SynCookieReply::AckRst,
+                                        telemetry.counters,
+                                    );
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
                             }
                         }
                         let resolution_target =
