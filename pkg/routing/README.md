@@ -1127,11 +1127,13 @@ row misleads a human, a missing FIB entry misdirects a packet.
 The snapshot builder uses **preference-aware same-prefix arbitration**. For
 each canonical `(table, family, prefix)`, it finds the best configured route:
 if that preference is 200 or better, the imported route is omitted and the
-configured route remains the only candidate. If the configured route is worse
-(for example a floating static at preference 250), both candidates are
-published and the Rust FIB's ascending-preference tie-break selects the
-kernel-selected route imported at preference 200. Thus ordinary statics remain
-preferred while a backup static cannot shadow a better learned route.
+configured tiers remain. If the best configured route is worse (for example a
+floating static at preference 250), both are published with the imported route
+at preference 200. The Rust FIB selects the first live tier by preference: a
+live imported route normally wins at 200, while a live configured backup
+remains usable if an earlier tier is unresolved (#11316). If no tier is live,
+the preferred tier's existing drivable-member fallback preserves neighbor
+resolution. Thus a backup cannot shadow a better live learned route.
 
 ### Known limitation
 
