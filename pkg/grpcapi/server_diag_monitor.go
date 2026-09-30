@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/denyaudit"
 	"github.com/psaab/xpf/pkg/diagcmd"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/logging"
@@ -775,6 +777,24 @@ func (s *Server) MonitorInterface(req *pb.MonitorInterfaceRequest, stream grpc.S
 		return status.Error(codes.Unavailable, "no active configuration")
 	}
 
+	// #11082: the interceptor verified the method-only token (connection
+	// gate). Re-verify against THESE arguments: a token captured from one
+	// stream must not authorize a different interface_name/summary_mode.
+	if tok, present := fabricAuthArgsTokenFromMetadata(stream.Context()); present {
+		if !verifyFabricStreamArgsToken(s.fabricAcceptedKeys(), tok, pb.BpfrxService_MonitorInterface_FullMethodName, req) {
+			if emit, suppressed := denyaudit.Note(denyaudit.SurfaceFabricAuth, "stream args-bound token mismatch"); emit {
+				slog.Warn("fabric MonitorInterface rejected call: arguments do not match the stream token",
+					"suppressed_since_last", suppressed)
+			}
+			return status.Error(codes.Unauthenticated, "fabric RPC authentication failed: stream arguments do not match the token")
+		}
+	} else {
+		// Legacy peer (predates args-bound stream tokens): the method
+		// token already passed the interceptor. Count the fallback so
+		// the migration is observable; Phase 2 removes it.
+		fabricStreamArgsUnboundTotal.Add(1)
+	}
+
 	hostname, _ := os.Hostname()
 	if hostname == "" {
 		hostname = "xpf"
@@ -1021,6 +1041,18 @@ func (s *Server) proxyMonitorInterface(req *pb.MonitorInterfaceRequest, stream g
 	// never proxies it back to us — the strict one-hop bound that closes the
 	// #5497 A->B->A recursion (mirrors the chassis-forwarding proxy).
 	ctx := metadata.AppendToOutgoingContext(stream.Context(), monitorNoPeerMarker, "1")
+
+	// #11082: bind the stream token to THESE request arguments so a
+	// captured token cannot be replayed with different args in-window.
+	// The method-only token (via creds) still travels for the connection
+	// gate; the peer's handler verifies this one against the received req.
+	if key := s.fabricAuthKey(); len(key) > 0 {
+		if digest, derr := fabricRequestDigest(req); derr == nil {
+			if tok := fabricAuthTokenHexForDigest(key, time.Now(), pb.BpfrxService_MonitorInterface_FullMethodName, digest); tok != "" {
+				ctx = metadata.AppendToOutgoingContext(ctx, fabricAuthArgsBoundKey, tok)
+			}
+		}
+	}
 
 	client := pb.NewBpfrxServiceClient(conn)
 	peerStream, _, estCancel, err := establishMonitorInterfacePeerStream(ctx, func(estCtx context.Context) (monitorInterfacePeerStream, error) {

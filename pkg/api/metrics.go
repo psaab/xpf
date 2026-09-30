@@ -101,8 +101,9 @@ type xpfCollector struct {
 	// here and emitted from metrics_admission_refusals_8312.go; the value comes
 	// from the diagcmd limiters themselves, so there is no counter state on the
 	// collector to keep in step.
-	admissionRefusalsTotal *prometheus.Desc
-	authzDenialsTotal      *prometheus.Desc
+	admissionRefusalsTotal       *prometheus.Desc
+	authzDenialsTotal            *prometheus.Desc
+	fabricStreamArgsUnboundTotal *prometheus.Desc
 
 	// #9019: work the dataplane DECLINED to do. Both counters existed with no
 	// reader; see metrics_dataplane_silent_skips_9019.go.
@@ -978,6 +979,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.managementTLSCertificateInvalidTotal
 	c.describeAdmissionRefusals(ch)
 	c.describeAuthzDenials(ch)
+	c.describeFabricStreamArgsUnbound(ch)
 	c.describeDataplaneSilentSkips(ch)
 	c.describeLearnedRouteImportCapped(ch)
 	ch <- c.degradedPathTotal
@@ -1467,6 +1469,7 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 	// after the dataplane gate would hide them in the case they matter most.
 	defer c.emitAdmissionRefusals(ch)
 	defer c.emitAuthzDenials(ch)
+	defer c.emitFabricStreamArgsUnbound(ch)
 	// #9019: also before the dataplane gate -- these report a dataplane that
 	// came up incompletely, so gating them on a healthy dataplane would hide
 	// them in precisely the case they exist for.
