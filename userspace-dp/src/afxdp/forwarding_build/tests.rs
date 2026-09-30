@@ -10528,7 +10528,7 @@ fn quarantine_row_never_overwrites_survivor_ifindex_claim_9956() {
             "#9956 GPT-2 ({order}): the survivor must own the shared ifindex's RI name"
         );
         let scope =
-            crate::afxdp::forwarding::nat_scope_ctx_for_flow(&state, 11, 0, 24, TENANT_A_DOMAIN);
+            crate::afxdp::forwarding::nat_scope_ctx_for_flow(&state, 11, 0, None, 24, TENANT_A_DOMAIN);
         assert_eq!(
             scope.ingress_routing_instance, "tenant-a",
             "#9956 GPT-2 ({order}): NAT scope on the shared ifindex must see tenant-a"

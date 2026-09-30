@@ -143,15 +143,15 @@ pub(super) fn stage_flow_cache_hit(
         &worker_ctx.rg_epochs,
         meta.pkt_len,
     ) {
-        // #3048/#5147: a kernel ARP/NDP update may have REPLACED this
-        // descriptor's next-hop MAC since it was cached (gateway VRRP
-        // failover, NIC swap). The neighbor map advances the epoch of the
-        // changed neighbor's SHARD only on a genuine MAC change — never on a
-        // same-MAC refresh — so this comparison is free of steady-state
-        // re-misses, and a MAC change to a neighbor in a DIFFERENT shard does
-        // NOT evict this flow (the #5147 map-wide-thrash fix). The check reads
-        // only this flow's own shard slot: a single indexed relaxed atomic
-        // load + compare. A mismatch means the cached dst_mac may be stale;
+        // #3048/#5147: an ARP/NDP MAC replacement or neighbor deletion may
+        // invalidate this descriptor's next-hop mapping (gateway VRRP
+        // failover, NIC swap, or DELNEIGH). The neighbor map advances only
+        // the changed neighbor's shard — same-MAC refreshes and absent-key
+        // removals do not bump — so this comparison avoids steady-state
+        // re-misses, and unrelated-shard changes do not evict this flow. The
+        // check reads only this flow's own shard slot: a single indexed
+        // relaxed atomic load + compare. A mismatch means the cached dst_mac
+        // or neighbor liveness may be stale;
         let neighbor_mac_stale = cached.neighbor_mac_epoch_stale(worker_ctx.dynamic_neighbors);
         // evict and re-resolve on the slow path.
         if neighbor_mac_stale
@@ -497,10 +497,20 @@ pub(super) fn stage_flow_cache_hit(
                     )
                 }
             });
-            // Check if target is same binding (hairpin) or same-UMEM.
-            // For simplicity, only do in-place fast path when target == self.
             let is_self_target = target_bi == Some(binding_index);
-            if is_self_target && owned_packet_frame.is_none() {
+            // A direct cache-hit TX bypasses `enqueue_pending_forwards`,
+            // where PMTUD and TCP segmentation are admitted. Keep oversized
+            // packets on that path; it also derives the correct inner MTU and
+            // encapsulates native-tunnel forwards.
+            if is_self_target
+                && owned_packet_frame.is_none()
+                && !flow_cache_hit_requires_pending_forward(
+                    packet_frame,
+                    meta,
+                    &cached_decision,
+                    worker_ctx.forwarding,
+                )
+            {
                 let ingress_slot = binding_slot;
                 let flow_key = flow.forward_key.clone();
                 let mirror_config = resolve_mirror_config(

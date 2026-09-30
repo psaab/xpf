@@ -115,9 +115,9 @@ type ZoneInfo struct {
 	// the description to carry intent/owner/ticket metadata.
 	Description string `json:"description,omitempty"`
 	// TcpRst mirrors gRPC GetZones (#3329): when `set security zones
-	// security-zone <z> tcp-rst` is configured the zone sends a TCP RST for
-	// non-SYN packets to closed ports, changing client-visible deny
-	// behaviour. Omitted (false) for zones without it.
+	// security-zone <z> tcp-rst` is configured, a non-SYN TCP packet dropped
+	// at the strict-SYN session-miss gate may receive a TCP RST. Policy denies
+	// remain silent. Omitted (false) for zones without it.
 	TcpRst        bool     `json:"tcp_rst,omitempty"`
 	ScreenProfile string   `json:"screen_profile,omitempty"`
 	Interfaces    []string `json:"interfaces"`

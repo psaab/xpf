@@ -207,11 +207,17 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
     let pool_v4: Ipv4Addr = "172.16.80.50".parse().expect("pool v4");
     let dst_v4: Ipv4Addr = "8.8.8.8".parse().expect("dst v4");
     let mut translated_port = 0u16;
-    sessions.iter_with_origin(|key, _decision, _metadata, _origin| {
+    let mut reverse_nat64 = false;
+    sessions.iter_with_origin(|key, decision, _metadata, _origin| {
         if key.addr_family == libc::AF_INET as u8 {
             translated_port = key.dst_port;
+            reverse_nat64 = decision.nat.nat64;
         }
     });
+    assert!(
+        reverse_nat64,
+        "the installed reverse companion must retain the NAT64 marker"
+    );
     assert_ne!(
         translated_port, 0,
         "the reverse NAT64 (v4) session must key on a translated port"
@@ -233,8 +239,13 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
     // instead of the translation counter.
     let mut wan_binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     wan_binding.interface = Arc::<str>::from("reth0.80");
-    let reply_meta = txn_meta_v4(12, TCP_FLAG_SYN | ACK, reply_frame.len() as u16);
-    let (rev_batch, _rev_dbg) = txn_run_descriptor_checked(
+    // The test frame omits the NIC-stripped 802.1Q header; retain VID 80 in
+    // descriptor metadata so ingress resolution sees reth0.80.
+    let reply_meta = UserspaceDpMeta {
+        ingress_vlan_id: 80,
+        ..txn_meta_v4(12, TCP_FLAG_SYN | ACK, reply_frame.len() as u16)
+    };
+    let (rev_batch, rev_dbg) = txn_run_descriptor_checked(
         &mut wan_binding,
         &mut sessions,
         &forwarding,
@@ -242,6 +253,27 @@ fn txn_nat64_translation_bumps_counter_both_directions() {
         &reply_frame,
         reply_meta,
         true,
+    );
+    assert_eq!(
+        rev_dbg.tx,
+        1,
+        "the reverse NAT64 reply must translate and reach transmit \
+         (rx={}, hit={}, miss={}, metadata_err={}, forward={}, no_route={}, \
+         missing_neigh={}, policy_deny={}, foreign_drop={}, build_fail={}, \
+         tx_err={}, nat_none={}, enqueue={})",
+        rev_dbg.rx,
+        rev_dbg.session_hit,
+        rev_dbg.session_miss,
+        rev_dbg.metadata_err,
+        rev_dbg.forward,
+        rev_dbg.no_route,
+        rev_dbg.missing_neigh,
+        rev_dbg.policy_deny,
+        rev_dbg.foreign_authority_drops,
+        rev_dbg.build_fail,
+        rev_dbg.tx_err,
+        rev_dbg.nat_applied_none,
+        rev_dbg.enqueue_ok,
     );
     assert_eq!(
         rev_batch.nat64_translations, 1,
@@ -768,6 +800,7 @@ fn txn_tunnel_marked_missing_neighbor_not_buffered() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "8.8.8.8/32".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["@gr-0/0/0.0".to_string()],
         discard: false,
         next_table: String::new(),
@@ -1366,6 +1399,8 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
     let ident = 0x4321;
     let mut wan_binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     wan_binding.interface = Arc::<str>::from("reth0.80");
+    // These synthetic frames model NIC-stripped VLAN tags: the WAN unit's VID
+    // must still be present in descriptor metadata for ingress resolution.
     let mut reverse_nonfirst = nat64_v4_frag_frame(0x0003, ident, server_v4, pool_v4, 0, 0, 0);
     reverse_nonfirst[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
     let (early_batch, early_dbg) = txn_run_descriptor_checked(
@@ -1376,6 +1411,7 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
         &reverse_nonfirst,
         {
             let mut m = txn_meta_v4(12, 0, reverse_nonfirst.len() as u16);
+            m.ingress_vlan_id = 80;
             m.flow_src_addr[..4].copy_from_slice(&server_v4.octets());
             m.flow_dst_addr[..4].copy_from_slice(&pool_v4.octets());
             m
@@ -1401,7 +1437,10 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
         TCP_SYN_ACK,
     );
     reverse_first[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
-    let reverse_first_meta = txn_meta_v4(12, TCP_SYN_ACK, reverse_first.len() as u16);
+    let reverse_first_meta = UserspaceDpMeta {
+        ingress_vlan_id: 80,
+        ..txn_meta_v4(12, TCP_SYN_ACK, reverse_first.len() as u16)
+    };
     let (reverse_batch, reverse_dbg) = txn_run_descriptor_checked(
         &mut wan_binding,
         &mut sessions,
@@ -1419,11 +1458,16 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
         "the AF_INET reverse first fragment must install a second association"
     );
 
-    let reverse_authority = crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_authority(
-        &forwarding,
-        txn_meta_v4(12, 0, reverse_first.len() as u16),
-        None,
-    );
+    let reverse_authority_meta = UserspaceDpMeta {
+        ingress_vlan_id: 80,
+        ..txn_meta_v4(12, 0, reverse_first.len() as u16)
+    };
+    let reverse_authority =
+        crate::afxdp::poll_descriptor::frag_assoc::frag_ingress_authority(
+            &forwarding,
+            reverse_authority_meta,
+            None,
+        );
     let reverse_key = crate::fragment_assoc::first_fragment_key(
         &reverse_first[14..],
         libc::AF_INET,
@@ -1455,6 +1499,7 @@ fn nat64_reverse_nonfirst_reply_fragment_translates_9957() {
         &reverse_nonfirst,
         {
             let mut m = txn_meta_v4(12, 0, reverse_nonfirst.len() as u16);
+            m.ingress_vlan_id = 80;
             m.flow_src_addr[..4].copy_from_slice(&server_v4.octets());
             m.flow_dst_addr[..4].copy_from_slice(&pool_v4.octets());
             m

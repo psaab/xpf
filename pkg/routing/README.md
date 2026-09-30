@@ -830,6 +830,14 @@ when the existing kernel link is genuinely incompatible:
     pass stays best-effort at WARN like 0a: a routing-instance `interface` list
     can legitimately name an interface genuinely absent on this chassis, and
     failing the commit on that would reject configs correct for the fleet.
+  - **Removed routing-instance list members (#11390).** Apply and periodic
+    reassert scan the enslaved links of surviving configured VRFs; links no
+    longer claimed by an RI list or tunnel stanza are detached through the
+    same master-ifindex check. This also catches stale memberships left across
+    a daemon restart without detaching a device moved to another RI or a link
+    on an unrelated master. The reassert pass uses the active desired set, so
+    removed members are detached, never rebound.
+
 - **Keepalives** (BOTH the anchor and the legacy branch, #4071): runners
   are reconciled by normalized identity `(remote, source, interval,
   retry<=0→3)` and survive unrelated applies; `LinkSetUp` is SKIPPED

@@ -25,7 +25,7 @@ pub(crate) use rotation::{
     input_dscp_filter_families_changed, input_per_packet_l4_filter_families_changed,
     interface_input_filter_has_dscp_match, interface_input_filter_has_per_packet_l4_match,
     interface_input_filter_varies_per_packet, interface_output_filter_has_dscp_match,
-    interface_output_filter_has_per_packet_l4_match,
+    interface_output_filter_has_per_packet_l4_match, lo0_filter_families_changed,
 };
 
 pub(crate) fn evaluate_filter_ref_tx_selection_cached(

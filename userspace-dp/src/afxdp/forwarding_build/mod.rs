@@ -626,6 +626,9 @@ fn build_fallible_forwarding_state(
     // #6458: zone -> RG-bound-member map for the fabric-ingress zone-stamp
     // validation; needs both ifindex_to_zone_id and egress final.
     interfaces::populate_zone_to_rgs(&mut state);
+    // #11337: carry a stable peer-resolvable NAT ingress identity in the
+    // synthetic fabric source MAC; interface indexes are node-local.
+    interfaces::populate_fabric_nat_scope_ids(&mut state);
 
     fib::sort_connected(&mut state);
     // #3771: fail the snapshot CLOSED on a route whose `family` contradicts its

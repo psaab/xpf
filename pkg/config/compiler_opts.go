@@ -1391,6 +1391,10 @@ type compileOpts struct {
 	// merging them, so a leniently-loaded config is already inert. Same
 	// doctrine as lenientNextTableRefs.
 	lenientForwardingInstanceProtocols bool
+	// lenientForwardingInstanceMembers (#11312) warns for legacy or peer-synced
+	// forwarding members. The userspace maps leave those interfaces in the
+	// default domain, matching the daemon's no-VRF binding behavior.
+	lenientForwardingInstanceMembers bool
 
 	protocolScopeOpts
 	// lenientDHCPRelayDHCPv6 (#9553) downgrades validateDHCPRelayDHCPv6AST from
@@ -2819,6 +2823,10 @@ type compileOpts struct {
 	// leaves the device unbound, and records alarm/metric evidence while
 	// preserving unaffected units from a bare member.
 	lenientRIDualClaim11060 bool
+	// lenientRIMgmtMember11392 warns about management-class RI list members on
+	// tolerant load/peer-sync so existing configs still boot. Strict commit
+	// rejects these members because fxp*/fab*/em* are owned by vrf-mgmt.
+	lenientRIMgmtMember11392 bool
 	// lenientRoutingInstanceType9814 (#9814) downgrades the routing-instance
 	// instance-type value-domain gate (validateRoutingInstanceTypeStrict9814)
 	// from a hard compile error to a cfg.Warnings entry. A mistyped or
@@ -3066,6 +3074,7 @@ func lenientCompileOpts() compileOpts {
 		lenientGlobalInterfaceRoutesRibGroup:   true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
+		lenientForwardingInstanceMembers:       true,
 		protocolScopeOpts:                      protocolScopeOpts{lenientProtocolInterfaceMembership11310: true},
 		lenientDHCPRelayDHCPv6:                 true,
 		lenientWireguardRoutingInstance:        true,
@@ -3091,6 +3100,7 @@ func lenientCompileOpts() compileOpts {
 		lenientHelperStateFile:                 true,
 		lenientAddressBookNameCollision:        true,
 		lenientRIDualClaim11060:                true,
+		lenientRIMgmtMember11392:               true,
 		lenientZoneInterfaceMembership:         true,
 		lenientFabricZoneRoutingInstance:       true,
 		lenientZoneInterfaceDefined:            true,

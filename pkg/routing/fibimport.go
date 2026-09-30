@@ -115,6 +115,9 @@ type LearnedRoute struct {
 	TableID int
 	// Family is netlink.FAMILY_V4 or netlink.FAMILY_V6.
 	Family int
+	// Metric is the Linux route priority (RTA_PRIORITY). Lower metrics win
+	// within one learned prefix; snapshots keep the fixed import preference.
+	Metric int
 	// Destination is the route prefix in CIDR form. A kernel default route
 	// carries a nil Dst; it is normalised here to "0.0.0.0/0" or "::/0" so
 	// the consumer never has to special-case it. Getting this wrong would
@@ -123,6 +126,12 @@ type LearnedRoute struct {
 	// NextHops holds every gateway leg, in kernel order. Always non-empty:
 	// a route with no gateway is not imported (see importableRoute).
 	NextHops []string
+	// NextHopWeights parallels NextHops in kernel leg order (#11402). Each
+	// entry is the Linux multipath weight for that leg, uint32(Hops)+1 in
+	// the 1..256 range; a single-path route carries exactly one weight of
+	// 1. The consumer must never sort or reorder the legs: the weight at
+	// index i selects the next hop at index i.
+	NextHopWeights []uint32
 	// Protocol is the rtnetlink protocol name (rtProtoName) that admitted
 	// the route — "bgp", "ospf", "isis", "rip", "static", "dhcp",
 	// "connected". Diagnostic only; it does not reach the helper.
@@ -251,20 +260,22 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 	if !ok {
 		return LearnedRoute{}, false
 	}
-	nextHops, ok, scopeFailureGateway := learnedRouteNextHops(r, linkName)
-	if scopeFailureGateway != nil {
-		warnUnscopedLearnedGatewayOnce(tableID, dst, scopeFailureGateway, r)
+	nextHops, nextHopWeights, ok, unscoped := learnedRouteNextHops(r, linkName)
+	if unscoped != nil {
+		warnUnscopedLearnedGatewayOnce(tableID, dst, unscoped, r)
 		return LearnedRoute{}, false
 	}
 	if !ok || len(nextHops) == 0 {
 		return LearnedRoute{}, false
 	}
 	return LearnedRoute{
-		TableID:     tableID,
-		Family:      family,
-		Destination: dst,
-		NextHops:    nextHops,
-		Protocol:    rtProtoName(r.Protocol),
+		TableID:        tableID,
+		Family:         family,
+		Metric:         r.Priority,
+		Destination:    dst,
+		NextHops:       nextHops,
+		NextHopWeights: nextHopWeights,
+		Protocol:       rtProtoName(r.Protocol),
 	}, true
 }
 
@@ -286,7 +297,9 @@ func learnedRouteDestination(r netlink.Route, family int) (string, bool) {
 	return "0.0.0.0/0", true
 }
 
-// learnedRouteNextHops collects every gateway leg of a route.
+// learnedRouteNextHops collects each gateway leg with its parallel Linux
+// weight (`uint32(Hops)+1` for multipath, 1 for a single path). Both slices
+// preserve kernel leg order.
 //
 // Returns ok=false when the route is an ECMP set with at least one leg that
 // carries no gateway — see the all-or-nothing rule on importableRoute.
@@ -302,38 +315,40 @@ func learnedRouteDestination(r netlink.Route, family int) (string, bool) {
 //
 // So each link-local leg is published as `gateway@<netdev>`, using the kernel
 // name the helper resolves through its linux-name map. A link-local leg whose
-// link cannot be named makes the whole route unimportable: a scope-less
-// link-local next hop has no correct binding to fall back to.
+// link cannot be named makes the whole route unimportable (unscoped is set):
+// a scope-less link-local next hop has no correct binding to fall back to.
 //
 // #11389: an ECMP gateway shared by legs on distinct links is also scoped.
 // Without the link, identical `gateway` strings resolve by first matching
 // connected prefix and collapse those legs onto one egress. Other global and
 // IPv4 gateways remain bare so their existing connected-prefix inference is
 // unchanged.
-func learnedRouteNextHops(r netlink.Route, linkName func(int) (string, bool)) (nhs []string, ok bool, scopeFailureGateway net.IP) {
+func learnedRouteNextHops(r netlink.Route, linkName func(int) (string, bool)) (nhs []string, weights []uint32, ok bool, unscoped net.IP) {
 	if len(r.MultiPath) > 0 {
 		nhs = make([]string, 0, len(r.MultiPath))
+		weights = make([]uint32, 0, len(r.MultiPath))
 		gatewayLinks := learnedRouteGatewayLinks(r.MultiPath)
 		for _, nh := range r.MultiPath {
 			if nh == nil || nh.Gw == nil {
-				return nil, false, nil
+				return nil, nil, false, nil
 			}
 			leg, scoped := scopeLearnedGateway(nh.Gw, nh.LinkIndex, linkName, gatewayLinks[nh.Gw.String()].ambiguous)
 			if !scoped {
-				return nil, false, nh.Gw
+				return nil, nil, false, nh.Gw
 			}
 			nhs = append(nhs, leg)
+			weights = append(weights, uint32(nh.Hops)+1)
 		}
-		return nhs, true, nil
+		return nhs, weights, true, nil
 	}
 	if r.Gw == nil {
-		return nil, true, nil
+		return nil, nil, true, nil
 	}
 	leg, scoped := scopeLearnedGateway(r.Gw, r.LinkIndex, linkName, false)
 	if !scoped {
-		return nil, false, r.Gw
+		return nil, nil, false, r.Gw
 	}
-	return []string{leg}, true, nil
+	return []string{leg}, []uint32{1}, true, nil
 }
 
 // learnedGatewayLinkState records whether an ECMP gateway is known on multiple

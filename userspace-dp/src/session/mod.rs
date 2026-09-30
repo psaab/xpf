@@ -4336,11 +4336,12 @@ mod policy_revalidation_8356_tests;
 #[cfg(test)]
 #[path = "icmp_error_budget_9901_tests.rs"]
 mod icmp_error_budget_9901_tests;
-// #9895: reverse NAT lookup must refuse a validating pass-2 candidate when
-// both the reply and candidate carry different non-zero routing domains.
+// #11298: reverse NAT lookup compares the reply domain with the forward
+// egress-interface domain; mixed-zero mismatches are refused, while asymmetric
+// forward ingress/egress domains still match their replies.
 #[cfg(test)]
-#[path = "reverse_domain_9895_tests.rs"]
-mod reverse_domain_9895_tests;
+#[path = "reverse_egress_domain_11298_tests.rs"]
+mod reverse_egress_domain_11298_tests;
 // #9990/#9991: pre-decision probes and strict hit-path expiry.
 #[cfg(test)]
 #[path = "session_lifetime_9990_9991_tests.rs"]

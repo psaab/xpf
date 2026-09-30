@@ -4146,6 +4146,146 @@ fn input_dscp_filter_families_changed_detects_filter_removed_from_interface() {
     );
 }
 
+// #11330: local-delivery sessions only need republishing when the lo0 filter's
+// match/action semantics change. These helpers build the real compiler output,
+// so independently parsed states have fresh Filter Arcs and compiler IDs.
+fn make_lo0_filter_state(
+    filters: &[FirewallFilterSnapshot],
+    lo0_v4: &str,
+    lo0_v6: &str,
+) -> FilterState {
+    parse_filter_state(filters, &[], &[], lo0_v4, lo0_v6).expect("lo0 filter state compiles")
+}
+
+fn lo0_test_filter(name: &str, family: &str, action: &str) -> FirewallFilterSnapshot {
+    FirewallFilterSnapshot {
+        name: name.into(),
+        family: family.into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "term".into(),
+            action: action.into(),
+            ..Default::default()
+        }],
+    }
+}
+
+#[test]
+fn lo0_filter_families_changed_ignores_fresh_identical_filters_and_positional_ids_11330() {
+    let v4 = lo0_test_filter("protect-v4", "inet", "accept");
+    let v6 = lo0_test_filter("protect-v6", "inet6", "accept");
+    let unrelated = lo0_test_filter("unrelated", "inet", "accept");
+
+    // Reordering changes both lo0 filters' compiler-positional IDs, while their
+    // independently compiled filter contents remain semantically identical.
+    let old = make_lo0_filter_state(
+        &[v4.clone(), v6.clone(), unrelated.clone()],
+        "protect-v4",
+        "protect-v6",
+    );
+    let new = make_lo0_filter_state(
+        &[unrelated, v4, v6],
+        "protect-v4",
+        "protect-v6",
+    );
+
+    assert_ne!(
+        old.lo0_filter_v4_fast.as_ref().unwrap().id,
+        new.lo0_filter_v4_fast.as_ref().unwrap().id,
+        "test setup must shift the inet lo0 filter ID"
+    );
+    assert_ne!(
+        old.lo0_filter_v6_fast.as_ref().unwrap().id,
+        new.lo0_filter_v6_fast.as_ref().unwrap().id,
+        "test setup must shift the inet6 lo0 filter ID"
+    );
+    assert!(
+        !std::sync::Arc::ptr_eq(
+            old.lo0_filter_v4_fast.as_ref().unwrap(),
+            new.lo0_filter_v4_fast.as_ref().unwrap()
+        ),
+        "test setup must compile a fresh inet lo0 filter"
+    );
+    assert!(
+        !std::sync::Arc::ptr_eq(
+            old.lo0_filter_v6_fast.as_ref().unwrap(),
+            new.lo0_filter_v6_fast.as_ref().unwrap()
+        ),
+        "test setup must compile a fresh inet6 lo0 filter"
+    );
+    assert_eq!(lo0_filter_families_changed(&old, &new), (false, false));
+}
+
+#[test]
+fn lo0_filter_families_changed_detects_semantic_content_changes_11330() {
+    let v4 = lo0_test_filter("protect-v4", "inet", "accept");
+    let v6 = lo0_test_filter("protect-v6", "inet6", "accept");
+    let changed_v4 = lo0_test_filter("protect-v4", "inet", "discard");
+    let changed_v6 = lo0_test_filter("protect-v6", "inet6", "discard");
+    let old = make_lo0_filter_state(
+        &[v4.clone(), v6.clone()],
+        "protect-v4",
+        "protect-v6",
+    );
+    let v4_changed = make_lo0_filter_state(
+        &[changed_v4, v6.clone()],
+        "protect-v4",
+        "protect-v6",
+    );
+    let v6_changed = make_lo0_filter_state(
+        &[v4, changed_v6],
+        "protect-v4",
+        "protect-v6",
+    );
+
+    assert_eq!(
+        lo0_filter_families_changed(&old, &v4_changed),
+        (true, false),
+        "inet semantic changes must be reported independently"
+    );
+    assert_eq!(
+        lo0_filter_families_changed(&old, &v6_changed),
+        (false, true),
+        "inet6 semantic changes must be reported independently"
+    );
+}
+
+#[test]
+fn lo0_filter_families_changed_detects_presence_transitions_11330() {
+    let absent = make_lo0_filter_state(&[], "", "");
+    let present_v4 = make_lo0_filter_state(
+        &[lo0_test_filter("protect-v4", "inet", "accept")],
+        "protect-v4",
+        "",
+    );
+    let present_v6 = make_lo0_filter_state(
+        &[lo0_test_filter("protect-v6", "inet6", "accept")],
+        "",
+        "protect-v6",
+    );
+
+    assert_eq!(
+        lo0_filter_families_changed(&absent, &present_v4),
+        (true, false)
+    );
+    assert_eq!(
+        lo0_filter_families_changed(&present_v4, &absent),
+        (true, false)
+    );
+    assert_eq!(
+        lo0_filter_families_changed(&absent, &present_v6),
+        (false, true)
+    );
+    assert_eq!(
+        lo0_filter_families_changed(&present_v6, &absent),
+        (false, true)
+    );
+    assert_eq!(
+        lo0_filter_families_changed(&absent, &absent),
+        (false, false),
+        "None/None in both families is unchanged"
+    );
+}
+
 // ============================================================
 // #1725 — engine evaluation coverage gaps
 //
