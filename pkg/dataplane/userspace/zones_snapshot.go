@@ -91,8 +91,8 @@ func buildZoneSnapshots(cfg *config.Config) []ZoneSnapshot {
 			zs.HostInboundProtocols = lowerTokens(zone.HostInboundTraffic.Protocols)
 		}
 		// #3071: carry the per-zone `tcp-rst` knob to the dataplane so a
-		// denied TCP flow whose ingress (from) zone has tcp-rst enabled
-		// gets a TCP RST instead of a silent drop.
+		// non-SYN TCP transit packet dropped for a session miss whose ingress
+		// (from) zone has tcp-rst enabled may receive a TCP RST.
 		if z := cfg.Security.Zones[name]; z != nil && z.TCPRst {
 			zs.TCPRst = true
 		}

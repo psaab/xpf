@@ -297,7 +297,7 @@ fn record_ipsec_sa_miss_sample(
 use cookie_reply::{SynCookieReply, enqueue_syn_cookie_reply};
 use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
 use prerouting_scope::{PreroutingIngressScope, prerouting_ingress_scope};
-use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply};
+use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply, enqueue_session_miss_rst};
 use resolver_enqueue::try_enqueue_resolver;
 
 use filter::{
@@ -3600,7 +3600,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // A SYN-bearing packet is always eligible; the
                         // configured no-syn-check opt-out also admits
                         // mid-stream ACK/data, while strict-syn-check
-                        // overrides it. Bare RST/FIN remain fail-closed.
+                        // overrides it. `tcp-rst` answers only non-SYN misses
+                        // dropped here; an inbound RST is never answered.
                         // Counted in the aggregate `screen_drops` flow-statistics
                         // tally (no per-reason ordinal — that array mirrors the
                         // Junos SCREEN checks, and this is a flow tcp-session
@@ -3624,6 +3625,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.forwarding.tcp_no_syn_check,
                             worker_ctx.forwarding.tcp_strict_syn_check,
                         ) {
+                            // #11304: Junos `tcp-rst` applies at this transit
+                            // session-miss drop, never at a policy-deny site.
+                            let _ = enqueue_session_miss_rst(
+                                &mut binding.tx_pipeline,
+                                worker_ctx.forwarding,
+                                binding.ifindex,
+                                packet_frame,
+                                meta,
+                                flow,
+                                telemetry.counters,
+                                from_zone_id,
+                            );
                             telemetry.counters.record_screen_drop(
                                 "strict-syn-check",
                                 from_zone_id,
@@ -3830,9 +3843,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #3019/#3706: `to-zone junos-host` security policy on
                         // the session-MISS local-delivery path, AFTER
                         // host-inbound admission (Junos order). A matching
-                        // junos-host deny/reject drops the host-bound packet
-                        // (and emits the policy-deny RT_FLOW + reject/tcp-rst
-                        // reply); a matching PERMIT is carried forward so its
+                        // junos-host deny/reject drops and emits the policy-deny
+                        // RT_FLOW; an explicit `then reject` may reply, but
+                        // plain `deny` stays silent. A matching PERMIT is carried forward so its
                         // `then log` selection + admitting policy id + counter
                         // handle can be stamped onto the installed session
                         // (#3706); a no-match continues to local delivery with
@@ -5374,16 +5387,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                 }
                             } else {
-                                // #2089/#3071/#3615: enqueue the deny/reject
-                                // reply FIRST, then emit the policy-deny RT_FLOW
-                                // with the TRUTHFUL action. `reject` synthesizes
-                                // a TCP RST / ICMP unreachable back toward the
-                                // source; plain `deny` is a silent drop UNLESS
-                                // the flow is TCP and the ingress (from) zone has
-                                // Junos `tcp-rst`. When a `reject` reply
-                                // fail-closes (budget/rate/parse/output-filter)
-                                // the event is downgraded REJECT→DENY so the log
-                                // never claims an active reject that was not sent
+                                // #2089/#11304/#3615: enqueue an explicit reject
+                                // reply FIRST, then emit the truthful policy-deny
+                                // RT_FLOW. `then reject` replies; plain `deny`
+                                // always silently drops. Zone `tcp-rst` is handled
+                                // only at the transit session-miss strict-SYN gate.
+                                // A suppressed reject is logged as DENY, never REJECT.
                                 // (#3615). `decision.nat` carries the inbound dst
                                 // translation (#2345/#3058); the AppID is
                                 // resolved from the POST-translation dst port
@@ -7907,11 +7916,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx.forwarding,
                                             decision.resolution,
                                         );
-                                        // #2089/#3071/#3615: enqueue the deny/reject
-                                        // reply FIRST, then emit the policy-deny
-                                        // RT_FLOW with the TRUTHFUL action (a `reject`
-                                        // whose reply fail-closes is logged as DENY,
-                                        // not REJECT). `decision.nat` carries the
+                                        // #2089/#11304/#3615: enqueue an explicit
+                                        // reject reply FIRST, then emit truthful
+                                        // policy-deny RT_FLOW. Plain `deny` stays
+                                        // silent; a suppressed reject logs DENY,
+                                        // not REJECT. `decision.nat` carries the
                                         // inbound dst translation (#2345/#3058); the
                                         // AppID is resolved from the POST-translation
                                         // dst port (#2520/#3058).

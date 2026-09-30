@@ -199,7 +199,7 @@ fn session_key_has_lo0_filter_matches_packet_family() {
 }
 
 #[test]
-fn republish_local_delivery_sessions_for_lo0_filter_selects_existing_hits() {
+fn republish_local_delivery_sessions_for_lo0_filter_respects_change_gate() {
     let mut forwarding = ForwardingState::default();
     forwarding.filter_state.lo0_filter_v4_fast = Some(empty_filter("lo0-v4", "inet"));
     let key = SessionKey {
@@ -227,7 +227,17 @@ fn republish_local_delivery_sessions_for_lo0_filter_selects_existing_hits() {
         republish_local_delivery_sessions_for_lo0_filter(
             &sessions,
             SteeringMap::unshared_for_test(-1),
-            &forwarding
+            &forwarding,
+            false,
+        ),
+        0
+    );
+    assert_eq!(
+        republish_local_delivery_sessions_for_lo0_filter(
+            &sessions,
+            SteeringMap::unshared_for_test(-1),
+            &forwarding,
+            true,
         ),
         1
     );
@@ -237,9 +247,87 @@ fn republish_local_delivery_sessions_for_lo0_filter_selects_existing_hits() {
         republish_local_delivery_sessions_for_lo0_filter(
             &sessions,
             SteeringMap::unshared_for_test(-1),
-            &forwarding
+            &forwarding,
+            true,
         ),
         0
+    );
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn lo0_republish_false_gate_avoids_full_table_scan_in_release() {
+    const SESSION_COUNT: usize = 16_384;
+    const FALSE_GATE_CALLS: usize = 16;
+
+    let mut forwarding = ForwardingState::default();
+    forwarding.filter_state.lo0_filter_v4_fast = Some(empty_filter("lo0-v4", "inet"));
+    let mut sessions = SessionTable::new();
+    for index in 0..SESSION_COUNT {
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(
+                10,
+                0,
+                (index >> 8) as u8,
+                index as u8,
+            )),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
+            src_port: (index + 1) as u16,
+            dst_port: 5201,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        assert!(sessions.install_with_protocol_with_origin(
+            key,
+            test_local_delivery_decision(),
+            test_metadata(),
+            SessionOrigin::ForwardFlow,
+            1,
+            PROTO_TCP,
+            TCP_FLAG_SYN,
+        ));
+    }
+
+    let false_gate_start = std::time::Instant::now();
+    let mut false_gate_republished = 0usize;
+    for _ in 0..FALSE_GATE_CALLS {
+        let unchanged = std::hint::black_box(false);
+        let sessions = std::hint::black_box(&sessions);
+        false_gate_republished += republish_local_delivery_sessions_for_lo0_filter(
+            sessions,
+            SteeringMap::unshared_for_test(-1),
+            &forwarding,
+            unchanged,
+        );
+    }
+    let false_gate_elapsed = false_gate_start.elapsed();
+
+    let full_scan_start = std::time::Instant::now();
+    let changed = std::hint::black_box(true);
+    let sessions = std::hint::black_box(&sessions);
+    let selected = republish_local_delivery_sessions_for_lo0_filter(
+        sessions,
+        SteeringMap::unshared_for_test(-1),
+        &forwarding,
+        changed,
+    );
+    let full_scan_elapsed = full_scan_start.elapsed();
+    let false_gate_ns = false_gate_elapsed.as_nanos();
+    let full_scan_ns = full_scan_elapsed.as_nanos();
+
+    assert_eq!(false_gate_republished, 0);
+    assert_eq!(selected, SESSION_COUNT);
+    eprintln!(
+        "lo0 republish timings: {} false-gate calls over {} sessions: {:?}; one full scan: {:?}",
+        FALSE_GATE_CALLS, SESSION_COUNT, false_gate_elapsed, full_scan_elapsed
+    );
+    assert!(
+        false_gate_ns < full_scan_ns * 8,
+        "false-gate aggregate {:?} was not below 8x full scan {:?}",
+        false_gate_elapsed,
+        full_scan_elapsed
     );
 }
 
