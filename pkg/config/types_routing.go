@@ -303,12 +303,12 @@ type StaticRoute struct {
 	// FRR `ip route <p> reject`). Distinct from Discard (Junos `discard` → FRR
 	// Null0/blackhole, a silent drop). Both suppress a next-hop; Reject and
 	// Discard are mutually exclusive per route (Junos allows only one action).
-	Reject     bool
+	Reject bool
 	// NoInstall carries Junos `no-install` intent through compile-time install
 	// consumers. It is not serialized to the helper: excluded routes are
 	// omitted before snapshot construction.
 	NoInstall  bool `json:"-"`
-	Preference int // route preference (admin distance), default 5
+	Preference int  // route preference (admin distance), default 5
 	// HasPreference distinguishes an explicitly configured preference --
 	// INCLUDING one equal to the default 5 -- from an absent one (#9125).
 	//
@@ -592,7 +592,7 @@ type TunnelConfig struct {
 	Mode            string   // "gre" or "ipip"
 	Source          string   // local tunnel endpoint IP
 	Destination     string   // remote tunnel endpoint IP
-	Key             uint32   // GRE key 0..4294967295, 0 = none (canonical digits, #9899)
+	Key             uint32   // GRE key 0..4294967295; 0 = unkeyed (K bit absent for native decap, #9899)
 	TTL             int      // tunnel TTL 1..255, 0 = omitted = default 64 (explicit 0 rejects, #9899)
 	Addresses       []string // IPs to assign to tunnel interface (CIDR)
 	RoutingInstance string   // destination routing-instance (VRF)
