@@ -274,6 +274,14 @@ peer-sync paths (`opts.lenientRoutingRuleWindows`, #1960 no-brick) so an
 already-committed or peer-synced over-limit generation still boots (the
 applier's window hard-cap keeps the excess inert).
 
+The strict rib-group count now follows the same eligibility as `Apply`
+(#11397): only families whose per-instance import-rib resolves to the main
+table consume slots, and each source table consumes slots once. VRF-to-VRF and
+self-only imports use no Phase-1 leak slots (the existing Phase-2 warning
+remains), and a v4 group does not charge its instance's v6 prefixes or vice
+versa. Duplicate prefix entries still count separately when `Apply` would
+install separate rules.
+
 **Apply-side degraded error + FIB cap reconcile (#6467).** On the tolerant
 load / peer-sync path the commit gate is only a warning, so an over-limit
 generation still reaches the applier. There the next-table cap used to
