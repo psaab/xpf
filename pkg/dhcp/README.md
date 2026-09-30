@@ -16,9 +16,9 @@ power cut cannot silently change the client identity across reboot.
   The `onGatewayChange` callback (#1844, nil-able) fires —
   undebounced, always outside `m.mu` — on gateway-relevant lease
   state changes only: first lease committed, gateway delta on a
-  commit (strictly narrower than `onAddressChange`), or lease-record
-  removal in `finishClient` (every terminal client exit). It is an
-  immutable constructor argument, never a setter — client goroutines
+  commit (strictly narrower than `onAddressChange`), or lease-record removal
+  in `finishClient`, `abandonLeaseAfterNAK`, or `abandonLeaseAfterExpiry`.
+  This hook is an immutable constructor argument, never a setter — client
   read it outside `m.mu`, so mutation on a live manager would be a
   data race. Consumer: the ip-monitoring engine's
   `NotifyNextHopChange` (interface-typed preferred-route next-hops).
@@ -79,13 +79,17 @@ without DHCP no longer disables DHCP for the daemon's lifetime.
 > no DISCOVER) and the v6 client sends a `RENEW` echoing the held IA_NA /
 > IA_PD with the server's DUID; at T2 the v4 client broadcasts a
 > REBINDING `DHCPREQUEST` and the v6 client multicasts a `REBIND` (no
-> server DUID). Only lease expiry (both renew and rebind failed) falls
-> back to a full DISCOVER / SOLICIT. This supersedes the pre-#2994
-> force-DORA / Rapid-Solicit-at-every-T1 behavior (the old #1832 review
-> note), which broadcast a fresh server-selection every renewal and
-> could move the lease to a different server, churn the address (and
-> therefore interface-DDNS / FRR routes / ip-monitoring), and double the
-> WAN DHCP traffic.
+> server DUID). A generic T2 timeout immediately starts a fresh acquisition
+> (DISCOVER, SOLICIT, or stateless Information-Request) while retaining the
+> current lease, address, and delegated prefixes until a new reply commits or
+> the absolute `Obtained+LeaseTime` deadline arrives. If reacquisition is
+> still failing at that deadline, the lease/address/PDs are removed, and
+> gateway-change plus recompile notifications withdraw compiled state.
+> This supersedes the pre-#2994 force-DORA /
+> Rapid-Solicit-at-every-T1 behavior (the old #1832 review note), which
+> broadcast a fresh server-selection every renewal and could move the lease
+> to a different server, churn the address (and therefore interface-DDNS /
+> FRR routes / ip-monitoring), and double the WAN DHCP traffic.
 
 Acquisition and renewal share one commit path, `commitLease`
 (`commit.go`): remove the old address if the server moved us, apply the
@@ -443,34 +447,28 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   DHCP router.
   The delete is scoped to `RTPROT_DHCP` so operator routes in the VRF are
   never touched.
-- **Lease records are NOT expired by the wall clock.** During a
-  *timeout-driven* failed re-acquisition (T2 rebind timed out, fresh
-  DORA in progress) the lease record and the kernel address intentionally
-  persist until replaced — consumers (FRR DHCP routes,
-  ip-monitoring resolved next-hops) keep the last-known gateway. This
-  deliberately diverges from RFC 2131 §4.4.5 for the *timeout* case (an
-  expired lease should stop being used). An explicit **DHCPNAK is honored**
-  (#3956, #9944): a granting-server NAK deconfigures immediately through
-  `abandonLeaseAfterNAK`, schedules the coupled route recompile, and returns
-  the client to INIT; a wrong-server NAK is ignored. A timeout is still the
-  separate path that falls through to REBINDING and then fresh acquisition
-  while retaining the old lease until replacement.
-- **Coupling rule (#1844, extended #4874 A2):** any lease-record removal
-  (the NAK path, the `finishClient` max-retransmission/terminal exit, and,
-  if clock expiry is ever implemented, that path too) MUST route through a
-  path that fires **both** `onGatewayChange` AND `scheduleRecompile`
-  (`finishClient` and `abandonLeaseAfterNAK` both do).
-  `onGatewayChange` alone only marks the ip-monitoring overlay dirty; the
-  base DHCP default/classless routes (from `Leases()`) and the v6 RA prefix
-  (from `DelegatedPrefixesForRA()`) are re-rendered ONLY by `applyConfig`,
-  which the debounced `scheduleRecompile` drives — so without it a terminal
-  exit removes the address but leaves the FRR route + RA prefix stale until
-  an unrelated commit (indefinitely on the `finishClient` max-retransmission
-  exit, which does not run from an `applyConfig`). The ctx.Done cancellation
-  exits already delete the record inline and are re-rendered by their
-  surrounding `applyConfig` (Reconcile) or the following re-acquire (Renew),
-  so `finishClient` fires the recompile only when a lease record actually
-  remained.
+- **Lease retention and absolute expiry after T2 failure (#1844, #11382).**
+  A generic T2 timeout immediately starts a fresh DORA/Solicit or stateless
+  Information-Request while the old lease, address, and delegated prefixes
+  stay active, preserving the last-known gateway during reacquisition. This
+  retention ends at the original absolute `Obtained+LeaseTime` deadline: if
+  by then, `abandonLeaseAfterExpiry` removes the lease, v6 PDs, and address,
+  fires `onGatewayChange`, and schedules `scheduleRecompile` to withdraw
+  compiled routes. An explicit **DHCPNAK is honored** (#3956, #9944): the
+  granting-server NAK deconfigures immediately through
+  `abandonLeaseAfterNAK` and returns the client to INIT; a wrong-server NAK
+  is ignored.
+- **Coupling rule (#1844, extended #4874 A2 / #11382):** the T2-expiry path
+  (`abandonLeaseAfterExpiry`), terminal exits (`finishClient`), and DHCPv4
+  NAK (`abandonLeaseAfterNAK`) fire both `onGatewayChange` and
+  `scheduleRecompile`. The gateway hook alone only marks the ip-monitoring
+  overlay dirty; the base DHCP default/classless routes (from `Leases()`)
+  and v6 RA prefix (from `DelegatedPrefixesForRA()`) are re-rendered ONLY by
+  `applyConfig`, which the debounced recompile drives. Without it a terminal
+  exit or expired lease can leave compiled state stale until an unrelated
+  commit. The ctx.Done cancellation exits are re-rendered by their surrounding
+  `applyConfig` (Reconcile) or following re-acquire (Renew), so the terminal
+  cleanup recompile remains limited to a lease record that still existed.
 - **Degenerate subnet mask is refused (#4101, untrusted input).**
   `leaseFromACKv4` validates option 1 after `net.IPMask.Size()`: a zero
   mask (`0.0.0.0` → `Size()` returns `ones=0`) or a non-contiguous mask

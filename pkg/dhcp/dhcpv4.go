@@ -31,8 +31,9 @@ const dhcpClasslessTrustOverrideEnv = "XPF_DHCP_TRUST_CLASSLESS_OVERRIDE"
 // the granting server (the stored server-identifier), ciaddr set to the
 // current address, NO DISCOVER — and at T2 a REBINDING broadcast
 // DHCPREQUEST (#2994). A successful renew/rebind commits via commitLease
-// and returns to the T1 wait (#1777); only when both fail (lease
-// expiry) does the loop fall back to a fresh full DORA acquisition.
+// and returns to the T1 wait (#1777). After a generic T2 failure it starts
+// another DORA immediately, retaining the held lease until it is renewed,
+// replaced by a new acquisition, or reaches Obtained+LeaseTime.
 func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 	key := clientKey{iface: ifaceName, family: AFInet}
 
@@ -60,26 +61,59 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 	attempt := 0
 
 	// committed is the lease currently applied to the interface (nil
-	// until the first successful acquisition). commitLease compares
-	// against it to detect address moves and content changes.
-	var committed *Lease
+	// until the first successful acquisition). During T2-failure
+	// reacquisition, leaseExpiryAt remains its absolute expiry deadline.
+	var (
+		committed         *Lease
+		leaseExpiryAt     time.Time
+		leaseExpiryPending bool
+	)
 
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		if leaseExpiryPending && !time.Now().Before(leaseExpiryAt) {
+			m.abandonLeaseAfterExpiry(key, committed)
+			committed = nil
+			leaseExpiryPending = false
+		}
 
 		slog.Info("DHCPv4: starting discovery", "interface", ifaceName)
 
-		lease, err := m.v4Exchange(ctx, ifaceName, exchangeAcquire, nil)
+		// Bound both each DORA attempt and its retry backoff by the original
+		// lease deadline; before that deadline the old lease remains active.
+		acquireCtx := ctx
+		var cancelAcquire context.CancelFunc
+		var expiryDone <-chan struct{}
+		if leaseExpiryPending {
+			acquireCtx, cancelAcquire = context.WithDeadline(ctx, leaseExpiryAt)
+			expiryDone = acquireCtx.Done()
+		}
+		lease, err := m.v4Exchange(acquireCtx, ifaceName, exchangeAcquire, nil)
 		if err != nil {
 			if ctx.Err() != nil {
+				if cancelAcquire != nil {
+					cancelAcquire()
+				}
 				return
+			}
+			if leaseExpiryPending && !time.Now().Before(leaseExpiryAt) {
+				if cancelAcquire != nil {
+					cancelAcquire()
+				}
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				leaseExpiryPending = false
+				continue
 			}
 			attempt++
 			if maxAttempts > 0 && attempt >= maxAttempts {
 				slog.Warn("DHCPv4: max retransmission attempts reached",
 					"interface", ifaceName, "attempts", attempt)
+				if cancelAcquire != nil {
+					cancelAcquire()
+				}
 				return
 			}
 			slog.Warn("DHCPv4: discovery failed, retrying",
@@ -88,12 +122,35 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
+				if cancelAcquire != nil {
+					cancelAcquire()
+				}
 				return
+			case <-expiryDone:
+				if ctx.Err() != nil {
+					if cancelAcquire != nil {
+						cancelAcquire()
+					}
+					return
+				}
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				leaseExpiryPending = false
+				if cancelAcquire != nil {
+					cancelAcquire()
+				}
+				continue
+			}
+			if cancelAcquire != nil {
+				cancelAcquire()
 			}
 			backoff = min(backoff*2, 60*time.Second)
 			continue
 		}
 
+		if cancelAcquire != nil {
+			cancelAcquire()
+		}
 		backoff = baseBackoff // reset on success
 		attempt = 0
 
@@ -103,6 +160,7 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 			continue
 		}
 		committed = lease
+		leaseExpiryPending = false
 
 		slog.Info("DHCPv4: lease obtained",
 			"interface", ifaceName,
@@ -112,6 +170,7 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 
 		// Renewal cycle: stay in this loop while T1 renews / T2 rebinds
 		// keep succeeding; break out only to re-acquire from scratch.
+	renewalLoop:
 		for {
 			t1, t2Remaining, ok := renewalTimers(committed.LeaseTime)
 			if !ok {
@@ -132,35 +191,61 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 					m.mu.Unlock()
 					return
 				}
-				break
+				break renewalLoop
 			}
 
-			// Wait for T1 (50% of lease time) for renewal
+			deadline := committed.Obtained.Add(committed.LeaseTime)
+			if !time.Now().Before(deadline) {
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				break renewalLoop
+			}
+			leaseCtx, cancelLease := context.WithDeadline(ctx, deadline)
+
+			// Wait for T1 (50% of lease time) for renewal.
 			select {
 			case <-m.after(t1):
 				slog.Info("DHCPv4: T1 expired, renewing", "interface", ifaceName)
-			case <-ctx.Done():
-				m.removeAddress(ifaceName, committed)
-				m.mu.Lock()
-				delete(m.leases, key)
-				m.mu.Unlock()
-				return
+			case <-leaseCtx.Done():
+				if ctx.Err() != nil {
+					cancelLease()
+					m.removeAddress(ifaceName, committed)
+					m.mu.Lock()
+					delete(m.leases, key)
+					m.mu.Unlock()
+					return
+				}
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				cancelLease()
+				break renewalLoop
 			}
 
 			// T1 renewal attempt — unicast RENEW to the granting server,
 			// NOT a fresh DISCOVER (#2994).
-			renewed, rerr := m.v4Exchange(ctx, ifaceName, exchangeRenew, committed)
+			renewed, rerr := m.v4Exchange(leaseCtx, ifaceName, exchangeRenew, committed)
 			if rerr == nil {
 				if cerr := m.commitLease(key, renewed, committed, nil, nil, false); cerr != nil {
 					slog.Warn("DHCPv4: failed to apply renewed lease, re-acquiring",
 						"interface", ifaceName, "err", cerr)
-					break
+					leaseExpiryAt = deadline
+					leaseExpiryPending = true
+					cancelLease()
+					break renewalLoop
 				}
 				committed = renewed
+				leaseExpiryPending = false
+				cancelLease()
 				slog.Info("DHCPv4: lease renewed",
 					"interface", ifaceName, "address", renewed.Address,
 					"lease_time", renewed.LeaseTime)
 				continue
+			}
+			if ctx.Err() == nil && leaseCtx.Err() != nil {
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				cancelLease()
+				break renewalLoop
 			}
 			// A DHCPNAK from the granting server is an explicit lease
 			// revocation: the address is no longer valid (reassigned /
@@ -174,52 +259,77 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 					"interface", ifaceName)
 				m.abandonLeaseAfterNAK(key, committed)
 				committed = nil
-				break // outer loop → fresh DORA from INIT
+				cancelLease()
+				break renewalLoop
 			}
 			slog.Warn("DHCPv4: T1 renewal failed, waiting for T2",
 				"interface", ifaceName, "err", rerr)
 
-			// Wait for T2 (87.5% of lease) — remaining time after T1
+			// Wait for T2 (87.5% of lease) — remaining time after T1.
 			select {
 			case <-m.after(t2Remaining):
-			case <-ctx.Done():
-				m.removeAddress(ifaceName, committed)
-				m.mu.Lock()
-				delete(m.leases, key)
-				m.mu.Unlock()
-				return
+			case <-leaseCtx.Done():
+				if ctx.Err() != nil {
+					cancelLease()
+					m.removeAddress(ifaceName, committed)
+					m.mu.Lock()
+					delete(m.leases, key)
+					m.mu.Unlock()
+					return
+				}
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				cancelLease()
+				break renewalLoop
 			}
 
-			// T2 rebind attempt — broadcast REBIND (#2994).
-			renewed, rerr = m.v4Exchange(ctx, ifaceName, exchangeRebind, committed)
+			// T2 rebind attempt — broadcast REBIND (#2994), bounded by the
+			// same absolute lease deadline as the wait and T1 exchange.
+			renewed, rerr = m.v4Exchange(leaseCtx, ifaceName, exchangeRebind, committed)
 			if rerr == nil {
 				if cerr := m.commitLease(key, renewed, committed, nil, nil, false); cerr != nil {
 					slog.Warn("DHCPv4: failed to apply rebound lease, re-acquiring",
 						"interface", ifaceName, "err", cerr)
-					break
+					leaseExpiryAt = deadline
+					leaseExpiryPending = true
+					cancelLease()
+					break renewalLoop
 				}
 				committed = renewed
+				leaseExpiryPending = false
+				cancelLease()
 				slog.Info("DHCPv4: lease rebound",
 					"interface", ifaceName, "address", renewed.Address,
 					"lease_time", renewed.LeaseTime)
 				continue
 			}
+			if ctx.Err() == nil && leaseCtx.Err() != nil {
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				cancelLease()
+				break renewalLoop
+			}
 			// A DHCPNAK from the granting server in REBINDING is also a
 			// revocation (RFC 2131 §4.4.5): deconfigure now and re-DISCOVER
 			// from INIT with no prior lease. A rebind TIMEOUT is left to the
-			// lease-expiry fallback, retaining the address until re-acquire
-			// replaces it (#1844). Only an explicit granting-server NAK
-			// forces immediate abandon; off-server NAKs never match.
+			// lease-expiry fallback, retaining the address and routes until
+			// a new acquisition replaces it or Obtained+LeaseTime is reached.
+			// Only an explicit granting-server NAK forces immediate abandon;
+			// off-server NAKs never match.
 			if errors.Is(rerr, errDHCPNAK) {
 				slog.Warn("DHCPv4: REBINDING NAK — lease revoked, deconfiguring and restarting DISCOVER",
 					"interface", ifaceName)
 				m.abandonLeaseAfterNAK(key, committed)
 				committed = nil
-				break // outer loop → fresh DORA from INIT
+				cancelLease()
+				break renewalLoop
 			}
 			slog.Warn("DHCPv4: T2 rebind failed, lease will expire, re-acquiring",
 				"interface", ifaceName, "err", rerr)
-			break // fall back to a fresh DORA
+			leaseExpiryAt = deadline
+			leaseExpiryPending = true
+			cancelLease()
+			break renewalLoop
 		}
 	}
 }

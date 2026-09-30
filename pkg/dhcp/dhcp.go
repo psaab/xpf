@@ -145,6 +145,9 @@ type Manager struct {
 	doV4ExchangeForTest func(ctx context.Context, ifaceName string, mode dhcpExchangeMode, prev *Lease) (*Lease, error)
 	doV6ExchangeForTest func(ctx context.Context, ifaceName string, mode dhcpExchangeMode, prev *Lease, prevPDs []DelegatedPrefix) (*dhcpv6Result, error)
 	afterForTest        func(d time.Duration) <-chan time.Time
+	// removeAddressForTest observes address removal without a live netlink
+	// handle. nil in production.
+	removeAddressForTest func(ifaceName string, lease *Lease)
 	// waitLinkLocalForTest replaces the DHCPv6 link-local wait so the v6
 	// run loop is drivable without a real interface. nil in production.
 	waitLinkLocalForTest func(ctx context.Context, ifaceName string, timeout time.Duration) error
@@ -359,10 +362,10 @@ func (m *Manager) Start(ctx context.Context, ifaceName string, af AddressFamily)
 // cleanup path. Firing only from the run-loop inline delete sites
 // would leave a stale gateway in the ip-monitoring overlay after such
 // an exit (a silent blackhole). The successor-guard early return does
-// NOT fire (this call changed no lease state). If lease expiry is ever
-// implemented per RFC 2131 §4.4.5, the record removal must keep
-// routing through a hook-firing path so the overlay withdraws in
-// lock-step with the address.
+// NOT fire (this call changed no lease state). Lease expiry in the
+// T2-failure reacquisition path uses abandonLeaseAfterExpiry, which
+// routes removal through the same gateway/recompile notifications so
+// the overlay and compiled routes withdraw with the address.
 func (m *Manager) finishClient(key clientKey, dc *dhcpClient) {
 	m.mu.Lock()
 	cur, ok := m.clients[key]
@@ -403,6 +406,33 @@ func (m *Manager) finishClient(key clientKey, dc *dhcpClient) {
 	if lease != nil {
 		m.scheduleRecompile()
 	}
+}
+
+// abandonLeaseAfterExpiry removes the exact committed lease whose run loop
+// reached its absolute Obtained+LeaseTime deadline. A v6 expiry also drops
+// delegated prefixes; both notification paths run after the manager lock is
+// released.
+func (m *Manager) abandonLeaseAfterExpiry(key clientKey, expected *Lease) {
+	if expected == nil {
+		return
+	}
+
+	m.mu.Lock()
+	if m.leases[key] != expected {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.leases, key)
+	if key.family == AFInet6 {
+		delete(m.delegatedPDs, key.iface)
+	}
+	m.mu.Unlock()
+
+	if expected.Address.IsValid() {
+		m.removeAddress(key.iface, expected)
+	}
+	m.fireGatewayChange()
+	m.scheduleRecompile()
 }
 
 // Renew restarts the DHCP client for the specified interface and address
@@ -511,6 +541,9 @@ func (m *Manager) applyAddress(ifaceName string, lease *Lease) error {
 // removeAddress removes the DHCP address and default route from the interface.
 func (m *Manager) removeAddress(ifaceName string, lease *Lease) {
 	if m.nlHandle == nil {
+		if m.removeAddressForTest != nil {
+			m.removeAddressForTest(ifaceName, lease)
+		}
 		return // test-constructed Manager without netlink
 	}
 	link, err := m.nlHandle.LinkByName(ifaceName)
