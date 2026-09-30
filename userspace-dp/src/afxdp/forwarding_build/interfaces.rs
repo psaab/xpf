@@ -1402,7 +1402,16 @@ pub(super) fn populate_egress(
         }
         // The base interface row is not a logical untagged identity. Unit 0
         // without a VLAN id is explicit and keeps its existing VID-0 fallback.
-        if iface.is_unit == Some(true) && iface.name.ends_with(".0") && vlan_id == 0 {
+        // Old Go and fixture snapshots may omit `is_unit`; use the shared
+        // structural/fallback detector, then parse the terminal unit number.
+        if is_logical_unit_row(&iface.name, iface.is_unit)
+            && iface
+                .name
+                .rsplit_once('.')
+                .and_then(|(_, unit)| unit.parse::<u32>().ok())
+                == Some(0)
+            && vlan_id == 0
+        {
             untagged_unit_ifindexes.insert(bind_ifindex);
         }
 

@@ -2659,6 +2659,71 @@ fn native_unit_zero_retains_parent_zone_10520() {
     );
 }
 
+#[test]
+fn tagged_only_ingress_respects_legacy_unit_metadata_11297() {
+    use crate::afxdp::forwarding::unknown_ingress_vlan;
+
+    let legacy_unit_zero = build_forwarding_state(&ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0".into(),
+                linux_name: "reth0".into(),
+                ifindex: 81,
+                is_unit: Some(false),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth0.0".into(),
+                linux_name: "reth0".into(),
+                ifindex: 81,
+                is_unit: None,
+                vlan_id: 0,
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth0.100".into(),
+                linux_name: "reth0.100".into(),
+                ifindex: 82,
+                parent_ifindex: 81,
+                is_unit: Some(true),
+                vlan_id: 100,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    assert!(
+        !unknown_ingress_vlan(&legacy_unit_zero, 81, 0),
+        "legacy snapshots must preserve an explicit untagged unit 0"
+    );
+
+    let dotted_base_unit_zero = build_forwarding_state(&ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0.0".into(),
+                linux_name: "reth0.0".into(),
+                ifindex: 81,
+                is_unit: Some(false),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth0.100".into(),
+                linux_name: "reth0.100".into(),
+                ifindex: 82,
+                parent_ifindex: 81,
+                is_unit: Some(true),
+                vlan_id: 100,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    assert!(
+        unknown_ingress_vlan(&dotted_base_unit_zero, 81, 0),
+        "a dotted base row must not masquerade as an explicit unit 0"
+    );
+}
+
 // #10556 retained-guard pin (keeps the #10520 number for suite discovery):
 // the existing retained fixtures (partial-31, native-41) carry no exposure,
 // so the exposure guard alone would skip the sentinel even with the retained

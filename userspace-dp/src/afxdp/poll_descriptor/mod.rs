@@ -9142,9 +9142,6 @@ pub(super) fn poll_binding_process_descriptor(
         telemetry,
     );
 }
-#[cfg(test)]
-#[path = "named_pre_l3_10498_tests.rs"]
-mod named_pre_l3_10498_tests;
 
 #[cfg(test)]
 mod pptp_control_teardown_tests_11053 {
