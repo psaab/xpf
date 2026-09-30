@@ -1206,8 +1206,19 @@ to a warning (`lenientPolicyThenDeny`) so an already-persisted or peer-synced
 config an older binary silently accepted still boots (#1960 no-brick doctrine,
 same as #3114/#3115).
 
-**All-nodes walk (#3377 review fold):** the permit/reject/deny gates iterate
-EVERY same-named action node under `then` (`FindChildren`, not `FindChild`). A
+**Inert `then count` alarm thresholds are rejected on commit and warned on
+tolerant load (#11342):** `compilePolicy` enables policy counting but does not
+implement the nested `alarm` thresholds, so `then count { alarm {
+per-minute-threshold N; } }` used to retain counting while silently dropping
+the configured alarm. `validatePolicyThenCountAlarmStrict` rejects that subtree
+on strict commit/commit-check; tolerant load and peer-sync continue to boot and
+include an explicit `#11342` diagnostic in `cfg.Warnings`. Flat-set and
+hierarchical forms are both inspected, and a bare `then count` remains
+supported.
+
+**All-nodes walk (#3377 review fold):** the permit/reject/deny gates and the
+#11342 count-alarm gate inspect EVERY same-named action node under `then`
+(`FindChildren`, not `FindChild`). A
 flat-set `set ... then permit` followed by `set ... then permit
 application-services X` produces TWO separate `then permit` nodes (a bare leaf
 plus an extended one — the split predates #3377 and is independent of the schema

@@ -214,12 +214,11 @@ func conflictingPolicyTerminalActions(actions []PolicyAction) bool {
 }
 
 // policyThenActionNodes returns every `then` action node named `action`
-// (permit / deny / reject) across ALL `then {}` blocks under a policy term.
-// The then-action reject gates (validatePolicyThenPermitStrict #3114,
-// validatePolicyThenRejectStrict #3115, validatePolicyThenDenyStrict #3141)
-// use it so a modifier carried by a DUPLICATE `then {}` block is inspected,
-// not only the first block's action nodes (#3842). It composes with the
-// existing per-then-block FindChildren(action) two-node handling (#3377).
+// (permit / deny / reject / count) across ALL `then {}` blocks under a policy
+// term. The then-action gates use it so children carried by a DUPLICATE
+// `then {}` block are inspected, not only the first block's action nodes
+// (#3842). It composes with the existing per-then-block FindChildren(action)
+// two-node handling (#3377).
 func policyThenActionNodes(polNode *Node, action string) []*Node {
 	var out []*Node
 	for _, tn := range polNode.FindChildren("then") {
