@@ -3133,6 +3133,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         sessions,
         shared_nat_sessions,
         forwarding,
+        shared_owner_rg_indexes,
         &flow.forward_key,
         reverse_ingress,
         now_ns,
