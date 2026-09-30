@@ -1,8 +1,12 @@
 package userspace
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -85,7 +89,9 @@ func snapshotFor(t *testing.T, table, family, dest string, out []RouteSnapshot) 
 // is exactly the state in which the dataplane resolves NoRoute for it and
 // hands the packet to the kernel unadjudicated.
 func TestLearnedRouteReachesTheSnapshot(t *testing.T) {
-	withLearnedRoutes(t, fixedLearned(learnedV4("10.20.30.0/24", "192.0.2.1")))
+	learned := learnedV4("10.20.30.0/24", "192.0.2.1")
+	learned.NextHopWeights = []uint32{1}
+	withLearnedRoutes(t, fixedLearned(learned))
 
 	out, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
 	if err != nil {
@@ -97,6 +103,20 @@ func TestLearnedRouteReachesTheSnapshot(t *testing.T) {
 	}
 	if !reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) {
 		t.Errorf("next-hops = %v, want [192.0.2.1]", hits[0].NextHops)
+	}
+	if len(hits[0].NextHopWeights) != 0 {
+		t.Errorf("default weight vector = %v, want implicit weight 1 omitted from snapshot", hits[0].NextHopWeights)
+	}
+	body, err := json.Marshal(hits[0])
+	if err != nil {
+		t.Fatalf("marshal single-path route snapshot: %v", err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("unmarshal single-path route snapshot: %v", err)
+	}
+	if _, ok := wire["next_hop_weights"]; ok {
+		t.Errorf("default single-path weights should be omitted from wire: %s", body)
 	}
 	if hits[0].Preference != routing.LearnedRouteImportPreference {
 		t.Errorf("preference = %d, want the learned-route preference %d",
@@ -139,6 +159,85 @@ func TestLearnedRouteLowestKernelMetricWinsSamePrefix11388(t *testing.T) {
 					hits[0].Preference, routing.LearnedRouteImportPreference)
 			}
 		})
+	}
+}
+
+// Weighted learned ECMP keeps Linux member order through the Go snapshot wire.
+// Two otherwise identical rows with different weights must also remain distinct.
+func TestLearnedECMPWeightsReachSnapshotAndDedupeByWeight(t *testing.T) {
+	first := learnedV4("10.20.30.0/24", "192.0.2.1")
+	first.NextHops = []string{"192.0.2.1", "192.0.2.2"}
+	first.NextHopWeights = []uint32{1, 4}
+	second := first
+	second.NextHopWeights = []uint32{4, 1}
+	withLearnedRoutes(t, fixedLearned(first, second))
+
+	out, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	hits := snapshotFor(t, "inet.0", "inet", "10.20.30.0/24", out)
+	if len(hits) != 2 {
+		t.Fatalf("same next-hops with distinct weights collapsed: got %d snapshots (%+v)", len(hits), hits)
+	}
+	wantWeights := [][]uint32{{1, 4}, {4, 1}}
+	for i, hit := range hits {
+		if !reflect.DeepEqual(hit.NextHops, []string{"192.0.2.1", "192.0.2.2"}) {
+			t.Errorf("snapshot %d next-hops = %v, want both kernel legs in order", i, hit.NextHops)
+		}
+		if !reflect.DeepEqual(hit.NextHopWeights, wantWeights[i]) {
+			t.Errorf("snapshot %d weights = %v, want %v", i, hit.NextHopWeights, wantWeights[i])
+		}
+		if i == 0 {
+			body, err := json.Marshal(hit)
+			if err != nil {
+				t.Fatalf("marshal weighted route snapshot: %v", err)
+			}
+			var wire struct {
+				NextHopWeights []uint32 `json:"next_hop_weights"`
+			}
+			if err := json.Unmarshal(body, &wire); err != nil {
+				t.Fatalf("unmarshal weighted route snapshot: %v", err)
+			}
+			if !reflect.DeepEqual(wire.NextHopWeights, []uint32{1, 4}) {
+				t.Errorf("wire next_hop_weights = %v, want [1 4] in route order", wire.NextHopWeights)
+			}
+		}
+	}
+}
+
+// The populated Rust route wire specimen pins the same JSON key and ordered
+// weight vector used by Go, so serde renames cannot silently split the contract.
+func TestRouteSnapshotWeightWireKeyAgreesWithRustFixture11402(t *testing.T) {
+	fixture := filepath.Join("..", "..", "..", "userspace-dp", "tests", "fixtures", "protocol_wire_v1.json")
+	raw, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatalf("read Rust route snapshot fixture %s: %v", fixture, err)
+	}
+	var wire struct {
+		RouteSnapshotWeighted map[string]json.RawMessage `json:"route_snapshot_weighted"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("decode Rust route snapshot fixture: %v", err)
+	}
+	field, ok := reflect.TypeOf(RouteSnapshot{}).FieldByName("NextHopWeights")
+	if !ok {
+		t.Fatal("RouteSnapshot.NextHopWeights field is missing")
+	}
+	key := strings.Split(field.Tag.Get("json"), ",")[0]
+	if key != "next_hop_weights" {
+		t.Fatalf("Go weight JSON key = %q, want next_hop_weights", key)
+	}
+	encodedWeights, ok := wire.RouteSnapshotWeighted[key]
+	if !ok {
+		t.Fatalf("Rust weighted route specimen lacks Go key %q", key)
+	}
+	var weights []uint32
+	if err := json.Unmarshal(encodedWeights, &weights); err != nil {
+		t.Fatalf("decode Rust next_hop_weights: %v", err)
+	}
+	if !reflect.DeepEqual(weights, []uint32{1, 4}) {
+		t.Errorf("Rust next_hop_weights = %v, want [1 4] in route order", weights)
 	}
 }
 

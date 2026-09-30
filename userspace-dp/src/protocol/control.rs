@@ -217,7 +217,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // application terms carry ICMP type/code. A v35 helper ignores the knob (keeps
 // accepting unstamped traffic into MAIN on RI nodes) and the nested fields
 // (widens the typed match); exact equality refuses the mixed version on both.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 36;
+// v36 -> v37 (#11402): learned route snapshots carry Linux multipath member
+// weights end-to-end. A v36 helper ignores those weights and flattens an
+// unequal group to uniform ECMP; exact equality refuses the mixed contract.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 37;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
