@@ -3337,9 +3337,10 @@ never lock an operator out of a remote box it manages.
   malformed operands on recognized modifiers (#8971, e.g. extra count tokens)
   and unknown reject-message types also enter `UnknownActions` and therefore
   become `discard` on tolerant load / peer-sync.
-  non-empty action arriving directly in a mixed-version snapshot also fails
-  closed: Rust maps it to `FilterAction::Discard`, and the kernel mirror —
-  PRIMARY host-bound enforcement — renders `drop` and logs the drift. Pinned by
+  A future unknown non-empty action arriving directly in a mixed-version
+  snapshot also fails closed: Rust maps it to `FilterAction::Discard`, and
+  the kernel mirror — PRIMARY host-bound enforcement — renders `drop` and
+  logs the drift. Pinned by
   `TestNftRuleFromTermUnknownActionFailsClosed` (known accept/discard still map
   correctly; unknown actions render `drop`).
 
