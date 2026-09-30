@@ -9855,3 +9855,224 @@ fn rx_source_learn_cannot_pre_policy_overwrite_live_v6_neighbor() {
         }
     }
 }
+
+// #11332: filtered SYNs must be excluded from screen sketches and cookie
+// replies, while packets admitted by the same filter still exercise screens.
+fn g11332_runtime(
+    term: Option<FirewallTermSnapshot>,
+) -> (ForwardingState, ScreenState) {
+    let mut snapshot = nat_snapshot();
+    if let Some(term) = term {
+        g9528_attach(&mut snapshot, false, term);
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut profiles = FxHashMap::default();
+    profiles.insert(
+        "lan".to_string(),
+        crate::screen::ScreenProfile {
+            syn_flood_threshold: 1,
+            syn_cookie: true,
+            ..crate::screen::ScreenProfile::default()
+        },
+    );
+    let mut screen = ScreenState::new();
+    screen.update_profiles(profiles);
+    screen.update_syn_cookie_master_key(Some([0x42; 16]));
+    (forwarding, screen)
+}
+
+fn g11332_send_syn(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    screen: &mut ScreenState,
+    source: Ipv4Addr,
+) -> BatchCounters {
+    let frame = build_txn_tcp_syn_frame_v4(
+        source,
+        Ipv4Addr::new(198, 51, 100, 20),
+        49152,
+        443,
+        0x02,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(24, 0x02, frame.len() as u16);
+    let (batch, _) = txn_run_descriptor_with_screen_state(
+        binding,
+        sessions,
+        forwarding,
+        &txn_ha_state(),
+        &frame,
+        meta,
+        screen,
+    );
+    batch
+}
+
+#[test]
+fn filtered_syns_do_not_charge_screens_or_receive_syn_cookies_11332() {
+    let denied_source = Ipv4Addr::new(203, 0, 113, 10);
+    let permitted_source = Ipv4Addr::new(192, 0, 2, 10);
+    let mut term = g9528_term("discard", "");
+    term.source_addresses = vec![format!("{denied_source}/32")];
+    let (forwarding, mut screen) = g11332_runtime(Some(term));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+
+    // The first two SYNs would cross the threshold and challenge the second
+    // one if the input filter were evaluated only after screens. Both still
+    // reach the ordinary counted filter enforcement site.
+    for expected_count in 1..=2 {
+        let batch = g11332_send_syn(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &mut screen,
+            denied_source,
+        );
+        assert_eq!(batch.syn_cookie_challenges, 0);
+        assert_eq!(batch.syn_cookie_syn_ack_sent, 0);
+        assert!(
+            binding.tx_pipeline.pending_tx_local.is_empty(),
+            "a filter-discarded SYN must not elicit a reflected SYN-ACK",
+        );
+        assert_eq!(
+            g9528_packets(&forwarding),
+            expected_count,
+            "the normal input-filter evaluator still counts each denied SYN once",
+        );
+    }
+
+    // The same destination's sketch starts with the first filter-admitted SYN:
+    // it passes, and only the next admitted SYN triggers the configured cookie.
+    let first_permitted = g11332_send_syn(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        permitted_source,
+    );
+    assert_eq!(first_permitted.syn_cookie_challenges, 0);
+    assert!(binding.tx_pipeline.pending_tx_local.is_empty());
+    let second_permitted = g11332_send_syn(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        permitted_source,
+    );
+    assert_eq!(second_permitted.syn_cookie_challenges, 1);
+    assert_eq!(second_permitted.syn_cookie_syn_ack_sent, 1);
+    let challenge = binding
+        .tx_pipeline
+        .pending_tx_local
+        .front()
+        .expect("admitted SYN must still receive the configured cookie challenge");
+    assert_eq!(
+        &challenge.bytes[30..34],
+        &permitted_source.octets(),
+        "the cookie reply destination must be the admitted source, never the filtered one",
+    );
+}
+
+#[test]
+fn pbr_discard_is_applied_before_screen_sketches_11332() {
+    let denied_source = Ipv4Addr::new(203, 0, 113, 11);
+    let mut term = g9528_term("discard", "scrub");
+    term.source_addresses = vec![format!("{denied_source}/32")];
+    let (forwarding, mut screen) = g11332_runtime(Some(term));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let batch = g11332_send_syn(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        denied_source,
+    );
+    assert_eq!(batch.syn_cookie_challenges, 0);
+    assert!(binding.tx_pipeline.pending_tx_local.is_empty());
+    assert_eq!(
+        g9528_packets(&forwarding),
+        1,
+        "the PBR discard term is counted once by the normal route evaluator",
+    );
+}
+
+#[test]
+fn filtered_cookie_ack_cannot_reflect_rst_before_input_filter_11332() {
+    let denied_source = Ipv4Addr::new(203, 0, 113, 12);
+    let server = Ipv4Addr::new(198, 51, 100, 20);
+    let (open_forwarding, mut screen) = g11332_runtime(None);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut syn_sessions = SessionTable::new();
+
+    // Establish a real cookie for this tuple before installing the deny, as
+    // can happen when an operator changes the input filter mid-handshake.
+    let _ = g11332_send_syn(
+        &mut binding,
+        &mut syn_sessions,
+        &open_forwarding,
+        &mut screen,
+        denied_source,
+    );
+    let challenged = g11332_send_syn(
+        &mut binding,
+        &mut syn_sessions,
+        &open_forwarding,
+        &mut screen,
+        denied_source,
+    );
+    assert_eq!(challenged.syn_cookie_challenges, 1);
+    let challenge = binding
+        .tx_pipeline
+        .pending_tx_local
+        .front()
+        .expect("the unfiltered SYN must produce a cookie SYN-ACK");
+    let cookie_isn = u32::from_be_bytes(
+        challenge.bytes[38..42]
+            .try_into()
+            .expect("SYN-ACK sequence field"),
+    );
+    binding.tx_pipeline.pending_tx_local.clear();
+
+    let mut term = g9528_term("discard", "");
+    term.source_addresses = vec![format!("{denied_source}/32")];
+    let (filtered_forwarding, _unused_screen) = g11332_runtime(Some(term));
+    let mut ack_frame = build_txn_tcp_syn_frame_v4(
+        denied_source,
+        server,
+        49152,
+        443,
+        0x10,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    ack_frame[38..42].copy_from_slice(&2u32.to_be_bytes());
+    ack_frame[42..46].copy_from_slice(&cookie_isn.wrapping_add(1).to_be_bytes());
+    crate::afxdp::frame::recompute_l4_checksum_ipv4(&mut ack_frame[14..], 20, PROTO_TCP, false)
+        .expect("valid cookie ACK checksum");
+    let ack_meta = txn_meta_v4(24, 0x10, ack_frame.len() as u16);
+    let mut ack_sessions = SessionTable::new();
+    let (batch, _) = txn_run_descriptor_with_screen_state(
+        &mut binding,
+        &mut ack_sessions,
+        &filtered_forwarding,
+        &txn_ha_state(),
+        &ack_frame,
+        ack_meta,
+        &mut screen,
+    );
+    assert_eq!(batch.syn_cookie_ack_valid, 0);
+    assert!(
+        binding.tx_pipeline.pending_tx_local.is_empty(),
+        "a filter-discarded cookie ACK must not elicit a reflected RST",
+    );
+    assert_eq!(
+        g9528_packets(&filtered_forwarding),
+        1,
+        "the normal input-filter evaluator must count the denied ACK",
+    );
+}
