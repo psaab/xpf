@@ -228,16 +228,13 @@ func validateFirewallPrefixListReferencesStrict(cfg *Config) error {
 // blackhole / fall-through to the default table. This gate makes the typo
 // operator-visible at commit, consistent with the other cross-reference gates.
 //
-// Any defined routing-instance is a valid steer target (Junos FBF accepts
-// virtual-router / vrf / forwarding instances alike); the gap closed here is
-// strictly the dangling-name case, so instance-type is intentionally not
-// constrained.
+// The Junos FBF literal `default` is the built-in master-RIB alias and is valid
+// without a `routing-instances default` declaration.
 //
-// Both filter families are walked, sorted by filter name then by term position
-// for a deterministic first-error. On the tolerant load / peer-sync paths the
-// call site downgrades to a warning (opts.lenientFirewallRefs) so an already-
-// persisted or peer-synced config still BOOTS (#1960). Mirrors
-// validateFirewallPolicerReferencesStrict.
+// Any defined routing-instance remains a valid target, regardless of
+// instance-type. Both filter families are walked in stable filter/term order;
+// on tolerant load and peer-sync the call site downgrades failures to warnings
+// so an already-persisted or peer-synced config still boots (#1960).
 func validateFirewallRoutingInstanceReferencesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -260,7 +257,9 @@ func validateFirewallRoutingInstanceReferencesStrict(cfg *Config) error {
 				continue
 			}
 			for _, term := range filter.Terms {
-				if term == nil || term.RoutingInstance == "" || defined[term.RoutingInstance] {
+				if term == nil || term.RoutingInstance == "" ||
+					term.RoutingInstance == FBFDefaultRoutingInstance ||
+					defined[term.RoutingInstance] {
 					continue
 				}
 				return fmt.Errorf(

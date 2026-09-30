@@ -196,6 +196,66 @@ func TestFBFRoutingInstanceRefUndefinedLenientWarns(t *testing.T) {
 	}
 }
 
+func TestFBFDefaultRoutingInstanceAliasAcceptedStrictFlatSet11308(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set firewall family inet filter f1 term t1 then routing-instance default",
+		"set firewall family inet filter f1 term t1 then accept",
+	})
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile must accept Juniper's default-instance alias: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["f1"]
+	if filter == nil || len(filter.Terms) == 0 || filter.Terms[0].RoutingInstance != "default" {
+		t.Fatalf("compiled term must preserve the authored alias, got: %+v", filter)
+	}
+}
+
+func TestFBFDefaultRoutingInstanceAliasAcceptedStrictHierarchicalInet6_11308(t *testing.T) {
+	input := `firewall {
+    family inet6 {
+        filter f6 {
+            term t6 {
+                then {
+                    routing-instance default;
+                    accept;
+                }
+            }
+        }
+    }
+}`
+	tree, errs := NewParser(input).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict inet6 compile must accept the default-instance alias: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet6["f6"]
+	if filter == nil || len(filter.Terms) == 0 || filter.Terms[0].RoutingInstance != "default" {
+		t.Fatalf("compiled inet6 term must preserve the authored alias, got: %+v", filter)
+	}
+}
+
+func TestFBFDefaultRoutingInstanceAliasLenientDoesNotWarn11308(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set firewall family inet filter f1 term t1 then routing-instance default",
+		"set firewall family inet filter f1 term t1 then accept",
+	})
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile must accept the default-instance alias: %v", err)
+	}
+	if warningsContain(cfg.Warnings, "firewall routing-instance reference") {
+		t.Fatalf("the documented default alias is not a dangling-reference warning: %v", cfg.Warnings)
+	}
+	filter := cfg.Firewall.FiltersInet["f1"]
+	if filter == nil || len(filter.Terms) == 0 || filter.Terms[0].RoutingInstance != "default" {
+		t.Fatalf("tolerant compile must preserve the authored alias, got: %+v", filter)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Finding B — application-set member
 // ---------------------------------------------------------------------------
