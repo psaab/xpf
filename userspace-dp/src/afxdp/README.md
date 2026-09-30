@@ -127,9 +127,9 @@ sync.
         stays keyed on the PHYSICAL `ingress_ident.ifindex`.
       - **#3035 — generated SYN-cookie / reject reply:**
         `poll_descriptor/cookie_reply.rs` (SYN-cookie SYN-ACK / ACK-RST)
-        and `poll_descriptor/reject_reply.rs` (policy/filter `reject` TCP
-        RST or ICMP/ICMPv6 unreachable, and zone `tcp-rst`) classify the
-        generated reply (CoS queue / DSCP rewrite / output filter) on the
+        `poll_descriptor/reject_reply.rs` (policy/filter `reject` TCP RST or
+        ICMP/ICMPv6 unreachable, and zone `tcp-rst` session-miss TCP resets)
+        classify the generated reply (CoS queue / DSCP rewrite / output filter) on the
         LOGICAL egress unit ifindex resolved from the physical bind /
         ingress ifindex via the SSOT, NOT the raw physical index. These two
         pre-date #3034 (#2238) and were out of its scope; the physical
@@ -1112,23 +1112,26 @@ sync.
   reject that was not sent. Reply-free paths (flowless fragments, the
   PBR/output-filter forward path — #3608's silent-drop domain — and
   cached-log replay) pass `reject_reply_enqueued = false`. Suppression is
-  also counted per SOURCE: `policy_reject_reply_budget_drops` /
+  also counted per SOURCE for explicit policy/filter rejects:
+  `policy_reject_reply_budget_drops` /
   `policy_reject_output_filter_drops` / `policy_reject_rate_limit_drops`
   (policy) vs `filter_reject_reply_budget_drops` /
   `filter_reject_output_filter_drops` / `filter_reject_rate_limit_drops`
   (filter); the parse-error leg `generated_reply_classify_parse_errors`
-  stays source-neutral (shared by every generated-reply type). The
-  rate-limit split (#3661) attributes an empty-bucket drop to the reply's
-  source at the consume site. #3618 made the reject rate-limit budget PER
-  INGRESS (from) ZONE — one per-source-fair `ZoneLimiter` per configured zone
-  in `ForwardingState::reject_buckets` (#9901 F-074; a hierarchical limiter: a
-  per-source tier in front of the zone aggregate), resolved from the ingress
-  interface's zone, with a process-global `REJECT_FALLBACK_LIMITER` for an
+  stays source-neutral (shared by every generated-reply type). The rate-limit
+  split (#3661) attributes explicit policy/filter reject drops to their source
+  at the consume site; session-miss resets have no source label. #3618 made
+  the reject rate-limit budget PER INGRESS (from) ZONE: one
+  per-source-fair `ZoneLimiter` per configured zone in
+  `ForwardingState::reject_buckets` (#9901 F-074), resolved from the ingress
+  interface's zone. A process-global `REJECT_FALLBACK_LIMITER` for an
   unzoned/unknown zone — so a rejected-flow flood in one zone no longer starves
   reject generation in another (and, within a zone, one source no longer
   starves another). The observable aggregate `reject_rate_limited_total`
-  stays a SINGLE atomic bumped on any per-zone deny, so the metric is unchanged
-  and `policy`+`filter` still sum to it. #5856 extended the SAME per-zone split
+  stays a SINGLE atomic bumped on any limiter denial. The policy/filter
+  source split covers explicit `reject` paths only; zone `tcp-rst` session-miss
+  resets also count in the aggregate but have no source attribution, so the
+  source-specific sum may be lower. #5856 extended the SAME per-zone split
   to the TimeExceeded and PacketTooBig reasons (`ForwardingState::
   time_exceeded_buckets` / `packet_too_big_buckets`, resolved from
   `ingress_ident.ifindex`), so a TTL=1/hop-limit=1 or oversized-DF flood in one

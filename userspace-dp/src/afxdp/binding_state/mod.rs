@@ -295,10 +295,11 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// #3615 (L04): FILTER-`reject` replies suppressed by TX-frame budget —
     /// the source-split sibling of `policy_reject_reply_budget_drops`.
     pub(super) filter_reject_reply_budget_drops: AtomicU64,
-    /// #3661: POLICY-`reject` replies dropped because the shared per-reason
-    /// REJECT_BUCKET rate-limit bucket was empty. Source-split of the
-    /// source-neutral aggregate `reject_rate_limited_total`; filter-source
-    /// drops are in `filter_reject_rate_limit_drops`.
+    /// #3661: explicit POLICY-`reject` replies dropped because the shared
+    /// per-reason REJECT_BUCKET was empty. Source-specific leg of the
+    /// source-neutral `reject_rate_limited_total`; zone `tcp-rst`
+    /// session-miss resets count only in the aggregate. Filter-source drops
+    /// are in `filter_reject_rate_limit_drops`.
     pub(super) policy_reject_rate_limit_drops: AtomicU64,
     /// #3661: FILTER-`reject` replies dropped by the rate-limit bucket — the
     /// source-split sibling of `policy_reject_rate_limit_drops`.

@@ -881,12 +881,11 @@ pub(crate) struct ZoneSnapshot {
     #[serde(rename = "host_inbound_protocols", default)]
     pub host_inbound_protocols: Vec<String>,
     /// #3071: Junos `security zones security-zone <z> tcp-rst`. When true,
-    /// a TCP flow DENIED by policy/default-deny whose INGRESS (from) zone is
-    /// this zone is answered with a TCP RST toward the source instead of the
-    /// silent drop `deny` otherwise produces. Non-TCP denied traffic is
-    /// unaffected. Additive via serde default: a snapshot from an old Go
-    /// binary lacks the field, in which case the zone is treated as tcp-rst
-    /// off (the pre-#3071 silent-drop behavior).
+    /// a non-SYN TCP transit packet dropped for a session miss may receive a
+    /// TCP RST toward its source when this is its INGRESS (from) zone. Policy
+    /// `deny` remains a silent drop. Additive via serde default: a snapshot
+    /// from an old Go binary lacks the field, in which case the zone is
+    /// treated as tcp-rst off (pre-#3071 behavior).
     #[serde(rename = "tcp_rst", default)]
     pub tcp_rst: bool,
 }

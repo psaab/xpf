@@ -1696,6 +1696,41 @@ fn forwarded_egress_mtu(decision: &SessionDecision, forwarding: &ForwardingState
         .unwrap_or(0)
 }
 
+/// Whether a cache hit can skip the pending-forward dispatcher.
+///
+/// The inline rewrite path is valid only when the plain egress MTU decision is
+/// `Forward`. Every oversized decision reaches the dispatcher, where TCP
+/// segmentation runs before PTB handling. NAT64 is not currently cacheable,
+/// and native tunnels require the dispatcher's post-transform inner-MTU
+/// calculation and encapsulation path; preserve those constraints here.
+#[inline(always)]
+pub(in crate::afxdp) fn flow_cache_hit_requires_pending_forward(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+) -> bool {
+    let meta = meta.into();
+    if decision.nat.nat64 || decision.resolution.tunnel_endpoint_id != 0 {
+        return true;
+    }
+    let l3_offset = frame_l3_offset(frame).or_else(|| {
+        crate::afxdp::frame::nibble_trusted_stamp(frame, meta.l3_offset, meta.addr_family)
+    });
+    let Some(l3_offset) = l3_offset else {
+        return false;
+    };
+    !matches!(
+        forwarded_egress_mtu_decision(
+            frame,
+            l3_offset,
+            meta.addr_family,
+            forwarded_egress_mtu(decision, forwarding),
+        ),
+        EgressMtuDecision::Forward
+    )
+}
+
 #[inline(always)]
 fn forwarded_tcp_may_need_segmentation(
     frame: &[u8],

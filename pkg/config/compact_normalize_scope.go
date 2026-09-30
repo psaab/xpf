@@ -1745,8 +1745,9 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		// WHAT THE DROP COSTS, since it is not uniform and "flag" reads as
 		// cosmetic. `tcp-session no-syn-check` / `strict-syn-check` decide
 		// whether a TCP session may be seeded by a non-SYN packet;
-		// `security-zone <z> tcp-rst` decides whether a denied TCP flow is
-		// RST-ed or blackholed; `nat source address-persistent` decides whether
+		// `security-zone <z> tcp-rst` decides whether a non-SYN TCP transit
+		// packet that misses a session is answered with a RST or dropped;
+		// `nat source address-persistent` decides whether
 		// one internal host keeps one external address; `{ike,ipsec} gateway
 		// <g> no-nat-traversal` decides whether NAT-T is negotiated. Each was
 		// silently absent in the elided spelling on a commit reporting success,

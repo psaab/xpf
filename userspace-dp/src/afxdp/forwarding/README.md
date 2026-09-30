@@ -1001,10 +1001,13 @@ never on the wire because zone ids are u8) and looks up the
 `(ingress_zone_id, JUNOS_HOST_ZONE_ID)` zone pair in the SAME `zone_pair_index`
 as transit rules — `parse_policy_state_with_counters` now INDEXES junos-host rules
 via `resolve_policy_zone_id` (pre-#3019 they were kept-but-not-indexed, like the
-wildcard-`any` case). A matched deny/reject drops the packet, emits the
-policy-deny RT_FLOW (egress zone reported as `0`/host since the synthetic id
-does not fit the u8 wire slot), synthesizes a `reject`/zone-`tcp-rst` reply, and
-on the hit path tears down the cached host-local session.
+wildcard-`any` case).
+
+A matched deny/reject drops the packet and emits policy-deny RT_FLOW (egress
+zone reported as `0`/host since the synthetic id does not fit the u8 wire
+slot); only explicit `then reject` synthesizes a reply. Zone `tcp-rst` applies
+to strict-SYN transit session misses, not host-bound policy denies. On the hit
+path the cached host-local session is torn down.
 
 Enforcement is MATCH-DRIVEN and fail-safe: the gate is a NO-OP unless
 `PolicyState::has_junos_host_rules` is set (some junos-host rule configured),
