@@ -220,12 +220,23 @@ pub(super) fn build_live_forward_request_from_frame(
     });
     let mut decision = *decision;
     // #919/#922: ID-keyed redirect — no `zone_id_to_name` round-trip.
+    // #11337: preserve a validated V2 peer scope when this packet is punted
+    // again; otherwise retain the V1 zone-only stamp.
     if decision.resolution.disposition == ForwardingDisposition::FabricRedirect
         && let Some(ingress_zone_id) = fabric_ingress_zone
-        && let Some(zone_redirect) =
-            resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone_id)
     {
-        decision.resolution.src_mac = zone_redirect.src_mac;
+        let v2_source = frame
+            .get(6..12)
+            .and_then(|source_mac| {
+                fabric_nat_scope_stamp_mac_for_zone(forwarding, source_mac, ingress_zone_id)
+            });
+        if let Some(source_mac) = v2_source {
+            decision.resolution.src_mac = Some(source_mac);
+        } else if let Some(zone_redirect) =
+            resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone_id)
+        {
+            decision.resolution.src_mac = zone_redirect.src_mac;
+        }
     }
     let fallback_flow;
     let tx_selection_flow = if flow.is_some() {

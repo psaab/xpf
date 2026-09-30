@@ -51,10 +51,11 @@ pub(super) enum SynCookieAckOutcome {
 
 /// Output of `stage_classify_fabric_ingress`. The stage *also*
 /// mutates `meta.meta_flags` to set `FABRIC_INGRESS_FLAG`; this
-/// struct carries the decoded zone, fabric flag, and invalid-stamp
-/// terminal signal to the packet loop.
+/// struct carries the decoded zone, optional peer-local NAT scope, fabric
+/// flag, and invalid-stamp terminal signal to the packet loop.
 pub(super) struct FabricIngressOutcome {
     pub(super) ingress_zone_override: Option<u16>,
+    pub(super) ingress_nat_scope_ifindex: Option<i32>,
     pub(super) packet_fabric_ingress: bool,
     pub(super) invalid_zone_stamp: bool,
 }
@@ -572,8 +573,8 @@ pub(in crate::afxdp) fn capture_pptp_control_segment(
 ///
 /// Mutates `meta.meta_flags` to set `FABRIC_INGRESS_FLAG` when the
 /// packet's ingress is a fabric overlay or carries a zone-encoded
-/// fabric ingress marker. Returns the discovered zone override
-/// (used by the screen stage), the fabric flag, and invalid stamp state.
+/// fabric ingress marker. Returns the zone override, optional peer-local
+/// NAT-scope ifindex, fabric flag, and invalid-stamp state.
 ///
 /// This stage MUST run before screen / IPsec / flow-cache because
 /// those downstream stages read `meta.meta_flags` and the
@@ -599,9 +600,12 @@ pub(super) fn stage_classify_fabric_ingress(
         worker_ctx.ha_state,
         now_secs,
     );
-    let ingress_zone_override = match stamp {
-        ZoneEncodedFabricStamp::Valid(zone) => Some(zone),
-        ZoneEncodedFabricStamp::Absent | ZoneEncodedFabricStamp::Invalid => None,
+    let (ingress_zone_override, ingress_nat_scope_ifindex) = match stamp {
+        ZoneEncodedFabricStamp::Valid(zone) => (Some(zone), None),
+        ZoneEncodedFabricStamp::ValidScoped { zone_id, ifindex } => {
+            (Some(zone_id), Some(ifindex))
+        }
+        ZoneEncodedFabricStamp::Absent | ZoneEncodedFabricStamp::Invalid => (None, None),
     };
     let invalid_zone_stamp = stamp == ZoneEncodedFabricStamp::Invalid;
     let packet_fabric_ingress = ingress_zone_override.is_some()
@@ -611,6 +615,7 @@ pub(super) fn stage_classify_fabric_ingress(
     }
     FabricIngressOutcome {
         ingress_zone_override,
+        ingress_nat_scope_ifindex,
         packet_fabric_ingress,
         invalid_zone_stamp,
     }

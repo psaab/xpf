@@ -531,6 +531,8 @@ pub(crate) const DELEGATED_SLOW_PATH_TUN: &str = "xpf-usp1";
 const LOCAL_TUNNEL_DELIVERY_QUEUE_DEPTH: usize = 4096;
 const HA_WATCHDOG_STALE_AFTER_SECS: u64 = 10;
 const FABRIC_ZONE_MAC_MAGIC: u8 = 0xfe;
+/// #11337: V2 fabric source-MAC marker followed by a stable 24-bit NAT-scope id.
+const FABRIC_NAT_SCOPE_MAC_PREFIX: [u8; 3] = [0x02, 0xbf, 0x73];
 use crate::ip_proto::{PROTO_AH, PROTO_ESP, PROTO_GRE, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
 // #2151: TCP flag bits now live in the shared crate::tcp_flags SSOT.
 // Re-exported here under the historical TCP_FLAG_* spellings (and made
