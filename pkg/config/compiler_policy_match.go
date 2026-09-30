@@ -115,9 +115,11 @@ var globalOnlyPolicyMatchLeaves = map[string]bool{
 // child would be. Keep in lockstep with the vSRX match dimensions xpf does
 // not yet enforce.
 var unsupportedPolicyMatchLeaves = map[string]bool{
-	"dynamic-application": true,
-	"url-category":        true,
-	"source-identity":     true,
+	"dynamic-application":       true,
+	"url-category":              true,
+	"source-identity":           true,
+	"dynamic-application-group": true, // #11078: Junos sibling of dynamic-application
+	"source-end-user-profile":   true, // #11078: Junos sibling of source-identity
 }
 
 // swallowedStructuralMatchTokens are structural policy `match` keywords that
