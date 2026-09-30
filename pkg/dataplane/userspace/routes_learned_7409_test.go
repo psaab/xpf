@@ -48,6 +48,12 @@ func learnedV4(dst, gw string) routing.LearnedRoute {
 		Destination: dst, NextHops: []string{gw}, Protocol: "bgp",
 	}
 }
+func learnedV6(dst, gw string) routing.LearnedRoute {
+	return routing.LearnedRoute{
+		TableID: 254, Family: netlink.FAMILY_V6,
+		Destination: dst, NextHops: []string{gw}, Protocol: "bgp",
+	}
+}
 
 // cfgWithStaticDefault returns a config carrying a v4 static default, the
 // shape almost every shipped xpf config has.
@@ -361,5 +367,163 @@ func TestGapFillMatchesANonCanonicalConfigPrefix(t *testing.T) {
 	if !reflect.DeepEqual(forPrefix[0].NextHops, []string{"192.0.2.1"}) {
 		t.Fatalf("surviving next-hop = %v, want the operator's [192.0.2.1]",
 			forPrefix[0].NextHops)
+	}
+}
+
+// A recursive config static is not a usable helper next-hop: the Rust FIB
+// resolves bare gateways only through a connected prefix in the same table.
+// Keep the kernel's resolved copy instead of letting the config coverage key
+// hide it (#11317).
+func TestRecursiveStaticRouteKeepsKernelResolvedGapFill11317(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
+		{
+			Destination: "10.10.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "192.0.2.1"}},
+		},
+		{
+			Destination: "10.20.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "10.10.0.1"}},
+		},
+	}
+	interfaces := []InterfaceSnapshot{{
+		Name:    "eth0",
+		Ifindex: 42,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family:  "inet",
+			Address: "192.0.2.10/24",
+		}},
+	}}
+	withLearnedRoutes(t, fixedLearned(learnedV4("10.20.0.0/24", "192.0.2.1")))
+
+	out, _, err := buildRouteSnapshots(cfg, interfaces, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	hits := snapshotFor(t, "inet.0", "inet", "10.20.0.0/24", out)
+	if len(hits) != 1 || hits[0].Preference != routing.LearnedRouteImportPreference ||
+		!reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) {
+		t.Fatalf("recursive static must yield to the resolved kernel copy, got %+v", hits)
+	}
+}
+
+func TestRecursiveViaRecursiveStaticsKeepKernelResolvedGapFills11317(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
+		{
+			Destination: "10.10.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "192.0.2.1"}},
+		},
+		{
+			Destination: "10.20.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "10.10.0.1"}},
+		},
+		{
+			Destination: "10.30.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "10.20.0.1"}},
+		},
+	}
+	interfaces := []InterfaceSnapshot{{
+		Name:    "eth0",
+		Ifindex: 42,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family:  "inet",
+			Address: "192.0.2.10/24",
+		}},
+	}}
+	withLearnedRoutes(t, fixedLearned(
+		learnedV4("10.20.0.0/24", "192.0.2.1"),
+		learnedV4("10.30.0.0/24", "192.0.2.1"),
+	))
+
+	out, _, err := buildRouteSnapshots(cfg, interfaces, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for _, destination := range []string{"10.20.0.0/24", "10.30.0.0/24"} {
+		hits := snapshotFor(t, "inet.0", "inet", destination, out)
+		if len(hits) != 1 || hits[0].Preference != routing.LearnedRouteImportPreference ||
+			!reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) {
+			t.Errorf("%s must use its resolved kernel copy, got %+v", destination, hits)
+		}
+	}
+	direct := snapshotFor(t, "inet.0", "inet", "10.10.0.0/24", out)
+	if len(direct) != 1 || direct[0].Preference != 0 ||
+		!reflect.DeepEqual(direct[0].NextHops, []string{"192.0.2.1"}) {
+		t.Fatalf("the directly connected first hop route must remain configured, got %+v", direct)
+	}
+}
+
+func TestRecursiveIPv6StaticKeepsKernelResolvedGapFill11317(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.Inet6StaticRoutes = []*config.StaticRoute{
+		{
+			Destination: "2001:db8:10::/64",
+			NextHops:    []config.NextHopEntry{{Address: "2001:db8:1::2"}},
+		},
+		{
+			Destination: "2001:db8:20::/64",
+			NextHops:    []config.NextHopEntry{{Address: "2001:db8:10::1"}},
+		},
+	}
+	interfaces := []InterfaceSnapshot{{
+		Name:    "eth0",
+		Ifindex: 42,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family:  "inet6",
+			Address: "2001:db8:1::1/64",
+		}},
+	}}
+	withLearnedRoutes(t, fixedLearned(learnedV6("2001:db8:20::/64", "2001:db8:1::2")))
+
+	out, _, err := buildRouteSnapshots(cfg, interfaces, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	hits := snapshotFor(t, "inet6.0", "inet6", "2001:db8:20::/64", out)
+	if len(hits) != 1 || hits[0].Preference != routing.LearnedRouteImportPreference ||
+		!reflect.DeepEqual(hits[0].NextHops, []string{"2001:db8:1::2"}) {
+		t.Fatalf("recursive IPv6 static must yield to its resolved kernel copy, got %+v", hits)
+	}
+}
+
+func TestDirectAndExplicitStaticGatewaysRemainConfigured11317(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
+		{
+			Destination: "10.40.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "192.0.2.1"}},
+		},
+		{
+			Destination: "10.50.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "198.51.100.1", Interface: "eth1"}},
+		},
+	}
+	interfaces := []InterfaceSnapshot{{
+		Name:    "eth0",
+		Ifindex: 42,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family:  "inet",
+			Address: "192.0.2.10/24",
+		}},
+	}}
+	withLearnedRoutes(t, fixedLearned(
+		learnedV4("10.40.0.0/24", "192.0.2.254"),
+		learnedV4("10.50.0.0/24", "198.51.100.254"),
+	))
+
+	out, _, err := buildRouteSnapshots(cfg, interfaces, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for destination, nextHop := range map[string]string{
+		"10.40.0.0/24": "192.0.2.1",
+		"10.50.0.0/24": "198.51.100.1@eth1",
+	} {
+		hits := snapshotFor(t, "inet.0", "inet", destination, out)
+		if len(hits) != 1 || hits[0].Preference != 0 ||
+			!reflect.DeepEqual(hits[0].NextHops, []string{nextHop}) {
+			t.Errorf("%s must retain configured gateway %s, got %+v", destination, nextHop, hits)
+		}
 	}
 }

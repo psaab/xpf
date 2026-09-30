@@ -242,7 +242,40 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// per-route causes, and the show surfaces consult the same function.
 	staticRouteExclusions := config.StaticRouteExclusions(cfg)
 	nextTableRulePriorities := configNextTableRulePriorities(cfg, staticRouteExclusions)
-	addRoutes := func(table, family string, routes []*config.StaticRoute, perInstance bool) {
+	connectedNetworks := make(map[routeSnapshotTableFamily][]*net.IPNet)
+	interfaceTablesV4, interfaceTablesV6 := buildInterfaceRouteTables(cfg)
+	addConnectedRoutes := func(table, family string, prefixes []string) {
+		for _, prefix := range prefixes {
+			addSnapshot(RouteSnapshot{
+				Table:       table,
+				Family:      family,
+				Destination: prefix,
+			})
+			_, network, err := net.ParseCIDR(prefix)
+			if err != nil {
+				continue
+			}
+			key := routeSnapshotTableFamily{table: table, family: family}
+			connectedNetworks[key] = append(connectedNetworks[key], network)
+		}
+	}
+	for _, iface := range interfaces {
+		if iface.Name == "" {
+			continue
+		}
+		v4Table := interfaceTablesV4[iface.Name]
+		if v4Table == "" {
+			v4Table = "inet.0"
+		}
+		v6Table := interfaceTablesV6[iface.Name]
+		if v6Table == "" {
+			v6Table = "inet6.0"
+		}
+		v4Prefixes, v6Prefixes := connectedPrefixesForInterface(iface)
+		addConnectedRoutes(v4Table, "inet", v4Prefixes)
+		addConnectedRoutes(v6Table, "inet6", v6Prefixes)
+	}
+	addRoutes := func(table, family string, routes []*config.StaticRoute, instanceName, instanceType string) {
 		for _, route := range routes {
 			if route == nil {
 				continue
@@ -262,6 +295,17 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				continue
 			}
 			tableName, familyName := normalizeRouteSnapshotFamily(table, family, route.Destination)
+			if staticRouteHasUnresolvedBareGateway(
+				route, tableName, familyName, instanceName, instanceType,
+				connectedNetworks, interfaces,
+			) {
+				// Ordinary bare gateways resolve only through a connected
+				// prefix in the same table. A recursive config next-hop would
+				// be emitted with ifindex 0, while the kernel may already have
+				// the recursively resolved copy; do not let this config row
+				// suppress that copy in the learned-route gap fill (#11317).
+				continue
+			}
 			base := RouteSnapshot{
 				Table:       tableName,
 				Family:      familyName,
@@ -345,19 +389,8 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			}
 		}
 	}
-	interfaceTablesV4, interfaceTablesV6 := buildInterfaceRouteTables(cfg)
-	addConnectedRoutes := func(family, table string, prefixes []string) {
-		for _, prefix := range prefixes {
-			snap := RouteSnapshot{
-				Table:       table,
-				Family:      family,
-				Destination: prefix,
-			}
-			addSnapshot(snap)
-		}
-	}
-	addRoutes("inet.0", "inet", cfg.RoutingOptions.StaticRoutes, false)
-	addRoutes("inet6.0", "inet6", cfg.RoutingOptions.Inet6StaticRoutes, false)
+	addRoutes("inet.0", "inet", cfg.RoutingOptions.StaticRoutes, "", "")
+	addRoutes("inet6.0", "inet6", cfg.RoutingOptions.Inet6StaticRoutes, "", "")
 
 	if len(cfg.RoutingInstances) > 0 {
 		insts := make([]*config.RoutingInstanceConfig, 0, len(cfg.RoutingInstances))
@@ -368,25 +401,9 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		}
 		sort.Slice(insts, func(i, j int) bool { return insts[i].Name < insts[j].Name })
 		for _, ri := range insts {
-			addRoutes(ri.Name+".inet.0", "inet", ri.StaticRoutes, true)
-			addRoutes(ri.Name+".inet6.0", "inet6", ri.Inet6StaticRoutes, true)
+			addRoutes(ri.Name+".inet.0", "inet", ri.StaticRoutes, ri.Name, ri.InstanceType)
+			addRoutes(ri.Name+".inet6.0", "inet6", ri.Inet6StaticRoutes, ri.Name, ri.InstanceType)
 		}
-	}
-	for _, iface := range interfaces {
-		if iface.Name == "" {
-			continue
-		}
-		v4Table := interfaceTablesV4[iface.Name]
-		if v4Table == "" {
-			v4Table = "inet.0"
-		}
-		v6Table := interfaceTablesV6[iface.Name]
-		if v6Table == "" {
-			v6Table = "inet6.0"
-		}
-		v4Prefixes, v6Prefixes := connectedPrefixesForInterface(iface)
-		addConnectedRoutes("inet", v4Table, v4Prefixes)
-		addConnectedRoutes("inet6", v6Table, v6Prefixes)
 	}
 
 	// Add synthetic routes for ip-rule entries that implement inter-VRF
@@ -979,6 +996,54 @@ func routingInstanceDomain(name string) uint32 {
 		return 0
 	}
 	return uint32(config.StableRoutingInstanceTableID(name))
+}
+
+type routeSnapshotTableFamily struct {
+	table  string
+	family string
+}
+
+func staticRouteHasUnresolvedBareGateway(
+	route *config.StaticRoute,
+	table, family, instanceName, instanceType string,
+	connectedNetworks map[routeSnapshotTableFamily][]*net.IPNet,
+	interfaces []InterfaceSnapshot,
+) bool {
+	// Without an interface inventory there is no evidence that a gateway is
+	// recursive; preserve the config-only snapshot behavior for callers that
+	// intentionally build a partial route view.
+	if route == nil || len(interfaces) == 0 || route.Discard || route.Reject ||
+		route.NextTable != "" || len(route.NextHops) == 0 {
+		return false
+	}
+	networks := connectedNetworks[routeSnapshotTableFamily{table: table, family: family}]
+	for _, nextHop := range route.NextHops {
+		if nextHop.Address == "" || nextHop.Interface != "" {
+			continue
+		}
+		gateway := net.ParseIP(nextHop.Address)
+		if gateway == nil || (family == "inet" && gateway.To4() == nil) ||
+			(family == "inet6" && gateway.To4() != nil) {
+			continue
+		}
+		direct := false
+		for _, network := range networks {
+			if network.Contains(gateway) {
+				direct = true
+				break
+			}
+		}
+		if !direct && instanceType == "forwarding" {
+			// Forwarding instances have no VRF connected table of their own;
+			// the existing qualifier explicitly scopes gateways reachable via
+			// an interface in this instance or in the default instance.
+			direct = forwardingGatewayInterface(instanceName, family, gateway, interfaces) != ""
+		}
+		if !direct {
+			return true
+		}
+	}
+	return false
 }
 
 func connectedPrefixesForInterface(iface InterfaceSnapshot) ([]string, []string) {
