@@ -705,6 +705,15 @@ impl PolicyReadCollector {
     pub(in crate::afxdp) fn overflowed(&self) -> bool {
         self.overflow
     }
+    /// Whether this exact conditional-delete identity was reserved by a worker
+    /// scan.
+    pub(in crate::afxdp) fn contains_identity(
+        &self,
+        key: &SessionKey,
+        session_id: u64,
+    ) -> bool {
+        self.seen.contains(&(key.clone(), session_id))
+    }
 }
 
 #[derive(Clone, Debug)]
