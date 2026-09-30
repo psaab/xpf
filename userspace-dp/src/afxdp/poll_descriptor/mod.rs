@@ -6553,7 +6553,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     if is_non_first
                         && let Some(l3_flow) = l3_ctx.as_ref()
                         && session_gated_reverse_fragment_requires_nat_translation(
-                            sessions, l3_flow, meta, now_ns,
+                            worker_ctx.forwarding, sessions, l3_flow, meta, now_ns,
                         )
                     {
                         telemetry.counters.record_nat_frag_untranslated_dropped();
@@ -8011,7 +8011,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         }
                                         let nat_translation_required = if is_non_first {
                                             session_gated_reverse_fragment_requires_nat_translation(
-                                                &*sessions, &l3_flow, meta, now_ns,
+                                                worker_ctx.forwarding, &*sessions, &l3_flow, meta, now_ns,
                                             ) || flowless_nat_rule_possible(
                                                 worker_ctx.forwarding,
                                                 &l3_flow,

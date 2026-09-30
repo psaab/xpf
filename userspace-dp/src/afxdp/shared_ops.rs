@@ -665,46 +665,44 @@ pub(super) fn lookup_shared_session(
 }
 
 pub(super) fn lookup_shared_forward_nat_match(
+    forwarding: &ForwardingState,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     reply_key: &SessionKey,
 ) -> Option<SyncedSessionEntry> {
     // #2402: recover poison (see lookup_shared_session).
     let map = lock_shared_recover(shared_nat_sessions);
-    // #7160 (#2387): the shared NAT map is published under BOTH reverse keys —
-    // `reverse_session_key` (which PRESERVES the routing domain) and
-    // `reverse_canonical_key` (which zeroes it, being a reverse-MATCH key).
-    // Probe in that order so a reply that resolved the flow's own domain
-    // demuxes to its own tenant's entry. The zeroed second probe remains
-    // available for a legitimate non-contained flow when either endpoint is
-    // domain 0, but a different non-zero domain is a cross-tenant collision
-    // and must be refused before the shared entry is cloned. Synthetic fabric
-    // quarantine domains are stricter: they cannot participate in any
-    // mixed-zero fallback.
+    // The shared NAT map is published under both the domain-preserving reverse
+    // key and the canonical, domain-neutral reverse-match key. Probe in that
+    // order, but validate each candidate against the forward EGRESS interface's
+    // routing domain before cloning it. Domain 0 is strict rather than a
+    // wildcard, so mixed-zero collisions cannot borrow across instances.
     //
-    // A domain-0 reply key makes the second probe identical to the first;
-    // `reverse_match_key` returns the key unchanged in that case, so a
-    // deployment with no routing-instance interface membership pays one
-    // lookup, exactly as before.
-    if let Some(exact) = map.get(reply_key).cloned() {
-        return Some(exact);
+    // Synthetic fabric domains retain their prior exact-key-only behavior:
+    // they may use an exact matching forward key, but never a canonical alias.
+    let matches_reply_domain = |entry: &SyncedSessionEntry, exact: bool| {
+        let forward_key_domain = entry.key.routing_domain;
+        if crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
+            || crate::session::is_quarantined_routing_domain(forward_key_domain)
+        {
+            return exact && forward_key_domain == reply_key.routing_domain;
+        }
+        crate::afxdp::forwarding::egress_routing_domain(
+            forwarding,
+            entry.decision.resolution.egress_ifindex,
+        ) == reply_key.routing_domain
+    };
+
+    if let Some(exact) = map.get(reply_key) {
+        if matches_reply_domain(exact, true) {
+            return Some(exact.clone());
+        }
     }
     let probe = crate::session::reverse_match_key(reply_key);
     if probe == *reply_key {
         return None;
     }
     let fallback = map.get(&probe)?;
-    if crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
-        || crate::session::is_quarantined_routing_domain(fallback.key.routing_domain)
-    {
-        return None;
-    }
-    if reply_key.routing_domain != 0
-        && fallback.key.routing_domain != 0
-        && fallback.key.routing_domain != reply_key.routing_domain
-    {
-        return None;
-    }
-    Some(fallback.clone())
+    matches_reply_domain(fallback, false).then(|| fallback.clone())
 }
 
 /// Prove that the shared reverse index contains the expected forward entry
@@ -1257,16 +1255,24 @@ fn revalidate_reverse_ingress(
 pub(super) fn lookup_forward_nat_across_scopes(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forwarding: &ForwardingState,
     reply_key: &SessionKey,
     ingress: ReverseIngress,
 ) -> Option<ForwardSessionMatch> {
-    let m = lookup_forward_nat_across_scopes_inner(sessions, shared_nat_sessions, reply_key, None)?;
+    let m = lookup_forward_nat_across_scopes_inner(
+        sessions,
+        shared_nat_sessions,
+        forwarding,
+        reply_key,
+        None,
+    )?;
     revalidate_reverse_ingress(m, ingress)
 }
 
 pub(super) fn lookup_forward_nat_across_scopes_at(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forwarding: &ForwardingState,
     reply_key: &SessionKey,
     ingress: ReverseIngress,
     now_ns: u64,
@@ -1274,6 +1280,7 @@ pub(super) fn lookup_forward_nat_across_scopes_at(
     let m = lookup_forward_nat_across_scopes_inner(
         sessions,
         shared_nat_sessions,
+        forwarding,
         reply_key,
         Some(now_ns),
     )?;
@@ -1283,15 +1290,23 @@ pub(super) fn lookup_forward_nat_across_scopes_at(
 fn lookup_forward_nat_across_scopes_inner(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forwarding: &ForwardingState,
     reply_key: &SessionKey,
     now_ns: Option<u64>,
 ) -> Option<ForwardSessionMatch> {
-    let local_match = now_ns
-        .map(|now| sessions.find_forward_nat_match_at(reply_key, now))
-        .unwrap_or_else(|| sessions.find_forward_nat_match(reply_key));
+    let egress_domain = |ifindex| {
+        crate::afxdp::forwarding::egress_routing_domain(forwarding, ifindex)
+    };
+    let local_match = if let Some(now) = now_ns {
+        sessions.find_forward_nat_match_at(reply_key, now, &egress_domain)
+    } else {
+        sessions.find_forward_nat_match(reply_key, &egress_domain)
+    };
     if now_ns.is_some()
         && local_match.is_none()
-        && sessions.find_forward_nat_match(reply_key).is_some()
+        && sessions
+            .find_forward_nat_match(reply_key, &egress_domain)
+            .is_some()
     {
         // A wheel-lazy local entry was found but failed the strict age gate.
         // Do not resurrect its shared-map clone on this worker.
@@ -1303,17 +1318,16 @@ fn lookup_forward_nat_across_scopes_inner(
             local.metadata.is_reverse,
             local.decision,
         ) {
-            return lookup_shared_forward_nat_match(shared_nat_sessions, reply_key).map(|entry| {
-                ForwardSessionMatch {
+            return lookup_shared_forward_nat_match(forwarding, shared_nat_sessions, reply_key)
+                .map(|entry| ForwardSessionMatch {
                     key: entry.key,
                     decision: entry.decision,
                     metadata: entry.metadata,
-                }
-            });
+                });
         }
         return Some(local);
     }
-    lookup_shared_forward_nat_match(shared_nat_sessions, reply_key).map(|entry| {
+    lookup_shared_forward_nat_match(forwarding, shared_nat_sessions, reply_key).map(|entry| {
         ForwardSessionMatch {
             key: entry.key,
             decision: entry.decision,

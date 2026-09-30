@@ -752,14 +752,13 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
 /// must return None instead of borrowing the MAIN session.
 ///
 /// Outcome pin over layered enforcement (no single layer is individually
-/// necessary here — verified: disabling the :3050 gate alone, or the
-/// shared_ops mixed-zero refusal alone, keeps this GREEN): the matcher
-/// guards (lookup.rs pass-2 refusal, shared_ops mixed-zero refusal) refuse
-/// the borrow, the :3050 gate backstops the synthesis site, and the sentinel
-/// domain has no install-table row so installation fails closed. What this
-/// tripwires is DOMAIN COLLAPSE: any regression that zeroes/truncates the
-/// reply's sentinel domain (the exact 0-hole this issue closes) makes the
-/// quarantined leg behave as the control and flips this RED.
+/// necessary here — verified: disabling the :3050 gate alone, or the local /
+/// shared exact-key-only quarantine check alone, keeps this GREEN): the matcher
+/// guards refuse cross-domain borrowing, the :3050 gate backstops the synthesis
+/// site, and the sentinel domain has no install-table row so installation fails
+/// closed. What this tripwires is DOMAIN COLLAPSE: any regression that
+/// zeroes/truncates the reply's sentinel domain (the exact 0-hole this issue
+/// closes) makes the quarantined leg behave as the control and flips this RED.
 /// Control: the identical flow with domain 0 resolves.
 #[test]
 fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
@@ -1640,6 +1639,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
     let hit = lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
+        &ForwardingState::default(),
         &reply_key,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -1653,15 +1653,10 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
     assert_eq!(hit.metadata, entry.metadata);
 }
 
-/// #9895 local leg: prove the zone-matching wrapper cannot admit a
-/// tuple-valid reply from another non-zero routing domain through the LOCAL
-/// `SessionTable` bucket. Uses an EMPTY shared map, so it exercises only the
-/// local `find_forward_nat_match` refusal; the populated-shared cell below
-/// covers the shared-map second probe, which stays vulnerable while this
-/// cell alone is GREEN. The direct `SessionTable` cells live in
-/// `session/reverse_domain_9895_tests.rs`.
+/// Local reverse lookup must use the forward egress routing domain while
+/// preserving the independent arrival-zone check.
 #[test]
-fn zone_matching_cross_domain_reply_is_refused_9895() {
+fn zone_matching_reverse_reply_uses_forward_egress_domain_11298() {
     const DOMAIN_A: u32 = 100_001;
     const DOMAIN_B: u32 = 100_002;
 
@@ -1672,7 +1667,7 @@ fn zone_matching_cross_domain_reply_is_refused_9895() {
     let metadata = test_metadata();
     assert_eq!(
         metadata.egress_zone, TEST_WAN_ZONE_ID,
-        "fixture must exercise the forward egress zone, not wrong-zone refusal"
+        "fixture must exercise the forward egress zone"
     );
     assert!(sessions.install_with_protocol(
         forward.clone(),
@@ -1683,49 +1678,93 @@ fn zone_matching_cross_domain_reply_is_refused_9895() {
         TCP_FLAG_ACK,
     ));
 
-    // The wire reply has the same reverse tuple, but arrived after routing
-    // resolved it in tenant B. It also arrives in the forward egress zone,
-    // making this the exact narrowed #9895 actor path rather than a wrong-zone
-    // rejection.
-    let mut reply = reverse_session_key(&forward, decision.nat);
-    reply.routing_domain = DOMAIN_B;
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(decision.resolution.egress_ifindex, DOMAIN_B);
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
-    let hit = lookup_forward_nat_across_scopes(
+
+    let mut reply_b = reverse_session_key(&forward, decision.nat);
+    reply_b.routing_domain = DOMAIN_B;
+    let hit = super::lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
-        &reply,
+        &forwarding,
+        &reply_b,
         crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
-    );
+    )
+    .expect("A-ingress/B-egress reply must resolve its local forward session");
+    assert_eq!(hit.key, forward);
+
+    let mut reply_a = reply_b.clone();
+    reply_a.routing_domain = DOMAIN_A;
     assert!(
-        hit.is_none(),
-        "#9895: zone-matching tenant-B reply must not land in tenant-A flow"
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_nat_sessions,
+            &forwarding,
+            &reply_a,
+            crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+        )
+        .is_none(),
+        "a zone-matching reply in the ingress domain must not bypass egress-domain admission"
+    );
+    let mut default_forward = test_key();
+    default_forward.routing_domain = 0;
+    default_forward.src_port = default_forward.src_port.wrapping_add(1);
+    let mut default_egress_decision = decision;
+    default_egress_decision.resolution.egress_ifindex += 1;
+    assert!(sessions.install_with_protocol(
+        default_forward.clone(),
+        default_egress_decision,
+        test_metadata(),
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+
+    let mut reply_b_to_default =
+        reverse_session_key(&default_forward, default_egress_decision.nat);
+    reply_b_to_default.routing_domain = DOMAIN_B;
+    assert!(
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_nat_sessions,
+            &forwarding,
+            &reply_b_to_default,
+            crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+        )
+        .is_none(),
+        "a B-domain reply must not borrow a default-keyed/default-egress local session"
+    );
+
+    let default_reply = reverse_session_key(&default_forward, default_egress_decision.nat);
+    assert!(
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_nat_sessions,
+            &forwarding,
+            &default_reply,
+            crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+        )
+        .is_some(),
+        "the matching default-domain local reply must still resolve"
     );
 }
 
-/// #9895 shared leg: force the production wrapper through
-/// `lookup_shared_forward_nat_match` with the victim forward published to the
-/// shared NAT map. The exact reverse probe resolves only for domain A; the
-/// zeroed second probe is what used to admit a zone-matching domain-B reply.
-/// This cell REDs until that shared fallback is guarded too.
+/// HA/shared reverse-NAT entries use the identical egress-domain predicate:
+/// asymmetric A->B replies match, while mixed-zero aliases do not.
 #[test]
-fn zone_matching_cross_domain_shared_reply_is_refused_9895() {
+fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
     const DOMAIN_A: u32 = 100_001;
     const DOMAIN_B: u32 = 100_002;
 
-    // The local table is intentionally empty: this isolates the shared leg.
     let sessions = SessionTable::new();
     let mut forward = test_key();
     forward.routing_domain = DOMAIN_A;
     let decision = test_decision();
     let metadata = test_metadata();
-    assert_eq!(
-        metadata.egress_zone, TEST_WAN_ZONE_ID,
-        "fixture must exercise the forward egress zone, not wrong-zone refusal"
-    );
-    assert!(
-        !metadata.fabric_ingress && !metadata.is_reverse,
-        "fixture must publish an ordinary forward, not a placeholder"
-    );
     let entry = SyncedSessionEntry {
         key: forward.clone(),
         decision,
@@ -1749,50 +1788,93 @@ fn zone_matching_cross_domain_shared_reply_is_refused_9895() {
         &shared_owner_rg_indexes,
         &entry,
     );
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(decision.resolution.egress_ifindex, DOMAIN_B);
 
-    // Sanity: the same-domain exact shared probe resolves, so the assertion
-    // below exercises the domain fallback rather than a broken publication.
-    let mut same_domain_reply = reverse_session_key(&forward, decision.nat);
-    same_domain_reply.routing_domain = DOMAIN_A;
-    let same_domain_hit = lookup_forward_nat_across_scopes(
+    let mut reply_b = reverse_session_key(&forward, decision.nat);
+    reply_b.routing_domain = DOMAIN_B;
+    let hit = super::lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
-        &same_domain_reply,
+        &forwarding,
+        &reply_b,
         crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
     )
-    .expect("same-domain shared reply must resolve");
-    assert_eq!(
-        same_domain_hit.key, forward,
-        "same-domain shared reply must demux to tenant A"
+    .expect("A-ingress/B-egress reply must resolve its shared forward session");
+    assert_eq!(hit.key, forward);
+
+    // The shared canonical alias is the mixed-zero path: a tenant-A forward
+    // with a domain-B egress must not be borrowed by a default-domain reply.
+    let mut reply_zero = reply_b.clone();
+    reply_zero.routing_domain = 0;
+    assert!(
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_nat_sessions,
+            &forwarding,
+            &reply_zero,
+            crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+        )
+        .is_none(),
+        "a mixed-zero shared alias must not be admitted without an egress-domain match"
     );
 
-    // Decisive: no local candidate exists, so the old implementation returned
-    // the shared entry through its unguarded domain-zeroed second probe.
-    let mut foreign_reply = reverse_session_key(&forward, decision.nat);
-    foreign_reply.routing_domain = DOMAIN_B;
-    let foreign_hit = lookup_forward_nat_across_scopes(
-        &sessions,
-        &shared_nat_sessions,
-        &foreign_reply,
-        crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+    // The opposite mixed-zero direction: a default-keyed forward egressing in
+    // the default domain cannot be borrowed by a domain-B reply.
+    let mut forward_zero = test_key();
+    forward_zero.routing_domain = 0;
+    let mut default_egress_decision = decision;
+    default_egress_decision.resolution.egress_ifindex += 1;
+    let zero_entry = SyncedSessionEntry {
+        key: forward_zero.clone(),
+        decision: default_egress_decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let shared_zero = Arc::new(Mutex::new(FastMap::default()));
+    let shared_sessions_zero = Arc::new(Mutex::new(FastMap::default()));
+    let shared_wire_zero = Arc::new(Mutex::new(FastMap::default()));
+    let owner_indexes_zero = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions_zero,
+        &shared_zero,
+        &shared_wire_zero,
+        &owner_indexes_zero,
+        &zero_entry,
     );
     assert!(
-        foreign_hit.is_none(),
-        "#9895 shared leg: zone-matching tenant-B reply must not land in \
-         tenant-A shared flow"
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_zero,
+            &forwarding,
+            &reverse_session_key(&forward_zero, default_egress_decision.nat),
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+        )
+        .is_some(),
+        "the default-domain control should match a default egress"
     );
-    // Control: the same published tenant-A entry still serves a reply that
-    // arrives in domain 0. Only the both-non-zero/different case is refused.
-    let mut zero_reply = reverse_session_key(&forward, decision.nat);
-    zero_reply.routing_domain = 0;
-    let zero_hit = lookup_forward_nat_across_scopes(
-        &sessions,
-        &shared_nat_sessions,
-        &zero_reply,
-        crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
-    )
-    .expect("shared non-zero-forward/zero-reply fallback must resolve");
-    assert_eq!(zero_hit.key, forward);
+    let mut reply_b_to_zero = reverse_session_key(&forward_zero, default_egress_decision.nat);
+    reply_b_to_zero.routing_domain = DOMAIN_B;
+    assert!(
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_zero,
+            &forwarding,
+            &reply_b_to_zero,
+            crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+        )
+        .is_none(),
+        "a domain-B reply must not borrow a default-keyed/default-egress shared session"
+    );
 }
 
 #[test]
@@ -1842,6 +1924,7 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
     let hit = lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
+        &ForwardingState::default(),
         &reply_key,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -1886,6 +1969,7 @@ fn lookup_forward_nat_across_scopes_ignores_fabric_wire_placeholder_without_shar
         lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
+        &ForwardingState::default(),
         &reply_key,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -1928,6 +2012,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
     let hit = lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
+        &ForwardingState::default(),
         &canonical_reply,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -1982,6 +2067,7 @@ fn shared_nat_fallback_does_not_borrow_main_for_quarantined_domain_11061() {
         lookup_forward_nat_across_scopes(
             &sessions,
             &shared_nat_sessions,
+            &ForwardingState::default(),
             &quarantined_reply,
             crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
         )
@@ -2076,8 +2162,12 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
         &shared_owner_rg_indexes,
         &entry,
     );
-    let alias_hit = lookup_shared_forward_nat_match(&shared_nat_sessions, &canonical_reply)
-        .expect("canonical reverse alias should be published");
+    let alias_hit = lookup_shared_forward_nat_match(
+        &ForwardingState::default(),
+        &shared_nat_sessions,
+        &canonical_reply,
+    )
+    .expect("canonical reverse alias should be published");
     assert_eq!(alias_hit.key, key);
 
     remove_shared_session(
@@ -2087,7 +2177,14 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
         &shared_owner_rg_indexes,
         &entry.key,
     );
-    assert!(lookup_shared_forward_nat_match(&shared_nat_sessions, &canonical_reply).is_none());
+    assert!(
+        lookup_shared_forward_nat_match(
+            &ForwardingState::default(),
+            &shared_nat_sessions,
+            &canonical_reply,
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -11205,6 +11302,7 @@ fn a_reverse_match_from_the_wrong_zone_is_rejected_7169() {
     let ok = lookup_forward_nat_across_scopes(
         &sessions,
         &shared,
+        &ForwardingState::default(),
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Zone(2),
     );
@@ -11216,6 +11314,7 @@ fn a_reverse_match_from_the_wrong_zone_is_rejected_7169() {
     let hijack = lookup_forward_nat_across_scopes(
         &sessions,
         &shared,
+        &ForwardingState::default(),
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Zone(7),
     );
@@ -11241,6 +11340,7 @@ fn an_unzoned_arrival_interface_matches_nothing_7169() {
     let out = lookup_forward_nat_across_scopes(
         &sessions,
         &shared,
+        &ForwardingState::default(),
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Unzoned,
     );
@@ -11264,6 +11364,7 @@ fn an_unconstrained_caller_is_exempt_7169() {
     let out = lookup_forward_nat_across_scopes(
         &sessions,
         &shared,
+        &ForwardingState::default(),
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
     );
@@ -13425,7 +13526,7 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
 
     let reply_key = reverse_session_key(&fwd_key, nat);
     assert!(
-        sessions.find_forward_nat_match(&reply_key).is_some(),
+        sessions.find_forward_nat_match(&reply_key, |_| reply_key.routing_domain).is_some(),
         "the reply tuple must find the forward NAT match BEFORE the arrival-zone \
          check runs — otherwise a `None` result says nothing about the zone (#9383)"
     );

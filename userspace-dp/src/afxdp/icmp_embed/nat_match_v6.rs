@@ -134,10 +134,9 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         hdr.src_port,
         hdr.dst_port,
         quoted_discriminator,
-        // #9162: the same domain the forward `embedded_key` carries. See the
-        // twin call in `nat_match_v4.rs` and `embedded_reply_key` for why a
-        // real domain is correct in BOTH the exact and the reverse-match
-        // index.
+        // #9162/#11298: the same domain the forward `embedded_key` carries.
+        // Exact probes need it; reverse-NAT probes compare it with the
+        // forward egress-interface domain after zeroing the bucket key.
         embedded_routing_domain,
     );
 
@@ -145,6 +144,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         lookup_forward_nat_across_scopes_at(
             ctx.sessions,
             ctx.shared_nat_sessions,
+            ctx.forwarding,
             &reverse_key,
             // #7169: no ingress constraint here, and the reason is not
             // that it is inconvenient. This path installs NO session —

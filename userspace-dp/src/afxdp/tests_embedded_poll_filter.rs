@@ -240,7 +240,14 @@ fn no_match_embedded_icmp_returns_none() {
 
     let mut sessions = SessionTable::new();
     // Don't install any sessions
-    let result = try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 1_000_000, 0);
+    let result = try_embedded_icmp_session_match_from_frame(
+        &frame,
+        meta,
+        &ForwardingState::default(),
+        &mut sessions,
+        1_000_000,
+        0,
+    );
     assert!(
         result.is_none(),
         "should return None when no session matches"
@@ -6790,7 +6797,14 @@ fn the_as_is_embedded_key_carries_the_discriminator_9031() {
     ));
 
     assert!(
-        try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 123_100_000_000, 0)
+        try_embedded_icmp_session_match_from_frame(
+            &frame,
+            meta,
+            &ForwardingState::default(),
+            &mut sessions,
+            123_100_000_000,
+            0,
+        )
             .is_some(),
         "#9031: the as-is embedded key found no session for a quoted GRE tunnel \
          whose session is keyed on exactly that tuple. SessionKey's Eq includes \
@@ -6880,7 +6894,14 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
     ));
 
     assert!(
-        try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 123_100_000_000, 0)
+        try_embedded_icmp_session_match_from_frame(
+            &frame,
+            meta,
+            &ForwardingState::default(),
+            &mut sessions,
+            123_100_000_000,
+            0,
+        )
             .is_none(),
         "#9031: a quote naming tunnel key 40001 matched the session for tunnel \
          key 40000. GRE has no L4 ports, so without the discriminator the two \
@@ -7357,7 +7378,14 @@ fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
     ));
 
     assert!(
-        try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 123_100_000_000, 0)
+        try_embedded_icmp_session_match_from_frame(
+            &frame,
+            meta,
+            &ForwardingState::default(),
+            &mut sessions,
+            123_100_000_000,
+            0,
+        )
             .is_some(),
         "#9298: the as-is embedded key found no session for a quoted PPTP data \
          packet whose session is keyed on exactly that tuple. SessionKey's Eq \

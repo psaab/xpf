@@ -573,18 +573,29 @@ impl SessionTable {
         Some((pair.forward, pair.reverse))
     }
 
-    pub fn find_forward_nat_match(&self, reply_key: &SessionKey) -> Option<ForwardSessionMatch> {
-        self.find_forward_nat_match_inner(reply_key, None)
+    pub fn find_forward_nat_match<F>(
+        &self,
+        reply_key: &SessionKey,
+        egress_routing_domain: F,
+    ) -> Option<ForwardSessionMatch>
+    where
+        F: Fn(i32) -> u32,
+    {
+        self.find_forward_nat_match_inner(reply_key, None, &egress_routing_domain)
     }
 
     /// Expiry-aware reverse-NAT probe used by packet admission and embedded
-    /// quote paths. The legacy accessor remains unaged for inspection callers.
-    pub fn find_forward_nat_match_at(
+    /// quote paths.
+    pub fn find_forward_nat_match_at<F>(
         &self,
         reply_key: &SessionKey,
         now_ns: u64,
-    ) -> Option<ForwardSessionMatch> {
-        self.find_forward_nat_match_inner(reply_key, Some(now_ns))
+        egress_routing_domain: F,
+    ) -> Option<ForwardSessionMatch>
+    where
+        F: Fn(i32) -> u32,
+    {
+        self.find_forward_nat_match_inner(reply_key, Some(now_ns), &egress_routing_domain)
     }
 
     /// Find the sole live, established forward session whose reverse tuple
@@ -628,53 +639,30 @@ impl SessionTable {
         })
     }
 
-    fn find_forward_nat_match_inner(
+    fn find_forward_nat_match_inner<F>(
         &self,
         reply_key: &SessionKey,
         now_ns: Option<u64>,
-    ) -> Option<ForwardSessionMatch> {
-        // #4399: `nat_reverse_index` is a 1:N multimap — a reverse-key
-        // collision (interface-mode SNAT / DNAT-to-shared-backend / NAT64 /
-        // non-bijective static NAT, the #1758 latent collision) parks BOTH
-        // colliding forward handles in one bucket. Walk the candidates and
-        // return the first whose forward session actually reverse-maps to
-        // THIS reply (validate-on-lookup): the pre-#4399 single-value map
-        // returned only the last-installed handle, so a displaced session's
-        // reply was mis-delivered or dropped. The common (bijective /
-        // non-colliding) case is a len-1 bucket — one validate, zero heap
-        // (SmallVec inline) — so the pool-mode-SNAT fast path is unchanged.
+        egress_routing_domain: &F,
+    ) -> Option<ForwardSessionMatch>
+    where
+        F: Fn(i32) -> u32,
+    {
+        // `nat_reverse_index` is a 1:N multimap — interface-mode SNAT,
+        // DNAT-to-shared-backend, NAT64, and non-bijective static NAT can all
+        // place multiple forward handles in one reverse-key bucket. Validate
+        // the tuple and routing identity for every candidate before selecting
+        // it; rejecting a candidate must not hide a later valid collision.
         //
-        // #7160 (#2387): the bucket is keyed domain-AGNOSTICALLY — the two
-        // reverse-match transforms zero `routing_domain` because a reply may
-        // legitimately arrive in a different routing domain than the forward
-        // direction resolved (this dataplane's transit route lookup is not
-        // VRF-isolated; see the `routing_domain` doc in session/key.rs). So the
-        // probe is zeroed to match, and the domain is instead spent on a
-        // PREFERENCE over the candidates:
+        // The reverse index is domain-agnostic because transit route lookup is
+        // not VRF-isolated. The reply's domain must therefore match the
+        // forward session's EGRESS interface domain, not its ingress/key
+        // domain. Domain 0 is an ordinary domain in this comparison, not a
+        // wildcard. Quarantined fabric domains retain their exact-key-only
+        // behavior and cannot borrow another session through the shared bucket.
         //
-        //   pass 1 — a candidate whose forward session carries the reply's OWN
-        //            domain. Two tenants whose flows are contained in their
-        //            routing instances land in one bucket and demux exactly
-        //            here, which is what keeps the reverse direction isolated
-        //            once the forward direction is.
-        //   pass 2 — a validating candidate from the default domain (0) is
-        //            still a legitimate fallback for a reply in a tenant
-        //            domain, and vice versa. A candidate from a DIFFERENT
-        //            non-zero domain is refused: accepting it would inject a
-        //            zone-matching tenant reply into this flow.
-        //
-        // The reverse index remains domain-agnostic so non-contained VRF
-        // flows keep forwarding, but no two non-zero domains can cross via
-        // pass 2.
-        //
-        // In a deployment with no routing-instance interface membership every
-        // key is domain 0, so pass 1 accepts exactly what pass 2 would and the
-        // walk is bit-identical to pre-#7160.
-        // Borrow, do not clone, in the domain-0 case — which is EVERY packet in
-        // a deployment with no routing-instance interface membership, on the
-        // established-session reverse path. `reverse_match_key` returns the key
-        // unchanged there, so materialising it would be a per-packet copy of a
-        // key this function used to take by reference.
+        // Borrow, do not clone, in the domain-0 case — `reverse_match_key`
+        // returns the key unchanged there, avoiding a per-packet key copy.
         let zeroed;
         let probe: &SessionKey = if reply_key.routing_domain == 0 {
             reply_key
@@ -683,7 +671,6 @@ impl SessionTable {
             &zeroed
         };
         let bucket = self.nat_reverse_index.get(probe)?;
-        let mut fallback: Option<ForwardSessionMatch> = None;
         for &handle in bucket.iter() {
             let Some(record) = self.entries.get(handle as usize) else {
                 continue;
@@ -697,41 +684,29 @@ impl SessionTable {
             {
                 continue;
             }
-            let forward_domain = record.key.routing_domain;
-            if forward_domain != reply_key.routing_domain
-                && (crate::session::is_quarantined_routing_domain(forward_domain)
-                    || crate::session::is_quarantined_routing_domain(reply_key.routing_domain))
+            let forward_key_domain = record.key.routing_domain;
+            if (crate::session::is_quarantined_routing_domain(forward_key_domain)
+                || crate::session::is_quarantined_routing_domain(reply_key.routing_domain))
+                && forward_key_domain != reply_key.routing_domain
             {
-                // A synthetic/quarantined identity may match an exact peer
-                // domain, but it must never borrow a mixed-zero session.
+                // Synthetic/quarantined identities may match their exact
+                // forward key, but must never borrow a mixed-domain session.
                 continue;
             }
-            if record.key.routing_domain == reply_key.routing_domain {
-                return Some(ForwardSessionMatch {
-                    key: record.key.clone(),
-                    decision: entry.decision,
-                    metadata: entry.metadata.clone(),
-                });
-            }
-            // A zero-domain endpoint is the legitimate non-contained fallback:
-            // preserve it when either side is the default instance. But a
-            // validating candidate from another non-zero domain is a
-            // cross-tenant collision and must not be remembered as pass 2.
-            // Reject before cloning the candidate, since this is the only
-            // candidate class that can never be returned.
-            if reply_key.routing_domain != 0 && record.key.routing_domain != 0 {
+            if !crate::session::is_quarantined_routing_domain(forward_key_domain)
+                && !crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
+                && egress_routing_domain(entry.decision.resolution.egress_ifindex)
+                    != reply_key.routing_domain
+            {
                 continue;
             }
-            let matched = ForwardSessionMatch {
+            return Some(ForwardSessionMatch {
                 key: record.key.clone(),
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
-            };
-            if fallback.is_none() {
-                fallback = Some(matched);
-            }
+            });
         }
-        fallback
+        None
     }
 
     /// #10130/#10674: session-gated discriminator for a flowless reply fragment.
@@ -741,13 +716,19 @@ impl SessionTable {
     /// without a global scan. A real-protocol probe still requires an exact
     /// protocol match; 255 is an explicit unknown-protocol wildcard and matches
     /// any real protocol. Candidates remain validated against live forward
-    /// records, expiry, and routing-domain compatibility.
-    pub fn reverse_nat_fragment_requires_translation(
+    /// records and expiry. A live tuple candidate remains fail-closed even when
+    /// its egress domain differs, because a missing fragment association cannot
+    /// safely carry out the required translation.
+    pub fn reverse_nat_fragment_requires_translation<F>(
         &self,
         reply_key: &L3ReverseKey,
         reply_routing_domain: u32,
         now_ns: u64,
-    ) -> bool {
+        egress_routing_domain: F,
+    ) -> bool
+    where
+        F: Fn(i32) -> u32,
+    {
         let index_key = l3_reverse_fragment_index_key(*reply_key);
         let Some(bucket) = self.l3_reverse_index.get(&index_key) else {
             return false;
@@ -772,7 +753,8 @@ impl SessionTable {
                 continue;
             }
             live_candidate = true;
-            let forward_domain = record.key.routing_domain;
+            let forward_domain =
+                egress_routing_domain(entry.decision.resolution.egress_ifindex);
             if forward_domain == reply_routing_domain {
                 return true;
             }
@@ -784,12 +766,9 @@ impl SessionTable {
             // `continue`, but that was unobservable (the live flag already
             // yields TRUE) — the session/tests.rs AMBIGUOUS|2 pin below
             // asserts this outcome, not a fence mechanism.
-            if forward_domain == 0 || reply_routing_domain == 0 {
-                return true;
-            }
         }
-        // A live candidate in another non-default domain is deliberately
-        // fail-closed: refusing to borrow it means dropping the ambiguous tail.
+        // A live candidate whose egress domain differs from the reply is still
+        // deliberately fail-closed: do not let the ambiguous tail bypass NAT.
         live_candidate
     }
 

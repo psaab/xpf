@@ -489,14 +489,11 @@ pub(in crate::afxdp::icmp_embed) fn embedded_reply_key(
         //     VRF (#9162), and for the same-family arms it silently disabled
         //     the #6474 outbound-SNAT reply-key fallback there.
         //   * The REVERSE-MATCH index — `find_forward_nat_match` and
-        //     `lookup_shared_forward_nat_match`. Neither requires a zeroed
-        //     probe from its caller: both zero it THEMSELVES
-        //     (`reverse_match_key`) to find the bucket, then spend the domain
-        //     on a preference — the local one as a two-pass walk, the shared
-        //     one as an exact-then-zeroed probe pair. Passing a real domain
-        //     there is therefore not merely safe, it is what restores the
-        //     per-tenant demux #7160 built; passing 0 forced the pre-#7160
-        //     fallback pass for every flow.
+        //     `lookup_shared_forward_nat_match`. Each zeroes the probe to find
+        //     the bucket, then compares this arriving domain against each
+        //     candidate's forward egress-interface domain. Passing the real
+        //     domain is required to reject mixed-zero mismatches while keeping
+        //     legitimate asymmetric ingress/egress routing.
         //
         // A deployment with no routing-instance interface membership resolves
         // 0 here, so its behaviour is bit-identical to before.

@@ -1044,6 +1044,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
 /// session and remains forwardable.
 #[inline]
 pub(super) fn session_gated_reverse_fragment_requires_nat_translation(
+    forwarding: &crate::afxdp::ForwardingState,
     sessions: &crate::session::SessionTable,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
@@ -1059,5 +1060,8 @@ pub(super) fn session_gated_reverse_fragment_requires_nat_translation(
         &reply_key,
         l3_flow.forward_key.routing_domain,
         now_ns,
+        |egress_ifindex| {
+            crate::afxdp::forwarding::egress_routing_domain(forwarding, egress_ifindex)
+        },
     )
 }

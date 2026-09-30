@@ -825,16 +825,15 @@ sync.
     `nat_match_v4.rs` / `nat_match_v6.rs` already did — that file previously
     contained ZERO `routing_domain` references while both siblings carried
     one, which was the issue's own positive control. Passing a real domain is
-    correct in BOTH index families: the exact lookups need it, and the
-    reverse-MATCH index (`find_forward_nat_match`,
-    `lookup_shared_forward_nat_match`) zeroes the probe ITSELF before hitting
-    its bucket and spends the domain on a per-tenant preference, so stamping
-    restores the #7160 demux there rather than breaking it. There is
-    deliberately NO domain-agnostic retry in the NAT64 arm: the only fallback
-    available would be a retry at domain 0, which is not "domain-agnostic" but
-    "the DEFAULT instance" — another tenant's sessions. A flow whose error
-    arrives in a different domain than the flow resolved declines to ordinary
-    flowless enforcement, exactly as before the stamp existed.
+    correct in BOTH index families: exact lookups need the arriving key domain,
+    while reverse-NAT lookups zero the probe and compare the reply domain with
+    each forward candidate's egress-interface domain (`#11298`). This permits
+    an A-ingress/B-egress reply in B without treating domain 0 as a wildcard.
+    The NAT64 companion arm remains an exact installed-session lookup: there is
+    deliberately NO domain-0 retry there, which would name the DEFAULT instance
+    rather than perform a domain-agnostic search. An error that does not match
+    the installed session in its arrival domain declines to ordinary flowless
+    enforcement, exactly as before the stamp existed.
 - `frame/` — packet parsing (L2 / L3 / L4), checksum helpers, TCP MSS
   clamp. `tests.rs` was relocated out of `mod.rs` in #1046 Phase 1.
   `headers.rs` holds the consolidated outer-header serializers (#1440).
