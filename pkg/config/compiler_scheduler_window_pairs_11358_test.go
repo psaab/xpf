@@ -35,8 +35,7 @@ func TestSchedulerRepeatedWindowPairRejectedOrWarned11358(t *testing.T) {
 			}
 			found := false
 			for _, warning := range cfg.Warnings {
-				if strings.Contains(warning, "#11358") && strings.Contains(warning, day) &&
-					strings.Contains(warning, "last value for each boundary") {
+				if strings.Contains(warning, "#11358") && strings.Contains(warning, day) {
 					found = true
 					break
 				}

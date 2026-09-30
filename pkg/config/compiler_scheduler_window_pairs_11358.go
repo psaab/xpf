@@ -55,7 +55,7 @@ func validateSchedulerWindowPairs11358(tree *ConfigTree, lenient bool) ([]string
 	warnings := make([]string, 0, len(keys))
 	for _, key := range keys {
 		message := fmt.Sprintf(
-			"scheduler %q %s has conflicting repeated time boundaries; xpf stores one window per day and compiles the last value for each boundary, so earlier window boundaries would be lost (#11358)",
+			"scheduler %q %s has conflicting repeated time boundaries; xpf stores one window per day, so conflicting repeats do not define a supported multiple-window representation and later definitions may replace earlier boundary values or whole windows (#11358)",
 			key.scheduler, key.day)
 		if !lenient {
 			return nil, fmt.Errorf("%s", message)
