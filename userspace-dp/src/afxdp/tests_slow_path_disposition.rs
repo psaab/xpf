@@ -4192,6 +4192,12 @@ fn t9_gre_inner_coarse_deny_remains_first_10585() {
     let mut snapshot = gre_to_self_snapshot();
     for zone in snapshot.zones.iter_mut() {
         zone.host_inbound_system_services.clear();
+        if zone.name == "wan" {
+            // #11054: admit the outer GRE while leaving inner IKE denied, so
+            // this test reaches the GRE-inner coarse-deny path it specifies.
+            zone.host_inbound_configured = true;
+            zone.host_inbound_system_services.push("gre".to_string());
+        }
     }
     let frame = build_gre_inner_ike_frame_10585(src, dst, 40_000, 500, 0x1058_500b, 0);
     let meta = gre_ike_meta_10585(&frame);
