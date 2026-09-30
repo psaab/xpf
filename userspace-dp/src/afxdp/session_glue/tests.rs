@@ -89,6 +89,21 @@ fn test_decision() -> SessionDecision {
     }
 }
 
+fn dynamic_neighbors_for_test_resolution() -> Arc<ShardedNeighborMap> {
+    let resolution = test_resolution();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    dynamic_neighbors.insert(
+        (
+            resolution.egress_ifindex,
+            resolution.next_hop.expect("test resolution has a next-hop"),
+        ),
+        NeighborEntry {
+            mac: resolution.neighbor_mac.expect("test resolution has a MAC"),
+        },
+    );
+    dynamic_neighbors
+}
+
 fn empty_filter(name: &str, family: &str) -> Arc<Filter> {
     Arc::new(Filter {
         id: 1,
@@ -752,14 +767,13 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
 /// must return None instead of borrowing the MAIN session.
 ///
 /// Outcome pin over layered enforcement (no single layer is individually
-/// necessary here — verified: disabling the :3050 gate alone, or the
-/// shared_ops mixed-zero refusal alone, keeps this GREEN): the matcher
-/// guards (lookup.rs pass-2 refusal, shared_ops mixed-zero refusal) refuse
-/// the borrow, the :3050 gate backstops the synthesis site, and the sentinel
-/// domain has no install-table row so installation fails closed. What this
-/// tripwires is DOMAIN COLLAPSE: any regression that zeroes/truncates the
-/// reply's sentinel domain (the exact 0-hole this issue closes) makes the
-/// quarantined leg behave as the control and flips this RED.
+/// necessary here — verified: disabling the :3050 gate alone, or the local /
+/// shared exact-key-only quarantine check alone, keeps this GREEN): the matcher
+/// guards refuse cross-domain borrowing, the :3050 gate backstops the synthesis
+/// site, and the sentinel domain has no install-table row so installation fails
+/// closed. What this tripwires is DOMAIN COLLAPSE: any regression that
+/// zeroes/truncates the reply's sentinel domain (the exact 0-hole this issue
+/// closes) makes the quarantined leg behave as the control and flips this RED.
 /// Control: the identical flow with domain 0 resolves.
 #[test]
 fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
@@ -1018,7 +1032,8 @@ fn cached_session_resolution_skips_fabric_redirect() {
         tx_vlan_id: 0,
     };
 
-    assert!(cached_session_resolution(&forwarding, cached).is_none());
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    assert!(cached_session_resolution(&forwarding, &dynamic_neighbors, cached).is_none());
 }
 
 #[test]
@@ -1640,6 +1655,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
     let hit = lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
+        &ForwardingState::default(),
         &reply_key,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -1653,15 +1669,10 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
     assert_eq!(hit.metadata, entry.metadata);
 }
 
-/// #9895 local leg: prove the zone-matching wrapper cannot admit a
-/// tuple-valid reply from another non-zero routing domain through the LOCAL
-/// `SessionTable` bucket. Uses an EMPTY shared map, so it exercises only the
-/// local `find_forward_nat_match` refusal; the populated-shared cell below
-/// covers the shared-map second probe, which stays vulnerable while this
-/// cell alone is GREEN. The direct `SessionTable` cells live in
-/// `session/reverse_domain_9895_tests.rs`.
+/// Local reverse lookup must use the forward egress routing domain while
+/// preserving the independent arrival-zone check.
 #[test]
-fn zone_matching_cross_domain_reply_is_refused_9895() {
+fn zone_matching_reverse_reply_uses_forward_egress_domain_11298() {
     const DOMAIN_A: u32 = 100_001;
     const DOMAIN_B: u32 = 100_002;
 
@@ -1672,7 +1683,7 @@ fn zone_matching_cross_domain_reply_is_refused_9895() {
     let metadata = test_metadata();
     assert_eq!(
         metadata.egress_zone, TEST_WAN_ZONE_ID,
-        "fixture must exercise the forward egress zone, not wrong-zone refusal"
+        "fixture must exercise the forward egress zone"
     );
     assert!(sessions.install_with_protocol(
         forward.clone(),
@@ -1683,49 +1694,93 @@ fn zone_matching_cross_domain_reply_is_refused_9895() {
         TCP_FLAG_ACK,
     ));
 
-    // The wire reply has the same reverse tuple, but arrived after routing
-    // resolved it in tenant B. It also arrives in the forward egress zone,
-    // making this the exact narrowed #9895 actor path rather than a wrong-zone
-    // rejection.
-    let mut reply = reverse_session_key(&forward, decision.nat);
-    reply.routing_domain = DOMAIN_B;
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(decision.resolution.egress_ifindex, DOMAIN_B);
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
-    let hit = lookup_forward_nat_across_scopes(
+
+    let mut reply_b = reverse_session_key(&forward, decision.nat);
+    reply_b.routing_domain = DOMAIN_B;
+    let hit = super::lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
-        &reply,
+        &forwarding,
+        &reply_b,
         crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
-    );
+    )
+    .expect("A-ingress/B-egress reply must resolve its local forward session");
+    assert_eq!(hit.key, forward);
+
+    let mut reply_a = reply_b.clone();
+    reply_a.routing_domain = DOMAIN_A;
     assert!(
-        hit.is_none(),
-        "#9895: zone-matching tenant-B reply must not land in tenant-A flow"
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_nat_sessions,
+            &forwarding,
+            &reply_a,
+            crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+        )
+        .is_none(),
+        "a zone-matching reply in the ingress domain must not bypass egress-domain admission"
+    );
+    let mut default_forward = test_key();
+    default_forward.routing_domain = 0;
+    default_forward.src_port = default_forward.src_port.wrapping_add(1);
+    let mut default_egress_decision = decision;
+    default_egress_decision.resolution.egress_ifindex += 1;
+    assert!(sessions.install_with_protocol(
+        default_forward.clone(),
+        default_egress_decision,
+        test_metadata(),
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+
+    let mut reply_b_to_default =
+        reverse_session_key(&default_forward, default_egress_decision.nat);
+    reply_b_to_default.routing_domain = DOMAIN_B;
+    assert!(
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_nat_sessions,
+            &forwarding,
+            &reply_b_to_default,
+            crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+        )
+        .is_none(),
+        "a B-domain reply must not borrow a default-keyed/default-egress local session"
+    );
+
+    let default_reply = reverse_session_key(&default_forward, default_egress_decision.nat);
+    assert!(
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_nat_sessions,
+            &forwarding,
+            &default_reply,
+            crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+        )
+        .is_some(),
+        "the matching default-domain local reply must still resolve"
     );
 }
 
-/// #9895 shared leg: force the production wrapper through
-/// `lookup_shared_forward_nat_match` with the victim forward published to the
-/// shared NAT map. The exact reverse probe resolves only for domain A; the
-/// zeroed second probe is what used to admit a zone-matching domain-B reply.
-/// This cell REDs until that shared fallback is guarded too.
+/// HA/shared reverse-NAT entries use the identical egress-domain predicate:
+/// asymmetric A->B replies match, while mixed-zero aliases do not.
 #[test]
-fn zone_matching_cross_domain_shared_reply_is_refused_9895() {
+fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
     const DOMAIN_A: u32 = 100_001;
     const DOMAIN_B: u32 = 100_002;
 
-    // The local table is intentionally empty: this isolates the shared leg.
     let sessions = SessionTable::new();
     let mut forward = test_key();
     forward.routing_domain = DOMAIN_A;
     let decision = test_decision();
     let metadata = test_metadata();
-    assert_eq!(
-        metadata.egress_zone, TEST_WAN_ZONE_ID,
-        "fixture must exercise the forward egress zone, not wrong-zone refusal"
-    );
-    assert!(
-        !metadata.fabric_ingress && !metadata.is_reverse,
-        "fixture must publish an ordinary forward, not a placeholder"
-    );
     let entry = SyncedSessionEntry {
         key: forward.clone(),
         decision,
@@ -1749,51 +1804,324 @@ fn zone_matching_cross_domain_shared_reply_is_refused_9895() {
         &shared_owner_rg_indexes,
         &entry,
     );
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(decision.resolution.egress_ifindex, DOMAIN_B);
 
-    // Sanity: the same-domain exact shared probe resolves, so the assertion
-    // below exercises the domain fallback rather than a broken publication.
-    let mut same_domain_reply = reverse_session_key(&forward, decision.nat);
-    same_domain_reply.routing_domain = DOMAIN_A;
-    let same_domain_hit = lookup_forward_nat_across_scopes(
+    let mut reply_b = reverse_session_key(&forward, decision.nat);
+    reply_b.routing_domain = DOMAIN_B;
+    let hit = super::lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
-        &same_domain_reply,
+        &forwarding,
+        &reply_b,
         crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
     )
-    .expect("same-domain shared reply must resolve");
-    assert_eq!(
-        same_domain_hit.key, forward,
-        "same-domain shared reply must demux to tenant A"
+    .expect("A-ingress/B-egress reply must resolve its shared forward session");
+    assert_eq!(hit.key, forward);
+
+    // The shared canonical alias is the mixed-zero path: a tenant-A forward
+    // with a domain-B egress must not be borrowed by a default-domain reply.
+    let mut reply_zero = reply_b.clone();
+    reply_zero.routing_domain = 0;
+    assert!(
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_nat_sessions,
+            &forwarding,
+            &reply_zero,
+            crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+        )
+        .is_none(),
+        "a mixed-zero shared alias must not be admitted without an egress-domain match"
     );
 
-    // Decisive: no local candidate exists, so the old implementation returned
-    // the shared entry through its unguarded domain-zeroed second probe.
-    let mut foreign_reply = reverse_session_key(&forward, decision.nat);
-    foreign_reply.routing_domain = DOMAIN_B;
-    let foreign_hit = lookup_forward_nat_across_scopes(
-        &sessions,
-        &shared_nat_sessions,
-        &foreign_reply,
-        crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+    // The opposite mixed-zero direction: a default-keyed forward egressing in
+    // the default domain cannot be borrowed by a domain-B reply.
+    let mut forward_zero = test_key();
+    forward_zero.routing_domain = 0;
+    let mut default_egress_decision = decision;
+    default_egress_decision.resolution.egress_ifindex += 1;
+    let zero_entry = SyncedSessionEntry {
+        key: forward_zero.clone(),
+        decision: default_egress_decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let shared_zero = Arc::new(Mutex::new(FastMap::default()));
+    let shared_sessions_zero = Arc::new(Mutex::new(FastMap::default()));
+    let shared_wire_zero = Arc::new(Mutex::new(FastMap::default()));
+    let owner_indexes_zero = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions_zero,
+        &shared_zero,
+        &shared_wire_zero,
+        &owner_indexes_zero,
+        &zero_entry,
     );
     assert!(
-        foreign_hit.is_none(),
-        "#9895 shared leg: zone-matching tenant-B reply must not land in \
-         tenant-A shared flow"
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_zero,
+            &forwarding,
+            &reverse_session_key(&forward_zero, default_egress_decision.nat),
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+        )
+        .is_some(),
+        "the default-domain control should match a default egress"
     );
-    // Control: the same published tenant-A entry still serves a reply that
-    // arrives in domain 0. Only the both-non-zero/different case is refused.
-    let mut zero_reply = reverse_session_key(&forward, decision.nat);
-    zero_reply.routing_domain = 0;
-    let zero_hit = lookup_forward_nat_across_scopes(
-        &sessions,
-        &shared_nat_sessions,
-        &zero_reply,
-        crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
-    )
-    .expect("shared non-zero-forward/zero-reply fallback must resolve");
-    assert_eq!(zero_hit.key, forward);
+    let mut reply_b_to_zero = reverse_session_key(&forward_zero, default_egress_decision.nat);
+    reply_b_to_zero.routing_domain = DOMAIN_B;
+    assert!(
+        super::lookup_forward_nat_across_scopes(
+            &sessions,
+            &shared_zero,
+            &forwarding,
+            &reply_b_to_zero,
+            crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+        )
+        .is_none(),
+        "a domain-B reply must not borrow a default-keyed/default-egress shared session"
+    );
 }
+
+/// Embedded quote rewriting has no reverse-session admission side effect: an
+/// off-path router may send an error outside the forward egress domain.
+#[test]
+fn embedded_quote_reverse_lookup_allows_off_path_domain_11298() {
+    const DOMAIN_A: u32 = 100_001;
+    const DOMAIN_B: u32 = 100_002;
+    const OFF_PATH_DOMAIN: u32 = 100_003;
+
+    let mut forward = test_key();
+    forward.routing_domain = DOMAIN_A;
+    let decision = test_decision();
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(decision.resolution.egress_ifindex, DOMAIN_B);
+    let mut quote_reply = reverse_session_key(&forward, decision.nat);
+    quote_reply.routing_domain = OFF_PATH_DOMAIN;
+
+    let mut local_sessions = SessionTable::new();
+    assert!(local_sessions.install_with_protocol(
+        forward.clone(),
+        decision,
+        test_metadata(),
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let empty_shared = Arc::new(Mutex::new(FastMap::default()));
+    let local_hit = lookup_forward_nat_for_icmp_quote_at(
+        &local_sessions,
+        &empty_shared,
+        None,
+        &forwarding,
+        &quote_reply,
+        1_000_000_000,
+    )
+    .expect("off-path ICMP quote must recover the local forward NAT tuple");
+    assert_eq!(local_hit.key, forward);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let owner_indexes = SharedSessionOwnerRgIndexes::default();
+    let entry = SyncedSessionEntry {
+        key: forward.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &owner_indexes,
+        &entry,
+    );
+    let shared_hit = lookup_forward_nat_for_icmp_quote_at(
+        &SessionTable::new(),
+        &shared_nat_sessions,
+        Some(&owner_indexes),
+        &forwarding,
+        &quote_reply,
+        1_000_000_000,
+    )
+    .expect("off-path ICMP quote must recover the shared forward NAT tuple");
+    assert_eq!(shared_hit.key, forward);
+}
+
+#[test]
+fn embedded_quote_reverse_lookup_rejects_cross_domain_collision_11298() {
+    const DOMAIN_A: u32 = 100_001;
+    const DOMAIN_B: u32 = 100_002;
+    const OFF_PATH_DOMAIN: u32 = 100_003;
+
+    let mut forward_a = test_key();
+    forward_a.routing_domain = DOMAIN_A;
+    let mut forward_b = forward_a.clone();
+    forward_b.routing_domain = DOMAIN_B;
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+        rewrite_src_port: Some(40_000),
+        ..NatDecision::default()
+    };
+    let mut decision = test_decision();
+    decision.nat = nat;
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    let mut quote_reply = reverse_session_key(&forward_a, nat);
+    quote_reply.routing_domain = OFF_PATH_DOMAIN;
+
+    let mut local_sessions = SessionTable::new();
+    for forward in [&forward_a, &forward_b] {
+        assert!(local_sessions.install_with_protocol(
+            forward.clone(),
+            decision,
+            test_metadata(),
+            1_000_000_000,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+    }
+    let empty_shared = Arc::new(Mutex::new(FastMap::default()));
+    assert!(
+        lookup_forward_nat_for_icmp_quote_at(
+            &local_sessions,
+            &empty_shared,
+            None,
+            &forwarding,
+            &quote_reply,
+            1_000_000_000,
+        )
+        .is_none(),
+        "an off-path quote must fail closed when two nonzero-domain tenants \
+         own the same translated tuple"
+    );
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let owner_indexes = SharedSessionOwnerRgIndexes::default();
+    for forward in [&forward_a, &forward_b] {
+        let entry = SyncedSessionEntry {
+            key: forward.clone(),
+            decision,
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        };
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &owner_indexes,
+            &entry,
+        );
+    }
+    assert!(
+        lookup_forward_nat_for_icmp_quote_at(
+            &SessionTable::new(),
+            &shared_nat_sessions,
+            Some(&owner_indexes),
+            &forwarding,
+            &quote_reply,
+            1_000_000_000,
+        )
+        .is_none(),
+        "the shared alias history must not select one tenant for an ambiguous quote"
+    );
+    let mut domain_zero_local = SessionTable::new();
+    let mut forward_zero = forward_a.clone();
+    forward_zero.routing_domain = 0;
+    assert!(domain_zero_local.install_with_protocol(
+        forward_zero,
+        decision,
+        test_metadata(),
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let mixed_shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mixed_shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mixed_shared_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mixed_owner_indexes = SharedSessionOwnerRgIndexes::default();
+    let mixed_entry = SyncedSessionEntry {
+        key: forward_a.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    publish_shared_session(
+        &mixed_shared_sessions,
+        &mixed_shared_nat_sessions,
+        &mixed_shared_wire_sessions,
+        &mixed_owner_indexes,
+        &mixed_entry,
+    );
+    let shared_unique_hit = lookup_forward_nat_for_icmp_quote_at(
+        &SessionTable::new(),
+        &mixed_shared_nat_sessions,
+        Some(&mixed_owner_indexes),
+        &forwarding,
+        &quote_reply,
+        1_000_000_000,
+    )
+    .expect("one shared tenant must remain recoverable for its unique translated tuple");
+    assert_eq!(shared_unique_hit.key, forward_a);
+    assert!(
+        matches!(
+            domain_zero_local.find_forward_nat_quote_match_at(&quote_reply, 1_000_000_000),
+            crate::session::ForwardNatQuoteLookup::Unique(hit)
+                if hit.key.routing_domain == 0
+        ),
+        "fixture must produce a unique default-domain local quote candidate"
+    );
+    let mixed_hit = lookup_forward_nat_for_icmp_quote_at(
+        &domain_zero_local,
+        &mixed_shared_nat_sessions,
+        Some(&mixed_owner_indexes),
+        &forwarding,
+        &quote_reply,
+        1_000_000_000,
+    );
+    assert!(
+        mixed_hit.is_none(),
+        "domain zero is a tenant too: do not choose between local default \
+         and a different shared routing domain; got {:?}",
+        mixed_hit.map(|hit| hit.key.routing_domain)
+    );
+
+}
+
 
 #[test]
 fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeholder() {
@@ -1842,6 +2170,7 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
     let hit = lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
+        &ForwardingState::default(),
         &reply_key,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -1886,6 +2215,7 @@ fn lookup_forward_nat_across_scopes_ignores_fabric_wire_placeholder_without_shar
         lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
+        &ForwardingState::default(),
         &reply_key,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -1928,6 +2258,7 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
     let hit = lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
+        &ForwardingState::default(),
         &canonical_reply,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -1982,6 +2313,7 @@ fn shared_nat_fallback_does_not_borrow_main_for_quarantined_domain_11061() {
         lookup_forward_nat_across_scopes(
             &sessions,
             &shared_nat_sessions,
+            &ForwardingState::default(),
             &quarantined_reply,
             crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
         )
@@ -2076,8 +2408,12 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
         &shared_owner_rg_indexes,
         &entry,
     );
-    let alias_hit = lookup_shared_forward_nat_match(&shared_nat_sessions, &canonical_reply)
-        .expect("canonical reverse alias should be published");
+    let alias_hit = lookup_shared_forward_nat_match(
+        &ForwardingState::default(),
+        &shared_nat_sessions,
+        &canonical_reply,
+    )
+    .expect("canonical reverse alias should be published");
     assert_eq!(alias_hit.key, key);
 
     remove_shared_session(
@@ -2087,7 +2423,14 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
         &shared_owner_rg_indexes,
         &entry.key,
     );
-    assert!(lookup_shared_forward_nat_match(&shared_nat_sessions, &canonical_reply).is_none());
+    assert!(
+        lookup_shared_forward_nat_match(
+            &ForwardingState::default(),
+            &shared_nat_sessions,
+            &canonical_reply,
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -2922,7 +3265,7 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, inactive_ha_runtime(0));
     let forwarding = test_forwarding_state();
-    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let dynamic_neighbors = dynamic_neighbors_for_test_resolution();
     apply_worker_commands(
         &commands,
         &mut sessions,
@@ -3351,7 +3694,7 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
         .expect("commands lock")
         .push_back(WorkerCommand::DemoteOwnerRGS { owner_rgs: vec![1] });
     let forwarding = test_forwarding_state();
-    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let dynamic_neighbors = dynamic_neighbors_for_test_resolution();
     let inactive_state = BTreeMap::from([(1, inactive_ha_runtime(0))]);
 
     apply_worker_commands(
@@ -5011,7 +5354,7 @@ fn apply_worker_commands_demote_owner_rg_rewrites_resolution_to_fabric_redirect(
         -1,
         &test_forwarding_state_with_fabric(),
         &ha_state,
-        &Arc::new(ShardedNeighborMap::new()),
+        &dynamic_neighbors_for_test_resolution(),
         0,
         &mut VecDeque::new(),
     );
@@ -10707,7 +11050,7 @@ fn install_synced_forward_5152(table: &mut SessionTable, key: &SessionKey, now_n
 
 #[test]
 fn refresh_owner_rgs_skips_hainactive_hold_clock_5152() {
-    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let neighbors = dynamic_neighbors_for_test_resolution();
     let forwarding = test_forwarding_state(); // NO fabric -> HAInactive survives
     let key = test_key();
     let then = 1_000_000_000u64;
@@ -11205,6 +11548,7 @@ fn a_reverse_match_from_the_wrong_zone_is_rejected_7169() {
     let ok = lookup_forward_nat_across_scopes(
         &sessions,
         &shared,
+        &ForwardingState::default(),
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Zone(2),
     );
@@ -11216,6 +11560,7 @@ fn a_reverse_match_from_the_wrong_zone_is_rejected_7169() {
     let hijack = lookup_forward_nat_across_scopes(
         &sessions,
         &shared,
+        &ForwardingState::default(),
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Zone(7),
     );
@@ -11241,6 +11586,7 @@ fn an_unzoned_arrival_interface_matches_nothing_7169() {
     let out = lookup_forward_nat_across_scopes(
         &sessions,
         &shared,
+        &ForwardingState::default(),
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Unzoned,
     );
@@ -11264,6 +11610,7 @@ fn an_unconstrained_caller_is_exempt_7169() {
     let out = lookup_forward_nat_across_scopes(
         &sessions,
         &shared,
+        &ForwardingState::default(),
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
     );
@@ -13425,7 +13772,7 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
 
     let reply_key = reverse_session_key(&fwd_key, nat);
     assert!(
-        sessions.find_forward_nat_match(&reply_key).is_some(),
+        sessions.find_forward_nat_match(&reply_key, |_| reply_key.routing_domain).is_some(),
         "the reply tuple must find the forward NAT match BEFORE the arrival-zone \
          check runs — otherwise a `None` result says nothing about the zone (#9383)"
     );
@@ -15507,4 +15854,232 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
         "materialize of a stale-zone hit must bump the fence-drop counter"
     );
     let _ = lookup;
+}
+
+/// #11315: a session hit must not serve a stored neighbor MAC the live table
+/// contradicts. Gateway VRRP failover A -> B: the stored decision still carries
+/// A while the live dynamic neighbor is B. The lookup must re-resolve to B,
+/// not serve A (the #3048 blackhole the session fast path bypassed).
+#[test]
+fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
+    let mut forwarding = ForwardingState::default();
+    let ifindex = 6;
+    let next_hop = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 0), 24).unwrap()),
+        host: Ipv4Addr::new(10, 0, 0, 0),
+        ifindex,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.egress.insert(
+        ifindex,
+        EgressInterface {
+            bind_ifindex: ifindex,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let mac_a = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let mac_b = [0x00, 0x11, 0x22, 0x33, 0x44, 0x66];
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    dynamic_neighbors.insert((ifindex, next_hop), NeighborEntry { mac: mac_a });
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
+        dst_ip: next_hop,
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
+            dst_ip: next_hop,
+            src_port: 5201,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    // Stored session decision as installed while A was live.
+    let stored = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: ifindex,
+            tx_ifindex: ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(next_hop),
+            neighbor_mac: Some(mac_a),
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    // Sanity: with A live, the cached fast path still serves A.
+    let served_a =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        served_a.neighbor_mac,
+        Some(mac_a),
+        "live A must still serve the cached decision"
+    );
+    // FAILED/INCOMPLETE removes the live row. The stored A must not survive
+    // that absence, and the first learn of B does not bump the shard epoch.
+    let epoch_before_remove = dynamic_neighbors
+        .snapshot_shard_epochs()
+        .epoch_for(&(ifindex, next_hop));
+    assert!(dynamic_neighbors.remove_if_present(&(ifindex, next_hop)));
+    let absent =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        absent.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "a missing live neighbor must not fall back to cached MAC A"
+    );
+    assert_eq!(absent.neighbor_mac, None);
+    let epoch_after_remove = dynamic_neighbors
+        .snapshot_shard_epochs()
+        .epoch_for(&(ifindex, next_hop));
+    assert_eq!(epoch_after_remove, epoch_before_remove);
+    dynamic_neighbors.insert_if_changed((ifindex, next_hop), NeighborEntry { mac: mac_b });
+    assert_eq!(
+        dynamic_neighbors
+            .snapshot_shard_epochs()
+            .epoch_for(&(ifindex, next_hop)),
+        epoch_after_remove,
+        "the first learn after removal does not bump the shard epoch"
+    );
+    // The same stored decision (stale A) must now re-resolve to live B.
+    let served_b =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        served_b.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "re-resolve after a MAC change must still forward"
+    );
+    assert_eq!(
+        served_b.neighbor_mac,
+        Some(mac_b),
+        "stale cached MAC A must re-resolve to live MAC B (#11315)"
+    );
+    // Direct helper check: the stale cached resolution is rejected.
+    assert!(
+        cached_session_resolution(&forwarding, &dynamic_neighbors, stored.resolution).is_none(),
+        "cached_session_resolution must reject a live-contradicted MAC"
+    );
+}
+
+/// #11315 v6 twin of the session-hit recheck above.
+#[test]
+fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
+    let mut forwarding = ForwardingState::default();
+    let ifindex = 6;
+    let next_hop: IpAddr = "2001:db8:1::2".parse().unwrap();
+    forwarding.connected_v6.push(ConnectedRouteV6 {
+        prefix: PrefixV6::from_net(Ipv6Net::new("2001:db8:1::".parse().unwrap(), 64).unwrap()),
+        host: "2001:db8:1::".parse().unwrap(),
+        ifindex,
+        tunnel_endpoint_id: 0,
+        table: "inet6.0".to_string(),
+    });
+    forwarding.egress.insert(
+        ifindex,
+        EgressInterface {
+            bind_ifindex: ifindex,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let mac_a = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let mac_b = [0x00, 0x11, 0x22, 0x33, 0x44, 0x66];
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    dynamic_neighbors.insert((ifindex, next_hop), NeighborEntry { mac: mac_a });
+    let src: IpAddr = "2001:db8:1::100".parse().unwrap();
+    let flow = SessionFlow {
+        src_ip: src,
+        dst_ip: next_hop,
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            src_ip: src,
+            dst_ip: next_hop,
+            src_port: 5201,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    let stored = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: ifindex,
+            tx_ifindex: ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(next_hop),
+            neighbor_mac: Some(mac_a),
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let served_a =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        served_a.neighbor_mac,
+        Some(mac_a),
+        "live A must still serve the cached decision"
+    );
+    let epoch_before_remove = dynamic_neighbors
+        .snapshot_shard_epochs()
+        .epoch_for(&(ifindex, next_hop));
+    assert!(dynamic_neighbors.remove_if_present(&(ifindex, next_hop)));
+    let absent =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        absent.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "a missing live neighbor must not fall back to cached MAC A (v6)"
+    );
+    assert_eq!(absent.neighbor_mac, None);
+    let epoch_after_remove = dynamic_neighbors
+        .snapshot_shard_epochs()
+        .epoch_for(&(ifindex, next_hop));
+    assert_eq!(epoch_after_remove, epoch_before_remove);
+    dynamic_neighbors.insert_if_changed((ifindex, next_hop), NeighborEntry { mac: mac_b });
+    assert_eq!(
+        dynamic_neighbors
+            .snapshot_shard_epochs()
+            .epoch_for(&(ifindex, next_hop)),
+        epoch_after_remove,
+        "the first learn after removal does not bump the shard epoch (v6)"
+    );
+    let served_b =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        served_b.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "re-resolve after a MAC change must still forward"
+    );
+    assert_eq!(
+        served_b.neighbor_mac,
+        Some(mac_b),
+        "stale cached MAC A must re-resolve to live MAC B (#11315 v6)"
+    );
+    assert!(
+        cached_session_resolution(&forwarding, &dynamic_neighbors, stored.resolution).is_none(),
+        "cached_session_resolution must reject a live-contradicted MAC (v6)"
+    );
 }

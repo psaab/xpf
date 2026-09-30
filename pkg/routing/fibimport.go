@@ -77,11 +77,11 @@ import (
 // kernel-selected routes in the helper FIB.
 //
 // The snapshot builder uses it in same-prefix arbitration: a configured route
-// at this preference or better remains the sole candidate, while a worse
-// configured fallback (for example a floating static at preference 250) is
-// retained beside the imported route. The Rust FIB's #2390 ascending-
-// preference tie-break then selects the imported route at 200. The value also
-// mirrors the admin distance FRR renders for DHCP-learned defaults.
+// at this preference or better remains sole; a worse configured fallback
+// (for example a floating static at preference 250) is retained beside the
+// imported route. The Rust FIB selects the first live preference tier, so a
+// later live configured backup remains usable if the imported route is
+// unresolved (#11316). The value also mirrors FRR's DHCP default distance.
 const LearnedRouteImportPreference = 200
 
 // mgmtVRFTableID is the kernel routing table backing the management VRF
@@ -115,6 +115,9 @@ type LearnedRoute struct {
 	TableID int
 	// Family is netlink.FAMILY_V4 or netlink.FAMILY_V6.
 	Family int
+	// Metric is the Linux route priority (RTA_PRIORITY). Lower metrics win
+	// within one learned prefix; snapshots keep the fixed import preference.
+	Metric int
 	// Destination is the route prefix in CIDR form. A kernel default route
 	// carries a nil Dst; it is normalised here to "0.0.0.0/0" or "::/0" so
 	// the consumer never has to special-case it. Getting this wrong would
@@ -262,6 +265,7 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 	return LearnedRoute{
 		TableID:     tableID,
 		Family:      family,
+		Metric:      r.Priority,
 		Destination: dst,
 		NextHops:    nextHops,
 		Protocol:    rtProtoName(r.Protocol),

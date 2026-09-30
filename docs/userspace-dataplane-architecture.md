@@ -1432,6 +1432,12 @@ Scope of the fallback:
   unenforced. If #4308 is implemented they acquire a defined unit — the native
   VLAN — and declining to zone them becomes wrong for that unit specifically,
   while staying right for every other contested case.
+  #11297 now fails closed before that fallback: untagged and priority-tagged
+  VID-0 frames are dropped at the common ingress boundary on tagged-only binds
+  that carry positive-VID units but no explicit untagged unit 0. Ordinary
+  untagged ports retain their physical fallback. Implementing #4308 must replace
+  this guard with explicit native-VLAN unit resolution.
+
 
   Junos zones logical UNITS, so a gap still runs the other way: `st0.0` and
   `st0.1` cannot be given DIFFERENT zones and both forward. Closing that needs

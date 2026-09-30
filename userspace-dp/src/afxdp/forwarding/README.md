@@ -25,7 +25,7 @@ code-motion — functions moved verbatim, visibility preserved
 | File | Purpose |
 |------|---------|
 | `mod.rs` | Submodule wiring + re-exports, and the small zone-pair / DNS-reply / ingress-logical-ifindex helpers (`zone_pair_for_flow*`, `zone_pair_ids_for_flow*`, `allow_unsolicited_dns_reply`, `resolve_ingress_logical_ifindex`). |
-| `fib.rs` | Core FIB resolution hot path: `classify_metadata`, `canonical_route_table`, packet-destination parse, the `lookup_forwarding_resolution*` table / next-table walk, per-family v4/v6 resolution + `_inner` helpers, ECMP hashing (`ecmp_hash_*`), route choice (`choose_v4_route`/`choose_v6_route`, `ResolvedRouteV4/V6`), `select_route_next_hop`, `tunnel_next_hop_live`, `no_route_resolution`, and the `DEFAULT_V4_TABLE`/`DEFAULT_V6_TABLE`/`MAX_NEXT_TABLE_DEPTH` constants. |
+| `fib.rs` | Core FIB resolution hot path: `classify_metadata`, `canonical_route_table`, packet-destination parse, the `lookup_forwarding_resolution*` table / next-table walk, per-family v4/v6 resolution + `_inner` helpers, ECMP hashing (`ecmp_hash_*`), preference-tier route selection (`select_v4_route`/`select_v6_route`, `select_route_next_hop_with_status`), `tunnel_next_hop_live`, `no_route_resolution`, and the `DEFAULT_V4_TABLE`/`DEFAULT_V6_TABLE`/`MAX_NEXT_TABLE_DEPTH` constants. |
 | `fabric.rs` | Fabric cross-chassis forwarding: link resolution/skip classification (`build_fabric_link_or_skip`, `resolve_fabric_links_from_snapshots`, the skip counters), fabric-redirect selection (`resolve_fabric_redirect*`, zone-encoded variants), `redirect_via_fabric_if_needed`, `prefer_local_forward_candidate_for_fabric_ingress`, and the shared kernel-neighbor-state classifier (`classify_neighbor_state`, `neighbor_state_usable`, `NeighborStateClass`). (The HA `cluster_peer_return_fast_path` was removed in #6478.) |
 | `nat.rs` | Source-NAT flow matching (`nat_scope_ctx_for_flow`, `match_source_nat_for_flow*`) and interface-NAT local resolution (`interface_nat_local_resolution*`, `should_block_tunnel_interface_nat_session_miss`). |
 | `ha.rs` | HA redundancy-group resolution enforcement (`enforce_ha_resolution*`, `cached_flow_decision_valid`, `finalize_new_flow_ha_resolution`), owner-RG attribution (`owner_rg_for_flow`, `owner_rg_for_resolution`), and demoted/activated owner-RG set diffs. |
@@ -138,7 +138,7 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
   (RFC 6164), and `/128` has no host bits.
 - **ECMP: all next-hops retained, dead ones skipped (#2389), per-FLOW
   spread (#2734).** A static route keeps EVERY configured next-hop
-  (`RouteEntryV4::next_hops: Vec<RouteNextHopV4>`). `select_route_next_hop`
+  (`RouteEntryV4::next_hops: Vec<RouteNextHopV4>`). `select_route_next_hop_with_status`
   prefers a candidate with a resolved neighbor (so a dead first next-hop
   no longer blackholes a route with a healthy alternate), then distributes
   across the live candidates by a spread hash. **#5161: liveness is
@@ -176,32 +176,40 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
   return the FIRST candidate for non-multipath call sites.
 - **Preference tie-break before insertion order (#2390).**
   `RouteSnapshot.preference` (Junos admin distance; lower = more
-  preferred, default 5) is carried on the wire and used as the secondary
-  sort key in `sort_routes` (descending prefix length, then ascending
-  preference). Two same-prefix routes in a table select by operator
-  preference, not insertion order; same-prefix/same-preference routes
-  keep insertion order (stable sort).
-- **Qualified-next-hop backups lower as distinct-preference standby
+  preferred, default 5) is carried on the wire and used after descending
+  prefix length. For the best matching prefix, the FIB visits distinct
+  preference tiers in ascending order and selects the first with a live
+  next-hop. Same-prefix/same-preference rows keep stable insertion order.
+  If no tier is live, the selector retains its preferred-tier no-live
+  fallback; a drivable gateway still uses the existing `MissingNeighbor`
+  path to resolve ARP/NDP.
+  - **Qualified-next-hop backups lower as distinct-preference standby
   routes (#5678).** A Junos floating static (a primary `next-hop` plus a
   `qualified-next-hop <gw> { preference N; }` backup, #3871) carries a
   PER-next-hop admin distance. The Go snapshot builder
-  (`pkg/dataplane/userspace/routes.go`) groups a route's next-hops by
-  their EFFECTIVE preference (the qualified `nh.Preference` when
-  `HasPreference`, else the route-level `Preference`) and emits ONE
-  `RouteSnapshot` per distinct preference. So the backup arrives as a
-  SEPARATE, higher-preference route for the same prefix — the #2390
-  tie-break above then selects the primary and holds the backup as a
-  standby entry (first-match lookup never reaches it while the primary
-  route is present). Before #5678 the builder collapsed every next-hop
-  onto ONE route-level-preference snapshot, so the backup was installed
-  as an equal-cost ECMP member and traffic load-balanced across both
-  tiers — a silent routing-semantics change. Next-hops that SHARE a
-  preference (a plain `next-hop [ a b ]` list, or qualified next-hops at
-  the same distance) still collapse to one equal-cost ECMP snapshot, so
-  real ECMP is unaffected. This mirrors the FRR renderer
+  (`pkg/dataplane/userspace/routes.go`) groups next-hops by their effective
+  preference and emits one `RouteSnapshot` per tier. When the preferred
+  primary gateway has no neighbor but a less-preferred backup gateway is
+  resolved, the FIB selects the backup (#11316); a resolved primary remains
+  preferred, and equal-preference next-hops still form ECMP. If neither
+  tier has a live gateway, the preferred drivable member still enters the
+  `MissingNeighbor` cold path to resolve ARP/NDP. Interface-only members
+  retain their existing live-on-up semantics (#5161), and tunnel members
+  keep type-aware liveness (#2923).
+  - **Preference-aware kernel gap-fill (#11323).** If the best configured
+  route is preference 200 or better, the importer omits a duplicate
+  same-prefix kernel route; otherwise it publishes preference 200 beside
+  the configured tiers. The FIB evaluates whichever tiers are present by
+  preference and liveness, so a live imported route wins at 200 while a
+  live floating-static backup remains usable when an earlier tier is
+  unresolved.
+  - Before #5678, the builder collapsed every next-hop onto one route-level
+  preference snapshot, installing the backup as an equal-cost ECMP member
+  and load-balancing across both tiers. Next-hops sharing a preference
+  (plain `next-hop [ a b ]` or qualified next-hops at the same distance)
+  still share one ECMP snapshot. This mirrors the FRR renderer
   (`pkg/frr/config_render.go`), which emits one `ip route` line per
-  next-hop at `dist = nh.Preference` when `HasPreference` else the
-  route-level distance.
+  next-hop at the qualified preference or route-level distance.
 
 All three wire fields (`routing_instance`, `next_hops`, `preference`)
 are additive: an old Rust helper ignores them (pre-fix behavior) and an
@@ -347,32 +355,34 @@ forward-direction collision.
   A complete but invalid stamp always drops. Legacy single-table deployments
   retain unstamped redirects and absent stamps retain their existing MAIN behavior.
 
-- **Why the ingress interface and nothing else.** The reverse key is built
-  by swapping the forward key's fields and never observes the reply, so the
-  domain must be a quantity a packet resolves from its own arrival. A PBR
-  `then routing-instance` ASSIGNMENT is not one — the reply ingresses on an
-  interface the PBR term never touches — so PBR-steered flows on an
-  `instance-type forwarding` instance with no member interfaces stay domain
-  0 in both directions, and #7924's strict-path rejection of overlap + PBR
-  remains what covers that shape.
-- **Forward isolation is exact; reverse matching is domain-PREFERRING and
-  fail-closed across non-zero domains.** The collision #7160 exists to close
-  is a forward-direction one — tenant B's packets hitting tenant A's
-  conntrack entry and inheriting its cached egress, NAT and **policy** verdict.
-  Forward lookups go through `key_to_handle` on the full key, so two tenants
-  now hold two entries. The reverse side cannot be keyed the same way: this
-  dataplane's transit route lookup is **not** VRF-isolated (see the PBR bullet
-  below), so a flow that ingresses on a routing-instance member interface and
-  egresses out of the default instance is a real, working configuration whose
-  reply resolves a DIFFERENT domain. `reverse_wire_key` /
-  `reverse_canonical_key` therefore build the reverse-match index with
-  `routing_domain: 0`, and `find_forward_nat_match` walks the (1:N) bucket in
-  two passes — preferring a candidate whose forward session carries the
-  reply's own domain, then allowing a pass-2 candidate only when either the
-  reply or candidate is domain 0. A validating candidate from a different
-  non-zero domain is refused, including through the shared NAT-map second
-  probe. Two contained tenants demux exactly; a non-contained flow keeps
-  forwarding when its two directions are the legitimate mixed-zero shape.
+- **Forward key is ingress; reverse admission is egress.** `SessionKey.routing_domain`
+  records the forward packet's ingress-interface identity, known when that key
+  is built. A PBR `then routing-instance` assignment is not an interface
+  routing-domain identity; reverse admission instead compares the arriving
+  reply's domain with the forward session's egress-interface domain. An
+  `instance-type forwarding` PBR target with no member interfaces therefore
+  does not stamp its route-table assignment into either interface domain, and
+  #7924's strict-path rejection of overlap + PBR remains what covers that
+  shape.
+- **Forward isolation is exact; reverse admission checks the forward egress
+  domain.** The collision #7160 exists to close is a forward-direction one —
+  tenant B's packets hitting tenant A's conntrack entry and inheriting its
+  cached egress, NAT and **policy** verdict. Forward lookups use `key_to_handle`
+  on the full key, so two tenants hold separate entries. Reverse lookup cannot
+  use that full domain as its bucket key: transit route lookup is **not**
+  VRF-isolated (see the PBR bullet below), so an A-ingress/B-egress flow can
+  receive its reply in B. `reverse_wire_key` / `reverse_canonical_key` therefore
+  build a domain-agnostic reverse-match index, and `find_forward_nat_match`
+  compares the arriving reply domain with each candidate's
+  `decision.resolution.egress_ifindex` routing domain. Domain 0 is strict, not a
+  wildcard: mixed-zero replies match only when the forward egress actually
+  resolves to the arriving domain. This same predicate guards local and
+  HA/shared NAT entries; the arrival-zone check remains an independent gate.
+  Same-family embedded-ICMP quote rewriting is the deliberate exception: its
+  tuple-only lookup creates no session, and an off-path router may send the
+  error from a different domain. If multiple routing domains own the same
+  translated tuple, quote matching fails closed instead of selecting a tenant
+  by reverse-index order.
   `forward_wire_key`, `translated_session_key` and `reverse_session_key` still
   PRESERVE the domain — they name another key of the same direction, or
   navigate between the two halves of one flow.

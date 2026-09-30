@@ -1850,6 +1850,7 @@ pub(crate) fn worker_loop(
                         &mut shared_recycles,
                         &shared_runtime,
                         &shared_sessions,
+                        &shared_owner_rg_indexes,
                         &deltas,
                         Some(&mut sessions),
                     );
@@ -1966,6 +1967,7 @@ pub(crate) fn worker_loop(
                     &mut shared_recycles,
                     &shared_runtime,
                     &shared_sessions,
+                    &shared_owner_rg_indexes,
                     deltas,
                     Some(&mut sessions),
                 );
@@ -2612,6 +2614,7 @@ pub(crate) fn worker_loop(
                 &mut shared_recycles,
                 &shared_runtime,
                 &shared_sessions,
+                &shared_owner_rg_indexes,
                 &deltas,
                 Some(&mut sessions),
             );

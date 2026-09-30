@@ -477,8 +477,8 @@ pub(in crate::afxdp::icmp_embed) fn embedded_reply_key(
         // lookup, which is all this function produces. #9271 settled the same
         // distinction on the install side; this is the lookup side of it.
         //
-        // Both kinds of index this key reaches take a real domain correctly,
-        // and each for its own reason:
+        // This key reaches two index families, and retaining its actual
+        // arrival domain matters for both:
         //
         //   * EXACT lookups — `lookup_session_across_scopes`, whose four
         //     probes (`key_to_handle`, `forward_wire_index`, and the two
@@ -489,14 +489,13 @@ pub(in crate::afxdp::icmp_embed) fn embedded_reply_key(
         //     VRF (#9162), and for the same-family arms it silently disabled
         //     the #6474 outbound-SNAT reply-key fallback there.
         //   * The REVERSE-MATCH index — `find_forward_nat_match` and
-        //     `lookup_shared_forward_nat_match`. Neither requires a zeroed
-        //     probe from its caller: both zero it THEMSELVES
-        //     (`reverse_match_key`) to find the bucket, then spend the domain
-        //     on a preference — the local one as a two-pass walk, the shared
-        //     one as an exact-then-zeroed probe pair. Passing a real domain
-        //     there is therefore not merely safe, it is what restores the
-        //     per-tenant demux #7160 built; passing 0 forced the pre-#7160
-        //     fallback pass for every flow.
+        //     `lookup_shared_forward_nat_match` zero the probe to find the
+        //     bucket. Ordinary reverse-session admission then compares the
+        //     arriving domain with each forward candidate's egress domain,
+        //     rejecting mixed-zero mismatches while preserving asymmetry.
+        //     Same-family embedded quotes use a separate tuple-only lookup:
+        //     they rewrite the quoted packet but install no session, and an
+        //     off-path router may send the error from another domain.
         //
         // A deployment with no routing-instance interface membership resolves
         // 0 here, so its behaviour is bit-identical to before.

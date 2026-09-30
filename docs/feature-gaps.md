@@ -30,7 +30,7 @@ Last updated: 2026-05-24
 | ALG Enhancements | 9 | 0 | 0 | 9 |
 | Security Logging Enhancements | 0 | 0 | 0 | 0 |
 | PKI / Certificates | 3 | 1 | 0 | 4 |
-| Routing Enhancements | 10 | 3 | 0 | 13 |
+| Routing Enhancements | 11 | 3 | 0 | 14 |
 | VPN Enhancements | 10 | 0 | 0 | 10 |
 | HA Enhancements | 0 | 2 | 0 | 2 |
 | Firewall Filter Enhancements | 2 | 1 | 0 | 3 |
@@ -40,7 +40,7 @@ Last updated: 2026-05-24
 | Interface Enhancements | 1 | 1 | 0 | 2 |
 | System Enhancements | 6 | 0 | 1 | 7 |
 | Miscellaneous | 6 | 0 | 0 | 6 |
-| **TOTAL** | **121** | **19** | **1** | **141** |
+| **TOTAL** | **122** | **19** | **1** | **142** |
 
 > **Count note (#7971).** The System Enhancements row was recounted directly
 > against that section's own rows before being incremented (5 Missing + 1
@@ -543,12 +543,24 @@ xpf uses strongSwan for IPsec. Basic certificate-auth IKE generation exists, but
 
 ## 14. Routing Enhancements
 
-**`routing-options rib <name>` scoping (#7512).** Static routes are implemented
-in the IPv4 and IPv6 unicast tables only — bare `inet.0` / `inet6.0` at the top
-level, and `<instance>.inet.0` / `<instance>.inet6.0` inside a routing instance.
-A route scoped to any OTHER table is **not installed**, and the commit now says
-so: `validateUnhandledRibWarnings` emits a WARN naming the rib and how many
-routes were discarded.
+**Global interface-route rib-group import into routing instances (#11311).**
+The Juniper FBF recipe configures
+`routing-options interface-routes rib-group inet|inet6 <group>` to copy
+main-table connected routes into selected routing-instance tables. xpf's
+implemented rib-group path supports the opposite direction: per-instance
+connected routes imported into main. It does not install global imports in the
+kernel or userspace FIB, so the global selector is rejected at strict commit
+and warned on tolerant load rather than silently steering traffic to an
+instance default route. Full support is a feature gap requiring cross-plane
+route derivation and kernel/userspace forwarding parity, not a defect in the
+supported per-instance path.
+
+**`routing-options rib <name>` scoping (#7512, #11335).** Static routes are
+implemented in the IPv4 and IPv6 unicast tables only — bare `inet.0` /
+`inet6.0` at global scope, and `<instance>.inet.0` / `<instance>.inet6.0`
+inside the matching routing instance. Routes in unsupported tables or selectors
+aimed at a different scope are **not installed**; `validateUnhandledRibWarnings`
+emits a WARN naming the rib and how many routes were discarded.
 
 Before #7512 the compiler matched only the inet6 tables and every other rib name
 fell through with no branch and no `else`, so `rib inet.0 { static { route
@@ -557,6 +569,11 @@ and the natural thing to write beside a `rib inet6.0` block — compiled to
 NOTHING, committed clean and emitted no warning. An operator authoring the
 symmetric pair got their IPv6 default route and silently lost the IPv4 one, with
 `show configuration` rendering the stanza back verbatim.
+
+The scope is enforced in both directions: `rib B.inet.0` inside instance A, a
+bare `rib inet.0` inside A, and `rib A.inet.0` at global scope all warn and
+discard their routes rather than filing them into the enclosing table. Use
+`A.inet.0` / `A.inet6.0` under instance A, and the bare table names globally.
 
 The warning is deliberately WARN and not reject: `rib inet.2` is valid Junos that
 xpf does not implement, and a box may already hold a committed config containing
@@ -609,6 +626,7 @@ was emitted, covering interface-level AND unit-level records.
 |---------|-------------------|-------------|----------|--------|
 | **BFD** | `protocols ospf area ... interface ... bfd-liveness-detection ...` | Bidirectional Forwarding Detection for sub-second failure detection on routing adjacencies. FRR supports BFD natively. | High | **Done** -- OSPF (v2) and OSPFv3 (`protocols ospf3 area ... interface ... bfd-liveness-detection`, renders `ipv6 ospf6 bfd`, #2474) BFD with interval/multiplier via FRR profiles, IS-IS BFD support with optional interval/multiplier, BGP BFD multiplier configurable. |
 | **BGP Import Policy** | `protocols bgp ... import <policy>` | Inbound route filtering on a BGP peer (`route-map ... in`). | Medium | **Done (#2490)** — `Import []string` parsed at global/group/neighbor scope (symmetric to `export`), rendered `neighbor <X> route-map <name> in` per neighbor/AF (`bgpEffectiveImport` + `lastNonEmpty`, most-specific-wins). Import has NO redistribute equivalent, so a ref MUST be a defined policy-statement: an undefined/bare-token ref is rejected at commit (lenient-warn on load/peer-sync) and SKIPPED at render (`isDefinedPolicyStatement` guard), never emitting a dangling `route-map in` (the #2473 permit-all leak, inbound side). The same `isDefinedPolicyStatement` guard was added to BOTH `route-map out` emit sites (#2539) so a per-neighbor export — newly parseable as of #2490 — cannot leak permit-all OUTBOUND on the lenient path either. Before #2490 the `import` clause parsed to nothing — a silent no-op. |
+| **Global Interface-Route Rib-Group Import** | `routing-options interface-routes rib-group inet|inet6 <group>` | Import global connected prefixes from main into routing-instance tables for filter-based forwarding; the kernel and userspace FIB import path is not implemented. Per-instance import into main remains supported. | Medium | Missing (#11311: strict commit rejects and tolerant load warns) |
 | **Graceful Restart** | `routing-options graceful-restart` | Non-stop routing during control plane restart. Keep forwarding while protocols reconverge. FRR supports GR. | Medium | Missing (FRR has GR but xpf doesn't configure it) |
 | **Aggregate Routes** | `routing-options aggregate route ...` | Aggregate (summary) routes with policy control, different from generate routes in contributing route behavior | Medium | Partial (generate routes implemented but aggregate semantics differ) |
 | **Martian Addresses** | `routing-options martians ... allow/exact/orlonger` | Configure additional martian (reserved) address filtering or allow specific martians | Low | Missing |

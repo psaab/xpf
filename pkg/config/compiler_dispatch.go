@@ -44,7 +44,7 @@ func compileSections(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 				return fmt.Errorf("applications: %w", err)
 			}
 		case "routing-options":
-			if err := compileRoutingOptions(node, &cfg.RoutingOptions); err != nil {
+			if err := compileRoutingOptions(node, &cfg.RoutingOptions, ""); err != nil {
 				return fmt.Errorf("routing-options: %w", err)
 			}
 		case "protocols":

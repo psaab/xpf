@@ -105,6 +105,7 @@ routing-instances { ISP-B { instance-type forwarding;
 func TestVirtualRouterProtocolsStillAccepted9409(t *testing.T) {
 	text := fwdBase9409 + `
 routing-instances { ISP-B { instance-type virtual-router;
+    interface ge-0/0/1.0;
     protocols { ospf { area 0.0.0.0 { interface ge-0/0/1.0; } } } } }`
 	cfg, err := compile9409(t, text)
 	if err != nil {

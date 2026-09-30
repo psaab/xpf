@@ -40,15 +40,14 @@ type greOuterKey struct {
 // unimplemented gate. A half-configured tunnel is already declined by the
 // emitter and never reaches the dataplane, so it cannot collide.
 // Key semantics (mirroring the decap predicate exactly):
-//   - Key 0 is "unkeyed" (types_routing.go), but it is still part of the
-//     key: two unkeyed tunnels on one outer pair both match every
-//     unkeyed frame and collide.
+//   - Key 0 is "unkeyed" (types_routing.go), and two unkeyed tunnels on
+//     one outer pair both match K-clear frames and collide.
 //   - A keyed tunnel and an unkeyed tunnel on one outer pair do NOT
 //     collide: a keyed frame matches only the keyed row
 //     (`key_present && endpoint.key == key`) and an unkeyed frame matches
-//     only the unkeyed row (`!key_present || key == 0`). The Rust comment
-//     calls this out as disambiguated-by-key, and the gate agrees —
-//     rejecting it would forbid a working shape.
+//     only the unkeyed row (`!key_present`). K-present with value zero
+//     matches neither row: config cannot express a keyed-zero endpoint.
+//     Rejecting keyed/unkeyed pairs would forbid a working shape.
 //   - Direction matters: (A,B) and (B,A) are different tunnels in
 //     different decap buckets and never collide.
 //   - Transport instance matters (#10653): same triple in DIFFERENT

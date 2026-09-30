@@ -256,6 +256,94 @@ pub(super) fn evaluate_non_pbr_input_filter(
     }
 }
 
+/// Side-effect-free input-filter precheck for the screen stage.
+///
+/// The poll loop keeps the normal counted/logged filter evaluation at its
+/// established enforcement site. This verdict-only walk stops packets the
+/// input filter rejects from mutating screen sketches or triggering a
+/// SYN-cookie reply first.
+#[inline]
+pub(super) fn input_filter_would_deny_before_screen(
+    forwarding: &ForwardingState,
+    packet_frame: &[u8],
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+) -> bool {
+    let flowless = flow.is_none();
+    let flowless_flow = if flowless {
+        crate::afxdp::frame::l3_enforcement_flow_from_frame(packet_frame, meta)
+    } else {
+        None
+    };
+    let Some(flow) = flow.or(flowless_flow.as_ref()) else {
+        return false;
+    };
+    let ingress_ifindex = resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    let filter = if is_v6 {
+        forwarding
+            .filter_state
+            .iface_filter_v6_fast
+            .get(&ingress_ifindex)
+    } else {
+        forwarding
+            .filter_state
+            .iface_filter_v4_fast
+            .get(&ingress_ifindex)
+    };
+    let Some(filter) = filter else {
+        return false;
+    };
+    let mut extra = term_match_extra_from_frame(packet_frame, meta);
+    if flowless {
+        // The L3 enforcement tuple substitutes zero ports; they are not wire
+        // values and must not make positive/negated port terms match.
+        extra.ports_unknown = true;
+    }
+    if crate::filter::filter_ref_static_verdict(
+        filter,
+        flow.src_ip,
+        flow.dst_ip,
+        meta.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        extra,
+    ) != crate::filter::FilterAction::Accept
+    {
+        return true;
+    }
+
+    // The ordinary non-routing walk deliberately defers a matching
+    // `routing-instance` term. Include its independent verdict so a PBR
+    // discard/reject is excluded before the normal counted evaluator runs.
+    let Some(route_filter) = crate::filter::interface_filter_route_lookup_affecting(
+        &forwarding.filter_state,
+        ingress_ifindex,
+        is_v6,
+    ) else {
+        return false;
+    };
+    let eval_protocol = crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
+    crate::filter::evaluate_filter_ref_routing_instance_uncounted(
+        route_filter,
+        flow.src_ip,
+        flow.dst_ip,
+        eval_protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        extra,
+    )
+    .is_some_and(|result| result.action != crate::filter::FilterAction::Accept)
+}
+
+
 #[cold]
 #[inline(never)]
 pub(super) fn evaluate_non_pbr_input_filter_log_only(
@@ -414,25 +502,35 @@ pub(super) fn collect_revoked_flow_cache_keys(
 ///
 /// A plain `routing-instance` term is a permit, not a session revocation
 /// (#8114). It still changes the route lookup, though, and the old hit path
-/// kept using the cached MAIN resolution forever after a config commit added
-/// the term. This helper runs only for the one stale `(generation, ingress)`
-/// stamp and resolves the target in the matched table.
+/// kept using the cached MAIN resolution forever after a config commit added it.
+/// For static route filters, a stale `(generation, ingress)` stamp triggers this
+/// check; per-packet predicates are also evaluated on every HIT.
 ///
-/// The result is consumed by the poll caller as a pair teardown: changing a
-/// route table can also change the egress zone and the reverse companion's
-/// route, so the safe cutover is to discard this hit, evict the pair, and let
-/// the next packet take the ordinary session-miss path under the new snapshot.
-/// The desired `(domain, check)` is compared with the install stamp, so an
-/// unrelated generation bump does not churn an unchanged steer. A removed PBR
-/// term maps back to MAIN `(0, 0)` and is handled as a route change too.
+/// A FORWARD hit whose desired identity changed is consumed by the poll caller
+/// as a pair teardown: changing a route table can also change the egress zone
+/// and the reverse companion's route, so the safe cutover is to discard this
+/// hit, evict the pair, and let the next packet take the ordinary session-miss
+/// path under the new snapshot.
+///
+/// #11324: a reverse companion is stamped from the FORWARD ingress native
+/// table (#10312), so it must not derive its fallback identity from the REPLY
+/// ingress (domain/filter). That makes cross-domain replies compare against
+/// their forward-stamped native identity. If the reply's own ingress has a
+/// matching `then routing-instance` term, the reverse hit is STEERED in that
+/// table instead of being discarded and pair-revoked; the caller updates only
+/// the reverse decision and keeps the pair alive.
 #[derive(Clone, Debug)]
 pub(super) struct SessionHitPbrRouteRevalidation {
     pub(super) canonical_key: crate::session::SessionKey,
     /// `None` for a resolved hit that this worker does not hold locally:
     /// derive/drop the packet, but never hand teardown a key that names no
-    /// entry (#8114 sessionless contract).
+    /// entry (#8114 sessionless contract). Always `None` for a reverse steer.
     pub(super) revoked_key: Option<crate::session::SessionKey>,
     pub(super) resolution: ForwardingResolution,
+    /// #11324: reverse-route transition, not a pair-revocation request.
+    pub(super) steer_only: bool,
+    pub(super) install_table_domain: u32,
+    pub(super) install_table_check: u32,
 }
 
 /// #10630: the steady-state pin predicate for a TUNNELED stored decision.
@@ -515,6 +613,7 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
     decision: SessionDecision,
+    is_reverse: bool,
 ) -> Option<SessionHitPbrRouteRevalidation> {
     let ingress_ifindex = resolve_ingress_logical_ifindex(
         forwarding,
@@ -563,13 +662,36 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
     // that fallback here so an unrelated generation bump does not tear down an
     // unchanged native-RI session. An unresolvable native RI is terminal, not
     // MAIN: it must fail closed on this hit just as it does on a miss.
-    let native_route_table = || {
-        crate::afxdp::forwarding::native_route_table_for_flow_target(
-            forwarding,
-            flow.forward_key.routing_domain,
+    // #11324: a reverse companion's routing-domain key is the original
+    // forward ingress identity. Its reply arrival must not become the native
+    // fallback, especially when a MAIN reply arrives over an RI-member or
+    // vice versa. A shared/sessionless reverse hit has no canonical local key,
+    // so its stamped identity is the only trustworthy native identity.
+    let native_flow_domain = if is_reverse {
+        if no_local_entry {
+            decision.install_table_domain
+        } else {
+            canonical_key.routing_domain
+        }
+    } else {
+        flow.forward_key.routing_domain
+    };
+    let native_ingress = if is_reverse {
+        (0, 0, None)
+    } else {
+        (
             meta.ingress_ifindex as i32,
             meta.ingress_vlan_id,
             ingress_zone_override,
+        )
+    };
+    let native_route_table = || {
+        crate::afxdp::forwarding::native_route_table_for_flow_target(
+            forwarding,
+            native_flow_domain,
+            native_ingress.0,
+            native_ingress.1,
+            native_ingress.2,
             flow.dst_ip,
         )
     };
@@ -654,17 +776,21 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
     // PBR retargets too: (0,0)==(0,0)->None, and the ordinary evaluator
     // returns None for PBR Accept, so the stale tunnel persists until session
     // churn. Compare the FRESH tunnel resolution instead: re-resolve the
-    // target in the desired table and revoke unless the live table still
-    // delivers the same endpoint. There is deliberately NO identity fast-path
+    // target in the desired table. A FORWARD hit revokes unless the live table
+    // still delivers the same endpoint; a REVERSE hit updates only its own
+    // route decision (#11324). There is deliberately NO identity fast-path
     // here — desired (0,0) (PBR removed) equaling installed (0,0) must NOT
     // pin, because MAIN may resolve nothing like the stored tunnel.
     if decision.resolution.tunnel_endpoint_id != 0 {
         let target = crate::afxdp::session_glue::resolution_target_for_session(flow, decision);
         if native_unresolvable {
             return Some(SessionHitPbrRouteRevalidation {
-                revoked_key: (!no_local_entry).then_some(canonical_key.clone()),
+                revoked_key: (!no_local_entry && !is_reverse).then_some(canonical_key.clone()),
                 canonical_key,
                 resolution: crate::afxdp::forwarding::no_route_resolution(Some(target)),
+                steer_only: is_reverse,
+                install_table_domain: desired_identity.0,
+                install_table_check: desired_identity.1,
             });
         }
         let fresh =
@@ -678,17 +804,23 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
             return None;
         }
         return Some(SessionHitPbrRouteRevalidation {
-            revoked_key: (!no_local_entry).then_some(canonical_key.clone()),
+            revoked_key: (!no_local_entry && !is_reverse).then_some(canonical_key.clone()),
             canonical_key,
             resolution: fresh,
+            steer_only: is_reverse,
+            install_table_domain: desired_identity.0,
+            install_table_check: desired_identity.1,
         });
     }
     let target = crate::afxdp::session_glue::resolution_target_for_session(flow, decision);
     if native_unresolvable {
         return Some(SessionHitPbrRouteRevalidation {
-            revoked_key: (!no_local_entry).then_some(canonical_key.clone()),
+            revoked_key: (!no_local_entry && !is_reverse).then_some(canonical_key.clone()),
             canonical_key,
             resolution: crate::afxdp::forwarding::no_route_resolution(Some(target)),
+            steer_only: is_reverse,
+            install_table_domain: desired_identity.0,
+            install_table_check: desired_identity.1,
         });
     }
     if desired_identity == (decision.install_table_domain, decision.install_table_check) {
@@ -702,11 +834,15 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
             table.as_deref(),
         );
     Some(SessionHitPbrRouteRevalidation {
-        revoked_key: (!no_local_entry).then_some(canonical_key.clone()),
+        revoked_key: (!no_local_entry && !is_reverse).then_some(canonical_key.clone()),
         canonical_key,
         resolution,
+        steer_only: is_reverse,
+        install_table_domain: desired_identity.0,
+        install_table_check: desired_identity.1,
     })
 }
+
 
 /// Re-evaluate the ingress interface's INPUT filter for an established-session
 /// hit, when it owes one.

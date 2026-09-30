@@ -6,6 +6,18 @@ inet <rg>; } } }` with a `rib-groups { <rg> { import-rib [ <ri>.inet.0 inet.0 ];
 every secondary rib in the import list. xpf realizes the **import-into-main**
 case (the common one) with Linux policy-routing rules.
 
+## Global interface-routes selectors are unsupported (#11311)
+
+`routing-options interface-routes rib-group ...` is the other direction: it
+imports global/main connected routes into selected routing-instance tables
+(the pattern used by some filter-based forwarding recipes). That global
+main-to-instance import is **not implemented** in either the kernel rule path
+or userspace FIB. Strict commits reject the selector; tolerant loads warn so a
+persisted config remains bootable. Do not rely on it to make steered traffic to
+a main-table connected destination local. This remains a feature gap, distinct
+from the supported per-instance-to-main path below; see
+`docs/feature-gaps.md` §14.
+
 ## Mechanism (Phase 1: import into main)
 
 For each source routing instance whose `interface-routes` rib-group imports the

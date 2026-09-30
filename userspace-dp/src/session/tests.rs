@@ -3208,13 +3208,13 @@ fn find_forward_nat_match_uses_reverse_index() {
     ));
 
     let hit = table
-        .find_forward_nat_match(&reply)
+        .find_forward_nat_match(&reply, |_| reply.routing_domain)
         .expect("forward nat match");
     assert_eq!(hit.key, forward);
     assert_eq!(hit.decision.nat, nat);
 
     table.delete(&hit.key);
-    assert!(table.find_forward_nat_match(&reply).is_none());
+    assert!(table.find_forward_nat_match(&reply, |_| reply.routing_domain).is_none());
 }
 
 #[test]
@@ -3258,7 +3258,7 @@ fn find_forward_nat_match_does_not_borrow_main_for_quarantined_domain_11061() {
         TCP_ACK,
     ));
     assert!(
-        table.find_forward_nat_match(&reply).is_some(),
+        table.find_forward_nat_match(&reply, |_| reply.routing_domain).is_some(),
         "the domain-0 control reply must still match its MAIN session"
     );
     let quarantined_reply = SessionKey {
@@ -3266,7 +3266,7 @@ fn find_forward_nat_match_does_not_borrow_main_for_quarantined_domain_11061() {
         ..reply
     };
     assert!(
-        table.find_forward_nat_match(&quarantined_reply).is_none(),
+        table.find_forward_nat_match(&quarantined_reply, |_| quarantined_reply.routing_domain).is_none(),
         "a stamped ambiguous-zone reply must not borrow a domain-0 NAT session"
     );
 }
@@ -3313,7 +3313,7 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
         libc::AF_INET as u8,
     );
     assert!(
-        table.reverse_nat_fragment_requires_translation(&reply, 0, 2_000_000_000),
+        table.reverse_nat_fragment_requires_translation(&reply, 0, 2_000_000_000, |_| 0),
         "a live DNAT forward session must gate its reordered reply tail"
     );
     let native_tail = l3_reverse_probe(
@@ -3323,11 +3323,11 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
         libc::AF_INET as u8,
     );
     assert!(
-        table.reverse_nat_fragment_requires_translation(&native_tail, 0, 2_000_000_000),
+        table.reverse_nat_fragment_requires_translation(&native_tail, 0, 2_000_000_000, |_| 0),
         "a native-255 reply tail must match the live real-protocol NAT session"
     );
     assert!(
-        table.reverse_nat_fragment_requires_translation(&native_tail, 99, 2_000_000_000),
+        table.reverse_nat_fragment_requires_translation(&native_tail, 99, 2_000_000_000, |_| 99),
         "a native-255 probe with a cross-domain collision must fail closed, not borrow foreign NAT"
     );
     let other_family = l3_reverse_probe(
@@ -3337,7 +3337,7 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
         libc::AF_INET6 as u8,
     );
     assert!(
-        !table.reverse_nat_fragment_requires_translation(&other_family, 0, 2_000_000_000),
+        !table.reverse_nat_fragment_requires_translation(&other_family, 0, 2_000_000_000, |_| 0),
         "a native-255 IPv6 probe must not match the IPv4 session"
     );
     let wrong_protocol = l3_reverse_probe(
@@ -3347,11 +3347,11 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
         libc::AF_INET as u8,
     );
     assert!(
-        !table.reverse_nat_fragment_requires_translation(&wrong_protocol, 0, 2_000_000_000),
+        !table.reverse_nat_fragment_requires_translation(&wrong_protocol, 0, 2_000_000_000, |_| 0),
         "a real-protocol probe must not match a session for another protocol"
     );
     assert!(
-        table.reverse_nat_fragment_requires_translation(&reply, 99, 2_000_000_000),
+        table.reverse_nat_fragment_requires_translation(&reply, 99, 2_000_000_000, |_| 99),
         "a live candidate in another non-default domain must fail closed"
     );
     assert!(
@@ -3359,6 +3359,7 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
             &reply,
             crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
             2_000_000_000,
+            |_| crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
         ),
         "an ambiguous fabric-domain fragment tail must take the live-candidate          path (TRUE): the caller drops on TRUE, so it never borrows a tenant          NAT candidate. Outcome pin, not a fence-mechanism pin."
     );
@@ -3369,7 +3370,7 @@ fn reverse_fragment_gate_requires_live_forward_nat_10130() {
         libc::AF_INET as u8,
     );
     assert!(
-        !table.reverse_nat_fragment_requires_translation(&plain_outbound, 0, 2_000_000_000),
+        !table.reverse_nat_fragment_requires_translation(&plain_outbound, 0, 2_000_000_000, |_| 0),
         "an unrelated plain outbound fragment must not be over-dropped"
     );
 }
@@ -3417,13 +3418,13 @@ fn find_forward_nat_match_uses_canonical_reverse_index() {
     ));
 
     let hit = table
-        .find_forward_nat_match(&canonical_reply)
+        .find_forward_nat_match(&canonical_reply, |_| canonical_reply.routing_domain)
         .expect("canonical reverse match");
     assert_eq!(hit.key, forward);
     assert_eq!(hit.decision.nat, nat);
 
     table.delete(&hit.key);
-    assert!(table.find_forward_nat_match(&canonical_reply).is_none());
+    assert!(table.find_forward_nat_match(&canonical_reply, |_| canonical_reply.routing_domain).is_none());
 }
 
 #[test]
@@ -3488,13 +3489,13 @@ fn find_forward_nat_match_uses_canonical_reverse_index_for_icmp() {
     ));
 
     let hit = table
-        .find_forward_nat_match(&canonical_reply)
+        .find_forward_nat_match(&canonical_reply, |_| canonical_reply.routing_domain)
         .expect("icmp canonical reverse match");
     assert_eq!(hit.key, forward);
     assert_eq!(hit.decision.nat, nat);
 
     table.delete(&hit.key);
-    assert!(table.find_forward_nat_match(&canonical_reply).is_none());
+    assert!(table.find_forward_nat_match(&canonical_reply, |_| canonical_reply.routing_domain).is_none());
 }
 
 #[test]
@@ -3914,13 +3915,13 @@ fn find_forward_nat_match_with_dnat_port_rewrite() {
     ));
 
     let hit = table
-        .find_forward_nat_match(&reply)
+        .find_forward_nat_match(&reply, |_| reply.routing_domain)
         .expect("forward nat match with port");
     assert_eq!(hit.key, forward);
     assert_eq!(hit.decision.nat, nat);
 
     table.delete(&hit.key);
-    assert!(table.find_forward_nat_match(&reply).is_none());
+    assert!(table.find_forward_nat_match(&reply, |_| reply.routing_domain).is_none());
 }
 
 #[test]
@@ -4610,8 +4611,8 @@ fn assert_tables_equiv(
     }
     for pk in probe_keys {
         assert_eq!(
-            inplace.find_forward_nat_match(pk).map(|m| m.key),
-            reference.find_forward_nat_match(pk).map(|m| m.key),
+            inplace.find_forward_nat_match(pk, |_| pk.routing_domain).map(|m| m.key),
+            reference.find_forward_nat_match(pk, |_| pk.routing_domain).map(|m| m.key),
             "find_forward_nat_match diverged for {pk:?}"
         );
         assert_eq!(
@@ -5348,7 +5349,7 @@ fn nat_reverse_1n_collision_preserves_displaced_return_path() {
     // multimap returns the first-installed S1 deterministically instead of
     // "whatever was written last".
     assert_eq!(
-        table.find_forward_nat_match(&reply).map(|m| m.key),
+        table.find_forward_nat_match(&reply, |_| reply.routing_domain).map(|m| m.key),
         Some(s1.clone()),
         "reply on K resolves to the first-installed forward session",
     );
@@ -5364,7 +5365,7 @@ fn nat_reverse_1n_collision_preserves_displaced_return_path() {
         "delete removes only S2's handle; S1's entry remains in the bucket",
     );
     assert_eq!(
-        table.find_forward_nat_match(&reply).map(|m| m.key),
+        table.find_forward_nat_match(&reply, |_| reply.routing_domain).map(|m| m.key),
         Some(s1.clone()),
         "surviving S1 must still resolve after the colliding S2 closes \
          (single-value map returned None here)",
@@ -5378,7 +5379,7 @@ fn nat_reverse_1n_collision_preserves_displaced_return_path() {
         "the reverse key is dropped once its bucket empties",
     );
     assert_eq!(
-        table.find_forward_nat_match(&reply),
+        table.find_forward_nat_match(&reply, |_| reply.routing_domain),
         None,
         "no session left -> no reverse-NAT match",
     );
@@ -5408,7 +5409,7 @@ fn nat_reverse_1n_delete_removes_specific_handle_not_the_key() {
     table.delete(&s1);
     assert_eq!(small_bucket_len(&table, &reply), 1);
     assert_eq!(
-        table.find_forward_nat_match(&reply).map(|m| m.key),
+        table.find_forward_nat_match(&reply, |_| reply.routing_domain).map(|m| m.key),
         Some(s2.clone()),
         "surviving S2 resolves after the first-installed S1 closes",
     );
@@ -5437,7 +5438,7 @@ fn nat_reverse_1n_pool_snat_fast_path_stays_single_value() {
     );
     assert_eq!(table.nat_reverse_key_collisions(), 0, "no collision on PAT");
     assert_eq!(
-        table.find_forward_nat_match(&reply).map(|m| m.key),
+        table.find_forward_nat_match(&reply, |_| reply.routing_domain).map(|m| m.key),
         Some(s1.clone()),
         "the pool-mode reply resolves through the single-value fast path",
     );
@@ -9229,13 +9230,9 @@ fn key_transforms_split_same_direction_preserve_from_reverse_match_zero_7160() {
         assert_eq!(
             derived.routing_domain, 0,
             "{name} carried the forward domain ({:#x}) onto a REVERSE-MATCH \
-             key. That key is the bucket a REPLY is looked up under, and this \
-             dataplane routes transit traffic in the DEFAULT table unless a PBR \
-             term overrides it — so a flow whose egress leaves its routing \
-             instance has a reply that resolves another domain and would now \
-             find no bucket at all. That is a forwarding outage, not a \
-             hardening; the isolation lives in find_forward_nat_match's \
-             two-pass preference.",
+             key. The bucket must stay domain-agnostic so asymmetric replies \
+             can reach it; `find_forward_nat_match` now compares the reply \
+             domain with each candidate's forward egress interface domain.",
             DOMAIN
         );
     }
@@ -9247,33 +9244,36 @@ fn key_transforms_split_same_direction_preserve_from_reverse_match_zero_7160() {
     assert_eq!(rev.dst_ip, key.src_ip);
 }
 
-/// The behavioural consequence at the LOOKUP layer, which is the layer that
-/// decides which tenant's cached decision a reply inherits.
-///
-/// Two tenants, identical 5-tuples, contained in their own routing instances
-/// (their replies arrive on interfaces in the same instance, so each reply
-/// resolves its own domain). Both forward sessions land in ONE reverse bucket,
-/// because the reverse-match index is domain-agnostic by construction. The
-/// two-pass preference is the only thing that demuxes them.
-///
-/// FAIL-ON-REVERT: delete the preference in `find_forward_nat_match` and this
-/// goes red — bucket order is install order, so tenant B's reply would take
-/// tenant A's session and inherit its egress, NAT and policy decision.
+/// The reverse bucket remains domain-agnostic, but candidates are selected by
+/// the forward egress interface domain rather than the ingress/key domain.
+/// Overlapping tuples therefore demultiplex even when their forward ingress
+/// and egress instances differ.
 #[test]
-fn each_contained_tenants_reply_resolves_its_own_session_7160() {
+fn each_contained_tenants_reply_resolves_by_egress_domain_11298() {
     const DOMAIN_A: u32 = 0x0001_86A1;
     const DOMAIN_B: u32 = 0x0001_86A2;
+    const EGRESS_A: i32 = 12;
+    const EGRESS_B: i32 = 13;
     let mut table = SessionTable::new();
     let nat = decision().nat;
+    let egress_domain = |ifindex| match ifindex {
+        EGRESS_A => DOMAIN_A,
+        EGRESS_B => DOMAIN_B,
+        _ => 0,
+    };
 
     let mut tenant_a = key_v4();
     tenant_a.routing_domain = DOMAIN_A;
     let mut tenant_b = key_v4();
     tenant_b.routing_domain = DOMAIN_B;
+    let mut decision_a = decision();
+    decision_a.resolution.egress_ifindex = EGRESS_A;
+    let mut decision_b = decision();
+    decision_b.resolution.egress_ifindex = EGRESS_B;
 
     assert!(table.install_with_protocol(
         tenant_a.clone(),
-        decision(),
+        decision_a,
         metadata(),
         1_000,
         PROTO_TCP,
@@ -9281,58 +9281,34 @@ fn each_contained_tenants_reply_resolves_its_own_session_7160() {
     ));
     assert!(table.install_with_protocol(
         tenant_b.clone(),
-        decision(),
+        decision_b,
         metadata(),
         1_000,
         PROTO_TCP,
         TCP_SYN,
     ));
 
-    // The reply each tenant's own interface produces: the reverse tuple, in
-    // that tenant's domain.
     let mut reply_a = super::key::reverse_wire_key(&tenant_a, nat);
     reply_a.routing_domain = DOMAIN_A;
     let mut reply_b = reply_a.clone();
     reply_b.routing_domain = DOMAIN_B;
 
     let matched_a = table
-        .find_forward_nat_match(&reply_a)
-        .expect("tenant A's reply found no session at all — the domain-agnostic \
-                 reverse bucket is not being probed");
-    assert_eq!(
-        matched_a.key.routing_domain, DOMAIN_A,
-        "tenant A's reply resolved a session in domain {:#x} instead of its own \
-         {:#x}. The reply now inherits another tenant's cached egress, NAT and \
-         policy decision on the return path.",
-        matched_a.key.routing_domain, DOMAIN_A
-    );
-
+        .find_forward_nat_match(&reply_a, egress_domain)
+        .expect("tenant A's egress-domain reply must find its forward session");
+    assert_eq!(matched_a.key, tenant_a);
     let matched_b = table
-        .find_forward_nat_match(&reply_b)
-        .expect("tenant B's reply found no session at all");
-    assert_eq!(
-        matched_b.key.routing_domain, DOMAIN_B,
-        "tenant B's reply resolved a session in domain {:#x} instead of its own \
-         {:#x}",
-        matched_b.key.routing_domain, DOMAIN_B
-    );
+        .find_forward_nat_match(&reply_b, egress_domain)
+        .expect("tenant B's egress-domain reply must find its forward session");
+    assert_eq!(matched_b.key, tenant_b);
 }
 
-/// The regression this design exists to avoid, stated as a cell.
-///
-/// A flow that ingresses on a routing-instance member interface and egresses
-/// out of the DEFAULT instance is a real, working configuration — this
-/// dataplane's transit route lookup is not VRF-isolated, so the reply comes
-/// back on a default-instance interface and resolves domain 0. Its session was
-/// installed in the ingress interface's domain. If the reverse-match index
-/// carried that domain, this reply would find nothing, the reverse direction
-/// would be adjudicated as a new flow from the wrong zone pair, and the flow
-/// would break outright.
-///
-/// FAIL-ON-REVERT: make `reverse_wire_key` / `reverse_canonical_key` preserve
-/// the domain again and this goes red.
+/// An ingress-domain key may legitimately egress through the default
+/// instance. The reply is admitted because its arrival domain matches the
+/// forward egress domain (0), not because either mixed-zero combination is a
+/// wildcard.
 #[test]
-fn a_reply_from_outside_the_flows_domain_still_resolves_its_session_7160() {
+fn a_reply_in_forward_egress_instance_matches_asymmetric_flow_11298() {
     const DOMAIN: u32 = 0x0001_86A3;
     let mut table = SessionTable::new();
     let nat = decision().nat;
@@ -9348,40 +9324,21 @@ fn a_reply_from_outside_the_flows_domain_still_resolves_its_session_7160() {
         TCP_SYN,
     ));
 
-    // The reply arrives on a default-instance interface: domain 0, not DOMAIN.
     let mut reply = super::key::reverse_wire_key(&forward, nat);
     reply.routing_domain = 0;
-
-    let matched = table.find_forward_nat_match(&reply).expect(
-        "a reply arriving in the default instance found no session for a flow \
-         that ingressed in a routing instance. This dataplane routes transit \
-         traffic in the DEFAULT table unless a PBR term overrides it, so this \
-         is not an exotic shape — it is what an interface-bound routing \
-         instance with no PBR does today, and this miss breaks the flow.",
-    );
-    assert_eq!(matched.key.routing_domain, DOMAIN);
+    let matched = table
+        .find_forward_nat_match(&reply, |_| 0)
+        .expect("reply in the forward egress domain must resolve");
     assert_eq!(matched.key, forward);
 }
 
-/// The NAT'd twin of the cell above, and it is not redundant with it.
-///
-/// With no NAT, `reverse_wire_key` and `reverse_canonical_key` produce the SAME
-/// tuple, so the index carries one bucket that either transform's zeroing is
-/// enough to place at domain 0 — and a revert of just ONE of them leaves that
-/// cell green. Measured: reverting `reverse_wire_key` alone did exactly that.
-/// Under NAT the two transforms produce DIFFERENT tuples, the reply arrives on
-/// the WIRE tuple, and only `reverse_wire_key`'s zeroing puts that bucket where
-/// the reply can find it.
-///
-/// FAIL-ON-REVERT: make `reverse_wire_key` preserve the domain and this goes
-/// red on its own, without needing `reverse_canonical_key` reverted too.
+/// The NAT'd twin keeps the non-bijective reverse-WIRE tuple and egress-domain
+/// check on the same path.
 #[test]
-fn a_natted_reply_from_outside_the_flows_domain_still_resolves_its_session_7160() {
+fn a_natted_reply_in_forward_egress_instance_matches_asymmetric_flow_11298() {
     const DOMAIN: u32 = 0x0001_86A5;
     let mut table = SessionTable::new();
 
-    // Source NAT: the reply comes back addressed to the POOL tuple, which is
-    // what `reverse_wire_key` names and `reverse_canonical_key` does not.
     let mut decision = decision();
     decision.nat = NatDecision {
         rewrite_src: Some(IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 80, 41))),
@@ -9395,8 +9352,7 @@ fn a_natted_reply_from_outside_the_flows_domain_still_resolves_its_session_7160(
     assert_ne!(
         super::key::reverse_wire_key(&forward, nat),
         super::key::reverse_canonical_key(&forward, nat),
-        "the fixture must NAT — with the two reverse transforms producing one \
-         tuple this cell cannot distinguish which of them zeroes the domain"
+        "the fixture must exercise the NAT reverse-WIRE tuple"
     );
     assert!(table.install_with_protocol(
         forward.clone(),
@@ -9407,25 +9363,18 @@ fn a_natted_reply_from_outside_the_flows_domain_still_resolves_its_session_7160(
         TCP_SYN,
     ));
 
-    // The reply the SERVER sends: addressed to the pool tuple, arriving on a
-    // default-instance interface.
     let mut reply = super::key::reverse_wire_key(&forward, nat);
     reply.routing_domain = 0;
-
-    let matched = table.find_forward_nat_match(&reply).expect(
-        "a NAT'd reply arriving in the default instance found no session for a \
-         flow that ingressed in a routing instance — the reverse WIRE bucket is \
-         keyed on the forward domain, so the pool tuple the server actually \
-         replies to is unreachable and the flow breaks",
-    );
+    let matched = table
+        .find_forward_nat_match(&reply, |_| 0)
+        .expect("NAT reply in the forward egress domain must resolve");
     assert_eq!(matched.key, forward);
 }
 
-/// A single-instance deployment must be bit-identical to pre-#7160: every key
-/// is domain 0, so the preference pass accepts exactly what the fallback would
-/// and the reverse bucket walk is unchanged.
+/// In a single-instance deployment, the default egress domain remains an
+/// ordinary matching domain.
 #[test]
-fn a_default_instance_reply_resolves_exactly_as_before_7160() {
+fn a_default_instance_reply_resolves_by_egress_domain_11298() {
     let mut table = SessionTable::new();
     let nat = decision().nat;
 
@@ -9443,8 +9392,8 @@ fn a_default_instance_reply_resolves_exactly_as_before_7160() {
     let reply = super::key::reverse_wire_key(&forward, nat);
     assert_eq!(reply.routing_domain, 0);
     let matched = table
-        .find_forward_nat_match(&reply)
-        .expect("the default-instance reply must still resolve its session");
+        .find_forward_nat_match(&reply, |_| 0)
+        .expect("the default egress domain must match a default reply");
     assert_eq!(matched.key, forward);
 }
 
@@ -10214,7 +10163,53 @@ fn bare_tuple_identity_survives_scoped_reinstall_10512() {
         PROTO_TCP,
         TCP_SYN | TCP_ACK,
     ));
-    let new_id = table.session_id_for_bare_tuple(&old_key);
+    let new_id = table
+        .session_id_for_bare_tuple(&old_key)
+        .expect("replacement must be indexed by bare tuple");
     assert_ne!(new_id, 0);
     assert_ne!(new_id, old_id);
+}
+
+#[test]
+fn bare_tuple_index_tracks_scope_collisions_and_slot_reuse_11299() {
+    let mut table = SessionTable::new();
+    let mut first = key_v4();
+    first.routing_domain = 7;
+    let mut second = first.clone();
+    second.routing_domain = 9;
+    for key in [&first, &second] {
+        assert!(table.install_with_protocol_with_origin(
+            key.clone(),
+            decision(),
+            metadata(),
+            SessionOrigin::ForwardFlow,
+            1_000,
+            PROTO_TCP,
+            TCP_SYN | TCP_ACK,
+        ));
+    }
+    let first_id = table.session_id_for(&first);
+    let second_id = table.session_id_for(&second);
+    assert_ne!(first_id, 0);
+    assert_ne!(second_id, 0);
+    assert_ne!(first_id, second_id);
+    assert_eq!(table.session_id_for_bare_tuple(&first), Some(first_id));
+
+    table.delete(&first);
+    assert_eq!(table.session_id_for_bare_tuple(&second), Some(second_id));
+
+    let mut unrelated = key_v4();
+    unrelated.src_port = unrelated.src_port.wrapping_add(1);
+    assert!(table.install_with_protocol_with_origin(
+        unrelated,
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        2_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    assert_eq!(table.session_id_for_bare_tuple(&second), Some(second_id));
+    table.delete(&second);
+    assert_eq!(table.session_id_for_bare_tuple(&second), None);
 }
