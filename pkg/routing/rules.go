@@ -102,6 +102,7 @@ const mainTableID = 254
 // can skip current and legacy PBR bands without drifting from the install side
 // (#4479).
 const pbrRulePriority = config.PBRRulePriorityBase
+
 // Priority order is part of the kernel/helper contract (#11319). Keep each
 // complete band disjoint and ordered before Linux's main-table rule. These
 // constant expressions intentionally fail compilation if a band is retuned
