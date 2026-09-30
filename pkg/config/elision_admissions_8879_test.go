@@ -801,12 +801,12 @@ func TestAdmittedDropsAreReadSomewhere8879(t *testing.T) {
 	// going inert, which would silently swap one finding for another; naming
 	// them means a MEMBERSHIP change reds this cell even when the total holds.
 	knownNotRead := map[string]string{
-		"forwarding-options family":      "inet6 mode packet-based is accepted-only; the dataplane is flow-based",
-		"flow aging":                     "configured aging values do not control the fixed 90% AF_XDP shedding policy",
-		"pre-id-default-policy then":     "pre-id session logging is inert; no pre-identification admit path exists (the depth-2 pair, same advisory as the depth-1 one above)",
-		"class-of-service rewrite-rules": "exp rewrite is inert; the dataplane rewrites dscp on egress only",
-		"security pre-id-default-policy": "pre-id session logging is inert; no pre-identification admit path exists",
-		"interface-routes rib-group":        "global main-to-instance import is unsupported and rejected at strict commit",
+		"forwarding-options family":        "inet6 mode packet-based is accepted-only; the dataplane is flow-based",
+		"flow aging":                       "configured aging values do not control the fixed 90% AF_XDP shedding policy",
+		"pre-id-default-policy then":       "pre-id session logging is inert; no pre-identification admit path exists (the depth-2 pair, same advisory as the depth-1 one above)",
+		"class-of-service rewrite-rules":   "exp rewrite is inert; the dataplane rewrites dscp on egress only",
+		"security pre-id-default-policy":   "pre-id session logging is inert; no pre-identification admit path exists",
+		"interface-routes rib-group":       "global main-to-instance import is unsupported and rejected at strict commit",
 		"routing-options interface-routes": "global main-to-instance import is unsupported and rejected at strict commit",
 	}
 	inertMarkers := []string{

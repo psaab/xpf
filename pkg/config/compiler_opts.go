@@ -3055,7 +3055,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyMatchAddressSetMembers:    true,
 		lenientAddressSetMembersDefined:        true,
 		lenientRibGroupRefs:                    true,
-		lenientGlobalInterfaceRoutesRibGroup: true,
+		lenientGlobalInterfaceRoutesRibGroup:   true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
 		lenientDHCPRelayDHCPv6:                 true,
