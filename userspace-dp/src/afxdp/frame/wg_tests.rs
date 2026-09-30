@@ -40,17 +40,24 @@ fn wg_encapped_size_is_pad_aware() {
 /// `egress_ifindex` = the tunnel LOGICAL ifindex (what the resolver
 /// stores) and `tunnel_endpoint_id` = the WG endpoint id.
 fn wg_tunnel_decision(logical_ifindex: i32, tunnel_endpoint_id: u16) -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::MissingNeighbor,
-        local_ifindex: 0,
-        egress_ifindex: logical_ifindex,
-        tx_ifindex: 0,
-        tunnel_endpoint_id,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::MissingNeighbor,
+            local_ifindex: 0,
+            egress_ifindex: logical_ifindex,
+            tx_ifindex: 0,
+            tunnel_endpoint_id,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: crate::nat::NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 // The peer endpoint the WG fixture's single peer learns / is configured
@@ -1126,7 +1133,7 @@ fn wg_encap_frame_sources_outer_from_physical_wan_primary_v6() {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     // The WG endpoint's transport table follows the v6 outer family.
     snap.tunnel_endpoints[0].outer_family = "inet6".to_string();

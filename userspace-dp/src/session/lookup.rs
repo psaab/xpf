@@ -1418,18 +1418,16 @@ mod export_unresolved_sessions_10790_tests {
     fn decision(disposition: ForwardingDisposition, egress_ifindex: i32) -> SessionDecision {
         let forwardable = egress_ifindex > 0;
         SessionDecision {
-            resolution: ForwardingResolution {
-                disposition,
-                local_ifindex: 0,
-                egress_ifindex,
-                tx_ifindex: egress_ifindex,
-                tunnel_endpoint_id: 0,
-                next_hop: forwardable.then_some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
-                neighbor_mac: (disposition == ForwardingDisposition::ForwardCandidate)
-                    .then_some([0, 1, 2, 3, 4, 5]),
-                src_mac: None,
-                tx_vlan_id: 0,
-            },
+            resolution: ForwardingResolution { disposition,
+            local_ifindex: 0,
+            egress_ifindex,
+            tx_ifindex: egress_ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: forwardable.then_some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+            neighbor_mac: (disposition == ForwardingDisposition::ForwardCandidate)
+                .then_some([0, 1, 2, 3, 4, 5]),
+            src_mac: None,
+            tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 },
             nat: NatDecision::default(),
             install_table_domain: 0,
             install_table_check: 0,

@@ -101,6 +101,8 @@ fn test_close_delta(kind: crate::session::SessionDeltaKind) -> crate::session::S
                 neighbor_mac: None,
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),

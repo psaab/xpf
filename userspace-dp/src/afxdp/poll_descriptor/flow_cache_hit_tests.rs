@@ -341,6 +341,8 @@ fn cached_entry() -> FlowCacheEntry {
             neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
             tx_vlan_id: INGRESS_VLAN_ID,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_TRUST_ZONE_ID,
@@ -3894,6 +3896,8 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
             neighbor_mac: Some(mac),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
             tx_vlan_id: INGRESS_VLAN_ID,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,

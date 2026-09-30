@@ -237,9 +237,9 @@ pub(in crate::afxdp) fn clamp_next_hop_mtu(mtu: usize, addr_family: u8) -> u16 {
 /// (GRE) and `wg_endpoint_physical_outer_mtu` (WG) fall back to a non-zero
 /// MTU — so a 0 return reflects a missing/unknown endpoint or an
 /// unusably-small inner budget, never an unresolved outer MTU.
-/// `egress_mtu` is the already-resolved physical egress-interface MTU
-/// (`forwarded_egress_mtu`); used only for the NAT64 arm (the tunnel arms
-/// re-resolve the transport MTU via the SSOT helpers).
+/// `egress_mtu` is the effective plain-forward MTU (minimum known interface
+/// and selected-route MTU); used only for the NAT64-only arm (tunnel arms
+/// resolve physical transport MTUs separately).
 pub(in crate::afxdp) fn post_transform_inner_mtu(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
@@ -271,7 +271,10 @@ pub(in crate::afxdp) fn post_transform_inner_mtu(
     // the RFC 7915 header delta on top of that, in the same direction the
     // NAT64-only arm uses.
     if is_nat64 && decision.resolution.tunnel_endpoint_id != 0 {
-        let tunnel_inner = tunnel_inner_mtu(decision, forwarding, inner_dst);
+        let tunnel_inner = crate::afxdp::forwarding::min_nonzero_mtu(
+            tunnel_inner_mtu(decision, forwarding, inner_dst),
+            decision.resolution.route_mtu as usize,
+        );
         if tunnel_inner == 0 {
             return 0;
         }
@@ -304,7 +307,10 @@ pub(in crate::afxdp) fn post_transform_inner_mtu(
     if decision.resolution.tunnel_endpoint_id == 0 {
         return 0;
     }
-    tunnel_inner_mtu(decision, forwarding, inner_dst)
+    crate::afxdp::forwarding::min_nonzero_mtu(
+        tunnel_inner_mtu(decision, forwarding, inner_dst),
+        decision.resolution.route_mtu as usize,
+    )
 }
 
 /// The tunnel-only inner MTU: the physical underlay MTU less this tunnel

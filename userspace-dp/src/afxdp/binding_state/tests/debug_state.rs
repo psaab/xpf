@@ -304,6 +304,8 @@ fn active_flow_debug_test_entry(
             neighbor_mac: Some([0x56, 0x4a, 0xe8, 0x1e, 0xa8, 0x32]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x01, 0x00]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_TRUST_ZONE_ID,

@@ -21,19 +21,24 @@ pub(super) fn segment_forwarded_tcp_frames_into_prepared(
     if meta.protocol != PROTO_TCP || decision.resolution.tunnel_endpoint_id != 0 {
         return None;
     }
-    // #5159: use the ACTUAL egress MTU. The prior `.max(1280)` floored a valid
+    // #5159: use the effective MTU (interface plus selected-route constraint).
+    // The prior `.max(1280)` floored a valid
     // IPv4 MTU of 68-1279 to the IPv6-minimum LINK MTU (1280 is NOT an IPv4
     // floor; IPv4 min is 68), so a non-DF TCP datagram whose L3 length fell in
     // (real_mtu, 1280] was never chunked below the real MTU and went out
     // OVERSIZE. Kept byte-identical to the frame/tcp_segmentation.rs copy-path
     // twin. The `mtu == 0` guard (previously DEAD under the floor) now forwards
     // an unknown-MTU frame unchanged.
-    let mtu = forwarding
+    let interface_mtu = forwarding
         .egress
         .get(&decision.resolution.egress_ifindex)
         .or_else(|| forwarding.egress.get(&decision.resolution.tx_ifindex))
         .map(|egress| egress.mtu)
         .unwrap_or_default();
+    let mtu = crate::afxdp::forwarding::min_nonzero_mtu(
+        interface_mtu,
+        decision.resolution.route_mtu as usize,
+    );
     if mtu == 0 {
         return None;
     }

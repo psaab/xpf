@@ -284,6 +284,8 @@ fn test_resolution() -> ForwardingResolution {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }
 }
 
@@ -6919,6 +6921,8 @@ fn rg_activation_at_full_queue_refreshes_worker_9720() {
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -7365,6 +7369,8 @@ fn queued_stale_reverse_upsert_healed_by_positioned_refresh_9720() {
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -7714,6 +7720,8 @@ fn split_debt_supersedes_and_dispatches_per_rg_9720() {
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,

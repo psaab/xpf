@@ -67,6 +67,8 @@ fn decision(egress_ifindex: i32, nat: NatDecision) -> SessionDecision {
             neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat,
         install_table_domain: 0,

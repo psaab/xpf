@@ -468,6 +468,8 @@ fn build_forwarded_frame_keeps_tcp_checksum_valid_after_snat() {
             neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             rewrite_dst: None,
@@ -528,6 +530,8 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_checksum_valid_after_snat() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
         ..NatDecision::default()
@@ -799,6 +803,8 @@ fn rewrite_forwarded_frame_in_place_keeps_icmpv6_echo_identifier_and_sequence() 
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:50::8".parse().unwrap())),
         ..NatDecision::default()
@@ -2127,6 +2133,8 @@ fn rewrite_in_place_leaves_mss_untouched_through_ah_10729() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let rewrite_result = rewrite_forwarded_frame_in_place(
         &area,

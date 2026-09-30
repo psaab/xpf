@@ -98,6 +98,7 @@ fn forwarding_with_lan_rule(lan_action: Option<&str>) -> ForwardingState {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     if let Some(action) = lan_action {
         snapshot.policies.push(PolicyRuleSnapshot {
@@ -161,6 +162,8 @@ fn decision(egress_ifindex: i32) -> SessionDecision {
             neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -5942,6 +5945,7 @@ fn forwarding_with_fabric_dmz_10507() -> ForwardingState {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
@@ -5992,6 +5996,8 @@ fn syncimport_wan_decision_10507() -> SessionDecision {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -6022,6 +6028,8 @@ fn live_dmz_decision_10507() -> SessionDecision {
             neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0x05]),
             src_mac: Some(REVOCATION_DMZ_MAC),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -6310,6 +6318,7 @@ fn forwarding_with_fabric_dmz_armed_10507() -> ForwardingState {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
@@ -6501,6 +6510,8 @@ fn reverse_first_resolves_forward_live_and_revokes_pair_10507() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -6635,6 +6646,8 @@ fn reverse_icmp_recorded_forward_pair_fails_closed_10507() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -7100,6 +7113,8 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -7915,6 +7930,7 @@ fn refresh_skips_hainactive_preserving_recorded_10507() {
             next_table: String::new(),
             preference: 0,
             rule_priority: 0,
+            mtu: 0,
         });
         snapshot.neighbors.push(NeighborSnapshot {
             interface: "ge-0-0-2".to_string(),
@@ -8162,6 +8178,8 @@ fn reverse_syncimport_redirect_retained_without_stamp_10507() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -8281,6 +8299,8 @@ fn noegress_forward_decision_10507() -> SessionDecision {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,

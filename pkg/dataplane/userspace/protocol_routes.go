@@ -42,6 +42,10 @@ type RouteSnapshot struct {
 	// legitimate value (it deserializes back to 0 under serde default), so
 	// omitempty only suppresses the wire byte for an explicit preference 0.
 	Preference int `json:"preference,omitempty"`
+	// MTU is the selected route's route-wide L3 MTU (RTAX_MTU). Zero means
+	// absent/unknown and imposes no extra constraint. An old helper would
+	// ignore it and forward oversized DF packets, so snapshot v37 fences it.
+	MTU int `json:"mtu,omitempty"`
 }
 
 type NeighborSnapshot struct {

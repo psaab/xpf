@@ -43,6 +43,8 @@ fn delta_with_session_id(session_id: u64) -> SessionDelta {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
     metadata: SessionMetadata {
         ingress_zone: 1,

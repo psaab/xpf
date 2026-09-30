@@ -176,12 +176,16 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
         // may be dropped DOWNSTREAM, but `mtu == 0` here means a route to an
         // unconfigured egress (an inconsistent snapshot), so the practical risk
         // is low.
-        forwarding
+        let interface_mtu = forwarding
             .egress
             .get(&decision.resolution.egress_ifindex)
             .or_else(|| forwarding.egress.get(&decision.resolution.tx_ifindex))
             .map(|egress| egress.mtu)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        crate::afxdp::forwarding::min_nonzero_mtu(
+            interface_mtu,
+            decision.resolution.route_mtu as usize,
+        )
     };
     if mtu == 0 {
         return None;
@@ -785,6 +789,8 @@ mod mode_aware_segmentation_tests {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }
     }
 
@@ -1096,6 +1102,8 @@ mod mode_aware_segmentation_tests {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }
     }
 

@@ -4456,6 +4456,7 @@ fn route_destination_unparseable_fails_closed() {
                 table: table.into(),
                 destination: dest.into(),
                 discard: true,
+                mtu: 0,
                 ..Default::default()
             }],
             ..Default::default()
@@ -4489,11 +4490,13 @@ fn route_destination_valid_prefixes_still_build() {
             crate::RouteSnapshot {
                 table: "inet.0".into(),
                 destination: "10.9.0.0/16".into(),
+                mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
                 table: "inet.0".into(),
                 destination: "0.0.0.0/0".into(),
+                mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
@@ -4502,17 +4505,20 @@ fn route_destination_valid_prefixes_still_build() {
                 // host address — the shape that replaces the silent drop.
                 destination: "10.0.0.1/32".into(),
                 discard: true,
+                mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
                 table: "inet6.0".into(),
                 destination: "2001:db8::/64".into(),
+                mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
                 table: "inet6.0".into(),
                 destination: "2001:db8::1/128".into(),
                 discard: true,
+                mtu: 0,
                 ..Default::default()
             },
         ],
@@ -4537,6 +4543,7 @@ fn route_family_matching_or_empty_builds() {
                 family: "inet".into(),
                 destination: "10.0.0.0/8".into(),
                 next_hops: vec!["192.0.2.1".into()],
+                mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
@@ -4544,6 +4551,7 @@ fn route_family_matching_or_empty_builds() {
                 family: "inet6".into(),
                 destination: "2001:db8::/32".into(),
                 next_hops: vec!["2001:db8::1".into()],
+                mtu: 0,
                 ..Default::default()
             },
             // Empty family — unconstrained, must not be rejected.
@@ -4552,6 +4560,7 @@ fn route_family_matching_or_empty_builds() {
                 family: String::new(),
                 destination: "172.16.0.0/12".into(),
                 next_hops: vec!["192.0.2.2".into()],
+                mtu: 0,
                 ..Default::default()
             },
         ],
@@ -4581,6 +4590,7 @@ fn route_negative_preference_fails_closed() {
             destination: "0.0.0.0/0".into(),
             next_hops: vec!["192.0.2.1".into()],
             preference: i32::MIN,
+            mtu: 0,
             ..Default::default()
         }],
         ..Default::default()
@@ -4603,6 +4613,35 @@ fn route_negative_preference_fails_closed() {
     }
 }
 
+#[test]
+fn route_negative_mtu_fails_closed_11411() {
+    let snapshot = ConfigSnapshot {
+        routes: vec![crate::RouteSnapshot {
+            table: "inet.0".into(),
+            family: "inet".into(),
+            destination: "198.51.100.0/24".into(),
+            next_hops: vec!["192.0.2.1".into()],
+            mtu: -1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let err = try_build_forwarding_state_with_policy_counters(
+        &snapshot,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect_err("a negative route MTU must fail closed");
+    match err {
+        crate::policy::SnapshotIntegrityError::RouteMtuOutOfRange {
+            destination, mtu, ..
+        } => {
+            assert_eq!(destination, "198.51.100.0/24");
+            assert_eq!(mtu, -1);
+        }
+        other => panic!("expected RouteMtuOutOfRange, got {other:?}"),
+    }
+}
+
 /// #3771 (L1) anti-over-reject: preference 0 (the most-preferred value) and a
 /// normal positive preference both build.
 #[test]
@@ -4615,6 +4654,7 @@ fn route_nonnegative_preference_builds() {
                 destination: "10.0.0.0/8".into(),
                 next_hops: vec!["192.0.2.1".into()],
                 preference: 0,
+                mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
@@ -4623,6 +4663,7 @@ fn route_nonnegative_preference_builds() {
                 destination: "172.16.0.0/12".into(),
                 next_hops: vec!["192.0.2.2".into()],
                 preference: 100,
+                mtu: 0,
                 ..Default::default()
             },
         ],
@@ -4695,6 +4736,7 @@ fn static_bare_gateway_infers_ifindex_in_own_table_v4() {
                 family: "inet".into(),
                 destination: "10.0.0.0/8".into(),
                 next_hops: vec!["192.168.0.254".into()],
+                mtu: 0,
                 ..Default::default()
             },
             // ...and in BLUE, same gateway, different instance.
@@ -4703,6 +4745,7 @@ fn static_bare_gateway_infers_ifindex_in_own_table_v4() {
                 family: "inet".into(),
                 destination: "10.0.0.0/8".into(),
                 next_hops: vec!["192.168.0.254".into()],
+                mtu: 0,
                 ..Default::default()
             },
         ],
@@ -4765,6 +4808,7 @@ fn static_bare_gateway_infers_ifindex_in_own_table_v6() {
                 family: "inet6".into(),
                 destination: "2001:db8:beef::/48".into(),
                 next_hops: vec!["2001:db8::254".into()],
+                mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
@@ -4772,6 +4816,7 @@ fn static_bare_gateway_infers_ifindex_in_own_table_v6() {
                 family: "inet6".into(),
                 destination: "2001:db8:beef::/48".into(),
                 next_hops: vec!["2001:db8::254".into()],
+                mtu: 0,
                 ..Default::default()
             },
         ],
@@ -4824,6 +4869,7 @@ fn static_bare_gateway_single_table_still_resolves() {
                 family: "inet".into(),
                 destination: "10.0.0.0/8".into(),
                 next_hops: vec!["192.168.0.254".into()],
+                mtu: 0,
                 ..Default::default()
             },
             // A next-table leak: no forwarding next-hop, so the inference is
@@ -4833,6 +4879,7 @@ fn static_bare_gateway_single_table_still_resolves() {
                 family: "inet".into(),
                 destination: "172.16.0.0/12".into(),
                 next_table: "blue.inet.0".into(),
+                mtu: 0,
                 ..Default::default()
             },
         ],
@@ -4894,6 +4941,7 @@ fn recursive_ecmp_preserves_direct_member_11317() {
                 family: "inet".into(),
                 destination: "10.10.0.0/24".into(),
                 next_hops: vec![direct_gateway.to_string()],
+                mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
@@ -4901,6 +4949,7 @@ fn recursive_ecmp_preserves_direct_member_11317() {
                 family: "inet".into(),
                 destination: "10.20.0.0/24".into(),
                 next_hops: vec![direct_gateway.to_string(), "10.10.0.1".into()],
+                mtu: 0,
                 ..Default::default()
             },
         ],
@@ -7345,6 +7394,8 @@ fn stale_session_never_adopts_reowned_tunnel_id() {
         neighbor_mac: Some([2, 0, 0, 0, 0, 9]),
         src_mac: Some([2, 0, 0, 0, 0, 1]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let resolved = lookup_forwarding_resolution_for_session(
         &state,
@@ -7411,6 +7462,8 @@ fn stale_owner_resolution_does_not_inherit_new_owner_rg() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     assert_eq!(owner_rg_for_resolution(&state, resolution), 2);
     // Stale owner: a different netdev owned this id when the session
@@ -9044,6 +9097,7 @@ fn secure_tunnel_unit_ifindex_decides_route_disposition() {
                 destination: "192.168.99.0/24".into(),
                 next_hops: vec!["10.5.5.2".into()],
                 preference: 5,
+                mtu: 0,
                 ..Default::default()
             }],
             ..Default::default()
@@ -9117,6 +9171,7 @@ fn next_table_target_uses_table_lpm_without_rule_restart_9955() {
                 family: "inet".into(),
                 destination: "172.16.0.0/12".into(),
                 next_table: "blue.inet.0".into(),
+                mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
@@ -9124,6 +9179,7 @@ fn next_table_target_uses_table_lpm_without_rule_restart_9955() {
                 family: "inet".into(),
                 destination: "172.16.0.0/12".into(),
                 next_table: "inet.0".into(),
+                mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
@@ -9131,6 +9187,7 @@ fn next_table_target_uses_table_lpm_without_rule_restart_9955() {
                 family: "inet".into(),
                 destination: "172.16.0.0/12".into(),
                 next_hops: vec!["@ge-0/0/12".into()],
+                mtu: 0,
                 ..Default::default()
             },
         ],
@@ -9267,6 +9324,7 @@ fn xfrmi_egress_resolves_a_negative_cache_key_6710() {
                 destination: "192.168.99.0/24".into(),
                 next_hops: vec!["10.5.5.2".into()],
                 preference: 5,
+                mtu: 0,
                 ..Default::default()
             }],
             ..Default::default()
@@ -10149,6 +10207,7 @@ fn learned_link_local_next_hop_binds_its_own_link_in_any_order_9512() {
         family: "inet6".into(),
         destination: dst.into(),
         next_hops: hops.iter().map(|h| h.to_string()).collect(),
+        mtu: 0,
         ..Default::default()
     };
     let one = iface("ge-0/0/1.0", "ge-0-0-1", 101, "2001:db8:1::1/64", "fe80::1/64");
