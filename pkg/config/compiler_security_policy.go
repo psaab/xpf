@@ -5,6 +5,12 @@ import "fmt"
 func compilePolicies(node *Node, sec *SecurityConfig) error {
 	for _, child := range node.Children {
 		if child.Name() == "default-policy" {
+			// #11367: never let a tolerant compile turn a malformed choice
+			// block into first-child-wins permit-all.
+			if len(child.Children) > 1 {
+				return fmt.Errorf("security policies default-policy: "+defaultPolicyAmbiguousBlockDiagnostic,
+					len(child.Children))
+			}
 			var policyStr string
 			if len(child.Keys) >= 2 {
 				// Flat form: default-policy deny-all;

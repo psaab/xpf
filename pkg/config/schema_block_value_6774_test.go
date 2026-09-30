@@ -86,12 +86,12 @@ func TestDefaultPolicyBlockAndFlatFormsAgree_6774(t *testing.T) {
 func TestDefaultPolicyBlockRejectsAmbiguousAndInvalid_6774(t *testing.T) {
 	cases := []struct{ name, cfg, wantSubstr string }{
 		{
-			// The compiler reads Children[0] and silently DISCARDS the rest, so
-			// this does not do what it reads as and must not commit.
+			// Two choices are ambiguous and must be rejected with a
+			// cardinality diagnostic instead of being treated as missing.
 			name: "two-actions",
 			cfg: "security {\n    policies {\n        default-policy {\n" +
 				"            deny-all;\n            permit-all;\n        }\n    }\n}",
-			wantSubstr: "missing value",
+			wantSubstr: "expected exactly one block value, found 2 children",
 		},
 		{
 			// The block value must be VALIDATED, not merely accepted.
@@ -111,8 +111,8 @@ func TestDefaultPolicyBlockRejectsAmbiguousAndInvalid_6774(t *testing.T) {
 			cfg, _ := CompileConfig(tree)
 			err := SchemaValidate(tree, cfg)
 			if err == nil {
-				t.Fatalf("strict validation ACCEPTED %s; the compiler discards all "+
-					"but the first token, so this config does not do what it reads as", tc.name)
+				t.Fatalf("strict validation ACCEPTED %s; malformed block form must be rejected",
+					tc.name)
 			}
 			if !strings.Contains(err.Error(), tc.wantSubstr) {
 				t.Fatalf("error %q does not mention %q", err, tc.wantSubstr)

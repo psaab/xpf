@@ -1053,11 +1053,9 @@ func consumeNodeKeys(keys []string, childSchema *schemaNode) (int, *schemaNode) 
 // leaf — `keyword { value; }` parses to a node with no trailing keys and one
 // childless child whose sole key is the value (#6774).
 //
-// It is deliberately strict. More than one child, a child carrying more than
-// one token, or a child carrying its own block all return false, so the leaf
-// falls through to the ordinary "missing value" rejection rather than silently
-// binding the first token of an ambiguous block — which is exactly what the
-// compiler would then discard.
+// It is deliberately strict. More than one child is reported as an ambiguous
+// choice by validateTypedLeaf; malformed single children return false and the
+// leaf then fails through the ordinary missing-value rejection.
 func singleBlockValue(node *Node) (string, bool) {
 	if len(node.Children) != 1 {
 		return "", false
@@ -1107,11 +1105,13 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 	// without this the strict commit path rejects canonical Junos that the
 	// compiler compiles correctly and the tolerated load path applies.
 	//
-	// EXACTLY ONE child carrying EXACTLY ONE token is accepted. Two children
-	// is NOT "the first one wins": the compiler reads Children[0] and
-	// silently discards the rest, so `default-policy { deny-all; permit-all; }`
-	// does not do what it reads as and must still be rejected.
+	// EXACTLY ONE child carrying EXACTLY ONE token is accepted. More than one
+	// child gets an explicit cardinality diagnostic; it must never bind only the
+	// first action and let an ambiguous block fail open.
 	if len(values) == 0 && leafSchema.blockValue {
+		if len(node.Children) > 1 {
+			return typedLeafErrorf(path, defaultPolicyAmbiguousBlockDiagnostic, len(node.Children))
+		}
 		if v, ok := singleBlockValue(node); ok {
 			values = []string{v}
 		}
