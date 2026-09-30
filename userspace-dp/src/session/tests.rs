@@ -10214,7 +10214,53 @@ fn bare_tuple_identity_survives_scoped_reinstall_10512() {
         PROTO_TCP,
         TCP_SYN | TCP_ACK,
     ));
-    let new_id = table.session_id_for_bare_tuple(&old_key);
+    let new_id = table
+        .session_id_for_bare_tuple(&old_key)
+        .expect("replacement must be indexed by bare tuple");
     assert_ne!(new_id, 0);
     assert_ne!(new_id, old_id);
+}
+
+#[test]
+fn bare_tuple_index_tracks_scope_collisions_and_slot_reuse_11299() {
+    let mut table = SessionTable::new();
+    let mut first = key_v4();
+    first.routing_domain = 7;
+    let mut second = first.clone();
+    second.routing_domain = 9;
+    for key in [&first, &second] {
+        assert!(table.install_with_protocol_with_origin(
+            key.clone(),
+            decision(),
+            metadata(),
+            SessionOrigin::ForwardFlow,
+            1_000,
+            PROTO_TCP,
+            TCP_SYN | TCP_ACK,
+        ));
+    }
+    let first_id = table.session_id_for(&first);
+    let second_id = table.session_id_for(&second);
+    assert_ne!(first_id, 0);
+    assert_ne!(second_id, 0);
+    assert_ne!(first_id, second_id);
+    assert_eq!(table.session_id_for_bare_tuple(&first), Some(first_id));
+
+    table.delete(&first);
+    assert_eq!(table.session_id_for_bare_tuple(&second), Some(second_id));
+
+    let mut unrelated = key_v4();
+    unrelated.src_port = unrelated.src_port.wrapping_add(1);
+    assert!(table.install_with_protocol_with_origin(
+        unrelated,
+        decision(),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        2_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    assert_eq!(table.session_id_for_bare_tuple(&second), Some(second_id));
+    table.delete(&second);
+    assert_eq!(table.session_id_for_bare_tuple(&second), None);
 }

@@ -1193,10 +1193,11 @@ impl Coordinator {
             // sessions and the survivors still count toward the #5674
             // aggregate admission ceiling, refusing legitimate imports. A
             // teardown must leave every surface empty, poisoned or not.
-            lock_shared_recover(&self.sessions.synced).clear();
             lock_shared_recover(&self.sessions.nat).clear();
             lock_shared_recover(&self.sessions.forward_wire).clear();
-            self.sessions.owner_rg_indexes.clear();
+            self.sessions
+                .owner_rg_indexes
+                .clear(&self.sessions.synced);
         }
         if let Ok(mut recent) = self.recent_exceptions.lock() {
             recent.clear();

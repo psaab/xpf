@@ -758,7 +758,9 @@ impl crate::afxdp::ha::SessionDomain {
             let _ =
                 self.delete_synced_session_gen_marked(key, 0, false, false, Some(&fence), false, 0);
         }
-        lock_shared_recover(&self.sessions.synced).clear();
+        self.sessions
+            .owner_rg_indexes
+            .clear(&self.sessions.synced);
         lock_shared_recover(&self.sessions.nat).clear();
         lock_shared_recover(&self.sessions.forward_wire).clear();
         drop(fence);
