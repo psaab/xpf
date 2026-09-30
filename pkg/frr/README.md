@@ -728,6 +728,11 @@ step. Both are required — neither sees the other's case:
   interfaces and no qualifier the next-hop is genuinely ambiguous — the
   inference refuses to guess (leaves it unresolved) rather than route to the
   wrong link, and the operator must add an interface qualifier.
+  The Rust userspace helper follows the same rule: its in-table connected
+  candidates must collapse to one egress before an unqualified link-local
+  next-hop can bind. Multiple candidates leave the helper route at ifindex 0,
+  matching the daemon's unresolved/no-route disposition rather than selecting
+  whichever address row appears first. Explicit interfaces remain authoritative.
 - **Static `next-hop [ a b ]` ECMP list (#3872).** A static route's
   `next-hop [ gw1 gw2 ]` is the canonical Junos ECMP spelling — multiple
   next-hops = equal-cost multipath. The schema `next-hop` leaf is `multi:
