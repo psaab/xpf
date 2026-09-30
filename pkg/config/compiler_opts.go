@@ -1352,6 +1352,10 @@ type compileOpts struct {
 	// guard skips the phantom rib and installs no rule, so a leniently-loaded
 	// config is already inert. Same doctrine as lenientRoutingExportRef.
 	lenientRibGroupRefs bool
+	// lenientGlobalInterfaceRoutesRibGroup (#11311) downgrades the unsupported
+	// global main-to-instance connected-route import gate to a warning on
+	// tolerant loads, so a previously persisted config remains bootable.
+	lenientGlobalInterfaceRoutesRibGroup bool
 	// lenientNextTableRefs (#5693) downgrades the next-table target
 	// definedness gate (validateNextTableTargetReferencesStrict) from a hard
 	// compile error to a cfg.Warnings entry. A static route whose
@@ -3051,6 +3055,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyMatchAddressSetMembers:    true,
 		lenientAddressSetMembersDefined:        true,
 		lenientRibGroupRefs:                    true,
+		lenientGlobalInterfaceRoutesRibGroup:   true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
 		lenientDHCPRelayDHCPv6:                 true,
