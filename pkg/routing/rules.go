@@ -206,7 +206,7 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 	// leak's rules are programmed, reusing slots a rollback freed.
 	admitted := 0
 	for i, sr := range routes {
-		if sr == nil || sr.NextTable == "" {
+		if sr == nil || sr.NoInstall || sr.NextTable == "" {
 			continue
 		}
 		tableID, ok := tableIDs[sr.NextTable]
@@ -376,7 +376,7 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 
 // hasEligibleNextTableRoute reports whether any route would actually install a
 // next-table ip rule — the same eligibility the Apply loop applies (non-nil,
-// a NextTable set, and a known target instance). It exists so the #9420
+// no-install clear, NextTable set, and a known target instance). It exists so the
 // fail-closed gate stays SILENT for a config with no next-table leaks at all:
 // without it, every commit on a box with zero leaks and zero resolvable
 // interfaces would report a degraded next-table apply for a leak that does not
@@ -388,7 +388,7 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 // the fail-safe direction — and keeps this predicate cheap.
 func hasEligibleNextTableRoute(routes []*config.StaticRoute, tableIDs map[string]int) bool {
 	for _, sr := range routes {
-		if sr == nil || sr.NextTable == "" {
+		if sr == nil || sr.NoInstall || sr.NextTable == "" {
 			continue
 		}
 		if _, ok := tableIDs[sr.NextTable]; ok {
