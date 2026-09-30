@@ -112,6 +112,7 @@ func TestFBFQualificationLeavesVirtualRouterBare(t *testing.T) {
 		RoutingInstances: []*config.RoutingInstanceConfig{{
 			Name:         "VRF-A",
 			InstanceType: "virtual-router",
+			Interfaces:   []string{"reth0.80"},
 			StaticRoutes: []*config.StaticRoute{{
 				Destination: "0.0.0.0/0",
 				NextHops:    []config.NextHopEntry{{Address: "172.16.80.1"}},

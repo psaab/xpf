@@ -4796,6 +4796,90 @@ fn static_bare_gateway_single_table_still_resolves() {
     );
 }
 
+/// #11317: retaining a mixed direct+recursive ECMP row must preserve the
+/// directly connected member; the recursive member gets ifindex 0 and is
+/// excluded from live selection rather than blackholing the usable path.
+#[test]
+fn recursive_ecmp_preserves_direct_member_11317() {
+    let direct_gateway = Ipv4Addr::new(192, 168, 0, 254);
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0-0-1".into(),
+            ifindex: 201,
+            hardware_addr: "02:00:00:00:02:01".into(),
+            addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "192.168.0.1/24".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        neighbors: vec![crate::NeighborSnapshot {
+            interface: "ge-0-0-1".into(),
+            ifindex: 201,
+            family: "inet".into(),
+            ip: direct_gateway.to_string(),
+            mac: "02:00:00:00:00:fe".into(),
+            state: "reachable".into(),
+            ..Default::default()
+        }],
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.10.0.0/24".into(),
+                next_hops: vec![direct_gateway.to_string()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.20.0.0/24".into(),
+                next_hops: vec![direct_gateway.to_string(), "10.10.0.1".into()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    let route = state
+        .routes_v4
+        .get("inet.0")
+        .expect("inet.0 table")
+        .iter()
+        .find(|route| route.prefix.contains(Ipv4Addr::new(10, 20, 0, 5)))
+        .expect("mixed recursive route");
+    let direct = route
+        .next_hops
+        .iter()
+        .find(|next_hop| next_hop.next_hop == Some(direct_gateway))
+        .expect("direct ECMP member");
+    assert_eq!(direct.ifindex, 201, "direct ECMP member must resolve");
+    let recursive = route
+        .next_hops
+        .iter()
+        .find(|next_hop| next_hop.next_hop == Some(Ipv4Addr::new(10, 10, 0, 1)))
+        .expect("recursive ECMP member");
+    assert_eq!(recursive.ifindex, 0, "recursive member must remain unresolved");
+
+    let resolution = lookup_forwarding_resolution_v4(
+        &state,
+        None,
+        Ipv4Addr::new(10, 20, 0, 5),
+        "inet.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(
+        resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "the usable direct member must carry the mixed route"
+    );
+    assert_eq!(resolution.egress_ifindex, 201);
+    assert_eq!(resolution.next_hop, Some(IpAddr::V4(direct_gateway)));
+}
+
 /// #3771 (M11): a neighbor declaring family="inet" with an IPv6 IP fails the
 /// snapshot CLOSED via `NeighborFamilyMismatch`. fail-on-revert: restoring the
 /// family-ignoring `populate_neighbors` installs the neighbor and the build
