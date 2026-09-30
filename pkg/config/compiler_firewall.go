@@ -1855,6 +1855,18 @@ var rejectMessageTypes = map[string]bool{
 	"tcp-reset":                   true,
 }
 
+// failClosedUnknownFilterAction turns any term with an unrecognized `then`
+// token into an explicit discard after parsing the complete statement. The
+// token remains in UnknownActions for the strict rejection / tolerant warning,
+// while the tolerant runtime can no longer interpret an empty action as
+// fall-through to the implicit accept. Run after the walk so a recognized
+// action earlier or later in the same statement cannot override the failure.
+func failClosedUnknownFilterAction(term *FirewallFilterTerm) {
+	if len(term.UnknownActions) > 0 {
+		term.Action = "discard"
+	}
+}
+
 func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 	// Handle leaf form: "then discard;" or "then accept;" produces
 	// Keys=["then", "discard"] with IsLeaf=true and no children. A leaf can
@@ -1932,13 +1944,14 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 					term.Policer = v
 				}
 			default:
-				// #2399 (032-16): an unrecognized `then` token must NOT be
-				// silently dropped — it would default to ACCEPT in the
-				// dataplane (fail-open). Record it so the strict commit gate
-				// (validateFilterActionsStrict) can reject the operator's typo.
+				// Record unknown tokens for the strict commit gate. The
+				// tolerant path keeps the config loadable, then maps the
+				// completed term to discard below rather than allowing an
+				// empty action to fall through to the implicit accept.
 				term.UnknownActions = append(term.UnknownActions, k)
 			}
 		}
+		failClosedUnknownFilterAction(term)
 		return
 	}
 
@@ -2048,6 +2061,7 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 			term.UnknownActions = append(term.UnknownActions, child.Name())
 		}
 	}
+	failClosedUnknownFilterAction(term)
 }
 
 // flattenThenChain8939 hoists actions that SetPath nested beneath a terminating

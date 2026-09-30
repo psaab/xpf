@@ -63,14 +63,12 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// #2399 (032-16) firewall-filter `then` action fail-open gate. Strict on
 	// commit / commit-check (hard-reject a term whose `then` block carries a
 	// token that is neither a recognized terminating action nor a recognized
-	// modifier). Before this gate such a token was silently DROPPED by
-	// compileFilterThen, leaving Action == "", which the dataplane compiler and
-	// the Rust filter (parse_term) both map to ACCEPT — a fail-open permit for
-	// a term the operator meant to deny. Lenient on load / peer-sync (warn so
-	// an already-persisted or peer-synced config carrying an unknown action
-	// still BOOTS — #1960 no-brick). Runs on the fully-compiled *Config so the
-	// typed term list (with UnknownActions populated by compileFilterThen) is
-	// available.
+	// modifier). compileFilterThen records unknown tokens and selects `discard`
+	// as the compiled action, so the lenient load / peer-sync path warns while
+	// keeping startup unbricked (#1960 no-brick) and the term fails closed
+	// rather than falling through to the implicit accept. Runs on the
+	// fully-compiled *Config so the typed term list (with UnknownActions
+	// populated by compileFilterThen) is available.
 	if err := validateFilterActionsStrict(cfg); err != nil {
 		if opts.lenientFilterActions {
 			cfg.Warnings = append(cfg.Warnings,

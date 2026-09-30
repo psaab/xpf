@@ -3324,21 +3324,19 @@ never lock an operator out of a remote box it manages.
   `TestNftRoutingInstanceWithNextTermStillTerminatesMirroringRust9140` and
   `TestLo0PayloadRoutingInstanceNextTermShadowsLaterDeny9140`
   (`lo0_ri_nextterm_mirror_9140_test.go`).
-  **Unknown terminating action fails CLOSED (#3724 M08):** the terminating
-  verdict switch mirrors the Rust filter compiler
+  **Unknown terminating action fails CLOSED (#3724 M08, #11357):** the
+  terminating verdict switch mirrors the Rust filter compiler
   (`userspace-dp/src/filter/compiler.rs`) EXACTLY — `discard` → `drop`,
   `accept` (and the empty-action routing-instance PBR term) → `accept`, and any
-  OTHER non-empty action → `drop`. An unknown / unhandled action cannot arrive
-  through the CLI commit path (`validateFilterActionsStrict` plus the
-  `UnknownActions` capture in `compileFilterThen` leave `term.Action == ""`), but
-  a tolerant load / peer session-sync / mixed-version snapshot can carry a future
-  action string directly in `term.Action`. The Rust compiler fails such a term
-  CLOSED to `FilterAction::Discard`; the kernel mirror — the PRIMARY host-bound
-  enforcement — MUST match, or it would ADMIT host-bound traffic userspace-dp
-  drops (a mixed-version control-plane fail-OPEN). The pre-#3724 default arm
-  rendered nft `accept` for any non-`discard` action; it now renders `drop` and
-  logs the drift. Pinned by `TestNftRuleFromTermUnknownActionFailsClosed`
-  (known accept/discard still map correctly; unknown actions render `drop`).
+  OTHER non-empty action → `drop`. Strict commit rejects an unknown `then`
+  token; on tolerant load / peer-sync, `compileFilterThen` preserves it in
+  `UnknownActions`, warns, and sets the compiled `Action` to `discard` rather
+  than letting the term's empty action become implicit accept. A future unknown
+  non-empty action arriving directly in a mixed-version snapshot also fails
+  closed: Rust maps it to `FilterAction::Discard`, and the kernel mirror —
+  PRIMARY host-bound enforcement — renders `drop` and logs the drift. Pinned by
+  `TestNftRuleFromTermUnknownActionFailsClosed` (known accept/discard still map
+  correctly; unknown actions render `drop`).
 
   **Non-terminating `then` modifier policy (#3445):** the kernel lo0 chain is
   the PRIMARY enforcement for host-bound traffic, so a term's non-terminating

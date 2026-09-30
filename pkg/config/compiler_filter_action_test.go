@@ -5,16 +5,10 @@ import (
 	"testing"
 )
 
-// #2399 finding 032-16: a firewall-filter `then` term with an UNKNOWN /
-// misspelled action token was silently DROPPED by compileFilterThen, leaving
-// the term's Action == "". Both the dataplane compiler
-// (pkg/dataplane/compiler_filter.go) and the Rust filter
-// (userspace-dp/src/filter/compiler.rs parse_term) map "" to ACCEPT, so a term
-// the operator meant to DENY became a fail-open PERMIT, and commit reported
-// SUCCESS. validateFilterActionsStrict now hard-rejects an unknown `then` token
-// at the strict commit path (CompileConfig) while the tolerant load /
-// peer-sync path (CompileConfigLenient) downgrades it to a warning (#1960
-// no-brick).
+// #2399 finding 032-16 / #11357: unknown firewall-filter `then` actions are
+// captured in `UnknownActions` and rejected at strict commit. The tolerant path
+// warns without bricking startup (#1960), but selects `discard` so an unknown
+// action cannot fall through to implicit accept.
 //
 // All trees are built from flat `set` commands via flatTreeFromSets (defined in
 // compiler_interfaces_unsupported_test.go) — the only correct way to exercise
@@ -27,9 +21,8 @@ func filterWithThen(then string) []string {
 	}
 }
 
-// MUST FAIL if validateFilterActionsStrict (or the UnknownActions capture in
-// compileFilterThen) is reverted: without the gate the term silently compiles
-// to accept and CompileConfig returns no error.
+// Without the strict gate the unknown-action tree would still compile (to a
+// fail-closed discard) and commit would incorrectly succeed.
 func TestFilterAction_UnknownAction_RejectsAtCommit(t *testing.T) {
 	tree := flatTreeFromSets(t, filterWithThen("frobnicate")...)
 	_, err := CompileConfig(tree)
@@ -113,11 +106,11 @@ func TestFilterAction_ValidActions_Commit(t *testing.T) {
 	})
 }
 
-// No-brick (#1960 doctrine): a config persisted / peer-synced with a filter term
-// carrying an unknown action must still LOAD on the tolerant path
+// No-brick (#1960 doctrine): a config persisted / peer-synced with a filter
+// term carrying an unknown action must still LOAD on the tolerant path
 // (CompileConfigLenient), downgraded to a warning — an upgraded or receiving
-// node must not fail closed on boot. (The dataplane independently fails the
-// unknown action closed; the leniently-loaded Go term keeps Action == "".)
+// node must not fail commit-style validation on boot. Its compiled action is
+// discard so the unknown action cannot become an implicit accept (#11357).
 func TestFilterAction_Unknown_LenientWarns(t *testing.T) {
 	tree := flatTreeFromSets(t, filterWithThen("frobnicate")...)
 	cfg, err := CompileConfigLenient(tree)
@@ -133,8 +126,11 @@ func TestFilterAction_Unknown_LenientWarns(t *testing.T) {
 	if !warned {
 		t.Fatalf("expected lenient path to record a firewall-filter-action downgrade warning, got %v", cfg.Warnings)
 	}
+	term := cfg.Firewall.FiltersInet["f1"].Terms[0]
+	if term.Action != "discard" {
+		t.Fatalf("an unknown action must fail closed as discard, got %q", term.Action)
+	}
 }
-
 // The unknown token must be captured onto the typed term (UnknownActions), not
 // silently dropped — this is the seam the strict gate reads. MUST FAIL if the
 // default arm of compileFilterThen is reverted.
@@ -152,11 +148,51 @@ func TestFilterAction_CompileCapturesUnknownToken(t *testing.T) {
 	if len(term.UnknownActions) == 0 || term.UnknownActions[0] != "frobnicate" {
 		t.Fatalf("expected term.UnknownActions to capture %q, got %v", "frobnicate", term.UnknownActions)
 	}
-	// A captured-unknown term keeps Action == "" — which the dataplane maps to
-	// accept. This is exactly why the commit gate (and the Rust fail-closed for
-	// a non-empty unknown) are required.
-	if term.Action != "" {
-		t.Fatalf("expected Action to stay \"\" for an unknown token, got %q", term.Action)
+	if term.Action != "discard" {
+		t.Fatalf("expected an unknown action to select fail-closed discard, got %q", term.Action)
+	}
+}
+
+// The unknown "next-*" spellings from #11357 are rejected on the strict path
+// and remain bootable but fail-closed on the tolerant path.
+func TestFilterAction_UnknownNextActionsRejectAndDiscardLeniently11357(t *testing.T) {
+	for _, then := range []string{"next-ip 1.2.3.4", "next-interface ge-0/0/0"} {
+		t.Run(strings.ReplaceAll(then, " ", "_"), func(t *testing.T) {
+			tree := flatTreeFromSets(t, filterWithThen(then)...)
+			_, strictErr := CompileConfig(tree)
+			if strictErr == nil || !strings.Contains(strictErr.Error(), strings.Fields(then)[0]) {
+				t.Fatalf("strict compile must reject %q and name it, got %v", then, strictErr)
+			}
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile of %q must remain bootable: %v", then, err)
+			}
+			term := cfg.Firewall.FiltersInet["f1"].Terms[0]
+			if term.Action != "discard" {
+				t.Fatalf("lenient action %q compiled as %q, want fail-closed discard", then, term.Action)
+			}
+			if len(term.UnknownActions) == 0 || term.UnknownActions[0] != strings.Fields(then)[0] {
+				t.Fatalf("lenient compile did not preserve unknown token %q: %v", then, term.UnknownActions)
+			}
+		})
+	}
+}
+
+func TestFilterAction_UnknownRemainsFailClosedAcrossThenBlocks11357(t *testing.T) {
+	for _, order := range [][2]string{
+		{"accept", "next-ip 1.2.3.4"},
+		{"next-ip 1.2.3.4", "accept"},
+	} {
+		commands := filterWithThen(order[0])
+		commands = append(commands, "set firewall family inet filter f1 term t1 then "+order[1])
+		cfg, err := CompileConfigLenient(flatTreeFromSets(t, commands...))
+		if err != nil {
+			t.Fatalf("lenient compile with then actions %q and %q: %v", order[0], order[1], err)
+		}
+		term := cfg.Firewall.FiltersInet["f1"].Terms[0]
+		if len(term.UnknownActions) == 0 || term.Action != "discard" {
+			t.Fatalf("unknown action must dominate known accept in either order, got %+v", term)
+		}
 	}
 }
 
