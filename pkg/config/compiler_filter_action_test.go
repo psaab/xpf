@@ -210,3 +210,82 @@ func TestFilterAction_UnknownRejectMessageType_RejectsAtCommit(t *testing.T) {
 		t.Fatal("expected commit to reject `then reject blorp` (unknown message-type)")
 	}
 }
+
+// #11355: SetPath nests tokens following `next term` and `reject <type>` below
+// the action node. Those tails must not disappear on the strict commit or
+// tolerant-load path; the compiler has no typed representation for them.
+func TestFilterAction_FlatSetTrailingTailAfterNextOrRejectIsReported11355(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		then      string
+		offending string
+	}{
+		{"next term with routing-instance", "next term routing-instance ISP-B", "routing-instance"},
+		{"reject type with routing-instance", "reject tcp-reset routing-instance ISP-B", "routing-instance"},
+		{"reject type with count", "reject tcp-reset count c1", "count"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := flatTreeFromSets(t, filterWithThen(tc.then)...)
+			_, err := CompileConfig(tree)
+			if err == nil {
+				t.Fatalf("strict commit silently accepted trailing action in then %q", tc.then)
+			}
+			if !strings.Contains(err.Error(), tc.offending) {
+				t.Fatalf("strict refusal %q does not name trailing action %q", err, tc.offending)
+			}
+
+			tree = flatTreeFromSets(t, filterWithThen(tc.then)...)
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("tolerant load rejected then %q: %v", tc.then, err)
+			}
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "firewall filter action") &&
+					strings.Contains(warning, tc.offending) {
+					return
+				}
+			}
+			t.Fatalf("tolerant load did not warn about trailing action %q: %v", tc.offending, cfg.Warnings)
+		})
+	}
+}
+
+// The hierarchical nested-body spelling must reach the same strict/lenient
+// decision as SetPath's nested flat-set chain.
+func TestFilterAction_HierarchicalNestedTailAfterNextOrRejectIsReported11355(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		body      string
+		offending string
+	}{
+		{"next term with routing-instance", "then { next term { routing-instance ISP-B; } }", "routing-instance"},
+		{"reject type with routing-instance", "then { reject { tcp-reset { routing-instance ISP-B; } } }", "routing-instance"},
+		{"reject type with count", "then { reject { tcp-reset { count c1; } } }", "count"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := `firewall { family inet { filter f1 { term t1 { from { protocol tcp; } ` +
+				tc.body + ` } } } }`
+			tree := hierTree(t, source)
+			_, err := CompileConfig(tree)
+			if err == nil {
+				t.Fatalf("strict commit silently accepted hierarchical trailing action in %q", tc.body)
+			}
+			if !strings.Contains(err.Error(), tc.offending) {
+				t.Fatalf("strict refusal %q does not name hierarchical trailing action %q", err, tc.offending)
+			}
+
+			cfg, err := CompileConfigLenient(hierTree(t, source))
+			if err != nil {
+				t.Fatalf("tolerant load rejected hierarchical action body %q: %v", tc.body, err)
+			}
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "firewall filter action") &&
+					strings.Contains(warning, tc.offending) {
+					return
+				}
+			}
+			t.Fatalf("tolerant load did not warn about hierarchical trailing action %q: %v",
+				tc.offending, cfg.Warnings)
+		})
+	}
+}
