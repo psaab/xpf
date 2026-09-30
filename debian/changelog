@@ -119,5 +119,7 @@ xpf (0.0.0) unstable; urgency=medium
   * Index local and shared tuple identities for delayed session-close checks,
     preserving scoped-incarnation teardown while avoiding slab and shared-map
     scans under the shared-session mutex (#11299).
+  * Route oversized same-binding flow-cache hits through pending-forward so
+    normal egress MTU, PTB, and TCP-segmentation handling is preserved (#11376).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
