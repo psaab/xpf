@@ -1139,7 +1139,7 @@ impl<'a> BulkShardGuard<'a> {
     /// Remove `key` from the appropriate shard if present.
     pub(crate) fn remove_if_present(&mut self, key: &(i32, IpAddr)) -> Option<NeighborEntry> {
         let i = shard_idx(key);
-        self.guards[i].remove(key)
+        self.guards[i].remove(key).map(|record| record.entry)
     }
 
     /// Remove `key` from the appropriate shard.
