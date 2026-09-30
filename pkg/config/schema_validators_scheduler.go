@@ -58,4 +58,3 @@ func ValidateDate(raw string, _ *Config) error {
 	}
 	return nil
 }
-
