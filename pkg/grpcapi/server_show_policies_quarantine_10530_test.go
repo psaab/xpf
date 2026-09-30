@@ -118,3 +118,25 @@ func TestShowPoliciesTextQuarantineQualifier10530(t *testing.T) {
 		t.Fatalf("ordinary hit-count row = %q, want %q:\n%s", got, wantOrdinaryRow, ordinaryHit.String())
 	}
 }
+
+// TestGetPoliciesQuarantineBit11072 pins the structured twin: rules whose
+// scope touches a quarantined zone carry Quarantined=true, so a remote show
+// does not present scrubbed permits as live.
+func TestGetPoliciesQuarantineBit11072(t *testing.T) {
+	s := &Server{store: quarantinePolicyTextStore10530(t)}
+	resp, err := s.GetPolicies(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("GetPolicies: %v", err)
+	}
+	got := make(map[string]bool)
+	for _, pi := range resp.Policies {
+		for _, pr := range pi.Rules {
+			got[pr.Name] = pr.Quarantined
+		}
+	}
+	for name, want := range map[string]bool{"loser-rule": true, "ordinary-rule": false, "scoped-global": true} {
+		if got[name] != want {
+			t.Errorf("rule %q Quarantined=%v, want %v (full=%v)", name, got[name], want, got)
+		}
+	}
+}

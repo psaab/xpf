@@ -122,9 +122,12 @@ func (c *CLI) showSecurityLog(args []string) error {
 			natDstPort = dstPort
 		}
 
+		// #11072: an empty ingress interface renders "unknown" — falling
+		// back to the zone name misattributes the packet to an interface
+		// it may never have touched.
 		inIface := e.IngressIface
 		if inIface == "" {
-			inIface = zoneName(e.InZoneName, e.InZone)
+			inIface = "unknown"
 		}
 		appName := e.AppName
 		if appName == "" {
@@ -155,15 +158,21 @@ func (c *CLI) showSecurityLog(args []string) error {
 				appName, inIface)
 
 		case "POLICY_DENY", "POLICY_REJECT":
+			// #11072: a reject renders distinctly from a deny (it sends a
+			// reset/unreachable where a deny drops silently).
+			denyTag := "RT_FLOW_SESSION_DENY"
+			if e.Type == "POLICY_REJECT" {
+				denyTag = "RT_FLOW_SESSION_REJECT"
+			}
 			if e.Reason != "" {
-				fmt.Printf("%s %s RT_FLOW - RT_FLOW_SESSION_DENY [source-address=\"%s\" source-port=\"%s\" destination-address=\"%s\" destination-port=\"%s\" protocol-id=\"%s\" policy-name=\"%s\" source-zone-name=\"%s\" destination-zone-name=\"%s\" application=\"%s\" packet-incoming-interface=\"%s\" reason=\"%s\"]\n",
-					ts, hostname, srcAddr, srcPort, dstAddr, dstPort,
+				fmt.Printf("%s %s RT_FLOW - %s [source-address=\"%s\" source-port=\"%s\" destination-address=\"%s\" destination-port=\"%s\" protocol-id=\"%s\" policy-name=\"%s\" source-zone-name=\"%s\" destination-zone-name=\"%s\" application=\"%s\" packet-incoming-interface=\"%s\" reason=\"%s\"]\n",
+					ts, hostname, denyTag, srcAddr, srcPort, dstAddr, dstPort,
 					protoNameToID(e.Protocol), policyName(e),
 					zoneName(e.InZoneName, e.InZone), zoneName(e.OutZoneName, e.OutZone),
 					appName, inIface, e.Reason)
 			} else {
-				fmt.Printf("%s %s RT_FLOW - RT_FLOW_SESSION_DENY [source-address=\"%s\" source-port=\"%s\" destination-address=\"%s\" destination-port=\"%s\" protocol-id=\"%s\" policy-name=\"%s\" source-zone-name=\"%s\" destination-zone-name=\"%s\" application=\"%s\" packet-incoming-interface=\"%s\"]\n",
-					ts, hostname, srcAddr, srcPort, dstAddr, dstPort,
+				fmt.Printf("%s %s RT_FLOW - %s [source-address=\"%s\" source-port=\"%s\" destination-address=\"%s\" destination-port=\"%s\" protocol-id=\"%s\" policy-name=\"%s\" source-zone-name=\"%s\" destination-zone-name=\"%s\" application=\"%s\" packet-incoming-interface=\"%s\"]\n",
+					ts, hostname, denyTag, srcAddr, srcPort, dstAddr, dstPort,
 					protoNameToID(e.Protocol), policyName(e),
 					zoneName(e.InZoneName, e.InZone), zoneName(e.OutZoneName, e.OutZone),
 					appName, inIface)

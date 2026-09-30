@@ -494,6 +494,11 @@ message PolicyRule {
   // read FAILURE (the dataplane snapshot itself errored) is still fail-loud as
   // codes.Internal (#3408), never this flag.
   bool hit_counters_unavailable = 23;
+  // #11072: true when either of the rule's zones is StableZoneID-collision
+  // quarantined. The text twin marks such scope (ZoneQuarantinePoliciesQualifier);
+  // without this bit a remote show presents scrubbed permits as live.
+  // Additive; false (omitted) for unquarantined scope.
+  bool quarantined = 24;
 }
 
 message GetSessionsRequest {

@@ -303,6 +303,8 @@ func (c *xpfCollector) collectSystemMetrics(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue, float64(c.srv.eventBuf.DroppedTotal()))
 		ch <- prometheus.MustNewConstMetric(c.eventStreamSubscriberRefusals,
 			prometheus.CounterValue, float64(c.srv.eventBuf.SubscriberRefusals()))
+		ch <- prometheus.MustNewConstMetric(c.eventStreamRingEvicted,
+			prometheus.CounterValue, float64(c.srv.eventBuf.EvictedTotal()))
 	}
 
 	// #1895: currently-failed RPM probe-pin installs. Nonzero means

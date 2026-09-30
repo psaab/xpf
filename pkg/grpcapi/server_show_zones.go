@@ -206,6 +206,31 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 	// matching the text surface's fail-open display rather than the
 	// fail-closed match-policies simulator (#3414).
 	schedActive, haveSched := s.policySchedulerActiveState()
+	// #11072: mirror the text twin's quarantine marking (server_show_policies_text.go):
+	// a rule whose scope touches a StableZoneID-collision quarantine carries
+	// Quarantined=true so remote show does not present scrubbed permits as live.
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
+	isQuarantined := func(name string) bool {
+		_, ok := quarantinedZones[name]
+		return ok
+	}
+	scopeQuarantined := func(from, to []string) bool {
+		for _, name := range from {
+			if isQuarantined(name) {
+				return true
+			}
+		}
+		for _, name := range to {
+			if isQuarantined(name) {
+				return true
+			}
+		}
+		return false
+	}
 	var policySetID uint32
 	for _, zpp := range cfg.Security.Policies {
 		// #3476: skip a nil zone-pair set (tolerant / HA-sync path) while
@@ -228,6 +253,7 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 				Name:        rule.Name,
 				Description: rule.Description,
 				Action:      policyActionStr(rule.Action),
+				Quarantined: isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone),
 				// #3358: unqualify synthetic zone-local keys (#3061) so the
 				// inventory exposes the authored book name, not the internal
 				// compiler token. DisplayAddressNames returns a new slice.
@@ -313,6 +339,7 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 				Name:        rule.Name,
 				Description: rule.Description,
 				Action:      policyActionStr(rule.Action),
+				Quarantined: scopeQuarantined(rule.Match.FromZones, rule.Match.ToZones),
 				// #3358: unqualify synthetic zone-local keys (#3061) so the
 				// inventory exposes the authored book name, not the internal
 				// compiler token. DisplayAddressNames returns a new slice.

@@ -128,6 +128,15 @@ type EventBuffer struct {
 	// same number (surfaced as xpf_event_stream_subscriber_refusals_total).
 	// Monotonic; never reset.
 	refused atomic.Uint64
+
+	// evictedTotal counts records overwritten in the ring because it was
+	// full when Add arrived (#11072). Unlike droppedTotal (per-subscriber
+	// channel loss), this is storage loss: Latest readers see a contiguous
+	// ring and would mistake truncation for complete history. Monotonic;
+	// never reset. Surfaced as xpf_event_stream_ring_evicted_total, and
+	// the oldest record of every Latest read carries Overrun=true once
+	// this is nonzero so the gap is visible in-band.
+	evictedTotal atomic.Uint64
 }
 
 // Subscription receives new events from an EventBuffer.
@@ -214,6 +223,8 @@ func (eb *EventBuffer) Add(rec EventRecord) {
 	eb.head = (eb.head + 1) % eb.size
 	if eb.count < eb.size {
 		eb.count++
+	} else {
+		eb.evictedTotal.Add(1)
 	}
 	eb.mu.Unlock()
 
@@ -257,6 +268,21 @@ func (eb *EventBuffer) DroppedTotal() uint64 { return eb.droppedTotal.Load() }
 // because the live subscriber cap was reached. It includes every control
 // surface sharing the buffer (REST SSE, gRPC, and internal callers).
 func (eb *EventBuffer) SubscriberRefusals() uint64 { return eb.refused.Load() }
+
+// EvictedTotal returns the aggregate number of records overwritten in the
+// ring because it was full (#11072). Monotonic for the life of the buffer.
+func (eb *EventBuffer) EvictedTotal() uint64 { return eb.evictedTotal.Load() }
+
+// OldestLiveSeq returns the BufSeq of the oldest record still held, or 0
+// when the ring is empty. Everything below it was evicted.
+func (eb *EventBuffer) OldestLiveSeq() uint64 {
+	eb.mu.RLock()
+	defer eb.mu.RUnlock()
+	if eb.count == 0 {
+		return 0
+	}
+	return eb.seq - uint64(eb.count) + 1
+}
 
 // Dropped returns the number of records THIS subscriber lost because its
 // channel was full when Add tried to deliver (#5064). A nonzero value means
@@ -424,6 +450,13 @@ func (eb *EventBuffer) LatestFiltered(n int, f EventFilter) []EventRecord {
 			result = append(result, eb.buf[idx])
 		}
 	}
+	// #11072: the ring overwrote history — mark the oldest returned record
+	// so a forensic reader cannot mistake truncation for completeness.
+	// Same in-band contract as the subscriber Overrun flag (copies, so the
+	// stored records are untouched).
+	if len(result) > 0 && eb.evictedTotal.Load() > 0 {
+		result[len(result)-1].Overrun = true
+	}
 	return result
 }
 
@@ -451,6 +484,11 @@ func (eb *EventBuffer) Latest(n int) []EventRecord {
 		// Walk backwards from the most recent entry
 		idx := (eb.head - 1 - i + eb.size) % eb.size
 		result[i] = eb.buf[idx]
+	}
+	// #11072: mark ring-overwrite on the oldest returned record (see
+	// LatestFiltered for the contract).
+	if len(result) > 0 && eb.evictedTotal.Load() > 0 {
+		result[len(result)-1].Overrun = true
 	}
 	return result
 }
