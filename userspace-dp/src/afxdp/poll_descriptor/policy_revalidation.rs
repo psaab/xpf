@@ -204,6 +204,13 @@
 //! evaluation on the established-hit path, which is exactly what #2620 forbids
 //! (that path is the sole counter for its packet precisely because it never
 //! calls the routing evaluator). #8356 does not re-open #2620.
+//!
+//! #11075: the residual is DOCUMENTED (here) and ALARMED instead of silently
+//! open. Every worker watches its validation's fib_generation each tick: on
+//! advance with live sessions, it bumps ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL
+//! and rate-limits one journal line naming the session count that was NOT
+//! re-judged. The trigger is bounded (fires once per generation step per
+//! worker) and performs no routing evaluation, so #2620 holds.
 
 use super::*;
 use crate::afxdp::FastMap;
@@ -233,6 +240,32 @@ use std::sync::{Arc, Mutex};
 /// teardown or flow-cache eviction: there is no entry, and the teardown would
 /// emit a close delta and release NAT state for a flow this node never owned.
 /// Mirrors #8114's `revoked_key: None`.
+/// #11075: cumulative count of established sessions alive on workers that
+/// observed a FIB-generation advance WITHOUT re-judging them (the route-move
+/// residual #2620 leaves open). Bumped once per worker per generation step
+/// with the worker's live session count at the moment of advance.
+pub(crate) static ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// #11075: minimum interval between route-change alarm lines from one worker.
+pub(crate) const ROUTE_CHANGE_ALARM_INTERVAL_NS: u64 = 60_000_000_000;
+
+/// #11075: pure edge predicate for the route-change alarm. Fires when the
+/// worker's validation advanced to a new FIB generation while sessions are
+/// live, at most once per interval. Unit-testable; the worker tick wires it.
+pub(crate) fn should_alarm_route_change(
+    last_fib_generation: u32,
+    live_fib_generation: u32,
+    live_sessions: usize,
+    last_alarm_ns: u64,
+    now_ns: u64,
+) -> bool {
+    live_fib_generation != last_fib_generation
+        && live_sessions > 0
+        && (last_alarm_ns == 0
+            || now_ns.saturating_sub(last_alarm_ns) >= ROUTE_CHANGE_ALARM_INTERVAL_NS)
+}
+
 pub(super) struct PolicyRevocation {
     pub(super) canonical_key: Option<SessionKey>,
     pub(super) decision: SessionDecision,
@@ -1496,6 +1529,34 @@ fn zone_policy_deny_on_session_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #11075: the route-change alarm fires exactly when a generation step
+    /// lands with live sessions, rate-limited to one line per interval.
+    #[test]
+    fn route_change_alarm_edge_matrix_11075() {
+        // Advance + live sessions + never alarmed -> fire.
+        assert!(should_alarm_route_change(7, 8, 100, 0, 1_000));
+        // Same generation -> silent.
+        assert!(!should_alarm_route_change(8, 8, 100, 0, 1_000));
+        // No live sessions -> silent.
+        assert!(!should_alarm_route_change(7, 8, 0, 0, 1_000));
+        // Within the interval -> silent.
+        assert!(!should_alarm_route_change(
+            7,
+            8,
+            100,
+            1_000,
+            1_000 + ROUTE_CHANGE_ALARM_INTERVAL_NS - 1
+        ));
+        // Past the interval -> fire again.
+        assert!(should_alarm_route_change(
+            7,
+            8,
+            100,
+            1_000,
+            1_000 + ROUTE_CHANGE_ALARM_INTERVAL_NS
+        ));
+    }
 
     fn marker_forward_10038() -> (SessionDecision, SessionMetadata, SessionOrigin) {
         (

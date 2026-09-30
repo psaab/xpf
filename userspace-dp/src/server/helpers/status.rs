@@ -117,6 +117,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.ndp_na_frag_refused_total = state.afxdp.ndp_na_frag_refused_total();
     state.status.ndp_na_bad_source_refused_total =
         state.afxdp.ndp_na_bad_source_refused_total();
+    state.status.route_change_unrejudged_sessions_total =
+        state.afxdp.route_change_unrejudged_sessions_total();
     // #1789: total failed USERSPACE_SESSIONS BPF-map publishes
     // (per-binding worker-poll sites + shared no-binding sites). The
     // cause-side signal for rising XDP-shim NO_SESSION fallbacks.

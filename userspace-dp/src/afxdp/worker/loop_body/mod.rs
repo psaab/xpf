@@ -1020,6 +1020,8 @@ pub(crate) fn worker_loop(
     let mut wr_state = WorkerRuntimeState::IdleBlock;
     let mut wr_last_loop_ns = monotonic_nanos();
     let mut wr_last_publish_ns = wr_last_loop_ns;
+    // #11075: last route-change alarm emission (rate-limit state).
+    let mut last_route_change_alarm_ns: u64 = 0;
     // #1760 W1: previous-snapshot values for the durable journald
     // collision warn. Compared on the ~1s publish cadence below — zero
     // per-packet work, one u64 compare per publish while the counters
@@ -1257,6 +1259,28 @@ pub(crate) fn worker_loop(
                     ipsec_inner_completions.clear();
                 }
             });
+        // #11075: FIB generation advanced — established sessions were NOT
+        // re-judged against the new routes (#2620 forbids hit-path routing
+        // eval). Count the live sessions and rate-limit one alarm line so
+        // the residual is observable instead of silent. Bounded: fires at
+        // most once per generation step per worker.
+        if crate::afxdp::poll_descriptor::should_alarm_route_change(
+            validation.fib_generation,
+            live_validation.fib_generation,
+            sessions.len(),
+            last_route_change_alarm_ns,
+            loop_now_ns,
+        ) {
+            crate::afxdp::poll_descriptor::ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL
+                .fetch_add(sessions.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "xpf-userspace-dp: WARNING: FIB generation {} -> {} with {} established sessions:                  sessions were NOT re-judged against new routes (#11075 residual; #2620)",
+                validation.fib_generation,
+                live_validation.fib_generation,
+                sessions.len(),
+            );
+            last_route_change_alarm_ns = loop_now_ns;
+        }
         if live_validation != validation {
             validation = live_validation;
         }

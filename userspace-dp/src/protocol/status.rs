@@ -352,6 +352,8 @@ pub(crate) struct ProcessStatus {
     /// for backward compatibility with older daemons.
     #[serde(rename = "ndp_na_bad_source_refused_total", default)]
     pub ndp_na_bad_source_refused_total: u64,
+    #[serde(rename = "route_change_unrejudged_sessions_total", default)]
+    pub route_change_unrejudged_sessions_total: u64,
     /// #1789: total failed USERSPACE_SESSIONS BPF-map publishes
     /// (per-binding worker-poll sites summed with the shared no-binding
     /// sites: HA upsert, session-glue worker publish, post-reconcile
