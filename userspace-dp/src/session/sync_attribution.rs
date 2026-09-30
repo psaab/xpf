@@ -28,9 +28,11 @@
 //! session for one peer. So the derivation is single-sourced here rather than
 //! duplicated across the two producers. Both producers destructure
 //! `SessionSyncAttribution` EXHAUSTIVELY (no `..`), so adding a field requires
-//! each producer to account for it. The behavioral test
-//! `session_delta_json_and_binary_agree_on_policy_attribution_6949` compares
-//! the actual JSON and binary outputs for one non-default session.
+//! each producer to account for it. The
+//! `sync_attribution_exhaustive_destructure_6949` guard keeps the no-`..` seam
+//! explicit; behavioral coverage uses
+//! `session_delta_json_and_binary_agree_on_policy_attribution_6949` to compare
+//! actual JSON and binary outputs for one non-default session.
 
 use std::net::{IpAddr, Ipv4Addr};
 
