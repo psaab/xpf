@@ -116,6 +116,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Reject undeclared fields in named API-auth credentials and validate
     API-auth class references; reconcile the schema-census inventories
     (#11544).
+  * Bump the helper FIB generation after learned-route republish and retain
+    retry state when invalidation fails (#11565).
   * Fail closed when an embedded ICMP quote's translated NAT tuple is ambiguous
     across routing domains, while retaining off-path reversal for unique flows
     (#11298).
