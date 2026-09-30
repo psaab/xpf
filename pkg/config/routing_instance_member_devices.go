@@ -247,6 +247,132 @@ func RoutingInstanceMemberLinuxNamesForInstance(
 	return out
 }
 
+// RoutingInstanceMemberLinuxNameOwners returns the first routing-instance
+// owner for each claimed Linux device. Routing-instance and member order are
+// preserved, so malformed duplicate claims resolve deterministically.
+// Forwarding instances are included because protocol membership still belongs
+// to them even though they do not bind a Linux VRF device.
+func RoutingInstanceMemberLinuxNameOwners(cfg *Config) map[string]string {
+	if cfg == nil {
+		return map[string]string{}
+	}
+	return routingInstanceMemberLinuxNameOwnersWith(cfg, cfg.TunnelNameMap())
+}
+
+func routingInstanceMemberLinuxNameOwnersWith(
+	cfg *Config, tunnelNames map[string]string,
+) map[string]string {
+	owners := make(map[string]string)
+	if cfg == nil {
+		return owners
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || IsReservedRoutingInstanceName(ri.Name) {
+			continue
+		}
+		for _, member := range RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, ri) {
+			if member.LinuxName == "" {
+				continue
+			}
+			if _, exists := owners[member.LinuxName]; !exists {
+				owners[member.LinuxName] = ri.Name
+			}
+		}
+	}
+
+	// Explicit tunnel routing-instance stanzas claim their compiled Linux
+	// device exactly like list members (#11310). List members win ties by
+	// record order; any such tie is itself a #11060 conflict.
+	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
+		if claim.LinuxName == "" || claim.Instance == "" || IsReservedRoutingInstanceName(claim.Instance) {
+			continue
+		}
+		if _, exists := owners[claim.LinuxName]; !exists {
+			owners[claim.LinuxName] = claim.Instance
+		}
+	}
+	return owners
+}
+
+// RoutingInstanceMemberDeviceOwnersForRefs resolves each authored reference
+// to the owner of its kernel device. Unknown devices and default-instance
+// devices map to an empty owner. One TunnelNameMap is shared across all refs.
+func RoutingInstanceMemberDeviceOwnersForRefs(cfg *Config, refs []string) map[string]string {
+	owners := make(map[string]string, len(refs))
+	if cfg == nil || len(refs) == 0 {
+		return owners
+	}
+	declared := declaredInterfaceIndex(cfg)
+	tunnelNames := cfg.TunnelNameMap()
+	deviceOwners := routingInstanceMemberLinuxNameOwnersWith(cfg, tunnelNames)
+	for _, ref := range refs {
+		if ref == "" {
+			continue
+		}
+		if ref == "all" || unresolvedInterfaceRef(declared, ref) != "" {
+			owners[ref] = ""
+			continue
+		}
+		device := cfg.resolveKernelIfNameWith(ref, tunnelNames)
+		owners[ref] = deviceOwners[device]
+	}
+	return owners
+}
+
+// routingInstanceTunnelDeviceClaim is one explicit tunnel `routing-instance`
+// ownership claim in deterministic traversal order.
+type routingInstanceTunnelDeviceClaim struct {
+	LinuxName string
+	Instance  string
+	Member    string
+}
+
+// routingInstanceTunnelDeviceClaims collects interface-level and unit-level
+// tunnel routing-instance claims in sorted interface/unit order, using each
+// tunnel's compiled Linux device name verbatim: the compiler assigns shared
+// WireGuard units the parent name and mode-overriding units their distinct uN
+// name. The conflict detector and the membership-owner map share this one
+// traversal so both agree on claim identity and order (#11310).
+func routingInstanceTunnelDeviceClaims(cfg *Config) []routingInstanceTunnelDeviceClaim {
+	if cfg == nil {
+		return nil
+	}
+	interfaceNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
+	for ifName := range cfg.Interfaces.Interfaces {
+		interfaceNames = append(interfaceNames, ifName)
+	}
+	sort.Strings(interfaceNames)
+	var out []routingInstanceTunnelDeviceClaim
+	for _, ifName := range interfaceNames {
+		ifc := cfg.Interfaces.Interfaces[ifName]
+		if ifc == nil {
+			continue
+		}
+		if tc := ifc.Tunnel; tc != nil && tc.RoutingInstance != "" {
+			out = append(out, routingInstanceTunnelDeviceClaim{
+				LinuxName: tc.Name, Instance: tc.RoutingInstance,
+				Member: fmt.Sprintf("%s tunnel routing-instance", ifName),
+			})
+		}
+		unitNums := make([]int, 0, len(ifc.Units))
+		for unitNum := range ifc.Units {
+			unitNums = append(unitNums, unitNum)
+		}
+		sort.Ints(unitNums)
+		for _, unitNum := range unitNums {
+			unit := ifc.Units[unitNum]
+			if unit == nil || unit.Tunnel == nil || unit.Tunnel.RoutingInstance == "" {
+				continue
+			}
+			out = append(out, routingInstanceTunnelDeviceClaim{
+				LinuxName: unit.Tunnel.Name, Instance: unit.Tunnel.RoutingInstance,
+				Member: fmt.Sprintf("%s.%d tunnel routing-instance", ifName, unitNum),
+			})
+		}
+	}
+	return out
+}
+
 // RoutingInstanceMemberDeviceConflicts finds every Linux device claimed by
 // multiple routing instances through either an `interface` list or an explicit
 // tunnel `routing-instance` stanza. Forwarding instances do not bind links to
@@ -294,35 +420,11 @@ func RoutingInstanceMemberDeviceConflicts(cfg *Config, tunnelNames map[string]st
 	}
 
 	// A tunnel's explicit routing-instance stanza is an ownership claim on the
-	// tunnel's compiled Linux device, just like an RI list member. The compiler
-	// assigns shared WireGuard units the parent name and mode-overriding units
-	// their distinct uN name, so use the resolved unit name verbatim.
-	interfaceNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
-	for ifName := range cfg.Interfaces.Interfaces {
-		interfaceNames = append(interfaceNames, ifName)
-	}
-	sort.Strings(interfaceNames)
-	for _, ifName := range interfaceNames {
-		ifc := cfg.Interfaces.Interfaces[ifName]
-		if ifc == nil {
-			continue
-		}
-		if tc := ifc.Tunnel; tc != nil && tc.RoutingInstance != "" {
-			recordOwner(tc.Name, tc.RoutingInstance, fmt.Sprintf("%s tunnel routing-instance", ifName))
-		}
-		unitNums := make([]int, 0, len(ifc.Units))
-		for unitNum := range ifc.Units {
-			unitNums = append(unitNums, unitNum)
-		}
-		sort.Ints(unitNums)
-		for _, unitNum := range unitNums {
-			unit := ifc.Units[unitNum]
-			if unit == nil || unit.Tunnel == nil || unit.Tunnel.RoutingInstance == "" {
-				continue
-			}
-			recordOwner(unit.Tunnel.Name, unit.Tunnel.RoutingInstance,
-				fmt.Sprintf("%s.%d tunnel routing-instance", ifName, unitNum))
-		}
+	// tunnel's compiled Linux device, just like an RI list member. Both this
+	// detector and the membership-owner map consume the shared
+	// routingInstanceTunnelDeviceClaims traversal (#11310).
+	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
+		recordOwner(claim.LinuxName, claim.Instance, claim.Member)
 	}
 	for _, claim := range cfg.QuarantinedRIMemberPrimaryClaims {
 		recordOwner(claim.LinuxName, claim.Instance, "primary "+claim.InterfaceKey)
