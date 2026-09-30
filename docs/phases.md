@@ -833,8 +833,8 @@ Gap audit: `docs/archived/userspace-forwarding-and-failover-gap-audit.md` (PR #3
 ### Routing Enhancements
 - **IPv6 route leaking (next-table inet6.0):** `rib inet6.0 { static { route ::/0 next-table X.inet6.0; } }` — IPv6 inter-VRF route leaking via `ip -6 rule`
 - **Multi-VRF rib-groups (8+ import-ribs):** Scaled up ip rule generation for rib-groups with 8+ import-ribs (e.g., `Other-ISPS` with 8 VRFs)
-- **Global interface-routes rib-group:** `routing-options { interface-routes { rib-group { inet X; inet6 Y; } } }` — new `InterfaceRoutesRibGroup`/`InterfaceRoutesRibGroupV6` fields on RoutingOptionsConfig
-- **IPv6 rib-group leaking:** `ApplyRibGroupRules()` now handles both `InterfaceRoutesRibGroup` and `InterfaceRoutesRibGroupV6`, creating both IPv4 and IPv6 ip rules per source table
+- **Global main-to-VRF interface-routes rib-group:** Explicitly rejected at strict commit and warned on tolerant load until cross-plane import is implemented (#11311); per-instance import-into-main remains supported
+- **Per-instance IPv4/IPv6 rib-group leaking:** `ApplyRibGroupRules()` handles both per-instance family selectors, creating per-prefix IPv4 and IPv6 rules for connected routes imported into main
 - **BGP family inet/inet6 unicast:** Per-address-family config in BGP groups → FRR `address-family ipv4/ipv6 unicast` blocks
 - **Route-filter exact:** Policy-statement route-filter matching → FRR `ip prefix-list` + `route-map match`
 - **Next-hop peer-address:** Junos `next-hop peer-address` → FRR `set ip next-hop peer-address` (was incorrectly a no-op)
@@ -871,7 +871,7 @@ Gap audit: `docs/archived/userspace-forwarding-and-failover-gap-audit.md` (PR #3
 - `TestGRETunnelRoutingInstanceDestination` — GRE VRF binding
 - `TestPointToPointFlag` — unit point-to-point config
 - `TestIPsecAggressiveModeSetSyntax` — Full IPsec feature chain (aggressive, local-address, dynamic hostname, df-bit, establish-tunnels)
-- `TestGlobalInterfaceRoutesRibGroup`, `TestGlobalInterfaceRoutesRibGroupSetSyntax` — Global rib-group inet/inet6
+- `TestGlobalInterfaceRoutesRibGroup`, `TestGlobalInterfaceRoutesRibGroupSetSyntax` — tolerant parser retention and warning for unsupported global selectors (#11311)
 - `TestIPv6NextTableStaticRoutes` — IPv6 inter-VRF route leaking
 - `TestDNATSourceAddressName`, `TestDNATSourceAddressNameSetSyntax` — DNAT address-book name matching
 - `TestDNATPortRange`, `TestDNATPortRangeSetSyntax` — DNAT port range parsing

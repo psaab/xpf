@@ -1886,6 +1886,7 @@ pub(super) fn publish_shared_session(
         let previous_owner_rg = sessions
             .insert(entry.key.clone(), entry.clone())
             .map(|existing| existing.metadata.owner_rg_id);
+        lock_shared_recover(&shared_owner_rg_indexes.bare_tuple_sessions).insert(&entry.key);
         update_owner_rg_index(
             &shared_owner_rg_indexes.sessions,
             &entry.key,
@@ -2137,6 +2138,7 @@ pub(super) fn remove_shared_session_if(
     }
     let removed_entry = sessions.remove(key);
     if let Some(entry) = removed_entry.as_ref() {
+        lock_shared_recover(&shared_owner_rg_indexes.bare_tuple_sessions).remove(&entry.key);
         remove_owner_rg_index_entry(
             &shared_owner_rg_indexes.sessions,
             entry.metadata.owner_rg_id,

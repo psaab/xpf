@@ -964,6 +964,33 @@ func validateRibGroupImportRibReferencesStrict(cfg *Config) error {
 	return nil
 }
 
+// validateGlobalInterfaceRoutesRibGroupStrict rejects the global
+// main-to-instance import shape. The runtime rib-group path only supports
+// per-instance connected-prefix imports into main; silently accepting this
+// global selector can leave FBF traffic following the instance default route
+// instead of being delivered to a directly connected destination.
+func validateGlobalInterfaceRoutesRibGroupStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	selectors := make([]string, 0, 2)
+	if group := cfg.RoutingOptions.InterfaceRoutesRibGroup; group != "" {
+		selectors = append(selectors, fmt.Sprintf("inet %q", group))
+	}
+	if group := cfg.RoutingOptions.InterfaceRoutesRibGroupV6; group != "" {
+		selectors = append(selectors, fmt.Sprintf("inet6 %q", group))
+	}
+	if len(selectors) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"global routing-options interface-routes rib-group %s is not implemented: "+
+			"global connected-route imports into routing instances are not applied "+
+			"to the kernel or userspace forwarding table; remove the selector or "+
+			"configure the required routes explicitly",
+		strings.Join(selectors, ", "))
+}
+
 // ribInstanceFromName extracts the routing-instance prefix from a non-default
 // rib name of the EXACT form "<instance>.inet.0" or "<instance>.inet6.0",
 // returning ok=false for any other shape. The instance prefix must be

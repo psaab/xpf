@@ -1,5 +1,7 @@
 package config
 
+import "fmt"
+
 // runUniformGates runs the P6b "uniform fail-open gate" phase of config
 // compilation — the long contiguous run of ~75 independent validation gates
 // extracted from compileExpanded as step 4 of the #4406 god-orchestrator
@@ -97,9 +99,32 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesRIDualClaim11060(tree, cfg, opts); err != nil {
 		return err
 	}
-	// #11312 follows #11060 so a dual claim keeps its existing cross-instance
-	// diagnostic priority. The tolerant dual-claim path defers quarantine until
-	// after all gates, so forwarding members are still visible here to warn.
+
+	// #11310: appended after #11060 at the end of this phase, preserving the
+	// existing first-error order. Gates appended after this one must preserve
+	// its diagnostic priority. Protocol interface references must match the
+	// routing-instance membership of the resolved Linux device. A global
+	// protocol cannot claim an RI-owned device, and an RI protocol must
+	// reference a device owned by that same instance; otherwise FRR activates
+	// the interface in a different routing context from the configured device.
+	// Known aliases are compared by kernel identity, while undeclared refs
+	if mismatches := protocolInterfaceMembershipMismatches11310(cfg); len(mismatches) > 0 {
+		if opts.lenientProtocolInterfaceMembership11310 {
+			for _, mismatch := range mismatches {
+				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+					"protocol interface membership (downgraded to warning on tolerant path): %s",
+					mismatch))
+			}
+		} else {
+			return fmt.Errorf("%s", mismatches[0])
+		}
+	}
+
+	// #11312 follows #11310 at the tail of the phase, preserving its first-error
+	// priority while remaining after #11060 so dual claims keep their existing
+	// cross-instance diagnostic priority. The tolerant dual-claim path defers
+	// quarantine until after all gates, so forwarding members are still visible
+	// here to warn.
 	if err := runUniformGatesForwardingInstanceMembers11312(tree, cfg, opts); err != nil {
 		return err
 	}

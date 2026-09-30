@@ -1,5 +1,12 @@
 package config
 
+type protocolScopeOpts struct {
+	// lenientProtocolInterfaceMembership11310 downgrades global/RI protocol
+	// interface ownership mismatches to warnings during tolerant loading. The
+	// strict commit and commit-check paths reject the same cross-scope refs.
+	lenientProtocolInterfaceMembership11310 bool
+}
+
 // compileOpts carries per-call compilation policy. It is threaded into
 // compileExpanded so the strict commit path and the tolerant
 // load/peer-sync path can share the identical compile + group-expansion
@@ -1352,6 +1359,10 @@ type compileOpts struct {
 	// guard skips the phantom rib and installs no rule, so a leniently-loaded
 	// config is already inert. Same doctrine as lenientRoutingExportRef.
 	lenientRibGroupRefs bool
+	// lenientGlobalInterfaceRoutesRibGroup (#11311) downgrades the unsupported
+	// global main-to-instance connected-route import gate to a warning on
+	// tolerant loads, so a previously persisted config remains bootable.
+	lenientGlobalInterfaceRoutesRibGroup bool
 	// lenientNextTableRefs (#5693) downgrades the next-table target
 	// definedness gate (validateNextTableTargetReferencesStrict) from a hard
 	// compile error to a cfg.Warnings entry. A static route whose
@@ -1385,6 +1396,7 @@ type compileOpts struct {
 	// default domain, matching the daemon's no-VRF binding behavior.
 	lenientForwardingInstanceMembers bool
 
+	protocolScopeOpts
 	// lenientDHCPRelayDHCPv6 (#9553) downgrades validateDHCPRelayDHCPv6AST from
 	// a hard compile error to a cfg.Warnings entry. The implemented RFC 8415
 	// subset is compiled into the typed DHCPv6 relay configuration and excluded
@@ -3055,9 +3067,11 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyMatchAddressSetMembers:    true,
 		lenientAddressSetMembersDefined:        true,
 		lenientRibGroupRefs:                    true,
+		lenientGlobalInterfaceRoutesRibGroup:   true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
 		lenientForwardingInstanceMembers:       true,
+		protocolScopeOpts:                      protocolScopeOpts{lenientProtocolInterfaceMembership11310: true},
 		lenientDHCPRelayDHCPv6:                 true,
 		lenientWireguardRoutingInstance:        true,
 		lenientDHCPRelayChildTokens:            true,

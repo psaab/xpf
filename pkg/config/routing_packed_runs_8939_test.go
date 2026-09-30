@@ -17,7 +17,9 @@ func buildRouting8939(t *testing.T, lines ...string) *Config {
 			t.Fatalf("SetPath(%q): %v", l, err)
 		}
 	}
-	c, err := CompileConfig(tr)
+	// Global selector fixtures use tolerant compilation because strict commit
+	// rejects that unsupported shape (#11311); per-instance cases remain valid.
+	c, err := CompileConfigLenient(tr)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

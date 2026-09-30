@@ -2810,9 +2810,13 @@ routing-options {
 	if errs != nil {
 		t.Fatal(errs)
 	}
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	if !warningsContain(cfg.Warnings, "global interface-routes rib-group") {
+		t.Fatalf("expected unsupported global rib-group warning, got: %v", cfg.Warnings)
 	}
 	if cfg.RoutingOptions.InterfaceRoutesRibGroup != "Other-ISPS" {
 		t.Errorf("InterfaceRoutesRibGroup = %q, want Other-ISPS", cfg.RoutingOptions.InterfaceRoutesRibGroup)
@@ -2856,9 +2860,13 @@ func TestGlobalInterfaceRoutesRibGroupSetSyntax(t *testing.T) {
 		}
 		tree.SetPath(cmd)
 	}
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	if !warningsContain(cfg.Warnings, "global interface-routes rib-group") {
+		t.Fatalf("expected unsupported global rib-group warning, got: %v", cfg.Warnings)
 	}
 	if cfg.RoutingOptions.InterfaceRoutesRibGroup != "Other-ISPS" {
 		t.Errorf("InterfaceRoutesRibGroup = %q, want Other-ISPS", cfg.RoutingOptions.InterfaceRoutesRibGroup)
