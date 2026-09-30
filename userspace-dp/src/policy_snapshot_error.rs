@@ -494,10 +494,10 @@ pub(crate) enum SnapshotIntegrityError {
     /// where that gate is downgraded to a warning and nothing else was left.
     ///
     /// The predicate is DEFINEDNESS, deliberately NOT presence in the compiled
-    /// `three_color_policer_by_name` map. Those two differ, and the difference
-    /// matters: `lower_single_rate_policer_runtimes` (#4514) SKIPS a degenerate
+    /// `three_color_policer_by_scope` map. Those two differ, and the difference
+    /// matters: `lower_single_rate_policer_templates` (#4514) SKIPS a degenerate
     /// zero-rate METER-ONLY policer because it has no action to enforce, so
-    /// such a policer is defined, absent from the map, and must NOT be
+    /// such a policer is defined, absent from the scope map, and must NOT be
     /// rejected. Keying this on the map would refuse a config that boots today.
     /// An EMPTY reference (no policer on the term) is the legitimate
     /// "unpoliced" case and is NOT an error.

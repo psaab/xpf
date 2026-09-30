@@ -1,19 +1,18 @@
-// #2089/#11304 generated-reply synthesis: explicit `then reject` emits a TCP
-// RST (for TCP) or an ICMP/ICMPv6 Destination Unreachable, administratively
-// prohibited (for every other non-suppressed protocol). Plain `then deny`
-// remains a silent drop. Junos zone `tcp-rst` separately uses the same reply
-// machinery for non-SYN TCP transit session misses, not policy denies. Lifted
-// out of poll_descriptor/mod.rs so the hot ingress loop does not carry the
-// reject-path bodies in its codegen unit, mirroring cookie_reply.rs.
+// #2089/#11303 policy `then reject` replies follow Junos semantics: TCP gets a
+// RST, UDP gets ICMP/ICMPv6 port-unreachable, and other protocols are dropped.
+// Plain `then deny` stays silent. Junos zone `tcp-rst` is separate: it uses
+// the same reply machinery only for non-SYN TCP transit session misses, not
+// policy denies. Lifted out of poll_descriptor/mod.rs so the hot ingress loop
+// does not carry the reject-path bodies in its codegen unit, mirroring
+// cookie_reply.rs.
 //
 // `enqueue_policy_reject_reply` is on the cold policy exception arm and fires
-// solely when the matched action is `PolicyAction::Reject`. The
-// `enqueue_session_miss_rst` helper is reached only from the strict-SYN miss
-// gate. Both are true cold/exception bodies — `#[cold] #[inline(never)]`
-// places them in `.text.unlikely`, away from the hot loop's cache lines. They
-// share the SYN-cookie TX-frame budget gate so a reply flood cannot starve
-// transit TX frames; on budget or build failure the caller still drops the
-// packet (fail-closed).
+// solely for `PolicyAction::Reject`. `enqueue_session_miss_rst` is reached only
+// from the strict-SYN miss gate. Both are cold/exception bodies —
+// `#[cold] #[inline(never)]` places them in `.text.unlikely`, away from the hot
+// loop's cache lines. They share the SYN-cookie TX-frame budget gate so a reply
+// flood cannot starve transit TX frames; on budget or build failure the caller
+// still drops the packet (fail-closed).
 
 use super::cookie_reply::syn_cookie_reply_budget_available;
 use super::worker::WorkerTxPipeline;
@@ -49,6 +48,11 @@ pub(super) fn enqueue_policy_reject_reply(
     flow: &SessionFlow,
     counters: &mut BatchCounters,
 ) -> bool {
+    let reject_message = match meta.protocol {
+        PROTO_TCP => crate::filter::RejectMessage::ADMIN_PROHIBITED,
+        PROTO_UDP => crate::filter::RejectMessage::PORT_UNREACHABLE,
+        _ => return false,
+    };
     enqueue_reject_reply(
         tx_pipeline,
         forwarding,
@@ -58,20 +62,20 @@ pub(super) fn enqueue_policy_reject_reply(
         flow,
         counters,
         RejectReplySource::Policy,
-        // #6854: a POLICY reject has no filter term and so no message-type;
-        // it keeps the administratively-prohibited codes it has always sent.
-        crate::filter::RejectMessage::ADMIN_PROHIBITED,
+        reject_message,
     )
 }
 
-/// #2521: firewall-filter `then reject` now synthesizes the SAME active
-/// reply as policy `reject` (TCP RST for TCP, ICMP/ICMPv6 admin-prohibited
-/// unreachable otherwise) instead of the historical silent drop. Reuses the
-/// exact synthesis + #2238 output-classification path via the shared
-/// `enqueue_reject_reply`; only the success counter differs
-/// (`filter_reject_sent` vs `policy_reject_sent`). Budget, output-filter, and
-/// parse-error drops share policy reject's counters and its fail-closed
-/// behavior (the caller still drops the packet on a `false` return).
+/// #2521: firewall-filter `then reject` synthesizes an active reply using
+/// the configured `then reject <message-type>` (admin-prohibited by default)
+/// for non-TCP traffic, unlike policy `then reject` (#11303), which sends
+/// port-unreachable only for UDP and silently drops other protocols. TCP
+/// rejects in both paths use the same RST builder. Both reuse the exact
+/// synthesis + #2238 output-classification path via `enqueue_reject_reply`;
+/// only the success counter differs (`filter_reject_sent` vs
+/// `policy_reject_sent`). Budget and output-filter drops retain source-specific
+/// counters, parse errors stay source-neutral, and every failure remains
+/// fail-closed (the caller still drops the packet on a `false` return).
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]

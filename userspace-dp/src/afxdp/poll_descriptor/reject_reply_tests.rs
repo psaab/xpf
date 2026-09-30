@@ -82,6 +82,255 @@ fn tcp_v4_syn() -> (Vec<u8>, UserspaceDpMeta, SessionFlow) {
     };
     (frame, meta, flow)
 }
+fn policy_reject_packet_v4(protocol: u8) -> (Vec<u8>, UserspaceDpMeta, SessionFlow) {
+    let client = std::net::Ipv4Addr::new(10, 0, 61, 102);
+    let server = std::net::Ipv4Addr::new(1, 1, 1, 1);
+    let payload = match protocol {
+        crate::ip_proto::PROTO_UDP => [0xc0, 0, 0, 53, 0, 8, 0, 0],
+        crate::ip_proto::PROTO_ICMP => [8, 0, 0, 0, 0x12, 0x34, 0, 1],
+        crate::ip_proto::PROTO_GRE => [0, 0, 0x08, 0, 0, 0, 0, 0],
+        crate::ip_proto::PROTO_ESP => [0, 0, 0, 1, 0, 0, 0, 1],
+        _ => panic!("unsupported test protocol {protocol}"),
+    };
+    let (src_port, dst_port) = match protocol {
+        crate::ip_proto::PROTO_UDP => (0xc000, 53),
+        crate::ip_proto::PROTO_ICMP => (0x1234, 0),
+        _ => (0, 0),
+    };
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    frame.extend_from_slice(&[0x36, 0xe4, 0x2b, 0xd5, 0x39, 0xe6]);
+    frame.extend_from_slice(&0x0800u16.to_be_bytes());
+    frame.extend_from_slice(&[
+        0x45, 0, 0, 28, 0, 0, 0x40, 0, 64, protocol, 0, 0,
+    ]);
+    frame.extend_from_slice(&client.octets());
+    frame.extend_from_slice(&server.octets());
+    frame.extend_from_slice(&payload);
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: 5,
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol,
+        pkt_len: frame.len() as u16,
+        ..UserspaceDpMeta::default()
+    };
+    let flow = SessionFlow {
+        src_ip: std::net::IpAddr::V4(client),
+        dst_ip: std::net::IpAddr::V4(server),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol,
+            src_ip: std::net::IpAddr::V4(client),
+            dst_ip: std::net::IpAddr::V4(server),
+            src_port,
+            dst_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    (frame, meta, flow)
+}
+
+fn policy_reject_packet_v6(protocol: u8) -> (Vec<u8>, UserspaceDpMeta, SessionFlow) {
+    let client: std::net::Ipv6Addr = "2001:db8:61::102".parse().unwrap();
+    let server: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let payload = match protocol {
+        crate::ip_proto::PROTO_UDP => [0xc0, 0, 0, 53, 0, 8, 0, 0],
+        crate::ip_proto::PROTO_ICMPV6 => [128, 0, 0, 0, 0x12, 0x34, 0, 1],
+        crate::ip_proto::PROTO_GRE => [0, 0, 0x08, 0, 0, 0, 0, 0],
+        crate::ip_proto::PROTO_ESP => [0, 0, 0, 1, 0, 0, 0, 1],
+        _ => panic!("unsupported test protocol {protocol}"),
+    };
+    let (src_port, dst_port) = match protocol {
+        crate::ip_proto::PROTO_UDP => (0xc000, 53),
+        crate::ip_proto::PROTO_ICMPV6 => (0x1234, 0),
+        _ => (0, 0),
+    };
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    frame.extend_from_slice(&[0x36, 0xe4, 0x2b, 0xd5, 0x39, 0xe6]);
+    frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+    frame.extend_from_slice(&[0x60, 0, 0, 0, 0, 8, protocol, 64]);
+    frame.extend_from_slice(&client.octets());
+    frame.extend_from_slice(&server.octets());
+    frame.extend_from_slice(&payload);
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: 5,
+        l3_offset: 14,
+        l4_offset: 54,
+        addr_family: libc::AF_INET6 as u8,
+        protocol,
+        pkt_len: frame.len() as u16,
+        ..UserspaceDpMeta::default()
+    };
+    let flow = SessionFlow {
+        src_ip: std::net::IpAddr::V6(client),
+        dst_ip: std::net::IpAddr::V6(server),
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol,
+            src_ip: std::net::IpAddr::V6(client),
+            dst_ip: std::net::IpAddr::V6(server),
+            src_port,
+            dst_port,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    (frame, meta, flow)
+}
+
+fn policy_reject_forwarding() -> ForwardingState {
+    let mut forwarding = ForwardingState::default();
+    forwarding.egress.insert(
+        5,
+        EgressInterface {
+            bind_ifindex: 5,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0, 0x61, 1],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: Some(std::net::Ipv4Addr::new(10, 0, 61, 1)),
+            primary_v6: Some("2001:db8:61::1".parse().unwrap()),
+        },
+    );
+    forwarding
+}
+
+#[test]
+fn policy_reject_udp_uses_port_unreachable_11303_v4() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (frame, meta, flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    let forwarding = policy_reject_forwarding();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_sent, 1);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("UDP policy reject reply");
+    assert_eq!(
+        &reply.bytes[34..36],
+        &[3, 3],
+        "UDP policy reject must return ICMPv4 destination-unreachable/port-unreachable"
+    );
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+}
+
+#[test]
+fn policy_reject_udp_uses_port_unreachable_11303_v6() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (frame, meta, flow) = policy_reject_packet_v6(crate::ip_proto::PROTO_UDP);
+    let forwarding = policy_reject_forwarding();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_sent, 1);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("UDP policy reject reply");
+    assert_eq!(
+        &reply.bytes[54..56],
+        &[1, 4],
+        "UDP policy reject must return ICMPv6 destination-unreachable/port-unreachable"
+    );
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+}
+
+#[test]
+fn policy_reject_non_udp_protocols_drop_silently_11303() {
+    for protocol in [
+        crate::ip_proto::PROTO_ICMP,
+        crate::ip_proto::PROTO_GRE,
+        crate::ip_proto::PROTO_ESP,
+    ] {
+        let (frame, meta, flow) = policy_reject_packet_v4(protocol);
+        let forwarding = policy_reject_forwarding();
+        let mut pipeline = tx_pipeline(64, 64);
+        let mut counters = BatchCounters::default();
+        assert!(
+            !enqueue_policy_reject_reply(
+                &mut pipeline,
+                &forwarding,
+                5,
+                &frame,
+                meta,
+                &flow,
+                &mut counters,
+            ),
+            "IPv4 protocol {protocol} policy reject must be silent"
+        );
+        assert_eq!(counters.policy_reject_sent, 0);
+        assert!(pipeline.pending_tx_local.is_empty());
+    }
+    for protocol in [
+        crate::ip_proto::PROTO_ICMPV6,
+        crate::ip_proto::PROTO_GRE,
+        crate::ip_proto::PROTO_ESP,
+    ] {
+        let (frame, meta, flow) = policy_reject_packet_v6(protocol);
+        let forwarding = policy_reject_forwarding();
+        let mut pipeline = tx_pipeline(64, 64);
+        let mut counters = BatchCounters::default();
+        assert!(
+            !enqueue_policy_reject_reply(
+                &mut pipeline,
+                &forwarding,
+                5,
+                &frame,
+                meta,
+                &flow,
+                &mut counters,
+            ),
+            "IPv6 protocol {protocol} policy reject must be silent"
+        );
+        assert_eq!(counters.policy_reject_sent, 0);
+        assert!(pipeline.pending_tx_local.is_empty());
+    }
+}
 
 #[test]
 fn reject_reply_budget_exhausted_fails_closed_no_send() {
@@ -155,11 +404,9 @@ fn reject_tcp_with_egress_enqueues_rst() {
     assert_ne!(tcp_flags & 0x04, 0, "RST flag must be set");
 }
 
-/// #2238: a generated reject reply matching an OUTPUT filter `then
-/// discard` (keyed on the reply's own tuple) is NOT enqueued, and the
-/// dedicated `policy_reject_output_filter_drops` counter increments.
-/// Uses a non-TCP (ICMP) trigger so the generated reply is an ICMP
-/// unreachable, and the egress output filter discards `protocol icmp`.
+/// #2238: a policy-generated UDP port-unreachable matching an OUTPUT filter
+/// `then discard` is not enqueued, and the dedicated
+/// `policy_reject_output_filter_drops` counter increments.
 #[test]
 fn reject_reply_dropped_by_egress_output_filter() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
@@ -168,46 +415,9 @@ fn reject_reply_dropped_by_egress_output_filter() {
         crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
         0,
     );
-    // Inbound ICMP echo (a query, not an error) on ifindex 5 → the
-    // reject path builds an ICMP unreachable, which the egress output
-    // filter discards.
-    let client = std::net::Ipv4Addr::new(10, 0, 61, 102);
-    let server = std::net::Ipv4Addr::new(1, 1, 1, 1);
-    let mut frame = Vec::new();
-    frame.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
-    frame.extend_from_slice(&[0x36, 0xe4, 0x2b, 0xd5, 0x39, 0xe6]);
-    frame.extend_from_slice(&0x0800u16.to_be_bytes());
-    let l3 = frame.len();
-    frame.extend_from_slice(&[
-        0x45, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x40, 0x00, 64, PROTO_ICMP, 0, 0,
-    ]);
-    frame.extend_from_slice(&client.octets());
-    frame.extend_from_slice(&server.octets());
-    let _ = l3; // inbound IP csum not validated by the builders
-    frame.extend_from_slice(&[8, 0, 0, 0, 0x12, 0x34, 0, 1]); // ICMP echo
-    let meta = UserspaceDpMeta {
-        ingress_ifindex: 5,
-        l3_offset: 14,
-        l4_offset: 34,
-        addr_family: libc::AF_INET as u8,
-        protocol: PROTO_ICMP,
-        pkt_len: frame.len() as u16,
-        ..UserspaceDpMeta::default()
-    };
-    let flow = SessionFlow {
-        src_ip: std::net::IpAddr::V4(client),
-        dst_ip: std::net::IpAddr::V4(server),
-        forward_key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_ICMP,
-            src_ip: std::net::IpAddr::V4(client),
-            dst_ip: std::net::IpAddr::V4(server),
-            src_port: 0x1234,
-            dst_port: 0,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
-        },
-    };
+    // Policy UDP reject builds an ICMP port-unreachable, which the egress
+    // output filter discards.
+    let (frame, meta, flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
     let filter_state = crate::filter::parse_filter_state(
         &[crate::FirewallFilterSnapshot {
             name: "drop-icmp".into(),
@@ -324,7 +534,8 @@ fn filter_reject_tcp_enqueues_rst_filter_counter() {
 }
 
 /// #2521: a firewall-filter `then reject` on a NON-TCP (ICMP) flow
-/// synthesizes an ICMP unreachable and increments `filter_reject_sent`.
+/// still uses the configured/default admin-prohibited message, unlike
+/// policy `reject` (#11303). It increments `filter_reject_sent`.
 #[test]
 fn filter_reject_non_tcp_enqueues_icmp_unreachable() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
@@ -414,6 +625,11 @@ fn filter_reject_non_tcp_enqueues_icmp_unreachable() {
         req.bytes[14 + 20],
         3,
         "ICMP type must be Destination Unreachable"
+    );
+    assert_eq!(
+        req.bytes[14 + 20 + 1],
+        13,
+        "filter reject retains default ICMPv4 admin-prohibited code"
     );
 }
 
@@ -1211,17 +1427,15 @@ fn reject_reply_non_vlan_classify_unchanged_3035() {
     assert_eq!(counters.policy_reject_sent, 0);
 }
 
-/// #3976 fail-on-revert (IPv4): a non-TCP (ICMP) packet arriving on a VLAN
-/// sub-interface that hits `then reject` must build its ICMP unreachable
-/// from the INGRESS SUB-INTERFACE's own primary address and VLAN tag, not
-/// the physical parent's. The logical unit reth0.80 (ifindex 202, parent
-/// 11, VID 80) carries 172.16.80.8/24; the physical parent 11 has NO egress
-/// entry of its own. Driving the real enqueue with the physical ingress
-/// ifindex 11 must resolve the logical unit and source the reply from
-/// 172.16.80.8 tagged VID 80. On revert (the build keys off the physical
-/// `ingress_ifindex`), `forwarding.egress.get(&11)` misses, the builder
-/// returns None, and the reject silently degrades to a discard
-/// (`sent == false`, `pending_tx_local` empty) — RED.
+/// #3976 fail-on-revert (IPv4): a UDP policy reject arriving on a VLAN
+/// sub-interface must build its ICMP port-unreachable from the INGRESS
+/// SUB-INTERFACE's own primary address and VLAN tag, not the physical parent's.
+/// The logical unit reth0.80 (ifindex 202, parent 11, VID 80) carries
+/// 172.16.80.8/24; the physical parent 11 has NO egress entry of its own.
+/// Driving the real enqueue with the physical ingress ifindex 11 must resolve
+/// the logical unit and source the reply from 172.16.80.8 tagged VID 80. On
+/// revert the physical-parent-keyed lookup misses and the reject silently
+/// degrades to a discard — RED.
 #[test]
 fn reject_reply_non_tcp_sources_from_logical_vlan_ifindex_3976() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
@@ -1257,44 +1471,20 @@ fn reject_reply_non_tcp_sources_from_logical_vlan_ifindex_3976() {
         "parent 11 / VLAN 80 must resolve to logical unit 202"
     );
 
-    // Inbound ICMP echo (untagged frame; the hardware tag is carried in
-    // meta.ingress_vlan_id) from a VLAN-80 host to a unicast destination.
+    // Inbound UDP datagram (untagged frame; hardware tag in metadata) from a
+    // VLAN-80 host to a unicast destination.
     let client = std::net::Ipv4Addr::new(172, 16, 80, 55);
     let server = std::net::Ipv4Addr::new(8, 8, 8, 8);
-    let mut frame = Vec::new();
-    frame.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]); // dst (fw)
-    frame.extend_from_slice(&[0x36, 0xe4, 0x2b, 0xd5, 0x39, 0xe6]); // src (host)
-    frame.extend_from_slice(&0x0800u16.to_be_bytes());
-    frame.extend_from_slice(&[
-        0x45, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x40, 0x00, 64, PROTO_ICMP, 0, 0,
-    ]);
-    frame.extend_from_slice(&client.octets());
-    frame.extend_from_slice(&server.octets());
-    frame.extend_from_slice(&[8, 0, 0, 0, 0x12, 0x34, 0, 1]); // ICMP echo
-    let meta = UserspaceDpMeta {
-        ingress_ifindex: 11,
-        ingress_vlan_id: 80,
-        l3_offset: 14,
-        l4_offset: 34,
-        addr_family: libc::AF_INET as u8,
-        protocol: PROTO_ICMP,
-        pkt_len: frame.len() as u16,
-        ..UserspaceDpMeta::default()
-    };
-    let flow = SessionFlow {
-        src_ip: std::net::IpAddr::V4(client),
-        dst_ip: std::net::IpAddr::V4(server),
-        forward_key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_ICMP,
-            src_ip: std::net::IpAddr::V4(client),
-            dst_ip: std::net::IpAddr::V4(server),
-            src_port: 0x1234,
-            dst_port: 0,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
-        },
-    };
+    let (mut frame, mut meta, mut flow) =
+        policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    frame[26..30].copy_from_slice(&client.octets());
+    frame[30..34].copy_from_slice(&server.octets());
+    meta.ingress_ifindex = 11;
+    meta.ingress_vlan_id = 80;
+    flow.src_ip = std::net::IpAddr::V4(client);
+    flow.dst_ip = std::net::IpAddr::V4(server);
+    flow.forward_key.src_ip = std::net::IpAddr::V4(client);
+    flow.forward_key.dst_ip = std::net::IpAddr::V4(server);
 
     let mut pipeline = tx_pipeline(
         SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
@@ -1313,15 +1503,15 @@ fn reject_reply_non_tcp_sources_from_logical_vlan_ifindex_3976() {
     );
     assert!(
         sent,
-        "non-TCP reject on a VLAN sub-if must build + enqueue an ICMP \
-         unreachable (a physical-parent-keyed build misses the sub-if \
+        "UDP policy reject on a VLAN sub-if must build + enqueue an ICMP \
+         port-unreachable (a physical-parent-keyed build misses the sub-if \
          egress and silently drops)"
     );
     assert_eq!(counters.policy_reject_sent, 1);
     let req = pipeline
         .pending_tx_local
         .pop_front()
-        .expect("reject ICMP request");
+        .expect("reject ICMP port-unreachable request");
     // Transmit on the PHYSICAL bind port (unchanged).
     assert_eq!(req.egress_ifindex, 11);
     // The reply carries the sub-if's VLAN tag (VID 80), from the egress
@@ -1344,9 +1534,9 @@ fn reject_reply_non_tcp_sources_from_logical_vlan_ifindex_3976() {
         &[172, 16, 80, 8],
         "ICMP unreachable must be sourced from the ingress sub-if address"
     );
-    // ICMP Destination Unreachable, admin-prohibited (type 3, code 13).
+    // UDP policy reject: ICMP Destination Unreachable, port-unreachable (3/3).
     assert_eq!(req.bytes[38], 3, "ICMP type Destination Unreachable");
-    assert_eq!(req.bytes[39], 13, "ICMP code admin-prohibited");
+    assert_eq!(req.bytes[39], 3, "ICMP code port-unreachable");
 }
 
 /// #3976 fail-on-revert (IPv6): the same VLAN-sub-if reject fix on the
@@ -1911,16 +2101,15 @@ fn per_zone_reject_isolation_at_call_site_3618() {
 /// ifindex 5 → zone A → the SAME per-zone bucket, so this is same-zone
 /// cross-protocol starvation, not the #3618 cross-ZONE case.
 ///
-/// FIXED ordering (classify BEFORE token): each filtered ICMP reject
-/// short-circuits at the output-filter drop and spends no token, so the bucket
-/// stays full and the trailing PERMITTED RST is admitted. Pre-fix ordering
-/// (token BEFORE classify): each filtered ICMP reject consumes a token before
-/// being discarded; a flood larger than the burst drains the bucket (and
-/// out-consumes any wall-clock refill, since a pre-fix filtered reject that
-/// finds a refilled token still consumes it before the classify drop), so the
-/// trailing PERMITTED RST is denied (rate-limited) — RED there on the
-/// output-filter-drop count, the rate-limit-drop count, AND the permitted-RST
-/// send.
+/// FIXED ordering (classify BEFORE token): each policy-generated UDP
+/// port-unreachable short-circuits at the output-filter drop and spends no
+/// token, so the bucket stays full and the trailing PERMITTED RST is admitted.
+/// Pre-fix ordering (token BEFORE classify): each filtered UDP policy reject
+/// builds an ICMP port-unreachable and consumes a token before being discarded;
+/// a flood larger than the burst drains the bucket (and out-consumes any
+/// wall-clock refill), so the trailing PERMITTED RST is denied (rate-limited)
+/// — RED there on the output-filter-drop count, the rate-limit-drop count,
+/// AND the permitted-RST send.
 #[test]
 fn egress_filtered_reject_does_not_drain_zone_token_5569() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
@@ -1983,8 +2172,8 @@ fn egress_filtered_reject_does_not_drain_zone_token_5569() {
         reject_buckets,
         ..ForwardingState::default()
     };
-    // egress[5] with a v4 primary so the ICMP unreachable BUILDS (feasible) —
-    // the flood must reach the classify (fixed) / token (pre-fix) gate, not
+    // Egress[5] has a v4 primary so the UDP-triggered ICMP port-unreachable
+    // BUILDS (feasible) — the flood must reach the classify/token gate, not
     // short-circuit at the #3656 feasibility check.
     forwarding.egress.insert(
         5,
@@ -2000,9 +2189,10 @@ fn egress_filtered_reject_does_not_drain_zone_token_5569() {
         },
     );
 
-    // Flood N filtered ICMP rejects. N > DEFAULT_BURST (1000) so the pre-fix
+    // Flood N filtered UDP rejects. N > DEFAULT_BURST (1000) so the pre-fix
     // ordering fully drains the bucket.
-    let (icmp_frame, icmp_meta, icmp_flow) = icmp_v4_echo();
+    let (udp_frame, udp_meta, udp_flow) =
+        policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
     let mut pipeline = tx_pipeline(
         SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
         SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
@@ -2014,12 +2204,12 @@ fn egress_filtered_reject_does_not_drain_zone_token_5569() {
             &mut pipeline,
             &forwarding,
             5,
-            &icmp_frame,
-            icmp_meta,
-            &icmp_flow,
+            &udp_frame,
+            udp_meta,
+            &udp_flow,
             &mut counters,
         );
-        assert!(!sent, "an egress-filtered ICMP reject must not enqueue");
+        assert!(!sent, "an egress-filtered UDP reject must not enqueue");
     }
     // Every filtered reject took the output-filter drop leg and spent NO
     // token: all counted as output-filter drops, none as rate-limit drops.
