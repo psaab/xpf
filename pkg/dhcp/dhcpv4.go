@@ -401,9 +401,17 @@ func leaseFromACKv4(ifaceName string, ack *dhcpv4.DHCPv4) (*Lease, error) {
 		// get (#10728 A10b-F02): a rogue server must not install a bogus
 		// default next-hop.
 		routers := ack.Router()
-		if len(routers) > 0 {
-			if gw, ok := netip.AddrFromSlice(routers[0].To4()); ok && dhcpDefaultGatewayAcceptable(gw, "option-3") {
+		// #11084: first ACCEPTABLE router wins (a martian head must not
+		// block a later valid router) — same first-valid rule as the
+		// option-121 default entry below.
+		for _, r := range routers {
+			gw, ok := netip.AddrFromSlice(r.To4())
+			if !ok {
+				continue
+			}
+			if dhcpDefaultGatewayAcceptable(gw, "option-3") {
 				lease.Gateway = gw
+				break
 			}
 		}
 	}
