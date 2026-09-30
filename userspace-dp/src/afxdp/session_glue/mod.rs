@@ -162,6 +162,7 @@ pub(super) fn resolve_install_table_for_session(
 
 pub(super) fn cached_session_resolution(
     forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
     cached: ForwardingResolution,
 ) -> Option<ForwardingResolution> {
     if cached.disposition != ForwardingDisposition::ForwardCandidate {
@@ -169,6 +170,24 @@ pub(super) fn cached_session_resolution(
     }
     if cached.egress_ifindex <= 0 || cached.neighbor_mac.is_none() {
         return None;
+    }
+    // #11315: recheck the live neighbor binding before serving a stored
+    // session resolution. The decision caches neighbor_mac at install; a
+    // gateway failover can replace it, and FAILED/INCOMPLETE can remove it.
+    // Either a contradictory or missing live binding makes the cached MAC
+    // stale. The subsequent first learn after removal does not advance the
+    // #3048 shard epoch, so accepting the cached MAC while absent could leave
+    // it in the flow cache through recovery.
+    if let (Some(next_hop), Some(stored_mac)) = (cached.next_hop, cached.neighbor_mac) {
+        let ifindex = super::outer_neighbor_ifindex(forwarding, Some(dynamic_neighbors), &cached);
+        let Some(live) =
+            super::lookup_neighbor_entry(forwarding, Some(dynamic_neighbors), ifindex, next_hop)
+        else {
+            return None;
+        };
+        if live.mac != stored_mac {
+            return None;
+        }
     }
     let mut fallback = cached;
     fallback.disposition = ForwardingDisposition::ForwardCandidate;
@@ -349,13 +368,13 @@ fn lookup_forwarding_resolution_for_session_with_cache(
             ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
                 if allow_cached_fallback =>
             {
-                cached_session_resolution(forwarding, decision.resolution).unwrap_or(resolved)
+                cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution).unwrap_or(resolved)
             }
             _ => resolved,
         };
     }
     if allow_cached_fast_path {
-        if let Some(cached) = cached_session_resolution(forwarding, decision.resolution) {
+        if let Some(cached) = cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution) {
             return cached;
         }
     }
@@ -389,7 +408,7 @@ fn lookup_forwarding_resolution_for_session_with_cache(
         ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
             if allow_cached_fallback =>
         {
-            cached_session_resolution(forwarding, decision.resolution).unwrap_or(resolved)
+            cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution).unwrap_or(resolved)
         }
         _ => resolved,
     }

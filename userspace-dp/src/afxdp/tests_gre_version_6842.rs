@@ -133,16 +133,16 @@ fn build_injected_inner_v4() -> Vec<u8> {
 /// parsed with RFC 2890 rules — its 32-bit "Key" is never read as an opaque
 /// tunnel discriminator.
 ///
-/// The Key here is `0x0000_0000`, i.e. Payload Length 0 and Call ID 0. That is
-/// the value that MATCHES the keyless test endpoint (`endpoint.key == 0` =>
-/// `!key_present || key == 0`), so if the version check is removed the frame
-/// resolves the tunnel and decaps. The version-0 leg proves exactly that.
+/// Configure a keyed endpoint with key 42. The version-1 "Key" word below is
+/// Payload Length 0 and Call ID 42; if the version check is removed, the
+/// version-0 control matches the endpoint and proves that the parser reaches it.
 #[test]
 fn gre_version_1_frame_is_refused_while_the_same_bytes_at_version_0_decap() {
-    let forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.tunnel_endpoints[0].key = 42;
+    let forwarding = build_forwarding_state(&snapshot);
     let inner = build_gre_inner_icmp_packet_v4();
-
-    let v1 = build_gre_versioned_outer_frame_v4(1, GRE_FLAG_KEY, 0, 0, TUNNEL_PEER, &inner);
+    let v1 = build_gre_versioned_outer_frame_v4(1, GRE_FLAG_KEY, 42, 0, TUNNEL_PEER, &inner);
     let meta = gre_to_self_outer_meta(0, v1.len());
     assert!(
         try_native_gre_decap_from_frame(&v1, meta, &forwarding).is_none(),
@@ -153,7 +153,7 @@ fn gre_version_1_frame_is_refused_while_the_same_bytes_at_version_0_decap() {
     // Paired control: identical bytes, version field cleared. This MUST decap
     // — otherwise the assertion above would pass for a reason that has nothing
     // to do with the version field.
-    let v0 = build_gre_versioned_outer_frame_v4(0, GRE_FLAG_KEY, 0, 0, TUNNEL_PEER, &inner);
+    let v0 = build_gre_versioned_outer_frame_v4(0, GRE_FLAG_KEY, 42, 0, TUNNEL_PEER, &inner);
     let meta = gre_to_self_outer_meta(0, v0.len());
     let decap = try_native_gre_decap_from_frame(&v0, meta, &forwarding)
         .expect("the same frame at GRE version 0 must decap (fixture reaches the endpoint match)");
@@ -177,13 +177,16 @@ fn gre_version_1_frame_is_refused_while_the_same_bytes_at_version_0_decap() {
 /// payload). The version-1 leg must refuse. The pair is what shows the
 /// injection is fully reachable and that the version field is the only thing
 /// standing in front of it.
+/// The paired version-0 control uses key 42 to match a keyed endpoint.
 #[test]
 fn gre_version_1_ack_field_cannot_promote_an_injected_inner_packet() {
-    let forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.tunnel_endpoints[0].key = 42;
+    let forwarding = build_forwarding_state(&snapshot);
     let injected = build_injected_inner_v4();
     let flags = GRE_FLAG_KEY | GRE_FLAG_SEQUENCE | GRE_FLAG_ACK_V1;
 
-    let v1 = build_gre_versioned_outer_frame_v4(1, flags, 0, 0x0000_0001, TUNNEL_PEER, &injected);
+    let v1 = build_gre_versioned_outer_frame_v4(1, flags, 42, 0x0000_0001, TUNNEL_PEER, &injected);
     let meta = gre_to_self_outer_meta(0, v1.len());
     assert!(
         try_native_gre_decap_from_frame(&v1, meta, &forwarding).is_none(),
@@ -192,7 +195,7 @@ fn gre_version_1_ack_field_cannot_promote_an_injected_inner_packet() {
          Acknowledgment Number as the inner packet"
     );
 
-    let v0 = build_gre_versioned_outer_frame_v4(0, flags, 0, 0x0000_0001, TUNNEL_PEER, &injected);
+    let v0 = build_gre_versioned_outer_frame_v4(0, flags, 42, 0x0000_0001, TUNNEL_PEER, &injected);
     let meta = gre_to_self_outer_meta(0, v0.len());
     let decap = try_native_gre_decap_from_frame(&v0, meta, &forwarding).expect(
         "the same bytes at GRE version 0 must decap — this is what proves the \
@@ -247,7 +250,7 @@ fn gre_version_refusal_counter_only_counts_frames_offered_to_a_gre_endpoint() {
     );
 
     // Row 3: version 0 at the configured endpoint — decaps, counts nothing.
-    let frame = build_gre_versioned_outer_frame_v4(0, GRE_FLAG_KEY, 0, 0, TUNNEL_PEER, &inner);
+    let frame = build_gre_versioned_outer_frame_v4(0, 0, 0, 0, TUNNEL_PEER, &inner);
     let meta = gre_to_self_outer_meta(0, frame.len());
     let before = forwarding.gre_decap_counters.unsupported_version_refusals();
     assert!(try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_some());
@@ -368,7 +371,7 @@ fn pt_nibble_mismatch_refusal_total_survives_apply_and_reaches_status_10865() {
         build_forwarding_state_with_policy_counters_and_previous(&snapshot, &policy, &nat, None)
             .expect("first apply builds");
 
-    // Same endpoint/key as the version tests, but a valid v4 header whose
+    // This is an unkeyed endpoint with K clear. The valid v4 header's
     // version nibble disagrees with the GRE Protocol Type's IPv4 claim.
     let mut inner = build_gre_inner_icmp_packet_v4();
     inner[0] = 0x65;
@@ -377,7 +380,7 @@ fn pt_nibble_mismatch_refusal_total_survives_apply_and_reaches_status_10865() {
     let ip_sum = checksum16(&inner[0..20]);
     inner[10] = (ip_sum >> 8) as u8;
     inner[11] = ip_sum as u8;
-    let frame = build_gre_versioned_outer_frame_v4(0, GRE_FLAG_KEY, 0, 0, TUNNEL_PEER, &inner);
+    let frame = build_gre_versioned_outer_frame_v4(0, 0, 0, 0, TUNNEL_PEER, &inner);
     let meta = gre_to_self_outer_meta(0, frame.len());
     assert!(try_native_gre_decap_from_frame(&frame, meta, &first).is_none());
     assert_eq!(

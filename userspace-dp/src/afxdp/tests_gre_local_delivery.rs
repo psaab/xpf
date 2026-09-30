@@ -937,21 +937,91 @@ fn native_gre_decap_checksum_present_yields_inner_packet() {
 }
 
 
+/// An unkeyed endpoint matches only a GRE header with the K bit clear.
+/// Keyed endpoints still match their exact nonzero 32-bit key.
+#[test]
+fn gre_key_zero_endpoint_requires_key_absent_11296() {
+    const GRE_KEY: u32 = 42;
+    let unkeyed_forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let inner = build_gre_inner_icmp_packet_v4();
+    let frame_with_key = |key: u32| {
+        build_gre_checksum_present_outer_frame_v4(
+            0,
+            crate::afxdp::gre::GRE_FLAG_KEY,
+            key,
+            0,
+            &inner,
+            false,
+        )
+    };
+
+    let absent_key = build_gre_to_self_outer_frame_v4(0, &inner);
+    let meta = gre_to_self_outer_meta(0, absent_key.len());
+    assert!(
+        try_native_gre_decap_from_frame(&absent_key, meta, &unkeyed_forwarding).is_some(),
+        "an unkeyed endpoint must accept a GRE header without the K bit"
+    );
+
+    let present_zero = frame_with_key(0);
+    let meta = gre_to_self_outer_meta(0, present_zero.len());
+    assert!(
+        try_native_gre_decap_from_frame(&present_zero, meta, &unkeyed_forwarding).is_none(),
+        "K-present with key zero must not match an endpoint configured as unkeyed"
+    );
+
+    let present_nonzero = frame_with_key(GRE_KEY);
+    let meta = gre_to_self_outer_meta(0, present_nonzero.len());
+    assert!(
+        try_native_gre_decap_from_frame(&present_nonzero, meta, &unkeyed_forwarding).is_none(),
+        "a keyed GRE frame must not match an unkeyed endpoint"
+    );
+
+    let mut keyed_snapshot = gre_to_self_snapshot();
+    keyed_snapshot.tunnel_endpoints[0].key = GRE_KEY;
+    let keyed_forwarding = build_forwarding_state(&keyed_snapshot);
+    let matching_key = frame_with_key(GRE_KEY);
+    let meta = gre_to_self_outer_meta(0, matching_key.len());
+    assert!(
+        try_native_gre_decap_from_frame(&matching_key, meta, &keyed_forwarding).is_some(),
+        "a keyed endpoint must accept its exact present key"
+    );
+    let meta = gre_to_self_outer_meta(0, present_zero.len());
+    assert!(
+        try_native_gre_decap_from_frame(&present_zero, meta, &keyed_forwarding).is_none(),
+        "a keyed endpoint must reject key zero when its configured key differs"
+    );
+
+    let absent_key = build_gre_to_self_outer_frame_v4(0, &inner);
+    let meta = gre_to_self_outer_meta(0, absent_key.len());
+    assert!(
+        try_native_gre_decap_from_frame(&absent_key, meta, &keyed_forwarding).is_none(),
+        "a keyed endpoint must reject a key-absent GRE header"
+    );
+
+    let mismatched_key = frame_with_key(GRE_KEY + 1);
+    let meta = gre_to_self_outer_meta(0, mismatched_key.len());
+    assert!(
+        try_native_gre_decap_from_frame(&mismatched_key, meta, &keyed_forwarding).is_none(),
+        "a keyed endpoint must reject a different present key"
+    );
+}
+
 /// #2782: composed optional fields — C + Key + Sequence all present. The
 /// Checksum+Reserved1 (4B) precedes Key (4B) precedes Sequence (4B) per
-/// RFC 2890; the decap must skip ALL three to land on the inner payload.
-/// (`key` is 0 so it matches the keyless test endpoint while still
-/// exercising the key-field offset advance.)
+/// RFC 2890; the decap must skip ALL three to land on the inner payload. The
+/// nonzero key matches the configured keyed endpoint.
 #[test]
 fn native_gre_decap_checksum_key_sequence_present_yields_inner_packet() {
-    let forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.tunnel_endpoints[0].key = 42;
+    let forwarding = build_forwarding_state(&snapshot);
     let inner = build_gre_inner_icmp_packet_v4();
     let frame = build_gre_checksum_present_outer_frame_v4(
         80,
         crate::afxdp::gre::GRE_FLAG_CHECKSUM
             | crate::afxdp::gre::GRE_FLAG_KEY
             | crate::afxdp::gre::GRE_FLAG_SEQUENCE,
-        0,
+        0x0000_002a,
         0x0000_002a,
         &inner,
         false,

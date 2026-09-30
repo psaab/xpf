@@ -762,6 +762,18 @@ sync.
     (HA/fabric finalizer, CoS classify with `flow_key = None`, prebuilt
     forward, never seeds a session).
 
+  - **#11332 — input-filter denies are excluded from screens and SYN
+    cookies:** before flood/scan screen processing or SYN-cookie ACK validation
+    can run, the poll loop evaluates a side-effect-free verdict walk over the
+    logical-interface input filter, including its PBR routing-instance term. A
+    deny bypasses both stages and continues to the existing counted/logged
+    filter enforcement site, so denied packets do not affect sketches or
+    generate cookie SYN-ACK/RST replies and filter counters/logs still run once.
+    Flowless packets use the same L3-only, ports-unknown match context as their
+    ordinary filter path. Cells are `*_11332` in
+    `tests_embedded_poll_filter.rs`.
+
+
   - **#10666 — NAT/NAT64 PMTUD is RELATED only on the quoted packet's
     actual arrival side:** the flowless error builders mark IPv4
     Fragmentation-Needed and IPv6 Packet-Too-Big errors as RELATED only when

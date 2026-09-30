@@ -457,8 +457,9 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 //     default of 64 (tunnel.go:202-205), not the kernel inherit
 //     behaviour (AGY r1 Low on PR #1886). Explicit 0 rejects (#9899):
 //     1..255 plus canonical unsigned digits.
-//   - key: 0..4294967295 canonical unsigned digits (#9899); the GRE key
-//     wire field (IKey/OKey, tunnel.go:238-239) is exactly 32 bits.
+//   - key: 0..4294967295 canonical unsigned digits (#9899); 0 is unkeyed.
+//     Native GRE decap requires the K bit clear for key 0; K-present/0 is
+//     distinct from unkeyed. Nonzero GRE keys use the 32-bit IKey/OKey field.
 //   - keepalive: typed 0..32767 seconds (0 = disabled). An unbounded
 //     value overflowed time.Duration(sec)*time.Second (int64 ns) at the
 //     runtime probe/ticker multiply and could wrap non-positive →
@@ -527,7 +528,7 @@ func tunnelSchemaChildren() map[string]*schemaNode {
 			args:          1,
 			placeholder:   "<key>",
 			valueType:     ValueInteger,
-			valueDesc:     "GRE key (0..4294967295; 32-bit wire field, canonical digits)",
+			valueDesc:     "GRE key (0 = unkeyed; nonzero 32-bit key; K-present/0 is distinct, canonical digits)",
 			valueExamples: []string{"100"},
 			validator:     validateInterfaceNumeric9899(0, 4294967295),
 			children:      nil,

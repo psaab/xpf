@@ -256,6 +256,94 @@ pub(super) fn evaluate_non_pbr_input_filter(
     }
 }
 
+/// Side-effect-free input-filter precheck for the screen stage.
+///
+/// The poll loop keeps the normal counted/logged filter evaluation at its
+/// established enforcement site. This verdict-only walk stops packets the
+/// input filter rejects from mutating screen sketches or triggering a
+/// SYN-cookie reply first.
+#[inline]
+pub(super) fn input_filter_would_deny_before_screen(
+    forwarding: &ForwardingState,
+    packet_frame: &[u8],
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+) -> bool {
+    let flowless = flow.is_none();
+    let flowless_flow = if flowless {
+        crate::afxdp::frame::l3_enforcement_flow_from_frame(packet_frame, meta)
+    } else {
+        None
+    };
+    let Some(flow) = flow.or(flowless_flow.as_ref()) else {
+        return false;
+    };
+    let ingress_ifindex = resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+    let filter = if is_v6 {
+        forwarding
+            .filter_state
+            .iface_filter_v6_fast
+            .get(&ingress_ifindex)
+    } else {
+        forwarding
+            .filter_state
+            .iface_filter_v4_fast
+            .get(&ingress_ifindex)
+    };
+    let Some(filter) = filter else {
+        return false;
+    };
+    let mut extra = term_match_extra_from_frame(packet_frame, meta);
+    if flowless {
+        // The L3 enforcement tuple substitutes zero ports; they are not wire
+        // values and must not make positive/negated port terms match.
+        extra.ports_unknown = true;
+    }
+    if crate::filter::filter_ref_static_verdict(
+        filter,
+        flow.src_ip,
+        flow.dst_ip,
+        meta.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        extra,
+    ) != crate::filter::FilterAction::Accept
+    {
+        return true;
+    }
+
+    // The ordinary non-routing walk deliberately defers a matching
+    // `routing-instance` term. Include its independent verdict so a PBR
+    // discard/reject is excluded before the normal counted evaluator runs.
+    let Some(route_filter) = crate::filter::interface_filter_route_lookup_affecting(
+        &forwarding.filter_state,
+        ingress_ifindex,
+        is_v6,
+    ) else {
+        return false;
+    };
+    let eval_protocol = crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
+    crate::filter::evaluate_filter_ref_routing_instance_uncounted(
+        route_filter,
+        flow.src_ip,
+        flow.dst_ip,
+        eval_protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        extra,
+    )
+    .is_some_and(|result| result.action != crate::filter::FilterAction::Accept)
+}
+
+
 #[cold]
 #[inline(never)]
 pub(super) fn evaluate_non_pbr_input_filter_log_only(

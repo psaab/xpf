@@ -404,6 +404,14 @@ RFC-2784 checksum validation the bit implies:
    `xpf_userspace_gre_decap_checksum_invalid_drops_total`. A valid
    checksummed frame decaps normally (router-interop / vSRX parity).
 
+Endpoint key matching distinguishes the K bit from the 32-bit value.
+`key: 0` is unkeyed: native GRE encap clears K, and decap accepts only
+K-clear headers. K-present with value zero does not match (the config has
+no separate keyed-zero value), even though RFC 2890 permits the wire shape.
+This is compatible with XPF peers; third-party peers that send K+0 for an
+unkeyed tunnel will not interoperate with this endpoint. The GRE key is a
+flow identifier, not an authentication mechanism.
+
 The **Routing-Present (`R`) bit stays a drop** — the Source Route Entry
 list is variable-length with no fixed offset and is effectively dead on
 the modern Internet; parsing it is out of scope.
