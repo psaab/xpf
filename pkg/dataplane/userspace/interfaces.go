@@ -1384,6 +1384,59 @@ var buildLinkSnapshot = func(linuxName string) (ifindex int, mtu int, hardwareAd
 	return ifindex, mtu, hardwareAddr, addresses
 }
 
+// revalidateSnapshotIfindexes re-resolves every interface row's ifindex
+// (and parent ifindex) against the kernel just before publish (#11086).
+// Link churn between snapshot build and apply otherwise ships a row whose
+// stale ifindex stamps the WRONG netdev's zone on the helper (which keys
+// rows purely by ifindex). A row whose name resolves to a different ifindex
+// is refreshed in place; a row whose name is gone is dropped (a vanished
+// link carries no traffic, so dropping cannot fail open — and the warn
+// names it). Returns refreshed/dropped counts for the apply log.
+// Pure over buildLinkSnapshot (a package-var seam), so tests drive it
+// without kernel interfaces.
+func revalidateSnapshotIfindexes(snap *ConfigSnapshot) (refreshed, dropped int) {
+	if snap == nil {
+		return 0, 0
+	}
+	kept := snap.Interfaces[:0]
+	for _, row := range snap.Interfaces {
+		if row.LinuxName == "" {
+			kept = append(kept, row)
+			continue
+		}
+		live, _, _, _ := buildLinkSnapshot(row.LinuxName)
+		if live == 0 {
+			slog.Warn("snapshot row dropped: interface vanished after build",
+				"name", row.Name, "linux_name", row.LinuxName)
+			dropped++
+			continue
+		}
+		if live != row.Ifindex {
+			slog.Warn("snapshot row ifindex refreshed after link churn",
+				"name", row.Name, "linux_name", row.LinuxName,
+				"stale_ifindex", row.Ifindex, "live_ifindex", live)
+			row.Ifindex = live
+			refreshed++
+		}
+		if row.ParentLinuxName != "" {
+			plive, _, _, _ := buildLinkSnapshot(row.ParentLinuxName)
+			if plive != 0 && plive != row.ParentIfindex {
+				slog.Warn("snapshot row parent ifindex refreshed after link churn",
+					"name", row.Name, "stale_ifindex", row.ParentIfindex, "live_ifindex", plive)
+				row.ParentIfindex = plive
+				refreshed++
+			}
+		}
+		kept = append(kept, row)
+	}
+	// Zero the tail so dropped rows do not linger past len.
+	for i := len(kept); i < len(snap.Interfaces); i++ {
+		snap.Interfaces[i] = InterfaceSnapshot{}
+	}
+	snap.Interfaces = kept
+	return refreshed, dropped
+}
+
 func buildConfiguredAddressSnapshots(addrs []string) []InterfaceAddressSnapshot {
 	if len(addrs) == 0 {
 		return nil
