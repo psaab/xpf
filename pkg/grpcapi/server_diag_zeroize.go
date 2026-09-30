@@ -1568,6 +1568,48 @@ func completeZeroize(record zeroizePendingRecord, completion zeroizeCompletion) 
 // real archive, carrying cleartext IKE PSKs, WireGuard keys and SNMP
 // communities, was never examined and the reset reported clean. Pass "" to mean
 // "archival disabled, nothing to erase".
+// zeroizeCLIHistoryFilenames are the readline history files the CLI has
+// persisted (#11102); both may predate the no-autosave fix.
+var zeroizeCLIHistoryFilenames = []string{".xpf_history", ".xpf_cli_history"}
+
+// zeroizeCLIHistoryHomesOverride, when non-nil, replaces the production
+// home list so the full-wipe primitive stays hermetic under test.
+var zeroizeCLIHistoryHomesOverride []string
+
+// zeroizeCLIHistoryHomes returns the deduped home directories whose CLI
+// history files the wipe removes: $HOME and /root.
+func zeroizeCLIHistoryHomes() []string {
+	if zeroizeCLIHistoryHomesOverride != nil {
+		return zeroizeCLIHistoryHomesOverride
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, h := range []string{os.Getenv("HOME"), "/root"} {
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	return out
+}
+
+// zeroizeCLIHistoryFiles removes CLI history files from the given homes.
+// Missing files are fine (zeroizeRemovePath tolerates absence); any other
+// failure joins. Homes are parameters (not read here) so tests drive a
+// throwaway tree instead of the real $HOME.
+func zeroizeCLIHistoryFiles(homes ...string) error {
+	var errs []error
+	for _, h := range homes {
+		for _, f := range zeroizeCLIHistoryFilenames {
+			if err := zeroizeRemovePath(filepath.Join(h, f)); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func PerformZeroizeWipe(configDir, configBase, archiveDir string) error {
 	return performZeroizeWipeWithLogInventory(configDir, configBase, archiveDir, ZeroizeLogInventory{}, zeroizeComplete)
 }
@@ -1723,6 +1765,15 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	// busy upgrade lock or a failed unlink means the reset is INCOMPLETE and
 	// must not be reported as a clean factory reset.
 	if e := zeroizeUpgradeDBSnapshots(zeroizeVersionsDir); e != nil {
+		legErrs = append(legErrs, e)
+	}
+
+	// CLI readline history (#11105): pre-existing ~/.xpf_history and
+	// ~/.xpf_cli_history may hold cleartext PSKs (#11102 stopped NEW writes
+	// only). Security-critical leg: remove both files from the daemon
+	// user's home and /root (deduped). Missing files are fine; removal
+	// failures join the surfaced result.
+	if e := zeroizeCLIHistoryFiles(zeroizeCLIHistoryHomes()...); e != nil {
 		legErrs = append(legErrs, e)
 	}
 
