@@ -285,10 +285,10 @@ impl EventFrame {
         // recycled onto a sibling between install and sync folded to the
         // sibling's name, and the peer imported the session into that
         // sibling's routing domain. If the two interfaces sit in different
-        // routing instances that is a cross-tenant mis-file, in the field
-        // #7160 added to prevent exactly that, and it is a CONFIDENT one: the
-        // two-pass preference in `find_forward_nat_match` matches a reply in
-        // the wrong tenant's domain on pass 1.
+        // routing instances, the peer would import the session into the wrong
+        // tenant. The field #7160 preserves the originating ingress domain;
+        // reverse-NAT admission separately checks the reply against the
+        // forward session's egress-interface domain.
         //
         // This value is stamped at INSTALL, from the interface the flow
         // actually arrived on — it is already on the key — so no later recycle

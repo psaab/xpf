@@ -2156,9 +2156,10 @@ func emitJunosHostProgramChain(rules *[]string, index int, p dpuserspace.JunosHo
 }
 
 // emitJunosHostRule renders one projected rule: one nft rule per L4 fragment, or
-// one for `application any`. A verdict that answers TCP with a RST (a reject, or
-// a deny on a tcp-rst zone) renders an `application any` rule as two, the TCP
-// rule first. A return carries no counter: the counter counts denies.
+// one for `application any`. A `reject` verdict that answers TCP with a RST
+// renders an `application any` rule as two, the TCP rule first. Zone `tcp-rst`
+// does not alter host-bound policy denies. A return carries no counter: the
+// counter counts denies.
 func emitJunosHostRule(rules *[]string, zone string, r config.JunosHostDenyRule) {
 	head := "    meta nfproto " + junosHostNfproto(r.Family)
 	preds := junosHostSrcPredicate(r) + junosHostDstPredicate(r)

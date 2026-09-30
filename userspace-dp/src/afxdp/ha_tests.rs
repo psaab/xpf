@@ -9484,6 +9484,117 @@ fn coord_list_fans_out_merges_and_dedups_10512() {
     assert_eq!(policies, vec![5, 6]);
 }
 
+/// A matching row in shared HA authority but absent from every worker-local
+/// table must not become an authoritative empty READ (#11339).
+#[test]
+fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
+    let now_ns = 1_000_000_000u64;
+    let mut coordinator = Coordinator::new();
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+    let publish = |key: SessionKey, policy_id: u32, session_id: u64| {
+        let mut metadata = test_metadata();
+        metadata.policy_id = policy_id;
+        let entry = SyncedSessionEntry {
+            key,
+            decision: test_decision(),
+            metadata,
+            leak_incarnation: 0,
+            origin: SessionOrigin::SyncImport,
+            protocol: PROTO_TCP,
+            tcp_flags: 0x10,
+            generation: 0,
+            session_id,
+            tcp_close_class: 0,
+        };
+        publish_shared_session(
+            &coordinator.sessions.synced,
+            &coordinator.sessions.nat,
+            &coordinator.sessions.forward_wire,
+            &coordinator.sessions.owner_rg_indexes,
+            &entry,
+        );
+    };
+
+    let mut unrelated_key = test_key();
+    unrelated_key.src_port = unrelated_key.src_port.wrapping_add(1);
+    publish(unrelated_key, 6, 60);
+
+    let coverage_domain = coordinator.session_domain();
+    let coverage_request = list_req_ha10512(vec![5]);
+    let mut coverage_table = SessionTable::new();
+    let (rows, complete, errors, continuation) = call_list_with_pump10512(
+        &coverage_domain,
+        &coverage_request,
+        std::slice::from_ref(&q0),
+        std::slice::from_mut(&mut coverage_table),
+    );
+    assert!(rows.is_empty(), "the worker has no policy-5 row");
+    assert!(complete, "an out-of-scope shared row does not break coverage");
+    assert!(errors.is_empty(), "out-of-scope rows are not READ errors: {errors:?}");
+    assert!(continuation.is_empty(), "an empty response has no page token");
+
+    let mut covered_table = SessionTable::new();
+    let mut key = test_key();
+    key.src_port = key.src_port.wrapping_add(2);
+    install_list_row10512(&mut covered_table, &key, 5, now_ns);
+    let session_id = covered_table.session_id_for(&key);
+    assert_ne!(session_id, 0, "fixture must mint a live identity");
+    publish(key.clone(), 5, session_id);
+
+    let domain = coordinator.session_domain();
+    let request = list_req_ha10512(vec![5]);
+    let mut empty_table = SessionTable::new();
+    let (rows, complete, errors, continuation) = call_list_with_pump10512(
+        &domain,
+        &request,
+        std::slice::from_ref(&q0),
+        std::slice::from_mut(&mut empty_table),
+    );
+    assert!(rows.is_empty(), "the matching row is absent from workers");
+    assert!(!complete, "shared-only coverage must not report complete");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error == "shared-synced-map-uncovered"),
+        "the response must name the coverage gap, got {errors:?}"
+    );
+    assert!(continuation.is_empty(), "an empty response has no page token");
+
+    let mut legacy_request = request.clone();
+    legacy_request.mode = "legacy".to_string();
+    legacy_request.before_secs = Some(0);
+    let (rows, complete, errors, _) = call_list_with_pump10512(
+        &domain,
+        &legacy_request,
+        std::slice::from_ref(&q0),
+        std::slice::from_mut(&mut empty_table),
+    );
+    assert!(rows.is_empty(), "the matching legacy row is absent from workers");
+    assert!(!complete, "an unbounded legacy scan must expose shared-only coverage");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error == "shared-synced-map-uncovered"),
+        "the legacy response must name the coverage gap, got {errors:?}"
+    );
+
+    let (rows, complete, errors, _) = call_list_with_pump10512(
+        &domain,
+        &request,
+        std::slice::from_ref(&q0),
+        std::slice::from_mut(&mut covered_table),
+    );
+    assert!(errors.is_empty(), "worker-local coverage is complete: {errors:?}");
+    assert!(complete, "a shared row captured by a worker remains complete");
+    assert_eq!(rows.len(), 1, "the worker returns the covered matching row");
+    assert_eq!(rows[0].expected_rt_flow_session_id, session_id);
+}
+
 /// Coordinator pages beyond 4096 rows: first page + continuation, then
 /// the terminal page (complete, no continuation).
 #[test]

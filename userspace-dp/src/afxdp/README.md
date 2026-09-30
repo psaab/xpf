@@ -127,9 +127,9 @@ sync.
         stays keyed on the PHYSICAL `ingress_ident.ifindex`.
       - **#3035 — generated SYN-cookie / reject reply:**
         `poll_descriptor/cookie_reply.rs` (SYN-cookie SYN-ACK / ACK-RST)
-        and `poll_descriptor/reject_reply.rs` (policy/filter `reject` TCP
-        RST or ICMP/ICMPv6 unreachable, and zone `tcp-rst`) classify the
-        generated reply (CoS queue / DSCP rewrite / output filter) on the
+        `poll_descriptor/reject_reply.rs` (policy/filter `reject` TCP RST or
+        ICMP/ICMPv6 unreachable, and zone `tcp-rst` session-miss TCP resets)
+        classify the generated reply (CoS queue / DSCP rewrite / output filter) on the
         LOGICAL egress unit ifindex resolved from the physical bind /
         ingress ifindex via the SSOT, NOT the raw physical index. These two
         pre-date #3034 (#2238) and were out of its scope; the physical
@@ -844,17 +844,9 @@ sync.
     `nat64_match.rs` now derives it with `ingress_routing_domain` the way
     `nat_match_v4.rs` / `nat_match_v6.rs` already did — that file previously
     contained ZERO `routing_domain` references while both siblings carried
-    one, which was the issue's own positive control. Passing a real domain is
-    correct in BOTH index families: the exact lookups need it, and the
-    reverse-MATCH index (`find_forward_nat_match`,
-    `lookup_shared_forward_nat_match`) zeroes the probe ITSELF before hitting
-    its bucket and spends the domain on a per-tenant preference, so stamping
-    restores the #7160 demux there rather than breaking it. There is
-    deliberately NO domain-agnostic retry in the NAT64 arm: the only fallback
-    available would be a retry at domain 0, which is not "domain-agnostic" but
-    "the DEFAULT instance" — another tenant's sessions. A flow whose error
-    arrives in a different domain than the flow resolved declines to ordinary
-    flowless enforcement, exactly as before the stamp existed.
+    one, which was the issue's own positive control. Ordinary reverse-session admission compares each candidate's forward egress routing domain with the reply's arriving domain (`#11298`), so A-ingress/B-egress replies match in B without treating domain 0 as a wildcard. Same-family embedded quotes instead use tuple-only lookup: they rewrite a quoted packet without installing a session, and an off-path router may send the error from another routing domain. The NAT64 companion arm remains an exact installed-session lookup: there is deliberately NO domain-0 retry there, which would name the DEFAULT instance rather than perform a domain-agnostic search. An error that does not match the installed session in its arrival domain declines to ordinary flowless enforcement, exactly as before the stamp existed.
+
+- **#11361 — mixed-zero shared NAT replies need a unique owner, not a colliding alias.** The shared NAT map retains each translated reverse key in its forward session's routing domain and uses a bounded ambiguity index for the domain-neutral tuple. A mixed-zero reply can probe an owner-specific key only when that index proves the tuple has one owner; it never publishes a translated alias at domain 0, so tenant collisions cannot displace one another. Every recovered candidate still passes the #11298 forward-egress-domain admission; A→0 and 0→A resolve only when the candidate's egress domain equals the reply domain. Ambiguous or saturated ownership fails closed.
 - `frame/` — packet parsing (L2 / L3 / L4), checksum helpers, TCP MSS
   clamp. `tests.rs` was relocated out of `mod.rs` in #1046 Phase 1.
   `headers.rs` holds the consolidated outer-header serializers (#1440).
@@ -1119,23 +1111,26 @@ sync.
   reject that was not sent. Reply-free paths (flowless fragments, the
   PBR/output-filter forward path — #3608's silent-drop domain — and
   cached-log replay) pass `reject_reply_enqueued = false`. Suppression is
-  also counted per SOURCE: `policy_reject_reply_budget_drops` /
+  also counted per SOURCE for explicit policy/filter rejects:
+  `policy_reject_reply_budget_drops` /
   `policy_reject_output_filter_drops` / `policy_reject_rate_limit_drops`
   (policy) vs `filter_reject_reply_budget_drops` /
   `filter_reject_output_filter_drops` / `filter_reject_rate_limit_drops`
   (filter); the parse-error leg `generated_reply_classify_parse_errors`
-  stays source-neutral (shared by every generated-reply type). The
-  rate-limit split (#3661) attributes an empty-bucket drop to the reply's
-  source at the consume site. #3618 made the reject rate-limit budget PER
-  INGRESS (from) ZONE — one per-source-fair `ZoneLimiter` per configured zone
-  in `ForwardingState::reject_buckets` (#9901 F-074; a hierarchical limiter: a
-  per-source tier in front of the zone aggregate), resolved from the ingress
-  interface's zone, with a process-global `REJECT_FALLBACK_LIMITER` for an
+  stays source-neutral (shared by every generated-reply type). The rate-limit
+  split (#3661) attributes explicit policy/filter reject drops to their source
+  at the consume site; session-miss resets have no source label. #3618 made
+  the reject rate-limit budget PER INGRESS (from) ZONE: one
+  per-source-fair `ZoneLimiter` per configured zone in
+  `ForwardingState::reject_buckets` (#9901 F-074), resolved from the ingress
+  interface's zone. A process-global `REJECT_FALLBACK_LIMITER` for an
   unzoned/unknown zone — so a rejected-flow flood in one zone no longer starves
   reject generation in another (and, within a zone, one source no longer
   starves another). The observable aggregate `reject_rate_limited_total`
-  stays a SINGLE atomic bumped on any per-zone deny, so the metric is unchanged
-  and `policy`+`filter` still sum to it. #5856 extended the SAME per-zone split
+  stays a SINGLE atomic bumped on any limiter denial. The policy/filter
+  source split covers explicit `reject` paths only; zone `tcp-rst` session-miss
+  resets also count in the aggregate but have no source attribution, so the
+  source-specific sum may be lower. #5856 extended the SAME per-zone split
   to the TimeExceeded and PacketTooBig reasons (`ForwardingState::
   time_exceeded_buckets` / `packet_too_big_buckets`, resolved from
   `ingress_ident.ifindex`), so a TTL=1/hop-limit=1 or oversized-DF flood in one

@@ -90,8 +90,31 @@ func TestImportAdoptsBGPLearnedRoute(t *testing.T) {
 	if !reflect.DeepEqual(got[0].NextHops, []string{"192.0.2.1"}) {
 		t.Errorf("next-hops = %v, want [192.0.2.1]", got[0].NextHops)
 	}
+	if !reflect.DeepEqual(got[0].NextHopWeights, []uint32{1}) {
+		t.Errorf("next-hop weights = %v, want [1] for a single path", got[0].NextHopWeights)
+	}
 	if got[0].Protocol != "bgp" {
 		t.Errorf("protocol = %q, want bgp", got[0].Protocol)
+	}
+}
+
+func TestImportCarriesKernelMetrics11388(t *testing.T) {
+	lower := unicast(mustCIDR(t, "198.51.100.0/24"), "192.0.2.2", unix.RTPROT_DHCP)
+	lower.Priority = 100
+	higher := unicast(mustCIDR(t, "198.51.100.0/24"), "192.0.2.10", unix.RTPROT_DHCP)
+	higher.Priority = 200
+	withRouteLister(t, staticLister(v4Main(lower, higher)))
+
+	got, err := ImportLearnedRoutes([]int{mainTableID})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	metrics := make(map[string]int, len(got))
+	for _, route := range got {
+		metrics[route.NextHops[0]] = route.Metric
+	}
+	if len(metrics) != 2 || metrics["192.0.2.2"] != 100 || metrics["192.0.2.10"] != 200 {
+		t.Fatalf("imported route metrics = %v, want .2:100 and .10:200", metrics)
 	}
 }
 
@@ -276,8 +299,8 @@ func TestImportAdoptsEveryECMPLeg(t *testing.T) {
 			Type:     unix.RTN_UNICAST,
 			Protocol: netlink.RouteProtocol(unix.RTPROT_OSPF),
 			MultiPath: []*netlink.NexthopInfo{
-				{Gw: net.ParseIP("192.0.2.1")},
-				{Gw: net.ParseIP("192.0.2.2")},
+				{Gw: net.ParseIP("192.0.2.1"), Hops: 0},
+				{Gw: net.ParseIP("192.0.2.2"), Hops: 3},
 			},
 		},
 	)))
@@ -292,6 +315,9 @@ func TestImportAdoptsEveryECMPLeg(t *testing.T) {
 	want := []string{"192.0.2.1", "192.0.2.2"}
 	if !reflect.DeepEqual(got[0].NextHops, want) {
 		t.Errorf("next-hops = %v, want %v", got[0].NextHops, want)
+	}
+	if !reflect.DeepEqual(got[0].NextHopWeights, []uint32{1, 4}) {
+		t.Errorf("next-hop weights = %v, want [1 4] in kernel leg order", got[0].NextHopWeights)
 	}
 }
 

@@ -175,24 +175,21 @@ pub(crate) struct ShardedNeighborMap {
     /// nothing: a worker cannot know which shard a pending key hashes to
     /// without walking its keys, which is the walk being avoided.
     ///
-    /// Distinct from the per-shard `mac_change_epoch` above, which fires only
-    /// when an EXISTING neighbour's hwaddr is replaced. That is the wrong
-    /// signal here: a pending key is waiting for its neighbour to APPEAR, and
-    /// a first insert changes no existing hwaddr, so it bumps no epoch.
+    /// Distinct from the per-shard neighbor-resolution epoch above, which
+    /// advances on an existing neighbor's MAC replacement or actual removal.
+    /// This is the wrong signal here: a pending key is waiting for its
+    /// neighbor to APPEAR, and a first insert changes no existing mapping.
     insert_generation: AtomicU64,
-    /// #5147: PER-SHARD monotonic MAC-change epochs. Bumped ONLY when a
-    /// kernel ARP/NDP update REPLACES an existing neighbor's hwaddr with a
-    /// different MAC (gateway VRRP failover, host NIC swap, upstream MAC
-    /// change), and ONLY on the epoch of the shard that holds the changed
-    /// neighbor key. The worker flow cache stamps the epoch of the SPECIFIC
-    /// shard its resolved next-hop lives in
-    /// (`FlowCacheEntry::neighbor_shard`) into each cached forwarding
-    /// descriptor and re-reads that one slot on every fast-path hit; a
-    /// mismatch means the descriptor's `dst_mac` may be stale, so the entry
-    /// is evicted and the next packet re-resolves the current MAC.
+    /// #5147: PER-SHARD neighbor-resolution epochs. Bumped only when an
+    /// existing neighbor's MAC changes or an existing key is removed, and
+    /// only on the epoch of the shard holding that key. The worker flow cache
+    /// stamps the resolved next-hop shard into each cached forwarding
+    /// descriptor and re-reads that slot on every fast-path hit; a mismatch
+    /// means the descriptor's destination MAC or neighbor liveness may be
+    /// stale, so the entry is evicted and the next packet re-resolves.
     ///
     /// This replaces the single global `mac_change_epoch` that made ANY
-    /// neighbor's MAC change invalidate EVERY cached flow. An on-link sender
+    /// neighbor change invalidate EVERY cached flow. An on-link sender
     /// alternating one IP's MAC advanced that global counter faster than
     /// entries could warm, collapsing the whole flow cache to ~1 packet
     /// (attacker-driven cache thrash / DoS, #5147). With a per-shard epoch a
@@ -200,16 +197,11 @@ pub(crate) struct ShardedNeighborMap {
     /// rare event A and B hash to the SAME shard (1/NUM_SHARDS), never
     /// map-wide.
     ///
-    /// Same #3048 non-bump discipline, now applied per shard. It is
-    /// deliberately NOT bumped on:
-    ///   * a first insert of a brand-new neighbor (no cached flow can
-    ///     reference a neighbor that did not previously exist), nor
-    ///   * a periodic ARP/NDP REFRESH that re-learns the SAME MAC (the
-    ///     overwhelmingly common case) — bumping there would flush that
-    ///     shard's cached flows on every neighbor refresh and collapse the
-    ///     fast-path hit rate.
-    /// `insert_if_changed` distinguishes these because it reads the prior
-    /// entry under the shard lock before overwriting.
+    /// First inserts and same-MAC refreshes do not bump: no existing cached
+    /// decision can be stale in either case. An attempted removal of an absent
+    /// key also does not bump, while an actual removal does because cached
+    /// flows may still depend on that neighbor. `insert_if_changed` checks the
+    /// prior entry under the shard lock before overwriting.
     ///
     /// The fast-path read is a single indexed relaxed atomic load + compare
     /// (the shard is precomputed at cache-miss time) — allocation-free per
@@ -471,33 +463,32 @@ impl ShardedNeighborMap {
         shard_idx(key)
     }
 
-    /// #5147: current MAC-change epoch for one shard. Read by the worker
-    /// flow cache on every fast-path hit (single indexed relaxed atomic
-    /// load; the shard is precomputed at insert). Mirrors the old global
-    /// `mac_change_epoch` accessor but scoped to the neighbor's own shard.
+    /// #5147: current neighbor-resolution epoch for one shard. Read by the
+    /// worker flow cache on every fast-path hit (single indexed relaxed
+    /// atomic load; the shard is precomputed at insert). Mirrors the old
+    /// global `mac_change_epoch` accessor but scoped to the neighbor's shard.
     #[inline]
     pub(crate) fn shard_mac_epoch(&self, shard: usize) -> u32 {
         self.shard_mac_epochs[shard].load(Ordering::Relaxed)
     }
 
-    /// #5147: MAC-change epoch for the shard that holds `key`. Convenience
-    /// over `shard_mac_epoch(shard_index(key))`; used by tests and by the
-    /// pre-resolve snapshot's `epoch_for`.
+    /// #5147: neighbor-resolution epoch for the shard that holds `key`.
+    /// Convenience over `shard_mac_epoch(shard_index(key))`; used by tests
+    /// and by the pre-resolve snapshot's `epoch_for`.
     #[inline]
     pub(crate) fn mac_change_epoch_for(&self, key: &(i32, IpAddr)) -> u32 {
         self.shard_mac_epoch(shard_idx(key))
     }
 
-    /// #5147/#3918: snapshot every shard's MAC-change epoch at once. The
-    /// worker takes this BEFORE it resolves a packet's next-hop MAC (it does
-    /// not yet know which shard the resolve will land in), then stamps the
+    /// #5147/#3918: snapshot every shard's neighbor-resolution epoch. The
+    /// worker takes this BEFORE it resolves a packet's next-hop (it does not
+    /// yet know which shard the resolve will land in), then stamps the
     /// resolved shard's snapshotted value onto the new cache entry. Reading
     /// pre-resolve — the whole vector — preserves the #3918 resolve→stamp
-    /// TOCTOU fix per shard: the snapshot cannot already reflect a MAC change
-    /// that lands during/after the resolve, so such a change advances the
-    /// live shard epoch past the stamp and the entry is evicted on its next
-    /// hit rather than serving the stale MAC. NUM_SHARDS relaxed loads, on
-    /// the cold cache-miss path only.
+    /// TOCTOU fix per shard: the snapshot cannot already reflect a mapping
+    /// change that lands during/after the resolve, so the live shard epoch
+    /// advances past the stamp and the entry is evicted on its next hit.
+    /// NUM_SHARDS relaxed loads, on the cold cache-miss path only.
     #[inline]
     pub(crate) fn snapshot_shard_epochs(&self) -> ShardEpochSnapshot {
         ShardEpochSnapshot(std::array::from_fn(|i| {
@@ -505,10 +496,9 @@ impl ShardedNeighborMap {
         }))
     }
 
-    /// #5147: advance the MAC-change epoch of the shard that holds `key`.
-    /// Called under the shard lock on a genuine MAC replacement so a
-    /// concurrent fast-path hit never observes the new MAC paired with the
-    /// old shard epoch.
+    /// #5147: advance the neighbor-resolution epoch of the shard that holds
+    /// `key`. Called under the shard lock on a MAC replacement or actual
+    /// removal so a concurrent fast-path hit cannot retain a stale decision.
     #[inline]
     fn bump_shard_epoch(&self, shard: usize) {
         self.shard_mac_epochs[shard].fetch_add(1, Ordering::Relaxed);
@@ -547,9 +537,9 @@ impl ShardedNeighborMap {
         self.insert_generation.fetch_add(1, Ordering::Release);
     }
 
-    /// Remove `key` if present. Unit-returning.
+    /// Remove `key` if present.
     pub(crate) fn remove(&self, key: &(i32, IpAddr)) {
-        self.lock_shard(shard_idx(key)).remove(key);
+        let _ = self.remove_if_present(key);
     }
 
     /// #1769: race-safe confirmed insert for the on-demand resolver.
@@ -715,10 +705,17 @@ impl ShardedNeighborMap {
         Some(true)
     }
 
-    /// Remove `key` if present and return whether it was actually
-    /// removed. Mirrors `neighbor::remove_dynamic_neighbor` semantics.
+    /// Remove `key` if present and return whether it was actually removed.
+    /// A successful removal advances that neighbor's shard epoch so cached
+    /// descriptors cannot keep forwarding through the deleted member.
     pub(crate) fn remove_if_present(&self, key: &(i32, IpAddr)) -> bool {
-        self.lock_shard(shard_idx(key)).remove(key).is_some()
+        let shard_idx = shard_idx(key);
+        let mut shard = self.lock_shard(shard_idx);
+        let removed = shard.remove(key).is_some();
+        if removed {
+            self.bump_shard_epoch(shard_idx);
+        }
+        removed
     }
 
     /// Expire idle RX source-learned entries. Manager-owned keys are excluded
@@ -821,8 +818,9 @@ impl ShardedNeighborMap {
     /// authoritative neighbor mechanism). Removes `remove_keys`, then
     /// inserts `insert_entries`, all under a single all-shard lock so
     /// readers see either the pre- or post-replace set, never a partial
-    /// one. Bumps `mac_change_epoch` exactly once if ANY incoming key
-    /// REPLACES an existing neighbor's MAC with a different one.
+    /// one. Bumps each affected shard once if an incoming key REPLACES an
+    /// existing neighbor's MAC or an existing key is removed without being
+    /// reinserted.
     ///
     /// This is the FOURTH neighbor-MAC write path and the only one that
     /// removes the prior entry BEFORE installing the new one (a Go
@@ -834,8 +832,8 @@ impl ShardedNeighborMap {
     ///
     /// Semantics match the per-key paths: a pure refresh where every key
     /// keeps the same MAC does NOT bump; a brand-new key with no prior
-    /// does NOT force a bump on its own (no cached flow can reference a
-    /// neighbor that did not previously exist). Reachable on a
+    /// does NOT force a bump on its own; and a removal bumps only when the
+    /// key existed and is not reinserted. Reachable on a
     /// VRRP-failover RTM_NEWNEIGH burst when the in-process monitor's
     /// bounded rcvbuf overflows and the Go neighbor listener pushes the
     /// new gateway MAC through this path.
@@ -844,6 +842,16 @@ impl ShardedNeighborMap {
         remove_keys: &[(i32, IpAddr)],
         insert_entries: &[(i32, IpAddr, NeighborEntry)],
     ) {
+        let reinserted_keys = if remove_keys.is_empty() || insert_entries.is_empty() {
+            None
+        } else {
+            let mut keys = FastSet::default();
+            keys.reserve(insert_entries.len());
+            for (ifindex, ip, _) in insert_entries {
+                keys.insert((*ifindex, *ip));
+            }
+            Some(keys)
+        };
         self.with_all_shards(|bulk| {
             // Snapshot the prior MAC for every INCOMING key BEFORE any
             // removal — the replace removes the old entry before the
@@ -859,18 +867,21 @@ impl ShardedNeighborMap {
                 }
             }
             for key in remove_keys {
-                bulk.remove(key);
+                let removed = bulk.remove_if_present(key).is_some();
+                let reinserted = reinserted_keys
+                    .as_ref()
+                    .is_some_and(|keys| keys.contains(key));
+                if removed && !reinserted {
+                    changed_shards[shard_idx(key)] = true;
+                }
             }
             for (ifindex, ip, entry) in insert_entries {
                 bulk.insert((*ifindex, *ip), *entry);
             }
             // Bump under the same bulk lock as the mutation so a
-            // concurrent fast-path hit never observes the new MAC with
-            // the old epoch. #5147: bump each shard that had a genuine MAC
-            // change exactly once — a change to a neighbor in shard S
-            // invalidates only cached flows resolved to shard S, not the
-            // whole flow cache. (Two changed keys colliding in one shard
-            // bump it once.)
+            // concurrent fast-path hit cannot keep a stale decision.
+            // #5147: bump each shard with a MAC replacement or actual
+            // removal exactly once; an unrelated shard remains valid.
             for (shard, &changed) in changed_shards.iter().enumerate() {
                 if changed {
                     self.bump_shard_epoch(shard);
@@ -894,12 +905,11 @@ impl ShardedNeighborMap {
         // advances on every call carries the same information as one that never
         // advances.
         //
-        // The condition is "did we install anything", NOT the `changed_shards`
-        // set the epoch uses. Those answer different questions and reusing the
-        // epoch's set was my first attempt and wrong: changed_shards marks a key
-        // whose MAC CHANGED, and a brand-new key has no prior MAC to differ
-        // from -- so a freshly resolved neighbour, the exact case the poll loop
-        // is waiting for, would not have bumped.
+        // The condition is "did we install anything", NOT `changed_shards`,
+        // which tracks invalidating mapping changes for the flow cache. Those
+        // answer different questions: a brand-new key has no prior mapping to
+        // invalidate, but is still a fresh resolution the poll loop may be
+        // waiting for.
         self.bump_insert_generation_9071(!insert_entries.is_empty());
     }
 
@@ -1074,20 +1084,20 @@ impl Default for ShardedNeighborMap {
     }
 }
 
-/// #5147/#3918: an immutable snapshot of every shard's MAC-change epoch,
-/// captured by the worker BEFORE it resolves a packet's next-hop neighbor
-/// MAC. Because the resolved shard is not known until after the resolve, the
+/// #5147/#3918: immutable snapshot of every shard's neighbor-resolution
+/// epoch, captured by the worker BEFORE it resolves a packet's next-hop.
+/// Because the resolved shard is not known until after the resolve, the
 /// worker snapshots the whole vector first, then stamps the resolved shard's
-/// snapshotted value onto the new flow-cache entry (`epoch_for`). Taking the
-/// snapshot pre-resolve preserves the #3918 TOCTOU fix per shard: a MAC
-/// change that lands during/after the resolve cannot already be reflected in
-/// this snapshot, so the entry's stamped epoch is < the live shard epoch and
-/// the entry is evicted on its next hit rather than serving the stale MAC.
+/// value onto the new flow-cache entry (`epoch_for`). Taking the snapshot
+/// pre-resolve preserves the #3918 TOCTOU fix per shard: a MAC replacement or
+/// removal that lands during/after the resolve cannot already be reflected
+/// in this snapshot, so the entry's stamped epoch is < the live shard epoch
+/// and is evicted on its next hit rather than using the stale mapping.
 pub(crate) struct ShardEpochSnapshot([u32; NUM_SHARDS]);
 
 impl ShardEpochSnapshot {
-    /// The snapshotted MAC-change epoch for the shard that holds `key` (the
-    /// flow's resolved next-hop `(egress_ifindex, next_hop)`).
+    /// The snapshotted neighbor-resolution epoch for the shard holding `key`
+    /// (the flow's resolved next-hop `(egress_ifindex, next_hop)`).
     #[inline]
     pub(crate) fn epoch_for(&self, key: &(i32, IpAddr)) -> u32 {
         self.0[shard_idx(key)]
@@ -1126,10 +1136,15 @@ impl<'a> BulkShardGuard<'a> {
         );
     }
 
+    /// Remove `key` from the appropriate shard if present.
+    pub(crate) fn remove_if_present(&mut self, key: &(i32, IpAddr)) -> Option<NeighborEntry> {
+        let i = shard_idx(key);
+        self.guards[i].remove(key)
+    }
+
     /// Remove `key` from the appropriate shard.
     pub(crate) fn remove(&mut self, key: &(i32, IpAddr)) {
-        let i = shard_idx(key);
-        self.guards[i].remove(key);
+        let _ = self.remove_if_present(key);
     }
 
     /// #3048: read the entry for `key` from its shard while every shard

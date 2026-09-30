@@ -45,21 +45,26 @@ fn get_returns_none_for_missing_key() {
 }
 
 #[test]
-fn remove_clears_entry() {
+fn remove_clears_entry_and_advances_neighbor_epoch() {
     let map = ShardedNeighborMap::new();
     let k = key_v4(7, 42);
     map.insert(k, entry(0xAB));
+    assert_eq!(map.mac_change_epoch_for(&k), 0);
     map.remove(&k);
     assert_eq!(map.get(&k), None);
+    assert_eq!(map.mac_change_epoch_for(&k), 1);
 }
 
 #[test]
-fn remove_if_present_returns_true_when_existing_false_when_absent() {
+fn remove_if_present_bumps_epoch_only_when_present() {
     let map = ShardedNeighborMap::new();
     let k = key_v4(7, 42);
     map.insert(k, entry(0xAB));
+    assert_eq!(map.mac_change_epoch_for(&k), 0);
     assert!(map.remove_if_present(&k));
+    assert_eq!(map.mac_change_epoch_for(&k), 1);
     assert!(!map.remove_if_present(&k));
+    assert_eq!(map.mac_change_epoch_for(&k), 1);
 }
 
 #[test]
@@ -313,15 +318,15 @@ fn concurrent_per_key_with_bulk_replace_no_deadlock() {
     assert!(map.len() > 0);
 }
 
-// ── #3048/#5147: PER-SHARD neighbor MAC-change epoch ──────────────────
+// ── #3048/#5147: PER-SHARD neighbor-resolution epoch ──────────────────
 // The worker flow cache stamps the epoch of the SPECIFIC shard its
 // resolved next-hop lives in (`FlowCacheEntry::neighbor_shard`) and
 // re-reads that one slot on every fast-path hit. A shard's epoch MUST
-// advance only on a genuine MAC CHANGE to a neighbor IN THAT SHARD, so a
-// stale cached dst_mac is evicted; it MUST NOT advance on a first insert
-// or a same-MAC refresh, and a change to a neighbor in a DIFFERENT shard
-// MUST leave this shard's epoch untouched (#5147 — the old single global
-// epoch let one neighbor's MAC flap invalidate every cached flow).
+// advance on a genuine MAC replacement or actual removal in THAT SHARD,
+// so a stale cached destination MAC or deleted next-hop is re-resolved.
+// It MUST NOT advance on a first insert, same-MAC refresh, absent-key
+// removal, or change to a neighbor in a DIFFERENT shard (#5147 — the old
+// single global epoch let one neighbor's MAC flap invalidate every flow).
 // Reverting any `bump_shard_epoch` makes the corresponding "change bumps"
 // assertion fail (RED); the isolation test fails if a change bumps a
 // shard other than its own.
@@ -467,6 +472,21 @@ fn mac_change_epoch_bulk_replace_no_bump_on_same_mac() {
     map.bulk_replace_neighbors(&remove, &insert);
     assert_eq!(map.get(&k), Some(entry(0xAB)));
     assert_eq!(map.mac_change_epoch_for(&k), 0);
+}
+
+#[test]
+fn mac_change_epoch_bulk_replace_bumps_on_pure_removal_per_shard() {
+    let map = ShardedNeighborMap::new();
+    let (removed, untouched) = keys_in_distinct_shards();
+    map.insert(removed, entry(0x11));
+    map.insert(untouched, entry(0x22));
+
+    map.bulk_replace_neighbors(&[removed], &[]);
+
+    assert_eq!(map.get(&removed), None);
+    assert_eq!(map.mac_change_epoch_for(&removed), 1);
+    assert_eq!(map.get(&untouched), Some(entry(0x22)));
+    assert_eq!(map.mac_change_epoch_for(&untouched), 0);
 }
 
 #[test]

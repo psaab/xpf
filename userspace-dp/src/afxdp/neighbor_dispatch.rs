@@ -1046,14 +1046,16 @@ fn learn_dynamic_neighbor_with_mac(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     allow_mac_change: bool,
 ) {
-    // #3075: skip xpf's own synthetic fabric-zone-encoded source MAC
-    // (02:bf:72:fe:HI:LO). A forwarded, admitted fabric frame reaches this
-    // leg too, so keep the guard in the shared MAC path rather than only the
-    // pre-policy frame extractor.
-    if src_mac[0] == 0x02
+    // #3075/#11337: skip xpf's own synthetic fabric-zone (V1) or
+    // interface-scope (V2) source MAC. A forwarded admitted fabric frame
+    // reaches this leg too, so keep the guard in the shared MAC path.
+    if (src_mac[0] == 0x02
         && src_mac[1] == 0xbf
         && src_mac[2] == 0x72
-        && src_mac[3] == FABRIC_ZONE_MAC_MAGIC
+        && src_mac[3] == FABRIC_ZONE_MAC_MAGIC)
+        || (src_mac[0] == FABRIC_NAT_SCOPE_MAC_PREFIX[0]
+            && src_mac[1] == FABRIC_NAT_SCOPE_MAC_PREFIX[1]
+            && src_mac[2] == FABRIC_NAT_SCOPE_MAC_PREFIX[2])
     {
         return;
     }
