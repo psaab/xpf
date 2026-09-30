@@ -2823,6 +2823,10 @@ type compileOpts struct {
 	// leaves the device unbound, and records alarm/metric evidence while
 	// preserving unaffected units from a bare member.
 	lenientRIDualClaim11060 bool
+	// lenientRIMgmtMember11392 warns about management-class RI list members on
+	// tolerant load/peer-sync so existing configs still boot. Strict commit
+	// rejects these members because fxp*/fab*/em* are owned by vrf-mgmt.
+	lenientRIMgmtMember11392 bool
 	// lenientRoutingInstanceType9814 (#9814) downgrades the routing-instance
 	// instance-type value-domain gate (validateRoutingInstanceTypeStrict9814)
 	// from a hard compile error to a cfg.Warnings entry. A mistyped or
@@ -3096,6 +3100,7 @@ func lenientCompileOpts() compileOpts {
 		lenientHelperStateFile:                 true,
 		lenientAddressBookNameCollision:        true,
 		lenientRIDualClaim11060:                true,
+		lenientRIMgmtMember11392:               true,
 		lenientZoneInterfaceMembership:         true,
 		lenientFabricZoneRoutingInstance:       true,
 		lenientZoneInterfaceDefined:            true,

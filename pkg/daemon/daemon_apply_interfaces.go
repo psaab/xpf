@@ -335,9 +335,11 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 		conflictByDevice[conflict.LinuxName] = conflict
 		logRIMemberDeviceConflict(conflict)
 		// A tolerant config has already had its conflicting references removed,
-		// but a link can retain the old master across restart. Detach it here and
-		// let the periodic reassertion retry if netlink fails.
-		d.detachRIMemberDeviceConflict(conflict)
+		// but a link can retain its old master across restart. Non-management
+		// conflicts are detached here; management-class links belong to vrf-mgmt.
+		if !config.IsManagementIfName(conflict.LinuxName) {
+			d.detachRIMemberDeviceConflict(conflict)
+		}
 	}
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
@@ -345,6 +347,9 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 		}
 		for _, key := range config.RoutingInstanceMemberDeviceKeysForInstance(cfg, tunMap, ri) {
 			linuxName := key.LinuxName
+			if config.IsManagementIfName(linuxName) {
+				continue // #11392: vrf-mgmt owns management-class devices
+			}
 			if _, found := conflictByDevice[linuxName]; found {
 				continue
 			}
@@ -365,8 +370,12 @@ func logRIMemberDeviceConflict(conflict config.RoutingInstanceMemberDeviceConfli
 	for _, claim := range conflict.Claims {
 		claims = append(claims, claim.Instance+" (member "+claim.Member+")")
 	}
-	slog.Error("routing-instance interface device has conflicting ownership; leaving it unbound",
-		"linux", conflict.LinuxName, "claims", claims, "issue", "#11060")
+	message, issue := "routing-instance interface device has conflicting ownership; leaving it unbound", "#11060"
+	if config.IsManagementIfName(conflict.LinuxName) {
+		message = "routing-instance interface device has conflicting ownership; management-class device is reserved for vrf-mgmt"
+		issue = "#11060/#11392"
+	}
+	slog.Error(message, "linux", conflict.LinuxName, "claims", claims, "issue", issue)
 }
 
 // rebindRoutingInstanceMembers is the #6805 late pass: the step-0a bind, re-run

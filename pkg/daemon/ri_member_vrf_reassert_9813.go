@@ -161,6 +161,8 @@ func riMemberDeviceConflicts(cfg *config.Config) []config.RoutingInstanceMemberD
 // riMembersOutsideTheirVRF returns list members requiring reconciliation.
 // Quarantined conflicts produce detach actions only while they remain mastered
 // by one of their claimant VRFs; unrelated or already-default links stay alone.
+// Management-class devices are owned by vrf-mgmt and never enter this tenant
+// bind/detach path (#11392).
 func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 	if cfg == nil {
 		return nil
@@ -170,6 +172,9 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 	var out []riMember
 	for _, conflict := range conflicts {
 		conflictByDevice[conflict.LinuxName] = conflict
+		if config.IsManagementIfName(conflict.LinuxName) {
+			continue
+		}
 		if !d.riMemberConflictNeedsDetach(conflict) {
 			continue
 		}
@@ -189,6 +194,9 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 		}
 		for _, key := range config.RoutingInstanceMemberDeviceKeysForInstance(cfg, tunMap, ri) {
 			linuxName := key.LinuxName
+			if config.IsManagementIfName(linuxName) {
+				continue // #11392: vrf-mgmt owns management-class devices
+			}
 			if _, found := conflictByDevice[linuxName]; found {
 				continue // #11060: quarantine owns this device, never bind it
 			}
