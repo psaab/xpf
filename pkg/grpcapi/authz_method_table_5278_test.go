@@ -750,3 +750,27 @@ func TestShowTextDispatchLivesInOneFile_5278(t *testing.T) {
 		}
 	}
 }
+
+// TestSimulatorCostsControlOnBothSurfaces_11077 pins one price for one
+// simulator: the MatchPolicies RPC runs the identical verdict as ShowText
+// test-policy:, so a read-only class must be denied on BOTH (RED on revert:
+// price MatchPolicies back at PermView and the read-only dial succeeds).
+func TestSimulatorCostsControlOnBothSurfaces_11077(t *testing.T) {
+	svc := "/" + pb.BpfrxService_ServiceDesc.ServiceName
+	matchPerm, matchMapped := methodPermission(svc+"/MatchPolicies", nil)
+	if !matchMapped {
+		t.Fatal("MatchPolicies is unmapped")
+	}
+	if matchPerm != config.PermControl {
+		t.Errorf("MatchPolicies priced %s, want control — same simulator as test-policy: (#11077)", permName(matchPerm))
+	}
+	textPerm, textMapped := methodPermission(svc+"/ShowText", &pb.ShowTextRequest{Topic: "test-policy:from=trust,to=untrust,src=10.0.1.5,dst=10.0.2.5,proto=tcp,port=443"})
+	if !textMapped || textPerm != config.PermControl {
+		t.Fatalf("test-policy: fixture moved (mapped=%v perm=%s); the parity cell needs the control-tier anchor", textMapped, permName(textPerm))
+	}
+	for _, class := range []string{"read-only", "config-viewer"} {
+		if config.ClassHasPermission(nil, class, matchPerm) {
+			t.Errorf("MatchPolicies reachable by view-only class %q — control tier bypassable (#11077)", class)
+		}
+	}
+}
