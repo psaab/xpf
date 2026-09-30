@@ -20,8 +20,8 @@ import (
 // [PBRRulePriorityBase, PBRRulePriorityBase+PBRRuleWindow) — 29000..29999 —
 // and that constant is already the SSOT shared with the userspace FIB ingest
 // (#4479), so counting by priority cannot drift from the install side. Rules
-// outside the band (the kernel's own 0/32766/32767, next-table at 32000-32099,
-// rib-group at 30000-30999, and legacy rules) are not ours and are not counted.
+// outside the band (the kernel's own 0/32766/32767, shared destination leaks
+// at 30000-30999, and legacy rules) are not ours and are not counted.
 
 // PBRAppliedCount returns the number of PBR ip rules present in the kernel,
 // summed across both address families, and whether the readback SUCCEEDED.

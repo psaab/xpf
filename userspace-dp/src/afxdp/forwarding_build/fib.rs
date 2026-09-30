@@ -278,8 +278,10 @@ pub(super) fn sort_routes(state: &mut ForwardingState) {
                 .then(a.preference.cmp(&b.preference))
         });
     }
-    // #9955: leaks are ip rules, not FIB routes. Their priority is the only
-    // ordering key in stage one; prefix length is deliberately ignored.
+    // #9955/#11396: leak priorities are the kernel's stage-one ordering key.
+    // The Go producer maps prefix length and leak kind into one shared LPM-first
+    // range, so more-specific leaks sort first across sources. Keep this stable
+    // priority sort and preserve producer order for equal-priority ties.
     for leaks in state.leak_rules_v4.values_mut() {
         leaks.sort_by_key(|leak| leak.rule_priority);
     }

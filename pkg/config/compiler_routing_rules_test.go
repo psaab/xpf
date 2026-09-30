@@ -61,9 +61,9 @@ func mkNextTableCfg(n int) *Config {
 	return cfg
 }
 
-// TestRoutingRuleWindowsStrictGate_5854 unit-tests the window over-subscription
-// gate directly: at or below the applier's fixed ip-rule windows (100
-// next-table, 1000 rib-group leak) it passes; above either window it returns an
+// TestRoutingRuleWindowsStrictGate_5854 unit-tests the admission-cap
+// over-subscription gate directly: at or below each cap (100 next-table rule
+// entries, 1000 rib-group leak rules) it passes; above either cap it returns an
 // error. It also pins the counting semantics (both static-route lists count;
 // an instance with no rib-group reference does not; a v6-only reference does).
 //
@@ -125,10 +125,10 @@ func TestRoutingRuleWindowsStrictGate_5854(t *testing.T) {
 }
 
 // nextTableOverLimitSets returns flat `set` commands for 101 next-table static
-// routes (one over the 100-rule window) all pointing at a DEFINED routing-
-// instance, so the #5693 next-table definedness gate passes and the #5854
-// window gate is the one that fires. One unclaimed unit (N=1, #9810) keeps
-// this a genuine overflow cell rather than an N=0 reject.
+// routes (one over the 100-entry admission cap) all pointing at a DEFINED
+// routing-instance, so the #5693 next-table definedness gate passes and the
+// #5854 admission-cap gate is the one that fires. One unclaimed unit (N=1,
+// #9810) keeps this a genuine overflow cell rather than an N=0 reject.
 func nextTableOverLimitSets() []string {
 	sets := []string{
 		"set routing-instances vr instance-type virtual-router",
@@ -141,9 +141,8 @@ func nextTableOverLimitSets() []string {
 	return sets
 }
 
-// ribGroupOverLimitSets returns flat `set` commands for a routing-instance
 // whose interface-routes rib-group imports the main table and whose member
-// unit carries 1001 connected prefixes (one over the 1000-rule leak window).
+// unit carries 1001 connected prefixes (one over the 1000-rule admission cap).
 func ribGroupOverLimitSets() []string {
 	sets := []string{
 		"set routing-instances vr instance-type virtual-router",
@@ -159,7 +158,7 @@ func ribGroupOverLimitSets() []string {
 }
 
 // TestRoutingRuleWindowsStrictReject_5854 proves the #5854 fix end-to-end on the
-// STRICT commit path: a config that over-subscribes either ip-rule window is
+// STRICT commit path: a config that exceeds either ip-rule admission cap is
 // HARD-REJECTED by CompileConfig instead of committing green and being silently
 // truncated at apply time (routes claimed but not programmed).
 //
@@ -188,7 +187,7 @@ func TestRoutingRuleWindowsStrictReject_5854(t *testing.T) {
 // SAME over-limit configs LOAD (never hard-fail) on the tolerant path
 // (CompileConfigLenient) with a downgrade warning, so an already-committed or
 // peer-synced generation that predates this rejection still boots (#1960 — the
-// applier's window hard-cap keeps the excess inert).
+// applier's admission caps keep the excess inert).
 //
 // FAIL-ON-REVERT: dropping opts.lenientRoutingRuleWindows from the lenient opts
 // (or otherwise hard-rejecting in lenient) makes these loads error → RED.

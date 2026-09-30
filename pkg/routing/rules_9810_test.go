@@ -224,9 +224,9 @@ func (f *failNthAddOps9810) RuleAdd(r *netlink.Rule) error {
 }
 
 // TestNextTableInstallIsFaultAtomic_9810 pins SYN-C-LEAK-05: a netlink fault
-// on one ingress interface of a leak must not leave the leak installed on a
-// subset of its interfaces. The partial install is rolled back, the priority
-// is not consumed, and the next leak installs in its place.
+// on one ingress interface of a leak must not leave that leak installed on a
+// subset of its interfaces. The partial install is rolled back; later leaks
+// retain their own prefix-derived priority.
 func TestNextTableInstallIsFaultAtomic_9810(t *testing.T) {
 	inner := newFakeRuleOps()
 	ops := &failNthAddOps9810{fakeRuleOps: inner, n: 2, err: errors.New("netlink: transient EBUSY")}
@@ -253,9 +253,10 @@ func TestNextTableInstallIsFaultAtomic_9810(t *testing.T) {
 			bPrios = append(bPrios, r.Priority)
 		}
 	}
-	if len(bPrios) != 2 || bPrios[0] != nextTableRulePriority || bPrios[1] != nextTableRulePriority+1 {
-		t.Fatalf("the next leak must reuse the failed prio (%d,%d), got %v",
-			nextTableRulePriority, nextTableRulePriority+1, bPrios)
+	want := config.RouteLeakRulePriority(16, 32, config.RouteLeakNextTable)
+	if len(bPrios) != 2 || bPrios[0] != want || bPrios[1] != want {
+		t.Fatalf("the surviving /16 leak copies must share prefix-derived priority %d, got %v",
+			want, bPrios)
 	}
 }
 
@@ -317,7 +318,7 @@ func TestNextTableApplierAgreesWithExclusions_9810(t *testing.T) {
 	applyErr := nt.Apply(cfg.RoutingOptions.StaticRoutes, cfg.RoutingInstances,
 		DefaultInstanceIngressIfaces(cfg))
 	if applyErr == nil {
-		t.Fatal("30 leaks over 4 ingress interfaces must overflow the 100-slot window")
+		t.Fatal("30 leaks over 4 ingress interfaces must overflow the 100-entry cap")
 	}
 
 	installed := map[string]bool{}
@@ -351,11 +352,10 @@ func TestNextTableApplierAgreesWithExclusions_9810(t *testing.T) {
 
 // TestNextTableOverflowAfterAddFailure_9810 is the GPT-1 regression: admission
 // is independent of install/rollback accounting. Leak 1 faults and rolls back
-// cleanly, freeing its slots — but its reservation is still consumed, so the
-// verdict-excluded 51st leak must NOT install (pre-fix the freed cursor
-// admitted it, and live-rule ingestion published it too). Every installed leak
-// must be a verdict-admitted one; the faulted leak under-installs (reported,
-// healed by #9693 retry) rather than shifting the tail in.
+// cleanly, but its route reservation remains consumed, so the verdict-excluded
+// 51st leak must NOT install. Every installed leak must be verdict-admitted;
+// the faulted leak under-installs (reported, healed by #9693 retry) rather
+// than shifting the tail in.
 func TestNextTableOverflowAfterAddFailure_9810(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -404,8 +404,8 @@ func TestNextTableOverflowAfterAddFailure_9810(t *testing.T) {
 }
 
 // TestNextTableOverflowAfterFailedRollback_9810 pins that the GPT-1 admission
-// fix also holds when the rollback itself fails: the orphan stays, the
-// reservation is still consumed, and the verdict-excluded tail still does not
+// fix also holds when rollback itself fails: the orphan stays, its route's
+// reservation remains consumed, and the verdict-excluded tail still does not
 // install.
 func TestNextTableOverflowAfterFailedRollback_9810(t *testing.T) {
 	inner := newFakeRuleOps()
@@ -440,61 +440,36 @@ func TestNextTableOverflowAfterFailedRollback_9810(t *testing.T) {
 	}
 }
 
-// failNthDelOps9810 fails exactly the n-th RuleDel (1-based), delegating every
-// other call to the embedded ops.
-type failNthDelOps9810 struct {
-	ruleOps
-	n     int
-	count int
-	err   error
-}
-
-func (f *failNthDelOps9810) RuleDel(r *netlink.Rule) error {
-	f.count++
-	if f.count == f.n {
-		return f.err
-	}
-	return f.ruleOps.RuleDel(r)
-}
-
-// TestNextTableRollbackSurvivorsPackAndGap_9810 pins the most contentious
-// cursor logic: rollback survivors sit at ARBITRARY positions, so the scalar
-// cursor is approximate — the next leak packs at a priority the orphan still
-// holds (duplicate priorities, kernel-permitted) and skips a freed slot (gap
-// waste). Both are transient: the joined error plus the #9693 retry heals.
-// Fidelity note (SPARK-F6): the fake deletes by priority only while prod
-// netlink deletes by full rule identity, so this cell pins the PRIO LAYOUT
-// (dup at base+1, gap at base), not del precision.
-func TestNextTableRollbackSurvivorsPackAndGap_9810(t *testing.T) {
+// TestNextTableRollbackDeleteFailureSurfaced_9810 verifies that a rollback
+// delete failure is reported while later admitted leaks are still attempted.
+func TestNextTableRollbackDeleteFailureSurfaced_9810(t *testing.T) {
 	inner := newFakeRuleOps()
-	addOps := &failNthAddOps9810{fakeRuleOps: inner, n: 3, err: errors.New("netlink: transient EBUSY on add")}
-	ops := &failNthDelOps9810{ruleOps: addOps, n: 2, err: errors.New("netlink: transient EBUSY on delete")}
+	inner.delErr = errors.New("netlink: transient EBUSY on delete")
+	ops := &failNthAddOps9810{fakeRuleOps: inner, n: 3, err: errors.New("netlink: transient EBUSY on add")}
 	nt := &nextTableManager{ops: ops}
 	instances := []*config.RoutingInstanceConfig{{Name: "dmz-vr", TableID: 101}}
 	routes := []*config.StaticRoute{
 		{Destination: "10.21.0.0/16", NextTable: "dmz-vr"},
 		{Destination: "10.22.0.0/16", NextTable: "dmz-vr"},
 	}
-	err := nt.Apply(routes, instances, []string{"ge-0-0-0", "ge-0-0-1", "ge-0-0-2"})
+	iifs := []string{"ge-0-0-0", "ge-0-0-1", "ge-0-0-2"}
+	err := nt.Apply(routes, instances, iifs)
 	if err == nil || !strings.Contains(err.Error(), "roll back") {
 		t.Fatalf("the failed rollback del must surface, got %v", err)
 	}
-	byPrio := map[int][]string{}
-	for _, r := range inner.rules[unix.AF_INET] {
-		if r.Dst != nil {
-			byPrio[r.Priority] = append(byPrio[r.Priority], r.Dst.String())
+	byDestination := map[string]int{}
+	for _, rule := range inner.rules[unix.AF_INET] {
+		if rule.Dst != nil {
+			byDestination[rule.Dst.String()]++
 		}
 	}
-	if len(byPrio[nextTableRulePriority]) != 0 {
-		t.Errorf("prio %d was rolled back and skipped: gap waste pinned, got %v",
-			nextTableRulePriority, byPrio[nextTableRulePriority])
+	if byDestination["10.21.0.0/16"] != 2 {
+		t.Errorf("two rollback deletes failed, so the partial first leak should remain twice; got %d",
+			byDestination["10.21.0.0/16"])
 	}
-	if dsts := byPrio[nextTableRulePriority+1]; len(dsts) != 2 {
-		t.Fatalf("prio %d must pack the orphan and the next leak (dup), got %v",
-			nextTableRulePriority+1, dsts)
-	} else if !((dsts[0] == "10.21.0.0/16") != (dsts[1] == "10.21.0.0/16")) {
-		t.Fatalf("prio %d must hold exactly one orphan + one next-leak rule, got %v",
-			nextTableRulePriority+1, dsts)
+	if byDestination["10.22.0.0/16"] != len(iifs) {
+		t.Errorf("the later leak should still be attempted on all interfaces; got %d copies",
+			byDestination["10.22.0.0/16"])
 	}
 }
 
@@ -514,10 +489,10 @@ func (s *scriptOps9810) RuleAdd(r *netlink.Rule) error {
 	return s.fakeRuleOps.RuleAdd(r)
 }
 
-// TestNextTableEEXISTAdvancesInstallCursor_9810 pins that EEXIST-occupied slots
-// advance the install cursor: the next leak programs past them rather than
-// packing onto converged content.
-func TestNextTableEEXISTAdvancesInstallCursor_9810(t *testing.T) {
+// TestNextTableEEXISTDoesNotBlockFollowingLeak_9810 verifies that an already
+// installed rule is treated as converged and does not prevent later leaks from
+// being attempted.
+func TestNextTableEEXISTDoesNotBlockFollowingLeak_9810(t *testing.T) {
 	inner := newFakeRuleOps()
 	ops := &scriptOps9810{fakeRuleOps: inner, script: []error{unix.EEXIST, unix.EEXIST}}
 	nt := &nextTableManager{ops: ops}
@@ -526,17 +501,24 @@ func TestNextTableEEXISTAdvancesInstallCursor_9810(t *testing.T) {
 		{Destination: "10.23.0.0/16", NextTable: "dmz-vr"},
 		{Destination: "10.24.0.0/16", NextTable: "dmz-vr"},
 	}
-	if err := nt.Apply(routes, instances, []string{"ge-0-0-0", "ge-0-0-1"}); err != nil {
+	iifs := []string{"ge-0-0-0", "ge-0-0-1"}
+	if err := nt.Apply(routes, instances, iifs); err != nil {
 		t.Fatalf("EEXIST content is converged and must not fail the apply, got %v", err)
 	}
-	var prios []int
-	for _, r := range inner.rules[unix.AF_INET] {
-		if r.Dst != nil && r.Dst.String() == "10.24.0.0/16" {
-			prios = append(prios, r.Priority)
+	wantPriority := config.RouteLeakRulePriority(16, 32, config.RouteLeakNextTable)
+	var got []netlink.Rule
+	for _, rule := range inner.rules[unix.AF_INET] {
+		if rule.Dst != nil && rule.Dst.String() == "10.24.0.0/16" {
+			got = append(got, rule)
 		}
 	}
-	if len(prios) != 2 || prios[0] != nextTableRulePriority+2 || prios[1] != nextTableRulePriority+3 {
-		t.Fatalf("the leak after an EEXIST leak must program past it (%d,%d), got %v",
-			nextTableRulePriority+2, nextTableRulePriority+3, prios)
+	if len(got) != len(iifs) {
+		t.Fatalf("later leak got %d rules, want %d", len(got), len(iifs))
+	}
+	for i, rule := range got {
+		if rule.IifName != iifs[i] || rule.Priority != wantPriority {
+			t.Errorf("later leak rule %d = %+v, want ingress %q at derived priority %d",
+				i, rule, iifs[i], wantPriority)
+		}
 	}
 }

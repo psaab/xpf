@@ -1017,11 +1017,10 @@ const (
 // reserved probe table range 7000-7049 is clear of the Linux reserved
 // tables (0/253/254/255), the daemon's management VRF table (999), and
 // the routing-instance auto-assignment that grows upward from 100
-// (compileRoutingInstances). The ip-rule priority band 50-99 sits below
-// PBR (29000-29999), rib-group leaking (30000-30999), and next-table
-// leaking (32000-32099). pkg/routing's probe-pin reconciler and pkg/rpm's
-// SO_MARK assignment both consume these constants so the rule/table/mark
-// assignment cannot drift between the two sides.
+// (compileRoutingInstances). Probe priorities 50-99 sit below PBR
+// (29000-29999) and the shared next-table/rib-group leak range (30000-30999).
+// pkg/routing's probe-pin reconciler and pkg/rpm's SO_MARK assignment both
+// consume these constants so the rule/table/mark assignment cannot drift.
 const (
 	// ProbeTableBase is the first kernel routing table reserved for
 	// RPM probe next-hop pins.
@@ -1042,7 +1041,7 @@ const (
 	// route-leak rules so the kernel matches the helper's PBR-first
 	// precedence (#11319). These rules carry match SELECTORS (source/dest
 	// address, DSCP, protocol, source/dest port), so — unlike next-table /
-	// rib-group leak bands — they MUST NOT be mirrored into the userspace
+	// rib-group leak rules — they MUST NOT be mirrored into the userspace
 	// next-table FIB snapshot as a bare dst-only leak (which drops the
 	// selectors and re-opens the #3730 over-steer; see #4479 and
 	// pkg/dataplane/userspace/routes.go buildRouteSnapshots). Both
@@ -1061,30 +1060,21 @@ const (
 	// the next routing apply clears it. New PBR rules MUST use
 	// PBRRulePriorityBase.
 	LegacyPBRRulePriorityBase = 31000
-	// NextTableRulePriorityBase is the first ip-rule priority of the
-	// next-table inter-VRF route-leak band (32000-32099): global
-	// `routing-options static route <p> next-table <instance>` leaks installed
-	// by pkg/routing's nextTableManager. Unlike PBR these rules carry a pure
-	// per-prefix Dst with NO selectors, so the userspace FIB snapshot
-	// (pkg/dataplane/userspace/routes.go) DOES mirror them as bare NextTable
-	// leaks. They are after PBR and rib-group rules (#11319) but before main.
-	// Both pkg/routing (install side) and pkg/dataplane/userspace (config-static
-	// mirror side) consume the band, so it lives here as the single source of
-	// truth alongside PBRRulePriorityBase.
-	NextTableRulePriorityBase = 32000
-	// NextTableRuleWindow is the size of the next-table band; the band is
-	// [NextTableRulePriorityBase, NextTableRulePriorityBase+NextTableRuleWindow)
-	// = 32000-32099. It bounds THREE things that MUST agree or the control
-	// plane and dataplane diverge past the cap (#6467): the number of next-table
-	// ip rules the applier installs and the priority window clear() scans
-	// (pkg/routing maxNextTableRules), the commit-time over-subscription gate
-	// (pkg/config maxNextTableRules, #5854), and the number of config-static
-	// next-table leaks the userspace FIB mirror publishes (pkg/dataplane/userspace).
-	// Since #9420 one leak costs one slot per default-instance ingress interface
-	// (#9810), so all three sides cap LEAKS at floor(window/N) with N from the
-	// shared resolver — capping all three at that single value keeps the kernel
-	// ip-rule table and userspace dataplane FIB from disagreeing on which leaks
-	// survive truncation.
+	// NextTableRulePriorityBase is the start of the shared destination-leak
+	// priority range. RouteLeakRulePriority maps prefix length to a priority
+	// in that range, so a longer prefix always sorts before a shorter prefix
+	// across both next-table and rib-group rules. Equal-length prefixes use a
+	// kind tie-break (next-table before rib-group). The range remains after PBR
+	// and before the kernel main rule.
+	NextTableRulePriorityBase = 30000
+	// RouteLeakRulePriorityWindow is the shared next-table/rib-group priority
+	// range [NextTableRulePriorityBase, +1000). It accommodates every IPv6
+	// prefix length plus the leak-kind tie-break and is independent of each
+	// manager's admission cap.
+	RouteLeakRulePriorityWindow = 1000
+	// NextTableRuleWindow caps the number of next-table ip-rule entries. One
+	// leak costs one entry per default-instance ingress interface (#9810), so
+	// the applier, commit-time gate, and userspace FIB mirror share this cap.
 	NextTableRuleWindow = 100
 )
 
