@@ -32,13 +32,20 @@ type ruleOps interface {
 }
 
 // nextTableRulePriority is the base priority for next-table ip rules.
-// Lower values = higher priority. We use the 100-199 range for next-table
-// rules. The base + window are the SSOT in pkg/config (NextTableRulePriorityBase
-// / NextTableRuleWindow) so the install cap here, the commit-time gate
+// Lower values = higher priority. The current 32000-32099 range follows
+// PBR and rib-group leak rules, matching the helper's PBR-first precedence
+// while remaining before the kernel's main rule (32766). The base + window
+// are the SSOT in pkg/config (NextTableRulePriorityBase /
+// NextTableRuleWindow) so the install cap here, the commit-time gate
 // (pkg/config maxNextTableRules), and the userspace FIB mirror
 // (pkg/dataplane/userspace/routes.go) all cap at the same boundary (#6467) —
 // floor(window/N) LEAKS with N from the shared ingress resolver (#9810).
 const nextTableRulePriority = config.NextTableRulePriorityBase
+
+// legacyNextTableRulePriority is the pre-#11319 next-table band. It is
+// scanned only to remove rules left by an in-place upgrade; new rules use
+// nextTableRulePriority.
+const legacyNextTableRulePriority = 100
 
 // maxNextTableRules bounds the number of next-table inter-VRF leak ip rules the
 // applier installs, matching the nextTableRulePriority window clear() scans
@@ -63,10 +70,11 @@ const ribGroupRulePriority = 33000
 
 // ribGroupLeakRulePriority is the base priority for the #3876 rib-group
 // per-prefix import leak rules: `ip rule to <connected-prefix> lookup
-// <sourceTable>`. It sits BEFORE the main table (32766) and before PBR
-// (31000-31999) so a specific imported connected prefix wins over a
-// main-table default route — the fix for the #3876 shadow-by-default no-op.
-// We use the 30000-30999 range (maxRibGroupLeakRules priorities).
+// <sourceTable>`. It sits after PBR (29000-29999) but before next-table
+// (32000-32099) and the main table (32766). The ordering matches the helper:
+// explicit PBR steering is applied before its destination FIB lookup, then
+// the pure per-prefix leak rules are consulted in priority order.
+// We use 30000-30999 (maxRibGroupLeakRules priorities).
 const ribGroupLeakRulePriority = 30000
 
 // maxRibGroupLeakRules bounds the number of per-prefix rib-group leak ip
@@ -86,12 +94,24 @@ const maxRibGroupLeakRules = 1000
 const mainTableID = 254
 
 // pbrRulePriority is the base priority for policy-based routing ip rules.
-// BEFORE the main table (32766) so the kernel also honors PBR for XDP_PASS'd
-// packets (e.g. SNAT'd traffic destined for a VRF/GRE tunnel).
-// We use 31000-31999 range. The band constant is the SSOT in pkg/config so
-// the userspace FIB snapshot ingest (pkg/dataplane/userspace/routes.go) can
-// skip this same band without drifting from the install side (#4479).
+// It is after the VRF miss terminator (2000) and before both route-leak
+// bands and main. This keeps the kernel's first-match order aligned with
+// the helper's PBR-first route-table override (#11319).
+// We use the 29000-29999 range. The band constant is the SSOT in pkg/config
+// so the userspace FIB snapshot ingest (pkg/dataplane/userspace/routes.go)
+// can skip current and legacy PBR bands without drifting from the install side
+// (#4479).
 const pbrRulePriority = config.PBRRulePriorityBase
+// Priority order is part of the kernel/helper contract (#11319). Keep each
+// complete band disjoint and ordered before Linux's main-table rule. These
+// constant expressions intentionally fail compilation if a band is retuned
+// into an overlap or if a later priority pushes route leaks behind main.
+const (
+	_ = uint(pbrRulePriority - vrfMissTerminatorPriority - 1)
+	_ = uint(ribGroupLeakRulePriority - (pbrRulePriority + maxPBRRules))
+	_ = uint(nextTableRulePriority - (ribGroupLeakRulePriority + maxRibGroupLeakRules))
+	_ = uint(32766 - (nextTableRulePriority + maxNextTableRules))
+)
 
 // nextTableManager reconciles next-table inter-VRF route-leak ip rules.
 // Stateless apart from the borrowed ruleOps; it reconciles against live
@@ -133,7 +153,14 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		tableIDs[inst.Name] = inst.TableID
 	}
 
-	// Clean up old next-table rules (priority range 100-199). A failed
+	// Clean up both next-table windows: current (32000-32099) and
+	// pre-#11319 (100-199). The old band outranked PBR, so an in-place
+	// upgrade must remove it before routing is considered converged. A
+	// failed per-family list does NOT abort the apply — we still re-add
+	// every desired rule below so forward progress is preserved on the
+	// common path. The clear error is captured and returned at the end so
+	// the caller can observe (and a future caller retry) instead of leaving
+	// orphaned rules in an unobservable window (#2273).
 	// per-family list does NOT abort the apply — we still re-add every
 	// desired rule below so forward progress is preserved on the common
 	// path. The clear error is captured and returned at the end so the
@@ -477,7 +504,9 @@ func (n *nextTableManager) clear() error {
 			continue
 		}
 		for _, r := range rules {
-			if r.Priority >= nextTableRulePriority && r.Priority < nextTableRulePriority+maxNextTableRules {
+			inCurrent := r.Priority >= nextTableRulePriority && r.Priority < nextTableRulePriority+maxNextTableRules
+			inLegacy := r.Priority >= legacyNextTableRulePriority && r.Priority < legacyNextTableRulePriority+maxNextTableRules
+			if inCurrent || inLegacy {
 				if err := n.ops.RuleDel(&r); err != nil {
 					if isRuleAlreadyGone(err) {
 						// The rule is already absent (ENOENT / no such
@@ -1057,7 +1086,8 @@ func (p *pbrManager) Apply(rules []PBRRule) error {
 	return errors.Join(errs...)
 }
 
-// clear removes all ip rules in the PBR priority range.
+// clear removes current PBR ip rules and stale rules from the former
+// 31000-31999 band (#11319).
 //
 // Per-family RuleList dump failures are aggregated and returned rather
 // than swallowed; see the rationale on nextTableManager.clear (#2273).
@@ -1070,7 +1100,10 @@ func (p *pbrManager) clear() error {
 			continue
 		}
 		for _, r := range rules {
-			if r.Priority >= pbrRulePriority && r.Priority < pbrRulePriority+maxPBRRules {
+			inCurrent := r.Priority >= pbrRulePriority && r.Priority < pbrRulePriority+maxPBRRules
+			inLegacy := r.Priority >= config.LegacyPBRRulePriorityBase &&
+				r.Priority < config.LegacyPBRRulePriorityBase+maxPBRRules
+			if inCurrent || inLegacy {
 				if err := p.ops.RuleDel(&r); err != nil {
 					// #3430 H3: a RuleDel failure leaves a STALE PBR rule in the
 					// kernel. Join it into the returned error so Apply does not

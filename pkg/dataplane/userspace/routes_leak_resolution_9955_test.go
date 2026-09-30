@@ -239,9 +239,9 @@ func TestBuildRouteSnapshotsConfigRulePriorityMatchesKernelWindow9955(t *testing
 		t.Fatalf("buildRouteSnapshots: %v", err)
 	}
 	want := map[string]uint32{
-		"10.1.2.0/24":      100,
-		"2001:db8:10::/48": 102,
-		"2001:db8:11::/48": 104,
+		"10.1.2.0/24":      config.NextTableRulePriorityBase,
+		"2001:db8:10::/48": config.NextTableRulePriorityBase + 2,
+		"2001:db8:11::/48": config.NextTableRulePriorityBase + 4,
 	}
 	for destination, priority := range want {
 		route, ok := findRouteSnapshot9955(routes, destination, "")
@@ -328,8 +328,9 @@ func TestRouteOverlayKeepsLeakAndReplacesOrdinary9955(t *testing.T) {
 			ordinary = route
 		}
 	}
-	if leak == nil || leak.NextTable != "red" || leak.RulePriority != 100 {
-		t.Fatalf("leak after overlay = %+v, want preserved priority-100 leak", leak)
+	if leak == nil || leak.NextTable != "red" || leak.RulePriority != uint32(config.NextTableRulePriorityBase) {
+		t.Fatalf("leak after overlay = %+v, want preserved priority-%d leak",
+			leak, config.NextTableRulePriorityBase)
 	}
 	if ordinary == nil || !reflect.DeepEqual(ordinary.NextHops, []string{"172.16.52.1"}) {
 		t.Fatalf("ordinary overlay route = %+v, want the overlay next-hop", ordinary)

@@ -240,8 +240,8 @@ func TestProbePinClearRemovesOnlyBand(t *testing.T) {
 		rules: []netlink.Rule{
 			{Priority: config.ProbeRulePriorityBase, Family: unix.AF_INET, Table: config.ProbeTableBase},
 			{Priority: config.ProbeRulePriorityBase + 7, Family: unix.AF_INET6, Table: config.ProbeTableBase + 7},
-			{Priority: 100, Family: unix.AF_INET, Table: 101},   // next-table band
-			{Priority: 31000, Family: unix.AF_INET, Table: 102}, // PBR band
+			{Priority: config.NextTableRulePriorityBase, Family: unix.AF_INET, Table: 101}, // next-table band
+			{Priority: config.PBRRulePriorityBase, Family: unix.AF_INET, Table: 102},      // PBR band
 		},
 		routes: []netlink.Route{
 			{Table: config.ProbeTableBase, Dst: stale1},
