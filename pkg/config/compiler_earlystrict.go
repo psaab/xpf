@@ -196,7 +196,12 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 		strictErrs = append(strictErrs, err)
 	}
 	if err := validatePolicySchedulerReferencesStrict(cfg); err != nil {
-		strictErrs = append(strictErrs, err)
+		if opts.lenientPolicySchedulerRef {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("policy scheduler reference (downgraded to warning on tolerant path; the policy loads inactive): %v", err))
+		} else {
+			strictErrs = append(strictErrs, err)
+		}
 	}
 	if err := validateRPMProbePinsStrict(cfg); err != nil {
 		strictErrs = append(strictErrs, err)

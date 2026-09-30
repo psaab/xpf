@@ -272,6 +272,18 @@ type compileOpts struct {
 	// Same doctrine as lenientPolicyMatchAddress.
 	lenientIPsecPolicyProposalRef bool
 
+	// lenientPolicySchedulerRef downgrades the policy scheduler-name ->
+	// scheduler cross-reference check (validatePolicySchedulerReferencesStrict)
+	// from a hard error to a warning on the tolerant load / peer-sync paths.
+	// A policy naming a scheduler that was deleted, renamed, or typo'd would
+	// otherwise BRICK boot and peer-sync (#11071, #1960 class): an already-
+	// persisted or synced config may carry the dangling reference and must
+	// still boot. The dataplane resolves an unknown scheduler name to
+	// inactive (policyRuleInactive: !ok => true), so the leniently-loaded
+	// policy degrades to dropped-rule fail-closed on that boot. Commit /
+	// commit-check stay strict. Same doctrine as lenientSchedulerMapRef.
+	lenientPolicySchedulerRef bool
+
 	// lenientSchedulerMapRef downgrades the class-of-service
 	// scheduler-map -> scheduler cross-reference check
 	// (validateClassOfServiceSchedulerMapRefsStrict) from a hard error to
@@ -2956,6 +2968,7 @@ func lenientCompileOpts() compileOpts {
 		suppressContestedTrunkZoneAdvisory:     true,
 		suppressFabricStampAdvisory:            true,
 		lenientIPsecPolicyProposalRef:          true,
+		lenientPolicySchedulerRef:              true,
 		lenientSchedulerMapRef:                 true,
 		lenientCoSInterfaceRefs:                true,
 		lenientCoSLossPriority:                 true,
