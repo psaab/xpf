@@ -372,7 +372,9 @@ forward-direction collision.
   HA/shared NAT entries; the arrival-zone check remains an independent gate.
   Same-family embedded-ICMP quote rewriting is the deliberate exception: its
   tuple-only lookup creates no session, and an off-path router may send the
-  error from a different domain.
+  error from a different domain. If multiple routing domains own the same
+  translated tuple, quote matching fails closed instead of selecting a tenant
+  by reverse-index order.
   `forward_wire_key`, `translated_session_key` and `reverse_session_key` still
   PRESERVE the domain — they name another key of the same direction, or
   navigate between the two halves of one flow.

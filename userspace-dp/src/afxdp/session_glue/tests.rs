@@ -1909,6 +1909,7 @@ fn embedded_quote_reverse_lookup_allows_off_path_domain_11298() {
     let local_hit = lookup_forward_nat_for_icmp_quote_at(
         &local_sessions,
         &empty_shared,
+        None,
         &forwarding,
         &quote_reply,
         1_000_000_000,
@@ -1942,6 +1943,7 @@ fn embedded_quote_reverse_lookup_allows_off_path_domain_11298() {
     let shared_hit = lookup_forward_nat_for_icmp_quote_at(
         &SessionTable::new(),
         &shared_nat_sessions,
+        Some(&owner_indexes),
         &forwarding,
         &quote_reply,
         1_000_000_000,
@@ -1949,6 +1951,161 @@ fn embedded_quote_reverse_lookup_allows_off_path_domain_11298() {
     .expect("off-path ICMP quote must recover the shared forward NAT tuple");
     assert_eq!(shared_hit.key, forward);
 }
+
+#[test]
+fn embedded_quote_reverse_lookup_rejects_cross_domain_collision_11298() {
+    const DOMAIN_A: u32 = 100_001;
+    const DOMAIN_B: u32 = 100_002;
+    const OFF_PATH_DOMAIN: u32 = 100_003;
+
+    let mut forward_a = test_key();
+    forward_a.routing_domain = DOMAIN_A;
+    let mut forward_b = forward_a.clone();
+    forward_b.routing_domain = DOMAIN_B;
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+        rewrite_src_port: Some(40_000),
+        ..NatDecision::default()
+    };
+    let mut decision = test_decision();
+    decision.nat = nat;
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    let mut quote_reply = reverse_session_key(&forward_a, nat);
+    quote_reply.routing_domain = OFF_PATH_DOMAIN;
+
+    let mut local_sessions = SessionTable::new();
+    for forward in [&forward_a, &forward_b] {
+        assert!(local_sessions.install_with_protocol(
+            forward.clone(),
+            decision,
+            test_metadata(),
+            1_000_000_000,
+            PROTO_TCP,
+            TCP_FLAG_ACK,
+        ));
+    }
+    let empty_shared = Arc::new(Mutex::new(FastMap::default()));
+    assert!(
+        lookup_forward_nat_for_icmp_quote_at(
+            &local_sessions,
+            &empty_shared,
+            None,
+            &forwarding,
+            &quote_reply,
+            1_000_000_000,
+        )
+        .is_none(),
+        "an off-path quote must fail closed when two nonzero-domain tenants \
+         own the same translated tuple"
+    );
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let owner_indexes = SharedSessionOwnerRgIndexes::default();
+    for forward in [&forward_a, &forward_b] {
+        let entry = SyncedSessionEntry {
+            key: forward.clone(),
+            decision,
+            metadata: test_metadata(),
+            leak_incarnation: 0,
+            origin: SessionOrigin::ForwardFlow,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_FLAG_ACK,
+            generation: 0,
+            session_id: 0,
+            tcp_close_class: 0,
+        };
+        publish_shared_session(
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &owner_indexes,
+            &entry,
+        );
+    }
+    assert!(
+        lookup_forward_nat_for_icmp_quote_at(
+            &SessionTable::new(),
+            &shared_nat_sessions,
+            Some(&owner_indexes),
+            &forwarding,
+            &quote_reply,
+            1_000_000_000,
+        )
+        .is_none(),
+        "the shared alias history must not select one tenant for an ambiguous quote"
+    );
+    let mut domain_zero_local = SessionTable::new();
+    let mut forward_zero = forward_a.clone();
+    forward_zero.routing_domain = 0;
+    assert!(domain_zero_local.install_with_protocol(
+        forward_zero,
+        decision,
+        test_metadata(),
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let mixed_shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mixed_shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mixed_shared_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let mixed_owner_indexes = SharedSessionOwnerRgIndexes::default();
+    let mixed_entry = SyncedSessionEntry {
+        key: forward_a.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    publish_shared_session(
+        &mixed_shared_sessions,
+        &mixed_shared_nat_sessions,
+        &mixed_shared_wire_sessions,
+        &mixed_owner_indexes,
+        &mixed_entry,
+    );
+    let shared_unique_hit = lookup_forward_nat_for_icmp_quote_at(
+        &SessionTable::new(),
+        &mixed_shared_nat_sessions,
+        Some(&mixed_owner_indexes),
+        &forwarding,
+        &quote_reply,
+        1_000_000_000,
+    )
+    .expect("one shared tenant must remain recoverable for its unique translated tuple");
+    assert_eq!(shared_unique_hit.key, forward_a);
+    assert!(
+        matches!(
+            domain_zero_local.find_forward_nat_quote_match_at(&quote_reply, 1_000_000_000),
+            crate::session::ForwardNatQuoteLookup::Unique(hit)
+                if hit.key.routing_domain == 0
+        ),
+        "fixture must produce a unique default-domain local quote candidate"
+    );
+    let mixed_hit = lookup_forward_nat_for_icmp_quote_at(
+        &domain_zero_local,
+        &mixed_shared_nat_sessions,
+        Some(&mixed_owner_indexes),
+        &forwarding,
+        &quote_reply,
+        1_000_000_000,
+    );
+    assert!(
+        mixed_hit.is_none(),
+        "domain zero is a tenant too: do not choose between local default \
+         and a different shared routing domain; got {:?}",
+        mixed_hit.map(|hit| hit.key.routing_domain)
+    );
+
+}
+
 
 #[test]
 fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeholder() {

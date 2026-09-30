@@ -598,6 +598,65 @@ impl SessionTable {
         self.find_forward_nat_match_inner(reply_key, Some(now_ns), &egress_routing_domain)
     }
 
+    /// Find a live forward NAT candidate for an embedded quote without
+    /// applying reverse-session egress admission. Unlike ordinary reverse
+    /// admission, a quote may come from an off-path routing domain; if the
+    /// tuple is owned by multiple routing domains, its tenant is ambiguous.
+    pub(crate) fn find_forward_nat_quote_match_at(
+        &self,
+        reply_key: &SessionKey,
+        now_ns: u64,
+    ) -> ForwardNatQuoteLookup {
+        let zeroed;
+        let probe: &SessionKey = if reply_key.routing_domain == 0 {
+            reply_key
+        } else {
+            zeroed = reverse_match_key(reply_key);
+            &zeroed
+        };
+        let Some(bucket) = self.nat_reverse_index.get(probe) else {
+            return ForwardNatQuoteLookup::NoMatch;
+        };
+        let mut candidate: Option<&SessionRecord> = None;
+        for &handle in bucket.iter() {
+            let Some(record) = self.entries.get(handle as usize) else {
+                continue;
+            };
+            let entry = &record.entry;
+            if entry.metadata.is_reverse
+                || !reply_matches_forward_session(&record.key, entry.decision.nat, probe)
+            {
+                continue;
+            }
+            let forward_domain = record.key.routing_domain;
+            if (crate::session::is_quarantined_routing_domain(forward_domain)
+                || crate::session::is_quarantined_routing_domain(reply_key.routing_domain))
+                && forward_domain != reply_key.routing_domain
+            {
+                continue;
+            }
+            if now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns {
+                continue;
+            }
+            if let Some(previous) = candidate {
+                if previous.key.routing_domain != record.key.routing_domain {
+                    return ForwardNatQuoteLookup::Ambiguous;
+                }
+            } else {
+                candidate = Some(record);
+            }
+        }
+        if let Some(record) = candidate {
+            ForwardNatQuoteLookup::Unique(ForwardSessionMatch {
+                key: record.key.clone(),
+                decision: record.entry.decision,
+                metadata: record.entry.metadata.clone(),
+            })
+        } else {
+            ForwardNatQuoteLookup::NoMatch
+        }
+    }
+
     /// Find the sole live, established forward session whose reverse tuple
     /// matches an unstamped fabric reply. Unlike the ordinary reverse-NAT
     /// matcher, this refuses a multi-candidate bucket: there is no ingress

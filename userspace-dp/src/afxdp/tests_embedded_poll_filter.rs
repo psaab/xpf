@@ -461,7 +461,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         &entry,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -469,6 +469,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -6545,7 +6546,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         &entry,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -6553,6 +6554,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -6681,7 +6683,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
     );
 
     assert!(
-        try_embedded_icmp_nat_match_from_frame(
+        try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
             &frame,
             meta,
             &mut sessions,
@@ -6689,6 +6691,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
             &neighbors,
             &shared_sessions,
             &shared_nat_sessions,
+            &shared_owner_rg_indexes,
             &shared_forward_wire_sessions,
             1_000_000,
         ).into_option()
@@ -6971,7 +6974,7 @@ fn publish_pptp_gre_session_9298(
     snat: IpAddr,
     handle: u32,
     egress_ifindex: i32,
-) {
+) -> SharedSessionOwnerRgIndexes {
     let entry = SyncedSessionEntry {
         key: SessionKey {
             addr_family: if client.is_ipv4() {
@@ -7046,6 +7049,7 @@ fn publish_pptp_gre_session_9298(
         &shared_owner_rg_indexes,
         &entry,
     );
+    shared_owner_rg_indexes
 }
 
 /// FAIL-ON-REVERT (IPv4 arm): reds if `nat_match_v4`'s REPLY key goes back to
@@ -7094,7 +7098,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    publish_pptp_gre_session_9298(
+    let shared_owner_rg_indexes = publish_pptp_gre_session_9298(
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -7105,7 +7109,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
         12,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -7113,6 +7117,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -7177,7 +7182,7 @@ fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    publish_pptp_gre_session_9298(
+    let shared_owner_rg_indexes = publish_pptp_gre_session_9298(
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -7188,7 +7193,7 @@ fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
         12,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -7196,6 +7201,7 @@ fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -7254,7 +7260,7 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    publish_pptp_gre_session_9298(
+    let shared_owner_rg_indexes = publish_pptp_gre_session_9298(
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -7266,7 +7272,7 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
     );
 
     assert!(
-        try_embedded_icmp_nat_match_from_frame(
+        try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
             &frame,
             meta,
             &mut sessions,
@@ -7274,6 +7280,7 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
             &neighbors,
             &shared_sessions,
             &shared_nat_sessions,
+            &shared_owner_rg_indexes,
             &shared_forward_wire_sessions,
             1_000_000,
         ).into_option()

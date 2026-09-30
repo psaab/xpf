@@ -1311,23 +1311,83 @@ pub(super) fn lookup_forward_nat_across_scopes_at(
 /// Read-only reverse-tuple lookup for embedded ICMP quotes. Off-path routers
 /// can send an error from a routing domain other than the forward egress, so
 /// this path validates tuple identity (and the quarantine fence) without
-/// applying reverse-session admission. Its result is used only to rewrite the
-/// quoted packet; callers must not install a reverse session from it.
+/// applying reverse-session admission. Local and shared candidates fail closed
+/// when multiple routing domains own the same translated tuple.
 pub(super) fn lookup_forward_nat_for_icmp_quote_at(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: Option<&SharedSessionOwnerRgIndexes>,
     forwarding: &ForwardingState,
     reply_key: &SessionKey,
     now_ns: u64,
 ) -> Option<ForwardSessionMatch> {
-    lookup_forward_nat_across_scopes_inner(
-        sessions,
-        shared_nat_sessions,
+    let local_match = match sessions.find_forward_nat_quote_match_at(reply_key, now_ns) {
+        crate::session::ForwardNatQuoteLookup::NoMatch => None,
+        crate::session::ForwardNatQuoteLookup::Unique(local) => Some(local),
+        crate::session::ForwardNatQuoteLookup::Ambiguous => return None,
+    };
+    if local_match.is_none()
+        && sessions
+            .find_forward_nat_match(reply_key, |_| reply_key.routing_domain)
+            .is_some()
+    {
+        // A wheel-lazy local entry was found but failed the strict age gate.
+        // Do not resurrect its shared-map clone on this worker.
+        return None;
+    }
+    let shared_match = lookup_shared_forward_nat_match_with_admission(
         forwarding,
+        shared_nat_sessions,
         reply_key,
-        Some(now_ns),
         ReverseDomainAdmission::QuotedTupleOnly,
     )
+    .map(|entry| ForwardSessionMatch {
+        key: entry.key,
+        decision: entry.decision,
+        metadata: entry.metadata,
+    });
+    let shared_match = if let Some(shared) = shared_match {
+        if !crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
+            && !crate::session::is_quarantined_routing_domain(shared.key.routing_domain)
+        {
+            let Some(indexes) = shared_owner_rg_indexes else {
+                return None;
+            };
+            let mut canonical_reply_key = reply_key.clone();
+            canonical_reply_key.routing_domain = 0;
+            if !shared_forward_nat_candidate_is_unique(
+                shared_nat_sessions,
+                indexes,
+                &canonical_reply_key,
+                &shared.key,
+                shared.decision.nat,
+            ) {
+                return None;
+            }
+        }
+        Some(shared)
+    } else {
+        None
+    };
+    match (local_match, shared_match) {
+        (Some(local), Some(shared)) => {
+            if local.key.routing_domain != shared.key.routing_domain {
+                return None;
+            }
+            if is_fabric_wire_placeholder(
+                local.metadata.fabric_ingress,
+                local.metadata.is_reverse,
+                local.decision,
+            ) {
+                Some(shared)
+            } else {
+                Some(local)
+            }
+        }
+        (Some(local), None) => Some(local),
+        (None, Some(shared)) => Some(shared),
+        (None, None) => None,
+    }
 }
 
 fn lookup_forward_nat_across_scopes_inner(
@@ -2005,6 +2065,25 @@ pub(super) fn publish_shared_session(
                 entry.metadata.owner_rg_id,
             );
         }
+        let reverse_match = crate::session::reverse_match_key(&reverse_wire);
+        if reverse_match != reverse_wire && reverse_match != reverse_canonical {
+            let displaced = sessions.insert(reverse_match.clone(), entry.clone());
+            record_shared_nat_displacement(displaced.as_ref(), entry);
+            if displaced
+                .as_ref()
+                .is_some_and(|existing| existing.key != entry.key)
+            {
+                lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
+                    .mark(reverse_match.clone());
+            }
+            let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
+            update_owner_rg_index(
+                &shared_owner_rg_indexes.nat_sessions,
+                &reverse_match,
+                previous_owner_rg,
+                entry.metadata.owner_rg_id,
+            );
+        }
     }
     if !entry.metadata.is_reverse {
         let mut sessions = lock_shared_publish(shared_forward_wire_sessions);
@@ -2058,9 +2137,11 @@ pub(super) fn restamp_shared_policy_entries(
             if entry.metadata.is_reverse {
                 continue;
             }
+            let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
             let aliases = [
-                reverse_session_key(&entry.key, entry.decision.nat),
+                reverse_wire.clone(),
                 reverse_canonical_key(&entry.key, entry.decision.nat),
+                crate::session::reverse_match_key(&reverse_wire),
             ];
             for alias in aliases {
                 if let Some(stored) = sessions.get_mut(&alias)
@@ -2237,6 +2318,18 @@ pub(super) fn remove_shared_session_if(
                     &shared_owner_rg_indexes.nat_sessions,
                     removed.metadata.owner_rg_id,
                     &reverse_canonical,
+                );
+            }
+            let reverse_match = crate::session::reverse_match_key(&reverse_wire);
+            if reverse_match != reverse_wire
+                && reverse_match != reverse_canonical
+                && let Some(removed) =
+                    remove_shared_alias_owned_by(&mut nat_sessions, &reverse_match, &entry.key)
+            {
+                remove_owner_rg_index_entry(
+                    &shared_owner_rg_indexes.nat_sessions,
+                    removed.metadata.owner_rg_id,
+                    &reverse_match,
                 );
             }
             {

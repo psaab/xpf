@@ -144,6 +144,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v6(
         lookup_forward_nat_for_icmp_quote_at(
             ctx.sessions,
             ctx.shared_nat_sessions,
+            ctx.shared_owner_rg_indexes,
             ctx.forwarding,
             &reverse_key,
             now_ns,
