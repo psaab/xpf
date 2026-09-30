@@ -223,10 +223,11 @@ fn flush_one(
     (replies, counters.filter_reject_sent, rx)
 }
 /// A 1500-byte IPv4/TCP datagram with DF set, parked before its next hop
-/// resolves. The output filter is optional so the same replay harness covers
-/// the PMTU signal and the policy-precedence counterfactual.
+/// resolves. The output filter and target binding are optional so the same
+/// replay harness covers PMTU signaling, policy precedence, and no-binding.
 fn flush_oversized_pending_tcp(
     output_filter_action: Option<&str>,
+    include_egress_binding: bool,
 ) -> (Vec<BindingWorker>, Vec<String>) {
     const FRAME_LEN: usize = 14 + 1500;
     let src_ip = Ipv4Addr::new(10, 0, 0, 1);
@@ -293,10 +294,10 @@ fn flush_oversized_pending_tcp(
         },
     );
 
-    let mut bindings = vec![
-        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
-        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
-    ];
+    let mut bindings = vec![BindingWorker::new_for_mirror_test(0, 0, 11, 0)];
+    if include_egress_binding {
+        bindings.push(BindingWorker::new_for_mirror_test(1, 0, 22, 0));
+    }
     // SAFETY: only this single-threaded test touches the UMEM frame.
     let area = bindings[0].umem.area() as *const MmapArea as *mut MmapArea;
     unsafe {
@@ -389,7 +390,7 @@ fn flush_oversized_pending_tcp(
 
 #[test]
 fn deferred_neighbor_replay_emits_ptb_for_1500_df_on_1400_egress_11410() {
-    let (bindings, reasons) = flush_oversized_pending_tcp(None);
+    let (bindings, reasons) = flush_oversized_pending_tcp(None, true);
     let ingress_tx = &bindings[0].tx_pipeline.pending_tx_local;
     assert_eq!(
         ingress_tx.len(),
@@ -425,7 +426,7 @@ fn deferred_neighbor_replay_emits_ptb_for_1500_df_on_1400_egress_11410() {
 
 #[test]
 fn deferred_neighbor_output_discard_preempts_ptb_11410() {
-    let (bindings, reasons) = flush_oversized_pending_tcp(Some("discard"));
+    let (bindings, reasons) = flush_oversized_pending_tcp(Some("discard"), true);
     assert!(
         bindings[0].tx_pipeline.pending_tx_local.is_empty(),
         "an output-filter discard must not be answered with a PTB"
@@ -443,6 +444,26 @@ fn deferred_neighbor_output_discard_preempts_ptb_11410() {
         bindings[0].tx_pipeline.pending_fill_frames.len(),
         1,
         "the discarded original must be recycled exactly once"
+    );
+}
+
+#[test]
+fn deferred_neighbor_missing_egress_binding_skips_ptb_11410() {
+    let (bindings, reasons) = flush_oversized_pending_tcp(None, false);
+
+    assert!(
+        bindings[0].tx_pipeline.pending_tx_local.is_empty()
+            && bindings[0].tx_pipeline.pending_tx_prepared.is_empty(),
+        "an oversized frame with no target binding must not emit a PTB or TX original"
+    );
+    assert!(
+        !reasons.iter().any(|reason| reason == "egress_mtu_exceeded"),
+        "missing egress binding must not record egress_mtu_exceeded: {reasons:?}"
+    );
+    assert_eq!(
+        bindings[0].tx_pipeline.pending_fill_frames.len(),
+        1,
+        "the original frame must be recycled exactly once"
     );
 }
 

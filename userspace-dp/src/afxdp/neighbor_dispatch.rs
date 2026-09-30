@@ -836,10 +836,24 @@ pub(super) fn retry_pending_neigh(
         ) {
             record_mirror_clone_result(&binding.live, result, source_frame.len());
         }
-        // #11410: match the immediate forward ordering. The replay's current
-        // egress verdict has been resolved above; a discard/reject is terminal
-        // and must not trigger a PTB. Only permitted replay candidates reach
-        // the shared PMTU decision before in-place rewrite/TX.
+        let target_ifindex = if decision.resolution.tx_ifindex > 0 {
+            decision.resolution.tx_ifindex
+        } else {
+            resolve_tx_binding_ifindex(forwarding, decision.resolution.egress_ifindex)
+        };
+        let Some(target_idx) = binding_lookup.target_index(
+            binding_index,
+            ingress_ifindex,
+            ingress_queue,
+            target_ifindex,
+        ) else {
+            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+            continue;
+        };
+        // #11410: match the immediate forward ordering. The replay output
+        // verdict and target binding have both been resolved above; a
+        // discard/reject or missing target binding must not trigger a PTB.
+        // Only permitted, deliverable candidates reach this PMTU decision.
         let ingress_ident = binding.identity();
         let (ptb_reply, mtu_signalled) =
             super::tx::dispatch::compute_forwarded_egress_ptb(
@@ -878,20 +892,6 @@ pub(super) fn retry_pending_neigh(
             false,
             expected_ports,
             selected_tcp_mss,
-        ) else {
-            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
-            continue;
-        };
-        let target_ifindex = if decision.resolution.tx_ifindex > 0 {
-            decision.resolution.tx_ifindex
-        } else {
-            resolve_tx_binding_ifindex(forwarding, decision.resolution.egress_ifindex)
-        };
-        let Some(target_idx) = binding_lookup.target_index(
-            binding_index,
-            ingress_ifindex,
-            ingress_queue,
-            target_ifindex,
         ) else {
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
