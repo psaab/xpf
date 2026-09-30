@@ -600,24 +600,9 @@ fn lookup_forwarding_resolution_v4_inner(
             }
         }
     }
-    let static_match = state
-        .routes_v4
-        .get(table)
-        .and_then(|routes| {
-            routes
-                .iter()
-                .find(|entry| entry.next_table.is_empty() && entry.prefix.contains(ip))
-        });
-    // #2388: connected routes are table-scoped — only consider a connected
-    // prefix that belongs to the table being resolved, so a per-VRF /
-    // next-table lookup never matches another routing-instance's connected
-    // prefix. The vec is sorted longest-prefix-first, so the first matching
-    // in-table entry is the most specific.
-    let connected_match = state
-        .connected_v4
-        .iter()
-        .find(|entry| entry.table == table && entry.prefix.contains(ip));
-    match choose_v4_route(static_match, connected_match) {
+    match select_v4_route(
+        state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash,
+    ) {
         Some(ResolvedRouteV4::Connected {
             ifindex,
             tunnel_endpoint_id,
@@ -653,7 +638,7 @@ fn lookup_forwarding_resolution_v4_inner(
             populate_egress_resolution(state, ifindex, &mut resolution);
             resolution
         }
-        Some(ResolvedRouteV4::Static(route)) => {
+        Some(ResolvedRouteV4::Static { route, selected }) => {
             if route.discard {
                 return ForwardingResolution {
                     disposition: ForwardingDisposition::DiscardRoute,
@@ -667,53 +652,9 @@ fn lookup_forwarding_resolution_v4_inner(
                     tx_vlan_id: 0,
                 };
             }
-            // #9955: next-table entries are removed from the table-local FIB
-            // during build and are handled by the priority-ordered rule stage
-            // above. Keeping this branch absent is what prevents a target
-            // table miss from being selected again by the source-table LPM.
-            // #2389/#2734: select one equal-cost next-hop, skipping a dead
-            // one. Spread by the per-flow 5-tuple hash when supplied,
-            // else fall back to the per-destination hash.
-            let spread_hash = ecmp_flow_hash.unwrap_or_else(|| ecmp_hash_v4(ip));
-            let selected = select_route_next_hop(&route.next_hops, spread_hash, |nh| {
-                // #2923: tunnel candidates use TUNNEL liveness (endpoint +
-                // resolvable underlay), NOT the direct-neighbor gate they can
-                // never satisfy. Without this branch a live direct member in a
-                // mixed ECMP group starves the tunnel path.
-                if nh.tunnel_endpoint_id != 0 {
-                    return tunnel_next_hop_live(
-                        state,
-                        dynamic_neighbors,
-                        nh.tunnel_endpoint_id,
-                        depth,
-                    );
-                }
-                // #5161: an interface-only member (`next_hop == None` — a
-                // directly-connected / point-to-point "via <if>" candidate)
-                // resolves its neighbor from the PER-FLOW destination `ip`, not
-                // a stable gateway. The coordinator warmer cannot pre-resolve
-                // that address (the on-link destination is a whole prefix,
-                // unknown at route-sweep time), so gating liveness on an
-                // already-present destination neighbor drops the member out of
-                // the live set the moment any explicit-next_hop member resolves
-                // — ECMP collapses to width-1. Treat an up interface-only
-                // member as LIVE and let the MissingNeighbor cold path resolve
-                // the destination lazily per flow, mirroring the single-member
-                // resolution path (which forwards a missing-neighbor direct hop
-                // as MissingNeighbor, never a drop).
-                if nh.next_hop.is_none() {
-                    return nh.ifindex > 0;
-                }
-                let target = nh.next_hop.unwrap_or(ip);
-                nh.ifindex > 0
-                    && lookup_neighbor_entry(state, dynamic_neighbors, nh.ifindex, IpAddr::V4(target))
-                        .is_some()
-            },
-            // #11318: a member can drive ARP/NDP from the cold path iff it has
-            // an egress interface (direct + interface-only) or a tunnel
-            // endpoint (underlay resolution pending). ifindex-0 direct members
-            // can never resolve → excluded from the no-live fallback.
-            |nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0);
+            // `select_v4_route` has already selected a member within the
+            // preferred live tier, or the preferred drivable member if every
+            // tier is unresolved (preserving the MissingNeighbor cold path).
             let (next_hop, ifindex, tunnel_endpoint_id) = match selected {
                 Some(nh) => (nh.next_hop, nh.ifindex, nh.tunnel_endpoint_id),
                 None => (None, 0, 0),
@@ -851,20 +792,9 @@ fn lookup_forwarding_resolution_v6_inner(
             }
         }
     }
-    let static_match = state
-        .routes_v6
-        .get(table)
-        .and_then(|routes| {
-            routes
-                .iter()
-                .find(|entry| entry.next_table.is_empty() && entry.prefix.contains(ip))
-        });
-    // #2388: connected routes are table-scoped (see the v4 lookup).
-    let connected_match = state
-        .connected_v6
-        .iter()
-        .find(|entry| entry.table == table && entry.prefix.contains(ip));
-    match choose_v6_route(static_match, connected_match) {
+    match select_v6_route(
+        state, dynamic_neighbors, ip, table, depth, ecmp_flow_hash,
+    ) {
         Some(ResolvedRouteV6::Connected {
             ifindex,
             tunnel_endpoint_id,
@@ -900,7 +830,7 @@ fn lookup_forwarding_resolution_v6_inner(
             populate_egress_resolution(state, ifindex, &mut resolution);
             resolution
         }
-        Some(ResolvedRouteV6::Static(route)) => {
+        Some(ResolvedRouteV6::Static { route, selected }) => {
             if route.discard {
                 return ForwardingResolution {
                     disposition: ForwardingDisposition::DiscardRoute,
@@ -914,46 +844,8 @@ fn lookup_forwarding_resolution_v6_inner(
                     tx_vlan_id: 0,
                 };
             }
-            // #9955: next-table entries are handled by the priority-ordered
-            // rule stage before this table-local LPM; they are not ordinary
-            // routes and cannot turn a target-table miss into a second
-            // recursive lookup.
-            // #2389/#2734: select one equal-cost next-hop, skipping a dead
-            // one. Spread by the per-flow 5-tuple hash when supplied,
-            // else fall back to the per-destination hash.
-            let spread_hash = ecmp_flow_hash.unwrap_or_else(|| ecmp_hash_v6(ip));
-            let selected = select_route_next_hop(&route.next_hops, spread_hash, |nh| {
-                // #2923: tunnel candidates use TUNNEL liveness (endpoint +
-                // resolvable underlay), NOT the direct-neighbor gate they can
-                // never satisfy. Without this branch a live direct member in a
-                // mixed ECMP group starves the tunnel path.
-                if nh.tunnel_endpoint_id != 0 {
-                    return tunnel_next_hop_live(
-                        state,
-                        dynamic_neighbors,
-                        nh.tunnel_endpoint_id,
-                        depth,
-                    );
-                }
-                // #5161: an interface-only member (`next_hop == None`) resolves
-                // its neighbor from the PER-FLOW destination `ip`, which the
-                // warmer cannot pre-resolve (a whole prefix, unknown at
-                // route-sweep time). Gating on an already-present destination
-                // neighbor starves it out of the live set once any
-                // explicit-next_hop member resolves — ECMP collapses to
-                // width-1. Treat an up interface-only member as LIVE; the
-                // MissingNeighbor cold path resolves the destination lazily per
-                // flow. See the v4 twin for the full rationale.
-                if nh.next_hop.is_none() {
-                    return nh.ifindex > 0;
-                }
-                let target = nh.next_hop.unwrap_or(ip);
-                nh.ifindex > 0
-                    && lookup_neighbor_entry(state, dynamic_neighbors, nh.ifindex, IpAddr::V6(target))
-                        .is_some()
-            },
-            // #11318: v6 twin of the v4 drivable gate above.
-            |nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0);
+            // See the v4 twin: preserve the preferred tier's cold-path
+            // fallback only when no same-prefix tier has a live member.
             let (next_hop, ifindex, tunnel_endpoint_id) = match selected {
                 Some(nh) => (nh.next_hop, nh.ifindex, nh.tunnel_endpoint_id),
                 None => (None, 0, 0),
@@ -1037,7 +929,10 @@ enum ResolvedRouteV4<'a> {
         ifindex: i32,
         tunnel_endpoint_id: u16,
     },
-    Static(&'a RouteEntryV4),
+    Static {
+        route: &'a RouteEntryV4,
+        selected: Option<&'a RouteNextHopV4>,
+    },
 }
 
 enum ResolvedRouteV6<'a> {
@@ -1045,47 +940,219 @@ enum ResolvedRouteV6<'a> {
         ifindex: i32,
         tunnel_endpoint_id: u16,
     },
-    Static(&'a RouteEntryV6),
+    Static {
+        route: &'a RouteEntryV6,
+        selected: Option<&'a RouteNextHopV6>,
+    },
 }
 
-fn choose_v4_route<'a>(
-    static_match: Option<&'a RouteEntryV4>,
-    connected_match: Option<&'a ConnectedRouteV4>,
+/// Choose the most-specific route, then the first preference tier with a live
+/// next-hop. If every tier is unresolved, preserve the preferred tier's
+/// drivable member so the existing MissingNeighbor path can resolve it.
+fn select_v4_route<'a>(
+    state: &'a ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    ip: Ipv4Addr,
+    table: &str,
+    depth: usize,
+    ecmp_flow_hash: Option<u64>,
 ) -> Option<ResolvedRouteV4<'a>> {
-    match (static_match, connected_match) {
-        (Some(route), Some(conn)) if conn.prefix.prefix_len() >= route.prefix.prefix_len() => {
-            Some(ResolvedRouteV4::Connected {
+    let connected_match = state
+        .connected_v4
+        .iter()
+        .find(|entry| entry.table == table && entry.prefix.contains(ip));
+    let mut matched_prefix_len = None;
+    let mut last_preference = None;
+    let mut fallback = None;
+    let mut spread_hash = ecmp_flow_hash;
+
+    if let Some(routes) = state.routes_v4.get(table) {
+        for route in routes {
+            let prefix_len = route.prefix.prefix_len();
+            if matched_prefix_len.is_some_and(|best| prefix_len < best) {
+                break;
+            }
+            if !route.next_table.is_empty() || !route.prefix.contains(ip) {
+                continue;
+            }
+            if matched_prefix_len.is_none() {
+                matched_prefix_len = Some(prefix_len);
+                if let Some(conn) = connected_match {
+                    if conn.prefix.prefix_len() >= prefix_len {
+                        return Some(ResolvedRouteV4::Connected {
+                            ifindex: conn.ifindex,
+                            tunnel_endpoint_id: conn.tunnel_endpoint_id,
+                        });
+                    }
+                }
+            }
+            // Preserve stable first-match semantics for duplicate rows in
+            // one preference tier; #5678 emits each tier as one ECMP row.
+            if last_preference == Some(route.preference) {
+                continue;
+            }
+            last_preference = Some(route.preference);
+            if route.discard {
+                return Some(ResolvedRouteV4::Static {
+                    route,
+                    selected: None,
+                });
+            }
+
+            let hash = *spread_hash.get_or_insert_with(|| ecmp_hash_v4(ip));
+            let selected = select_route_next_hop_with_status(
+                &route.next_hops,
+                hash,
+                |nh| {
+                    if nh.tunnel_endpoint_id != 0 {
+                        return tunnel_next_hop_live(
+                            state,
+                            dynamic_neighbors,
+                            nh.tunnel_endpoint_id,
+                            depth,
+                        );
+                    }
+                    // Interface-only members resolve the per-flow destination
+                    // lazily; explicit gateways require an installed neighbor.
+                    if nh.next_hop.is_none() {
+                        return nh.ifindex > 0;
+                    }
+                    let target = nh.next_hop.unwrap_or(ip);
+                    nh.ifindex > 0
+                        && lookup_neighbor_entry(
+                            state,
+                            dynamic_neighbors,
+                            nh.ifindex,
+                            IpAddr::V4(target),
+                        )
+                        .is_some()
+                },
+                |nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0,
+            );
+            match selected {
+                Some((nh, true)) => {
+                    return Some(ResolvedRouteV4::Static {
+                        route,
+                        selected: Some(nh),
+                    });
+                }
+                selected if fallback.is_none() => {
+                    fallback = Some((route, selected.map(|(nh, _)| nh)));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fallback
+        .map(|(route, selected)| ResolvedRouteV4::Static { route, selected })
+        .or_else(|| {
+            connected_match.map(|conn| ResolvedRouteV4::Connected {
                 ifindex: conn.ifindex,
                 tunnel_endpoint_id: conn.tunnel_endpoint_id,
             })
-        }
-        (Some(route), _) => Some(ResolvedRouteV4::Static(route)),
-        (None, Some(conn)) => Some(ResolvedRouteV4::Connected {
-            ifindex: conn.ifindex,
-            tunnel_endpoint_id: conn.tunnel_endpoint_id,
-        }),
-        (None, None) => None,
-    }
+        })
 }
 
-fn choose_v6_route<'a>(
-    static_match: Option<&'a RouteEntryV6>,
-    connected_match: Option<&'a ConnectedRouteV6>,
+fn select_v6_route<'a>(
+    state: &'a ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    ip: Ipv6Addr,
+    table: &str,
+    depth: usize,
+    ecmp_flow_hash: Option<u64>,
 ) -> Option<ResolvedRouteV6<'a>> {
-    match (static_match, connected_match) {
-        (Some(route), Some(conn)) if conn.prefix.prefix_len() >= route.prefix.prefix_len() => {
-            Some(ResolvedRouteV6::Connected {
+    let connected_match = state
+        .connected_v6
+        .iter()
+        .find(|entry| entry.table == table && entry.prefix.contains(ip));
+    let mut matched_prefix_len = None;
+    let mut last_preference = None;
+    let mut fallback = None;
+    let mut spread_hash = ecmp_flow_hash;
+
+    if let Some(routes) = state.routes_v6.get(table) {
+        for route in routes {
+            let prefix_len = route.prefix.prefix_len();
+            if matched_prefix_len.is_some_and(|best| prefix_len < best) {
+                break;
+            }
+            if !route.next_table.is_empty() || !route.prefix.contains(ip) {
+                continue;
+            }
+            if matched_prefix_len.is_none() {
+                matched_prefix_len = Some(prefix_len);
+                if let Some(conn) = connected_match {
+                    if conn.prefix.prefix_len() >= prefix_len {
+                        return Some(ResolvedRouteV6::Connected {
+                            ifindex: conn.ifindex,
+                            tunnel_endpoint_id: conn.tunnel_endpoint_id,
+                        });
+                    }
+                }
+            }
+            if last_preference == Some(route.preference) {
+                continue;
+            }
+            last_preference = Some(route.preference);
+            if route.discard {
+                return Some(ResolvedRouteV6::Static {
+                    route,
+                    selected: None,
+                });
+            }
+
+            let hash = *spread_hash.get_or_insert_with(|| ecmp_hash_v6(ip));
+            let selected = select_route_next_hop_with_status(
+                &route.next_hops,
+                hash,
+                |nh| {
+                    if nh.tunnel_endpoint_id != 0 {
+                        return tunnel_next_hop_live(
+                            state,
+                            dynamic_neighbors,
+                            nh.tunnel_endpoint_id,
+                            depth,
+                        );
+                    }
+                    if nh.next_hop.is_none() {
+                        return nh.ifindex > 0;
+                    }
+                    let target = nh.next_hop.unwrap_or(ip);
+                    nh.ifindex > 0
+                        && lookup_neighbor_entry(
+                            state,
+                            dynamic_neighbors,
+                            nh.ifindex,
+                            IpAddr::V6(target),
+                        )
+                        .is_some()
+                },
+                |nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0,
+            );
+            match selected {
+                Some((nh, true)) => {
+                    return Some(ResolvedRouteV6::Static {
+                        route,
+                        selected: Some(nh),
+                    });
+                }
+                selected if fallback.is_none() => {
+                    fallback = Some((route, selected.map(|(nh, _)| nh)));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fallback
+        .map(|(route, selected)| ResolvedRouteV6::Static { route, selected })
+        .or_else(|| {
+            connected_match.map(|conn| ResolvedRouteV6::Connected {
                 ifindex: conn.ifindex,
                 tunnel_endpoint_id: conn.tunnel_endpoint_id,
             })
-        }
-        (Some(route), _) => Some(ResolvedRouteV6::Static(route)),
-        (None, Some(conn)) => Some(ResolvedRouteV6::Connected {
-            ifindex: conn.ifindex,
-            tunnel_endpoint_id: conn.tunnel_endpoint_id,
-        }),
-        (None, None) => None,
-    }
+        })
 }
 
 /// #2389/#2734: select one equal-cost next-hop candidate for a forwarding
@@ -1098,9 +1165,9 @@ fn choose_v6_route<'a>(
 /// #2734: the spread key is now per-FLOW. The session resolution path
 /// threads the 5-tuple flow hash (`ecmp_hash_flow`, the same seeded
 /// FxHasher the flow cache already feeds the session 5-tuple — see
-/// `ecmp_hash_flow`) into `select_route_next_hop`, so distinct flows to
-/// the SAME destination spread across equal-cost members while every
-/// packet of a single flow pins to one member (flow-consistent — no
+/// `ecmp_hash_flow`) into `select_route_next_hop_with_status`; distinct flows
+/// to the SAME destination spread across equal-cost members while every packet
+/// of a single flow pins to one member (flow-consistent — no
 /// intra-flow reordering). Callers without a flow context (tunnel outer
 /// resolution, `inject`, bare-dst lookups) pass `None`, which falls back
 /// to the per-DESTINATION hash (`ecmp_hash_v4`/`ecmp_hash_v6`) — the
@@ -1140,8 +1207,8 @@ fn ecmp_hash_v6(ip: Ipv6Addr) -> u64 {
 /// correct (HA peers re-derive their own pick under their own seed, exactly
 /// as the flow cache and fabric-queue hash do). Determinism within a boot
 /// guarantees flow consistency — every packet of one flow hashes to the
-/// same member, no intra-flow reordering. `select_route_next_hop` reduces
-/// this modulo the live-member count, so the spread tracks the live pool.
+/// same member, no intra-flow reordering. The status-aware
+/// `select_route_next_hop_with_status` reduces this modulo the live-member
 fn ecmp_hash_flow(key: &crate::session::SessionKey) -> u64 {
     ecmp_hash_flow_seeded(crate::hot_hash_seed::hot_path_hash_seed(), key)
 }
@@ -1240,12 +1307,26 @@ fn tunnel_next_hop_live(
 /// by a test against the rendered ceiling rather than left as a bare literal.
 pub(in crate::afxdp) const MAX_SUPPORTED_ECMP_FANOUT: usize = 64;
 
+#[cfg(test)]
 pub(in crate::afxdp) fn select_route_next_hop<'a, T: Copy>(
     candidates: &'a [T],
     ip_hash: u64,
     is_live: impl Fn(&T) -> bool,
     is_drivable: impl Fn(&T) -> bool,
 ) -> Option<&'a T> {
+    select_route_next_hop_with_status(candidates, ip_hash, is_live, is_drivable)
+        .map(|(candidate, _)| candidate)
+}
+
+/// Select an ECMP member and report whether the returned candidate was live.
+/// Preference-tier lookup uses the status to fall through only when the
+/// preferred tier has no resolved member, while retaining its ARP fallback.
+fn select_route_next_hop_with_status<'a, T: Copy>(
+    candidates: &'a [T],
+    ip_hash: u64,
+    is_live: impl Fn(&T) -> bool,
+    is_drivable: impl Fn(&T) -> bool,
+) -> Option<(&'a T, bool)> {
     if candidates.is_empty() {
         return None;
     }
@@ -1292,7 +1373,7 @@ pub(in crate::afxdp) fn select_route_next_hop<'a, T: Copy>(
             loop {
                 let idx = remaining.trailing_zeros() as usize;
                 if pick == 0 {
-                    return candidates.get(idx);
+                    return candidates.get(idx).map(|candidate| (candidate, true));
                 }
                 pick -= 1;
                 remaining &= remaining - 1;
@@ -1318,14 +1399,14 @@ pub(in crate::afxdp) fn select_route_next_hop<'a, T: Copy>(
             loop {
                 let idx = remaining.trailing_zeros() as usize;
                 if pick == 0 {
-                    return candidates.get(idx);
+                    return candidates.get(idx).map(|candidate| (candidate, false));
                 }
                 pick -= 1;
                 remaining &= remaining - 1;
             }
         }
         let pick = (ip_hash % candidates.len() as u64) as usize;
-        return candidates.get(pick);
+        return candidates.get(pick).map(|candidate| (candidate, false));
     }
 
     // Above the supported ceiling the mask cannot represent every candidate, so
@@ -1337,7 +1418,7 @@ pub(in crate::afxdp) fn select_route_next_hop<'a, T: Copy>(
         candidates.iter().filter(|c| is_live(c)).collect();
     if !live.is_empty() {
         let pick = (ip_hash % live.len() as u64) as usize;
-        live.get(pick).copied()
+        live.get(pick).copied().map(|candidate| (candidate, true))
     } else {
         // #11318 twin of the mask path above: drivable subset first, full
         // vector only when nothing is drivable.
@@ -1345,10 +1426,10 @@ pub(in crate::afxdp) fn select_route_next_hop<'a, T: Copy>(
             candidates.iter().filter(|c| is_drivable(c)).collect();
         if !drivable.is_empty() {
             let pick = (ip_hash % drivable.len() as u64) as usize;
-            drivable.get(pick).copied()
+            drivable.get(pick).copied().map(|candidate| (candidate, false))
         } else {
             let pick = (ip_hash % candidates.len() as u64) as usize;
-            candidates.get(pick)
+            candidates.get(pick).map(|candidate| (candidate, false))
         }
     }
 }
