@@ -14,6 +14,21 @@ use crate::test_zone_ids::*;
 use crate::{FirewallFilterSnapshot, FirewallTermSnapshot, ThreeColorPolicerSnapshot};
 use super::tests_support::*;
 
+fn native_gre_host_inbound_snapshot() -> crate::protocol::snapshot::ConfigSnapshot {
+    let mut snapshot = native_gre_snapshot(true);
+    let wan = snapshot
+        .zones
+        .iter_mut()
+        .find(|zone| zone.name == "wan")
+        .expect("native GRE fixture has a wan zone");
+    // #11054: exercise inner decap semantics only after the outer GRE packet
+    // has passed the real ingress host-inbound gate.
+    wan.host_inbound_configured = true;
+    wan.host_inbound_system_services.push("gre".to_string());
+    snapshot
+}
+
+
 #[test]
 fn native_gre_logical_egress_retains_zone_without_mac() {
     let state = build_forwarding_state(&native_gre_pbr_snapshot(true));
@@ -44,7 +59,7 @@ fn owner_rg_for_resolution_uses_native_gre_endpoint_group() {
 
 #[test]
 fn native_gre_decap_maps_inner_packet_to_logical_tunnel_ingress() {
-    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let state = build_forwarding_state(&native_gre_host_inbound_snapshot());
     let inner = build_icmp_echo_frame_v4(
         Ipv4Addr::new(10, 255, 192, 41),
         Ipv4Addr::new(10, 255, 192, 42),
@@ -73,7 +88,7 @@ fn native_gre_decap_combines_outer_ce_into_inner_ecn() {
     // #2315 RFC 6040 §4.2: an outer CE over an ECN-capable inner must
     // upgrade the inner ECN to CE at decap, and the inner IPv4 header
     // checksum must remain valid after the TOS change.
-    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let state = build_forwarding_state(&native_gre_host_inbound_snapshot());
     // Inner DSCP EF (46) + ECT(0) (0b10).
     let inner_tos = (46u8 << 2) | 0b10;
     let inner = inner_v4_frame_with_tos(
@@ -116,7 +131,7 @@ fn native_gre_decap_combines_outer_ce_into_inner_ecn() {
 fn native_gre_decap_drops_illegal_outer_ce_over_not_ect_inner() {
     // #2315 RFC 6040 §4.2: outer CE over a Not-ECT inner is the illegal
     // combination — decap must DROP (return None).
-    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let state = build_forwarding_state(&native_gre_host_inbound_snapshot());
     let inner = inner_v4_frame_with_tos(
         Ipv4Addr::new(10, 255, 192, 41),
         Ipv4Addr::new(10, 255, 192, 42),
@@ -142,7 +157,7 @@ fn native_gre_decap_drops_illegal_outer_ce_over_not_ect_inner() {
 fn native_gre_decap_leaves_inner_unchanged_when_outer_not_congested() {
     // Outer Not-ECT must leave the inner ECN/DSCP and checksum exactly
     // as they arrived (no spurious mutation on the common case).
-    let state = build_forwarding_state(&native_gre_snapshot(true));
+    let state = build_forwarding_state(&native_gre_host_inbound_snapshot());
     let inner_tos = (10u8 << 2) | 0b01; // DSCP 10 + ECT(1)
     let inner = inner_v4_frame_with_tos(
         Ipv4Addr::new(10, 255, 192, 41),

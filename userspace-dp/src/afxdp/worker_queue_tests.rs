@@ -392,10 +392,109 @@ fn call_argument(src: &str, open: usize) -> &str {
     &src[open + 1..j.saturating_sub(1).max(open + 1)]
 }
 
+/// Blank inline `#[cfg(test)] mod` bodies before the producer census.
+///
+/// Production files can also contain test-only modules. The source walk excludes
+/// test-only files, but scanning those inline modules would report fixture
+/// queue setup as a production producer.
+fn blank_cfg_test_modules(src: &str) -> String {
+    let mut out = src.as_bytes().to_vec();
+    let mut search = 0;
+    while let Some(relative) = src[search..].find("#[cfg(test)]") {
+        let attr_start = search + relative;
+        let mut cursor = attr_start + "#[cfg(test)]".len();
+
+        loop {
+            while cursor < src.len() && src.as_bytes()[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if src[cursor..].starts_with("#[") {
+                let Some(close) = src[cursor..].find(']') else {
+                    break;
+                };
+                cursor += close + 1;
+                continue;
+            }
+            if src[cursor..].starts_with("pub") {
+                cursor += "pub".len();
+                while cursor < src.len() && src.as_bytes()[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+                if src.as_bytes().get(cursor) == Some(&b'(') {
+                    let mut depth = 1;
+                    cursor += 1;
+                    while cursor < src.len() && depth > 0 {
+                        match src.as_bytes()[cursor] {
+                            b'(' => depth += 1,
+                            b')' => depth -= 1,
+                            _ => {}
+                        }
+                        cursor += 1;
+                    }
+                }
+                while cursor < src.len() && src.as_bytes()[cursor].is_ascii_whitespace() {
+                    cursor += 1;
+                }
+            }
+            let mod_end = cursor + "mod".len();
+            if !src[cursor..].starts_with("mod")
+                || src
+                    .as_bytes()
+                    .get(mod_end)
+                    .map_or(true, |b| !b.is_ascii_whitespace())
+            {
+                break;
+            }
+            cursor = mod_end;
+            while cursor < src.len() && src.as_bytes()[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            while cursor < src.len()
+                && (src.as_bytes()[cursor].is_ascii_alphanumeric()
+                    || src.as_bytes()[cursor] == b'_')
+            {
+                cursor += 1;
+            }
+            while cursor < src.len() && src.as_bytes()[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if src.as_bytes().get(cursor) != Some(&b'{') {
+                break;
+            }
+
+            let mut depth = 1;
+            let mut end = cursor + 1;
+            while end < src.len() && depth > 0 {
+                match src.as_bytes()[end] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                end += 1;
+            }
+            if depth == 0 {
+                for byte in &mut out[attr_start..end] {
+                    if *byte != b'\n' {
+                        *byte = b' ';
+                    }
+                }
+                search = end;
+                break;
+            }
+            search = attr_start + "#[cfg(test)]".len();
+            break;
+        }
+        if search <= attr_start {
+            search = attr_start + "#[cfg(test)]".len();
+        }
+    }
+    String::from_utf8(out).expect("blanking preserves UTF-8 boundaries")
+}
+
 /// Every bare `push_back(..)` in `src` whose argument mentions `WorkerCommand`,
 /// as (1-based line, argument text).
 fn bare_worker_command_pushes(src: &str) -> Vec<(usize, String)> {
-    let cleaned = blank_comments_and_strings(src);
+    let cleaned = blank_cfg_test_modules(&blank_comments_and_strings(src));
     let mut hits = Vec::new();
     let mut from = 0usize;
     while let Some(rel) = cleaned[from..].find("push_back(") {
@@ -643,7 +742,7 @@ fn worker_queue_6929_every_production_producer_routes_through_push_bounded() {
         }
         production += 1;
         let src = std::fs::read_to_string(path).expect("read source");
-        let cleaned = blank_comments_and_strings(&src);
+        let cleaned = blank_cfg_test_modules(&blank_comments_and_strings(&src));
         bounded_calls += cleaned.matches("push_bounded(").count();
         for (line, arg) in bare_worker_command_pushes(&src) {
             bare.push(format!("{rel}:{line}: push_back({arg})"));
@@ -696,6 +795,10 @@ fn worker_queue_6929_the_wiring_scan_can_actually_see_a_bare_push_back() {
         /* pending.push_back(WorkerCommand::UpsertSynced(block_commented)); */
         let msg = "pending.push_back(WorkerCommand::InAStringLiteral)";
         worker_queue::push_bounded(&mut pending, WorkerCommand::UpsertLocal(ok));
+        #[cfg(test)]
+        mod fixture {
+            pending.push_back(WorkerCommand::DeleteSynced(test_fixture));
+        }
         pending.push_back(WorkerCommand::DemoteOwnerRGS {
             owner_rgs: vec![1],
         });
@@ -706,20 +809,18 @@ fn worker_queue_6929_the_wiring_scan_can_actually_see_a_bare_push_back() {
     assert_eq!(
         hits.len(),
         1,
-        "detector must find exactly the one real bare push — a comment, a \
-         block comment, a string literal, a push_bounded call and an \
-         unrelated push_back must all be ignored; got {hits:?}"
+        "detector must ignore inline cfg(test) queue setup and strip comments, \
+         string literals, bounded calls, and unrelated push_back calls; got {hits:?}"
     );
     assert!(
         hits[0].1.contains("DemoteOwnerRGS"),
-        "detector found the wrong push: {:?}",
+        "detector found the wrong production push: {:?}",
         hits[0]
     );
-    // The real push spans three lines: a line-oriented scan would miss it.
+    // The real production push spans three lines: a line-oriented scan would miss it.
     assert!(
         hits[0].1.contains("owner_rgs"),
-        "argument capture must span lines, so a multi-line push (ha/state.rs, \
-         ha/session_import.rs) is not invisible to the guard: {:?}",
+        "argument capture must span lines, so a multi-line push is not invisible: {:?}",
         hits[0]
     );
 }
