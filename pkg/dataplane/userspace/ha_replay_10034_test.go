@@ -730,4 +730,3 @@ func TestRetryDebtConvergenceHAReplayIsIdempotent10034(t *testing.T) {
 		t.Fatalf("repeated settled convergence replayed HA state: refreshes=%d requests=%d", refreshCalls, len(requests))
 	}
 }
-

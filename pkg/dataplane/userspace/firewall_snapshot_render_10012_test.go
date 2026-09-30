@@ -89,6 +89,7 @@ func compileLenientFilter10012(t *testing.T, action, rejectType string) *config.
 	}
 	return cfg
 }
+
 // compileLenientRoutingInstance10012 exercises the tolerant path for the
 // routing-instance + next-term contradiction. The strict gate rejects this
 // shape, while CompileConfigLenient retains it with a warning.
@@ -123,7 +124,6 @@ func compileLenientRoutingInstance10012(t *testing.T) *config.Config {
 	t.Fatalf("lenient compile retained no routing-instance/next-term warning: %v", cfg.Warnings)
 	return nil
 }
-
 
 func snapshotTermsFromConfig10012(t *testing.T, cfg *config.Config, filterName string) []FirewallTermSnapshot {
 	t.Helper()
@@ -296,6 +296,7 @@ func TestSnapshotRenderRoutingInstanceNextTermHandBuilt10012(t *testing.T) {
 		t.Errorf("PBR term must annotate the contradictory next-term bit as ignored.\n%s", out)
 	}
 }
+
 // TestSnapshotRenderRoutingInstanceNextTermTolerant10012 exercises the complete
 // tolerant config path: the builder must preserve the authored next-term bit
 // even though routing-instance makes the effective term terminating.

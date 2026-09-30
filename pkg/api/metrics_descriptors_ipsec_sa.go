@@ -58,7 +58,7 @@ func (c *xpfCollector) initIpsecSaDescriptors() {
 	)
 	c.ipsecSAMultiSourceCollisionsTotal = prometheus.NewDesc(
 		"xpf_userspace_ipsec_sa_multi_source_collisions_total",
-        "Multi-source collision observations for one destination and SPI from full dumps and incremental upserts.",
+		"Multi-source collision observations for one destination and SPI from full dumps and incremental upserts.",
 		nil, nil,
 	)
 	c.ipsecSANetlinkEnobufsTotal = prometheus.NewDesc(
@@ -68,12 +68,12 @@ func (c *xpfCollector) initIpsecSaDescriptors() {
 	)
 	c.ipsecSANetlinkRedumpsTotal = prometheus.NewDesc(
 		"xpf_userspace_ipsec_sa_netlink_redumps_total",
-        "Full XFRM-SA dumps issued for initial readiness, periodic drift sync, and monitor recovery.",
+		"Full XFRM-SA dumps issued for initial readiness, periodic drift sync, and monitor recovery.",
 		nil, nil,
 	)
 	c.ipsecSANetlinkRedumpUpsertsTotal = prometheus.NewDesc(
 		"xpf_userspace_ipsec_sa_netlink_redump_upserts_total",
-        "Eligible XFRM-SA records returned by successful full dumps; counts every eligible record in each dump, not only new records.",
+		"Eligible XFRM-SA records returned by successful full dumps; counts every eligible record in each dump, not only new records.",
 		nil, nil,
 	)
 }

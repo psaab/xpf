@@ -118,8 +118,8 @@ func TestFabricAllowlistUnary_SystemActionNestedGate(t *testing.T) {
 		"clear-persistent-nat ",      // trailing whitespace
 		"clear-arp",                  // sibling clear-* action
 		"clear-nat-counters",         // sibling clear-* action
-		"cluster-failover-reset:1", // local-only, never proxied
-		"cluster-failover:1",       // no node suffix -> local-only, never proxied
+		"cluster-failover-reset:1",   // local-only, never proxied
+		"cluster-failover:1",         // no node suffix -> local-only, never proxied
 		// Malformed / out-of-range failover suffixes must be denied AT THE
 		// INTERCEPTOR so they never reach the handler's outbound proxy-dial
 		// path (an unauth fabric client could otherwise drive avoidable proxy

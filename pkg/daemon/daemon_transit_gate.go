@@ -195,6 +195,7 @@ var (
 func transitForwardSysctlPaths() []string {
 	return []string{ipv4ForwardSysctlPath, ipv6ForwardSysctlPath}
 }
+
 // shouldManageTransitGate limits the persistent kernel forwarding fence to
 // appliance images and hosts with a committed xpf configuration. A package
 // install on a foreign, never-committed host must leave its existing kernel
@@ -221,8 +222,6 @@ func (d *Daemon) shouldManageTransitGate() bool {
 	}
 	return false
 }
-
- 
 
 // writeTransitForwardSysctls drives both transit knobs to on/off.
 //

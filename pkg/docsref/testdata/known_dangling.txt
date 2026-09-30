@@ -134,3 +134,52 @@ docs/research/5837-xdp-dnat-before-local/plan.md
 # up again. This is the "the plan genuinely will not land" case the registry
 # exists for — not rot, a decision.
 docs/research/6749-armed-state/plan.md
+
+# #11480 — lane-local planning artifacts not included on master (verified 2026-09-29).
+#
+# These cited paths are absent from the master line. Some survived only on
+# research/checkpoint refs; others existed only in uncommitted, untracked, or
+# gitignored worktrees. The implementation lane may have landed even though
+# its plan did not; entry notes distinguish that from plans whose work never
+# merged. There is no exact replacement for these historical artifacts, and
+# inventing one would fabricate rationale.
+# Verified: none of the 11 exists on disk or is tracked on HEAD; `git log
+# --all` finds path history only for 9506 (research/9506-xfrm-capture) and
+# 9821 (tag 9821-pre-scrub), neither on the master line. docs/log/9814.md
+# cites five only by quoting this gate's failure output verbatim; that quote is
+# a historical record, so it stays and the paths are grandfathered rather than
+# unquoted.
+#
+# cited by: docs/log/9506.md
+# Exists on research/9506-xfrm-capture, not on the master line.
+docs/pr/9506-xfrm-capture/plan.md
+# cited by: docs/log/9814.md, docs/wireguard-interop.md
+# Never committed on any ref; #9587 itself landed, but the plan did not.
+docs/pr/9587/plan.md
+# cited by: docs/log/9604.md, docs/log/9814.md
+# Never committed on any ref; the log marks it (uncommitted) at every round.
+docs/pr/9604/plan.md
+# cited by: docs/log/9637.md, docs/log/9814.md
+# Worktree-only follow-up note; its design was filed as #10069 instead.
+docs/pr/9637/followups/mtu-delegated-retry-reporting.md
+# cited by: docs/log/9644.md
+# Never committed on any ref; the log marks it "uncommitted worktree file, audit-only" and "never to merge".
+docs/pr/9644/plan.md
+# cited by: docs/log/9814.md, docs/log/9821.md
+# Plan checkpoint lives only on tag 9821-pre-scrub, not master.
+docs/pr/9821/plan.md
+# cited by: docs/log/9814.md, docs/log/9824.md
+# Never committed on any ref; the log marks it (uncommitted) at every round.
+docs/pr/9824/plan.md
+# cited by: docs/log/9903.md
+# Never committed on any ref; the log marks it (untracked).
+docs/pr/9903/brief.md
+# cited by: docs/log/9905.md
+# Never committed on any ref; gitignored worktree file, never added.
+docs/pr/9905-delta-hotpath/plan.md
+# cited by: docs/log/9916.md
+# Never committed on any ref; the log marks it (untracked, not shipped).
+docs/pr/9916/brief.md
+# cited by: docs/log/9956.md
+# Never committed on any ref; gitignored worktree file.
+docs/pr/9956-session-scope/plan.md

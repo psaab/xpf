@@ -35,7 +35,7 @@ type collisionDP10512 struct {
 	revRows []dpuserspace.SessionPolicyMatch
 	// over, when set, is appended to every READ unfiltered (faithless
 	// helper modeling for the P6 over-return cells).
-	over []dpuserspace.SessionPolicyMatch
+	over    []dpuserspace.SessionPolicyMatch
 	deleted []dpuserspace.SessionPolicyMatch
 	modes   []string
 	reqs    []dpuserspace.SessionPolicyListRequest

@@ -66,7 +66,7 @@ func (r *routeLister10708) RouteListFilteredIter(family int, _ *netlink.Route, _
 	return nil
 }
 
-func (*routeLister10708) LinkByIndex(int) (netlink.Link, error) { return nil, nil }
+func (*routeLister10708) LinkByIndex(int) (netlink.Link, error)   { return nil, nil }
 func (*routeLister10708) LinkByName(string) (netlink.Link, error) { return nil, nil }
 
 func TestGetRoutesCapStreamsKernelTable10708(t *testing.T) {
@@ -122,7 +122,7 @@ func TestGetRoutesECMPPathsCountAgainstResponseCap10708(t *testing.T) {
 type ribReader10708 struct {
 	path      string
 	total     int
-	remaining  int
+	remaining int
 	line      string
 	offset    int
 	readBytes int

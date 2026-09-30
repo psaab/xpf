@@ -215,6 +215,9 @@ ip link set vrf-b up; ip link set vrf-c up
 ip link set dumb master vrf-b; ip link set dumc master vrf-c
 ip link set duma up; ip link set dumb up; ip link set dumc up; ip link set lo up
 ip addr add 10.10.0.2/24 dev duma; ip addr add 10.20.0.2/24 dev dumb; ip addr add 10.30.0.2/24 dev dumc
+# This netns models a router; forwarding is disabled by default in a fresh
+# namespace, which makes every ip route get query with iif return no-route.
+echo 1 > /proc/sys/net/ipv4/ip_forward
 ip route add 10.9.0.0/16 via 10.20.0.1 dev dumb table 200
 g() { ip route get "$@" 2>&1 | head -1; }
 echo "A_BASELINE_VRFC=$(g 10.9.0.1 from 10.30.0.77 iif dumc)"
@@ -263,7 +266,9 @@ echo "F1C_SCOPED_VRFC_OWNROUTE=$(g 10.9.0.1 from 10.30.0.77 iif dumc)"
 	// not contain table 200" is also satisfied by "Invalid argument" (the
 	// wrong probe shape — see docs/log/9420.md), an empty string, or any
 	// unrelated error, and none of those is a measurement.
-	terminated := func(k string) bool { return strings.Contains(strings.ToLower(got[k]), "unreachable") }
+	terminated := func(k string) bool {
+		return strings.Contains(strings.ToLower(got[k]), "unreachable")
+	}
 
 	// Controls first: the probe reaches the FIB at all, and the diversion is
 	// not an artifact of the topology.

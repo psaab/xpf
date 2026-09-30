@@ -193,6 +193,7 @@ func (s *Server) noteFabricAuthSkewForDigest(keys [][]byte, tokenHex string, now
 	}
 	return fabricSkewClause(skew)
 }
+
 // fabricSkewClause renders the reason suffix for a measured skew.
 func fabricSkewClause(skew int64) string {
 	dir := "ahead of"

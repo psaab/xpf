@@ -31,9 +31,9 @@ func TestRoutingInstancesDetailShowsInet6StaticsWithReason_10235(t *testing.T) {
 		RoutingInstances: []*config.RoutingInstanceConfig{
 			{Name: "target", InstanceType: "virtual-router"},
 			{
-				Name:             "holder",
-				InstanceType:     "virtual-router",
-				StaticRoutes:     []*config.StaticRoute{v4healthy},
+				Name:              "holder",
+				InstanceType:      "virtual-router",
+				StaticRoutes:      []*config.StaticRoute{v4healthy},
 				Inet6StaticRoutes: []*config.StaticRoute{v6leak, v6healthy, v6discard},
 			},
 		},

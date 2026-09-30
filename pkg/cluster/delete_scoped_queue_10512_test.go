@@ -178,9 +178,9 @@ type scopedCallV610512 struct {
 
 type scopedRecorderStore10512 struct {
 	dataplane.SessionStore
-	mu sync.Mutex
-	v4 []scopedCallV410512
-	v6 []scopedCallV610512
+	mu     sync.Mutex
+	v4     []scopedCallV410512
+	v6     []scopedCallV610512
 	putsV4 int
 	putsV6 int
 }

@@ -98,7 +98,6 @@ func TestGraceHoldsInsideTheWindow7441(t *testing.T) {
 	}
 }
 
-
 // TestUnanchoredConnectionIsNotEvicted7441: a connection no reconcile has
 // reached yet has no anchor, and must not be evicted on a zero timestamp.
 //

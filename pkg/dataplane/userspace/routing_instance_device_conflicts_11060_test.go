@@ -46,7 +46,6 @@ func TestRIMemberDeviceConflictLeavesAliasClaimUnassigned11060(t *testing.T) {
 	}
 }
 
-
 func TestTolerantTunnelStanzaConflictUsesDefaultDataplaneMembership11060(t *testing.T) {
 	lines := []string{
 		"set system dataplane-type userspace",

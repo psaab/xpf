@@ -117,7 +117,6 @@ func (c capturedSessions) empty() bool {
 	return len(c.v4) == 0 && len(c.v6) == 0 && len(c.policy) == 0
 }
 
-
 // policyInvalidationCapture is the whole pre-publication snapshot: one bucket
 // per change class, plus the enumerate errors.
 //
@@ -494,6 +493,7 @@ func idInSet(ids map[uint32]struct{}, id uint32) bool {
 	_, ok := ids[id]
 	return ok
 }
+
 // policyMatchEntries converts one helper READ match into the existing
 // dataplane entry shape consumed by the companion-aware delete path. The
 // helper is authoritative for the routing domain and RT_FLOW identity; the

@@ -266,10 +266,10 @@ type pendingEntry struct {
 // either structure past the cap.
 type pendingTableOf[K comparable] struct {
 	mu      sync.Mutex
-	entries map[K]pendingEntry   // key -> expiry + owning generation
-	ring    []pendingSlotOf[K]   // fixed length == capacity; expiry-ordered
-	head    int                   // index of the oldest slot
-	count   int                   // slots in use
+	entries map[K]pendingEntry // key -> expiry + owning generation
+	ring    []pendingSlotOf[K] // fixed length == capacity; expiry-ordered
+	head    int                // index of the oldest slot
+	count   int                // slots in use
 	ttl     time.Duration
 	now     func() time.Time
 

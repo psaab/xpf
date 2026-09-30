@@ -425,8 +425,8 @@ func TestClusterRADemotionSilentlyClearsSharedIdentity10789(t *testing.T) {
 	var events []string
 	var cleared [][]string
 	d := &Daemon{
-		store:                 store,
-		rgStates:              make(map[int]*rgStateMachine),
+		store:    store,
+		rgStates: make(map[int]*rgStateMachine),
 		raStatusFn: func() []ra.SenderInfo {
 			return []ra.SenderInfo{{
 				Interface: "ge-0-0-0.50",
@@ -434,7 +434,7 @@ func TestClusterRADemotionSilentlyClearsSharedIdentity10789(t *testing.T) {
 				State:     "active",
 			}}
 		},
-		raApplyFn:             func(desired []*config.RAInterfaceConfig) error {
+		raApplyFn: func(desired []*config.RAInterfaceConfig) error {
 			events = append(events, "apply")
 			return spy.apply(desired)
 		},

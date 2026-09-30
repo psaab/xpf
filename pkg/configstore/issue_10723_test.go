@@ -131,8 +131,8 @@ func TestConfirmEnvelopeVersionGateAndUnknownFields10723(t *testing.T) {
 	}
 
 	body, err := json.Marshal(map[string]any{
-		"deadline":            time.Now().Add(time.Hour),
-		"prev_tree":           &config.ConfigTree{},
+		"deadline":             time.Now().Add(time.Hour),
+		"prev_tree":            &config.ConfigTree{},
 		"future_safety_marker": true,
 	})
 	if err != nil {

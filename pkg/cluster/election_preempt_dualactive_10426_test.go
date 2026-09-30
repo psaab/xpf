@@ -197,6 +197,7 @@ func TestElection_PreemptIncumbent_NoReaffirmWhenPeerNotPrimary(t *testing.T) {
 	default:
 	}
 }
+
 // TestElection_NonPreemptDualActive_WinnerControl is the preempt-disabled
 // control for #10426. The existing non-preempt reaffirm path must continue to
 // emit the same event for an already-primary dual-active winner.

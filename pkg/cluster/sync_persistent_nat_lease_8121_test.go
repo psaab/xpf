@@ -132,7 +132,6 @@ func TestPersistentNatLeaseDecodeClampsLifetimeSkew(t *testing.T) {
 	}
 }
 
-
 // #4892 shape: a string field longer than the uint16 length prefix can describe
 // must DROP that record, never narrow the prefix. A wrapped length misframes the
 // peer's decode, so every record after it is read from the wrong offset — one

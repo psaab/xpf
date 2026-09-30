@@ -379,9 +379,9 @@ func TestHeartbeatReplayGatesLivenessRefresh(t *testing.T) {
 // drive election.
 func TestHeartbeatAuthDecision(t *testing.T) {
 	cases := []struct {
-		name                                       string
+		name                                      string
 		keyConfigured, present, macOK, nonceFresh bool
-		wantAccept                                 bool
+		wantAccept                                bool
 	}{
 		// No local key -> dual-accept everything (cannot verify; may be the
 		// not-yet-keyed side of a rolling upgrade). No regression.
@@ -390,7 +390,7 @@ func TestHeartbeatAuthDecision(t *testing.T) {
 
 		// Local key + authed frame -> enforce.
 		{"key/good-hmac-fresh", true, true, true, true, true},
-		{"key/bad-hmac", true, true, false, false, false},       // forged/tampered -> REJECT
+		{"key/bad-hmac", true, true, false, false, false},        // forged/tampered -> REJECT
 		{"key/good-hmac-replay", true, true, true, false, false}, // replayed nonce -> REJECT
 
 		// Local key + no trailer is always rejected. There is no first-contact
@@ -530,10 +530,10 @@ func TestHeartbeatAuthDecisionReasonNamesTheArm_6968(t *testing.T) {
 	}
 
 	cases := []struct {
-		name                                       string
+		name                                      string
 		keyConfigured, present, macOK, nonceFresh bool
-		wantAccept                                 bool
-		wantReason                                 string
+		wantAccept                                bool
+		wantReason                                string
 	}{
 		{"no-key/legacy", false, false, false, false, true, ""},
 		{"no-key/authed-frame", false, true, false, false, true, ""},

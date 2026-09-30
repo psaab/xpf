@@ -46,7 +46,7 @@ func validateFirewallUnknownChildrenStrict(cfg *Config) error {
 			return fmt.Errorf(
 				"security nat source rule-set %q rule %q has unknown child %q under `then source-nat` (#10294): "+
 					"the compiler reads only interface, off, and pool; remove the typo",
-					rs.Name, rule.Name, rule.unknownThenLeaves[0])
+				rs.Name, rule.Name, rule.unknownThenLeaves[0])
 		}
 	}
 	return nil

@@ -370,7 +370,6 @@ func (rr *routeReader) multiPathNextHops(mp []*netlink.NexthopInfo, linkName fun
 	return nhs
 }
 
-
 // rtprotZStatic is FRR's private rtnetlink protocol value for staticd-
 // installed routes (RTPROT_ZSTATIC). It is NOT a Linux UAPI constant, so
 // it has no golang.org/x/sys/unix counterpart; FRR's zebra2proto() maps

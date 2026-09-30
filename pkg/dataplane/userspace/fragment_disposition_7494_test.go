@@ -386,6 +386,7 @@ func fragSessionKeyV6(srcPort, dstPort uint16) fragSessionKey {
 		SrcPort: srcPort, DstPort: dstPort, SrcAddr: src, DstAddr: dst,
 	}
 }
+
 // ipv6TCPFrame10662 builds an IPv6 datagram with a complete captured TCP
 // header but a caller-selected declared payload length. The addresses match
 // fragSessionKeyV6 so an out-of-declared-range SYN can be tested against a

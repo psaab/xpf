@@ -840,8 +840,8 @@ func TestD11ValidationDenialsCountOnlyDeliveredReason52Events11017(t *testing.T)
 				p := &CapturePipeline{
 					submitter: new(pipelineTestSubmitter),
 					attestation: &D11AttestationConfig{
-						Ledger: ledger,
-						OriginValid: func(CaptureOrigin) bool { return true },
+						Ledger:           ledger,
+						OriginValid:      func(CaptureOrigin) bool { return true },
 						AuthorityCurrent: func() bool { return true },
 					},
 					zoneEvaluator: tc.evaluator, zoneSnapshot: tc.snapshot,

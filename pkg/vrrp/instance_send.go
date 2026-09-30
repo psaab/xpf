@@ -12,10 +12,10 @@ import (
 // emitEvent sends a state change event to the manager's event channel.
 func (vi *vrrpInstance) emitEvent() {
 	evt := VRRPEvent{
-		Interface: vi.cfg.Interface,
-		Family:    vi.cfg.Family,
-		GroupID:   vi.cfg.GroupID,
-		State:     vi.getState(),
+		Interface:         vi.cfg.Interface,
+		Family:            vi.cfg.Family,
+		GroupID:           vi.cfg.GroupID,
+		State:             vi.getState(),
 		VIPs:              vi.vipsSnapshot(),
 		VIPDiverged:       vi.vipDiverged.Load() || vi.vipUpdateDiverged.Load(),
 		VIPUpdateFailures: vi.vipUpdateFailures.Load(),

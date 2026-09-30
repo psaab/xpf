@@ -76,6 +76,18 @@ var notMarkerFiles7343 = map[string][]markerStmt{
 		{`m.publishedPlanKey = ""`, 1},
 		{`m.publishedSnapshot = 0`, 1},
 	},
+	// Zero-reset: withQuiescedPreSeed invalidates the per-family applied-config
+	// cache (#10896) after a successful dhcp-disable so a config-identical
+	// ApplyAsync cannot skip the restart the freshly installed memfile
+	// requires. Nil never equals the rendered bytes, so reconcileFamilyRestart's
+	// skip check fails and Kea restarts — the SAFE direction, which can never
+	// claim a convergence that did not happen. The proof-of-applied write is the
+	// pointer store in reconcileFamilyRestart (*appliedConfig = rendered), which
+	// the population grep does not match.
+	"pkg/dhcpserver/lease_sync.go": {
+		{`m.appliedConfig4 = nil`, 1},
+		{`m.appliedConfig6 = nil`, 1},
+	},
 }
 
 // markerFiles7343 hold REAL convergence markers. Driver is the symbol that

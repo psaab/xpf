@@ -37,8 +37,8 @@ func TestHandleClusterEventPreemptDualActiveWinSchedulesDirectAnnounce(t *testin
 	state.SetCluster(true)
 	announces := make(chan int, 1)
 	d := &Daemon{
-		store:                 store,
-		rgStates:              map[int]*rgStateMachine{0: state},
+		store:                  store,
+		rgStates:               map[int]*rgStateMachine{0: state},
 		directAnnounceSchedule: []time.Duration{0},
 		directSendGARPsFn: func(rgID int) {
 			announces <- rgID

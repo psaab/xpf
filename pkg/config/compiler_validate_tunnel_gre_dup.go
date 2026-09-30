@@ -54,6 +54,7 @@ type greOuterKey struct {
 //   - Transport instance matters (#10653): same triple in DIFFERENT
 //     instances never collides — decap selects by ingress VRF. The
 //     instance compares exactly ("" is the default VRF on both sides).
+//
 // Normalization: endpoints are compared by net.ParseIP + String(), so IPv6
 // respellings of one address ("2001:db8::1" vs "2001:0db8::1") collide as
 // they do in the Rust bucket key (parsed IpAddr). The one deliberate

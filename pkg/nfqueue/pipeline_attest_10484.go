@@ -608,6 +608,7 @@ func (l *D11AttestationLedger) FinalizeIfTerminal() bool {
 	l.snapshotSeq++
 	return true
 }
+
 // AllTerminal reports whether every selected row has reached a terminal
 // disposition, without declaring the artifact clean. It is used by the close
 // owner to disarm even when duplicate or late evidence makes finalization fail.
@@ -994,7 +995,6 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 		p.cancelUncertainLease(item.lease)
 	}
 }
-
 
 func (p *CapturePipeline) admissionFailedState(item *pendingReinject, code string, cause error) bool {
 	if p == nil || item == nil {

@@ -53,8 +53,6 @@ func TestRIDualClaimRejectedAndToleratedWithWarning11060(t *testing.T) {
 	}
 }
 
-
-
 // A bare member claims its configured units, so it conflicts with another
 // instance that lists one of those units explicitly.
 func TestRIBareAndUnitClaimRejectedAcrossInstances11060(t *testing.T) {

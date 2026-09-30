@@ -134,7 +134,7 @@ func TestResolveTupleFallbackUsesDisplacedAssignedID_10722(t *testing.T) {
 			middle, config.StableAppID(middle), naturalID)
 	}
 	cfg := mkAppIDCfg([]string{displaced, naturalOwner, middle}, map[string]string{
-		displaced:   "8080",
+		displaced:    "8080",
 		naturalOwner: "8080",
 		middle:       "8080",
 	})

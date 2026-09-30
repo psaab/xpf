@@ -74,6 +74,7 @@ func validateThreeColorPolicerMarkingWarnings(cfg *Config) []string {
 	}
 	return warnings
 }
+
 // validateThreeColorPolicerDisarmWarnings emits a WARN-only commit-time
 // message for every color-aware three-color policer (#10502).
 //
@@ -106,7 +107,6 @@ func validateThreeColorPolicerDisarmWarnings(cfg *Config) []string {
 	}
 	return warnings
 }
-
 
 // validateFirewallInterfaceSpecificWarnings emits a WARN-only commit-time
 // message for each firewall filter carrying `interface-specific` (fable-167

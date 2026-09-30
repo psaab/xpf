@@ -232,7 +232,6 @@ func (s *Server) Delete(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteR
 	return &pb.DeleteResponse{}, nil
 }
 
-
 func (s *Server) Load(ctx context.Context, req *pb.LoadRequest) (*pb.LoadResponse, error) {
 	sessionID := connSessionID(ctx)
 	plantClass, err := s.mutationPlantClass(ctx)

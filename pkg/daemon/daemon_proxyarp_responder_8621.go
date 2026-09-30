@@ -57,8 +57,8 @@ type proxyARPResponders struct {
 }
 
 type proxyARPResponder struct {
-	cancel   context.CancelFunc
-	done     chan struct{}
+	cancel context.CancelFunc
+	done   chan struct{}
 
 	// addrsMu guards the reconcile snapshot: addresses, interface identity,
 	// redundancy-group ownership input, and the current interface MAC. A
@@ -69,7 +69,7 @@ type proxyARPResponder struct {
 	// rgID is the redundancy group of the interface, resolved from config at
 	// reconcile. 0 means the interface belongs to no group, which answers
 	// unconditionally — there is no ownership question to ask.
-	rgID int
+	rgID  int
 	addrs map[string]struct{} // canonical IPv4 string -> present
 	mac   net.HardwareAddr    // current interface MAC, refreshed on reconcile
 	// macSet distinguishes "reconcile deliberately cleared the MAC after a
@@ -80,6 +80,7 @@ type proxyARPResponder struct {
 func newProxyARPResponders() *proxyARPResponders {
 	return &proxyARPResponders{running: map[string]*proxyARPResponder{}}
 }
+
 // proxyARPInterfaceByName is a seam for the reconcile-time MAC lookup. The
 // production function reads the live kernel interface so a virtual-MAC live
 // set is observed even though the AF_PACKET socket remains open.
@@ -98,6 +99,7 @@ func (r *proxyARPResponder) currentMAC() net.HardwareAddr {
 	defer r.addrsMu.RUnlock()
 	return append(net.HardwareAddr(nil), r.mac...)
 }
+
 // snapshot returns one coherent reconcile view. In particular, junosRef and
 // rgID are read under the same lock that publishes them; the receive goroutine
 // must never pair a new address set with an old ownership identity.

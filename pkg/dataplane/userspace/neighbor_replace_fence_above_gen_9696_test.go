@@ -53,9 +53,9 @@ func (h *fenceHook9696) hook(req ControlRequest, status *ProcessStatus) error {
 		}
 		if status != nil {
 			*status = ProcessStatus{
-				PID:                      4321,
+				PID:                       4321,
 				ManagerNeighborGeneration: ack,
-				NeighborReplaceApplied:   h.applied,
+				NeighborReplaceApplied:    h.applied,
 			}
 		}
 		return nil
