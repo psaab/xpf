@@ -129,19 +129,20 @@ var families = []family{
 		Unannotated:       nil, // closed by #7348
 	},
 	{
-		// #7357 items 3-5, plus the #5830 per-instance case the issue does not
-		// list, #10000's unusable ordinary destination, and #11328's no-install
-		// option. buildRouteSnapshots drops six classes of static route and the
-		// `show routing-options` / `show routing-instances` renderers must not
-		// print any of them as installed. Sharpest for `next-table`, whose entire
-		// content IS a forwarding decision.
+		// #7357 items 3-5, plus the #5830 per-instance case, #10000's
+		// unusable ordinary destination, #11327's no-disposition route, and
+		// #11328's no-install option. buildRouteSnapshots drops seven classes
+		// of static route and the `show routing-options` / `show
+		// routing-instances` renderers must not print any of them as installed.
+		// Sharpest for `next-table`, whose entire content IS a forwarding
+		// decision.
 		//
-		// This family has TWO builder predicates because one of the six reasons
-		// is order-dependent: the kernel caps global next-table leaks at
-		// NextTableRuleWindow ip rules, so whether a route falls outside the
+		// This family has TWO builder predicates because one of the seven
+		// reasons is order-dependent: the kernel caps global next-table leaks
+		// at NextTableRuleWindow ip rules, so whether a route falls outside the
 		// window depends on how many eligible ones precede it.
-		// StaticRouteExcludedReason answers the five per-route causes;
-		// StaticRouteExclusions walks the whole config for the sixth.
+		// StaticRouteExcludedReason answers the six per-route causes;
+		// StaticRouteExclusions walks the whole config for the seventh.
 		Name:        "static route",
 		Collections: []string{"RoutingOptions.StaticRoutes", "RoutingOptions.Inet6StaticRoutes"},
 		// The builder calls the whole-config map, not the per-route helper:

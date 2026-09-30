@@ -484,6 +484,10 @@ mod tests_noroute_capped_import_9054;
 #[cfg(test)]
 #[path = "tests_lpm_parity_9522.rs"]
 mod tests_lpm_parity_9522;
+// #11327: zero-disposition statics must not shadow an installable route.
+#[cfg(test)]
+#[path = "tests_zero_disposition_11327.rs"]
+mod tests_zero_disposition_11327;
 // #9955: the overlapping-leak resolution differential (kernel rule priority vs
 // helper longest-prefix).
 #[cfg(test)]

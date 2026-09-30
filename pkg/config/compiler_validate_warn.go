@@ -433,6 +433,31 @@ func ValidateConfig(cfg *Config) []string {
 		}
 	}
 
+	// #11327: a configured static route with no forwarding/leak/terminal
+	// disposition is accepted by Junos syntax but installs nothing. Warn on
+	// both commit and tolerant-load paths; the shared exclusion predicate
+	// keeps it out of the helper FIB so it cannot shadow a less-specific route.
+	warnZeroDisposition := func(scope string, routes []*StaticRoute) {
+		for _, sr := range routes {
+			if sr == nil || staticRouteHasDisposition(sr) {
+				continue
+			}
+			warnings = append(warnings, fmt.Sprintf(
+				"%s %q has no forwarding disposition (no next-hop, next-table, discard, or reject) and will not be installed (#11327)",
+				scope, sr.Destination))
+		}
+	}
+	warnZeroDisposition("static route", cfg.RoutingOptions.StaticRoutes)
+	warnZeroDisposition("inet6 static route", cfg.RoutingOptions.Inet6StaticRoutes)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		scope := fmt.Sprintf("routing-instances %s static route", ri.Name)
+		warnZeroDisposition(scope, ri.StaticRoutes)
+		warnZeroDisposition(fmt.Sprintf("routing-instances %s inet6 static route", ri.Name), ri.Inet6StaticRoutes)
+	}
+
 	// Source/destination-NAT pool REFERENCES (`then ... pool <name>` naming a
 	// pool not defined under `security nat source/destination pool`) are
 	// validated by the strict commit gate validateNATPoolReferencesStrict

@@ -9,7 +9,7 @@ import (
 //
 // #7357 items 3-5: `show route` / `show routing-options` render every
 // configured static route straight from config, while
-// buildRouteSnapshots (pkg/dataplane/userspace/routes.go) DROPS multiple
+// buildRouteSnapshots (pkg/dataplane/userspace/routes.go) DROPS seven
 // classes of them. A dropped route printed as configured reads as an
 // installed route, which is the #6534 archetype: the operator checks the
 // surface after committing and it confirms a forwarding decision that is
@@ -19,8 +19,8 @@ import (
 // applied-set readback: every verdict below is a deterministic function of
 // the committed config, so the renderer can reach it without runtime state.
 //
-// Per-route exclusions are deterministic; the next-table window is
-// ORDER-DEPENDENT and cannot be decided from one route, which is why
+// Six of the seven reasons are per-route. The seventh (the next-table window)
+// is ORDER-DEPENDENT and cannot be decided from one route, which is why
 // StaticRouteExclusions exists alongside this.
 
 // StaticRouteExcludedReason reports why buildRouteSnapshots drops `sr`, or ""
@@ -38,6 +38,8 @@ func StaticRouteExcludedReason(sr *StaticRoute, perInstance bool, definedInstanc
 	if sr == nil {
 		return ""
 	}
+	// #11539: explicit operator intent takes precedence over derived
+	// zero-disposition classification below.
 	if sr.NoInstall {
 		return "route has the `no-install` option set"
 	}
@@ -49,8 +51,12 @@ func StaticRouteExcludedReason(sr *StaticRoute, perInstance bool, definedInstanc
 		if !staticRouteDestinationUsable(sr.Destination) {
 			return fmt.Sprintf("destination %q is neither a CIDR prefix nor a bare IP address", sr.Destination)
 		}
+		if !staticRouteHasDisposition(sr) {
+			return "route has no forwarding disposition (no next-hop, next-table, discard, or reject)"
+		}
 		return ""
 	}
+
 	// #5830: a `next-table` authored UNDER a routing-instance is NOT programmed
 	// on the kernel/FRR forwarding plane — daemon_apply feeds only the GLOBAL
 	// routing-options statics to ApplyNextTableRules, the FRR renderer emits
@@ -76,6 +82,22 @@ func StaticRouteExcludedReason(sr *StaticRoute, perInstance bool, definedInstanc
 	return ""
 }
 
+// staticRouteHasDisposition reports whether a static route describes an action
+// that either routing plane can install. Empty qualified-next-hop placeholders
+// are not forwarding targets: the snapshot builder skips them before deciding
+// whether to publish a route row.
+func staticRouteHasDisposition(sr *StaticRoute) bool {
+	if sr == nil {
+		return false
+	}
+	for _, nh := range sr.NextHops {
+		if nh.Address != "" || nh.Interface != "" {
+			return true
+		}
+	}
+	return sr.NextTable != "" || sr.Discard || sr.Reject
+}
+
 // staticRouteDestinationUsable mirrors the destination acceptance in
 // userspace.routeDestinationForWire without creating a package dependency
 // cycle. A bare host is usable because the builder adds its host prefix before
@@ -90,7 +112,7 @@ func staticRouteDestinationUsable(destination string) bool {
 // StaticRouteExclusions returns the exclusion reason for every static route in
 // `cfg` that buildRouteSnapshots drops, keyed by the route pointer.
 //
-// It exists for the ORDER-DEPENDENT next-table window. The kernel programs
+// It exists for the ORDER-DEPENDENT seventh reason. The kernel programs global
 // next-table leaks as ip rules capped at NextTableRuleWindow entries — one
 // slot per default-instance ingress interface per leak since #9420 (#9810) —
 // and the applier advances that counter only for an ELIGIBLE route, drawn down
