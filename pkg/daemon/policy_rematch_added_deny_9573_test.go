@@ -18,15 +18,15 @@ import (
 //   - rematch off (the default) and plain `policy-rematch` sweep NOTHING.
 //     changedPolicyRuntimeIDs iterates OLD ids only and compares policies
 //     present on both sides, and the permit itself did not change.
-//   - `extensive` sweeps the shadowed permit only INCIDENTALLY. Inserting the
-//     deny shifts the permit's positional policy_id, and the resolved
-//     fingerprint hashes the rule including policy_id. An appended deny shifts
-//     nothing and sweeps nothing. A permit holding policy_id 0 is excluded by
-//     the overloaded-wire-value rule even when the insert shifts it.
+//   - `extensive` also sweeps NOTHING for this added deny. The inserted policy
+//     is not a survivor, and the unchanged permit's resolved fingerprint omits
+//     its positional `policy_id` (#11329). An appended deny likewise sweeps
+//     nothing because it changes no existing policy. A permit holding
+//     `policy_id` 0 remains excluded by the overloaded-wire-value rule.
 //
-// These cells pin that table, so a change to either behaviour is deliberate
-// rather than silent. They do not claim the table is the right policy; #9573
-// records the decision question for `extensive`'s positional sweep.
+// These cells pin the current table, so a change to either behaviour is deliberate
+// rather than silent. They do not claim the table is the right policy; #9573 left
+// the question open and #11329 resolved it by ignoring positional shifts.
 
 func addedDenyCfg9573(t *testing.T, lines []string) *config.Config {
 	t.Helper()
@@ -85,7 +85,7 @@ func TestRematchAddedDenyTable9573(t *testing.T) {
 	}{
 		{name: "rematch-off", mode: "", sweep: false},
 		{name: "policy-rematch", mode: "policy-rematch", sweep: false},
-		{name: "policy-rematch-extensive", mode: "policy-rematch extensive", sweep: true},
+		{name: "policy-rematch-extensive", mode: "policy-rematch extensive", sweep: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			old := build(tc.mode, first, icmp)
@@ -128,20 +128,4 @@ func TestRematchAddedDenyTable9573(t *testing.T) {
 		})
 	}
 
-	t.Run("policy-rematch-extensive: a permit holding policy_id 0 is not swept even when a deny shifts it", func(t *testing.T) {
-		const mode = "policy-rematch extensive"
-		old := build(mode, icmp)
-		if id := dpuserspace.PolicyIDsByStableKey(old)[icmpKey]; id != 0 {
-			t.Fatalf("precondition: the sole policy p-icmp must hold id 0; got %d", id)
-		}
-		newCfg := build(mode, deny, icmp)
-		if dpuserspace.PolicyIDsByStableKey(newCfg)[icmpKey] == 0 {
-			t.Fatalf("precondition: the inserted deny must shift p-icmp off id 0; ids=%v",
-				dpuserspace.PolicyIDsByStableKey(newCfg))
-		}
-		if got := changedPolicyRuntimeIDs(old, newCfg, nil, nil); len(got) != 0 {
-			t.Errorf("#9573: extensive swept %v for a permit that held policy_id 0; the overloaded "+
-				"wire value is excluded, so nothing is expected", got)
-		}
-	})
 }
