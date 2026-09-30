@@ -10,19 +10,14 @@ use super::outer_error_atomic;
 /// `routing_domain` is the domain of the interface the ICMP error arrived on
 /// — `crate::afxdp::forwarding::ingress_routing_domain(forwarding,
 /// meta.ingress_ifindex as i32, meta.ingress_vlan_id, None)`, exactly as
-/// `nat_match_v4` / `nat_match_v6` / `nat64_match` derive it. It is a
-/// PARAMETER rather than a derivation because this function is handed no
-/// `ForwardingState`: it has no non-test caller today
-/// (`afxdp/mod.rs` imports it under `#[cfg(test)]`), so plumbing a whole
-/// forwarding borrow through a path nothing runs would be churn.
+/// `nat_match_v4` / `nat_match_v6` / `nat64_match` derive it. The accompanying
+/// `ForwardingState` supplies the egress-interface domain map used by the
+/// reverse-NAT candidate check. This helper currently has only test callers.
 ///
-/// #9162: it is also not allowed to be a hardcoded 0 any more. Both keys below
-/// go into EXACT lookups, and every index behind `SessionTable::lookup` is
-/// domain-preserving — so the old literals meant this path could never match a
-/// session in a routing instance, and whoever wired it into production would
-/// have inherited that silently. Making the domain an argument means the
-/// wiring has to answer the question at its call site, the way the three
-/// production arms do.
+/// #9162: the arriving domain is not a hardcoded 0. Exact session lookups use
+/// it as part of their key; reverse-NAT lookup compares it with the forward
+/// session's egress domain. The call site supplies the arriving interface's
+/// ingress-domain identity; the accompanying forwarding map resolves egress.
 ///
 /// #9901 (F-077): this path performs NO per-session budget gate — there is
 /// deliberately no `note_icmp_error_delivered` call below. That is safe ONLY
@@ -36,6 +31,7 @@ use super::outer_error_atomic;
 pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,
+    forwarding: &crate::afxdp::ForwardingState,
     sessions: &mut SessionTable,
     now_ns: u64,
     routing_domain: u32,
@@ -96,7 +92,7 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
                 quoted_discriminator,
                 routing_domain,
             );
-            lookup_embedded_session(sessions, &embedded_key, &reverse_key, now_ns)
+            lookup_embedded_session(forwarding, sessions, &embedded_key, &reverse_key, now_ns)
         }
         PROTO_ICMPV6 => {
             let hdr = parse_embedded_v6(
@@ -139,13 +135,14 @@ pub(in crate::afxdp::icmp_embed) fn try_embedded_icmp_session_match_from_frame(
                 quoted_discriminator,
                 routing_domain,
             );
-            lookup_embedded_session(sessions, &embedded_key, &reverse_key, now_ns)
+            lookup_embedded_session(forwarding, sessions, &embedded_key, &reverse_key, now_ns)
         }
         _ => None,
     }
 }
 
 fn lookup_embedded_session(
+    forwarding: &crate::afxdp::ForwardingState,
     sessions: &mut SessionTable,
     embedded_key: &SessionKey,
     reverse_key: &SessionKey,
@@ -156,7 +153,12 @@ fn lookup_embedded_session(
         .or_else(|| sessions.lookup(reverse_key, now_ns, 0))
         .or_else(|| {
             sessions
-                .find_forward_nat_match(reverse_key)
+                .find_forward_nat_match(reverse_key, |egress_ifindex| {
+                    crate::afxdp::forwarding::egress_routing_domain(
+                        forwarding,
+                        egress_ifindex,
+                    )
+                })
                 .map(|m| SessionLookup {
                     decision: m.decision,
                     metadata: m.metadata,
