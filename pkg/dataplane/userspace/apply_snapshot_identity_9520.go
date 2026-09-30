@@ -82,6 +82,14 @@ func stampSnapshotContentDigest(snap *ConfigSnapshot) error {
 // worst-case m.mu hold on this refusal is therefore two round trips; once
 // BeginControlShutdown has latched, the retry is skipped.
 func (m *Manager) requestApplySnapshotLocked(snap *ConfigSnapshot, status *ProcessStatus) (err error) {
+	// #11086: re-resolve interface rows against the live kernel BEFORE the
+	// digest stamp, so a row built before link churn ships refreshed (or
+	// dropped when its netdev is gone) instead of stamping the wrong
+	// netdev's zone. The digest then covers the refreshed content.
+	if refreshed, dropped := revalidateSnapshotIfindexes(snap); refreshed+dropped > 0 {
+		slog.Info("userspace: snapshot interface rows revalidated at apply",
+			"refreshed", refreshed, "dropped", dropped)
+	}
 	if stampErr := stampSnapshotContentDigest(snap); stampErr != nil {
 		// Nothing was sent, so the helper's state is known to be unchanged.
 		return stampErr
