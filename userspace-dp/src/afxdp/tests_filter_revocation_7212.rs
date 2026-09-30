@@ -187,6 +187,17 @@ fn pbr_term(name: &str, dport: &str) -> FirewallTermSnapshot {
         ..Default::default()
     }
 }
+fn inbound_reply_source_pbr_term() -> FirewallTermSnapshot {
+    FirewallTermSnapshot {
+        name: "source-steer-reply".into(),
+        source_addresses: vec!["172.16.80.200/32".into()],
+        protocols: vec!["tcp".into()],
+        routing_instance: "blue".into(),
+        action: "accept".into(),
+        ..Default::default()
+    }
+}
+
 
 fn per_packet_pbr_term(name: &str, dport: &str) -> FirewallTermSnapshot {
     let mut term = pbr_term(name, dport);
@@ -479,6 +490,216 @@ fn stale_pbr_empty_vrf_denies_and_revokes_the_established_hit_10467() {
         "the route transition must evict the old flow-cache descriptor"
     );
 }
+/// #11324 end-to-end: an inbound flow's first reply matches a
+/// source-address `then routing-instance blue` term on its own LAN ingress.
+/// The reverse companion must be updated and the packet steered through the
+/// blue route without revoking either half of the established pair.
+#[test]
+fn inbound_first_reply_uses_its_ingress_pbr_without_tearing_down_pair_11324() {
+    let snapshot = revocation_snapshot(vec![inbound_reply_source_pbr_term()]);
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+
+    let client = Ipv4Addr::new(10, 250, 0, 2);
+    let server = Ipv4Addr::new(172, 16, 80, 200);
+    let frame = build_txn_tcp_syn_frame_v4(
+        server,
+        client,
+        5201,
+        12345,
+        0x12, // first reply: SYN|ACK
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, 0x12, frame.len() as u16);
+
+    let forward_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(client),
+        dst_ip: IpAddr::V4(server),
+        src_port: 12345,
+        dst_port: 5201,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let reverse_key =
+        crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    let mut forward_metadata = revocation_metadata();
+    forward_metadata.ingress_zone = TEST_WAN_ZONE_ID;
+    forward_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    forward_metadata.ingress_ifindex = 12;
+    let mut reverse_metadata = revocation_metadata();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_ifindex = 0;
+    let forward_decision = revocation_decision(None);
+    let reverse_decision = revocation_decision(None);
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(STAMPED_GENERATION);
+    assert!(sessions.install_with_protocol_with_origin(
+        forward_key.clone(),
+        forward_decision,
+        forward_metadata,
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse_key.clone(),
+        reverse_decision,
+        reverse_metadata,
+        SessionOrigin::ReverseFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &BTreeMap::new(),
+        &frame,
+        meta,
+    );
+    assert!(
+        sessions.lookup(&forward_key, 123_000_000_000, 0).is_some(),
+        "steering the reply must preserve the forward companion too"
+    );
+    let (blue_domain, blue_check) = crate::session::install_table_identity("blue");
+    let reply = sessions
+        .lookup(&reverse_key, 123_000_000_000, 0)
+        .expect("the first inbound reply must preserve the reverse companion");
+    assert_eq!(
+        (reply.decision.install_table_domain, reply.decision.install_table_check),
+        (blue_domain, blue_check),
+        "the reverse entry must remember the reply-ingress PBR table"
+    );
+    assert_eq!(
+        reply.decision.resolution.egress_ifindex, 101,
+        "the reply must use blue's connected route, not the cached MAIN path"
+    );
+    assert!(
+        !binding
+            .scratch
+            .scratch_filter_revoked_keys
+            .contains(&reverse_key)
+            && !binding
+                .scratch
+                .scratch_filter_revoked_keys
+                .contains(&crate::session::reverse_session_key(
+                    &reverse_key,
+                    reverse_decision.nat,
+                )),
+        "steering the reverse half must not queue pair teardown or cache eviction"
+    );
+    assert_eq!(
+        dbg.filter_revoked_sessions, 0,
+        "a permitted reply-ingress PBR term must not count as a revocation"
+    );
+}
+
+/// #11324 safety control: a later static discard still sees the stale reverse
+/// stamp and revokes the pair, rather than being hidden by route-state refresh.
+#[test]
+fn stale_reverse_pbr_route_does_not_skip_new_static_discard_11324() {
+    let discard = FirewallTermSnapshot {
+        name: "discard-inbound-reply".into(),
+        source_addresses: vec!["172.16.80.200/32".into()],
+        protocols: vec!["tcp".into()],
+        action: "discard".into(),
+        ..Default::default()
+    };
+    let snapshot = revocation_snapshot(vec![discard]);
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+
+    let client = Ipv4Addr::new(10, 250, 0, 2);
+    let server = Ipv4Addr::new(172, 16, 80, 200);
+    let frame = build_txn_tcp_syn_frame_v4(
+        server,
+        client,
+        5201,
+        12345,
+        0x12,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(LAN_IFINDEX as u32, 0x12, frame.len() as u16);
+    let forward_key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(client),
+        dst_ip: IpAddr::V4(server),
+        src_port: 12345,
+        dst_port: 5201,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let reverse_key =
+        crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    let mut forward_metadata = revocation_metadata();
+    forward_metadata.ingress_zone = TEST_WAN_ZONE_ID;
+    forward_metadata.egress_zone = TEST_LAN_ZONE_ID;
+    forward_metadata.ingress_ifindex = 12;
+    let mut reverse_metadata = revocation_metadata();
+    reverse_metadata.is_reverse = true;
+    reverse_metadata.ingress_ifindex = 0;
+    let forward_decision = revocation_decision(None);
+    let mut reverse_decision = revocation_decision(None);
+    let (blue_domain, blue_check) = crate::session::install_table_identity("blue");
+    reverse_decision.install_table_domain = blue_domain;
+    reverse_decision.install_table_check = blue_check;
+    reverse_decision.resolution.egress_ifindex = 101;
+    reverse_decision.resolution.tx_ifindex = 101;
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(STAMPED_GENERATION);
+    assert!(sessions.install_with_protocol_with_origin(
+        forward_key.clone(),
+        forward_decision,
+        forward_metadata,
+        SessionOrigin::ForwardFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse_key.clone(),
+        reverse_decision,
+        reverse_metadata,
+        SessionOrigin::ReverseFlow,
+        122_000_000_000,
+        PROTO_TCP,
+        0,
+    ));
+
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &BTreeMap::new(),
+        &frame,
+        meta,
+    );
+    assert!(
+        sessions.lookup(&reverse_key, 123_000_000_000, 0).is_none(),
+        "the static discard must revoke the stale reverse companion"
+    );
+    assert!(
+        sessions.lookup(&forward_key, 123_000_000_000, 0).is_none(),
+        "the static discard must tear down the forward half too"
+    );
+    assert_eq!(dbg.filter_revoked_sessions, 1);
+    assert!(
+        binding
+            .scratch
+            .scratch_filter_revoked_keys
+            .contains(&reverse_key),
+        "the denied reply's reverse key must reach flow-cache eviction"
+    );
+}
+
 /// A per-packet PBR term is evaluated even when the established entry's
 /// generation/ingress stamp is Fresh. Its ordinary HIT evaluator returns
 /// Accept, so the poll caller must still apply the route transition and revoke

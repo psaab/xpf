@@ -1972,6 +1972,37 @@ impl SessionTable {
             record.entry.filter_revalidated = stamp;
         }
     }
+    /// #11324: persist a reverse-direction route selected from the reply's
+    /// ingress filter without replacing or revoking the session pair.
+    ///
+    /// Route selection is local derived state: the peer evaluates its own
+    /// reply-ingress filter when it receives traffic. Preserve the reverse
+    /// entry's NAT/zone/provenance fields, update only its forwarding decision,
+    /// and stamp the route filter for this generation and logical ingress.
+    pub(crate) fn update_reverse_route_on_filter_hit(
+        &mut self,
+        key: &SessionKey,
+        logical_ingress_ifindex: i32,
+        resolution: ForwardingResolution,
+        install_table_domain: u32,
+        install_table_check: u32,
+    ) -> bool {
+        let stamp =
+            FilterRevalidationStamp::live(self.filter_revalidation_gen, logical_ingress_ifindex);
+        if let Some(handle) = self.key_to_handle.get(key).copied()
+            && let Some(record) = self.entries.get_mut(handle as usize)
+            && record.key == *key
+            && record.entry.metadata.is_reverse
+        {
+            record.entry.decision.resolution = resolution;
+            record.entry.decision.install_table_domain = install_table_domain;
+            record.entry.decision.install_table_check = install_table_check;
+            record.entry.filter_revalidated = stamp;
+            return true;
+        }
+        false
+    }
+
     /// #10467: keep a route-transition hit stale until the pair teardown has
     /// completed. If teardown is refused or delayed, the surviving entry must
     /// not look freshly judged under the new generation while still carrying
