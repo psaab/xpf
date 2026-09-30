@@ -53,10 +53,11 @@ func TestPBRAppliedCountBandAndValidity7422(t *testing.T) {
 		{"the first priority above the band is NOT ours", fakeRuleOps7422{v4: []netlink.Rule{rule7422(top)}}, 0, true},
 		// The neighbours that actually exist on a live box, so "count by band"
 		// is shown to exclude them rather than merely asserted to.
-		{"kernel main/default and next-table/rib-group rules are not ours",
+		{"kernel main/default, leak rules, and legacy PBR are not ours",
 			fakeRuleOps7422{v4: []netlink.Rule{
-				rule7422(0), rule7422(100), rule7422(30000), rule7422(33000),
-				rule7422(32766), rule7422(32767),
+				rule7422(0), rule7422(config.NextTableRulePriorityBase),
+				rule7422(config.PBRRulePriorityBase - 1), rule7422(config.LegacyPBRRulePriorityBase),
+				rule7422(30000), rule7422(33000), rule7422(32766), rule7422(32767),
 			}}, 0, true},
 		{"both families are summed",
 			fakeRuleOps7422{

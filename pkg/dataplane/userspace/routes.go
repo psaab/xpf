@@ -428,12 +428,15 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			if rule.Dst == nil || rule.Table <= 0 {
 				continue
 			}
-			// #4479 (opus-172 M-2): SKIP policy-based-routing / filter-based-
-			// forwarding rules. These carry match selectors that a bare
-			// per-prefix NextTable row cannot represent; ingesting one would
-			// widen the FBF steer.
-			if rule.Priority >= config.PBRRulePriorityBase &&
-				rule.Priority < config.PBRRulePriorityBase+config.PBRRuleWindow {
+			// #4479/#11319: SKIP current and legacy policy-based-routing /
+			// filter-based-forwarding rules. These carry match selectors that a
+			// per-prefix NextTable row cannot represent; ingesting one would widen
+			// the FBF steer, including during an in-place priority-band upgrade.
+			inPBRBand := rule.Priority >= config.PBRRulePriorityBase &&
+				rule.Priority < config.PBRRulePriorityBase+config.PBRRuleWindow
+			inLegacyPBRBand := rule.Priority >= config.LegacyPBRRulePriorityBase &&
+				rule.Priority < config.LegacyPBRRulePriorityBase+config.PBRRuleWindow
+			if inPBRBand || inLegacyPBRBand {
 				continue
 			}
 			familyStr := "inet"
