@@ -55,9 +55,11 @@ func samplingFlowServerNode() *schemaNode {
 // modifier path). Both leaves were accepted untyped before #2448, so a
 // malformed destination or next-hop committed cleanly and then silently
 // failed to install in the FRR renderer and the Rust FIB builder. The
-// remaining children (qualified-next-hop, no-install, discard, reject,
-// next-table, preference) are declared so completion does not drop them and
-// so each is recognized as a known child rather than an extra identity token.
+	// Remaining children (qualified-next-hop, no-install, discard, reject,
+	// next-table, preference, and rib-group) are declared so completion does not
+	// drop them and so the schema-aware diagnostics can distinguish implemented
+	// options from accepted-but-inert static-route rib-group export (#11314).
+
 func staticRouteNode() *schemaNode {
 	return &schemaNode{
 		desc: "Static route", args: 1, placeholder: "<destination>",
@@ -130,6 +132,7 @@ func staticRouteNode() *schemaNode {
 			"discard":    {desc: "Discard (blackhole) route", children: nil},
 			"reject":     {desc: "Reject route (send ICMP unreachable)", children: nil},
 			"next-table": {desc: "Resolve in another routing table", args: 1, placeholder: "<table>", children: nil},
+			"rib-group": {desc: "Static route RIB group (route export is not implemented)", args: 1, placeholder: "<group-name>", children: nil},
 			// #3771 (L1): validate the route preference at the Go commit boundary
 			// — a non-negative admin distance representable on the i32 wire. This
 			// is the primary gate; the Rust helper backstops it
@@ -151,11 +154,13 @@ var schemaRoutingOptions = &schemaNode{desc: "Routing options", children: map[st
 		}},
 	}},
 	"autonomous-system": {desc: "Autonomous system number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
+	"router-id": {desc: "Default router ID for routing protocols", args: 1, placeholder: "<address>", children: nil},
 	"forwarding-table": {desc: "Forwarding table", children: map[string]*schemaNode{
 		"export": {desc: "Export policy", args: 1, multi: true, placeholder: "<policy>", children: nil},
 	}},
 	"rib-groups": {desc: "RIB groups", wildcard: &schemaNode{desc: "RIB group name", placeholder: "<group-name>", children: map[string]*schemaNode{
-		"import-rib": {desc: "Import RIB", children: nil},
+		"import-rib":    {desc: "Import RIB", children: nil},
+		"import-policy": {desc: "Import policy (strict commits reject this unsupported policy-filtered leak)", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 	}}},
 	"interface-routes": {desc: "Interface routes", children: map[string]*schemaNode{
 		"rib-group": {desc: "RIB group", children: map[string]*schemaNode{

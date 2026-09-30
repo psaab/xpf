@@ -213,6 +213,10 @@ type RoutingOptionsConfig struct {
 	// count with nonEmptyValues and skip empties when checking a reference.
 	ForwardingTableExports    []string
 	AutonomousSystem          uint32 // autonomous-system <number>
+	// routerID is the global `routing-options router-id` default. It is
+	// compiler-only: resolveRoutingOptionsRouterID copies it into protocol
+	// config before Config is serialized to the routing helper.
+	routerID                  string
 	RibGroups                 map[string]*RibGroup
 	InterfaceRoutesRibGroup   string // global interface-routes { rib-group inet <name>; }
 	InterfaceRoutesRibGroupV6 string // global interface-routes { rib-group inet6 <name>; }

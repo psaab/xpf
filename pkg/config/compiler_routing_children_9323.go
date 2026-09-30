@@ -154,12 +154,7 @@ func validateRoutingInstanceChildTokensAST(nodes []*Node, lenient bool) ([]strin
 				if permitted[tok] {
 					continue
 				}
-				msg := fmt.Sprintf("routing-instances %s: %q is not a routing-instance "+
-					"keyword (known: %s) — the subtree under it compiles to NOTHING: it "+
-					"commits clean, renders in `show configuration`, and takes effect "+
-					"nowhere. There is no supported way to scope NAT or a firewall "+
-					"filter to a routing instance; configure it globally instead (#9323)",
-					instName, tok, strings.Join(declared, ", "))
+				msg := routingInstanceUnknownKeywordMessage9323(instName, tok, declared)
 				if lenient {
 					warnings = append(warnings, msg)
 					continue
@@ -311,4 +306,22 @@ func routingInstanceApplyMetaKeyword9323(tok string) bool {
 		return true
 	}
 	return false
+}
+
+// routingInstanceUnknownKeywordMessage9323 keeps unsupported per-instance
+// policy-leak statements actionable without making them schema keywords.
+func routingInstanceUnknownKeywordMessage9323(instName, tok string, declared []string) string {
+	if tok == "instance-import" || tok == "instance-export" {
+		return fmt.Sprintf("routing-instances %s: %q is unsupported: xpf has no cross-RIB "+
+			"policy-leak engine for per-instance instance-import/instance-export policy. "+
+			"The supported global routing-options/interface-routes rib-group mechanism "+
+			"leaks connected prefixes only; it is not instance-import/export policy (#11314)",
+			instName, tok)
+	}
+	return fmt.Sprintf("routing-instances %s: %q is not a routing-instance "+
+		"keyword (known: %s) — the subtree under it compiles to NOTHING: it "+
+		"commits clean, renders in `show configuration`, and takes effect "+
+		"nowhere. There is no supported way to scope NAT or a firewall "+
+		"filter to a routing instance; configure it globally instead (#9323)",
+		instName, tok, strings.Join(declared, ", "))
 }
