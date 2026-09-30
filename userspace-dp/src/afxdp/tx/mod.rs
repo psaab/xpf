@@ -33,9 +33,10 @@ pub(super) mod tcp_segmentation;
 pub(in crate::afxdp) use cos_classify::cos_queue_dscp_rewrite;
 pub(super) use cos_classify::{
     CoSTxSelection, GeneratedReplyVerdict, classify_generated_reply, enqueue_local_into_cos,
-    reclassify_cached_ba_queue, resolve_cached_cos_tx_queue_id, resolve_cached_cos_tx_selection,
-    resolve_cached_cos_tx_selection_flowless, resolve_cached_cos_tx_selection_prenat,
-    resolve_cos_queue_id, resolve_cos_tx_selection, resolve_cos_tx_selection_at,
+    reclassify_cached_ba_queue_and_lp_rewrite, resolve_cached_cos_tx_queue_id,
+    resolve_cached_cos_tx_selection, resolve_cached_cos_tx_selection_flowless,
+    resolve_cached_cos_tx_selection_prenat, resolve_cos_queue_id,
+    resolve_cos_tx_selection, resolve_cos_tx_selection_at,
     resolve_cos_tx_selection_at_prenat,
 };
 // Private use, not a re-export: a `pub(super) use` of a `pub(super)`

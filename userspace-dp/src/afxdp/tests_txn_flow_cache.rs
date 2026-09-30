@@ -13,7 +13,8 @@ use crate::test_zone_ids::*;
 use crate::xsk_ffi::IfInfo;
 use crate::{
     ClassOfServiceSnapshot, CoSDSCPClassifierEntrySnapshot, CoSDSCPClassifierSnapshot,
-    CoSForwardingClassSnapshot, CoSIEEE8021ClassifierEntrySnapshot, CoSIEEE8021ClassifierSnapshot,
+    CoSDSCPRewriteRuleEntrySnapshot, CoSDSCPRewriteRuleSnapshot, CoSForwardingClassSnapshot,
+    CoSIEEE8021ClassifierEntrySnapshot, CoSIEEE8021ClassifierSnapshot,
     CoSSchedulerMapEntrySnapshot, CoSSchedulerMapSnapshot, CoSSchedulerSnapshot,
     DestinationNATRuleSnapshot, FirewallFilterSnapshot, FirewallTermSnapshot,
     InterfaceAddressSnapshot, NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot,
@@ -1316,6 +1317,252 @@ fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
     );
 }
 
+/// #11430 RED-on-revert: a BA queue reclassification hit must recompute both
+/// its queue and the loss-priority rewrite for this packet. The same 5-tuple
+/// carries each marking in turn, including both seed orders, and the output
+/// filter rewrite remains higher precedence than CoS.
+#[test]
+fn txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430() {
+
+    fn set_ipv4_dscp(frame: &mut [u8], dscp: u8) {
+        debug_assert!(dscp < 64);
+        frame[15] = (dscp << 2) | (frame[15] & 0x03);
+        frame[24] = 0;
+        frame[25] = 0;
+        let checksum = checksum16(&frame[14..34]);
+        frame[24] = (checksum >> 8) as u8;
+        frame[25] = checksum as u8;
+    }
+    let make_snapshot = || {
+        let mut snapshot = nat_snapshot();
+        snapshot.interfaces[1].cos_shaping_rate_bytes_per_sec = 10_000_000;
+        snapshot.interfaces[1].cos_shaping_burst_bytes = 256_000;
+        snapshot.interfaces[1].cos_scheduler_map = "wan-map".into();
+        snapshot.interfaces[1].cos_dscp_classifier = "dscp-cls".into();
+        snapshot.interfaces[1].cos_dscp_rewrite_rule = "lp-rewrite".into();
+        snapshot.class_of_service = Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![
+                CoSForwardingClassSnapshot {
+                    name: "best-effort".into(),
+                    queue: 0,
+                },
+                CoSForwardingClassSnapshot {
+                    name: "expedited-forwarding".into(),
+                    queue: 1,
+                },
+            ],
+            dscp_classifiers: vec![CoSDSCPClassifierSnapshot {
+                name: "dscp-cls".into(),
+                entries: vec![
+                    CoSDSCPClassifierEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        loss_priority: "low".into(),
+                        dscp_values: vec![10],
+                    },
+                    CoSDSCPClassifierEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        loss_priority: "high".into(),
+                        dscp_values: vec![18],
+                    },
+                    CoSDSCPClassifierEntrySnapshot {
+                        forwarding_class: "expedited-forwarding".into(),
+                        loss_priority: "low".into(),
+                        dscp_values: vec![26],
+                    },
+                    CoSDSCPClassifierEntrySnapshot {
+                        forwarding_class: "expedited-forwarding".into(),
+                        loss_priority: "high".into(),
+                        dscp_values: vec![46],
+                    },
+                ],
+            }],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![CoSDSCPRewriteRuleSnapshot {
+                name: "lp-rewrite".into(),
+                entries: vec![
+                    CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        loss_priority: "low".into(),
+                        dscp_value: 8,
+                    },
+                    CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        loss_priority: "high".into(),
+                        dscp_value: 9,
+                    },
+                    CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "expedited-forwarding".into(),
+                        loss_priority: "low".into(),
+                        dscp_value: 30,
+                    },
+                    CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "expedited-forwarding".into(),
+                        loss_priority: "high".into(),
+                        dscp_value: 31,
+                    },
+                ],
+            }],
+            schedulers: vec![
+                CoSSchedulerSnapshot {
+                    name: "be-sched".into(),
+                    transmit_rate_bytes: 4_000_000,
+                    priority: "low".into(),
+                    buffer_size_bytes: 128_000,
+                    ..Default::default()
+                },
+                CoSSchedulerSnapshot {
+                    name: "ef-sched".into(),
+                    transmit_rate_bytes: 6_000_000,
+                    priority: "strict-high".into(),
+                    buffer_size_bytes: 64_000,
+                    ..Default::default()
+                },
+            ],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "wan-map".into(),
+                entries: vec![
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        scheduler: "be-sched".into(),
+                    },
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "expedited-forwarding".into(),
+                        scheduler: "ef-sched".into(),
+                    },
+                ],
+            }],
+            inet_precedence_classifiers: vec![],
+        });
+        snapshot
+    };
+
+    let run_flow = |forwarding: &ForwardingState,
+                    source_port: u16,
+                    seed_dscp: u8,
+                    seed_queue: u8,
+                    seed_rewrite: u8,
+                    hits: &[(u8, u8, u8)]| {
+        let ha_state = txn_ha_state();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+
+        let mut syn = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(8, 8, 8, 8),
+            source_port,
+            443,
+            TCP_FLAG_SYN,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        set_ipv4_dscp(&mut syn, seed_dscp);
+        let mut syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+        syn_meta.dscp = seed_dscp;
+        txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            forwarding,
+            &ha_state,
+            &syn,
+            syn_meta,
+            true,
+        );
+
+        let mut seed = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(8, 8, 8, 8),
+            source_port,
+            443,
+            0x10_u8,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        set_ipv4_dscp(&mut seed, seed_dscp);
+        let mut seed_meta = txn_meta_v4(24, 0x10_u8, (seed.len() - 14) as u16);
+        seed_meta.dscp = seed_dscp;
+        txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            forwarding,
+            &ha_state,
+            &seed,
+            seed_meta,
+            true,
+        );
+        assert_eq!(txn_flow_cache_entries(&binding), 1, "the ACK seeds the cache");
+        let seed_request = binding
+            .scratch
+            .scratch_forwards
+            .last()
+            .expect("the seed packet must forward");
+        assert_eq!(seed_request.cos_queue_id, Some(seed_queue));
+        assert_eq!(seed_request.dscp_rewrite, Some(seed_rewrite));
+
+        for &(dscp, expected_queue, expected_rewrite) in hits {
+            let mut frame = build_txn_tcp_syn_frame_v4(
+                Ipv4Addr::new(10, 0, 61, 102),
+                Ipv4Addr::new(8, 8, 8, 8),
+                source_port,
+                443,
+                0x10_u8,
+                crate::afxdp::tests_support::TEST_LAN_MAC,
+            );
+            set_ipv4_dscp(&mut frame, dscp);
+            let mut meta = txn_meta_v4(24, 0x10_u8, (frame.len() - 14) as u16);
+            meta.dscp = dscp;
+            txn_run_descriptor_checked(
+                &mut binding,
+                &mut sessions,
+                forwarding,
+                &ha_state,
+                &frame,
+                meta,
+                true,
+            );
+            let request = binding
+                .scratch
+                .scratch_forwards
+                .last()
+                .expect("the cache-hit packet must forward");
+            assert_eq!(
+                request.cos_queue_id,
+                Some(expected_queue),
+                "DSCP {dscp} must select its current BA queue"
+            );
+            assert_eq!(
+                request.dscp_rewrite,
+                Some(expected_rewrite),
+                "DSCP {dscp} must select its current queue/loss-priority rewrite"
+            );
+        }
+    };
+
+    let forwarding = build_forwarding_state(&make_snapshot());
+    run_flow(
+        &forwarding,
+        12345,
+        10,
+        0,
+        8,
+        &[(46, 1, 31), (18, 0, 9), (26, 1, 30)],
+    );
+    run_flow(&forwarding, 12346, 46, 1, 31, &[(10, 0, 8)]);
+
+    let mut filtered_snapshot = make_snapshot();
+    filtered_snapshot.interfaces[1].filter_output_v4 = "rewrite-out".into();
+    filtered_snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "rewrite-out".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "rewrite-all".into(),
+            action: "accept".into(),
+            dscp_rewrite: Some(42),
+            ..Default::default()
+        }],
+    }];
+    let filtered_forwarding = build_forwarding_state(&filtered_snapshot);
+    run_flow(&filtered_forwarding, 12347, 10, 0, 42, &[(46, 1, 42)]);
+}
+
 
 /// #3779 RED-on-revert: on the flow-cache hit path the TTL/hop-limit check (and
 /// its ICMP Time Exceeded) MUST run BEFORE the egress side effects (output
@@ -1486,15 +1733,15 @@ fn txn_flow_cache_hit_ttl_check_precedes_egress_accounting_3779() {
 /// #4422 RED-on-revert: the CoS behavior-aggregate re-classify on a flow-cache
 /// HIT (#3778) must also cover the IEEE 802.1p (PCP) classifier branch, not just
 /// DSCP. PCP — like DSCP — is a per-packet field excluded from the 5-tuple
-/// flow-cache key (`reclassify_cached_ba_queue` reads `meta.ingress_pcp`), so a
-/// mixed-priority flow must not be pinned to the SEED packet's queue.
+/// flow-cache key (the BA helper reads `meta.ingress_pcp`), so a mixed-priority
+/// flow must not be pinned to the SEED packet's queue.
 ///
 /// A priority-tagged (802.1p, VID 0) packet 1 (SYN, PCP 0) installs the session
 /// without seeding (#2363); packet 2 (first ACK, PCP 0) seeds the cache on the
 /// default (best-effort) queue; packet 3 (same 5-tuple, PCP 5) hits the flow
-/// cache and MUST re-classify to the EF queue via the 802.1p branch of
-/// `reclassify_cached_ba_queue`. The interface carries ONLY an 802.1p classifier
-/// (no DSCP classifier), so the PCP branch is the sole path to the EF queue.
+/// cache and MUST re-classify to the EF queue via the 802.1p branch of the
+/// BA hit helper. The interface carries ONLY an 802.1p classifier (no DSCP
+/// classifier), so the PCP branch is the sole path to the EF queue.
 /// Reverting the per-packet re-classify (or dropping the 802.1p arm) replays the
 /// frozen default queue (0), which this asserts against (expects queue 1).
 /// SYN-first per the #10270 fail-closed gate (#10605).
@@ -1531,8 +1778,7 @@ fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
     // CoS on the WAN egress (reth0.80, ifindex 12): an 802.1p (PCP) BA
     // classifier maps PCP 5 -> expedited-forwarding (queue 1); PCP 0 is unmapped
     // and falls to the default best-effort queue (0). Deliberately NO DSCP
-    // classifier, so the 802.1p branch of reclassify_cached_ba_queue is the only
-    // path that can select the EF queue.
+    // classifier, so its 802.1p branch is the only path to select the EF queue.
     snapshot.interfaces[1].cos_shaping_rate_bytes_per_sec = 10_000_000;
     snapshot.interfaces[1].cos_shaping_burst_bytes = 256_000;
     snapshot.interfaces[1].cos_scheduler_map = "wan-map".to_string();
