@@ -353,7 +353,15 @@ run_shell test/mutation/selftest-bpf-exist-cannot-create_6923.sh --selftest
 # BPF_ANY positive control so an ENOENT cannot come from a broken fixture.
 # The probe runs via `sudo -n` when available. SKIPs without cc, passwordless
 # sudo, or CAP_BPF; it never prompts for a password.
-run_shell test/mutation/selftest-bpf-exist-cannot-create_6923.sh
+# #10771 coord-selftest-sudo: `make selftest` is documented hermetic (no
+# root), so the privileged probe is opt-in: without
+# XPF_SELFTEST_ALLOW_SUDO=1 the leg SKIPs (the --selftest contract leg above
+# still pins the privilege boundary with fake tools on every run).
+if [ "${XPF_SELFTEST_ALLOW_SUDO:-}" = "1" ]; then
+	run_shell test/mutation/selftest-bpf-exist-cannot-create_6923.sh
+else
+	skipl "test/mutation/selftest-bpf-exist-cannot-create_6923.sh (needs XPF_SELFTEST_ALLOW_SUDO=1: creates a BPF map via passwordless sudo)"
+fi
 # #6936: FBF two-upstream steering verdicts. Hermetic — no incus, no cluster,
 # no network. Guards a negative cell that used to fail to a HEALTHY value:
 # "no leak" and "the probe returned nothing" both scored PASS. Needs bash.
