@@ -2892,12 +2892,19 @@ fn colliding_ordinary_close_without_identity_drops10512() {
 #[test]
 #[ignore = "manual loaded shared-session churn measurement"]
 fn close_check_and_publish_churn_11299() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
     use std::thread;
     use std::time::{Duration, Instant};
 
+    struct PublisherDone(std::sync::Arc<AtomicUsize>);
+    impl Drop for PublisherDone {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::Release);
+        }
+    }
+
     const LIVE_ROWS: u32 = 100_000;
-    const CLOSE_CHECKS: usize = 5_000;
     const PUBLISHERS: usize = 4;
     const PUBLISHES_PER_WORKER: usize = 1_000;
 
@@ -2937,10 +2944,14 @@ fn close_check_and_publish_churn_11299() {
         );
     }
 
+    let publishers_remaining = std::sync::Arc::new(AtomicUsize::new(PUBLISHERS));
+    let publisher_mutations_inflight = std::sync::Arc::new(AtomicUsize::new(0));
     let start_gate = std::sync::Arc::new(Barrier::new(PUBLISHERS + 2));
     let close_shared = std::sync::Arc::clone(&shared);
     let close_gate = std::sync::Arc::clone(&start_gate);
     let close_delta_for_worker = std::sync::Arc::clone(&close_delta);
+    let close_remaining = std::sync::Arc::clone(&publishers_remaining);
+    let close_mutations = std::sync::Arc::clone(&publisher_mutations_inflight);
     let close_worker = thread::spawn(move || {
         let mut local_sessions = SessionTable::new();
         for index in 0..LIVE_ROWS {
@@ -2964,23 +2975,34 @@ fn close_check_and_publish_churn_11299() {
         local_sessions.drain_deltas(256);
         close_gate.wait();
         let started = Instant::now();
-        for _ in 0..CLOSE_CHECKS {
+        let mut close_checks = 0usize;
+        let mut overlapping_close_checks = 0usize;
+        while close_remaining.load(Ordering::Acquire) > 0 {
+            let overlapping_before = close_mutations.load(Ordering::Acquire) > 0;
             assert!(!super::super::session_delta::close_delta_is_stale_incarnation(
                 &close_delta_for_worker,
                 Some(&local_sessions),
                 &close_shared.sessions,
                 &close_shared.owner_rg_indexes,
             ));
+            let overlapping_after = close_mutations.load(Ordering::Acquire) > 0;
+            close_checks += 1;
+            if overlapping_before || overlapping_after {
+                overlapping_close_checks += 1;
+            }
         }
-        started.elapsed()
+        (started.elapsed(), close_checks, overlapping_close_checks)
     });
 
     let mut publish_workers = Vec::with_capacity(PUBLISHERS);
     for worker_id in 0..PUBLISHERS {
         let publish_shared = std::sync::Arc::clone(&shared);
         let publish_gate = std::sync::Arc::clone(&start_gate);
+        let publishers_remaining = std::sync::Arc::clone(&publishers_remaining);
+        let publisher_mutations = std::sync::Arc::clone(&publisher_mutations_inflight);
         publish_workers.push(thread::spawn(move || {
             let _counter_exempt = crate::afxdp::counter_test_lock::CounterExempt::new();
+            let _publisher_done = PublisherDone(publishers_remaining);
             publish_gate.wait();
             let mut latencies = Vec::with_capacity(PUBLISHES_PER_WORKER);
             for sequence in 0..PUBLISHES_PER_WORKER {
@@ -2995,6 +3017,7 @@ fn close_check_and_publish_churn_11299() {
                     unstamped_decision(unusable_resolution()),
                     pbr_metadata(),
                 );
+                publisher_mutations.fetch_add(1, Ordering::AcqRel);
                 let started = Instant::now();
                 publish_shared_session(
                     &publish_shared.sessions,
@@ -3011,6 +3034,7 @@ fn close_check_and_publish_churn_11299() {
                     &publish_shared.owner_rg_indexes,
                     &key,
                 );
+                publisher_mutations.fetch_sub(1, Ordering::Release);
             }
             latencies
         }));
@@ -3018,28 +3042,32 @@ fn close_check_and_publish_churn_11299() {
 
     start_gate.wait();
     let started = Instant::now();
-    let close_elapsed = close_worker.join().expect("close worker completed");
+    let (close_elapsed, close_checks, overlapping_close_checks) =
+        close_worker.join().expect("close worker completed");
     let mut publish_latencies = Vec::with_capacity(PUBLISHERS * PUBLISHES_PER_WORKER);
     for worker in publish_workers {
         publish_latencies.extend(worker.join().expect("publish worker completed"));
     }
     let elapsed = started.elapsed();
     assert_eq!(publish_latencies.len(), PUBLISHERS * PUBLISHES_PER_WORKER);
-    assert!(
-        elapsed < Duration::from_secs(30),
-        "indexed close checks starved concurrent publishes: {elapsed:?}"
-    );
+    assert!(close_checks > 0, "close checker did not run");
+    assert!(overlapping_close_checks > 0, "close checks did not overlap publishing");
     publish_latencies.sort_unstable();
     let p99 = publish_latencies[publish_latencies.len() * 99 / 100];
     let max = *publish_latencies.last().expect("publish samples exist");
     eprintln!(
-        "loaded close churn: rows={LIVE_ROWS} close_checks={CLOSE_CHECKS} \
-         publishes={} elapsed_ms={} close_checks_per_s={:.0} \
-         publish_p99_us={} publish_max_us={}",
+        "loaded close churn: rows={LIVE_ROWS} close_checks={close_checks} \
+         overlapping_close_checks={overlapping_close_checks} publishes={} elapsed_ms={} \
+         close_checks_per_s={:.0} publish_p99_us={} publish_max_us={}",
         publish_latencies.len(),
         elapsed.as_millis(),
-        CLOSE_CHECKS as f64 / close_elapsed.as_secs_f64(),
+        close_checks as f64 / close_elapsed.as_secs_f64(),
         p99.as_micros(),
         max.as_micros(),
     );
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "indexed close checks starved concurrent publishes: {elapsed:?}"
+    );
+
 }
