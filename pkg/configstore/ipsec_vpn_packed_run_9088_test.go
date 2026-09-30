@@ -10,7 +10,7 @@ import (
 // be rejected for an undefined reference and mistaken for the gate under test.
 const ipsecPreamble9088 = `security {
     ike {
-        proposal PR { authentication-method pre-shared-keys; }
+        proposal PR { authentication-method pre-shared-keys; encryption-algorithm aes-256-cbc; authentication-algorithm sha-256; }
         policy IKEP { proposals PR; }
         gateway G {
             ike-policy IKEP;
