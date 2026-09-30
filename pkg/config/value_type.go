@@ -83,13 +83,12 @@ const (
 	// rules are enforced by each leaf's validator; for example, DDNS uses
 	// ValidateDDNSHostname while system host-name uses ValidateSystemHostname.
 	ValueHostname
-	// ValueTimeOfDay is a Junos scheduler time-of-day in HH:MM:SS 24-hour
-	// form (e.g. 09:00:00). Validated by ValidateTimeOfDay so an
-	// unparseable start-time/stop-time is rejected at commit instead of
-	// silently zeroing the scheduler window (#3849 fail-closed).
+	// ValueTimeOfDay is a Junos scheduler time-of-day in HH:MM or HH:MM:SS
+	// 24-hour form (e.g. 09:00 or 09:00:00). Validated by ValidateTimeOfDay;
+	// omitted seconds are zero.
 	ValueTimeOfDay
-	// ValueDate is a Junos scheduler calendar date in YYYY-MM-DD form
-	// (e.g. 2026-03-01). Validated by ValidateDate.
+	// ValueDate marks a date-shaped leaf; the leaf validator defines its
+	// accepted form. Scheduler bounds also accept local YYYY-MM-DD.HH:MM.
 	ValueDate
 	// ValueTimeZone is an IANA tz-database / zoneinfo name (e.g. UTC,
 	// America/Los_Angeles, Etc/GMT+5). It is rendered into the

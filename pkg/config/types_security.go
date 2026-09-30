@@ -18,20 +18,22 @@ import (
 // A weekday present in Days overrides the daily window for that day (Junos
 // per-day scheduling). AllDay marks the daily window as active for the whole
 // day (`daily all-day`). StartDate/StopDate bound the scheduler to a calendar
-// range.
+// range; bounds accept either YYYY-MM-DD or Junos local wall-clock
+// YYYY-MM-DD.HH:MM. A date-only stop is inclusive through that date, while a
+// date-time stop is exclusive.
 //
 // Fail-closed invariant (#3849): a scheduler that resolves to NO window for a
 // given instant (no daily window, no applicable per-day window, and no
-// date-only range) is INACTIVE, not always-on. The runtime evaluator
+// date range) is INACTIVE, not always-on. The runtime evaluator
 // (pkg/scheduler.isWithinWindow) must never treat an absent window as
 // always-permit — a policy `scheduler-name` scoped to a window that failed to
 // compile must deny, not permit around the clock.
 type SchedulerConfig struct {
 	Name      string
-	StartTime string // daily-window start "HH:MM:SS"
-	StopTime  string // daily-window stop "HH:MM:SS"
-	StartDate string // "YYYY-MM-DD" (optional)
-	StopDate  string // "YYYY-MM-DD" (optional)
+	StartTime string // daily-window start "HH:MM" or "HH:MM:SS"
+	StopTime  string // daily-window stop "HH:MM" or "HH:MM:SS", exclusive
+	StartDate string // "YYYY-MM-DD" or "YYYY-MM-DD.HH:MM" (optional)
+	StopDate  string // date-only inclusive or date-time exclusive (optional)
 	Daily     bool   // `daily` recurrence keyword present
 	AllDay    bool   // `daily all-day` — active the entire day
 
@@ -44,12 +46,13 @@ type SchedulerConfig struct {
 // SchedulerDayWindow is a single day's time window inside a scheduler — the
 // body of a `daily { ... }` or a `monday { ... }` (..`sunday`) container.
 // A day is active when AllDay is set, or when the current time-of-day falls
-// within [StartTime, StopTime); Exclude forces the day inactive. An empty
+// within [StartTime, StopTime); times accept HH:MM (seconds zero) and
+// HH:MM:SS. Exclude forces the day inactive. An empty
 // window (no times, no all-day, no exclude) is treated as CLOSED by the
 // runtime evaluator (#3849 fail-closed).
 type SchedulerDayWindow struct {
-	StartTime string // "HH:MM:SS"
-	StopTime  string // "HH:MM:SS"
+	StartTime string // "HH:MM" or "HH:MM:SS"
+	StopTime  string // "HH:MM" or "HH:MM:SS"
 	AllDay    bool   // active the entire day
 	Exclude   bool   // never active this day
 }
