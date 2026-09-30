@@ -78,8 +78,9 @@ use flowless_verdict::{
 use frag_assoc::{
     flowbacked_no_route_requires_nat_translation, flowless_nat_rule_possible,
     flowless_no_route_requires_nat_translation, flowless_requires_nat_translation,
-    frag_ingress_authority, nat_consult_forward_fragment_assoc, nat_install_forward_fragment_assoc,
-    nat64_consult_forward_fragment_assoc, nat64_install_forward_fragment_assoc,
+    frag_ingress_authority_with_nat_scope, nat_consult_forward_fragment_assoc,
+    nat_install_forward_fragment_assoc, nat64_consult_forward_fragment_assoc,
+    nat64_install_forward_fragment_assoc,
     session_gated_reverse_fragment_requires_nat_translation,
 };
 use host_inbound_policy::{
@@ -656,9 +657,26 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // an RI node is also gated before that pre-policy side effect.
                 let FabricIngressOutcome {
                     ingress_zone_override,
+                    ingress_nat_scope_ifindex,
                     packet_fabric_ingress,
                     invalid_zone_stamp,
                 } = stage_classify_fabric_ingress(packet_frame, &mut meta, now_secs, worker_ctx);
+                // Preserve only identities admitted by stage 9; local arrivals
+                // use their configured logical interface when creating a punt.
+                let fabric_nat_scope_ifindex_for_redirect = ingress_nat_scope_ifindex.or_else(|| {
+                    if packet_fabric_ingress {
+                        None
+                    } else {
+                        Some(
+                            resolve_ingress_logical_ifindex(
+                                worker_ctx.forwarding,
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                            )
+                            .unwrap_or(meta.ingress_ifindex as i32),
+                        )
+                    }
+                });
                 // #11061: an invalid zone stamp is not the legacy "unstamped"
                 // case. Drop it before neighbor/session/cache lookup so stale
                 // or forged identity cannot collapse to routing domain 0 / MAIN.
@@ -2620,10 +2638,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // Raw stage-9 override (mirrors the commit-site capture —
                             // arm-scoped shadows below do not reach this tail).
                             let frag_authority_zone_override = ingress_zone_override;
-                            let frag_authority = frag_ingress_authority(
+                            let frag_authority = frag_ingress_authority_with_nat_scope(
                                 worker_ctx.forwarding,
                                 meta,
                                 frag_authority_zone_override,
+                                ingress_nat_scope_ifindex,
                             );
                             let frag_session_key = &resolved.key;
                             let frag_session_id = resolved.session_id;
@@ -2766,6 +2785,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             meta.ingress_ifindex as i32,
                             meta.ingress_vlan_id,
                             ingress_zone_override,
+                            ingress_nat_scope_ifindex,
                         );
                         // #3437: the DNAT `match application` term may pin a
                         // source-port (H10) and an ICMP type/code (H11). Supply
@@ -3285,6 +3305,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // consult can only see the raw one would desynchronize them
                         // and turn legitimate same-domain fragments into misses.
                         let frag_authority_zone_override = ingress_zone_override;
+                        let frag_authority_nat_scope_ifindex = ingress_nat_scope_ifindex;
                         let ingress_zone_override = gate_fabric_zone_override_on_owner_rg(
                             worker_ctx.forwarding,
                             worker_ctx.ha_state,
@@ -3292,6 +3313,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ingress_zone_override,
                             resolution,
                         );
+                        // NAT scope identity is only authoritative when its
+                        // zone survived the same owner-RG gate used for policy.
+                        let ingress_nat_scope_ifindex = ingress_nat_scope_ifindex
+                            .filter(|_| ingress_zone_override.is_some());
                         let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
                             worker_ctx.forwarding,
                             ingress_logical,
@@ -4284,6 +4309,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx.forwarding,
                                             meta.ingress_ifindex as i32,
                                             meta.ingress_vlan_id,
+                                            ingress_nat_scope_ifindex,
                                             &from_zone,
                                             &to_zone,
                                             decision.resolution.egress_ifindex,
@@ -4841,11 +4867,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             // Both helpers self-gate (NAT64 vs
                                             // ordinary same-family), so exactly
                                             // one fires for a given fragment.
-                                            let frag_authority = frag_ingress_authority(
-                                                worker_ctx.forwarding,
-                                                meta,
-                                                frag_authority_zone_override,
-                                            );
+                                            let frag_authority =
+                                                frag_ingress_authority_with_nat_scope(
+                                                    worker_ctx.forwarding,
+                                                    meta,
+                                                    frag_authority_zone_override,
+                                                    frag_authority_nat_scope_ifindex,
+                                                );
                                             let frag_session_id =
                                                 sessions.session_id_for(&flow.forward_key);
                                             if frag_session_id != 0 {
@@ -5374,10 +5402,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // (always in scope) rather than going through the debug
                             // struct which may not have been populated.
                             // #919/#922: ID-keyed redirect — no name lookup.
-                            if let Some(redirect) = resolve_fabric_redirect_for_ingress_zone(
-                                worker_ctx.forwarding,
-                                Some(from_zone_id),
-                            ) {
+                            if let Some(redirect) =
+                                resolve_fabric_redirect_for_ingress_identity(
+                                    worker_ctx.forwarding,
+                                    Some(from_zone_id),
+                                    fabric_nat_scope_ifindex_for_redirect,
+                                )
+                            {
                                 decision.resolution = redirect;
                             }
                         } else if should_seed_fabric_punt(
@@ -5520,10 +5551,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // Here `ingress_zone_override` is still the RAW stamp (the
                         // RG-gated shadow is bound later, in the miss arm), which
                         // is the same value the install captured.
-                        let frag_authority = frag_ingress_authority(
+                        let frag_authority = frag_ingress_authority_with_nat_scope(
                             worker_ctx.forwarding,
                             meta,
                             ingress_zone_override,
+                            ingress_nat_scope_ifindex,
                         );
                         nat64_consult_forward_fragment_assoc(
                             worker_ctx.forwarding,
@@ -6160,9 +6192,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 .get(&arrival_logical)
                                 .copied()
                         });
-                        resolve_fabric_redirect_for_ingress_zone(
+                        resolve_fabric_redirect_for_ingress_identity(
                             worker_ctx.forwarding,
                             ingress_zone_id,
+                            fabric_nat_scope_ifindex_for_redirect,
                         )
                         .unwrap_or(base_resolution)
                     } else {
@@ -6212,6 +6245,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         ingress_zone_override,
                         final_resolution,
                     );
+                    let ingress_nat_scope_ifindex =
+                        ingress_nat_scope_ifindex.filter(|_| ingress_zone_override.is_some());
 
                     // (3) Zone security policy — only for TRANSIT
                     //     (ForwardCandidate). Local delivery (host-inbound) is
@@ -6331,6 +6366,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 l3_flow,
                                 meta,
                                 ingress_zone_override,
+                                ingress_nat_scope_ifindex,
                                 from_zone_id,
                                 to_zone_id,
                                 final_resolution.egress_ifindex,
@@ -6634,9 +6670,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             .get(&arrival_logical)
                             .copied()
                     });
-                    if let Some(redirect) =
-                        resolve_fabric_redirect_for_ingress_zone(worker_ctx.forwarding, zone_id)
-                    {
+                    if let Some(redirect) = resolve_fabric_redirect_for_ingress_identity(
+                        worker_ctx.forwarding,
+                        zone_id,
+                        fabric_nat_scope_ifindex_for_redirect,
+                    ) {
                         decision.resolution = redirect;
                     }
                 }
@@ -7515,6 +7553,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta,
                                                 policy_packet_icmp(packet_frame, meta),
                                                 ingress_zone_override,
+                                                ingress_nat_scope_ifindex,
                                                 from_zone_id,
                                                 decision.nat,
                                             )
@@ -7524,6 +7563,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 adj_flow,
                                                 meta,
                                                 ingress_zone_override,
+                                                ingress_nat_scope_ifindex,
                                                 from_zone_id,
                                                 now_ns,
                                             )
@@ -8017,6 +8057,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 &l3_flow,
                                                 meta,
                                                 ingress_zone_override,
+                                                ingress_nat_scope_ifindex,
                                                 from_zone_id,
                                                 to_zone_id,
                                                 decision.resolution.egress_ifindex,
@@ -8028,6 +8069,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 &l3_flow,
                                                 meta,
                                                 ingress_zone_override,
+                                                ingress_nat_scope_ifindex,
                                                 from_zone_id,
                                                 to_zone_id,
                                                 decision.resolution.egress_ifindex,
@@ -8456,6 +8498,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_ctx.forwarding,
                                                 meta.ingress_ifindex as i32,
                                                 meta.ingress_vlan_id,
+                                                ingress_nat_scope_ifindex,
                                                 &from_zone,
                                                 &to_zone,
                                                 pending_decision.resolution.egress_ifindex,

@@ -32,9 +32,23 @@ pub(in crate::afxdp) fn frag_ingress_authority(
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
 ) -> crate::fragment_assoc::FragAuthority {
+    frag_ingress_authority_with_nat_scope(forwarding, meta, ingress_zone_override, None)
+}
+
+/// #11337: a validated V2 peer stamp contributes the original logical
+/// ingress index so first/non-first fragment association keys retain NAT scope.
+#[inline]
+pub(in crate::afxdp) fn frag_ingress_authority_with_nat_scope(
+    forwarding: &ForwardingState,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
+) -> crate::fragment_assoc::FragAuthority {
     let physical = meta.ingress_ifindex as i32;
-    let logical = resolve_ingress_logical_ifindex(forwarding, physical, meta.ingress_vlan_id)
-        .unwrap_or(physical);
+    let logical = fabric_ingress_scope_ifindex.unwrap_or_else(|| {
+        resolve_ingress_logical_ifindex(forwarding, physical, meta.ingress_vlan_id)
+            .unwrap_or(physical)
+    });
     // Zone precedence mirrors prerouting_ingress_scope: a fabric-encoded
     // override wins, else the LOGICAL unit's configured zone (#5802). An
     // unzoned ingress resolves to 0, which is itself a distinct authority —
@@ -353,6 +367,7 @@ pub(super) fn flowless_requires_nat_translation(
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
     to_zone_id: u16,
     egress_ifindex: i32,
@@ -398,6 +413,7 @@ pub(super) fn flowless_requires_nat_translation(
         // #9956 F-052: the packet's OWN VLAN, used to resolve logical ingress
         // scope for this per-packet NAT decision.
         meta.ingress_vlan_id,
+        fabric_ingress_scope_ifindex,
         from_zone,
         to_zone,
         egress_ifindex,
@@ -410,6 +426,7 @@ pub(super) fn flowless_requires_nat_translation(
         forwarding,
         l3_flow,
         meta,
+        fabric_ingress_scope_ifindex,
         from_zone_id,
         to_zone_id,
         egress_ifindex,
@@ -423,6 +440,7 @@ pub(super) fn flowless_requires_nat_translation(
         l3_flow,
         meta,
         ingress_zone_override,
+        fabric_ingress_scope_ifindex,
         to_zone_id,
         egress_ifindex,
     )
@@ -436,6 +454,7 @@ fn flowless_destination_nat_requires_translation(
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
     to_zone_id: u16,
     egress_ifindex: i32,
 ) -> bool {
@@ -444,6 +463,7 @@ fn flowless_destination_nat_requires_translation(
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
         ingress_zone_override,
+        fabric_ingress_scope_ifindex,
     );
     if let IpAddr::V6(dst_v6) = l3_flow.dst_ip {
         let mut probe = dst_v6;
@@ -512,6 +532,7 @@ fn flowless_destination_nat_requires_translation(
         l3_flow,
         meta,
         ingress_zone_override,
+        fabric_ingress_scope_ifindex,
         to_zone_id,
         egress_ifindex,
     )
@@ -528,6 +549,7 @@ pub(super) fn flowless_no_route_requires_nat_translation(
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
     now_ns: u64,
 ) -> bool {
@@ -546,6 +568,7 @@ pub(super) fn flowless_no_route_requires_nat_translation(
             l3_flow,
             meta,
             ingress_zone_override,
+            fabric_ingress_scope_ifindex,
             from_zone_id,
             forwarding.egress_zone_id(egress_ifindex),
             egress_ifindex,
@@ -563,6 +586,7 @@ pub(super) fn flowless_no_route_requires_nat_translation(
             l3_flow,
             meta,
             ingress_zone_override,
+            fabric_ingress_scope_ifindex,
             from_zone_id,
             0,
             0,
@@ -587,6 +611,7 @@ pub(super) fn flowbacked_no_route_requires_nat_translation(
     meta: UserspaceDpMeta,
     packet_icmp: Option<(u8, u8)>,
     ingress_zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
     nat: crate::nat::NatDecision,
 ) -> bool {
@@ -620,6 +645,7 @@ pub(super) fn flowbacked_no_route_requires_nat_translation(
             meta,
             packet_icmp,
             ingress_zone_override,
+            fabric_ingress_scope_ifindex,
             from_zone_id,
             egress_ifindex,
             source_untranslated,
@@ -640,6 +666,7 @@ pub(super) fn flowbacked_no_route_requires_nat_translation(
             meta,
             packet_icmp,
             ingress_zone_override,
+            fabric_ingress_scope_ifindex,
             from_zone_id,
             0,
             source_untranslated,
@@ -663,6 +690,7 @@ fn flowbacked_requires_nat_translation_on_egress(
     meta: UserspaceDpMeta,
     packet_icmp: Option<(u8, u8)>,
     ingress_zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
     egress_ifindex: i32,
     source_untranslated: bool,
@@ -692,6 +720,7 @@ fn flowbacked_requires_nat_translation_on_egress(
             forwarding,
             meta.ingress_ifindex as i32,
             meta.ingress_vlan_id,
+            fabric_ingress_scope_ifindex,
             egress_ifindex,
             flow.forward_key.routing_domain,
         );
@@ -728,6 +757,7 @@ fn flowbacked_requires_nat_translation_on_egress(
             meta.ingress_ifindex as i32,
             meta.ingress_vlan_id,
             ingress_zone_override,
+            fabric_ingress_scope_ifindex,
         );
         if let IpAddr::V6(mut dst_v6) = flow.dst_ip {
             if !matches!(
@@ -781,6 +811,7 @@ pub(super) fn flowless_nat_rule_possible(
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
     to_zone_id: u16,
     egress_ifindex: i32,
@@ -790,6 +821,7 @@ pub(super) fn flowless_nat_rule_possible(
         forwarding,
         l3_flow,
         meta,
+        fabric_ingress_scope_ifindex,
         from_zone_id,
         to_zone_id,
         egress_ifindex,
@@ -799,6 +831,7 @@ pub(super) fn flowless_nat_rule_possible(
         l3_flow,
         meta,
         ingress_zone_override,
+        fabric_ingress_scope_ifindex,
         to_zone_id,
         egress_ifindex,
     )
@@ -808,6 +841,7 @@ fn flowless_source_nat_rule_possible(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
     to_zone_id: u16,
     egress_ifindex: i32,
@@ -825,6 +859,7 @@ fn flowless_source_nat_rule_possible(
         forwarding,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
+        fabric_ingress_scope_ifindex,
         egress_ifindex,
         l3_flow.forward_key.routing_domain,
     );
@@ -858,6 +893,7 @@ fn flowless_destination_nat_rule_possible(
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
     to_zone_id: u16,
     egress_ifindex: i32,
 ) -> bool {
@@ -866,6 +902,7 @@ fn flowless_destination_nat_rule_possible(
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
         ingress_zone_override,
+        fabric_ingress_scope_ifindex,
     );
     if forwarding.dnat_table.flowless_l4_translation_possible(
         meta.protocol,
@@ -881,6 +918,7 @@ fn flowless_destination_nat_rule_possible(
         forwarding,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
+        fabric_ingress_scope_ifindex,
         egress_ifindex,
         l3_flow.forward_key.routing_domain,
     );
@@ -952,6 +990,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         flow,
         meta,
         None,
+        None,
         from_zone_id,
         to_zone_id,
         egress_ifindex,
@@ -964,6 +1003,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         flow,
         meta,
         None,
+        None,
         to_zone_id,
         egress_ifindex,
     ) {
@@ -975,6 +1015,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         forwarding,
         flow,
         meta,
+        None,
         from_zone_id,
         to_zone_id,
         egress_ifindex,
@@ -1018,6 +1059,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         forwarding,
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
+        None,
         from_zone,
         to_zone,
         egress_ifindex,

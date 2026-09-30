@@ -20,7 +20,7 @@
 
 use super::super::*;
 use ipnet::IpNet;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// Carry context built by [`populate_interfaces`] for downstream
@@ -1492,6 +1492,103 @@ pub(super) fn populate_zone_to_rgs(state: &mut ForwardingState) {
         let rgs = state.zone_to_rgs.entry(*zone_id).or_default();
         if !rgs.contains(&rg) {
             rgs.push(rg);
+        }
+    }
+}
+
+/// #11337: build peer-stable NAT scope ids from configured identity, never
+/// Linux ifindex. If a 24-bit hash collides, both identities are omitted so a
+/// fabric packet can never be scoped to the wrong interface or routing instance.
+pub(super) fn populate_fabric_nat_scope_ids(state: &mut ForwardingState) {
+    let mut scope_by_id: BTreeMap<u32, (u16, String, String, i32, i32)> = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+
+    for (ifindex, zone_id) in &state.ifindex_to_zone_id {
+        if *zone_id == 0 {
+            continue;
+        }
+        let ifname = state
+            .ifindex_to_config_name
+            .get(ifindex)
+            .map(String::as_str)
+            .unwrap_or("");
+        let routing_instance = state
+            .ifindex_to_routing_instance
+            .get(ifindex)
+            .map(String::as_str)
+            .unwrap_or("");
+        let redundancy_group = state
+            .egress
+            .get(ifindex)
+            .map_or(0, |egress| egress.redundancy_group);
+        let id = super::super::forwarding::fabric_nat_scope_stamp_id(
+            *zone_id,
+            ifname,
+            routing_instance,
+        );
+
+        match scope_by_id.get_mut(&id) {
+            Some((old_zone, old_ifname, old_ri, old_ifindex, old_rg)) => {
+                if *old_zone != *zone_id
+                    || old_ifname != ifname
+                    || old_ri != routing_instance
+                    || *old_rg != redundancy_group
+                {
+                    ambiguous.insert(id);
+                } else {
+                    *old_ifindex = (*old_ifindex).min(*ifindex);
+                }
+            }
+            None => {
+                scope_by_id.insert(
+                    id,
+                    (
+                        *zone_id,
+                        ifname.to_string(),
+                        routing_instance.to_string(),
+                        *ifindex,
+                        redundancy_group,
+                    ),
+                );
+            }
+        }
+    }
+
+    state.ifindex_to_fabric_nat_scope_id.clear();
+    state.fabric_nat_scope_id_to_identity.clear();
+    for (ifindex, zone_id) in &state.ifindex_to_zone_id {
+        if *zone_id == 0 {
+            continue;
+        }
+        let ifname = state
+            .ifindex_to_config_name
+            .get(ifindex)
+            .map(String::as_str)
+            .unwrap_or("");
+        let routing_instance = state
+            .ifindex_to_routing_instance
+            .get(ifindex)
+            .map(String::as_str)
+            .unwrap_or("");
+        let id = super::super::forwarding::fabric_nat_scope_stamp_id(
+            *zone_id,
+            ifname,
+            routing_instance,
+        );
+        if !ambiguous.contains(&id) {
+            state.ifindex_to_fabric_nat_scope_id.insert(*ifindex, id);
+        }
+    }
+    for (id, (zone_id, _, _, ifindex, redundancy_group)) in scope_by_id {
+        if !ambiguous.contains(&id) {
+            state.fabric_nat_scope_id_to_identity.insert(
+                id,
+                FabricNatScopeIdentity {
+                    zone_id,
+                    ifindex,
+                    redundancy_group,
+                },
+            );
         }
     }
 }
