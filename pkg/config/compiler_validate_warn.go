@@ -512,15 +512,17 @@ func ValidateConfig(cfg *Config) []string {
 		if sched == nil {
 			continue
 		}
-		// #10006: the runtime intentionally preserves the historical
-		// start==stop wraparound convention, which makes the time-of-day arm
-		// always-active. Surface that surprising shorthand at commit and point
-		// operators to the matching explicit form.
+		// #10006/#11089: start==stop is a degenerate zero window and the
+		// runtime treats it as never-active (Junos parity — an empty
+		// [start, stop) range matches nothing). Surface that surprising
+		// dead arm at commit and point operators to the matching explicit
+		// form. (Pre-#11089 the runtime fell into the wraparound branch and
+		// permitted 24/7; any config relying on that shorthand must adopt
+		// the explicit always-active arm.)
 		if alwaysForm, ok := schedulerEqualTimeWindowForm(sched); ok {
 			warnings = append(warnings, fmt.Sprintf(
-				"scheduler %q has start-time == stop-time; equal bounds make "+
-					"the time-of-day arm always-active (use `%s` for the "+
-					"explicit always-active form)", name, alwaysForm))
+				"scheduler %q has start-time == stop-time; equal bounds match "+
+					"nothing (use `%s` for the explicit always-active form)", name, alwaysForm))
 		}
 		if schedulerHasEffectiveWindow(sched) {
 			continue

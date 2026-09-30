@@ -576,10 +576,12 @@ func schedulerHasDateRange(sched *config.SchedulerConfig) bool {
 
 // withinTimeOfDay reports whether now's clock time falls within
 // [start, stop), handling overnight (wraparound) windows. An unparseable
-// bound fails closed. Equal bounds (start == stop) take the wraparound branch
-// and therefore mean always-active. Use the corresponding explicit all-day
-// arm (`daily all-day` for a daily window or `<weekday> all-day` for a per-day
-// arm) when that intent is explicit.
+// bound fails closed. Equal bounds (start == stop) are never-active per
+// Junos parity: a zero window matches nothing (#11089 — previously the
+// wraparound branch below made them always-active, fail-open for
+// time-gated permits). Use the corresponding explicit all-day arm
+// (`daily all-day` for a daily window or `<weekday> all-day` for a per-day
+// arm) when always-on is intended.
 func withinTimeOfDay(now time.Time, name, start, stop string) bool {
 	startTOD, err := parseTimeOfDay(start)
 	if err != nil {
@@ -594,7 +596,14 @@ func withinTimeOfDay(now time.Time, name, start, stop string) bool {
 
 	nowTOD := timeOfDay(now)
 
-	if !startTOD.before(stopTOD) {
+	if startTOD == stopTOD {
+		// #11089: degenerate zero window. Junos treats start == stop as
+		// never-active (an empty [start, stop) range matches nothing), so
+		// fail closed here instead of falling into the wraparound branch,
+		// which is true for every clock time and permitted 24/7.
+		return false
+	}
+	if stopTOD.before(startTOD) {
 		// Wraparound: e.g. 22:00:00 - 06:00:00 means overnight.
 		// Active if now >= start OR now < stop.
 		return !nowTOD.before(startTOD) || nowTOD.before(stopTOD)
