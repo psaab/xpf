@@ -48,6 +48,10 @@ mod nat_exception;
 mod prerouting_scope;
 
 mod policy_revalidation;
+pub(in crate::afxdp) use policy_revalidation::{
+    ROUTE_CHANGE_ALARM_INTERVAL_NS, ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL,
+    should_alarm_route_change,
+};
 #[cfg(test)]
 pub(crate) use policy_revalidation::{
     revalidate_zone_policy_canonical_key_for_test, revalidate_zone_policy_declines_for_test,

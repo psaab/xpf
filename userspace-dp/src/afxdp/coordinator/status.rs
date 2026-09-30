@@ -57,6 +57,15 @@ impl super::Coordinator {
         crate::afxdp::parser::NDP_NA_BAD_SOURCE_REFUSED.load(Ordering::Relaxed)
     }
 
+    /// #11075: cumulative established sessions alive on workers that
+    /// observed a FIB-generation advance without re-judging them (the
+    /// route-move residual #2620 leaves open). Surfaced as
+    /// `xpf_userspace_route_change_unrejudged_sessions_total`.
+    pub fn route_change_unrejudged_sessions_total(&self) -> u64 {
+        crate::afxdp::poll_descriptor::ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL
+            .load(Ordering::Relaxed)
+    }
+
     /// #3773 (M13): cumulative count of fabric links skipped for a MALFORMED
     /// value (invalid parent ifindex / unparseable peer address / a NON-EMPTY
     /// unparseable local|peer MAC). Surfaced as

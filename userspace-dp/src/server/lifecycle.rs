@@ -409,6 +409,7 @@ pub(crate) fn run() -> Result<(), String> {
             dynamic_neighbor_learn_cap_drops_total: 0,
             ndp_na_frag_refused_total: 0,
             ndp_na_bad_source_refused_total: 0,
+            route_change_unrejudged_sessions_total: 0,
             session_publish_errors_total: 0,
             // #4800 new-flow-install contention surface.
             shared_session_publishes_total: 0,
