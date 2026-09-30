@@ -275,30 +275,35 @@ A **gap-filling kernel-FIB importer** in `pkg/routing/`:
 - Return a typed list that `buildRouteSnapshots` consumes as a **fifth source**,
   appended after the existing four and before `applyRouteOverlay`.
 
-### 6.2 The precedence rule — and why it needs no wire change
+### 6.2 The precedence rule — refined by #11323, without a wire change
 
-**The importer never overrides a config-derived route; it only fills gaps.** For
-each `(table, family, prefix)` already present in the config-derived set, the
-imported route is discarded.
+**The importer is preference-aware, not unconditional gap-fill.** For each
+canonical `(table, family, prefix)`, the snapshot builder finds the best
+configured ordinary route. When its preference is 200 or better, the imported
+route is discarded and the configured route remains the sole candidate. When
+the configured route has a worse preference (for example a floating static at
+250), both candidates are emitted and the Rust FIB's #2390 ascending-
+preference tie-break selects the kernel-selected route imported at preference
+200. #11323 corrected the original gap-fill-only implementation, which let a
+floating static remain active while FRR had selected a better learned route.
 
-This matters more than it looks. FRR renders config statics, generate-routes,
-DHCP defaults, `backup-router`, cluster blackholes **and** ip-monitoring preferred
-routes all through staticd — so they all come back from the kernel stamped
-`RTPROT_ZSTATIC(196)`. Importing 196 unconditionally would re-import, at
-kernel-derived preference, everything the snapshot already carries at config
-preference, and would fight:
+FRR renders config statics, generate-routes, DHCP defaults, `backup-router`,
+cluster blackholes and ip-monitoring preferred routes through staticd, so
+their kernel entries can share `RTPROT_ZSTATIC(196)`. The preference gate keeps
+an imported route from replacing a config candidate that is at least as good;
+it deliberately allows a better learned route to sit beside a lower-preference
+config fallback.
 
-- the `#3770` dedupe key, which includes `Preference` (`routes.go:~88`), so
-  duplicates at different preferences produce **two** entries rather than
-  collapsing;
-- the `#2390` sort tie-break (`forwarding_build/fib.rs:169-174`);
+The existing boundaries still hold:
+
+- the `#3770` dedupe key includes `Preference`, so distinct configured/imported
+  candidates survive as separate entries;
+- the `#2390` sort tie-break makes the lower-preference candidate win;
 - the overlay's whole-entry replacement contract (`routes.go:422-443`), which
-  #1827 guarantees can never produce an ECMP half-override.
+  #1827 guarantees, still prevents an ECMP half-override.
 
-The gap-fill rule preserves all three **by construction** and keeps
-`RouteSnapshot` unchanged — so no `CONFIG_SNAPSHOT_PROTOCOL_VERSION` bump, and Go
-and Rust need not ship together. That is a material scope reduction and is the
-main reason to prefer this shape over a source-tagged wire field.
+The preference-aware rule reuses `RouteSnapshot.Preference`, so it needs no
+`CONFIG_SNAPSHOT_PROTOCOL_VERSION` bump and Go and Rust need not ship together.
 
 Exclusions the importer must carry, each with a concrete reason:
 

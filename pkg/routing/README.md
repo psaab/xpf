@@ -1133,11 +1133,14 @@ row misleads a human, a missing FIB entry misdirects a packet.
 
 ### Consumer-side rule
 
-The snapshot builder applies the import as **gap-fill only** — an imported
-route is discarded whenever the config-derived set already covers the same
-`(table, family, prefix)`, compared on the *canonical* prefix. The operator's
-route always wins, and every existing precedence contract keeps operating on
-exactly the routes it did before.
+The snapshot builder uses **preference-aware same-prefix arbitration**. For
+each canonical `(table, family, prefix)`, it finds the best configured route:
+if that preference is 200 or better, the imported route is omitted and the
+configured route remains the only candidate. If the configured route is worse
+(for example a floating static at preference 250), both candidates are
+published and the Rust FIB's ascending-preference tie-break selects the
+kernel-selected route imported at preference 200. Thus ordinary statics remain
+preferred while a backup static cannot shadow a better learned route.
 
 ### Known limitation
 
