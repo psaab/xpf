@@ -598,8 +598,8 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			// ValueAny leaves are skipped by the schema walk.
 			"api-auth": {desc: "API authentication", children: map[string]*schemaNode{
 				"class": {desc: "Default API credential login class", args: 1, placeholder: "<class-name>",
-					valueType: ValueEnumOf,
-					valueDesc: "System-defined class (super-user | operator | read-only | config-viewer | unauthorized) or a custom `login class <name>`",
+					valueType:     ValueEnumOf,
+					valueDesc:     "System-defined class (super-user | operator | read-only | config-viewer | unauthorized) or a custom `login class <name>`",
 					valueExamples: []string{"super-user", "operator", "read-only"},
 					treeValidator: validateLoginClassRef, children: nil},
 				"expires": {desc: "Default API credential expiry (UTC date)", args: 1, placeholder: "<YYYY-MM-DD>", valueType: ValueDate, validator: ValidateAPIAuthExpiry, children: nil},
@@ -609,8 +609,8 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 					closedWorld: true, children: map[string]*schemaNode{
 						"password": {desc: "Password", args: 1, placeholder: "<password>", valueType: ValueString, validator: ValidateAPIAuthBasicPassword, children: nil},
 						"class": {desc: "Login class for this Basic identity", args: 1, placeholder: "<class-name>",
-							valueType: ValueEnumOf,
-							valueDesc: "System-defined class (super-user | operator | read-only | config-viewer | unauthorized) or a custom `login class <name>`",
+							valueType:     ValueEnumOf,
+							valueDesc:     "System-defined class (super-user | operator | read-only | config-viewer | unauthorized) or a custom `login class <name>`",
 							valueExamples: []string{"super-user", "operator", "read-only"},
 							treeValidator: validateLoginClassRef, children: nil},
 						"expires": {desc: "This Basic identity's expiry (UTC date)", args: 1, placeholder: "<YYYY-MM-DD>", valueType: ValueDate, validator: ValidateAPIAuthExpiry, children: nil},
@@ -627,8 +627,8 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 					closedWorld: true, children: map[string]*schemaNode{
 						"secret": {desc: "API key secret", args: 1, placeholder: "<key>", valueType: ValueString, validator: ValidateAPIAuthKey, children: nil},
 						"class": {desc: "Login class for this API key", args: 1, placeholder: "<class-name>",
-							valueType: ValueEnumOf,
-							valueDesc: "System-defined class (super-user | operator | read-only | config-viewer | unauthorized) or a custom `login class <name>`",
+							valueType:     ValueEnumOf,
+							valueDesc:     "System-defined class (super-user | operator | read-only | config-viewer | unauthorized) or a custom `login class <name>`",
 							valueExamples: []string{"super-user", "operator", "read-only"},
 							treeValidator: validateLoginClassRef, children: nil},
 						"expires": {desc: "This API key's expiry (UTC date)", args: 1, placeholder: "<YYYY-MM-DD>", valueType: ValueDate, validator: ValidateAPIAuthExpiry, children: nil},
