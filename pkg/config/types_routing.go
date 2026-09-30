@@ -592,7 +592,7 @@ type TunnelConfig struct {
 	Mode            string   // "gre" or "ipip"
 	Source          string   // local tunnel endpoint IP
 	Destination     string   // remote tunnel endpoint IP
-	Key             uint32   // GRE key 0..4294967295, 0 = none (canonical digits, #9899)
+	Key             uint32   // GRE key 0..4294967295; 0 = unkeyed (K bit absent for native decap, #9899)
 	TTL             int      // tunnel TTL 1..255, 0 = omitted = default 64 (explicit 0 rejects, #9899)
 	Addresses       []string // IPs to assign to tunnel interface (CIDR)
 	RoutingInstance string   // destination routing-instance (VRF)

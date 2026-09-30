@@ -852,8 +852,10 @@ fn match_tunnel_endpoint<'a>(
         if transport_instance_of_table(&endpoint.transport_table) != ingress_routing_instance {
             continue;
         }
+        // Config key 0 means unkeyed, so its endpoint matches only a GRE
+        // header with the K bit clear. K-present with value zero is distinct.
         let key_ok = if endpoint.key == 0 {
-            !key_present || key == 0
+            !key_present
         } else {
             key_present && endpoint.key == key
         };
