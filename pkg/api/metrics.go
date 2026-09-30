@@ -672,11 +672,12 @@ type xpfCollector struct {
 	// aggregate userspaceRejectRateLimited above stays for back-compat; these
 	// expose the #3615 per-BindingStatus sent / TX-frame reply-budget /
 	// egress output-filter drop legs plus the #3661 rate-limit drop leg,
-	// labeled source=policy|filter, so alerting can attribute reject SUCCESS
-	// vs SUPPRESSION to a security policy `then reject` or a firewall-filter
-	// `then reject`. The rate-limit bucket is still a single global-per-reason
-	// bucket in the helper; #3661 attributes each drop to the reply's source
-	// at the consume site (policy+filter sum to the aggregate).
+	// labeled source=policy|filter, so alerting can attribute explicit reject
+	// SUCCESS vs SUPPRESSION to a security-policy `then reject` or a
+	// firewall-filter `then reject`. Per-ingress-zone rate-limit buckets are
+	// shared by policy/filter rejects and zone `tcp-rst` session-miss resets.
+	// #3661 attributes explicit policy/filter rejects only, so their sum may
+	// be below the aggregate.
 	userspaceRejectSent                *prometheus.Desc
 	userspaceRejectReplyBudgetDrops    *prometheus.Desc
 	userspaceRejectOutputFilterDrops   *prometheus.Desc

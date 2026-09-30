@@ -104,6 +104,36 @@ func (d *Daemon) commitOverlayForConfig(cfg *config.Config) []config.RouteOverla
 // IPv6 next-hop interfaces, ClusterMode, per-VRF instances, and the
 // overlay's PreferredRoutes).
 func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOverlayEntry) *frr.FullConfig {
+	// #11310: the config gate rejects cross-instance IGP interface references,
+	// and this render belt makes tolerant loads inert rather than activating an
+	// interface in the wrong FRR routing instance. Resolve all operands in one
+	// ownership pass so aliases and tunnel names use the same membership rules.
+	var protocolRefs []string
+	var seenProtocolRefs map[string]struct{}
+	appendProtocolRefs := func(protocols config.ProtocolsConfig) {
+		for _, ref := range frrProtocolInterfaceRefs11310(protocols) {
+			if seenProtocolRefs == nil {
+				seenProtocolRefs = make(map[string]struct{})
+			}
+			if _, ok := seenProtocolRefs[ref]; ok {
+				continue
+			}
+			seenProtocolRefs[ref] = struct{}{}
+			protocolRefs = append(protocolRefs, ref)
+		}
+	}
+	appendProtocolRefs(cfg.Protocols)
+	for _, ri := range cfg.RoutingInstances {
+		if ri.InstanceType == "forwarding" {
+			continue
+		}
+		appendProtocolRefs(config.ProtocolsConfig{
+			OSPF: ri.OSPF, OSPFv3: ri.OSPFv3, RIP: ri.RIP, ISIS: ri.ISIS,
+		})
+	}
+	protocolOwners := config.RoutingInstanceMemberDeviceOwnersForRefs(cfg, protocolRefs)
+	globalProtocols := filterFRRProtocolInterfaces11310(cfg.Protocols, "", protocolOwners)
+
 	// Collect interface bandwidths and point-to-point flags for FRR.
 	ifaceBandwidths := make(map[string]uint64)
 	ifaceP2P := make(map[string]bool)
@@ -128,11 +158,11 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 	}
 
 	fc := &frr.FullConfig{
-		OSPF:                  cfg.Protocols.OSPF,
-		OSPFv3:                cfg.Protocols.OSPFv3,
-		BGP:                   cfg.Protocols.BGP,
-		RIP:                   cfg.Protocols.RIP,
-		ISIS:                  cfg.Protocols.ISIS,
+		OSPF:                  globalProtocols.OSPF,
+		OSPFv3:                globalProtocols.OSPFv3,
+		BGP:                   globalProtocols.BGP,
+		RIP:                   globalProtocols.RIP,
+		ISIS:                  globalProtocols.ISIS,
 		StaticRoutes:          cfg.RoutingOptions.StaticRoutes,
 		Inet6StaticRoutes:     cfg.RoutingOptions.Inet6StaticRoutes,
 		GenerateRoutes:        cfg.RoutingOptions.GenerateRoutes,
@@ -171,15 +201,21 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 			vrfName = ""
 			tableID = ri.TableID
 		}
+		instanceProtocols := config.ProtocolsConfig{
+			OSPF: ri.OSPF, OSPFv3: ri.OSPFv3, BGP: ri.BGP, RIP: ri.RIP, ISIS: ri.ISIS,
+		}
+		if !forwarding {
+			instanceProtocols = filterFRRProtocolInterfaces11310(instanceProtocols, ri.Name, protocolOwners)
+		}
 		inst := frr.InstanceConfig{
 			Name:              ri.Name,
 			VRFName:           vrfName,
 			TableID:           tableID,
-			OSPF:              ri.OSPF,
-			OSPFv3:            ri.OSPFv3,
-			BGP:               ri.BGP,
-			RIP:               ri.RIP,
-			ISIS:              ri.ISIS,
+			OSPF:              instanceProtocols.OSPF,
+			OSPFv3:            instanceProtocols.OSPFv3,
+			BGP:               instanceProtocols.BGP,
+			RIP:               instanceProtocols.RIP,
+			ISIS:              instanceProtocols.ISIS,
 			StaticRoutes:      ri.StaticRoutes,
 			Inet6StaticRoutes: ri.Inet6StaticRoutes,
 		}

@@ -104,6 +104,44 @@ func TestLearnedRouteReachesTheSnapshot(t *testing.T) {
 	}
 }
 
+func TestLearnedRouteLowestKernelMetricWinsSamePrefix11388(t *testing.T) {
+	const destination = "198.51.100.0/24"
+	lowMetric := routing.LearnedRoute{
+		TableID: 254, Family: netlink.FAMILY_V4, Metric: 100,
+		Destination: destination, NextHops: []string{"192.0.2.2"}, Protocol: "dhcp",
+	}
+	highMetric := routing.LearnedRoute{
+		TableID: 254, Family: netlink.FAMILY_V4, Metric: 200,
+		Destination: destination, NextHops: []string{"192.0.2.10"}, Protocol: "dhcp",
+	}
+	for _, tc := range []struct {
+		name   string
+		routes []routing.LearnedRoute
+	}{
+		{name: "lexicographic gateway arrives first", routes: []routing.LearnedRoute{highMetric, lowMetric}},
+		{name: "lower metric arrives first", routes: []routing.LearnedRoute{lowMetric, highMetric}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withLearnedRoutes(t, fixedLearned(tc.routes...))
+			out, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			hits := snapshotFor(t, "inet.0", "inet", destination, out)
+			if len(hits) != 1 {
+				t.Fatalf("want one imported candidate at the lowest metric, got %+v", hits)
+			}
+			if !reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.2"}) {
+				t.Errorf("kernel metric 100 route lost to lexicographic tie-break: %+v", hits[0])
+			}
+			if hits[0].Preference != routing.LearnedRouteImportPreference {
+				t.Errorf("preference = %d, want fixed learned-route preference %d",
+					hits[0].Preference, routing.LearnedRouteImportPreference)
+			}
+		})
+	}
+}
+
 // A better-preference config route remains the sole candidate when a learned
 // route carries preference 200.
 //

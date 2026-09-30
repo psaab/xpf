@@ -1972,6 +1972,37 @@ impl SessionTable {
             record.entry.filter_revalidated = stamp;
         }
     }
+    /// #11324: persist a reverse-direction route selected from the reply's
+    /// ingress filter without replacing or revoking the session pair.
+    ///
+    /// Route selection is local derived state: the peer evaluates its own
+    /// reply-ingress filter when it receives traffic. Preserve the reverse
+    /// entry's NAT/zone/provenance fields, update only its forwarding decision,
+    /// and stamp the route filter for this generation and logical ingress.
+    pub(crate) fn update_reverse_route_on_filter_hit(
+        &mut self,
+        key: &SessionKey,
+        logical_ingress_ifindex: i32,
+        resolution: ForwardingResolution,
+        install_table_domain: u32,
+        install_table_check: u32,
+    ) -> bool {
+        let stamp =
+            FilterRevalidationStamp::live(self.filter_revalidation_gen, logical_ingress_ifindex);
+        if let Some(handle) = self.key_to_handle.get(key).copied()
+            && let Some(record) = self.entries.get_mut(handle as usize)
+            && record.key == *key
+            && record.entry.metadata.is_reverse
+        {
+            record.entry.decision.resolution = resolution;
+            record.entry.decision.install_table_domain = install_table_domain;
+            record.entry.decision.install_table_check = install_table_check;
+            record.entry.filter_revalidated = stamp;
+            return true;
+        }
+        false
+    }
+
     /// #10467: keep a route-transition hit stale until the pair teardown has
     /// completed. If teardown is refused or delayed, the surviving entry must
     /// not look freshly judged under the new generation while still carrying
@@ -4305,11 +4336,12 @@ mod policy_revalidation_8356_tests;
 #[cfg(test)]
 #[path = "icmp_error_budget_9901_tests.rs"]
 mod icmp_error_budget_9901_tests;
-// #9895: reverse NAT lookup must refuse a validating pass-2 candidate when
-// both the reply and candidate carry different non-zero routing domains.
+// #11298: reverse NAT lookup compares the reply domain with the forward
+// egress-interface domain; mixed-zero mismatches are refused, while asymmetric
+// forward ingress/egress domains still match their replies.
 #[cfg(test)]
-#[path = "reverse_domain_9895_tests.rs"]
-mod reverse_domain_9895_tests;
+#[path = "reverse_egress_domain_11298_tests.rs"]
+mod reverse_egress_domain_11298_tests;
 // #9990/#9991: pre-decision probes and strict hit-path expiry.
 #[cfg(test)]
 #[path = "session_lifetime_9990_9991_tests.rs"]

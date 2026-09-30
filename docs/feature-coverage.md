@@ -177,6 +177,12 @@ the userspace dataplane admission boundary is in
 
 - **FRR integration**: static, OSPF, BGP, IS-IS, RIP, ECMP multipath,
   export/redistribute.
+- **Protocol interface scoping (#11310)**: references to declared interfaces in
+  global OSPF/OSPFv3/RIP/IS-IS stanzas must belong to the default instance;
+  per-instance stanzas may reference only interfaces owned by that instance,
+  through either routing-instance membership or an explicit tunnel
+  `routing-instance destination` claim. Cross-instance references are rejected
+  on commit and dropped during tolerant FRR assembly.
 - **VRFs** with inter-VRF route leaking (next-table + rib-group). The
   `interface-routes rib-group` import into the main table leaks each source
   instance's connected (interface) routes per-prefix so a specific imported

@@ -78,8 +78,9 @@ use flowless_verdict::{
 use frag_assoc::{
     flowbacked_no_route_requires_nat_translation, flowless_nat_rule_possible,
     flowless_no_route_requires_nat_translation, flowless_requires_nat_translation,
-    frag_ingress_authority, nat_consult_forward_fragment_assoc, nat_install_forward_fragment_assoc,
-    nat64_consult_forward_fragment_assoc, nat64_install_forward_fragment_assoc,
+    frag_ingress_authority_with_nat_scope, nat_consult_forward_fragment_assoc,
+    nat_install_forward_fragment_assoc, nat64_consult_forward_fragment_assoc,
+    nat64_install_forward_fragment_assoc,
     session_gated_reverse_fragment_requires_nat_translation,
 };
 use host_inbound_policy::{
@@ -296,7 +297,7 @@ fn record_ipsec_sa_miss_sample(
 use cookie_reply::{SynCookieReply, enqueue_syn_cookie_reply};
 use nat_exception::{record_source_nat_failure, source_nat_decision_for_flow};
 use prerouting_scope::{PreroutingIngressScope, prerouting_ingress_scope};
-use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply};
+use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply, enqueue_session_miss_rst};
 use resolver_enqueue::try_enqueue_resolver;
 
 use filter::{
@@ -656,9 +657,26 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // an RI node is also gated before that pre-policy side effect.
                 let FabricIngressOutcome {
                     ingress_zone_override,
+                    ingress_nat_scope_ifindex,
                     packet_fabric_ingress,
                     invalid_zone_stamp,
                 } = stage_classify_fabric_ingress(packet_frame, &mut meta, now_secs, worker_ctx);
+                // Preserve only identities admitted by stage 9; local arrivals
+                // use their configured logical interface when creating a punt.
+                let fabric_nat_scope_ifindex_for_redirect = ingress_nat_scope_ifindex.or_else(|| {
+                    if packet_fabric_ingress {
+                        None
+                    } else {
+                        Some(
+                            resolve_ingress_logical_ifindex(
+                                worker_ctx.forwarding,
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                            )
+                            .unwrap_or(meta.ingress_ifindex as i32),
+                        )
+                    }
+                });
                 // #11061: an invalid zone stamp is not the legacy "unstamped"
                 // case. Drop it before neighbor/session/cache lookup so stale
                 // or forged identity cannot collapse to routing domain 0 / MAIN.
@@ -1631,13 +1649,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #9519; the arrival zone for a foreign packet.
                         let authority_zone =
                             foreign_arrival_zone.unwrap_or(resolved.metadata.ingress_zone);
-                        // #10467: a changed PBR route identity must not mutate
-                        // only this direction's cached decision.  Tear down the
-                        // pair and let the next packet take the normal miss
-                        // path, which recomputes both egress-zone policy and
-                        // forward/reverse route state.  Unchanged identities
-                        // stay on the #8114 fast path; foreign arrivals cannot
-                        // revoke the admitting session.
+                        // #10467: a changed FORWARD PBR identity must not
+                        // mutate only one cached direction. Tear down the pair
+                        // and let the next packet take the normal MISS path,
+                        // which recomputes egress-zone policy and both routes.
+                        // #11324: a REVERSE companion is different: its native
+                        // identity belongs to the FORWARD ingress. A matching
+                        // PBR term on this reply's own ingress steers this
+                        // direction in place; it must not tear down the pair.
                         // #10038 Part C / #10630: a TUN-origin forward HIT
                         // declines PBR revalidation outright. Self-originated
                         // runs no PBR admission, so there is no admitting
@@ -1671,6 +1690,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta,
                                 ingress_zone_override,
                                 resolved.decision,
+                                resolved.metadata.is_reverse,
                             )
                         } else {
                             None
@@ -1855,7 +1875,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 Some(hit)
                                     if hit.eval.action == crate::filter::FilterAction::Accept =>
                                 {
-                                    if let Some(route) = stale_pbr_route {
+                                    if let Some(route) =
+                                        stale_pbr_route.as_ref().filter(|route| !route.steer_only)
+                                    {
                                         // The ordinary evaluator may have stamped
                                         // this entry fresh on its Accept path.
                                         if let Some(revoked_key) = route.revoked_key.as_ref() {
@@ -1867,7 +1889,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     action: crate::filter::FilterAction::Discard,
                                                     cached_log: None,
                                                 },
-                                                revoked_key: route.revoked_key,
+                                                revoked_key: route.revoked_key.clone(),
                                                 log_source: FilterLogSource::Pbr,
                                             }),
                                             // #10566: route override is synthesized
@@ -1880,19 +1902,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 }
                                 Some(hit) => (Some(hit), ordinary_input_already_counted),
                                 None => (
-                                    stale_pbr_route.map(|route| {
-                                        if let Some(revoked_key) = route.revoked_key.as_ref() {
-                                            sessions.clear_filter_revalidation(revoked_key);
-                                        }
-                                        SessionHitInputFilterEval {
-                                            eval: NonPbrInputFilterEval {
-                                                action: crate::filter::FilterAction::Discard,
-                                                cached_log: None,
-                                            },
-                                            revoked_key: route.revoked_key,
-                                            log_source: FilterLogSource::Pbr,
-                                        }
-                                    }),
+                                    stale_pbr_route
+                                        .as_ref()
+                                        .filter(|route| !route.steer_only)
+                                        .map(|route| {
+                                            if let Some(revoked_key) = route.revoked_key.as_ref() {
+                                                sessions.clear_filter_revalidation(revoked_key);
+                                            }
+                                            SessionHitInputFilterEval {
+                                                eval: NonPbrInputFilterEval {
+                                                    action: crate::filter::FilterAction::Discard,
+                                                    cached_log: None,
+                                                },
+                                                revoked_key: route.revoked_key.clone(),
+                                                log_source: FilterLogSource::Pbr,
+                                            }
+                                        }),
                                     // #10566: neither a static ACCEPT nor a
                                     // synthesized PBR discard was counted.
                                     false,
@@ -2048,6 +2073,30 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
+                        }
+                        // #11324: persist reverse route state only after the
+                        // ordinary input-filter gate accepts. A config change
+                        // from reverse PBR to discard must still see its stale
+                        // generation stamp and revoke the pair.
+                        if let Some(route) =
+                            stale_pbr_route.as_ref().filter(|route| route.steer_only)
+                        {
+                            let logical_ingress_ifindex = resolve_ingress_logical_ifindex(
+                                worker_ctx.forwarding,
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                            )
+                            .unwrap_or(meta.ingress_ifindex as i32);
+                            sessions.update_reverse_route_on_filter_hit(
+                                &route.canonical_key,
+                                logical_ingress_ifindex,
+                                route.resolution,
+                                route.install_table_domain,
+                                route.install_table_check,
+                            );
+                            resolved.decision.resolution = route.resolution;
+                            resolved.decision.install_table_domain = route.install_table_domain;
+                            resolved.decision.install_table_check = route.install_table_check;
                         }
                         // #8356: re-derive ZONE POLICY on the established
                         // hit, at most once per session per config generation.
@@ -2635,10 +2684,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // Raw stage-9 override (mirrors the commit-site capture —
                             // arm-scoped shadows below do not reach this tail).
                             let frag_authority_zone_override = ingress_zone_override;
-                            let frag_authority = frag_ingress_authority(
+                            let frag_authority = frag_ingress_authority_with_nat_scope(
                                 worker_ctx.forwarding,
                                 meta,
                                 frag_authority_zone_override,
+                                ingress_nat_scope_ifindex,
                             );
                             let frag_session_key = &resolved.key;
                             let frag_session_id = resolved.session_id;
@@ -2783,6 +2833,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             meta.ingress_ifindex as i32,
                             meta.ingress_vlan_id,
                             ingress_zone_override,
+                            ingress_nat_scope_ifindex,
                         );
                         // #3437: the DNAT `match application` term may pin a
                         // source-port (H10) and an ICMP type/code (H11). Supply
@@ -3302,6 +3353,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // consult can only see the raw one would desynchronize them
                         // and turn legitimate same-domain fragments into misses.
                         let frag_authority_zone_override = ingress_zone_override;
+                        let frag_authority_nat_scope_ifindex = ingress_nat_scope_ifindex;
                         let ingress_zone_override = gate_fabric_zone_override_on_owner_rg(
                             worker_ctx.forwarding,
                             worker_ctx.ha_state,
@@ -3309,6 +3361,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ingress_zone_override,
                             resolution,
                         );
+                        // NAT scope identity is only authoritative when its
+                        // zone survived the same owner-RG gate used for policy.
+                        let ingress_nat_scope_ifindex = ingress_nat_scope_ifindex
+                            .filter(|_| ingress_zone_override.is_some());
                         let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
                             worker_ctx.forwarding,
                             ingress_logical,
@@ -3544,7 +3600,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // A SYN-bearing packet is always eligible; the
                         // configured no-syn-check opt-out also admits
                         // mid-stream ACK/data, while strict-syn-check
-                        // overrides it. Bare RST/FIN remain fail-closed.
+                        // overrides it. `tcp-rst` answers only non-SYN misses
+                        // dropped here; an inbound RST is never answered.
                         // Counted in the aggregate `screen_drops` flow-statistics
                         // tally (no per-reason ordinal — that array mirrors the
                         // Junos SCREEN checks, and this is a flow tcp-session
@@ -3568,6 +3625,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.forwarding.tcp_no_syn_check,
                             worker_ctx.forwarding.tcp_strict_syn_check,
                         ) {
+                            // #11304: Junos `tcp-rst` applies at this transit
+                            // session-miss drop, never at a policy-deny site.
+                            let _ = enqueue_session_miss_rst(
+                                &mut binding.tx_pipeline,
+                                worker_ctx.forwarding,
+                                binding.ifindex,
+                                packet_frame,
+                                meta,
+                                flow,
+                                telemetry.counters,
+                                from_zone_id,
+                            );
                             telemetry.counters.record_screen_drop(
                                 "strict-syn-check",
                                 from_zone_id,
@@ -3774,9 +3843,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #3019/#3706: `to-zone junos-host` security policy on
                         // the session-MISS local-delivery path, AFTER
                         // host-inbound admission (Junos order). A matching
-                        // junos-host deny/reject drops the host-bound packet
-                        // (and emits the policy-deny RT_FLOW + reject/tcp-rst
-                        // reply); a matching PERMIT is carried forward so its
+                        // junos-host deny/reject drops and emits the policy-deny
+                        // RT_FLOW; an explicit `then reject` may reply, but
+                        // plain `deny` stays silent. A matching PERMIT is carried forward so its
                         // `then log` selection + admitting policy id + counter
                         // handle can be stamped onto the installed session
                         // (#3706); a no-match continues to local delivery with
@@ -4301,6 +4370,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx.forwarding,
                                             meta.ingress_ifindex as i32,
                                             meta.ingress_vlan_id,
+                                            ingress_nat_scope_ifindex,
                                             &from_zone,
                                             &to_zone,
                                             decision.resolution.egress_ifindex,
@@ -4858,11 +4928,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             // Both helpers self-gate (NAT64 vs
                                             // ordinary same-family), so exactly
                                             // one fires for a given fragment.
-                                            let frag_authority = frag_ingress_authority(
-                                                worker_ctx.forwarding,
-                                                meta,
-                                                frag_authority_zone_override,
-                                            );
+                                            let frag_authority =
+                                                frag_ingress_authority_with_nat_scope(
+                                                    worker_ctx.forwarding,
+                                                    meta,
+                                                    frag_authority_zone_override,
+                                                    frag_authority_nat_scope_ifindex,
+                                                );
                                             let frag_session_id =
                                                 sessions.session_id_for(&flow.forward_key);
                                             if frag_session_id != 0 {
@@ -5315,16 +5387,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                 }
                             } else {
-                                // #2089/#3071/#3615: enqueue the deny/reject
-                                // reply FIRST, then emit the policy-deny RT_FLOW
-                                // with the TRUTHFUL action. `reject` synthesizes
-                                // a TCP RST / ICMP unreachable back toward the
-                                // source; plain `deny` is a silent drop UNLESS
-                                // the flow is TCP and the ingress (from) zone has
-                                // Junos `tcp-rst`. When a `reject` reply
-                                // fail-closes (budget/rate/parse/output-filter)
-                                // the event is downgraded REJECT→DENY so the log
-                                // never claims an active reject that was not sent
+                                // #2089/#11304/#3615: enqueue an explicit reject
+                                // reply FIRST, then emit the truthful policy-deny
+                                // RT_FLOW. `then reject` replies; plain `deny`
+                                // always silently drops. Zone `tcp-rst` is handled
+                                // only at the transit session-miss strict-SYN gate.
+                                // A suppressed reject is logged as DENY, never REJECT.
                                 // (#3615). `decision.nat` carries the inbound dst
                                 // translation (#2345/#3058); the AppID is
                                 // resolved from the POST-translation dst port
@@ -5391,10 +5459,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // (always in scope) rather than going through the debug
                             // struct which may not have been populated.
                             // #919/#922: ID-keyed redirect — no name lookup.
-                            if let Some(redirect) = resolve_fabric_redirect_for_ingress_zone(
-                                worker_ctx.forwarding,
-                                Some(from_zone_id),
-                            ) {
+                            if let Some(redirect) =
+                                resolve_fabric_redirect_for_ingress_identity(
+                                    worker_ctx.forwarding,
+                                    Some(from_zone_id),
+                                    fabric_nat_scope_ifindex_for_redirect,
+                                )
+                            {
                                 decision.resolution = redirect;
                             }
                         } else if should_seed_fabric_punt(
@@ -5537,10 +5608,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // Here `ingress_zone_override` is still the RAW stamp (the
                         // RG-gated shadow is bound later, in the miss arm), which
                         // is the same value the install captured.
-                        let frag_authority = frag_ingress_authority(
+                        let frag_authority = frag_ingress_authority_with_nat_scope(
                             worker_ctx.forwarding,
                             meta,
                             ingress_zone_override,
+                            ingress_nat_scope_ifindex,
                         );
                         nat64_consult_forward_fragment_assoc(
                             worker_ctx.forwarding,
@@ -6177,9 +6249,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 .get(&arrival_logical)
                                 .copied()
                         });
-                        resolve_fabric_redirect_for_ingress_zone(
+                        resolve_fabric_redirect_for_ingress_identity(
                             worker_ctx.forwarding,
                             ingress_zone_id,
+                            fabric_nat_scope_ifindex_for_redirect,
                         )
                         .unwrap_or(base_resolution)
                     } else {
@@ -6229,6 +6302,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         ingress_zone_override,
                         final_resolution,
                     );
+                    let ingress_nat_scope_ifindex =
+                        ingress_nat_scope_ifindex.filter(|_| ingress_zone_override.is_some());
 
                     // (3) Zone security policy — only for TRANSIT
                     //     (ForwardCandidate). Local delivery (host-inbound) is
@@ -6348,6 +6423,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 l3_flow,
                                 meta,
                                 ingress_zone_override,
+                                ingress_nat_scope_ifindex,
                                 from_zone_id,
                                 to_zone_id,
                                 final_resolution.egress_ifindex,
@@ -6570,7 +6646,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     if is_non_first
                         && let Some(l3_flow) = l3_ctx.as_ref()
                         && session_gated_reverse_fragment_requires_nat_translation(
-                            sessions, l3_flow, meta, now_ns,
+                            worker_ctx.forwarding, sessions, l3_flow, meta, now_ns,
                         )
                     {
                         telemetry.counters.record_nat_frag_untranslated_dropped();
@@ -6651,9 +6727,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             .get(&arrival_logical)
                             .copied()
                     });
-                    if let Some(redirect) =
-                        resolve_fabric_redirect_for_ingress_zone(worker_ctx.forwarding, zone_id)
-                    {
+                    if let Some(redirect) = resolve_fabric_redirect_for_ingress_identity(
+                        worker_ctx.forwarding,
+                        zone_id,
+                        fabric_nat_scope_ifindex_for_redirect,
+                    ) {
                         decision.resolution = redirect;
                     }
                 }
@@ -7532,6 +7610,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta,
                                                 policy_packet_icmp(packet_frame, meta),
                                                 ingress_zone_override,
+                                                ingress_nat_scope_ifindex,
                                                 from_zone_id,
                                                 decision.nat,
                                             )
@@ -7541,6 +7620,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 adj_flow,
                                                 meta,
                                                 ingress_zone_override,
+                                                ingress_nat_scope_ifindex,
                                                 from_zone_id,
                                                 now_ns,
                                             )
@@ -7836,11 +7916,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx.forwarding,
                                             decision.resolution,
                                         );
-                                        // #2089/#3071/#3615: enqueue the deny/reject
-                                        // reply FIRST, then emit the policy-deny
-                                        // RT_FLOW with the TRUTHFUL action (a `reject`
-                                        // whose reply fail-closes is logged as DENY,
-                                        // not REJECT). `decision.nat` carries the
+                                        // #2089/#11304/#3615: enqueue an explicit
+                                        // reject reply FIRST, then emit truthful
+                                        // policy-deny RT_FLOW. Plain `deny` stays
+                                        // silent; a suppressed reject logs DENY,
+                                        // not REJECT. `decision.nat` carries the
                                         // inbound dst translation (#2345/#3058); the
                                         // AppID is resolved from the POST-translation
                                         // dst port (#2520/#3058).
@@ -8028,12 +8108,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         }
                                         let nat_translation_required = if is_non_first {
                                             session_gated_reverse_fragment_requires_nat_translation(
-                                                &*sessions, &l3_flow, meta, now_ns,
+                                                worker_ctx.forwarding, &*sessions, &l3_flow, meta, now_ns,
                                             ) || flowless_nat_rule_possible(
                                                 worker_ctx.forwarding,
                                                 &l3_flow,
                                                 meta,
                                                 ingress_zone_override,
+                                                ingress_nat_scope_ifindex,
                                                 from_zone_id,
                                                 to_zone_id,
                                                 decision.resolution.egress_ifindex,
@@ -8045,6 +8126,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 &l3_flow,
                                                 meta,
                                                 ingress_zone_override,
+                                                ingress_nat_scope_ifindex,
                                                 from_zone_id,
                                                 to_zone_id,
                                                 decision.resolution.egress_ifindex,
@@ -8473,6 +8555,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_ctx.forwarding,
                                                 meta.ingress_ifindex as i32,
                                                 meta.ingress_vlan_id,
+                                                ingress_nat_scope_ifindex,
                                                 &from_zone,
                                                 &to_zone,
                                                 pending_decision.resolution.egress_ifindex,

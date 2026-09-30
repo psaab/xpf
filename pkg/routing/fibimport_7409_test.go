@@ -95,6 +95,26 @@ func TestImportAdoptsBGPLearnedRoute(t *testing.T) {
 	}
 }
 
+func TestImportCarriesKernelMetrics11388(t *testing.T) {
+	lower := unicast(mustCIDR(t, "198.51.100.0/24"), "192.0.2.2", unix.RTPROT_DHCP)
+	lower.Priority = 100
+	higher := unicast(mustCIDR(t, "198.51.100.0/24"), "192.0.2.10", unix.RTPROT_DHCP)
+	higher.Priority = 200
+	withRouteLister(t, staticLister(v4Main(lower, higher)))
+
+	got, err := ImportLearnedRoutes([]int{mainTableID})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	metrics := make(map[string]int, len(got))
+	for _, route := range got {
+		metrics[route.NextHops[0]] = route.Metric
+	}
+	if len(metrics) != 2 || metrics["192.0.2.2"] != 100 || metrics["192.0.2.10"] != 200 {
+		t.Fatalf("imported route metrics = %v, want .2:100 and .10:200", metrics)
+	}
+}
+
 // THE DEFAULT-ROUTE NORMALISATION. The kernel may report 0.0.0.0/0 and ::/0
 // as a route with NO RTA_DST, i.e. Dst == nil — pkg/routing routeToEntry
 // already carries that same normalisation for the display path. A DHCP-learned

@@ -1282,10 +1282,11 @@ impl SessionDomain {
         mirror_ok
     }
 
-    /// #10512: enumerate policy-tagged sessions from the helper-owned
-    /// authority. The request is fanned out to every live worker because the
-    /// worker table is the only place that retains the creation/identity pair
-    /// needed for an identity-conditional delete. The shared synced map is
+    /// #10512: enumerate policy-tagged sessions from the helper-owned authority.
+    /// The request is fanned out to every live worker because worker tables
+    /// provide the creation/identity pair needed for conditional deletes. A
+    /// matching shared synced row absent from worker-local results makes the
+    /// READ incomplete: it cannot safely be returned as a delete candidate.
     pub(crate) fn list_sessions_by_policy(
         &self,
         request: &crate::protocol::SessionPolicyListRequest,
@@ -1423,6 +1424,20 @@ impl SessionDomain {
         let mut collector = collected
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Worker-local tables provide the creation timestamp and live identity
+        // used for conditional delete. The shared-map walk is only a coverage
+        // check: an in-scope key/id pair missing from the collector means the
+        // scan cannot claim completeness. Shared entries lack created_ns, so
+        // even a legacy time fence cannot safely classify that gap.
+        let shared_uncovered = {
+            let shared = crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced);
+            shared.values().any(|entry| {
+                wanted.contains(&entry.metadata.policy_id)
+                    && family_allowed(policy_wire_family(entry.key.addr_family))
+                    && class_allowed(entry.metadata.is_reverse)
+                    && !collector.contains_identity(&entry.key, entry.session_id)
+            })
+        };
         let mut rows = collector.take_rows();
         let overflowed = collector.overflowed();
         drop(collector);
@@ -1430,6 +1445,10 @@ impl SessionDomain {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        if shared_uncovered {
+            all_errors.push("shared-synced-map-uncovered".to_string());
+            complete = false;
+        }
 
         if request.mode == "legacy" && request.before_secs.is_none() {
             all_errors.push("legacy-before-secs-missing".to_string());
