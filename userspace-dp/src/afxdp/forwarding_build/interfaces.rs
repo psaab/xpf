@@ -750,17 +750,17 @@ pub(super) fn populate_interfaces(
                 // guess after a second row contested it. Without that the
                 // outcome would depend on row order again, just less obviously.
                 //
-                // WHAT WOULD INVALIDATE THIS (#4308). The rationale above rests
-                // on untagged traffic having no principled unit attribution
-                // today: `native-vlan-id` is accepted-only and NOT enforced
-                // (`schema_interfaces.go`, and `compiler_validate_warn_routing.go`
-                // emits a commit advisory saying so). If #4308 is ever
-                // implemented, untagged frames on a trunk acquire a DEFINED unit
-                // — the native VLAN — and declining to zone them becomes wrong
-                // for that unit specifically, though it stays right for every
-                // other contested case. A future implementer of #4308 will not
-                // think to look here, so this is written down rather than left
-                // to be re-derived.
+                // WHAT WOULD INVALIDATE THIS (#4308). Today `native-vlan-id`
+                // is accepted-only and NOT enforced (`schema_interfaces.go`,
+                // and `compiler_validate_warn_routing.go` emits a commit
+                // advisory saying so). #11297 therefore rejects VID 0 at the
+                // common poll head on tagged-only binds rather than changing
+                // this shared parent-zone derivation; an explicit untagged
+                // unit 0 is the only current exception. If #4308 is
+                // implemented, ingress must resolve untagged frames to the
+                // configured native unit and exempt only that identity.
+                // Simply bypassing the gate and reusing this parent fallback
+                // would lend sibling zone rights to ambiguous traffic.
                 //
                 // SCOPE, wider than the issue's framing. #7509 describes
                 // interface-level TUNNEL units sharing a netdev. The condition
@@ -1375,6 +1375,9 @@ pub(super) fn populate_egress(
     state: &mut ForwardingState,
     iface_ctx: &IfaceIndex,
 ) -> Result<(), crate::policy::SnapshotIntegrityError> {
+    let mut tagged_only_ingress_ifindexes = FastSet::default();
+    let mut untagged_unit_ifindexes = FastSet::default();
+
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 {
             continue;
@@ -1391,6 +1394,18 @@ pub(super) fn populate_egress(
         // different VLAN (a different L2 domain).
         let vlan_id =
             super::validated::VlanId::try_from_snapshot(iface.vlan_id, &iface.name)?.get();
+        if iface.parent_ifindex > 0 && vlan_id > 0 {
+            // The physical parent is the normal bind target, but some XDP
+            // attachments can report the configured VLAN child directly.
+            tagged_only_ingress_ifindexes.insert(bind_ifindex);
+            tagged_only_ingress_ifindexes.insert(iface.ifindex);
+        }
+        // The base interface row is not a logical untagged identity. Unit 0
+        // without a VLAN id is explicit and keeps its existing VID-0 fallback.
+        if iface.is_unit == Some(true) && iface.name.ends_with(".0") && vlan_id == 0 {
+            untagged_unit_ifindexes.insert(bind_ifindex);
+        }
+
         // #2706: validate the MTU ONCE here instead of narrowing it with an
         // unchecked `iface.mtu.max(0) as usize`. A NEGATIVE value fails the
         // snapshot closed rather than collapsing to 0 — which the egress MTU
@@ -1462,6 +1477,8 @@ pub(super) fn populate_egress(
             },
         );
     }
+    tagged_only_ingress_ifindexes.retain(|ifindex| !untagged_unit_ifindexes.contains(ifindex));
+    state.tagged_only_ingress_ifindexes = tagged_only_ingress_ifindexes;
     Ok(())
 }
 

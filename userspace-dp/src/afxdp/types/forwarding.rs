@@ -357,6 +357,10 @@ pub(in crate::afxdp) struct ForwardingState {
         FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
     pub(in crate::afxdp) egress: FastMap<i32, EgressInterface>,
     pub(in crate::afxdp) ingress_logical_ifindex: FastMap<(i32, u16), i32>,
+    /// #11297: ingress ifindexes for tagged-only trunks. Contains each
+    /// physical bind target and tagged VLAN child; VID 0 there cannot inherit
+    /// a sibling unit's zone. An explicit untagged unit 0 exempts its parent.
+    pub(in crate::afxdp) tagged_only_ingress_ifindexes: FastSet<i32>,
     pub(in crate::afxdp) fabrics: Vec<FabricLink>,
     /// #3773 (M13): fabric links this build/refresh pass SKIPPED because a
     /// value was malformed (`parent_ifindex <= 0`, an unparseable
