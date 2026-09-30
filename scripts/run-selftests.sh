@@ -118,6 +118,42 @@ run_py() {
 		echo "$out" | sed 's/^/      /'
 	fi
 }
+# run_incus_py <test/incus/*_test.py> — run one test/incus file through
+# `unittest discover` (see the §3b note for why discovery instead of direct
+# execution). A file with only skipped tests is a SKIP, not a PASS, even
+# though unittest exits 0 (mirror of run_py's #10750 classification).
+run_incus_py() {
+	script=$1
+	if [ ! -f "$script" ]; then
+		faill "$script (not present -- a registered leg that is gone)"
+		return
+	fi
+	out=$(python3 -m unittest discover -s test/incus -p "$(basename "$script")" 2>&1)
+	rc=$?
+	ran=$(printf '%s\n' "$out" | sed -n 's/^Ran \([0-9][0-9]*\) test.*/\1/p' | head -1)
+	nskip=$(printf '%s\n' "$out" | sed -n 's/.*skipped=\([0-9][0-9]*\).*/\1/p' | head -1)
+	if [ "$rc" -eq 5 ]; then
+		# unittest's "NO TESTS RAN". A registered file that executes
+		# nothing is indistinguishable from a passing one by every
+		# signal except this exit code, so it must be a FAIL and not
+		# a pass or a skip.
+		faill "$script (NO TESTS RAN -- registered but measures nothing)"
+	elif [ "$rc" -eq 0 ]; then
+		# Compare the number of tests run with unittest's skipped count. A
+		# zero exit status is not a measured PASS when every test skipped.
+		if [ -n "$ran" ] && [ -n "$nskip" ] && [ "$ran" -gt 0 ] && [ "$ran" -eq "$nskip" ]; then
+			skipl "$script (all $nskip tests skipped)"
+		elif [ -n "$nskip" ] && [ "$nskip" -gt 0 ]; then
+			passl "$script (${ran:-?} tests, skipped=$nskip)"
+		else
+			passl "$script (${ran:-?} tests)"
+		fi
+	else
+		faill "$script"
+		printf '%s\n' "$out" | sed 's/^/      /'
+	fi
+}
+
 
 # ── 1. shell-syntax lint (<interp> -n) over the image/dist/day-0 scripts ──
 # The interpreter is chosen from each script's shebang: xpf-day0-config is
@@ -246,21 +282,7 @@ if command -v python3 >/dev/null 2>&1; then
 		esac
 		incus_py_seen="$incus_py_seen $t"
 		incus_py_ran=$((incus_py_ran + 1))
-		out=$(python3 -m unittest discover -s test/incus -p "$(basename "$t")" 2>&1)
-		rc=$?
-		ran=$(printf '%s\n' "$out" | sed -n 's/^Ran \([0-9][0-9]*\) test.*/\1/p' | head -1)
-		if [ "$rc" -eq 5 ]; then
-			# unittest's "NO TESTS RAN". A registered file that executes
-			# nothing is indistinguishable from a passing one by every
-			# signal except this exit code, so it must be a FAIL and not
-			# a pass or a skip.
-			faill "$t (NO TESTS RAN -- registered but measures nothing)"
-		elif [ "$rc" -eq 0 ]; then
-			passl "$t (${ran:-?} tests)"
-		else
-			faill "$t"
-			printf '%s\n' "$out" | sed 's/^/      /'
-		fi
+		run_incus_py "$t"
 	done
 else
 	skipl "test/incus python self-tests (python3 not installed)"
