@@ -405,3 +405,65 @@ func TestAnalyzePolicyShadowingGlobalExplicitAnyScopeShadows(t *testing.T) {
 		t.Fatalf("an explicit-any earlier global must make a narrower same-action later global REDUNDANT, got:\n%s", joined)
 	}
 }
+
+// TestAnalyzeCrossTierGlobalShadowing11088 pins #11088: a scoped global
+// fully covered by earlier wildcard zone-pair rules is SHADOWED (dead deny
+// certified clean before); partially covered is PARTIALLY SHADOWED;
+// uncovered and unscoped globals are silent.
+func TestAnalyzeCrossTierGlobalShadowing11088(t *testing.T) {
+	zpol := func(name string, action config.PolicyAction) *config.Policy {
+		return &config.Policy{
+			Name:   name,
+			Action: action,
+			Match: config.PolicyMatch{
+				SourceAddresses:      []string{"any"},
+				DestinationAddresses: []string{"any"},
+				Applications:         []string{"any"},
+			},
+		}
+	}
+	gpol := func(name string, action config.PolicyAction, from, to []string) *config.Policy {
+		return &config.Policy{
+			Name:   name,
+			Action: action,
+			Match: config.PolicyMatch{
+				SourceAddresses:      []string{"any"},
+				DestinationAddresses: []string{"any"},
+				Applications:         []string{"any"},
+				FromZones:            from,
+				ToZones:              to,
+			},
+		}
+	}
+	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust": {Name: "trust"}, "untrust": {Name: "untrust"}, "dmz": {Name: "dmz"},
+	}
+	cfg.Security.Policies = []*config.ZonePairPolicies{
+		{FromZone: "any", ToZone: "untrust", Policies: []*config.Policy{
+			zpol("wide-permit", config.PolicyPermit),
+		}},
+	}
+	cfg.Security.GlobalPolicies = []*config.Policy{
+		gpol("dead-deny", config.PolicyDeny, []string{"trust"}, []string{"untrust"}),
+		gpol("live-deny", config.PolicyDeny, []string{"trust"}, []string{"dmz"}),
+		gpol("unscoped", config.PolicyDeny, nil, nil),
+		gpol("half-covered", config.PolicyDeny, []string{"trust"}, []string{"untrust", "dmz"}),
+	}
+	joined := strings.Join(AnalyzePolicyShadowing(cfg), "\n")
+	if !strings.Contains(joined, "dead-deny") || !strings.Contains(joined, "SHADOWED") {
+		t.Fatalf("fully-covered scoped global must be SHADOWED:\n%s", joined)
+	}
+	if !strings.Contains(joined, "half-covered") || !strings.Contains(joined, "PARTIALLY SHADOWED") {
+		t.Fatalf("half-covered scoped global must be PARTIALLY SHADOWED:\n%s", joined)
+	}
+	for _, quiet := range []string{"live-deny", "unscoped"} {
+		for _, line := range strings.Split(joined, "\n") {
+			// A rule is "reported" when it is the SUBJECT (policy "q" is ...),
+			// not when named as another rule's coverer.
+			if strings.Contains(line, "policy \""+quiet+"\" is ") {
+				t.Fatalf("%s must stay silent, got line: %s\n%s", quiet, line, joined)
+			}
+		}
+	}
+}
