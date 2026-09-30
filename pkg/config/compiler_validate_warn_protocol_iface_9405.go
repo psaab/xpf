@@ -144,9 +144,11 @@ func unresolvedInterfaceRef(declared map[string]*InterfaceConfig, ref string) st
 // protocolIfaceRef is one authored routing-protocol interface reference, with
 // the config path that names it for the advisory message.
 type protocolIfaceRef struct {
-	scope string // "protocols" or "routing-instances <n> protocols"
-	proto string // "ospf" / "ospf3" / "rip" / "isis"
-	ref   string
+	scope    string // "protocols" or "routing-instances <n> protocols"
+	instance string // owning RI name when scoped to an RI (#11310)
+	global   bool   // distinguishes global from a malformed empty RI name
+	proto    string // "ospf" / "ospf3" / "rip" / "isis"
+	ref      string
 }
 
 // collectProtocolInterfaceRefs walks the global protocols block and every
@@ -154,12 +156,14 @@ type protocolIfaceRef struct {
 // BGP is absent because its peers are addresses, not interface references.
 func collectProtocolInterfaceRefs(cfg *Config) []protocolIfaceRef {
 	var out []protocolIfaceRef
-	add := func(scope, proto, ref string) {
+	add := func(scope, instance string, global bool, proto, ref string) {
 		if ref != "" {
-			out = append(out, protocolIfaceRef{scope: scope, proto: proto, ref: ref})
+			out = append(out, protocolIfaceRef{
+				scope: scope, instance: instance, global: global, proto: proto, ref: ref,
+			})
 		}
 	}
-	walk := func(scope string, ospf *OSPFConfig, ospfv3 *OSPFv3Config, rip *RIPConfig, isis *ISISConfig) {
+	walk := func(scope, instance string, global bool, ospf *OSPFConfig, ospfv3 *OSPFv3Config, rip *RIPConfig, isis *ISISConfig) {
 		if ospf != nil {
 			for _, area := range ospf.Areas {
 				if area == nil {
@@ -167,7 +171,7 @@ func collectProtocolInterfaceRefs(cfg *Config) []protocolIfaceRef {
 				}
 				for _, iface := range area.Interfaces {
 					if iface != nil {
-						add(scope, "ospf", iface.Name)
+						add(scope, instance, global, "ospf", iface.Name)
 					}
 				}
 			}
@@ -179,34 +183,34 @@ func collectProtocolInterfaceRefs(cfg *Config) []protocolIfaceRef {
 				}
 				for _, iface := range area.Interfaces {
 					if iface != nil {
-						add(scope, "ospf3", iface.Name)
+						add(scope, instance, global, "ospf3", iface.Name)
 					}
 				}
 			}
 		}
 		if rip != nil {
 			for _, ref := range rip.Interfaces {
-				add(scope, "rip", ref)
+				add(scope, instance, global, "rip", ref)
 			}
 			for _, ref := range rip.Passive {
-				add(scope, "rip", ref)
+				add(scope, instance, global, "rip", ref)
 			}
 		}
 		if isis != nil {
 			for _, iface := range isis.Interfaces {
 				if iface != nil {
-					add(scope, "isis", iface.Name)
+					add(scope, instance, global, "isis", iface.Name)
 				}
 			}
 		}
 	}
 
-	walk("protocols", cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.RIP, cfg.Protocols.ISIS)
+	walk("protocols", "", true, cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.RIP, cfg.Protocols.ISIS)
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil {
 			continue
 		}
-		walk("routing-instances "+ri.Name+" protocols", ri.OSPF, ri.OSPFv3, ri.RIP, ri.ISIS)
+		walk("routing-instances "+ri.Name+" protocols", ri.Name, false, ri.OSPF, ri.OSPFv3, ri.RIP, ri.ISIS)
 	}
 	return out
 }

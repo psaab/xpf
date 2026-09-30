@@ -344,6 +344,5 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 			return err
 		}
 	}
-
 	return nil
 }
