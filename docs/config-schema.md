@@ -14529,6 +14529,27 @@ lenient-warns; plus three-color-policer + `junos-*` predefined + nested-set +
 implicit-multi-term-not-false-rejected cases). Like the gates above, these are
 compiler-side only — not yet typed `setSchema` leaves.
 
+### #11321 — FBF attached to a routing-instance member (commit gate)
+
+An input filter carrying `then routing-instance <target>` on an interface-unit
+that is also a member of a non-forwarding routing instance is rejected at
+commit. The kernel slow path consults the member VRF through the `l3mdev` rule
+at priority 1000 and stops a table miss at the `l3mdev unreachable` terminator
+at priority 2000; both precede xpf's FBF rule band (31000–31999). The Rust
+userspace forwarding helper still honors the explicit FBF override, so allowing
+the config would make the two paths disagree. Bare routing-instance member
+references are resolved across their configured units, as in the userspace FIB.
+`instance-type forwarding` members are exempt because they are not bound to a
+Linux VRF device.
+
+**Strict (`commit` / `commit check`):** the gate rejects the member-FBF
+attachment with the family, filter, term, attachment unit, and owning instance.
+**Lenient (`Store.Load` / HA peer-sync):** it warns without blocking startup, in
+keeping with #1960. The Rust userspace FBF behavior is unchanged.
+Regression coverage: `pkg/config/firewall_ri_member_fbf_11321_test.go` (inet and
+inet6 strict gate, lenient warning, bare-member fan-out, forwarding-instance
+and unattached-filter controls).
+
 ### #3339 — application / application-set name-collision validation
 
 `compileApplications` (`compiler_applications.go`) collects user applications and

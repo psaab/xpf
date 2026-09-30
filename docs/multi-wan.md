@@ -411,6 +411,13 @@ How it lands (the `instance-type forwarding` divergence fix):
   match the rule and be mis-steered into the wrong uplink's VRF. A filter
   attached to several interfaces expands to one iif-scoped rule per
   interface rather than a single global rule.
+
+  FBF filters on an interface-unit that belongs to a non-forwarding
+  `virtual-router` / `vrf` routing-instance are rejected at commit (#11321).
+  The kernel's l3mdev lookup (pref 1000) and miss terminator (pref 2000) run
+  before the PBR band (31000–31999), while the userspace helper still honors
+  the FBF override. The recipe above uses a default-instance ingress interface,
+  where both dataplane paths can apply the PBR rule.
 - **PBR build-health metrics (#4422, #7422)**: `xpf_pbr_rules_desired`
   gauges the number of kernel `ip rule` FBF entries the active config
   yields (the desired-install set), `xpf_pbr_rules_applied` counts the
