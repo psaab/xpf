@@ -3316,6 +3316,68 @@ fn learned_ingress_neighbor_enables_reverse_lan_resolution() {
 }
 
 #[test]
+fn rx_learned_neighbor_expires_to_missing_without_host_traffic_11406() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100));
+    let mac_a = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: 24,
+        ..Default::default()
+    };
+    let mut last_learned_neighbor = None;
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac_a,
+        &mut last_learned_neighbor,
+        &state,
+        &dynamic_neighbors,
+    );
+
+    let before = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    assert_eq!(before.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(before.neighbor_mac, Some(mac_a));
+
+    // Drive the production expiry sweep with a future monotonic timestamp.
+    // This represents an idle interval beyond the dynamic RX-learn lease
+    // without a wall-clock sleep or any packets from the host.
+    let max_age_ns =
+        super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS;
+    let now_ns = super::super::neighbor::monotonic_nanos()
+        .saturating_add(max_age_ns)
+        .saturating_add(1);
+    assert_eq!(
+        dynamic_neighbors.age_rx_learned_neighbors(now_ns, max_age_ns, &Default::default()),
+        1
+    );
+
+    let after = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    assert_eq!(
+        after.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "an idle RX-learned MAC must expire to MissingNeighbor without host traffic"
+    );
+    assert_eq!(after.neighbor_mac, None);
+    // The duplicate-RX fast path must notice that its cached map row expired
+    // and perform the source learn again instead of suppressing the refresh.
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac_a,
+        &mut last_learned_neighbor,
+        &state,
+        &dynamic_neighbors,
+    );
+    let relearned = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    assert_eq!(
+        relearned.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(relearned.neighbor_mac, Some(mac_a));
+}
+
+#[test]
 fn learned_vlan_ingress_neighbor_maps_to_logical_ifindex() {
     let state = build_forwarding_state(&nat_snapshot());
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());

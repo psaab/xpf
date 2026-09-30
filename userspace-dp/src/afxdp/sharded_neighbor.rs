@@ -25,7 +25,7 @@
 //!   `NeighborEntry` is plain `[u8; 6]` with no invariants to corrupt,
 //!   so the safer choice is to recover-from-poison and keep forwarding.
 
-use super::types::{FastMap, NeighborEntry};
+use super::types::{FastMap, FastSet, NeighborEntry};
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
@@ -108,6 +108,12 @@ const _: () = assert!(
 /// fire-and-forget unsolicited overwrite, not the race.
 pub(super) const ARP_SOLICITED_WINDOW_NS: u64 = 5_000_000_000;
 
+/// Maximum idle age for an RX source-learned entry that is not subsequently
+/// confirmed by the kernel neighbor monitor.
+pub(crate) const RX_LEARNED_NEIGHBOR_MAX_AGE_NS: u64 = 60_000_000_000;
+/// Bound the delay between an entry reaching its idle age and being removed.
+pub(crate) const RX_LEARNED_NEIGHBOR_SWEEP_INTERVAL_NS: u64 = 5_000_000_000;
+
 /// #10704: per-shard bound on recorded solicitation keys (see
 /// `record_neighbor_probe`). Records are created only after successful local
 /// probes; the per-shard cap and amortized pruning bound memory even when many
@@ -124,10 +130,28 @@ impl SolicitedShard {
     }
 }
 
+/// Dynamic-neighbor metadata kept private to the sharded map. RX source
+/// learns are the only entries with an age lease; kernel and control-plane
+/// updates clear it.
+#[derive(Clone, Copy)]
+pub(crate) struct NeighborRecord {
+    entry: NeighborEntry,
+    last_rx_learned_ns: Option<u64>,
+}
+
+impl NeighborRecord {
+    fn authoritative(entry: NeighborEntry) -> Self {
+        Self {
+            entry,
+            last_rx_learned_ns: None,
+        }
+    }
+}
+
 /// One mutex-guarded shard, padded to 64 bytes so adjacent shards do
 /// not share cache lines.
 #[repr(align(64))]
-pub(super) struct PaddedShard(Mutex<FastMap<(i32, IpAddr), NeighborEntry>>);
+pub(super) struct PaddedShard(Mutex<FastMap<(i32, IpAddr), NeighborRecord>>);
 
 impl PaddedShard {
     fn new() -> Self {
@@ -406,14 +430,32 @@ impl ShardedNeighborMap {
     }
 
     /// #5673: `get` plus whether the key's shard is at the per-shard learn
-    /// cap, under ONE shard lock (same cost as `get`). The RX-learn
-    /// pre-check (`learn_dynamic_neighbor`) uses this to detect that every
-    /// candidate key is a NEW learn whose shard is full and skip the
-    /// all-shard bulk write — avoiding the 64-shard serialization a
-    /// spoofed-source flood would otherwise inflict on every packet.
+    /// cap, under ONE shard lock (same cost as `get`). This plain-read form is
+    /// useful to capacity checks; the RX source-learn path uses
+    /// `get_with_capacity_for_rx_learn` to also refresh an existing age lease.
     pub(crate) fn get_with_capacity(&self, key: &(i32, IpAddr)) -> (Option<NeighborEntry>, bool) {
         let shard = self.lock_shard(shard_idx(key));
-        let entry = shard.get(key).copied();
+        let entry = shard.get(key).map(|record| record.entry);
+        let at_cap = shard.len() >= MAX_DYNAMIC_NEIGHBORS_PER_SHARD;
+        (entry, at_cap)
+    }
+
+    /// RX source-learn precheck that refreshes the lease only when the
+    /// packet's MAC agrees with the current RX-learned entry. A differing
+    /// pre-policy source must not keep a stale entry alive.
+    pub(crate) fn get_with_capacity_for_rx_learn(
+        &self,
+        key: &(i32, IpAddr),
+        mac: [u8; 6],
+        now_ns: u64,
+    ) -> (Option<NeighborEntry>, bool) {
+        let mut shard = self.lock_shard(shard_idx(key));
+        let entry = shard.get_mut(key).map(|record| {
+            if record.entry.mac == mac && record.last_rx_learned_ns.is_some() {
+                record.last_rx_learned_ns = Some(now_ns);
+            }
+            record.entry
+        });
         let at_cap = shard.len() >= MAX_DYNAMIC_NEIGHBORS_PER_SHARD;
         (entry, at_cap)
     }
@@ -475,7 +517,7 @@ impl ShardedNeighborMap {
     fn lock_shard(
         &self,
         idx: usize,
-    ) -> MutexGuard<'_, FastMap<(i32, IpAddr), NeighborEntry>> {
+    ) -> MutexGuard<'_, FastMap<(i32, IpAddr), NeighborRecord>> {
         match self.shards[idx].0.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -484,7 +526,9 @@ impl ShardedNeighborMap {
 
     /// Get a copy of the entry for `key`, if present.
     pub(crate) fn get(&self, key: &(i32, IpAddr)) -> Option<NeighborEntry> {
-        self.lock_shard(shard_idx(key)).get(key).copied()
+        self.lock_shard(shard_idx(key))
+            .get(key)
+            .map(|record| record.entry)
     }
 
     /// Insert (or overwrite) `key → val`. Unit-returning.
@@ -496,7 +540,8 @@ impl ShardedNeighborMap {
     }
 
     pub(crate) fn insert(&self, key: (i32, IpAddr), val: NeighborEntry) {
-        self.lock_shard(shard_idx(&key)).insert(key, val);
+        self.lock_shard(shard_idx(&key))
+            .insert(key, NeighborRecord::authoritative(val));
         // #7156: AFTER the map write, Release-ordered — a worker that observes
         // this generation is guaranteed to see the entry it announces.
         self.insert_generation.fetch_add(1, Ordering::Release);
@@ -546,12 +591,12 @@ impl ShardedNeighborMap {
         // MAC must invalidate just like the monitor path. A re-confirm of
         // the SAME MAC does not bump.
         if let Some(prior) = shard.get(&key)
-            && prior.mac != val.mac
+            && prior.entry.mac != val.mac
         {
             // #5147: bump only THIS neighbor's shard epoch.
             self.bump_shard_epoch(idx);
         }
-        shard.insert(key, val);
+        shard.insert(key, NeighborRecord::authoritative(val));
         // #7156: AFTER the map write, Release-ordered — a worker that observes
         // this generation is guaranteed to see the entry it announces.
         self.insert_generation.fetch_add(1, Ordering::Release);
@@ -620,7 +665,7 @@ impl ShardedNeighborMap {
     ) -> Option<bool> {
         let idx = shard_idx(&key);
         let mut shard = self.lock_shard(idx);
-        let prior_mac = shard.get(&key).map(|existing| existing.mac);
+        let prior_mac = shard.get(&key).map(|existing| existing.entry.mac);
         // #11069: an UNSOLICITED Override=1 NA gets Override=0 semantics
         // (ARP #10704 parity): it may create or refresh, never replace a
         // live differing LLA — the unsolicited-NA next-hop hijack primitive.
@@ -663,7 +708,7 @@ impl ShardedNeighborMap {
             // does not invalidate cached flows resolved to other shards.
             self.bump_shard_epoch(idx);
         }
-        shard.insert(key, val);
+        shard.insert(key, NeighborRecord::authoritative(val));
         // #7156: AFTER the map write, Release-ordered — a worker that observes
         // this generation is guaranteed to see the entry it announces.
         self.insert_generation.fetch_add(1, Ordering::Release);
@@ -674,6 +719,72 @@ impl ShardedNeighborMap {
     /// removed. Mirrors `neighbor::remove_dynamic_neighbor` semantics.
     pub(crate) fn remove_if_present(&self, key: &(i32, IpAddr)) -> bool {
         self.lock_shard(shard_idx(key)).remove(key).is_some()
+    }
+
+    /// Expire idle RX source-learned entries. Manager-owned keys are excluded
+    /// even if a packet learn temporarily wrote the same key into this map.
+    /// Removal advances only the affected shard's MAC epoch so cached flows
+    /// cannot continue forwarding to the aged MAC; it does not signal an
+    /// insertion to pending-neighbor sweeps.
+    pub(crate) fn age_rx_learned_neighbors(
+        &self,
+        now_ns: u64,
+        max_age_ns: u64,
+        manager_keys: &FastSet<(i32, IpAddr)>,
+    ) -> usize {
+        let mut removed = 0;
+        for idx in 0..NUM_SHARDS {
+            let mut shard = self.lock_shard(idx);
+            let before = shard.len();
+            shard.retain(|key, record| {
+                manager_keys.contains(key)
+                    || !record
+                        .last_rx_learned_ns
+                        .is_some_and(|seen| now_ns.saturating_sub(seen) >= max_age_ns)
+            });
+            let shard_removed = before - shard.len();
+            if shard_removed != 0 {
+                self.bump_shard_epoch(idx);
+                removed += shard_removed;
+            }
+        }
+        removed
+    }
+
+    /// A matching kernel monitor update proves that the current MAC is
+    /// backed by the kernel neighbor table, so it no longer needs the RX
+    /// source-learn lease.
+    pub(crate) fn mark_kernel_backed_if_same(&self, key: &(i32, IpAddr), mac: [u8; 6]) {
+        let mut shard = self.lock_shard(shard_idx(key));
+        if let Some(record) = shard.get_mut(key)
+            && record.entry.mac == mac
+        {
+            record.last_rx_learned_ns = None;
+        }
+    }
+
+    /// Refresh the lease for an unchanged RX-learned VLAN key pair. Returns
+    /// false if any key disappeared or no longer maps to the packet's MAC,
+    /// allowing the caller to fall through to the normal learn path.
+    pub(crate) fn refresh_rx_learned_pair(
+        &self,
+        keys: &[(i32, IpAddr)],
+        mac: [u8; 6],
+        now_ns: u64,
+    ) -> bool {
+        for key in keys {
+            let mut shard = self.lock_shard(shard_idx(key));
+            let Some(record) = shard.get_mut(key) else {
+                return false;
+            };
+            if record.entry.mac != mac {
+                return false;
+            }
+            if record.last_rx_learned_ns.is_some() {
+                record.last_rx_learned_ns = Some(now_ns);
+            }
+        }
+        !keys.is_empty()
     }
 
     /// Lock every shard in shard-index order and run the closure with
@@ -694,7 +805,7 @@ impl ShardedNeighborMap {
         // Lock all 64 shards in ascending order. Use a Vec then convert
         // to a fixed-size array because MutexGuard doesn't impl Default,
         // ruling out `array::from_fn`.
-        let mut guards: Vec<MutexGuard<'_, FastMap<(i32, IpAddr), NeighborEntry>>> =
+        let mut guards: Vec<MutexGuard<'_, FastMap<(i32, IpAddr), NeighborRecord>>> =
             Vec::with_capacity(NUM_SHARDS);
         for i in 0..NUM_SHARDS {
             guards.push(self.lock_shard(i));
@@ -814,10 +925,15 @@ impl ShardedNeighborMap {
     /// `BulkShardGuard::get` under the same bulk lock as the insert and
     /// the bump, so a concurrent fast-path hit never observes the new MAC
     /// paired with the old epoch.
-    pub(crate) fn learn_pair_if_changed(
+    pub(crate) fn learn_pair_if_changed(&self, keys: &[(i32, IpAddr)], val: NeighborEntry) {
+        self.learn_pair_if_changed_at(keys, val, super::neighbor::monotonic_nanos());
+    }
+
+    pub(crate) fn learn_pair_if_changed_at(
         &self,
         keys: &[(i32, IpAddr)],
         val: NeighborEntry,
+        now_ns: u64,
     ) {
         let installed = self.with_all_shards(|bulk| {
             // #5673: refuse the WHOLE pair-write if ANY new key's shard is at
@@ -853,7 +969,7 @@ impl ShardedNeighborMap {
                 }
             }
             for key in keys {
-                bulk.insert(*key, val);
+                bulk.insert_rx_learned(*key, val, now_ns);
             }
             // #5147: bump each shard whose neighbor MAC changed exactly once,
             // so cached flows resolved to an unrelated shard survive.
@@ -887,6 +1003,15 @@ impl ShardedNeighborMap {
         keys: &[(i32, IpAddr)],
         val: NeighborEntry,
     ) -> bool {
+        self.learn_pair_if_absent_or_same_at(keys, val, super::neighbor::monotonic_nanos())
+    }
+
+    pub(crate) fn learn_pair_if_absent_or_same_at(
+        &self,
+        keys: &[(i32, IpAddr)],
+        val: NeighborEntry,
+        now_ns: u64,
+    ) -> bool {
         let installed = self.with_all_shards(|bulk| {
             if keys.iter().any(|key| {
                 bulk.get(key).is_some_and(|prior| prior.mac != val.mac)
@@ -903,7 +1028,7 @@ impl ShardedNeighborMap {
                 return false;
             }
             for key in keys {
-                bulk.insert(*key, val);
+                bulk.insert_rx_learned(*key, val, now_ns);
             }
             !keys.is_empty()
         });
@@ -973,14 +1098,32 @@ impl ShardEpochSnapshot {
 /// across shards safely. Provides key-routed `insert`/`remove` plus
 /// raw shard iteration for `clear` and friends.
 pub(crate) struct BulkShardGuard<'a> {
-    guards: [MutexGuard<'a, FastMap<(i32, IpAddr), NeighborEntry>>; NUM_SHARDS],
+    guards: [MutexGuard<'a, FastMap<(i32, IpAddr), NeighborRecord>>; NUM_SHARDS],
 }
 
 impl<'a> BulkShardGuard<'a> {
-    /// Insert `key → val` into the appropriate shard.
+    /// Insert `key → val` into the appropriate shard as a non-RX entry.
     pub(crate) fn insert(&mut self, key: (i32, IpAddr), val: NeighborEntry) {
         let i = shard_idx(&key);
-        self.guards[i].insert(key, val);
+        self.guards[i].insert(key, NeighborRecord::authoritative(val));
+    }
+
+    /// Insert or refresh an RX source-learned entry. A same-MAC refresh of
+    /// an entry already backed by the kernel preserves that status; a new or
+    /// changed MAC starts a userspace-only lease.
+    fn insert_rx_learned(&mut self, key: (i32, IpAddr), val: NeighborEntry, now_ns: u64) {
+        let i = shard_idx(&key);
+        let last_rx_learned_ns = match self.guards[i].get(&key).copied() {
+            Some(prior) if prior.entry.mac == val.mac => prior.last_rx_learned_ns.map(|_| now_ns),
+            _ => Some(now_ns),
+        };
+        self.guards[i].insert(
+            key,
+            NeighborRecord {
+                entry: val,
+                last_rx_learned_ns,
+            },
+        );
     }
 
     /// Remove `key` from the appropriate shard.
@@ -994,14 +1137,14 @@ impl<'a> BulkShardGuard<'a> {
     /// MAC BEFORE the replace removes it.
     pub(crate) fn get(&self, key: &(i32, IpAddr)) -> Option<NeighborEntry> {
         let i = shard_idx(key);
-        self.guards[i].get(key).copied()
+        self.guards[i].get(key).map(|record| record.entry)
     }
 
     /// Iterate every shard's underlying map mutably. Used for
     /// shard-wide operations like `clear`.
     pub(crate) fn each_shard_mut(
         &mut self,
-    ) -> impl Iterator<Item = &mut FastMap<(i32, IpAddr), NeighborEntry>> {
+    ) -> impl Iterator<Item = &mut FastMap<(i32, IpAddr), NeighborRecord>> {
         self.guards.iter_mut().map(|g| &mut **g)
     }
 
@@ -1011,7 +1154,7 @@ impl<'a> BulkShardGuard<'a> {
     /// access.
     pub(crate) fn each_shard_ref(
         &self,
-    ) -> impl Iterator<Item = &FastMap<(i32, IpAddr), NeighborEntry>> {
+    ) -> impl Iterator<Item = &FastMap<(i32, IpAddr), NeighborRecord>> {
         self.guards.iter().map(|g| &**g)
     }
 

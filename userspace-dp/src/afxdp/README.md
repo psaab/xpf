@@ -277,6 +277,14 @@ sync.
     overlap (`#3182`), NOT the source-IP class — closing that gap brings it
     to parity with the L2 advert paths. Rejection is do-not-learn only (the
     packet still forwards); this is a learn-path guard, not a packet filter.
+  - **RX-learned neighbor age (#11406):** the transit source-MAC path does
+    not program the kernel table, so its dynamic-only rows carry a monotonic
+    last-seen lease. Matching RX learns refresh it; the neighbor-monitor sweep
+    runs every 5s and removes rows idle for 60s, except manager-owned keys or
+    rows subsequently confirmed by the kernel. Removal advances the owning
+    shard's MAC epoch, so cached destination MACs are discarded and future
+    resolutions enter the existing MissingNeighbor/probe path. This lease is
+    process-local and is not HA-synchronized.
   - **STALE install + NDP Override honor (`#4475`, opus-172 H-2, RFC 4861
     §7.2.5):** the own-IP gate above only protects addresses the router
     OWNS. Every OTHER same-segment next-hop — including the WAN gateway —
