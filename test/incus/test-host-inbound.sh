@@ -111,6 +111,11 @@ CLI=/usr/local/sbin/cli
 
 PASS=0
 FAIL=0
+# #11079: Phase-0 posture checks (config-text reads) score apart from the
+# on-wire matrix: cells_passed/cells_failed count OBSERVED packets only,
+# posture_passed/posture_failed count config assertions.
+POSTURE_PASS=0
+POSTURE_FAIL=0
 ERRORS=()
 
 info() { echo "==> $*"; }
@@ -118,6 +123,12 @@ pass() { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail() {
 	echo "  FAIL  $*"
 	FAIL=$((FAIL + 1))
+	ERRORS+=("$*")
+}
+ppass() { echo "  PASS  $*"; POSTURE_PASS=$((POSTURE_PASS + 1)); }
+pfail() {
+	echo "  FAIL  $*"
+	POSTURE_FAIL=$((POSTURE_FAIL + 1))
 	ERRORS+=("$*")
 }
 die() {
@@ -135,6 +146,16 @@ score() {
 	PASS\ *) pass "${label}: ${verdict#PASS }" ;;
 	FAIL\ *) fail "${label}: ${verdict#FAIL }" ;;
 	*) fail "${label}: verdict helper returned an unrecognised line: ${verdict:-<empty>}" ;;
+	esac
+}
+
+# pscore maps a verdict line onto the POSTURE counters (Phase-0 only).
+pscore() {
+	local label="$1" verdict="$2"
+	case "$verdict" in
+	PASS\ *) ppass "${label}: ${verdict#PASS }" ;;
+	FAIL\ *) pfail "${label}: ${verdict#FAIL }" ;;
+	*) pfail "${label}: verdict helper returned an unrecognised line: ${verdict:-<empty>}" ;;
 	esac
 }
 
@@ -225,12 +246,12 @@ info "read $(grep -c . <<<"$ZONE_SETS") zone and $(grep -c . <<<"$IFACE_SETS") i
 # an expectation table that has silently gone stale reports a clean pass while
 # asserting the wrong thing.
 info "Phase 0: zone posture the matrix depends on"
-score "posture lan/ssh" "$(hi_zone_service_verdict "$ZONE_SETS" lan ssh PRESENT)"
-score "posture lan/ping" "$(hi_zone_service_verdict "$ZONE_SETS" lan ping PRESENT)"
-score "posture wan/ping" "$(hi_zone_service_verdict "$ZONE_SETS" wan ping PRESENT)"
-score "posture wan/ssh" "$(hi_zone_service_verdict "$ZONE_SETS" wan ssh ABSENT)"
-score "posture lan/telnet" "$(hi_zone_service_verdict "$ZONE_SETS" lan telnet ABSENT)"
-score "posture wan/telnet" "$(hi_zone_service_verdict "$ZONE_SETS" wan telnet ABSENT)"
+pscore "posture lan/ssh" "$(hi_zone_service_verdict "$ZONE_SETS" lan ssh PRESENT)"
+pscore "posture lan/ping" "$(hi_zone_service_verdict "$ZONE_SETS" lan ping PRESENT)"
+pscore "posture wan/ping" "$(hi_zone_service_verdict "$ZONE_SETS" wan ping PRESENT)"
+pscore "posture wan/ssh" "$(hi_zone_service_verdict "$ZONE_SETS" wan ssh ABSENT)"
+pscore "posture lan/telnet" "$(hi_zone_service_verdict "$ZONE_SETS" lan telnet ABSENT)"
+pscore "posture wan/telnet" "$(hi_zone_service_verdict "$ZONE_SETS" wan telnet ABSENT)"
 # #9637: every probe arrives on the LAN host's segment, reth1. The ssh cells
 # below are scored against that zone's posture, so the zone must own reth1.
 PROBER_ZONE=lan
@@ -238,18 +259,18 @@ PROBER_ZONE=lan
 # interface-level host-inbound override follows it on the same line (the loss
 # cluster's own config reads `... interfaces reth1 host-inbound-traffic ...`).
 if grep -qE "^set security zones security-zone ${PROBER_ZONE} interfaces reth1(\.0)?( |$)" <<<"$ZONE_SETS"; then
-	pass "posture ${PROBER_ZONE}/reth1: the prober's ingress interface is in ${PROBER_ZONE}, whose posture scores every ssh cell"
+	ppass "posture ${PROBER_ZONE}/reth1: the prober's ingress interface is in ${PROBER_ZONE}, whose posture scores every ssh cell"
 else
-	fail "posture ${PROBER_ZONE}/reth1: ${PROBER_ZONE} no longer owns the prober's ingress interface — the ssh cells would be scored against the wrong zone"
+	pfail "posture ${PROBER_ZONE}/reth1: ${PROBER_ZONE} no longer owns the prober's ingress interface — the ssh cells would be scored against the wrong zone"
 fi
 for tagged in reth0.50 reth0.80; do
 	if grep -qxF "set security zones security-zone wan interfaces ${tagged}" <<<"$ZONE_SETS"; then
-		pass "posture wan/${tagged}: the wan zone owns the tagged sub-unit (this is the VLAN leg's subject)"
+		ppass "posture wan/${tagged}: the wan zone owns the tagged sub-unit (this is the VLAN leg's subject)"
 	else
-		fail "posture wan/${tagged}: the wan zone no longer owns this VLAN sub-unit — the VLAN cells below would measure some other zone's posture"
+		pfail "posture wan/${tagged}: the wan zone no longer owns this VLAN sub-unit — the VLAN cells below would measure some other zone's posture"
 	fi
 done
-[[ "$FAIL" -eq 0 ]] || die "zone posture precondition failed — update the expectation table rather than weakening a cell"
+[[ "$POSTURE_FAIL" -eq 0 ]] || die "zone posture precondition failed — update the expectation table rather than weakening a cell"
 trap cleanup_ssh_probe_listener EXIT
 start_ssh_probe_listener
 
@@ -454,9 +475,9 @@ else
 	HI_GATE="test-host-inbound"
 fi
 if [[ "$FAIL" -gt 0 ]]; then
-	printf 'WIRE_GATE %s FAIL reason=-- cells_passed=%s cells_failed=%s\n' "$HI_GATE" "$PASS" "$FAIL"
+	printf 'WIRE_GATE %s FAIL reason=-- cells_passed=%s cells_failed=%s posture_passed=%s posture_failed=%s\n' "$HI_GATE" "$PASS" "$FAIL" "$POSTURE_PASS" "$POSTURE_FAIL"
 else
-	printf 'WIRE_GATE %s PASS reason=-- cells_passed=%s cells_failed=%s\n' "$HI_GATE" "$PASS" "$FAIL"
+	printf 'WIRE_GATE %s PASS reason=-- cells_passed=%s cells_failed=%s posture_passed=%s posture_failed=%s\n' "$HI_GATE" "$PASS" "$FAIL" "$POSTURE_PASS" "$POSTURE_FAIL"
 fi
 if [[ "$FAIL" -gt 0 ]]; then
 	echo
