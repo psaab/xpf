@@ -1307,8 +1307,12 @@ func TestSessionHAQueuedDemotionIsPerRG11160(t *testing.T) {
 		{RGID: 1, Active: true, WatchdogTimestamp: 1},
 		{RGID: 2, Active: true, WatchdogTimestamp: 1},
 	}, 10)
+	// RG1 expired (the stall outlasted its lease — the #11160 scenario);
+	// RG2 VALID: the helper refuses whole-set when an incoming-active RG
+	// has an expired stored-active lease (#10787), so an expired RG2 would
+	// make Served unobservable and the renewal proof vacuous.
 	oracle.leaseUntil[1] = 9
-	oracle.leaseUntil[2] = 9
+	oracle.leaseUntil[2] = 12
 	var served int
 	var sawRetained bool
 	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
