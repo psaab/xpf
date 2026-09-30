@@ -664,21 +664,41 @@ pub(super) fn lookup_shared_session(
     lock_shared_recover(shared_sessions).get(key).cloned()
 }
 
+#[derive(Clone, Copy)]
+enum ReverseDomainAdmission {
+    ForwardEgress,
+    QuotedTupleOnly,
+}
+
 pub(super) fn lookup_shared_forward_nat_match(
     forwarding: &ForwardingState,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     reply_key: &SessionKey,
 ) -> Option<SyncedSessionEntry> {
+    lookup_shared_forward_nat_match_with_admission(
+        forwarding,
+        shared_nat_sessions,
+        reply_key,
+        ReverseDomainAdmission::ForwardEgress,
+    )
+}
+
+fn lookup_shared_forward_nat_match_with_admission(
+    forwarding: &ForwardingState,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    reply_key: &SessionKey,
+    domain_admission: ReverseDomainAdmission,
+) -> Option<SyncedSessionEntry> {
     // #2402: recover poison (see lookup_shared_session).
     let map = lock_shared_recover(shared_nat_sessions);
     // The shared NAT map is published under both the domain-preserving reverse
     // key and the canonical, domain-neutral reverse-match key. Probe in that
-    // order, but validate each candidate against the forward EGRESS interface's
-    // routing domain before cloning it. Domain 0 is strict rather than a
-    // wildcard, so mixed-zero collisions cannot borrow across instances.
+    // order. Ordinary packet admission checks each candidate's forward egress
+    // domain; embedded quotes use this match only to recover the quoted tuple,
+    // because an off-path router may send the error from another domain.
     //
-    // Synthetic fabric domains retain their prior exact-key-only behavior:
-    // they may use an exact matching forward key, but never a canonical alias.
+    // Synthetic fabric domains retain their exact-key-only behavior in both
+    // modes: they may use an exact matching forward key, never a canonical alias.
     let matches_reply_domain = |entry: &SyncedSessionEntry, exact: bool| {
         let forward_key_domain = entry.key.routing_domain;
         if crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
@@ -686,10 +706,15 @@ pub(super) fn lookup_shared_forward_nat_match(
         {
             return exact && forward_key_domain == reply_key.routing_domain;
         }
-        crate::afxdp::forwarding::egress_routing_domain(
-            forwarding,
-            entry.decision.resolution.egress_ifindex,
-        ) == reply_key.routing_domain
+        match domain_admission {
+            ReverseDomainAdmission::ForwardEgress => {
+                crate::afxdp::forwarding::egress_routing_domain(
+                    forwarding,
+                    entry.decision.resolution.egress_ifindex,
+                ) == reply_key.routing_domain
+            }
+            ReverseDomainAdmission::QuotedTupleOnly => true,
+        }
     };
 
     if let Some(exact) = map.get(reply_key) {
@@ -1221,16 +1246,10 @@ pub(super) enum ReverseIngress {
     /// Distinct from `Unconstrained` precisely so an unmapped ifindex cannot
     /// reach the same outcome as a deliberate exemption.
     Unzoned,
-    /// The caller asserts no ingress constraint, and owes a reason at the call
-    /// site. Two hold today:
-    ///
-    /// * the ICMP embedded-error rewriters, which use the match only to recover
-    ///   a pre-NAT tuple and install NO session — and where an error may
-    ///   legitimately originate off-path (an intermediate router), so
-    ///   constraining the arrival zone would break PMTUD;
-    /// * a FABRIC-ingress packet, which arrives on the fabric link from the
-    ///   peer node rather than in its logical ingress zone, so its arrival zone
-    ///   is structurally not the flow's.
+    /// The caller has no arrival-zone constraint. Egress-domain admission
+    /// still applies; embedded ICMP quotes use the separate tuple-only API.
+    /// The active exemption is a FABRIC-ingress packet, which arrives on the
+    /// fabric link from the peer node rather than in its logical ingress zone.
     Unconstrained,
 }
 
@@ -1265,6 +1284,7 @@ pub(super) fn lookup_forward_nat_across_scopes(
         forwarding,
         reply_key,
         None,
+        ReverseDomainAdmission::ForwardEgress,
     )?;
     revalidate_reverse_ingress(m, ingress)
 }
@@ -1283,8 +1303,31 @@ pub(super) fn lookup_forward_nat_across_scopes_at(
         forwarding,
         reply_key,
         Some(now_ns),
+        ReverseDomainAdmission::ForwardEgress,
     )?;
     revalidate_reverse_ingress(m, ingress)
+}
+
+/// Read-only reverse-tuple lookup for embedded ICMP quotes. Off-path routers
+/// can send an error from a routing domain other than the forward egress, so
+/// this path validates tuple identity (and the quarantine fence) without
+/// applying reverse-session admission. Its result is used only to rewrite the
+/// quoted packet; callers must not install a reverse session from it.
+pub(super) fn lookup_forward_nat_for_icmp_quote_at(
+    sessions: &SessionTable,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    forwarding: &ForwardingState,
+    reply_key: &SessionKey,
+    now_ns: u64,
+) -> Option<ForwardSessionMatch> {
+    lookup_forward_nat_across_scopes_inner(
+        sessions,
+        shared_nat_sessions,
+        forwarding,
+        reply_key,
+        Some(now_ns),
+        ReverseDomainAdmission::QuotedTupleOnly,
+    )
 }
 
 fn lookup_forward_nat_across_scopes_inner(
@@ -1293,9 +1336,13 @@ fn lookup_forward_nat_across_scopes_inner(
     forwarding: &ForwardingState,
     reply_key: &SessionKey,
     now_ns: Option<u64>,
+    domain_admission: ReverseDomainAdmission,
 ) -> Option<ForwardSessionMatch> {
-    let egress_domain = |ifindex| {
-        crate::afxdp::forwarding::egress_routing_domain(forwarding, ifindex)
+    let egress_domain = |ifindex| match domain_admission {
+        ReverseDomainAdmission::ForwardEgress => {
+            crate::afxdp::forwarding::egress_routing_domain(forwarding, ifindex)
+        }
+        ReverseDomainAdmission::QuotedTupleOnly => reply_key.routing_domain,
     };
     let local_match = if let Some(now) = now_ns {
         sessions.find_forward_nat_match_at(reply_key, now, &egress_domain)
@@ -1318,21 +1365,30 @@ fn lookup_forward_nat_across_scopes_inner(
             local.metadata.is_reverse,
             local.decision,
         ) {
-            return lookup_shared_forward_nat_match(forwarding, shared_nat_sessions, reply_key)
-                .map(|entry| ForwardSessionMatch {
-                    key: entry.key,
-                    decision: entry.decision,
-                    metadata: entry.metadata,
-                });
+            return lookup_shared_forward_nat_match_with_admission(
+                forwarding,
+                shared_nat_sessions,
+                reply_key,
+                domain_admission,
+            )
+            .map(|entry| ForwardSessionMatch {
+                key: entry.key,
+                decision: entry.decision,
+                metadata: entry.metadata,
+            });
         }
         return Some(local);
     }
-    lookup_shared_forward_nat_match(forwarding, shared_nat_sessions, reply_key).map(|entry| {
-        ForwardSessionMatch {
-            key: entry.key,
-            decision: entry.decision,
-            metadata: entry.metadata,
-        }
+    lookup_shared_forward_nat_match_with_admission(
+        forwarding,
+        shared_nat_sessions,
+        reply_key,
+        domain_admission,
+    )
+    .map(|entry| ForwardSessionMatch {
+        key: entry.key,
+        decision: entry.decision,
+        metadata: entry.metadata,
     })
 }
 

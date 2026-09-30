@@ -1877,6 +1877,79 @@ fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
     );
 }
 
+/// Embedded quote rewriting has no reverse-session admission side effect: an
+/// off-path router may send an error outside the forward egress domain.
+#[test]
+fn embedded_quote_reverse_lookup_allows_off_path_domain_11298() {
+    const DOMAIN_A: u32 = 100_001;
+    const DOMAIN_B: u32 = 100_002;
+    const OFF_PATH_DOMAIN: u32 = 100_003;
+
+    let mut forward = test_key();
+    forward.routing_domain = DOMAIN_A;
+    let decision = test_decision();
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(decision.resolution.egress_ifindex, DOMAIN_B);
+    let mut quote_reply = reverse_session_key(&forward, decision.nat);
+    quote_reply.routing_domain = OFF_PATH_DOMAIN;
+
+    let mut local_sessions = SessionTable::new();
+    assert!(local_sessions.install_with_protocol(
+        forward.clone(),
+        decision,
+        test_metadata(),
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let empty_shared = Arc::new(Mutex::new(FastMap::default()));
+    let local_hit = lookup_forward_nat_for_icmp_quote_at(
+        &local_sessions,
+        &empty_shared,
+        &forwarding,
+        &quote_reply,
+        1_000_000_000,
+    )
+    .expect("off-path ICMP quote must recover the local forward NAT tuple");
+    assert_eq!(local_hit.key, forward);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let owner_indexes = SharedSessionOwnerRgIndexes::default();
+    let entry = SyncedSessionEntry {
+        key: forward.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &owner_indexes,
+        &entry,
+    );
+    let shared_hit = lookup_forward_nat_for_icmp_quote_at(
+        &SessionTable::new(),
+        &shared_nat_sessions,
+        &forwarding,
+        &quote_reply,
+        1_000_000_000,
+    )
+    .expect("off-path ICMP quote must recover the shared forward NAT tuple");
+    assert_eq!(shared_hit.key, forward);
+}
+
 #[test]
 fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeholder() {
     let mut sessions = SessionTable::new();

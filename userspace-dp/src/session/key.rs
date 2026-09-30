@@ -125,9 +125,9 @@ pub(crate) struct SessionKey {
     ///     translated alias) or navigate between the two halves of one flow,
     ///     so they must not lose the discriminator.
     ///   * `reverse_wire_key` and `reverse_canonical_key` deliberately ZERO
-    ///     it. Those keys build the REVERSE-MATCH index, whose candidate
-    ///     admission compares the reply's arriving domain with the forward
-    ///     session's egress-interface domain. This preserves legitimate
+    ///     it. Those keys build the REVERSE-MATCH index. Ordinary reverse
+    ///     session admission compares each candidate's forward egress-interface
+    ///     domain with the arriving reply domain. This preserves legitimate
     ///     asymmetric routes without treating mixed-zero domains as wildcards.
     ///
     /// Zeroing the reverse-match keys does NOT give the cross-tenant collision
@@ -136,15 +136,19 @@ pub(crate) struct SessionKey {
     /// bucket domain-agnostic, then validates each candidate against the
     /// routing domain of `decision.resolution.egress_ifindex`:
     ///
-    ///   * A reply is admitted only when its arrival domain matches that forward
-    ///     egress domain. The forward key's ingress domain and PBR install-table
-    ///     domain are not substitutes.
+    ///   * A reverse session is admitted only when its reply's arrival domain
+    ///     matches that forward egress domain. The forward key's ingress domain
+    ///     and PBR install-table domain are not substitutes.
     ///   * Domain 0 is strict, not a wildcard. Mixed-zero replies work only when
     ///     the forward egress actually resolves to the reply's domain.
     ///   * Asymmetric A-ingress/B-egress flows therefore match a B-domain reply,
     ///     while replies from a different egress domain cannot borrow the
     ///     overlapping candidate. Quarantined fabric identities retain their
     ///     exact-key-only rule.
+    ///
+    /// Same-family embedded ICMP quotes use a tuple-only lookup as an explicit
+    /// exception: they rewrite quoted packets but install no session, and an
+    /// off-path router may send an error from another domain.
     ///
     /// Do not "optimise" the PRESERVING three to `Default::default()`, and do
     /// not restore a domain-preserving reverse index without changing the
@@ -323,9 +327,10 @@ pub(crate) fn reverse_canonical_key(forward_key: &SessionKey, _nat: NatDecision)
 ///
 /// `reverse_wire_key` / `reverse_canonical_key` build those index keys with
 /// `routing_domain: 0`, so the arriving reply must be zeroed the same way
-/// before it is used as a probe. The reply's own domain is retained by the
-/// caller and compared with each candidate's forward egress-interface domain
-/// by `find_forward_nat_match`; domain 0 is not a wildcard.
+/// before it is used as a probe. Ordinary reverse-session admission retains the
+/// reply's domain and compares it with each candidate's forward egress-interface
+/// domain; domain 0 is not a wildcard. Embedded quote-only lookup is the
+/// intentional tuple-recovery exception because it installs no reverse session.
 pub(crate) fn reverse_match_key(key: &SessionKey) -> SessionKey {
     if key.routing_domain == 0 {
         return key.clone();

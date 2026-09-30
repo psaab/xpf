@@ -72,11 +72,10 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         hdr.src_port,
         hdr.dst_port,
         quoted_discriminator,
-        // #9162/#11298: the SAME domain the forward `embedded_key` above
-        // carries, not a hardcoded 0. This key is probed against both index
-        // kinds: the exact lookup needs it, while reverse-NAT lookup zeroes
-        // the probe and compares this reply domain with the forward egress
-        // interface domain. See `embedded_reply_key`.
+        // #9162/#11298: retain the arriving interface's domain for exact
+        // probes. This quote-only reverse lookup is tuple-based because it
+        // creates no session and off-path routers may send errors from another
+        // routing domain. See `embedded_reply_key`.
         embedded_routing_domain,
     );
 
@@ -84,19 +83,11 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     // reply direction of a forward-NAT'd session. Recover the original
     // pre-NAT src + port from the forward key.
     if let Some(fwd) =
-        lookup_forward_nat_across_scopes_at(
+        lookup_forward_nat_for_icmp_quote_at(
             ctx.sessions,
             ctx.shared_nat_sessions,
             ctx.forwarding,
             &reverse_key,
-            // #7169: no ingress constraint here, and the reason is not
-            // that it is inconvenient. This path installs NO session —
-            // it uses the match only to recover the pre-NAT tuple for
-            // rewriting an embedded ICMP error — so there is no durable
-            // state to endorse a spoof. And an ICMP error may legitimately
-            // originate off-path from an intermediate router, so requiring
-            // it to arrive from the flow's egress zone would break PMTUD.
-            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
             now_ns,
         )
     {

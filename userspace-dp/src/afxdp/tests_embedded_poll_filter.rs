@@ -3361,9 +3361,8 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_in_routing_instance_9162() 
     assert_eq!(
         &ip[12..16],
         &snat_ip.octets(),
-        "#9162: outer src re-NAT'd to the SNAT address. A domain-0 reply key \
-         misses the domain-7 session, the outbound-SNAT mark never fires, and \
-         the #5690 reversal puts the INTERNAL client address on the wire"
+        "#9162: the recovered forward NAT session must re-NAT the outer source; \
+         a lookup miss leaves the internal client address on the wire"
     );
     let icmp = &ip[20..];
     let emb = &icmp[8..];
@@ -3447,8 +3446,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_in_routing_instance_9162() 
     assert_eq!(
         &ip[8..24],
         &snat_v6.octets(),
-        "#9162: outer src re-NAT'd to the SNAT66 address. With a domain-0 reply \
-         key the domain-7 session is unreachable and the internal source leaks"
+        "#9162: the recovered forward NAT66 session must re-NAT the outer source"
     );
     let icmp = &ip[40..];
     let emb = &icmp[8..];

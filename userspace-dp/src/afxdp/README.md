@@ -824,11 +824,13 @@ sync.
     `nat64_match.rs` now derives it with `ingress_routing_domain` the way
     `nat_match_v4.rs` / `nat_match_v6.rs` already did — that file previously
     contained ZERO `routing_domain` references while both siblings carried
-    one, which was the issue's own positive control. Passing a real domain is
-    correct in BOTH index families: exact lookups need the arriving key domain,
-    while reverse-NAT lookups zero the probe and compare the reply domain with
-    each forward candidate's egress-interface domain (`#11298`). This permits
-    an A-ingress/B-egress reply in B without treating domain 0 as a wildcard.
+    one, which was the issue's own positive control. Exact lookups need the
+    arriving key domain; ordinary reverse-session admission zeroes its probe
+    and compares the reply domain with each forward candidate's egress domain
+    (`#11298`), permitting A-ingress/B-egress replies without treating domain
+    0 as a wildcard. Same-family embedded quotes instead use tuple-only lookup:
+    they rewrite a quoted packet without installing a session, and an off-path
+    router may send the error from another routing domain.
     The NAT64 companion arm remains an exact installed-session lookup: there is
     deliberately NO domain-0 retry there, which would name the DEFAULT instance
     rather than perform a domain-agnostic search. An error that does not match
