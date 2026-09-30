@@ -351,6 +351,7 @@ fn same_family_icmp_quote_uses_read_only_plain_probe_9990() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         install_ns + 1_000_000,
     );
@@ -613,6 +614,7 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -680,6 +682,7 @@ fn embedded_icmp_nat_match_ignores_non_error_echo() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option();
@@ -3499,6 +3502,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -3572,6 +3576,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -3607,6 +3612,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -7839,6 +7845,7 @@ fn full_tcp_quote_in_atomic_outer_matches_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -7871,6 +7878,7 @@ fn short_tcp_quote_in_atomic_outer_refused_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -7900,6 +7908,7 @@ fn short_tcp_quote_in_fragmented_outer_kept_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -8007,6 +8016,7 @@ fn ptb_pair_same_session_both_delivered_9901() {
             &neighbors,
             &shared,
             &shared_nat,
+            &SharedSessionOwnerRgIndexes::default(),
             &shared_wire,
             1_000_000,
         );
@@ -8043,6 +8053,7 @@ fn same_router_sessions_match_independently_9901() {
             &neighbors,
             &shared,
             &shared_nat,
+            &SharedSessionOwnerRgIndexes::default(),
             &shared_wire,
             1_000_000,
         );
@@ -8059,6 +8070,7 @@ fn same_router_sessions_match_independently_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -8074,6 +8086,7 @@ fn same_router_sessions_match_independently_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -8106,6 +8119,7 @@ fn match_flood_capped_at_burst_and_counted_9901() {
             &neighbors,
             &shared,
             &shared_nat,
+            &SharedSessionOwnerRgIndexes::default(),
             &shared_wire,
             1_000_000,
         ) {
@@ -8235,6 +8249,7 @@ fn outer_slack_quote_refused_at_match_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
