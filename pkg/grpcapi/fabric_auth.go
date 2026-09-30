@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/psaab/xpf/pkg/denyaudit"
@@ -116,6 +117,12 @@ const (
 	// fabricAuthMetadataKey is the gRPC metadata header carrying the hex token.
 	// Lowercase per the gRPC metadata-key contract.
 	fabricAuthMetadataKey = "xpf-fabric-auth"
+	// fabricAuthArgsBoundKey carries the #11082 args-bound stream token:
+	// HMAC(PSK, window || method || digest(request-args)). The method-only
+	// token stays mandatory (connection gate); the handler additionally
+	// requires this token to match the ACTUAL request, so a captured
+	// stream token cannot be replayed with different arguments in-window.
+	fabricAuthArgsBoundKey = "xpf-fabric-auth-args"
 
 	// fabricAuthWindowSeconds is the token validity window. The verifier also
 	// accepts the adjacent windows (±1), so a token is honored for up to
@@ -244,7 +251,6 @@ func verifyFabricAuthTokenForDigest(key []byte, tokenHex string, method string, 
 	return false
 }
 
-
 // fabricAuthTokenFromMetadata extracts the token header from an inbound context.
 // present is false when the caller sent no token (a not-yet-keyed peer).
 func fabricAuthTokenFromMetadata(ctx context.Context) (token string, present bool) {
@@ -257,6 +263,47 @@ func fabricAuthTokenFromMetadata(ctx context.Context) (token string, present boo
 		return "", false
 	}
 	return vals[0], true
+}
+
+// fabricStreamArgsUnboundTotal counts MonitorInterface streams accepted on
+// the legacy method-only token because the peer sent no args-bound token
+// (#11082). Monotonic; surfaced as xpf_fabric_stream_args_unbound_total.
+// Phase 2 removes the fallback once all peers bind arguments.
+var fabricStreamArgsUnboundTotal atomic.Uint64
+
+// FabricStreamArgsUnboundTotal reports legacy method-only stream accepts
+// for the Prometheus collector.
+func FabricStreamArgsUnboundTotal() uint64 {
+	return fabricStreamArgsUnboundTotal.Load()
+}
+
+// fabricAuthArgsTokenFromMetadata extracts the args-bound stream token, if
+// the peer sent one (new clients always do; old clients predate it).
+func fabricAuthArgsTokenFromMetadata(ctx context.Context) (token string, present bool) {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return "", false
+	}
+	vals := md.Get(fabricAuthArgsBoundKey)
+	if len(vals) == 0 || vals[0] == "" {
+		return "", false
+	}
+	return vals[0], true
+}
+
+// verifyFabricStreamArgsToken verifies an args-bound stream token against the
+// actual request arguments across all accepted keys (rotation-safe, #6630).
+func verifyFabricStreamArgsToken(keys [][]byte, token, method string, req interface{}) bool {
+	digest, err := fabricRequestDigest(req)
+	if err != nil {
+		return false
+	}
+	for _, k := range keys {
+		if verifyFabricAuthTokenForDigest(k, token, method, digest) {
+			return true
+		}
+	}
+	return false
 }
 
 // fabricAuthDecision applies the #4107 dual-accept policy for one inbound fabric
@@ -407,7 +454,7 @@ func (s *Server) checkFabricAuthRequest(ctx context.Context, method string, req 
 	var accept bool
 	var reason string
 	if !keyConfigured && method != pb.BpfrxService_GetStatus_FullMethodName {
-		accept, reason = false, "cluster authentication-key not configured " +
+		accept, reason = false, "cluster authentication-key not configured "+
 			"(only GetStatus is served until a PSK is committed)"
 	} else {
 		// The downgrade-guard is armed by EITHER a prior valid fabric token OR
@@ -480,7 +527,7 @@ func (s *Server) fabricAuthStreamInterceptor(srv interface{}, ss grpc.ServerStre
 type fabricAuthMethodContextKey struct{}
 
 type fabricAuthContext struct {
-	method   string
+	method    string
 	reqDigest []byte
 }
 
