@@ -8655,6 +8655,27 @@ covered by `pkg/config/compiler_scheduler_block_merge_5825_test.go` (two-block d
 merge, hierarchical==flat parity, across-roots merge, daily+weekday compose,
 single-block unchanged).
 
+### Repeated scheduler day-window boundaries are diagnosed (#11358)
+
+The compiled scheduler model carries one daily window and one window per
+weekday. A repeated `start-time` or `stop-time` with a different value within
+the same effective day used to overwrite the earlier scalar in
+`schedulerWindowFromNode`, so Juniper-style multiple window pairs could compile
+to only the last pair. Whether Junos unions those pairs is unresolved; xpf does
+not guess or silently discard them:
+
+- Strict compilation rejects conflicting repeated time boundaries in the same
+  scheduler day window.
+- Tolerant load / peer-sync compilation warns and continues with the existing
+  single-window result, making the lost boundary visible without preventing an
+  already-persisted config from booting.
+- Repeated identical boundary values are accepted because they do not lose a
+  distinct value. Separate weekday windows remain valid.
+
+The AST gate runs after group expansion and checks both `daily` and weekday
+windows, including legacy direct daily leaves. Regression coverage:
+`pkg/config/compiler_scheduler_window_pairs_11358_test.go`.
+
 ### Quoted-value escape round-trip contract (#3854)
 
 When a key or value is not safe to emit bare (see the next section for the
