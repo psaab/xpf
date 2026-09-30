@@ -1600,6 +1600,36 @@ fn a_stale_pbr_steer_to_empty_vrf_does_not_keep_main_10467() {
     );
 }
 
+/// A session hit whose PBR target is Juniper's literal `default` remains in
+/// the global table and keeps the same cached route, rather than revalidating
+/// against a synthetic `default.inet.0` table.
+#[test]
+fn pbr_default_alias_hit_preserves_main_table_session_11308() {
+    let mut term = pbr_term("pbr-default", "5201", "accept");
+    term.routing_instance = "default".into();
+    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![term]);
+    let flow = v4_flow(5201);
+    let sessions = table_with_session(&flow, 7, None);
+    let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &neighbors,
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        decision(),
+    );
+    assert!(
+        route.is_none(),
+        "the explicit default alias must resolve to the existing main-table \
+         route; a synthetic default.inet.0 lookup would produce a transition"
+    );
+}
+
 /// A Fresh HIT still evaluates per-packet PBR predicates against the current
 /// frame. The old `varies_per_packet_within_flow()` early return silently kept
 /// the cached MAIN identity and left route-changing terms unenforced.
