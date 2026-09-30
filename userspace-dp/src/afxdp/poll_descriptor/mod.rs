@@ -1662,31 +1662,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         } else {
                             None
                         };
-                        // #11324: use the reply-ingress PBR resolution for
-                        // this packet and persist it only on the reverse
-                        // companion. The route helper sets no revocation key
-                        // for this arm, and the ordinary filter evaluator
-                        // below still owns any actual discard/reject verdict.
-                        if let Some(route) =
-                            stale_pbr_route.as_ref().filter(|route| route.steer_only)
-                        {
-                            resolved.decision.resolution = route.resolution;
-                            resolved.decision.install_table_domain = route.install_table_domain;
-                            resolved.decision.install_table_check = route.install_table_check;
-                            let logical_ingress_ifindex = resolve_ingress_logical_ifindex(
-                                worker_ctx.forwarding,
-                                meta.ingress_ifindex as i32,
-                                meta.ingress_vlan_id,
-                            )
-                            .unwrap_or(meta.ingress_ifindex as i32);
-                            sessions.update_reverse_route_on_filter_hit(
-                                &route.canonical_key,
-                                logical_ingress_ifindex,
-                                route.resolution,
-                                route.install_table_domain,
-                                route.install_table_check,
-                            );
-                        }
                         // #3073: re-count this established-session packet against
                         // the admitting policy's hit counter. The cold path
                         // counts the first packet in `try_match_rule`; this
@@ -1895,6 +1870,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 Some(hit) => (Some(hit), ordinary_input_already_counted),
                                 None => (
                                     stale_pbr_route
+                                        .as_ref()
                                         .filter(|route| !route.steer_only)
                                         .map(|route| {
                                             if let Some(revoked_key) = route.revoked_key.as_ref() {
@@ -1905,7 +1881,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     action: crate::filter::FilterAction::Discard,
                                                     cached_log: None,
                                                 },
-                                                revoked_key: route.revoked_key,
+                                                revoked_key: route.revoked_key.clone(),
                                                 log_source: FilterLogSource::Pbr,
                                             }
                                         }),
@@ -2064,6 +2040,30 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
+                        }
+                        // #11324: persist reverse route state only after the
+                        // ordinary input-filter gate accepts. A config change
+                        // from reverse PBR to discard must still see its stale
+                        // generation stamp and revoke the pair.
+                        if let Some(route) =
+                            stale_pbr_route.as_ref().filter(|route| route.steer_only)
+                        {
+                            let logical_ingress_ifindex = resolve_ingress_logical_ifindex(
+                                worker_ctx.forwarding,
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                            )
+                            .unwrap_or(meta.ingress_ifindex as i32);
+                            sessions.update_reverse_route_on_filter_hit(
+                                &route.canonical_key,
+                                logical_ingress_ifindex,
+                                route.resolution,
+                                route.install_table_domain,
+                                route.install_table_check,
+                            );
+                            resolved.decision.resolution = route.resolution;
+                            resolved.decision.install_table_domain = route.install_table_domain;
+                            resolved.decision.install_table_check = route.install_table_check;
                         }
                         // #8356: re-derive ZONE POLICY on the established
                         // hit, at most once per session per config generation.
