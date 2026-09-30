@@ -19,7 +19,7 @@ seed rather than the per-boot hot-path seed. Distinct flows spread across
 equal-cost uplinks while each flow stays pinned. With the same ordered live
 member set, the mapping is stable across restarts and HA re-resolution, which
 preserves path-pinned NAT; a changed member set/order can still remap flows.
-(unequal-cost ratios) remains unimplemented; if demand materializes it is
+Weighted ECMP (unequal-cost ratios) remains unimplemented; if demand materializes it is
 its own issue with its own value case — it is not a multi-WAN failover
 deliverable.
 
