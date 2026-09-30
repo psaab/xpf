@@ -1275,9 +1275,12 @@ func TestHARefreshNeedsControlPrefixMatchesTheHelper9629(t *testing.T) {
 }
 
 // TestSessionHAQueuedDemotionIsPerRG11160: a demotion queued for RG1 must
-// suppress refreshes for RG1 only — RG2's watchdog tick during RG1's queued
-// demotion must still send (RED on revert: the global counter suppresses
-// every RG, so the RG2 refresh never sends).
+// suppress RG1's renewal only — RG2's watchdog ticks during RG1's queued
+// demotion must still renew RG2's helper lease, repeatedly. The degraded
+// refresh retains RG1's key as INACTIVE (the helper rejects narrowed
+// key-sets with NeedsLock) and the oracle — a stateful mirror of the
+// helper's decision table — proves each refresh SERVED and each lease
+// advanced, not merely that bytes were emitted.
 func TestSessionHAQueuedDemotionIsPerRG11160(t *testing.T) {
 	m := sessionTestManager9629(t, map[int]HAGroupStatus{
 		1: {Active: true, WatchdogTimestamp: 1},
@@ -1300,10 +1303,34 @@ func TestSessionHAQueuedDemotionIsPerRG11160(t *testing.T) {
 	m.publishHAWatchdogSnapshotLocked()
 	m.mu.Unlock()
 
-	var sent [][]HAGroupStatus
+	oracle := newHARefreshOracle9629([]HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 1},
+		{RGID: 2, Active: true, WatchdogTimestamp: 1},
+	}, 10)
+	oracle.leaseUntil[1] = 9
+	oracle.leaseUntil[2] = 9
+	var served int
+	var sawRetained bool
 	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
 		if req.HAState != nil {
-			sent = append(sent, append([]HAGroupStatus(nil), req.HAState.Groups...))
+			if oracle.apply(req.HAState.Groups) != haRefreshServed9629 {
+				return errors.New("HA refresh oracle rejected degraded payload (key-set narrowed?)")
+			}
+			served++
+			// The demoting RG's key must be RETAINED as inactive (the
+			// helper rejects narrowed key-sets with NeedsLock).
+			rg1Inactive, rg2Fresh := false, false
+			for _, g := range req.HAState.Groups {
+				if g.RGID == 1 && !g.Active {
+					rg1Inactive = true
+				}
+				if g.RGID == 2 && g.Active && g.WatchdogTimestamp >= 100 {
+					rg2Fresh = true
+				}
+			}
+			if rg1Inactive && rg2Fresh {
+				sawRetained = true
+			}
 		}
 		return nil
 	}
@@ -1332,8 +1359,8 @@ func TestSessionHAQueuedDemotionIsPerRG11160(t *testing.T) {
 		t.Fatal("RG1 demotion must not mark RG2 pending")
 	}
 
-	// RG2's ticks during RG1's queued demotion must send, repeatedly —
-	// the healthy RG's lease must advance past expiry, not just once.
+	// RG2's ticks during RG1's queued demotion must SERVE and advance
+	// RG2's lease past its pre-demotion expiry — repeatedly, not once.
 	for _, ts := range []uint64{100, 200} {
 		if err := m.UpdateHAWatchdog(2, ts); err != nil {
 			m.mu.Unlock()
@@ -1345,25 +1372,13 @@ func TestSessionHAQueuedDemotionIsPerRG11160(t *testing.T) {
 	if err := <-demoteDone; err != nil {
 		t.Fatalf("authoritative demotion: %v", err)
 	}
-	for _, ts := range []uint64{100, 200} {
-		found := false
-		for _, batch := range sent {
-			for _, g := range batch {
-				if g.RGID == 2 && g.WatchdogTimestamp == ts {
-					found = true
-				}
-			}
-		}
-		if !found {
-			t.Errorf("RG2 refresh @%d never sent during RG1 queued demotion (global suppression?): sent=%+v", ts, sent)
-		}
+	if served == 0 {
+		t.Fatal("no degraded refresh served during RG1 queued demotion (global suppression?)")
 	}
-	// RG1's stale snapshot must never ride a degraded refresh.
-	for _, batch := range sent {
-		for _, g := range batch {
-			if g.RGID == 1 {
-				t.Errorf("demoting RG1 present in degraded refresh: %+v", batch)
-			}
-		}
+	if got := oracle.leaseUntil[2]; got < 200 {
+		t.Errorf("RG2 lease stuck at %d, want advanced past both ticks (lease expired despite per-RG fix)", got)
+	}
+	if !sawRetained {
+		t.Errorf("no served refresh retained demoting RG1 as inactive alongside fresh RG2 (key-set narrowed?)")
 	}
 }

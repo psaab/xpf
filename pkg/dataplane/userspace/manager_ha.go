@@ -1232,15 +1232,18 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 	if due {
 		groups = make([]HAGroupStatus, 0, len(m.haDegradedCurrent))
 		for id, current := range m.haDegradedCurrent {
-			// #11160: skip RGs with a queued demotion — their snapshot
-			// is stale and must not be renewed — but still refresh the
-			// healthy remainder instead of suppressing the whole set.
+			// #11160: a queued demotion rides as INACTIVE, never omitted:
+			// the helper requires exact key-set equality and rejects a
+			// narrowed set with NeedsLock (nothing renews). The mismatch
+			// arm keeps the demoting RG on bounded stored-ownership
+			// receipts while the healthy remainder refreshes normally.
+			active := current.active
 			if m.haWatchdogPendingDemotions.has(id) {
-				continue
+				active = false
 			}
 			groups = append(groups, HAGroupStatus{
 				RGID:              id,
-				Active:            current.active,
+				Active:            active,
 				WatchdogTimestamp: current.timestamp,
 			})
 		}
@@ -1258,7 +1261,7 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 		m.haDegradedHaveLastSent = true
 	}
 	m.haDegradedMu.Unlock()
-	if !due || len(groups) == 0 {
+	if !due {
 		return true, nil
 	}
 
