@@ -2469,6 +2469,7 @@ pub(in crate::afxdp) enum ZoneEncodedFabricStamp {
     Absent,
     Invalid,
     Valid(u16),
+    ValidScoped { zone_id: u16, ifindex: i32 },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2486,15 +2487,15 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress(
     parse_zone_encoded_fabric_ingress_from_frame(frame, meta, forwarding, ha_state, now_secs)
 }
 
-/// #919/#922: returns the encoded zone ID directly, no `zone_id_to_name`
-/// lookup or `String` clone. #3075: the id is a u16 carried big-endian across
-/// frame[10]/frame[11] of the synthetic fabric MAC.
+/// Decode a synthetic fabric source-MAC identity. V1 carries a u16 zone id
+/// at frame[10..12]; V2 carries a stable 24-bit NAT-scope id in its last three
+/// bytes and resolves that id to this node's logical ifindex.
 ///
-/// Absent means the source MAC lacks the complete fabric-zone marker; other
-/// local or peer fabric MACs remain ordinary unstamped ingress. A complete
-/// marker with an incomplete or invalid zone claim is Invalid and must be
-/// dropped by the packet path; treating it as absent would erase evidence of
-/// a stale or forged claim.
+/// Absent means the source MAC lacks either complete marker; other local or
+/// peer fabric MACs remain ordinary unstamped ingress. A recognized marker
+/// with an incomplete or invalid claim is Invalid and must be dropped by the
+/// packet path; treating it as absent would erase evidence of a stale or
+/// forged claim.
 pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -2502,10 +2503,42 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     now_secs: u64,
 ) -> ZoneEncodedFabricStamp {
-    if !ingress_is_fabric(forwarding, meta.ingress_ifindex as i32)
-        || frame.len() < 10
-        || frame[6..10] != [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC]
-    {
+    if !ingress_is_fabric(forwarding, meta.ingress_ifindex as i32) || frame.len() < 9 {
+        return ZoneEncodedFabricStamp::Absent;
+    }
+    if frame[6..9] == FABRIC_NAT_SCOPE_MAC_PREFIX {
+        if frame.len() < 12 {
+            return ZoneEncodedFabricStamp::Invalid;
+        }
+        let scope_id = (u32::from(frame[9]) << 16)
+            | (u32::from(frame[10]) << 8)
+            | u32::from(frame[11]);
+        let Some(identity) = forwarding.fabric_nat_scope_id_to_identity.get(&scope_id).copied()
+        else {
+            return ZoneEncodedFabricStamp::Invalid;
+        };
+        if identity.zone_id == 0 || !forwarding.zone_id_to_name.contains_key(&identity.zone_id) {
+            return ZoneEncodedFabricStamp::Invalid;
+        }
+        // V2 retains the V1 fabric-link/destination and zone ownership checks,
+        // then binds the claim to its exact interface's peer-owned RG.
+        if zone_encoded_fabric_stamp_valid(
+            forwarding,
+            ha_state,
+            now_secs,
+            &frame[0..6],
+            meta.ingress_ifindex as i32,
+            identity.zone_id,
+        ) && fabric_nat_scope_identity_is_peer_owned(identity, ha_state, now_secs)
+        {
+            return ZoneEncodedFabricStamp::ValidScoped {
+                zone_id: identity.zone_id,
+                ifindex: identity.ifindex,
+            };
+        }
+        return ZoneEncodedFabricStamp::Invalid;
+    }
+    if frame.len() < 10 || frame[6..10] != [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC] {
         return ZoneEncodedFabricStamp::Absent;
     }
     if frame.len() < 12 {

@@ -17,6 +17,13 @@ type VRFSpec struct {
 	TableID int
 }
 
+// VRFInterfaceMember is a link currently enslaved to a named routing-instance
+// VRF device.
+type VRFInterfaceMember struct {
+	InterfaceName string
+	InstanceName  string
+}
+
 // vrfOps is the minimal netlink surface the VRF domain needs.
 // Satisfied by *netlink.Handle in production; tests substitute a fake.
 type vrfOps interface {
@@ -281,6 +288,57 @@ func (v *vrfManager) UnbindInterfaceFromVRFs(ifaceName string, instanceNames []s
 		return false, errors.Join(lookupErrs...)
 	}
 	return false, nil
+}
+
+// InterfaceMembers returns links currently enslaved to the named VRF devices.
+// Matching uses the live VRF type and ifindex so a same-name foreign master is
+// never treated as a routing-instance membership.
+func (v *vrfManager) InterfaceMembers(instanceNames []string) ([]VRFInterfaceMember, error) {
+	if v == nil || v.ops == nil || len(instanceNames) == 0 {
+		return nil, nil
+	}
+	links, err := v.ops.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("list links for routing-instance VRF members: %w", err)
+	}
+
+	instanceByMasterIndex := make(map[int]string, len(instanceNames))
+	var lookupErrs []error
+	for _, instanceName := range instanceNames {
+		if instanceName == "" {
+			continue
+		}
+		link, err := v.ops.LinkByName("vrf-" + instanceName)
+		if err != nil {
+			if !isLinkNotFound(err) {
+				lookupErrs = append(lookupErrs, fmt.Errorf("lookup VRF vrf-%s for members: %w", instanceName, err))
+			}
+			continue
+		}
+		vrf, ok := link.(*netlink.Vrf)
+		if !ok || vrf.Attrs() == nil || vrf.Attrs().Index <= 0 {
+			continue
+		}
+		instanceByMasterIndex[vrf.Attrs().Index] = instanceName
+	}
+
+	members := make([]VRFInterfaceMember, 0)
+	for _, link := range links {
+		if link == nil || link.Attrs() == nil || link.Attrs().Name == "" ||
+			link.Attrs().MasterIndex <= 0 {
+			continue
+		}
+		if _, isVRF := link.(*netlink.Vrf); isVRF {
+			continue
+		}
+		if instanceName, ok := instanceByMasterIndex[link.Attrs().MasterIndex]; ok {
+			members = append(members, VRFInterfaceMember{
+				InterfaceName: link.Attrs().Name,
+				InstanceName:  instanceName,
+			})
+		}
+	}
+	return members, errors.Join(lookupErrs...)
 }
 
 // errLinkNotFound is an internal sentinel wrapper used when the

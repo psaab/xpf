@@ -41,6 +41,7 @@ pub(super) fn source_nat_decision_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
@@ -55,6 +56,7 @@ pub(super) fn source_nat_decision_for_flow(
         forwarding,
         ingress_ifindex,
         ingress_vlan_id,
+        fabric_ingress_scope_ifindex,
         from_zone,
         to_zone,
         egress_ifindex,
@@ -79,6 +81,8 @@ fn source_nat_decision_with_holder(
     // which reads the EGRESS half; the pool/interface scope rebuilt inside
     // `match_source_nat_for_flow_result_at` is the load-bearing consumer.)
     ingress_vlan_id: u16,
+    // #11337: a validated V2 stamp supplies the peer's logical ingress unit.
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
@@ -104,11 +108,11 @@ fn source_nat_decision_with_holder(
     *matched_counter = None;
     // #3096: resolve the interface / routing-instance scope for this flow once
     // (cold path). The static-NAT reverse (SNAT) direction matches the rule's
-    // `from` external context on EGRESS, so it uses the egress identity.
     let scope = super::super::forwarding::nat_scope_ctx_for_flow(
         forwarding,
         ingress_ifindex,
         ingress_vlan_id,
+        fabric_ingress_scope_ifindex,
         egress_ifindex,
         // #9062: the session layer's own domain, not a value re-derived here.
         flow.forward_key.routing_domain,
@@ -137,6 +141,7 @@ fn source_nat_decision_with_holder(
         forwarding,
         ingress_ifindex,
         ingress_vlan_id,
+        fabric_ingress_scope_ifindex,
         from_zone,
         to_zone,
         egress_ifindex,
@@ -180,6 +185,7 @@ pub(super) fn source_nat_would_translate_flowless(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
@@ -191,6 +197,7 @@ pub(super) fn source_nat_would_translate_flowless(
         forwarding,
         ingress_ifindex,
         ingress_vlan_id,
+        fabric_ingress_scope_ifindex,
         from_zone,
         to_zone,
         egress_ifindex,

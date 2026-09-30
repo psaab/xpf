@@ -34,13 +34,13 @@ import (
 //     junos-host policies keeps the #4168 warning. Never a per-term partial.
 //   - FIRST-MATCH, NEVER A FINE ACCEPT (#9504), WITH A KERNEL TERMINAL DENY
 //     FOR PERMIT PROGRAMS (#11065): each ingress zone's program renders, in
-//     authored order, into its own nft subchain. A `deny` drops (answering TCP
-//     with a RST on a `tcp-rst` zone), a `reject` answers (TCP RST, else ICMP
-//     administratively prohibited), and a `permit` RETURNS from the subchain
-//     so the coarse host-inbound gate still decides. A permit never emits a
-//     fine accept (that could re-admit a coarse-rejected service — Rust
-//     poll_descriptor/mod.rs:138). If a permit matches a subset of one family,
-//     the kernel subchain's terminal deny refuses the non-permitted remainder
+//     authored order, into its own nft subchain. A `deny` silently drops, a
+//     `reject` answers (TCP RST, else ICMP administratively prohibited), and a
+//     `permit` RETURNS from the subchain so the coarse host-inbound gate still
+//     decides. Zone `tcp-rst` applies to transit TCP session misses, not policy
+//     denies. A permit never emits a fine accept (that could re-admit a coarse-
+//     rejected service — Rust poll_descriptor/mod.rs:138). If a permit matches
+//     a subset of one family, the kernel subchain's terminal deny refuses the
 //     on the direct host-bound path. The userspace path deliberately keeps its
 //     deliver-on-no-match lifeline (policy.rs
 //     evaluate_junos_host_policy_l3_aware, policymatch.matchJunosHost), so
@@ -82,13 +82,9 @@ type JunosHostDenyL4 struct {
 type JunosHostVerdict uint8
 
 const (
-	// JunosHostDrop is `then deny` on an ingress zone without `tcp-rst`: a
-	// silent drop.
+	// JunosHostDrop is `then deny`: a silent drop. The ingress zone's
+	// `tcp-rst` setting affects TCP session misses, not policy denies.
 	JunosHostDrop JunosHostVerdict = iota
-	// JunosHostDropTCPReset is `then deny` on a `tcp-rst` ingress zone. The
-	// runtime answers a TCP packet with a RST and drops everything else
-	// silently (reject_reply.rs enqueue_deny_reply).
-	JunosHostDropTCPReset
 	// JunosHostReject is `then reject`: a TCP RST for TCP and an ICMP/ICMPv6
 	// destination-unreachable, administratively prohibited, for everything
 	// else (reject_reply.rs).
@@ -102,7 +98,7 @@ const (
 // protocol (with a RST), so an `application any` rule renders a TCP rule ahead of
 // the rest.
 func (v JunosHostVerdict) SplitsTCP() bool {
-	return v == JunosHostReject || v == JunosHostDropTCPReset
+	return v == JunosHostReject
 }
 
 // JunosHostDenyRule is one projected rule for a single family, in first-match
@@ -355,8 +351,6 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 				break
 			}
 		}
-		// A `tcp-rst` ingress zone is representable (#9504): its denies render
-		// as JunosHostDropTCPReset, the RST the runtime sends for a TCP deny.
 		var prog JunosHostDenyProgram
 		// emitted is the subset of this zone's term keys that actually produced
 		// >=1 rule; nil whenever no program was projected at all (#6705).
@@ -365,7 +359,7 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 			// #9504: a permit renders as a return in first-match order, so a
 			// narrow-application, source-excluded or destination-scoped permit
 			// ahead of a deny no longer makes the program un-representable.
-			prog, emitted = junosHostProjectProgram(zoneName, ifaceRefs, terms, zone.TCPRst)
+			prog, emitted = junosHostProjectProgram(zoneName, ifaceRefs, terms)
 			prog.IngressNetdevs = netdevs
 			// #5565: scope the fine-eligible metadata to the SPECIFIC netdevs whose
 			// effective per-interface host-inbound set admits it, NOT the whole
@@ -634,7 +628,7 @@ func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[stri
 // every packet in its family and makes that family's terminal unnecessary.
 // The userspace `None => deliver` lifeline is unchanged, so the existing permit
 // warning stays to describe that residual path.
-func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostTerm, tcpRst bool) (JunosHostDenyProgram, map[string]bool) {
+func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostTerm) (JunosHostDenyProgram, map[string]bool) {
 	prog := JunosHostDenyProgram{
 		Zone:          zone,
 		InterfaceRefs: ifaceRefs,
@@ -654,7 +648,7 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 		if t.action == PolicyPermit && t.lenientDropped {
 			continue // #9572: a #5575-poisoned permit carves nothing.
 		}
-		verdict := junosHostTermVerdict(t.action, tcpRst)
+		verdict := junosHostTermVerdict(t.action)
 		add := func(family string, rules *[]JunosHostDenyRule, done, hasPermit *bool) {
 			if *done {
 				return
@@ -675,7 +669,7 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 		add("ip", &prog.RulesV4, &doneV4, &hasPermitV4)
 		add("ip6", &prog.RulesV6, &doneV6, &hasPermitV6)
 	}
-	terminal := junosHostTermVerdict(PolicyDeny, tcpRst)
+	terminal := junosHostTermVerdict(PolicyDeny)
 	hasPermitProgram := hasPermitV4 || hasPermitV6
 	if hasPermitProgram && !doneV4 {
 		prog.RulesV4 = append(prog.RulesV4, JunosHostDenyRule{
@@ -694,17 +688,13 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 	return prog, emitted
 }
 
-// junosHostTermVerdict maps a term's action to its rule verdict on an ingress
-// zone. A deny on a `tcp-rst` zone answers TCP with a RST, as the runtime's
-// enqueue_deny_reply does; on any other zone it is silent.
-func junosHostTermVerdict(action PolicyAction, tcpRst bool) JunosHostVerdict {
-	switch {
-	case action == PolicyPermit:
+// junosHostTermVerdict maps a term's action to its rule verdict.
+func junosHostTermVerdict(action PolicyAction) JunosHostVerdict {
+	switch action {
+	case PolicyPermit:
 		return JunosHostReturn
-	case action == PolicyReject:
+	case PolicyReject:
 		return JunosHostReject
-	case tcpRst:
-		return JunosHostDropTCPReset
 	default:
 		return JunosHostDrop
 	}

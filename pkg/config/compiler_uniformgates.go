@@ -128,6 +128,12 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesForwardingInstanceMembers11312(tree, cfg, opts); err != nil {
 		return err
 	}
+	// #11392 follows the existing routing-instance membership gates so their
+	// strict diagnostic priority remains unchanged. Management-class devices
+	// are owned by vrf-mgmt, never by a tenant VRF.
+	if err := runUniformGatesRIMgmtMember11392(tree, cfg, opts); err != nil {
+		return err
+	}
 	// #11313 runs after all existing tail gates so it cannot steal an
 	// established first-error diagnostic. A missing router AS is checked on
 	// the fully-derived config after routing-options inheritance is resolved.

@@ -1441,6 +1441,7 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -1633,6 +1634,7 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -1788,6 +1790,7 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()

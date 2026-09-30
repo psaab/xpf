@@ -6,7 +6,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"time"
 )
 
 // deterministicIPv4Enforced reports whether a deterministic-NAT pool uses the
@@ -1944,21 +1943,16 @@ func schedulerEqualTimeWindowForm(s *SchedulerConfig) (string, bool) {
 }
 
 // schedulerTimeOfDayEqual reports whether two scheduler time-of-day bounds
-// denote the same clock time. Comparison is on PARSED values with the layout
-// the runtime evaluator (pkg/scheduler.parseTimeOfDay) and the schema
-// validator (ValidateTimeOfDay) share ("15:04:05"), so mixed spellings of one
-// instant ("9:00:00" vs "09:00:00") compare equal exactly when the runtime
-// treats them as equal. Bounds parse RAW, with no whitespace trim, exactly
-// like the runtime: padded or otherwise unparseable bounds fail closed there.
-// Schema validation handles malformed configuration values separately; this
-// equality advisory stays silent rather than misclaiming always-active
-// (#10006).
+// denote the same clock time. It uses the same parser as schema validation,
+// so HH:MM and HH:MM:SS values compare as equal when they represent the same
+// instant. Bounds parse RAW, with no whitespace trim, exactly like the runtime:
+// padded or otherwise unparseable bounds fail closed there.
 func schedulerTimeOfDayEqual(start, stop string) bool {
-	s, err := time.Parse("15:04:05", start)
+	s, err := parseSchedulerTimeOfDay(start)
 	if err != nil {
 		return false
 	}
-	e, err := time.Parse("15:04:05", stop)
+	e, err := parseSchedulerTimeOfDay(stop)
 	if err != nil {
 		return false
 	}

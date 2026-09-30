@@ -605,6 +605,113 @@ pub(in crate::afxdp) fn resolve_fabric_redirect_for_ingress_zone(
     resolve_fabric_redirect(forwarding)
 }
 
+/// #11337: deterministic 24-bit identity for a peer's configured ingress
+/// scope. Names, zone, and routing-instance are shared across HA nodes; Linux
+/// ifindexes are not. Collisions are rejected when the forwarding maps build.
+pub(in crate::afxdp) fn fabric_nat_scope_stamp_id(
+    zone_id: u16,
+    ifname: &str,
+    routing_instance: &str,
+) -> u32 {
+    let mut hash = 0x811c_9dc5u32;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+    };
+    feed(&zone_id.to_be_bytes());
+    feed(&(ifname.len() as u64).to_be_bytes());
+    feed(ifname.as_bytes());
+    feed(&(routing_instance.len() as u64).to_be_bytes());
+    feed(routing_instance.as_bytes());
+    let id = hash & 0x00ff_ffff;
+    if id == 0 { 1 } else { id }
+}
+
+fn resolve_fabric_redirect_with_nat_scope_id(
+    forwarding: &ForwardingState,
+    zone_id: u16,
+    scope_id: u32,
+) -> Option<ForwardingResolution> {
+    if zone_id == 0 || !(1..=0x00ff_ffff).contains(&scope_id) {
+        return None;
+    }
+    let identity = forwarding.fabric_nat_scope_id_to_identity.get(&scope_id)?;
+    if identity.zone_id != zone_id || identity.redundancy_group <= 0 {
+        return None;
+    }
+    let mut resolution = resolve_fabric_redirect(forwarding)?;
+    let high = (scope_id >> 16) as u8;
+    let middle = (scope_id >> 8) as u8;
+    let low = scope_id as u8;
+    resolution.src_mac = Some([
+        FABRIC_NAT_SCOPE_MAC_PREFIX[0],
+        FABRIC_NAT_SCOPE_MAC_PREFIX[1],
+        FABRIC_NAT_SCOPE_MAC_PREFIX[2],
+        high,
+        middle,
+        low,
+    ]);
+    Some(resolution)
+}
+
+/// Resolve a punt using the peer-stable ingress identity when it is present
+/// and unambiguous. Zone-only stamping remains the fail-closed fallback for
+/// identities that cannot be represented or validated as an HA member.
+pub(in crate::afxdp) fn resolve_fabric_redirect_for_ingress_identity(
+    forwarding: &ForwardingState,
+    ingress_zone_id: Option<u16>,
+    ingress_scope_ifindex: Option<i32>,
+) -> Option<ForwardingResolution> {
+    if let (Some(zone_id), Some(ifindex)) = (
+        ingress_zone_id.filter(|zone_id| *zone_id != 0),
+        ingress_scope_ifindex,
+    ) && let Some(scope_id) = forwarding.ifindex_to_fabric_nat_scope_id.get(&ifindex)
+        && let Some(redirect) =
+            resolve_fabric_redirect_with_nat_scope_id(forwarding, zone_id, *scope_id)
+    {
+        return Some(redirect);
+    }
+    resolve_fabric_redirect_for_ingress_zone(forwarding, ingress_zone_id)
+}
+
+/// A previously validated V2 stamp can be preserved when an admitted packet
+/// is redirected again. The caller has already applied the receive-side V1
+/// identity and RG checks before reaching the forward-request path.
+pub(in crate::afxdp) fn fabric_nat_scope_stamp_mac_for_zone(
+    forwarding: &ForwardingState,
+    source_mac: &[u8],
+    zone_id: u16,
+) -> Option<[u8; 6]> {
+    let source_mac: [u8; 6] = source_mac.try_into().ok()?;
+    if source_mac[..3] != FABRIC_NAT_SCOPE_MAC_PREFIX {
+        return None;
+    }
+    let scope_id = (u32::from(source_mac[3]) << 16)
+        | (u32::from(source_mac[4]) << 8)
+        | u32::from(source_mac[5]);
+    let identity = forwarding.fabric_nat_scope_id_to_identity.get(&scope_id)?;
+    if identity.zone_id == zone_id && identity.redundancy_group > 0 {
+        Some(source_mac)
+    } else {
+        None
+    }
+}
+
+/// A V2 stamp must identify an interface whose HA redundancy group is peer
+/// active locally, not merely another member of the same zone.
+pub(in crate::afxdp) fn fabric_nat_scope_identity_is_peer_owned(
+    identity: FabricNatScopeIdentity,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+) -> bool {
+    identity.redundancy_group > 0
+        && !ha_state
+            .get(&identity.redundancy_group)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+}
+
 pub(in crate::afxdp) fn redirect_via_fabric_if_needed(
     forwarding: &ForwardingState,
     resolution: ForwardingResolution,

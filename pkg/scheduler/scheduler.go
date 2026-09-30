@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -462,7 +463,7 @@ func copyActiveState(in map[string]bool) map[string]bool {
 //
 // Fail-closed (#3849): an ABSENT window is INACTIVE, never always-on. A
 // scheduler that resolves to no window at all — no daily window, no per-day
-// window for today, and no date-only range — returns false. This is the
+// window for today, and no date range — returns false. This is the
 // security half of the fix: a policy `scheduler-name` bound to a window that
 // failed to compile (or was left empty) must DENY, not permit 24/7. The old
 // "no times configured => active" shortcut was the fail-open bug.
@@ -507,42 +508,55 @@ func isWithinWindow(now time.Time, sched *config.SchedulerConfig) bool {
 }
 
 // withinDateRange reports whether now is inside sched's calendar range.
-// ok is false when a configured date fails to parse (caller fails closed).
+// ok is false when a configured bound fails to parse (caller fails closed).
 //
-// #3988/#10949: the calendar boundary is interpreted in the scheduler's
-// local zone, matching the Junos convention that a start-date/stop-date is a
-// local wall-clock date. Production evaluate converts each tick into the
-// committed system time zone before calling this function; direct/package
-// callers retain the location carried by now. Parsing with
-// time.ParseInLocation("2006-01-02", ..., now.Location()) places the boundary
-// on local midnight. Parsing as UTC shifted the boundary by the local offset
-// (e.g. a start-date 2026-07-01 range under UTC-7 went active at 17:00 local
-// on 2026-06-30 — 7h early). Deriving the zone from now keeps the boundary
-// consistent with the same clock the time-of-day comparison uses.
+// Scheduler dates and times are interpreted in the local zone, matching the
+// Junos convention. Production evaluate converts each tick into the committed
+// system time zone before calling this function; direct/package callers retain
+// the location carried by now.
 func withinDateRange(now time.Time, sched *config.SchedulerConfig) (inRange, ok bool) {
 	loc := now.Location()
 	if sched.StartDate != "" {
-		startDate, err := time.ParseInLocation("2006-01-02", sched.StartDate, loc)
+		start, _, err := parseSchedulerDateBound(sched.StartDate, loc)
 		if err != nil {
 			slog.Warn("scheduler: invalid start date", "name", sched.Name, "date", sched.StartDate, "err", err)
 			return false, false
 		}
-		if now.Before(startDate) {
+		if now.Before(start) {
 			return false, true
 		}
 	}
 	if sched.StopDate != "" {
-		stopDate, err := time.ParseInLocation("2006-01-02", sched.StopDate, loc)
+		stop, hasTime, err := parseSchedulerDateBound(sched.StopDate, loc)
 		if err != nil {
 			slog.Warn("scheduler: invalid stop date", "name", sched.Name, "date", sched.StopDate, "err", err)
 			return false, false
 		}
-		// StopDate is inclusive: active through the entire stop date.
-		if now.After(stopDate.AddDate(0, 0, 1)) {
-			return false, true
+		if hasTime {
+			// Junos date-time stop bounds are exclusive, like daily stop-time.
+			if !now.Before(stop) {
+				return false, true
+			}
+		} else {
+			// Date-only StopDate remains inclusive through the full date.
+			if now.After(stop.AddDate(0, 0, 1)) {
+				return false, true
+			}
 		}
 	}
 	return true, true
+}
+
+func parseSchedulerDateBound(raw string, loc *time.Location) (time.Time, bool, error) {
+	if strings.Contains(raw, ".") {
+		if len(raw) != len("2006-01-02.15:04") {
+			return time.Time{}, true, fmt.Errorf("invalid scheduler date-time %q", raw)
+		}
+		t, err := time.ParseInLocation("2006-01-02.15:04", raw, loc)
+		return t, true, err
+	}
+	t, err := time.ParseInLocation("2006-01-02", raw, loc)
+	return t, false, err
 }
 
 // effectiveDayWindow resolves the window applying to weekday wd: a per-day
@@ -629,7 +643,19 @@ func (t tod) before(other tod) bool {
 }
 
 func parseTimeOfDay(s string) (tod, error) {
-	t, err := time.Parse("15:04:05", s)
+	var t time.Time
+	var err error
+	switch strings.Count(s, ":") {
+	case 1:
+		if len(s) != len("15:04") {
+			return tod{}, fmt.Errorf("invalid scheduler time %q", s)
+		}
+		t, err = time.Parse("15:04", s)
+	case 2:
+		t, err = time.Parse("15:04:05", s)
+	default:
+		return tod{}, fmt.Errorf("invalid scheduler time %q", s)
+	}
 	if err != nil {
 		return tod{}, err
 	}

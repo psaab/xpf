@@ -163,6 +163,15 @@ func (m *Manager) UnbindInterfaceFromVRFs(ifaceName string, instanceNames []stri
 	return m.vrf.UnbindInterfaceFromVRFs(ifaceName, instanceNames)
 }
 
+// VRFInterfaceMembers lists the current slaves of the named routing-instance
+// VRFs, matched by their live device type and ifindex.
+func (m *Manager) VRFInterfaceMembers(instanceNames []string) ([]VRFInterfaceMember, error) {
+	if m == nil || m.vrf == nil {
+		return nil, nil
+	}
+	return m.vrf.InterfaceMembers(instanceNames)
+}
+
 // --- Route reads ---
 
 // GetRoutesForTable reads routes from a specific kernel routing table.

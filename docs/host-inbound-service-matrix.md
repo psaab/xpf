@@ -2426,9 +2426,9 @@ helper never sees it, so a helper crash cannot lock management out).
   warning.
 - **FIRST-MATCH, never a fine accept (#9504).** Each ingress zone's program
   renders, in authored order, into its own nft chain that the `xpf_hostinbound`
-  input chain enters with an `iifname`-scoped `jump`. A `deny` drops (answering
-  TCP with a RST on a `tcp-rst` zone), a `reject` answers (TCP RST, else ICMP
-  administratively prohibited), and a `permit` RETURNS from the subchain, so the
+  input chain enters with an `iifname`-scoped `jump`. A `deny` silently drops,
+  regardless of the zone's `tcp-rst` setting; `reject` answers with TCP RST or
+  administratively prohibited ICMP, and `permit` RETURNS from the subchain, so the
   coarse host-inbound gate still decides. A permit NEVER emits a fine `accept`
   (that would let it re-admit a coarse-rejected service — Rust
   `poll_descriptor/mod.rs:138`); `return` leaves the fine program without
@@ -2647,10 +2647,9 @@ source-address` / `source-address-excluded` **and** `match destination-address` 
 `destination-address-excluded` resolving entirely to *static* address-book CIDRs
 (recursively feed-untainted); `match application` reducing to simple
 proto + optional dst/src port + optional ICMP type/code (application-sets
-OR-expanded to multiple rules); **no** `scheduler-name`. A `tcp-rst` ingress zone
-is representable: its denies render as a TCP `reject with tcp reset` ahead of the
-drop for everything else, which is what `enqueue_deny_reply` (reject_reply.rs)
-does at runtime.
+OR-expanded to multiple rules); **no `scheduler-name`**. A `tcp-rst` ingress
+zone does not alter host-bound policy verdicts: `deny` remains a drop; the
+transit session-miss reset is a separate strict-SYN path (#11304).
 
 **Address-match semantics (source AND destination).** Both dimensions route
 through ONE projection formula (`junosHostProjectAddrMatch`,
@@ -2731,8 +2730,9 @@ failure this projection exists to avoid.
 un-representable class, and gives every row a FLIP (the same fixture with the
 residual attribute neutralised) so a row cannot pass because the fixture was
 broken in some other way. Covered today: scheduler-gated deny, feed-bound source,
-feed-bound destination, `reject`, `tcp-rst` zone, ALG application, and
-IKE-exempt-tuple application. Restricted-permit kernel terminal behavior and
+feed-bound destination, `reject`, ALG application, and IKE-exempt-tuple
+application. Host-bound policy denies on `tcp-rst` zones are separately pinned
+as silent drops (#11304). Restricted-permit kernel terminal behavior and
 the retained userspace warning are covered by the #11065 projection and warning
 tests.
 

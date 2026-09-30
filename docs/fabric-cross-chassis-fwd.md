@@ -903,7 +903,7 @@ and `_skips_icmp_echo_request`.
 
 ## The zone-encoded stamp must prove it came from the peer (#6458)
 
-The zone-encoded synthetic source MAC (`02:bf:72:fe:<hi>:<lo>`) exists so a
+The V1 zone-only synthetic source MAC (`02:bf:72:fe:<hi>:<lo>`) exists so a
 new flow whose ingress-RG primary and egress-RG primary differ — split-RG
 active/active steady state, or an asymmetric failover window — can be
 punted raw to the egress RG owner and admitted there under the TRUE zone
@@ -955,14 +955,38 @@ pre-existing gates (fabric ingress, magic, id != 0, zone exists):
   the host-inbound variant. Evaluated once at stage 9
   (`stage_classify_fabric_ingress`), so screens / SYN cookie / IKE
   admission consume only validated zones.
-- **V2 — owner binding.** At every session-MISS zone-pair computation
-  (flow-backed, flowless transit, flowless local-delivery, and the
-  MissingNeighbor arm) the validated override is honored only when the
-  resolution's owner RG (`owner_rg_for_resolution`) is forwarding-active
+- **Owner-RG binding (the #6458 V2 gate).** At every session-MISS
+  zone-pair computation (flow-backed, flowless transit,
+  flowless local-delivery, and the MissingNeighbor arm) the validated override
+  is honored only when the resolution's owner RG (`owner_rg_for_resolution`) is
   locally (`gate_fabric_zone_override_on_owner_rg`): the peer punts a new
   flow to us only because WE own its egress RG. This binds the stamp to
   the packet's actual forwarding outcome, including the rg-0
   local-delivery case V1b cannot see.
+
+### V2 peer ingress identity for NAT scope (#11337)
+
+V1 carries only the zone, so an RI deployment cannot match a punted packet's
+`from interface` or `from routing-instance` NAT scope on the receiver. V2 uses
+the reserved source-MAC prefix `02:bf:73` followed by a 24-bit stable scope ID.
+The ID is FNV-1a-derived from the zone ID, configured interface name, and
+routing-instance name; it never uses a node-local Linux ifindex. Each node
+builds the ID-to-local-logical-ifindex map from its own forwarding snapshot.
+If two distinct configured identities collide, the builder omits that ID and
+falls back to V1 rather than choosing one scope.
+
+The receiver first applies the existing V1 fabric-link/destination and zone
+ownership checks, then requires the V2 ID to exist locally and its exact
+interface redundancy group to be peer-owned. A valid V2 stamp supplies the
+peer's logical interface for DNAT and SNAT interface/RI scope. DNAT uses the
+validated ingress identity directly; SNAT uses it only when the existing
+owner-RG gate retains the stamped zone. V1 remains accepted for compatibility,
+but has no recoverable peer interface/RI identity and therefore keeps the
+legacy local-fabric scope behavior.
+
+This deterministic ID is a scope selector, not authentication: the shared-L2
+forgery residual described below still applies.
+
 
 ### Resulting posture
 
@@ -1228,14 +1252,14 @@ validation (#8444)".
 
 ## Fabric stamp authentication: document-and-constrain (#10105)
 
-Parent-filed from the #9901 lane (F-073 residual): the zone-encoded stamp
-(`02:bf:72:fe:<hi>:<lo>`, `FABRIC_ZONE_MAC_MAGIC`, u16 BE `StableZoneID`)
-is cloneable by any L2-adjacent host on a shared fabric segment. #9901
-wired `routing_table` via the `ingress_routing_domain` SSOT with no wire
-change and left this protocol-design question: shared-secret MAC vs
+Parent-filed from the #9901 lane (F-073 residual): the baseline V1 zone stamp
+(`02:bf:72:fe:<hi>:<lo>`, `FABRIC_ZONE_MAC_MAGIC`, u16 BE `StableZoneID`) is
+cloneable by any L2-adjacent host on a shared fabric segment. #9901 wired
+`routing_table` via the `ingress_routing_domain` SSOT without changing that
+wire format and left this protocol-design question: shared-secret MAC vs
 asymmetric signatures vs document-and-constrain. Decision: **document-and-
-constrain**. No wire change; the only code change is a strict compile-time
-operator advisory tied to a configured fabric interface.
+constrain**. #11337 later adds V2's deterministic NAT-scope selector
+(`02:bf:73:<24-bit-id>`); it is also public and is not authentication.
 
 ### Threat model and observability
 
@@ -1245,16 +1269,16 @@ placement. The shipped/reference wiring is private; a production shared VLAN
 or hypervisor/switch-port co-tenant is a deployment possibility, not a claim
 that the repository has measured one.
 
-- The stamp is 6 bytes of source MAC with zero spare room
-  (`resolve_zone_encoded_fabric_redirect_by_id`,
-  `userspace-dp/src/afxdp/forwarding/fabric.rs:537-555`), and
-  `StableZoneID` is a public FNV-1a fold (`pkg/config/zoneid.go:41-49`)
-  computable offline by anyone who knows a zone name.
-- The sender stamps EVERY HAInactive packet, including established-session
-  punts (`redirect_session_resolution_for_metadata`,
-  `userspace-dp/src/afxdp/session_glue/mod.rs:385-396`), and the receiver
-  parses at stage 9 on the per-packet poll path
-  (`stage_classify_fabric_ingress`, `userspace-dp/src/afxdp/poll_stages.rs:530-552`).
+- V1 and V2 each occupy the full 6-byte source MAC. V1 carries a public
+  `StableZoneID`; V2 carries a deterministic 24-bit NAT-scope ID derived from
+  public configuration (`resolve_fabric_redirect_with_nat_scope_id`,
+  `userspace-dp/src/afxdp/forwarding/fabric.rs`). Neither includes a secret or
+  cryptographic authenticator.
+- The sender emits V1 when only a zone is available; #11337 emits V2 for an
+  initial punt with an unambiguous configured ingress scope and preserves an
+  already validated V2 stamp on a re-punt. The receiver parses either format
+  at stage 9 on the per-packet poll path
+  (`stage_classify_fabric_ingress`, `userspace-dp/src/afxdp/poll_stages.rs`).
   In split-RG active/active, stamp traffic is per-packet at fabric line
   rate — any per-packet verify must cost nanoseconds, and any crypto
   verify could only afford to run where the stamp drives a decision

@@ -574,18 +574,20 @@ func writeSecurityCountersSection(b *strings.Builder, agg statusSummaryAggregate
 	// source under the generated-reply status — a policy `then reject`
 	// silently downgraded to `deny` because the per-tick TX-frame budget was
 	// exhausted must be attributable, distinct from an egress output-filter
-	// drop (the "Generated-reply drops" line above) and the global reject
-	// rate-limit bucket (RejectRateLimitedTotal).
+	// drop (the "Generated-reply drops" line above) and the source-neutral
+	// reject rate-limit aggregate (`RejectRateLimitedTotal`).
 	if agg.policyRejectReplyBudgetDrops != 0 || agg.filterRejectReplyBudgetDrops != 0 {
 		fmt.Fprintf(b, "  Generated-reply budget drops: policy_reject=%d filter_reject=%d\n",
 			agg.policyRejectReplyBudgetDrops, agg.filterRejectReplyBudgetDrops)
 	}
-	// #3661 (M02): reject replies dropped because the shared per-reason
-	// rate-limit token bucket was empty, split by source. This is distinct
-	// from a TX-frame budget drop (the line above) and an egress output-filter
-	// drop; the source split tells policy-reject starvation from filter-reject
-	// starvation. The source-neutral aggregate is RejectRateLimitedTotal /
-	// xpf_userspace_reject_rate_limited_total (Prometheus).
+	// #3661 (M02): explicit policy/filter reject replies dropped because the
+	// shared per-reason rate-limit token bucket was empty, split by source.
+	// This is distinct from a TX-frame budget drop (the line above) and an
+	// egress output-filter drop; the source split tells policy-reject
+	// starvation from filter-reject starvation. Zone `tcp-rst` session-miss
+	// resets share the limiter but are not source-attributed. The aggregate
+	// RejectRateLimitedTotal / xpf_userspace_reject_rate_limited_total remains
+	// source-neutral.
 	if agg.policyRejectRateLimitDrops != 0 || agg.filterRejectRateLimitDrops != 0 {
 		fmt.Fprintf(b, "  Generated-reply rate-limited: policy_reject=%d filter_reject=%d\n",
 			agg.policyRejectRateLimitDrops, agg.filterRejectRateLimitDrops)

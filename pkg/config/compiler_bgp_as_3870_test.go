@@ -104,4 +104,3 @@ func TestBGPInstanceInheritsAutonomousSystem_3870(t *testing.T) {
 		t.Fatalf("GREEN BGP LocalAS = %d, want 65099 (instance protocols bgp local-as overrides routing-options)", got)
 	}
 }
-

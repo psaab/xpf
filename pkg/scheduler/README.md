@@ -35,29 +35,35 @@ during specific windows.
   `xpf_scheduler_republish_fail_open_stale`; the old
   `xpf_scheduler_republish_fail_closed` metric remains a deprecated alias.
 
-## Time-window model (#3849)
+## Time-window model (#3849, #11305)
 
 A `config.SchedulerConfig` resolves to at most one window per instant:
 
 - **Daily window** — `StartTime`/`StopTime` (the body of a Junos
   `daily { start-time X; stop-time Y; }` block, or the legacy simplified
   shape where `start-time`/`stop-time` are direct children of the
-  scheduler). `AllDay` marks the daily window active for the whole day
+  scheduler). Both `HH:MM` and `HH:MM:SS` are accepted; omitted seconds
+  mean `:00`. `AllDay` marks the daily window active for the whole day
   (`daily all-day`).
 - **Per-day overrides** — `Days["monday".."sunday"]`. A weekday present in
   `Days` overrides the daily window for that weekday; its `Exclude` flag
   forces the day inactive, `AllDay` forces it active. Days without an
   override fall back to the daily window.
-- **Date range** — `StartDate`/`StopDate` gate the whole scheduler to a
-  calendar range (inclusive of the stop date). A scheduler with only a
-  date range (no time-of-day window) is active for the entire range.
+- **Date range** — `StartDate`/`StopDate` gate the whole scheduler. Date-only
+  `YYYY-MM-DD` bounds keep their existing semantics: start at local midnight,
+  and stop inclusive through the entire stop date. Junos date-time bounds
+  use `YYYY-MM-DD.HH:MM`, interpreted as local wall-clock instants. The start
+  is inclusive and the date-time stop is exclusive; a date-only bound can
+  still be paired with a date-time bound.
+- A scheduler with only a date range (no time-of-day window) is active for
+  the entire range.
 
 `compileSchedulers` (`pkg/config/compiler_system.go`) reads all of these
 for both the hierarchical and flat-set AST shapes; the flat-set grammar is
 grouped by the `schedulers` entry in `setSchema`
-(`pkg/config/schema_schedulers.go`), and the `start-time`/`stop-time` /
-`start-date`/`stop-date` value slots are typed so a malformed window is
-rejected at commit (`ValidateTimeOfDay` / `ValidateDate`).
+(`pkg/config/schema_schedulers.go`). The scheduler's typed time slots are
+validated at commit: times accept `HH:MM` or `HH:MM:SS`, and date bounds
+accept `YYYY-MM-DD` or `YYYY-MM-DD.HH:MM`.
 
 **Time zone — committed system local (#3988, #10949).** Scheduler dates and
 times are Junos local wall-clock. The daemon resolves a configured
@@ -70,19 +76,19 @@ regardless of restart history. If no zone is configured, the caller's time
 location is retained. If a configured zone cannot be loaded, scheduled
 policies fail closed.
 
-`withinDateRange` parses `StartDate`/`StopDate` with
-`time.ParseInLocation("2006-01-02", …, now.Location())`, so the calendar
-boundary lands on local midnight. Parsing the date with `time.Parse` (its UTC
-default) put the boundary on UTC midnight and shifted the whole range by the
-local UTC offset — a `start-date 2026-07-01` range under UTC-7 went active at
-17:00 local on 2026-06-30, ~7 h early. Daily `start-time`/`stop-time` windows
-compare only wall-clock H/M/S components (`parseTimeOfDay` vs `timeOfDay`),
-using the same converted local instant.
+`withinDateRange` parses date-only bounds with
+`time.ParseInLocation("2006-01-02", …, now.Location())` and date-time bounds
+with `time.ParseInLocation("2006-01-02.15:04", …, now.Location())`. Parsing
+in the scheduler's local location keeps both absolute instants and
+date-only-midnight boundaries consistent with the same clock the
+time-of-day comparison uses. Daily `start-time`/`stop-time` windows compare
+only wall-clock H/M/S components (`parseTimeOfDay` vs `timeOfDay`), so
+`08:30` and `08:30:00` denote the same clock time.
 
 **Fail-closed invariant (#3849 — security).** `isWithinWindow` treats an
 ABSENT window as **inactive**, never always-on. A scheduler that resolves
 to no window for a given instant — no daily window, no applicable per-day
-override, and no date-only range — returns `false`. Before #3849 the
+override, and no date range — returns `false`. Before #3849 the
 `daily {}` block was never descended (so `StartTime`/`StopTime` stayed
 empty) and an empty window returned `true`, so a policy `scheduler-name`
 scoped to business hours actually permitted traffic 24/7 (fail-open). A

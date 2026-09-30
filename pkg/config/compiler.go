@@ -1034,6 +1034,12 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if len(cfg.QuarantinedRIMemberDeviceConflicts) > 0 {
 		quarantineRIDualClaimDevices(cfg, cfg.TunnelNameMap())
 	}
+	// #11392: tolerant management-member warnings remain intact, but no
+	// compiled-config consumer may map these devices into a tenant routing
+	// domain or table. Run after legacy tail validators, like #11060 cleanup.
+	if opts.lenientRIMgmtMember11392 {
+		quarantineRIMgmtMembers11392(cfg, cfg.TunnelNameMap())
+	}
 
 	// #1539: the structural invariant `cfg.System.DPDKDataplane = nil`
 	// was added on master (PR #1553) as a runtime safeguard against

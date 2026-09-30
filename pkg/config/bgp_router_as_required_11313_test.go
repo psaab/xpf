@@ -7,9 +7,9 @@ import (
 
 func TestBGPRouterASMissingIsRejectedAndWarned11313(t *testing.T) {
 	cases := []struct {
-		name       string
-		commands   []string
-		wantScope  string
+		name      string
+		commands  []string
+		wantScope string
 	}{
 		{
 			name: "global BGP with inherited peer-as but no router AS",
@@ -82,5 +82,43 @@ func TestBGPRouterASMissingIsRejectedAndWarned11313(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBGPRouterASDoesNotStealManagementDiagnosticPriority11313(t *testing.T) {
+	build := func() *ConfigTree {
+		return buildTree(t, []string{
+			"set interfaces fxp0 unit 0 family inet address 192.0.2.1/24",
+			"set routing-instances blue instance-type virtual-router",
+			"set routing-instances blue interface fxp0.0",
+			"set protocols bgp group G peer-as 65002",
+			"set protocols bgp group G neighbor 10.0.0.2",
+		})
+	}
+
+	_, err := CompileConfig(build())
+	if err == nil || !strings.Contains(err.Error(), "#11392") ||
+		strings.Contains(err.Error(), "missing router AS") {
+		t.Fatalf("strict diagnostic = %v, want the #11392 management error before missing router AS", err)
+	}
+
+	cfg, err := CompileConfigLenient(build())
+	if err != nil {
+		t.Fatalf("tolerant compile must preserve loadability: %v", err)
+	}
+	managementWarning, bgpWarning := -1, -1
+	for i, warning := range cfg.Warnings {
+		if strings.Contains(warning, "management-class routing-instance interface membership") {
+			managementWarning = i
+		}
+		if strings.Contains(warning, "BGP router AS") {
+			bgpWarning = i
+		}
+	}
+	if managementWarning < 0 || bgpWarning < 0 {
+		t.Fatalf("both tail-gate warnings must be present: %v", cfg.Warnings)
+	}
+	if managementWarning >= bgpWarning {
+		t.Fatalf("warning order = %v, want #11392 before BGP router-AS warning", cfg.Warnings)
 	}
 }

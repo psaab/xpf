@@ -842,10 +842,10 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 			},
 			RulesV6: []config.JunosHostDenyRule{
 				{Family: "ip6", Src: []string{"2001:db8:a::/48"}, DstAny: true, L4: []config.JunosHostDenyL4{{Proto: 47}}},
-				// #9504: a deny on a tcp-rst zone, as `application any` (split) and as a
-				// TCP fragment (RST).
-				{Family: "ip6", Src: []string{"2001:db8:b::/48"}, DstAny: true, Verdict: config.JunosHostDropTCPReset},
-				{Family: "ip6", SrcAny: true, DstAny: true, Verdict: config.JunosHostDropTCPReset,
+				// #11304: host-bound policy denies stay plain drops even on a
+				// `tcp-rst` ingress zone; application-any and TCP fragments alike.
+				{Family: "ip6", Src: []string{"2001:db8:b::/48"}, DstAny: true, Verdict: config.JunosHostDrop},
+				{Family: "ip6", SrcAny: true, DstAny: true, Verdict: config.JunosHostDrop,
 					L4: []config.JunosHostDenyL4{{Proto: config.HostInboundProtoTCP, Ports: []config.PortRange{{Lo: 179, Hi: 179}}}}},
 				{Family: "ip6", SrcAny: true, Dst: []string{"2001:db8:5::1/128"},
 					L4: []config.JunosHostDenyL4{{Proto: config.HostInboundProtoTCP, Ports: []config.PortRange{{Lo: 22, Hi: 22}}}}},
