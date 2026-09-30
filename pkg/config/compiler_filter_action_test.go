@@ -131,6 +131,7 @@ func TestFilterAction_Unknown_LenientWarns(t *testing.T) {
 		t.Fatalf("an unknown action must fail closed as discard, got %q", term.Action)
 	}
 }
+
 // The unknown token must be captured onto the typed term (UnknownActions), not
 // silently dropped — this is the seam the strict gate reads. MUST FAIL if the
 // default arm of compileFilterThen is reverted.
@@ -180,19 +181,55 @@ func TestFilterAction_UnknownNextActionsRejectAndDiscardLeniently11357(t *testin
 
 func TestFilterAction_UnknownRemainsFailClosedAcrossThenBlocks11357(t *testing.T) {
 	for _, order := range [][2]string{
-		{"accept", "next-ip 1.2.3.4"},
 		{"next-ip 1.2.3.4", "accept"},
+		{"accept", "next-ip 1.2.3.4"},
 	} {
-		commands := filterWithThen(order[0])
-		commands = append(commands, "set firewall family inet filter f1 term t1 then "+order[1])
-		cfg, err := CompileConfigLenient(flatTreeFromSets(t, commands...))
-		if err != nil {
-			t.Fatalf("lenient compile with then actions %q and %q: %v", order[0], order[1], err)
-		}
-		term := cfg.Firewall.FiltersInet["f1"].Terms[0]
-		if len(term.UnknownActions) == 0 || term.Action != "discard" {
-			t.Fatalf("unknown action must dominate known accept in either order, got %+v", term)
-		}
+		t.Run(strings.ReplaceAll(order[0]+"_then_"+order[1], " ", "_"), func(t *testing.T) {
+			cfgText := `
+firewall {
+    family inet {
+        filter F1 {
+            term T1 {
+                then {
+                    ` + order[0] + `;
+                }
+                then {
+                    ` + order[1] + `;
+                }
+            }
+        }
+    }
+}
+`
+			tree, parseErrs := NewParser(cfgText).Parse()
+			if len(parseErrs) > 0 {
+				t.Fatalf("Parse: %v", parseErrs)
+			}
+			fwNode := tree.FindChild("firewall")
+			if fwNode == nil {
+				t.Fatal("test fixture lost firewall node")
+			}
+			familyNode := fwNode.FindChild("family")
+			if familyNode == nil {
+				t.Fatal("test fixture lost family node")
+			}
+			filterNode := familyNode.FindChild("filter")
+			if filterNode == nil {
+				t.Fatal("test fixture lost filter node")
+			}
+			termNode := filterNode.FindChild("term")
+			if termNode == nil || len(termNode.FindChildren("then")) != 2 {
+				t.Fatal("test fixture must retain two distinct then blocks")
+			}
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile with separate then blocks %q and %q: %v", order[0], order[1], err)
+			}
+			term := cfg.Firewall.FiltersInet["F1"].Terms[0]
+			if len(term.UnknownActions) == 0 || term.Action != "discard" {
+				t.Fatalf("unknown action must dominate known accept across separate then blocks, got %+v", term)
+			}
+		})
 	}
 }
 
