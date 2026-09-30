@@ -589,14 +589,24 @@ func severityName(s int) string {
 	}
 }
 
+// actionToken renders the action segment, omitted when the record carries
+// no action (#11085: lifecycle/close records printed a bare `action= `).
+func actionToken(action string) string {
+	if action == "" {
+		return ""
+	}
+	return " action=" + action
+}
+
 func formatLogMessage(rec logging.EventRecord) string {
+	act := actionToken(rec.Action)
 	if rec.Type == "SCREEN_DROP" {
-		return fmt.Sprintf("RT_FLOW %s screen=%s src=%s dst=%s proto=%s action=%s zone=%d",
-			rec.Type, rec.ScreenCheck, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action, rec.InZone)
+		return fmt.Sprintf("RT_FLOW %s screen=%s src=%s dst=%s proto=%s%s zone=%d",
+			rec.Type, rec.ScreenCheck, rec.SrcAddr, rec.DstAddr, rec.Protocol, act, rec.InZone)
 	}
 	if rec.Type == "SESSION_CLOSE" {
-		return fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s action=%s policy=%d zone=%d->%d pkts=%d bytes=%d",
-			rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action,
+		return fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s%s policy=%d zone=%d->%d pkts=%d bytes=%d",
+			rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, act,
 			rec.PolicyID, rec.InZone, rec.OutZone, rec.SessionPkts, rec.SessionBytes)
 	}
 	if rec.Type == "FILTER_LOG" {
@@ -604,12 +614,12 @@ func formatLogMessage(rec logging.EventRecord) string {
 		if source == "" {
 			source = "unknown"
 		}
-		return fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s action=%s zone=%d->%d source=%s filter=%d term=%d",
-			rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action,
+		return fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s%s zone=%d->%d source=%s filter=%d term=%d",
+			rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, act,
 			rec.InZone, rec.OutZone, source, rec.RuleID, rec.TermID)
 	}
-	message := fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s action=%s policy=%d zone=%d->%d",
-		rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, rec.Action,
+	message := fmt.Sprintf("RT_FLOW %s src=%s dst=%s proto=%s%s policy=%d zone=%d->%d",
+		rec.Type, rec.SrcAddr, rec.DstAddr, rec.Protocol, act,
 		rec.PolicyID, rec.InZone, rec.OutZone)
 	if rec.Reason != "" {
 		message += fmt.Sprintf(" reason=%q", rec.Reason)
