@@ -359,20 +359,24 @@ Mirrors the BPF firewall-filter pipeline in userspace.
   **The revalidation passes `TermMatchExtra::default()`, not the frame — and
   `varies_per_packet_within_flow()` is NOT a complete purity gate.** That
   predicate covers the #1430 DSCP condition and the #2362 per-packet-L4
-  conditions, and it is tempting to conclude that a filter failing it reads
-  nothing from `TermMatchExtra`. It is not true: `port_terms_match` reads
-  `is_fragment`, `l4_present` and `ports_unknown`, gated on a PORT constraint
-  rather than on either flag. Against a NON-FIRST FRAGMENT, that gate suppresses
-  every port-constrained term — so `term web { from destination-port 5201; then
-  accept; } term deny-rest { then discard; }` skips its permit, falls through to
-  the deny, and would REVOKE a session the operator permits, off one fragment.
-  The revalidation asks a question about the FLOW, so it evaluates on the flow's
-  5-tuple alone: `default()` leaves the fragment gate untriggered and every
-  per-packet-L4 condition inert, which is exactly the 5-tuple verdict, and the
-  DENY-path counted walk is handed the same value so the two cannot disagree. A
-  future read of `TermMatchExtra` from OUTSIDE `per_packet_l4_matches` — the one
-  place `varies_per_packet_within_flow()` actually summarises — has to be
-  re-checked against this argument.
+  conditions. `port_terms_match` also reads `is_fragment`, `l4_present` and
+  `ports_unknown` when a PORT constraint exists. Against a NON-FIRST FRAGMENT,
+  that gate suppresses every port-constrained term — so `term web { from
+  destination-port 5201; then accept; } term deny-rest { then discard; }` skips
+  its permit and could revoke a session the operator permits. Revalidation asks
+  about the FLOW, so it uses the flow's 5-tuple alone: `default()` leaves the
+  fragment gate untriggered and per-packet-L4 conditions inert.
+
+  `protocol_bitmap_matches` also reads `TermMatchExtra` outside
+  `per_packet_l4_matches` for #11338. It consults the native-fragment sentinel
+  fields only when the shim supplied 255; frame-backed evaluation resolves the
+  protocol from the declared IP header, and an unresolved sentinel fails
+  constrained protocol terms closed. The resolved protocol is part of
+  `SessionKey`. Session-backed revalidation passes `flow.forward_key.protocol`
+  with `TermMatchExtra::default()`; the frame-backed sentinel marker is used
+  only when evaluating a packet whose protocol argument remains 255. Any future
+  read outside `per_packet_l4_matches` must still be checked against this
+  argument.
 
 - **A routing-instance term that ALSO carries `reject`/`discard` is a DENY
   (#4392).** The non-PBR precheck DEFERS any matched routing-instance term
@@ -583,7 +587,7 @@ exactly one of these two classes:
 |-----------------|---------------|-------|
 | `source_addresses` / `source_v4` / `source_v6` | yes | `src_ip` in `SessionKey` |
 | `destination_addresses` / `dest_v4` / `dest_v6` | yes | `dst_ip` |
-| `protocols` / `protocol_bitmap` (+ `protocol_match_enabled`) | yes | `protocol` |
+| `protocols` / `protocol_bitmap` (+ `protocol_match_enabled`) | yes | `protocol`; #11338 resolves a native-fragment sentinel from the IP header before matching |
 | `source_ports` | yes (TCP/UDP); ICMP-special | `src_port` carries the ICMP identifier word from bytes 4-5 of the ICMP header (meaningful for Echo Request/Reply, opaque otherwise) |
 | `destination_ports` | yes (TCP/UDP); ICMP-zero | `dst_port` is 0 for ICMP |
 | `dscp_values` / `dscp_bitmap` (+ `dscp_match_enabled`) | NO — cache-sensitive | see #1430 pattern below |
@@ -613,6 +617,12 @@ tcp-flags / icmp-type / icmp-code constraints on that flag — NOT on the byte
 value, because 0 is a valid `icmp-type` (echo-reply) and a valid `icmp-code`, so
 a zeroed byte would still match `from { icmp-type 0 }` / `from { icmp-code 0 }`.
 The L4 byte fields are also zeroed (defense-in-depth) but the gate is the flag.
+For #11338, the builder also distinguishes shim sentinel 255 from wire protocol
+255. IPv4 recovery reads the IP Protocol byte; a non-first IPv6 fragment uses
+the Fragment header's Next Header byte; an AH header before Fragment retains
+protocol-51 classification (#10729). Payload bytes are never used as protocol.
+If the declared header cannot be read, only protocol-unconstrained terms match
+the unresolved sentinel.
 The L3-derived `is_fragment` bit is NOT gated by `l4_present` and stays true
 (a non-first fragment IS a fragment). This applies on the
 CoS / TX-selection leg too (`tx/cos_classify.rs`): the TX-selection evaluators

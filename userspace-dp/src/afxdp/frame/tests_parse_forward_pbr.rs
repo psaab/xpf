@@ -571,30 +571,95 @@ fn ingress_filter_routing_instance_steers_flow_into_native_gre_table() {
 }
 
 #[test]
-fn pbr_protocol_filter_matches_native_255_and_decapped_udp_fragments_10676() {
+fn pbr_protocol_filter_uses_native_fragment_header_protocol_11338() {
     let mut snapshot = native_gre_pbr_action_snapshot("discard");
     snapshot.filters[0].terms[0].protocols = vec!["udp".to_string()];
     let state = build_forwarding_state(&snapshot);
     let flow = pbr_v4_flow();
 
-    for (label, protocol, should_drop) in [
+    for (label, meta_protocol, wire_protocol, should_drop) in [
         (
-            "native-255",
+            "native-udp",
             crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            crate::ip_proto::PROTO_UDP,
             true,
         ),
-        ("decapped-udp", crate::ip_proto::PROTO_UDP, true),
-        ("decapped-tcp", crate::ip_proto::PROTO_TCP, false),
+        (
+            "native-tcp",
+            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            crate::ip_proto::PROTO_TCP,
+            false,
+        ),
+        (
+            "decapped-udp",
+            crate::ip_proto::PROTO_UDP,
+            crate::ip_proto::PROTO_UDP,
+            true,
+        ),
+        (
+            "decapped-tcp",
+            crate::ip_proto::PROTO_TCP,
+            crate::ip_proto::PROTO_TCP,
+            false,
+        ),
     ] {
+        let mut frame = crate::afxdp::tests_support::eth_ipv4_frag_frame(
+            0x0001,
+            &[0; 8],
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        frame[23] = wire_protocol;
         let mut meta = pbr_v4_meta();
-        meta.protocol = protocol;
-        let result = ingress_route_table_override(&state, &[], meta, &flow, None, None, 0, None);
+        meta.protocol = meta_protocol;
+        meta.l3_offset = 14;
+        meta.l4_offset = 34;
+        let result =
+            ingress_route_table_override(&state, &frame, meta, &flow, None, None, 0, None);
         assert_eq!(
             matches!(result, RouteOverride::Drop),
             should_drop,
-            "#10676 {label}: PBR protocol term must apply to this fragment"
+            "{label}: PBR protocol filter must match the fragment header protocol"
         );
     }
+}
+
+#[test]
+fn flowless_effective_protocol_recovers_ipv6_fragment_header_11338() {
+    let mut frame = crate::afxdp::tests_support::eth_ipv6_frag_frame(0x0001, &[0; 8]);
+    frame[54] = crate::ip_proto::PROTO_UDP;
+    let mut meta = pbr_v4_meta();
+    meta.addr_family = libc::AF_INET6 as u8;
+    meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+    meta.l3_offset = 14;
+    meta.l4_offset = 62;
+
+    assert_eq!(
+        crate::afxdp::frame::flowless_effective_protocol(&frame, meta),
+        crate::ip_proto::PROTO_UDP,
+        "the non-first IPv6 fragment's Fragment.Next Header is authoritative"
+    );
+}
+
+#[test]
+fn flowless_protocol_recovery_preserves_wire_protocol_255_11338() {
+    let mut frame = crate::afxdp::tests_support::eth_ipv4_frag_frame(
+        0x0001,
+        &[0; 8],
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    frame[23] = 255;
+    let mut meta = pbr_v4_meta();
+    meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+    meta.l3_offset = 14;
+    meta.l4_offset = 34;
+
+    assert_eq!(
+        crate::afxdp::frame::flowless_effective_protocol(&frame, meta),
+        255
+    );
+    let extra = crate::afxdp::frame::term_match_extra_from_frame(&frame, meta);
+    assert!(extra.native_fragment_sentinel);
+    assert_eq!(extra.fragment_protocol, Some(255));
 }
 
 

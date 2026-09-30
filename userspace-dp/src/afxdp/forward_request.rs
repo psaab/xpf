@@ -314,7 +314,7 @@ pub(super) fn build_live_forward_request_from_frame(
     // flow) so the output filter is selected AND matched on what actually leaves
     // the box. `None` for a flow-bearing packet, which already has the wire key.
     let flowless_wire_flow = if tx_selection_flow.is_none() {
-        l3_wire_session_flow_from_meta(meta, decision.nat)
+        l3_wire_session_flow_from_frame(frame, meta, decision.nat)
     } else {
         None
     };
@@ -435,24 +435,36 @@ pub(super) fn build_live_forward_request_from_frame(
 /// selected from the wrong family, matched against the wrong addresses, and the
 /// filter-log event recorded the wrong tuple.
 ///
-/// This rebuilds the L3-only flow from `meta` and then puts it through the SAME
-/// `forward_wire_key` the flow-bearing path uses, so family, addresses and
-/// protocol (including the NAT64 `ICMPV6`<->`ICMP` swap) move together BY
-/// CONSTRUCTION. That is the property that makes this the right shape: the
-/// alternative — patching each of the four pre-NAT reads independently — is
-/// correct only while four edits stay in agreement, and a partial version of it
-/// selects the right filter family and then evaluates it against the wrong
-/// addresses, which no address-less test fixture can see.
+/// This rebuilds the L3-only flow from `meta`, recovering the protocol from
+/// the verified, IP-declared frame when the shim stamped its native-fragment
+/// sentinel, then puts the flow through the SAME `forward_wire_key` used by
+/// flow-bearing packets. Family, addresses and protocol (including the NAT64
+/// `ICMPV6`<->`ICMP` swap) therefore move together BY CONSTRUCTION. IPv4 uses
+/// its Protocol byte; a non-first IPv6 fragment uses the Fragment header's
+/// Next Header rather than interpreting payload bytes as an extension/L4
+/// header. An unreadable sentinel protocol produces no synthetic wire key,
+/// avoiding a false protocol-255 output-filter match.
 ///
-/// Returns `None` exactly where `l3_session_flow_from_meta` does (unparsed or
-/// unspecified addresses), so a non-NAT flowless packet is unaffected:
-/// `forward_wire_key` leaves family and protocol alone when `nat.nat64` is
-/// false and rewrites addresses only where the decision set one.
-pub(super) fn l3_wire_session_flow_from_meta(
+/// Returns `None` when no L3-only address context can be formed or a native
+/// fragment's protocol cannot be recovered. For a non-NAT flowless packet,
+/// `forward_wire_key` leaves family and protocol alone and rewrites addresses
+/// only where the decision set one.
+pub(super) fn l3_wire_session_flow_from_frame(
+    frame: &[u8],
     meta: UserspaceDpMeta,
     nat: NatDecision,
 ) -> Option<SessionFlow> {
-    let pre = crate::afxdp::frame::l3_enforcement_flow_from_meta(meta)?;
+    let mut pre = crate::afxdp::frame::l3_enforcement_flow_from_meta(meta)?;
+    pre.forward_key.protocol = if meta.protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4 {
+        crate::afxdp::frame::fragment_protocol_from_frame(
+            frame,
+            meta.l3_offset,
+            meta.addr_family,
+        )?
+    } else {
+        // Preserve the prior metadata-based behavior for non-sentinel flows.
+        meta.protocol
+    };
     let key = forward_wire_key(&pre.forward_key, nat);
     Some(SessionFlow {
         src_ip: key.src_ip,

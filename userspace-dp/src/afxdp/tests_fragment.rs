@@ -806,7 +806,7 @@ fn flowless_snat_egress_output_filter_matches_the_postnat_tuple_8367() {
             "{label}: FLOWLESS non-first fragment. A 0 on the post-NAT arm means \
              the egress output filter is still being MATCHED against the ingress \
              (pre-NAT) tuple — family, addresses and protocol must all come from \
-             the synthesized post-NAT wire key (l3_wire_session_flow_from_meta), \
+             the synthesized post-NAT wire key (l3_wire_session_flow_from_frame), \
              not from `meta`"
         );
 
@@ -1183,7 +1183,7 @@ fn flowless_non_first_fragment_dropped_by_is_fragment_input_filter_3291() {
 }
 
 #[test]
-fn flowless_protocol_filter_matches_native_255_and_decapped_udp_fragments_10676() {
+fn flowless_protocol_filter_uses_fragment_header_protocol_11338() {
     let mut snapshot = policy_deny_snapshot();
     snapshot.default_policy = "permit".to_string();
     snapshot.policies.clear();
@@ -1205,11 +1205,31 @@ fn flowless_protocol_filter_matches_native_255_and_decapped_udp_fragments_10676(
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
-    for (id, label, meta) in [
-        (0x1067, "native-255", udp_native_frag_meta_5689()),
-        (0x1068, "decapped-udp", udp_decapped_frag_meta_5689()),
+    for (id, label, meta, wire_protocol, expected_forward) in [
+        (
+            0x1067,
+            "native-udp",
+            udp_native_frag_meta_5689(),
+            crate::ip_proto::PROTO_UDP,
+            0,
+        ),
+        (
+            0x1068,
+            "decapped-udp",
+            udp_decapped_frag_meta_5689(),
+            crate::ip_proto::PROTO_UDP,
+            0,
+        ),
+        (
+            0x1069,
+            "native-tcp",
+            udp_native_frag_meta_5689(),
+            crate::ip_proto::PROTO_TCP,
+            1,
+        ),
     ] {
-        let frame = udp_frag_frame_5689(0x0001, id);
+        let mut frame = udp_frag_frame_5689(0x0001, id);
+        frame[23] = wire_protocol;
         let (_batch, dbg) = txn_run_descriptor_checked(
             &mut binding,
             &mut sessions,
@@ -1220,8 +1240,8 @@ fn flowless_protocol_filter_matches_native_255_and_decapped_udp_fragments_10676(
             true,
         );
         assert_eq!(
-            dbg.forward, 0,
-            "#10676 {label}: protocol UDP input discard must drop the fragment"
+            dbg.forward, expected_forward,
+            "{label}: a UDP input filter must use the fragment header protocol"
         );
     }
 }
