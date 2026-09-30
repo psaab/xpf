@@ -742,16 +742,6 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// warnings on both strict commit and tolerant load / peer-sync paths.
 	openWorldRoutingWarnings := warnUnknownRoutingLeaves10707(tree)
 
-	// #11358: scheduler daily / weekday windows compile to one scalar
-	// start/stop pair. Reject conflicting repeated boundaries on strict
-	// compilation; tolerant loads warn rather than preventing an older
-	// persisted config from booting.
-	schedulerWindowWarnings11358, err := validateSchedulerWindowPairs11358(
-		tree, opts.lenientSchedulerWindowPairs11358)
-	if err != nil {
-		return nil, err
-	}
-
 	var warnings []string
 	warnings = append(warnings, ctrlCharWarnings...)
 	warnings = append(warnings, trackWarnings...)
@@ -792,6 +782,5 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, garpCountWarnings...)
 	warnings = append(warnings, bareLeafWarnings...)
 	warnings = append(warnings, openWorldRoutingWarnings...)
-	warnings = append(warnings, schedulerWindowWarnings11358...)
 	return warnings, nil
 }

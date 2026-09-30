@@ -8672,8 +8672,10 @@ not guess or silently discard them:
 - Repeated identical boundary values are accepted because they do not lose a
   distinct value. Separate weekday windows remain valid.
 
-The AST gate runs after group expansion and checks both `daily` and weekday
-windows, including legacy direct daily leaves. Regression coverage:
+The validator checks the node0 and node1 effective group expansions before
+node-local compilation, so `apply-groups "${node}"` cannot hide a peer-only
+repeated window from strict commit validation. It covers `daily`, weekday, and
+legacy direct daily leaves. Regression coverage:
 `pkg/config/compiler_scheduler_window_pairs_11358_test.go`.
 
 ### Quoted-value escape round-trip contract (#3854)
