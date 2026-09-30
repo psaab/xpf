@@ -330,23 +330,5 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 			return err
 		}
 	}
-	// #11310: protocol interface references must match the routing-instance
-	// membership of the resolved Linux device. A global protocol cannot claim
-	// an RI-owned device, and an RI protocol must reference a device owned by
-	// that same instance; otherwise FRR activates the interface in a different
-	// routing context from the configured device. Known aliases are compared by
-	// kernel identity, while undeclared refs remain owned by the #9405 advisory.
-	if mismatches := protocolInterfaceMembershipMismatches11310(cfg); len(mismatches) > 0 {
-		if opts.lenientProtocolInterfaceMembership11310 {
-			for _, mismatch := range mismatches {
-				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
-					"protocol interface membership (downgraded to warning on tolerant path): %s",
-					mismatch))
-			}
-		} else {
-			return fmt.Errorf("%s", mismatches[0])
-		}
-	}
-
 	return nil
 }

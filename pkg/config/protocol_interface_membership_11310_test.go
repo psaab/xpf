@@ -359,3 +359,21 @@ func TestProtocolInterfaceMembershipTunnelStanzaClaims11310(t *testing.T) {
 		})
 	}
 }
+
+func TestProtocolMembershipGatePreservesDualClaimFirstError11310(t *testing.T) {
+	lines := append(interfaceTunnelMembershipLines11310(),
+		"set routing-instances red instance-type virtual-router",
+		"set routing-instances red interface gr-0/0/0",
+		"set protocols ospf area 0.0.0.0 interface gr-0/0/0",
+	)
+	_, err := CompileConfig(buildProtocolMembershipTree11310(t, lines...))
+	if err == nil {
+		t.Fatal("strict compile accepted conflicting tunnel and member ownership")
+	}
+	if !strings.Contains(err.Error(), "#11060") {
+		t.Errorf("dual-claim gate did not preserve its earlier error: %v", err)
+	}
+	if strings.Contains(err.Error(), "#11310") {
+		t.Errorf("protocol membership gate preempted the #11060 dual-claim error: %v", err)
+	}
+}
