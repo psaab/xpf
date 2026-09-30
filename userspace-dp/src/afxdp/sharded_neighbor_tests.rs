@@ -989,7 +989,7 @@ fn ndp_cas_override0_refuses_live_differing_mac_9893() {
     let drops_before = map.learn_cap_drops();
     let epoch_before = map.mac_change_epoch_for(&k);
     assert_eq!(
-        map.insert_ndp_na_if_override_allows(k, entry(0xCD), false),
+        map.insert_ndp_na_if_override_allows(k, entry(0xCD), false, true),
         None,
         "Override=0 must refuse a live differing LLA"
     );
@@ -1022,7 +1022,7 @@ fn ndp_cas_override1_overwrites_live_differing_mac_9893() {
     let k = key_v4(7, 42);
     map.insert(k, entry(0xAB));
     assert_eq!(
-        map.insert_ndp_na_if_override_allows(k, entry(0xCD), true),
+        map.insert_ndp_na_if_override_allows(k, entry(0xCD), true, true),
         Some(true),
         "Override=1 (legit §7.2.6 LLA change) must overwrite"
     );
@@ -1035,14 +1035,14 @@ fn ndp_cas_override0_first_insert_and_same_mac_refresh_9893() {
     let k = key_v4(7, 42);
     // First-time Override=0 learn creates.
     assert_eq!(
-        map.insert_ndp_na_if_override_allows(k, entry(0xAB), false),
+        map.insert_ndp_na_if_override_allows(k, entry(0xAB), false, true),
         Some(true),
         "first-time Override=0 learn must create the entry"
     );
     assert_eq!(map.get(&k), Some(entry(0xAB)));
     // Same-MAC Override=0 refresh is a no-change Some(false), not a refusal.
     assert_eq!(
-        map.insert_ndp_na_if_override_allows(k, entry(0xAB), false),
+        map.insert_ndp_na_if_override_allows(k, entry(0xAB), false, true),
         Some(false),
         "same-MAC Override=0 refresh must succeed as no-change"
     );
@@ -1054,7 +1054,7 @@ fn ndp_cas_override1_same_mac_is_no_change_9893() {
     let k = key_v4(7, 42);
     map.insert(k, entry(0xAB));
     assert_eq!(
-        map.insert_ndp_na_if_override_allows(k, entry(0xAB), true),
+        map.insert_ndp_na_if_override_allows(k, entry(0xAB), true, true),
         Some(false),
         "same-MAC Override=1 must be no-change, matching insert_if_changed"
     );
@@ -1195,7 +1195,7 @@ fn ndp_cas_concurrent_peer_insert_never_lost_9893() {
             for i in 0..ITERS {
                 let k = key_v4(2000 + i, 42);
                 start.wait();
-                let _ = map.insert_ndp_na_if_override_allows(k, cas_mac, false);
+                let _ = map.insert_ndp_na_if_override_allows(k, cas_mac, false, true);
                 settled.wait();
             }
         });
@@ -1244,7 +1244,7 @@ fn ndp_cas_empty_race_exactly_one_winner_9893() {
                 for i in 0..ITERS {
                     let k = key_v4(3000 + i, 77);
                     start.wait();
-                    let r = map.insert_ndp_na_if_override_allows(k, my_mac, false);
+                    let r = map.insert_ndp_na_if_override_allows(k, my_mac, false, true);
                     results.lock().unwrap()[i as usize][tid] = r;
                     settled.wait();
                 }
@@ -1277,4 +1277,41 @@ fn ndp_cas_empty_race_exactly_one_winner_9893() {
             "iter {i}: the final entry must be the single winner's MAC"
         );
     }
+}
+
+/// #11069: unsolicited Override=1 must NOT replace a live differing LLA
+/// (the unsolicited-NA hijack primitive) — it gets Override=0 semantics
+/// and counts the refusal. Solicited Override=1 still converges failover.
+#[test]
+fn ndp_unsolicited_override1_refused_solicited_converges_11069() {
+    let map = ShardedNeighborMap::new();
+    let k = key_v4(7, 42);
+    map.insert(k, entry(0xAB));
+    assert_eq!(map.na_unsolicited_override_refusals(), 0);
+    // Hijack attempt: unsolicited Override=1 vs live differing MAC.
+    assert_eq!(
+        map.insert_ndp_na_if_override_allows(k, entry(0xCD), true, false),
+        None,
+        "unsolicited Override=1 must refuse a live differing LLA"
+    );
+    assert_eq!(map.get(&k), Some(entry(0xAB)), "live entry untouched");
+    assert_eq!(
+        map.na_unsolicited_override_refusals(),
+        1,
+        "the hijack refusal must count"
+    );
+    // Same-MAC unsolicited refresh is fine (no-change, uncounted).
+    assert_eq!(
+        map.insert_ndp_na_if_override_allows(k, entry(0xAB), true, false),
+        Some(false)
+    );
+    assert_eq!(map.na_unsolicited_override_refusals(), 1);
+    // Legitimate failover: solicited Override=1 converges.
+    assert_eq!(
+        map.insert_ndp_na_if_override_allows(k, entry(0xCD), true, true),
+        Some(true),
+        "solicited Override=1 must converge"
+    );
+    assert_eq!(map.get(&k), Some(entry(0xCD)));
+    assert_eq!(map.na_unsolicited_override_refusals(), 1);
 }

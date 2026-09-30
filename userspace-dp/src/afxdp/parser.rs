@@ -231,6 +231,7 @@ pub(super) struct NdpNeighborAdvert {
     /// first-time entry or refresh the same LLA, never to replace a live
     /// differing one.
     pub override_flag: bool,
+    pub solicited: bool,
 }
 
 /// Parse an IPv6 Neighbor Advertisement. Returns `None` if the frame
@@ -362,6 +363,10 @@ pub(super) fn parse_ndp_neighbor_advert(raw_frame: &[u8]) -> Option<NdpNeighborA
     // ICMPV6_NA_HDR_LEN` (24). Read it so the learn site can honor §7.2.5
     // (#4475: do not let an Override=0 NA overwrite a live differing LLA).
     let override_flag = raw_frame[l4_start + 4] & 0x20 != 0;
+    // #11069: bit 0x40 is the Solicited (S) flag. An unsolicited Override=1
+    // NA gets Override=0 semantics at the learn site (ARP #10704 parity):
+    // it may create or refresh, never replace a live differing MAC.
+    let solicited = raw_frame[l4_start + 4] & 0x40 != 0;
 
     // ICMPv6 checksum over the IPv6 pseudo-header + the ICMPv6 message
     // (`l4_start..packet_end`). A valid packet sums (including its own
@@ -401,6 +406,7 @@ pub(super) fn parse_ndp_neighbor_advert(raw_frame: &[u8]) -> Option<NdpNeighborA
         target_ip,
         target_mac,
         override_flag,
+        solicited,
     })
 }
 
