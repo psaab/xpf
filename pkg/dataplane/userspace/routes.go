@@ -494,13 +494,12 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// a config default happens to cover it, is forwarded to the STATIC
 	// default's next-hop instead of the learned one. Import closes both.
 	//
-	// GAP-FILL ONLY. An imported route is dropped whenever the config-derived
-	// set above already carries the same (table, family, prefix). That single
-	// rule is what makes this safe to add without renegotiating any existing
-	// precedence contract: the #3770 dedupe key, the #2390 preference
-	// tie-break and the overlay's whole-entry replacement all keep operating
-	// on exactly the routes they did before, because no imported route can
-	// ever contend with one of theirs.
+	// PREFERENCE-AWARE GAP-FILL. Keep a config-derived route when its
+	// preference is at least as good as the imported route's 200. When the
+	// config route is a worse-preference fallback (for example preference
+	// 250), publish both: the Rust FIB's ascending-preference tie-break then
+	// selects the kernel's already-selected learned route. This preserves
+	// ordinary config routes as winners while honoring floating fallbacks.
 	//
 	// THE OVERLAY ALWAYS WINS, and the gap-fill rule — not this call's
 	// position — is what guarantees it. Measured, because the obvious claim
@@ -1094,18 +1093,17 @@ func learnedRouteTableName(tableID int, family string, instByTableID map[int]str
 const learnedRouteMainTableID = 254
 
 // addLearnedRouteSnapshots imports kernel-learned routes and feeds the ones
-// that fill a genuine gap to addSnapshot.
+// that fill a genuine gap or outrank the configured route at that prefix to
+// addSnapshot.
 //
 // `existing` is the config-derived snapshot set built so far; it is read to
-// compute the gap-fill key and never mutated. Only ORDINARY table routes count
-// as covered. A NextTable row is a priority-ordered stage-1 rule, not an
-// answer from a table's LPM; if its target table misses, kernel evaluation
-// falls through and the ordinary main-table route must still be imported.
-// The key is built from the SAME (table, family, destination) triple the
-// caller's dedupe uses, and the imported destination is normalised through
-// routeDestinationForWire first so a kernel rendering can never miss an
-// ordinary config route it is semantically identical to.
-//
+// find the best preference at each canonical (table, family, destination) key
+// and never mutated. Only ORDINARY table routes count. A NextTable row is a
+// priority-ordered stage-1 rule, not an answer from a table's LPM; if its
+// target table misses, kernel evaluation falls through and the ordinary
+// main-table route must still be imported. The imported destination is
+// normalised through routeDestinationForWire first so a kernel rendering can
+// never miss an ordinary config route it is semantically identical to.
 // A failure from the importer is returned, not swallowed: same #3772 M9
 // reasoning as the ip-rule enumeration above — a snapshot silently missing
 // a subset of learned destinations is a FIB that disagrees with the kernel
@@ -1144,7 +1142,7 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 		return true, nil
 	}
 
-	covered := make(map[string]struct{}, len(existing))
+	configuredPreference := make(map[string]int, len(existing))
 	for _, snap := range existing {
 		// A NextTable row is a stage-1 rule, not a table route. Its presence
 		// must not make the helper believe the ordinary main-table answer is
@@ -1153,7 +1151,10 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 		if snap.NextTable != "" {
 			continue
 		}
-		covered[learnedRouteGapKey(snap.Table, snap.Family, snap.Destination)] = struct{}{}
+		key := learnedRouteGapKey(snap.Table, snap.Family, snap.Destination)
+		if best, ok := configuredPreference[key]; !ok || snap.Preference < best {
+			configuredPreference[key] = snap.Preference
+		}
 	}
 
 	// Deterministic emission order. The kernel dump order is not a stable
@@ -1201,10 +1202,13 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 				"family", family, "protocol", lr.Protocol)
 			continue
 		}
-		if _, ok := covered[learnedRouteGapKey(table, family, dest)]; ok {
-			// The operator's own route wins, always. This is the gap-fill
-			// rule; see the call site for why it is what makes the import
-			// safe to add.
+		key := learnedRouteGapKey(table, family, dest)
+		if best, ok := configuredPreference[key]; ok &&
+			best <= routing.LearnedRouteImportPreference {
+			// The configured route is at least as preferred as the imported
+			// route, so keep it as the sole candidate. A lower-preference
+			// fallback remains beside the imported route for the Rust FIB's
+			// established preference ordering to select the better path.
 			continue
 		}
 		addSnapshot(RouteSnapshot{
@@ -1218,27 +1222,24 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 	return capped, nil
 }
 
-// learnedRouteGapKey is the (table, family, destination) identity the
-// gap-fill test uses.
+// learnedRouteGapKey is the (table, family, destination) identity used to
+// find the best configured preference for an imported route.
 //
-// Deliberately NARROWER than the caller's #3770 dedupe key, which also
-// spans next-hops, next-table, discard and preference. The dedupe key
-// answers "is this the same route?"; this key answers "does the operator
-// already have an answer for this destination?" — and if they do, the
-// kernel's answer must not be published alongside it, however different its
-// next-hop is. Using the wider key here would let an imported route sit
-// beside a config route for the same prefix and leave the Rust FIB to pick
-// between them by preference, which is precisely the contention the
-// gap-fill rule exists to prevent.
+// Deliberately NARROWER than the caller's #3770 dedupe key, which also spans
+// next-hops, next-table, discard and preference. The dedupe key answers "is
+// this the same route?"; this key answers "what is the best configured route
+// for this destination?" An imported route may coexist with the configured
+// route only when its preference is strictly better; the Rust FIB then
+// selects it through #2390's ascending-preference tie-break.
 //
 // The destination is CANONICALISED, matching what applyRouteOverlay does on
 // both sides of its own comparison. routeDestinationForWire passes a parseable
 // CIDR through untouched, so a config static written with host bits set
 // (`route 10.20.30.1/24`) reaches the snapshot in that literal form while the
-// kernel always reports the masked prefix — comparing the raw strings would
-// therefore MISS the coverage, emit the imported route alongside the
-// operator's, and hand the Rust FIB two routes for one prefix. An
-// uncanonicalisable destination falls back to its raw text so it can still
+// kernel always reports the masked prefix — comparing raw strings would miss
+// the configured candidate's preference. The kernel result would then be
+// treated as a gap regardless of whether its preference should lose or win.
+// An uncanonicalisable destination falls back to its raw text so it can still
 // match itself rather than collapsing every such route onto one empty key.
 func learnedRouteGapKey(table, family, destination string) string {
 	if canonical := canonicalRoutePrefix(destination); canonical != "" {

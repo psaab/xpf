@@ -767,10 +767,11 @@ routing, and only on double fault).
   AD-200 DHCP default plus its RFC 3442 classless routes) into
   `buildRouteSnapshots`. A DHCP uplink therefore now works as a primary
   fast-path uplink without a static default.
-  - The import is **gap-fill only**: an imported route is discarded
-    whenever the config-derived set already covers the same
-    `(table, family, prefix)`, so an operator's route always wins and no
-    existing precedence contract changes.
+  - Same-prefix import is **preference-aware**: if the best configured
+    route has preference 200 or better, the imported candidate is
+    omitted. If a configured route is a worse-preference fallback (for
+    example a floating static at 250), both are published and the Rust
+    FIB selects the kernel-selected learned route at preference 200.
   - It is **BOUNDED, and refuses rather than truncates (#8355).** A
     learned route serializes to ~113 bytes — stable to within 1.5% from
     one route to 500,000, which is what makes a route COUNT derivable
