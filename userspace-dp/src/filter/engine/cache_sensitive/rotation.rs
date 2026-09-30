@@ -209,6 +209,24 @@ pub(crate) fn input_dscp_filter_families_changed(
     )
 }
 
+/// #11330: compares the optional lo0 filters semantically so a rebuild that
+/// only creates fresh `Arc`s or changes a positional filter ID does not trigger
+/// a session-table scan.
+fn lo0_filter_family_changed(old: &Option<Arc<Filter>>, new: &Option<Arc<Filter>>) -> bool {
+    match (old.as_ref(), new.as_ref()) {
+        (None, None) => false,
+        (Some(old), Some(new)) => !dscp_sensitive_filter_semantics_match(old, new),
+        _ => true,
+    }
+}
+
+pub(crate) fn lo0_filter_families_changed(old: &FilterState, new: &FilterState) -> (bool, bool) {
+    (
+        lo0_filter_family_changed(&old.lo0_filter_v4_fast, &new.lo0_filter_v4_fast),
+        lo0_filter_family_changed(&old.lo0_filter_v6_fast, &new.lo0_filter_v6_fast),
+    )
+}
+
 pub(crate) fn interface_input_filter_has_dscp_match(
     state: &FilterState,
     ifindex: i32,

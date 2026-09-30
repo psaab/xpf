@@ -358,6 +358,14 @@ func (d *Daemon) bindRoutingInstanceMembers(cfg *config.Config) {
 			}
 		}
 	}
+
+	// #11390: list-binding intent does not carry old membership across applies.
+	// Reconcile surviving VRF slaves against the complete current owner set.
+	for _, member := range d.riMembersOutsideTheirVRF(cfg) {
+		if member.unbind {
+			d.detachRemovedRIMemberFromVRF(member)
+		}
+	}
 }
 
 func logRIMemberDeviceConflict(conflict config.RoutingInstanceMemberDeviceConflict) {

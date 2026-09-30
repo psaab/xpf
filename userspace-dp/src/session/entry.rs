@@ -475,6 +475,13 @@ pub(crate) struct ForwardSessionMatch {
     pub(crate) metadata: SessionMetadata,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ForwardNatQuoteLookup {
+    NoMatch,
+    Ambiguous,
+    Unique(ForwardSessionMatch),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionOrigin {
     ForwardFlow,

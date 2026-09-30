@@ -378,6 +378,24 @@ pub(in crate::afxdp) fn ingress_routing_domain(
         .unwrap_or(0)
 }
 
+/// Resolve the routing-instance identity of a forward session's egress
+/// interface. Reverse-path admission compares the reply's arriving domain with
+/// this value, not the forward key's ingress domain or its PBR install table.
+#[inline]
+pub(in crate::afxdp) fn egress_routing_domain(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+) -> u32 {
+    if !forwarding.has_routing_domains {
+        return 0;
+    }
+    forwarding
+        .ifindex_to_routing_domain
+        .get(&egress_ifindex)
+        .copied()
+        .unwrap_or(0)
+}
+
 /// #10312/#11061: native routing-table resolution has three outcomes.
 ///
 /// `Default` is the real unscoped/main instance; `Table` is a validated

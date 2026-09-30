@@ -189,12 +189,13 @@ type BindingStatus struct {
 	// #3615 (L04): FILTER-`reject` reply TX-frame-budget suppression, split
 	// from PolicyRejectReplyBudgetDrops (which is now policy-reject-only).
 	FilterRejectReplyBudgetDrops uint64 `json:"filter_reject_reply_budget_drops,omitempty"`
-	// #3661: reject replies dropped because the shared per-reason rate-limit
-	// token bucket (REJECT_BUCKET) was empty, split by source. The aggregate
-	// ProcessStatus.RejectRateLimitedTotal stays source-neutral for
-	// back-compat; policy+filter here sum to it exactly (the Reject bucket has
-	// one consume site). omitempty + the Rust serde `default` keep
-	// cross-version wire safety (an older helper omits them → 0).
+	// #3661: explicit policy/filter reject replies dropped because the shared
+	// per-reason rate-limit token bucket was empty, split by source. The
+	// aggregate ProcessStatus.RejectRateLimitedTotal stays source-neutral for
+	// back-compat and also includes zone `tcp-rst` session-miss resets, which
+	// are not attributed here; policy+filter may sum to less than the aggregate.
+	// omitempty + Rust serde `default` keep cross-version wire safety (an older
+	// helper omits them → 0).
 	PolicyRejectRateLimitDrops uint64 `json:"policy_reject_rate_limit_drops,omitempty"`
 	FilterRejectRateLimitDrops uint64 `json:"filter_reject_rate_limit_drops,omitempty"`
 	// #2238: locally-generated replies (Time Exceeded, policy-reject

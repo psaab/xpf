@@ -401,20 +401,18 @@ func TestJunosHostSubchainRulesCarryTheirFamily9504(t *testing.T) {
 	}
 }
 
-// TestJunosHostVerdictsRenderAsTheRuntimeAnswers9504 pins the two verdicts #9504
-// added to the kernel path, in the text the daemon installs.
-//
-// Both split TCP from everything else, because the runtime does: a `reject`
-// answers TCP with a RST and every other protocol with an ICMP administratively
-// prohibited, and a deny on a `tcp-rst` zone answers TCP with a RST and drops the
-// rest silently (enqueue_deny_reply, reject_reply.rs). Rendering either as a
-// plain drop would be invisible to a rule-count assertion and wrong on the wire.
-func TestJunosHostVerdictsRenderAsTheRuntimeAnswers9504(t *testing.T) {
+// TestJunosHostVerdictsRenderAsJunosSemantics9504_11304 pins the direct
+// host-bound verdicts: explicit `then reject` remains active, while `deny`
+// remains a silent drop even when the ingress zone has `tcp-rst`. That zone
+// setting applies to transit session misses, not policy denials. The deny cell
+// also forbids any generated-reject clause, not only checking for a drop line.
+func TestJunosHostVerdictsRenderAsJunosSemantics9504_11304(t *testing.T) {
 	cn := xnft.HostInboundJunosHostDenyCounterName("untrust", "ip")
 	for _, tc := range []struct {
-		name  string
-		build func() *config.Config
-		want  []string
+		name    string
+		build   func() *config.Config
+		want    []string
+		notWant []string
 	}{
 		{
 			name: "then reject",
@@ -444,8 +442,11 @@ func TestJunosHostVerdictsRenderAsTheRuntimeAnswers9504(t *testing.T) {
 				return cfg
 			},
 			want: []string{
-				`meta nfproto ipv4 meta l4proto tcp ip saddr 10.0.0.5/32 counter name "` + cn + `" reject with tcp reset`,
 				`meta nfproto ipv4 ip saddr 10.0.0.5/32 counter name "` + cn + `" drop`,
+			},
+			notWant: []string{
+				`meta nfproto ipv4 meta l4proto tcp ip saddr 10.0.0.5/32 counter name "` + cn + `" reject with tcp reset`,
+				`meta nfproto ipv4 ip saddr 10.0.0.5/32 counter name "` + cn + `" reject with icmpx type admin-prohibited`,
 			},
 		},
 	} {
@@ -454,9 +455,13 @@ func TestJunosHostVerdictsRenderAsTheRuntimeAnswers9504(t *testing.T) {
 			if len(programs) != 1 {
 				t.Fatalf("want 1 program, got %+v", programs)
 			}
-			// Ordered: the TCP answer must precede the catch-all, or TCP never
-			// reaches it.
+			// Assert both the required verdict and any forbidden reply clauses.
 			assertOrder(t, payload, tc.want...)
+			for _, forbidden := range tc.notWant {
+				if strings.Contains(payload, forbidden) {
+					t.Errorf("payload unexpectedly contains %q:\n%s", forbidden, payload)
+				}
+			}
 		})
 	}
 }

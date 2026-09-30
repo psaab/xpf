@@ -223,16 +223,19 @@ use self::icmp::{
     can_generate_icmp_error_reply, reject_icmp_reply_suppressed,
 };
 #[cfg(test)]
-use self::icmp_embed::{EmbeddedIcmpMatch, try_embedded_icmp_session_match_from_frame};
+use self::icmp_embed::{
+    EmbeddedIcmpMatch, try_embedded_icmp_nat_match_from_frame,
+    try_embedded_icmp_session_match_from_frame,
+};
 use self::icmp_embed::{
     EmbeddedMatchOutcome, Nat64IcmpErrorMatch, build_nat_reversed_icmp_error_v4,
     build_nat_reversed_icmp_error_v6,
     build_snat_outbound_icmp_error_v4, build_snat_outbound_icmp_error_v6,
     finalize_embedded_icmp_resolution, finalize_embedded_icmp_resolution_parts,
-    // #8271: the `_from_frame` form is now the ONLY form. Its `(area, desc)`
-    // wrapper was deleted because it could only pair a descriptor with a meta
-    // that may describe a different packet.
-    try_embedded_icmp_nat_match_from_frame, try_nat64_icmp_error_match_from_frame,
+    // #8271: production names the frame slice explicitly; it also supplies the
+    // shared owner index used to fail closed on ambiguous quoted NAT tuples.
+    try_embedded_icmp_nat_match_from_frame_with_owner_indexes,
+    try_nat64_icmp_error_match_from_frame,
 };
 use self::mirror::*;
 use self::mpsc_inbox::MpscInbox;
@@ -531,6 +534,8 @@ pub(crate) const DELEGATED_SLOW_PATH_TUN: &str = "xpf-usp1";
 const LOCAL_TUNNEL_DELIVERY_QUEUE_DEPTH: usize = 4096;
 const HA_WATCHDOG_STALE_AFTER_SECS: u64 = 10;
 const FABRIC_ZONE_MAC_MAGIC: u8 = 0xfe;
+/// #11337: V2 fabric source-MAC marker followed by a stable 24-bit NAT-scope id.
+const FABRIC_NAT_SCOPE_MAC_PREFIX: [u8; 3] = [0x02, 0xbf, 0x73];
 use crate::ip_proto::{PROTO_AH, PROTO_ESP, PROTO_GRE, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
 // #2151: TCP flag bits now live in the shared crate::tcp_flags SSOT.
 // Re-exported here under the historical TCP_FLAG_* spellings (and made
@@ -1006,13 +1011,11 @@ pub(in crate::afxdp) struct BatchCounters {
     // from `policy_reject_reply_budget_drops` so filter-reject troubleshooting
     // is precise (both still share the same budget gate).
     filter_reject_reply_budget_drops: u64,
-    // #3661: POLICY-`reject` replies dropped because the shared per-reason
-    // REJECT_BUCKET rate-limit token bucket was empty. The aggregate
-    // `reject_rate_limited_total` (bumped inside `allow_generated_error`) stays
-    // source-neutral; this splits the SAME drop by reply source so
-    // policy-reject starvation is distinguishable from filter-reject
-    // starvation under a rejected-flow flood. Sibling of
-    // `policy_reject_reply_budget_drops`.
+    // #3661: explicit policy-`reject` replies dropped because the shared
+    // per-reason rate-limit token bucket was empty. The aggregate
+    // `reject_rate_limited_total` is source-neutral and also includes zone
+    // `tcp-rst` session-miss resets. This source split contains only explicit
+    // policy/filter rejects, so its sum may be below the aggregate.
     policy_reject_rate_limit_drops: u64,
     // #3661: FILTER-`reject` reply rate-limit drop — the source-split sibling
     // of `policy_reject_rate_limit_drops` (both share the one REJECT_BUCKET).

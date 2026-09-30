@@ -125,34 +125,36 @@ pub(crate) struct SessionKey {
     ///     translated alias) or navigate between the two halves of one flow,
     ///     so they must not lose the discriminator.
     ///   * `reverse_wire_key` and `reverse_canonical_key` deliberately ZERO
-    ///     it. Those two build the REVERSE-MATCH index — the keys a REPLY is
-    ///     looked up under — and a reply from the default domain may still
-    ///     need to find a tenant forward session (and vice versa). Preserving
-    ///     the domain there would blackhole every legitimate mixed-zero
-    ///     non-contained VRF flow's replies, which is a forwarding outage, not
-    ///     a hardening.
+    ///     it. Those keys build the REVERSE-MATCH index. Ordinary reverse
+    ///     session admission compares each candidate's forward egress-interface
+    ///     domain with the arriving reply domain. This preserves legitimate
+    ///     asymmetric routes without treating mixed-zero domains as wildcards.
     ///
     /// Zeroing the reverse-match keys does NOT give the cross-tenant collision
-    /// back, and this is the part to check before touching either group.
-    /// The collision #7160 exists to close is a FORWARD-direction one: tenant
-    /// B's packets matching tenant A's conntrack entry and inheriting its
-    /// cached egress, NAT and policy verdict. Forward lookups go through
-    /// `key_to_handle` on this full key, domain included, so two tenants now
-    /// hold two entries and neither can reach the other's. The reverse side
-    /// keeps its isolation a different way: `find_forward_nat_match` walks the
-    /// (1:N) reverse bucket in TWO passes and prefers a candidate whose
-    /// forward session carries the reply's own domain. Its pass-2 fallback is
-    /// permitted only when either endpoint is domain 0, preserving the
-    /// legitimate non-contained VRF shape; two different non-zero domains
-    /// fail closed rather than crossing tenants. Two contained tenants
-    /// therefore demux exactly, while a flow whose reply genuinely arrives
-    /// in the default domain (or whose default-domain forward sees a tenant
-    /// reply) still resolves.
+    /// back. Forward lookups go through `key_to_handle` on the full key, domain
+    /// included, so two tenants hold separate entries. Reverse lookup keeps its
+    /// bucket domain-agnostic, then validates each candidate against the
+    /// routing domain of `decision.resolution.egress_ifindex`:
+    ///
+    ///   * A reverse session is admitted only when its reply's arrival domain
+    ///     matches that forward egress domain. The forward key's ingress domain
+    ///     and PBR install-table domain are not substitutes.
+    ///   * Domain 0 is strict, not a wildcard. Mixed-zero replies work only when
+    ///     the forward egress actually resolves to the reply's domain.
+    ///   * Asymmetric A-ingress/B-egress flows therefore match a B-domain reply,
+    ///     while replies from a different egress domain cannot borrow the
+    ///     overlapping candidate. Quarantined fabric identities retain their
+    ///     exact-key-only rule.
+    ///
+    /// Same-family embedded ICMP quotes use a tuple-only lookup as an explicit
+    /// exception: they rewrite quoted packets but install no session, and an
+    /// off-path router may send an error from another domain.
     ///
     /// Do not "optimise" the PRESERVING three to `Default::default()`, and do
-    /// not "restore symmetry" on the zeroing two without also removing the
-    /// two-pass preference in `session/lookup.rs` — each half is what makes
-    /// the other correct, and every single-instance test passes either way.
+    /// not restore a domain-preserving reverse index without changing the
+    /// candidate check in `session/lookup.rs` — the index and egress-domain
+    /// admission work together, and every single-instance test passes either
+    /// way.
     pub routing_domain: u32,
 }
 /// The five-tuple used by delayed-close identity checks. Routing domain and
@@ -330,12 +332,10 @@ pub(super) fn reverse_wire_key(forward_key: &SessionKey, nat: NatDecision) -> Se
         // #8103: REVERSE-direction key — derive the discriminator through the
         // exhaustive helper, so a new class must decide rather than defaulting.
         discriminator: reverse_direction_discriminator(forward_key.discriminator),
-        // #7160 (#2387): REVERSE-MATCH key — deliberately domain-agnostic.
-        // See the `routing_domain` doc on SessionKey: a reply may legitimately
-        // arrive in a different routing domain than the forward direction
-        // resolved, so the bucket it is looked up under must not carry one.
-        // The isolation lives in the two-pass preference in
-        // `find_forward_nat_match`, not here.
+        // #7160/#11298: REVERSE-MATCH key — deliberately domain-agnostic.
+        // `find_forward_nat_match` compares the arriving reply's domain with
+        // each forward decision's egress-interface domain after probing this
+        // bucket; the ingress/key domain is not the reverse admission identity.
         routing_domain: 0,
     }
 }
@@ -356,23 +356,21 @@ pub(crate) fn reverse_canonical_key(forward_key: &SessionKey, _nat: NatDecision)
         // #8103: REVERSE-direction key — derive the discriminator through the
         // exhaustive helper, so a new class must decide rather than defaulting.
         discriminator: reverse_direction_discriminator(forward_key.discriminator),
-        // #7160 (#2387): REVERSE-MATCH key — deliberately domain-agnostic, for
-        // the same reason as `reverse_wire_key` above.
+        // #7160/#11298: REVERSE-MATCH key — deliberately domain-agnostic;
+        // see `reverse_wire_key` for the egress-domain admission contract.
         routing_domain: 0,
     }
 }
 
-/// #7160 (#2387): the domain-agnostic form of a key, for looking one up in a
+/// #7160/#11298: the domain-agnostic form of a key, for looking one up in a
 /// REVERSE-MATCH index.
 ///
 /// `reverse_wire_key` / `reverse_canonical_key` build those index keys with
 /// `routing_domain: 0`, so the arriving reply must be zeroed the same way
-/// before it is used as a probe — otherwise a reply that DID resolve a domain
-/// would look for a bucket that was never inserted. One named function so the
-/// two halves of the convention cannot drift apart.
-///
-/// The reply's own domain is not discarded: the caller keeps it to run the
-/// two-pass preference that restores per-domain demux (`find_forward_nat_match`).
+/// before it is used as a probe. Ordinary reverse-session admission retains the
+/// reply's domain and compares it with each candidate's forward egress-interface
+/// domain; domain 0 is not a wildcard. Embedded quote-only lookup is the
+/// intentional tuple-recovery exception because it installs no reverse session.
 pub(crate) fn reverse_match_key(key: &SessionKey) -> SessionKey {
     if key.routing_domain == 0 {
         return key.clone();

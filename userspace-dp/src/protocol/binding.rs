@@ -620,9 +620,10 @@ pub(crate) struct BindingStatus {
     // wire safety (an older helper omits it → 0).
     #[serde(rename = "filter_reject_reply_budget_drops", default)]
     pub filter_reject_reply_budget_drops: u64,
-    // #3661: POLICY-`reject` replies dropped because the shared per-reason
-    // rate-limit token bucket (REJECT_BUCKET) was empty — the source split of
-    // the source-neutral aggregate ProcessStatus.reject_rate_limited_total.
+    // #3661: explicit POLICY-`reject` replies dropped because the shared
+    // per-reason rate-limit token bucket was empty. The source-neutral
+    // ProcessStatus.reject_rate_limited_total also includes zone `tcp-rst`
+    // session-miss resets, which are not attributed to this source field.
     // `default` keeps cross-version wire safety (an older helper omits it → 0).
     #[serde(rename = "policy_reject_rate_limit_drops", default)]
     pub policy_reject_rate_limit_drops: u64,

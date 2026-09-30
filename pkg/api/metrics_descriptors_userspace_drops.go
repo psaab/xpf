@@ -125,51 +125,52 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 	)
 	c.userspaceRejectRateLimited = prometheus.NewDesc(
 		"xpf_userspace_reject_rate_limited_total",
-		"Locally-generated policy/filter `reject` replies (TCP RST or "+
-			"ICMP/ICMPv6 administratively-prohibited unreachable) dropped "+
-			"because the per-reason token bucket was empty. This is in "+
-			"ADDITION to the SYN-cookie TX-frame budget gate "+
-			"(which is queue protection, not a rate cap). A nonzero value "+
-			"flags a rejected-flow flood being clamped before it amplifies "+
-			"into unbounded RST/ICMP backscatter (#2472). Source-neutral "+
-			"aggregate: the rate-limit bucket is a single global-per-reason "+
-			"bucket. The per-source breakdown is "+
+		"Locally-generated reject replies (policy/filter `reject` and zone "+
+			"`tcp-rst` session-miss resets) dropped because the per-reason "+
+			"token bucket was empty. This is in ADDITION to the SYN-cookie "+
+			"TX-frame budget gate (which is queue protection, not a rate cap). "+
+			"A nonzero value flags a rejected-flow flood being clamped before "+
+			"it amplifies into unbounded RST/ICMP backscatter (#2472). The "+
+			"source-neutral aggregate includes configured per-ingress-zone "+
+			"buckets and the unzoned/unknown-zone fallback. The explicit "+
+			"policy/filter source breakdown is "+
 			"xpf_userspace_reject_rate_limited_by_source_total (#3661).",
 		nil, nil,
 	)
-	// #3657 (H13/H15/M02): source-split reject reply telemetry. #3615
-	// wired the per-source sent / TX-frame reply-budget / egress
-	// output-filter legs onto BindingStatus; these expose them so
-	// alerting can tell policy-reject from filter-reject and success from
-	// suppression. Summed across bindings, labeled source=policy|filter,
-	// emitted unconditionally (a 0 is a real "no reject activity" signal).
+	// #3657 (H13/H15/M02): source-split explicit reject reply telemetry. #3615
+	// wired the per-source sent / TX-frame reply-budget / egress output-filter
+	// legs onto BindingStatus; these expose them so alerting can distinguish
+	// policy-reject from filter-reject and success from suppression. Summed
+	// across bindings, labeled source=policy|filter, emitted unconditionally
+	// (a 0 is a real "no explicit reject activity" signal).
 	c.userspaceRejectSent = prometheus.NewDesc(
 		"xpf_userspace_reject_sent_total",
-		"Locally-generated `reject` replies (TCP RST or ICMP/ICMPv6 "+
+		"Explicitly generated `reject` replies (TCP RST or ICMP/ICMPv6 "+
 			"administratively-prohibited unreachable) actually enqueued, "+
 			"split by source: a security-policy `then reject` "+
-			"(source=policy, includes a zone `tcp-rst`) vs a "+
-			"firewall-filter `then reject` (source=filter). This is the "+
-			"active reject SUCCESS volume — as important as the suppression "+
-			"counters for validating vSRX-style reject under load "+
+			"(source=policy) vs a firewall-filter `then reject` "+
+			"(source=filter). Zone `tcp-rst` session-miss resets share the "+
+			"reject rate limiter but are not attributed to either source. "+
+			"This is the active explicit reject SUCCESS volume — as important as "+
+			"the suppression counters for validating vSRX-style reject under load "+
 			"(#3615/#3657 H13).",
 		[]string{"source"}, nil,
 	)
 	c.userspaceRejectReplyBudgetDrops = prometheus.NewDesc(
 		"xpf_userspace_reject_reply_budget_drops_total",
-		"Locally-generated `reject` replies suppressed because the "+
+		"Explicit policy/filter `reject` replies suppressed because the "+
 			"per-tick TX-frame budget was exhausted, split by source "+
 			"(policy vs firewall-filter). Budget pressure during a flood is "+
 			"exactly when a `reject` is silently downgraded to a truthful "+
 			"`deny`; the source split tells policy-reject starvation from "+
-			"filter-reject starvation and is distinct from the global "+
+			"filter-reject starvation and is distinct from the source-neutral "+
 			"rate-limit bucket (xpf_userspace_reject_rate_limited_total) "+
 			"and an egress output-filter drop (#3615 L04/#3657 H14/M02).",
 		[]string{"source"}, nil,
 	)
 	c.userspaceRejectOutputFilterDrops = prometheus.NewDesc(
 		"xpf_userspace_reject_output_filter_drops_total",
-		"Locally-generated `reject` replies dropped by an egress output "+
+		"Explicit policy/filter `reject` replies dropped by an egress output "+
 			"firewall filter (terminal discard/reject or three-color "+
 			"policer) applied to the reflected reply's own egress tuple, "+
 			"split by source (policy vs firewall-filter). Distinguishes an "+
@@ -177,27 +178,24 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 			"TX-frame budget or rate-limit drop (#3615 L05/#3657 H15/M02).",
 		[]string{"source"}, nil,
 	)
-	// #3661 (M02 Rust follow-up): per-source breakdown of the reject
-	// rate-limit drop leg. The aggregate
-	// xpf_userspace_reject_rate_limited_total stays source-neutral for
-	// back-compat; this attributes each drop (at the consume site, where
-	// the reply source is known) to a security-policy `then reject`
-	// (source=policy) or a firewall-filter `then reject` (source=filter),
-	// so a rejected-flow flood's bucket starvation is attributable. Both
-	// sources share the one global-per-reason bucket, so policy+filter sum
-	// to the aggregate. Summed across bindings, labeled source=policy|
-	// filter, emitted unconditionally (a 0 is a real "no rate-limit drop"
-	// signal).
+	// #3661 (M02 Rust follow-up): per-source breakdown of explicit
+	// policy/filter reject rate-limit drops. The source-neutral aggregate
+	// xpf_userspace_reject_rate_limited_total stays for back-compat and also
+	// includes zone `tcp-rst` session-miss resets, which have no source label;
+	// therefore this source split may sum to less than the aggregate. Summed
+	// across bindings and emitted unconditionally (a 0 is a real "no explicit
+	// policy/filter reject rate-limit drop" signal).
 	c.userspaceRejectRateLimitedBySource = prometheus.NewDesc(
 		"xpf_userspace_reject_rate_limited_by_source_total",
-		"Locally-generated `reject` replies (TCP RST or ICMP/ICMPv6 "+
+		"Explicit policy/filter `reject` replies (TCP RST or ICMP/ICMPv6 "+
 			"administratively-prohibited unreachable) dropped because the "+
 			"shared per-reason rate-limit token bucket was empty, split by "+
 			"source (policy vs firewall-filter). Distinguishes "+
 			"policy-reject starvation from filter-reject starvation under a "+
 			"rejected-flow flood. The source-neutral aggregate is "+
-			"xpf_userspace_reject_rate_limited_total; policy+filter sum to "+
-			"it (#3661).",
+			"xpf_userspace_reject_rate_limited_total and can also include "+
+			"zone `tcp-rst` session-miss resets, so this split may sum to less "+
+			"than the aggregate (#3661).",
 		[]string{"source"}, nil,
 	)
 	c.userspaceMartianDropped = prometheus.NewDesc(

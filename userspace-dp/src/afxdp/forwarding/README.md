@@ -355,32 +355,34 @@ forward-direction collision.
   A complete but invalid stamp always drops. Legacy single-table deployments
   retain unstamped redirects and absent stamps retain their existing MAIN behavior.
 
-- **Why the ingress interface and nothing else.** The reverse key is built
-  by swapping the forward key's fields and never observes the reply, so the
-  domain must be a quantity a packet resolves from its own arrival. A PBR
-  `then routing-instance` ASSIGNMENT is not one — the reply ingresses on an
-  interface the PBR term never touches — so PBR-steered flows on an
-  `instance-type forwarding` instance with no member interfaces stay domain
-  0 in both directions, and #7924's strict-path rejection of overlap + PBR
-  remains what covers that shape.
-- **Forward isolation is exact; reverse matching is domain-PREFERRING and
-  fail-closed across non-zero domains.** The collision #7160 exists to close
-  is a forward-direction one — tenant B's packets hitting tenant A's
-  conntrack entry and inheriting its cached egress, NAT and **policy** verdict.
-  Forward lookups go through `key_to_handle` on the full key, so two tenants
-  now hold two entries. The reverse side cannot be keyed the same way: this
-  dataplane's transit route lookup is **not** VRF-isolated (see the PBR bullet
-  below), so a flow that ingresses on a routing-instance member interface and
-  egresses out of the default instance is a real, working configuration whose
-  reply resolves a DIFFERENT domain. `reverse_wire_key` /
-  `reverse_canonical_key` therefore build the reverse-match index with
-  `routing_domain: 0`, and `find_forward_nat_match` walks the (1:N) bucket in
-  two passes — preferring a candidate whose forward session carries the
-  reply's own domain, then allowing a pass-2 candidate only when either the
-  reply or candidate is domain 0. A validating candidate from a different
-  non-zero domain is refused, including through the shared NAT-map second
-  probe. Two contained tenants demux exactly; a non-contained flow keeps
-  forwarding when its two directions are the legitimate mixed-zero shape.
+- **Forward key is ingress; reverse admission is egress.** `SessionKey.routing_domain`
+  records the forward packet's ingress-interface identity, known when that key
+  is built. A PBR `then routing-instance` assignment is not an interface
+  routing-domain identity; reverse admission instead compares the arriving
+  reply's domain with the forward session's egress-interface domain. An
+  `instance-type forwarding` PBR target with no member interfaces therefore
+  does not stamp its route-table assignment into either interface domain, and
+  #7924's strict-path rejection of overlap + PBR remains what covers that
+  shape.
+- **Forward isolation is exact; reverse admission checks the forward egress
+  domain.** The collision #7160 exists to close is a forward-direction one —
+  tenant B's packets hitting tenant A's conntrack entry and inheriting its
+  cached egress, NAT and **policy** verdict. Forward lookups use `key_to_handle`
+  on the full key, so two tenants hold separate entries. Reverse lookup cannot
+  use that full domain as its bucket key: transit route lookup is **not**
+  VRF-isolated (see the PBR bullet below), so an A-ingress/B-egress flow can
+  receive its reply in B. `reverse_wire_key` / `reverse_canonical_key` therefore
+  build a domain-agnostic reverse-match index, and `find_forward_nat_match`
+  compares the arriving reply domain with each candidate's
+  `decision.resolution.egress_ifindex` routing domain. Domain 0 is strict, not a
+  wildcard: mixed-zero replies match only when the forward egress actually
+  resolves to the arriving domain. This same predicate guards local and
+  HA/shared NAT entries; the arrival-zone check remains an independent gate.
+  Same-family embedded-ICMP quote rewriting is the deliberate exception: its
+  tuple-only lookup creates no session, and an off-path router may send the
+  error from a different domain. If multiple routing domains own the same
+  translated tuple, quote matching fails closed instead of selecting a tenant
+  by reverse-index order.
   `forward_wire_key`, `translated_session_key` and `reverse_session_key` still
   PRESERVE the domain — they name another key of the same direction, or
   navigate between the two halves of one flow.
@@ -999,10 +1001,13 @@ never on the wire because zone ids are u8) and looks up the
 `(ingress_zone_id, JUNOS_HOST_ZONE_ID)` zone pair in the SAME `zone_pair_index`
 as transit rules — `parse_policy_state_with_counters` now INDEXES junos-host rules
 via `resolve_policy_zone_id` (pre-#3019 they were kept-but-not-indexed, like the
-wildcard-`any` case). A matched deny/reject drops the packet, emits the
-policy-deny RT_FLOW (egress zone reported as `0`/host since the synthetic id
-does not fit the u8 wire slot), synthesizes a `reject`/zone-`tcp-rst` reply, and
-on the hit path tears down the cached host-local session.
+wildcard-`any` case).
+
+A matched deny/reject drops the packet and emits policy-deny RT_FLOW (egress
+zone reported as `0`/host since the synthetic id does not fit the u8 wire
+slot); only explicit `then reject` synthesizes a reply. Zone `tcp-rst` applies
+to strict-SYN transit session misses, not host-bound policy denies. On the hit
+path the cached host-local session is torn down.
 
 Enforcement is MATCH-DRIVEN and fail-safe: the gate is a NO-OP unless
 `PolicyState::has_junos_host_rules` is set (some junos-host rule configured),

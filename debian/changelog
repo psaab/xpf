@@ -113,8 +113,13 @@ xpf (0.0.0) unstable; urgency=medium
   * Warn about and exclude static routes without a forwarding disposition, so
     they cannot shadow an installable less-specific route in the helper FIB
     (#11327).
+  * Fail closed when an embedded ICMP quote's translated NAT tuple is ambiguous
+    across routing domains, while retaining off-path reversal for unique flows
+    (#11298).
   * Index local and shared tuple identities for delayed session-close checks,
     preserving scoped-incarnation teardown while avoiding slab and shared-map
     scans under the shared-session mutex (#11299).
+  * Route oversized same-binding flow-cache hits through pending-forward so
+    normal egress MTU, PTB, and TCP-segmentation handling is preserved (#11376).
 
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

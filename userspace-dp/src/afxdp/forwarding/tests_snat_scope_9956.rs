@@ -191,7 +191,7 @@ fn snat_scope_resolves_the_logical_vlan_unit_9956() {
     // Unit-B traffic as the scope helper now resolves it: physical ingress 11
     // + VID 50 → logical 13. RED on base: the helper took no vlan and read
     // the physical parent, reporting unit-A's identity.
-    let scope_b = nat_scope_ctx_for_flow(&forwarding, 11, 50, 24, DOMAIN_B);
+    let scope_b = nat_scope_ctx_for_flow(&forwarding, 11, 50, None, 24, DOMAIN_B);
     assert_eq!(
         scope_b.ingress_ifname, "reth0.50",
         "#9956 F-052: VID-50 traffic must scope to unit-B's interface"
@@ -204,7 +204,7 @@ fn snat_scope_resolves_the_logical_vlan_unit_9956() {
     // End to end: unit-B traffic must NOT match unit-A's scoped SNAT rule.
     let flow_b = unit_flow(Ipv4Addr::new(10, 0, 50, 100), DOMAIN_B);
     assert!(
-        match_source_nat_for_flow(&forwarding, 11, 50, "lan", "wan", 24, &flow_b).is_none(),
+        match_source_nat_for_flow(&forwarding, 11, 50, None, "lan", "wan", 24, &flow_b).is_none(),
         "#9956 F-052: traffic from unit B must not match unit-A's \
          `from interface reth0.0 / from routing-instance tenant-a` SNAT rule"
     );
@@ -213,7 +213,28 @@ fn snat_scope_resolves_the_logical_vlan_unit_9956() {
     // resolves logical == physical).
     let flow_a = unit_flow(Ipv4Addr::new(10, 0, 61, 100), DOMAIN_A);
     assert!(
-        match_source_nat_for_flow(&forwarding, 11, 0, "lan", "wan", 24, &flow_a).is_some(),
+        match_source_nat_for_flow(&forwarding, 11, 0, None, "lan", "wan", 24, &flow_a).is_some(),
         "#9956 F-052 control: unit-A traffic must still match its own scoped rule"
+    );
+}
+
+/// A fabric punt's local physical ingress is the fabric link, not the
+/// original logical interface. Its stamp must recover the peer's NAT scope.
+#[test]
+fn fabric_punt_snat_scope_uses_peer_nat_identity_11337() {
+    let forwarding = build_forwarding_state(&trunk_snapshot());
+    let scope = nat_scope_ctx_for_flow(&forwarding, 101, 0, Some(11), 24, DOMAIN_A);
+    assert_eq!(
+        scope.ingress_ifname, "reth0.0",
+        "#11337: fabric arrival must recover the peer's ingress interface"
+    );
+    assert_eq!(
+        scope.ingress_routing_instance, "tenant-a",
+        "#11337: fabric arrival must recover the peer's ingress routing instance"
+    );
+    let flow_a = unit_flow(Ipv4Addr::new(10, 0, 61, 100), DOMAIN_A);
+    assert!(
+        match_source_nat_for_flow(&forwarding, 101, 0, Some(11), "lan", "wan", 24, &flow_a).is_some(),
+        "#11337: RI/interface-scoped SNAT must match on a fabric-punted flow"
     );
 }

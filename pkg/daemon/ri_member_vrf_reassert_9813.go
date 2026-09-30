@@ -83,13 +83,17 @@ func (d *Daemon) reassertRIMemberVRFOnce(ctx context.Context) {
 	d.rebindRIMembersOutsideTheirVRF(cfg)
 }
 
-// rebindRIMembersOutsideTheirVRF binds list members that sit outside their VRF
-// and detaches quarantined devices only when their current master is one of the
-// conflicting VRFs. Unrelated masters are never detached.
+// rebindRIMembersOutsideTheirVRF restores desired list members, detaches
+// quarantined conflicts, and identity-gated-detaches unclaimed slaves from
+// surviving routing-instance VRFs. Unrelated masters are never detached.
 func (d *Daemon) rebindRIMembersOutsideTheirVRF(cfg *config.Config) {
 	for _, m := range d.riMembersOutsideTheirVRF(cfg) {
 		if m.conflict != nil {
 			d.detachRIMemberDeviceConflict(*m.conflict)
+			continue
+		}
+		if m.unbind {
+			d.detachRemovedRIMemberFromVRF(m)
 			continue
 		}
 		slog.Warn("routing-instance member outside its VRF — re-binding",
@@ -101,12 +105,27 @@ func (d *Daemon) rebindRIMembersOutsideTheirVRF(cfg *config.Config) {
 	}
 }
 
+func (d *Daemon) detachRemovedRIMemberFromVRF(member riMember) {
+	detached, err := d.routing.UnbindInterfaceFromVRFs(member.linuxName, []string{member.instance})
+	if err != nil {
+		slog.Error("removed routing-instance member VRF detach failed; will retry",
+			"interface", member.linuxName, "instance", member.instance, "err", err)
+		return
+	}
+	if detached {
+		slog.Warn("removed routing-instance member detached to default routing context",
+			"interface", member.linuxName, "instance", member.instance)
+	}
+}
+
 // riMember names one routing-instance list member that needs reconciliation.
-// A non-nil conflict requests a safe detach rather than a bind.
+// A non-nil conflict requests a safe detach; unbind marks a kernel VRF slave
+// that no current routing-instance member or tunnel claim wants.
 type riMember struct {
 	linuxName string
 	instance  string
 	conflict  *config.RoutingInstanceMemberDeviceConflict
+	unbind    bool
 }
 
 // riMemberDeviceConflicts combines freshly derived ambiguity with evidence
@@ -158,9 +177,9 @@ func riMemberDeviceConflicts(cfg *config.Config) []config.RoutingInstanceMemberD
 	return out
 }
 
-// riMembersOutsideTheirVRF returns list members requiring reconciliation.
-// Quarantined conflicts produce detach actions only while they remain mastered
-// by one of their claimant VRFs; unrelated or already-default links stay alone.
+// riMembersOutsideTheirVRF returns configured members needing a bind or
+// kernel VRF slaves needing a safe detach because no current owner wants them.
+// Quarantined conflicts remain gated by their claimant VRF identities.
 func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 	if cfg == nil {
 		return nil
@@ -178,16 +197,29 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 	}
 
 	stanza := tunnelsWithTheirOwnRIStanza(cfg)
+	desiredDevices := make(map[string]struct{}, len(stanza)+len(conflictByDevice))
+	for name := range stanza {
+		desiredDevices[name] = struct{}{}
+	}
+	for name := range conflictByDevice {
+		desiredDevices[name] = struct{}{}
+	}
 	tunMap := cfg.TunnelNameMap()
+	instanceNames := make([]string, 0, len(cfg.RoutingInstances))
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.InstanceType == "forwarding" || config.IsReservedRoutingInstanceName(ri.Name) {
 			continue
+		}
+		instanceNames = append(instanceNames, ri.Name)
+		keys := config.RoutingInstanceMemberDeviceKeysForInstance(cfg, tunMap, ri)
+		for _, key := range keys {
+			desiredDevices[key.LinuxName] = struct{}{}
 		}
 		vrf, err := d.fabricLinkByName("vrf-" + ri.Name)
 		if err != nil || vrf == nil || vrf.Attrs() == nil {
 			continue // no VRF device on the box: ReconcileVRFs owns creating it
 		}
-		for _, key := range config.RoutingInstanceMemberDeviceKeysForInstance(cfg, tunMap, ri) {
+		for _, key := range keys {
 			linuxName := key.LinuxName
 			if _, found := conflictByDevice[linuxName]; found {
 				continue // #11060: quarantine owns this device, never bind it
@@ -203,6 +235,24 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 				continue // already a member
 			}
 			out = append(out, riMember{linuxName: linuxName, instance: ri.Name})
+		}
+	}
+
+	if d.routing != nil && len(instanceNames) > 0 {
+		members, err := d.routing.VRFInterfaceMembers(instanceNames)
+		if err != nil {
+			slog.Warn("failed to enumerate routing-instance VRF members; stale-member cleanup will retry",
+				"err", err)
+		}
+		for _, member := range members {
+			if _, wanted := desiredDevices[member.InterfaceName]; wanted {
+				continue
+			}
+			out = append(out, riMember{
+				linuxName: member.InterfaceName,
+				instance:  member.InstanceName,
+				unbind:    true,
+			})
 		}
 	}
 	return out

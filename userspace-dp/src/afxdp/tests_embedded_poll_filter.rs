@@ -240,7 +240,14 @@ fn no_match_embedded_icmp_returns_none() {
 
     let mut sessions = SessionTable::new();
     // Don't install any sessions
-    let result = try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 1_000_000, 0);
+    let result = try_embedded_icmp_session_match_from_frame(
+        &frame,
+        meta,
+        &ForwardingState::default(),
+        &mut sessions,
+        1_000_000,
+        0,
+    );
     assert!(
         result.is_none(),
         "should return None when no session matches"
@@ -454,7 +461,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         &entry,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -462,6 +469,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -3354,9 +3362,8 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_in_routing_instance_9162() 
     assert_eq!(
         &ip[12..16],
         &snat_ip.octets(),
-        "#9162: outer src re-NAT'd to the SNAT address. A domain-0 reply key \
-         misses the domain-7 session, the outbound-SNAT mark never fires, and \
-         the #5690 reversal puts the INTERNAL client address on the wire"
+        "#9162: the recovered forward NAT session must re-NAT the outer source; \
+         a lookup miss leaves the internal client address on the wire"
     );
     let icmp = &ip[20..];
     let emb = &icmp[8..];
@@ -3440,8 +3447,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_in_routing_instance_9162() 
     assert_eq!(
         &ip[8..24],
         &snat_v6.octets(),
-        "#9162: outer src re-NAT'd to the SNAT66 address. With a domain-0 reply \
-         key the domain-7 session is unreachable and the internal source leaks"
+        "#9162: the recovered forward NAT66 session must re-NAT the outer source"
     );
     let icmp = &ip[40..];
     let emb = &icmp[8..];
@@ -6540,7 +6546,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         &entry,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -6548,6 +6554,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -6676,7 +6683,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
     );
 
     assert!(
-        try_embedded_icmp_nat_match_from_frame(
+        try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
             &frame,
             meta,
             &mut sessions,
@@ -6684,6 +6691,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
             &neighbors,
             &shared_sessions,
             &shared_nat_sessions,
+            &shared_owner_rg_indexes,
             &shared_forward_wire_sessions,
             1_000_000,
         ).into_option()
@@ -6790,7 +6798,14 @@ fn the_as_is_embedded_key_carries_the_discriminator_9031() {
     ));
 
     assert!(
-        try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 123_100_000_000, 0)
+        try_embedded_icmp_session_match_from_frame(
+            &frame,
+            meta,
+            &ForwardingState::default(),
+            &mut sessions,
+            123_100_000_000,
+            0,
+        )
             .is_some(),
         "#9031: the as-is embedded key found no session for a quoted GRE tunnel \
          whose session is keyed on exactly that tuple. SessionKey's Eq includes \
@@ -6880,7 +6895,14 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
     ));
 
     assert!(
-        try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 123_100_000_000, 0)
+        try_embedded_icmp_session_match_from_frame(
+            &frame,
+            meta,
+            &ForwardingState::default(),
+            &mut sessions,
+            123_100_000_000,
+            0,
+        )
             .is_none(),
         "#9031: a quote naming tunnel key 40001 matched the session for tunnel \
          key 40000. GRE has no L4 ports, so without the discriminator the two \
@@ -6952,7 +6974,7 @@ fn publish_pptp_gre_session_9298(
     snat: IpAddr,
     handle: u32,
     egress_ifindex: i32,
-) {
+) -> SharedSessionOwnerRgIndexes {
     let entry = SyncedSessionEntry {
         key: SessionKey {
             addr_family: if client.is_ipv4() {
@@ -7027,6 +7049,7 @@ fn publish_pptp_gre_session_9298(
         &shared_owner_rg_indexes,
         &entry,
     );
+    shared_owner_rg_indexes
 }
 
 /// FAIL-ON-REVERT (IPv4 arm): reds if `nat_match_v4`'s REPLY key goes back to
@@ -7075,7 +7098,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    publish_pptp_gre_session_9298(
+    let shared_owner_rg_indexes = publish_pptp_gre_session_9298(
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -7086,7 +7109,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
         12,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -7094,6 +7117,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -7158,7 +7182,7 @@ fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    publish_pptp_gre_session_9298(
+    let shared_owner_rg_indexes = publish_pptp_gre_session_9298(
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -7169,7 +7193,7 @@ fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
         12,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -7177,6 +7201,7 @@ fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -7235,7 +7260,7 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    publish_pptp_gre_session_9298(
+    let shared_owner_rg_indexes = publish_pptp_gre_session_9298(
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -7247,7 +7272,7 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
     );
 
     assert!(
-        try_embedded_icmp_nat_match_from_frame(
+        try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
             &frame,
             meta,
             &mut sessions,
@@ -7255,6 +7280,7 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
             &neighbors,
             &shared_sessions,
             &shared_nat_sessions,
+            &shared_owner_rg_indexes,
             &shared_forward_wire_sessions,
             1_000_000,
         ).into_option()
@@ -7357,7 +7383,14 @@ fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
     ));
 
     assert!(
-        try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 123_100_000_000, 0)
+        try_embedded_icmp_session_match_from_frame(
+            &frame,
+            meta,
+            &ForwardingState::default(),
+            &mut sessions,
+            123_100_000_000,
+            0,
+        )
             .is_some(),
         "#9298: the as-is embedded key found no session for a quoted PPTP data \
          packet whose session is keyed on exactly that tuple. SessionKey's Eq \
@@ -9853,6 +9886,81 @@ fn rx_source_learn_cannot_pre_policy_overwrite_live_v6_neighbor() {
                 "denied cell must exercise the actual zone-policy denial",
             );
         }
+    }
+}
+
+#[test]
+fn zone_tcp_rst_only_resets_tcp_session_misses_11304() {
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
+
+    let cases = [
+        ("ACK session miss", true, TCP_ACK, false, false, true),
+        ("FIN session miss", true, TCP_FIN | TCP_ACK, false, false, true),
+        ("tcp-rst disabled", false, TCP_ACK, false, false, false),
+        ("incoming RST", true, TCP_RST | TCP_ACK, false, false, false),
+        ("SYN policy deny", true, TCP_SYN, true, false, false),
+        (
+            "no-syn-check policy deny",
+            true,
+            TCP_ACK,
+            true,
+            true,
+            false,
+        ),
+    ];
+
+    for (name, tcp_rst, flags, policy_deny, no_syn_check, expect_rst) in cases {
+        let mut snapshot = nat_snapshot();
+        snapshot.zones[0].tcp_rst = tcp_rst;
+        snapshot.flow.tcp_no_syn_check = no_syn_check;
+        if policy_deny {
+            snapshot.policies[0].action = "deny".to_string();
+        }
+        let forwarding = build_forwarding_state(&snapshot);
+        let ha_state = txn_ha_state();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(198, 51, 100, 20),
+            49152,
+            443,
+            flags,
+            TEST_LAN_MAC,
+        );
+        let meta = txn_meta_v4(24, flags, frame.len() as u16);
+
+        let (batch, _) = txn_run_descriptor(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+        );
+        assert_eq!(
+            binding.tx_pipeline.pending_tx_local.len(),
+            usize::from(expect_rst),
+            "{name}: unexpected local reply count"
+        );
+        if expect_rst {
+            let reply = &binding
+                .tx_pipeline
+                .pending_tx_local
+                .front()
+                .expect("session-miss RST")
+                .bytes;
+            assert_ne!(
+                reply[14 + 20 + 13] & TCP_RST,
+                0,
+                "{name}: reply must be RST"
+            );
+        }
+        assert_eq!(
+            batch.policy_reject_sent, 0,
+            "{name}: a session-miss RST is not a policy reject"
+        );
     }
 }
 

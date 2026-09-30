@@ -1,5 +1,12 @@
 package config
 
+type protocolScopeOpts struct {
+	// lenientProtocolInterfaceMembership11310 downgrades global/RI protocol
+	// interface ownership mismatches to warnings during tolerant loading. The
+	// strict commit and commit-check paths reject the same cross-scope refs.
+	lenientProtocolInterfaceMembership11310 bool
+}
+
 // compileOpts carries per-call compilation policy. It is threaded into
 // compileExpanded so the strict commit path and the tolerant
 // load/peer-sync path can share the identical compile + group-expansion
@@ -1389,7 +1396,12 @@ type compileOpts struct {
 	// merging them, so a leniently-loaded config is already inert. Same
 	// doctrine as lenientNextTableRefs.
 	lenientForwardingInstanceProtocols bool
+	// lenientForwardingInstanceMembers (#11312) warns for legacy or peer-synced
+	// forwarding members. The userspace maps leave those interfaces in the
+	// default domain, matching the daemon's no-VRF binding behavior.
+	lenientForwardingInstanceMembers bool
 
+	protocolScopeOpts
 	// lenientDHCPRelayDHCPv6 (#9553) downgrades validateDHCPRelayDHCPv6AST from
 	// a hard compile error to a cfg.Warnings entry. The implemented RFC 8415
 	// subset is compiled into the typed DHCPv6 relay configuration and excluded
@@ -3064,6 +3076,8 @@ func lenientCompileOpts() compileOpts {
 		lenientGlobalInterfaceRoutesRibGroup:   true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
+		lenientForwardingInstanceMembers:       true,
+		protocolScopeOpts:                      protocolScopeOpts{lenientProtocolInterfaceMembership11310: true},
 		lenientDHCPRelayDHCPv6:                 true,
 		lenientWireguardRoutingInstance:        true,
 		lenientDHCPRelayChildTokens:            true,

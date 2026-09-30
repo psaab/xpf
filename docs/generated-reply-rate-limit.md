@@ -17,7 +17,7 @@ gates:
 |--------|-----------|------------------|
 | `TimeExceeded` | ICMPv4 Time Exceeded / ICMPv6 Hop-Limit Exceeded (`icmp::build_local_time_exceeded_request`) | **Per ingress (from) zone (#5856), per-source-fair within the zone (#9901 F-074)** |
 | `PacketTooBig` | ICMPv4 Frag-Needed / ICMPv6 Packet Too Big (PMTUD, #2301/#2330) | **Per ingress (from) zone (#5856), per-source-fair within the zone (#9901 F-074)** |
-| `Reject` | Policy `then reject`, firewall-filter / lo0 `then reject`, and a zone `tcp-rst` deny → TCP RST or ICMP/ICMPv6 admin-prohibited unreachable (`poll_descriptor::reject_reply`) | **Per ingress (from) zone (#3618), per-source-fair within the zone (#9901 F-074)** |
+| `Reject` | Policy `then reject`, firewall-filter / lo0 `then reject`, and a zone `tcp-rst` non-SYN TCP session-miss reset (`poll_descriptor::reject_reply`) → TCP RST or ICMP/ICMPv6 admin-prohibited unreachable | **Per ingress (from) zone (#3618), per-source-fair within the zone (#9901 F-074)** |
 
 Without a limiter, an attacker driving a flood of TTL-1 packets, oversized DF=1
 packets, or rejected flows makes the box emit one generated reply per trigger
