@@ -774,6 +774,13 @@ routing, and only on double fault).
   AD-200 DHCP default plus its RFC 3442 classless routes) into
   `buildRouteSnapshots`. A DHCP uplink therefore now works as a primary
   fast-path uplink without a static default.
+  - **Gateway-link scope (#9512/#11389).** Learned IPv6 link-local next-hops
+    and repeated ECMP gateways whose `LinkIndex` values identify distinct
+    links carry `gateway@<netdev>` into the Rust FIB. This preserves separate
+    egress legs for identical gateways on different uplinks; other
+    global/IPv4 gateway inference remains unchanged. If a required interface
+    name cannot be resolved, the importer declines the whole route rather than
+    publishing an ambiguous ECMP set.
   - Same-prefix import is **preference-aware**: if the best configured
     route has preference 200 or better, the imported candidate is omitted.
     Otherwise both candidates are published and the Rust FIB selects the
