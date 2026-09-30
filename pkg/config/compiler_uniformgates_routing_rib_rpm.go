@@ -29,6 +29,20 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// #11311: the global selector imports main-table connected routes into
+	// routing instances, but the runtime path only implements per-instance
+	// imports into main. Strict commits reject this shape so FBF traffic
+	// cannot silently follow an instance default route; tolerant loads keep
+	// the existing config bootable and emit an explicit warning.
+	if err := validateGlobalInterfaceRoutesRibGroupStrict(cfg); err != nil {
+		if opts.lenientGlobalInterfaceRoutesRibGroup {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("global interface-routes rib-group (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #5693: next-table target definedness gate. A static route whose
 	// `next-table <target>` names an UNDEFINED routing-instance was accepted
 	// at commit and then silently dropped at apply time (the applier's

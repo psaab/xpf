@@ -806,11 +806,13 @@ func TestAdmittedDropsAreReadSomewhere8879(t *testing.T) {
 		"pre-id-default-policy then":     "pre-id session logging is inert; no pre-identification admit path exists (the depth-2 pair, same advisory as the depth-1 one above)",
 		"class-of-service rewrite-rules": "exp rewrite is inert; the dataplane rewrites dscp on egress only",
 		"security pre-id-default-policy": "pre-id session logging is inert; no pre-identification admit path exists",
+		"interface-routes rib-group":        "global main-to-instance import is unsupported and rejected at strict commit",
+		"routing-options interface-routes": "global main-to-instance import is unsupported and rejected at strict commit",
 	}
 	inertMarkers := []string{
 		"inert", "no runtime effect", "no effect", "accepted-only",
 		"accepted but", "accepted for compatibility", "runtime no-op",
-		"not yet enforced",
+		"not yet enforced", "global interface-routes rib-group",
 	}
 
 	read, notRead := 0, 0
