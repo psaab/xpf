@@ -59,7 +59,7 @@ func bgpishRouteTable(n int) []RouteSnapshot {
 			Family:      "inet",
 			Destination: fmt.Sprintf("%d.%d.%d.0/%d", a, b, c, length),
 			// 256 distinct next-hops, cycled — JSON repeats each in full.
-			NextHops:       []string{fmt.Sprintf("172.16.%d.%d", (i/256)%256, i%256)},
+			NextHops: []string{fmt.Sprintf("172.16.%d.%d", (i/256)%256, i%256)},
 		})
 	}
 	return out

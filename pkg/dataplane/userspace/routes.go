@@ -26,6 +26,7 @@ func routeSnapshotDedupeKey(snap RouteSnapshot) string {
 		strings.Join(snap.NextHops, ","), snap.NextHopWeights, snap.NextTable,
 		snap.Discard, snap.Preference, snap.RulePriority)
 }
+
 // nonDefaultRouteWeights omits the wire vector when all entries mean weight 1.
 // The Rust FIB defaults absent, short, and zero weights to 1; retaining the
 // full vector here would needlessly grow common single-path snapshot publishes.

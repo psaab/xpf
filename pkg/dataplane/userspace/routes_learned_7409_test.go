@@ -159,7 +159,7 @@ func TestLearnedRouteLowestKernelMetricWinsSamePrefix11388(t *testing.T) {
 					hits[0].Preference, routing.LearnedRouteImportPreference)
 			}
 		})
-}
+	}
 }
 
 // Weighted learned ECMP keeps Linux member order through the Go snapshot wire.
