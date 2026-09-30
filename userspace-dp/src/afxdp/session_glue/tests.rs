@@ -1018,7 +1018,8 @@ fn cached_session_resolution_skips_fabric_redirect() {
         tx_vlan_id: 0,
     };
 
-    assert!(cached_session_resolution(&forwarding, cached).is_none());
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    assert!(cached_session_resolution(&forwarding, &dynamic_neighbors, cached).is_none());
 }
 
 #[test]
@@ -15507,4 +15508,185 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
         "materialize of a stale-zone hit must bump the fence-drop counter"
     );
     let _ = lookup;
+}
+
+/// #11315: a session hit must not serve a stored neighbor MAC the live table
+/// contradicts. Gateway VRRP failover A -> B: the stored decision still carries
+/// A while the live dynamic neighbor is B. The lookup must re-resolve to B,
+/// not serve A (the #3048 blackhole the session fast path bypassed).
+#[test]
+fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
+    let mut forwarding = ForwardingState::default();
+    let ifindex = 6;
+    let next_hop = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 0), 24).unwrap()),
+        host: Ipv4Addr::new(10, 0, 0, 0),
+        ifindex,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.egress.insert(
+        ifindex,
+        EgressInterface {
+            bind_ifindex: ifindex,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let mac_a = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let mac_b = [0x00, 0x11, 0x22, 0x33, 0x44, 0x66];
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    dynamic_neighbors.insert((ifindex, next_hop), NeighborEntry { mac: mac_a });
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
+        dst_ip: next_hop,
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
+            dst_ip: next_hop,
+            src_port: 5201,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    // Stored session decision as installed while A was live.
+    let stored = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: ifindex,
+            tx_ifindex: ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(next_hop),
+            neighbor_mac: Some(mac_a),
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    // Sanity: with A live, the cached fast path still serves A.
+    let served_a =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        served_a.neighbor_mac,
+        Some(mac_a),
+        "live A must still serve the cached decision"
+    );
+    // VRRP failover: the live binding moves to B.
+    dynamic_neighbors.insert_if_changed((ifindex, next_hop), NeighborEntry { mac: mac_b });
+    // The same stored decision (stale A) must now re-resolve to live B.
+    let served_b =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        served_b.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "re-resolve after a MAC change must still forward"
+    );
+    assert_eq!(
+        served_b.neighbor_mac,
+        Some(mac_b),
+        "stale cached MAC A must re-resolve to live MAC B (#11315)"
+    );
+    // Direct helper check: the stale cached resolution is rejected.
+    assert!(
+        cached_session_resolution(&forwarding, &dynamic_neighbors, stored.resolution).is_none(),
+        "cached_session_resolution must reject a live-contradicted MAC"
+    );
+}
+
+/// #11315 v6 twin of the session-hit recheck above.
+#[test]
+fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
+    let mut forwarding = ForwardingState::default();
+    let ifindex = 6;
+    let next_hop: IpAddr = "2001:db8:1::2".parse().unwrap();
+    forwarding.connected_v6.push(ConnectedRouteV6 {
+        prefix: PrefixV6::from_net(Ipv6Net::new("2001:db8:1::".parse().unwrap(), 64).unwrap()),
+        host: "2001:db8:1::".parse().unwrap(),
+        ifindex,
+        tunnel_endpoint_id: 0,
+        table: "inet6.0".to_string(),
+    });
+    forwarding.egress.insert(
+        ifindex,
+        EgressInterface {
+            bind_ifindex: ifindex,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let mac_a = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let mac_b = [0x00, 0x11, 0x22, 0x33, 0x44, 0x66];
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    dynamic_neighbors.insert((ifindex, next_hop), NeighborEntry { mac: mac_a });
+    let src: IpAddr = "2001:db8:1::100".parse().unwrap();
+    let flow = SessionFlow {
+        src_ip: src,
+        dst_ip: next_hop,
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_TCP,
+            src_ip: src,
+            dst_ip: next_hop,
+            src_port: 5201,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    let stored = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: ifindex,
+            tx_ifindex: ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(next_hop),
+            neighbor_mac: Some(mac_a),
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let served_a =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        served_a.neighbor_mac,
+        Some(mac_a),
+        "live A must still serve the cached decision"
+    );
+    dynamic_neighbors.insert_if_changed((ifindex, next_hop), NeighborEntry { mac: mac_b });
+    let served_b =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        served_b.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "re-resolve after a MAC change must still forward"
+    );
+    assert_eq!(
+        served_b.neighbor_mac,
+        Some(mac_b),
+        "stale cached MAC A must re-resolve to live MAC B (#11315 v6)"
+    );
+    assert!(
+        cached_session_resolution(&forwarding, &dynamic_neighbors, stored.resolution).is_none(),
+        "cached_session_resolution must reject a live-contradicted MAC (v6)"
+    );
 }

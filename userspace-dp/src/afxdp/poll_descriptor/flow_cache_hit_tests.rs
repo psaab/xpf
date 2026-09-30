@@ -3683,3 +3683,214 @@ fn admitted_cache_hit_learns_original_rx_source_mac_after_in_place_rewrite() {
         "the logical VLAN neighbor key must learn the original source MAC too",
     );
 }
+
+/// #11315: the flow-cache seed must not launder a stale neighbor MAC with the
+/// fresh pre-resolve epoch. The live binding for the decision's next-hop is
+/// MAC B while the stored decision still carries MAC A: the seed must insert
+/// nothing (the slow path re-resolves instead). Positive control: a decision
+/// carrying the live MAC B seeds as before.
+#[test]
+fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = vlan_tagged_tcp_v4_frame(0);
+    let meta = test_meta(&frame);
+    let key = test_key();
+    let flow = Some(SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    });
+    // Live binding for the cached decision's next-hop is MAC B, contradicting
+    // the stored decision's MAC A.
+    let next_hop = cached_entry()
+        .decision
+        .resolution
+        .next_hop
+        .expect("cached decision carries a next-hop");
+    let mac_b = [0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b];
+    fixture.dynamic_neighbors.insert(
+        (EGRESS_IFINDEX, next_hop),
+        crate::afxdp::types::NeighborEntry { mac: mac_b },
+    );
+    assert_ne!(
+        cached_entry().decision.resolution.neighbor_mac,
+        Some(mac_b),
+        "fixture precondition: stored MAC A must differ from live MAC B"
+    );
+    let worker_ctx = fixture.worker_ctx();
+    let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
+    let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
+    let seed = |cache: &mut FlowCache, decision: SessionDecision| {
+        stage_flow_cache_seed(
+            cache,
+            &flow,
+            meta,
+            ValidationState::default(),
+            decision,
+            None,
+            0,
+            Some(TEST_TRUST_ZONE_ID),
+            false,
+            false,
+            0,
+            &policy_counter,
+            crate::filter::TermMatchExtra::default(),
+            None,
+            false,
+            &neighbor_epoch_snapshot,
+            &worker_ctx,
+        );
+    };
+    let lookup_present = |cache: &mut FlowCache| {
+        cache
+            .lookup(
+                &key,
+                FlowCacheLookup::for_packet(meta, ValidationState::default(), &fixture.forwarding),
+                1,
+                &fixture.rg_epochs,
+            )
+            .is_some()
+    };
+
+    // Stale decision (MAC A) against live B: no seed.
+    let mut stale_cache = FlowCache::new();
+    seed(&mut stale_cache, cached_entry().decision);
+    assert!(
+        !lookup_present(&mut stale_cache),
+        "a stale-MAC decision must not seed the flow cache (#11315)"
+    );
+
+    // Positive control: the same decision carrying the live MAC B seeds.
+    let mut fresh_decision = cached_entry().decision;
+    fresh_decision.resolution.neighbor_mac = Some(mac_b);
+    let mut fresh_cache = FlowCache::new();
+    seed(&mut fresh_cache, fresh_decision);
+    assert!(
+        lookup_present(&mut fresh_cache),
+        "a live-MAC decision must still seed the flow cache"
+    );
+}
+/// #11315 v6 twin: a stale IPv6 neighbor MAC must not be re-stamped with a
+/// fresh epoch when the forward packet seeds the flow cache.
+#[test]
+fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let src: IpAddr = "2001:db8:1::100".parse().unwrap();
+    let dst: IpAddr = "2001:db8:1::200".parse().unwrap();
+    let next_hop: IpAddr = "2001:db8:1::1".parse().unwrap();
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        src_ip: src,
+        dst_ip: dst,
+        src_port: 45678,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let flow = Some(SessionFlow {
+        src_ip: src,
+        dst_ip: dst,
+        forward_key: key.clone(),
+    });
+    let mut src_addr = [0u8; 16];
+    src_addr.copy_from_slice(&match src {
+        IpAddr::V6(ip) => ip.octets(),
+        _ => unreachable!(),
+    });
+    let mut dst_addr = [0u8; 16];
+    dst_addr.copy_from_slice(&match dst {
+        IpAddr::V6(ip) => ip.octets(),
+        _ => unreachable!(),
+    });
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: PHYS_INGRESS_IFINDEX as u32,
+        ingress_vlan_id: INGRESS_VLAN_ID,
+        ingress_vlan_present: 1,
+        l3_offset: 18,
+        l4_offset: 58,
+        payload_offset: 78,
+        pkt_len: 78,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        flow_src_addr: src_addr,
+        flow_dst_addr: dst_addr,
+        flow_src_port: key.src_port,
+        flow_dst_port: key.dst_port,
+        ..UserspaceDpMeta::default()
+    };
+    let mac_a = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+    let mac_b = [0x00, 0x11, 0x22, 0x33, 0x44, 0x66];
+    fixture.dynamic_neighbors.insert(
+        (EGRESS_IFINDEX, next_hop),
+        crate::afxdp::types::NeighborEntry { mac: mac_b },
+    );
+    let decision = |mac| SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: EGRESS_IFINDEX,
+            tx_ifindex: EGRESS_IFINDEX,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(next_hop),
+            neighbor_mac: Some(mac),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
+            tx_vlan_id: INGRESS_VLAN_ID,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let worker_ctx = fixture.worker_ctx();
+    let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
+    let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
+    let seed = |cache: &mut FlowCache, d: SessionDecision| {
+        stage_flow_cache_seed(
+            cache,
+            &flow,
+            meta,
+            ValidationState::default(),
+            d,
+            None,
+            0,
+            Some(TEST_TRUST_ZONE_ID),
+            false,
+            false,
+            0,
+            &policy_counter,
+            crate::filter::TermMatchExtra::default(),
+            None,
+            false,
+            &neighbor_epoch_snapshot,
+            &worker_ctx,
+        );
+    };
+    let lookup_present = |cache: &mut FlowCache| {
+        cache
+            .lookup(
+                &key,
+                FlowCacheLookup::for_packet(meta, ValidationState::default(), &fixture.forwarding),
+                1,
+                &fixture.rg_epochs,
+            )
+            .is_some()
+    };
+
+    let mut stale_cache = FlowCache::new();
+    seed(&mut stale_cache, decision(mac_a));
+    assert!(
+        !lookup_present(&mut stale_cache),
+        "a stale IPv6 MAC must not seed the flow cache (#11315)"
+    );
+
+    let mut fresh_cache = FlowCache::new();
+    seed(&mut fresh_cache, decision(mac_b));
+    assert!(
+        lookup_present(&mut fresh_cache),
+        "a current IPv6 MAC must still seed the flow cache"
+    );
+}
