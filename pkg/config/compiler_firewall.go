@@ -1855,6 +1855,75 @@ var rejectMessageTypes = map[string]bool{
 	"tcp-reset":                   true,
 }
 
+// filterThenMisplacedTail11355 returns the first token that follows the
+// complete `next [term]` or `reject [message-type]` action. These actions are
+// not ordinary leaf modifiers: SetPath can nest the rest of the command below
+// them, bypassing the schema-arity check and the direct-child walk.
+func filterThenMisplacedTail11355(action *Node) string {
+	if action == nil {
+		return ""
+	}
+	switch action.Name() {
+	case "next":
+		i := 1
+		if i < len(action.Keys) && action.Keys[i] == "term" {
+			i++
+		}
+		if i < len(action.Keys) {
+			return action.Keys[i]
+		}
+		for _, child := range action.Children {
+			if child == nil {
+				continue
+			}
+			if child.Name() == "term" {
+				if len(child.Keys) > 1 {
+					return child.Keys[1]
+				}
+				if len(child.Children) > 0 && child.Children[0] != nil {
+					return child.Children[0].Name()
+				}
+				continue
+			}
+			return child.Name()
+		}
+	case "reject":
+		i := 1
+		if i < len(action.Keys) {
+			if !rejectMessageTypes[action.Keys[i]] {
+				return ""
+			}
+			i++
+		}
+		if i < len(action.Keys) {
+			return action.Keys[i]
+		}
+		hasKeyedMessageType := len(action.Keys) > 1
+		for _, child := range action.Children {
+			if child == nil {
+				continue
+			}
+			if rejectMessageTypes[child.Name()] {
+				if len(child.Keys) > 1 {
+					return child.Keys[1]
+				}
+				if len(child.Children) > 0 && child.Children[0] != nil {
+					return child.Children[0].Name()
+				}
+				continue
+			}
+			// With the packed form the message type can already be in Keys,
+			// and any child is then a trailing action rather than a reject
+			// reason. Without it, the existing reject walk reports the child
+			// as an unrecognized message type.
+			if hasKeyedMessageType {
+				return child.Name()
+			}
+		}
+	}
+	return ""
+}
+
 func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 	// Handle leaf form: "then discard;" or "then accept;" produces
 	// Keys=["then", "discard"] with IsLeaf=true and no children. A leaf can
@@ -1978,6 +2047,13 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 		// naming the token, and the tolerant path already warns. Reusing that
 		// keeps ONE answer for "the operator typed something we do not know"
 		// instead of a second one that only this spelling reaches.
+		// #11355: `next [term]` and `reject [message-type]` have their own
+		// optional operands, but SetPath can nest later actions underneath
+		// those heads. Keep those misplaced tails on the same deferred-reject
+		// channel as other malformed `then` tokens.
+		if tail := filterThenMisplacedTail11355(child); tail != "" {
+			term.UnknownActions = append(term.UnknownActions, tail)
+		}
 		if extras := thenActionExtras8971(child); len(extras) > 0 {
 			term.UnknownActions = append(term.UnknownActions, extras...)
 		}
