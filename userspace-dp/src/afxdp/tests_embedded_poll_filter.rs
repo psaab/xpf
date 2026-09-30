@@ -23,6 +23,91 @@ use crate::session::TunnelDiscriminator;
 use super::poll_descriptor::{try_reverse_embedded_icmp_error, EmbeddedIcmpReversal};
 
 use super::poll_descriptor::dns_reply_fastpath_admit;
+/// `reth0.80` is the tagged WAN child. Its fixtures must carry an on-wire
+/// 802.1Q VID-80 tag and matching RX metadata/offsets; VID 0 is intentionally
+/// dropped by #11297. Explicit unit-0 arrivals remain untagged.
+const EMBEDDED_POLL_TEST_WAN_VLAN_ID: u16 = 80;
+/// Give a poll fixture on `reth0.80` the same on-wire tag and offsets the XDP
+/// shim would report. A non-zero ingress VLAN in metadata cannot accompany an
+/// untagged frame: the shim derives both from the physical 802.1Q header.
+fn embedded_poll_test_tag_wan_ingress(
+    frame: &[u8],
+    mut meta: UserspaceDpMeta,
+) -> (Vec<u8>, UserspaceDpMeta) {
+    if meta.ingress_ifindex != 12 {
+        return (frame.to_vec(), meta);
+    }
+
+    let mut tagged_frame = frame.to_vec();
+    let already_tagged = tagged_frame.get(12..14) == Some(&[0x81, 0x00]);
+    if already_tagged {
+        let tci = u16::from_be_bytes([tagged_frame[14], tagged_frame[15]]);
+        assert_eq!(
+            tci & 0x0fff,
+            EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+            "WAN child packet must carry VID 80 on wire"
+        );
+    } else {
+        tagged_frame.splice(12..12, [0x81, 0x00, 0x00, 0x50]);
+    }
+
+    match meta.l3_offset {
+        14 => {
+            meta.l3_offset = 18;
+            meta.l4_offset += 4;
+            meta.payload_offset += 4;
+        }
+        18 => {}
+        offset => panic!("WAN Ethernet fixture has unexpected L3 offset {offset}"),
+    }
+    meta.ingress_vlan_id = EMBEDDED_POLL_TEST_WAN_VLAN_ID;
+    meta.ingress_vlan_present = 1;
+    meta.pkt_len = tagged_frame.len().min(u16::MAX as usize) as u16;
+    assert_eq!(&tagged_frame[12..14], &[0x81, 0x00]);
+    assert_eq!(
+        super::frame::frame_l3_offset(&tagged_frame),
+        Some(18),
+        "WAN tag must place L3 at the shim-reported offset",
+    );
+    assert_eq!(meta.l3_offset, 18);
+    (tagged_frame, meta)
+}
+
+/// Keep the checked poll fixtures wire-realistic without changing their
+/// scenario-specific packet construction or assertions.
+fn txn_run_descriptor_checked(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    expect_mac_acceptance: bool,
+) -> (BatchCounters, DebugPollCounters) {
+    if meta.ingress_ifindex != 12 {
+        return super::tests_support::txn_run_descriptor_checked(
+            binding,
+            sessions,
+            forwarding,
+            ha_state,
+            frame,
+            meta,
+            expect_mac_acceptance,
+        );
+    }
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(frame, meta);
+    super::tests_support::txn_run_descriptor_checked(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        &frame,
+        meta,
+        expect_mac_acceptance,
+    )
+}
+
+
 
 #[test]
 fn dns_query_from_port_53_requires_session_tracking_10321() {
@@ -858,6 +943,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex,
+        ingress_vlan_id: if ingress_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(ingress_ifindex == 12),
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -870,6 +957,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -1882,6 +1970,8 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: arrival_ifindex,
+        ingress_vlan_id: if arrival_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(arrival_ifindex == 12),
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -1894,6 +1984,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let (batch, dbg, event_handle, event_rx) = txn_run_descriptor_capturing_events(
         &mut binding,
         &mut sessions,
@@ -2258,6 +2349,8 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_im
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: arrival_ifindex,
+        ingress_vlan_id: if arrival_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(arrival_ifindex == 12),
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -2482,7 +2575,12 @@ fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
         );
     }
     assert_eq!(
-        crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 12, 0, None),
+        crate::afxdp::forwarding::ingress_routing_domain(
+            &forwarding,
+            12,
+            EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+            None
+        ),
         domain,
         "fixture precondition: the ICMPv4 error ingresses on reth0.80 (ifindex 12), \
          and the domain the poll loop stamps from that interface must be the domain \
@@ -2500,6 +2598,8 @@ fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -2797,6 +2897,8 @@ fn poll_descriptor_nat64_icmp_error_outer_dst_mismatch_declined_6472() {
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -2919,6 +3021,8 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -2943,6 +3047,7 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
         IpAddr::V4(client_ip),
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
     );
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     txn_run_descriptor_with_neighbors(
         &mut binding,
         &mut sessions,
@@ -5106,6 +5211,8 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -5133,6 +5240,7 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
         },
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -5416,6 +5524,8 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -5443,6 +5553,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         },
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -5807,6 +5918,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
     meta.ingress_ifindex = 12;
     meta.config_generation = 7;
     meta.fib_generation = 9;
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -6191,6 +6303,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -6203,6 +6317,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -7483,6 +7598,8 @@ fn g9528_run_nat64(term: Option<FirewallTermSnapshot>) -> (usize, usize, Option<
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -7602,6 +7719,8 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -8348,6 +8467,8 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: arrival_ifindex as u32,
+        ingress_vlan_id: if arrival_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(arrival_ifindex == 12),
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -8362,6 +8483,7 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
     };
     meta.flow_src_addr[..4].copy_from_slice(&router_ip.octets());
     meta.flow_dst_addr[..4].copy_from_slice(&client_ip.octets());
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -8800,6 +8922,8 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -8812,6 +8936,7 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -9142,6 +9267,8 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -9154,6 +9281,7 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -9470,6 +9598,8 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -9482,6 +9612,7 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
