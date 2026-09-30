@@ -524,9 +524,12 @@ func (m *Manager) requestHAWatchdogSessionAtPathForGeneration(
 	defer m.sessionMu.Unlock()
 	// A demotion is announced before it can acquire m.mu. Recheck while holding
 	// sessionMu so refreshes already queued on the session socket cannot renew
-	// the pre-demotion snapshot.
-	if m.haWatchdogPendingDemotions.Load() != 0 {
-		return errHARefreshStaleIntent
+	// the pre-demotion snapshot. Per-RG (#11160): only a pending demotion for
+	// an RG in THIS refresh set suppresses it.
+	for _, g := range groups {
+		if m.haWatchdogPendingDemotions.has(g.RGID) {
+			return errHARefreshStaleIntent
+		}
 	}
 
 	if m.haWatchdogProcessGen.Load() != processGen {

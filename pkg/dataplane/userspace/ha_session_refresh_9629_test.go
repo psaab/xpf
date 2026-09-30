@@ -1097,10 +1097,10 @@ func TestSessionHAQueuedDemotionSuppressesDegradedRefresh9629(t *testing.T) {
 	demoteDone := make(chan error, 1)
 	go func() { demoteDone <- m.UpdateRGActive(1, false) }()
 	deadline := time.Now().Add(5 * time.Second)
-	for m.haWatchdogPendingDemotions.Load() == 0 && time.Now().Before(deadline) {
+	for !m.haWatchdogPendingDemotions.has(1) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	pendingPublished := m.haWatchdogPendingDemotions.Load() != 0
+	pendingPublished := m.haWatchdogPendingDemotions.has(1)
 	if !pendingPublished {
 		t.Errorf("queued demotion did not publish its pending state before waiting on m.mu")
 	}
@@ -1271,5 +1271,99 @@ func TestHARefreshNeedsControlPrefixMatchesTheHelper9629(t *testing.T) {
 		t.Fatalf("refusal token disagreement: helper emits %q, Go matches %q — "+
 			"every NeedsLock would be misclassified as a transport failure",
 			match[1], haRefreshNeedsControlPrefix)
+	}
+}
+
+// TestSessionHAQueuedDemotionIsPerRG11160: a demotion queued for RG1 must
+// suppress refreshes for RG1 only — RG2's watchdog tick during RG1's queued
+// demotion must still send (RED on revert: the global counter suppresses
+// every RG, so the RG2 refresh never sends).
+func TestSessionHAQueuedDemotionIsPerRG11160(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{
+		1: {Active: true, WatchdogTimestamp: 1},
+		2: {Active: true, WatchdogTimestamp: 1},
+	})
+	m.haRGActiveMapWrite = func(int, bool) error { return nil }
+	m.helperStatusCtrlMapHook = &fakeCtrlMap{}
+	m.helperStatusBindingsMapHook = &fakeBindingsMap{}
+	m.syncClassifierMapsHook = func(*ConfigSnapshot) error { return nil }
+	m.xskLivenessProven = true
+
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 1},
+		{RGID: 2, Active: true, WatchdogTimestamp: 1},
+	}
+	m.publishHAWatchdogSnapshotLocked()
+	m.mu.Unlock()
+
+	var sent [][]HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = append(sent, append([]HAGroupStatus(nil), req.HAState.Groups...))
+		}
+		return nil
+	}
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type == "update_ha_state" {
+			*status = *readyHelperStatus()
+		}
+		return nil
+	}
+
+	m.mu.Lock()
+	demoteDone := make(chan error, 1)
+	go func() { demoteDone <- m.UpdateRGActive(1, false) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for !m.haWatchdogPendingDemotions.has(1) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !m.haWatchdogPendingDemotions.has(1) {
+		m.mu.Unlock()
+		<-demoteDone
+		t.Fatal("queued RG1 demotion did not publish its pending state before waiting on m.mu")
+	}
+	if m.haWatchdogPendingDemotions.has(2) {
+		m.mu.Unlock()
+		<-demoteDone
+		t.Fatal("RG1 demotion must not mark RG2 pending")
+	}
+
+	// RG2's ticks during RG1's queued demotion must send, repeatedly —
+	// the healthy RG's lease must advance past expiry, not just once.
+	for _, ts := range []uint64{100, 200} {
+		if err := m.UpdateHAWatchdog(2, ts); err != nil {
+			m.mu.Unlock()
+			<-demoteDone
+			t.Fatalf("RG2 watchdog tick during RG1 queued demotion: %v", err)
+		}
+	}
+	m.mu.Unlock()
+	if err := <-demoteDone; err != nil {
+		t.Fatalf("authoritative demotion: %v", err)
+	}
+	for _, ts := range []uint64{100, 200} {
+		found := false
+		for _, batch := range sent {
+			for _, g := range batch {
+				if g.RGID == 2 && g.WatchdogTimestamp == ts {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("RG2 refresh @%d never sent during RG1 queued demotion (global suppression?): sent=%+v", ts, sent)
+		}
+	}
+	// RG1's stale snapshot must never ride a degraded refresh.
+	for _, batch := range sent {
+		for _, g := range batch {
+			if g.RGID == 1 {
+				t.Errorf("demoting RG1 present in degraded refresh: %+v", batch)
+			}
+		}
 	}
 }

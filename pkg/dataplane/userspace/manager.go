@@ -333,7 +333,9 @@ type Manager struct {
 	// haWatchdogPendingDemotions covers demotions that have started but are
 	// still waiting to publish their state under m.mu. The degraded watchdog
 	// must not refresh the older ownership snapshot during that window.
-	haWatchdogPendingDemotions atomic.Int32
+	// Per-RG (#11160): a pending demotion for one RG must not suppress
+	// refreshes for the others.
+	haWatchdogPendingDemotions pendingDemotionSet
 
 	// haDegradedMu is a leaf held only across the degraded merge/throttle
 	// decision, never across socket I/O, so snapshot application cannot wedge

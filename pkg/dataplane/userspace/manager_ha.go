@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -862,16 +863,49 @@ func (m *Manager) syncDesiredForwardingStateLocked() error {
 	return m.applyHelperStatusLocked(&status)
 }
 
+// pendingDemotionSet tracks per-RG demotions announced but not yet published
+// under m.mu (#11160). Refcounted: concurrent UpdateRGActive calls for one RG
+// each hold a slot. Leaf mutex, never held across I/O or other locks.
+type pendingDemotionSet struct {
+	mu      sync.Mutex
+	pending map[int]int
+}
+
+func (s *pendingDemotionSet) add(rgID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending == nil {
+		s.pending = make(map[int]int)
+	}
+	s.pending[rgID]++
+}
+
+func (s *pendingDemotionSet) done(rgID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending[rgID] <= 1 {
+		delete(s.pending, rgID)
+		return
+	}
+	s.pending[rgID]--
+}
+
+func (s *pendingDemotionSet) has(rgID int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pending[rgID] > 0
+}
+
 func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	// Publish the pending demotion before waiting for m.mu so watchdog ticks
 	// blocked by another manager operation cannot renew an old Active snapshot.
 	pendingDemotion := !active
 	if pendingDemotion {
-		m.haWatchdogPendingDemotions.Add(1)
+		m.haWatchdogPendingDemotions.add(rgID)
 	}
 	finishPendingDemotion := func() {
 		if pendingDemotion {
-			m.haWatchdogPendingDemotions.Add(-1)
+			m.haWatchdogPendingDemotions.done(rgID)
 			pendingDemotion = false
 		}
 	}
@@ -1106,7 +1140,7 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 	rgID int,
 	timestamp uint64,
 ) (bool, error) {
-	if m.haWatchdogPendingDemotions.Load() != 0 {
+	if m.haWatchdogPendingDemotions.has(rgID) {
 		return true, nil
 	}
 
@@ -1198,6 +1232,12 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 	if due {
 		groups = make([]HAGroupStatus, 0, len(m.haDegradedCurrent))
 		for id, current := range m.haDegradedCurrent {
+			// #11160: skip RGs with a queued demotion — their snapshot
+			// is stale and must not be renewed — but still refresh the
+			// healthy remainder instead of suppressing the whole set.
+			if m.haWatchdogPendingDemotions.has(id) {
+				continue
+			}
 			groups = append(groups, HAGroupStatus{
 				RGID:              id,
 				Active:            current.active,
@@ -1218,7 +1258,7 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 		m.haDegradedHaveLastSent = true
 	}
 	m.haDegradedMu.Unlock()
-	if !due {
+	if !due || len(groups) == 0 {
 		return true, nil
 	}
 
@@ -1343,7 +1383,7 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 		}
 		m.mu.Lock()
 	}
-	if m.haWatchdogPendingDemotions.Load() != 0 {
+	if m.haWatchdogPendingDemotions.has(rgID) {
 		m.mu.Unlock()
 		return nil
 	}
