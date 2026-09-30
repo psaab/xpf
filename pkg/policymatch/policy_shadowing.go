@@ -99,6 +99,103 @@ func AnalyzePolicyShadowing(cfg *config.Config) []string {
 	// global tier is reached only when no zone-pair policy matched, so a
 	// zone-pair superset is not an unreachability proof for a global.
 	findings = analyzePolicyListShadowing(cfg.Security.GlobalPolicies, "global", globalScopeCovers, findings)
+	findings = analyzeCrossTierGlobalShadowing(cfg, pairs, findings)
+	return findings
+}
+
+// analyzeCrossTierGlobalShadowing reports scoped globals unreachable behind
+// earlier tiers (#11088, F-108/F-111). The runtime evaluates T1 exact
+// zone-pair, T2 single-wildcard, T3 both-any, then T4 globals: a scoped
+// global whose ENTIRE zone scope is covered by earlier matching rules never
+// fires, yet the within-list passes certify it clean. Unscoped globals
+// (empty scope = all zones) are deliberately NOT analyzed — an earlier
+// wildcard is not an unreachability proof for them (see the note above).
+func analyzeCrossTierGlobalShadowing(cfg *config.Config, pairs []*config.ZonePairPolicies, findings []string) []string {
+	var zones []string
+	for name := range cfg.Security.Zones {
+		zones = append(zones, name)
+	}
+	sort.Strings(zones)
+	expand := func(set []string) []string {
+		if config.IsWildcardZoneSet(set) {
+			return zones
+		}
+		return set
+	}
+	for _, global := range cfg.Security.GlobalPolicies {
+		if global == nil {
+			continue
+		}
+		if config.IsWildcardZoneSet(global.Match.FromZones) && config.IsWildcardZoneSet(global.Match.ToZones) {
+			continue // unscoped: unchanged behavior
+		}
+		fromSet := expand(global.Match.FromZones)
+		toSet := expand(global.Match.ToZones)
+		total := len(fromSet) * len(toSet)
+		if total == 0 {
+			continue
+		}
+		type cover struct {
+			rule string
+			same bool // coverer shares the global's action
+		}
+		covered := make(map[[2]string]cover)
+		for _, zpp := range pairs {
+			if zpp == nil {
+				continue
+			}
+			for _, pol := range zpp.Policies {
+				if pol == nil {
+					continue
+				}
+				if !policyMatchIsSuperset(pol, global) {
+					continue
+				}
+				for _, f := range fromSet {
+					if zpp.FromZone != "any" && zpp.FromZone != f {
+						continue
+					}
+					for _, t := range toSet {
+						if zpp.ToZone != "any" && zpp.ToZone != t {
+							continue
+						}
+						k := [2]string{f, t}
+						if _, ok := covered[k]; !ok {
+							covered[k] = cover{rule: pol.Name, same: pol.Action == global.Action}
+						}
+					}
+				}
+			}
+		}
+		if len(covered) == 0 {
+			continue
+		}
+		allSame := true
+		var firstRule string
+		for _, c := range covered {
+			if firstRule == "" {
+				firstRule = c.rule
+			}
+			if !c.same {
+				allSame = false
+			}
+		}
+		if len(covered) == total {
+			if allSame {
+				findings = append(findings, fmt.Sprintf(
+					"  [global] policy %q is REDUNDANT: earlier zone-pair policies already match its entire scope with the same action (e.g. %q)",
+					global.Name, firstRule))
+			} else {
+				findings = append(findings, fmt.Sprintf(
+					"  [global] policy %q is SHADOWED: earlier zone-pair policies cover its entire scope with a different action (e.g. %q)",
+					global.Name, firstRule))
+			}
+			continue
+		}
+		findings = append(findings, fmt.Sprintf(
+			"  [global] policy %q is PARTIALLY SHADOWED: %d of %d zone pairs covered by earlier zone-pair policies (e.g. %q)",
+			global.Name, len(covered), total, firstRule))
+	}
 	return findings
 }
 
