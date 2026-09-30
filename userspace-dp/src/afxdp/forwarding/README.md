@@ -155,25 +155,23 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
   collapsing ECMP to width-1; instead it is live whenever its interface is
   up (`ifindex > 0`), and the MissingNeighbor cold path resolves each
   destination lazily per flow (mirroring the single-member interface-only
-  path). Tunnel members use their own type-aware liveness (#2923). **#2734:
-  the spread key is
-  per-FLOW.** The session resolution path
+  path). Tunnel members use their own type-aware liveness (#2923).
+  **#2734: the spread key is per-FLOW.** The session resolution path
   (`lookup_forwarding_resolution_with_dynamic_for_flow`) hashes the forward
-  5-tuple with `ecmp_hash_flow` — the SAME per-boot seeded `FxHasher` the
-  flow cache uses (`hot_hash_seed::hot_path_hash_seed`, #2364), so distinct
-  flows to the same destination spread across equal-cost members while
-  every packet of one flow pins to one member (flow-consistent, no
-  intra-flow reordering; the resolution is cached on the session entry).
-  The hash reduces modulo the LIVE-member count, so the spread tracks the
-  live pool and the dead-NH fallback is preserved. Callers without a flow
-  context (tunnel/WG outer resolution, `inject`, bare-dst lookups) pass
-  `ecmp_flow_hash = None`, which falls back to the per-DESTINATION hash
-  (`ecmp_hash_v4`/`ecmp_hash_v6`, the #2389 behavior). The seed is
-  node-local (ECMP picks among THIS node's members and is not wire/HA
-  state), so an HA peer re-derives its own pick under its own seed — the
-  same property the flow cache and fabric-queue hash already rely on. The
-  legacy `RouteEntryV4::{ifindex,next_hop,tunnel_endpoint_id}` accessors
-  return the FIRST candidate for non-multipath call sites.
+  5-tuple with `ecmp_hash_flow`, using a fixed, ECMP-specific domain seed
+  rather than the per-boot `hot_hash_seed`. Distinct flows to the same
+  destination spread across equal-cost members while each flow remains
+  consistent. With the same ordered live-member set, the mapping survives
+  process restart and HA re-resolution, preserving path-pinned NAT. The
+  selector reduces the hash modulo the live-member count, so membership or
+  ordering changes can remap flows; this is not a persisted per-flow pin.
+  Callers without a flow context (tunnel/WG outer resolution, `inject`,
+  bare-dst lookups) pass `ecmp_flow_hash = None`, which falls back to the
+  per-DESTINATION hash (`ecmp_hash_v4`/`ecmp_hash_v6`, the #2389 behavior).
+  The ECMP seed is stable, not secret; per-boot secrecy remains on the
+  caches/maps where predictable collisions can cause eviction or collision
+  chains. The legacy `RouteEntryV4::{ifindex,next_hop,tunnel_endpoint_id}`
+  accessors return the FIRST candidate for non-multipath call sites.
 - **Preference tie-break before insertion order (#2390).**
   `RouteSnapshot.preference` (Junos admin distance; lower = more
   preferred, default 5) is carried on the wire and used after descending

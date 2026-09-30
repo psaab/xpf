@@ -1194,29 +1194,26 @@ fn ecmp_hash_v6(ip: Ipv6Addr) -> u64 {
     ecmp_hash_bytes((bits as u64) ^ ((bits >> 64) as u64))
 }
 
-/// #2734: per-FLOW ECMP spread key over the full 5-tuple.
+/// #2734/#11405: per-FLOW ECMP spread key over the full 5-tuple.
 ///
-/// Hashes the session forward 5-tuple (`addr_family`/`protocol`/`src_ip`/
-/// `dst_ip`/`src_port`/`dst_port`) with the SAME per-boot, per-process
-/// seeded `FxHasher` the flow cache uses (`hot_hash_seed::hot_path_hash_seed`
-/// — #2364), so the cost is one already-vetted hash and the per-flow
-/// mapping reshuffles each restart (defeats offline collision construction)
-/// while staying stable for a flow's lifetime within a boot. The seed is
-/// node-local: ECMP selection picks among THIS node's equal-cost members
-/// and is not part of any wire/HA-synced structure, so a per-node seed is
-/// correct (HA peers re-derive their own pick under their own seed, exactly
-/// as the flow cache and fabric-queue hash do). Determinism within a boot
-/// guarantees flow consistency — every packet of one flow hashes to the
-/// same member, no intra-flow reordering. The status-aware
-/// `select_route_next_hop_with_status` reduces this modulo the live-member
-fn ecmp_hash_flow(key: &crate::session::SessionKey) -> u64 {
-    ecmp_hash_flow_seeded(crate::hot_hash_seed::hot_path_hash_seed(), key)
+/// Hashes the session forward 5-tuple with a fixed, ECMP-specific `FxHasher`
+/// seed. Unlike local cache/map placement, ECMP member selection must remain
+/// stable across process restarts and HA re-resolution: a per-boot seed can
+/// change the selected route while the stored SNAT rewrite remains unchanged.
+/// This seed is intentionally stable, not secret; the per-boot secret remains
+/// on hashes where predictable collisions can amplify into cache churn or map
+/// collision work. With the same 5-tuple and ordered live-member set, the flow
+/// selects the same member across processes. A changed live set or order can
+/// still remap it.
+pub(in crate::afxdp) const ECMP_FLOW_HASH_SEED: u64 = 0x4543_4d50_0000_0001;
+
+pub(in crate::afxdp) fn ecmp_hash_flow(key: &crate::session::SessionKey) -> u64 {
+    ecmp_hash_flow_seeded(ECMP_FLOW_HASH_SEED, key)
 }
 
-/// Seed-parameterized core of `ecmp_hash_flow`. Split out so tests can pin
-/// the seed and assert (a) intra-seed stability (flow consistency) and
-/// (b) that distinct 5-tuples spread. Production calls through
-/// `ecmp_hash_flow`, which supplies the per-boot process seed.
+/// Seed-parameterized core of `ecmp_hash_flow`. Production supplies the fixed
+/// `ECMP_FLOW_HASH_SEED`; explicit seeds remain available for reproducibility
+/// and for tests of the core's hash behavior.
 pub(in crate::afxdp) fn ecmp_hash_flow_seeded(seed: u64, key: &crate::session::SessionKey) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::with_seed(seed as usize);

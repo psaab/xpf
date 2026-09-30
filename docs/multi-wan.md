@@ -14,11 +14,11 @@ multi-next-hop routes to the first entry at build time. That premise has
 since shifted: #2389 retained the full equal-cost candidate vector
 (`Vec<RouteNextHopV4>`) with dead-NH fallback, and **#2734 added
 EQUAL-COST per-FLOW selection** — the session resolution path hashes the
-forward 5-tuple (the per-boot seeded `ecmp_hash_flow`) to pick a member,
-so distinct flows spread across equal-cost uplinks while a single flow
-stays pinned (flow-consistent). The seed is node-local (ECMP picks among
-THIS node's members, not wire/HA state), so there are no cross-node
-hash-symmetry invariants to maintain. **WEIGHTED** per-flow load-share
+forward 5-tuple with `ecmp_hash_flow`, using a fixed ECMP-specific domain
+seed rather than the per-boot hot-path seed. Distinct flows spread across
+equal-cost uplinks while each flow stays pinned. With the same ordered live
+member set, the mapping is stable across restarts and HA re-resolution, which
+preserves path-pinned NAT; a changed member set/order can still remap flows.
 (unequal-cost ratios) remains unimplemented; if demand materializes it is
 its own issue with its own value case — it is not a multi-WAN failover
 deliverable.
