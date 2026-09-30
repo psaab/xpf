@@ -1668,11 +1668,11 @@ func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
 		{Name: "Comcast", TableID: 102},
 	}
 	tests := []struct {
-		name          string
-		prior         *config.FirewallFilterTerm
-		candidate     *config.FirewallFilterTerm
-		wantRules     int
-		wantDegraded  bool
+		name         string
+		prior        *config.FirewallFilterTerm
+		candidate    *config.FirewallFilterTerm
+		wantRules    int
+		wantDegraded bool
 	}{
 		{
 			name: "accept destination carve-out",
@@ -1777,7 +1777,7 @@ func TestBuildPBRRules_TerminatingPrecedence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			filter := &config.FirewallFilter{
-				Name: "ordered-fbf",
+				Name:  "ordered-fbf",
 				Terms: []*config.FirewallFilterTerm{tt.prior, tt.candidate},
 			}
 			rules, err := BuildPBRRules(pbrTestConfig("inet", filter, instances, nil))
