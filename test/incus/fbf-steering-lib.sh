@@ -78,24 +78,19 @@ fbf_main_default_leak_verdict() {
 #   Exit 0 iff the table's routes contain a default via exactly <gw>.
 #
 #   Used to pick the RIGHT PBR table out of the priority band. The smoke used
-#   to take the FIRST rule in the 31000+ band and stop:
+#   to take the FIRST rule in the former 31000+ band and stop:
 #
 #       ip rule show | awk -F'lookup ' '$1 ~ /^31[0-9][0-9][0-9]:/ {print $2; exit}'
 #
-#   The band is not private to FBF. Measured on loss:xpf-userspace-fw0, a
-#   PRE-EXISTING GRE rule already sits at exactly priority 31000:
+#   A GRE rule already sat at priority 31000 on
+#   loss:xpf-userspace-fw0:
 #
 #       31000: from all to 10.255.192.40/30 iif ge-0-0-1 lookup 488570
 #
-#   so the discovery bound table 488570 — a GRE table — and the divergence cell
-#   then reported "ISP-B kernel table 488570 lacks 'default via ...' — FRR table
-#   rendering broken". A FALSE failure, pointing at the wrong subsystem, on a
-#   correctly-rendered config. Fail-CLOSED, so it costs a wasted investigation
-#   rather than a silent pass, but it is still the cell failing to identify its
-#   own subject.
-#
-#   Selecting by CONTENT instead of by position makes the cell name the table it
-#   actually means. Exact-token match, so `via 172.16.80.11` is not `via
+#   That exposed the old band overlap: PBR now uses 29000-29999 (#11319), so
+#   this GRE rule is not a PBR candidate. The harness still selects by CONTENT
+#   instead of position because multiple current PBR rules can target
+#   different tables. Exact-token match, so `via 172.16.80.11` is not `via
 #   172.16.80.1` (the same near-miss the leak verdict fixes).
 fbf_table_holds_default() {
 	local gw="$1" routes="$2"

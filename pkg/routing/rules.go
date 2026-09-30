@@ -32,13 +32,20 @@ type ruleOps interface {
 }
 
 // nextTableRulePriority is the base priority for next-table ip rules.
-// Lower values = higher priority. We use the 100-199 range for next-table
-// rules. The base + window are the SSOT in pkg/config (NextTableRulePriorityBase
-// / NextTableRuleWindow) so the install cap here, the commit-time gate
+// Lower values = higher priority. The current 32000-32099 range follows
+// PBR and rib-group leak rules, matching the helper's PBR-first precedence
+// while remaining before the kernel's main rule (32766). The base + window
+// are the SSOT in pkg/config (NextTableRulePriorityBase /
+// NextTableRuleWindow) so the install cap here, the commit-time gate
 // (pkg/config maxNextTableRules), and the userspace FIB mirror
 // (pkg/dataplane/userspace/routes.go) all cap at the same boundary (#6467) —
 // floor(window/N) LEAKS with N from the shared ingress resolver (#9810).
 const nextTableRulePriority = config.NextTableRulePriorityBase
+
+// legacyNextTableRulePriority is the pre-#11319 next-table band. It is
+// scanned only to remove rules left by an in-place upgrade; new rules use
+// nextTableRulePriority.
+const legacyNextTableRulePriority = 100
 
 // maxNextTableRules bounds the number of next-table inter-VRF leak ip rules the
 // applier installs, matching the nextTableRulePriority window clear() scans
@@ -63,10 +70,11 @@ const ribGroupRulePriority = 33000
 
 // ribGroupLeakRulePriority is the base priority for the #3876 rib-group
 // per-prefix import leak rules: `ip rule to <connected-prefix> lookup
-// <sourceTable>`. It sits BEFORE the main table (32766) and before PBR
-// (31000-31999) so a specific imported connected prefix wins over a
-// main-table default route — the fix for the #3876 shadow-by-default no-op.
-// We use the 30000-30999 range (maxRibGroupLeakRules priorities).
+// <sourceTable>`. It sits after PBR (29000-29999) but before next-table
+// (32000-32099) and the main table (32766). The ordering matches the helper:
+// explicit PBR steering is applied before its destination FIB lookup, then
+// the pure per-prefix leak rules are consulted in priority order.
+// We use 30000-30999 (maxRibGroupLeakRules priorities).
 const ribGroupLeakRulePriority = 30000
 
 // maxRibGroupLeakRules bounds the number of per-prefix rib-group leak ip
@@ -86,12 +94,25 @@ const maxRibGroupLeakRules = 1000
 const mainTableID = 254
 
 // pbrRulePriority is the base priority for policy-based routing ip rules.
-// BEFORE the main table (32766) so the kernel also honors PBR for XDP_PASS'd
-// packets (e.g. SNAT'd traffic destined for a VRF/GRE tunnel).
-// We use 31000-31999 range. The band constant is the SSOT in pkg/config so
-// the userspace FIB snapshot ingest (pkg/dataplane/userspace/routes.go) can
-// skip this same band without drifting from the install side (#4479).
+// It is after the VRF miss terminator (2000) and before both route-leak
+// bands and main. This keeps the kernel's first-match order aligned with
+// the helper's PBR-first route-table override (#11319).
+// We use the 29000-29999 range. The band constant is the SSOT in pkg/config
+// so the userspace FIB snapshot ingest (pkg/dataplane/userspace/routes.go)
+// can skip current and legacy PBR bands without drifting from the install side
+// (#4479).
 const pbrRulePriority = config.PBRRulePriorityBase
+
+// Priority order is part of the kernel/helper contract (#11319). Keep each
+// complete band disjoint and ordered before Linux's main-table rule. These
+// constant expressions intentionally fail compilation if a band is retuned
+// into an overlap or if a later priority pushes route leaks behind main.
+const (
+	_ = uint(pbrRulePriority - vrfMissTerminatorPriority - 1)
+	_ = uint(ribGroupLeakRulePriority - (pbrRulePriority + maxPBRRules))
+	_ = uint(nextTableRulePriority - (ribGroupLeakRulePriority + maxRibGroupLeakRules))
+	_ = uint(32766 - (nextTableRulePriority + maxNextTableRules))
+)
 
 // nextTableManager reconciles next-table inter-VRF route-leak ip rules.
 // Stateless apart from the borrowed ruleOps; it reconciles against live
@@ -133,11 +154,13 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		tableIDs[inst.Name] = inst.TableID
 	}
 
-	// Clean up old next-table rules (priority range 100-199). A failed
-	// per-family list does NOT abort the apply — we still re-add every
-	// desired rule below so forward progress is preserved on the common
-	// path. The clear error is captured and returned at the end so the
-	// caller can observe (and a future caller retry) instead of leaving
+	// Clean up both next-table windows: current (32000-32099) and
+	// pre-#11319 (100-199). The old band outranked PBR, so an in-place
+	// upgrade must remove it before routing is considered converged. A
+	// failed per-family list does NOT abort the apply — we still re-add
+	// every desired rule below so forward progress is preserved on the
+	// common path. The clear error is captured and returned at the end so
+	// the caller can observe (and a future caller retry) instead of leaving
 	// orphaned rules in an unobservable window (#2273).
 	clearErr := n.clear()
 	if clearErr != nil {
@@ -477,7 +500,9 @@ func (n *nextTableManager) clear() error {
 			continue
 		}
 		for _, r := range rules {
-			if r.Priority >= nextTableRulePriority && r.Priority < nextTableRulePriority+maxNextTableRules {
+			inCurrent := r.Priority >= nextTableRulePriority && r.Priority < nextTableRulePriority+maxNextTableRules
+			inLegacy := r.Priority >= legacyNextTableRulePriority && r.Priority < legacyNextTableRulePriority+maxNextTableRules
+			if inCurrent || inLegacy {
 				if err := n.ops.RuleDel(&r); err != nil {
 					if isRuleAlreadyGone(err) {
 						// The rule is already absent (ENOENT / no such
@@ -1057,7 +1082,8 @@ func (p *pbrManager) Apply(rules []PBRRule) error {
 	return errors.Join(errs...)
 }
 
-// clear removes all ip rules in the PBR priority range.
+// clear removes current PBR ip rules and stale rules from the former
+// 31000-31999 band (#11319).
 //
 // Per-family RuleList dump failures are aggregated and returned rather
 // than swallowed; see the rationale on nextTableManager.clear (#2273).
@@ -1070,7 +1096,10 @@ func (p *pbrManager) clear() error {
 			continue
 		}
 		for _, r := range rules {
-			if r.Priority >= pbrRulePriority && r.Priority < pbrRulePriority+maxPBRRules {
+			inCurrent := r.Priority >= pbrRulePriority && r.Priority < pbrRulePriority+maxPBRRules
+			inLegacy := r.Priority >= config.LegacyPBRRulePriorityBase &&
+				r.Priority < config.LegacyPBRRulePriorityBase+maxPBRRules
+			if inCurrent || inLegacy {
 				if err := p.ops.RuleDel(&r); err != nil {
 					// #3430 H3: a RuleDel failure leaves a STALE PBR rule in the
 					// kernel. Join it into the returned error so Apply does not
@@ -1132,10 +1161,11 @@ func (p *pbrManager) clear() error {
 //     and the userspace filter path still enforces the term exactly.
 //
 // The returned error is non-nil when the build is DEGRADED: a term carries an
-// ip-rule-unrepresentable predicate (per the matrix above), an attachment is
-// unresolvable or on loopback with routing-instance terms (#9810 LEAD-O4), or
-// the expansion exceeds maxPBRRules. The successfully-built rules are still
-// returned so the caller can install them and surface the degradation.
+// ip-rule-unrepresentable predicate (per the matrix above), a later steer may
+// overlap a preceding terminating term (#11325), an attachment is unresolvable
+// or on loopback with routing-instance terms (#9810 LEAD-O4), or the expansion
+// exceeds maxPBRRules. The successfully-built rules are still returned so the
+// caller can install them and surface the degradation.
 func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	if cfg == nil {
 		return nil, nil
@@ -1251,13 +1281,13 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 //   - degraded: the number of routing-instance filter terms DROPPED from the
 //     kernel FBF mirror (fail-closed under-steer to the main table) — an
 //     unrepresentable `except` set, an unknown DSCP name, a contradictory
-//     `routing-instance` + `discard`/`reject` term (#4534), an
-//     ip-rule-unrepresentable L4/per-packet predicate (#3730), a loopback
-//     attachment carrying routing-instance terms (#9810 LEAD-O4, one per
-//     attachment, not per term), or the
-//     maxPBRRules overflow (#3430 M3, counted as one condition). A non-zero
-//     value means the kernel slow path under-steers vs the userspace fast path
-//     (which still enforces every term exactly).
+//     `routing-instance` + `discard`/`reject` term (#4534), a later term that
+//     may overlap a preceding terminator (#11325), an ip-rule-unrepresentable
+//     L4/per-packet predicate (#3730), a loopback attachment carrying
+//     routing-instance terms (#9810 LEAD-O4, one per attachment, not per term),
+//     or the maxPBRRules overflow (#3430 M3, counted as one condition). A
+//     non-zero value means the kernel slow path under-steers vs the userspace
+//     fast path (which still enforces every term exactly).
 //
 // There is deliberately no "widened" count: BuildPBRRules REFUSES to widen an
 // unrepresentable match to an address-only over-steer (fail-closed drop), so an
@@ -1376,8 +1406,9 @@ func sortAttachments(atts []pbrAttachment) {
 
 // buildPBRFromFilter extracts PBR rules from a single firewall filter.
 // The returned error slice carries per-term DEGRADED conditions (an
-// unrepresentable except set, an unknown DSCP name, or an ip-rule-unrepresentable
-// L4/per-packet predicate — #3730); the buildable rules are still returned.
+// unrepresentable predicate, an unknown DSCP name, a shadowing preceding
+// terminating term — #11325, or an ip-rule-unrepresentable L4 predicate);
+// buildable rules are still returned.
 //
 // budget is the number of ip rules the caller can still install before the
 // maxPBRRules priority window is full. Before expanding a term's six-dimensional
@@ -1393,8 +1424,39 @@ func sortAttachments(atts []pbrAttachment) {
 func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[string]int, pls map[string]*config.PrefixList, budget int) ([]PBRRule, []error, bool) {
 	var rules []PBRRule
 	var errs []error
+	var precedingTerminating []*config.FirewallFilterTerm
 	for _, term := range filter.Terms {
+		if term == nil {
+			continue
+		}
+		// The kernel mirror cannot encode the firewall filter's first-match
+		// precedence. A prior terminating term that can match the same packet
+		// must therefore suppress this later steer (or a preceding accept/
+		// discard carve-out would still be sent to the routing instance).
+		shadowed := false
+		if term.RoutingInstance != "" {
+			for _, prior := range precedingTerminating {
+				if pbrTermsMayOverlap(prior, term, family) {
+					shadowed = true
+					break
+				}
+			}
+		}
+		// Both an explicit terminal action and routing-instance terminate the
+		// userspace walk. Record every such term even if its own mirror cannot
+		// be emitted, so a later rule cannot bypass it.
+		if term.Action != "" || term.RoutingInstance != "" {
+			precedingTerminating = append(precedingTerminating, term)
+		}
 		if term.RoutingInstance == "" {
+			continue
+		}
+		if shadowed {
+			errs = append(errs, fmt.Errorf(
+				"PBR filter %s term %s is shadowed by a preceding terminating term; "+
+					"the kernel ip-rule mirror cannot preserve filter term order, so "+
+					"steering for this term is dropped (fail-safe under-steer)",
+				filter.Name, term.Name))
 			continue
 		}
 
@@ -1608,6 +1670,201 @@ func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[
 		}
 	}
 	return rules, errs, false
+}
+
+// pbrTermsMayOverlap is conservative: true means a preceding terminal term may
+// match a packet that a later routing-instance term would steer. False is
+// returned only when a positive selector proves the match sets disjoint. The
+// ip-rule mirror cannot encode the full ordered filter walk, so uncertain
+// predicates must suppress the later steer rather than risk bypassing a
+// terminating accept/discard carve-out.
+func pbrTermsMayOverlap(prior, candidate *config.FirewallFilterTerm, family int) bool {
+	if prior == nil || candidate == nil {
+		return true
+	}
+	// A preceding non-denying steer to the same instance cannot send this
+	// packet to a different table, so retaining a later rule preserves the
+	// candidate term's remaining (non-overlapping) traffic too.
+	if prior.RoutingInstance != "" &&
+		prior.RoutingInstance == candidate.RoutingInstance &&
+		(prior.Action == "" || prior.Action == "accept") {
+		return false
+	}
+	if pbrDSCPsProveDisjoint(prior.DSCPs, candidate.DSCPs) ||
+		pbrLiteralAddressesProveDisjoint(prior.SourceAddresses, prior.SourcePrefixLists,
+			candidate.SourceAddresses, candidate.SourcePrefixLists, family) ||
+		pbrLiteralAddressesProveDisjoint(prior.DestAddresses, prior.DestPrefixLists,
+			candidate.DestAddresses, candidate.DestPrefixLists, family) ||
+		pbrProtocolsProveDisjoint(prior.Protocols, candidate.Protocols) ||
+		(len(prior.SourcePortsExcept) == 0 && len(candidate.SourcePortsExcept) == 0 &&
+			pbrPortsProveDisjoint(prior.SourcePorts, candidate.SourcePorts)) ||
+		(len(prior.DestPortsExcept) == 0 && len(candidate.DestPortsExcept) == 0 &&
+			pbrPortsProveDisjoint(prior.DestinationPorts, candidate.DestinationPorts)) {
+		return false
+	}
+	// Prefix-list matches, except sets, per-packet predicates, and unknown or
+	// malformed selectors are intentionally not used to prove disjointness.
+	return true
+}
+
+func pbrDSCPsProveDisjoint(a, b []string) bool {
+	if !hasRealString(a) || !hasRealString(b) {
+		return false
+	}
+	values := make(map[uint8]struct{}, len(a))
+	for _, value := range a {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		dscp, ok := dscpValue(value)
+		if !ok {
+			return false
+		}
+		values[dscp] = struct{}{}
+	}
+	if len(values) == 0 {
+		return false
+	}
+	otherCount := 0
+	for _, value := range b {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		dscp, ok := dscpValue(value)
+		if !ok {
+			return false
+		}
+		otherCount++
+		if _, ok := values[dscp]; ok {
+			return false
+		}
+	}
+	return otherCount > 0
+}
+
+func pbrLiteralAddressesProveDisjoint(a []string, aRefs []config.PrefixListRef, b []string, bRefs []config.PrefixListRef, family int) bool {
+	if len(aRefs) != 0 || len(bRefs) != 0 {
+		return false
+	}
+	aNets, aConstrained, aExact := pbrLiteralAddressNets(a)
+	bNets, bConstrained, bExact := pbrLiteralAddressNets(b)
+	if !aConstrained || !bConstrained || !aExact || !bExact {
+		return false
+	}
+	for _, aNet := range aNets {
+		for _, bNet := range bNets {
+			if pbrCIDRsOverlap(aNet, bNet, family) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func pbrLiteralAddressNets(values []string) (nets []*net.IPNet, constrained, exact bool) {
+	constrained = hasRealString(values)
+	if !constrained {
+		return nil, false, false
+	}
+	exact = true
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		cidr, unconstrained, err := normalizePBRAddr(value)
+		if err != nil || unconstrained {
+			return nil, true, false
+		}
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, true, false
+		}
+		nets = append(nets, network)
+	}
+	return nets, true, exact
+}
+
+func pbrCIDRsOverlap(a, b *net.IPNet, family int) bool {
+	if a == nil || b == nil {
+		return true
+	}
+	aV4, bV4 := a.IP.To4() != nil, b.IP.To4() != nil
+	if aV4 != bV4 || (family == unix.AF_INET) != aV4 {
+		return false
+	}
+	return a.Contains(b.IP) || b.Contains(a.IP)
+}
+
+func pbrProtocolsProveDisjoint(a, b []string) bool {
+	if !hasRealString(a) || !hasRealString(b) {
+		return false
+	}
+	values := make(map[uint8]struct{}, len(a))
+	for _, value := range a {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		protocol, ok := appid.ProtocolNumber(value)
+		if !ok || protocol == 0 {
+			return false
+		}
+		values[protocol] = struct{}{}
+	}
+	if len(values) == 0 {
+		return false
+	}
+	otherCount := 0
+	for _, value := range b {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		protocol, ok := appid.ProtocolNumber(value)
+		if !ok || protocol == 0 {
+			return false
+		}
+		otherCount++
+		if _, ok := values[protocol]; ok {
+			return false
+		}
+	}
+	return otherCount > 0
+}
+
+func pbrPortsProveDisjoint(a, b []string) bool {
+	if !hasRealString(a) || !hasRealString(b) {
+		return false
+	}
+	var rangesA []PBRPortRange
+	for _, spec := range a {
+		if strings.TrimSpace(spec) == "" {
+			continue
+		}
+		lo, hi, ok := config.ResolveFilterPortRange(spec)
+		if !ok {
+			return false
+		}
+		rangesA = append(rangesA, PBRPortRange{Lo: lo, Hi: hi})
+	}
+	if len(rangesA) == 0 {
+		return false
+	}
+	otherCount := 0
+	for _, spec := range b {
+		if strings.TrimSpace(spec) == "" {
+			continue
+		}
+		lo, hi, ok := config.ResolveFilterPortRange(spec)
+		if !ok {
+			return false
+		}
+		otherCount++
+		for _, aRange := range rangesA {
+			if aRange.Lo <= hi && lo <= aRange.Hi {
+				return false
+			}
+		}
+	}
+	return otherCount > 0
 }
 
 // pbrTermProduct returns the size of a routing-instance term's Cartesian

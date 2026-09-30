@@ -392,7 +392,7 @@ How it lands (the `instance-type forwarding` divergence fix):
   master routing) and the instance's kernel table stayed empty, so
   kernel-path FBF silently no-opped while the dataplane steered.
 - **Kernel steering**: the existing PBR machinery emits `ip rule`s
-  (priority band 31000+) matching the term's addresses / DSCP /
+  (priority band 29000-29999) matching the term's addresses / DSCP /
   `protocol` / `source-port` / `destination-port` into the instance's
   table — now populated, so the kernel slow path agrees with the fast
   path. Protocol and port predicates map onto `FRA_IP_PROTO`,
@@ -519,7 +519,7 @@ using the two WAN VLANs as distinguishable egress paths: ISP-A =
 `reth0.80` (gw 172.16.80.1 / 2001:559:8585:80::1, FBF instance).
 `test/incus/test-fbf-steering.sh` applies it atomically (commit check
 → commit → validate → rollback), then asserts: the ISP-B kernel table
-(discovered via the 31000+ PBR rule band) holds the instance default;
+  (discovered via the PBR rule band 29000-29999) holds the instance default;
 the main table is not polluted; DSCP-af31 pings from the LAN host move
 the `fbf-steer`/`to-isp-b` hit counter while unmarked control pings do
 not; and `show services ip-monitoring status` lists `fbf-fallback`.
@@ -775,10 +775,11 @@ routing, and only on double fault).
   `buildRouteSnapshots`. A DHCP uplink therefore now works as a primary
   fast-path uplink without a static default.
   - Same-prefix import is **preference-aware**: if the best configured
-    route has preference 200 or better, the imported candidate is
-    omitted. If a configured route is a worse-preference fallback (for
-    example a floating static at 250), both are published and the Rust
-    FIB selects the kernel-selected learned route at preference 200.
+    route has preference 200 or better, the imported candidate is omitted.
+    Otherwise both candidates are published and the Rust FIB selects the
+    first live tier by preference. A live kernel-selected route at 200
+    normally wins, while a live floating-static backup can still carry
+    traffic if an earlier tier is unresolved (#11316).
   - It is **BOUNDED, and refuses rather than truncates (#8355).** A
     learned route serializes to ~113 bytes — stable to within 1.5% from
     one route to 500,000, which is what makes a route COUNT derivable

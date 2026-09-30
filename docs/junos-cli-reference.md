@@ -471,6 +471,9 @@ From zone: guest, To zone: lan
     host-inbound admission on its actual logical ingress interface/zone before
     decapsulation can reattribute the inner packet to the tunnel; the inner
     packet then undergoes its own host-inbound check as tunnel ingress.
+    A configured GRE key of 0 is unkeyed: native decap accepts only K-clear
+    headers; K-present/0 is distinct and will not match. Third-party peers
+    that send K+0 for an unkeyed tunnel must clear K to interoperate.
     A cold dataplane, before any snapshot is applied, has
     an EMPTY zone table in which every id would take that same admit arm — that
     state is never observable, because a worker thread exists only while a

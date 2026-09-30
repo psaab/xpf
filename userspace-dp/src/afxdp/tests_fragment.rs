@@ -1281,14 +1281,12 @@ fn flowless_non_first_fragment_steered_by_pbr_routing_instance_3291() {
         dbg.no_route, 1,
         "#3291: the PBR-steered fragment resolves NoRoute in the empty scrub table"
     );
-    // #10467: an explicit-table NoRoute is terminal before generic reinjection.
-    // This harness installs no reinjector (`slow_path: None`), so a regression
-    // that reaches the enqueue site would bump `slow_path_drops` to 1. The
-    // fixed scoped gate must leave it at zero.
+    // #10467/#11326: an explicit-table NoRoute reaches the shared reinject
+    // boundary only to be counted and terminalized before the TUN enqueue.
     assert_eq!(
         binding.live.slow_path_drops.load(Ordering::Relaxed),
-        0,
-        "#10467: the PBR-steered NoRoute fragment must not reach the slow path"
+        1,
+        "the PBR-steered NoRoute fragment must be counted and must not enqueue"
     );
 }
 
@@ -1531,6 +1529,11 @@ fn flowless_non_first_fragment_missing_neighbor_permitted_forwards_4024() {
     // MissingNeighbor fragment — the gate must not over-block legitimate
     // flowless forwarding. The permitted fragment stays on the cold path
     // (buffered for in-place retry once the neighbor resolves).
+    // #11326: the buffered packet is the delivery owner; its duplicate must
+    // not be reinjected to q0, where the fence mark would allow a MAIN lookup
+    // without the original ingress selectors.
+    use crate::slowpath::SlowPathReinjector;
+
     let mut snapshot = policy_deny_snapshot();
     snapshot.policies = vec![PolicyRuleSnapshot {
         name: "permit-lan-wan".to_string(),
@@ -1551,14 +1554,22 @@ fn flowless_non_first_fragment_missing_neighbor_permitted_forwards_4024() {
     let mut sessions = SessionTable::new();
     let ha_state = BTreeMap::new();
     let frame = frag_v4_transit_frame(crate::afxdp::tests_support::TEST_LAN_MAC);
-    let (_batch, dbg) = txn_run_descriptor_checked(
+    let meta = frag_v4_transit_meta();
+    assert!(crate::afxdp::forwarding::ingress_destination_mac_accepted(
+        &forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        &frame,
+    ));
+    let reinjector = Arc::new(SlowPathReinjector::new_without_worker(1500));
+    let (_batch, dbg) = txn_run_descriptor_with_reinjector(
         &mut binding,
         &mut sessions,
         &forwarding,
         &ha_state,
         &frame,
-        frag_v4_transit_meta(),
-        true,
+        meta,
+        &reinjector,
     );
 
     assert_eq!(
@@ -1573,6 +1584,13 @@ fn flowless_non_first_fragment_missing_neighbor_permitted_forwards_4024() {
         !binding.pending_neigh.is_empty(),
         "#4024: a PERMITTED flowless MissingNeighbor fragment must still take the \
          forward/retry path (buffered for neighbor resolution) — no over-gating"
+    );
+    assert_eq!(binding.live.slow_path_packets.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        reinjector.test_enqueued_delegated(),
+        Vec::<bool>::new(),
+        "#11326: the pending frame stays in the userspace retry path instead of \
+         reaching the marked adjudicated q0 TUN"
     );
 }
 

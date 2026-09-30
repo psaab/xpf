@@ -6,11 +6,11 @@ import (
 )
 
 // The event-stream producer appends ingress identity and stable policy rule ID
-// after the install-table trailer. Reverting either decode leaves fabric
-// ownership zone-approximate or drops the stable counter binding.
+// after the install-table and source-NAT ICMP trailers. Reverting either decode
+// leaves fabric ownership zone-approximate or drops the stable counter binding.
 func TestDecodeSessionEventCarriesIngressAndRuleIdentity11070(t *testing.T) {
 	const ruleID = "lan->wan/allow-web"
-	payload := make([]byte, 177+len(ruleID))
+	payload := make([]byte, 180+len(ruleID))
 	payload[0], payload[1] = 6, 6
 	binary.LittleEndian.PutUint64(payload[140:148], 0x1234)
 	binary.LittleEndian.PutUint64(payload[148:156], 0x55)
@@ -18,17 +18,23 @@ func TestDecodeSessionEventCarriesIngressAndRuleIdentity11070(t *testing.T) {
 	payload[160] = 2
 	binary.LittleEndian.PutUint32(payload[161:165], 8)
 	binary.LittleEndian.PutUint32(payload[165:169], 9)
-	binary.LittleEndian.PutUint32(payload[169:173], 4242)
-	binary.LittleEndian.PutUint16(payload[173:175], 51)
-	binary.LittleEndian.PutUint16(payload[175:177], uint16(len(ruleID)))
-	copy(payload[177:], ruleID)
+	payload[169] = 1  // source-NAT ICMP identity is present
+	payload[170] = 13 // ICMP type
+	payload[171] = 7  // ICMP code
+	binary.LittleEndian.PutUint32(payload[172:176], 4242)
+	binary.LittleEndian.PutUint16(payload[176:178], 51)
+	binary.LittleEndian.PutUint16(payload[178:180], uint16(len(ruleID)))
+	copy(payload[180:], ruleID)
 
 	delta, ok := decodeSessionEvent(payload)
 	if !ok {
 		t.Fatal("complete session-open payload was rejected")
 	}
-	if delta.IngressIfindex != 4242 || delta.IngressVLANID != 51 || delta.PolicyRuleID != ruleID {
-		t.Fatalf("decoded identity = ifindex %d vlan %d rule %q", delta.IngressIfindex, delta.IngressVLANID, delta.PolicyRuleID)
+	if !delta.SourceNatICMPValid || delta.SourceNatICMPType != 13 || delta.SourceNatICMPCode != 7 ||
+		delta.IngressIfindex != 4242 || delta.IngressVLANID != 51 || delta.PolicyRuleID != ruleID {
+		t.Fatalf("decoded identity = ICMP %v/%d/%d ifindex %d vlan %d rule %q",
+			delta.SourceNatICMPValid, delta.SourceNatICMPType, delta.SourceNatICMPCode,
+			delta.IngressIfindex, delta.IngressVLANID, delta.PolicyRuleID)
 	}
 
 	legacy, ok := decodeSessionEvent(payload[:169])

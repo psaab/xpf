@@ -95,6 +95,33 @@ pub(super) fn stage_flow_cache_seed(
         )),
         None => 0,
     };
+    // #11315: never seed a stale neighbor MAC with the fresh epoch above. The
+    // session-hit path rechecks live state before serving a cached resolution;
+    // any stale ForwardCandidate reaching this path must not be laundered by
+    // pairing its old MAC with a fresh pre-resolve epoch. A missing binding is
+    // stale too: FAILED/INCOMPLETE removes the row, and the first subsequent
+    // learn does not bump the #3048 shard epoch. FabricRedirect carries a
+    // fabric peer MAC rather than a neighbor-table binding, so it is exempt.
+    if decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
+        && let (Some(next_hop), Some(stored_mac)) =
+            (decision.resolution.next_hop, decision.resolution.neighbor_mac)
+    {
+        let live_ifindex = outer_neighbor_ifindex(
+            worker_ctx.forwarding,
+            Some(worker_ctx.dynamic_neighbors),
+            &decision.resolution,
+        );
+        let live_mac_matches = lookup_neighbor_entry(
+            worker_ctx.forwarding,
+            Some(worker_ctx.dynamic_neighbors),
+            live_ifindex,
+            next_hop,
+        )
+        .is_some_and(|live| live.mac == stored_mac);
+        if !live_mac_matches {
+            return;
+        }
+    }
     if !flow_cache_install_failed
         && let Some(flow) = flow.as_ref()
     {

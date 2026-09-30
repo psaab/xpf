@@ -12,8 +12,8 @@ import (
 // Packets counts marked q0 frames that reached the post-TUN inet FORWARD
 // pinhole. A userspace write() to the TUN injects into the kernel RX path;
 // TX is the kernel-to-userspace direction and was the wrong bg_7 scrape.
-// Because q0 is also used by transit MissingNeighbor adjudication, callers
-// must use the delta only under a quiesced S5 window.
+// Because q0 may also carry other mark-admitted reinjects, callers must use
+// this delta only under a quiesced S5 window.
 type TransitFenceCounter struct {
 	Packets uint64
 	Bytes   uint64

@@ -210,6 +210,7 @@
         "TCPMSSGreOut": 0,
         "AllowDNSReply": false,
         "AllowEmbeddedICMP": false,
+        "AllowUnstampedFabricIngress": false,
         "GREPerformanceAcceleration": false,
         "PowerModeDisable": false,
         "SynFloodProtectionMode": "",

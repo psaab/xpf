@@ -253,8 +253,9 @@ func TestNextTableInstallIsFaultAtomic_9810(t *testing.T) {
 			bPrios = append(bPrios, r.Priority)
 		}
 	}
-	if len(bPrios) != 2 || bPrios[0] != 100 || bPrios[1] != 101 {
-		t.Fatalf("the next leak must reuse the failed prio (100,101), got %v", bPrios)
+	if len(bPrios) != 2 || bPrios[0] != nextTableRulePriority || bPrios[1] != nextTableRulePriority+1 {
+		t.Fatalf("the next leak must reuse the failed prio (%d,%d), got %v",
+			nextTableRulePriority, nextTableRulePriority+1, bPrios)
 	}
 }
 
@@ -463,7 +464,7 @@ func (f *failNthDelOps9810) RuleDel(r *netlink.Rule) error {
 // waste). Both are transient: the joined error plus the #9693 retry heals.
 // Fidelity note (SPARK-F6): the fake deletes by priority only while prod
 // netlink deletes by full rule identity, so this cell pins the PRIO LAYOUT
-// (dup at 101, gap at 100), not del precision.
+// (dup at base+1, gap at base), not del precision.
 func TestNextTableRollbackSurvivorsPackAndGap_9810(t *testing.T) {
 	inner := newFakeRuleOps()
 	addOps := &failNthAddOps9810{fakeRuleOps: inner, n: 3, err: errors.New("netlink: transient EBUSY on add")}
@@ -484,13 +485,16 @@ func TestNextTableRollbackSurvivorsPackAndGap_9810(t *testing.T) {
 			byPrio[r.Priority] = append(byPrio[r.Priority], r.Dst.String())
 		}
 	}
-	if len(byPrio[100]) != 0 {
-		t.Errorf("prio 100 was rolled back and skipped: gap waste pinned, got %v", byPrio[100])
+	if len(byPrio[nextTableRulePriority]) != 0 {
+		t.Errorf("prio %d was rolled back and skipped: gap waste pinned, got %v",
+			nextTableRulePriority, byPrio[nextTableRulePriority])
 	}
-	if dsts := byPrio[101]; len(dsts) != 2 {
-		t.Fatalf("prio 101 must pack the orphan and the next leak (dup), got %v", dsts)
+	if dsts := byPrio[nextTableRulePriority+1]; len(dsts) != 2 {
+		t.Fatalf("prio %d must pack the orphan and the next leak (dup), got %v",
+			nextTableRulePriority+1, dsts)
 	} else if !((dsts[0] == "10.21.0.0/16") != (dsts[1] == "10.21.0.0/16")) {
-		t.Fatalf("prio 101 must hold exactly one orphan + one next-leak rule, got %v", dsts)
+		t.Fatalf("prio %d must hold exactly one orphan + one next-leak rule, got %v",
+			nextTableRulePriority+1, dsts)
 	}
 }
 
@@ -531,7 +535,8 @@ func TestNextTableEEXISTAdvancesInstallCursor_9810(t *testing.T) {
 			prios = append(prios, r.Priority)
 		}
 	}
-	if len(prios) != 2 || prios[0] != 102 || prios[1] != 103 {
-		t.Fatalf("the leak after an EEXIST leak must program past it (102,103), got %v", prios)
+	if len(prios) != 2 || prios[0] != nextTableRulePriority+2 || prios[1] != nextTableRulePriority+3 {
+		t.Fatalf("the leak after an EEXIST leak must program past it (%d,%d), got %v",
+			nextTableRulePriority+2, nextTableRulePriority+3, prios)
 	}
 }

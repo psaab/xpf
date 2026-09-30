@@ -205,3 +205,117 @@ func TestImplementedAndEmptyRibsDoNotWarn_7512(t *testing.T) {
 		}
 	}
 }
+
+func TestCrossScopeRibSelectorsWarnAndDiscard_11335(t *testing.T) {
+	const route = `static { route 10.211.0.0/24 { next-hop 10.0.0.1; } }`
+	const route6 = `static { route 2001:db8:211::/48 { next-hop 2001:db8::1; } }`
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "other instance rib inside instance",
+			text: `routing-instances {
+				A { instance-type vrf; routing-options { rib B.inet.0 { ` + route + ` } } }
+				B { instance-type vrf; }
+			}`,
+			want: `rib "B.inet.0"`,
+		},
+		{
+			name: "other instance inet6 rib inside instance",
+			text: `routing-instances {
+				A { instance-type vrf; routing-options { rib B.inet6.0 { ` + route6 + ` } } }
+				B { instance-type vrf; }
+			}`,
+			want: `rib "B.inet6.0"`,
+		},
+		{
+			name: "main table rib inside instance",
+			text: `routing-instances {
+				A { instance-type vrf; routing-options { rib inet.0 { ` + route + ` } } }
+			}`,
+			want: `rib "inet.0"`,
+		},
+		{
+			name: "instance rib at global scope",
+			text: `routing-options { rib B.inet.0 { ` + route + ` } }
+				routing-instances { B { instance-type vrf; } }`,
+			want: `rib "B.inet.0"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := rib7512Compile(t, tc.text)
+			warnings := rib7512DiscardWarnings(cfg)
+			if len(warnings) != 1 {
+				t.Fatalf("cross-scope rib must produce one discard warning, got %d: %v", len(warnings), warnings)
+			}
+			if !strings.Contains(warnings[0], "cross-scope rib selector") ||
+				!strings.Contains(warnings[0], tc.want) {
+				t.Fatalf("warning %q must identify the cross-scope selector %q", warnings[0], tc.want)
+			}
+
+			tree, errs := NewParser(tc.text).Parse()
+			if len(errs) != 0 {
+				t.Fatalf("strict fixture parse errors: %v", errs)
+			}
+			strict, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("cross-scope rib should be warned and discarded, not silently installed or rejected: %v", err)
+			}
+			strictWarnings := rib7512DiscardWarnings(strict)
+			if len(strictWarnings) != 1 ||
+				!strings.Contains(strictWarnings[0], "cross-scope rib selector") ||
+				!strings.Contains(strictWarnings[0], tc.want) {
+				t.Errorf("strict compile must warn about the cross-scope selector %q, got %v", tc.want, strictWarnings)
+			}
+			if got := rib7512Prefixes(cfg.RoutingOptions.StaticRoutes); len(got) != 0 {
+				t.Errorf("cross-scope routes must not be filed in the global table, got %v", got)
+			}
+			if got := rib7512Prefixes(cfg.RoutingOptions.Inet6StaticRoutes); len(got) != 0 {
+				t.Errorf("cross-scope routes must not be filed in the global IPv6 table, got %v", got)
+			}
+			for _, ri := range cfg.RoutingInstances {
+				if got := rib7512Prefixes(ri.StaticRoutes); len(got) != 0 {
+					t.Errorf("cross-scope routes must not be filed in instance %q, got %v", ri.Name, got)
+				}
+				if got := rib7512Prefixes(ri.Inet6StaticRoutes); len(got) != 0 {
+					t.Errorf("cross-scope routes must not be filed in instance %q IPv6 table, got %v", ri.Name, got)
+				}
+			}
+		})
+	}
+}
+
+func TestInScopeRibSelectorsRemainAccepted_11335(t *testing.T) {
+	cfg := rib7512Compile(t, `routing-options {
+		rib inet.0 { static { route 192.0.2.0/24 { next-hop 10.0.0.1; } } }
+		rib inet6.0 { static { route 2001:db8:10::/48 { next-hop 2001:db8::1; } } }
+	}
+	routing-instances { A { instance-type vrf; routing-options {
+		rib A.inet.0 { static { route 198.51.100.0/24 { next-hop 10.0.1.1; } } }
+		rib A.inet6.0 { static { route 2001:db8:20::/48 { next-hop 2001:db8:1::1; } } }
+	} } }`)
+
+	if got := rib7512Prefixes(cfg.RoutingOptions.StaticRoutes); strings.Join(got, ",") != "192.0.2.0/24" {
+		t.Errorf("global rib inet.0 routes = %v, want [192.0.2.0/24]", got)
+	}
+	if got := rib7512Prefixes(cfg.RoutingOptions.Inet6StaticRoutes); strings.Join(got, ",") != "2001:db8:10::/48" {
+		t.Errorf("global rib inet6.0 routes = %v, want [2001:db8:10::/48]", got)
+	}
+	if len(cfg.RoutingInstances) != 1 {
+		t.Fatalf("got %d routing instances, want one", len(cfg.RoutingInstances))
+	}
+	ri := cfg.RoutingInstances[0]
+	if got := rib7512Prefixes(ri.StaticRoutes); strings.Join(got, ",") != "198.51.100.0/24" {
+		t.Errorf("instance A rib A.inet.0 routes = %v, want [198.51.100.0/24]", got)
+	}
+	if got := rib7512Prefixes(ri.Inet6StaticRoutes); strings.Join(got, ",") != "2001:db8:20::/48" {
+		t.Errorf("instance A rib A.inet6.0 routes = %v, want [2001:db8:20::/48]", got)
+	}
+	if warnings := rib7512DiscardWarnings(cfg); len(warnings) != 0 {
+		t.Errorf("in-scope rib selectors must remain warning-free, got %v", warnings)
+	}
+}

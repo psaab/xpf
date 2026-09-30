@@ -317,6 +317,125 @@ fn maybe_reinject_slow_path_from_frame_records_unavailable() {
     assert_eq!(last.ifindex, 6);
 }
 
+/// #11326: a generic TUN loses the original iif. Stamped NoRoute remains
+/// terminal, and every non-tunnel MissingNeighbor copy must be refused even
+/// when it is an unstamped MAIN-table decision: q0 is marked and the kernel
+/// would otherwise accept it and look up the packet without the original
+/// ingress selectors. The LocalDelivery control remains TUN-eligible.
+#[test]
+fn route_identity_is_dropped_before_any_slow_path_outlet_11326() {
+    use crate::slowpath::SlowPathReinjector;
+
+    for (disposition, outlet, table_domain, table_check, want_drop) in [
+        (
+            ForwardingDisposition::MissingNeighbor,
+            crate::afxdp::tx::dispatch::SlowPathOutlet::Adjudicated,
+            123,
+            456,
+            true,
+        ),
+        (
+            ForwardingDisposition::NoRoute,
+            crate::afxdp::tx::dispatch::SlowPathOutlet::Delegated,
+            123,
+            456,
+            true,
+        ),
+        (
+            ForwardingDisposition::MissingNeighbor,
+            crate::afxdp::tx::dispatch::SlowPathOutlet::Adjudicated,
+            0,
+            0,
+            true,
+        ),
+        (
+            ForwardingDisposition::LocalDelivery,
+            crate::afxdp::tx::dispatch::SlowPathOutlet::Trusted,
+            0,
+            0,
+            false,
+        ),
+    ] {
+        let frame = build_icmp_echo_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(1, 1, 1, 1),
+            64,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        let binding = BindingIdentity {
+            slot: 7,
+            queue_id: 0,
+            worker_id: 0,
+            interface: Arc::<str>::from("ge-0-0-2"),
+            ifindex: 6,
+        };
+        let live = BindingLiveState::new();
+        let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+        let meta = UserspaceDpMeta {
+            magic: USERSPACE_META_MAGIC,
+            version: USERSPACE_META_VERSION,
+            length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+            l3_offset: 14,
+            l4_offset: 34,
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_ICMP,
+            ..UserspaceDpMeta::default()
+        };
+        let decision = SessionDecision {
+            resolution: ForwardingResolution {
+                disposition,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: Some([6, 7, 8, 9, 10, 11]),
+                tx_vlan_id: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: table_domain,
+            install_table_check: table_check,
+        };
+        let reinjector = Arc::new(SlowPathReinjector::new_without_worker(1500));
+        let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+
+        let accepted = maybe_reinject_slow_path_from_frame_with_outlet(
+            &binding,
+            &live,
+            Some(&reinjector),
+            &local_tunnel_deliveries,
+            &frame,
+            meta,
+            decision,
+            outlet,
+            None,
+            &recent_exceptions,
+            "issue_11326",
+            &ForwardingState::default(),
+        );
+        assert_eq!(accepted, !want_drop);
+        if want_drop {
+            assert_eq!(live.slow_path_packets.load(Ordering::Relaxed), 0);
+            assert_eq!(live.slow_path_drops.load(Ordering::Relaxed), 1);
+            assert_eq!(reinjector.status().queued_packets, 0);
+            assert_eq!(reinjector.delegated_status().queued_packets, 0);
+            assert!(reinjector.test_enqueued_delegated().is_empty());
+            let exceptions = recent_exceptions.lock().expect("exceptions");
+            assert_eq!(
+                exceptions.back().expect("slow-path exception").reason(),
+                "slow_path_ingress_identity_lost"
+            );
+        } else {
+            assert_eq!(live.slow_path_packets.load(Ordering::Relaxed), 1);
+            assert_eq!(live.slow_path_drops.load(Ordering::Relaxed), 0);
+            assert_eq!(reinjector.status().queued_packets, 1);
+            assert_eq!(reinjector.test_enqueued_delegated(), vec![false]);
+            assert!(recent_exceptions.lock().expect("exceptions").is_empty());
+        }
+    }
+}
+
 
 #[test]
 fn handle_forward_build_failure_records_build_and_slow_path_failures() {
@@ -382,6 +501,89 @@ fn handle_forward_build_failure_records_build_and_slow_path_failures() {
     assert_eq!(
         reasons,
         vec!["forward_build_failed", "slow_path_unavailable"]
+    );
+}
+
+/// #11326: a stamped ForwardCandidate build/enqueue fallback also reaches the
+/// shared identity gate; it must not turn an explicit table decision into a
+/// MAIN-table lookup through xpf-usp1.
+#[test]
+fn stamped_route_identity_build_failure_does_not_reinject_11326() {
+    let frame = build_icmp_echo_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(1, 1, 1, 1),
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let binding = BindingIdentity {
+        slot: 7,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("ge-0-0-2"),
+        ifindex: 6,
+    };
+    let live = BindingLiveState::new();
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        l3_offset: 14,
+        l4_offset: 34,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        ..UserspaceDpMeta::default()
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 123,
+        install_table_check: 456,
+    };
+    let mut dbg = DebugPollCounters::default();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+
+    handle_forward_build_failure(
+        &binding,
+        &live,
+        None,
+        &local_tunnel_deliveries,
+        &recent_exceptions,
+        &mut dbg,
+        12,
+        frame.len() as u32,
+        &frame,
+        meta,
+        decision,
+        true,
+        &ForwardingState::default(),
+    );
+
+    assert_eq!(dbg.build_fail, 1);
+    assert_eq!(live.slow_path_packets.load(Ordering::Relaxed), 0);
+    assert_eq!(live.slow_path_drops.load(Ordering::Relaxed), 1);
+    let reasons: Vec<String> = recent_exceptions
+        .lock()
+        .expect("exceptions")
+        .iter()
+        .map(|entry| entry.reason().to_string())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            "forward_build_failed",
+            "slow_path_ingress_identity_lost"
+        ]
     );
 }
 
@@ -1413,9 +1615,10 @@ fn reinject_outlet_declared_per_production_site_9637() {
 //
 // Rows: gated LocalDelivery → trusted (the authorized ACCEPT control);
 // NoRoute (common-skew + capped + D2 tunnel-forced shape — all resolve
-// NoRoute at the outlet) → delegated; transit MissingNeighbor (D4a) →
-// delegated; ForwardCandidate (D4b build-failure class) → delegated;
-// synthetic LocalDelivery with authorized=false (NAT-T shape) → delegated.
+// NoRoute at the outlet) → delegated; ForwardCandidate (D4b build-failure
+// class) → delegated; synthetic LocalDelivery with authorized=false (NAT-T
+// shape) → delegated. #11326 MissingNeighbor copies are refused before outlet
+// selection and are pinned by `route_identity_is_dropped_before_any_slow_path_outlet_11326`.
 // A row whose outlet ever crosses reds here, not in a mapping unit test.
 #[test]
 fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
@@ -1432,7 +1635,6 @@ fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
     let cases = [
         Case { name: "gated-LocalDelivery-trusted-ACCEPT-control", disposition: LocalDelivery, authorized: true, frame_len: 96, force_trusted_live: Some(64), expect_trusted: true },
         Case { name: "NoRoute-delegated", disposition: NoRoute, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
-        Case { name: "MissingNeighbor-delegated-D4a", disposition: MissingNeighbor, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
         Case { name: "ForwardCandidate-delegated-D4b", disposition: ForwardCandidate, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
         Case { name: "synthetic-LocalDelivery-delegated-NAT-T", disposition: LocalDelivery, authorized: false, frame_len: 2048, force_trusted_live: None, expect_trusted: false },
     ];
@@ -4192,6 +4394,12 @@ fn t9_gre_inner_coarse_deny_remains_first_10585() {
     let mut snapshot = gre_to_self_snapshot();
     for zone in snapshot.zones.iter_mut() {
         zone.host_inbound_system_services.clear();
+        if zone.name == "wan" {
+            // #11054: admit the outer GRE while leaving inner IKE denied, so
+            // this test reaches the GRE-inner coarse-deny path it specifies.
+            zone.host_inbound_configured = true;
+            zone.host_inbound_system_services.push("gre".to_string());
+        }
     }
     let frame = build_gre_inner_ike_frame_10585(src, dst, 40_000, 500, 0x1058_500b, 0);
     let meta = gre_ike_meta_10585(&frame);

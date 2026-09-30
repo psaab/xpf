@@ -6,6 +6,18 @@ inet <rg>; } } }` with a `rib-groups { <rg> { import-rib [ <ri>.inet.0 inet.0 ];
 every secondary rib in the import list. xpf realizes the **import-into-main**
 case (the common one) with Linux policy-routing rules.
 
+## Global interface-routes selectors are unsupported (#11311)
+
+`routing-options interface-routes rib-group ...` is the other direction: it
+imports global/main connected routes into selected routing-instance tables
+(the pattern used by some filter-based forwarding recipes). That global
+main-to-instance import is **not implemented** in either the kernel rule path
+or userspace FIB. Strict commits reject the selector; tolerant loads warn so a
+persisted config remains bootable. Do not rely on it to make steered traffic to
+a main-table connected destination local. This remains a feature gap, distinct
+from the supported per-instance-to-main path below; see
+`docs/feature-gaps.md` §14.
+
 ## Mechanism (Phase 1: import into main)
 
 For each source routing instance whose `interface-routes` rib-group imports the
@@ -16,12 +28,28 @@ connected prefix** of that instance:
 ip rule to <connected-prefix> lookup <sourceTable> pref 30000
 ```
 
-These rules sit at priority band **30000-30999**, which is **BEFORE** the main
-table's rule (32766) and before the PBR band (31000-31999). Because the rule
-matches a *specific* destination prefix, a main-table **default route no longer
-shadows it** — a lookup for the leaked prefix consults the source instance's
-table (where the connected route lives), while everything else still falls
-through to main.
+These rules sit at priority band **30000-30999**, which is **after PBR**
+(29000-29999) and **before** next-table (32000-32099) and the main table's
+rule (32766). Because the rule matches a *specific* destination prefix, a
+main-table **default route no longer shadows it** — a lookup for the leaked
+prefix consults the source instance's table (where the connected route lives),
+while everything else still falls through to main.
+
+### Kernel/helper precedence parity (#11319)
+
+The priority order is deliberate: kernel PBR rules use 29000-29999, rib-group
+per-prefix leaks use 30000-30999, and next-table leaks use 32000-32099. PBR
+therefore selects its target table before either kernel leak rule can match,
+the same order the helper applies an explicit `then routing-instance` override
+before looking up destination routes. Before #11319, the kernel's next-table
+(100-199) and rib-group (30000-30999) bands both sorted ahead of PBR
+(31000-31999), so a leak could select a different table for the same packet.
+
+The old next-table and PBR bands are retained only for upgrade cleanup:
+`nextTableManager.clear()` removes stale rules at 100-199, and
+`pbrManager.clear()` removes stale selector-bearing rules at 31000-31999.
+The userspace snapshot builder also refuses to widen old-band PBR rules while
+an in-place upgrade is converging.
 
 - Source: `pkg/routing/rules.go` — `ribGroupManager.Apply` +
   `ribGroupLeaksIntoMain`; band constant `ribGroupLeakRulePriority = 30000`,
@@ -143,11 +171,11 @@ it — the leak was absent from **both** FIBs.
 
 ### Upgrade cleanup
 
-`ribGroupManager.clear()` scans three priority windows on every reconcile: the
-current `[30000, 31000)` per-prefix band, the legacy `[33000, 33100)` blanket
-band, and the original `[200, 300)` band. An in-place binary upgrade therefore
-**removes the stale pref-33000 blanket rule** so the box is never left with the
-broken blanket rule alongside the new per-prefix rules.
+`ribGroupManager.clear()` scans the current `[30000, 31000)` per-prefix band,
+the legacy `[33000, 33100)` blanket band, and the original `[200, 300)` band.
+An in-place binary upgrade therefore **removes the stale pref-33000 blanket
+rule** so the box is never left with the broken blanket rule alongside the
+new per-prefix rules.
 
 ### Final rib-group removal (zero-transition, #5642)
 
@@ -225,10 +253,12 @@ silently no-op — for the cases Phase 1 cannot fully realize:
 ### Strict rejection — ip-rule window over-subscription (#5854)
 
 The applier programs next-table and interface-routes rib-group leaks into
-**fixed ip-rule priority windows** and hard-caps at each boundary: 100 rules for
-next-table (`pkg/routing/rules.go`, the `nextTableRulePriority+maxNextTableRules`
-cap) and `maxRibGroupLeakRules` (1000) rules for the per-prefix rib-group leak (the
-`ribGroupLeakRulePriority+maxRibGroupLeakRules` cap). A config that exceeds a
+**fixed ip-rule priority windows** and hard-caps at each boundary: 100 rules
+for next-table (`pkg/routing/rules.go`, the
+`nextTableRulePriority+maxNextTableRules` cap) and `maxRibGroupLeakRules`
+(1000) rules for the per-prefix rib-group leak (the
+`ribGroupLeakRulePriority+maxRibGroupLeakRules` cap). The next-table band is
+32000-32099; the rib-group band is 30000-30999. A config that exceeds a
 window used to commit green with only a **warning**
 (`validateRoutingRuleWindowWarnings`); the reconciler then silently stopped at
 the limit and returned success, so the committed generation **claimed routes the
@@ -291,17 +321,21 @@ Every next-table `ip rule` carries an **`FRA_IIFNAME` ingress selector**.
 
 Before #9420 the rule was `Dst` + `Table` + `Priority` + `Family` and nothing
 else, installed at priority 100-199 — **ahead of the kernel's l3mdev rule at
-1000**. A packet ingressing **any** routing instance whose destination fell in
-the leaked prefix was therefore routed out of the **target** instance's table,
-on the target instance's device, overriding the ingress instance's own routing.
+1000**. #11319 moved the current band to 32000-32099, after the l3mdev lookup
+and VRF miss terminator. The ingress selector remains required: a packet
+ingressing **any** routing instance whose destination fell in the leaked prefix
+was formerly routed out of the **target** instance's table, on the target
+instance's device, overriding the ingress instance's own routing.
 Measured on a live kernel, with a control, and in the sharper case where the
 ingress VRF **has its own route for the same prefix** and still loses — the
 measurement is a test, `TestNextTableIngressScopeOnRealKernel_9420` in
 `pkg/routing/rules_9420_test.go`, which reproduces the defect (B1/B2) and the
-control (B3) in the same run as the fix. Since #9812 it runs under a forcing
-leg (`test/routing/selftest-routing-kernel_9812.sh`, in `make selftest` and
-`make test-routing-kernel-lib`); without that leg it skips silently where no
-netns is available.
+control (B3) in the same run as the fix. The same forcing netns leg also runs
+`TestPBRPrecedesLeakBandsOnRealKernel11319` in IPv4 and IPv6, pinning that an
+explicit PBR selector wins over both leak bands in kernel first-match order.
+`test/routing/selftest-routing-kernel_9812.sh` is in `make selftest` and
+`make test-routing-kernel-lib`; without that leg the cells skip where no netns
+is available.
 
 This is the same defect **#5117** fixed for the PBR/FBF band, in the same file;
 `nextTableManager.Apply` was not covered by that sweep. **#4073** closed the

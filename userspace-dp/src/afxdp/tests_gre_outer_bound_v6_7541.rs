@@ -165,15 +165,18 @@ fn gre_decap_v6_outer_accepts_an_honest_inner_under_a_trailer_7541() {
 /// `gre_checksum_region` already excluded the trailer from the sum.
 #[test]
 fn gre_decap_v6_outer_checksum_present_honours_the_outer_bound_7541() {
-    let forwarding = build_forwarding_state(&gre_to_self_snapshot_v6());
-    // C-bit + K-bit: option fields present, so the inner offset is past them.
+    let mut snapshot = gre_to_self_snapshot_v6();
+    snapshot.tunnel_endpoints[0].key = 42;
+    let forwarding = build_forwarding_state(&snapshot);
+    // C-bit + K-bit: option fields present. Use a nonzero matching key so
+    // these controls remain valid under strict key-presence matching.
     const FLAGS: u16 = 0x8000 | 0x2000;
 
     // Refusal half.
     let honest = build_gre_inner_icmp_packet_v4();
     let mut lying = honest.clone();
     set_inner_total_len(&mut lying, (honest.len() + TRAILER_LEN) as u16);
-    let mut frame = build_gre_checksum_present_outer_frame_v6(0, FLAGS, 0, 0, &lying);
+    let mut frame = build_gre_checksum_present_outer_frame_v6(0, FLAGS, 42, 0, &lying);
     let outer_end = frame.len();
     frame.extend(std::iter::repeat_n(TRAILER_BYTE, TRAILER_LEN));
     assert_v6_fixture_premises(&frame, outer_end, 14);
@@ -189,7 +192,7 @@ fn gre_decap_v6_outer_checksum_present_honours_the_outer_bound_7541() {
 
     // Acceptance half — the control that keeps the above from being a blanket
     // rejection of checksummed v6 frames with padding.
-    let mut ok_frame = build_gre_checksum_present_outer_frame_v6(0, FLAGS, 0, 0, &honest);
+    let mut ok_frame = build_gre_checksum_present_outer_frame_v6(0, FLAGS, 42, 0, &honest);
     let ok_end = ok_frame.len();
     ok_frame.extend(std::iter::repeat_n(TRAILER_BYTE, TRAILER_LEN));
     assert_v6_fixture_premises(&ok_frame, ok_end, 14);

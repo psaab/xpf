@@ -123,12 +123,14 @@ cat > "$d/canned.txt" <<'EOF'
 --- PASS: TestNextTableIngressScopeOnRealKernel_9420 (0.06s)
 === RUN   TestVRFMissTerminatorOnRealKernel9819
 --- PASS: TestVRFMissTerminatorOnRealKernel9819 (0.45s)
+=== RUN   TestPBRPrecedesLeakBandsOnRealKernel11319
+--- PASS: TestPBRPrecedesLeakBandsOnRealKernel11319 (0.13s)
 PASS
-ok  	github.com/psaab/xpf/pkg/routing	0.516s
+ok  	github.com/psaab/xpf/pkg/routing	0.646s
 EOF
 write_fake_go "$d/go" "$d/canned.txt"
 out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
-if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "both routing kernel cells ran and passed"; then
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all three routing kernel cells ran and passed"; then
 	ok "positive control: good canned run passes the guard"
 else
 	bad "positive control: rc=$rc out=$out"

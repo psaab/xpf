@@ -114,9 +114,13 @@ func transitBarrierFamilyUnsupported(err error) bool {
 // ACCEPT rule(s) supplied by the daemon, then retains that DROP policy. This
 // keeps configured-but-unzoned and leave-alone interfaces out of the kernel
 // router while preserving only explicitly owned runtime XDP paths and the
-// daemon-owned xpf-usp1 delegated TUN residual. xpf-usp0 is LocalDelivery/
-// gated-only and is not a FORWARD pinhole; direct route-based IPsec plaintext
-// arrives on xfrmi and remains dropped.
+// daemon-owned xpf-usp1 adjudicated queue when its exact mark is present.
+// Delegated queue-one traffic is unmarked and remains under DROP;
+// userspace refuses table-stamped NoRoute/build fallbacks and every
+// non-tunnel MissingNeighbor copy (including an unstamped q0 decision)
+// before reinjection (#11326). xpf-usp0 is LocalDelivery/gated-only and
+// is not a FORWARD pinhole; direct route-based IPsec plaintext arrives on
+// xfrmi and remains dropped.
 //
 // WHY BOTH FAMILIES. `ip_forward` does not govern bridged frames at all, and
 // this repo creates Linux bridge domains (compiler_iface.go), so an inet

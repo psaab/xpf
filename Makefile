@@ -860,14 +860,14 @@ test-mouse-elephant-lib:
 test-rule-dscp-lib:
 	sh ./test/routing/selftest-rule-dscp_7796.sh
 
-# Self-test the #9420 next-table ingress-scope and #9819 VRF-miss terminator
-# kernel cells. Both SKIP under a plain `go test` without a usable netns, and
-# a skipped cell reads identically to a passing one — so this target runs them
-# under `unshare -rn` with XPF_REQUIRE_NETNS=1, where a missing tool or a
-# failed namespace is a failure. It SKIPS as a whole (not fails) where user
-# namespaces are unavailable, matching the other tool-gated legs. The two
-# kernel cells are pinned BY NAME inside the script, so a rotted -run
-# predicate cannot report a clean pass over nothing.
+# Self-test the #9420 next-table ingress-scope, #9819 VRF-miss terminator, and
+# #11319 PBR-before-leak kernel cells. They SKIP under plain `go test` without
+# a usable netns, and a skipped cell reads identically to a passing one — so
+# this target runs them under `unshare -rn` with XPF_REQUIRE_NETNS=1, where a
+# missing tool or failed namespace is a failure. It SKIPS as a whole (not
+# fails) where user namespaces are unavailable, matching the other tool-gated
+# legs. All three kernel cells are pinned BY NAME inside the script, so a
+# rotted -run predicate cannot report a clean pass over nothing.
 # Single-sourced with the `make selftest` legs: each script here is the SAME
 # script the aggregate runs, so the target and the aggregate cannot drift into
 # testing different things. The probes script pins the leg's missing-tool

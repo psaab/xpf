@@ -12,7 +12,7 @@
 #      filter + ip-monitoring preferred-route INTO the forwarding
 #      instance — the PR-1b rejection lifted in PR-2);
 #   2. kernel side of the divergence fix: the ISP-B kernel table
-#      (discovered from the PBR ip-rule band 31000+) contains the
+#      (discovered from the PBR ip-rule band 29000-29999) contains the
 #      instance default — before PR-2 that table was EMPTY and the
 #      instance static leaked into the main table;
 #   3. main table is NOT polluted by the ISP-B default;
@@ -140,16 +140,13 @@ sleep 3
 
 # ---- Phase 2: kernel side of the divergence fix ----
 info "Discovering ISP-B kernel table from the PBR ip-rule band..."
-# #6936: enumerate ALL tables in the band and select by CONTENT, not by
-# position. The old form took the FIRST 31xxx rule and exited, but the band is
-# not private to FBF: this cluster already carries a GRE rule at exactly
-# priority 31000 (`from all to 10.255.192.40/30 iif ge-0-0-1 lookup 488570`),
-# so the discovery bound a GRE table and the cell below then blamed FRR for a
-# default it was never going to find there.
+# #6936: enumerate ALL tables in the current PBR band and select by CONTENT,
+# not by position: a configured filter can install several rules/tables, and
+# only the ISP-B table has the expected default next hop.
 PBR_CANDIDATES="$(incus exec "$TARGET" -- sh -c \
-    "ip rule show | awk -F'lookup ' '\$1 ~ /^31[0-9][0-9][0-9]:/ {print \$2}'" | tr -d '\r')"
+    "ip rule show | awk -F'lookup ' '\$1 ~ /^29[0-9][0-9][0-9]:/ {print \$2}'" | tr -d '\r')"
 [[ -n "${PBR_CANDIDATES//[[:space:]]/}" ]] \
-    || fail "no PBR ip rule in the 31000+ band (FBF kernel rule missing)"
+    || fail "no PBR ip rule in the 29000-29999 band (FBF kernel rule missing)"
 info "PBR band candidates: $(echo $PBR_CANDIDATES)"
 
 PBR_TABLE=""
@@ -162,7 +159,7 @@ for _cand in $PBR_CANDIDATES; do
         break
     fi
 done
-[[ -n "$PBR_TABLE" ]] || fail "no table in the 31000+ band ($(echo $PBR_CANDIDATES)) holds 'default via ${ISP_B_GW4}' — either FRR table rendering is broken (pre-PR-2 divergence) or the FBF rule never installed"
+[[ -n "$PBR_TABLE" ]] || fail "no table in the 29000-29999 band ($(echo $PBR_CANDIDATES)) holds 'default via ${ISP_B_GW4}' — either FRR table rendering is broken (pre-PR-2 divergence) or the FBF rule never installed"
 info "ISP-B table $PBR_TABLE holds the instance default (divergence fix OK): $(grep -m1 '^default' <<<"$ROUTES")"
 
 # #6936: take the route TEXT, not a count. The counting form collapsed

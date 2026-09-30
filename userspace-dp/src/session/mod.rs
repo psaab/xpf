@@ -3,7 +3,7 @@ use crate::nat::NatDecision;
 use crate::nat64::Nat64ReverseInfo;
 use rustc_hash::{FxHashMap, FxHashSet, FxSeededState};
 use smallvec::SmallVec;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -49,6 +49,71 @@ type SeededForwardWireIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>
 type SeededReverseTranslatedIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
 /// #10130/#10674: address-only index key for session-gated reply fragments.
 type SeededL3ReverseIndex = HashMap<L3ReverseKey, NatIndexBucket, FxSeededState>;
+/// The slab scan order for a bare tuple is ascending handle order. Keep the
+/// common one-session case allocation-free; only true scope collisions need a
+/// tree so lookup and removal stay logarithmically bounded.
+enum BareTupleHandleBucket {
+    One(u32),
+    Many(BTreeSet<u32>),
+}
+
+impl BareTupleHandleBucket {
+    fn insert(&mut self, handle: u32) {
+        let replacement = match self {
+            Self::One(existing) if *existing == handle => return,
+            Self::One(existing) => {
+                let mut handles = BTreeSet::new();
+                handles.insert(*existing);
+                handles.insert(handle);
+                Some(Self::Many(handles))
+            }
+            Self::Many(handles) => {
+                handles.insert(handle);
+                None
+            }
+        };
+        if let Some(replacement) = replacement {
+            *self = replacement;
+        }
+    }
+
+    /// Remove this handle. Returns true when the outer tuple key is empty.
+    fn remove(&mut self, handle: u32) -> bool {
+        let (empty, collapse_to) = match self {
+            Self::One(existing) => return *existing == handle,
+            Self::Many(handles) => {
+                if !handles.remove(&handle) {
+                    return false;
+                }
+                (
+                    handles.is_empty(),
+                    (handles.len() == 1).then(|| *handles.first().expect("one handle remains")),
+                )
+            }
+        };
+        if let Some(only) = collapse_to {
+            *self = Self::One(only);
+        }
+        empty
+    }
+
+    fn first(&self) -> Option<u32> {
+        match self {
+            Self::One(handle) => Some(*handle),
+            Self::Many(handles) => handles.first().copied(),
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn contains(&self, handle: u32) -> bool {
+        match self {
+            Self::One(existing) => *existing == handle,
+            Self::Many(handles) => handles.contains(&handle),
+        }
+    }
+}
+
+type SeededBareTupleIndex = HashMap<BareSessionTuple, BareTupleHandleBucket, FxSeededState>;
 
 // #1047 P2: SessionKey and the key-transform helpers (forward_wire_key,
 // translated_session_key, reverse_canonical_key, reverse_wire_key,
@@ -1188,6 +1253,8 @@ pub(crate) struct SessionTable {
     /// #964 Step 1: forward-key → handle. Replaces the
     /// `sessions` HashMap's key-to-entry mapping.
     key_to_handle: SeededKeyMap<u32>,
+    /// Bare five-tuple → lowest live slab handle for delayed-Close identity.
+    bare_tuple_index: SeededBareTupleIndex,
     /// Forward keys for local TCP sessions whose handshake is incomplete.
     /// Seeded and maintained with insert, promotion, and removal so pressure
     /// arbitration does not scan the session table.
@@ -1531,6 +1598,7 @@ impl SessionTable {
             // `state` is the shared `FxSeededState` (carries the seed; a
             // `Clone` per map is just a `usize` copy).
             key_to_handle: HashMap::with_hasher(state.clone()),
+            bare_tuple_index: HashMap::with_hasher(state.clone()),
             pressure_shed_openings: HashMap::with_hasher(state.clone()),
             nat_reverse_index: HashMap::with_hasher(state.clone()),
             forward_wire_index: HashMap::with_hasher(state.clone()),
@@ -1904,6 +1972,37 @@ impl SessionTable {
             record.entry.filter_revalidated = stamp;
         }
     }
+    /// #11324: persist a reverse-direction route selected from the reply's
+    /// ingress filter without replacing or revoking the session pair.
+    ///
+    /// Route selection is local derived state: the peer evaluates its own
+    /// reply-ingress filter when it receives traffic. Preserve the reverse
+    /// entry's NAT/zone/provenance fields, update only its forwarding decision,
+    /// and stamp the route filter for this generation and logical ingress.
+    pub(crate) fn update_reverse_route_on_filter_hit(
+        &mut self,
+        key: &SessionKey,
+        logical_ingress_ifindex: i32,
+        resolution: ForwardingResolution,
+        install_table_domain: u32,
+        install_table_check: u32,
+    ) -> bool {
+        let stamp =
+            FilterRevalidationStamp::live(self.filter_revalidation_gen, logical_ingress_ifindex);
+        if let Some(handle) = self.key_to_handle.get(key).copied()
+            && let Some(record) = self.entries.get_mut(handle as usize)
+            && record.key == *key
+            && record.entry.metadata.is_reverse
+        {
+            record.entry.decision.resolution = resolution;
+            record.entry.decision.install_table_domain = install_table_domain;
+            record.entry.decision.install_table_check = install_table_check;
+            record.entry.filter_revalidated = stamp;
+            return true;
+        }
+        false
+    }
+
     /// #10467: keep a route-transition hit stale until the pair teardown has
     /// completed. If teardown is refused or delayed, the surviving entry must
     /// not look freshly judged under the new generation while still carrying
@@ -2321,10 +2420,16 @@ impl SessionTable {
         let opening_key =
             Self::is_pressure_shed_opening(&record.key, &record.entry, false)
                 .then(|| record.key.clone());
+        let bare_tuple = record.key.bare_tuple();
         let raw = self.entries.insert(record);
+        let handle: u32 = raw.try_into().expect("slab handle exceeds u32");
         if let Some(key) = opening_key {
             self.pressure_shed_openings.insert(key, ());
         }
+        self.bare_tuple_index
+            .entry(bare_tuple)
+            .and_modify(|bucket| bucket.insert(handle))
+            .or_insert(BareTupleHandleBucket::One(handle));
         // Only grows, never shrinks — see the `slot_high_watermark` field
         // doc for why a stale-low watermark would be a correctness bug but
         // a slightly-high one is merely a few wasted vacant visits.
@@ -2332,6 +2437,16 @@ impl SessionTable {
             self.slot_high_watermark = raw + 1;
         }
         raw
+    }
+
+    fn remove_bare_tuple_handle(&mut self, key: BareSessionTuple, handle: u32) {
+        let remove_key = self
+            .bare_tuple_index
+            .get_mut(&key)
+            .is_some_and(|bucket| bucket.remove(handle));
+        if remove_key {
+            self.bare_tuple_index.remove(&key);
+        }
     }
 
     /// Resolve the slab handle for a forward-key direct lookup.
@@ -2463,38 +2578,24 @@ impl SessionTable {
     pub(crate) fn session_id_for(&self, key: &SessionKey) -> u64 {
         self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0)
     }
-    /// Return the live session identity for any incarnation of the same
-    /// canonical bare tuple, ignoring routing-domain and tunnel discriminator.
-    /// Used by delayed close drains to reject an old scoped close after a
-    /// collision survivor has been installed.
+    /// Return the session identity for the lowest live slab handle sharing
+    /// this bare five-tuple, or None when no scoped incarnation is present.
+    /// The ordered collision bucket preserves the previous slab-iteration
+    /// result while keeping lookup independent of total table size.
     #[inline]
-    pub(crate) fn session_id_for_bare_tuple(&self, key: &SessionKey) -> u64 {
-        let mut canonical = key.clone();
-        canonical.routing_domain = 0;
-        canonical.discriminator = Default::default();
-        self.entries
-            .iter()
-            .find_map(|record| {
-                let mut candidate = record.1.key.clone();
-                candidate.routing_domain = 0;
-                candidate.discriminator = Default::default();
-                (candidate == canonical).then_some(record.1.entry.session_id)
-            })
-            .unwrap_or(0)
-    }
-
-    /// Return whether any live incarnation occupies the canonical bare tuple,
-    /// including rows whose legacy session id is zero.
-    pub(crate) fn contains_bare_tuple(&self, key: &SessionKey) -> bool {
-        let mut canonical = key.clone();
-        canonical.routing_domain = 0;
-        canonical.discriminator = Default::default();
-        self.entries.iter().any(|(_, record)| {
-            let mut candidate = record.key.clone();
-            candidate.routing_domain = 0;
-            candidate.discriminator = Default::default();
-            candidate == canonical
-        })
+    pub(crate) fn session_id_for_bare_tuple(&self, key: &SessionKey) -> Option<u64> {
+        let bare_tuple = key.bare_tuple();
+        let handle = self.bare_tuple_index.get(&bare_tuple)?.first()?;
+        let record = self.entries.get(handle as usize)?;
+        if record.key.bare_tuple() != bare_tuple {
+            debug_assert!(
+                false,
+                "bare-tuple index handle {} points at a different tuple",
+                handle
+            );
+            return None;
+        }
+        Some(record.entry.session_id)
     }
     /// #9582: true when `session_id` was minted by ANOTHER worker and carried here.
     ///
@@ -3655,6 +3756,7 @@ impl SessionTable {
             return None;
         }
         let decision = record.entry.decision;
+        let bare_tuple = record.key.bare_tuple();
         let metadata = record.entry.metadata.clone();
         // #2134/#10985: snapshot the counted-class inputs and ingress zone
         // before the borrow ends. This is the sole removal sink — expire,
@@ -3666,10 +3768,10 @@ impl SessionTable {
         // Borrow on `record` ends here; subsequent calls take
         // &mut self (cleanup helpers) without conflict.
         let _ = record;
-        // Clean every handle-valued internal index. Each cleanup is
-        // VALUE-GUARDED via guarded_remove — only remove if the
-        // stored handle still equals our handle. Mirrors today's
-        // matches!(... existing == key) pattern.
+        // Clean every handle-valued internal index. The bare-tuple bucket
+        // removes this exact handle; the remaining removals are value-guarded
+        // so a stale handle cannot erase a reused slot's index entry.
+        self.remove_bare_tuple_handle(bare_tuple, handle);
         self.remove_forward_nat_index(key, handle, decision, &metadata);
         remove_owner_rg_index_entry(&mut self.owner_rg_sessions, metadata.owner_rg_id, handle);
         // Mandatory debug assertion: NO handle-valued index still
@@ -3989,6 +4091,10 @@ impl SessionTable {
                 .l3_reverse_index
                 .values()
                 .any(|bucket| bucket.contains(&handle))
+            && !self
+                .bare_tuple_index
+                .values()
+                .any(|bucket| bucket.contains(handle))
             && !self
                 .owner_rg_sessions
                 .values()

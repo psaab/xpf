@@ -212,3 +212,102 @@ func TestRibInstanceFromNameConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestGlobalInterfaceRoutesRibGroupRejectedStrict11311(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		group string
+	}{
+		{
+			name:  "inet",
+			group: "global-v4",
+			lines: []string{
+				"set routing-instances blue instance-type virtual-router",
+				"set routing-options interface-routes rib-group inet global-v4",
+				"set routing-options rib-groups global-v4 import-rib inet.0",
+				"set routing-options rib-groups global-v4 import-rib blue.inet.0",
+			},
+		},
+		{
+			name:  "inet6",
+			group: "global-v6",
+			lines: []string{
+				"set routing-instances blue instance-type virtual-router",
+				"set routing-options interface-routes rib-group inet6 global-v6",
+				"set routing-options rib-groups global-v6 import-rib inet6.0",
+				"set routing-options rib-groups global-v6 import-rib blue.inet6.0",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(buildTree(t, tc.lines))
+			if err == nil {
+				t.Fatal("expected strict rejection for an unimplemented global interface-routes rib-group")
+			}
+			if !strings.Contains(err.Error(), tc.group) ||
+				!strings.Contains(err.Error(), "not implemented") {
+				t.Fatalf("error = %v, want it to identify the global group as unimplemented", err)
+			}
+		})
+	}
+}
+
+func TestGlobalInterfaceRoutesRibGroupWarnedTolerant11311(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		group string
+	}{
+		{
+			name:  "inet",
+			group: "global-v4",
+			lines: []string{
+				"set routing-instances blue instance-type virtual-router",
+				"set routing-options interface-routes rib-group inet global-v4",
+				"set routing-options rib-groups global-v4 import-rib inet.0",
+				"set routing-options rib-groups global-v4 import-rib blue.inet.0",
+			},
+		},
+		{
+			name:  "inet6",
+			group: "global-v6",
+			lines: []string{
+				"set routing-instances blue instance-type virtual-router",
+				"set routing-options interface-routes rib-group inet6 global-v6",
+				"set routing-options rib-groups global-v6 import-rib inet6.0",
+				"set routing-options rib-groups global-v6 import-rib blue.inet6.0",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := CompileConfigLenient(buildTree(t, tc.lines))
+			if err != nil {
+				t.Fatalf("tolerant load must retain the unsupported selector: %v", err)
+			}
+			if !warningsContain(cfg.Warnings, "global interface-routes rib-group") ||
+				!warningsContain(cfg.Warnings, tc.group) ||
+				!warningsContain(cfg.Warnings, "not implemented") {
+				t.Fatalf("warnings = %v, want an explicit warning for group %q", cfg.Warnings, tc.group)
+			}
+		})
+	}
+}
+
+func TestPerInstanceInterfaceRoutesRibGroupStillCommits11311(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue routing-options interface-routes rib-group inet per-instance",
+		"set routing-options rib-groups per-instance import-rib inet.0",
+		"set routing-options rib-groups per-instance import-rib blue.inet.0",
+	})
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("the supported per-instance import-into-main path must still commit: %v", err)
+	}
+	if warningsContain(cfg.Warnings, "global interface-routes rib-group") {
+		t.Fatalf("supported per-instance rib-group received global-selector warning: %v", cfg.Warnings)
+	}
+}

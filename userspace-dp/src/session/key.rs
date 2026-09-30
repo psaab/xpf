@@ -157,6 +157,46 @@ pub(crate) struct SessionKey {
     /// way.
     pub routing_domain: u32,
 }
+/// The five-tuple used by delayed-close identity checks. Routing domain and
+/// tunnel discriminator are deliberately excluded: a Close must detect a live
+/// replacement in any scope that shares the same wire tuple.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct BareSessionTuple {
+    pub addr_family: u8,
+    pub protocol: u8,
+    pub src_ip: IpAddr,
+    pub dst_ip: IpAddr,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
+
+/// The two scope fields omitted from `BareSessionTuple`.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct SessionScope {
+    pub routing_domain: u32,
+    pub discriminator: TunnelDiscriminator,
+}
+
+impl SessionKey {
+    pub(crate) fn bare_tuple(&self) -> BareSessionTuple {
+        BareSessionTuple {
+            addr_family: self.addr_family,
+            protocol: self.protocol,
+            src_ip: self.src_ip,
+            dst_ip: self.dst_ip,
+            src_port: self.src_port,
+            dst_port: self.dst_port,
+        }
+    }
+
+    pub(crate) fn scope(&self) -> SessionScope {
+        SessionScope {
+            routing_domain: self.routing_domain,
+            discriminator: self.discriminator,
+        }
+    }
+}
+
 
 pub(crate) fn reply_matches_forward_session(
     forward_key: &SessionKey,

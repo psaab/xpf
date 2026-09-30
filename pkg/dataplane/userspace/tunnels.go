@@ -75,10 +75,10 @@ func buildTunnelEndpointSnapshots(cfg *config.Config, interfaces []InterfaceSnap
 	// later-sorting collider is dropped loudly. Iteration is the
 	// emitter's sorted order, so the drop is deterministic. Key 0
 	// (unkeyed) still participates: two unkeyed tunnels on one outer
-	// pair match the same frames. Transport instance participates too
-	// (#10653 selects by ingress VRF, so same-triple different-VRF
-	// rows are unambiguous and must NOT drop here). Pure inheritance
-	// (one *TunnelConfig fanning out to N unit rows) is exempt — the
+	// pair both match the same K-clear frames. Transport instance
+	// participates too (#10653 selects by ingress VRF, so same-triple
+	// different-VRF rows are unambiguous and must NOT drop here). Pure
+	// inheritance (one *TunnelConfig fanning out to N unit rows) is exempt — the
 	// multi-unit logical model, not a duplicate.
 	type greOuterKey struct {
 		source      string

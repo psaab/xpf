@@ -762,6 +762,18 @@ sync.
     (HA/fabric finalizer, CoS classify with `flow_key = None`, prebuilt
     forward, never seeds a session).
 
+  - **#11332 — input-filter denies are excluded from screens and SYN
+    cookies:** before flood/scan screen processing or SYN-cookie ACK validation
+    can run, the poll loop evaluates a side-effect-free verdict walk over the
+    logical-interface input filter, including its PBR routing-instance term. A
+    deny bypasses both stages and continues to the existing counted/logged
+    filter enforcement site, so denied packets do not affect sketches or
+    generate cookie SYN-ACK/RST replies and filter counters/logs still run once.
+    Flowless packets use the same L3-only, ports-unknown match context as their
+    ordinary filter path. Cells are `*_11332` in
+    `tests_embedded_poll_filter.rs`.
+
+
   - **#10666 — NAT/NAT64 PMTUD is RELATED only on the quoted packet's
     actual arrival side:** the flowless error builders mark IPv4
     Fragmentation-Needed and IPv6 Packet-Too-Big errors as RELATED only when
@@ -882,9 +894,20 @@ sync.
     leaks the descriptor (per-packet UMEM-pool drain → worker stall
     under TX congestion). The two enqueue-failure sites also set
     `build_failed=true; fallback_to_slow_path=true` so the finalizer's
-    `handle_forward_build_failure` reinjects the frame to the slow path;
-    the two oversized sites set `build_failed=true` only (the frame is
-    undeliverable — drop-and-recycle, no reinject).
+    `handle_forward_build_failure` offers the frame to the slow path unless
+    its routing decision carries a non-default table stamp. #11326 terminally
+    drops such stamped ForwardCandidate fallbacks before the TUN: the kernel
+    would see the TUN as iif and lose the FBF/next-table/l3mdev identity.
+    The same shared reinject boundary drops stamped NoRoute decisions and
+    every non-tunnel MissingNeighbor copy, including an unstamped MAIN-table
+    decision admitted on q0. Native MissingNeighbor frames stay in
+    `pending_neigh`; GRE-decapped frames retain the existing probe/resolver and
+    retransmission recovery. Tunnel-marked frames remain fail-closed at the
+    existing tunnel-encapsulation gate. Unstamped MAIN NoRoute and
+    ForwardCandidate fallbacks still use delegated q1, which remains unmarked
+    and is dropped by the armed forward fence. The two oversized sites set
+    `build_failed=true` only (the frame is undeliverable — drop-and-recycle,
+    no reinject).
     **Egress-MTU PTB (#2301):** for a forwarded frame the TCP-segmentation
     path did NOT handle (non-TCP, TCP seg-miss, non-segmentable TCP) the
     dispatcher makes an egress-MTU decision (`icmp_ptb.rs`,

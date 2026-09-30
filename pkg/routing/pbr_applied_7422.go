@@ -17,11 +17,11 @@ import (
 // alerts on cannot see the failure it exists to catch.
 //
 // The band, not a tag, is what identifies xpf's rules. PBR ip rules occupy
-// [PBRRulePriorityBase, PBRRulePriorityBase+PBRRuleWindow) — 31000..31999 —
+// [PBRRulePriorityBase, PBRRulePriorityBase+PBRRuleWindow) — 29000..29999 —
 // and that constant is already the SSOT shared with the userspace FIB ingest
 // (#4479), so counting by priority cannot drift from the install side. Rules
-// outside the band (the kernel's own 0/32766/32767, next-table at 100-199,
-// rib-group at 30000/33000) are not ours and are not counted.
+// outside the band (the kernel's own 0/32766/32767, next-table at 32000-32099,
+// rib-group at 30000-30999, and legacy rules) are not ours and are not counted.
 
 // PBRAppliedCount returns the number of PBR ip rules present in the kernel,
 // summed across both address families, and whether the readback SUCCEEDED.

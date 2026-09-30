@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
@@ -80,7 +81,7 @@ func TestRuleAddDSCPAcceptedByKernel7796(t *testing.T) {
 			rule := netlink.NewRule()
 			rule.Family = unix.AF_INET
 			rule.Table = 236616 // a real FBF table id: > 255, so FRA_TABLE carries it
-			rule.Priority = 31000 + int(dscp)
+			rule.Priority = config.PBRRulePriorityBase + int(dscp)
 
 			if err := ops.RuleAddDSCP(rule, dscp); err != nil {
 				t.Fatalf("kernel REJECTED a dscp %d rule: %v\n\n"+
@@ -164,7 +165,7 @@ func TestRuleAddDSCPRejectsLegacyTOS7796(t *testing.T) {
 	rule := netlink.NewRule()
 	rule.Family = unix.AF_INET
 	rule.Table = 236616
-	rule.Priority = 31999
+	rule.Priority = config.PBRRulePriorityBase + config.PBRRuleWindow - 1
 	rule.Tos = 46 << 2 // the pre-#7796 value
 
 	err := ops.RuleAddDSCP(rule, 46)
@@ -253,8 +254,8 @@ func TestDSCPZeroIsDistinctFromNoDSCP7796(t *testing.T) {
 		t.Skip("iproute2 `ip` not found; cannot read the kernel's stored selector back")
 	}
 
-	const zeroPrio = 31700
-	const nonePrio = 31701
+	const zeroPrio = config.PBRRulePriorityBase + 700
+	const nonePrio = config.PBRRulePriorityBase + 701
 
 	zeroRule := netlink.NewRule()
 	zeroRule.Family = unix.AF_INET

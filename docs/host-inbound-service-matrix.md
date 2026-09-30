@@ -2265,12 +2265,14 @@ RETH unit therefore resolves to its member netdev on the node (`reth1.0` →
     TCP/22 from the LAN host to the `wan` addresses is now admitted: those
     SYNs arrive adjudicated on `xpf-usp0` (a SYN to the LAN VIP still arrives
     on `ge-0-0-1` and takes the ingress-zone rules). Operator narrowing: the
-    accept admits ONLY gate-passed LocalDelivery reinjects — every delegation
-    path (default-permit or capped NoRoute, transit-adjudicated
-    MissingNeighbor, ForwardCandidate build-failure fallback, unconditionally
-    exempt IPsec incl. NAT-T) rides `xpf-usp1`, for which the kernel holds no
-    accept, and meets the destination rules exactly as before. No deployment
-    loses a currently-effective destination denial. See PR #10059.
+  accept admits ONLY gate-passed LocalDelivery reinjects on `xpf-usp0`.
+  #11326 refuses non-tunnel MissingNeighbor and table-stamped NoRoute or
+  ForwardCandidate copies before generic TUN injection because ingress
+  identity would be lost. Any remaining unmarked delegated copies use
+  `xpf-usp1` q1 and remain under the armed FORWARD fence's default DROP; its
+  pinhole admits only the exact-marked q0 class, not every `xpf-usp1` packet.
+  The destination-deny rules remain in place as defense-in-depth. See PR
+  #10059 and #11541.
 - The per-zone deny counters (#3361) count the drop under the ingress zone.
 - The fences (#5644 cold-boot, #5789 gap) are unchanged. They drop by destination
   address, with no per-service accepts and no `xpf-usp0` exemption, over the

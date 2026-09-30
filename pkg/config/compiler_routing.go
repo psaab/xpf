@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig) error {
+func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName string) error {
 	// Parse autonomous-system
 	if asNode := node.FindChild("autonomous-system"); asNode != nil {
 		if v := nodeVal(asNode); v != "" {
@@ -82,49 +82,35 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig) error {
 		}
 	}
 
-	// Parse rib <name> { static { route ... } }.
-	// In routing-instances the rib name is "<instance>.inet6.0" / "<instance>.inet.0"
-	// (e.g. "ATT.inet6.0"); at the top level it is the bare table name.
-	//
-	// #7512: this loop used to match ONLY the inet6 tables, and every other name
-	// fell through with no branch and no else. `rib inet.0 { static { route
-	// 0.0.0.0/0 { next-hop ...; } } }` — the ordinary Junos way to scope IPv4
-	// statics, and the natural thing to write beside a `rib inet6.0` block —
-	// therefore compiled to NOTHING, committed clean, and emitted no warning.
-	// An operator authoring the symmetric pair got their IPv6 default route and
-	// silently lost their IPv4 one, with `show configuration` rendering the
-	// stanza back verbatim so the config looked correct.
-	//
-	// The missing `else` is the real defect and is the durable half of the fix:
-	// adding an `inet.0` branch alone would leave `inet.2`, `inet.3`, a typo'd
-	// `ient.0` and every future table name silently eating routes exactly as
-	// before. An unimplemented rib is now RECORDED so the commit path can say
-	// so — see validateUnhandledRibWarnings.
+	// Parse rib <name> { static { route ... } }, accepting only the table whose
+	// scope matches this routing-options block. The global block owns bare
+	// inet.0 / inet6.0; an instance block owns only <instance>.inet.0 /
+	// <instance>.inet6.0. A qualified rib from another scope must not be
+	// silently filed into the current instance's route list.
 	for _, ribNode := range node.FindChildren("rib") {
 		ribName := nodeVal(ribNode)
 		ribStatic := ribNode.FindChild("static")
-		switch {
-		case ribName == "inet6.0" || strings.HasSuffix(ribName, ".inet6.0"):
+		if ribMatchesRoutingOptionsScope(ribName, instanceName) {
 			if ribStatic != nil {
-				ro.Inet6StaticRoutes = compileStaticRoutes(ribStatic, ro.Inet6StaticRoutes)
+				if ribName == "inet6.0" || strings.HasSuffix(ribName, ".inet6.0") {
+					ro.Inet6StaticRoutes = compileStaticRoutes(ribStatic, ro.Inet6StaticRoutes)
+				} else {
+					// The IPv4 unicast table is the SAME destination as a bare
+					// `routing-options static` block, so routes reached either way
+					// land in one list and append rather than replace.
+					ro.StaticRoutes = compileStaticRoutes(ribStatic, ro.StaticRoutes)
+				}
 			}
-		case ribName == "inet.0" || strings.HasSuffix(ribName, ".inet.0"):
-			// The IPv4 unicast table is the SAME destination as a bare
-			// `routing-options static` block, so routes reached either way land
-			// in one list and append rather than replace.
-			if ribStatic != nil {
-				ro.StaticRoutes = compileStaticRoutes(ribStatic, ro.StaticRoutes)
-			}
-		default:
-			// Not implemented. Record it ONLY when routes were actually lost —
-			// an empty `rib foo { }` discards nothing, and warning there would
-			// be noise that teaches operators to scroll past the real case.
-			if ribStatic == nil {
-				continue
-			}
-			if n := len(compileStaticRoutes(ribStatic, nil)); n > 0 {
-				ro.UnhandledRibs = append(ro.UnhandledRibs, UnhandledRib{Name: ribName, Routes: n})
-			}
+			continue
+		}
+		// Not implemented in this scope (either an unsupported table or a table
+		// owned by another scope). Record it ONLY when routes were actually lost;
+		// an empty `rib foo { }` discards nothing, and warning there would be noise.
+		if ribStatic == nil {
+			continue
+		}
+		if n := len(compileStaticRoutes(ribStatic, nil)); n > 0 {
+			ro.UnhandledRibs = append(ro.UnhandledRibs, UnhandledRib{Name: ribName, Routes: n})
 		}
 	}
 
@@ -224,6 +210,18 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig) error {
 	}
 
 	return nil
+}
+
+// ribMatchesRoutingOptionsScope reports whether ribName selects the main
+// unicast table in global routing-options or the current instance's own table.
+// Keeping the selector scope check separate from family handling prevents a
+// qualified rib from another scope being silently installed in the enclosing
+// scope's route list.
+func ribMatchesRoutingOptionsScope(ribName, instanceName string) bool {
+	if instanceName == "" {
+		return ribName == "inet.0" || ribName == "inet6.0"
+	}
+	return ribName == instanceName+".inet.0" || ribName == instanceName+".inet6.0"
 }
 
 // isRouteInlineKeyword reports whether tok is a static-route clause keyword in
@@ -622,7 +620,7 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 				ri.Interfaces = append(ri.Interfaces, firewallMatchValues(prop)...)
 			case "routing-options":
 				var ro RoutingOptionsConfig
-				if err := compileRoutingOptions(prop, &ro); err != nil {
+				if err := compileRoutingOptions(prop, &ro, instanceName); err != nil {
 					return fmt.Errorf("instance %s routing-options: %w", instanceName, err)
 				}
 				ri.StaticRoutes = ro.StaticRoutes

@@ -1436,15 +1436,17 @@ Currently implemented:
   every worker
 - ownership is now spread deterministically across eligible workers when
   multiple shaped egress interfaces share the same TX path
-- `show firewall` / `show firewall filter <name>` now surfaces the three-color
+- `show firewall` / `show firewall filter <name>` now surfaces three-color
   policer status inline under each `then policer <name>` term (#4372): the
   policer mode (single-rate / two-rate), color mode (color-aware / color-blind),
   and the per-color green (conform) / yellow (exceed) / red (violate) plus
-  treatment-drop packet/byte counters the userspace dataplane publishes over its
-  `three_color_policer_counters` status. Legacy single-rate `firewall policer`
-  definitions are lowered into the same three-color runtime (#4514), so both
-  policer namespaces render. The same counters are also printed as a
-  "Three-color policers:" table in the dataplane status summary.
+  treatment-drop packet/byte counters the userspace dataplane publishes over
+  its `three_color_policer_counters` status. Each distinct `(family, filter,
+  term)` reference gets an independent default runtime; these status counters
+  aggregate all such instances by configured name. Legacy single-rate `firewall
+  policer` definitions are lowered into the same three-color runtime family
+  (#4514), so both policer namespaces render. The same aggregate counters are
+  also printed as a "Three-color policers:" table in the dataplane status summary.
 
 Still planned:
 

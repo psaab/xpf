@@ -662,11 +662,12 @@ pub struct SlowPathReinjector {
     /// D11 per-worker slab transport shared by the submit socket and workers.
     ipsec_inner_transport: Arc<IpsecInnerWorkerTransport>,
     tx: SyncSender<PacketRequest>,
-    /// #9637 operator narrowing: outlet for reinjects that did NOT pass a
-    /// userspace host-inbound gate (delegated NoRoute/MissingNeighbor,
-    /// ForwardCandidate fallback, exempt IPsec). Separate worker + TUN
-    /// (`xpf-usp1`); the kernel holds no accept for it. `tx` stays the
-    /// adjudicated-only outlet (`xpf-usp0`).
+    /// #9637 operator narrowing / #11326 route-identity gate: outlet for
+    /// generic fallback reinjects not covered by host-inbound adjudication
+    /// and still eligible for TUN copying. Non-tunnel MissingNeighbor and
+    /// table-stamped NoRoute/ForwardCandidate dispositions are blocked before
+    /// this outlet. The armed fence has no device-wide xpf-usp1 accept: only
+    /// exact-marked q0 traffic is admitted; unmarked delegated q1 stays DROP.
     tx_delegated: SyncSender<PacketRequest>,
     limiter: Mutex<RateLimiter>,
     status: Arc<SharedStatus>,

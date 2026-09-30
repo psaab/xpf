@@ -304,8 +304,8 @@ use filter::{
     apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit, evaluate_non_pbr_input_filter,
     evaluate_non_pbr_input_filter_counters_cached, evaluate_non_pbr_input_filter_log_only,
-    filter_terminal, host_inbound_gated_lo0_action, lo0_action_for_solicited_reply,
-    revalidate_static_pbr_route_on_session_hit,
+    filter_terminal, host_inbound_gated_lo0_action, input_filter_would_deny_before_screen,
+    lo0_action_for_solicited_reply, revalidate_static_pbr_route_on_session_hit,
 };
 use policy_revalidation::{
     revalidate_zone_policy_on_session_hit, tun_origin_forward, tun_origin_reverse,
@@ -513,23 +513,23 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 };
-                // #10313/#10656: reject an unknown tagged VID at the common
-                // ingress boundary. This must run before destination
+                // #10313/#10656/#11297: reject unknown VLAN identities and
+                // VID 0 on a tagged-only ingress bind at the common boundary.
+                // This guard must also run when no 802.1Q tag is present:
+                // untagged and priority-tagged frames both carry VID 0, and
+                // neither may observe the parent's fallback zone on a
+                // tagged-only trunk. The check precedes destination
                 // classification, ARP/NDP learning, tunnel decapsulation,
                 // flow-cache lookup, session lookup, screen evaluation, and
-                // policy/NAT consumers: none may observe a fallback zone for
-                // an identity the snapshot does not own, whether the fallback
-                // is an inherited sibling zone or the port's own zone.
+                // policy/NAT consumers.
                 //
-                // The pre-routing scope helper independently preserves the
-                // physical config name for from-interface diagnostics and
-                // scope matching, while forcing its zone empty. The packet
-                // itself never reaches that downstream path for an unknown
-                // VID.
+                // For unknown nonzero VIDs, the pre-routing scope helper still
+                // preserves the physical config name for from-interface
+                // diagnostics while forcing its zone empty. VID 0 is stopped
+                // here before that scope can consume the parent's fallback.
                 // #10597: injected WG records arrive post-decap with logical
                 // ingress; the native link-layer guards below are bypassed.
-                if meta.ingress_vlan_present != 0
-                    && !is_injected
+                if !is_injected
                     && crate::afxdp::forwarding::unknown_ingress_vlan(
                         worker_ctx.forwarding,
                         meta.ingress_ifindex as i32,
@@ -798,38 +798,53 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     flow.forward_key.routing_domain = matched.key.routing_domain;
                     fabric_ingress_for_session = true;
                 }
+                // #11332: a packet the interface input filter (including its
+                // routing-instance verdict) will reject must not update screen
+                // sketches or elicit a SYN-cookie response. The verdict-only
+                // walk has no counter/log side effects; the normal filter
+                // enforcement below remains the sole counted/logged evaluation.
+                let input_filter_denied_before_screens = screen.has_screen_state()
+                    && input_filter_would_deny_before_screen(
+                        worker_ctx.forwarding,
+                        packet_frame,
+                        flow.as_ref(),
+                        meta,
+                    );
                 // #946 Phase 1 stage 10: screen / IDS slow-path.
-                // Caller still owns the recycle push (matches
-                // original code's pattern).
-                match stage_screen_check(
-                    flow.as_ref(),
-                    packet_frame,
-                    meta,
-                    ingress_zone_override,
-                    now_ns,
-                    now_secs,
-                    screen,
-                    telemetry.counters,
-                    worker_ctx,
-                ) {
-                    StageOutcome::RecycleAndContinue => {
-                        binding.scratch.scratch_recycle.push(desc.addr);
-                        continue;
-                    }
-                    StageOutcome::Continue(ScreenCheckOutcome::Pass) => {}
-                    StageOutcome::Continue(ScreenCheckOutcome::SynCookieChallenge(challenge)) => {
-                        enqueue_syn_cookie_reply(
-                            &mut binding.tx_pipeline,
-                            worker_ctx.forwarding,
-                            binding.ifindex,
-                            packet_frame,
-                            meta,
-                            flow.as_ref(),
-                            SynCookieReply::SynAck(challenge),
-                            telemetry.counters,
-                        );
-                        binding.scratch.scratch_recycle.push(desc.addr);
-                        continue;
+                // Filter-denied packets continue to their ordinary filter
+                // enforcement site below without mutating screens or producing
+                // a challenge. Caller still owns the recycle push.
+                if !input_filter_denied_before_screens {
+                    match stage_screen_check(
+                        flow.as_ref(),
+                        packet_frame,
+                        meta,
+                        ingress_zone_override,
+                        now_ns,
+                        now_secs,
+                        screen,
+                        telemetry.counters,
+                        worker_ctx,
+                    ) {
+                        StageOutcome::RecycleAndContinue => {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        StageOutcome::Continue(ScreenCheckOutcome::Pass) => {}
+                        StageOutcome::Continue(ScreenCheckOutcome::SynCookieChallenge(challenge)) => {
+                            enqueue_syn_cookie_reply(
+                                &mut binding.tx_pipeline,
+                                worker_ctx.forwarding,
+                                binding.ifindex,
+                                packet_frame,
+                                meta,
+                                flow.as_ref(),
+                                SynCookieReply::SynAck(challenge),
+                                telemetry.counters,
+                            );
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                     }
                 }
                 // #9950 (F-035): fragment-overlap CHECK — post-screen (preserves
@@ -1616,13 +1631,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #9519; the arrival zone for a foreign packet.
                         let authority_zone =
                             foreign_arrival_zone.unwrap_or(resolved.metadata.ingress_zone);
-                        // #10467: a changed PBR route identity must not mutate
-                        // only this direction's cached decision.  Tear down the
-                        // pair and let the next packet take the normal miss
-                        // path, which recomputes both egress-zone policy and
-                        // forward/reverse route state.  Unchanged identities
-                        // stay on the #8114 fast path; foreign arrivals cannot
-                        // revoke the admitting session.
+                        // #10467: a changed FORWARD PBR identity must not
+                        // mutate only one cached direction. Tear down the pair
+                        // and let the next packet take the normal MISS path,
+                        // which recomputes egress-zone policy and both routes.
+                        // #11324: a REVERSE companion is different: its native
+                        // identity belongs to the FORWARD ingress. A matching
+                        // PBR term on this reply's own ingress steers this
+                        // direction in place; it must not tear down the pair.
                         // #10038 Part C / #10630: a TUN-origin forward HIT
                         // declines PBR revalidation outright. Self-originated
                         // runs no PBR admission, so there is no admitting
@@ -1656,6 +1672,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta,
                                 ingress_zone_override,
                                 resolved.decision,
+                                resolved.metadata.is_reverse,
                             )
                         } else {
                             None
@@ -1840,7 +1857,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 Some(hit)
                                     if hit.eval.action == crate::filter::FilterAction::Accept =>
                                 {
-                                    if let Some(route) = stale_pbr_route {
+                                    if let Some(route) =
+                                        stale_pbr_route.as_ref().filter(|route| !route.steer_only)
+                                    {
                                         // The ordinary evaluator may have stamped
                                         // this entry fresh on its Accept path.
                                         if let Some(revoked_key) = route.revoked_key.as_ref() {
@@ -1852,7 +1871,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     action: crate::filter::FilterAction::Discard,
                                                     cached_log: None,
                                                 },
-                                                revoked_key: route.revoked_key,
+                                                revoked_key: route.revoked_key.clone(),
                                                 log_source: FilterLogSource::Pbr,
                                             }),
                                             // #10566: route override is synthesized
@@ -1865,19 +1884,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 }
                                 Some(hit) => (Some(hit), ordinary_input_already_counted),
                                 None => (
-                                    stale_pbr_route.map(|route| {
-                                        if let Some(revoked_key) = route.revoked_key.as_ref() {
-                                            sessions.clear_filter_revalidation(revoked_key);
-                                        }
-                                        SessionHitInputFilterEval {
-                                            eval: NonPbrInputFilterEval {
-                                                action: crate::filter::FilterAction::Discard,
-                                                cached_log: None,
-                                            },
-                                            revoked_key: route.revoked_key,
-                                            log_source: FilterLogSource::Pbr,
-                                        }
-                                    }),
+                                    stale_pbr_route
+                                        .as_ref()
+                                        .filter(|route| !route.steer_only)
+                                        .map(|route| {
+                                            if let Some(revoked_key) = route.revoked_key.as_ref() {
+                                                sessions.clear_filter_revalidation(revoked_key);
+                                            }
+                                            SessionHitInputFilterEval {
+                                                eval: NonPbrInputFilterEval {
+                                                    action: crate::filter::FilterAction::Discard,
+                                                    cached_log: None,
+                                                },
+                                                revoked_key: route.revoked_key.clone(),
+                                                log_source: FilterLogSource::Pbr,
+                                            }
+                                        }),
                                     // #10566: neither a static ACCEPT nor a
                                     // synthesized PBR discard was counted.
                                     false,
@@ -2033,6 +2055,30 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
                             }
+                        }
+                        // #11324: persist reverse route state only after the
+                        // ordinary input-filter gate accepts. A config change
+                        // from reverse PBR to discard must still see its stale
+                        // generation stamp and revoke the pair.
+                        if let Some(route) =
+                            stale_pbr_route.as_ref().filter(|route| route.steer_only)
+                        {
+                            let logical_ingress_ifindex = resolve_ingress_logical_ifindex(
+                                worker_ctx.forwarding,
+                                meta.ingress_ifindex as i32,
+                                meta.ingress_vlan_id,
+                            )
+                            .unwrap_or(meta.ingress_ifindex as i32);
+                            sessions.update_reverse_route_on_filter_hit(
+                                &route.canonical_key,
+                                logical_ingress_ifindex,
+                                route.resolution,
+                                route.install_table_domain,
+                                route.install_table_check,
+                            );
+                            resolved.decision.resolution = route.resolution;
+                            resolved.decision.install_table_domain = route.install_table_domain;
+                            resolved.decision.install_table_check = route.install_table_check;
                         }
                         // #8356: re-derive ZONE POLICY on the established
                         // hit, at most once per session per config generation.
@@ -2664,35 +2710,37 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         }
                         telemetry.counters.session_misses += 1;
                         telemetry.dbg.session_miss += 1;
-                        match stage_screen_syn_cookie_ack_on_session_miss(
-                            Some(flow),
-                            packet_frame,
-                            meta,
-                            ingress_zone_override,
-                            now_ns,
-                            now_secs,
-                            screen,
-                            telemetry.counters,
-                            worker_ctx,
-                        ) {
-                            StageOutcome::RecycleAndContinue => {
-                                binding.scratch.scratch_recycle.push(desc.addr);
-                                continue;
-                            }
-                            StageOutcome::Continue(SynCookieAckOutcome::Pass) => {}
-                            StageOutcome::Continue(SynCookieAckOutcome::Validated) => {
-                                enqueue_syn_cookie_reply(
-                                    &mut binding.tx_pipeline,
-                                    worker_ctx.forwarding,
-                                    binding.ifindex,
-                                    packet_frame,
-                                    meta,
-                                    Some(flow),
-                                    SynCookieReply::AckRst,
-                                    telemetry.counters,
-                                );
-                                binding.scratch.scratch_recycle.push(desc.addr);
-                                continue;
+                        if !input_filter_denied_before_screens {
+                            match stage_screen_syn_cookie_ack_on_session_miss(
+                                Some(flow),
+                                packet_frame,
+                                meta,
+                                ingress_zone_override,
+                                now_ns,
+                                now_secs,
+                                screen,
+                                telemetry.counters,
+                                worker_ctx,
+                            ) {
+                                StageOutcome::RecycleAndContinue => {
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
+                                StageOutcome::Continue(SynCookieAckOutcome::Pass) => {}
+                                StageOutcome::Continue(SynCookieAckOutcome::Validated) => {
+                                    enqueue_syn_cookie_reply(
+                                        &mut binding.tx_pipeline,
+                                        worker_ctx.forwarding,
+                                        binding.ifindex,
+                                        packet_frame,
+                                        meta,
+                                        Some(flow),
+                                        SynCookieReply::AckRst,
+                                        telemetry.counters,
+                                    );
+                                    binding.scratch.scratch_recycle.push(desc.addr);
+                                    continue;
+                                }
                             }
                         }
                         let resolution_target =
@@ -8177,8 +8225,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // Send ARP/NDP solicitation via RAW socket (not XSK)
                                 // so the reply goes through the kernel's normal RX
                                 // path (cpumap_or_pass), bypassing XSK fill ring issues.
-                                // Also reinject original packet to slow-path for kernel
-                                // to forward once the neighbor is resolved.
+                                // Native frames are retained below for userspace
+                                // retry after the kernel probe; GRE-decapped
+                                // frames cannot use that buffer and their TUN
+                                // copies are refused at the final identity gate.
                                 // Trigger ARP/NDP resolution via kernel netlink.
                                 // Adding an INCOMPLETE neighbor entry makes the
                                 // kernel send its own ARP/NDP solicitation through
@@ -8787,12 +8837,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // kernel ARP/ICMP probe above already fired,
                                 // the trailing decap-aware
                                 // maybe_reinject_slow_path_from_frame
-                                // chokepoint (#1901) still hands the
-                                // correctly-paired INNER packet to the kernel
-                                // slow path, and the #1769 resolver +
-                                // retransmission recover the flow once the
-                                // neighbor resolves. Counted per binding so
-                                // the live gate is observable
+                                // chokepoint (#1901) refuses the correctly-
+                                // paired INNER packet before TUN because q0
+                                // would route it without its original iif. The
+                                // resolver still runs; the flow recovers by
+                                // retransmission once the neighbor resolves.
+                                // Counted per binding so the live gate is
                                 // (xpf_userspace_pending_neigh_decap_drops_total).
                                 // #10311: all non-buffered MISS fallthroughs
                                 // must use the arm's composed decision. A
@@ -9009,21 +9059,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // already counted by record_forwarding_disposition
                     // above and recycled by the recycle_now epilogue
                     // below — no leak, no double-count.
-                    // #10467: an explicit FBF/native-RI table owns the
-                    // resolution. If that table misses, delegating the
-                    // original frame to the kernel loses the userspace
-                    // ingress identity and can forward it through MAIN.
-                    // Ordinary MAIN-table NoRoute still delegates during the
-                    // normal FIB-refresh window; only a non-default install
-                    // identity is terminal here.
-                    let stamped_table_no_route = decision.resolution.disposition
-                        == ForwardingDisposition::NoRoute
-                        && decision.install_table_domain != 0;
+                    // #10467/#11326: a generic kernel TUN packet loses the
+                    // original ingress selectors. The shared
+                    // maybe_reinject_slow_path_from_frame_with_outlet boundary
+                    // terminally drops every non-tunnel MissingNeighbor copy,
+                    // including an unstamped MAIN-table decision admitted on q0;
+                    // native packets remain in pending_neigh, and GRE-decapped
+                    // packets use the existing probe/resolver and retransmission.
+                    // It also drops table-stamped NoRoute and ForwardCandidate
+                    // build fallbacks before any queue reaches the kernel.
                     let missing_neighbor_adjudicated =
                         missing_neighbor_slow_path_decision.is_some();
                     let slow_path_decision =
                         missing_neighbor_slow_path_decision.unwrap_or(decision);
-                    if !suppress_slow_path_reinject && !stamped_table_no_route {
+                    if !suppress_slow_path_reinject {
                         if slow_path_admit(&binding.live, decision.resolution.disposition) {
                             let outlet = if missing_neighbor_adjudicated {
                                 // The neighbor policy decision is the explicit
@@ -9141,9 +9190,6 @@ pub(super) fn poll_binding_process_descriptor(
         telemetry,
     );
 }
-#[cfg(test)]
-#[path = "named_pre_l3_10498_tests.rs"]
-mod named_pre_l3_10498_tests;
 
 #[cfg(test)]
 mod pptp_control_teardown_tests_11053 {

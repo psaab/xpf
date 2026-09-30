@@ -522,15 +522,13 @@ pub(crate) fn transfer_tombstone_drops_for_export_test(drops: u64) -> u64 {
 const BIND_RETRY_ATTEMPTS: usize = 20;
 const BIND_RETRY_DELAY: Duration = Duration::from_millis(250);
 const DEFAULT_SLOW_PATH_TUN: &str = "xpf-usp0";
-/// #9637-D4 (operator narrowing): the slow-path TUN for reinjects that did
-/// NOT pass a userspace host-inbound gate (NoRoute frames whose policy result
-/// is Permit, transit-adjudicated MissingNeighbor, ForwardCandidate
-/// build-failure fallback, unconditionally-exempt IPsec classes). A capped
-/// NoRoute DENY is adjudicated exactly like an uncapped NoRoute and never
-/// reaches this delegated outlet. The kernel holds NO accept for this device,
-/// so these frames are judged by the destination rules exactly as pre-#9637.
-/// (its accept admits solely gate-passed traffic). Must stay equal to the
-/// Go `HostInboundDelegatedIfname` (pinned by test, same as
+/// #9637-D4 / #11326: delegated TUN for fallback reinjects that remain
+/// eligible for generic TUN copying. Because IFF_NO_PI loses original iif,
+/// non-tunnel MissingNeighbor and table-stamped NoRoute/ForwardCandidate
+/// dispositions are refused before this outlet. Remaining delegated copies
+/// use unmarked q1 and stay under the armed FORWARD fence's default DROP; the
+/// xpf-usp1 pinhole is exact-marked q0 only, not a device-wide accept. Must
+/// stay equal to Go `HostInboundDelegatedIfname` (pinned by test, same as
 /// DEFAULT_SLOW_PATH_TUN ↔ HostInboundReinjectIfname).
 pub(crate) const DELEGATED_SLOW_PATH_TUN: &str = "xpf-usp1";
 const LOCAL_TUNNEL_DELIVERY_QUEUE_DEPTH: usize = 4096;
