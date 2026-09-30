@@ -1097,10 +1097,10 @@ func TestSessionHAQueuedDemotionSuppressesDegradedRefresh9629(t *testing.T) {
 	demoteDone := make(chan error, 1)
 	go func() { demoteDone <- m.UpdateRGActive(1, false) }()
 	deadline := time.Now().Add(5 * time.Second)
-	for m.haWatchdogPendingDemotions.Load() == 0 && time.Now().Before(deadline) {
+	for !m.haWatchdogPendingDemotions.has(1) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	pendingPublished := m.haWatchdogPendingDemotions.Load() != 0
+	pendingPublished := m.haWatchdogPendingDemotions.has(1)
 	if !pendingPublished {
 		t.Errorf("queued demotion did not publish its pending state before waiting on m.mu")
 	}
@@ -1271,5 +1271,118 @@ func TestHARefreshNeedsControlPrefixMatchesTheHelper9629(t *testing.T) {
 		t.Fatalf("refusal token disagreement: helper emits %q, Go matches %q — "+
 			"every NeedsLock would be misclassified as a transport failure",
 			match[1], haRefreshNeedsControlPrefix)
+	}
+}
+
+// TestSessionHAQueuedDemotionIsPerRG11160: a demotion queued for RG1 must
+// suppress RG1's renewal only — RG2's watchdog ticks during RG1's queued
+// demotion must still renew RG2's helper lease, repeatedly. The degraded
+// refresh retains RG1's key as INACTIVE (the helper rejects narrowed
+// key-sets with NeedsLock) and the oracle — a stateful mirror of the
+// helper's decision table — proves each refresh SERVED and each lease
+// advanced, not merely that bytes were emitted.
+func TestSessionHAQueuedDemotionIsPerRG11160(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{
+		1: {Active: true, WatchdogTimestamp: 1},
+		2: {Active: true, WatchdogTimestamp: 1},
+	})
+	m.haRGActiveMapWrite = func(int, bool) error { return nil }
+	m.helperStatusCtrlMapHook = &fakeCtrlMap{}
+	m.helperStatusBindingsMapHook = &fakeBindingsMap{}
+	m.syncClassifierMapsHook = func(*ConfigSnapshot) error { return nil }
+	m.xskLivenessProven = true
+
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.haWatchdogHelperInventory = []HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 1},
+		{RGID: 2, Active: true, WatchdogTimestamp: 1},
+	}
+	m.publishHAWatchdogSnapshotLocked()
+	m.mu.Unlock()
+
+	oracle := newHARefreshOracle9629([]HAGroupStatus{
+		{RGID: 1, Active: true, WatchdogTimestamp: 1},
+		{RGID: 2, Active: true, WatchdogTimestamp: 1},
+	}, 10)
+	// RG1 expired (the stall outlasted its lease — the #11160 scenario);
+	// RG2 VALID: the helper refuses whole-set when an incoming-active RG
+	// has an expired stored-active lease (#10787), so an expired RG2 would
+	// make Served unobservable and the renewal proof vacuous.
+	oracle.leaseUntil[1] = 9
+	oracle.leaseUntil[2] = 12
+	var served int
+	var sawRetained bool
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			if oracle.apply(req.HAState.Groups) != haRefreshServed9629 {
+				return errors.New("HA refresh oracle rejected degraded payload (key-set narrowed?)")
+			}
+			served++
+			// The demoting RG's key must be RETAINED as inactive (the
+			// helper rejects narrowed key-sets with NeedsLock).
+			rg1Inactive, rg2Fresh := false, false
+			for _, g := range req.HAState.Groups {
+				if g.RGID == 1 && !g.Active {
+					rg1Inactive = true
+				}
+				if g.RGID == 2 && g.Active && g.WatchdogTimestamp >= 100 {
+					rg2Fresh = true
+				}
+			}
+			if rg1Inactive && rg2Fresh {
+				sawRetained = true
+			}
+		}
+		return nil
+	}
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type == "update_ha_state" {
+			*status = *readyHelperStatus()
+		}
+		return nil
+	}
+
+	m.mu.Lock()
+	demoteDone := make(chan error, 1)
+	go func() { demoteDone <- m.UpdateRGActive(1, false) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for !m.haWatchdogPendingDemotions.has(1) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !m.haWatchdogPendingDemotions.has(1) {
+		m.mu.Unlock()
+		<-demoteDone
+		t.Fatal("queued RG1 demotion did not publish its pending state before waiting on m.mu")
+	}
+	if m.haWatchdogPendingDemotions.has(2) {
+		m.mu.Unlock()
+		<-demoteDone
+		t.Fatal("RG1 demotion must not mark RG2 pending")
+	}
+
+	// RG2's ticks during RG1's queued demotion must SERVE and advance
+	// RG2's lease past its pre-demotion expiry — repeatedly, not once.
+	for _, ts := range []uint64{100, 200} {
+		if err := m.UpdateHAWatchdog(2, ts); err != nil {
+			m.mu.Unlock()
+			<-demoteDone
+			t.Fatalf("RG2 watchdog tick during RG1 queued demotion: %v", err)
+		}
+	}
+	m.mu.Unlock()
+	if err := <-demoteDone; err != nil {
+		t.Fatalf("authoritative demotion: %v", err)
+	}
+	if served == 0 {
+		t.Fatal("no degraded refresh served during RG1 queued demotion (global suppression?)")
+	}
+	if got := oracle.leaseUntil[2]; got < 200 {
+		t.Errorf("RG2 lease stuck at %d, want advanced past both ticks (lease expired despite per-RG fix)", got)
+	}
+	if !sawRetained {
+		t.Errorf("no served refresh retained demoting RG1 as inactive alongside fresh RG2 (key-set narrowed?)")
 	}
 }
