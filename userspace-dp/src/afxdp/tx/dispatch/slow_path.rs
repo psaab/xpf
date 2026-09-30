@@ -68,12 +68,13 @@ pub(in crate::afxdp) fn handle_forward_build_failure(
     // exception reason for path observability). This also keeps the
     // documented invariant true: after #1946 the only intentional
     // unfiltered caller of the raw primitive ON A RESOLVED DISPOSITION is
-    // the ForwardCandidate build-failure reinject below (ForwardCandidate
-    // IS a route the kernel may legitimately serve). #6664 corrects the
-    // scope of that sentence: `poll_stages.rs` also calls the raw
-    // primitive unfiltered, but with a SYNTHETIC `LocalDelivery` decision
-    // for host-terminated IPsec passthrough, so it never carries a
-    // resolved disposition past the predicate.
+    // the ForwardCandidate build-failure path below. #11326's shared reinject
+    // boundary refuses its non-default table-stamped cases because the TUN
+    // loses the original iif/table identity; only MAIN-table candidates reach
+    // the kernel fallback. #6664 corrects the scope of that sentence:
+    // `poll_stages.rs` also calls the raw primitive unfiltered, but with a
+    // SYNTHETIC `LocalDelivery` decision for host-terminated IPsec passthrough,
+    // so it never carries a resolved disposition past the predicate.
     if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
         live.fabric_redirect_unsendable_drops
             .fetch_add(1, Ordering::Relaxed);
@@ -97,10 +98,12 @@ pub(in crate::afxdp) fn handle_forward_build_failure(
             frame,
             meta,
             decision,
-            // #9637 operator narrowing: the build-failure fallback carries a
-            // FORWARD disposition (possibly firewall-local via a non-owning
-            // table) that never passed a host gate — delegated outlet, so the
-            // kernel judges it by destination exactly as pre-#9637.
+            // #9637/#11326: the build-failure fallback carries a FORWARD
+            // disposition (possibly firewall-local via a non-owning table)
+            // that never passed a host gate, so it selects the delegated
+            // outlet. The shared reinject boundary drops explicit-table
+            // decisions before TUN; only an unstamped MAIN decision reaches
+            // the kernel FIB.
             false,
             recent_exceptions,
             "forward_build_slow_path",
@@ -176,6 +179,25 @@ pub(in crate::afxdp) fn reinject_host_authorized(
     matches!(disposition, ForwardingDisposition::LocalDelivery) && gate_proof
 }
 
+/// A generic TUN cannot retain the original ingress iif. Refuse every
+/// non-tunnel MissingNeighbor copy because the q0 mark can admit it even when
+/// the table stamp is zero; native packets remain in the userspace neighbor
+/// retry queue, while GRE-decapped packets keep the existing probe/resolver and
+/// retransmission recovery. Also refuse stamped NoRoute and build-failure
+/// ForwardCandidate fallbacks, which would otherwise be looked up in MAIN.
+pub(in crate::afxdp) fn slow_path_route_identity_requires_drop(
+    decision: SessionDecision,
+) -> bool {
+    decision.resolution.tunnel_endpoint_id == 0
+        && (decision.resolution.disposition == ForwardingDisposition::MissingNeighbor
+            || (decision.install_table_domain != 0
+                && matches!(
+                    decision.resolution.disposition,
+                    ForwardingDisposition::ForwardCandidate | ForwardingDisposition::NoRoute
+                )))
+}
+
+
 #[cold]
 #[inline(never)]
 pub(in crate::afxdp) fn maybe_reinject_slow_path(
@@ -229,18 +251,21 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path(
     );
 }
 
-/// RAW / unchecked slow-path reinjection primitive.
+/// Disposition-unfiltered slow-path reinjection primitive.
 ///
-/// This helper does NOT filter on `decision.resolution.disposition`: it
-/// will hand ANY parseable L3 frame to the kernel slow path (or local
-/// tunnel-delivery channel). Callers are responsible for applying
-/// [`ForwardingDisposition::is_slow_path_eligible`] BEFORE calling this,
-/// unless they have a documented reason to bypass the allow-list.
+/// This helper does NOT apply [`ForwardingDisposition::is_slow_path_eligible`]:
+/// callers must apply that allow-list unless they have a documented reason to
+/// bypass it. The shared output boundary refuses non-tunnel MissingNeighbor
+/// copies (the q0 mark can admit these without their original iif), plus
+/// table-stamped NoRoute and ForwardCandidate fallbacks.
 ///
 /// The filtered entry point is the `maybe_reinject_slow_path` wrapper
 /// above (and the gated trailing chokepoint in
 /// `poll_descriptor::poll_binding_process_descriptor`, #1913), which both
-/// apply the predicate.
+/// apply the disposition predicate.
+/// These callers rely on bypassing the disposition allow-list; do NOT add a
+/// disposition filter inside this primitive (it would break them — #1913
+/// Path B, rejected).
 ///
 /// The TWO INTENTIONAL unfiltered callers (disposition deliberately
 /// outside the allow-list):
@@ -257,9 +282,6 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path(
 ///     predicate. ESP/AH, ESP-in-UDP and NAT-T keepalives are
 ///     unconditionally exempt; IKE faces its own host-inbound admit
 ///     checks (#4323/#6471) before reaching this call.
-/// These callers rely on the unfiltered behavior; do NOT add a
-/// disposition filter inside this primitive (it would break them — #1913
-/// Path B, rejected).
 ///
 /// #7480: this enumeration is PINNED by
 /// `tests/slow_path_admit_single_site_6664.rs`
@@ -331,6 +353,19 @@ pub(in crate::afxdp) fn maybe_reinject_slow_path_from_frame_with_outlet(
     forwarding: &ForwardingState,
 ) -> bool {
     let meta = meta.into();
+    if slow_path_route_identity_requires_drop(decision) {
+        live.slow_path_drops.fetch_add(1, Ordering::Relaxed);
+        record_exception(
+            recent_exceptions,
+            binding,
+            "slow_path_ingress_identity_lost",
+            frame.len() as u32,
+            Some(meta),
+            None,
+            forwarding,
+        );
+        return false;
+    }
     let packet = if decision.nat.nat64 {
         crate::afxdp::frame::build_nat64_l3_packet_for_slow_path(
             frame,

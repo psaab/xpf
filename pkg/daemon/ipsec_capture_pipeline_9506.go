@@ -54,8 +54,8 @@ type IpsecCapturePipelineConfig struct {
 // IpsecCapturePipelineStatus is the bounded live-evidence view exported by the
 // actor. PipelineStats contains the per-outcome, provenance, overlap, L2, and
 // per-flow terminal counters. Delivered is the inet q0 mark-counter delta
-// downstream of the TUN write; q0 is shared with transit MissingNeighbor, so
-// it is authoritative only under a quiesced S5 window.
+// downstream of the TUN write. q0 may also count other mark-admitted
+// reinjects, so it is authoritative only under a quiesced S5 window.
 type IpsecCapturePipelineStatus struct {
 	Available          bool
 	Active             bool

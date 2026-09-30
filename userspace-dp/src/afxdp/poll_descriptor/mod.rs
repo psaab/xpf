@@ -8177,8 +8177,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // Send ARP/NDP solicitation via RAW socket (not XSK)
                                 // so the reply goes through the kernel's normal RX
                                 // path (cpumap_or_pass), bypassing XSK fill ring issues.
-                                // Also reinject original packet to slow-path for kernel
-                                // to forward once the neighbor is resolved.
+                                // Native frames are retained below for userspace
+                                // retry after the kernel probe; GRE-decapped
+                                // frames cannot use that buffer and their TUN
+                                // copies are refused at the final identity gate.
                                 // Trigger ARP/NDP resolution via kernel netlink.
                                 // Adding an INCOMPLETE neighbor entry makes the
                                 // kernel send its own ARP/NDP solicitation through
@@ -8787,12 +8789,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // kernel ARP/ICMP probe above already fired,
                                 // the trailing decap-aware
                                 // maybe_reinject_slow_path_from_frame
-                                // chokepoint (#1901) still hands the
-                                // correctly-paired INNER packet to the kernel
-                                // slow path, and the #1769 resolver +
-                                // retransmission recover the flow once the
-                                // neighbor resolves. Counted per binding so
-                                // the live gate is observable
+                                // chokepoint (#1901) refuses the correctly-
+                                // paired INNER packet before TUN because q0
+                                // would route it without its original iif. The
+                                // resolver still runs; the flow recovers by
+                                // retransmission once the neighbor resolves.
+                                // Counted per binding so the live gate is
                                 // (xpf_userspace_pending_neigh_decap_drops_total).
                                 // #10311: all non-buffered MISS fallthroughs
                                 // must use the arm's composed decision. A
@@ -9009,21 +9011,20 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // already counted by record_forwarding_disposition
                     // above and recycled by the recycle_now epilogue
                     // below — no leak, no double-count.
-                    // #10467: an explicit FBF/native-RI table owns the
-                    // resolution. If that table misses, delegating the
-                    // original frame to the kernel loses the userspace
-                    // ingress identity and can forward it through MAIN.
-                    // Ordinary MAIN-table NoRoute still delegates during the
-                    // normal FIB-refresh window; only a non-default install
-                    // identity is terminal here.
-                    let stamped_table_no_route = decision.resolution.disposition
-                        == ForwardingDisposition::NoRoute
-                        && decision.install_table_domain != 0;
+                    // #10467/#11326: a generic kernel TUN packet loses the
+                    // original ingress selectors. The shared
+                    // maybe_reinject_slow_path_from_frame_with_outlet boundary
+                    // terminally drops every non-tunnel MissingNeighbor copy,
+                    // including an unstamped MAIN-table decision admitted on q0;
+                    // native packets remain in pending_neigh, and GRE-decapped
+                    // packets use the existing probe/resolver and retransmission.
+                    // It also drops table-stamped NoRoute and ForwardCandidate
+                    // build fallbacks before any queue reaches the kernel.
                     let missing_neighbor_adjudicated =
                         missing_neighbor_slow_path_decision.is_some();
                     let slow_path_decision =
                         missing_neighbor_slow_path_decision.unwrap_or(decision);
-                    if !suppress_slow_path_reinject && !stamped_table_no_route {
+                    if !suppress_slow_path_reinject {
                         if slow_path_admit(&binding.live, decision.resolution.disposition) {
                             let outlet = if missing_neighbor_adjudicated {
                                 // The neighbor policy decision is the explicit

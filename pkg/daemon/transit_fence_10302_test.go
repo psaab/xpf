@@ -18,6 +18,10 @@ func (r *fenceRuntime10302) AttachedXDPIfindexes() []int {
 	return append([]int(nil), r.ifindexes...)
 }
 
+// #11326: the q0 mark pinhole must not imply an unmarked xpf-usp1 admission;
+// delegated q1 stays behind DROP while the Rust gate refuses table-stamped
+// NoRoute/build fallbacks and all non-tunnel MissingNeighbor copies before TUN.
+
 func TestArmedForwardFenceDropsUnownedTransit10302(t *testing.T) {
 	oldLinks := transitFenceLinkList
 	t.Cleanup(func() { transitFenceLinkList = oldLinks })
