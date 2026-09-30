@@ -171,26 +171,22 @@ pub(super) fn cached_session_resolution(
     if cached.egress_ifindex <= 0 || cached.neighbor_mac.is_none() {
         return None;
     }
-    // #11315: recheck the live neighbor MAC before serving a stored session
-    // resolution. The decision caches neighbor_mac at install; a gateway VRRP
-    // failover or NIC swap replaces the live binding (bumping the #3048 shard
-    // epoch), but this fast path never consulted it and served stale MAC A
-    // after the gateway moved to B. On a contradictory live binding return
-    // None so the caller falls through to a full re-resolve. This also stops the
-    // flow-cache reseed from laundering: the seed stamps the fresh pre-resolve
-    // epoch, so seeding a stale MAC would make it un-evictable.
+    // #11315: recheck the live neighbor binding before serving a stored
+    // session resolution. The decision caches neighbor_mac at install; a
+    // gateway failover can replace it, and FAILED/INCOMPLETE can remove it.
+    // Either a contradictory or missing live binding makes the cached MAC
+    // stale. The subsequent first learn after removal does not advance the
+    // #3048 shard epoch, so accepting the cached MAC while absent could leave
+    // it in the flow cache through recovery.
     if let (Some(next_hop), Some(stored_mac)) = (cached.next_hop, cached.neighbor_mac) {
         let ifindex = super::outer_neighbor_ifindex(forwarding, Some(dynamic_neighbors), &cached);
-        // Only a contradictory live binding proves staleness. Absent means no
-        // live information (an expired/GC'd entry whose MAC likely never
-        // changed); serving cached there preserves steady-state forwarding,
-        // matching #3048's same-MAC never-evicts discipline.
-        if let Some(live) =
+        let Some(live) =
             super::lookup_neighbor_entry(forwarding, Some(dynamic_neighbors), ifindex, next_hop)
-        {
-            if live.mac != stored_mac {
-                return None;
-            }
+        else {
+            return None;
+        };
+        if live.mac != stored_mac {
+            return None;
         }
     }
     let mut fallback = cached;

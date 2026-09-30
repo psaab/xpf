@@ -1222,6 +1222,20 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         forward_key: key.clone(),
     });
     let mut flow_cache = FlowCache::new();
+    let next_hop = cached_entry()
+        .decision
+        .resolution
+        .next_hop
+        .expect("cached decision carries a next-hop");
+    let live_mac = cached_entry()
+        .decision
+        .resolution
+        .neighbor_mac
+        .expect("cached decision carries a neighbor MAC");
+    fixture.dynamic_neighbors.insert(
+        (EGRESS_IFINDEX, next_hop),
+        crate::afxdp::types::NeighborEntry { mac: live_mac },
+    );
     let mut worker_ctx = fixture.worker_ctx();
     let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
     let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
@@ -3684,11 +3698,10 @@ fn admitted_cache_hit_learns_original_rx_source_mac_after_in_place_rewrite() {
     );
 }
 
-/// #11315: the flow-cache seed must not launder a stale neighbor MAC with the
-/// fresh pre-resolve epoch. The live binding for the decision's next-hop is
-/// MAC B while the stored decision still carries MAC A: the seed must insert
-/// nothing (the slow path re-resolves instead). Positive control: a decision
-/// carrying the live MAC B seeds as before.
+/// #11315: a missing live neighbor must not let a stale session decision
+/// seed a flow-cache entry with the fresh epoch. FAILED/INCOMPLETE removes the
+/// binding, then the first learn after removal does not bump the shard epoch.
+/// A stale decision must remain uncacheable before and after that first learn.
 #[test]
 fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
@@ -3700,27 +3713,34 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
         dst_ip: key.dst_ip,
         forward_key: key.clone(),
     });
-    // Live binding for the cached decision's next-hop is MAC B, contradicting
-    // the stored decision's MAC A.
-    let next_hop = cached_entry()
-        .decision
+    let stale_decision = cached_entry().decision;
+    let next_hop = stale_decision
         .resolution
         .next_hop
         .expect("cached decision carries a next-hop");
+    let mac_a = stale_decision
+        .resolution
+        .neighbor_mac
+        .expect("cached decision carries neighbor MAC A");
     let mac_b = [0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b];
     fixture.dynamic_neighbors.insert(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: mac_b },
+        crate::afxdp::types::NeighborEntry { mac: mac_a },
     );
-    assert_ne!(
-        cached_entry().decision.resolution.neighbor_mac,
-        Some(mac_b),
-        "fixture precondition: stored MAC A must differ from live MAC B"
+    assert!(
+        fixture
+            .dynamic_neighbors
+            .remove_if_present(&(EGRESS_IFINDEX, next_hop)),
+        "fixture precondition: FAILED/INCOMPLETE removes a present binding"
     );
+    let missing_neighbor_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
+    let epoch_before_first_learn =
+        missing_neighbor_snapshot.epoch_for(&(EGRESS_IFINDEX, next_hop));
     let worker_ctx = fixture.worker_ctx();
-    let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
     let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
-    let seed = |cache: &mut FlowCache, decision: SessionDecision| {
+    let seed = |cache: &mut FlowCache,
+                decision: SessionDecision,
+                neighbor_epoch_snapshot: &crate::afxdp::sharded_neighbor::ShardEpochSnapshot| {
         stage_flow_cache_seed(
             cache,
             &flow,
@@ -3737,7 +3757,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
             crate::filter::TermMatchExtra::default(),
             None,
             false,
-            &neighbor_epoch_snapshot,
+            neighbor_epoch_snapshot,
             &worker_ctx,
         );
     };
@@ -3752,26 +3772,51 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
             .is_some()
     };
 
-    // Stale decision (MAC A) against live B: no seed.
-    let mut stale_cache = FlowCache::new();
-    seed(&mut stale_cache, cached_entry().decision);
+    let mut absent_cache = FlowCache::new();
+    seed(
+        &mut absent_cache,
+        stale_decision.clone(),
+        &missing_neighbor_snapshot,
+    );
     assert!(
-        !lookup_present(&mut stale_cache),
-        "a stale-MAC decision must not seed the flow cache (#11315)"
+        !lookup_present(&mut absent_cache),
+        "a stale-MAC decision must not seed while its neighbor is absent"
     );
 
-    // Positive control: the same decision carrying the live MAC B seeds.
+    // The first learn after removal does not advance the shard epoch.
+    fixture.dynamic_neighbors.insert_if_changed(
+        (EGRESS_IFINDEX, next_hop),
+        crate::afxdp::types::NeighborEntry { mac: mac_b },
+    );
+    let live_neighbor_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
+    assert_eq!(
+        live_neighbor_snapshot.epoch_for(&(EGRESS_IFINDEX, next_hop)),
+        epoch_before_first_learn,
+        "a first learn must not bump the shard epoch"
+    );
+
+    let mut stale_cache = FlowCache::new();
+    seed(
+        &mut stale_cache,
+        stale_decision,
+        &live_neighbor_snapshot,
+    );
+    assert!(
+        !lookup_present(&mut stale_cache),
+        "a stale-MAC decision must not seed after the first learn either"
+    );
+
     let mut fresh_decision = cached_entry().decision;
     fresh_decision.resolution.neighbor_mac = Some(mac_b);
     let mut fresh_cache = FlowCache::new();
-    seed(&mut fresh_cache, fresh_decision);
+    seed(&mut fresh_cache, fresh_decision, &live_neighbor_snapshot);
     assert!(
         lookup_present(&mut fresh_cache),
         "a live-MAC decision must still seed the flow cache"
     );
 }
-/// #11315 v6 twin: a stale IPv6 neighbor MAC must not be re-stamped with a
-/// fresh epoch when the forward packet seeds the flow cache.
+/// #11315 v6 twin: after FAILED/INCOMPLETE removal, a stale IPv6 decision
+/// must not be re-stamped before or after the first neighbor learn.
 #[test]
 fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
@@ -3827,8 +3872,17 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
     let mac_b = [0x00, 0x11, 0x22, 0x33, 0x44, 0x66];
     fixture.dynamic_neighbors.insert(
         (EGRESS_IFINDEX, next_hop),
-        crate::afxdp::types::NeighborEntry { mac: mac_b },
+        crate::afxdp::types::NeighborEntry { mac: mac_a },
     );
+    assert!(
+        fixture
+            .dynamic_neighbors
+            .remove_if_present(&(EGRESS_IFINDEX, next_hop)),
+        "fixture precondition: FAILED/INCOMPLETE removes a present v6 binding"
+    );
+    let missing_neighbor_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
+    let epoch_before_first_learn =
+        missing_neighbor_snapshot.epoch_for(&(EGRESS_IFINDEX, next_hop));
     let decision = |mac| SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
@@ -3846,9 +3900,10 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
         install_table_check: 0,
     };
     let worker_ctx = fixture.worker_ctx();
-    let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
     let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
-    let seed = |cache: &mut FlowCache, d: SessionDecision| {
+    let seed = |cache: &mut FlowCache,
+                d: SessionDecision,
+                neighbor_epoch_snapshot: &crate::afxdp::sharded_neighbor::ShardEpochSnapshot| {
         stage_flow_cache_seed(
             cache,
             &flow,
@@ -3865,7 +3920,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
             crate::filter::TermMatchExtra::default(),
             None,
             false,
-            &neighbor_epoch_snapshot,
+            neighbor_epoch_snapshot,
             &worker_ctx,
         );
     };
@@ -3880,15 +3935,45 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
             .is_some()
     };
 
+    let mut absent_cache = FlowCache::new();
+    seed(
+        &mut absent_cache,
+        decision(mac_a),
+        &missing_neighbor_snapshot,
+    );
+    assert!(
+        !lookup_present(&mut absent_cache),
+        "a stale IPv6 MAC must not seed while its neighbor is absent"
+    );
+
+    fixture.dynamic_neighbors.insert_if_changed(
+        (EGRESS_IFINDEX, next_hop),
+        crate::afxdp::types::NeighborEntry { mac: mac_b },
+    );
+    let live_neighbor_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
+    assert_eq!(
+        live_neighbor_snapshot.epoch_for(&(EGRESS_IFINDEX, next_hop)),
+        epoch_before_first_learn,
+        "a first v6 learn must not bump the shard epoch"
+    );
+
     let mut stale_cache = FlowCache::new();
-    seed(&mut stale_cache, decision(mac_a));
+    seed(
+        &mut stale_cache,
+        decision(mac_a),
+        &live_neighbor_snapshot,
+    );
     assert!(
         !lookup_present(&mut stale_cache),
-        "a stale IPv6 MAC must not seed the flow cache (#11315)"
+        "a stale IPv6 decision must not seed after the first learn either"
     );
 
     let mut fresh_cache = FlowCache::new();
-    seed(&mut fresh_cache, decision(mac_b));
+    seed(
+        &mut fresh_cache,
+        decision(mac_b),
+        &live_neighbor_snapshot,
+    );
     assert!(
         lookup_present(&mut fresh_cache),
         "a current IPv6 MAC must still seed the flow cache"

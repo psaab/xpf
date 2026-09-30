@@ -89,6 +89,21 @@ fn test_decision() -> SessionDecision {
     }
 }
 
+fn dynamic_neighbors_for_test_resolution() -> Arc<ShardedNeighborMap> {
+    let resolution = test_resolution();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    dynamic_neighbors.insert(
+        (
+            resolution.egress_ifindex,
+            resolution.next_hop.expect("test resolution has a next-hop"),
+        ),
+        NeighborEntry {
+            mac: resolution.neighbor_mac.expect("test resolution has a MAC"),
+        },
+    );
+    dynamic_neighbors
+}
+
 fn empty_filter(name: &str, family: &str) -> Arc<Filter> {
     Arc::new(Filter {
         id: 1,
@@ -2923,7 +2938,7 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, inactive_ha_runtime(0));
     let forwarding = test_forwarding_state();
-    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let dynamic_neighbors = dynamic_neighbors_for_test_resolution();
     apply_worker_commands(
         &commands,
         &mut sessions,
@@ -3352,7 +3367,7 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
         .expect("commands lock")
         .push_back(WorkerCommand::DemoteOwnerRGS { owner_rgs: vec![1] });
     let forwarding = test_forwarding_state();
-    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let dynamic_neighbors = dynamic_neighbors_for_test_resolution();
     let inactive_state = BTreeMap::from([(1, inactive_ha_runtime(0))]);
 
     apply_worker_commands(
@@ -5012,7 +5027,7 @@ fn apply_worker_commands_demote_owner_rg_rewrites_resolution_to_fabric_redirect(
         -1,
         &test_forwarding_state_with_fabric(),
         &ha_state,
-        &Arc::new(ShardedNeighborMap::new()),
+        &dynamic_neighbors_for_test_resolution(),
         0,
         &mut VecDeque::new(),
     );
@@ -10708,7 +10723,7 @@ fn install_synced_forward_5152(table: &mut SessionTable, key: &SessionKey, now_n
 
 #[test]
 fn refresh_owner_rgs_skips_hainactive_hold_clock_5152() {
-    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let neighbors = dynamic_neighbors_for_test_resolution();
     let forwarding = test_forwarding_state(); // NO fabric -> HAInactive survives
     let key = test_key();
     let then = 1_000_000_000u64;
@@ -15582,8 +15597,32 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
         Some(mac_a),
         "live A must still serve the cached decision"
     );
-    // VRRP failover: the live binding moves to B.
+    // FAILED/INCOMPLETE removes the live row. The stored A must not survive
+    // that absence, and the first learn of B does not bump the shard epoch.
+    let epoch_before_remove = dynamic_neighbors
+        .snapshot_shard_epochs()
+        .epoch_for(&(ifindex, next_hop));
+    assert!(dynamic_neighbors.remove_if_present(&(ifindex, next_hop)));
+    let absent =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        absent.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "a missing live neighbor must not fall back to cached MAC A"
+    );
+    assert_eq!(absent.neighbor_mac, None);
+    let epoch_after_remove = dynamic_neighbors
+        .snapshot_shard_epochs()
+        .epoch_for(&(ifindex, next_hop));
+    assert_eq!(epoch_after_remove, epoch_before_remove);
     dynamic_neighbors.insert_if_changed((ifindex, next_hop), NeighborEntry { mac: mac_b });
+    assert_eq!(
+        dynamic_neighbors
+            .snapshot_shard_epochs()
+            .epoch_for(&(ifindex, next_hop)),
+        epoch_after_remove,
+        "the first learn after removal does not bump the shard epoch"
+    );
     // The same stored decision (stale A) must now re-resolve to live B.
     let served_b =
         lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
@@ -15672,7 +15711,30 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
         Some(mac_a),
         "live A must still serve the cached decision"
     );
+    let epoch_before_remove = dynamic_neighbors
+        .snapshot_shard_epochs()
+        .epoch_for(&(ifindex, next_hop));
+    assert!(dynamic_neighbors.remove_if_present(&(ifindex, next_hop)));
+    let absent =
+        lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
+    assert_eq!(
+        absent.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "a missing live neighbor must not fall back to cached MAC A (v6)"
+    );
+    assert_eq!(absent.neighbor_mac, None);
+    let epoch_after_remove = dynamic_neighbors
+        .snapshot_shard_epochs()
+        .epoch_for(&(ifindex, next_hop));
+    assert_eq!(epoch_after_remove, epoch_before_remove);
     dynamic_neighbors.insert_if_changed((ifindex, next_hop), NeighborEntry { mac: mac_b });
+    assert_eq!(
+        dynamic_neighbors
+            .snapshot_shard_epochs()
+            .epoch_for(&(ifindex, next_hop)),
+        epoch_after_remove,
+        "the first learn after removal does not bump the shard epoch (v6)"
+    );
     let served_b =
         lookup_forwarding_resolution_for_session(&forwarding, &dynamic_neighbors, &flow, stored);
     assert_eq!(
