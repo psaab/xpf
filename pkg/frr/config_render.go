@@ -180,6 +180,7 @@ func (m *Manager) generateInterfaceSettings(fc *FullConfig) string {
 // disagree. It mirrors generateStaticRouteInTable's emit structure exactly:
 //   - a next-table route is realized by an `ip rule` in the routing package,
 //     not FRR, so it renders no FRR FIB line here;
+//   - a route with `no-install` emits no line and does not count as installed;
 //   - a discard/reject route renders a negative (Null0/reject) route;
 //   - otherwise a route renders one line per next-hop, so it needs >= 1.
 //
@@ -190,7 +191,7 @@ func (m *Manager) generateInterfaceSettings(fc *FullConfig) string {
 // leaving NO default route at all (WAN / management remote lockout). Deriving
 // suppression from renderability closes that gap.
 func staticRouteRendersFIB(sr *config.StaticRoute) bool {
-	if sr.NextTable != "" {
+	if sr.NoInstall || sr.NextTable != "" {
 		return false
 	}
 	return sr.Discard || sr.Reject || len(sr.NextHops) > 0
@@ -283,6 +284,9 @@ func (m *Manager) generateStaticRoute(sr *config.StaticRoute, vrfName string, re
 func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName string, tableID int, rethMap map[string]string, ipv6NextHopInterfaces map[string]map[string]string, declaredNetdevs map[string]string) string {
 	if sr.NextTable != "" {
 		return "" // handled via ip rule in routing package
+	}
+	if sr.NoInstall {
+		return ""
 	}
 	// #6795: final operand-validity belt. Destination is a RAW STRING from the
 	// parser, and it is interpolated into every `ip route` line this function

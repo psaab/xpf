@@ -55,9 +55,9 @@ func samplingFlowServerNode() *schemaNode {
 // modifier path). Both leaves were accepted untyped before #2448, so a
 // malformed destination or next-hop committed cleanly and then silently
 // failed to install in the FRR renderer and the Rust FIB builder. The
-// remaining children (qualified-next-hop, discard, reject, next-table,
-// preference) are declared so completion does not drop them and so each is
-// recognized as a known child rather than an extra identity token.
+// remaining children (qualified-next-hop, no-install, discard, reject,
+// next-table, preference) are declared so completion does not drop them and
+// so each is recognized as a known child rather than an extra identity token.
 func staticRouteNode() *schemaNode {
 	return &schemaNode{
 		desc: "Static route", args: 1, placeholder: "<destination>",
@@ -126,6 +126,7 @@ func staticRouteNode() *schemaNode {
 					// preference is what creates the floating backup.
 					"metric": {desc: "Metric", args: 1, placeholder: "<value>", children: nil},
 				}},
+			"no-install": {desc: "Do not install this static route", children: nil},
 			"discard":    {desc: "Discard (blackhole) route", children: nil},
 			"reject":     {desc: "Reject route (send ICMP unreachable)", children: nil},
 			"next-table": {desc: "Resolve in another routing table", args: 1, placeholder: "<table>", children: nil},
