@@ -1637,19 +1637,20 @@ type FirewallFilterTerm struct {
 	// enforcing only the first range. A single range (len == 1) compiles exactly
 	// as before via FlexMatch. Populated by compileFilterFrom.
 	FlexMatchRangeNames []string
-	// UnknownFrom records `from` match leaves the dataplane does NOT enforce
-	// (#3307). The schema gate is opt-in (schema_walk.go), so an unknown `from`
-	// leaf (e.g. ttl / source-mac-address / ip-options / fragment-offset /
-	// hop-limit) resolves to a nil schema child and passes commit; the
-	// compileFilterFrom switch had no default arm, so the leaf was silently
-	// dropped and the term enforced a BROADER match than authored — an `accept`
-	// term over-permits, a `discard`/`reject` term over-drops, with no commit or
-	// apply error. Mirroring UnknownActions/UnknownFlexMatch, compileFilterFrom's
-	// default arm records the offending leaf name here and
-	// validateFilterFromMatchStrict hard-rejects the commit; the tolerant load /
-	// peer-sync path downgrades to a warning (#1960 no-brick). The enforced set
-	// is exactly the compileFilterFrom switch cases (every one maps to a wire
-	// field the snapshot builder emits and the Rust matcher evaluates).
+	// UnknownFrom records `from` predicates the dataplane does NOT enforce
+	// (#3307/#11334). Whole unrecognized leaves (e.g. ttl / source-mac-address /
+	// ip-options / fragment-offset / hop-limit) resolve to a nil schema child
+	// and pass commit because the schema gate is opt-in; compileFilterFrom's
+	// default arm records those leaf names here. The recognized-but-unsupported
+	// literal `source-address <prefix> except` /
+	// `destination-address <prefix> except` construct is recorded here with its
+	// full spelling too, so strict commit names it as unsupported rather than
+	// misclassifying `except` as a malformed address. Ignoring this marker would
+	// match the listed prefixes positively instead of excluding them, changing
+	// which packets the term action affects. validateFilterFromMatchStrict
+	// hard-rejects the commit; the tolerant load / peer-sync path downgrades to a
+	// warning (#1960 no-brick). Each entry maps to a wire marker the snapshot
+	// builder emits and the Rust matcher fails closed on.
 	UnknownFrom []string
 	// ValuelessFrom records value-bearing `from` match leaves the term WROTE
 	// but left EMPTY (`from protocol;` with no operand, #8480). Such a leaf
