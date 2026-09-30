@@ -102,6 +102,16 @@ func TestPerformZeroizeWipeErasesFullSecretSet_5890(t *testing.T) {
 	archiveSnap := filepath.Join(archiveDir, "config-20260101.1.conf")
 	mustWriteFile(t, archiveSnap, []byte("system { services { ssh; } }\n"+secret))
 
+	// --- CLI history files (#11105, seamed home). ---
+	fakeHome := filepath.Join(root, "home-op")
+	histMain := filepath.Join(fakeHome, ".xpf_history")
+	histCLI := filepath.Join(fakeHome, ".xpf_cli_history")
+	mustWriteFile(t, histMain, []byte("set secret hunter2\n"))
+	mustWriteFile(t, histCLI, []byte("set secret hunter2\n"))
+	origHistHomes := zeroizeCLIHistoryHomesOverride
+	zeroizeCLIHistoryHomesOverride = []string{fakeHome}
+	t.Cleanup(func() { zeroizeCLIHistoryHomesOverride = origHistHomes })
+
 	// === Drive the SHARED primitive the console delegates to. ===
 	// #7173: the archive dir is now a PARAMETER, not read from the package
 	// default. Passing "" here would mean "archival disabled" and silently skip
@@ -128,6 +138,10 @@ func TestPerformZeroizeWipeErasesFullSecretSet_5890(t *testing.T) {
 	assertAbsent(t, swanctl)
 	assertAbsent(t, kea4)
 	assertAbsent(t, kea6)
+
+	// CLI history files (cleartext PSKs) gone.
+	assertAbsent(t, histMain)
+	assertAbsent(t, histCLI)
 
 	// Login accounts torn down; operator artifacts survive.
 	if len(*deleted) != 1 || (*deleted)[0] != "alice" {
