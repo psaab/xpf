@@ -37,12 +37,13 @@ func TestInstalledValBuildsTheImportRequest9752(t *testing.T) {
 		t.Fatalf("marshal request: %v", err)
 	}
 	s := string(wire)
-	// The chain's load-bearing content survives the builder.
+	// The installed session's source NAT survives; all other absent fields stay omitted.
 	for _, want := range []string{
 		`"operation":"upsert"`,
 		`"install_table_domain":525590`,
 		`"install_table_check":3318534811`,
 		`"session_id":77`,
+		`"nat_src_ip":"203.0.113.10"`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("request lost %s: %s", want, s)
@@ -51,13 +52,14 @@ func TestInstalledValBuildsTheImportRequest9752(t *testing.T) {
 	// Round 5 item 2: the mirror-sourced resend lost RTFlowSessionID, but
 	// the builder falls back to the mirror-preserved SessionID, so the
 	// incarnation still rides the request (this also closes #10103).
-	// The unresolved session omits every other omitempty-absent key.
+	// The installed value is SNAT-only, so destination NAT and unrelated
+	// omitempty fields remain absent.
 	for _, absent := range []string{
-		"neighbor_mac", "src_mac", "nat_src_ip", "nat_dst_ip",
+		"neighbor_mac", "src_mac", "nat_dst_ip",
 		"policy_id", "peer_delete", "forward_only",
 	} {
 		if strings.Contains(s, absent) {
-			t.Errorf("request carries %s for an unresolved upsert (must be absent): %s", absent, s)
+			t.Errorf("request carries %s for an SNAT-only upsert (must be absent): %s", absent, s)
 		}
 	}
 	const path = "testdata/synced_request_9752.json"

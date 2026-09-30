@@ -81,6 +81,28 @@ func vrfScopeProgram(t *testing.T, cfg *config.Config, zone string) (JunosHostPr
 	return JunosHostProgram{}, false
 }
 
+// compileLegacyVRFScopeConfig6619 uses the tolerant load path for a mixed-
+// routing-instance zone that strict commits now reject. Persisted configs
+// from before that gate can still reach this runtime projection.
+func compileLegacyVRFScopeConfig6619(t *testing.T, cmds []string) *config.Config {
+	t.Helper()
+	tree := &config.ConfigTree{}
+	for _, cmd := range cmds {
+		path, err := config.ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", cmd, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	return cfg
+}
+
 // TestJunosHostIngressScopeCoverage6619 walks the scope-resolution states.
 func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 	rows := []struct {
@@ -88,9 +110,10 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 		// zone / policyName are explicit rather than derived: a heuristic that
 		// picks the subject from the expected values makes the row's assertions
 		// depend on the answer they are checking.
-		zone       string
-		policyName string
-		cmds       []string
+		zone           string
+		policyName     string
+		cmds           []string
+		compileLenient bool
 		// wantScoped is the zone's resolved iifname set, asserted exactly: a
 		// count would pass for the right number of wrong netdevs, and the whole
 		// defect is that a rule names a netdev traffic never arrives on.
@@ -135,12 +158,11 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 			wantWarn:   1,
 		},
 		{
-			// #6619 + member 8, resolved-SOME. This is the state the coverage
-			// predicate exists for: the rule that CAN be scoped is still emitted
-			// (protection that works is never withdrawn) AND the warning fires,
-			// because the deny is not enforced on ge-0-0-1's ingress. An
-			// existence check reports this zone as fully enforced.
-			name:       "VRF-enslaved plus a sibling — partial scope, rule AND warning",
+			// #6619 + member 8, resolved-SOME. Keep the rule for ge-0-0-2,
+			// but warn that VRF-enslaved ge-0-0-1 cannot be scoped. Strict
+			// commits reject zones spanning MAIN and vrA (#11061); configs
+			// committed before that gate can still arrive through tolerant load.
+			name:       "legacy mixed-routing zone — partial scope, rule AND warning",
 			zone:       "zoneA",
 			policyName: "denyA",
 			cmds: concat(vrfScopeBase,
@@ -151,9 +173,10 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 					"set routing-instances vrA interface ge-0/0/1.0",
 				},
 				vrfScopeDeny("zoneA", "denyA")),
-			wantScoped: []string{"ge-0-0-2"},
-			wantRules:  true,
-			wantWarn:   1,
+			compileLenient: true,
+			wantScoped:     []string{"ge-0-0-2"},
+			wantRules:      true,
+			wantWarn:       1,
 		},
 		{
 			// The enslavement predicate keys on the NETDEV, not the config ref.
@@ -267,7 +290,12 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			zone, policyName := row.zone, row.policyName
-			cfg := residualCfg(t, row.cmds)
+			var cfg *config.Config
+			if row.compileLenient {
+				cfg = compileLegacyVRFScopeConfig6619(t, row.cmds)
+			} else {
+				cfg = residualCfg(t, row.cmds)
+			}
 
 			if got := config.JunosHostZoneIngressNetdevs(cfg)[zone]; !slices.Equal(got, row.wantScoped) {
 				t.Errorf("scope for %s = %v, want %v — the iifname set is the mechanism; a rule naming a netdev LOCAL_IN never reports enforces nothing",
