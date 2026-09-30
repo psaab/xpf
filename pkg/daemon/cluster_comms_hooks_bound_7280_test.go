@@ -29,10 +29,8 @@ import (
 // and returns only bools: a caller here never touches a func value, so the
 // boxing bug cannot be reintroduced from this side.
 //
-// COUNT NOTE. #7280 says "13 sites" but enumerates twelve, and the file
-// actually carries FOURTEEN wiring assignments across the three builders (two
-// transport refs, ten failover hooks, two fence hooks). The issue's list is a
-// floor. All fourteen are bound here.
+// COUNT NOTE. The #7280 baseline predates the #11566 never-seen sync-freshness
+// hook. Keep every currently reported hook in the explicit list below.
 
 // A fresh manager must report every hook UNINSTALLED.
 //
@@ -90,13 +88,14 @@ func allWiredHooks7280() []string {
 		cluster.HookLocalTransferCommitRdy,
 		cluster.HookTransferReadiness,
 		cluster.HookPeerTimeoutGuard,
+		cluster.HookPeerNeverSeenSyncFresh,
 		cluster.HookHeartbeatRestartNotify,
 		cluster.HookPeerFence,
 		cluster.HookPeerFenceConfirm,
 	}
 }
 
-// The ten Manager hooks installed by wireClusterPeerFailoverHooks, plus the
+// Manager hooks installed by wireClusterPeerFailoverHooks, plus the
 // lease duration it computes.
 func TestWireClusterPeerFailoverHooksInstallsManagerHooks_7280(t *testing.T) {
 	d := newWiringTestDaemon()
@@ -115,6 +114,7 @@ func TestWireClusterPeerFailoverHooksInstallsManagerHooks_7280(t *testing.T) {
 		cluster.HookLocalTransferCommitRdy,
 		cluster.HookTransferReadiness,
 		cluster.HookPeerTimeoutGuard,
+		cluster.HookPeerNeverSeenSyncFresh,
 		cluster.HookHeartbeatRestartNotify,
 	} {
 		if !got[name] {
