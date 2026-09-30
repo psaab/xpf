@@ -1064,6 +1064,12 @@ type compileOpts struct {
 	// no-brick); the runtime routes-and-mislogs the term independently. Same
 	// doctrine as lenientFilterPortExcept.
 	lenientFilterRoutingInstanceConflict bool
+	// lenientMemberFBFKernelBand (#11321) downgrades the commit gate for FBF
+	// attached to a non-forwarding routing-instance member from a strict error
+	// to an operator-visible warning on tolerant load / peer-sync. Such a
+	// member is VRF-enslaved: kernel l3mdev lookup and the miss terminator run
+	// before the PBR rule band, while userspace still honors the FBF override.
+	lenientMemberFBFKernelBand bool
 	// lenientFilterTerminalConflict (#4375, avo-review-007 H3) downgrades the
 	// firewall-filter conflicting-terminal-actions gate
 	// (validateFilterTerminalConflictStrict) from a hard compile error to a
@@ -3025,6 +3031,7 @@ func lenientCompileOpts() compileOpts {
 		lenientFilterFromMatch:                 true,
 		lenientFilterAddressLiterals:           true,
 		lenientFilterRoutingInstanceConflict:   true,
+		lenientMemberFBFKernelBand:             true,
 		lenientFilterTerminalConflict:          true,
 		lenientPolicerThenConflict:             true,
 		lenientPolicerUnknownActions:           true,
