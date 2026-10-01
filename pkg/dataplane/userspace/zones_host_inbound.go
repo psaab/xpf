@@ -57,9 +57,10 @@ type ZoneHostInboundView struct {
 	IngressNetdevs []string
 	// IngressDenyNetdevs (#10431) are netdevs whose host-inbound claims could
 	// not be assigned to one unambiguous view (for example, a shared parent).
-	// The renderer emits an unconditional drop for every judged destination
-	// before destination-only rules, disabling the unsafe fallback. They are
-	// attached to one view only so each fail-closed guard is emitted once.
+	// The renderer applies destination-owner service rights first, then emits a
+	// counted fail-closed catch-all for unmatched traffic before destination-only
+	// rules. They are attached to one view only so each ambiguous rule set is
+	// emitted once.
 	IngressDenyNetdevs []string
 }
 
