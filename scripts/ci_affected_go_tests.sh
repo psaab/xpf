@@ -15,17 +15,18 @@ fi
 BASE=$1
 HEAD=$2
 
-if ! CHANGED=$(git diff --name-only "$BASE" "$HEAD" -- '*.go' go.mod go.sum); then
-  echo "unable to diff Go source or module files between $BASE and $HEAD" >&2
+if ! CHANGED=$(git diff --name-only "$BASE" "$HEAD"); then
+  echo "unable to diff repository paths between $BASE and $HEAD" >&2
   exit 1
 fi
 if [ -z "$CHANGED" ]; then
-  echo "No Go source or module files changed; skipping affected Go tests."
+  echo "No files changed; skipping affected Go tests."
   exit 0
 fi
 
 # The Python selector uses go list's package owners and all regular/test import
-# edges. Module or vendored-source changes seed every in-repository package.
+# edges. Package-local fixtures map to their nearest Go package; shared fixtures,
+# module changes, or vendored changes seed every in-repository package.
 PKGS=$(printf '%s\n' "$CHANGED" | python3 -c '
 import json
 import os
@@ -36,12 +37,7 @@ import sys
 changed = [line.rstrip("\n") for line in sys.stdin if line.rstrip("\n")]
 module_changed = any(path in ("go.mod", "go.sum") for path in changed)
 vendored_changed = any(path.startswith("vendor/") for path in changed)
-go_files = [path for path in changed if path.endswith(".go")]
-source_files = [
-    path for path in go_files
-    if "testdata" not in pathlib.PurePosixPath(path).parts
-    and not path.startswith("vendor/")
-]
+fixture_dirs = {"testdata", "fixtures", "test-fixtures", "test_fixtures"}
 
 listed = subprocess.run(
     ["go", "list", "-json", "./..."],
@@ -74,15 +70,24 @@ if module_changed or vendored_changed:
 else:
     unresolved = []
     root = os.path.realpath(".")
-    for filename in source_files:
+    for filename in changed:
         path = os.path.normpath(os.path.join(root, filename))
         owner = owners.get(path)
-        if owner is None:
-            owner = directories.get(os.path.dirname(path))
-        if owner is None:
-            unresolved.append(filename)
-        else:
+        directory = os.path.realpath(os.path.dirname(path))
+        while owner is None:
+            owner = directories.get(directory)
+            if owner is not None or directory == root:
+                break
+            parent = os.path.dirname(directory)
+            if parent == directory:
+                break
+            directory = parent
+        if owner is not None:
             seeds.add(owner)
+        elif fixture_dirs.intersection(pathlib.PurePosixPath(filename).parts):
+            seeds.update(packages)
+        elif filename.endswith(".go"):
+            unresolved.append(filename)
     if unresolved:
         print(
             "cannot map changed Go file(s) to a package; refusing to skip tests: "

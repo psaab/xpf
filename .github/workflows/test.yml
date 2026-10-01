@@ -1,7 +1,8 @@
-# These checks report on every PR but do not block merges until the repository
-# owner adds both exact job contexts below as required status checks on master.
-# Owner action: require `CI tests / Go build and affected tests` and
-# `CI tests / Rust workspace compile check` in the master branch ruleset.
+# These checks report on every PR but do not block merges until status contexts
+# are required in master branch rulesets. Do not require the Go job while
+# ordinary affected-package selections are red on master.
+# Owner action, once those baselines are green: require `CI tests / Go build
+# and affected tests` and `CI tests / Rust workspace compile check`.
 #
 # The full Go suite is currently red on master, so the Go test step selects the
 # changed packages and their reverse dependents. Once `go test ./... -count=1`
