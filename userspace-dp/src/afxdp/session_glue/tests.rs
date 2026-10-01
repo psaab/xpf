@@ -14472,9 +14472,9 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     let sync: Vec<_> = update.iter().filter(|f| f.as_bytes()[4] == 3 /* MSG_SESSION_UPDATE; the #9412 golden lockstep pins this byte in both languages */).collect();
     assert_eq!(sync.len(), 1, "#9412: the Update must be queued to the peer exactly once as MSG_SESSION_UPDATE");
     assert_eq!(
-        sync[0].as_bytes()[sync[0].as_bytes().len() - 12], // #11064: +3 source-NAT ICMP identity behind the #9752 tail
+        sync[0].as_bytes()[sync[0].as_bytes().len() - 18],
         2,
-        "#9412/#11064: the queued Update must carry its close class 11 bytes from the end (#9752 tail + 3-byte source-NAT ICMP identity follow)"
+        "#9412/#11070: the queued Update must carry its close class before the 17-byte session-sync trailer"
     );
 }
 

@@ -154,6 +154,14 @@ distinction).
   which the userspace snapshot builder marks `TCPFlagsUnparseable` to fail
   the term CLOSED (#3367) — a deny sentinel, never a match-all widening;
   the out-of-range code-point entry is dropped (the pre-#2447 fail-safe).
+  **Unknown firewall-filter `then` actions fail closed on tolerant loads
+  (#11357):** `compileFilterThen` retains an unrecognized token in
+  `FirewallFilterTerm.UnknownActions`. Strict commit rejects it; `Store.Load`
+  and `Store.SyncApply` keep startup/HA sync bootable with a warning and compile
+  that term's action as `discard`, rather than treating the empty action as a
+  fall-through to the implicit accept. Known modifier-only terms remain
+  fall-through terms.
+
 - `ValueType` — `value_type.go`. Classifies a typed leaf's value
   (`ValueRate`, `ValueByteSizeOrPercent`, `ValueDate`, `ValueString`, ...)
   and supplies the `?`-completion placeholder via `Placeholder()`.
