@@ -9,7 +9,27 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/psaab/xpf/pkg/dhcp"
+	"github.com/psaab/xpf/pkg/routing"
+	"github.com/vishvananda/netlink"
 )
+
+type mgmtRouteRebindOps11450 struct {
+	*reconcileFakeLinkOps
+	masterBinds int
+}
+
+func (ops *mgmtRouteRebindOps11450) LinkSetMaster(link, master netlink.Link) error {
+	ops.masterBinds++
+	link.Attrs().MasterIndex = master.Attrs().Index
+	return nil
+}
+
+func (ops *mgmtRouteRebindOps11450) LinkSetNoMaster(link netlink.Link) error {
+	link.Attrs().MasterIndex = 0
+	return nil
+}
 
 func TestMgmtRouteFailureRetriesWithoutNewEvents11450(t *testing.T) {
 	d := daemonWithActiveConfig9693(t)
@@ -65,6 +85,71 @@ func TestMgmtRouteFailureRetriesWithoutNewEvents11450(t *testing.T) {
 	d.reassertRoutingReconcileOnce(context.Background())
 	if attempts != 2 || policyRuns != 0 {
 		t.Fatalf("the owner kept doing work after route debt cleared: attempts=%d policy-runs=%d", attempts, policyRuns)
+	}
+}
+
+func TestFullApplyRestoresMgmtRouteAfterNetworkdRebind11450(t *testing.T) {
+	d, _ := minimalNetworkdDaemon(t, t.TempDir(), &dataplane.ApplyResult{})
+	cfg := mgmtIfaceConfig()
+
+	ops := &mgmtRouteRebindOps11450{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	fxp0 := &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "fxp0", Index: 2}}
+	mgmtVRF := &netlink.Vrf{
+		LinkAttrs: netlink.LinkAttrs{Name: "vrf-mgmt", Index: 9},
+		Table:     config.ManagementVRFTableID,
+	}
+	ops.links["fxp0"] = fxp0
+	ops.links["vrf-mgmt"] = mgmtVRF
+	d.routing = routing.NewManagerWithLinkTermAndRuleOpsForTest(
+		ops, &startupTerminator10421{}, startupRuleOps10421{})
+
+	leases := []*dhcp.Lease{gwLease("fxp0", "192.0.2.1")}
+	mgmtSet := map[string]bool{"fxp0": true}
+	fake := &fakeMgmtProgrammer{linkIdx: fxp0.Attrs().Index}
+	if err := d.applyMgmtVRFRoutesTo(fake, leases, mgmtSet); err != nil {
+		t.Fatalf("seed table-999 route: %v", err)
+	}
+	if len(fake.v4) != 1 {
+		t.Fatalf("seed route count = %d, want one table-999 route", len(fake.v4))
+	}
+
+	networkdApplied := false
+	d.afterNetworkdApplyForTest = func() {
+		networkdApplied = true
+		fake.v4 = nil // networkd reconfigure strips the table-999 route
+		_ = ops.LinkSetNoMaster(fxp0)
+	}
+	prevMgmt := mgmtVRFRouteReconcileFn
+	routePasses := 0
+	mgmtVRFRouteReconcileFn = func(d *Daemon) error {
+		routePasses++
+		if !networkdApplied {
+			return errors.New("management routes ran before networkd activation")
+		}
+		if fxp0.Attrs().MasterIndex != mgmtVRF.Attrs().Index {
+			return errors.New("management interface was not rebound before route reconcile")
+		}
+		publishedSet := d.mgmtVRFIfaceSet()
+		if !publishedSet["fxp0"] {
+			return errors.New("management interface set was not published before route reconcile")
+		}
+		if len(fake.v4) != 0 {
+			return errors.New("test route was not removed by networkd activation")
+		}
+		return d.applyMgmtVRFRoutesTo(fake, leases, publishedSet)
+	}
+	t.Cleanup(func() { mgmtVRFRouteReconcileFn = prevMgmt })
+
+	if err := d.applyConfigLocked(context.Background(), cfg); err != nil {
+		t.Fatalf("applyConfigLocked: %v", err)
+	}
+	if !networkdApplied || routePasses != 1 || ops.masterBinds < 2 {
+		t.Fatalf("networkd/rebind/route passes = %v/%d/%d, want activation, both binds, and one route pass",
+			networkdApplied, ops.masterBinds, routePasses)
+	}
+	if len(fake.v4) != 1 || fake.v4[0].Table != mgmtVRFTableID ||
+		fake.v4[0].Gw == nil || fake.v4[0].Gw.String() != "192.0.2.1" {
+		t.Fatalf("table-999 DHCP route was not restored after networkd rebind: %+v", fake.v4)
 	}
 }
 
