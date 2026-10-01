@@ -12,7 +12,7 @@
 # overridden vars through the sourced functions).
 set -e
 
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 POSTRM="${1:-$HERE/../../debian/xpf.postrm}"
 PRERM="${PRERM:-$HERE/../../debian/xpf.prerm}"
 [ -f "$POSTRM" ] || { echo "postrm not found: $POSTRM" >&2; exit 1; }
@@ -35,6 +35,8 @@ patched_postrm() {
       -e "s#^TRANSIT_IPV4_SYSCTL=.*#TRANSIT_IPV4_SYSCTL=$ROOT/proc/sys/net/ipv4/ip_forward#" \
       -e "s#^EARLY_INPUT_HANDOFF_MARKER=.*#EARLY_INPUT_HANDOFF_MARKER=$ROOT/run/xpf/early-input-handoff.done#" \
       -e "s#^TRANSIT_IPV6_SYSCTL=.*#TRANSIT_IPV6_SYSCTL=$ROOT/proc/sys/net/ipv6/conf/all/forwarding#" \
+      -e "s#^XPF_APT_SRC=/etc/apt/sources.list.d/xpf.sources#XPF_APT_SRC=$ROOT/etc/apt/sources.list.d/xpf.sources#" \
+      -e "s#^XPF_APT_PREF=/etc/apt/preferences.d/xpf-channel.pref#XPF_APT_PREF=$ROOT/etc/apt/preferences.d/xpf-channel.pref#" \
       -e "s#\\[ -d /run/systemd/system \\]#false#" \
       "$POSTRM" > "$ROOT/postrm"
     chmod +x "$ROOT/postrm"
@@ -70,6 +72,7 @@ run_scenario() {
     INPUT_XPFD_REQUIRES_LINK="$XPFD_REQUIRES_DIR/xpf-input-closed.service"
     TRANSIT_IPV4_SYSCTL="$ROOT/proc/sys/net/ipv4/ip_forward"
     TRANSIT_IPV6_SYSCTL="$ROOT/proc/sys/net/ipv6/conf/all/forwarding"
+    XPF_APT_PREF="$ROOT/etc/apt/preferences.d/xpf-channel.pref"
     mkdir -p "$(dirname "$TRANSIT_IPV4_SYSCTL")" "$(dirname "$TRANSIT_IPV6_SYSCTL")"
     printf '0\n' > "$TRANSIT_IPV4_SYSCTL"
     printf '0\n' > "$TRANSIT_IPV6_SYSCTL"
@@ -589,6 +592,27 @@ scenario_remove_and_purge_clear_handoff_marker() {
     [ ! -e "$MARKER" ] || { echo "FAIL: purge left a stale handoff marker"; exit 1; }
 }
 
+# #11133: remove/purge delete only the marked installer-owned pin. Unmarked
+# preferences remain administrator-owned and must survive both actions.
+scenario_apt_pin_cleanup_marker_gated() {
+    pin_marker='# xpf appliance channel pin; Managed by install.sh (#11133)'
+    mkdir -p "$(dirname "$XPF_APT_PREF")"
+    printf '%s\n' "$pin_marker" 'Package: xpf*' > "$XPF_APT_PREF"
+    "$ROOT/postrm" remove
+    [ ! -e "$XPF_APT_PREF" ] || { echo "FAIL: remove left marked apt pin"; exit 1; }
+    printf '%s\n' "$pin_marker" 'Package: xpf*' > "$XPF_APT_PREF"
+    "$ROOT/postrm" purge
+    [ ! -e "$XPF_APT_PREF" ] || { echo "FAIL: purge left marked apt pin"; exit 1; }
+    printf '%s\n' '# administrator preference' 'Package: xpf*' > "$XPF_APT_PREF"
+    "$ROOT/postrm" remove
+    [ "$(cat "$XPF_APT_PREF")" = "$(printf '%s\n' '# administrator preference' 'Package: xpf*')" ] \
+        || { echo "FAIL: remove changed unmarked apt preferences"; exit 1; }
+    "$ROOT/postrm" purge
+    [ "$(cat "$XPF_APT_PREF")" = "$(printf '%s\n' '# administrator preference' 'Package: xpf*')" ] \
+        || { echo "FAIL: purge changed unmarked apt preferences"; exit 1; }
+}
+
+
 run_scenario remove_keeps_versions
 run_scenario remove_barrier_failure_keeps_sysctls_closed
 run_scenario transit_failure_still_removes_input_barrier
@@ -599,6 +623,7 @@ run_scenario remove_no_dropin_ok
 run_scenario prerm_scrubs_legacy_requires_before_stop
 run_scenario postrm_scrubs_legacy_requires_link
 run_scenario remove_and_purge_clear_handoff_marker
+run_scenario apt_pin_cleanup_marker_gated
 run_scenario downgrade_to_prehardened
 run_scenario downgrade_skips_foreign_link
 run_scenario upgrade_to_hardened_noop

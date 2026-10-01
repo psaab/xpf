@@ -383,8 +383,9 @@ info "6. install.sh --dry-run (preflight + source rendering)"
 if XPF_DRY_RUN=1 XPF_APT_BASE_URL="https://example.invalid/apt" XPF_CHANNEL=stable \
    sh "$DIST/install.sh" >"$WORK/install.out" 2>&1; then
     if grep -q "preflight OK" "$WORK/install.out" \
-       && grep -q "Suites: stable" "$WORK/install.out"; then
-        ok "install.sh dry-run preflight + source render OK"
+       && grep -q "Suites: stable" "$WORK/install.out" \
+       && grep -q "would write managed apt channel pin" "$WORK/install.out"; then
+        ok "install.sh dry-run preflight, source, and channel-pin preview OK"
     else
         bad "install.sh dry-run output missing expected lines"; cat "$WORK/install.out" >&2
     fi
@@ -873,7 +874,7 @@ done
 
 # ── 9. install.sh H-16: validate-before-mutate + cleanup-on-failure ─────────
 info "9. install.sh validate-before-mutate + cleanup-on-failure (H-16)"
-H16="$WORK/h16"; mkdir -p "$H16/bin" "$H16/keyrings" "$H16/sources"
+H16="$WORK/h16"; mkdir -p "$H16/bin" "$H16/keyrings" "$H16/sources" "$H16/preferences"
 printf '#!/bin/sh\necho 0\n' > "$H16/bin/id"; chmod +x "$H16/bin/id"
 printf '#!/bin/sh\nexit 0\n' > "$H16/bin/systemctl"; chmod +x "$H16/bin/systemctl"
 printf '#!/bin/sh\nexit 100\n' > "$H16/bin/apt-get"; chmod +x "$H16/bin/apt-get"  # simulate install failure
@@ -882,6 +883,7 @@ printf '#!/bin/sh\nexit 100\n' > "$H16/bin/apt-get"; chmod +x "$H16/bin/apt-get"
 #     the system paths so the test never touches the real host.
 sed -e "s#^KEYRING=/usr/share/keyrings/xpf-archive-keyring.asc#KEYRING=$H16/keyrings/k.asc#" \
     -e "s#^SRC=/etc/apt/sources.list.d/xpf.sources#SRC=$H16/sources/xpf.sources#" \
+    -e "s#^PIN=/etc/apt/preferences.d/xpf-channel.pref#PIN=$H16/preferences/xpf-channel.pref#" \
     "$BAKED" > "$H16/install.sh"
 PATH="$H16/bin:$PATH" sh "$H16/install.sh" >/dev/null 2>&1 || true
 if [ ! -f "$H16/sources/xpf.sources" ]; then
@@ -895,6 +897,7 @@ rm -f "$H16/keyrings/k.asc" "$H16/sources/xpf.sources"
 sed -e "s#^KEYRING=/usr/share/keyrings/xpf-archive-keyring.asc#KEYRING=$H16/keyrings/k.asc#" \
     -e "s#^SRC=/etc/apt/sources.list.d/xpf.sources#SRC=$H16/sources/xpf.sources#" \
     -e "s#^XPF_APT_BASE_URL_BAKED=.*#XPF_APT_BASE_URL_BAKED='%%XPF_APT_BASE_URL%%'#" \
+    -e "s#^PIN=/etc/apt/preferences.d/xpf-channel.pref#PIN=$H16/preferences/xpf-channel.pref#" \
     "$BAKED" > "$H16/nourl.sh"
 PATH="$H16/bin:$PATH" sh "$H16/nourl.sh" >"$H16/nourl.out" 2>&1 || true
 if [ ! -f "$H16/keyrings/k.asc" ] && grep -q "XPF_APT_BASE_URL is required" "$H16/nourl.out"; then
