@@ -93,6 +93,13 @@ EARLY_INPUT_HANDOFF_MARKER=/run/xpf/early-input-handoff.done
 # comment is present) so an operator-authored source is never touched.
 XPF_APT_SRC=/etc/apt/sources.list.d/xpf.sources
 XPF_APT_SRC_MARKER="Managed by install.sh"
+
+# Persistent channel preference written by install.sh (#11133), not a package
+# payload file. Remove it with the installer-owned source on remove/purge, but
+# only when its exact marker is present.
+XPF_APT_PREF=/etc/apt/preferences.d/xpf-channel.pref
+XPF_APT_PREF_MARKER="# xpf appliance channel pin; Managed by install.sh (#11133)"
+
 # #1985 hardened-layout version floor. This is the first package whose postrm
 # manages the #1964 versioned-runtime layout (versions/current + the unit
 # drop-in) on downgrade and whose xpfd answers `seed-runtime
@@ -215,6 +222,17 @@ remove_install_sh_apt_source() {
     fi
 }
 
+# remove_install_sh_apt_pin removes only the channel preference owned by
+# install.sh (#11133); an unmarked administrator preference is left untouched.
+remove_install_sh_apt_pin() {
+    [ -f "$XPF_APT_PREF" ] && [ ! -L "$XPF_APT_PREF" ] || return 0
+    if grep -qF "$XPF_APT_PREF_MARKER" "$XPF_APT_PREF" 2>/dev/null; then
+        echo "xpf: removing install.sh-written apt channel pin $XPF_APT_PREF." >&2
+        rm -f "$XPF_APT_PREF"
+    fi
+}
+
+
 # remove_runtime_dropin removes the #1964 versioned-runtime unit drop-in and
 # the now-empty .service.d dir, then boot-guarded daemon-reloads so systemd
 # drops the removed drop-in. Shared by the remove/purge and downgrade paths
@@ -316,6 +334,7 @@ case "$1" in
         # source would break `apt update`. Marker-gated so operator sources are
         # untouched.
         remove_install_sh_apt_source
+        remove_install_sh_apt_pin
         if [ "$1" = "purge" ]; then
             # versions/ and staged-gen/ are package-derived (copied binaries),
             # not operator config — remove the whole trees on purge. staged-gen/

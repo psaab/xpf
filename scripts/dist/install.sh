@@ -20,8 +20,8 @@
 #      with a clear message (use the appliance image instead).
 #   2. Install the pinned apt archive keyring to /usr/share/keyrings (inline).
 #   3. Write /etc/apt/sources.list.d/xpf.sources (deb822, Signed-By).
-#   4. apt-get update, bind the signed Release Suite/Codename to CHANNEL, and
-#      apt-get install -y xpf-appliance.
+#   4. apt-get update, bind the signed Release Suite/Codename to CHANNEL, write
+#      the managed APT channel pin, then install xpf-appliance.
 #   5. Print next steps + the interface-takeover caveat (#1879).
 #
 # Config inputs (the operator decisions — NOT hardcoded):
@@ -61,40 +61,65 @@ XPF_APT_BASE_URL="${XPF_APT_BASE_URL:-$_baked_url}"
 CHANNEL="${XPF_CHANNEL:-${_baked_channel:-stable}}"
 DRY="${XPF_DRY_RUN:-0}"
 
-# Cleanup-on-failure state (H-16): if we fail AFTER writing the apt source but
-# before a successful install, remove xpf.sources so a half-done install does
-# not brick `apt update` forever (a source pointing at an unreachable / not-
-# yet-configured repo makes every subsequent apt update error out).
+# Cleanup-on-failure state: remove the apt source written by this run and
+# restore/remove the managed channel pin if the installer does not finish.
 SRC_WRITTEN=0
 INSTALL_OK=0
+PIN_WRITTEN=0
+PIN_BACKUP=''
+PIN_TEMP=''
 # /usr/share/keyrings (NOT /etc/apt/keyrings): the xpf package ships the same
 # keyring here as a package-owned (non-conffile) file, so this bootstrap write
 # and the later `apt install` agree without a dpkg conffile prompt, and key
 # rotation lands seamlessly on `apt upgrade` (AGY-A1).
 KEYRING=/usr/share/keyrings/xpf-archive-keyring.asc
 SRC=/etc/apt/sources.list.d/xpf.sources
+PIN=/etc/apt/preferences.d/xpf-channel.pref
+PIN_MARKER="# xpf appliance channel pin; Managed by install.sh (#11133)"
+
+# cleanup_on_fail removes files written by a failed install. A new channel pin
+# is rolled back to the previous marked file byte-for-byte (or removed if this
+# was the first install); an unmarked preference is never changed.
+cleanup_on_fail() {
+    _rc=$?
+    if [ "$INSTALL_OK" != "1" ] && [ "$DRY" != "1" ]; then
+        if [ "$SRC_WRITTEN" = "1" ]; then
+            info "install failed (rc=$_rc) — removing $SRC so it does not break apt update"
+            rm -f "$SRC" || _rc=1
+        fi
+        if [ -n "$PIN_TEMP" ]; then
+            rm -f "$PIN_TEMP" || _rc=1
+        fi
+        if [ "$PIN_WRITTEN" = "1" ]; then
+            if [ -n "$PIN_BACKUP" ]; then
+                info "install failed (rc=$_rc) — restoring previous $PIN"
+                if mv -f "$PIN_BACKUP" "$PIN"; then
+                    PIN_BACKUP=''
+                else
+                    echo "xpf-install ERROR: could not restore previous $PIN" >&2
+                    _rc=1
+                fi
+            else
+                info "install failed (rc=$_rc) — removing new $PIN"
+                rm -f "$PIN" || _rc=1
+            fi
+        elif [ -n "$PIN_BACKUP" ]; then
+            rm -f "$PIN_BACKUP" || _rc=1
+        fi
+    else
+        [ -z "$PIN_TEMP" ] || rm -f "$PIN_TEMP" || _rc=1
+        [ -z "$PIN_BACKUP" ] || rm -f "$PIN_BACKUP" || _rc=1
+    fi
+    exit "$_rc"
+}
+trap cleanup_on_fail EXIT
+
 
 die() { echo "xpf-install ERROR: $*" >&2; exit 1; }
 info() { echo "xpf-install: $*"; }
 run() {
     if [ "$DRY" = "1" ]; then echo "  (dry-run) $*"; else eval "$*"; fi
 }
-
-# cleanup_on_fail removes a half-written apt source on any non-success exit
-# (H-16). It runs from the EXIT trap: a failure at `apt-get update/install`
-# (or any error under `set -e`) after write_source would otherwise leave
-# xpf.sources on disk pointing at a repo that may not resolve, breaking every
-# later `apt update` until an operator hand-deletes a file they never knew
-# existed. Only removes what THIS run wrote, and never in dry-run.
-cleanup_on_fail() {
-    _rc=$?
-    if [ "$INSTALL_OK" != "1" ] && [ "$SRC_WRITTEN" = "1" ] && [ "$DRY" != "1" ]; then
-        info "install failed (rc=$_rc) — removing $SRC so it does not break apt update"
-        rm -f "$SRC"
-    fi
-    exit "$_rc"
-}
-trap cleanup_on_fail EXIT
 
 # ── embedded archive public key (PLACEHOLDER until release) ──────────────
 # Replace the block between the markers with the real ASCII-armored key.
@@ -290,6 +315,56 @@ EOF
     fi
 }
 
+# Persist the selected channel for later apt upgrades. The selected identity
+# rule is first so it wins over the single-field deny rules; those separately
+# catch a mismatched or malformed Release that omits Suite or Codename.
+write_channel_pin() {
+    body=$(cat <<EOF
+$PIN_MARKER
+
+Package: xpf*
+Pin: release a=$CHANNEL,n=$CHANNEL
+Pin-Priority: 990
+
+Package: xpf*
+Pin: release a=*
+Pin-Priority: -1
+
+Package: xpf*
+Pin: release n=*
+Pin-Priority: -1
+EOF
+)
+    if [ "$DRY" = "1" ]; then
+        info "dry-run: would write managed apt channel pin -> $PIN (channel=$CHANNEL)"
+        return
+    fi
+
+    if [ -L "$PIN" ]; then
+        die "refusing to replace symlink at $PIN"
+    fi
+    if [ -e "$PIN" ]; then
+        [ -f "$PIN" ] \
+            || die "refusing to replace non-regular preferences path at $PIN"
+        grep -Fqx "$PIN_MARKER" "$PIN" \
+            || die "refusing to replace unmanaged apt preferences file $PIN"
+    fi
+
+    _pin_dir=$(dirname "$PIN")
+    install -d -m 0755 "$_pin_dir"
+    PIN_TEMP=$(mktemp "$_pin_dir/.xpf-channel.pref.tmp.XXXXXX")
+    printf '%s\n' "$body" > "$PIN_TEMP"
+    chmod 0644 "$PIN_TEMP"
+    if [ -e "$PIN" ]; then
+        PIN_BACKUP=$(mktemp "$_pin_dir/.xpf-channel.pref.backup.XXXXXX")
+        cp -p "$PIN" "$PIN_BACKUP"
+    fi
+    mv -f "$PIN_TEMP" "$PIN"
+    PIN_TEMP=''
+    PIN_WRITTEN=1
+    info "wrote managed apt channel pin -> $PIN (channel=$CHANNEL)"
+}
+
 # ── 4. bind apt metadata to the selected channel ────────────────────────────
 # APT verifies the archive signature, but normally only warns when the signed
 # Release at dists/$CHANNEL advertises another Suite; it still makes those
@@ -332,12 +407,14 @@ verify_channel() {
 
 # ── 5. install ─────────────────────────────────────────────────────────────
 do_install() {
-    info "apt-get update && install xpf-appliance"
+    info "apt-get update, bind channel, and install xpf-appliance"
     run "apt-get update"
     if [ "$DRY" = "1" ]; then
         info "dry-run: skipping post-update apt channel binding check"
+        write_channel_pin
     else
         verify_channel
+        write_channel_pin
     fi
     run "DEBIAN_FRONTEND=noninteractive apt-get install -y xpf-appliance"
 }
@@ -368,7 +445,7 @@ main() {
     install_keyring # ── mutation begins here ──
     write_source
     do_install
-    INSTALL_OK=1    # success — disarm the cleanup trap (keep xpf.sources)
+    INSTALL_OK=1    # commit the source/pin; cleanup only removes pin backups
     next_steps
 }
 

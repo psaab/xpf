@@ -124,6 +124,20 @@ source's signed index-target metadata and refuses to install unless both
 archive signature alone does not bind the host to the operator-selected
 channel.
 
+After that check, `install.sh` atomically writes the managed preference
+`/etc/apt/preferences.d/xpf-channel.pref` before the package install. Its first
+rule gives `xpf*` packages from the selected `Suite` + `Codename` priority 990;
+separate -1 rules for APT's Archive/Suite (`a`) and Codename (`n`) fields deny
+other or malformed releases, including a missing Codename after lists are
+cleared. Other packages and Debian dependencies are not pinned. The preference
+persists across ordinary `apt upgrade`, which does not rerun the installer.
+Rerun `install.sh` to rebind channels; priority 990 deliberately preserves
+APT's no-automatic-downgrade behavior. The installer refuses to overwrite an
+unmarked preferences file and rolls back its marked pin if installation fails.
+On `apt remove`/`purge`, `xpf.postrm` removes only the installer-marked source
+and pin.
+
+
 ### Freshness / anti-rollback
 
 - Apt `Release`/`InRelease` carries `Valid-Until` (default 1 year,
@@ -282,10 +296,12 @@ Trust level: TLS + first-fetch trust of `install.sh` (the same level
 Tailscale/Docker/rustup accept). `install.sh` first VALIDATES all inputs
 (root, arch/distro/kernel — refuses kernel < 6.18, use the appliance image on
 older hosts — the archive key, and the apt URL/channel) BEFORE any mutation,
-then installs the pinned archive keyring, writes the deb822 apt source, and
-`apt install xpf-appliance`. If the `apt` step fails it removes the apt source
-it wrote, so a failed install never leaves a dangling repo that breaks
-`apt update`.
+then installs the pinned archive keyring and writes the deb822 apt source. After
+APT verifies the selected signed Release identity, it writes the managed
+channel preference and runs `apt install xpf-appliance`. If that apt step fails,
+the installer removes the source and restores the previous marked pin (or
+removes a new one), so a failed install does not leave a dangling repo or a
+partial channel rebind.
 
 ### Install (Tier B — verify before run)
 
