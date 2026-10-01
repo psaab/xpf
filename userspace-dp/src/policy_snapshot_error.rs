@@ -579,6 +579,13 @@ pub(crate) enum SnapshotIntegrityError {
         forwarding_class: String,
         queue: i32,
     },
+    /// A scheduler-map omits best-effort and materializes every u8 queue id,
+    /// leaving no id for the synthetic low-priority fallback. If it also has
+    /// no low-priority configured queue, unclassified traffic would be sent to
+    /// an expedited class; fail the snapshot closed instead.
+    CosNoLowPriorityDefaultQueue {
+        scheduler_map: String,
+    },
     /// #2706: an interface snapshot's `mtu` is NEGATIVE. The pre-fix code
     /// narrowed it with `iface.mtu.max(0) as usize`, so a negative value
     /// silently collapsed to 0 — and the egress MTU guard
@@ -1094,6 +1101,11 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "cos forwarding-class {:?} has queue {} outside the 0..=255 range — refusing to silently drop the class (which would unmap every classifier/scheduler entry referencing it)",
                 forwarding_class, queue
+            ),
+            Self::CosNoLowPriorityDefaultQueue { scheduler_map } => write!(
+                f,
+                "cos scheduler-map {:?} has no best-effort or low-priority queue and all 256 queue IDs are occupied — refusing to route unclassified traffic to a higher-priority class",
+                scheduler_map
             ),
             Self::InterfaceMtuInvalid { interface, mtu } => write!(
                 f,

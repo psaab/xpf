@@ -1045,12 +1045,11 @@ pub(super) fn build_cos_iface_config(
     }
     let scheduler_map_resolved_to_queues = !queues.is_empty();
 
-    // Determine the set of (queue_id, forwarding_class) pairs that this
-    // interface will actually materialize at runtime. If the
-    // scheduler-map resolved, those are the configured queues. If not,
-    // the synthetic default best-effort queue (queue_id=0,
-    // class="best-effort") is added later — but ONLY if we admit the
-    // interface, so we model it here for the gate's purposes.
+    // Determine the set of (queue_id, forwarding_class) pairs that contribute
+    // to the admission gate. A resolved map starts with its configured queues;
+    // an unresolved / empty map models the best-effort queue added after the
+    // gate. After admission, a synthetic best-effort queue is also added to a
+    // resolved map that omitted it.
     let (iface_queue_ids, iface_classes): (Vec<u8>, Vec<&str>) = if scheduler_map_resolved_to_queues
     {
         (
@@ -1121,37 +1120,62 @@ pub(super) fn build_cos_iface_config(
         return Ok(None);
     }
 
-    if queues.is_empty() {
-        queues.push(CoSQueueConfig {
-            queue_id: 0,
-            forwarding_class: "best-effort".to_string(),
-            priority: cos_priority_rank("low").expect("\"low\" is a known scheduler priority"),
-            transmit_rate_bytes: iface.cos_shaping_rate_bytes_per_sec,
-            guarantee_enabled: true,
-            exact: false,
-            surplus_sharing: false,
-            equal_flow_enforcement: false,
-            equal_flow_target_policy: EqualFlowTargetPolicy::default(),
-            surplus_weight: 1,
-            buffer_bytes: burst_bytes,
-            // #3995: uniform-only fallback (see the scheduler-map queue above).
-            dscp_rewrite: dscp_rewrite_rule
-                .and_then(|rewrite_rule| uniform_fc_rewrite(rewrite_rule, "best-effort")),
-            // #1614 A3: synthetic best-effort queue has no scheduler;
-            // CoDel disabled by default (0 = off).
-            codel_target_ns: 0,
-        });
+    // Admission above is based only on configured CoS state. Once an interface
+    // is admitted, ensure every scheduler-map gets a safe unclassified-traffic
+    // fallback. A map that omits best-effort must not make the lowest queue id
+    // the default: the first configured queue can be expedited-forwarding.
+    if !queues
+        .iter()
+        .any(|queue| queue.forwarding_class == "best-effort")
+    {
+        // Prefer queue 0, matching the empty-map fallback, but avoid aliasing a
+        // configured class that already occupies that id.
+        let unused_queue_id =
+            (0..=u8::MAX).find(|queue_id| !queues.iter().any(|q| q.queue_id == *queue_id));
+        if let Some(queue_id) = unused_queue_id {
+            queues.push(CoSQueueConfig {
+                queue_id,
+                forwarding_class: "best-effort".to_string(),
+                priority: cos_priority_rank("low").expect("\"low\" is a known scheduler priority"),
+                transmit_rate_bytes: iface.cos_shaping_rate_bytes_per_sec,
+                guarantee_enabled: true,
+                exact: false,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+                equal_flow_target_policy: EqualFlowTargetPolicy::default(),
+                surplus_weight: 1,
+                buffer_bytes: burst_bytes,
+                dscp_rewrite: dscp_rewrite_rule
+                    .and_then(|rewrite_rule| uniform_fc_rewrite(rewrite_rule, "best-effort")),
+                codel_target_ns: 0,
+            });
+        } else {
+            let low_priority_rank =
+                cos_priority_rank("medium-low").expect("\"medium-low\" is a known priority");
+            let has_low_priority_queue = queues
+                .iter()
+                .any(|queue| queue.priority >= low_priority_rank);
+            if !has_low_priority_queue {
+                return Err(
+                    crate::policy::SnapshotIntegrityError::CosNoLowPriorityDefaultQueue {
+                        scheduler_map: iface.cos_scheduler_map.clone(),
+                    },
+                );
+            }
+        }
     }
     queues.sort_by(|a, b| a.queue_id.cmp(&b.queue_id));
     let queue_by_forwarding_class = queues
         .iter()
         .map(|queue| (queue.forwarding_class.clone(), queue.queue_id))
         .collect::<FastMap<_, _>>();
+    // Priority rank 5 is the lowest service priority; larger ranks are safer
+    // defaults. Prefer best-effort only among equally-low queues.
     let default_queue = queues
         .iter()
-        .find(|queue| queue.forwarding_class == "best-effort")
-        .map(|queue| queue.queue_id)
-        .unwrap_or_else(|| queues[0].queue_id);
+        .max_by_key(|queue| (queue.priority, queue.forwarding_class == "best-effort"))
+        .expect("an admitted interface always has a configured or synthetic CoS queue")
+        .queue_id;
     // #hb166 T-4: the queue ids this interface actually materializes at
     // runtime. Built AFTER the synthetic best-effort fallback + sort so it is
     // the FINAL queue set. The behavior-aggregate classifier tables below use
@@ -1315,10 +1339,10 @@ pub(super) fn build_cos_state(
     let Some(cos) = snapshot.class_of_service.as_ref() else {
         return Ok(CoSState::default());
     };
-    // #2410/#2409: both helpers are now fallible — an out-of-range queue id
-    // or a scheduler-map entry referencing a missing class fails the snapshot
-    // CLOSED rather than silently dropping the class / partially installing
-    // the scheduler.
+    // #2410/#2409/#11428: the CoS build fails closed on an out-of-range queue
+    // id, an unknown scheduler-map class, or an exhausted queue-id space with
+    // no best-effort / low-priority default, rather than installing partial or
+    // expedited-as-default state.
     let tables = build_cos_classifier_tables(cos)?;
     let mut state = CoSState::default();
     for iface in &snapshot.interfaces {
