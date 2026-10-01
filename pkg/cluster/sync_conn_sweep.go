@@ -274,6 +274,9 @@ func (s *SessionSync) syncSweep() int {
 			if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "sweep_v4") {
 				return true
 			}
+			if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+				return true
+			}
 			// #9752 round 5 item 1: a mirror (0,0) this node never
 			// announced is suspect on a PBR-active node (in-race delta,
 			// foreign row, or post-cap) — withhold it the same way.
@@ -315,6 +318,9 @@ func (s *SessionSync) syncSweep() int {
 			}
 			// #9752 round 4: v6 twin of the sweep fence above.
 			if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "sweep_v6") {
+				return true
+			}
+			if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
 				return true
 			}
 			// #9752 round 5 item 1: v6 twin of the unannounced rule above.
