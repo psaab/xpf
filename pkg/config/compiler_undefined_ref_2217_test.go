@@ -196,6 +196,181 @@ func TestFBFRoutingInstanceRefUndefinedLenientWarns(t *testing.T) {
 	}
 }
 
+func TestFBFDefaultRoutingInstanceAliasAcceptedStrictFlatSet11308(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set firewall family inet filter f1 term t1 then routing-instance default",
+		"set firewall family inet filter f1 term t1 then accept",
+	})
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile must accept Juniper's default-instance alias: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["f1"]
+	if filter == nil || len(filter.Terms) == 0 || filter.Terms[0].RoutingInstance != "default" {
+		t.Fatalf("compiled term must preserve the authored alias, got: %+v", filter)
+	}
+}
+
+func TestFBFDefaultRoutingInstanceAliasAcceptedStrictHierarchicalInet6_11308(t *testing.T) {
+	input := `firewall {
+    family inet6 {
+        filter f6 {
+            term t6 {
+                then {
+                    routing-instance default;
+                    accept;
+                }
+            }
+        }
+    }
+}`
+	tree, errs := NewParser(input).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict inet6 compile must accept the default-instance alias: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet6["f6"]
+	if filter == nil || len(filter.Terms) == 0 || filter.Terms[0].RoutingInstance != "default" {
+		t.Fatalf("compiled inet6 term must preserve the authored alias, got: %+v", filter)
+	}
+}
+
+func TestFBFDefaultRoutingInstanceAliasLenientDoesNotWarn11308(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set firewall family inet filter f1 term t1 then routing-instance default",
+		"set firewall family inet filter f1 term t1 then accept",
+	})
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile must accept the default-instance alias: %v", err)
+	}
+	if warningsContain(cfg.Warnings, "firewall routing-instance reference") {
+		t.Fatalf("the documented default alias is not a dangling-reference warning: %v", cfg.Warnings)
+	}
+	filter := cfg.Firewall.FiltersInet["f1"]
+	if filter == nil || len(filter.Terms) == 0 || filter.Terms[0].RoutingInstance != "default" {
+		t.Fatalf("tolerant compile must preserve the authored alias, got: %+v", filter)
+	}
+}
+
+func fbfDeclaredInstanceCommands11644(instance, target string) []string {
+	cmds := []string{
+		"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+		"set routing-instances " + instance + " instance-type virtual-router",
+		"set routing-instances " + instance + " interface ge-0/0/1.0",
+		"set routing-instances " + instance + " routing-options static route 198.51.100.0/24 discard",
+	}
+	if target != "" {
+		cmds = append(cmds,
+			"set firewall family inet filter f1 term t1 then routing-instance "+target,
+			"set firewall family inet filter f1 term t1 then accept",
+		)
+	}
+	return cmds
+}
+
+func requireFBFDefaultDeclarationCollision11644(t *testing.T, tree *ConfigTree) {
+	t.Helper()
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("strict compile accepted routing-instances default together with the FBF default alias")
+	}
+}
+
+func requireDeclaredInstanceSurvives11644(t *testing.T, cfg *Config, name string) *RoutingInstanceConfig {
+	t.Helper()
+	if len(cfg.RoutingInstances) != 1 {
+		t.Fatalf("declared instance was lost or duplicated: %+v", cfg.RoutingInstances)
+	}
+	ri := cfg.RoutingInstances[0]
+	if ri.Name != name || ri.InstanceType != "virtual-router" {
+		t.Fatalf("declared instance changed: %+v", ri)
+	}
+	if ri.TableID != StableRoutingInstanceTableID(name) || ri.TableID == 254 {
+		t.Fatalf("named instance table = %d, want stable non-main table %d", ri.TableID, StableRoutingInstanceTableID(name))
+	}
+	if len(ri.Interfaces) != 1 || ri.Interfaces[0] != "ge-0/0/1.0" {
+		t.Fatalf("declared instance members were changed: %v", ri.Interfaces)
+	}
+	if len(ri.StaticRoutes) != 1 || !ri.StaticRoutes[0].Discard {
+		t.Fatalf("declared instance static route was lost: %+v", ri.StaticRoutes)
+	}
+	if len(cfg.QuarantinedRoutingInstances) != 0 {
+		t.Fatalf("declared instance was quarantined: %+v", cfg.QuarantinedRoutingInstances)
+	}
+	return ri
+}
+
+func TestFBFDefaultDeclarationCollisionRejectedStrictFlatSet11644(t *testing.T) {
+	tree := buildTree(t, fbfDeclaredInstanceCommands11644("default", "default"))
+	requireFBFDefaultDeclarationCollision11644(t, tree)
+}
+
+func TestFBFDefaultDeclarationCollisionRejectedStrictHierarchicalInet6_11644(t *testing.T) {
+	input := `routing-instances {
+    default {
+        instance-type virtual-router;
+    }
+}
+firewall {
+    family inet6 {
+        filter f6 {
+            term t6 {
+                then {
+                    routing-instance default;
+                    accept;
+                }
+            }
+        }
+    }
+}`
+	tree, errs := NewParser(input).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	requireFBFDefaultDeclarationCollision11644(t, tree)
+}
+
+func TestFBFDefaultDeclarationCollisionTolerantKeepsInstanceAndTerm11644(t *testing.T) {
+	tree := buildTree(t, fbfDeclaredInstanceCommands11644("default", "default"))
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile must keep the declared instance and FBF term: %v", err)
+	}
+	requireDeclaredInstanceSurvives11644(t, cfg, "default")
+	filter := cfg.Firewall.FiltersInet["f1"]
+	if filter == nil || len(filter.Terms) != 1 ||
+		filter.Terms[0].Name != "t1" || filter.Terms[0].RoutingInstance != "default" ||
+		filter.Terms[0].Action != "accept" {
+		t.Fatalf("tolerant compile rewrote or dropped the FBF term: %+v", filter)
+	}
+}
+
+func TestFBFDefaultDeclarationWithoutAliasStillCommits11644(t *testing.T) {
+	tree := buildTree(t, fbfDeclaredInstanceCommands11644("default", ""))
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("a default declaration without an FBF default target must remain valid: %v", err)
+	}
+	requireDeclaredInstanceSurvives11644(t, cfg, "default")
+}
+
+func TestFBFDefaultNameCaseVariantRemainsNamedTarget11644(t *testing.T) {
+	tree := buildTree(t, fbfDeclaredInstanceCommands11644("Default", "Default"))
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("case-variant named instance and target must remain valid: %v", err)
+	}
+	requireDeclaredInstanceSurvives11644(t, cfg, "Default")
+	filter := cfg.Firewall.FiltersInet["f1"]
+	if filter == nil || len(filter.Terms) != 1 || filter.Terms[0].RoutingInstance != "Default" {
+		t.Fatalf("case-variant FBF term did not retain its named target: %+v", filter)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Finding B — application-set member
 // ---------------------------------------------------------------------------
