@@ -7,12 +7,29 @@ import (
 )
 
 func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName string) error {
+	// #11314: SetPath can encode multiple routing-options leaves as a chain
+	// under the first leaf. Split declared siblings before FindChild so a
+	// router-id does not silently swallow a following autonomous-system. Work
+	// on a shallow copy; strict gates still need the authored tree.
+	flatChildren := expandFlatRun(node.Children, schemaRoutingOptions)
+	if len(flatChildren) != len(node.Children) {
+		normalized := *node
+		normalized.Children = flatChildren
+		node = &normalized
+	}
 	// Parse autonomous-system
 	if asNode := node.FindChild("autonomous-system"); asNode != nil {
 		if v := nodeVal(asNode); v != "" {
 			if n, err := strconv.ParseUint(v, 10, 32); err == nil {
 				ro.AutonomousSystem = uint32(n)
 			}
+		}
+	}
+	// `routing-options router-id` is a global protocol default. Per-instance
+	// routing-options has a separate schema and does not admit this leaf.
+	if instanceName == "" {
+		if routerIDNode := node.FindChild("router-id"); routerIDNode != nil {
+			ro.routerID = nodeVal(routerIDNode)
 		}
 	}
 
@@ -791,6 +808,34 @@ func resolveBGPAutonomousSystem(cfg *Config) {
 		}
 		if as > 0 {
 			ri.BGP.LocalAS = as
+		}
+	}
+}
+
+// resolveRoutingOptionsRouterID fills empty protocol router-ids from the
+// global Junos `routing-options router-id` default. Explicit protocol-level
+// values take precedence. Run after the full tree is compiled because the
+// routing-options and protocols sections can appear in either order.
+func resolveRoutingOptionsRouterID(cfg *Config) {
+	if cfg == nil || cfg.RoutingOptions.routerID == "" {
+		return
+	}
+	routerID := cfg.RoutingOptions.routerID
+	inherit := func(ospf *OSPFConfig, ospfv3 *OSPFv3Config, bgp *BGPConfig) {
+		if ospf != nil && ospf.RouterID == "" {
+			ospf.RouterID = routerID
+		}
+		if ospfv3 != nil && ospfv3.RouterID == "" {
+			ospfv3.RouterID = routerID
+		}
+		if bgp != nil && bgp.RouterID == "" {
+			bgp.RouterID = routerID
+		}
+	}
+	inherit(cfg.Protocols.OSPF, cfg.Protocols.OSPFv3, cfg.Protocols.BGP)
+	for _, ri := range cfg.RoutingInstances {
+		if ri != nil {
+			inherit(ri.OSPF, ri.OSPFv3, ri.BGP)
 		}
 	}
 }

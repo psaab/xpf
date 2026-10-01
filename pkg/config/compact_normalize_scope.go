@@ -1150,7 +1150,10 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	}
 
 	// #8690 family 4: the ROUTING surface — protocols, routing-instances and
-	// routing-options. 80 inventory sites, every one recorded "empty".
+	// routing-options. 81 inventory sites, every one recorded "empty".
+	// #11314 adds a global scalar `routing-options router-id` reader. Its
+	// brace-elided leaf must be split into a child before compileRoutingOptions
+	// uses FindChild, or the configured default is silently dropped.
 	//
 	// THESE THREE CANNOT BE SPLIT, and that is a measured fact rather than a
 	// convenience. `routing-instances <n> protocols ospf ...` and
@@ -1316,6 +1319,9 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"route qualified-next-hop",
 		"router-advertisement interface",
 		"routing-options autonomous-system",
+		// #11314: this is a global scalar leaf; normalize its brace-elided
+		// spelling so the compiler's child reader sees the value.
+		"routing-options router-id",
 		"routing-options rib",
 		"routing-options rib-groups",
 		"static route",

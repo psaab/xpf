@@ -15154,6 +15154,44 @@ ZERO rules; `TestRibGroupRulesApply_DefinedRibStillLeaks` — a defined rib stil
 leaks correctly). Like the gates above, this is compiler-side only — not yet a
 typed `setSchema` leaf.
 
+### #11314 — Junos routing knobs are applied or diagnosed
+
+`routing-options router-id <IPv4>` is the default router ID for global and
+per-instance OSPF, OSPFv3, and BGP configuration. The compiler applies it only
+where a protocol-level `router-id` is absent; explicit protocol values win.
+The existing strict/tolerant validation rejects a malformed global value at
+commit and warns on load or peer sync.
+Brace-elided global `router-id` is normalized before compilation. Flat-set
+chains containing `router-id <IPv4> autonomous-system <asn>` are split into the
+two declared sibling leaves, so both values reach the routing compiler. Braced
+configuration still requires a semicolon between the statements; a fused run
+is rejected at strict commit and warned on tolerant load.
+
+
+The other affected knobs do not have equivalent xpf consumers and must not
+look silently supported:
+
+- Global `routing-options rib-groups <group> import-policy <policy>` is
+  rejected at strict commit because xpf cannot evaluate the filter on leaked
+  routes; ignoring it could widen the leak. Tolerant load and peer sync retain
+  the existing configuration with an explicit warning.
+- `routing-options static route <prefix> rib-group <group>` is accepted but
+  does not export the static route to another RIB. The route remains installed
+  only in its enclosing routing table, and both strict and tolerant paths warn.
+- Per-instance `routing-options rib-groups` definitions and `generate` routes
+  are accepted but are not copied into the routing-instance forwarding
+  configuration. Both paths name the dropped scope and knob.
+- Per-instance `instance-import` and `instance-export` remain strict-rejected.
+  Their diagnostics explain that xpf has no cross-RIB policy-leak engine; the
+  global interface-routes rib-group path leaks connected prefixes only and is
+  not a substitute for per-instance policy.
+
+Regression coverage: `pkg/config/routing_knobs_11314_test.go`,
+`pkg/config/routing_instance_closed_world_9323_test.go`,
+`pkg/configstore/routing_options_leaf_run_11314_test.go`, and
+`pkg/frr/routing_options_router_id_11314_test.go`.
+
+
 ## The `inactive:` universal node modifier (#2008 H1)
 
 `inactive:` is the Junos deactivate-without-delete marker and is NOT a

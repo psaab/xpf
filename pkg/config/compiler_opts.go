@@ -1363,6 +1363,11 @@ type compileOpts struct {
 	// guard skips the phantom rib and installs no rule, so a leniently-loaded
 	// config is already inert. Same doctrine as lenientRoutingExportRef.
 	lenientRibGroupRefs bool
+	// lenientRibGroupImportPolicy (#11314) downgrades an unsupported RIB-group
+	// import-policy rejection to a warning on tolerant loads. The existing
+	// runtime cannot apply the policy, so the warning names the possible
+	// over-broad leak while preserving the no-brick load/peer-sync contract.
+	lenientRibGroupImportPolicy bool
 	// lenientGlobalInterfaceRoutesRibGroup (#11311) downgrades the unsupported
 	// global main-to-instance connected-route import gate to a warning on
 	// tolerant loads, so a previously persisted config remains bootable.
@@ -3089,6 +3094,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyMatchAddressSetMembers:    true,
 		lenientAddressSetMembersDefined:        true,
 		lenientRibGroupRefs:                    true,
+		lenientRibGroupImportPolicy:            true,
 		lenientGlobalInterfaceRoutesRibGroup:   true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,

@@ -869,6 +869,9 @@ func validateRouterIDStrict(cfg *Config) error {
 		}
 		return nil
 	}
+	if err := check("", "routing-options", cfg.RoutingOptions.routerID); err != nil {
+		return err
+	}
 
 	checkScope := func(scope string, ospf *OSPFConfig, ospfv3 *OSPFv3Config, bgp *BGPConfig) error {
 		if ospf != nil {
@@ -993,6 +996,38 @@ func validateRibGroupImportRibReferencesStrict(cfg *Config) error {
 					"would otherwise silently leak this table's routes into "+
 					"the main lookup)",
 				name, ribName)
+		}
+	}
+	return nil
+}
+
+// validateRibGroupImportPolicyStrict rejects a global RIB-group import-policy
+// that the route-leak applier cannot evaluate. Ignoring the filter would leak
+// routes more broadly than the authored policy permits.
+func validateRibGroupImportPolicyStrict(tree *ConfigTree) error {
+	if tree == nil {
+		return nil
+	}
+	for _, routingOptions := range tree.Children {
+		if routingOptions == nil || routingOptions.Name() != "routing-options" {
+			continue
+		}
+		for _, ribGroups := range routingOptions.FindChildren("rib-groups") {
+			for _, group := range ribGroups.Children {
+				if group == nil || len(group.Keys) == 0 {
+					continue
+				}
+				importPolicy := group.FindChild("import-policy") != nil ||
+					(len(group.Keys) >= 3 && group.Keys[1] == "import-policy")
+				if !importPolicy {
+					continue
+				}
+				return fmt.Errorf(
+					"routing-options rib-groups %q import-policy is not implemented: "+
+						"xpf cannot apply this filter to imported routes, so the route leak "+
+						"would include routes the policy excludes",
+					group.Keys[0])
+			}
 		}
 	}
 	return nil

@@ -322,6 +322,79 @@ func TestTheRoutingInstanceGateIsStrictOnCommitAndLenientOnLoad9323(t *testing.T
 	}
 }
 
+// Per-instance import/export policy needs a cross-RIB policy-leak engine, which
+// xpf does not provide. Keep both spellings unsupported while telling operators
+// what the global rib-group mechanism does (and does not) support.
+func TestInstancePolicyLeakKeywordsHaveSpecificDiagnostics9323(t *testing.T) {
+	for _, tc := range []struct {
+		name, keyword, config string
+		flatSet               bool
+	}{
+		{
+			name: "flat-set/instance-import", keyword: "instance-import", flatSet: true,
+			config: "set routing-instances VRF-A instance-type vrf\n" +
+				"set routing-instances VRF-A instance-import policy-a",
+		},
+		{
+			name: "flat-set/instance-export", keyword: "instance-export", flatSet: true,
+			config: "set routing-instances VRF-A instance-type vrf\n" +
+				"set routing-instances VRF-A instance-export policy-a",
+		},
+		{
+			name: "hierarchical/instance-import", keyword: "instance-import",
+			config: "routing-instances {\n  VRF-A {\n    instance-type vrf;\n    instance-import policy-a;\n  }\n}\n",
+		},
+		{
+			name: "hierarchical/instance-export", keyword: "instance-export",
+			config: "routing-instances {\n  VRF-A {\n    instance-type vrf;\n    instance-export policy-a;\n  }\n}\n",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			tree := func() *ConfigTree {
+				if tc.flatSet {
+					return tree9323(t, strings.Split(tc.config, "\n")...)
+				}
+				return parse9323(t, tc.config)
+			}
+			checkDiagnostic := func(where, diagnostic string) {
+				t.Helper()
+				for _, want := range []string{
+					`"` + tc.keyword + `"`,
+					"cross-RIB policy-leak engine",
+					"connected prefixes only",
+					"not instance-import/export policy",
+				} {
+					if !strings.Contains(diagnostic, want) {
+						t.Errorf("%s diagnostic lacks %q: %s", where, want, diagnostic)
+					}
+				}
+			}
+
+			if _, err := CompileConfig(tree()); err == nil {
+				t.Fatalf("strict CompileConfig ACCEPTED unsupported %s", tc.keyword)
+			} else {
+				checkDiagnostic("strict", err.Error())
+			}
+
+			cfg, err := CompileConfigLenient(tree())
+			if err != nil {
+				t.Fatalf("lenient CompileConfigLenient REJECTED unsupported %s: %v", tc.keyword, err)
+			}
+			if cfg == nil {
+				t.Fatal("lenient compile returned no config")
+			}
+			if len(cfg.RoutingInstances) != 1 {
+				t.Fatalf("tolerant compile returned %d routing instances, want the valid VRF to boot", len(cfg.RoutingInstances))
+			}
+			if ri := cfg.RoutingInstances[0]; ri.Name != "VRF-A" || ri.InstanceType != "vrf" {
+				t.Errorf("tolerant compile lost valid instance settings: got name=%q type=%q", ri.Name, ri.InstanceType)
+			}
+			checkDiagnostic("tolerant warning", strings.Join(cfg.Warnings, "\n"))
+		})
+	}
+}
+
 // --- SPELLING COVERAGE, stated rather than inferred. ---
 //
 // Three spellings reach this gate and they put the same tokens in DIFFERENT

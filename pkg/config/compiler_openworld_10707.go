@@ -5,6 +5,46 @@ import (
 	"strings"
 )
 
+// routingKnobWarning11314 replaces generic open-world advisories with specific
+// diagnostics for Junos routing knobs that the compiler accepts but does not
+// apply.
+func routingKnobWarning11314(path []string, keyword string) string {
+	if keyword == "rib-group" && len(path) >= 3 &&
+		path[len(path)-3] == "static" && path[len(path)-2] == "route" {
+		hasRoutingOptions := false
+		for _, part := range path {
+			if part == "routing-options" {
+				hasRoutingOptions = true
+				break
+			}
+		}
+		if hasRoutingOptions {
+			return fmt.Sprintf(
+				"%s rib-group is ACCEPTED but NOT APPLIED: xpf only installs this static "+
+					"route in its enclosing routing table; static-route rib-group route "+
+					"sharing is not implemented (#11314)",
+				strings.Join(path, " "))
+		}
+	}
+	if len(path) == 3 && path[0] == "routing-instances" && path[2] == "routing-options" {
+		switch keyword {
+		case "rib-groups":
+			return fmt.Sprintf(
+				"routing-instance %q routing-options rib-groups is ACCEPTED but NOT APPLIED: "+
+					"per-instance RIB-group definitions are not copied into the runtime "+
+					"configuration; define route-sharing groups globally under routing-options (#11314)",
+				path[1])
+		case "generate":
+			return fmt.Sprintf(
+				"routing-instance %q routing-options generate is ACCEPTED but NOT APPLIED: "+
+					"per-instance generated routes are not applied because the compiler does "+
+					"not carry them into that instance's forwarding configuration (#11314)",
+				path[1])
+		}
+	}
+	return ""
+}
+
 // warnUnknownRoutingLeaves10707 reports unmodeled child keywords in the
 // protocols, policy-options, and routing-options grammars. Those schemas stay
 // open-world because several have valid but not-yet-modeled Junos children;
@@ -16,9 +56,7 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 	}
 	var warnings []string
 	var seen map[string]struct{}
-	warn := func(path []string, keyword string) {
-		message := fmt.Sprintf("%s: unmodeled configuration keyword %q is accepted by the open-world schema and may be silently ignored (#10707)",
-			strings.Join(path, " "), keyword)
+	appendWarning := func(message string) {
 		if seen != nil {
 			if _, ok := seen[message]; ok {
 				return
@@ -29,6 +67,14 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 		seen[message] = struct{}{}
 		warnings = append(warnings, message)
 	}
+	warn := func(path []string, keyword string) {
+		if message := routingKnobWarning11314(path, keyword); message != "" {
+			appendWarning(message)
+			return
+		}
+		appendWarning(fmt.Sprintf("%s: unmodeled configuration keyword %q is accepted by the open-world schema and may be silently ignored (#10707)",
+			strings.Join(path, " "), keyword))
+	}
 	var walkChildren func(nodes []*Node, parent *schemaNode, path []string)
 	var walkInstances func(nodes []*Node, container *schemaNode, remaining int, path []string)
 	walkChildren = func(nodes []*Node, parent *schemaNode, path []string) {
@@ -37,6 +83,10 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 				continue
 			}
 			keyword := node.Keys[0]
+			if message := routingKnobWarning11314(path, keyword); message != "" {
+				appendWarning(message)
+				continue
+			}
 			childSchema := resolveSchemaChild(parent, keyword)
 			if childSchema == nil {
 				warn(path, keyword)
