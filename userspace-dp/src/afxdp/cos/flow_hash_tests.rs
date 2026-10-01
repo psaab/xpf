@@ -334,6 +334,8 @@ fn flow_fair_bucket_separates_tunnel_discriminators_9645() {
         TunnelDiscriminator::Keyed(0x0002_0000),
         TunnelDiscriminator::Pptp(1),
         TunnelDiscriminator::Unparseable,
+        TunnelDiscriminator::Ipsec(1),
+        TunnelDiscriminator::Ipsec(0x0001_0000),
     ];
     for (i, da) in classes.iter().enumerate() {
         for db in &classes[i + 1..] {
