@@ -4,6 +4,10 @@ xpf (0.0.0) unstable; urgency=medium
     prefixes in table 999, regardless of the DHCP trust override (#11362).
   * Select a deterministic per-family management DHCP default and warn when
     competing leases exist, avoiding silent map-order gateway changes (#11363).
+  * Reject configured cluster lifelines as tenant routing-instance members and
+    quarantine them on tolerant loads so data co-members retain ingress scope;
+    diagnose mapped management-class NICs without host-inbound lifeline
+    exemption (#11364, #11365).
   * Honor interface > zone > routing-instance context precedence for DNAT and
     static-NAT rule-sets regardless of configuration order (#11351).
   * Guard out-of-normalizer compact `then <head>` leaf forms so routing-instance
