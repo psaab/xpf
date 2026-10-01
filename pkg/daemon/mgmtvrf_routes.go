@@ -85,30 +85,37 @@ func mgmtVRFControlFabricLinkIndexes(
 }
 
 // mgmtVRFRouteInventory keeps operator statics as the authority for DHCP
-// precedence (#9943), while separately retaining only connected kernel routes
-// on configured cluster control/fabric interfaces as a hard classless-route
-// fence (#11362). Other connected routes remain non-authoritative.
+// precedence (#9943), while retaining management connected kernel prefixes as
+// a classless-route fence (#11383). Connected routes on configured cluster
+// control/fabric interfaces are returned separately for the non-overridable
+// fence (#11362).
 func mgmtVRFRouteInventory(
 	nlh mgmtRouteReconciler,
 	family int,
 	controlFabricLinks map[int]string,
-) ([]netlink.Route, []netlink.Route, error) {
+) ([]netlink.Route, []netlink.Route, []netip.Prefix, error) {
 	routes, err := nlh.RouteListFiltered(family, &netlink.Route{
 		Table: mgmtVRFTableID,
 	}, netlink.RT_FILTER_TABLE)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	operators := make([]netlink.Route, 0, len(routes))
 	controlFabricConnected := make([]netlink.Route, 0, len(controlFabricLinks))
+	connectedPrefixes := make([]netip.Prefix, 0)
 	for _, route := range routes {
 		if route.Protocol == unix.RTPROT_DHCP {
 			continue
 		}
 		if route.Protocol == unix.RTPROT_KERNEL {
-			if _, protected := controlFabricLinks[route.LinkIndex]; protected &&
-				route.Scope == netlink.SCOPE_LINK && route.Dst != nil && route.Gw == nil {
-				controlFabricConnected = append(controlFabricConnected, route)
+			if route.Scope == netlink.SCOPE_LINK && route.Dst != nil && route.Gw == nil {
+				if prefix, ok := mgmtRoutePrefix(route, family); ok {
+					connectedPrefixes = append(connectedPrefixes, prefix)
+				}
+				if _, protected := controlFabricLinks[route.LinkIndex]; protected &&
+					route.Scope == netlink.SCOPE_LINK && route.Dst != nil && route.Gw == nil {
+					controlFabricConnected = append(controlFabricConnected, route)
+				}
 			}
 			continue
 		}
@@ -121,7 +128,7 @@ func mgmtVRFRouteInventory(
 		}
 		operators = append(operators, route)
 	}
-	return operators, controlFabricConnected, nil
+	return operators, controlFabricConnected, connectedPrefixes, nil
 }
 
 func mgmtRoutePrefixString(route netlink.Route, family int) string {

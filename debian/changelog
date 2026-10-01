@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Suppress management-VRF DHCP classless routes contained by connected
+    prefixes by default, and warn when the trust override restores them while
+    retaining the non-overridable cluster control/fabric fence (#11383).
   * Fence option-121 routes from overriding connected cluster control/fabric
     prefixes in table 999, regardless of the DHCP trust override (#11362).
   * Select a deterministic per-family management DHCP default and warn when
