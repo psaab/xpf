@@ -1,5 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Guard out-of-normalizer compact `then <head>` leaf forms so routing-instance
+    steering survives direct and `apply-groups` compilation (#11354).
   * Require the FBF steering smoke to verify IPv4 and IPv6 forwarding at the
     managed VLAN-80 peer against the resolved ISP-B gateway MAC, reject drop
     and wrong-egress cases, and discover inline/nexthop-id ECMP routes (#11306).
