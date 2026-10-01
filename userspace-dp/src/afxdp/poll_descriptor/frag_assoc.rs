@@ -351,6 +351,139 @@ pub(super) enum FlowlessPreRoutingNat {
     },
     Untranslatable,
 }
+/// Protocol facts recovered from the packet bytes for the selected flowless
+/// destination rewrite. `UserspaceDpMeta::protocol == 255` is only an unknown
+/// sentinel; it never proves that an unparsed fragment is checksum-safe.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct FlowlessNatWireInfo {
+    family: u8,
+    protocol: Option<u8>,
+    ah_sighted: bool,
+    is_fragmented: bool,
+    is_non_first_fragment: bool,
+    ipv6_fragment_next_header: Option<u8>,
+    vrrp_version: Option<u8>,
+}
+
+#[inline]
+pub(super) fn flowless_nat_wire_info(frame: &[u8], meta: UserspaceDpMeta) -> FlowlessNatWireInfo {
+    let l3 = crate::afxdp::frame::verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
+    let Some(packet) = frame.get(l3..) else {
+        return FlowlessNatWireInfo::default();
+    };
+    match meta.addr_family as i32 {
+        libc::AF_INET => {
+            let protocol = packet.get(9).copied();
+            let is_fragmented = crate::afxdp::frame::ipv4_is_any_fragment(packet);
+            let is_non_first_fragment = crate::afxdp::frame::ipv4_is_non_first_fragment(packet);
+            let vrrp_version = if protocol == Some(crate::ip_proto::PROTO_VRRP) && !is_fragmented {
+                crate::afxdp::frame::packet_rel_l4_offset_and_protocol(packet, meta.addr_family)
+                    .and_then(|(offset, _)| packet.get(offset))
+                    .map(|first| first >> 4)
+            } else {
+                None
+            };
+            FlowlessNatWireInfo {
+                family: meta.addr_family,
+                protocol,
+                ah_sighted: protocol == Some(crate::ip_proto::PROTO_AH),
+                is_fragmented,
+                is_non_first_fragment,
+                ipv6_fragment_next_header: None,
+                vrrp_version,
+            }
+        }
+        libc::AF_INET6 => {
+            let walk = crate::afxdp::frame::walk_ipv6_ext_chain(frame, l3);
+            let fragment = walk.first_non_atomic_fragment.or(walk.fragment);
+            let ipv6_fragment_next_header =
+                fragment.and_then(|fragment| fragment.bytes.map(|bytes| bytes[0]));
+            let protocol = if walk.non_first_fragment_offset_seen {
+                ipv6_fragment_next_header.filter(|protocol| {
+                    !crate::afxdp::frame::ipv6_ext_header_is_traversable(*protocol)
+                })
+            } else {
+                match walk.outcome {
+                    crate::afxdp::frame::ExtChainOutcome::L4(_, protocol) => Some(protocol),
+                    _ => None,
+                }
+            };
+            FlowlessNatWireInfo {
+                family: meta.addr_family,
+                protocol,
+                ah_sighted: walk.ah_present
+                    || ipv6_fragment_next_header == Some(crate::ip_proto::PROTO_AH),
+                is_fragmented: walk.fragment.is_some(),
+                is_non_first_fragment: walk.non_first_fragment_offset_seen,
+                ipv6_fragment_next_header,
+                vrrp_version: None,
+            }
+        }
+        _ => FlowlessNatWireInfo::default(),
+    }
+}
+
+#[inline]
+fn flowless_destination_rewrite_supported(
+    decision: NatDecision,
+    wire: FlowlessNatWireInfo,
+) -> bool {
+    let Some(protocol) = wire.protocol else {
+        return false;
+    };
+    if decision.rewrite_dst.is_none()
+        || decision.rewrite_dst_port.is_some()
+        || wire.ah_sighted
+        || protocol == crate::ip_proto::PROTO_ESP
+        || (wire.family == libc::AF_INET6 as u8
+            && wire.is_non_first_fragment
+            && wire
+                .ipv6_fragment_next_header
+                .is_some_and(crate::afxdp::frame::ipv6_ext_header_is_traversable))
+    {
+        return false;
+    }
+    if decision.nptv6 {
+        return wire.family == libc::AF_INET6 as u8;
+    }
+    match wire.family as i32 {
+        libc::AF_INET => match protocol {
+            crate::ip_proto::PROTO_TCP
+            | crate::ip_proto::PROTO_UDP
+            | crate::ip_proto::PROTO_ICMP
+            | crate::ip_proto::PROTO_GRE
+            | crate::ip_proto::PROTO_IPIP
+            | crate::ip_proto::PROTO_IPV6 => true,
+            crate::ip_proto::PROTO_VRRP => !wire.is_fragmented && wire.vrrp_version == Some(2),
+            _ => false,
+        },
+        libc::AF_INET6 => matches!(
+            protocol,
+            crate::ip_proto::PROTO_TCP
+                | crate::ip_proto::PROTO_UDP
+                | crate::ip_proto::PROTO_ICMPV6
+                | crate::ip_proto::PROTO_GRE
+                | crate::ip_proto::PROTO_IPIP
+                | crate::ip_proto::PROTO_IPV6
+        ),
+        _ => false,
+    }
+}
+
+#[inline]
+fn flowless_pre_routing_translation(
+    decision: NatDecision,
+    counter: Option<std::sync::Arc<crate::nat::NatRuleCounter>>,
+    wire: FlowlessNatWireInfo,
+) -> FlowlessPreRoutingNat {
+    if decision.rewrite_dst.is_none() && decision.rewrite_dst_port.is_none() {
+        return FlowlessPreRoutingNat::None;
+    }
+    if !flowless_destination_rewrite_supported(decision, wire) {
+        return FlowlessPreRoutingNat::Untranslatable;
+    }
+    FlowlessPreRoutingNat::Translated { decision, counter }
+}
 
 /// Resolve address-only static/DNAT/NPTv6 before a flowless route lookup.
 /// This mirrors the flow-backed pre-routing order without recovering missing
@@ -360,6 +493,7 @@ pub(super) fn flowless_pre_routing_destination_nat(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    wire: FlowlessNatWireInfo,
     ingress_zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
 ) -> FlowlessPreRoutingNat {
@@ -385,21 +519,30 @@ pub(super) fn flowless_pre_routing_destination_nat(
         );
 
     if l4_identity_missing
-        && forwarding.static_nat.flowless_l4_translation_possible(
+        && forwarding.static_nat.flowless_l4_dnat_translation_possible(
             meta.protocol,
             l3_flow.src_ip,
             l3_flow.dst_ip,
             scope.zone_name,
             scope.ifname,
             scope.routing_instance,
-            "",
-            "",
-            "",
         )
     {
         return FlowlessPreRoutingNat::Untranslatable;
     }
-
+    if forwarding
+        .static_nat
+        .flowless_non_tcp_udp_port_map_possible(
+            wire.protocol,
+            l3_flow.src_ip,
+            l3_flow.dst_ip,
+            scope.zone_name,
+            scope.ifname,
+            scope.routing_instance,
+        )
+    {
+        return FlowlessPreRoutingNat::Untranslatable;
+    }
     if let Some((decision, counter)) = forwarding.static_nat.match_dnat_with_counter_scoped(
         l3_flow.dst_ip,
         0,
@@ -408,17 +551,26 @@ pub(super) fn flowless_pre_routing_destination_nat(
         scope.ifname,
         scope.routing_instance,
     ) {
-        return if decision.rewrite_dst.is_some() && decision.rewrite_dst_port.is_none() {
-            FlowlessPreRoutingNat::Translated { decision, counter }
-        } else {
-            FlowlessPreRoutingNat::None
-        };
+        return flowless_pre_routing_translation(decision, counter, wire);
     }
 
     if !forwarding.dnat_table.is_empty() {
         if l4_identity_missing
             && forwarding.dnat_table.flowless_l4_precedence_possible(
                 meta.protocol,
+                l3_flow.src_ip,
+                l3_flow.dst_ip,
+                scope.zone_name,
+                scope.ifname,
+                scope.routing_instance,
+            )
+        {
+            return FlowlessPreRoutingNat::Untranslatable;
+        }
+        if forwarding
+            .dnat_table
+            .flowless_non_tcp_udp_port_map_possible(
+                wire.protocol,
                 l3_flow.src_ip,
                 l3_flow.dst_ip,
                 scope.zone_name,
@@ -439,11 +591,7 @@ pub(super) fn flowless_pre_routing_destination_nat(
             scope.routing_instance,
             None,
         ) {
-            return if decision.rewrite_dst.is_some() && decision.rewrite_dst_port.is_none() {
-                FlowlessPreRoutingNat::Translated { decision, counter }
-            } else {
-                FlowlessPreRoutingNat::None
-            };
+            return flowless_pre_routing_translation(decision, counter, wire);
         }
     }
 
@@ -453,14 +601,15 @@ pub(super) fn flowless_pre_routing_destination_nat(
             .translate_inbound_result(&mut dst_v6, scope.zone_name)
         {
             crate::nptv6::Nptv6Translation::Translated => {
-                return FlowlessPreRoutingNat::Translated {
-                    decision: NatDecision {
+                return flowless_pre_routing_translation(
+                    NatDecision {
                         rewrite_dst: Some(IpAddr::V6(dst_v6)),
                         nptv6: true,
                         ..NatDecision::default()
                     },
-                    counter: None,
-                };
+                    None,
+                    wire,
+                );
             }
             crate::nptv6::Nptv6Translation::NoMatch => {}
             crate::nptv6::Nptv6Translation::Untranslatable => {
@@ -471,7 +620,6 @@ pub(super) fn flowless_pre_routing_destination_nat(
 
     FlowlessPreRoutingNat::None
 }
-
 
 /// #6122/#10679: fail-closed discriminator for a flowless packet whose
 /// ordinary same-family NAT / NPTv6 decision is unavailable. Answers "would this
