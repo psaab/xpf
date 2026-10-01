@@ -108,6 +108,7 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	// reference a device owned by that same instance; otherwise FRR activates
 	// the interface in a different routing context from the configured device.
 	// Known aliases are compared by kernel identity, while undeclared refs
+	// remain owned by the #9405 advisory.
 	if mismatches := protocolInterfaceMembershipMismatches11310(cfg); len(mismatches) > 0 {
 		if opts.lenientProtocolInterfaceMembership11310 {
 			for _, mismatch := range mismatches {
