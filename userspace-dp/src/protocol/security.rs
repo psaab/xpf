@@ -652,8 +652,8 @@ pub(crate) struct PolicyApplicationSnapshot {
     /// #3020: optional ICMP/ICMPv6 type (and code) constraint. `None` means
     /// "no constraint" — the term matches every type/code of its protocol (the
     /// historical behavior, kept by the all-ICMP aliases). `junos-icmp-ping` sets
-    /// `icmp_type = Some(8)`; `junos-ping` and `junos-pingv6` leave it unset
-    /// makes an old Go snapshot that omits the field decode to `None` (match
+    /// `icmp_type = Some(8)`; `junos-ping` and `junos-pingv6` leave it unset.
+    /// This makes an old Go snapshot that omits the field decode to `None` (match
     /// all ICMP — today's behavior), so version skew degrades safely rather
     /// than failing to decode. `skip_serializing_if = Option::is_none` keeps
     /// the default specimen (and the `protocol_wire_v1` fixture) byte-identical.
