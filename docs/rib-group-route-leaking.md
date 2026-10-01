@@ -30,35 +30,45 @@ For each source routing instance whose `interface-routes` rib-group imports the
 connected prefix** of that instance:
 
 ```
-ip rule to <connected-prefix> lookup <sourceTable> pref 30000
+ip rule to <connected-prefix> lookup <sourceTable> pref <derived-priority>
 ```
 
-These rules sit at priority band **30000-30999**, which is **after PBR**
-(29000-29999) and **before** next-table (32000-32099) and the main table's
-rule (32766). Because the rule matches a *specific* destination prefix, a
-main-table **default route no longer shadows it** — a lookup for the leaked
-prefix consults the source instance's table (where the connected route lives),
-while everything else still falls through to main.
+The priority is `30000 + 2*(address-bits - prefix-length) + kind-offset`,
+where next-table leaks use offset 0 and rib-group leaks use offset 1. All such
+rules share **30000-30999**, after PBR (29000-29999) and before the main
+table's rule (32766). More-specific prefixes get lower (earlier) priorities,
+so a lookup for the leaked prefix consults its most-specific source table
+before a broader leak; everything else falls through to main. A main-table
+default route therefore no longer shadows a leaked connected prefix.
 
-### Kernel/helper precedence parity (#11319)
+### Kernel/helper precedence parity (#11319, #11396)
 
-The priority order is deliberate: kernel PBR rules use 29000-29999, rib-group
-per-prefix leaks use 30000-30999, and next-table leaks use 32000-32099. PBR
-therefore selects its target table before either kernel leak rule can match,
-the same order the helper applies an explicit `then routing-instance` override
-before looking up destination routes. Before #11319, the kernel's next-table
-(100-199) and rib-group (30000-30999) bands both sorted ahead of PBR
+Kernel PBR rules use 29000-29999. Next-table and rib-group per-prefix leaks
+share the following 30000-30999 priority range and use the same
+prefix-derived ordering. More-specific prefixes precede less-specific ones
+regardless of leak kind or source table; for an equal prefix, next-table
+precedes rib-group. This makes kernel first-match routing honor longest-prefix
+matching across overlapping leaks, as the userspace FIB does. The nested
+`10.0.0.0/8` and `10.1.2.0/24` regression covers both declaration orders and
+both leak kinds (#11396).
+
+PBR therefore selects its target table before either kernel leak rule can
+match, the same order the helper applies an explicit `then routing-instance`
+override before looking up destination routes. Before #11319, the kernel's
+next-table (100-199) and rib-group (30000-30999) bands both sorted ahead of PBR
 (31000-31999), so a leak could select a different table for the same packet.
 
 The old next-table and PBR bands are retained only for upgrade cleanup:
-`nextTableManager.clear()` removes stale rules at 100-199, and
+`nextTableManager.clear()` removes stale rules at 32000-32099 and 100-199, and
 `pbrManager.clear()` removes stale selector-bearing rules at 31000-31999.
 The userspace snapshot builder also refuses to widen old-band PBR rules while
 an in-place upgrade is converging.
 
 - Source: `pkg/routing/rules.go` — `ribGroupManager.Apply` +
-  `ribGroupLeaksIntoMain`; band constant `ribGroupLeakRulePriority = 30000`,
-  cap `maxRibGroupLeakRules = 1000`.
+  `ribGroupLeaksIntoMain`; shared base `ribGroupLeakRulePriority = 30000`,
+  priority range size `config.RouteLeakRulePriorityWindow = 1000`, and
+  independent admission cap `maxRibGroupLeakRules = 1000`. See also
+  [`pkg/routing/README.md`](../pkg/routing/README.md#ip-rule-priorities).
 - Connected-prefix derivation: `config.RibGroupConnectedPrefixes`
   (`pkg/config/compiler_routing.go`), which walks each instance's member
   interface units and masks their static addresses to network prefixes via
@@ -176,11 +186,13 @@ it — the leak was absent from **both** FIBs.
 
 ### Upgrade cleanup
 
-`ribGroupManager.clear()` scans the current `[30000, 31000)` per-prefix band,
-the legacy `[33000, 33100)` blanket band, and the original `[200, 300)` band.
-An in-place binary upgrade therefore **removes the stale pref-33000 blanket
-rule** so the box is never left with the broken blanket rule alongside the
-new per-prefix rules.
+`ribGroupManager.clear()` scans only destination-scoped rules without an
+ingress-interface selector in the shared `[30000, 31000)` priority range, so
+it preserves next-table rules in that same range. It also removes the legacy
+`[33000, 33100)` blanket band and the original `[200, 300)` band. An in-place
+binary upgrade therefore **removes the stale pref-33000 blanket rule** so the
+box is never left with the broken blanket rule alongside the new per-prefix
+rules.
 
 ### Final rib-group removal (zero-transition, #5642)
 
@@ -255,20 +267,19 @@ silently no-op — for the cases Phase 1 cannot fully realize:
   main). Phase 1 leaks only into the main table; a non-main import target is not
   yet installed.
 
-### Strict rejection — ip-rule window over-subscription (#5854)
+### Strict rejection — route-leak admission-cap over-subscription (#5854)
 
-The applier programs next-table and interface-routes rib-group leaks into
-**fixed ip-rule priority windows** and hard-caps at each boundary: 100 rules
-for next-table (`pkg/routing/rules.go`, the
-`nextTableRulePriority+maxNextTableRules` cap) and `maxRibGroupLeakRules`
-(1000) rules for the per-prefix rib-group leak (the
-`ribGroupLeakRulePriority+maxRibGroupLeakRules` cap). The next-table band is
-32000-32099; the rib-group band is 30000-30999. A config that exceeds a
-window used to commit green with only a **warning**
+The applier assigns next-table and interface-routes rib-group leaks
+prefix-derived priorities in the shared `[30000, 31000)` range, while
+independent admission caps limit installed rules: 100 next-table entries
+(`pkg/routing/rules.go`, one per default-instance ingress interface) and
+`maxRibGroupLeakRules` (1000 connected-prefix rules). These caps are not
+priority slots or separate per-kind priority bands. A config that exceeds a
+cap used to commit green with only a **warning**
 (`validateRoutingRuleWindowWarnings`); the reconciler then silently stopped at
-the limit and returned success, so the committed generation **claimed routes the
-kernel never programmed** — a blackhole / asymmetric-routing / silent inter-VRF
-leak loss with no operator-visible signal.
+the limit and returned success, so the committed generation **claimed routes
+the kernel never programmed** — a blackhole / asymmetric-routing / silent
+inter-VRF leak loss with no operator-visible signal.
 
 The over-subscription is now **hard-rejected at commit**
 (`validateRoutingRuleWindowsStrict`,
@@ -277,7 +288,7 @@ strict on commit / commit-check so the operator sees the over-limit condition
 before it truncates, downgraded to a single warning on the tolerant load /
 peer-sync paths (`opts.lenientRoutingRuleWindows`, #1960 no-brick) so an
 already-committed or peer-synced over-limit generation still boots (the
-applier's window hard-cap keeps the excess inert).
+applier's admission caps keep the excess inert).
 
 The strict rib-group count now follows the same eligibility as `Apply`
 (#11397): only families whose per-instance import-rib resolves to the main
@@ -289,8 +300,8 @@ install separate rules.
 
 **Apply-side degraded error + FIB cap reconcile (#6467).** On the tolerant
 load / peer-sync path the commit gate is only a warning, so an over-limit
-generation still reaches the applier. There the next-table cap used to
-`slog.Warn` and `break` with **no aggregated error**, so `Apply` returned nil
+generation still reaches the applier. There the next-table admission cap used
+to `slog.Warn` and `break` with **no aggregated error**, so `Apply` returned nil
 and reported success while truncating the leak set — and, worse, the userspace
 FIB (`buildRouteSnapshots`) mirrored **all** config next-table leaks
 **uncapped**, so leak #101+ existed in the userspace FIB but not the kernel. A
@@ -299,34 +310,34 @@ leak #101+ then resolved into the target VRF on the AF_XDP fast path but the
 main table in the kernel — a kernel/dataplane verdict split for the same flow.
 The next-table cap now **aggregates a degraded error** naming how many leaks
 were dropped (mirroring the rib-group and PBR caps in the same file), and the
-FIB config-static path caps GLOBAL next-table leaks at the **same** window,
-counting v4 then v6 in the same order as `ApplyNextTableRules`, so both planes
-truncate the identical tail.
+FIB config-static path caps GLOBAL next-table leaks at the **same admission
+limit**, counting v4 then v6 in the same order as `ApplyNextTableRules`, so
+both planes admit the identical tail.
 
 The FIB mirror also applies the applier's **eligibility** exactly. The applier
-installs an ip rule — and advances its window counter — ONLY for a next-table
-route whose target names a **defined** routing instance (`tableIDs[sr.NextTable]`
-hit; the compiler stores the bare instance name via `parseNextTableInstance`)
-AND whose destination parses as a CIDR; it `continue`s (no `prio++`) otherwise.
-`buildRouteSnapshots` now gates on the SAME predicate (a `definedInstances` name
-set + `net.ParseCIDR`). Without it a dangling (unknown-instance) or unparseable
-next-table route consumed a FIB window slot and published a **ghost** leak the
-kernel never installs — squeezing a valid leak out of the window (the FIB
-missing a leak the kernel HAS while carrying one it LACKS). The applier's
-degraded-error drop count likewise counts only **eligible** tail routes so the
-"N not leaked" figure is accurate rather than inflated by routes that would
-never install. Measured on 50 dangling + 100 valid routes: both planes now hold
-100 valid leaks and 0 ghosts.
+installs an ip rule — and advances its admission-cap counter — ONLY for a
+next-table route whose target names a **defined** routing instance
+(`tableIDs[sr.NextTable]` hit; the compiler stores the bare instance name via
+`parseNextTableInstance`) AND whose destination parses as a CIDR. Other routes
+are skipped without consuming admission capacity. `buildRouteSnapshots` gates
+on the SAME predicate (a `definedInstances` name set + `net.ParseCIDR`).
+Without it, a dangling (unknown-instance) or unparseable next-table route
+consumed a FIB admission slot and published a **ghost** leak the kernel never
+installs — squeezing a valid leak out of the cap (the FIB missing a leak the
+kernel HAS while carrying one it LACKS). The applier's degraded-error drop
+count likewise counts only **eligible** tail routes so the "N not leaked"
+figure is accurate rather than inflated by routes that would never install.
+Measured on 50 dangling + 100 valid routes: both planes now hold 100 valid
+leaks and 0 ghosts.
 
-The rib-group window size (`maxRibGroupLeakRules` = 1000) is duplicated in
-`pkg/config` with a keep-in-sync comment because `pkg/config` cannot import
-`pkg/routing` (that would be an import cycle — `pkg/routing` imports
-`pkg/config`); it MUST stay in lockstep with `pkg/routing/rules.go`. The
-next-table window is now the **exported SSOT** `config.NextTableRuleWindow`
-(alongside `config.NextTableRulePriorityBase`, mirroring the #4479 PBR band
-constants): `pkg/config`'s commit gate (`maxNextTableRules`), the applier
-(`pkg/routing.maxNextTableRules`), and the userspace FIB config-static mirror
-all reference that one value, so the three cannot drift.
+The shared priority base and range size are defined in `pkg/config`
+(`NextTableRulePriorityBase`, `RouteLeakRulePriorityWindow`) so the kernel
+managers, strict config validation, and userspace FIB use the same formula.
+`NextTableRuleWindow` is the separate 100-entry next-table admission cap
+(including per-ingress expansion); the rib-group admission cap remains 1000.
+`maxRibGroupLeakRules` is duplicated in `pkg/config` validation and
+`pkg/routing/rules.go` because the packages cannot import each other, and must
+stay in sync. Neither cap determines prefix priorities.
 
 ### Ingress scope on the next-table leak rules (#9420)
 
@@ -366,7 +377,7 @@ and the applier is fed only `cfg.RoutingOptions.StaticRoutes` +
 Three consequences an operator can observe:
 
 1. **One leak costs one ip rule per default-instance ingress interface.** The
-   100-slot window is drawn down **leak-atomically** — a leak whose full
+   100-entry admission cap is drawn down **leak-atomically** — a leak whose full
    expansion does not fit is dropped whole rather than installed on a subset of
    its interfaces, because a partially-scoped leak works on some ingress
    interfaces and silently not on others. The overflow error names the

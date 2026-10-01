@@ -3170,7 +3170,7 @@ Alternatively keep `ForwardingState` flat but introduce `struct ForwardingState 
 | `useful_cos_state` gate still prevents fwd-only admission | Unit test `build_cos_iface_config` with empty iface → None; iperf3 fwd-only cluster same throughput |
 | No new per-packet alloc | `cargo test` with allocation tracking? Check via `cargo bench` if exists, or audit via `grep "Vec::new\|Box::new" forwarding/mod.rs` in hot path must be zero |
 | `canonical_route_table` Cow optimization kept #4674 | Check `lookup_forwarding_resolution_inner_ecmp` still uses `Cow::Borrowed(DEFAULT_V*_TABLE)` not owned |
-| `ecmp_hash_flow` seed still per-boot #2364 | Ensure `hot_hash_seed::hot_path_hash_seed()` still used, not fixed seed |
+| `ecmp_hash_flow` uses the stable ECMP domain seed (#11405) | Ensure production uses `ECMP_FLOW_HASH_SEED`, not `hot_path_hash_seed`; keep the per-boot seed on collision-sensitive caches/maps |
 
 ---
 

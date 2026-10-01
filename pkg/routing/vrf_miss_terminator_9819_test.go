@@ -618,10 +618,12 @@ func assertRibGroupRulesInClearedWindows9819(t *testing.T, ops *fakeRuleOps) {
 	t.Helper()
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		for _, r := range ops.rules[family] {
-			inLeak := r.Priority >= ribGroupLeakRulePriority && r.Priority < ribGroupLeakRulePriority+maxRibGroupLeakRules
+			inLeak := r.Priority >= ribGroupLeakRulePriority &&
+				r.Priority < ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow
 			if !inLeak && r.Priority != RibGroupReturnRulePriority {
 				t.Errorf("rule priority %d is in no window clear() scans ([%d,%d) or %d) — would leak",
-					r.Priority, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules, RibGroupReturnRulePriority)
+					r.Priority, ribGroupLeakRulePriority,
+					ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow, RibGroupReturnRulePriority)
 			}
 		}
 	}

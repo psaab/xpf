@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Order next-table and rib-group leak rules by destination prefix specificity
+    across leak kinds so overlapping VRF routes follow longest-prefix match
+    in both kernel and userspace dataplanes (#11396).
   * Initial xpf Debian package (increment A of #1917, subsumes #1923).
     Ships xpfd, xpf-userspace-dp, cli, the day-0 config-drive loader,
     and the systemd units. Binaries install to a dpkg-static staging
