@@ -271,13 +271,14 @@ pub(in crate::afxdp) fn post_transform_inner_mtu(
     // the RFC 7915 header delta on top of that, in the same direction the
     // NAT64-only arm uses.
     if is_nat64 && decision.resolution.tunnel_endpoint_id != 0 {
-        let tunnel_inner = crate::afxdp::forwarding::min_nonzero_mtu(
-            tunnel_inner_mtu(decision, forwarding, inner_dst),
-            decision.resolution.route_mtu as usize,
-        );
+        let tunnel_inner = tunnel_inner_mtu(decision, forwarding, inner_dst);
         if tunnel_inner == 0 {
             return 0;
         }
+        let tunnel_inner = crate::afxdp::forwarding::min_nonzero_mtu(
+            tunnel_inner,
+            decision.resolution.route_mtu as usize,
+        );
         return match inner_addr_family as i32 {
             libc::AF_INET6 => tunnel_inner.saturating_add(20),
             libc::AF_INET => tunnel_inner.saturating_sub(20),
@@ -307,8 +308,12 @@ pub(in crate::afxdp) fn post_transform_inner_mtu(
     if decision.resolution.tunnel_endpoint_id == 0 {
         return 0;
     }
+    let tunnel_inner = tunnel_inner_mtu(decision, forwarding, inner_dst);
+    if tunnel_inner == 0 {
+        return 0;
+    }
     crate::afxdp::forwarding::min_nonzero_mtu(
-        tunnel_inner_mtu(decision, forwarding, inner_dst),
+        tunnel_inner,
         decision.resolution.route_mtu as usize,
     )
 }

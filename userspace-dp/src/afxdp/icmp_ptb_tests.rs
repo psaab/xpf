@@ -1748,13 +1748,48 @@ fn post_transform_inner_mtu_8896_nat64_through_gre_applies_both_budgets() {
          the family arm is not being consulted"
     );
 
+    // CONTROL: a known tunnel obeys a selected route MTU below its underlay.
+    let mut route_limited_decision = decision;
+    route_limited_decision.resolution.route_mtu = 1200;
+    assert_eq!(
+        post_transform_inner_mtu(
+            &route_limited_decision,
+            &fwd,
+            false,
+            libc::AF_INET6 as u8,
+            1400,
+            None,
+        ),
+        1200,
+        "known GRE mode must apply selected route MTU 1200",
+    );
+
     // FAIL CLOSED: an unknown mode yields 0 here exactly as the frame builders
     // drop it, rather than silently falling back to the un-composed budget.
     let mut unknown = forwarding_with_egress(1400);
     insert_tunnel_endpoint(&mut unknown, "ipsec-vti-future", libc::AF_INET, 0);
     assert_eq!(
-        post_transform_inner_mtu(&decision, &unknown, true, libc::AF_INET6 as u8, 1400, None),
+        post_transform_inner_mtu(
+            &route_limited_decision,
+            &unknown,
+            true,
+            libc::AF_INET6 as u8,
+            1400,
+            None,
+        ),
         0,
         "#2327: an unknown tunnel mode must yield no budget, not the NAT64-only one"
+    );
+    assert_eq!(
+        post_transform_inner_mtu(
+            &route_limited_decision,
+            &unknown,
+            false,
+            libc::AF_INET6 as u8,
+            1400,
+            None,
+        ),
+        0,
+        "#2327: an unknown tunnel mode must remain closed without NAT64 too",
     );
 }
