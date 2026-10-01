@@ -466,8 +466,28 @@ func flatSetAdmitted(lines []string) bool {
 
 func flatSetCompile(lines []string) (*Config, error) {
 	tr := &ConfigTree{}
+	hasBGP, hasProcessAS := false, false
 	for _, l := range lines {
+		if strings.Contains(l, "protocols bgp") {
+			hasBGP = true
+		}
+		if strings.Contains(l, "routing-options autonomous-system") ||
+			strings.Contains(l, "protocols bgp local-as") {
+			hasProcessAS = true
+		}
 		toks, err := ParseSetCommand(l)
+		if err != nil {
+			return nil, err
+		}
+		if err := tr.SetPath(toks); err != nil {
+			return nil, err
+		}
+	}
+	// These shape censuses measure flat-set compilation, not router-AS
+	// validation. Keep unrelated BGP fixtures valid while leaving explicit
+	// process-local-AS probes AS-less so #11313 remains observable.
+	if hasBGP && !hasProcessAS {
+		toks, err := ParseSetCommand("set routing-options autonomous-system 65000")
 		if err != nil {
 			return nil, err
 		}
@@ -644,9 +664,13 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	// gate, moving one row to unmeasured (83 -> 84). The measured loser set,
 	// walked/vacuous counts, and collector reach stay unchanged.
 	// #11544: reconciling the stored snapshot with the current api-auth schema
-	// measures 39 vacuous and 86 unmeasured rows, with collector reach 388/144.
-	// The three loser rows and 112 walked count remain unchanged; this is a
+	// measures 39 vacuous and 87 unmeasured rows, with collector reach 388/144.
+	// The three loser rows and 111 walked count remain unchanged; this is a
 	// population-count refresh, not a relaxation of the loss set.
+	// #11313: BGP chain-shape probes now include a process AS so the new strict
+	// router-AS gate cannot preempt the census. One formerly vacuous candidate
+	// moves to unmeasured (39 -> 38, 87 -> 88); the loser set and collector
+	// reach stay unchanged, so this is an observability-count refresh.
 	//
 	// THE COUNTS ARE PART OF THE FIXTURE, and that is a mutation result, not a
 	// flourish. With only the loser set recorded, deleting the observability
