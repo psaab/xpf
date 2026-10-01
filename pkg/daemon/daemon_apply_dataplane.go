@@ -551,6 +551,16 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			}
 		}
 	}
+	// networkd's reconfigure can strip route state along with the VRF binding.
+	// Reconcile management routes only after that binding has been restored;
+	// this final result decides whether management-route retry debt remains.
+	if err := mgmtVRFRouteReconcileFn(d); err != nil {
+		d.noteMgmtRouteReconcileResult(err)
+		networkdErr = errors.Join(networkdErr,
+			fmt.Errorf("management-VRF routes after networkd rebind: %w", err))
+	} else {
+		d.noteMgmtRouteReconcileResult(nil)
+	}
 	// A networkd activation can finish foreign-rule cleanup asynchronously
 	// after Apply returns. Reassert again at the end of the core, after the
 	// management-VRF rebind, so the apply's returned invariant covers that

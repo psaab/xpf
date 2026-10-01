@@ -58,20 +58,32 @@ var (
 	}
 )
 
-// routingReconcileDebt records that the routing reconcile is owed. The zero
-// value owes nothing, so a Daemon built as a struct literal needs no setup.
+// mgmtVRFRouteReconcileFn is the management-VRF route reconcile rerun by the
+// routing debt owner. Tests inject a transient failure without opening netlink.
+var mgmtVRFRouteReconcileFn = func(d *Daemon) error {
+	return d.applyMgmtVRFRoutes()
+}
+
+// routingReconcileDebt records routing work that is owed. The zero value
+// owes nothing, so a Daemon built as a struct literal needs no setup.
 type routingReconcileDebt struct {
 	mu   sync.Mutex
 	owed bool
-	// failures counts every failed attempt, the apply's and the retry owner's. A
-	// climbing count means the owner is running and failing, and a flat count
-	// with owed set means it is not running.
+	// failures counts every failed generic routing attempt (apply + retry).
 	failures uint64
-	lastErr  string
+	// routingLastErr holds the error for the generic routing debt.
+	routingLastErr string
+	// lastErr is the newest error among currently owed domains.
+	lastErr string
+	// Management-VRF DHCP routes share the owner but retain a separate debt so
+	// retrying them does not rewrite unrelated policy-routing state.
+	mgmtRoutesOwed     bool
+	mgmtRoutesFailures uint64
+	mgmtRoutesLastErr  string
 }
 
-// noteRoutingReconcileResult latches the debt when any of errs is non-nil and
-// discharges it when all are nil.
+// noteRoutingReconcileResult latches the generic routing debt when any of errs
+// is non-nil and discharges it when all are nil.
 func (d *Daemon) noteRoutingReconcileResult(errs ...error) {
 	err := errors.Join(errs...)
 	d.routingDebt.mu.Lock()
@@ -81,7 +93,12 @@ func (d *Daemon) noteRoutingReconcileResult(errs ...error) {
 			slog.Info("routing reconcile converged; routing reconcile debt discharged", "issue", "#9693")
 		}
 		d.routingDebt.owed = false
-		d.routingDebt.lastErr = ""
+		d.routingDebt.routingLastErr = ""
+		if d.routingDebt.mgmtRoutesOwed {
+			d.routingDebt.lastErr = d.routingDebt.mgmtRoutesLastErr
+		} else {
+			d.routingDebt.lastErr = ""
+		}
 		return
 	}
 	if !d.routingDebt.owed {
@@ -90,21 +107,54 @@ func (d *Daemon) noteRoutingReconcileResult(errs ...error) {
 	}
 	d.routingDebt.owed = true
 	d.routingDebt.failures++
+	d.routingDebt.routingLastErr = err.Error()
 	d.routingDebt.lastErr = err.Error()
 }
 
-// RoutingReconcileDebt reports whether the routing reconcile is owed, how many
-// attempts have failed, and the last error.
+// noteMgmtRouteReconcileResult latches or discharges the DHCP management-route
+// debt independently from policy-routing work.
+func (d *Daemon) noteMgmtRouteReconcileResult(err error) {
+	d.routingDebt.mu.Lock()
+	defer d.routingDebt.mu.Unlock()
+	if err == nil {
+		if d.routingDebt.mgmtRoutesOwed {
+			slog.Info("management-VRF route reconcile converged; routing debt discharged",
+				"issue", "#11450")
+		}
+		d.routingDebt.mgmtRoutesOwed = false
+		d.routingDebt.mgmtRoutesLastErr = ""
+		if d.routingDebt.owed {
+			d.routingDebt.lastErr = d.routingDebt.routingLastErr
+		} else {
+			d.routingDebt.lastErr = ""
+		}
+		return
+	}
+	if !d.routingDebt.mgmtRoutesOwed {
+		slog.Warn("management-VRF route reconcile failed; the retry owner will re-run it until it succeeds",
+			"err", err, "issue", "#11450")
+	}
+	d.routingDebt.mgmtRoutesOwed = true
+	d.routingDebt.mgmtRoutesFailures++
+	d.routingDebt.mgmtRoutesLastErr = err.Error()
+	d.routingDebt.lastErr = err.Error()
+}
+
+// RoutingReconcileDebt reports whether any routing reconcile is owed, how many
+// attempts have failed, and the most recent outstanding error.
 func (d *Daemon) RoutingReconcileDebt() (owed bool, failures uint64, lastErr string) {
 	d.routingDebt.mu.Lock()
 	defer d.routingDebt.mu.Unlock()
-	return d.routingDebt.owed, d.routingDebt.failures, d.routingDebt.lastErr
+	owed = d.routingDebt.owed || d.routingDebt.mgmtRoutesOwed
+	failures = d.routingDebt.failures + d.routingDebt.mgmtRoutesFailures
+	lastErr = d.routingDebt.lastErr
+	return owed, failures, lastErr
 }
 
 func (d *Daemon) routingReconcileOwed() bool {
 	d.routingDebt.mu.Lock()
 	defer d.routingDebt.mu.Unlock()
-	return d.routingDebt.owed
+	return d.routingDebt.owed || d.routingDebt.mgmtRoutesOwed
 }
 
 // routingReconcileReassertLoop is the always-on retry owner started from Run.
@@ -121,19 +171,18 @@ func (d *Daemon) routingReconcileReassertLoop(ctx context.Context) {
 	}
 }
 
-// reassertRoutingReconcileOnce gives the VRF miss terminator an always-on
-// day-2 tail, while keeping policy and route-leak reconciliation debt-gated.
+// reassertRoutingReconcileOnce retries only the routing domains that owe work.
+// Management-VRF DHCP routes have their own bit within routing debt, so a
+// failed route refresh does not rewrite unrelated policy-routing state.
 //
 // It takes applySem BEFORE reading the active config, for the reason #4001 gave
 // the proxy-ARP loop: a config read outside the semaphore could capture a
 // pre-commit snapshot and re-assert rules a concurrent commit has just removed.
 // A canceled tick returns before any semaphore acquisition; bootstrap ticks
-// retain debt-gated policy/route-leak retries but skip VRF takeover writes.
-// A no-debt tick uses TryAcquire so it does not queue behind a commit that has
-// nothing for the policy/route-leak retry owner to do; once it owns the
-// semaphore it still reasserts the VRF terminator. The owed check is repeated
-// inside because a commit that lands in between runs the same reconcile and
-// discharges the debt itself.
+// retain debt-gated policy/route-leak retries but skip VRF takeover writes. A
+// no-debt tick uses TryAcquire so it does not queue behind a commit that has
+// nothing for the retry owner to do; once it owns the semaphore it still
+// reasserts the VRF miss terminator.
 func (d *Daemon) reassertRoutingReconcileOnce(ctx context.Context) {
 	if d.store == nil || ctx.Err() != nil {
 		return
@@ -152,34 +201,42 @@ func (d *Daemon) reassertRoutingReconcileOnce(ctx context.Context) {
 		return
 	}
 
-	// The VRF terminator is always checked once the tick owns applySem, except
-	// in bootstrap mode where takeover writes remain suppressed. This closes
-	// the post-success async-delete window from #10458. The callback re-checks
-	// config-aware ownership, so an empty configuration remains a no-op.
 	var vrfErr error
 	if !d.inBootstrap() {
 		vrfErr = vrfMissTerminatorReconcileFn(d)
 	}
 
-	// A debt may have been discharged by the commit that held applySem while
-	// this tick waited. In that case, preserve the no-duplicate policy/route
-	// behavior while still retaining the always-on VRF check.
-	if !d.routingReconcileOwed() {
+	d.routingDebt.mu.Lock()
+	routingOwed := d.routingDebt.owed
+	mgmtRoutesOwed := d.routingDebt.mgmtRoutesOwed
+	d.routingDebt.mu.Unlock()
+
+	if !routingOwed {
+		// The VRF miss terminator remains an always-on day-2 check, independent
+		// of whether policy-routing or management routes are owed.
 		d.noteRoutingReconcileResult(vrfErr)
 		if vrfErr != nil {
 			slog.Warn("VRF miss terminator day-2 re-assert failed; will retry",
 				"err", vrfErr, "issue", "#10458")
 		}
-		return
+	} else {
+		err := errors.Join(
+			routingPolicyReconcileFn(d, cfg),
+			routeLeakReconcileFn(d, cfg, d.commitOverlayForConfig(cfg)),
+			vrfErr,
+		)
+		d.noteRoutingReconcileResult(err)
+		if err != nil {
+			slog.Warn("routing reconcile re-assert failed; will retry", "err", err, "issue", "#9693")
+		}
 	}
 
-	err := errors.Join(
-		routingPolicyReconcileFn(d, cfg),
-		routeLeakReconcileFn(d, cfg, d.commitOverlayForConfig(cfg)),
-		vrfErr,
-	)
-	d.noteRoutingReconcileResult(err)
-	if err != nil {
-		slog.Warn("routing reconcile re-assert failed; will retry", "err", err, "issue", "#9693")
+	if mgmtRoutesOwed {
+		err := mgmtVRFRouteReconcileFn(d)
+		d.noteMgmtRouteReconcileResult(err)
+		if err != nil {
+			slog.Warn("management-VRF route re-assert failed; will retry",
+				"err", err, "issue", "#11450")
+		}
 	}
 }
