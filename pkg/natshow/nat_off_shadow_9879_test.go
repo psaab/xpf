@@ -76,3 +76,56 @@ func TestHealthyOffRuleHasNoShadowWarning_9879(t *testing.T) {
 		t.Fatalf("off rule no longer renders as an exemption:\n%s", got)
 	}
 }
+
+func potentialShadowOffCfg11352() *config.Config {
+	cfg := &config.Config{}
+	cfg.Security.AddressBook = &config.AddressBook{
+		Addresses: map[string]*config.Address{
+			"svc-vip": {Name: "svc-vip", Value: "192.0.2.10/32"},
+		},
+		AddressSets: map[string]*config.AddressSet{},
+	}
+	cfg.Security.NAT.Destination = &config.DestinationNATConfig{
+		Pools: map[string]*config.NATPool{
+			"p1": {Name: "p1", Address: "192.168.1.10"},
+		},
+		RuleSets: []*config.NATRuleSet{{
+			Name:     "rs1",
+			FromZone: "untrust",
+			Rules: []*config.NATRule{
+				{
+					Name: "r-off",
+					Match: config.NATMatch{
+						DestinationAddressName:  "svc-vip",
+						DestinationAddressNames: []string{"svc-vip"},
+					},
+					Then: config.NATThen{Type: config.NATDestination, Off: true},
+				},
+				{
+					Name: "r-translate",
+					Match: config.NATMatch{
+						DestinationAddress:   "192.0.2.10/32",
+						DestinationAddresses: []string{"192.0.2.10/32"},
+						DestinationPorts:     []int{80},
+					},
+					Then: config.NATThen{Type: config.NATDestination, PoolName: "p1"},
+				},
+			},
+		}},
+	}
+	return cfg
+}
+
+func TestPotentiallyShadowedOffRuleIsAnnotated11352(t *testing.T) {
+	var b strings.Builder
+	RenderDestRuleDetail(context.Background(), &b, potentialShadowOffCfg11352(), nil, nil)
+	got := b.String()
+	if !strings.Contains(got, "POTENTIAL SHADOW") ||
+		!strings.Contains(got, "#11352") ||
+		!strings.Contains(got, `"r-translate"`) {
+		t.Fatalf("possible unsupported shadow was not clearly annotated:\n%s", got)
+	}
+	if strings.Contains(got, "PARTIALLY SHADOWED") {
+		t.Fatalf("unproven overlap was presented as a confirmed shadow:\n%s", got)
+	}
+}

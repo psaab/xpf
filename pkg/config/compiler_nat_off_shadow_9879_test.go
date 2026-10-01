@@ -109,9 +109,9 @@ func TestDNATOffShadowLenientWarns_9879(t *testing.T) {
 }
 
 // TestDNATOffShadowControlsCommitClean_9879 pins the shapes the gate must NOT
-// fire on: same-tier ties (config order wins — the off holds), reversed order
-// (no inversion under either semantic), disjoint matches, and the documented
-// out-of-scope shapes (application, cross-rule-set).
+// fire on: same-tier ties, reversed order, and disjoint matches. Potential
+// application/address-book/cross-rule-set overlaps have dedicated #11352
+// warning cells below.
 func TestDNATOffShadowControlsCommitClean_9879(t *testing.T) {
 	cases := []struct {
 		name string
@@ -217,13 +217,13 @@ func TestDNATOffShadowControlsCommitClean_9879(t *testing.T) {
 			},
 		},
 		{
-			// `match application` is out of scope (builder expansion too
-			// complex to mirror): skipped, never fired on.
-			"application-match-skipped",
+			// Application-bearing pairs with disjoint destination matches are
+			// not possible shadow candidates.
+			"application-disjoint-destinations",
 			[]string{
 				"set security nat destination rule-set rs1 rule r-exempt match destination-address 192.0.2.10/32",
 				"set security nat destination rule-set rs1 rule r-exempt then destination-nat off",
-				"set security nat destination rule-set rs1 rule r-dnat match destination-address 192.0.2.10/32",
+				"set security nat destination rule-set rs1 rule r-dnat match destination-address 192.0.2.20/32",
 				"set security nat destination rule-set rs1 rule r-dnat match application junos-http",
 				"set security nat destination rule-set rs1 rule r-dnat then destination-nat pool p1",
 			},
@@ -237,7 +237,7 @@ func TestDNATOffShadowControlsCommitClean_9879(t *testing.T) {
 				t.Fatalf("CompileConfig rejected control %q (want clean): %v", tc.name, err)
 			}
 			for _, w := range cfg.Warnings {
-				if strings.Contains(w, "shadowed") {
+				if strings.Contains(w, "shadowed") || strings.Contains(w, "#11352") {
 					t.Fatalf("control %q produced an off-shadow warning: %q", tc.name, w)
 				}
 			}
@@ -245,28 +245,26 @@ func TestDNATOffShadowControlsCommitClean_9879(t *testing.T) {
 	}
 }
 
-// TestDNATOffShadowCrossRuleSetSkipped_9879 pins the documented scope: pairs
-// across rule-sets are not analyzed (from-scope overlap modeling is a
-// follow-up), so a broad off in one rule-set and a narrower translate in
-// another commits clean.
-func TestDNATOffShadowCrossRuleSetSkipped_9879(t *testing.T) {
+// A cross-rule-set pair whose from-zone scopes cannot match one packet is not
+// a potential shadow (#11352).
+func TestDNATOffShadowCrossRuleSetDisjointScopesClean11352(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set security nat destination pool p1 address 192.168.1.10",
 		"set security nat destination rule-set rs1 from zone untrust",
 		"set security nat destination rule-set rs1 rule r-exempt match destination-address 192.0.2.10/32",
 		"set security nat destination rule-set rs1 rule r-exempt then destination-nat off",
-		"set security nat destination rule-set rs2 from zone untrust",
+		"set security nat destination rule-set rs2 from zone trust",
 		"set security nat destination rule-set rs2 rule r-dnat match destination-address 192.0.2.10/32",
 		"set security nat destination rule-set rs2 rule r-dnat match destination-port 80",
 		"set security nat destination rule-set rs2 rule r-dnat then destination-nat pool p1",
 	})
 	cfg, err := CompileConfig(tree)
 	if err != nil {
-		t.Fatalf("CompileConfig rejected the cross-rule-set pair (out of scope, want clean): %v", err)
+		t.Fatalf("CompileConfig rejected cross-rule-set rules with disjoint scopes: %v", err)
 	}
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "shadowed") {
-			t.Fatalf("cross-rule-set pair produced an off-shadow warning: %q", w)
+		if strings.Contains(w, "#11352") || strings.Contains(w, "shadowed") {
+			t.Fatalf("disjoint cross-rule-set scopes produced an off-shadow warning: %q", w)
 		}
 	}
 }

@@ -124,6 +124,16 @@ func noteDNATOffShadowed(w io.Writer, reason string) {
 	fmt.Fprintf(w, "    Warning:                 PARTIALLY SHADOWED — %s\n", reason)
 }
 
+// noteDNATOffShadowPotential reports a #11352 candidate the config gate cannot
+// prove either way. Keep it distinct from PARTIALLY SHADOWED so the show output
+// does not claim that the translation definitely wins.
+func noteDNATOffShadowPotential(w io.Writer, reason string) {
+	if reason == "" {
+		return
+	}
+	fmt.Fprintf(w, "    Warning:                 POTENTIAL SHADOW — %s\n", reason)
+}
+
 // noteLenientTerminalAction annotates a rule that the TOLERANT config path
 // admitted despite the strict terminal-action cardinality gate rejecting it
 // (#7640).

@@ -4707,24 +4707,19 @@ func natOverlapMessage(owners []natAllocOwner, instA int, memberA string, instB 
 }
 
 // validateDNATOffShadowStrict (#9879) hard-rejects a destination-NAT rule-set
-// in which a broad `then destination-nat off` exemption is configured BEFORE
-// a narrower later translate rule that re-enters its match space.
+// whose broad `then destination-nat off` exemption is proven to lose to a
+// narrower later translate rule.
 //
 // The dataplane resolves DNAT by most-specific match — exact (protocol,
 // destination, port), then wildcard port, then PROTO_ANY, then prefix LPM —
-// not by rule order, and an `off` short-circuits only the tiers probed AFTER
-// it (userspace-dp/src/nat/destination.rs, MOST-SPECIFIC-WINS). So the
-// overlapping subspace is TRANSLATED despite the exemption: a fail-open
-// inversion of the author's Junos first-match intent (typically a management
-// or hairpin exclusion), previously committed with no warning.
+// not by rule order. DNATOffShadowReason in nat_off_shadow_9879.go verifies an
+// explicit witness against the emitted entries and is shared with the
+// PARTIALLY SHADOWED show annotation.
 //
-// The detector is DNATOffShadowReason (nat_off_shadow_9879.go), shared with
-// the show annotation so the gate and the surface cannot disagree; its doc
-// states the deliberately narrow scope (same rule-set, literal addresses, no
-// `match application`) and the tier model. Rejecting is safe: every intent
-// expressible as off-first is expressible as translate-first — which agrees
-// under BOTH Junos first-match and xpf most-specific-wins — so the reject only
-// forces the unambiguous ordering.
+// #11352's application, address-book, and cross-rule-set shapes are not
+// hard-rejected because the exact winner is not proven. The uniform NAT gate
+// separately appends conservative operator warnings for those possible
+// overlaps, and the show surface marks them POTENTIAL SHADOW.
 //
 // Strict on commit / commit-check (hard reject naming the rule-set, the
 // shadowed `off` rule, and the re-entering translate rule); the caller

@@ -8,45 +8,36 @@ import (
 	"strings"
 )
 
-// Shared "is this DNAT `off` exemption partially shadowed?" predicate (#9879).
+// Shared DNAT `off`-shadow analysis (#9879/#11352).
 //
-// A `then destination-nat off` exemption short-circuits only the match tiers
-// probed AFTER it: the dataplane resolves DNAT by most-specific match, NOT by
-// rule order (userspace-dp/src/nat/destination.rs, MOST-SPECIFIC-WINS). So a
-// BROAD `off` configured BEFORE a NARROWER later translate rule loses for the
-// overlapping subspace — the "exempted" traffic is translated anyway, with a
-// clean commit and no warning (fail-open).
+// The dataplane resolves DNAT by most-specific match, not rule order. A broad
+// `then destination-nat off` configured before a narrower translate can
+// therefore lose for their overlapping subspace while the exemption still
+// protects its remainder.
 //
-// The fix is visibility, not a dataplane reordering (the tiered hash buys O(1)
-// lookup — the HPC constraint): the commit gate rejects the losing shape on the
-// strict path and warns on the lenient path, and the show surface annotates the
-// shadowed `off` rule. BOTH consumers call DNATOffShadowReason, so the gate and
-// the annotation cannot disagree about which rules are shadowed (the #6534
-// single-predicate shape). The annotation is a PARTIALLY SHADOWED warning, not
-// a NOT INSTALLED exclusion: the `off` entry IS installed and still exempts the
-// non-overlapping remainder — claiming NOT INSTALLED would promise fall-through
-// that does not happen.
+// DNATOffShadowReason is the exact #9879 witness predicate. It hard-rejects a
+// proven losing shape at strict commit, warns on tolerant load, and supplies
+// the PARTIALLY SHADOWED show annotation. #11352 adds a separate conservative
+// potential warning for application, address-book, and cross-rule-set pairs
+// that overlap but cannot be proved by that witness model. Potential pairs are
+// annotated, never described as definitely translated.
 //
-// SCOPE (deliberately narrow; anything uncertain skips rather than fires, so
-// the gate cannot false-reject):
+// EXACT WITNESS SCOPE:
 //
-//   - Same rule-set only, off-before-translate in configured rule order. Pairs
-//     across rule-sets also compete in the merged table when their from-scopes
-//     overlap, but modeling zone/interface/RI overlap plus the within-tier
-//     zone-specific-first rule is a follow-up.
-//   - Literal addresses only. Either side using an address-book name (source or
-//     destination) skips: name resolution needs the feed overlay the gate does
-//     not carry.
-//   - No `match application` on either side. Application terms expand to
-//     protocol/port/source-port/ICMP constraints in the builder; resolving that
-//     expansion here would reimplement the builder.
-//   - Valid ports only. InvalidDestinationPorts / ReversedDestinationPortRanges
-//     (rejected elsewhere on strict; split-endpoint installs on lenient) skip.
-//   - Both rules installed. An `off` or translate rule the builder drops
-//     (DestinationNATRuleExcludedReason — unknown #9877 leaves, undefined or
-//     invalid pool, empty match) installs nothing and cannot shadow or be
-//     shadowed; such pairs skip. In particular a translate rule that is NOT
-//     INSTALLED never yields a "TRANSLATED" claim.
+//   - Same rule-set only, off-before-translate in configured rule order.
+//   - Literal addresses only, no `match application`, and valid ports only.
+//     Address-book and application expansion belongs to the snapshot builder;
+//     attempting to mirror it for a hard reject could drift.
+//   - Both rules must be installed. An `off` or translate rule the builder
+//     drops (unknown #9877 leaves, undefined or invalid pool, empty match)
+//     installs nothing and cannot shadow or be shadowed.
+//
+// The potential advisory resolves static address-book entries and sets when
+// checking whether source/destination selectors overlap. Feed-backed names
+// remain unknown until the runtime overlay is available and are treated
+// conservatively. Rule-set overlap uses the Rust matcher’s ingress
+// zone/interface/routing-instance scopes; the advisory does not infer Junos
+// cross-rule-set admissibility or a definite winner.
 //
 // TRUE PROBE ORDER (review-hardened; an earlier revision compared tiers
 // pairwise and was wrong in both directions). The Rust lookup probes buckets
@@ -63,7 +54,7 @@ import (
 // tier (an any-protocol HOST translate beats a pinned-protocol PREFIX `off`).
 // Equal ranks tie to config order (the `off` is first, so it holds).
 //
-// SOUNDNESS (GPT-2): the predicate fires only on an explicit WITNESS FLOW —
+// SOUNDNESS (GPT-2): the exact predicate fires only on an explicit WITNESS FLOW —
 // a concrete (destination, protocol, port, source) verified against EVERY
 // emitted entry of BOTH rules, with the translate side's best matching entry
 // strictly outranking the exemption's best. A rule with several destinations
@@ -89,15 +80,17 @@ import (
 //     a rule left with no installable protocol installs nothing and skips. The
 //     strict #2396(a) gate rejects such a rule before this one runs, so the
 //     drop only matters on the lenient path.
+//
 
 // DNATOffShadowReason reports why a destination-NAT `off` rule is PARTIALLY
-// SHADOWED — the later narrower translate rule that re-enters its exempted
-// match space — or "" when the rule is not a shadowed exemption.
+// SHADOWED by a proven later narrower translate rule, or "" when no exact
+// witness exists. Potential, unsupported pairs are reported separately by
+// DNATOffShadowPotentialReason.
 //
-// Callers: validateDNATOffShadowStrict (the commit gate) and
-// natshow.RenderDestRuleDetail (the show annotation). A nil rule, a non-`off`
-// rule, a rule that installs nothing, a not-installed translate candidate,
-// and any pair outside the documented scope all report "".
+// Callers: validateDNATOffShadowStrict (the hard-rejecting commit gate) and
+// natshow.RenderDestRuleDetail (the PARTIALLY SHADOWED annotation). A nil rule,
+// a non-`off` rule, a rule that installs nothing, a not-installed translate
+// candidate, and any pair outside the exact witness scope report "".
 func DNATOffShadowReason(dnat *DestinationNATConfig, rs *NATRuleSet, rule *NATRule) string {
 	if dnat == nil || rs == nil || rule == nil {
 		return ""
@@ -146,6 +139,262 @@ func DNATOffShadowReason(dnat *DestinationNATConfig, rs *NATRuleSet, rule *NATRu
 		}
 	}
 	return ""
+}
+
+// DNATOffShadowPotentialReason reports a possible DNAT `off` shadow that the
+// exact #9879 witness model cannot prove because a rule uses an application,
+// an address-book name, or another rule-set. It is intentionally advisory:
+// callers must not present this conservative overlap as a proven translation.
+func DNATOffShadowPotentialReason(cfg *Config, rs *NATRuleSet, rule *NATRule) string {
+	if cfg == nil || cfg.Security.NAT.Destination == nil || rs == nil || rule == nil ||
+		rule.Then.Type != NATDestination || !rule.Then.Off || rule.LenientMatchDropped {
+		return ""
+	}
+	dnat := cfg.Security.NAT.Destination
+	if DestinationNATRuleExcludedReason(dnat, rule) != "" ||
+		DNATOffShadowReason(dnat, rs, rule) != "" {
+		return ""
+	}
+
+	offIndex := -1
+	for i, candidate := range rs.Rules {
+		if candidate == rule {
+			offIndex = i
+			break
+		}
+	}
+	if offIndex < 0 {
+		return ""
+	}
+	offDest := dnatOffRuleAddressSet(cfg, rule, false)
+	offSrc := dnatOffRuleAddressSet(cfg, rule, true)
+	if !offDest.constrained {
+		return ""
+	}
+
+	for _, candidateRS := range dnat.RuleSets {
+		if candidateRS == nil || (candidateRS != rs && !dnatOffRuleSetScopesMayOverlap(rs, candidateRS)) {
+			continue
+		}
+		for i, translate := range candidateRS.Rules {
+			if translate == nil || (candidateRS == rs && i <= offIndex) ||
+				translate.Then.Type != NATDestination || translate.Then.Off ||
+				translate.Then.PoolName == "" || translate.LenientMatchDropped ||
+				DestinationNATRuleExcludedReason(dnat, translate) != "" {
+				continue
+			}
+			dimensions := dnatOffPotentialDimensions(rs, rule, candidateRS, translate)
+			if len(dimensions) == 0 {
+				continue
+			}
+			trDest := dnatOffRuleAddressSet(cfg, translate, false)
+			trSrc := dnatOffRuleAddressSet(cfg, translate, true)
+			if !trDest.constrained || !dnatOffPotentialSelectorsOverlap(offDest, trDest, offSrc, trSrc) {
+				continue
+			}
+			return fmt.Sprintf("off rule-set %q rule %q may be re-entered by translate rule-set %q rule %q; overlapping address/source selectors include %s, whose emitted precedence is not proven by the exact #9879 analysis (#11352)",
+				rs.Name, rule.Name, candidateRS.Name, translate.Name, strings.Join(dimensions, ", "))
+		}
+	}
+	return ""
+}
+
+// appendDNATOffShadowPotentialWarnings keeps unsupported-but-plausible pairs
+// visible without turning an unproven overlap into a strict commit rejection.
+func appendDNATOffShadowPotentialWarnings(cfg *Config) {
+	if cfg == nil || cfg.Security.NAT.Destination == nil {
+		return
+	}
+	dnat := cfg.Security.NAT.Destination
+	ruleSets := append([]*NATRuleSet(nil), dnat.RuleSets...)
+	sort.Slice(ruleSets, func(i, j int) bool {
+		if ruleSets[i] == nil || ruleSets[j] == nil {
+			return ruleSets[j] == nil
+		}
+		return ruleSets[i].Name < ruleSets[j].Name
+	})
+	for _, rs := range ruleSets {
+		if rs == nil {
+			continue
+		}
+		for _, rule := range rs.Rules {
+			if reason := DNATOffShadowPotentialReason(cfg, rs, rule); reason != "" {
+				cfg.Warnings = append(cfg.Warnings, "destination-nat off shadow potential: "+reason)
+			}
+		}
+	}
+}
+
+type dnatOffAddressSet struct {
+	nets        []dnatOffNet
+	constrained bool
+	any         bool
+	unknown     bool
+}
+
+func dnatOffRuleAddressSet(cfg *Config, rule *NATRule, source bool) dnatOffAddressSet {
+	var values, names []string
+	if source {
+		values = append(values, rule.Match.SourceAddresses...)
+		if len(values) == 0 && rule.Match.SourceAddress != "" {
+			values = append(values, rule.Match.SourceAddress)
+		}
+		names = rule.Match.SourceAddressNameList()
+	} else {
+		values = append(values, rule.Match.DestinationAddresses...)
+		if len(values) == 0 && rule.Match.DestinationAddress != "" {
+			values = append(values, rule.Match.DestinationAddress)
+		}
+		names = rule.Match.DestinationAddressNameList()
+	}
+	set := dnatOffAddressSet{constrained: len(values)+len(names) > 0}
+	if !set.constrained {
+		set.any = source
+		return set
+	}
+	for _, value := range values {
+		if parsed, ok := dnatOffParseNet(value); ok {
+			set.nets = append(set.nets, parsed)
+		}
+	}
+	for _, name := range names {
+		dnatOffAddAddressBookName(cfg, &set, name)
+	}
+	return set
+}
+
+func dnatOffAddAddressBookName(cfg *Config, set *dnatOffAddressSet, name string) {
+	if cfg == nil || cfg.Security.AddressBook == nil {
+		set.unknown = true
+		return
+	}
+	book := cfg.Security.AddressBook
+	if addr, ok := book.Addresses[name]; ok {
+		dnatOffAddAddressValue(set, addr)
+		return
+	}
+	if _, ok := book.AddressSets[name]; !ok {
+		// A feed-backed name may resolve only when the dataplane overlay is
+		// available, so preserve it as an unknown selector for this advisory.
+		set.unknown = true
+		return
+	}
+	members, err := ExpandAddressSet(name, book)
+	if err != nil {
+		set.unknown = true
+		return
+	}
+	for _, member := range members {
+		addr, ok := book.Addresses[member]
+		if !ok {
+			set.unknown = true
+			continue
+		}
+		dnatOffAddAddressValue(set, addr)
+	}
+}
+
+func dnatOffAddAddressValue(set *dnatOffAddressSet, addr *Address) {
+	if addr == nil {
+		return
+	}
+	if value := addr.UsableValue(); value != "" {
+		if parsed, ok := dnatOffParseNet(value); ok {
+			set.nets = append(set.nets, parsed)
+		}
+	}
+}
+
+func dnatOffPotentialDimensions(offRS *NATRuleSet, off *NATRule, trRS *NATRuleSet, tr *NATRule) []string {
+	var dimensions []string
+	if offRS != trRS {
+		dimensions = append(dimensions, "cross-rule-set scope")
+	}
+	if dnatOffHasApplication(off) || dnatOffHasApplication(tr) {
+		dimensions = append(dimensions, "application matches")
+	}
+	if len(off.Match.SourceAddressNameList())+len(off.Match.DestinationAddressNameList())+
+		len(tr.Match.SourceAddressNameList())+len(tr.Match.DestinationAddressNameList()) > 0 {
+		dimensions = append(dimensions, "address-book references")
+	}
+	return dimensions
+}
+
+func dnatOffHasApplication(rule *NATRule) bool {
+	for _, name := range rule.Match.ApplicationList() {
+		if name != "" && name != "any" {
+			return true
+		}
+	}
+	return false
+}
+
+func dnatOffRuleSetScopesMayOverlap(a, b *NATRuleSet) bool {
+	return dnatOffScopeAxisMayOverlap(a.FromZone, b.FromZone) &&
+		dnatOffScopeAxisMayOverlap(a.FromInterface, b.FromInterface) &&
+		dnatOffScopeAxisMayOverlap(a.FromRoutingInstance, b.FromRoutingInstance)
+}
+
+func dnatOffScopeAxisMayOverlap(a, b string) bool {
+	return a == "" || b == "" || a == b
+}
+
+func dnatOffPotentialSelectorsOverlap(offDest, trDest, offSrc, trSrc dnatOffAddressSet) bool {
+	for _, v6 := range []bool{false, true} {
+		if dnatOffAddressSetsMayOverlap(offDest, trDest, v6) &&
+			dnatOffAddressSetsMayOverlap(offSrc, trSrc, v6) {
+			return true
+		}
+	}
+	return false
+}
+
+func dnatOffAddressSetsMayOverlap(a, b dnatOffAddressSet, v6 bool) bool {
+	if a.any {
+		return b.any || b.unknown || dnatOffAddressSetHasFamily(b, v6)
+	}
+	if b.any {
+		return a.unknown || dnatOffAddressSetHasFamily(a, v6)
+	}
+	for _, an := range a.nets {
+		if an.v6 != v6 {
+			continue
+		}
+		for _, bn := range b.nets {
+			if bn.v6 == v6 && dnatOffNetsOverlap(an, bn) {
+				return true
+			}
+		}
+	}
+	if a.unknown && (b.unknown || dnatOffAddressSetHasFamily(b, v6)) {
+		return true
+	}
+	return b.unknown && dnatOffAddressSetHasFamily(a, v6)
+}
+
+func dnatOffAddressSetHasFamily(set dnatOffAddressSet, v6 bool) bool {
+	for _, n := range set.nets {
+		if n.v6 == v6 {
+			return true
+		}
+	}
+	return false
+}
+
+func dnatOffNetsOverlap(a, b dnatOffNet) bool {
+	if a.v6 != b.v6 {
+		return false
+	}
+	switch {
+	case a.host && b.host:
+		return a.ip.Equal(b.ip)
+	case a.host:
+		return b.prefix.Contains(a.ip)
+	case b.host:
+		return a.prefix.Contains(b.ip)
+	default:
+		return dnatOffPrefixesOverlap(a.prefix, b.prefix)
+	}
 }
 
 // dnatOffNet is one parsed literal destination or source: a host or a prefix.
