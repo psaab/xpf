@@ -817,7 +817,7 @@ fn dnat_match_application_source_port_never_match_sentinel_3437() {
 
 #[test]
 fn dnat_match_application_constrains_icmp_type_3437() {
-    // `match application junos-ping` = ICMP echo-request (type 8). Only ICMP
+    // `match application junos-icmp-ping` = ICMP echo-request (type 8). Only ICMP
     // type 8 to the VIP is DNAT'd; an echo-reply (type 0), a destination-
     // unreachable (type 3), and a non-ICMP flow must NOT be translated.
     let table = dnat_table_with_l4("icmp", 0, vec![], Some(8), None);

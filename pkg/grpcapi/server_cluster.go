@@ -216,10 +216,10 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	}
 
 	// #3284: thread the optional ICMP/ICMPv6 type/code into the simulator so a
-	// type-constrained application term (junos-ping = type 8) matches only the
-	// declared type. The proto3 optional uint32 carries presence; values
-	// outside [0,255] cannot describe a real ICMP packet, so reject them
-	// rather than truncate to 8 bits (which would silently alias e.g. 264->8).
+	// type-constrained application term (junos-icmp-ping = type 8) matches only
+	// the declared type. The proto3 optional uint32 carries presence; values
+	// outside [0,255] cannot describe a real ICMP packet, so reject them rather
+	// than truncate to 8 bits (which would silently alias e.g. 264->8).
 	icmpType, err := grpcICMPValue(req.IcmpType)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid icmp-type: %v", err)

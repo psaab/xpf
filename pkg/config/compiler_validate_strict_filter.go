@@ -1880,10 +1880,11 @@ func protocolIsTCP(token string) bool {
 
 // protocolIsICMPFamily reports whether a protocol token names ICMP or ICMPv6 —
 // the only protocols on which an application `icmp-type`/`icmp-code` constraint
-// is enforceable (#3348). It recognizes the canonical names, the junos-*
-// aliases that resolve to ICMP/ICMPv6 (including junos-ping/junos-pingv6, which
-// carry an implicit echo type), and the numeric protocol numbers 1 (ICMP) and
-// 58 (ICMPv6). The set mirrors the ICMP arm of filterProtocolResolvable.
+// is enforceable (#3348). It recognizes canonical names and Junos aliases that
+// resolve to ICMP/ICMPv6; junos-ping/junos-pingv6 imply echo types only when
+// used by XPF's custom-app compatibility extension. Numeric protocol numbers 1
+// (ICMP) and 58 (ICMPv6) are accepted too. This mirrors the ICMP arm of
+// filterProtocolResolvable.
 func protocolIsICMPFamily(token string) bool {
 	switch strings.ToLower(strings.TrimSpace(token)) {
 	case "icmp", "junos-icmp-all", "junos-ping",

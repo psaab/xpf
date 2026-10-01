@@ -224,47 +224,45 @@ apply path (`CompileUserspaceShim → CompileConfig →
 compileApplications`): the apply aborts and the daemon retains the
 previous-good snapshot.
 
-### ICMP type/code constraint in policy matching (#3020)
+### ICMP type/code constraint in policy matching (#3020, #11340)
 
-`junos-ping` and `junos-pingv6` are **echo-request only** — Junos
-parity is ICMP type 8 (`junos-ping`) and ICMPv6 type 128
-(`junos-pingv6`), each with no code constraint. They are NOT the same
-as the all-ICMP aliases `junos-icmp-all` / `junos-icmp6-all`, which
-stay unconstrained and match every ICMP/ICMPv6 type/code. Before
-#3020 every predefined ICMP application carried only a protocol with
-no type/code, so `application junos-ping` matched all ICMP (identical
-to `junos-icmp-all`) — a `permit junos-ping` rule also admitted
-destination-unreachable, time-exceeded, redirect, neighbor-discovery,
-etc.
+The version-bounded Junos defaults cited by #11340 define `junos-ping` and
+`junos-pingv6` as protocol-only ICMP/ICMPv6 applications: each matches every
+message type/code of its protocol. The echo-only application is
+`junos-icmp-ping` (ICMP type 8, no code constraint). The explicitly all-ICMP
+aliases `junos-icmp-all` / `junos-icmp6-all` also remain unconstrained.
+Current-release vSRX readback is still outstanding.
 
-The constraint is modeled as an optional `(ICMPType, ICMPCode)` on the
-predefined application (`pkg/config/predefined.go`), carried on the
-policy snapshot's application term (`PolicyApplicationSnapshot.ICMPType`
-/ `.ICMPCode`, `pkg/dataplane/userspace/protocol.go`) and the Rust
-matcher (`ApplicationMatch.icmp_type` / `.icmp_code`,
-`userspace-dp/src/policy.rs`). `nil`/`None` means "no constraint"
-(match all of the protocol — what the all-ICMP aliases keep). The wire
-field is additive: a pointer + `omitempty` on the Go side and
-`#[serde(default, skip_serializing_if = "Option::is_none")]` on the
-Rust side, so an old helper missing the field — or an old Go snapshot
-omitting it — decodes to `None` and ignores the constraint (match-all,
-the pre-#3020 behavior); version skew degrades safely rather than
-failing to decode.
+Junos rejects an application name such as `junos-ping` in a custom application's
+`protocol` leaf. XPF retains that syntax as a compatibility extension for
+user-defined applications and keeps it echo-constrained (type 8 / 128); this is
+distinct from the predefined `junos-ping` all-ICMP object.
 
-The Rust matcher reads the packet's ICMP type/code from the live frame
-at policy-evaluation time (`policy_packet_icmp` in
-`poll_descriptor`, reusing the fragment/truncation-safe
-`term_match_extra_from_frame`). When the type/code is unknown (a
-truncated frame or a non-first fragment) an icmp-type-constrained term
-fails closed (does not match). Policy evaluation is on the cold path
-(session miss), so the per-packet extraction cost is incurred once per
-session.
+The constraint is modeled as an optional `(ICMPType, ICMPCode)` on an
+application (`pkg/config/predefined.go` for `junos-icmp-ping`), carried on the
+policy snapshot's application term (`PolicyApplicationSnapshot.ICMPType` /
+`.ICMPCode`, `pkg/dataplane/userspace/protocol.go`) and the Rust matcher
+(`ApplicationMatch.icmp_type` / `.icmp_code`, `userspace-dp/src/policy.rs`).
+`nil`/`None` means "no constraint" (match all types/codes of the protocol).
+The wire field is additive: a pointer + `omitempty` on the Go side and
+`#[serde(default, skip_serializing_if = "Option::is_none")]` on the Rust side,
+so an old helper missing the field — or an old Go snapshot omitting it —
+decodes to `None` and ignores the constraint (match-all, the pre-#3020
+behavior); version skew degrades safely rather than failing to decode.
+
+The Rust matcher reads the packet's ICMP type/code from the live frame at
+policy-evaluation time (`policy_packet_icmp` in `poll_descriptor`, reusing the
+fragment/truncation-safe `term_match_extra_from_frame`). When the type/code is
+unknown (a truncated frame or a non-first fragment) an icmp-type-constrained
+term fails closed (does not match). Policy evaluation is on the cold path
+(session miss), so the per-packet extraction cost is incurred once per session.
 
 This affects **policy matching** only. The app-identification catalog
-(`app_id` session stamping, above) does NOT carry ICMP type/code, so
-`junos-ping` and `junos-icmp-all` can still resolve to the same
-`app_id` for `show security flow session` display — that is cosmetic
-naming, not enforcement.
+(`app_id` session stamping, above) does NOT carry ICMP type/code. The
+type-constrained `junos-icmp-ping` and custom ICMP applications therefore do
+not ship protocol-only catalog rows (which would overmatch); protocol-only
+`junos-ping` / `junos-icmp-all` rows can still resolve to the same `app_id` for
+`show security flow session` display — cosmetic naming, not enforcement.
 
 ## What's parsed but not implemented
 
@@ -315,8 +313,8 @@ runtime effect is the L3/L4 catalog classification above
     `MatchSourcePorts`) and **ICMP/ICMPv6 type[,code]** (H11,
     `MatchICMPType` / `MatchICMPCode`), enforced by
     `DnatEntry::l4_extra_matches` in `nat/destination.rs`. Before
-    #3437 a `match application junos-ping` DNAT rule published its VIP
-    for **every** ICMP type (errors, replies, non-echo) and every
+    #3437 a `match application junos-icmp-ping` DNAT rule published its
+    VIP for **every** ICMP type (errors, replies, non-echo) and every
     source port — a fail-open widening that regressed the #3020/#3194
     ICMP type/code parity already enforced on the policy path. The
     source-port axis carries the same never-match sentinel as the

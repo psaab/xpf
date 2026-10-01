@@ -14740,23 +14740,30 @@ Regression coverage lives alongside the #3339 fixtures in
 `TestGeneratedTermNameCollisionLenientWarns`,
 `TestGeneratedTermNamesNoCollisionCommit`).
 
-### #3348 — custom `protocol junos-ping` echo constraint + `icmp-type`/`icmp-code` grammar
+### #3348 / #11340 — custom ICMP alias extension and predefined ping definitions
 
-A **user-defined** application that set `protocol junos-ping` (or `junos-pingv6`)
-lowered to bare ICMP with NO type constraint, so the projected policy term matched
-**every** ICMP type — silently widening any policy referencing it (a permit term
-then admitted unreachable / redirect / timestamp / ... not just echo), and broader
-than the predefined `junos-ping` object which carries `ICMPType=8` (the #3020 fix).
-`appid.ProtocolNumber` and the capability snapshot (`capabilities.go`) folded the
-alias to ICMP and carried `app.ICMPType`, which was `nil` for the custom-app path.
+A custom Junos application name in the `protocol` leaf (for example,
+`protocol junos-ping`) is invalid Junos syntax. XPF retains that shape as a
+compatibility extension for user-defined applications and constrains it to echo
+requests; it is separate from predefined-app semantics. The three
+version-bounded Junos defaults cited by #11340 define predefined
+`junos-ping`/`junos-pingv6` as protocol-only, and `junos-icmp-ping` as the
+echo-only application (ICMP type 8, no code constraint). Current-release vSRX
+readback remains outstanding.
 
-- **alias echo constraint** — `aliasEchoICMPType` (`compiler_applications.go`)
-  maps `junos-ping`→type 8, `junos-pingv6`→type 128. `compileApplications`
-  applies it AFTER the child loop (so an explicit `icmp-type` leaf wins), and
-  `parseApplicationTerms` applies it per normalized protocol inside an inline
-  `term` (capturing the echo type before `normalizeProtocol` folds the alias to
-  `icmp`/`icmpv6`). The all-ICMP aliases (`junos-icmp-all`/`junos-icmp6-all`)
-  return `nil` so they stay match-ALL.
+Before #3348, a user-defined app using the XPF custom protocol alias lowered to
+bare ICMP with NO type constraint, so the projected policy term matched every
+ICMP type — silently widening a permit to unreachable / redirect / timestamp /
+etc. The compiler preserves the echo constraint for that custom-app extension.
+The predefined `junos-ping` all-ICMP correction does not change this behavior.
+
+- **custom alias echo constraint** — `aliasEchoICMPType`
+  (`compiler_applications.go`) maps a custom app's `junos-ping`→type 8 and
+  `junos-pingv6`→type 128. `compileApplications` applies it AFTER the child
+  loop (so an explicit `icmp-type` leaf wins), and `parseApplicationTerms`
+  applies it per normalized protocol inside an inline `term` (capturing the
+  echo type before `normalizeProtocol` folds the alias to `icmp`/`icmpv6`). The
+  all-ICMP aliases (`junos-icmp-all`/`junos-icmp6-all`) return `nil`.
 - **typed grammar** — `schemaApplications.application` gains `icmp-type` and
   `icmp-code` `ValueInteger` leaves (`ValidateInteger(0,255)`), so an operator can
   author a constrained custom echo / traceroute / ICMP-control app. The compiler

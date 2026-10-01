@@ -838,8 +838,8 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// #3284: optional ICMP/ICMPv6 type/code so a type-constrained application
-	// term (junos-ping = type 8) is honored. An empty value is unspecified (a
-	// type-constrained term then fails closed, mirroring the dataplane); a
+	// term (junos-icmp-ping = type 8) is honored. An empty value is unspecified
+	// (a type-constrained term then fails closed, mirroring the dataplane); a
 	// malformed/out-of-range value is rejected, never coerced.
 	icmpType, err := policymatch.ParseICMPValue(r.URL.Query().Get("icmp_type"))
 	if err != nil {

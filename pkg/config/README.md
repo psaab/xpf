@@ -1609,8 +1609,8 @@ term. The gate resolves the port-bearing subset inline via
 pkg/config — so the subset is pinned to the `ip_proto.rs has_l4_ports` SSOT by
 the drift-guard test `TestProtocolIsPortBearingMatchesDataplaneExtraction`). It
 fires ONLY when a port is set AND the protocol is not in the extraction set, so
-an icmp-type-constrained ICMP app with no port (junos-ping shape) and a bare
-`protocol gre`/`protocol sctp` still commit. The tolerant load/peer-sync path
+an icmp-type-constrained ICMP app with no port (junos-icmp-ping shape) and a
+bare `protocol gre`/`protocol sctp` still commit. The tolerant load/peer-sync path
 downgrades the reject to a warning (`lenientApplicationSpecs`) per the #1960
 no-brick doctrine. Junos does not couple ports to non-port protocols, so this is
 a vSRX-parity fix.
@@ -1659,33 +1659,32 @@ is left verbatim so `validatePortSpec` hard-rejects it at the strict commit gate
 and the tolerant load/peer-sync path downgrades it to a warning
 (`lenientApplicationSpecs`, #1960 no-brick).
 
-**Custom-application ICMP type/code constraints (#3348):** a user-defined
-application whose `protocol` is the `junos-ping` / `junos-pingv6` alias now
-carries the same echo-request type constraint the predefined `junos-ping`
-object does (ICMP type 8 / ICMPv6 type 128, the #3020 parity). Before this fix
-the alias lowered to bare ICMP with no type, so a custom `protocol junos-ping`
-app projected a term the userspace matcher (and the `pkg/policymatch`
-simulator) treated as match-ALL ICMP — silently widening any policy that
-referenced it to every ICMP type (unreachable / redirect / timestamp / ...).
+**Custom-application ICMP type/code constraints (#3348, #11340):** Junos rejects
+a Junos application name such as `junos-ping` in a custom application's
+`protocol` leaf, but XPF retains `protocol junos-ping` / `junos-pingv6` as a
+compatibility extension and echo-constrains those user-defined applications
+(ICMP type 8 / ICMPv6 type 128). That extension is distinct from predefined
+application semantics: the three version-bounded Junos defaults cited by
+#11340 define predefined `junos-ping` / `junos-pingv6` as protocol-only, and
+`junos-icmp-ping` as the echo-only object (ICMP type 8, no code constraint).
+Current-release vSRX readback remains outstanding.
+
+Before #3348, the custom alias lowered to bare ICMP with no type, so the
+userspace matcher and `pkg/policymatch` simulator treated it as match-ALL ICMP.
 `aliasEchoICMPType` (`compiler_applications.go`) attaches the echo type on both
 the top-level and inline-`term` paths, AFTER the child loop so an explicit
 `icmp-type` leaf still wins; the all-ICMP aliases (`junos-icmp-all` /
-`junos-icmp6-all`) stay unconstrained. The grammar now also exposes typed
+`junos-icmp6-all`) stay unconstrained. The grammar also exposes typed
 `icmp-type` / `icmp-code` leaves (0..255, range-validated by the schema) on a
 custom application and inline term, so an operator can author a constrained
-echo / traceroute / ICMP-control app rather than only the all-ICMP widening.
-`validateApplicationSpecsStrict` rejects an `icmp-type`/`icmp-code` on a
-non-ICMP protocol (a never-match term, the same #3373 hazard as a port on a
-non-port protocol) and an `icmp-code` without an `icmp-type` (an ambiguous
-half-constraint); both downgrade to a warning on the tolerant load/peer-sync
-path. `protocolIsICMPFamily` mirrors the ICMP arm of `filterProtocolResolvable`.
-Two inline-`term` edge cases (the term is opaque to `SchemaValidate`): a term
-listing BOTH a junos-ping alias AND an unconstrained ICMP alias dedups onto one
-`icmp` term whose union is all-ICMP, so `unconstrainedICMP[proto]` suppresses the
-echo narrowing (a widening INVERSION otherwise); and a malformed inline
-`icmp-type`/`icmp-code` is recorded on `Application.UnknownICMP` (not silently
-dropped, which would leave the term matching all ICMP) for the same strict-reject
-/ lenient-warn gate.
+echo / traceroute / ICMP-control app. `validateApplicationSpecsStrict` rejects
+an `icmp-type`/`icmp-code` on a non-ICMP protocol and an `icmp-code` without an
+`icmp-type`; both downgrade to a warning on the tolerant load/peer-sync path.
+Two inline-`term` edge cases remain guarded: a term listing both a custom ping
+alias and an unconstrained ICMP alias dedups onto one `icmp` term whose union is
+all-ICMP, so `unconstrainedICMP[proto]` suppresses echo narrowing; malformed
+inline `icmp-type`/`icmp-code` is recorded on `Application.UnknownICMP` for the
+same strict-reject / lenient-warn gate.
 
 **Application is EITHER direct OR term-based, never both; conflicting duplicate
 term leaves rejected (#3366):** a custom `applications application <name>` may

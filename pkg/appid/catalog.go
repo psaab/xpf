@@ -207,19 +207,19 @@ func BuildCatalog(cfg *config.Config) (Catalog, error) {
 			cat.AppNames[appID] = name
 
 			// #3781 interim (log-integrity): an ICMP/ICMPv6 application that
-			// carries a type/code constraint (e.g. junos-ping = icmp type 8)
+			// carries a type/code constraint (e.g. junos-icmp-ping = icmp type 8)
 			// cannot express that constraint on the L3/L4-only catalog wire, so a
 			// protocol-only row would match EVERY ICMP message type. A non-echo
 			// ICMP (destination-unreachable, timestamp, ICMPv6 ND) that correctly
-			// falls to default-deny would then be stamped with the ping app label
-			// even though the echo-only verdict engine never matched it. Until the
+			// falls to default-deny would then be stamped with the type-constrained
+			// app label even though its verdict engine never matched it. Until the
 			// type/code-aware catalog wire lands (DEFERRED per the #3781 /research
 			// plan), drop the over-matching row: the AppNames id is still recorded
 			// above and consumed below, so such ICMP resolves to an honest UNKNOWN
-			// (or junos-icmp-all, when a protocol-only ICMP app is also referenced)
-			// rather than a false type-constrained label. An ICMP app WITHOUT a
-			// type/code constraint (junos-icmp-all, a user protocol-only ICMP app)
-			// is unaffected and still ships its protocol-only row.
+			// (or junos-ping / junos-icmp-all, when a protocol-only ICMP app is also
+			// referenced) rather than a false type-constrained label. An ICMP app
+			// WITHOUT a type/code constraint (junos-ping, junos-icmp-all, a user
+			// protocol-only ICMP app) is unaffected and still ships its row.
 			if !icmpTypeConstrained(app) {
 				// An OMITTED protocol (empty spec) means "any L4":
 				// compileApplications installs one entry per TCP and UDP (the
@@ -456,13 +456,13 @@ func ProtocolName(p uint8) string {
 }
 
 // icmpTypeConstrained reports whether an application carries an ICMP/ICMPv6
-// type or code constraint (e.g. junos-ping = icmp type 8, predefined.go). Such
-// an app's L3/L4 match rule — the catalog CatalogEntry and the display tuple
-// fallback — is protocol-only (the catalog wire has no icmp type/code fields,
-// #3781), so a protocol-only row / tuple match would over-match EVERY ICMP
-// message type and falsely label a non-echo ICMP (destination-unreachable,
-// timestamp, ICMPv6 ND) that correctly fell to default-deny as the ping app.
-//
+// type or code constraint (e.g. junos-icmp-ping = ICMP type 8 in predefined.go).
+// Such an app's L3/L4 match rule — the catalog CatalogEntry and the display
+// tuple fallback — is protocol-only (the catalog wire has no ICMP type/code
+// fields, #3781), so a protocol-only row / tuple match would over-match EVERY
+// ICMP message type and falsely label non-echo ICMP that fell to default-deny
+// with the constrained app's name.
+
 // The strict commit gate (validateApplicationSpecsStrict, #3348) rejects a code
 // without a type and a type on a non-ICMP protocol, so on the strict path a set
 // ICMPCode implies a set ICMPType. This predicate also treats a stray

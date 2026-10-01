@@ -183,13 +183,12 @@ func TestAppCatalogParityOnTolerantLoadPortEdges(t *testing.T) {
 	// direction. The malformed apps (badsrc/revrange/nope) must not appear.
 	//
 	// #3781 exception: ApplicationIdentification=true above pulls in the full
-	// predefined catalog, including the type-constrained ICMP apps junos-ping
-	// (icmp type 8) and junos-pingv6 (icmpv6 type 128). The interim DELIBERATELY
-	// keeps their AppNames row (for byte-identical parity with
-	// compileApplications, asserted above) while DROPPING the over-matching
-	// protocol-only ICMP catalog entry so a non-echo ICMP is not false-labeled.
-	// Their id is therefore a SAFE dangling id: no shipped catalog entry carries
-	// it, so the helper can never stamp it and it resolves for no live session —
+	// predefined catalog, including the type-constrained ICMP app
+	// junos-icmp-ping (icmp type 8). The interim DELIBERATELY keeps its
+	// AppNames row (for byte-identical parity with compileApplications, asserted
+	// above) while DROPPING the over-matching protocol-only ICMP catalog entry.
+	// Its id is therefore a SAFE dangling id: no shipped catalog entry carries
+	// it, so the helper can never stamp it and it resolves to no live session —
 	// unlike a malformed app, whose dangling name is a genuine mislabel risk.
 	// Skip type-constrained ICMP apps here; every other dangling id is still a
 	// bug.

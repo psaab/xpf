@@ -9,14 +9,14 @@
 // eligibility across the new module boundary); the two cold event
 // emitters stay un-hinted. Bodies byte-identical to their prior location.
 
-use super::*;
 use super::reject_reply::enqueue_deny_reply;
+use super::*;
 
 /// #3020: extract the ICMP/ICMPv6 `(type, code)` for policy matching. Returns
 /// `None` for non-ICMP protocols, and for ICMP/ICMPv6 frames whose type/code
 /// bytes are not safely readable (a truncated frame or a non-first fragment),
-/// so an icmp-type-constrained application term (junos-ping = echo-request only)
-/// fails closed rather than matching against a fabricated type/code of 0.
+/// so an icmp-type-constrained application term (`junos-icmp-ping` = echo-request
+/// only) fails closed rather than matching against a fabricated type/code of 0.
 ///
 /// Reuses the canonical, fragment/truncation-safe extractor
 /// `term_match_extra_from_frame` (the same one the firewall-filter icmp-type

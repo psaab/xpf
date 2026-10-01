@@ -6,11 +6,10 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #3020 — junos-ping / junos-pingv6 must compile to a policy application term
-// carrying an ICMP/ICMPv6 type constraint (echo-request: type 8 / 128), while
-// the all-ICMP aliases stay UNCONSTRAINED (nil type) so they keep matching
-// every ICMP message. Before #3020 every ICMP predefined app expanded to the
-// same protocol-only term, making junos-ping identical to junos-icmp-all.
+// #11340 — version-bounded Junos defaults define junos-ping/junos-pingv6 as
+// unconstrained ICMP/ICMPv6 applications. The separate junos-icmp-ping object
+// is echo-request-only (type 8). These tests pin the predefined app expansion
+// that is sent to the userspace matcher.
 
 func icmpAppCfg() *config.Config {
 	cfg := &config.Config{}
@@ -22,43 +21,41 @@ func icmpAppCfg() *config.Config {
 	return cfg
 }
 
-func TestJunosPingExpandsToEchoRequestTypeConstraint(t *testing.T) {
-	cfg := icmpAppCfg()
-	terms, ok := expandUserspacePolicyApplications(cfg, []string{"junos-ping"})
-	if !ok {
-		t.Fatal("expandUserspacePolicyApplications(junos-ping) ok=false, want true")
-	}
-	if len(terms) != 1 {
-		t.Fatalf("len(terms) = %d, want 1", len(terms))
-	}
-	if terms[0].Protocol != "icmp" {
-		t.Fatalf("junos-ping Protocol = %q, want \"icmp\"", terms[0].Protocol)
-	}
-	if terms[0].ICMPType == nil {
-		t.Fatal("junos-ping ICMPType = nil, want 8 (echo-request) — would match all ICMP like junos-icmp-all")
-	}
-	if *terms[0].ICMPType != 8 {
-		t.Fatalf("junos-ping ICMPType = %d, want 8", *terms[0].ICMPType)
-	}
-	if terms[0].ICMPCode != nil {
-		t.Fatalf("junos-ping ICMPCode = %d, want nil (any code of the type)", *terms[0].ICMPCode)
+func TestJunosPingApplicationsExpandUnconstrained_11340(t *testing.T) {
+	for _, tc := range []struct {
+		name, protocol string
+	}{
+		{"junos-ping", "icmp"},
+		{"junos-pingv6", "icmpv6"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			terms, ok := expandUserspacePolicyApplications(icmpAppCfg(), []string{tc.name})
+			if !ok || len(terms) != 1 {
+				t.Fatalf("expandUserspacePolicyApplications(%s): got ok=%v terms=%d, want one term",
+					tc.name, ok, len(terms))
+			}
+			if terms[0].Protocol != tc.protocol {
+				t.Fatalf("%s Protocol = %q, want %q", tc.name, terms[0].Protocol, tc.protocol)
+			}
+			if terms[0].ICMPType != nil || terms[0].ICMPCode != nil {
+				t.Fatalf("%s must match all types/codes, got type=%v code=%v",
+					tc.name, terms[0].ICMPType, terms[0].ICMPCode)
+			}
+		})
 	}
 }
 
-func TestJunosPingV6ExpandsToEchoRequestTypeConstraint(t *testing.T) {
-	cfg := icmpAppCfg()
-	terms, ok := expandUserspacePolicyApplications(cfg, []string{"junos-pingv6"})
-	if !ok {
-		t.Fatal("expandUserspacePolicyApplications(junos-pingv6) ok=false, want true")
+func TestJunosIcmpPingExpandsToEchoRequestTypeConstraint_11340(t *testing.T) {
+	terms, ok := expandUserspacePolicyApplications(icmpAppCfg(), []string{"junos-icmp-ping"})
+	if !ok || len(terms) != 1 {
+		t.Fatalf("expandUserspacePolicyApplications(junos-icmp-ping): got ok=%v terms=%d, want one term",
+			ok, len(terms))
 	}
-	if len(terms) != 1 {
-		t.Fatalf("len(terms) = %d, want 1", len(terms))
+	if terms[0].Protocol != "icmp" || terms[0].ICMPType == nil || *terms[0].ICMPType != 8 {
+		t.Fatalf("junos-icmp-ping term = %+v, want ICMP type 8", terms[0])
 	}
-	if terms[0].Protocol != "icmpv6" {
-		t.Fatalf("junos-pingv6 Protocol = %q, want \"icmpv6\"", terms[0].Protocol)
-	}
-	if terms[0].ICMPType == nil || *terms[0].ICMPType != 128 {
-		t.Fatalf("junos-pingv6 ICMPType = %v, want 128 (echo-request)", terms[0].ICMPType)
+	if terms[0].ICMPCode != nil {
+		t.Fatalf("junos-icmp-ping ICMPCode = %d, want nil", *terms[0].ICMPCode)
 	}
 }
 

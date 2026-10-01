@@ -10,12 +10,21 @@ func u8(v uint8) *uint8 { return &v }
 
 // TestICMPTypeConstraintParity pins the #3284 fix: the simulator must enforce
 // an application's ICMP/ICMPv6 type/code constraint the way the dataplane does
-// (policy.rs CompiledApplications.matches, fed packet_icmp). junos-ping is
-// echo-request ONLY (ICMP type 8), junos-pingv6 is ICMPv6 type 128; the
-// pre-#3284 simulator matched them on protocol alone and over-permitted every
-// ICMP message.
+// (policy.rs CompiledApplications.matches, fed packet_icmp). The predefined
+// junos-ping/junos-pingv6 apps are protocol-only (#11340); junos-icmp-ping is
+// echo-request-only. XPF's custom `protocol junos-ping` compatibility extension
+// is covered separately in app_junos_ping_3348_test.go.
 func TestICMPTypeConstraintParity(t *testing.T) {
 	pingCfg := cfgWith(config.SecurityConfig{
+		DefaultPolicy: config.PolicyDeny,
+		Zones:         zones("trust", "untrust"),
+		Policies: []*config.ZonePairPolicies{
+			zonePair("trust", "untrust", permit("allow-echo",
+				config.PolicyMatch{Applications: []string{"junos-icmp-ping"}})),
+		},
+	}, config.ApplicationsConfig{})
+
+	pingAllCfg := cfgWith(config.SecurityConfig{
 		DefaultPolicy: config.PolicyDeny,
 		Zones:         zones("trust", "untrust"),
 		Policies: []*config.ZonePairPolicies{
@@ -50,30 +59,38 @@ func TestICMPTypeConstraintParity(t *testing.T) {
 		wantAction  config.PolicyAction
 	}{
 		{
-			name:        "junos-ping permits ICMP echo type 8",
+			name:        "junos-icmp-ping permits ICMP echo type 8",
 			cfg:         pingCfg,
 			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "icmp", ICMPType: u8(8)},
 			wantMatched: true, wantAction: config.PolicyPermit,
 		},
 		{
-			// timestamp request (type 13) is NOT echo-request: junos-ping must
-			// NOT match -> default deny. The old simulator reported permit.
-			name:        "junos-ping denies ICMP timestamp type 13",
+			// Echo-specific builtin: timestamp request is not type 8.
+			name:        "junos-icmp-ping denies ICMP timestamp type 13",
 			cfg:         pingCfg,
 			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "icmp", ICMPType: u8(13)},
 			wantMatched: false, wantAction: config.PolicyDeny,
 		},
 		{
-			// No type supplied for an ICMP query: a type-constrained term fails
-			// closed (mirrors the dataplane packet_icmp = None path).
-			name:        "junos-ping fails closed when type omitted",
+			name:        "junos-icmp-ping fails closed when type omitted",
 			cfg:         pingCfg,
 			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "icmp"},
 			wantMatched: false, wantAction: config.PolicyDeny,
 		},
 		{
-			// An UNCONSTRAINED ICMP app (junos-icmp-all) still matches every
-			// ICMP type, including timestamp and even with no type supplied.
+			name:        "junos-ping permits ICMP timestamp type 13",
+			cfg:         pingAllCfg,
+			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "icmp", ICMPType: u8(13)},
+			wantMatched: true, wantAction: config.PolicyPermit,
+		},
+		{
+			name:        "junos-ping permits with type omitted",
+			cfg:         pingAllCfg,
+			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "icmp"},
+			wantMatched: true, wantAction: config.PolicyPermit,
+		},
+		{
+			// An explicitly all-ICMP alias remains unconstrained too.
 			name:        "junos-icmp-all permits timestamp type 13",
 			cfg:         allIcmpCfg,
 			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "icmp", ICMPType: u8(13)},
@@ -92,11 +109,17 @@ func TestICMPTypeConstraintParity(t *testing.T) {
 			wantMatched: true, wantAction: config.PolicyPermit,
 		},
 		{
-			// Router advertisement (type 134) is not echo-request.
-			name:        "junos-pingv6 denies ICMPv6 router-advert type 134",
+			// Protocol-only predefined pingv6 includes router advertisements.
+			name:        "junos-pingv6 permits ICMPv6 router-advert type 134",
 			cfg:         pingv6Cfg,
 			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "icmpv6", ICMPType: u8(134)},
-			wantMatched: false, wantAction: config.PolicyDeny,
+			wantMatched: true, wantAction: config.PolicyPermit,
+		},
+		{
+			name:        "junos-pingv6 permits with no type supplied",
+			cfg:         pingv6Cfg,
+			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "icmpv6"},
+			wantMatched: true, wantAction: config.PolicyPermit,
 		},
 	}
 
@@ -119,15 +142,13 @@ func TestICMPTypeConstraintParity(t *testing.T) {
 // deriveUserspaceCapabilities (pkg/dataplane/userspace/capabilities.go) fails
 // closed for proto=="" with NO ICMP-protocol inference
 // (normalizeUserspaceApplicationProtocol("")=="") → the __unsupported__ sentinel
-// → whole-snapshot reject (#3261), and strict commit hard-rejects a protocol-less
-// app (pkg/config/compiler_validate_strict.go). It is also not constructible via
-// real config: as of #3348 a user app CAN carry an ICMP type (via the
-// `icmp-type`/`icmp-code` grammar or a junos-ping/junos-pingv6 protocol alias),
-// but the application compiler (compiler_applications.go) only ever attaches a
-// type alongside a pinned ICMP protocol — and validateApplicationSpecsStrict
-// rejects an icmp-type on a non-ICMP protocol and a protocol-less app outright.
-// So a real config can never produce Protocol=="" with ICMPType set; this case
-// is the hand-built unrepresentable shape the runtime drops.
+// → whole-snapshot reject (#3261), and strict commit hard-rejects protocol-less
+// apps. Real config can carry an ICMP type via the `icmp-type`/`icmp-code`
+// grammar or the XPF custom junos-ping/junos-pingv6 compatibility extension, but
+// the compiler only attaches a type alongside a pinned ICMP protocol and strict
+// validation rejects constraints on non-ICMP/protocol-less apps. So a real
+// config can never produce Protocol=="" with ICMPType set; this case is the
+// hand-built unrepresentable shape the runtime drops.
 //
 // The simulator must therefore report NO concrete match for this app, for EVERY
 // query protocol — mirroring the dataplane reject. Before #3323 the
@@ -135,8 +156,8 @@ func TestICMPTypeConstraintParity(t *testing.T) {
 // falsely matched an ICMP query (a simulator-vs-runtime over-report). The
 // protocol gate (now unconditional) catches it first; the residual ICMP-family
 // gate remains as belt-and-suspenders for a protocol-PINNED ICMP app
-// (junos-ping), whose type/code check is still live and exercised by the cases
-// table above.
+// (junos-icmp-ping or an XPF custom-app alias), whose type/code check is still
+// live and exercised by the cases above.
 func TestICMPTypeConstrainedProtocolLessAppNeverMatches(t *testing.T) {
 	cfg := cfgWith(config.SecurityConfig{
 		DefaultPolicy: config.PolicyDeny,

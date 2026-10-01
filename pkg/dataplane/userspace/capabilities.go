@@ -447,10 +447,10 @@ func expandUserspacePolicyApplications(cfg *config.Config, apps []string) ([]Pol
 				Protocol:        proto,
 				SourcePort:      app.SourcePort,
 				DestinationPort: app.DestinationPort,
-				// #3020: carry the optional ICMP/ICMPv6 type/code constraint so
-				// the Rust matcher enforces junos-ping == echo-request only,
-				// rather than matching every ICMP type like junos-icmp-all.
-				// nil stays nil (the all-ICMP aliases remain unconstrained).
+				// #3020: carry an optional ICMP/ICMPv6 type/code constraint so the
+				// Rust matcher can enforce echo-only applications such as
+				// junos-icmp-ping. junos-ping is protocol-only (#11340), and nil
+				// keeps every ICMP type/code of the protocol unconstrained.
 				ICMPType: app.ICMPType,
 				ICMPCode: app.ICMPCode,
 				// #3227: carry the per-application inactivity (idle) timeout so

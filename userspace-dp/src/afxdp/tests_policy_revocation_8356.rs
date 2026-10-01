@@ -864,18 +864,20 @@ fn an_egress_that_does_not_resolve_at_all_still_declines_9513() {
 // #8618: the ICMP half of the #7323 residual.
 //
 // #8356 declined ICMP outright: a zone policy can match icmp type/code via a
-// junos-ping-style application term (#3020), so where such a term exists the
-// verdict is a property of the PACKET and a frame-independent derivation has no
-// type to offer. #8618 narrows that decline to the case the reasoning describes
-// — `packet_icmp` is read in exactly ONE arm of `CompiledApplications::matches`
-// (`icmp_constraints`), so with no type-constrained PERMIT in the snapshot a
-// type-blind evaluation is not a guess, it is the same answer.
+// type-constrained application term (`junos-icmp-ping`, #3020), so where such
+// a term exists the verdict is a property of the PACKET and a frame-independent
+// derivation has no type to offer. #8618 narrows that decline to the case the
+// reasoning describes — `packet_icmp` is read in exactly ONE arm of
+// `CompiledApplications::matches` (`icmp_constraints`), so with no
+// type-constrained PERMIT in the snapshot a type-blind evaluation is not a
+// guess, it is the same answer.
 //
 // THE PAIR THAT MATTERS is `..._revokes_an_established_icmp_session_8618` and
 // `..._a_type_constrained_permit_declines_8618`. Their fixtures are IDENTICAL
-// but for one junos-ping permit, so together they bind the gate's DIRECTION.
-// Either alone is satisfied by a constant: "always revoke" passes the first,
-// "always decline" (i.e. #8356 unchanged, the revert) passes the second.
+// but for one `junos-icmp-ping` permit, so together they bind the gate's
+// DIRECTION. Either alone is satisfied by a constant: "always revoke" passes
+// the first, "always decline" (i.e. #8356 unchanged, the revert) passes the
+// second.
 //
 // The first is also the POSITIVE CONTROL for the whole group: if the ICMP
 // session key or meta were wrong the packet would never find the session, and
@@ -901,7 +903,7 @@ fn icmp_flow_key() -> crate::session::SessionKey {
     }
 }
 
-/// A junos-ping-shaped PERMIT: an ICMP application term carrying an echo-request
+/// A `junos-icmp-ping` PERMIT: an ICMP application term carrying an echo-request
 /// TYPE constraint, which is what `icmp_constraints` (#3020) is populated from.
 ///
 /// Deliberately on a DIFFERENT zone pair (`dmz -> wan`) than the flow under
@@ -909,16 +911,16 @@ fn icmp_flow_key() -> crate::session::SessionKey {
 /// coarseness as a property rather than leaving it to be discovered: one
 /// type-constrained permit anywhere declines ICMP box-wide. That is #8356's
 /// behaviour, i.e. the conservative direction.
-fn junos_ping_permit() -> PolicyRuleSnapshot {
+fn junos_icmp_ping_permit() -> PolicyRuleSnapshot {
     PolicyRuleSnapshot {
         name: "ping-elsewhere".into(),
         from_zone: "dmz".into(),
         to_zone: "wan".into(),
         source_addresses: vec!["any".into()],
         destination_addresses: vec!["any".into()],
-        applications: vec!["junos-ping".into()],
+        applications: vec!["junos-icmp-ping".into()],
         application_terms: vec![PolicyApplicationSnapshot {
-            name: "junos-ping".into(),
+            name: "junos-icmp-ping".into(),
             protocol: "icmp".into(),
             source_port: String::new(),
             destination_port: String::new(),
@@ -951,7 +953,7 @@ fn drive_one_icmp_packet(permit_lan: bool, with_type_constrained_permit: bool) -
         });
     }
     if with_type_constrained_permit {
-        snapshot.policies.push(junos_ping_permit());
+        snapshot.policies.push(junos_icmp_ping_permit());
     }
     let forwarding = build_forwarding_state(&snapshot);
 
@@ -1023,8 +1025,8 @@ fn a_narrowed_zone_policy_revokes_an_established_icmp_session_8618() {
 }
 
 /// THE HONESTY GATE, and the direction that must never regress. Same fixture as
-/// above plus ONE junos-ping permit: the type-blind derivation could now be
-/// wrong, so it must decline rather than revoke.
+/// above plus ONE `junos-icmp-ping` permit: the type-blind derivation could now
+/// be wrong, so it must decline rather than revoke.
 ///
 /// If this ever fails, the box is tearing down live ICMP flows on a verdict it
 /// could not derive — strictly worse than the residual #8618 set out to close.
@@ -1033,7 +1035,7 @@ fn a_type_constrained_permit_declines_the_icmp_re_derivation_8618() {
     let out = drive_one_icmp_packet(false, true);
     assert_eq!(
         out.revoked, 0,
-        "with a junos-ping permit in the snapshot the verdict may depend on the \
+        "with a `junos-icmp-ping` permit in the snapshot the verdict may depend on the \
          icmp type, which this derivation does not have — it must decline"
     );
     assert_eq!(
@@ -1058,17 +1060,17 @@ fn a_still_permitted_icmp_flow_survives_the_re_derivation_8618() {
 /// The predicate is PER PROTOCOL, and this is the only cell that can see it.
 /// The three above all run over ICMPv4, so swapping the two slots — or collapsing
 /// them to one bool — leaves every one of them green while an ICMPv6 flow starts
-/// declining (or, worse, stops declining) for a v4-only junos-ping permit.
+/// declining (or, worse, stops declining) for a v4-only `junos-icmp-ping` permit.
 #[test]
 fn the_type_constrained_predicate_is_per_protocol_8618() {
     let mut snapshot = policy_deny_snapshot();
-    snapshot.policies.push(junos_ping_permit()); // protocol "icmp" = v4 only
+    snapshot.policies.push(junos_icmp_ping_permit()); // protocol "icmp" = v4 only
     let forwarding = build_forwarding_state(&snapshot);
     assert!(
         forwarding
             .policy
             .icmp_verdict_may_depend_on_type(PROTO_ICMP),
-        "a v4 junos-ping permit must make the ICMPv4 verdict type-dependent"
+        "a v4 `junos-icmp-ping` permit must make the ICMPv4 verdict type-dependent"
     );
     assert!(
         !forwarding
@@ -4335,19 +4337,19 @@ fn build_icmp_echo_reply_frame_v4_9604(
     frame
 }
 
-/// A junos-ping-shaped PERMIT for ICMPv6 (echo request, type 128), the v6 twin
-/// of `junos_ping_permit`. Deliberately on `dmz -> wan`: the gate predicate is
+/// A custom ICMPv6 echo-request PERMIT (type 128), the v6 twin of
+/// `junos_icmp_ping_permit`. Deliberately on `dmz -> wan`: the gate predicate is
 /// whole-snapshot, so the pair is irrelevant to arming.
-fn junos_ping_v6_permit_9604() -> PolicyRuleSnapshot {
+fn custom_icmpv6_echo_permit_9604() -> PolicyRuleSnapshot {
     PolicyRuleSnapshot {
         name: "ping6-elsewhere".into(),
         from_zone: "dmz".into(),
         to_zone: "wan".into(),
         source_addresses: vec!["any".into()],
         destination_addresses: vec!["any".into()],
-        applications: vec!["junos-ping6".into()],
+        applications: vec!["custom-icmpv6-echo".into()],
         application_terms: vec![PolicyApplicationSnapshot {
-            name: "junos-ping6".into(),
+            name: "custom-icmpv6-echo".into(),
             protocol: "icmpv6".into(),
             source_port: String::new(),
             destination_port: String::new(),
@@ -4433,7 +4435,7 @@ fn nat64_v6_armed_decline_keeps_flow_and_stamps_stale_9604() {
     let mut snapshot = policy_deny_snapshot();
     snapshot.generation = 7;
     snapshot.fib_generation = 9;
-    snapshot.policies.push(junos_ping_v6_permit_9604());
+    snapshot.policies.push(custom_icmpv6_echo_permit_9604());
     let forwarding = build_forwarding_state(&snapshot);
     assert!(
         forwarding
@@ -4493,7 +4495,7 @@ fn nat64_v4_armed_nonpermit_revokes_on_reverse_9604() {
     let mut snapshot = policy_deny_snapshot();
     snapshot.generation = 7;
     snapshot.fib_generation = 9;
-    snapshot.policies.push(junos_ping_permit());
+    snapshot.policies.push(junos_icmp_ping_permit());
     let forwarding = build_forwarding_state(&snapshot);
     assert!(
         forwarding
@@ -6420,7 +6422,7 @@ fn icmp_flow_key_to_10507(dst: Ipv4Addr) -> crate::session::SessionKey {
 }
 
 /// #10507 Cell 1 ICMP helper: the armed generation — same fabric+DMZ FIB
-/// as the base helper plus one box-wide junos-ping Permit (arming the
+/// as the base helper plus one box-wide `junos-icmp-ping` Permit (arming the
 /// ICMPv4 type predicate), published as generation 8.
 fn forwarding_with_fabric_dmz_armed_10507() -> ForwardingState {
     let mut snapshot = nat_snapshot_with_fabric();
@@ -6479,7 +6481,7 @@ fn forwarding_with_fabric_dmz_armed_10507() -> ForwardingState {
         router: false,
         link_local: false,
     });
-    snapshot.policies.push(junos_ping_permit());
+    snapshot.policies.push(junos_icmp_ping_permit());
     build_forwarding_state(&snapshot)
 }
 
@@ -6487,7 +6489,7 @@ fn forwarding_with_fabric_dmz_armed_10507() -> ForwardingState {
 /// revoke, never take the old ICMP `None`/Decline exit. Phase 1 earns a
 /// recorded ICMP Permit through poll (standby, unarmed generation 7 —
 /// `allow-all any` matches echo without a type constraint). A generation
-/// publish then arms the box-wide junos-ping predicate (generation 8) and
+/// publish then arms the box-wide `junos-icmp-ping` predicate (generation 8) and
 /// the promoting packet (active HA, live DMZ) must fail closed at the
 /// type guard instead of declining.
 ///
@@ -8556,7 +8558,7 @@ fn typed_permit_local_icmp_first_reply_coasts_10635() {
     });
     // Arms ICMP box-wide (whole-snapshot predicate): GATE 1b will coast
     // without stamping, exactly the production shape that self-sealed.
-    snapshot.policies.push(junos_ping_permit());
+    snapshot.policies.push(junos_icmp_ping_permit());
     // Reachable neighbor for the reply's LAN destination (inbound_dnat
     // shape): with the connected route this makes the reply a
     // ForwardCandidate out reth1.0.

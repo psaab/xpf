@@ -224,10 +224,10 @@ func junosHostPermitApplicationGap(cfg *Config, z *ZoneConfig, m PolicyMatch) (b
 	//
 	// A host-inbound token expands PER FAMILY: `ping` yields ICMP echo-request
 	// for ip AND ICMPv6 echo-request (128) for ip6. The application catalogue
-	// keys the two separately -- `junos-ping` is the v4 one, with a v6 twin
-	// under a different name. So comparing every family against the permit
-	// reports a v6 gap for the extremely common `application junos-ping`, which
-	// is precisely the false positive this issue forbids.
+	// keys the two separately -- `junos-ping` is the v4 all-ICMP object, with a
+	// v6 all-ICMP twin under a different name. So comparing every family against
+	// the permit reports a v6 gap for the extremely common `application
+	// junos-ping`, which is precisely the false positive this issue forbids.
 	//
 	// A token is therefore judged in its PRIMARY family: ip when it has any ip
 	// matches, ip6 only for a token that is v6-only. That still catches a token

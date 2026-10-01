@@ -960,10 +960,11 @@ message MatchPoliciesRequest {
   // terms (#3042). 0 = unspecified (does not constrain the match).
   int32 source_port = 7;
   // icmp_type / icmp_code let the simulator honor ICMP/ICMPv6 type-constrained
-  // application terms (#3284, junos-ping = type 8). proto3 `optional` so the
-  // simulator can distinguish "unspecified" (a type-constrained app term then
-  // fails closed, mirroring the dataplane's packet_icmp = None) from a valid
-  // type/code 0 (ICMP type 0 = echo-reply).
+  // application terms (#3284, for example junos-icmp-ping = type 8). junos-ping
+  // is protocol-only in the version-bounded predefined definitions (#11340).
+  // proto3 `optional` preserves "unspecified" so a constrained application
+  // term fails closed (mirroring packet_icmp = None); it also distinguishes a
+  // valid type/code 0 (ICMP type 0 = echo-reply).
   optional uint32 icmp_type = 8;
   optional uint32 icmp_code = 9;
   // non_first_fragment marks the query as a NON-FIRST IP fragment (#5572) — the

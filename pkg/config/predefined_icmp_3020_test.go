@@ -2,17 +2,19 @@ package config
 
 import "testing"
 
-// #3020 — junos-ping / junos-pingv6 are echo-request only (ICMP type 8 /
-// ICMPv6 type 128), distinct from the unconstrained all-ICMP aliases.
-func TestPredefinedPingApplicationsCarryEchoRequestType(t *testing.T) {
+// TestPredefinedICMPApplicationsCarryCorrectConstraints pins the Junos
+// application definitions. #11340's version-bounded defaults define
+// junos-ping/junos-pingv6 as protocol-only; junos-icmp-ping is echo-request only.
+func TestPredefinedICMPApplicationsCarryCorrectConstraints(t *testing.T) {
 	cases := []struct {
 		name      string
 		proto     string
 		wantType  uint8
 		wantTypeP bool
 	}{
-		{"junos-ping", "icmp", 8, true},
-		{"junos-pingv6", "icmpv6", 128, true},
+		{"junos-ping", "icmp", 0, false},
+		{"junos-pingv6", "icmpv6", 0, false},
+		{"junos-icmp-ping", "icmp", 8, true},
 		{"junos-icmp-all", "icmp", 0, false},
 		{"junos-icmp6-all", "icmpv6", 0, false},
 	}

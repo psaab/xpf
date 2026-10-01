@@ -417,15 +417,16 @@ carries a concrete source port and gates the app on it
 permit for an omitted source port over-matches vs the runtime. This supersedes
 #3107's earlier "omitted source port stays unconstrained" diagnostic stance;
 an unconstrained source-port term still matches any source port), and
-enforces ICMP/ICMPv6 type/code constraints (#3284, junos-ping = type 8,
-junos-pingv6 = type 128) from `Query.ICMPType` / `Query.ICMPCode`. A
-type-constrained application term matches only when the query's type is known
-and equal (and the code too, when the term constrains a code); a query that
-omits the type fails closed for that term, mirroring the dataplane's
-`packet_icmp = None` path. An unconstrained ICMP application (junos-icmp-all) is
-unaffected. The surfaces accept the type/code as `icmp_type`/`icmp_code` (REST
-query, gRPC `MatchPolicies` optional fields), `icmp-type`/`icmp-code` (CLI
-tokens), and `ictype=`/`iccode=` (gRPC `test policy` topic).
+enforces ICMP/ICMPv6 type/code constraints (#3284, for example the predefined
+`junos-icmp-ping` = type 8 and XPF's custom `protocol junos-ping` extension)
+from `Query.ICMPType` / `Query.ICMPCode`. A type-constrained application term
+matches only when the query's type is known and equal (and the code too, when
+the term constrains a code); a query that omits the type fails closed for that
+term, mirroring the dataplane's `packet_icmp = None` path. An unconstrained ICMP
+application (`junos-ping`, `junos-icmp-all`) is unaffected. The surfaces accept
+the type/code as `icmp_type`/`icmp_code` (REST query, gRPC `MatchPolicies`
+optional fields), `icmp-type`/`icmp-code` (CLI tokens), and
+`ictype=`/`iccode=` (gRPC `test policy` topic).
 
 ## Address token precedence (#9523)
 

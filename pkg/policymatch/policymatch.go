@@ -368,15 +368,15 @@ type Query struct {
 	// ICMPType / ICMPCode carry the query packet's ICMP/ICMPv6 type and code
 	// (#3284). They mirror the dataplane's per-packet `packet_icmp` tuple
 	// (policy.rs evaluate_policy_result_with_icmp): a type-constrained
-	// application term (junos-ping = ICMP type 8, junos-pingv6 = ICMPv6
-	// type 128) matches ONLY when the query's type is known and equal (and the
-	// code too, when the term constrains a code). A nil ICMPType means the
-	// query did not specify a type: a type-constrained term then fails closed
-	// (does NOT match), exactly like the runtime passing `packet_icmp = None`.
-	// An UNCONSTRAINED ICMP application (junos-icmp-all) is unaffected by these
-	// fields — it matches every ICMP packet on protocol alone. Pointers
-	// distinguish "unspecified" from a valid type/code 0 (ICMP type 0 is
-	// echo-reply, code 0 is common), which a plain int could not.
+	// application term (for example, junos-icmp-ping = ICMP type 8) matches
+	// ONLY when the query's type is known and equal (and the code too, when the
+	// term constrains a code). A nil ICMPType means the query did not specify a
+	// type: a type-constrained term then fails closed (does NOT match), exactly
+	// like the runtime passing `packet_icmp = None`. An UNCONSTRAINED ICMP
+	// application (junos-ping or junos-icmp-all) is unaffected by these fields
+	// — it matches every ICMP packet on protocol alone. Pointers distinguish
+	// "unspecified" from a valid type/code 0 (ICMP type 0 is echo-reply, code 0
+	// is common), which a plain int could not.
 	ICMPType *uint8
 	ICMPCode *uint8
 
@@ -2406,13 +2406,13 @@ func matchSingleApp(cfg *config.Config, appName string, queryProto uint8, queryP
 	if !appOK || !queryProtoOK || appProto != queryProto {
 		return false
 	}
-	// #3284: ICMP/ICMPv6 type[,code] constraint (junos-ping = type 8). Mirror
-	// policy.rs CompiledApplications.matches: a type-constrained term matches
-	// ONLY when the query's ICMP type is known and equal — and the code too,
-	// when the term constrains a code. A nil query type fails closed for the
-	// term (the runtime's `packet_icmp == None` path). An application with NO
-	// ICMP type constraint (junos-icmp-all, or any non-ICMP app) is unaffected:
-	// it matches on protocol/ports alone, exactly as before.
+	// #3284: ICMP/ICMPv6 type[,code] constraint (for example, junos-icmp-ping =
+	// type 8). Mirror policy.rs CompiledApplications.matches: a type-constrained
+	// term matches ONLY when the query's ICMP type is known and equal — and the
+	// code too, when the term constrains a code. A nil query type fails closed
+	// for the term (the runtime's `packet_icmp == None` path). An application
+	// with NO ICMP type constraint (junos-ping, junos-icmp-all, or any non-ICMP
+	// app) is unaffected: it matches on protocol/ports alone, exactly as before.
 	if app.ICMPType != nil {
 		// #5572: a non-first fragment (l4Present == false) carries no readable
 		// ICMP type/code — the dataplane's packet_icmp is None there — so an
