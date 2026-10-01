@@ -475,7 +475,9 @@ func (d *Daemon) reconcileSNMP(cfg *config.Config) bool {
 func (d *Daemon) startSNMPLocked(cfg *config.Config) error {
 	ctx, cancel := context.WithCancel(d.daemonCtx)
 	agent := snmp.NewAgentWithPaths(cfg.System.SNMP, d.snmpBootsPath, d.snmpEngineIDPath)
-	agent.SetIfDataFn(buildSNMPIfData)
+	// Host-inbound SNMP is served from the management routing context; a
+	// wildcard UDP socket otherwise replies and emits traps through main.
+	agent.SetVRFDevice(config.ManagementVRFDeviceName)
 
 	// The serve seam binds UDP/161 and then serves for the lifetime of ctx. It
 	// reports the bind outcome on `ready` EXACTLY ONCE — nil once the listener

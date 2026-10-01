@@ -184,11 +184,10 @@ func (a *Agent) buildLinkTrap(community string, linkUp bool, ifindex int, ifname
 // snmpTraps node.
 //
 // #9123: agent-addr is derived from the source address this trap will actually
-// leave from (agentAddrForTarget), NOT hardcoded to 0.0.0.0. The comment that
-// used to justify the hardcode cited "RFC 2576 §3.1", which is the wrong
-// direction of the mapping, and RFC 3584 §3.2's normative text requires the
-// opposite: a notification originator sending over IP SHALL set agent-addr to
-// its own IP address, and 0.0.0.0 is the fallback for a non-IP transport. See
+// leave from (agentAddrForTargetOnVRF uses the same VRF pin as the sender), NOT
+// hardcoded to 0.0.0.0. The old justification cited "RFC 2576 §3.1", the wrong
+// direction of the mapping; RFC 3584 §3.2 instead requires the originator's IP
+// address for IP notifications. 0.0.0.0 is the fallback for non-IP transport.
 // agent_addr_9123.go.
 func (a *Agent) buildLinkTrapV1(community, target string, linkUp bool, ifindex int, ifname string) []byte {
 	// sysUpTime in hundredths of a second.
@@ -236,7 +235,7 @@ func (a *Agent) buildLinkTrapV1WithUptime(community, target string, linkUp bool,
 	// time-stamp, variable-bindings.
 	var pduBody []byte
 	pduBody = append(pduBody, berEncodeTLV(tagObjectIdentifier, berEncodeOID(oidSnmpTraps))...)
-	agentAddr := agentAddrForTarget(target)
+	agentAddr := agentAddrForTargetOnVRF(target, a.vrfDevice)
 	pduBody = append(pduBody, berEncodeTLV(tagIPAddress, agentAddr[:])...)
 	pduBody = append(pduBody, berEncodeIntegerTLV(genericTrap)...)
 	pduBody = append(pduBody, berEncodeIntegerTLV(0)...) // specific-trap
@@ -278,11 +277,19 @@ func (a *Agent) buildLinkTrapsForVersion(community, version, target string, link
 	}
 }
 
-// sendTrap sends a pre-built trap packet to a single target on port 162. It is
-// the default value of Agent.trapSender (#5023); tests inject a slow/blocking
-// or mock sender per-Agent instead of mutating a shared package global that
-// races the running trap worker's read.
+// sendTrap sends a pre-built trap packet to a single target on port 162 without
+// a VRF pin. It remains the fallback for bare test Agents; constructed Agents
+// use sendTrapViaVRF so the socket shares the listener's routing context.
 func sendTrap(target string, pkt []byte) error {
+	return sendTrapOnVRF(target, pkt, "")
+}
+
+func (a *Agent) sendTrapViaVRF(target string, pkt []byte) error {
+	return sendTrapOnVRF(target, pkt, a.vrfDevice)
+}
+
+// sendTrapOnVRF sends one trap with an optional VRF device pin.
+func sendTrapOnVRF(target string, pkt []byte, device string) error {
 	// Ensure the target has a port.
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
@@ -290,12 +297,11 @@ func sendTrap(target string, pkt []byte) error {
 		port = "162"
 	}
 	addr := net.JoinHostPort(host, port)
-
-	conn, err := net.DialTimeout("udp", addr, 2*time.Second)
+	dialer := net.Dialer{Timeout: 2 * time.Second, Control: snmpVRFSocketControl(device)}
+	conn, err := dialer.Dial("udp", addr)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
-	defer conn.Close()
 
 	// #9025: bound the WRITE, not just the dial. A connected-UDP Write can block
 	// indefinitely on a full socket send buffer (ENOBUFS / a congested or down

@@ -541,6 +541,10 @@ this module states the divergence, not only the compiler.
 - `NewAgent(cfg *config.SNMPConfig) *Agent` — `agent.go`.
 - `Start(ctx context.Context) error` — `agent.go`. Blocks until ctx cancelled.
 - `Stop()` — `agent.go`.
+
+- `SetVRFDevice(device)` — call before `Bind` to pin UDP/161 and trap sends to a
+  Linux VRF device. The daemon sets it to `vrf-mgmt`, so management polls reply
+  through the management VRF and link traps use the same routing context.
 - `SetIfDataFn(fn)` — `agent.go`. Caller-supplied accessor for live
   interface data. The daemon wires `buildSNMPIfData`, which does a full
   netlink `LinkList` (RTM_GETLINK dump) per call — so the request path must
