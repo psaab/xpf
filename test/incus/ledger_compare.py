@@ -30,9 +30,9 @@ Why a band and not "compare against the previous run"
 A single prior value cannot tell a regression from a flake, so a comparator
 built on it either cries wolf or is tuned until it says nothing. The band is a
 robust interval over the last ``MIN_BASELINE_RUNS`` **green** runs at the same
-env; a run outside it is reported, a run inside it is not, and the number of
-runs that went into the band is printed so a thin baseline is visible rather
-than implied.
+env and measurement scope; a run outside it is reported, a run inside it is
+not, and the number of runs that went into the band is printed so a thin
+baseline is visible rather than implied.
 
 Three rules carry the whole design, and each one is a mutation cell in
 ``ledger_compare_test.py`` because a comparator with a broken band is
@@ -132,6 +132,7 @@ BAND_REL_FLOOR = 0.05
 
 VERDICTS = ("PASS", "FAIL", "VOID")
 EXE_CHECKS = ("MATCH", "MISMATCH", "UNAVAILABLE", "NOT-APPLICABLE")
+MEASUREMENT_SCOPES = ("cluster", "hermetic")
 REQUIRED_KEYS = (
     "schema",
     "run_id",
@@ -307,6 +308,12 @@ def lint_row(row: object, lineno: int) -> List[str]:
         errs.append(f"line {lineno}: verdict {verdict!r} is not one of {VERDICTS}")
     if row["exe_check"] not in EXE_CHECKS:
         errs.append(f"line {lineno}: exe_check {row['exe_check']!r} is not one of {EXE_CHECKS}")
+    measurement_scope = row.get("measurement_scope")
+    if measurement_scope is not None and measurement_scope not in MEASUREMENT_SCOPES:
+        errs.append(
+            f"line {lineno}: measurement_scope {measurement_scope!r} "
+            f"is not one of {MEASUREMENT_SCOPES}"
+        )
     reason = row.get("void_reason") or ""
     if verdict == "VOID" and not reason:
         errs.append(f"line {lineno}: VOID row with an empty void_reason")
@@ -621,11 +628,28 @@ def _sorted_rows(rows: Iterable[Dict]) -> List[Dict]:
     return sorted(rows, key=lambda r: (r["ts"], r.get("run_id", "")))
 
 
+def _measurement_scope(row: Dict) -> str:
+    """Return the measurement class, preserving scope for pre-field rows.
+
+    Hermetic rows written before this field existed used exe_scope=n/a (or
+    exe_check=NOT-APPLICABLE). Other legacy rows are cluster measurements;
+    known fixture records that predate the field are explicitly corrected in
+    the ledger rather than inferred from their binary-attestation metadata.
+    """
+    scope = row.get("measurement_scope")
+    if scope in MEASUREMENT_SCOPES:
+        return scope
+    if row.get("exe_scope") == "n/a" or row.get("exe_check") == "NOT-APPLICABLE":
+        return "hermetic"
+    return "cluster"
+
+
 def compare(
     rows: Sequence[Dict],
     gate: str,
     env: Optional[str] = None,
     k: int = MIN_BASELINE_RUNS,
+    measurement_scope: Optional[str] = None,
 ) -> Dict:
     """Compare the newest row for ``gate`` (at ``env``) against its band."""
     matching = [r for r in rows if r.get("gate") == gate]
@@ -647,6 +671,28 @@ def compare(
             ),
         }
 
+    measurement_scope = (
+        measurement_scope
+        if measurement_scope is not None
+        else _measurement_scope(matching[-1])
+    )
+    matching = [
+        r for r in matching if _measurement_scope(r) == measurement_scope
+    ]
+    if not matching:
+        return {
+            "outcome": NO_BASELINE,
+            "gate": gate,
+            "env": env,
+            "k_required": k,
+            "measurement_scope": measurement_scope,
+            "baseline_n": 0,
+            "note": (
+                f"no {measurement_scope} measurement rows for gate {gate!r}"
+                + (f" at env {env!r}" if env is not None else "")
+                + " — nothing has been measured, which is not a pass"
+            ),
+        }
     newest = matching[-1]
     # An env was not given: judge the newest row against its OWN env only.
     # Mixing envs into one band is how a comparator reports a clean history for
@@ -659,6 +705,7 @@ def compare(
         "gate": gate,
         "env": resolved_env,
         "k_required": k,
+        "measurement_scope": measurement_scope,
         "ts": newest.get("ts"),
         "verdict": newest.get("verdict"),
         "build_git_sha": newest.get("build_git_sha"),
@@ -816,7 +863,11 @@ def compare_all(
     rows: Sequence[Dict],
     k: int = MIN_BASELINE_RUNS,
 ) -> Dict:
-    """Compare the newest row of EVERY (gate, env) pair against its band.
+    """Compare every (gate, env) pair in a stable measurement scope.
+
+    When a pair has cluster rows, the red-watch uses that live cluster series;
+    a later hermetic fixture must not hide a cluster FAIL. Pairs with only
+    hermetic rows remain visible as hermetic comparisons.
 
     #9922 F-086: ``compare()`` over one gate needs a human ``GATE=`` and no
     automation ever ran it over real rows, so a gate failing every run stayed
@@ -828,14 +879,19 @@ def compare_all(
     normal state of young gates; completeness of a different kind — zero-row
     gates — is the coverage census's job, F-087).
     """
-    pairs = sorted(
-        set(
-            (r.get("gate"), r.get("env"))
-            for r in rows
-            if r.get("gate") is not None
+    rows_by_pair: Dict[Tuple[str, str], List[Dict]] = {}
+    for row in rows:
+        gate = row.get("gate")
+        if gate is not None:
+            rows_by_pair.setdefault((gate, row.get("env")), []).append(row)
+    pairs = sorted(rows_by_pair)
+    results = {}
+    for pair in pairs:
+        scopes = {_measurement_scope(r) for r in rows_by_pair[pair]}
+        scope = "cluster" if "cluster" in scopes else "hermetic"
+        results[pair] = compare(
+            rows, pair[0], pair[1], k, measurement_scope=scope
         )
-    )
-    results = {pair: compare(rows, pair[0], pair[1], k) for pair in pairs}
     red = {
         pair: res
         for pair, res in results.items()
@@ -970,6 +1026,33 @@ def _jsonable_agg(agg: Dict, declared: Dict[Tuple[str, str], str]) -> Dict:
 #: rather than gates and are excluded by coverage().
 WRAPPED_GATE_RE = re.compile(r"--gate (\S+)")
 
+# Wrapper invocations are scoped by the actual harness mode before the child
+# command separator. Flags after `--` belong to the child and cannot declare
+# the measurement mode.
+WRAPPED_RUN_RE = re.compile(
+    r"harness-result\.sh run(?P<args>.*?)(?:\s)--\s",
+    re.S,
+)
+
+
+def _gate_measurement_scopes(makefile_text: str) -> Dict[str, set[str]]:
+    recipe_text = "\n".join(
+        ln for ln in makefile_text.splitlines() if ln.startswith("\t")
+    )
+    scopes: Dict[str, set[str]] = {}
+    for match in WRAPPED_RUN_RE.finditer(recipe_text):
+        args = match.group("args")
+        gate_match = WRAPPED_GATE_RE.search(args)
+        if not gate_match or "$" in gate_match.group(1):
+            continue
+        scope = (
+            "hermetic"
+            if re.search(r"(?:^|\s)--hermetic(?:\s|$)", args)
+            else "cluster"
+        )
+        scopes.setdefault(gate_match.group(1), set()).add(scope)
+    return scopes
+
 #: Trailing ledger-relative window for coverage(): reached needs a measured
 #: row in the gate's newest env among its last COVERAGE_WINDOW rows.
 COVERAGE_WINDOW = 5
@@ -1017,6 +1100,9 @@ def coverage(
 
     Reached means a PASS or FAIL row in the gate's NEWEST env inside the
     trailing COVERAGE_WINDOW ledger rows — not merely "measured once, ever".
+
+    Only rows matching the Makefile wrapper's expected measurement scope enter
+    the census; a hermetic fixture cannot satisfy a cluster recipe.
     Per-gate-any-env would let one old measurement in a retired env satisfy
     coverage forever while every current run VOIDs; the window is ledger-
     relative (last K rows), never wall-clock, so the census is deterministic
@@ -1044,8 +1130,16 @@ def coverage(
     for r in rows:
         by_gate.setdefault(r.get("gate", ""), []).append(r)
     per_gate = {}
+    gate_scopes = _gate_measurement_scopes(makefile_text)
     for gate in wrapped:
-        grows = by_gate.get(gate, [])
+        all_grows = by_gate.get(gate, [])
+        expected_scopes = gate_scopes.get(gate, {"cluster"})
+        grows = [
+            r for r in all_grows if _measurement_scope(r) in expected_scopes
+        ]
+        scope_mismatch_rows = [
+            r for r in all_grows if _measurement_scope(r) not in expected_scopes
+        ]
         ordered = sorted(grows, key=lambda r: (r.get("ts", ""), r.get("run_id", "")))
         newest_env = ordered[-1].get("env") if ordered else None
         window = ordered[-COVERAGE_WINDOW:]
@@ -1056,6 +1150,9 @@ def coverage(
         ]
         per_gate[gate] = {
             "rows": len(grows),
+            "all_rows": len(all_grows),
+            "expected_scopes": sorted(expected_scopes),
+            "scope_mismatch_rows": len(scope_mismatch_rows),
             "measured_rows": len(measured),
             "measured_ever": len(measured_ever),
             "newest_env": newest_env,
@@ -1071,6 +1168,9 @@ def coverage(
         g for g in wrapped if per_gate[g]["rows"] > 0 and per_gate[g]["measured_ever"] > 0 and per_gate[g]["measured_rows"] == 0
     )
     zero_row = sorted(g for g in wrapped if per_gate[g]["rows"] == 0)
+    scope_mismatch = sorted(
+        g for g in wrapped if per_gate[g]["scope_mismatch_rows"] > 0
+    )
     unreached = sorted(set(wrapped) - set(reached))
     missing = sorted(g for g in unreached if g not in declared)
     stale = sorted(g for g in declared if g not in unreached)
@@ -1089,6 +1189,7 @@ def coverage(
         "wrapped": wrapped,
         "reached": reached,
         "void_only": void_only,
+        "scope_mismatch": scope_mismatch,
         "window_stale": window_stale,
         "zero_row": zero_row,
         "declared": declared,
@@ -1105,23 +1206,29 @@ def render_coverage(cov: Dict) -> str:
     out = [f"ledger-coverage: {len(cov.get('reached', []))} of {len(cov.get('wrapped', []))} wrapped gates measured"]
     for gate in cov.get("wrapped", []):
         pg = (cov.get("per_gate") or {}).get(gate, {})
+        expected = ",".join(pg.get("expected_scopes") or []) or "cluster"
+        mismatch_rows = pg.get("scope_mismatch_rows", 0)
         if gate in (cov.get("reached") or []):
             state = f"REACHED ({pg.get('measured_rows')} measured / {pg.get('rows')} rows)"
         elif gate in (cov.get("void_only") or []):
             state = f"VOID-ONLY ({pg.get('rows')} rows, none measured)"
         elif gate in (cov.get("window_stale") or []):
             state = f"STALE ({pg.get('measured_ever')} measured ever, none in the newest-env window)"
+        elif mismatch_rows:
+            state = f"SCOPE-MISMATCH ({mismatch_rows} wrong-scope row(s); expected {expected})"
         else:
             state = "ZERO ROWS"
         extra = ""
+        if mismatch_rows and gate in (cov.get("reached") or []):
+            extra = f"  [ignored {mismatch_rows} wrong-scope row(s)]"
         if gate in (cov.get("declared") or {}):
-            extra = (
+            extra += (
                 "  [declared: still unreached]"
                 if gate not in (cov.get("reached") or [])
                 else "  [declared: STALE — measured now, remove the declaration]"
             )
         envs = ",".join(pg.get("envs") or []) or "-"
-        out.append(f"  {gate:<32} {state:<34} envs={envs}{extra}")
+        out.append(f"  {gate:<32} {state:<34} scope={expected} envs={envs}{extra}")
     for gate in cov.get("missing", []):
         out.append(f"  MISSING: {gate} — unreached and undeclared (add rows or declare it)")
     for gate in cov.get("stale", []):
@@ -1135,6 +1242,8 @@ def render_coverage(cov: Dict) -> str:
 def render(result: Dict) -> str:
     out = [f"outcome: {result['outcome']}"]
     out.append(f"gate: {result['gate']}   env: {result['env']}")
+    if result.get("measurement_scope"):
+        out.append(f"measurement_scope: {result['measurement_scope']}")
     if result.get("ts"):
         out.append(f"newest run: {result['ts']}   verdict: {result.get('verdict')}")
         out.append(

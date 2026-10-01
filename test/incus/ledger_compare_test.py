@@ -86,6 +86,7 @@ def row(
     exe_check="MATCH",
     extra=None,
     run_id=None,
+    measurement_scope=None,
 ):
     """One ledger row. Complete enough to survive lint_row(), so the same
     fixtures can be round-tripped through parse_ledger()."""
@@ -93,7 +94,7 @@ def row(
         metrics = {} if (verdict == "VOID" and value is None) else {headline: value}
     if extra:
         metrics = dict(metrics, **extra)
-    return {
+    result = {
         "schema": 1,
         "run_id": run_id or uuid.uuid4().hex[:16],
         "ts": ts,
@@ -113,6 +114,9 @@ def row(
         "adapter": "ha-smoke",
         "node": "loss:xpf-userspace-fw0",
     }
+    if measurement_scope is not None:
+        result["measurement_scope"] = measurement_scope
+    return result
 
 
 def greens(values, start=1):
@@ -153,7 +157,7 @@ class BandArithmetic(unittest.TestCase):
 
 
 class RequiredMutationCells(unittest.TestCase):
-    """The four the brief names, plus the two the design adds."""
+    """Core guard cells, plus the measurement-scope regressions."""
 
     def test_void_rows_do_not_satisfy_the_k_floor(self):
         # MUTATION: delete the `verdict == "PASS"` filter from the baseline.
@@ -211,6 +215,21 @@ class RequiredMutationCells(unittest.TestCase):
         res = compare(rows, GATE, ENV)
         self.assertEqual(res["outcome"], NO_BASELINE)
         self.assertEqual(res["baseline_n"], 2)
+
+    def test_hermetic_fixture_does_not_supply_cluster_baseline(self):
+        # MUTATION: measurement-scope-filter-dropped.
+        rows = [
+            row("2026-09-01T00:01:00Z", measurement_scope="cluster"),
+            row("2026-09-01T00:02:00Z", measurement_scope="cluster"),
+            row("2026-09-01T00:03:00Z", value=1000.0, measurement_scope="hermetic"),
+            row("2026-09-01T00:04:00Z", measurement_scope="cluster"),
+        ]
+        res = compare(rows, GATE, ENV)
+        self.assertEqual(res["baseline_n"], 2)
+        self.assertEqual(res["outcome"], NO_BASELINE)
+        self.assertEqual(res["measurement_scope"], "cluster")
+        self.assertNotIn("2026-09-01T00:03:00Z", res.get("baseline_ts", []))
+
 
     def test_a_real_regression_does_not_fit_inside_the_band(self):
         # MUTATION: BAND_REL_FLOOR 0.05 -> 1.0, or BAND_Z 3.0 -> 50.0.
@@ -513,6 +532,27 @@ class AggregateComparison(unittest.TestCase):
         )
         self.assertEqual(sorted(agg["green"]), [("gate-green", ENV)])
         self.assertEqual(all_exit_status(agg), 1)
+
+    def test_newer_fixture_does_not_hide_live_cluster_fail(self):
+        # MUTATION: aggregate-selects-latest-scope.
+        rows = [
+            row("2026-09-01T00:01:00Z", gate=GATE, measurement_scope="cluster"),
+            row("2026-09-01T00:02:00Z", gate=GATE, measurement_scope="cluster"),
+            row("2026-09-01T00:03:00Z", gate=GATE, measurement_scope="cluster"),
+            row(
+                "2026-09-01T00:04:00Z",
+                verdict="FAIL",
+                value=10.0,
+                gate=GATE,
+                measurement_scope="cluster",
+            ),
+            row("2026-09-01T00:05:00Z", value=1000.0, measurement_scope="hermetic"),
+        ]
+        agg = compare_all(rows)
+        result = agg["pairs"][(GATE, ENV)]
+        self.assertIn((GATE, ENV), agg["red"])
+        self.assertEqual(result["measurement_scope"], "cluster")
+        self.assertEqual(result["verdict"], "FAIL")
 
     def test_compare_all_tolerates_undetermined(self):
         # A thin-baseline pair is surfaced, not failed: the aggregate watches
@@ -1154,6 +1194,29 @@ class CoverageCensus(unittest.TestCase):
         ]
         cov2 = coverage(self.MAKE, rows2, "")
         self.assertIn("test-foo", cov2["reached"])
+
+    def test_hermetic_fixture_cannot_reach_a_cluster_recipe(self):
+        # MUTATION: coverage-scope-filter-dropped.
+        make = (
+            "\t./test/incus/harness-result.sh run --gate test-failover --cluster -- bash gate.sh\n"
+            "\t./test/incus/harness-result.sh run --gate test-cluster-fixture --cluster -- bash gate.sh\n"
+            "\t./test/incus/harness-result.sh run --gate test-hermetic --hermetic -- bash gate.sh\n"
+        )
+        rows = [
+            row("2026-09-01T00:00:00Z", gate="test-failover", measurement_scope="cluster"),
+            row("2026-09-01T00:01:00Z", gate="test-cluster-fixture", measurement_scope="hermetic"),
+            row("2026-09-01T00:02:00Z", gate="test-hermetic", measurement_scope="hermetic"),
+        ]
+        cov = coverage(make, rows, "")
+        self.assertNotIn("test-cluster-fixture", cov["reached"])
+        self.assertIn("test-cluster-fixture", cov["zero_row"])
+        self.assertIn("test-cluster-fixture", cov["scope_mismatch"])
+        self.assertIn("test-cluster-fixture", cov["missing"])
+        self.assertIn("test-hermetic", cov["reached"])
+        self.assertEqual(
+            cov["per_gate"]["test-cluster-fixture"]["scope_mismatch_rows"], 1
+        )
+        self.assertIn("SCOPE-MISMATCH", render_coverage(cov))
 
     def test_positive_control_wrapped_but_unreached(self):
         # The :1054 branch: the control gate is wrapped but has no measured

@@ -778,7 +778,7 @@ harness_result_emit() {
 	local build_helper_exe="" running_helper_exe="" helper_exe_check=""
 	local running_helper_exe_peer="" helper_exe_scope=""
 	local duration_s="" artifacts="" adapter="" ledger="" node="" ts=""
-	local node_peer="" running_exe_peer="" exe_scope=""
+	local node_peer="" running_exe_peer="" exe_scope="" measurement_scope=""
 	while (($#)); do
 		case "$1" in
 		--gate) gate="$2"; shift 2 ;;
@@ -804,6 +804,7 @@ harness_result_emit() {
 		--node-peer) node_peer="$2"; shift 2 ;;
 		--running-exe-sha256-peer) running_exe_peer="$2"; shift 2 ;;
 		--exe-scope) exe_scope="$2"; shift 2 ;;
+		--measurement-scope) measurement_scope="$2"; shift 2 ;;
 		--ledger) ledger="$2"; shift 2 ;;
 		--ts) ts="$2"; shift 2 ;;
 		*) _hr_warn "emit: unknown argument '$1'"; return 2 ;;
@@ -833,6 +834,10 @@ harness_result_emit() {
 	case "$exe_check" in
 	MATCH | MISMATCH | UNAVAILABLE | NOT-APPLICABLE) ;;
 	*) _hr_warn "REFUSED: --exe-check must be MATCH, MISMATCH, UNAVAILABLE or NOT-APPLICABLE (got '${exe_check}')"; return 2 ;;
+	esac
+	case "$measurement_scope" in
+	"" | cluster | hermetic) ;;
+	*) _hr_warn "REFUSED: --measurement-scope must be cluster or hermetic (got '${measurement_scope}')"; return 2 ;;
 	esac
 	if [[ -n "$helper_exe_check" ]]; then
 		case "$helper_exe_check" in
@@ -887,6 +892,7 @@ harness_result_emit() {
 			HR_DURATION="$duration_s" HR_ARTIFACTS="$artifacts" HR_ADAPTER="$adapter" \
 			HR_NODE="$node" HR_NODE_PEER="$node_peer" \
 			HR_RUN_EXE_PEER="$running_exe_peer" HR_EXE_SCOPE="$exe_scope" \
+			HR_MEASUREMENT_SCOPE="$measurement_scope" \
 			HR_LEDGER="$ledger" \
 			python3 - <<'PY'
 import json, os, pathlib, sys
@@ -972,6 +978,7 @@ row = {
     "node_peer": opt("HR_NODE_PEER"),
     "running_exe_sha256_peer": opt("HR_RUN_EXE_PEER"),
     "exe_scope": opt("HR_EXE_SCOPE"),
+    "measurement_scope": opt("HR_MEASUREMENT_SCOPE"),
 }
 # separators without spaces and ensure_ascii=False keep the row compact; json
 # escapes every newline, so a row is always exactly one physical line even when
@@ -1059,6 +1066,22 @@ harness_result_run() {
 	[[ -n "$gate" ]] || { _hr_warn "run: --gate is required"; return 2; }
 	[[ -n "$adapter" ]] || { _hr_warn "run: --adapter is required"; return 2; }
 	[[ -n "$env" ]] || { _hr_warn "run: --env is required"; return 2; }
+	# A child fixture flag changes what the wrapper is measuring. Scan only
+	# the child argv (after the wrapper's `--`) and never attest cluster images
+	# for a verdict produced from a local transcript.
+	local measurement_scope="$mode" cmd_arg
+	for cmd_arg in "$@"; do
+		if [[ "$cmd_arg" == "--fixture" ]]; then
+			if [[ "$mode" == "cluster" ]]; then
+				_hr_warn "run: child --fixture selects a hermetic measurement; cluster attestation is disabled"
+			fi
+			mode="hermetic"
+			measurement_scope="hermetic"
+			node=""
+			peer_node_arg=""
+			break
+		fi
+	done
 
 	local root log t0 t1 rc
 	root="$(harness_result_root)"
@@ -1291,7 +1314,7 @@ harness_result_run() {
 		--duration-s "$((t1 - t0))" --artifacts "$artifacts" --adapter "$adapter" \
 		--node "$node" --node-peer "${peer_node:-}" \
 		--running-exe-sha256-peer "${peer_running_exe_sha:-}" \
-		--exe-scope "$exe_scope" "${ledger_arg[@]}"; then
+		--exe-scope "$exe_scope" --measurement-scope "$measurement_scope" "${ledger_arg[@]}"; then
 		_hr_warn "NO ROW WRITTEN for gate '$gate' (verdict was $verdict)"
 		emit_failed=1
 	else
@@ -1321,6 +1344,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 usage: harness-result.sh <run|emit|adapt|adapters> ...
   run     --gate G --adapter A --env E [--cluster|--hermetic] [--node INST]
           [--build-exe PATH] [--artifacts DIR] [--ledger PATH] -- cmd...
+          child --fixture selects hermetic scope even with --cluster
   emit    --gate G --env E --verdict PASS|FAIL|VOID ... (see harness_result_emit)
   adapt   <adapter> <rc> <logfile>
   adapters
