@@ -205,6 +205,13 @@ User-based policy enforcement integrating with directory services. Not implement
 
 xpf has SNAT (interface + pool, address-persistent, source-nat off bypass), DNAT (with pools, hit counters, source-address-name match, destination-address-name match (#3229), protocol-only match, port rewriting, multi-port matching, destination-nat off exemption (#3844)), static 1:1 (host AND block-to-block subnet mappings, #3031; named translation target `then static-nat prefix-name <addr>`, #4290), NAT64, and exemption rules. These are additional NAT features from the vSRX.
 
+> **DNAT `off` shadow visibility (#9879/#11352).** Proven same-rule-set literal
+> overlaps that a narrower later translation can re-enter are rejected at
+> strict commit and warned on tolerant loads. Potential overlaps involving
+> address-book names, application matches, or other rule-sets receive review
+> warnings and a destination-NAT show annotation; those warnings are advisory
+> because the exact winner is not proved.
+
 > **DNAT `match destination-address` now honors a multi-host prefix
 > (#3164 — supersedes the #3029 exact-host limitation).** The userspace
 > `DnatTable` installs a longest-prefix-match entry, so a destination-NAT

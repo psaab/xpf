@@ -1069,6 +1069,16 @@ stays firewall-local and its DNAT delivery is preserved. The withdrawal is
 per-translate-slot, so a host exempt for one slot but translated by another slot
 is still registered by the other slot.
 
+**DNAT `off` shadow diagnostics (#9879/#11352).** The exact commit-time witness
+rejects a proven same-rule-set literal overlap that the most-specific lookup
+translates despite an earlier `off`; tolerant loads warn and `show security nat
+destination rule detail` marks the exemption. For application-bearing,
+address-book-named, or cross-rule-set pairs, the compiler and show command emit
+a distinct POTENTIAL SHADOW advisory when source/destination selectors overlap
+and installed scopes may meet. This does not change the Rust lookup or claim
+that a cross-rule-set translation definitely wins; operators should review the
+paired rules and narrow or reorder them if the exemption must hold.
+
 **Wire.** One additive, skew-safe field: `DestinationNATRuleSnapshot.off`
 (`json:"off,omitempty"` / `#[serde(default)]`). An older helper that ignores it
 drops the pool-less `off` entry (reverting to the pre-#3844 fail-open, never a

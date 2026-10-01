@@ -16,6 +16,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Preserve destination-owner host-inbound service admits on VRF netdevs claimed
     by multiple zones, then count unmatched IPv4/IPv6 packets and report the
     ambiguous-ingress transition (#11331).
+  * Warn when potentially shadowed DNAT `off` rules use address-book,
+    application or cross-rule-set scopes (#11352).
   * Initial xpf Debian package (increment A of #1917, subsumes #1923).
     Ships xpfd, xpf-userspace-dp, cli, the day-0 config-drive loader,
     and the systemd units. Binaries install to a dpkg-static staging

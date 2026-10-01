@@ -150,11 +150,13 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			// for these rules, so the pool address/port printed below is config
 			// the dataplane never installed.
 			noteNotInstalled(w, excludedReason)
-			// #9879: a broad `off` exemption a narrower later translate rule
-			// re-enters. Unlike the exclusion above this rule IS installed —
-			// only the re-entered subspace translates — so the warning leads
-			// with PARTIALLY SHADOWED, never NOT INSTALLED.
+			// #9879: proven re-entry is marked PARTIALLY SHADOWED; the
+			// installed exemption still protects its non-overlapping remainder.
 			noteDNATOffShadowed(w, config.DNATOffShadowReason(dnat, rs, rule))
+			// #11352: preserve visibility for plausible address-book,
+			// application, and cross-rule-set overlaps without claiming an
+			// unproven pair definitely translates.
+			noteDNATOffShadowPotential(w, config.DNATOffShadowPotentialReason(cfg, rs, rule))
 			// #6823: #7640 wired this annotation on the SOURCE renderer only,
 			// while its record and gauge both walk source AND destination
 			// (TestOffendersCoverBothKinds7640). So the operator-facing half
