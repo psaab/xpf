@@ -2435,6 +2435,19 @@ fn wire_invariant_default_specimens() {
     s.insert("queue_control_request".into(), dump(&QueueControlRequest::default()));
     s.insert("queue_status".into(), dump(&QueueStatus::default()));
     s.insert("route_snapshot".into(), dump(&RouteSnapshot::default()));
+    // #11402: populate the weighted sibling so its non-default JSON key stays
+    // pinned even though the Go side omits all-default weight vectors.
+    s.insert(
+        "route_snapshot_weighted".into(),
+        dump(&RouteSnapshot {
+            table: "inet.0".into(),
+            family: "inet".into(),
+            destination: "203.0.113.0/24".into(),
+            next_hops: vec!["192.0.2.1".into(), "192.0.2.2".into()],
+            next_hop_weights: vec![1, 4],
+            ..Default::default()
+        }),
+    );
     s.insert("screen_missing_profile_ref".into(), dump(&ScreenMissingProfileRef::default()));
     s.insert("screen_profile_snapshot".into(), dump(&ScreenProfileSnapshot::default()));
     s.insert("session_delta_drain_request".into(), dump(&SessionDeltaDrainRequest::default()));

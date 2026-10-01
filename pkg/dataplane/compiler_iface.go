@@ -576,9 +576,9 @@ func compileZones(dp DataPlane, cfg *config.Config, result *CompileResult) error
 	return nil
 }
 
-// buildIfaceTableIDMap builds the interface -> routing-table-ID map from the
-// configured routing instances. Forwarding instances use the default table
-// (0), so they are skipped.
+// buildIfaceTableIDMap builds the interface -> routing-table-ID map from
+// configured memberships and retained base-only primary claims. Forwarding
+// instances use the default table (0), so they are skipped.
 func buildIfaceTableIDMap(cfg *config.Config) map[string]uint32 {
 	ifaceTableID := make(map[string]uint32)
 	for _, ri := range cfg.RoutingInstances {
@@ -587,6 +587,11 @@ func buildIfaceTableIDMap(cfg *config.Config) map[string]uint32 {
 		}
 		for _, ifaceName := range ri.Interfaces {
 			ifaceTableID[ifaceName] = uint32(ri.TableID)
+		}
+		for _, claim := range cfg.QuarantinedRIMemberPrimaryClaims {
+			if claim.Instance == ri.Name && claim.InterfaceKey != "" && claim.LinuxName != "" {
+				ifaceTableID[claim.InterfaceKey] = uint32(ri.TableID)
+			}
 		}
 	}
 	return ifaceTableID

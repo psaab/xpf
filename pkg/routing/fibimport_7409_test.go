@@ -90,6 +90,9 @@ func TestImportAdoptsBGPLearnedRoute(t *testing.T) {
 	if !reflect.DeepEqual(got[0].NextHops, []string{"192.0.2.1"}) {
 		t.Errorf("next-hops = %v, want [192.0.2.1]", got[0].NextHops)
 	}
+	if !reflect.DeepEqual(got[0].NextHopWeights, []uint32{1}) {
+		t.Errorf("next-hop weights = %v, want [1] for a single path", got[0].NextHopWeights)
+	}
 	if got[0].Protocol != "bgp" {
 		t.Errorf("protocol = %q, want bgp", got[0].Protocol)
 	}
@@ -296,8 +299,8 @@ func TestImportAdoptsEveryECMPLeg(t *testing.T) {
 			Type:     unix.RTN_UNICAST,
 			Protocol: netlink.RouteProtocol(unix.RTPROT_OSPF),
 			MultiPath: []*netlink.NexthopInfo{
-				{Gw: net.ParseIP("192.0.2.1")},
-				{Gw: net.ParseIP("192.0.2.2")},
+				{Gw: net.ParseIP("192.0.2.1"), Hops: 0},
+				{Gw: net.ParseIP("192.0.2.2"), Hops: 3},
 			},
 		},
 	)))
@@ -312,6 +315,9 @@ func TestImportAdoptsEveryECMPLeg(t *testing.T) {
 	want := []string{"192.0.2.1", "192.0.2.2"}
 	if !reflect.DeepEqual(got[0].NextHops, want) {
 		t.Errorf("next-hops = %v, want %v", got[0].NextHops, want)
+	}
+	if !reflect.DeepEqual(got[0].NextHopWeights, []uint32{1, 4}) {
+		t.Errorf("next-hop weights = %v, want [1 4] in kernel leg order", got[0].NextHopWeights)
 	}
 }
 

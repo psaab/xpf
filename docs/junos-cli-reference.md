@@ -397,10 +397,13 @@ From zone: guest, To zone: lan
   runs FIRST**, then the `to-zone junos-host` security policy. A packet that
   host-inbound already rejected never reaches policy, so a `to-zone junos-host
   then permit` cannot re-admit a service host-inbound denies. A matching
-  `then deny`/`then reject` drops the host-bound packet (emitting the same
-  policy-deny RT_FLOW + `reject`/zone-`tcp-rst` reply as a transit deny) and
-  tears down any cached host-local session on the next hit. Hit counters for
-  these rules now advance.
+  `then deny`/`then reject` drops the host-bound packet and emits the policy-deny
+  RT_FLOW event, but only explicit `then reject` synthesizes a reply; `deny`
+  stays silent, and zone `tcp-rst` does not alter host-bound policy behavior.
+  For transit TCP, it applies only to non-SYN session misses on the enabled
+  ingress zone.
+  Both actions tear down any cached host-local session on the next hit; hit
+  counters for these rules now advance.
   - **Reject-event truthfulness (#3615):** the policy/filter-log RT_FLOW
     record reports `action reject` ONLY when the RST/ICMP-unreachable reply was
     actually enqueued. If the generated reply fail-closes after the action is
@@ -410,30 +413,33 @@ From zone: guest, To zone: lan
     truthful `action deny` — the forensic log never claims an active reject
     that was not sent. Reply-free deny paths (non-first fragments with no L4
     header, the forward/output-filter path that has no reply synthesis pending
-    #3608) log `deny` for the same reason. Both SUCCESS and SUPPRESSION are
-    counted per source in `show ... status` (#3657), each split
+    Successful and source-attributed suppressed explicit policy/filter rejects
+    are counted per source in `show ... status` (#3657), split
     `policy_reject`/`filter_reject` so a security-policy `then reject` is
     never conflated with a firewall-filter `then reject`:
 
-    - `Generated-reply sent` — replies actually enqueued (active reject
-      volume; a zone `tcp-rst` counts under `policy_reject`).
-    - `Generated-reply budget drops` — replies suppressed because the
-      per-tick TX-frame budget was exhausted.
-    - `Generated-reply drops` — replies dropped by an egress output firewall
-      filter applied to the reflected reply's own tuple (`policy_reject` /
-      `filter_reject` legs, alongside `time_exceeded` / `syn_cookie` / `ptb`
-      / `classify_parse_errors`).
+    - `Generated-reply sent` — explicit policy/filter `reject` replies actually
+      enqueued; zone `tcp-rst` session-miss resets are not source-attributed.
+    - `Generated-reply budget drops` — explicit policy/filter `reject` replies
+      suppressed because the per-tick TX-frame budget was exhausted.
+    - `Generated-reply drops` — explicit policy/filter `reject` replies
+      dropped by an egress output firewall filter applied to the reflected
+      reply's own tuple (`policy_reject` / `filter_reject` legs, alongside
+      `time_exceeded` / `syn_cookie` / `ptb` / `classify_parse_errors`).
     - `Generated-reply rate-limited` (#3661) — replies suppressed because the
       shared per-reason rate-limit token bucket was empty, split
-      `policy_reject`/`filter_reject`. Distinct from a TX-frame budget drop
-      and an egress output-filter drop; the split tells policy-reject
-      starvation from filter-reject starvation under a rejected-flow flood.
+      `policy_reject`/`filter_reject`. Zone `tcp-rst` session-miss resets share
+      the limiter but not these source-specific counters. Distinct from a
+      TX-frame budget drop and egress output-filter drop; its source split
+      identifies policy-reject starvation from filter-reject starvation under
+      a rejected-flow flood.
 
-    The global reject rate-limit bucket itself is a single global-per-reason
-    token bucket; its source-NEUTRAL aggregate is `reject_rate_limited_total`
-    (Prometheus `xpf_userspace_reject_rate_limited_total`), kept for
-    back-compat. #3661 attributes each drop to the reply's source at the
-    consume site, so `policy_reject`+`filter_reject` sum to the aggregate.
+    The source-neutral aggregate `reject_rate_limited_total` (Prometheus
+    `xpf_userspace_reject_rate_limited_total`) rolls up rate-limit denials
+    across per-ingress-zone buckets and the unzoned/unknown-zone fallback;
+    it remains for back-compat. The source split covers explicit policy/filter
+    `reject` replies only. Zone `tcp-rst` session-miss resets share the limiter
+    but have no source label, so `policy_reject`+`filter_reject` may sum to less.
     The source-split legs are exported to Prometheus as
     `xpf_userspace_reject_sent_total`,
     `xpf_userspace_reject_reply_budget_drops_total`,

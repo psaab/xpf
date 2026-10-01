@@ -757,6 +757,17 @@ warning and apply-time ERROR log name the device and competing claims, and
 `xpf_routing_instance_member_device_conflicts` remains alertable for the active
 config (`> 0` means a tolerant-load quarantine is in effect).
 
+**Management-class links remain in the management VRF (#11392):** strict
+commit validation rejects routing-instance interface-list devices resolved by
+`RoutingInstanceMemberDeviceKeysForInstance` whose Linux name matches
+`IsManagementIfName` (`fxp*`, `fab*`, `em*`); tolerant load/peer-sync warns
+and removes management-class references from the compiled tenant memberships
+after tail validation. A bare reference that also fans out to ordinary
+devices retains only those unaffected keys. The daemon's list binder and
+`riMemberVRFReassertLoop` also skip this class, so tenant route/domain maps
+cannot steal `fxp0` from `vrf-mgmt` or fight the fabric-overlay rebind for
+`fab0`/`fab1`.
+
 **Backup-router destination family must match the next-hop (#2911):**
 `renderBackupRouter` (`pkg/frr/config_render.go`) keys the static-route
 prefix keyword (`ip` vs `ipv6`) on the NEXT-HOP family (#2891/#2907). An
