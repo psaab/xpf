@@ -3033,6 +3033,7 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "172.16.80.100/32".to_string(),
+            next_hop_weights: vec![],
             next_hops: vec!["172.16.80.1@reth0.80".to_string()],
             discard: false,
             next_table: String::new(),
@@ -3043,6 +3044,7 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
             table: "inet6.0".to_string(),
             family: "inet6".to_string(),
             destination: "fd00:100::/48".to_string(),
+            next_hop_weights: vec![],
             next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
             discard: false,
             next_table: String::new(),
@@ -3271,6 +3273,39 @@ fn flowless_gre_dnat_does_not_suppress_snat_fence_11435() {
     assert_eq!(batch.nat_flowless_untranslated_dropped, 1);
     assert_eq!(sessions, 0);
     assert!(forwarded.is_none(), "the untranslated packet must not be queued");
+}
+
+#[test]
+fn flowless_gre_snat_fence_matches_post_dnat_destination_11435() {
+    let vip = Ipv4Addr::new(198, 51, 100, 10);
+    let mut snapshot = flowless_dnat_snapshot("any");
+    let base = nat_snapshot();
+    snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "translated-destination-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        destination_addresses: vec!["172.16.80.100/32".to_string()],
+        interface_mode: true,
+        ..Default::default()
+    }];
+    snapshot.default_policy = base.default_policy;
+    snapshot.policies = base.policies;
+
+    let (batch, dbg, sessions, flow_backed, forwarded, reinjected) =
+        flowless_nat_descriptor(&snapshot, vip);
+    assert!(!flow_backed, "GRE must exercise the flowless path");
+    assert_eq!(
+        dbg.tx, 0,
+        "SNAT candidate must not leave without its rewrite"
+    );
+    assert_eq!(batch.nat_flowless_untranslated_dropped, 1);
+    assert_eq!(sessions, 0);
+    assert!(
+        forwarded.is_none(),
+        "the untranslated packet must not be queued"
+    );
+    assert_eq!(reinjected, 0, "the untranslated packet must not be retried");
 }
 
 fn run_10679_fragment_descriptor(

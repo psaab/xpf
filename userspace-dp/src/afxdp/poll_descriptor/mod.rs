@@ -6451,7 +6451,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         let requires_nat_translation = if flowless_nat.rewrite_dst.is_some() {
                             flowless_source_nat_requires_translation(
                                 worker_ctx.forwarding,
-                                l3_flow,
+                                policy_l3_ctx.unwrap_or(l3_flow),
                                 meta,
                                 ingress_nat_scope_ifindex,
                                 from_zone_id,
