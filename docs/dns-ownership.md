@@ -87,6 +87,26 @@ rather than re-derive it. A filter keyed on the raw config token would be
 **inert for the canonical Junos slash spelling**, exactly as the #8963 remedy
 was.
 
+### Management-DHCP DNS routing (#11385)
+
+Management DHCP nameservers remain in `/etc/resolv.conf`, but host lookups
+must not send them through the unrelated main-table default route. For every
+valid nameserver on a live lease for a published management-VRF interface,
+the daemon installs a destination-scoped pair:
+
+- `ip rule to <server>/32|/128 iif lo lookup 999 pref 2500`
+- an otherwise-identical `unreachable` rule at preference 2501
+
+The first rule sends locally generated host lookups for that exact server
+through the lease's management-table route. The shadow makes a missing
+table-999 route fail closed rather than falling through to a WAN default.
+The merge publishes a management nameserver only after it observes the
+complete lookup/shadow pair; a failed install or rule-table read suppresses
+that DHCP entry. Both rules are reconciled on config apply and DHCP changes,
+so changing or withdrawing the lease removes the old nameserver rules. They
+run after the priority-2000 VRF-miss terminator: a tenant-VRF-bound local
+lookup cannot escape its VRF through a management nameserver rule.
+
 ### Input-validation render belt (#4902, #5010)
 
 `system name-server`, `system domain-name`, and `system domain-search`

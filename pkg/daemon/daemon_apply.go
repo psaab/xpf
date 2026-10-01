@@ -484,10 +484,11 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// keys the protect-set on the full route identity, so the stale route is
 	// cleaned up) — and the failure is threaded into the tail commit-error join
 	// below so the commit fails closed instead of acknowledging a management
-	// route pinned to a stale/de-authorized gateway. Deferred (not fatal here)
-	// exactly like ifaceErr/routeLeakErr/routingRuleErr: the rest of the apply
-	// still runs.
-	mgmtRouteErr := d.applyMgmtVRFRoutes()
+	// route pinned to a stale/de-authorized gateway. The management DNS ip-rule
+	// reconcile shares this deferred error so a failed lease-lifetimed steering
+	// update is not acknowledged either. Deferred (not fatal here) exactly like
+	// ifaceErr/routeLeakErr/routingRuleErr: the rest of the apply still runs.
+	mgmtRouteErr := errors.Join(d.applyMgmtVRFRoutes(), d.applyMgmtDNSRules())
 
 	// #5310: capture the interface-reconcile failure (xfrmi/bond/tunnel/legacy-
 	// reth) and thread it into the tail commit-error join so a genuine reconcile

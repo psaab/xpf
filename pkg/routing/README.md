@@ -465,6 +465,15 @@ delegate to the owning domain. Exported types:
   l3mdev selector, so `rule_l3mdev_linux.go` builds the install request. A
   failure is returned into the commit (#5700 `vrfErr`) and never skips the
   VRF reconcile. The order of these priorities is checked at compile time.
+- `2500–2501`: management-DHCP nameserver steering (#11385), repeated per
+  nameserver destination. The daemon installs
+  `to <server>/32|/128 iif lo lookup 999` at 2500 and an identical-selector
+  `unreachable` shadow at 2501. The destination and loopback-ingress scopes
+  constrain the host route to traffic for a current management lease
+  nameserver. It follows the priority-2000 l3mdev miss terminator, so
+  VRF-bound local lookups cannot fall through into table 999; its shadow
+  prevents a missing management route from falling through to main.
+  `daemon_mgmt_dns_rules.go` reconciles both rules with the DHCP lease set.
   See `docs/rib-group-route-leaking.md`.
 - `29000–29999`: PBR (firewall-filter `routing-instance` action).
   `pbrRulePriority` in `rules.go`. It follows the #9819 VRF-miss terminator
