@@ -220,6 +220,9 @@ pub(super) fn stage_flow_cache_hit(
             worker_ctx.forwarding,
             cached_decision.resolution.disposition,
             flow.src_ip,
+            flow.forward_key.routing_domain,
+            ForwardPacketMeta::from(meta),
+            fabric_arrival_zone,
         ) {
             scratch.scratch_recycle.push(desc.addr);
             telemetry.counters.touched = true;
