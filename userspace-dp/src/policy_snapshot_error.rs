@@ -586,6 +586,18 @@ pub(crate) enum SnapshotIntegrityError {
     CosNoLowPriorityDefaultQueue {
         scheduler_map: String,
     },
+    /// #11429: two logical-unit rows sharing a netdev ifindex materialize
+    /// different CoS interface configs or loss-priority rewrite tables. Both
+    /// runtime maps are keyed only by ifindex, so the pre-fix later row silently
+    /// replaced the first and applied one unit's policy to both units. Reject
+    /// the snapshot instead of installing ambiguous per-unit CoS. Structural
+    /// base-interface aliases (`is_unit != Some(true)`) are not logical siblings
+    /// and are deliberately excluded from this check.
+    CosDuplicateUnitIfindex {
+        ifindex: i32,
+        first_interface: String,
+        second_interface: String,
+    },
     /// #2706: an interface snapshot's `mtu` is NEGATIVE. The pre-fix code
     /// narrowed it with `iface.mtu.max(0) as usize`, so a negative value
     /// silently collapsed to 0 — and the egress MTU guard
@@ -1106,6 +1118,15 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "cos scheduler-map {:?} has no best-effort or low-priority queue and all 256 queue IDs are occupied — refusing to route unclassified traffic to a higher-priority class",
                 scheduler_map
+            ),
+            Self::CosDuplicateUnitIfindex {
+                ifindex,
+                first_interface,
+                second_interface,
+            } => write!(
+                f,
+                "cos logical units {:?} and {:?} share ifindex {} but have different runtime CoS configurations — refusing to install last-writer-wins state",
+                first_interface, second_interface, ifindex
             ),
             Self::InterfaceMtuInvalid { interface, mtu } => write!(
                 f,
