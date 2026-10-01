@@ -744,6 +744,10 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					for _, thenNode := range termBody.FindChildren("then") {
 						compileFilterThen(thenNode, term)
 					}
+					// An unknown action must dominate a recognized terminal action
+					// in any later duplicate then block, so fail closed only after
+					// all blocks have contributed their tokens and actions.
+					failClosedUnknownFilterAction(term)
 
 					// #3076: a tcp-flags expression the dataplane cannot enforce
 					// (disjunction, a negated group, an unknown flag, or a
@@ -1855,6 +1859,18 @@ var rejectMessageTypes = map[string]bool{
 	"tcp-reset":                   true,
 }
 
+// failClosedUnknownFilterAction turns any term with an unrecognized `then`
+// token into an explicit discard after parsing the complete statement. The
+// token remains in UnknownActions for the strict rejection / tolerant warning,
+// while the tolerant runtime can no longer interpret an empty action as
+// fall-through to the implicit accept. Run after the walk so a recognized
+// action earlier or later in the same statement cannot override the failure.
+func failClosedUnknownFilterAction(term *FirewallFilterTerm) {
+	if len(term.UnknownActions) > 0 {
+		term.Action = "discard"
+	}
+}
+
 func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 	// Handle leaf form: "then discard;" or "then accept;" produces
 	// Keys=["then", "discard"] with IsLeaf=true and no children. A leaf can
@@ -1932,10 +1948,10 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 					term.Policer = v
 				}
 			default:
-				// #2399 (032-16): an unrecognized `then` token must NOT be
-				// silently dropped — it would default to ACCEPT in the
-				// dataplane (fail-open). Record it so the strict commit gate
-				// (validateFilterActionsStrict) can reject the operator's typo.
+				// Record unknown tokens for the strict gate. compileFirewall keeps
+				// tolerant loads bootable and maps the accumulated term to discard
+				// after all duplicate `then` blocks, so later recognized actions
+				// cannot override the failure or permit implicit-accept fall-through.
 				term.UnknownActions = append(term.UnknownActions, k)
 			}
 		}
