@@ -264,6 +264,10 @@ FRR DHCP default route; see the RFC 2131 coupling rule in
   `rpm.Manager.SetTransitionCallback`). RPM supplies an authoritative,
   non-nil results snapshot; the transition itself is still applied if a
   caller omits that snapshot.
+- A failure marked `rpm.Transition.TakeoverBurst` bypasses the overlay
+  debounce so a fresh takeover verdict is not held behind another interval;
+  the shared actuation throttle still applies. `SetPublishEnabled` flips also
+  immediately reconcile the baseline/overlay, subject to that throttle.
 - `SetNextHopResolver(NextHopResolver)` (before `Start`; mu-guarded so a
   late call cannot race the run loop's resolver read, #4423 L) and
   `NotifyNextHopChange()` — the #1844 DHCP next-hop seam (above).

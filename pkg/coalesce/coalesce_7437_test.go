@@ -176,3 +176,36 @@ func TestFailedActuationRetriesButDoesNotHotLoop7437(t *testing.T) {
 		t.Errorf("a failed actuation did not retry after the throttle window: %d", got)
 	}
 }
+
+// TestMarkImmediatelyBypassesDebounceAndKeepsThrottle verifies the urgent
+// failover path can act on a fresh verdict without weakening the loop's rate
+// bound for repeated updates.
+func TestMarkImmediatelyBypassesDebounceAndKeepsThrottle11414(t *testing.T) {
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	var got int
+	l := newTestLoop(t, clk, func(context.Context) bool { got++; return true })
+
+	l.Mark()
+	l.Tick(context.Background())
+	if got != 0 {
+		t.Fatalf("ordinary mark bypassed debounce: actuations = %d, want 0", got)
+	}
+
+	l.MarkImmediately()
+	l.Tick(context.Background())
+	if got != 1 {
+		t.Fatalf("immediate mark did not bypass debounce: actuations = %d, want 1", got)
+	}
+
+	l.MarkImmediately()
+	l.Tick(context.Background())
+	if got != 1 {
+		t.Fatalf("immediate mark bypassed throttle: actuations = %d, want 1 before throttle", got)
+	}
+
+	clk.advance(DefaultThrottle)
+	l.Tick(context.Background())
+	if got != 2 {
+		t.Fatalf("throttled immediate mark did not actuate after throttle: got %d, want 2", got)
+	}
+}

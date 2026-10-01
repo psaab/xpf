@@ -139,6 +139,19 @@ func (l *Loop) Mark() {
 	}
 }
 
+// MarkImmediately records a change whose consequence must not wait for the
+// debounce window. The normal throttle still bounds actuation frequency.
+func (l *Loop) MarkImmediately() {
+	l.mu.Lock()
+	l.dirtySince = l.now().Add(-l.debounce)
+	l.dirtyGen++
+	l.mu.Unlock()
+	select {
+	case l.kick <- struct{}{}:
+	default:
+	}
+}
+
 // Actuations reports how many times the actuator has been invoked.
 func (l *Loop) Actuations() uint64 {
 	l.mu.Lock()

@@ -230,6 +230,43 @@ func TestRPMHAGatingFilter(t *testing.T) {
 	}
 }
 
+// TestTakeoverBurstOnlyIncludesNewlyEnabledIPMonProbes11414 keeps the
+// takeover acceleration scoped to ip-monitoring probes that were gated off
+// before the RG transition; unrelated probes retain normal cadence.
+func TestTakeoverBurstOnlyIncludesNewlyEnabledIPMonProbes11414(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Services.RPM = &config.RPMConfig{Probes: map[string]*config.RPMProbe{
+		"WAN":       {Name: "WAN", Tests: map[string]*config.RPMTest{"t": {Name: "t"}}},
+		"unrelated": {Name: "unrelated", Tests: map[string]*config.RPMTest{"t": {Name: "t"}}},
+	}}
+	cfg.Services.IPMonitoring = &config.IPMonitoringConfig{Policies: map[string]*config.IPMonitoringPolicy{
+		"wan-failover": {Name: "wan-failover", MatchRPMProbe: "WAN"},
+	}}
+
+	previous := &config.RPMConfig{Probes: map[string]*config.RPMProbe{
+		"unrelated": cfg.Services.RPM.Probes["unrelated"],
+	}}
+	effective := &config.RPMConfig{Probes: cfg.Services.RPM.Probes}
+	got := newlyEnabledIPMonProbeNames(cfg, previous, effective)
+	if len(got) != 1 {
+		t.Fatalf("takeover burst probes = %v, want only newly-enabled WAN", got)
+	}
+	if _, ok := got["WAN"]; !ok {
+		t.Fatalf("takeover burst probes = %v, missing WAN", got)
+	}
+
+	previous.Probes["WAN"] = cfg.Services.RPM.Probes["WAN"]
+	if got := newlyEnabledIPMonProbeNames(cfg, previous, effective); len(got) != 0 {
+		t.Fatalf("already-active probe was burst again: %v", got)
+	}
+
+	delete(previous.Probes, "WAN")
+	withoutWAN := &config.RPMConfig{Probes: map[string]*config.RPMProbe{"unrelated": cfg.Services.RPM.Probes["unrelated"]}}
+	if got := newlyEnabledIPMonProbeNames(cfg, previous, withoutWAN); len(got) != 0 {
+		t.Fatalf("inactive probe was burst: %v", got)
+	}
+}
+
 // TestCommitOverlayForConfigFiltersStaleEntries (Codex PR #1843
 // HIGH-1): the overlay riding an operator commit's own publish is
 // filtered against the INCOMING config — removed policies and edited

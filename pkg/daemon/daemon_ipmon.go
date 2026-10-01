@@ -490,10 +490,9 @@ func (d *Daemon) ipmonPublishAllowed(cfg *config.Config) bool {
 
 // reconcileIPMonGating re-evaluates HA gating after an RG transition:
 // the probe set (gated probes run only on the primary) and the overlay
-// publication gate. On takeover the engine re-seeds from the freshly
-// restarted probes' results (all unknown ⇒ baseline first), and the
-// overlay follows the first fresh failure transitions — the plan's
-// baseline-then-fast-probe takeover semantics.
+// publication gate. Newly enabled ip-monitoring probes run their initial
+// test cycles without normal probe/test intervals; the first fresh failure
+// is then actuated immediately, subject to the shared throttle.
 func (d *Daemon) reconcileIPMonGating() {
 	if d.store == nil {
 		return
@@ -504,7 +503,7 @@ func (d *Daemon) reconcileIPMonGating() {
 	}
 	// Hash-gated: only re-applies when the gating filter actually
 	// changed the effective probe set.
-	changed := d.reconcileRPM(cfg)
+	changed := d.reconcileRPMForHATransition(cfg)
 	if d.ipmon == nil {
 		return
 	}

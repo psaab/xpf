@@ -128,14 +128,16 @@ type EventCallback func(Event)
 
 // Transition reports a per-test pass/fail status transition together
 // with a current-state snapshot of all probe results (#1827 PR-1a §4.2
-// item 6). It is the sensor input for the ip-monitoring engine; the
-// coarser Event/EventCallback surface stays intact for eventengine.
+// item 6). TakeoverBurst marks a fresh failure verdict produced by the
+// promoted node's initial probe burst, so route publication can bypass
+// the ordinary debounce without bypassing the actuation throttle.
 type Transition struct {
-	ProbeName  string
-	TestName   string
-	Status     string // new status: "pass" or "fail"
-	Generation uint64 // manager-local transition order; zero means unspecified
-	Results    []*ProbeResult
+	ProbeName     string
+	TestName      string
+	Status        string // new status: "pass" or "fail"
+	Generation    uint64 // manager-local transition order; zero means unspecified
+	TakeoverBurst bool   // initial fail verdict gathered during a HA takeover burst
+	Results       []*ProbeResult
 }
 
 // TransitionCallback is called on per-test status transitions.
@@ -274,15 +276,20 @@ func (m *Manager) SetRethMap(rethMap map[string]string) {
 // "probe/test", values the install error; nil/empty = all pins
 // installed). The map is replaced wholesale, so a successful re-apply
 // clears earlier failures and live probe loops resume on their next
-// tick — no probe restart required. On a config change the daemon
-// publishes AFTER Apply (the HoldPinsForReprogram union covers the
-// interim); on a hash-gated pin retry it publishes immediately
-// (#1895).
-func (m *Manager) SetPinInstallResults(failed map[string]error) {
+// tick — no probe restart required. The regular daemon apply publishes
+// AFTER Apply (the HoldPinsForReprogram union covers the interim); the HA
+// burst apply publishes after old loops stop but before new loops start.
+// A hash-gated pin retry publishes immediately (#1895).
+func copyProbePinFailures(failed map[string]error) map[string]error {
 	cp := make(map[string]error, len(failed))
 	for k, v := range failed {
 		cp[k] = v
 	}
+	return cp
+}
+
+func (m *Manager) SetPinInstallResults(failed map[string]error) {
+	cp := copyProbePinFailures(failed)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pinFailed = cp
@@ -398,6 +405,38 @@ func New() *Manager {
 // their marks are reprogrammed. What is preserved is the half the config does
 // not carry.
 func (m *Manager) Apply(ctx context.Context, cfg *config.RPMConfig) {
+	m.apply(ctx, cfg, nil, nil, false)
+}
+
+// ApplyWithProbeBurst starts the named probes with back-to-back initial test
+// cycles. The supplied pin-install results are installed after old probe loops
+// stop and before the new loops start.
+func (m *Manager) ApplyWithProbeBurst(ctx context.Context, cfg *config.RPMConfig, probeNames map[string]struct{}, pinFailures map[string]error) {
+	m.apply(ctx, cfg, probeNames, pinFailures, true)
+}
+
+// apply starts probes from the given RPM config.
+//
+// #6561: the prior results are SNAPSHOTTED before StopAll: it reallocates
+// m.results, and the mark map is overwritten below. A test whose definition
+// survives the commit unchanged keeps its runtime verdict. Without that, every
+// Apply reseeded every key to LastStatus "unknown", and ip-monitoring reads
+// "unknown" as PASS (seedResultsLocked buckets it with pass via
+// `r.LastStatus == "fail"`), so at the DEFAULT hold-down of 0 an ACTIVE
+// failover route was withdrawn on the spot.
+//
+// This is not a rare path. reconcileRPM is hash-gated, but the hash covers
+// `cfg.RethToPhysical()` as well as the RPM stanza (daemon_rpm.go), so adding,
+// removing or renaming ANY RETH member -- an interface-stanza edit that never
+// mentions `services rpm` or `services ip-monitoring` -- restarts the probes and
+// wiped every verdict. The commit's own FRR render is snapshotted before this
+// runs, so the withdrawal never showed up in the commit's output; it landed on
+// the delayed actuation about a second later.
+//
+// The reconcile itself is NOT skipped -- probes genuinely must restart when
+// their marks are reprogrammed. What is preserved is the half the config does
+// not carry.
+func (m *Manager) apply(ctx context.Context, cfg *config.RPMConfig, burstProbeNames map[string]struct{}, pinFailures map[string]error, replacePinFailures bool) {
 	// Snapshot BEFORE StopAll: it reallocates m.results, and the mark map is
 	// overwritten below.
 	m.mu.Lock()
@@ -406,6 +445,11 @@ func (m *Manager) Apply(ctx context.Context, cfg *config.RPMConfig) {
 
 	m.StopAll()
 
+	if replacePinFailures {
+		m.mu.Lock()
+		m.pinFailed = copyProbePinFailures(pinFailures)
+		m.mu.Unlock()
+	}
 	if cfg == nil || len(cfg.Probes) == 0 {
 		// Clear the mark assignment too: stale marks would otherwise
 		// inflate later HoldPinsForReprogram unions (#1895 hygiene —
@@ -446,11 +490,12 @@ func (m *Manager) Apply(ctx context.Context, cfg *config.RPMConfig) {
 			m.results[key] = res
 			m.mu.Unlock()
 
+			_, initialBurst := burstProbeNames[probe.Name]
 			m.wg.Add(1)
-			go func(p *config.RPMProbe, t *config.RPMTest, k string) {
+			go func(p *config.RPMProbe, t *config.RPMTest, k string, burst bool) {
 				defer m.wg.Done()
-				m.runProbeLoop(probeCtx, p, t, k)
-			}(probe, test, key)
+				m.runProbeLoop(probeCtx, p, t, k, burst)
+			}(probe, test, key, initialBurst)
 		}
 	}
 }
@@ -511,7 +556,7 @@ func clampRPMIntervalSeconds(sec int) time.Duration {
 	return time.Duration(sec) * time.Second
 }
 
-func (m *Manager) runProbeLoop(ctx context.Context, probe *config.RPMProbe, test *config.RPMTest, key string) {
+func (m *Manager) runProbeLoop(ctx context.Context, probe *config.RPMProbe, test *config.RPMTest, key string, initialBurst bool) {
 	interval := clampRPMIntervalSeconds(test.EffectiveTestInterval())
 	probeInterval := clampRPMIntervalSeconds(test.EffectiveProbeInterval())
 	probeCount := test.EffectiveProbeCount()
@@ -525,8 +570,27 @@ func (m *Manager) runProbeLoop(ctx context.Context, probe *config.RPMProbe, test
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Run first probe immediately
-	m.runSingleTest(ctx, probe.Name, test, key, probeCount, probeInterval, threshold)
+	if initialBurst {
+		// A new primary has no trustworthy standby verdict. Repeat initial
+		// test cycles without the configured inter-probe/test delays until
+		// the first path verdict is reached. Cap the burst at the configured
+		// successive-loss threshold; a setup failure (no packet reached the
+		// path) remains neutral and returns to normal cadence.
+		for range threshold {
+			_, sent := m.probeResultProgress(key)
+			m.runSingleTestWithBurst(ctx, probe.Name, test, key, probeCount, threshold, true)
+			if ctx.Err() != nil {
+				return
+			}
+			nextStatus, nextSent := m.probeResultProgress(key)
+			if nextStatus != "unknown" || nextSent == sent {
+				break
+			}
+		}
+	} else {
+		// Run first probe immediately
+		m.runSingleTest(ctx, probe.Name, test, key, probeCount, probeInterval, threshold)
+	}
 
 	for {
 		select {
@@ -538,7 +602,25 @@ func (m *Manager) runProbeLoop(ctx context.Context, probe *config.RPMProbe, test
 	}
 }
 
+func (m *Manager) probeResultProgress(key string) (string, int64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if r := m.results[key]; r != nil {
+		return r.LastStatus, r.TotalSent
+	}
+	return "unknown", 0
+}
+
 func (m *Manager) runSingleTest(ctx context.Context, probeName string, test *config.RPMTest, key string, probeCount int, probeInterval time.Duration, threshold int) {
+	m.runSingleTestWithOptions(ctx, probeName, test, key, probeCount, probeInterval, threshold, false)
+}
+
+func (m *Manager) runSingleTestWithBurst(ctx context.Context, probeName string, test *config.RPMTest, key string, probeCount, threshold int, takeoverBurst bool) {
+	m.runSingleTestWithOptions(ctx, probeName, test, key, probeCount, 0, threshold, takeoverBurst)
+}
+
+func (m *Manager) runSingleTestWithOptions(ctx context.Context, probeName string, test *config.RPMTest, key string, probeCount int, probeInterval time.Duration, threshold int, takeoverBurst bool) {
+
 	var successes, failures int
 	probeLimit := test.ProbeLimit // 0 = unlimited
 	setupWarned := false
@@ -563,7 +645,7 @@ func (m *Manager) runSingleTest(ctx context.Context, probeName string, test *con
 	m.mu.Unlock()
 	status := prevStatus
 
-	for i := 0; i < probeCount; i++ {
+	for i := range probeCount {
 		if i > 0 {
 			select {
 			case <-ctx.Done():
@@ -632,8 +714,11 @@ func (m *Manager) runSingleTest(ctx context.Context, probeName string, test *con
 			if r.SuccFail >= threshold {
 				status = "fail"
 			}
-			// Check probe-limit: stop test cycle when reached
-			hitLimit := probeLimit > 0 && r.SuccFail >= probeLimit
+			// Check probe-limit: stop test cycle when reached. During a
+			// takeover burst, stop as soon as the successive-loss verdict
+			// is established rather than sending unused configured probes.
+			hitLimit := (probeLimit > 0 && r.SuccFail >= probeLimit) ||
+				(takeoverBurst && r.SuccFail >= threshold)
 			m.mu.Unlock()
 			// Probe-level failure event stays per-probe — it is an
 			// eventengine signal and does not drive ip-monitoring
@@ -686,6 +771,9 @@ func (m *Manager) runSingleTest(ctx context.Context, probeName string, test *con
 	// initial "unknown" state holds), so no spurious transition fires.
 	if status != prevStatus {
 		tr, transition := m.prepareTransition(probeName, test.Name, status)
+		if takeoverBurst && status == "fail" {
+			tr.TakeoverBurst = true
+		}
 		if status == "fail" {
 			m.fireEvent("ping_test_failed", probeName, test)
 		}
