@@ -593,6 +593,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// the established ones. See docs/host-inbound-service-matrix.md,
 	// "Lifeline exclusion is by address VALUE, in the fence and the real table".
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrsFromSnapshots(cfg, snaps1)
+	unzonedIngressNetdevs, unzonedIngressVRFSlaves := dpuserspace.BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps1, views)
 	// #10751 R7-B/F8-A: unzoned DHCP units with no lease yet have no
 	// destination for any catch-all, yet a first lease would land
 	// host-reachable before the debounced re-apply installs one. Render
@@ -789,7 +790,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// the previous table (pre-existing #5789 staleness, commit fails closed
 	// via H7); the flag is untouched and the next call-site outcome re-drives
 	// it — see hostInboundDataplaneFresh for the full transition table.
-	spec := toNftHostInboundSpecWithOverlay(views, unzonedV4, unzonedV6, programs, wgListenPorts, wgZonePorts, d.hostInboundDataplaneFresh.Load(), overlay)
+	spec := toNftHostInboundSpecWithUnzonedIngress(views, unzonedV4, unzonedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves, programs, wgListenPorts, wgZonePorts, d.hostInboundDataplaneFresh.Load(), overlay)
 	spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
 	if err := nftInstaller.InstallHostInbound(spec); err != nil {
 		err = tagNftInstallErr(err)
@@ -1782,12 +1783,14 @@ func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool
 //     only), so it mirrors the shim's local-destination scope without touching
 //     transit UDP; only the WG port is opened, so the restricted default holds.
 //
-//  4. Ingress-zone rules: match each view's effective ingress netdevs against
-//     every judged local address. Ambiguous effective targets instead receive
-//     an unconditional drop, so no destination-only fallback can admit them.
+//  4. VRF slave names with no surviving zone are denied by `meta sdifname`
+//     before any zone rule scoped to their shared LOCAL_IN master. Ingress-zone
+//     service rules match only zone-owned local addresses; ambiguous effective
+//     targets retain owner-specific admits plus a counted catch-all drop.
 //
-//  5. ct state established,related accept — residual original-direction
-//     established traffic that survived ingress judgement.
+//  5. Other known unzoned physical ingress is denied by iifname before
+//     `ct state established,related accept`, which preserves established traffic
+//     only for ingress that survived source-zone adjudication.
 //
 //  6. Per host-inbound-configured zone, per family with addresses:
 //     - if `any-service`: <fam> daddr <addrs> accept (and no deny — the
@@ -1815,6 +1818,10 @@ func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzo
 }
 
 func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string) string {
+	return buildHostInboundFilterPayloadWithUnzonedIngress(views, unzonedV4, unzonedV6, nil, nil, programs, wgZonePorts, dataplaneFresh, overlay, unleasedV4, unleasedV6)
+}
+
+func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string) string {
 	// #11076: the stale-reply guards are scope-independent (port set only);
 	// derive the flat set from the zone map. Nothing else in this builder
 	// may use flat ports — WireGuard admission is per-zone below.
@@ -1868,15 +1875,15 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 			addCounter(xnft.HostInboundScreenFloodCounterName(floodRule, true))
 		}
 	}
-	// #9637: a view's ingress-zone rules reference the same per-zone/family
-	// counter, possibly in a family where the view has no address of its own, so
-	// the declaration covers them too.
+	// Ingress-zone rules reference the per-zone/family counter across every
+	// zone-owned destination, including families with no address in that view.
 	ingressV4, ingressV6 := hostInboundIngressDestinations(views, unzonedV4, unzonedV6)
+	zoneIngressV4, zoneIngressV6 := hostInboundZoneIngressDestinations(views)
 	for _, v := range views {
-		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, ingressV4) {
+		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip"))
 		}
-		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, ingressV6) {
+		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
 	}
@@ -1886,6 +1893,14 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		addCounter(xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip"))
 	}
 	if hostInboundEmitsAmbiguousIngressDrop(views, ingressV6) {
+		addCounter(xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip6"))
+	}
+	if hostInboundEmitsUnzonedIngressDrop(unzonedIngressNetdevs, ingressV4) ||
+		hostInboundEmitsUnzonedIngressDrop(unzonedIngressVRFSlaves, ingressV4) {
+		addCounter(xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip"))
+	}
+	if hostInboundEmitsUnzonedIngressDrop(unzonedIngressNetdevs, ingressV6) ||
+		hostInboundEmitsUnzonedIngressDrop(unzonedIngressVRFSlaves, ingressV6) {
 		addCounter(xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip6"))
 	}
 	// #9637 residual: the reinject-accept counter is declared exactly when the
@@ -2035,35 +2050,39 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		emitHostInboundReinjectAccept(&rules, "ip", reinjectV4)
 		emitHostInboundReinjectAccept(&rules, "ip6", reinjectV6)
 	}
-	// #9637: judge unambiguous netdevs by ingress-zone service rights first.
-	// Ambiguous effective netdevs cannot identify one ingress zone, so grant
-	// each destination owner's configured rights before their counted catch-all
-	// drop. This preserves destination-only per-zone fallback for other netdevs.
+	// #11409: VRF slave-name guards precede rules scoped to the shared
+	// LOCAL_IN master, so a zoned sibling cannot admit the unzoned member.
+	emitHostInboundUnzonedVRFIngressDrop(&rules, unzonedIngressVRFSlaves, "ip", ingressV4)
+	emitHostInboundUnzonedVRFIngressDrop(&rules, unzonedIngressVRFSlaves, "ip6", ingressV6)
+	// #9637: unambiguous ingress scopes take their zone's service rights first,
+	// but only for zone-owned destinations. Ambiguous scopes retain the
+	// destination-owner admits and their counted catch-all.
 	for _, v := range views {
-		emitHostInboundZoneIngress(&rules, v, "ip", ingressV4)
-		emitHostInboundZoneIngress(&rules, v, "ip6", ingressV6)
+		emitHostInboundZoneIngress(&rules, v, "ip", zoneIngressV4)
+		emitHostInboundZoneIngress(&rules, v, "ip6", zoneIngressV6)
 	}
 	emitHostInboundAmbiguousIngressAccepts(&rules, views, "ip", wgZonePorts)
 	emitHostInboundAmbiguousIngressDrop(&rules, views, "ip", ingressV4)
 	emitHostInboundAmbiguousIngressAccepts(&rules, views, "ip6", wgZonePorts)
 	emitHostInboundAmbiguousIngressDrop(&rules, views, "ip6", ingressV6)
-	// Original-direction established host traffic reaches this residual accept
-	// only after ingress-zone judgement. This preserves established sessions on
-	// admitted ingress scopes while stale cross-zone sessions hit their drop.
+	// #11409: unzoned ingress cannot reach a zoned destination's service
+	// fallback or the residual established accept. Non-physical reinjection
+	// devices intentionally retain destination policy.
+	emitHostInboundUnzonedIngressDrop(&rules, unzonedIngressNetdevs, "ip", ingressV4)
+	emitHostInboundUnzonedIngressDrop(&rules, unzonedIngressNetdevs, "ip6", ingressV6)
+	// Preserve the broad established-flow behavior for ingress not otherwise
+	// adjudicated; both source guards above run first.
 	rules = append(rules, "    ct state established,related accept")
 	for _, v := range views {
 		emitHostInboundZone(&rules, v, "ip", v.V4Addrs, wgZonePorts[v.Zone])
 		emitHostInboundZone(&rules, v, "ip6", v.V6Addrs, wgZonePorts[v.Zone])
 	}
 	// #4420 HI-2: catch-all DROP for firewall-local addresses on interfaces in NO
-	// security zone. Emitted AFTER the per-zone rules and the global
-	// established / ESP-AH / ND / PMTUD accepts, so those still admit their
-	// traffic on an unzoned interface (a decrypted host-terminated tunnel, ND,
-	// PMTUD) while every other host-bound service/protocol is denied — the Junos
-	// fail-closed posture for an interface with no zone. The address set is
-	// already zone-subtracted by BuildUnzonedHostInboundAddrs and excludes lifeline
-	// INTERFACES — but not lifeline address VALUES, so a management address on an
-	// unzoned interface is denied here with no service accept in front of it.
+	// security zone. Zone-ingress rules omit these addresses, and they are
+	// subtracted from zone views, so a NEW packet reaches this deny rather than a
+	// zone service accept. Established/global exceptions remain ahead of it.
+	// BuildUnzonedHostInboundAddrs excludes lifeline interfaces and lifeline
+	// address values, preserving management access.
 	emitUnzonedHostInboundDeny(&rules, "ip", unzonedV4)
 	emitUnzonedHostInboundDeny(&rules, "ip6", unzonedV6)
 	emitUnleasedHostInboundDeny(&rules, unleasedV4, unleasedV6)

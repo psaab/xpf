@@ -89,6 +89,120 @@ func TestZoneHostInboundViewIngressNetdevs9637(t *testing.T) {
 	}
 }
 
+func TestBuildUnzonedHostInboundIngressNetdevs11409(t *testing.T) {
+	cfg := ingressCfg9637()
+	cfg.Interfaces.Interfaces["ge-0/0/9"] = &config.InterfaceConfig{
+		Name: "ge-0/0/9",
+		Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"192.0.2.9/24"}},
+		},
+	}
+	snaps := []InterfaceSnapshot{
+		{Name: "ge-0/0/0.0", Zone: "lan", LinuxName: "ge-0-0-0"},
+		{Name: "ge-0/0/9.0", LinuxName: "ge-0-0-9"},
+		{Name: "ge-0/0/9", LinuxName: "ge-0-0-9"},
+		{Name: "fxp0.0", LinuxName: "fxp0"},
+		{Name: "lo0", LinuxName: "lo"},
+		{Name: "st0.0", LinuxName: "st0", Tunnel: true},
+		{Name: "xfrm100", LinuxName: "xfrm100", SecureTunnel: true},
+		{Name: "ge-0/0/8.0", LinuxName: "shared"},
+	}
+	views := []ZoneHostInboundView{{
+		Zone: "lan", IngressNetdevs: []string{"ge-0-0-0"},
+		IngressDenyNetdevs: []string{"shared"},
+	}}
+	iifnames, sdifnames := BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps, views)
+	if got := strings.Join(iifnames, " "); got != "ge-0-0-9" {
+		t.Fatalf("unzoned iifname ingress = %q, want %q; zone-owned, ambiguous, lifeline, and non-physical reinjection devices must stay outside this guard", got, "ge-0-0-9")
+	}
+	if got := strings.Join(sdifnames, " "); got != "" {
+		t.Fatalf("unexpected unzoned sdifname ingress = %q", got)
+	}
+}
+
+func TestBuildUnzonedHostInboundIngressVRFSlave11409(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/8": {Name: "ge-0/0/8", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"192.0.2.8/24"}},
+		}},
+		"ge-0/0/9": {Name: "ge-0/0/9", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0, Addresses: []string{"192.0.2.9/24"}},
+		}},
+	}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{
+		Name: "shared", InstanceType: "virtual-router",
+		Interfaces: []string{"ge-0/0/8.0", "ge-0/0/9.0"},
+	}}
+	snaps := []InterfaceSnapshot{
+		{Name: "ge-0/0/8.0", Zone: "lan", LinuxName: "ge-0-0-8", RoutingInstance: "shared"},
+		{Name: "ge-0/0/9.0", LinuxName: "ge-0-0-9", RoutingInstance: "shared"},
+	}
+	views := []ZoneHostInboundView{{Zone: "lan", IngressNetdevs: []string{"vrf-shared"}}}
+	iifnames, sdifnames := BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps, views)
+	if len(iifnames) != 0 {
+		t.Fatalf("un-zoned VRF ingress must not use shared-master iifname: %q", strings.Join(iifnames, " "))
+	}
+	if got := strings.Join(sdifnames, " "); got != "ge-0-0-9" {
+		t.Fatalf("un-zoned VRF slave sdifname = %q, want ge-0-0-9", got)
+	}
+}
+
+func TestBuildUnzonedHostInboundIngressPreservesUnzonedUnitZeroAlias11409(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/8": {Name: "ge-0/0/8", Units: map[int]*config.InterfaceUnit{
+			0:  {Number: 0, Addresses: []string{"192.0.2.8/24"}},
+			50: {Number: 50, VlanID: 50, Addresses: []string{"198.51.100.8/24"}},
+		}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"lan": {
+			Name:               "lan",
+			Interfaces:         []string{"ge-0/0/8.50"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}},
+		},
+	}
+
+	snaps := buildInterfaceSnapshotsFrom(cfg, nil)
+	var base, unzonedUnit0, zonedUnit50 *InterfaceSnapshot
+	for i := range snaps {
+		switch snaps[i].Name {
+		case "ge-0/0/8":
+			base = &snaps[i]
+		case "ge-0/0/8.0":
+			unzonedUnit0 = &snaps[i]
+		case "ge-0/0/8.50":
+			zonedUnit50 = &snaps[i]
+		}
+	}
+	if base == nil || unzonedUnit0 == nil || zonedUnit50 == nil ||
+		base.LinuxName == "" || base.LinuxName != unzonedUnit0.LinuxName ||
+		zonedUnit50.LinuxName == base.LinuxName {
+		t.Fatalf("production snapshots did not model the physical/unit-0 alias and VLAN unit: base=%+v unit0=%+v unit50=%+v", base, unzonedUnit0, zonedUnit50)
+	}
+	if base.Zone != "lan" || unzonedUnit0.Zone != "" || zonedUnit50.Zone != "lan" {
+		t.Fatalf("expected unit-50 zone to fan up only onto the base row: base=%+v unit0=%+v unit50=%+v", base, unzonedUnit0, zonedUnit50)
+	}
+	views := BuildZoneHostInboundViewsFromSnapshots(cfg, snaps)
+	if len(views) != 1 || views[0].Zone != "lan" {
+		t.Fatalf("zone view = %+v, want one lan view", views)
+	}
+	for _, name := range views[0].IngressNetdevs {
+		if name == base.LinuxName {
+			t.Fatalf("unit-50 zone view unexpectedly claims untagged parent netdev %q", name)
+		}
+	}
+
+	iifnames, sdifnames := BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps, views)
+	if got := strings.Join(iifnames, " "); got != base.LinuxName {
+		t.Fatalf("un-zoned unit-0 physical ingress = %q, want %q", got, base.LinuxName)
+	}
+	if len(sdifnames) != 0 {
+		t.Fatalf("unexpected unzoned VRF ingress = %v", sdifnames)
+	}
+}
+
 // TestZoneHostInboundViewIngressVRFMaster10431 is the #10431 narrow-residual
 // cell: a VRF-enslaved-only zone keeps matchable LOCAL_IN scope via the VRF
 // master device, not the enslaved names (which match nothing, #6619). Pre-fix

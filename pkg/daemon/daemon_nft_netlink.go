@@ -121,14 +121,20 @@ func toNftHostInboundSpec(views []dpuserspace.ZoneHostInboundView, unzonedV4, un
 }
 
 func toNftHostInboundSpecWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wg []uint16, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay) xnft.HostInboundSpec {
+	return toNftHostInboundSpecWithUnzonedIngress(views, unzonedV4, unzonedV6, nil, nil, programs, wg, wgZonePorts, dataplaneFresh, overlay)
+}
+
+func toNftHostInboundSpecWithUnzonedIngress(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, programs []dpuserspace.JunosHostProgram, wg []uint16, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay) xnft.HostInboundSpec {
 	spec := xnft.HostInboundSpec{
-		Views:          toNftViews(views),
-		UnzonedV4:      unzonedV4,
-		UnzonedV6:      unzonedV6,
-		WGListenPorts:  wg,
-		WGZonePorts:    wgZonePorts,
-		DataplaneFresh: dataplaneFresh,
-		Overlay:        overlay,
+		Views:                   toNftViews(views),
+		UnzonedV4:               unzonedV4,
+		UnzonedV6:               unzonedV6,
+		UnzonedIngressNetdevs:   unzonedIngressNetdevs,
+		UnzonedIngressVRFSlaves: unzonedIngressVRFSlaves,
+		WGListenPorts:           wg,
+		WGZonePorts:             wgZonePorts,
+		DataplaneFresh:          dataplaneFresh,
+		Overlay:                 overlay,
 	}
 	for _, p := range programs {
 		spec.Programs = append(spec.Programs, toNftProgram(p))

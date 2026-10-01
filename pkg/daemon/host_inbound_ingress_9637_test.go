@@ -32,8 +32,8 @@ func ingressViews9637(withIngress bool) []dpuserspace.ZoneHostInboundView {
 }
 
 // TestHostInboundIngressRulesShape9637 pins the payload shape:
-//   - every ingress-zone rule is scoped to its view's netdevs AND to every judged
-//     address, the unzoned ones included;
+//   - zone ingress rules are scoped to their netdevs AND to zone-owned
+//     destinations, not addresses owned by unzoned interfaces;
 //   - all of them come before the first destination-only rule;
 //   - the counter pre-pass declares the counter a family's ingress drop
 //     references, even where the view has no address of its own.
@@ -42,7 +42,7 @@ func TestHostInboundIngressRulesShape9637(t *testing.T) {
 	views[1].V6Addrs = []string{"2001:db8:80::8"} // lan has no v6 address of its own
 	payload := buildHostInboundFilterPayload(views, []string{"10.0.99.1"}, nil, nil, nil, true)
 
-	allV4 := nftAddrSet([]string{"10.0.61.1", "172.16.80.8", "10.0.99.1"})
+	allV4 := nftAddrSet([]string{"10.0.61.1", "172.16.80.8"})
 	allV6 := nftAddrSet([]string{"2001:db8:80::8"})
 	scope := func(netdev, family, set string) string {
 		return "    iifname " + nftIifnameSet([]string{netdev}) + " " + family + " daddr " + set
@@ -86,6 +86,52 @@ func TestHostInboundIngressRulesShape9637(t *testing.T) {
 	}
 	if !strings.Contains(payload, "  counter "+xnft.HostInboundDenyCounterName("lan", "ip6")+" {") {
 		t.Error("lan's ip6 ingress drop references a counter the table must declare, though lan has no v6 address")
+	}
+}
+
+func TestHostInboundUnzonedIngressOrdering11409(t *testing.T) {
+	views := ingressViews9637(true)
+	unzoned := []string{"192.0.2.1"}
+	unzonedIngress := []string{"fw-unzoned"}
+	programs := []dpuserspace.JunosHostProgram{{
+		Zone: "lan", IngressIfnames: []string{"fwlan"},
+	}}
+	unzonedVRFSlaves := []string{"ge-vrf-unzoned"}
+	payload := buildHostInboundFilterPayloadWithUnzonedIngress(
+		views, unzoned, nil, unzonedIngress, unzonedVRFSlaves, programs, nil, true, nil, nil, nil,
+	)
+	allDests := nftAddrSet([]string{"10.0.61.1", "172.16.80.8", "192.0.2.1"})
+	guard := `    iifname "fw-unzoned" ip daddr ` + allDests +
+		` counter name "` + xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip") + `" drop`
+	if !strings.Contains(payload, guard) {
+		t.Fatalf("addressed unzoned ingress is not denied across all local destinations:\n%s", payload)
+	}
+	guardAt := strings.Index(payload, guard)
+	residualAt := strings.Index(payload, "    ct state established,related accept")
+	fallbackAt := strings.Index(payload, "    ip daddr ")
+	if residualAt < 0 || fallbackAt < 0 || guardAt > residualAt || residualAt > fallbackAt {
+		t.Fatalf("unzoned ingress drop must precede residual established and destination-only fallback (guard=%d residual=%d fallback=%d):\n%s",
+			guardAt, residualAt, fallbackAt, payload)
+	}
+	zoneDestinations := nftAddrSet([]string{"10.0.61.1", "172.16.80.8"})
+	zoneServiceRule := `iifname "fwlan" ip daddr ` + zoneDestinations + " tcp dport 22 accept"
+	overbroadServiceRule := `iifname "fwlan" ip daddr ` + allDests + " tcp dport 22 accept"
+	if strings.Contains(payload, overbroadServiceRule) || !strings.Contains(payload, zoneServiceRule) {
+		t.Fatalf("zone-ingress permits must exclude the unzoned destination:\n%s", payload)
+	}
+	sdifGuard := `    meta sdifname "ge-vrf-unzoned" ip daddr ` + allDests + ` counter name "` +
+		xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip") + `" drop`
+	if sdifAt := strings.Index(payload, sdifGuard); sdifAt < 0 || sdifAt > strings.Index(payload, zoneServiceRule) {
+		t.Fatalf("VRF slave deny must precede shared-master zone service rules:\n%s", payload)
+	}
+	counterDecl := "  counter " + xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip") + " {"
+	if got := strings.Count(payload, counterDecl); got != 1 {
+		t.Fatalf("unzoned ingress counter declarations = %d, want exactly one", got)
+	}
+	unzonedDeny := `    ip daddr 192.0.2.1 counter name "` +
+		xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip") + `" drop`
+	if !strings.Contains(payload, unzonedDeny) {
+		t.Fatalf("unzoned destination catch-all missing:\n%s", payload)
 	}
 }
 
@@ -407,5 +453,142 @@ fi
 	})
 	if !t.Failed() {
 		fmt.Println("NETNS-CHILD-PASSED-9637")
+	}
+}
+
+const netnsChild11409 = "XPF_11409_NETNS_CHILD"
+
+// TestHostInboundUnzonedIngressVerdictsOnRealKernel11409 measures both sides
+// of the addressed-unzoned boundary: unzoned ingress must not use a zoned
+// destination's service fallback, and zoned ingress must not open an unzoned
+// destination before its catch-all deny.
+func TestHostInboundUnzonedIngressVerdictsOnRealKernel11409(t *testing.T) {
+	if os.Getenv(netnsChild11409) == "1" {
+		hostInboundUnzonedIngressNetnsChild11409(t)
+		return
+	}
+	if findNft() == "" {
+		t.Skip("nft not found")
+	}
+	for _, tool := range []string{"unshare", "ip", "nsenter", "timeout", "bash", "sleep"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not available", tool)
+		}
+	}
+	cmd := exec.Command("unshare", "-rn", os.Args[0],
+		"-test.run", "^TestHostInboundUnzonedIngressVerdictsOnRealKernel11409$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), netnsChild11409+"=1")
+	out, err := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "NETNS-CHILD-STARTED-11409") {
+		if os.Getenv("XPF_REQUIRE_NETNS") == "" {
+			t.Skipf("netns unavailable (%v): %s", err, out)
+		}
+		t.Fatalf("netns child never started (%v): %s", err, out)
+	}
+	if err != nil || !strings.Contains(string(out), "NETNS-CHILD-PASSED-11409") {
+		t.Fatalf("real-kernel unzoned-ingress cell failed inside the namespace (%v):\n%s", err, out)
+	}
+}
+
+func hostInboundUnzonedIngressNetnsChild11409(t *testing.T) {
+	fmt.Println("NETNS-CHILD-STARTED-11409")
+	run := func(name string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+			t.Fatalf("%s %s: %v: %s", name, strings.Join(args, " "), err, out)
+		}
+	}
+	selfNS, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		t.Fatalf("read own netns: %v", err)
+	}
+	client := func() string {
+		t.Helper()
+		c := exec.Command("unshare", "-n", "sleep", "120")
+		if err := c.Start(); err != nil {
+			t.Fatalf("start client namespace: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Process.Kill(); _ = c.Wait() })
+		pid := strconv.Itoa(c.Process.Pid)
+		for range 300 {
+			if ns, err := os.Readlink("/proc/" + pid + "/ns/net"); err == nil && ns != selfNS {
+				return pid
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("client %s never entered its own network namespace", pid)
+		return ""
+	}
+	wire := func(fwDev, clDev, fwAddr, clAddr, gw string) string {
+		pid := client()
+		run("ip", "link", "add", fwDev, "type", "veth", "peer", "name", clDev, "netns", pid)
+		run("ip", "addr", "add", fwAddr, "dev", fwDev)
+		run("ip", "link", "set", fwDev, "up")
+		for _, args := range [][]string{
+			{"link", "set", "lo", "up"},
+			{"addr", "add", clAddr, "dev", clDev},
+			{"link", "set", clDev, "up"},
+			{"route", "add", "default", "via", gw},
+		} {
+			run("nsenter", append([]string{"-t", pid, "-n", "ip"}, args...)...)
+		}
+		return pid
+	}
+	run("ip", "link", "set", "lo", "up")
+	zoned := wire("fwzone", "clzone", "10.0.61.1/24", "10.0.61.100/24", "10.0.61.1")
+	unzoned := wire("fwunzone", "clunzone", "198.51.100.1/24", "198.51.100.100/24", "198.51.100.1")
+	ln, err := net.Listen("tcp4", "0.0.0.0:22")
+	if err != nil {
+		t.Fatalf("listen on :22: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(c)
+		}
+	}()
+	payload := buildHostInboundFilterPayloadWithUnzonedIngress([]dpuserspace.ZoneHostInboundView{{
+		Zone: "lan", SystemServices: []string{"ssh"},
+		V4Addrs: []string{"10.0.61.1"}, IngressNetdevs: []string{"fwzone"},
+	}}, []string{"198.51.100.1"}, nil, []string{"fwunzone"}, nil, nil, nil, true, nil, nil, nil)
+	cmd := exec.Command(findNft(), "-f", "-")
+	cmd.Stdin = strings.NewReader(payload)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("nft -f: %v: %s", err, out)
+	}
+	connect := func(pid, dst string) string {
+		t.Helper()
+		err := exec.Command("nsenter", "-t", pid, "-n", "timeout", "1", "bash", "-c", "exec 3<>/dev/tcp/"+dst+"/22").Run()
+		var ee *exec.ExitError
+		switch {
+		case err == nil:
+			return "connected"
+		case errors.As(err, &ee) && ee.ExitCode() == 124:
+			return "timeout"
+		default:
+			return "error: " + err.Error()
+		}
+	}
+	for _, tc := range []struct {
+		name, src, dst, want string
+	}{
+		{"zoned ingress to zone service control", zoned, "10.0.61.1", "connected"},
+		{"unzoned ingress to zoned service", unzoned, "10.0.61.1", "timeout"},
+		{"zoned ingress to unzoned address", zoned, "198.51.100.1", "timeout"},
+		{"unzoned ingress to its own address", unzoned, "198.51.100.1", "timeout"},
+	} {
+		if got := connect(tc.src, tc.dst); got != tc.want {
+			t.Errorf("%s: SSH to %s = %s, want %s", tc.name, tc.dst, got, tc.want)
+		}
+	}
+	if !t.Failed() {
+		fmt.Println("NETNS-CHILD-PASSED-11409")
 	}
 }
