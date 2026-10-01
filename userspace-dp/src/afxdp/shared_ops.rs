@@ -673,11 +673,13 @@ enum ReverseDomainAdmission {
 pub(super) fn lookup_shared_forward_nat_match(
     forwarding: &ForwardingState,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     reply_key: &SessionKey,
 ) -> Option<SyncedSessionEntry> {
     lookup_shared_forward_nat_match_with_admission(
         forwarding,
         shared_nat_sessions,
+        Some(shared_owner_rg_indexes),
         reply_key,
         ReverseDomainAdmission::ForwardEgress,
     )
@@ -686,19 +688,10 @@ pub(super) fn lookup_shared_forward_nat_match(
 fn lookup_shared_forward_nat_match_with_admission(
     forwarding: &ForwardingState,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: Option<&SharedSessionOwnerRgIndexes>,
     reply_key: &SessionKey,
     domain_admission: ReverseDomainAdmission,
 ) -> Option<SyncedSessionEntry> {
-    // #2402: recover poison (see lookup_shared_session).
-    let map = lock_shared_recover(shared_nat_sessions);
-    // The shared NAT map is published under both the domain-preserving reverse
-    // key and the canonical, domain-neutral reverse-match key. Probe in that
-    // order. Ordinary packet admission checks each candidate's forward egress
-    // domain; embedded quotes use this match only to recover the quoted tuple,
-    // because an off-path router may send the error from another domain.
-    //
-    // Synthetic fabric domains retain their exact-key-only behavior in both
-    // modes: they may use an exact matching forward key, never a canonical alias.
     let matches_reply_domain = |entry: &SyncedSessionEntry, exact: bool| {
         let forward_key_domain = entry.key.routing_domain;
         if crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
@@ -717,23 +710,71 @@ fn lookup_shared_forward_nat_match_with_admission(
         }
     };
 
-    if let Some(exact) = map.get(reply_key) {
-        if matches_reply_domain(exact, true) {
-            return Some(exact.clone());
+    // Domain-zero keys are canonical aliases, not owner identities. Even an
+    // exact key hit needs a unique-owner proof before it can select a tenant.
+    let exact = {
+        let map = lock_shared_recover(shared_nat_sessions);
+        map.get(reply_key).cloned()
+    };
+    if let Some(exact) = exact {
+        if matches_reply_domain(&exact, true)
+            && (reply_key.routing_domain != 0
+                || shared_owner_rg_indexes.is_some_and(|indexes| {
+                    shared_forward_nat_candidate_is_unique(
+                        shared_nat_sessions,
+                        indexes,
+                        reply_key,
+                        &exact.key,
+                        exact.decision.nat,
+                    )
+                }))
+        {
+            return Some(exact);
         }
     }
+
+    // The neutral tuple may be recovered only if the sticky ambiguity index
+    // proves one forward entry. Probe that owner's domain-qualified wire key
+    // for either reply domain; never select a colliding domain-zero alias.
     let probe = crate::session::reverse_match_key(reply_key);
-    if probe == *reply_key {
+    let indexes = shared_owner_rg_indexes?;
+    let owner = lock_shared_recover(&indexes.nat_ambiguities)
+        .unique_owner(&probe)
+        .cloned()?;
+    if crate::session::is_quarantined_routing_domain(owner.routing_domain) {
         return None;
     }
-    let fallback = map.get(&probe)?;
-    matches_reply_domain(fallback, false).then(|| fallback.clone())
+    let domain_stamped_probe = probe == *reply_key;
+    if domain_stamped_probe && owner.routing_domain == 0 {
+        return None;
+    }
+    let mut lookup_key = probe.clone();
+    lookup_key.routing_domain = owner.routing_domain;
+    let candidate = {
+        let map = lock_shared_recover(shared_nat_sessions);
+        map.get(&lookup_key).cloned()?
+    };
+    let wire_key = crate::session::reverse_session_key(&candidate.key, candidate.decision.nat);
+    let wire_key_matches = wire_key == lookup_key;
+    if candidate.metadata.is_reverse || candidate.key != owner || !wire_key_matches {
+        return None;
+    }
+    if !shared_forward_nat_candidate_is_unique(
+        shared_nat_sessions,
+        indexes,
+        &probe,
+        &candidate.key,
+        candidate.decision.nat,
+    ) {
+        return None;
+    }
+    matches_reply_domain(&candidate, false).then_some(candidate)
 }
 
 /// Prove that the shared reverse index contains the expected forward entry
-/// and that its domain-neutral wire alias has only ever named that entry.
-/// The bounded ambiguity history is sticky: after saturation or any collision,
-/// unstamped fabric replies fail closed rather than choosing a tenant.
+/// and that its domain-neutral translated tuple has only ever named that
+/// owner. Legacy canonical aliases are accepted only when no displacement was
+/// recorded for their tuple. Saturation or any collision fails closed.
 pub(super) fn shared_forward_nat_candidate_is_unique(
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
@@ -745,8 +786,11 @@ pub(super) fn shared_forward_nat_candidate_is_unique(
         return false;
     }
     let expected_alias = reverse_session_key(expected_forward_key, expected_nat);
+    let canonical_alias = reverse_canonical_key(expected_forward_key, expected_nat);
     let probe = crate::session::reverse_match_key(reply_key);
-    if crate::session::reverse_match_key(&expected_alias) != probe {
+    let wire_probe = crate::session::reverse_match_key(&expected_alias);
+    let canonical_probe = crate::session::reverse_match_key(&canonical_alias);
+    if probe != wire_probe && probe != canonical_probe {
         return false;
     }
     let map = lock_shared_recover(shared_nat_sessions);
@@ -759,8 +803,9 @@ pub(super) fn shared_forward_nat_candidate_is_unique(
     {
         return false;
     }
-    lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
-        .is_unique_for(&probe, expected_forward_key)
+    let ambiguities = lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities);
+    ambiguities.is_unique_for(&wire_probe, expected_forward_key)
+        && (probe == wire_probe || !ambiguities.contains(&probe))
 }
 
 pub(super) fn lookup_shared_forward_wire_match(
@@ -1275,6 +1320,7 @@ pub(super) fn lookup_forward_nat_across_scopes(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     forwarding: &ForwardingState,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     reply_key: &SessionKey,
     ingress: ReverseIngress,
 ) -> Option<ForwardSessionMatch> {
@@ -1282,6 +1328,7 @@ pub(super) fn lookup_forward_nat_across_scopes(
         sessions,
         shared_nat_sessions,
         forwarding,
+        shared_owner_rg_indexes,
         reply_key,
         None,
         ReverseDomainAdmission::ForwardEgress,
@@ -1293,6 +1340,7 @@ pub(super) fn lookup_forward_nat_across_scopes_at(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     forwarding: &ForwardingState,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     reply_key: &SessionKey,
     ingress: ReverseIngress,
     now_ns: u64,
@@ -1301,6 +1349,7 @@ pub(super) fn lookup_forward_nat_across_scopes_at(
         sessions,
         shared_nat_sessions,
         forwarding,
+        shared_owner_rg_indexes,
         reply_key,
         Some(now_ns),
         ReverseDomainAdmission::ForwardEgress,
@@ -1338,6 +1387,7 @@ pub(super) fn lookup_forward_nat_for_icmp_quote_at(
     let shared_match = lookup_shared_forward_nat_match_with_admission(
         forwarding,
         shared_nat_sessions,
+        shared_owner_rg_indexes,
         reply_key,
         ReverseDomainAdmission::QuotedTupleOnly,
     )
@@ -1394,6 +1444,7 @@ fn lookup_forward_nat_across_scopes_inner(
     sessions: &SessionTable,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     forwarding: &ForwardingState,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     reply_key: &SessionKey,
     now_ns: Option<u64>,
     domain_admission: ReverseDomainAdmission,
@@ -1428,6 +1479,7 @@ fn lookup_forward_nat_across_scopes_inner(
             return lookup_shared_forward_nat_match_with_admission(
                 forwarding,
                 shared_nat_sessions,
+                Some(shared_owner_rg_indexes),
                 reply_key,
                 domain_admission,
             )
@@ -1442,6 +1494,7 @@ fn lookup_forward_nat_across_scopes_inner(
     lookup_shared_forward_nat_match_with_admission(
         forwarding,
         shared_nat_sessions,
+        Some(shared_owner_rg_indexes),
         reply_key,
         domain_admission,
     )
@@ -2025,6 +2078,8 @@ pub(super) fn publish_shared_session(
         );
     }
     if !entry.metadata.is_reverse {
+        // Keep translated aliases domain-stamped. The ambiguity index, not a
+        // colliding domain-zero map key, carries the neutral lookup identity.
         let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
         lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
             .observe(
@@ -2062,25 +2117,6 @@ pub(super) fn publish_shared_session(
             update_owner_rg_index(
                 &shared_owner_rg_indexes.nat_sessions,
                 &reverse_canonical,
-                previous_owner_rg,
-                entry.metadata.owner_rg_id,
-            );
-        }
-        let reverse_match = crate::session::reverse_match_key(&reverse_wire);
-        if reverse_match != reverse_wire && reverse_match != reverse_canonical {
-            let displaced = sessions.insert(reverse_match.clone(), entry.clone());
-            record_shared_nat_displacement(displaced.as_ref(), entry);
-            if displaced
-                .as_ref()
-                .is_some_and(|existing| existing.key != entry.key)
-            {
-                lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
-                    .mark(reverse_match.clone());
-            }
-            let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
-            update_owner_rg_index(
-                &shared_owner_rg_indexes.nat_sessions,
-                &reverse_match,
                 previous_owner_rg,
                 entry.metadata.owner_rg_id,
             );
@@ -2142,7 +2178,6 @@ pub(super) fn restamp_shared_policy_entries(
             let aliases = [
                 reverse_wire.clone(),
                 reverse_canonical_key(&entry.key, entry.decision.nat),
-                crate::session::reverse_match_key(&reverse_wire),
             ];
             for alias in aliases {
                 if let Some(stored) = sessions.get_mut(&alias)
@@ -2320,18 +2355,6 @@ pub(super) fn remove_shared_session_if(
                     &shared_owner_rg_indexes.nat_sessions,
                     removed.metadata.owner_rg_id,
                     &reverse_canonical,
-                );
-            }
-            let reverse_match = crate::session::reverse_match_key(&reverse_wire);
-            if reverse_match != reverse_wire
-                && reverse_match != reverse_canonical
-                && let Some(removed) =
-                    remove_shared_alias_owned_by(&mut nat_sessions, &reverse_match, &entry.key)
-            {
-                remove_owner_rg_index_entry(
-                    &shared_owner_rg_indexes.nat_sessions,
-                    removed.metadata.owner_rg_id,
-                    &reverse_match,
                 );
             }
             {

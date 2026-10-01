@@ -3511,6 +3511,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
+                next_hop_weights: vec![],
                 next_hops: vec![],
                 discard: false,
                 next_table: "red.inet.0".to_string(),
@@ -3521,6 +3522,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 table: "red.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
+                next_hop_weights: vec![],
                 next_hops: vec![],
                 discard: false,
                 next_table: "inet.0".to_string(),
@@ -4320,6 +4322,7 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
+            next_hop_weights: vec![],
             // Two equal-cost next-hops, each via a distinct interface.
             next_hops: vec![
                 "192.0.2.2@ge-0/0/1".to_string(),
@@ -4443,6 +4446,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
+            next_hop_weights: vec![],
             // Member 0: explicit gateway via ge-0/0/1. Member 1: INTERFACE-ONLY
             // (empty IP part before '@') via ge-0/0/2 — `next_hop == None`.
             next_hops: vec![
@@ -4580,6 +4584,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec![
             "192.0.2.2@ge-0/0/1".to_string(), // direct
             "@gr-0/0/0.0".to_string(),        // tunnel (endpoint id 1)
@@ -4696,6 +4701,7 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec![
             "192.0.2.2@ge-0/0/1".to_string(), // direct, live
             "@gr-0/0/0.0".to_string(),        // tunnel, underlay WITHDRAWN
@@ -4784,6 +4790,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "2001:db8:dead::/48".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec![
             "2001:db8:ec::2@ge-0/0/1".to_string(), // direct
             "@gr-0/0/0.0".to_string(),             // tunnel (endpoint id 1)
@@ -4901,6 +4908,7 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
+            next_hop_weights: vec![],
             next_hops: vec![
                 "192.0.2.2@ge-0/0/1".to_string(),
                 "192.0.3.2@ge-0/0/2".to_string(),
@@ -5108,6 +5116,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
+                next_hop_weights: vec![],
                 next_hops: vec!["192.0.2.2@ge-0/0/1".to_string()],
                 discard: false,
                 next_table: String::new(),
@@ -5119,6 +5128,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
+                next_hop_weights: vec![],
                 next_hops: vec!["192.0.3.2@ge-0/0/2".to_string()],
                 discard: false,
                 next_table: String::new(),
@@ -5538,6 +5548,7 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "192.168.99.0/24".to_string(),
+            next_hop_weights: vec![],
             next_hops: vec!["10.5.5.2".to_string()],
             discard: false,
             next_table: String::new(),
@@ -7410,6 +7421,155 @@ fn select_route_next_hop_drivable_unevaluated_on_live_path_11318() {
         calls.get(),
         0,
         "drivability must not be evaluated when a live member exists",
+    );
+}
+
+/// #11402: live legs use cumulative weights; no-live paths retain their
+/// established drivable-subset and legacy all-candidate fallback.
+#[test]
+fn select_route_next_hop_uses_weighted_cumulative_members_11402() {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy)]
+    struct Candidate {
+        id: u8,
+        weight: u32,
+        live: bool,
+        drivable: bool,
+    }
+    let candidates = [
+        Candidate {
+            id: 1,
+            weight: 1,
+            live: true,
+            drivable: true,
+        },
+        Candidate {
+            id: 2,
+            weight: 4,
+            live: true,
+            drivable: true,
+        },
+        Candidate {
+            id: 3,
+            weight: 100,
+            live: false,
+            drivable: false,
+        },
+    ];
+
+    let calls = Cell::new(0usize);
+    for (hash, expected) in [(0, 1), (1, 2), (2, 2), (3, 2), (4, 2), (5, 1)] {
+        calls.set(0);
+        let selected = select_route_next_hop_weighted(
+            &candidates,
+            hash,
+            |candidate| candidate.weight,
+            |candidate| {
+                calls.set(calls.get() + 1);
+                candidate.live
+            },
+            |candidate| candidate.drivable,
+        )
+        .expect("live weighted member");
+        assert_eq!(selected.id, expected, "live hash {hash}");
+        assert_eq!(calls.get(), candidates.len(), "one liveness call per leg");
+    }
+
+    for hash in 0u64..6 {
+        let selected = select_route_next_hop_weighted(
+            &candidates,
+            hash,
+            |candidate| candidate.weight,
+            |_| false,
+            |candidate| candidate.drivable,
+        )
+        .expect("drivable fallback");
+        assert_eq!(
+            selected.id,
+            if hash % 2 == 0 { 1 } else { 2 },
+            "drivable fallback preserves uniform authored-order hashing at {hash}"
+        );
+    }
+    let legacy = select_route_next_hop_weighted(
+        &candidates,
+        2,
+        |candidate| candidate.weight,
+        |_| false,
+        |_| false,
+    )
+    .expect("legacy all-candidate fallback");
+    assert_eq!(
+        legacy.id, 3,
+        "all-undrivable fallback remains hash modulo the full authored slice"
+    );
+
+    let zero_weight = [
+        Candidate {
+            id: 1,
+            weight: 0,
+            live: true,
+            drivable: true,
+        },
+        Candidate {
+            id: 2,
+            weight: 4,
+            live: true,
+            drivable: true,
+        },
+    ];
+    assert_eq!(
+        select_route_next_hop_weighted(
+            &zero_weight,
+            0,
+            |candidate| candidate.weight,
+            |candidate| candidate.live,
+            |candidate| candidate.drivable,
+        )
+        .map(|candidate| candidate.id),
+        Some(1),
+        "zero weights defensively normalize to one"
+    );
+    for hash in 1..5 {
+        assert_eq!(
+            select_route_next_hop_weighted(
+                &zero_weight,
+                hash,
+                |candidate| candidate.weight,
+                |candidate| candidate.live,
+                |candidate| candidate.drivable,
+            )
+            .map(|candidate| candidate.id),
+            Some(2),
+            "zero-weight normalized hash {hash}"
+        );
+    }
+
+    let wide_weights = [
+        Candidate {
+            id: 1,
+            weight: u32::MAX,
+            live: true,
+            drivable: true,
+        },
+        Candidate {
+            id: 2,
+            weight: u32::MAX,
+            live: true,
+            drivable: true,
+        },
+    ];
+    assert_eq!(
+        select_route_next_hop_weighted(
+            &wide_weights,
+            u32::MAX as u64,
+            |candidate| candidate.weight,
+            |candidate| candidate.live,
+            |candidate| candidate.drivable,
+        )
+        .map(|candidate| candidate.id),
+        Some(2),
+        "weight sum must not wrap at u32"
     );
 }
 

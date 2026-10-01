@@ -643,6 +643,10 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	// certificate/interface candidate fail the required certificate/key-pair
 	// gate, moving one row to unmeasured (83 -> 84). The measured loser set,
 	// walked/vacuous counts, and collector reach stay unchanged.
+	// #11544: reconciling the stored snapshot with the current api-auth schema
+	// measures 39 vacuous and 86 unmeasured rows, with collector reach 388/144.
+	// The three loser rows and 112 walked count remain unchanged; this is a
+	// population-count refresh, not a relaxation of the loss set.
 	//
 	// THE COUNTS ARE PART OF THE FIXTURE, and that is a mutation result, not a
 	// flourish. With only the loser set recorded, deleting the observability

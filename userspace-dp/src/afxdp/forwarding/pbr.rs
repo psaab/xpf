@@ -28,18 +28,17 @@ pub(in crate::afxdp) enum RouteOverride {
     /// routing-instance term matched. Use the default route table.
     None,
     /// A PBR routing-instance term matched with a non-drop (accept) action.
-    /// Steer the route lookup to this override table (`<ri>.inet[6].0`) and
-    /// forward — normal policy-based routing, unchanged.
+    /// Steer to `<ri>.inet[6].0`, or to the global `inet[6].0` tables for the
+    /// literal Juniper target `default`, then forward.
     /// #9752: carries the installing-table identity alongside the string so
     /// the miss path stamps the session without reverse-parsing the name
     /// (which could desync from this formation site).
     Table {
-        /// The override table (`<ri>.inet[6].0` for this packet's family).
+        /// The override table for this packet's family.
         table: String,
-        /// The target instance's stable domain id (0 never appears here —
-        /// a matched term always names an instance).
+        /// The target instance's stable domain id (zero for literal `default`).
         domain: u32,
-        /// The owner check for `domain` (same hash's high half).
+        /// The owner check for `domain` (same hash's high half; zero for `default`).
         check: u32,
     },
     /// A PBR routing-instance term matched with a `reject`/`discard` action.
@@ -49,6 +48,32 @@ pub(in crate::afxdp) enum RouteOverride {
     /// was supplied and the action is `reject`; `discard`, and the flowless
     /// (sink-less) path, drop silently.
     Drop,
+}
+
+const FBF_DEFAULT_ROUTING_INSTANCE: &str = "default";
+
+/// Resolve a matched FBF target to its route table and session identity.
+/// Juniper's literal `default` is the global master-RIB alias; unlike a named
+/// routing instance it uses the default table identity `(0, 0)`.
+pub(in crate::afxdp) fn pbr_table_target(
+    routing_instance: &str,
+    is_v6: bool,
+) -> (String, (u32, u32)) {
+    if routing_instance == FBF_DEFAULT_ROUTING_INSTANCE {
+        let table = if is_v6 {
+            DEFAULT_V6_TABLE
+        } else {
+            DEFAULT_V4_TABLE
+        };
+        return (table.to_string(), (0, 0));
+    }
+    let identity = crate::session::install_table_identity(routing_instance);
+    let table = if is_v6 {
+        format!("{routing_instance}.inet6.0")
+    } else {
+        format!("{routing_instance}.inet.0")
+    };
+    (table, identity)
 }
 
 pub(in crate::afxdp) fn ingress_route_table_override(
@@ -213,13 +238,9 @@ pub(in crate::afxdp) fn ingress_route_table_override(
     }
     let routing_instance = routing_result.routing_instance;
     // #9752: the identity travels with the string (no reverse-parsing at the
-    // stamp site). A matched term always names a non-empty instance.
-    let (domain, check) = crate::session::install_table_identity(routing_instance);
-    let table = if is_v6 {
-        format!("{routing_instance}.inet6.0")
-    } else {
-        format!("{routing_instance}.inet.0")
-    };
+    // stamp site). The shared target builder also maps Juniper's `default`
+    // alias to the global table and zero identity.
+    let (table, (domain, check)) = pbr_table_target(routing_instance, is_v6);
     RouteOverride::Table {
         table,
         domain,
@@ -228,11 +249,12 @@ pub(in crate::afxdp) fn ingress_route_table_override(
 }
 
 /// #9752: the installing-table stamp for a miss outcome: arm provenance, not
-/// disposition. Only the table arm with a live override stamps nonzero;
-/// tunnel-egress outcomes stamp `(0,0)` (endpoint-pinned, table-free) and so
-/// do precedence/blocked outcomes (no table consulted). Pure so the matrix
-/// is unit-testable; the poll-level wiring (override → stamp → install) is
-/// pinned by a C2 acceptance cell.
+/// disposition. A named-instance PBR override stamps its nonzero identity;
+/// Juniper's `default` alias resolves to the main table with identity `(0,0)`,
+/// as do tunnel-egress outcomes (endpoint-pinned, table-free) and precedence /
+/// blocked outcomes (no table consulted). Pure so the matrix is unit-testable;
+/// the poll-level wiring (override → stamp → install) is pinned by a C2
+/// acceptance cell.
 pub(in crate::afxdp) fn install_table_stamp_for_miss(
     pbr_install_table: Option<(u32, u32)>,
     resolved_in_table: bool,
