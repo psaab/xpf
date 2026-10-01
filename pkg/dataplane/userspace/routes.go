@@ -27,6 +27,34 @@ func routeSnapshotDedupeKey(snap RouteSnapshot) string {
 		snap.Discard, snap.Preference, snap.RulePriority, snap.MTU)
 }
 
+// ipRuleHasUnsupportedRouteLeakSelectors reports whether the destination-only
+// RouteSnapshot format would widen a live rule's match. Rib-group return rules
+// are the one exception: their interface selectors are encoded by the source
+// routing-instance table and reconstructed separately.
+func ipRuleHasUnsupportedRouteLeakSelectors(rule netlink.Rule, allowInterfaceSelectors bool) bool {
+	if rule.Src != nil ||
+		rule.Tos != 0 ||
+		rule.Mark != 0 ||
+		rule.Mask != nil ||
+		rule.TunID != 0 ||
+		(!allowInterfaceSelectors && (rule.IifName != "" || rule.OifName != "")) ||
+		rule.Invert ||
+		rule.Dport != nil ||
+		rule.Sport != nil ||
+		rule.IPProto != 0 ||
+		rule.UIDRange != nil {
+		return true
+	}
+	// RuleList initializes absent goto/flow/suppress attributes to -1 and sets
+	// Family on decoded kernel rules. Zero-value injected test rules have none
+	// of that provenance, so do not treat their zero defaults as live selectors.
+	return rule.Family != 0 &&
+		(rule.Goto >= 0 ||
+			rule.Flow >= 0 ||
+			rule.SuppressIfgroup >= 0 ||
+			rule.SuppressPrefixlen >= 0)
+}
+
 // nonDefaultRouteWeights omits the wire vector when all entries mean weight 1.
 // The Rust FIB defaults absent, short, and zero weights to 1; retaining the
 // full vector here would needlessly grow common single-path snapshot publishes.
@@ -459,6 +487,15 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			inLegacyPBRBand := rule.Priority >= config.LegacyPBRRulePriorityBase &&
 				rule.Priority < config.LegacyPBRRulePriorityBase+config.PBRRuleWindow
 			if inPBRBand || inLegacyPBRBand {
+				continue
+			}
+			// Only destination-only matches are representable. The scoped
+			// rib-group return exception is handled by the source-table mapping
+			// below.
+			if ipRuleHasUnsupportedRouteLeakSelectors(
+				rule,
+				rule.Priority == routing.RibGroupReturnRulePriority,
+			) {
 				continue
 			}
 			familyStr := "inet"

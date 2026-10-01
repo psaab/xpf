@@ -127,6 +127,42 @@ fn flush_one(
         pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
+        flow_src_addr: [
+            src_ip.octets()[0],
+            src_ip.octets()[1],
+            src_ip.octets()[2],
+            src_ip.octets()[3],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+        flow_dst_addr: [
+            dst_ip.octets()[0],
+            dst_ip.octets()[1],
+            dst_ip.octets()[2],
+            dst_ip.octets()[3],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
         ..UserspaceDpMeta::default()
     };
     // The buffered pre-NAT key must describe the SAME flow as the frame: the
@@ -319,6 +355,42 @@ fn flush_oversized_pending_tcp(
         pkt_len: frame.len() as u16,
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
+        flow_src_addr: [
+            src_ip.octets()[0],
+            src_ip.octets()[1],
+            src_ip.octets()[2],
+            src_ip.octets()[3],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+        flow_dst_addr: [
+            dst_ip.octets()[0],
+            dst_ip.octets()[1],
+            dst_ip.octets()[2],
+            dst_ip.octets()[3],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
         ..UserspaceDpMeta::default()
     };
     let flow_key = SessionKey {
@@ -545,3 +617,190 @@ fn deferred_flush_flowless_reject_stays_silent_7176() {
     assert_eq!(reject_sent, 0, "no reply means no reject metered");
 }
 
+
+/// A packet buffered before a connected directed-broadcast address becomes
+/// classified as a transit martian must be dropped when its neighbor resolves.
+/// The retry is a second TX admission point and must consult the current FIB
+/// snapshot, not only the decision made when the packet was parked.
+#[test]
+fn deferred_neighbor_retry_rechecks_transit_source_martian_11074() {
+    let source = Ipv4Addr::new(10, 0, 61, 255);
+    let destination = Ipv4Addr::new(198, 51, 100, 2);
+    let mut forwarding = forwarding_with_output_filter("accept", false);
+    let connected = build_forwarding_state(&ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "lan0".into(),
+            ifindex: 11,
+            addresses: vec![crate::InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "10.0.61.1/24".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    forwarding
+        .connected_v4_directed_broadcasts
+        .extend(connected.connected_v4_directed_broadcasts);
+
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]);
+    frame.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+    frame.extend_from_slice(&[0x08, 0x00]);
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x28, 0x12, 0x34, 0x40, 0x00, 64, PROTO_TCP, 0x00, 0x00,
+    ]);
+    frame.extend_from_slice(&source.octets());
+    frame.extend_from_slice(&destination.octets());
+    frame.extend_from_slice(&12345u16.to_be_bytes());
+    frame.extend_from_slice(&443u16.to_be_bytes());
+    frame.extend_from_slice(&[
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x50, 0x02, 0xfa, 0xf0, 0x00, 0x00,
+        0x00, 0x00,
+    ]);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 11,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 54,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        flow_src_addr: [
+            source.octets()[0],
+            source.octets()[1],
+            source.octets()[2],
+            source.octets()[3],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+        flow_dst_addr: [
+            destination.octets()[0],
+            destination.octets()[1],
+            destination.octets()[2],
+            destination.octets()[3],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+        flow_src_port: 12345,
+        flow_dst_port: 443,
+        ..UserspaceDpMeta::default()
+    };
+    let flow_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(source),
+        dst_ip: IpAddr::V4(destination),
+        src_port: 12345,
+        dst_port: 443,
+        discriminator: TunnelDiscriminator::default(),
+        routing_domain: 0,
+    };
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+    ];
+    unsafe {
+        bindings[0]
+            .umem
+            .area()
+            .slice_mut_unchecked(0, frame.len())
+            .expect("ingress frame")
+            .copy_from_slice(&frame);
+    }
+    let queued_ns = 1_000_000_000;
+    let key = (EGRESS_IFINDEX, NEXT_HOP);
+    let mut pkt = PendingNeighPacket {
+        addr: 0,
+        desc: XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        meta,
+        fabric_ingress_zone: None,
+        decision: deferred_decision(),
+        flow_key: Some(flow_key),
+        queued_ns,
+        probe_attempts: 0,
+    };
+    pkt.decision.resolution.disposition = ForwardingDisposition::MissingNeighbor;
+    bindings[0].pending_neigh.insert(key, pkt);
+    bindings[0].pending_neigh_schedule.arm(
+        key,
+        next_due_for_pending(
+            queued_ns,
+            queued_ns,
+            0,
+            PENDING_NEIGH_TIMEOUT_NS,
+            PROBE_SCHEDULE_NS,
+        ),
+    );
+
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let binding_lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let mut shared_recycles = Vec::new();
+    let area = bindings[0].umem.area() as *const MmapArea;
+    let (left, rest) = bindings.split_at_mut(0);
+    let (binding, right) = rest.split_first_mut().expect("ingress binding");
+    let mut counters = BatchCounters::default();
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut dbg = crate::afxdp::DebugPollCounters::default();
+    retry_pending_neigh(
+        binding,
+        left,
+        0,
+        right,
+        &binding_lookup,
+        &mirror_targets,
+        &forwarding,
+        &dynamic_neighbors,
+        None,
+        queued_ns + 100,
+        unsafe { &*area },
+        &mut shared_recycles,
+        None,
+        &mut counters,
+        &recent_exceptions,
+        &mut dbg,
+    );
+
+    assert!(bindings[0].pending_neigh.is_empty(), "resolved pending packet is consumed");
+    assert!(
+        bindings[1].tx_pipeline.pending_tx_prepared.is_empty()
+            && bindings[1].tx_pipeline.pending_tx_local.is_empty(),
+        "a newly martian buffered source must not be replayed to TX"
+    );
+    assert_eq!(
+        bindings[0].tx_pipeline.pending_fill_frames.front(),
+        Some(&0),
+        "the rejected buffered frame must be recycled"
+    );
+}

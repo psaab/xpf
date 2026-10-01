@@ -502,6 +502,23 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }
+        if pending_meta
+            .l3_addrs_unfiltered()
+            .is_some_and(|(source, _)| {
+                super::poll_descriptor::transit_source_class_drop(
+                    forwarding,
+                    decision.resolution.disposition,
+                    source,
+                    pkt.flow_key.as_ref().map_or(0, |flow| flow.routing_domain),
+                    pending_meta,
+                    pkt.fabric_ingress_zone,
+                )
+            })
+        {
+            counters.touched = true;
+            binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+            continue;
+        }
         // #1873 R-E defense-in-depth: tunnel-marked entries are excluded
         // at admission (poll_descriptor), so this should be unreachable —
         // but an in-place rewrite of a tunnel inner packet transmits it

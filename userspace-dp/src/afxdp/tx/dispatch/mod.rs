@@ -759,6 +759,26 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
         }
+        // #11074: an admitted live or owned transit frame can wait in this
+        // queue while the forwarding snapshot changes. Recheck the source
+        // against the current domain-scoped martian index before final TX.
+        if !matches!(&request.frame, PendingForwardFrame::Prebuilt(_))
+            && request.meta.l3_addrs_unfiltered().is_some_and(|(source, _)| {
+                crate::afxdp::poll_descriptor::transit_source_class_drop(
+                    forwarding,
+                    request.decision.resolution.disposition,
+                    source,
+                    request.flow_key.as_ref().map_or(0, |flow| flow.routing_domain),
+                    request.meta,
+                    None,
+                )
+            })
+        {
+            dbg.policy_deny += 1;
+            counters.touched = true;
+            recycle_ingress_frame(ingress_binding, source_offset, now_ns);
+            continue;
+        }
         let ingress_slot = ingress_binding.slot;
         // #hb166 T-7: the deferred CoS-TX-selection resolution that used to
         // live here was DEAD. Every PendingForwardRequest is constructed
