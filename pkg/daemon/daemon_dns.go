@@ -136,6 +136,8 @@ func validLeaseDNSServer(ip netip.Addr) bool {
 //     instance; excluding by VRF membership would take bootstrap DNS with it.
 //     The predicate is routing-instance membership, and mgmt interfaces are
 //     absent from that map unless an operator explicitly puts them there.
+//     Their live lease nameservers are routed through table 999 by the
+//     destination- and loopback-scoped rules in daemon_mgmt_dns_rules.go.
 //   - It does not touch the default context. A DHCP client on a WAN link in
 //     the default instance still contributes, which is the supported CPE
 //     deployment and matches Junos, where DHCP-learned DNS is global.
@@ -155,6 +157,10 @@ func validLeaseDNSServer(ip netip.Addr) bool {
 // domain-name / domain-search come from
 // static config only (DHCP domain options are not consumed here).
 func mergeDNSInput(cfg *config.Config, leases []*dhcp.Lease) system.ResolvedDropinInput {
+	return mergeDNSInputWithMgmtDNSRules(cfg, leases, nil, nil)
+}
+
+func mergeDNSInputWithMgmtDNSRules(cfg *config.Config, leases []*dhcp.Lease, mgmtSet, ready map[string]bool) system.ResolvedDropinInput {
 	seen := make(map[string]struct{})
 	var servers []string
 	add := func(s string) {
@@ -223,6 +229,12 @@ func mergeDNSInput(cfg *config.Config, leases []*dhcp.Lease) system.ResolvedDrop
 			for _, ip := range l.DNS {
 				if !validLeaseDNSServer(ip) {
 					slog.Warn("skipping non-global-unicast DHCP name-server",
+						"interface", l.Interface, "server", ip.String())
+					continue
+				}
+				if config.IsManagementIfName(l.Interface) && mgmtSet != nil &&
+					(!mgmtSet[l.Interface] || !ready[ip.String()]) {
+					slog.Warn("skipping management DHCP name-server without an installed host-routing rule",
 						"interface", l.Interface, "server", ip.String())
 					continue
 				}
@@ -470,7 +482,17 @@ func (d *Daemon) dnsInputLocked(cfg *config.Config) system.ResolvedDropinInput {
 	if d.dhcp != nil {
 		leases = d.dhcp.Leases()
 	}
-	return mergeDNSInput(cfg, leases)
+	mgmtSet := d.mgmtVRFIfaceSet()
+	if mgmtSet == nil {
+		mgmtSet = map[string]bool{}
+	}
+	ready, err := mgmtDNSRuleReadiness(netlinkMgmtDNSRuleOps{})
+	if err != nil {
+		slog.Warn("DNS: cannot verify management nameserver routing; skipping management DHCP name-servers",
+			"err", err)
+		ready = map[string]bool{}
+	}
+	return mergeDNSInputWithMgmtDNSRules(cfg, leases, mgmtSet, ready)
 }
 
 // reconcileDNSFromDHCP is the DHCP-callback entry point. It acquires
@@ -492,6 +514,9 @@ func (d *Daemon) reconcileDNSFromDHCP() {
 	// wipe-then-stop window must not re-render prior nameservers after it.
 	if d.isResetting() {
 		return
+	}
+	if err := d.applyMgmtDNSRules(); err != nil {
+		slog.Warn("mgmt DNS rules: refresh on DHCP lease change had errors", "err", err)
 	}
 	cfg := d.store.ActiveConfig()
 	// #6792: no commit to fail here — this is a lease-change callback, not an
