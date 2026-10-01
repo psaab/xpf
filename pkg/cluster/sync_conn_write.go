@@ -99,6 +99,9 @@ func (s *SessionSync) QueueSessionV4(key dataplane.SessionKey, val dataplane.Ses
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v4") {
 		return
 	}
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+		return
+	}
 	msg := encodeSessionV4(key, val)
 	s.queueMessage(msg, &s.stats.SessionsSent, "session_v4")
 }
@@ -107,6 +110,9 @@ func (s *SessionSync) QueueSessionV4(key dataplane.SessionKey, val dataplane.Ses
 func (s *SessionSync) QueueSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) {
 	s.stampInstallGenV6(key, &val)
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v6") {
+		return
+	}
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
 		return
 	}
 	msg := encodeSessionV6(key, val)
@@ -130,6 +136,9 @@ func (s *SessionSync) QueueSessionV4Paced(key dataplane.SessionKey, val dataplan
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v4") {
 		return false
 	}
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+		return false
+	}
 	return s.queueMessagePaced(encodeSessionV4(key, val), &s.stats.SessionsSent, "session_v4", maxWait)
 }
 
@@ -137,6 +146,9 @@ func (s *SessionSync) QueueSessionV4Paced(key dataplane.SessionKey, val dataplan
 func (s *SessionSync) QueueSessionV6Paced(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, maxWait time.Duration) bool {
 	s.stampInstallGenV6(key, &val)
 	if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "session_v6") {
+		return false
+	}
+	if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
 		return false
 	}
 	return s.queueMessagePaced(encodeSessionV6(key, val), &s.stats.SessionsSent, "session_v6", maxWait)
@@ -413,6 +425,24 @@ func (s *SessionSync) suppressStampedInstallForIncapablePeer(domain, check uint3
 			"peer_snapshot_protocol", s.peerSnapshotProtocol.Load(),
 			"peer_capability_flags", uint8(s.peerCapabilityFlags.Load()))
 	}
+	return true
+}
+
+// suppressIpsecDiscriminatorInstallForIncapablePeer withholds the S9.4
+// discriminator class from an unlearned peer or one that did not advertise
+// support. The repeated install sweep and capability-triggered cold prime
+// replay any withheld state after a capable peer is discovered.
+func (s *SessionSync) suppressIpsecDiscriminatorInstallForIncapablePeer(tag uint64) bool {
+	if tag>>32 != 3 || uint32(tag) == 0 {
+		return false
+	}
+	if s == nil {
+		return true
+	}
+	if s.peerCapabilitiesLearned() && s.IpsecTunnelDiscriminatorCapable() {
+		return false
+	}
+	s.ipsecDiscriminatorSuppressDebt.Store(true)
 	return true
 }
 

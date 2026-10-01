@@ -724,6 +724,7 @@ pub(in crate::afxdp) fn gre_keyed_session_flow(
     match discriminator {
         TunnelDiscriminator::Unparseable | TunnelDiscriminator::None => return None,
         TunnelDiscriminator::Unkeyed | TunnelDiscriminator::Keyed(_) => {}
+        TunnelDiscriminator::Ipsec(_) => return None,
         // #7699: cannot arrive from `gre_transit_discriminator`, which returns
         // `Unparseable` for any GRE version != 0 (`GRE_VERSION_MASK`, before
         // the Key read) and PPTP is version 1. A version-1 packet therefore
