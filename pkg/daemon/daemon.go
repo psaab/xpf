@@ -502,7 +502,7 @@ type Daemon struct {
 	// bump_fib_generation control message failed, so the next actuation
 	// must retry the bump even when its publish is a duplicate-skip —
 	// otherwise cached flow routes stay pinned to pre-failover paths.
-	// Mutated only in actuateRouteOverlayLocked under applySem.
+	// Mutated only by the route-overlay actuators under applySem.
 	pendingFIBBump bool
 	// #2461: one exporter per per-flow-server template group, so a
 	// collector receives the template it referenced (was a single exporter
