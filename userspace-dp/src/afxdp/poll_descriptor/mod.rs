@@ -721,7 +721,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     desc,
                     packet_frame,
                     meta,
-                    !is_injected && owned_packet_frame.is_none() && !absent_fabric_ingress_suspect,
+                    !is_injected
+                        && owned_packet_frame.is_none()
+                        && !absent_fabric_ingress_suspect,
+                    now_ns,
                     &mut binding.last_learned_neighbor,
                     worker_ctx,
                 );
@@ -7311,6 +7314,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta,
                                 flow.src_ip,
                                 src_mac,
+                                now_ns,
                                 &mut binding.last_learned_neighbor,
                                 worker_ctx.forwarding,
                                 worker_ctx.dynamic_neighbors,

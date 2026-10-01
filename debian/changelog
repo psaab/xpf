@@ -122,6 +122,8 @@ xpf (0.0.0) unstable; urgency=medium
     (#11544).
   * Reject multiple default-policy choices with an accurate diagnostic and
     fail tolerant loads closed instead of compiling first-wins permit (#11367).
+  * Bump the helper FIB generation after learned-route republish and retain
+    retry state when invalidation fails (#11565).
   * Fail closed when an embedded ICMP quote's translated NAT tuple is ambiguous
     across routing domains, while retaining off-path reversal for unique flows
     (#11298).
@@ -135,4 +137,6 @@ xpf (0.0.0) unstable; urgency=medium
     T1/T2 renewal and reacquisition. Remove stale addresses and delegated
     prefixes, retain stateless DHCPv6 options across failed refreshes, and
     notify dependent route recompilation (#11382).
+  * Refresh learned-route FIBs from coalesced kernel route events, and retry
+    unresolved FIB-generation bumps without publishing once per event (#11565).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

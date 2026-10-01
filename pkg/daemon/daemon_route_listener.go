@@ -256,10 +256,26 @@ func (d *Daemon) actuateLearnedRouteRefresh(ctx context.Context) bool {
 	// listener is doing anything: nothing else exposes the helper's
 	// learned-route set.
 	slog.Debug("route listener: republishing routes-only snapshot after kernel route change")
-	if _, err := pub.PublishRouteOverlaySnapshot(cfg, d.ipmonActiveOverlay(), schedulerState); err != nil {
+	published, err := pub.PublishRouteOverlaySnapshot(cfg, d.ipmonActiveOverlay(), schedulerState)
+	if err != nil {
 		slog.Warn("route listener: routes-only republish failed — staying dirty for retry",
 			"err", err)
 		return false
+	}
+	if !published && !d.pendingFIBBump {
+		// Duplicate-skip: the helper routes did not move and no earlier
+		// generation bump is still owed.
+		return true
+	}
+	if _, err := pub.BumpFIBGeneration(); err != nil {
+		d.pendingFIBBump = true
+		slog.Warn("route listener: FIB generation bump unconfirmed — staying dirty for retry",
+			"err", err)
+		return false
+	}
+	d.pendingFIBBump = false
+	if !published {
+		slog.Info("route listener: retried FIB generation bump after earlier failure")
 	}
 	return true
 }
