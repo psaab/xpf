@@ -73,6 +73,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: prefix_containing_probe(leak.prefix_len),
+            next_hop_weights: vec![],
             next_hops: vec![],
             discard: false,
             next_table: format!("{}.inet.0", leak.target),
@@ -85,6 +86,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             table: format!("{}.inet.0", leak.target),
             family: "inet".to_string(),
             destination: "10.0.0.0/8".to_string(),
+            next_hop_weights: vec![],
             next_hops: vec![format!(
                 "172.16.{}.1@ge-0/0/{}.50",
                 leak.subnet, leak.egress_ifindex
@@ -264,6 +266,7 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "10.1.2.0/24".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
         discard: false,
         next_table: String::new(),
@@ -338,6 +341,7 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "10.0.0.0/8".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
         discard: false,
         next_table: String::new(),

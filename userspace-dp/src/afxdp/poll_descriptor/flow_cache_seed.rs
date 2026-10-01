@@ -85,9 +85,9 @@ pub(super) fn stage_flow_cache_seed(
     // coupled). Keying on the logical `egress_ifindex` for
     // tunnels was the review MAJOR — it stamped a different
     // shard than the bump, so a tunnel flow never evicted on
-    // its outer gateway's MAC change (#3048 blackhole). A
+    // its outer gateway's mapping change (#3048 blackhole). A
     // resolution with no next-hop stamps 0 (paired with a
-    // `NEIGHBOR_SHARD_NONE` shard → never MAC-stale).
+    // `NEIGHBOR_SHARD_NONE` shard → never neighbor-stale).
     let neighbor_mac_epoch_at_resolve = match decision.resolution.next_hop {
         Some(nh) => neighbor_epoch_snapshot.epoch_for(&(
             outer_neighbor_ifindex(worker_ctx.forwarding, None, &decision.resolution),
@@ -95,13 +95,14 @@ pub(super) fn stage_flow_cache_seed(
         )),
         None => 0,
     };
-    // #11315: never seed a stale neighbor MAC with the fresh epoch above. The
-    // session-hit path rechecks live state before serving a cached resolution;
-    // any stale ForwardCandidate reaching this path must not be laundered by
-    // pairing its old MAC with a fresh pre-resolve epoch. A missing binding is
-    // stale too: FAILED/INCOMPLETE removes the row, and the first subsequent
-    // learn does not bump the #3048 shard epoch. FabricRedirect carries a
-    // fabric peer MAC rather than a neighbor-table binding, so it is exempt.
+    // #11315: never seed a stale neighbor resolution with the fresh epoch
+    // above. The session-hit path rechecks live state before serving a cached
+    // resolution; any stale ForwardCandidate reaching this path must not be
+    // laundered by pairing its old MAC with a fresh pre-resolve epoch. A
+    // missing binding is stale too: removing the row advances its shard
+    // epoch, and the first subsequent learn does not bump again. FabricRedirect
+    // carries a fabric peer MAC rather than a neighbor-table binding, so it
+    // is exempt.
     if decision.resolution.disposition == ForwardingDisposition::ForwardCandidate
         && let (Some(next_hop), Some(stored_mac)) =
             (decision.resolution.next_hop, decision.resolution.neighbor_mac)
@@ -157,17 +158,17 @@ pub(super) fn stage_flow_cache_seed(
             apply_nat_on_fabric,
             worker_ctx.rg_epochs,
             // #3048/#3918/#5147: stamp the PER-SHARD
-            // neighbor-MAC-change epoch snapshotted BEFORE
+            // neighbor-resolution epoch snapshotted BEFORE
             // the resolve above (the resolved shard's slot
             // of `neighbor_epoch_snapshot`), not a fresh
-            // post-resolve read. A later kernel ARP/NDP MAC
-            // change to THIS descriptor's next-hop neighbor
+            // post-resolve read. A later MAC replacement or
+            // deletion of THIS descriptor's next-hop neighbor
             // advances that shard's live epoch past this
-            // stamp, evicting the cached stale dst_mac on
+            // stamp, so the cached descriptor is evicted on
             // its next fast-path hit
             // (`neighbor_mac_epoch_stale`) — while a change
             // to an unrelated neighbor (a different shard)
-            // leaves this flow cached (#5147). A MAC change
+            // leaves this flow cached (#5147). A mapping change
             // racing the resolve is caught too, because the
             // pre-resolve snapshot cannot already reflect it
             // (closes the #3918 TOCTOU).

@@ -177,9 +177,11 @@ func riMemberDeviceConflicts(cfg *config.Config) []config.RoutingInstanceMemberD
 	return out
 }
 
-// riMembersOutsideTheirVRF returns configured members needing a bind or
-// kernel VRF slaves needing a safe detach because no current owner wants them.
-// Quarantined conflicts remain gated by their claimant VRF identities.
+// riMembersOutsideTheirVRF returns configured members needing a bind or detach.
+// Quarantined conflicts produce detach actions only while their link remains
+// mastered by one of the claimant VRFs; unrelated masters are never detached.
+// Management-class devices are owned by vrf-mgmt and never enter this tenant
+// bind/detach path (#11392).
 func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 	if cfg == nil {
 		return nil
@@ -189,6 +191,9 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 	var out []riMember
 	for _, conflict := range conflicts {
 		conflictByDevice[conflict.LinuxName] = conflict
+		if config.IsManagementIfName(conflict.LinuxName) {
+			continue
+		}
 		if !d.riMemberConflictNeedsDetach(conflict) {
 			continue
 		}
@@ -221,6 +226,9 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 		}
 		for _, key := range keys {
 			linuxName := key.LinuxName
+			if config.IsManagementIfName(linuxName) {
+				continue // #11392: vrf-mgmt owns management-class devices
+			}
 			if _, found := conflictByDevice[linuxName]; found {
 				continue // #11060: quarantine owns this device, never bind it
 			}
@@ -245,6 +253,9 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 				"err", err)
 		}
 		for _, member := range members {
+			if config.IsManagementIfName(member.InterfaceName) {
+				continue // #11392: vrf-mgmt owns this device, not stale tenant cleanup
+			}
 			if _, wanted := desiredDevices[member.InterfaceName]; wanted {
 				continue
 			}

@@ -5,6 +5,12 @@ import (
 	"sort"
 )
 
+// FBFDefaultRoutingInstance is Juniper's `then routing-instance default` target
+// alias for the global/master routing table. It does not reserve that name
+// from a routing-instance declaration; the ambiguous combination is guarded
+// during strict compilation and reported on tolerant loads (#11308).
+const FBFDefaultRoutingInstance = "default"
+
 // ManagementVRFInstanceName is the name of the VRF the daemon creates for the
 // management interfaces (pkg/daemon daemon_apply_interfaces.go). With
 // ManagementVRFDeviceName and ManagementVRFTableID below it is THE definition

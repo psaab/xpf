@@ -337,12 +337,11 @@ impl super::Coordinator {
         } else {
             Vec::new()
         };
-        // #949: bulk-remove stale manager keys atomically vs readers.
-        self.neighbors.dynamic.with_all_shards(|bulk| {
-            for key in &old_manager_keys {
-                bulk.remove(key);
-            }
-        });
+        // #949: bulk-remove stale manager keys atomically vs readers, and
+        // advance the affected shard epochs so cached flows re-resolve (#11375).
+        self.neighbors
+            .dynamic
+            .bulk_replace_neighbors(&old_manager_keys, &[]);
         // #1873 R-D (Codex code r3): captured BEFORE the overwrite —
         // gates the new-appearance purge arm below. False only when no
         // coordinator apply has ever installed a snapshot (disarmed

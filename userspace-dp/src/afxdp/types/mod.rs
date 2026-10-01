@@ -101,6 +101,13 @@ impl SharedNatAmbiguityIndex {
             && matches!(self.aliases.get(key), Some(Some(candidate)) if candidate == owner)
     }
 
+    pub(super) fn unique_owner(&self, key: &SessionKey) -> Option<&SessionKey> {
+        if self.saturated {
+            return None;
+        }
+        self.aliases.get(key).and_then(Option::as_ref)
+    }
+
     pub(super) fn clear(&mut self) {
         self.aliases.clear();
         self.saturated = false;
