@@ -295,7 +295,7 @@ pub(crate) struct RouteSnapshot {
     pub preference: i32,
     /// Kernel-selected route MTU (RTAX_MTU), route-wide rather than per
     /// next-hop. Zero/absent means no route-specific constraint. Mirrors
-    /// Go RouteSnapshot.MTU and is fenced by protocol v37.
+    /// Go RouteSnapshot.MTU and is fenced by protocol v38.
     #[serde(rename = "mtu", default, skip_serializing_if = "is_zero_i32")]
     pub mtu: i32,
 }
