@@ -30,6 +30,12 @@
 //     per-node seed is correct there too. NOTHING that requires
 //     cross-node or cross-restart hash determinism uses this seed.
 //
+// ECMP flow-to-member selection deliberately does not use this seed: its
+// mapping must survive restart/HA re-resolution when the live member set is
+// unchanged, so it uses an ECMP-specific fixed domain seed instead. Unlike
+// cache/map placement, predictable ECMP selection does not enable collision
+// eviction or chain amplification.
+//
 // The draw reuses the exact OS-entropy mechanism vetted for the CoS seed
 // (`getrandom(2)` with a CLOCK_MONOTONIC + pid + stack-address fallback
 // and a never-zero invariant) via `os_random_seed_u64`, so there is one
