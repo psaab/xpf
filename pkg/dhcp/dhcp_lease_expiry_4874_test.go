@@ -465,80 +465,106 @@ func TestRunDHCPv4RebindBoundByLeaseExpiry(t *testing.T) {
 	}
 }
 
-func TestRunDHCPv6PDOnlyRebindBoundByLeaseExpiry(t *testing.T) {
-	leaseA := &Lease{
-		Interface: "wan0",
-		Family:    AFInet6,
-		LeaseTime: 2 * time.Second,
-		Obtained:  time.Now().Add(-1500 * time.Millisecond),
+func TestRunDHCPv6RebindBoundByLeaseExpiry(t *testing.T) {
+	cases := []struct {
+		name               string
+		address            netip.Prefix
+		iaTypes            []string
+		wantAddressRemoval bool
+	}{
+		{
+			name:               "stateful_IA_NA_and_IA_PD",
+			address:            netip.MustParsePrefix("2001:db8::50/128"),
+			iaTypes:            []string{"ia-na", "ia-pd"},
+			wantAddressRemoval: true,
+		},
+		{
+			name:    "PD_only",
+			iaTypes: []string{"ia-pd"},
+		},
 	}
-	pd := DelegatedPrefix{
-		Interface:     "wan0",
-		Prefix:        netip.MustParsePrefix("2001:db8:1000::/48"),
-		ValidLifetime: 2 * time.Second,
-		Obtained:      leaseA.Obtained,
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			leaseA := &Lease{
+				Interface: "wan0",
+				Family:    AFInet6,
+				Address:   tc.address,
+				LeaseTime: 2 * time.Second,
+				Obtained:  time.Now().Add(-1500 * time.Millisecond),
+			}
+			pd := DelegatedPrefix{
+				Interface:     "wan0",
+				Prefix:        netip.MustParsePrefix("2001:db8:1000::/48"),
+				ValidLifetime: 2 * time.Second,
+				Obtained:      leaseA.Obtained,
+			}
 
-	var removed []*Lease
-	gatewayChanges := 0
-	var leaseAtReacquire *Lease
-	var pdsAtReacquire []DelegatedPrefix
-	var blockedMode dhcpExchangeMode
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m := &Manager{
-		leases:               map[clientKey]*Lease{},
-		delegatedPDs:         map[string][]DelegatedPrefix{},
-		v6opts:               map[string]*DHCPv6Options{"wan0": {IATypes: []string{"ia-pd"}, RAIface: "lan0"}},
-		afterForTest:         immediateAfter,
-		waitLinkLocalForTest: func(context.Context, string, time.Duration) error { return nil },
-		removeAddressForTest: func(_ string, lease *Lease) { removed = append(removed, lease) },
-		onGatewayChange:      func() { gatewayChanges++ },
-	}
-	var n int
-	m.doV6ExchangeForTest = func(exchangeCtx context.Context, _ string, mode dhcpExchangeMode, _ *Lease, _ []DelegatedPrefix) (*dhcpv6Result, error) {
-		n++
-		switch n {
-		case 1:
-			return &dhcpv6Result{lease: leaseA, prefixes: []DelegatedPrefix{pd}}, nil
-		case 2:
-			disarmRecompile(m)
-			return nil, context.DeadlineExceeded
-		case 3:
-			blockedMode = mode
-			<-exchangeCtx.Done()
-			return nil, exchangeCtx.Err()
-		default:
-			leaseAtReacquire = m.LeaseFor("wan0", AFInet6)
-			pdsAtReacquire = m.DelegatedPrefixes()
-			cancel()
-			return nil, context.Canceled
-		}
-	}
+			var removed []*Lease
+			gatewayChanges := 0
+			var leaseAtReacquire *Lease
+			var pdsAtReacquire []DelegatedPrefix
+			var blockedMode dhcpExchangeMode
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			m := &Manager{
+				leases:               map[clientKey]*Lease{},
+				delegatedPDs:         map[string][]DelegatedPrefix{},
+				v6opts:               map[string]*DHCPv6Options{"wan0": {IATypes: tc.iaTypes, RAIface: "lan0"}},
+				afterForTest:         immediateAfter,
+				waitLinkLocalForTest: func(context.Context, string, time.Duration) error { return nil },
+				removeAddressForTest: func(_ string, lease *Lease) { removed = append(removed, lease) },
+				onGatewayChange:      func() { gatewayChanges++ },
+			}
+			var n int
+			m.doV6ExchangeForTest = func(exchangeCtx context.Context, _ string, mode dhcpExchangeMode, _ *Lease, _ []DelegatedPrefix) (*dhcpv6Result, error) {
+				n++
+				switch n {
+				case 1:
+					return &dhcpv6Result{lease: leaseA, prefixes: []DelegatedPrefix{pd}}, nil
+				case 2:
+					disarmRecompile(m)
+					return nil, context.DeadlineExceeded
+				case 3:
+					blockedMode = mode
+					<-exchangeCtx.Done()
+					return nil, exchangeCtx.Err()
+				default:
+					leaseAtReacquire = m.LeaseFor("wan0", AFInet6)
+					pdsAtReacquire = m.DelegatedPrefixes()
+					cancel()
+					return nil, context.Canceled
+				}
+			}
 
-	done := make(chan struct{})
-	go func() { m.runDHCPv6(ctx, "wan0"); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		cancel()
-		t.Fatal("runDHCPv6 did not stop the blocked REBIND at lease expiry")
-	}
-	defer disarmRecompile(m)
+			done := make(chan struct{})
+			go func() { m.runDHCPv6(ctx, "wan0"); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				cancel()
+				t.Fatal("runDHCPv6 did not stop the blocked REBIND at lease expiry")
+			}
+			defer disarmRecompile(m)
 
-	if blockedMode != exchangeRebind {
-		t.Fatalf("blocked exchange mode = %s, want REBIND", blockedMode)
-	}
-	if leaseAtReacquire != nil || len(pdsAtReacquire) != 0 {
-		t.Fatalf("lease/PDs at re-acquire = %v/%+v, want both removed at expiry",
-			leaseAtReacquire, pdsAtReacquire)
-	}
-	if len(removed) != 0 {
-		t.Fatalf("address removals = %v, want none for a PD-only lease", removed)
-	}
-	if gatewayChanges < 2 || !recompileArmed(m) {
-		t.Fatalf("expiry notifications: gateway changes=%d, recompile armed=%t",
-			gatewayChanges, recompileArmed(m))
+			if blockedMode != exchangeRebind {
+				t.Fatalf("blocked exchange mode = %s, want REBIND", blockedMode)
+			}
+			if leaseAtReacquire != nil || len(pdsAtReacquire) != 0 {
+				t.Fatalf("lease/PDs at re-acquire = %v/%+v, want both removed at expiry",
+					leaseAtReacquire, pdsAtReacquire)
+			}
+			if tc.wantAddressRemoval {
+				if len(removed) != 1 || removed[0] != leaseA {
+					t.Fatalf("removed addresses = %v, want %p exactly once", removed, leaseA)
+				}
+			} else if len(removed) != 0 {
+				t.Fatalf("address removals = %v, want none for a PD-only lease", removed)
+			}
+			if gatewayChanges < 2 || !recompileArmed(m) {
+				t.Fatalf("expiry notifications: gateway changes=%d, recompile armed=%t",
+					gatewayChanges, recompileArmed(m))
+			}
+		})
 	}
 }
 
