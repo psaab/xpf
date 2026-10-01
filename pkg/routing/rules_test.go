@@ -51,8 +51,8 @@ type fakeRuleOps struct {
 	// that cannot be deleted must surface as a non-nil Apply error).
 	delErr error
 
-	adds int
-	dels int
+	adds     int
+	dels     int
 	delTypes []uint8
 
 	// dscps records, per family and in add order, the DSCP each RuleAddDSCP
@@ -140,7 +140,6 @@ func (f typeCheckingRuleOps) RuleDel(r *netlink.Rule) error {
 	}
 	return unix.ENOENT
 }
-
 
 // failList arms RuleList(family) to return err. Used to recreate the
 // transient per-family netlink dump failure from #2273.
@@ -781,8 +780,8 @@ func TestPBRRulesApply_Fake(t *testing.T) {
 		{
 			Family: unix.AF_INET, DSCP: 46, DSCPSet: true,
 			Src: "10.1.0.0/16", IPProto: 6,
-			Sport: &PBRPortRange{Lo: 1000, Hi: 2000},
-			Dport: &PBRPortRange{Lo: 443, Hi: 443},
+			Sport:   &PBRPortRange{Lo: 1000, Hi: 2000},
+			Dport:   &PBRPortRange{Lo: 443, Hi: 443},
 			TableID: 100, Instance: "vr-a", IifName: "ge-0-0-0",
 		},
 		{Family: unix.AF_INET6, Src: "2001:db8::/32", TableID: 100, Instance: "vr-a", IifName: "ge-0-0-0"},

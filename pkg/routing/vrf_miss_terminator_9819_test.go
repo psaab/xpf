@@ -445,8 +445,8 @@ func vrfMissTerminatorNetnsChild9819(t *testing.T) {
 		nextTableReturn4 = []string{"route", "get", "10.20.0.50", "from", "10.50.0.1", "vrf", "vrf-nt"}
 		nextTableReturn6 = []string{"-6", "route", "get", "2001:db8:20::50", "from", "2001:db8:50::1", "vrf", "vrf-nt"}
 		pbrReturn4       = []string{"route", "get", "10.20.0.50", "from", "10.60.0.1", "vrf", "vrf-pbr"}
-		pbrIngressMiss4 = []string{"route", "get", "10.20.0.50", "from", "10.250.0.2", "iif", "xingress"}
-		pbrIngressMiss6 = []string{"-6", "route", "get", "2001:db8:20::50", "from", "2001:db8:250::2", "iif", "xingress"}
+		pbrIngressMiss4  = []string{"route", "get", "10.20.0.50", "from", "10.250.0.2", "iif", "xingress"}
+		pbrIngressMiss6  = []string{"-6", "route", "get", "2001:db8:20::50", "from", "2001:db8:250::2", "iif", "xingress"}
 	)
 
 	m, err := New()
