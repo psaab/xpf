@@ -474,6 +474,12 @@ type Manager struct {
 	appliedSnapshot     appliedSnapshot
 	sessionMirrorFailed bool
 	sessionMirrorErr    string
+	// sessionRepairOverflowErr is unrecoverable per-key convergence debt:
+	// the helper committed authority but could not reserve a bounded worker
+	// repair slot. Unlike a pending repair, one successful socket round-trip
+	// cannot prove this row converged, so it independently gates takeover until
+	// this Manager is rebuilt and the cluster session inventory is replayed.
+	sessionRepairOverflowErr string
 
 	// syncedImportRefusals counts HA synced-session imports the helper REFUSED
 	// on semantic grounds (#6785) — a stale install generation, the aggregate

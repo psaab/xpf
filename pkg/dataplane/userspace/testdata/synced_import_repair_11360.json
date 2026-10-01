@@ -1,0 +1,10 @@
+{
+  "pending": {
+    "ok": false,
+    "error": "synced-import-repair:worker-repair-pending"
+  },
+  "overflow": {
+    "ok": false,
+    "error": "synced-import-repair:worker-repair-overflow"
+  }
+}

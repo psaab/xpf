@@ -3053,17 +3053,309 @@ fn upsert_synced_session_reports_capacity_refusal_6785() {
          stop an in-flight synced session from refreshing"
     );
 }
+/// #11360: a queue-full import is not reported Applied; after the preceding
+/// queue backlog drains, the worker re-resolves the latest shared intent.
+#[test]
+fn full_worker_queue_import_reports_repair_and_applies_latest_intent_11360() {
+    const WORKER_ID: u32 = 120;
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        WORKER_ID,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let mut first = synced_entry_port(52_120, 0);
+    first.generation = 1;
+    first.metadata.policy_id = 41;
+    let key = first.key.clone();
 
-// The refusal REASON tokens are part of the control-plane contract: Go strips
-// the prefix and surfaces the remainder to the operator, and it is the only way
-// to tell a capacity problem from a stale peer. Bind that Applied carries no
-// token and that the three refusals carry distinct ones — collapsing them to a
-// single token would compile, pass every behavioural cell above, and leave an
-// operator unable to tell which of three very different conditions they are in.
+    {
+        let mut pending = commands.lock().expect("worker commands");
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+        }
+        assert_eq!(
+            pending.len(),
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+            "fixture: the worker queue must be at its refusal bound"
+        );
+    }
+
+    let drops_before = crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS
+        .load(Ordering::Relaxed);
+    assert_eq!(
+        coordinator.upsert_synced_session(first),
+        SyncedImportOutcome::AppliedRepairPending,
+        "a refused upsert must not collapse into Applied"
+    );
+    let mut latest = synced_entry_port(52_120, 0);
+    latest.generation = 2;
+    latest.metadata.policy_id = 42;
+    assert_eq!(
+        coordinator.upsert_synced_session(latest),
+        SyncedImportOutcome::AppliedRepairPending,
+        "a later refused replacement must keep the repair obligation and its latest intent"
+    );
+    assert!(
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS.load(Ordering::Relaxed)
+            > drops_before,
+        "push_bounded refusal must remain operator-visible in the queue-drop counter"
+    );
+    assert!(
+        crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID),
+        "the refused key must remain latched until worker repair completes"
+    );
+    assert!(
+        coordinator.synced_session_contains(&key),
+        "the shared authority remains committed while worker convergence is pending"
+    );
+
+    let mut worker_sessions = SessionTable::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    for _ in 0..64 {
+        if commands.lock().expect("commands").is_empty()
+            && !crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID)
+        {
+            break;
+        }
+        let results = apply_worker_commands(
+            &commands,
+            &mut worker_sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &coordinator.forwarding,
+            &BTreeMap::new(),
+            &dynamic_neighbors,
+            WORKER_ID,
+            &mut scratch,
+        );
+        let mut stale_replay_dropped_keys = Vec::new();
+        let mut deleted_synced_keys = Vec::new();
+        apply_session_import_repairs(
+            &results.session_import_repairs,
+            &coordinator.sessions.synced,
+            &mut worker_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &coordinator.forwarding,
+            &BTreeMap::new(),
+            &dynamic_neighbors,
+            &mut stale_replay_dropped_keys,
+            &mut deleted_synced_keys,
+            WORKER_ID,
+        );
+        assert!(
+            stale_replay_dropped_keys.is_empty(),
+            "the current shared row must remain valid"
+        );
+        assert!(
+            deleted_synced_keys.is_empty(),
+            "a present shared row must not trigger the missing-authority delete path"
+        );
+    }
+    assert!(
+        commands.lock().expect("commands").is_empty(),
+        "fixture: the preceding backlog must drain"
+    );
+    assert!(
+        !crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID),
+        "the repair latch must clear only after applying the latest shared row"
+    );
+    assert_eq!(
+        worker_sessions
+            .entry_with_origin(&key)
+            .expect("worker-local row repaired")
+            .1
+            .policy_id,
+        42,
+        "repair must re-read latest shared intent rather than replay the superseded upsert"
+    );
+}
+
+/// A later delete can remove shared authority while an older upsert remains
+/// in the queue. The repair boundary must delete that stale worker row rather
+/// than completing the debt on a shared-map miss.
+#[test]
+fn missing_shared_import_repair_deletes_older_queued_upsert_11360() {
+    const WORKER_ID: u32 = 122;
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        WORKER_ID,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    let mut first = synced_entry_port(52_122, 0);
+    first.generation = 1;
+    let key = first.key.clone();
+    assert_eq!(
+        coordinator.upsert_synced_session(first),
+        SyncedImportOutcome::Applied,
+        "fixture: the older upsert must be accepted into the worker queue"
+    );
+    {
+        let mut pending = commands.lock().expect("worker commands");
+        while pending.len() < crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+        }
+    }
+
+    let mut latest = synced_entry_port(52_122, 0);
+    latest.generation = 2;
+    assert_eq!(
+        coordinator.upsert_synced_session(latest),
+        SyncedImportOutcome::AppliedRepairPending,
+        "the full queue must latch a repair after its current FIFO prefix"
+    );
+    coordinator.delete_synced_session(key.clone(), false);
+    assert!(
+        !coordinator.synced_session_contains(&key),
+        "the later delete must remove shared authority while its worker command is dropped"
+    );
+    assert!(
+        !coordinator.synced_session_contains(&key),
+        "fixture: the newest authority must be a delete"
+    );
+
+    let mut worker_sessions = SessionTable::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    let mut older_upsert_installed = false;
+    let mut repair_delete_seen = false;
+    for _ in 0..32 {
+        let results = apply_worker_commands(
+            &commands,
+            &mut worker_sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &coordinator.forwarding,
+            &BTreeMap::new(),
+            &dynamic_neighbors,
+            WORKER_ID,
+            &mut scratch,
+        );
+        if worker_sessions.entry_with_origin(&key).is_some() {
+            older_upsert_installed = true;
+        }
+        let mut stale_replay_dropped_keys = Vec::new();
+        let mut deleted_synced_keys = Vec::new();
+        apply_session_import_repairs(
+            &results.session_import_repairs,
+            &coordinator.sessions.synced,
+            &mut worker_sessions,
+            SteeringMap::unshared_for_test(-1),
+            &coordinator.forwarding,
+            &BTreeMap::new(),
+            &dynamic_neighbors,
+            &mut stale_replay_dropped_keys,
+            &mut deleted_synced_keys,
+            WORKER_ID,
+        );
+        repair_delete_seen |= deleted_synced_keys.contains(&key);
+        if commands.lock().expect("worker commands").is_empty()
+            && !crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID)
+        {
+            break;
+        }
+    }
+    assert!(
+        older_upsert_installed,
+        "fixture: the old queued upsert must land before its repair boundary"
+    );
+    assert!(
+        repair_delete_seen,
+        "a shared-map miss must use DeleteSynced so flow-cache invalidation is returned"
+    );
+    assert!(
+        worker_sessions.entry_with_origin(&key).is_none(),
+        "worker-local state from the older upsert survived the latest shared delete"
+    );
+    assert!(
+        !crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID),
+        "the delete repair must complete the out-of-band debt"
+    );
+}
+
+/// A full per-worker repair latch escalates the shared-only import explicitly.
+#[test]
+fn full_worker_repair_latch_reports_overflow_instead_of_applied_11360() {
+    const WORKER_ID: u32 = 121;
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        WORKER_ID,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    {
+        let mut pending = commands.lock().expect("worker commands");
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+        }
+    }
+    for offset in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+        let key = synced_entry_port(20_000 + offset as u16, 0).key;
+        assert!(
+            crate::afxdp::worker_queue::record_session_import_repair(
+                WORKER_ID,
+                &key,
+                u64::MAX,
+            ),
+            "fixture: repair slot {offset} must fit within the bound"
+        );
+    }
+
+    let entry = synced_entry_port(52_121, 0);
+    let key = entry.key.clone();
+    assert_eq!(
+        coordinator.upsert_synced_session(entry),
+        SyncedImportOutcome::AppliedRepairOverflow,
+        "a full repair latch must be an explicit non-success outcome"
+    );
+    assert!(
+        coordinator.synced_session_contains(&key),
+        "overflow must not roll back the committed shared authority"
+    );
+    assert!(
+        crate::afxdp::worker_queue::has_session_import_repair_debt(WORKER_ID),
+        "the existing bounded debt must remain visible after overflow"
+    );
+    crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+}
+
+// The refusal reason is a wire contract: repair-pending outcomes must not
+// collapse into `Applied`, and Go must distinguish pending repair/overflow
+// from terminal semantic refusal and transport failure.
 #[test]
 fn synced_import_outcome_reason_tokens_are_distinct_6785() {
     assert_eq!(SyncedImportOutcome::Applied.refusal_reason(), None);
-    let tokens = [
+    assert_eq!(
+        SyncedImportOutcome::AppliedRepairPending.refusal_reason(),
+        None,
+        "repair-pending is not a semantic refusal"
+    );
+    assert_eq!(
+        SyncedImportOutcome::AppliedRepairOverflow.refusal_reason(),
+        None,
+        "repair-overflow is not a semantic refusal"
+    );
+    assert_ne!(
+        SYNCED_IMPORT_REPAIR_PREFIX,
+        SYNCED_IMPORT_REFUSED_PREFIX,
+        "legacy Go readers map the refusal prefix to a rollback-class result"
+    );
+    let repair_tokens = [
+        SyncedImportOutcome::AppliedRepairPending
+            .repair_reason()
+            .expect("pending repair must be reported"),
+        SyncedImportOutcome::AppliedRepairOverflow
+            .repair_reason()
+            .expect("repair overflow must be reported"),
+    ];
+    let refusal_tokens = [
         SyncedImportOutcome::RejectedStaleGeneration
             .refusal_reason()
             .expect("stale generation is a refusal"),
@@ -3074,13 +3366,16 @@ fn synced_import_outcome_reason_tokens_are_distinct_6785() {
             .refusal_reason()
             .expect("reserve is a refusal"),
     ];
-    for (i, a) in tokens.iter().enumerate() {
-        assert!(!a.is_empty(), "token {i} is empty");
-        for (j, b) in tokens.iter().enumerate() {
+    for (i, a) in repair_tokens.iter().enumerate() {
+        for (j, b) in repair_tokens.iter().enumerate() {
             if i != j {
-                assert_ne!(a, b, "refusal tokens {i} and {j} collide: {a}");
+                assert_ne!(a, b, "repair tokens {i} and {j} collide: {a}");
             }
         }
+        assert!(
+            refusal_tokens.iter().all(|refusal| refusal != a),
+            "repair token {a} collided with a terminal refusal"
+        );
     }
 }
 

@@ -46,6 +46,18 @@ import (
 // hold and only its next full sync closes that gap.
 var ErrSyncedImportRefused = errors.New("synced session import refused by helper")
 
+// ErrSyncedImportRepairPending means the helper committed shared import
+// authority but latched worker-local convergence after a bounded queue refused
+// an upsert. Callers must not classify this as an Applied import or roll the
+// committed helper row back; the helper repairs from its latest shared row.
+var ErrSyncedImportRepairPending = errors.New("synced session worker repair pending")
+
+// ErrSyncedImportRepairOverflow means the helper committed shared import
+// authority but its bounded per-worker repair latch was full. It is distinct
+// from a terminal import refusal: callers must surface it and must not claim
+// that worker-local state converged.
+var ErrSyncedImportRepairOverflow = errors.New("synced session worker repair latch overflow")
+
 var ErrDPDKBackendRetired = errors.New(
 	"the DPDK dataplane backend has been retired; use " +
 		"'set system dataplane-type userspace' (see #1525)",

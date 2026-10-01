@@ -322,6 +322,7 @@ impl WorkerManager {
         // can only record debt for W after the insert below, so clear-first
         // never eats fresh debt, only the previous generation's stale slot.
         crate::afxdp::worker_queue::clear_transition_debt(worker_id);
+        crate::afxdp::worker_queue::clear_session_import_repairs(worker_id);
         let mut next = (**self.records.load()).clone();
         next.insert(worker_id, Arc::new(record));
         self.records.store(Arc::new(next));

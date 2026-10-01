@@ -952,6 +952,9 @@ pub(crate) fn worker_loop(
     let mut last_transition_debt_epoch =
         crate::afxdp::worker_queue::transition_debt_epoch(worker_id);
     let mut transition_debt_pending = false;
+    let mut last_session_import_repair_epoch =
+        crate::afxdp::worker_queue::session_import_repair_epoch(worker_id);
+    let mut session_import_repair_pending = false;
     // #9856: resumable owner-RG CommandExport (multi-pass cursor). `None` =
     // idle. Adopted from the tick's dispatch results when Export commands
     // arrive; cleared on completion (after acking). Paced like the sweeps
@@ -1641,23 +1644,21 @@ pub(crate) fn worker_loop(
         let has_commands = crate::afxdp::worker_queue::try_lock_recover(&commands)
             .map(|q| !q.is_empty())
             .unwrap_or(false);
-        // #9720: debt arms. The transition-debt epoch is sampled EVERY pass
-        // (one relaxed load): a record that landed while the queue sat empty
-        // — the producer records after releasing the queue lock, so a
-        // deschedule in between lets the worker drain-all first — must still
-        // schedule an apply, or the debt strands until the next enqueue
-        // (parent GPT-2). The carried pending flag covers the
-        // contended-with-empty pass. Consumption is last-observed AFTER
-        // apply returns, so a record landing mid-apply refires the next
-        // pass; the carry is worker-overwrite from the results. Call site +
-        // fresh load + post-apply consume + destructure are pinned by the
-        // source-scan wiring guard in worker_queue_tests.rs (#7201 pattern).
+        // #9720/#11360: sample both positional-debt epochs EVERY pass. A
+        // record that lands after a queue drain still schedules the out-of-band
+        // repair even when no later command arrives.
         let transition_debt_epoch = crate::afxdp::worker_queue::transition_debt_epoch(worker_id);
         let debt_epoch_changed = transition_debt_epoch != last_transition_debt_epoch;
+        let session_import_repair_epoch =
+            crate::afxdp::worker_queue::session_import_repair_epoch(worker_id);
+        let import_repair_epoch_changed =
+            session_import_repair_epoch != last_session_import_repair_epoch;
         let should_apply = crate::afxdp::worker_queue::should_apply_worker_commands(
             has_commands,
             debt_epoch_changed,
             transition_debt_pending,
+            import_repair_epoch_changed,
+            session_import_repair_pending,
         );
         let command_results = if should_apply {
             apply_worker_commands(
@@ -1677,11 +1678,13 @@ pub(crate) fn worker_loop(
         };
         if should_apply {
             last_transition_debt_epoch = transition_debt_epoch;
+            last_session_import_repair_epoch = session_import_repair_epoch;
         }
         let WorkerCommandResults {
             cancelled_keys,
-            deleted_synced_keys,
-            stale_replay_dropped_keys,
+            mut deleted_synced_keys,
+            mut stale_replay_dropped_keys,
+            session_import_repairs,
             exported_sequences,
             session_counter_answers,
             export_owner_rgs,
@@ -1690,8 +1693,26 @@ pub(crate) fn worker_loop(
             vacate_all_shared_exact_slots,
             commands_backlogged,
             transition_debt_pending: transition_debt_pending_now,
+            session_import_repair_pending: session_import_repair_pending_now,
         } = command_results;
         transition_debt_pending = transition_debt_pending_now;
+        session_import_repair_pending = session_import_repair_pending_now;
+        if !session_import_repairs.is_empty() {
+            crate::afxdp::session_glue::apply_session_import_repairs(
+                &session_import_repairs,
+                &shared_sessions,
+                &mut sessions,
+                session_map.handle(),
+                &forwarding,
+                ha_runtime.as_ref(),
+                &dynamic_neighbors,
+                &mut stale_replay_dropped_keys,
+                &mut deleted_synced_keys,
+                worker_id,
+            );
+            session_import_repair_pending =
+                crate::afxdp::worker_queue::has_session_import_repair_debt(worker_id);
+        }
         // #941 Work item C: HA-demotion vacate. The
         // VacateAllSharedExactSlots WorkerCommand cannot be processed
         // inside `apply_worker_commands` (no BindingWorker access);
@@ -2098,7 +2119,7 @@ pub(crate) fn worker_loop(
         // behind a 1 ms `poll(2)`, so the budget would trade a bounded 3.85 ms
         // stall for ~16 ms of drain. Seeded here rather than OR-ed after the
         // sweep so there is one assignment to reason about.
-        let mut did_work = commands_backlogged;
+        let mut did_work = commands_backlogged || !session_import_repairs.is_empty();
         let mut dbg_poll = DebugPollCounters::default();
         // #1620: read the cold-path sample mask from forwarding state once
         // per poll cycle (rather than per-binding) — it's a daemon-wide

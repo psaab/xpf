@@ -1390,6 +1390,25 @@ directly:
     (`session_glue/tests.rs`, `newflow_contention_tests.rs`) are
     excluded on purpose; they drive the consumer and routing them
     through the cap would change what they exercise.
+- A refused imported `UpsertSynced` is repaired out-of-band rather than
+  silently discarded. The helper already committed shared authority before
+  fan-out, so it latches one latest-intent slot per key in a bounded
+  per-worker map, positioned after the queue prefix present at refusal. At
+  that FIFO boundary the worker re-reads the current shared row and applies
+  it before later queued commands. If a newer delete removed the shared row,
+  the worker instead applies the normal `DeleteSynced` path and returns that
+  key for flow-cache invalidation; a stale queued upsert cannot resurrect it.
+  The helper answers `ok=false` with the distinct
+  `synced-import-repair:worker-repair-pending` status, so Go does not count
+  the session as installed. A full repair map answers
+  `synced-import-repair:worker-repair-overflow` instead. Overflow has no
+  reserved per-key repair slot, so Go independently blocks HA takeover
+  readiness until the manager is rebuilt and the full session inventory is
+  replayed; ordinary successful writes do not clear that latch. Older Go
+  readers see the distinct prefix as a generic helper error, fail closed,
+  and do not classify the committed import as a rollback-triggering refusal.
+  The queue-drop counter above remains the operator-visible push count for
+  both outcomes.
 - `drain_bounded_into` is how a worker consumes that queue (#7201).
   `apply_worker_commands` takes a **bounded prefix** of at most
   `WORKER_COMMAND_DRAIN_BUDGET` (256) commands into a worker-owned

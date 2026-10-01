@@ -223,49 +223,143 @@ func TestSyncedImportRefusalRollsBackWithoutGatingTakeoverV6_6785(t *testing.T) 
 	}
 }
 
-// rustRefusalPrefixRe extracts the helper's SYNCED_IMPORT_REFUSED_PREFIX literal.
-var rustRefusalPrefixRe = regexp.MustCompile(
-	`(?m)^pub const SYNCED_IMPORT_REFUSED_PREFIX:\s*&str\s*=\s*"([^"]*)"\s*;`)
-
-// TestSyncedImportRefusedPrefixMatchesTheHelper6785 asserts the AGREEMENT
-// between the Go classifier's token and the Rust constant the helper actually
-// emits, by READING the Rust source rather than pinning either side to a
-// literal.
-//
-// Pinning would encode which side is trusted, and here neither is: if the Rust
-// constant is renamed and Go keeps a hard-coded string, every semantic refusal
-// silently reclassifies as a transport failure — which sets sessionMirrorFailed
-// and permanently disarms HA takeover on a healthy standby. That failure is
-// worse than the bug #6785 fixes, and it is invisible: both sides compile, all
-// unit tests on either side pass, and the only symptom is a standby that never
-// takes over.
-func TestSyncedImportRefusedPrefixMatchesTheHelper6785(t *testing.T) {
-	src, err := os.ReadFile("../../../userspace-dp/src/afxdp/ha/session_import.rs")
-	if err != nil {
-		t.Fatalf("read the helper source that owns the refusal token: %v", err)
+func TestSyncedImportWorkerRepairIsNotAppliedOrHealthFailure11360(t *testing.T) {
+	operations := []struct {
+		name string
+		send func(*Manager) error
+	}{
+		{"set-v4", func(m *Manager) error {
+			return m.SetSessionV4(rollbackKeyV4(), dataplane.SessionValue{})
+		}},
+		{"set-v6", func(m *Manager) error {
+			return m.SetSessionV6(rollbackKeyV6(), dataplane.SessionValueV6{})
+		}},
+		{"cluster-v4", func(m *Manager) error {
+			return m.SetClusterSyncedSessionV4(rollbackKeyV4(), dataplane.SessionValue{})
+		}},
+		{"cluster-v6", func(m *Manager) error {
+			return m.SetClusterSyncedSessionV6(rollbackKeyV6(), dataplane.SessionValueV6{})
+		}},
 	}
-	// Strip line comments first: the doc comment above the constant quotes the
-	// token, and a gate satisfiable by its own documentation proves nothing.
-	var stripped strings.Builder
-	for _, line := range strings.Split(string(src), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "//") {
-			stripped.WriteString("\n")
-			continue
+	outcomes := []struct {
+		name    string
+		fixture string
+		err     error
+	}{
+		{"pending", "pending", dataplane.ErrSyncedImportRepairPending},
+		{"overflow", "overflow", dataplane.ErrSyncedImportRepairOverflow},
+	}
+	for _, operation := range operations {
+		for _, outcome := range outcomes {
+			operation, outcome := operation, outcome
+			t.Run(operation.name+"/"+outcome.name, func(t *testing.T) {
+				response := readRepairWireFixture11360(t, outcome.fixture)
+				if response.OK {
+					t.Fatal("repair wire fixture must be non-success")
+				}
+				if !strings.HasPrefix(response.Error, syncedImportRepairPrefix) {
+					t.Fatalf("repair wire error %q lacks its dedicated prefix", response.Error)
+				}
+				if strings.HasPrefix(response.Error, syncedImportRefusedPrefix) {
+					t.Fatalf("repair wire error %q aliases the legacy rollback-class refusal prefix",
+						response.Error)
+				}
+				m := newAnsweringManager6785(t, response)
+				primeTakeoverReady10788(t, m)
+				if ready, reasons := m.TakeoverReady(); !ready {
+					t.Fatalf("fixture is not takeover-ready before import: %v", reasons)
+				}
+				err := operation.send(m)
+				if err == nil {
+					t.Fatal("session import returned nil for an incomplete worker repair")
+				}
+				if !errors.Is(err, outcome.err) {
+					t.Fatalf("session import error = %v, want %v", err, outcome.err)
+				}
+				if errors.Is(err, dataplane.ErrSyncedImportRefused) {
+					t.Fatalf("worker repair outcome collapsed into terminal refusal: %v", err)
+				}
+				if m.sessionMirrorFailed {
+					t.Fatal("a helper-reported repair outcome latched socket-health failure")
+				}
+				if got := m.syncedImportRefusals.Load(); got != 0 {
+					t.Fatalf("worker repair outcome counted as terminal refusal: %d", got)
+				}
+				if outcome.name == "pending" {
+					if m.sessionRepairOverflowErr != "" {
+						t.Fatalf("pending repair set overflow debt: %q", m.sessionRepairOverflowErr)
+					}
+					if ready, reasons := m.TakeoverReady(); !ready {
+						t.Fatalf("healthy helper with a latched pending repair must stay takeover-ready: %v", reasons)
+					}
+					return
+				}
+				if m.sessionRepairOverflowErr == "" {
+					t.Fatal("overflow did not retain a separate takeover-readiness debt")
+				}
+				if ready, reasons := m.TakeoverReady(); ready ||
+					!strings.Contains(strings.Join(reasons, " "), "worker-session repair overflow") {
+					t.Fatalf("overflow must block takeover readiness with an explicit reason: ready=%v reasons=%v",
+						ready, reasons)
+				}
+				// A later successful mirror proves the socket is healthy, but
+				// cannot prove the overflowing worker/key converged.
+				m.mu.Lock()
+				m.recordSessionMirrorSuccessLocked()
+				m.mu.Unlock()
+				if ready, reasons := m.TakeoverReady(); ready {
+					t.Fatalf("successful socket traffic cleared unrepaired overflow debt: %v", reasons)
+				}
+			})
 		}
-		stripped.WriteString(line)
-		stripped.WriteString("\n")
 	}
-	match := rustRefusalPrefixRe.FindStringSubmatch(stripped.String())
-	if match == nil {
-		t.Fatal("SYNCED_IMPORT_REFUSED_PREFIX not found in the helper source — " +
-			"it was renamed or removed, so Go can no longer tell a semantic " +
-			"refusal from a transport failure and every refusal would disarm " +
-			"HA takeover (#6785)")
+}
+
+func readRepairWireFixture11360(t *testing.T, name string) ControlResponse {
+	t.Helper()
+	data, err := os.ReadFile("testdata/synced_import_repair_11360.json")
+	if err != nil {
+		t.Fatalf("read shared Rust/Go repair wire fixture: %v", err)
 	}
-	if match[1] != syncedImportRefusedPrefix {
-		t.Fatalf("refusal token disagreement: helper emits %q, Go matches %q — "+
-			"every refusal would be misclassified as a transport failure",
-			match[1], syncedImportRefusedPrefix)
+	var fixtures map[string]ControlResponse
+	if err := json.Unmarshal(data, &fixtures); err != nil {
+		t.Fatalf("decode shared repair wire fixtures: %v", err)
+	}
+	response, ok := fixtures[name]
+	if !ok {
+		t.Fatalf("repair wire fixture %q is missing", name)
+	}
+	return response
+}
+
+// A pre-change reader does not recognize the dedicated repair prefix, so it
+// takes the generic unknown-response path. That must fail closed on helper
+// health, but it must never look like the rollback-class semantic refusal.
+func TestLegacyReaderRepairWireFailsClosedWithoutRefusalClassification11360(t *testing.T) {
+	for _, name := range []string{"pending", "overflow"} {
+		t.Run(name, func(t *testing.T) {
+			response := readRepairWireFixture11360(t, name)
+			if response.OK || strings.HasPrefix(response.Error, syncedImportRefusedPrefix) {
+				t.Fatalf("repair fixture is not a distinct non-success response: %+v", response)
+			}
+			legacyErr := errors.New(response.Error)
+			if errors.Is(legacyErr, dataplane.ErrSyncedImportRefused) {
+				t.Fatalf("legacy unknown-response path became a semantic refusal: %v", legacyErr)
+			}
+			m := New()
+			m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
+			primeTakeoverReady10788(t, m)
+			m.mu.Lock()
+			m.noteSyncedMirrorFailureLocked(legacyErr)
+			m.mu.Unlock()
+			if !m.sessionMirrorFailed {
+				t.Fatal("legacy unknown repair response did not fail closed on helper health")
+			}
+			if ready, reasons := m.TakeoverReady(); ready {
+				t.Fatalf("legacy reader advertised takeover readiness after unknown repair response: %v",
+					reasons)
+			}
+		})
 	}
 }
 
@@ -287,15 +381,19 @@ func TestHelperErrorClassification6785(t *testing.T) {
 		helperError  string
 		wantRefusal  bool
 		wantGateBusy bool
+		wantPending  bool
+		wantOverflow bool
 	}{
-		{"refusal-capacity", syncedImportRefusedPrefix + "capacity", true, false},
-		{"refusal-stale", syncedImportRefusedPrefix + "stale-generation", true, false},
-		{"refusal-reserve", syncedImportRefusedPrefix + "reserve", true, false},
-		{"retryable-gate-busy", syncedImportRefusedPrefix + "gate-busy", false, true},
-		{"token-not-at-the-start", "write failed while handling " + syncedImportRefusedPrefix + "capacity", false, false},
-		{"bare-mirror-write-failed", "mirror-write-failed", false, false},
-		{"plain-helper-error", "session table write failed", false, false},
-		{"unknown-operation", "unknown session sync operation frobnicate", false, false},
+		{"refusal-capacity", syncedImportRefusedPrefix + "capacity", true, false, false, false},
+		{"refusal-stale", syncedImportRefusedPrefix + "stale-generation", true, false, false, false},
+		{"refusal-reserve", syncedImportRefusedPrefix + "reserve", true, false, false, false},
+		{"repair-pending", syncedImportRepairPrefix + "worker-repair-pending", false, false, true, false},
+		{"repair-overflow", syncedImportRepairPrefix + "worker-repair-overflow", false, false, false, true},
+		{"retryable-gate-busy", syncedImportRefusedPrefix + "gate-busy", false, true, false, false},
+		{"token-not-at-the-start", "write failed while handling " + syncedImportRefusedPrefix + "capacity", false, false, false, false},
+		{"bare-mirror-write-failed", "mirror-write-failed", false, false, false, false},
+		{"plain-helper-error", "session table write failed", false, false, false, false},
+		{"unknown-operation", "unknown session sync operation frobnicate", false, false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -343,12 +441,23 @@ func TestHelperErrorClassification6785(t *testing.T) {
 				t.Fatalf("classified as retryable gate-busy = %v, want %v (err %v)",
 					got, tc.wantGateBusy, err)
 			}
-			// A refusal must keep its reason readable; dropping it would leave
-			// an operator unable to tell a capacity problem from a stale peer.
-			if tc.wantRefusal || tc.wantGateBusy {
-				reason := strings.TrimPrefix(tc.helperError, syncedImportRefusedPrefix)
+			if got := errors.Is(err, errSyncedImportRepairPending); got != tc.wantPending {
+				t.Fatalf("classified as repair-pending = %v, want %v (err %v)",
+					got, tc.wantPending, err)
+			}
+			if got := errors.Is(err, errSyncedImportRepairOverflow); got != tc.wantOverflow {
+				t.Fatalf("classified as repair-overflow = %v, want %v (err %v)",
+					got, tc.wantOverflow, err)
+			}
+			// Every recognized status retains its stable reason token.
+			if tc.wantRefusal || tc.wantGateBusy || tc.wantPending || tc.wantOverflow {
+				prefix := syncedImportRefusedPrefix
+				if tc.wantPending || tc.wantOverflow {
+					prefix = syncedImportRepairPrefix
+				}
+				reason := strings.TrimPrefix(tc.helperError, prefix)
 				if !strings.Contains(err.Error(), reason) {
-					t.Fatalf("refusal error %q lost the reason %q", err, reason)
+					t.Fatalf("helper outcome error %q lost the reason %q", err, reason)
 				}
 			}
 		})

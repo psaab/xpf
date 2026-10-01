@@ -89,15 +89,20 @@ var errSessionHelperUnreachable = errors.New("session helper unreachable")
 // Unlike terminal semantic refusals, it needs another operation ID so the
 // helper mutation replay cache runs the import again.
 var errSyncedImportGateBusy = errors.New("synced session import gate busy")
+var errSyncedImportRepairPending = dataplane.ErrSyncedImportRepairPending
+var errSyncedImportRepairOverflow = dataplane.ErrSyncedImportRepairOverflow
 
-// syncedImportRefusedPrefix is the machine-readable token the helper prefixes
-// onto a SEMANTIC synced-import refusal (SYNCED_IMPORT_REFUSED_PREFIX in
-// userspace-dp/src/afxdp/ha/session_import.rs). The two spellings must agree;
-// TestSyncedImportRefusedPrefixMatchesTheHelper asserts the AGREEMENT by
-// reading the Rust constant rather than pinning either side to a literal, so a
-// rename on either side reds instead of silently reclassifying every refusal as
-// a transport failure.
+// syncedImportRefusedPrefix is the stable token for a terminal semantic
+// refusal (SYNCED_IMPORT_REFUSED_PREFIX in Rust). Older readers classify it as
+// a refusal and may roll back, so committed worker-repair outcomes MUST NOT use
+// this prefix.
 const syncedImportRefusedPrefix = "synced-import-refused:"
+
+// syncedImportRepairPrefix identifies a committed import with incomplete
+// worker-local convergence (SYNCED_IMPORT_REPAIR_PREFIX in Rust). Older readers
+// do not mistake it for a refusal: their generic error path fails closed
+// without rollback of the live row.
+const syncedImportRepairPrefix = "synced-import-repair:"
 
 // haRefreshNeedsControlPrefix is the machine-readable token the helper prefixes
 // onto a session fast-path refusal that must be retried on the control socket
@@ -461,19 +466,25 @@ func (m *Manager) requestSessionSyncResponseLocked(req ControlRequest) (ControlR
 		if resp.Error == "" {
 			resp.Error = "unknown helper error"
 		}
-		// #6785: discriminate a SEMANTIC refusal from a transport failure. Both
-		// arrive as an error, but they mean opposite things about helper health:
-		// a transport failure says the session socket is sick and must gate
-		// takeover-readiness (#5247), while a refusal is the correct answer from
-		// a HEALTHY helper — the peer sent a stale generation, this node is at
-		// its own import ceiling, or the translated tuple could not be reserved.
-		// Treating a refusal as a mirror failure would latch a working standby
-		// "not takeover-ready" the first time a peer oversubscribed it, which is
-		// a worse failure than the split truth this reporting exists to fix.
-		//
-		// Matched on the helper's stable machine-readable prefix, never on the
-		// human-readable remainder, so the sentence can be reworded without
-		// silently reclassifying a refusal as a transport failure.
+		// A repair result is a healthy-helper response but non-success: shared
+		// authority committed, and either a per-worker repair is pending or its
+		// bounded latch overflowed. A distinct prefix also makes older readers
+		// take their unknown-error fail-closed path rather than classifying the
+		// result as a rollback-class semantic refusal.
+		if strings.HasPrefix(resp.Error, syncedImportRepairPrefix) {
+			reason := strings.TrimPrefix(resp.Error, syncedImportRepairPrefix)
+			switch reason {
+			case "worker-repair-pending":
+				return ControlResponse{}, fmt.Errorf("%w: %s", errSyncedImportRepairPending, reason)
+			case "worker-repair-overflow":
+				return ControlResponse{}, fmt.Errorf("%w: %s", errSyncedImportRepairOverflow, reason)
+			default:
+				return ControlResponse{}, errors.New(resp.Error)
+			}
+		}
+		// #6785: only the distinct semantic-refusal prefix maps to
+		// ErrSyncedImportRefused. These responses mean the helper did not take
+		// the import, unlike the committed worker-repair states above.
 		if strings.HasPrefix(resp.Error, syncedImportRefusedPrefix) {
 			reason := strings.TrimPrefix(resp.Error, syncedImportRefusedPrefix)
 			if reason == "gate-busy" {

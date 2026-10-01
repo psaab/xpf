@@ -12,10 +12,11 @@ mod counter_query;
 mod export;
 mod session_domain;
 mod session_import;
-// #6785: the typed synced-import outcome and its refusal-token prefix are read
-// by the control handler, so they must escape this private module.
+// #6785/#11360: typed import outcomes and their distinct refusal/repair wire
+// prefixes are read by the control handler, so they escape this private module.
 pub use session_import::{
-    SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
+    SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX,
+    SYNCED_IMPORT_REFUSED_PREFIX,
 };
 pub(crate) use session_import::SyncedDeleteOutcome;
 pub use self::session_domain::HA_REFRESH_NEEDS_CONTROL_SOCKET;

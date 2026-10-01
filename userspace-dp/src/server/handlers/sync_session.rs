@@ -9,7 +9,7 @@ use super::super::helpers::{
 use crate::afxdp::SessionDomain;
 use crate::afxdp::{
     SyncedDeleteOutcome, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
-    SYNCED_IMPORT_REFUSED_PREFIX,
+    SYNCED_IMPORT_REPAIR_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
 };
 use crate::{ControlResponse, SessionSyncRequest};
 
@@ -181,33 +181,25 @@ pub(super) fn handle(
             resolved_domain.expect("the None arm above already returned"),
         ) {
             Ok(entry) => {
-                // #6785: a SEMANTIC refusal (stale generation / import cap /
-                // translated-tuple reserve) used to return `()` and leave
-                // `response.ok` true, so Go recorded a success and kept the BPF
-                // mirror row for a session this helper never took — the split
-                // truth #5305's transactional install already knows how to
-                // compensate, but could not, because the only failure it could
-                // see was an IPC error. Report the refusal so that rollback runs.
+                // #6785/#11360: every non-Applied import outcome must leave
+                // `response.ok` false. A semantic refusal means this helper
+                // did not take the row; `AppliedRepair*` means shared
+                // authority committed but worker convergence is incomplete.
+                // New Go readers distinguish those cases by the reason token:
+                // refusal may be compensated, while repair outcomes remain
+                // errors and must not roll back the committed shared row or
+                // count the session installed. Older readers still see
+                // `ok=false`, never a false Applied success.
                 //
-                // The reason token is prefixed so Go can tell a refusal from a
-                // transport failure. That distinction is load-bearing, not
-                // cosmetic: a transport failure means the session socket is sick
-                // and gates takeover-readiness (#5247), whereas a refusal is the
-                // correct answer from a HEALTHY helper and must not block
-                // failover on a node that is working.
+                // Keep the stable prefix so a healthy helper's response is
+                // distinguishable from transport failure, which gates
+                // takeover-readiness (#5247).
                 let outcome = if sync_req.operation == "mirror_upsert" {
                     domain.upsert_synced_session_mirror(entry)
                 } else {
                     domain.upsert_synced_session(entry)
                 };
-                if let Some(reason) = outcome.refusal_reason() {
-                    response.ok = false;
-                    response.error = if reason == "mirror-write-failed" {
-                        reason.to_string()
-                    } else {
-                        format!("{SYNCED_IMPORT_REFUSED_PREFIX}{reason}")
-                    };
-                }
+                apply_synced_import_outcome(response, outcome);
             }
             Err(err) => {
                 if err.starts_with(SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX) {
@@ -527,6 +519,22 @@ pub(super) fn handle(
     }
 }
 
+fn apply_synced_import_outcome(response: &mut ControlResponse, outcome: SyncedImportOutcome) {
+    if let Some(reason) = outcome.repair_reason() {
+        response.ok = false;
+        response.error = format!("{SYNCED_IMPORT_REPAIR_PREFIX}{reason}");
+        return;
+    }
+    if let Some(reason) = outcome.refusal_reason() {
+        response.ok = false;
+        response.error = if reason == "mirror-write-failed" {
+            reason.to_string()
+        } else {
+            format!("{SYNCED_IMPORT_REFUSED_PREFIX}{reason}")
+        };
+    }
+}
+
 /// #10511 MIN-10: the tunnel-variant wildcard fires ONLY for a GRE delete
 /// whose discriminator reads zero — the BPF-mirror shape where the row cannot
 /// be re-identified. Every other protocol, every nonzero discriminator, and
@@ -565,4 +573,40 @@ mod tests {
             0
         ));
     }
+    #[test]
+    fn worker_repair_outcomes_use_a_distinct_fail_closed_wire_11360() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../pkg/dataplane/userspace/testdata/synced_import_repair_11360.json"
+        ))
+        .expect("shared Go/Rust repair wire fixture");
+        for (outcome, fixture_name) in [
+            (
+                SyncedImportOutcome::AppliedRepairPending,
+                "pending",
+            ),
+            (
+                SyncedImportOutcome::AppliedRepairOverflow,
+                "overflow",
+            ),
+        ] {
+            let mut response = ControlResponse {
+                ok: true,
+                ..ControlResponse::default()
+            };
+            apply_synced_import_outcome(&mut response, outcome);
+            assert!(!response.ok, "repair outcome was serialized as success");
+            let wire = serde_json::to_value(response).expect("control response JSON");
+            let expected = &fixtures[fixture_name];
+            assert_eq!(wire["ok"], expected["ok"]);
+            assert_eq!(wire["error"], expected["error"]);
+            let error = expected["error"]
+                .as_str()
+                .expect("fixture error token");
+            assert!(
+                !error.starts_with(SYNCED_IMPORT_REFUSED_PREFIX),
+                "legacy Go readers must not classify committed repair outcomes as rollback refusals"
+            );
+        }
+    }
 }
+
