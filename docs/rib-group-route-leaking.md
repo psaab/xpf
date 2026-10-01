@@ -6,6 +6,11 @@ inet <rg>; } } }` with a `rib-groups { <rg> { import-rib [ <ri>.inet.0 inet.0 ];
 every secondary rib in the import list. xpf realizes the **import-into-main**
 case (the common one) with Linux policy-routing rules.
 
+The family remains part of the selector (#11395): `interface-routes rib-group
+inet` examines only `inet.0`, while `inet6` examines only `inet6.0`. Although
+both map to Linux table 254, importing one does not authorize leaking the other
+family's connected prefixes.
+
 ## Global interface-routes selectors are unsupported (#11311)
 
 `routing-options interface-routes rib-group ...` is the other direction: it
@@ -274,6 +279,14 @@ peer-sync paths (`opts.lenientRoutingRuleWindows`, #1960 no-brick) so an
 already-committed or peer-synced over-limit generation still boots (the
 applier's window hard-cap keeps the excess inert).
 
+The strict rib-group count now follows the same eligibility as `Apply`
+(#11397): only families whose per-instance import-rib resolves to the main
+table consume slots, and each source table consumes slots once. VRF-to-VRF and
+self-only imports use no Phase-1 leak slots (the existing Phase-2 warning
+remains), and a v4 group does not charge its instance's v6 prefixes or vice
+versa. Duplicate prefix entries still count separately when `Apply` would
+install separate rules.
+
 **Apply-side degraded error + FIB cap reconcile (#6467).** On the tolerant
 load / peer-sync path the commit gate is only a warning, so an over-limit
 generation still reaches the applier. There the next-table cap used to
@@ -370,17 +383,20 @@ Three consequences an operator can observe:
    VRF-bound daemon (FRR peering, DHCP relay, syslog, RPM probes, IPsec). This
    is a deliberate narrowing, recorded here rather than left to be rediscovered.
 
-The **AF_XDP fast path is instance-scoped only for PBR-steered traffic.** The
-userspace FIB follows a `next_table` route found in whichever table a lookup
-runs in (`userspace-dp/src/afxdp/forwarding/fib.rs`). A transit lookup runs in
-a per-instance table only when a PBR interface filter steers it there. Without
-PBR it runs in the global `inet.0`/`inet6.0`, whatever instance the ingress
-interface belongs to, so the fast path does no per-instance destination-FIB
-selection at all (`userspace-dp/src/afxdp/forwarding/README.md`, "PBR `then
-routing-instance` is the ONLY per-VRF forwarding path"). The exposure #9420
-closed was on the Linux path: host-originated traffic, slow-path `XDP_PASS`
-packets, local delivery, and any interface without native XDP where
-`redirect_capable` falls back to kernel forwarding.
+The **AF_XDP fast path scopes transit lookups by native routing-instance
+membership as well as explicit PBR (#10312).** A member interface's validated
+ingress `routing_domain` selects its per-family destination-FIB table when no
+PBR routing-instance term matches. Explicit PBR remains higher precedence,
+including a terminal discard/reject. Only the default routing domain uses
+global `inet.0`/`inet6.0`; a nonzero domain without a current per-family table
+is terminal rather than falling through to main. The userspace FIB follows a
+`next_table` route in the selected table
+(`userspace-dp/src/afxdp/forwarding/README.md`, native RI/PBR scoping contract).
+
+The exposure #9420 closed was on the Linux path: host-originated traffic,
+slow-path `XDP_PASS` packets, local delivery, and interfaces where
+`redirect_capable` falls back to kernel forwarding. Native userspace scoping
+does not replace the kernel rule's default-instance ingress restriction.
 
 ### Strict rejection — undefined `next-table` target (#5693)
 

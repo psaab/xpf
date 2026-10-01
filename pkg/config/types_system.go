@@ -1052,8 +1052,9 @@ const (
 	PBRRulePriorityBase = 29000
 	// PBRRuleWindow is the size of the PBR band; the band is
 	// [PBRRulePriorityBase, PBRRulePriorityBase+PBRRuleWindow) = 29000-29999.
-	// It also bounds the number of PBR ip rules the applier installs
-	// (pkg/routing maxPBRRules) and the priority window clear() scans.
+	// Each PBR lookup consumes two priorities (lookup and unreachable shadow),
+	// so pkg/routing caps steering rules at floor(PBRRuleWindow/2). This is
+	// also the priority window clear() scans.
 	PBRRuleWindow = 1000
 	// LegacyPBRRulePriorityBase is the former PBR band base (31000),
 	// retained only so an in-place upgrade can sweep stale rules and the
@@ -1570,12 +1571,10 @@ type FirewallFilterTerm struct {
 	TerminalActions []string
 	// UnknownActions records `then` tokens that are neither a recognized
 	// terminating action nor a recognized modifier (#2399 finding 032-16).
-	// An unknown or misspelled action would otherwise be silently dropped
-	// during compile and default to ACCEPT in BOTH the dataplane compiler and
-	// the Rust filter (a fail-open permit). validateFilterActionsStrict
-	// hard-rejects any term carrying an entry here at commit; the tolerant
-	// load path downgrades it to a warning (#1960 no-brick). Populated by
-	// compileFilterThen.
+	// Strict commit hard-rejects any term carrying an entry here; the tolerant
+	// load / peer-sync path keeps the config bootable, warns, and sets Action
+	// to `discard` so the term cannot fall through to the implicit accept.
+	// Populated by compileFilterThen.
 	UnknownActions []string
 	// RejectMessageType is the optional message-type after `then reject`
 	// (e.g. tcp-reset, administratively-prohibited, port-unreachable). Junos

@@ -63,14 +63,13 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// #2399 (032-16) firewall-filter `then` action fail-open gate. Strict on
 	// commit / commit-check (hard-reject a term whose `then` block carries a
 	// token that is neither a recognized terminating action nor a recognized
-	// modifier). Before this gate such a token was silently DROPPED by
-	// compileFilterThen, leaving Action == "", which the dataplane compiler and
-	// the Rust filter (parse_term) both map to ACCEPT — a fail-open permit for
-	// a term the operator meant to deny. Lenient on load / peer-sync (warn so
-	// an already-persisted or peer-synced config carrying an unknown action
-	// still BOOTS — #1960 no-brick). Runs on the fully-compiled *Config so the
-	// typed term list (with UnknownActions populated by compileFilterThen) is
-	// available.
+	// modifier). `compileFilterThen` records unknown tokens in `UnknownActions`;
+	// `compileFirewall` finalizes the complete term to `discard` only after all
+	// `then` blocks have contributed. This uniform gate rejects on strict commit
+	// and warns on tolerant load / peer-sync, keeping startup unbricked (#1960)
+	// while ensuring the term fails closed rather than falling through to
+	// implicit accept. It runs on the fully-compiled *Config so the typed term
+	// list (with `UnknownActions` populated by `compileFilterThen`) is available.
 	if err := validateFilterActionsStrict(cfg); err != nil {
 		if opts.lenientFilterActions {
 			cfg.Warnings = append(cfg.Warnings,
@@ -227,7 +226,7 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// #11321: a kernel PBR rule for FBF attached to a non-forwarding
 	// routing-instance member is structurally unreachable. The kernel's l3mdev
 	// lookup at pref 1000 wins first, and its pref-2000 miss terminator ends a
-	// table miss before the 31000-31999 PBR band; Rust's ingress helper still
+	// table miss before the 29000-29999 PBR band; Rust's ingress helper still
 	// honors the FBF override. Strict commit refuses the divergent configuration;
 	// tolerant load / peer-sync warns so a previously committed config still
 	// boots (#1960 no-brick).

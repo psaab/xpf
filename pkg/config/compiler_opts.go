@@ -968,13 +968,11 @@ type compileOpts struct {
 	// firewall-filter `then` action gate (validateFilterActionsStrict) from a
 	// hard compile error to a cfg.Warnings entry. The strict commit /
 	// commit-check path hard-rejects a term whose `then` block carries a token
-	// that is neither a recognized terminating action (accept/reject/discard)
-	// nor a recognized modifier. Before this gate such a token was silently
-	// DROPPED at compile, leaving Action == "" which the dataplane compiler and
-	// the Rust filter both map to ACCEPT (a fail-open permit). The tolerant
-	// load / peer-sync paths downgrade to a warning so an already-persisted or
-	// peer-synced config carrying an unknown action still BOOTS (#1960
-	// no-brick). Same doctrine as lenientFilterProtocols.
+	// that is neither a recognized terminating action nor a recognized
+	// modifier. The compiler retains that token in UnknownActions and sets the
+	// typed action to `discard`, so the tolerant load / peer-sync paths warn
+	// without bricking startup while the resulting term fails closed instead
+	// of falling through to the implicit accept (#1960 no-brick).
 	lenientFilterActions bool
 	// lenientFilterMatchValues (#3205, agy-070 #07/#08) downgrades the
 	// firewall-filter symbolic-match-value gate (validateFilterMatchValuesStrict)
@@ -1931,6 +1929,10 @@ type compileOpts struct {
 	// and a leniently-loaded bad neighbor is inert. Same doctrine as
 	// lenientRoutingExportRef.
 	lenientBGPNeighborPeerAS bool
+	// lenientBGPRouterAS (#11313) downgrades missing process-AS validation
+	// from a commit error to a warning on tolerant load / peer-sync. The FRR
+	// renderer omits the entire router BGP stanza when LocalAS is zero.
+	lenientBGPRouterAS bool
 
 	// lenientBGPDuplicateNeighbor (#9007) downgrades the duplicate BGP
 	// neighbor gate (validateBGPDuplicateNeighborStrict) from a hard compile
@@ -3117,6 +3119,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRPMHTTPGetScheme:                true,
 		lenientRPMRoutingInstance:              true,
 		lenientBGPNeighborPeerAS:               true,
+		lenientBGPRouterAS:                     true,
 		lenientBGPDuplicateNeighbor:            true,
 		lenientBGPNeighborAddress:              true,
 		lenientRouterID:                        true,

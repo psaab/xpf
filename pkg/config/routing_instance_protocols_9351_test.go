@@ -53,6 +53,19 @@ func bracedTree9351(t *testing.T, text string) *ConfigTree {
 
 func compile9351(t *testing.T, tree *ConfigTree) *Config {
 	t.Helper()
+	// These fixtures exercise protocol-tree parsing, not missing router-AS
+	// validation. Give any BGP example a valid process AS so #11313 cannot
+	// preempt the parser behavior under test.
+	formatted := tree.Format()
+	if strings.Contains(formatted, "protocols") && strings.Contains(formatted, "bgp") {
+		path, err := ParseSetCommand("set routing-options autonomous-system 65000")
+		if err != nil {
+			t.Fatalf("ParseSetCommand(router AS fixture): %v", err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(router AS fixture): %v", err)
+		}
+	}
 	cfg, err := CompileConfig(tree)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
@@ -569,6 +582,7 @@ func TestPerInstanceProtocolsFlatSetShapeMatchesGlobal9351(t *testing.T) {
 func TestPerInstanceBGPNeighbourElidedSpellingHasNoGateToDisarm9351(t *testing.T) {
 	const policy = "policy-options { policy-statement pol1 { then accept; } }\n"
 	compile := func(text string, skipPass bool) (*Config, error) {
+		text = `routing-options { autonomous-system 65000; } ` + text
 		tree, perrs := NewParser(text).Parse()
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
