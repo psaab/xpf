@@ -117,7 +117,7 @@ func TestUnresolvableLinkLocalLegRefusesTheRoute9512(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	unscopedLinkLocalWarned.Range(func(k, _ any) bool { unscopedLinkLocalWarned.Delete(k); return true })
+	unscopedLearnedGatewayWarned.Range(func(k, _ any) bool { unscopedLearnedGatewayWarned.Delete(k); return true })
 
 	withLinkNames9512(t, map[int]string{101: "ge-0-0-1"})
 	routes := []netlink.Route{

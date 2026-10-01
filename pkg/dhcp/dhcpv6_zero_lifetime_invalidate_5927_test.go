@@ -113,6 +113,7 @@ func TestRunDHCPv6ExplicitInvalidationDeconfigures_5927(t *testing.T) {
 		Interface: "wan0", Family: AFInet6,
 		Address:   netip.MustParsePrefix("2001:db8::1/128"),
 		LeaseTime: 100 * time.Second,
+		Obtained:  time.Now(),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -163,6 +164,7 @@ func TestRunDHCPv6AbsentIANAKeepsAddress_5927(t *testing.T) {
 		Interface: "wan0", Family: AFInet6,
 		Address:   netip.MustParsePrefix("2001:db8::1/128"),
 		LeaseTime: 100 * time.Second,
+		Obtained:  time.Now(),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

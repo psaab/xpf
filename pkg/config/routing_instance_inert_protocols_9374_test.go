@@ -102,7 +102,7 @@ func TestInertProtocolWarningIsDerivedNotListed9374(t *testing.T) {
 		// A body every protocol accepts is not available, so probe the bare
 		// keyword: the warning is about the KEYWORD being uncarried, and an
 		// empty body is enough to make the node exist.
-		text := "routing-instances { V { instance-type vrf; protocols { " + kw + " { } } } }"
+		text := "routing-options { autonomous-system 65000; } routing-instances { V { instance-type vrf; protocols { " + kw + " { } } } }"
 		tr, perrs := NewParser(text).Parse()
 		if len(perrs) > 0 {
 			t.Fatalf("parse %q: %v", kw, perrs)

@@ -29,12 +29,12 @@ func (f fakeRuleOps7422) RuleList(family int) ([]netlink.Rule, error) {
 
 func rule7422(prio int) netlink.Rule { return netlink.Rule{Priority: prio} }
 
-// #7422 row 12: xpf_pbr_rules_applied counts ip rules in the PBR priority band
-// only, and reports whether the readback SUCCEEDED.
+// #7422 row 12: xpf_pbr_rules_applied counts PBR steering lookup rules, not
+// their paired unreachable shadows, and reports whether readback SUCCEEDED.
 //
-// The band is what identifies xpf's rules — there is no tag — so the rows below
-// straddle both edges. An off-by-one at either edge silently miscounts against a
-// desired value the operator is comparing it to.
+// The lookup occupies the even priority in each pair because netlink v1.3.1
+// does not expose a rule's fib-rule action on readback. Rows straddle the
+// priority-band edges and both positions of a pair.
 func TestPBRAppliedCountBandAndValidity7422(t *testing.T) {
 	base := config.PBRRulePriorityBase
 	top := base + config.PBRRuleWindow
@@ -46,8 +46,10 @@ func TestPBRAppliedCountBandAndValidity7422(t *testing.T) {
 		wantK bool
 	}{
 		{"empty kernel", fakeRuleOps7422{}, 0, true},
-		{"one v4 rule at the band base", fakeRuleOps7422{v4: []netlink.Rule{rule7422(base)}}, 1, true},
-		{"last rule inside the band", fakeRuleOps7422{v4: []netlink.Rule{rule7422(top - 1)}}, 1, true},
+		{"one lookup at the band base", fakeRuleOps7422{v4: []netlink.Rule{rule7422(base)}}, 1, true},
+		{"last lookup inside the band", fakeRuleOps7422{v4: []netlink.Rule{rule7422(top - 2)}}, 1, true},
+		{"last shadow inside the band is excluded", fakeRuleOps7422{v4: []netlink.Rule{rule7422(top - 1)}}, 0, true},
+		{"unreachable shadow is not counted as steering", fakeRuleOps7422{v4: []netlink.Rule{rule7422(base + 1)}}, 0, true},
 		// The edges. Both are the off-by-one that would miscount.
 		{"one below the band is NOT ours", fakeRuleOps7422{v4: []netlink.Rule{rule7422(base - 1)}}, 0, true},
 		{"the first priority above the band is NOT ours", fakeRuleOps7422{v4: []netlink.Rule{rule7422(top)}}, 0, true},
@@ -59,11 +61,11 @@ func TestPBRAppliedCountBandAndValidity7422(t *testing.T) {
 				rule7422(config.PBRRulePriorityBase - 1), rule7422(config.LegacyPBRRulePriorityBase),
 				rule7422(30000), rule7422(33000), rule7422(32766), rule7422(32767),
 			}}, 0, true},
-		{"both families are summed",
+		{"both families count lookup slots, not shadows",
 			fakeRuleOps7422{
 				v4: []netlink.Rule{rule7422(base), rule7422(base + 1)},
-				v6: []netlink.Rule{rule7422(base + 2)},
-			}, 3, true},
+				v6: []netlink.Rule{rule7422(base + 2), rule7422(base + 3)},
+			}, 2, true},
 
 		// Validity. A failed read must not be reported as a count.
 		{"v4 read failure invalidates", fakeRuleOps7422{errV4: errors.New("boom")}, 0, false},
