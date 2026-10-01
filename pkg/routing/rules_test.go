@@ -45,14 +45,16 @@ type fakeRuleOps struct {
 	// next-table / rib-group add-failure aggregation with family isolation
 	// (a v4 add can fail while the sibling v6 add still installs).
 	addErrFamily map[int]error
+	addErrType   map[uint8]error
 
 	// delErr, when non-nil, makes RuleDel fail without removing the rule —
 	// used to exercise the #3430 H3 clear-failure aggregation (a stale rule
 	// that cannot be deleted must surface as a non-nil Apply error).
 	delErr error
 
-	adds int
-	dels int
+	adds     int
+	dels     int
+	delTypes []uint8
 
 	// dscps records, per family and in add order, the DSCP each RuleAddDSCP
 	// call carried. netlink.Rule cannot hold it (#7796).
@@ -72,6 +74,11 @@ func (f *fakeRuleOps) RuleAdd(r *netlink.Rule) error {
 	}
 	if f.addErrFamily != nil {
 		if err := f.addErrFamily[r.Family]; err != nil {
+			return err
+		}
+	}
+	if f.addErrType != nil {
+		if err := f.addErrType[r.Type]; err != nil {
 			return err
 		}
 	}
@@ -99,6 +106,7 @@ func (f *fakeRuleOps) RuleDel(r *netlink.Rule) error {
 	if f.delErr != nil {
 		return f.delErr
 	}
+	f.delTypes = append(f.delTypes, r.Type)
 	f.dels++
 	list := f.rules[r.Family]
 	out := list[:0:0]
@@ -119,6 +127,19 @@ func (f *fakeRuleOps) RuleList(family int) ([]netlink.Rule, error) {
 		}
 	}
 	return f.rules[family], nil
+}
+
+type typeCheckingRuleOps struct {
+	*fakeRuleOps
+}
+
+func (f typeCheckingRuleOps) RuleDel(r *netlink.Rule) error {
+	for _, existing := range f.rules[r.Family] {
+		if existing.Priority == r.Priority && existing.Type == r.Type {
+			return f.fakeRuleOps.RuleDel(r)
+		}
+	}
+	return unix.ENOENT
 }
 
 // failList arms RuleList(family) to return err. Used to recreate the
@@ -181,11 +202,11 @@ func TestRibGroupRulesApply_Fake(t *testing.T) {
 	ribGroups := map[string]*config.RibGroup{
 		"dmz-leak": {
 			Name:       "dmz-leak",
-			ImportRibs: []string{"dmz-vr.inet.0", "inet.0"},
+			ImportRibs: []string{"dmz-vr.inet.0", "dmz-vr.inet6.0", "inet.0", "inet6.0"},
 		},
 		"peer-leak": {
 			Name:       "peer-leak",
-			ImportRibs: []string{"peer-vr.inet.0", "inet.0"},
+			ImportRibs: []string{"peer-vr.inet.0", "peer-vr.inet6.0", "inet.0", "inet6.0"},
 		},
 		"self-only": {
 			Name:       "self-only",
@@ -385,10 +406,12 @@ func TestRibGroupRulesApply_DefinedRibStillLeaks(t *testing.T) {
 	ribGroups := map[string]*config.RibGroup{
 		"dmz-leak": {
 			Name: "dmz-leak",
-			// dmz-vr.inet.0 (self, table 101), tunnel-vr.inet.0 (defined,
-			// table 100), inet.0 (main, 254). The defined non-self ribs
-			// must drive the leak.
-			ImportRibs: []string{"dmz-vr.inet.0", "tunnel-vr.inet.0", "inet.0"},
+			// The group has both family-specific imports; the v4 and v6
+			// slots must only match their corresponding main RIB.
+			ImportRibs: []string{
+				"dmz-vr.inet.0", "tunnel-vr.inet.0", "inet.0",
+				"dmz-vr.inet6.0", "tunnel-vr.inet6.0", "inet6.0",
+			},
 		},
 	}
 	instances := []*config.RoutingInstanceConfig{
@@ -404,9 +427,8 @@ func TestRibGroupRulesApply_DefinedRibStillLeaks(t *testing.T) {
 	if err := rg.Apply(ribGroups, instances, connected); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	// The rib-group imports main (inet.0), so the per-prefix leak fires even
-	// though it ALSO names a VRF→VRF target (tunnel-vr.inet.0) that Phase 1
-	// does not install.
+	// The rib-group imports each family-specific main RIB, so the matching
+	// v4 and v6 slots leak even though VRF-to-VRF imports remain Phase 2.
 	if _, ok := ops.findDstRule(unix.AF_INET, 101, "10.0.30.0/24"); !ok {
 		t.Errorf("defined import-rib must still leak table 101 (IPv4), rules=%v", ops.rules[unix.AF_INET])
 	}
@@ -427,7 +449,7 @@ func TestRibGroupRulesApply_DefinedRibStillLeaks(t *testing.T) {
 // makes every subtest go RED (Apply returns nil).
 func TestRibGroupApplyAggregatesAddErrors(t *testing.T) {
 	ribGroups := map[string]*config.RibGroup{
-		"dmz-leak": {Name: "dmz-leak", ImportRibs: []string{"inet.0"}}, // imports main
+		"dmz-leak": {Name: "dmz-leak", ImportRibs: []string{"inet.0", "inet6.0"}},
 	}
 	instances := []*config.RoutingInstanceConfig{
 		{Name: "dmz-vr", TableID: 101,
@@ -748,15 +770,20 @@ func assertAllRulesInRange(t *testing.T, ops *fakeRuleOps, lo, hi int) {
 	}
 }
 
-// TestPBRRulesApply_Fake exercises pbrManager over a fake, asserting a
-// PBRRule with a TOS match becomes an ip rule targeting the right table,
-// and that clear-then-add keeps the rule set stable on re-apply.
+// TestPBRRulesApply_Fake verifies each PBR lookup is followed by an
+// unreachable rule with the same selectors, family, and ingress interface.
 func TestPBRRulesApply_Fake(t *testing.T) {
 	ops := newFakeRuleOps()
-	p := &pbrManager{ops: ops}
+	p := &pbrManager{ops: typeCheckingRuleOps{fakeRuleOps: ops}}
 
 	rules := []PBRRule{
-		{Family: unix.AF_INET, DSCP: 46, DSCPSet: true, TableID: 100, Instance: "vr-a", IifName: "ge-0-0-0"},
+		{
+			Family: unix.AF_INET, DSCP: 46, DSCPSet: true,
+			Src: "10.1.0.0/16", IPProto: 6,
+			Sport:   &PBRPortRange{Lo: 1000, Hi: 2000},
+			Dport:   &PBRPortRange{Lo: 443, Hi: 443},
+			TableID: 100, Instance: "vr-a", IifName: "ge-0-0-0",
+		},
 		{Family: unix.AF_INET6, Src: "2001:db8::/32", TableID: 100, Instance: "vr-a", IifName: "ge-0-0-0"},
 		{Family: unix.AF_INET, Dst: "10.5.0.0/16", TableID: 101, Instance: "vr-b", IifName: "ge-0-0-1"},
 	}
@@ -765,16 +792,60 @@ func TestPBRRulesApply_Fake(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	if !ops.hasTable(unix.AF_INET, 100) || !ops.hasTable(unix.AF_INET, 101) {
-		t.Errorf("expected IPv4 PBR rules for tables 100 and 101, rules=%v", ops.rules[unix.AF_INET])
+		t.Errorf("expected IPv4 PBR lookup rules for tables 100 and 101, rules=%v", ops.rules[unix.AF_INET])
 	}
 	if !ops.hasTable(unix.AF_INET6, 100) {
-		t.Errorf("expected IPv6 PBR rule for table 100, rules=%v", ops.rules[unix.AF_INET6])
+		t.Errorf("expected IPv6 PBR lookup rule for table 100, rules=%v", ops.rules[unix.AF_INET6])
 	}
-	if got := ops.count(unix.AF_INET); got != 2 {
-		t.Errorf("expected 2 IPv4 PBR rules, got %d", got)
+	if got := ops.count(unix.AF_INET); got != 4 {
+		t.Fatalf("expected 2 IPv4 lookup/shadow pairs, got %d rules", got)
+	}
+	if got := ops.count(unix.AF_INET6); got != 2 {
+		t.Fatalf("expected 1 IPv6 lookup/shadow pair, got %d rules", got)
 	}
 
-	// Empty rule set clears everything.
+	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
+		entries := ops.rules[family]
+		for i := 0; i < len(entries); i += 2 {
+			terminator, lookup := entries[i], entries[i+1]
+			if lookup.Type != unix.RTN_UNICAST || terminator.Type != pbrTerminatorAction {
+				t.Errorf("family %d pair actions = (lookup %d, shadow %d), want (unicast,unreachable)",
+					family, lookup.Type, terminator.Type)
+			}
+			if terminator.Priority != lookup.Priority+1 {
+				t.Errorf("family %d priorities = (%d,%d), want adjacent lookup/shadow pair",
+					family, lookup.Priority, terminator.Priority)
+			}
+			if lookup.Family != terminator.Family || lookup.IifName != terminator.IifName ||
+				!reflect.DeepEqual(lookup.Src, terminator.Src) ||
+				!reflect.DeepEqual(lookup.Dst, terminator.Dst) ||
+				lookup.IPProto != terminator.IPProto ||
+				!reflect.DeepEqual(lookup.Sport, terminator.Sport) ||
+				!reflect.DeepEqual(lookup.Dport, terminator.Dport) {
+				t.Errorf("family %d terminator selectors differ from lookup: lookup=%+v terminator=%+v",
+					family, lookup, terminator)
+			}
+			if terminator.Table != -1 {
+				t.Errorf("family %d unreachable rule table = %d, want no lookup table", family, terminator.Table)
+			}
+		}
+	}
+	if got := ops.dscps[unix.AF_INET]; len(got) != 2 || got[0] != 46 || got[1] != 46 {
+		t.Errorf("DSCP must qualify both the lookup and shadow, got %v", got)
+	}
+
+	// Reconcile the same desired state twice: clear must remove both members of
+	// every pair before they are re-added, without duplicate priorities.
+	if err := p.Apply(rules); err != nil {
+		t.Fatalf("re-Apply: %v", err)
+	}
+	if ops.count(unix.AF_INET) != 4 || ops.count(unix.AF_INET6) != 2 {
+		t.Errorf("re-Apply duplicated or lost PBR pairs: v4=%d v6=%d",
+			ops.count(unix.AF_INET), ops.count(unix.AF_INET6))
+	}
+
+	// Empty rule set clears both lookup and unreachable rules.
+	ops.delTypes = nil
 	if err := p.Apply(nil); err != nil {
 		t.Fatalf("Apply(nil): %v", err)
 	}
@@ -782,12 +853,41 @@ func TestPBRRulesApply_Fake(t *testing.T) {
 		t.Errorf("expected all PBR rules cleared, v4=%d v6=%d",
 			ops.count(unix.AF_INET), ops.count(unix.AF_INET6))
 	}
+	wantDeleteTypes := []uint8{
+		pbrTerminatorAction, unix.RTN_UNICAST,
+		pbrTerminatorAction, unix.RTN_UNICAST,
+		pbrTerminatorAction, unix.RTN_UNICAST,
+	}
+	if !reflect.DeepEqual(ops.delTypes, wantDeleteTypes) {
+		t.Errorf("clear delete actions = %v, want lookup/shadow actions %v",
+			ops.delTypes, wantDeleteTypes)
+	}
+}
+
+// The pre-#11394 implementation used one lookup per priority. An odd-priority
+// stale lookup must still be deleted after the current pair layout is deployed.
+func TestPBRClearFallsBackToLegacyLookupAction(t *testing.T) {
+	ops := newFakeRuleOps()
+	rule := &netlink.Rule{
+		Family: unix.AF_INET, Priority: pbrRulePriority + 1,
+		Table: 100, Type: unix.RTN_UNICAST,
+	}
+	if err := ops.RuleAdd(rule); err != nil {
+		t.Fatalf("seed legacy-layout PBR rule: %v", err)
+	}
+	p := &pbrManager{ops: typeCheckingRuleOps{fakeRuleOps: ops}}
+	if err := p.Apply(nil); err != nil {
+		t.Fatalf("Apply(nil): %v", err)
+	}
+	if got := ops.count(unix.AF_INET); got != 0 {
+		t.Errorf("legacy unicast rule at odd priority was not deleted, %d rules remain", got)
+	}
 }
 
 // TestPBRApplyScopesRuleToIif verifies pbrManager.Apply stamps the ingress
-// interface onto the installed netlink rule (FRA_IIFNAME, #5117): a PBRRule
-// carrying an IifName becomes an ip rule scoped to that interface, and a rule
-// with no IifName is REFUSED (never installed as a global iif-less rule).
+// interface onto both installed rules (FRA_IIFNAME, #5117): the PBR lookup and
+// its unreachable shadow are scoped to that interface, and a rule with no
+// IifName is REFUSED (never installed globally).
 func TestPBRApplyScopesRuleToIif(t *testing.T) {
 	t.Run("iif is programmed onto the rule", func(t *testing.T) {
 		ops := newFakeRuleOps()
@@ -798,11 +898,13 @@ func TestPBRApplyScopesRuleToIif(t *testing.T) {
 		if err := p.Apply(rules); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
-		if ops.count(unix.AF_INET) != 1 {
-			t.Fatalf("expected 1 installed rule, got %d", ops.count(unix.AF_INET))
+		if ops.count(unix.AF_INET) != 2 {
+			t.Fatalf("expected one installed lookup/shadow pair, got %d rules", ops.count(unix.AF_INET))
 		}
-		if got := ops.rules[unix.AF_INET][0].IifName; got != "ge-0-0-0" {
-			t.Errorf("installed rule IifName = %q, want %q (must scope to the ingress interface)", got, "ge-0-0-0")
+		for _, r := range ops.rules[unix.AF_INET] {
+			if got := r.IifName; got != "ge-0-0-0" {
+				t.Errorf("installed rule IifName = %q, want %q (must scope both rules to ingress)", got, "ge-0-0-0")
+			}
 		}
 	})
 
@@ -842,9 +944,27 @@ func TestPBRApplyAggregatesAddErrors(t *testing.T) {
 	}
 }
 
+func TestPBRApplyRollsBackTerminatorWhenLookupFails(t *testing.T) {
+	ops := newFakeRuleOps()
+	ops.addErrType = map[uint8]error{
+		unix.RTN_UNICAST: errors.New("lookup add failed"),
+	}
+	p := &pbrManager{ops: ops}
+	err := p.Apply([]PBRRule{{
+		Family: unix.AF_INET, Src: "10.0.1.0/24", TableID: 101,
+		Instance: "vr", IifName: "ge-0-0-0",
+	}})
+	if err == nil {
+		t.Fatal("a failed PBR lookup add must be surfaced")
+	}
+	if got := ops.count(unix.AF_INET); got != 0 {
+		t.Errorf("the unreachable shadow must be rolled back when its lookup fails, got %d rules", got)
+	}
+}
+
 // TestPBRApplyCapBoundary pins the apply-side priority-window cap: exactly
-// maxPBRRules rules install cleanly, and one more triggers the overflow error
-// after installing the first maxPBRRules (#3430 M3, apply leg).
+// maxPBRSteeringRules lookup/shadow pairs install cleanly, and one more
+// triggers the overflow error (#11394).
 func TestPBRApplyCapBoundary(t *testing.T) {
 	mk := func(n int) []PBRRule {
 		out := make([]PBRRule, n)
@@ -857,24 +977,26 @@ func TestPBRApplyCapBoundary(t *testing.T) {
 	t.Run("exactly at cap", func(t *testing.T) {
 		ops := newFakeRuleOps()
 		p := &pbrManager{ops: ops}
-		if err := p.Apply(mk(maxPBRRules)); err != nil {
-			t.Fatalf("exactly %d rules must apply without error, got %v", maxPBRRules, err)
+		if err := p.Apply(mk(maxPBRSteeringRules)); err != nil {
+			t.Fatalf("exactly %d steering rules must apply without error, got %v", maxPBRSteeringRules, err)
 		}
-		if ops.count(unix.AF_INET) != maxPBRRules {
-			t.Errorf("expected %d rules installed, got %d", maxPBRRules, ops.count(unix.AF_INET))
+		if got, want := ops.count(unix.AF_INET), 2*maxPBRSteeringRules; got != want {
+			t.Errorf("expected %d lookup/shadow rules installed, got %d", want, got)
 		}
+		assertAllRulesInRange(t, ops, pbrRulePriority, pbrRulePriority+maxPBRRules)
 	})
 
 	t.Run("one over cap", func(t *testing.T) {
 		ops := newFakeRuleOps()
 		p := &pbrManager{ops: ops}
-		err := p.Apply(mk(maxPBRRules + 1))
+		err := p.Apply(mk(maxPBRSteeringRules + 1))
 		if err == nil {
-			t.Fatal("exceeding the cap must return a non-nil error")
+			t.Fatal("exceeding the steering-rule cap must return a non-nil error")
 		}
-		if ops.count(unix.AF_INET) != maxPBRRules {
-			t.Errorf("expected %d rules installed at the cap, got %d", maxPBRRules, ops.count(unix.AF_INET))
+		if got, want := ops.count(unix.AF_INET), 2*maxPBRSteeringRules; got != want {
+			t.Errorf("expected %d rules installed at the cap, got %d", want, got)
 		}
+		assertAllRulesInRange(t, ops, pbrRulePriority, pbrRulePriority+maxPBRRules)
 	})
 }
 
@@ -1156,20 +1278,17 @@ func TestPBRApplyRoutesDSCPThroughRuleAddDSCP7796(t *testing.T) {
 	}
 
 	got := ops.dscps[unix.AF_INET]
-	if len(got) != 2 {
-		t.Fatalf("RuleAddDSCP called %d times, want 2 (one per DSCPSet rule); "+
-			"recorded=%v. A DSCP rule installed through plain RuleAdd carries NO "+
-			"dscp selector and matches every DSCP.", len(got), got)
+	wantDSCPs := []uint8{46, 46, 0, 0}
+	if len(got) != len(wantDSCPs) {
+		t.Fatalf("RuleAddDSCP called %d times, want %d (lookup and unreachable rule per DSCPSet PBR); recorded=%v", len(got), len(wantDSCPs), got)
 	}
-	if got[0] != 46 {
-		t.Errorf("first DSCP rule installed with dscp %d, want 46 (ef)", got[0])
+	for i, want := range wantDSCPs {
+		if got[i] != want {
+			t.Errorf("RuleAddDSCP call %d used DSCP %d, want %d", i, got[i], want)
+		}
 	}
-	// DSCP 0 must reach the wire as an installed selector, not be skipped.
-	if got[1] != 0 {
-		t.Errorf("second DSCP rule installed with dscp %d, want 0 (be/cs0)", got[1])
-	}
-	// The DSCP-less rule must NOT have gone through the DSCP path.
-	if total := ops.count(unix.AF_INET); total != 3 {
-		t.Errorf("expected 3 installed IPv4 rules total, got %d", total)
+	// The DSCP-less lookup and shadow must NOT have gone through the DSCP path.
+	if total := ops.count(unix.AF_INET); total != 6 {
+		t.Errorf("expected 6 installed IPv4 rules (three lookup/shadow pairs), got %d", total)
 	}
 }

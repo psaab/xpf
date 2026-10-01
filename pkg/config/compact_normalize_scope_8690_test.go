@@ -99,6 +99,7 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 		if flagSite {
 			elidedText = nest(parent, ctx+stanza+" "+s.leaf+";")
 		}
+		elidedText = compactBGPProcessASFixture8690(siteKey, elidedText)
 
 		// ADMISSION COMES FROM THE PASS, NOT FROM A RE-DERIVED MODEL OF IT.
 		//
@@ -134,9 +135,12 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 			bracedV1 = nest(parent, ctx+stanza+" { "+s.leaf+"; }")
 			bracedV2 = nest(parent, ctx+stanza+" { }")
 		}
+		bracedV1 = compactBGPProcessASFixture8690(siteKey, bracedV1)
+		bracedV2 = compactBGPProcessASFixture8690(siteKey, bracedV2)
 		cb1 := compileText(t, bracedV1)
 		cb2 := compileText(t, bracedV2)
-		ce := compileText(t, nest(parent, ctx+stanza+" { }"))
+		ceText := compactBGPProcessASFixture8690(siteKey, nest(parent, ctx+stanza+" { }"))
+		ce := compileText(t, ceText)
 		if cb1 == nil || cb2 == nil || ce == nil {
 			// The pass DOES normalize this site (checked above), but a
 			// reference spelling would not compile, so the safety property
@@ -279,7 +283,7 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 		// Informational: was this site also empty-equivalent before the pass
 		// existed? That is #8689's stated rule and the cheapest evidence, but a
 		// reader handling both shapes is safe without it.
-		if compactElidedCompilesEmpty(t, parent, ctx, stanza, s.leaf, v1, ce) {
+		if compactElidedCompilesEmpty(t, siteKey, parent, ctx, stanza, s.leaf, v1, ce) {
 			emptyEquivalent++
 		}
 	}
@@ -529,6 +533,14 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 			"peer-as\"; with the pass enabled the value survives and the same gate accepts. " +
 			"Braced is accepted either way. Identical shape to the global twin above, and " +
 			"hand-measured separately rather than assumed from it.",
+		// #11313: a direct process `local-as` is valid. Without normalization,
+		// the elided form drops it and strict validation rejects for missing
+		// router AS; with normalization, it compiles and matches the braced
+		// compiled result, preserving the authored AS. This is a repair of the
+		// dropped value, not a bypass of the missing-AS gate (which still
+		// rejects a genuinely absent process AS).
+		"protocols bgp local-as":                           "HAND-MEASURED: the braced form compiles with both pass modes; the elided form is rejected without normalization by the #11313 missing-router-AS gate, and accepted with normalization on. The census also asserts the normalized output equals the braced compiled config, preserving the authored process local-AS.",
+		"routing-instances xpfname protocols bgp local-as": "HAND-MEASURED: the per-instance braced form compiles with both pass modes; the elided form is rejected without normalization by #11313 and accepted with normalization on. The census asserts the normalized output equals the braced compiled config, preserving the authored process local-AS.",
 		"security dynamic-address feed-server xpfarg hostname": "the gate refuses the CONSEQUENCE of the drop. " +
 			"Measured with the pass disabled, elided `feed-server f1 hostname " +
 			"\"feeds.example.com\";` loses the hostname and the compiler rejects with " +
@@ -608,12 +620,24 @@ func TestCompactNormalizeScopePreservesCompiledResult8690(t *testing.T) {
 	}
 }
 
+// compactBGPProcessASFixture8690 supplies a valid AS to BGP census cases so
+// #11313 does not mask the unrelated leaf under measurement. A direct process
+// `local-as` leaf remains AS-less: it is the intentional normalizer-disarm
+// probe, and its result must stay visible to this cell.
+func compactBGPProcessASFixture8690(siteKey, text string) string {
+	if strings.Contains(siteKey, "protocols bgp") &&
+		!strings.HasSuffix(siteKey, "protocols bgp local-as") {
+		return `routing-options { autonomous-system 65000; } ` + text
+	}
+	return text
+}
+
 // compactElidedCompilesEmpty compiles the elided spelling with the normalizer
 // SUPPRESSED, so the question asked is the pre-normalization one: does the
 // packed tail reach any reader?
-func compactElidedCompilesEmpty(t *testing.T, parent []string, ctx, stanza, leaf, v string, empty *Config) bool {
+func compactElidedCompilesEmpty(t *testing.T, siteKey string, parent []string, ctx, stanza, leaf, v string, empty *Config) bool {
 	t.Helper()
-	text := nest(parent, ctx+stanza+" "+leaf+" "+v+";")
+	text := compactBGPProcessASFixture8690(siteKey, nest(parent, ctx+stanza+" "+leaf+" "+v+";"))
 	tree, perrs := NewParser(text).Parse()
 	if len(perrs) > 0 || tree == nil {
 		return true // unparseable here is the census's problem, not this cell's

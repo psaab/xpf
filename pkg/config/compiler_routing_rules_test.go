@@ -144,13 +144,17 @@ func nextTableOverLimitSets() []string {
 // whose interface-routes rib-group imports the main table and whose member
 // unit carries 1001 connected prefixes (one over the 1000-rule admission cap).
 func ribGroupOverLimitSets() []string {
+	return ribGroupPrefixSets(maxRibGroupLeakRules+1, "inet.0")
+}
+
+func ribGroupPrefixSets(prefixCount int, importRib string) []string {
 	sets := []string{
 		"set routing-instances vr instance-type virtual-router",
 		"set routing-instances vr routing-options interface-routes rib-group inet leak",
 		"set routing-instances vr interface ge-0/0/1.0",
-		"set routing-options rib-groups leak import-rib inet.0",
+		fmt.Sprintf("set routing-options rib-groups leak import-rib %s", importRib),
 	}
-	for i := 0; i <= maxRibGroupLeakRules; i++ { // 0..1000 => 1001 distinct prefixes
+	for i := 0; i < prefixCount; i++ {
 		sets = append(sets, fmt.Sprintf(
 			"set interfaces ge-0/0/1 unit 0 family inet address 10.%d.%d.1/24", i/256, i%256))
 	}
@@ -211,6 +215,101 @@ func TestRoutingRuleWindowsLenientWarns_5854(t *testing.T) {
 		}
 		if !hasWarningContaining(cfg.Warnings, "rib-group") {
 			t.Fatalf("tolerant load must record a rib-group window warning, got %v", cfg.Warnings)
+		}
+	})
+}
+
+func TestRibGroupLeakPrefixCountMatchesApply11397(t *testing.T) {
+	t.Run("v4 group ignores v6 prefixes", func(t *testing.T) {
+		cfg := mkLeakingInstance(800, "inet")
+		v6 := mkLeakingInstance(800, "inet6")
+		unit := cfg.Interfaces.Interfaces["ge-0/0/1"].Units[0]
+		unit.Addresses = append(unit.Addresses,
+			v6.Interfaces.Interfaces["ge-0/0/1"].Units[0].Addresses...)
+		if got, want := ribGroupLeakPrefixCount(cfg), 800; got != want {
+			t.Fatalf("v4-only group counts %d prefixes, want %d", got, want)
+		}
+		if err := validateRoutingRuleWindowsStrict(cfg); err != nil {
+			t.Fatalf("800 v4 leaks must fit the window despite 800 unused v6 prefixes: %v", err)
+		}
+	})
+
+	t.Run("v6 group ignores v4 prefixes", func(t *testing.T) {
+		cfg := mkLeakingInstance(800, "inet6")
+		v4 := mkLeakingInstance(800, "inet")
+		unit := cfg.Interfaces.Interfaces["ge-0/0/1"].Units[0]
+		unit.Addresses = append(unit.Addresses,
+			v4.Interfaces.Interfaces["ge-0/0/1"].Units[0].Addresses...)
+		if got, want := ribGroupLeakPrefixCount(cfg), 800; got != want {
+			t.Fatalf("v6-only group counts %d prefixes, want %d", got, want)
+		}
+		if err := validateRoutingRuleWindowsStrict(cfg); err != nil {
+			t.Fatalf("800 v6 leaks must fit the window despite 800 unused v4 prefixes: %v", err)
+		}
+	})
+
+	t.Run("shared source table is counted once", func(t *testing.T) {
+		cfg := mkLeakingInstance(600, "inet")
+		second := mkLeakingInstance(600, "inet")
+		peer := second.RoutingInstances[0]
+		peer.Name = "dmz-vr-peer"
+		peer.Interfaces = []string{"ge-0/0/2.0"}
+		cfg.Interfaces.Interfaces["ge-0/0/2"] = second.Interfaces.Interfaces["ge-0/0/1"]
+		cfg.Interfaces.Interfaces["ge-0/0/2"].Name = "ge-0/0/2"
+		cfg.RoutingInstances = append(cfg.RoutingInstances, peer)
+		if got, want := ribGroupLeakPrefixCount(cfg), 600; got != want {
+			t.Fatalf("shared table installs %d prefixes, want %d", got, want)
+		}
+		if err := validateRoutingRuleWindowsStrict(cfg); err != nil {
+			t.Fatalf("one 600-rule source table must fit the window: %v", err)
+		}
+	})
+
+	t.Run("self-only group counts no leaked prefixes", func(t *testing.T) {
+		cfg := mkLeakingInstance(1500, "inet")
+		cfg.RoutingOptions.RibGroups["leak"].ImportRibs = []string{"dmz-vr.inet.0"}
+		if got := ribGroupLeakPrefixCount(cfg); got != 0 {
+			t.Fatalf("self-only import produces %d leak rules, want 0", got)
+		}
+		if err := validateRoutingRuleWindowsStrict(cfg); err != nil {
+			t.Fatalf("self-only 1500-prefix group must not consume leak slots: %v", err)
+		}
+	})
+}
+
+func TestRibGroupWindowGateVRFOnlyAndMainImport11397(t *testing.T) {
+	t.Run("VRF-only 1500-prefix group commits with Phase 2 warning", func(t *testing.T) {
+		sets := ribGroupPrefixSets(1500, "peer.inet.0")
+		sets = append(sets, "set routing-instances peer instance-type virtual-router")
+		cfg, err := CompileConfig(flatTreeFromSets(t, sets...))
+		if err != nil {
+			t.Fatalf("VRF-only group must not consume phase-one leak slots: %v", err)
+		}
+		if !hasWarningContaining(cfg.Warnings, "Phase 2 deferral") {
+			t.Fatalf("VRF-only import must retain its Phase 2 warning, got %v", cfg.Warnings)
+		}
+	})
+
+	t.Run("main-importing 1500-prefix group remains rejected", func(t *testing.T) {
+		_, err := CompileConfig(flatTreeFromSets(t, ribGroupPrefixSets(1500, "inet.0")...))
+		if err == nil || !strings.Contains(err.Error(), "rib-group") ||
+			!strings.Contains(err.Error(), "1500") {
+			t.Fatalf("1500 main-table leaks must be rejected with their count, got %v", err)
+		}
+	})
+	t.Run("sibling-family main import counts zero and commits", func(t *testing.T) {
+		cfg := mkLeakingInstance(1500, "inet")
+		cfg.RoutingOptions.RibGroups["leak"].ImportRibs = []string{"inet6.0"}
+		if got := ribGroupLeakPrefixCount(cfg); got != 0 {
+			t.Fatalf("v4 slot importing only inet6.0 counts %d leaks, want 0", got)
+		}
+		if err := validateRoutingRuleWindowsStrict(cfg); err != nil {
+			t.Fatalf("v4 slot importing only inet6.0 must not consume leak slots: %v", err)
+		}
+
+		sets := ribGroupPrefixSets(1500, "inet6.0")
+		if _, err := CompileConfig(flatTreeFromSets(t, sets...)); err != nil {
+			t.Fatalf("1500 v4 prefixes imported only from inet6.0 must commit: %v", err)
 		}
 	})
 }

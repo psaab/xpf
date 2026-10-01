@@ -18,13 +18,17 @@ import (
 //
 // The band, not a tag, is what identifies xpf's rules. PBR ip rules occupy
 // [PBRRulePriorityBase, PBRRulePriorityBase+PBRRuleWindow) — 29000..29999 —
-// and that constant is already the SSOT shared with the userspace FIB ingest
-// (#4479), so counting by priority cannot drift from the install side. Rules
-// outside the band (the kernel's own 0/32766/32767, shared destination leaks
-// at 30000-30999, and legacy rules) are not ours and are not counted.
+// and each lookup rule uses the even offset of a two-priority pair; its
+// unreachable shadow occupies the following odd offset. netlink v1.3.1 does
+// not decode the fib-rule action into Rule.Type, so count lookup slots by their
+// stable priority-pair position. The band constant is the SSOT shared with the
+// userspace FIB ingest (#4479), so counting by priority cannot drift from the
+// install side. Rules outside the band (the kernel's own 0/32766/32767, the
+// shared destination-leak range at 30000-30999, and legacy rules) are not ours
+// and are not counted.
 
-// PBRAppliedCount returns the number of PBR ip rules present in the kernel,
-// summed across both address families, and whether the readback SUCCEEDED.
+// PBRAppliedCount returns the number of PBR steering lookup rules present in
+// the kernel, summed across both address families, and whether readback SUCCEEDED.
 //
 // The bool is not advisory. A failed RuleList is indistinguishable from "no
 // rules installed" in the count alone, and reporting 0-applied against
@@ -46,7 +50,8 @@ func PBRAppliedCount(ops ruleOps) (count int, ok bool) {
 			return 0, false
 		}
 		for i := range rules {
-			if p := rules[i].Priority; p >= int(lo) && p < int(hi) {
+			if p := rules[i].Priority; p >= int(lo) && p < int(hi) &&
+				(p-int(lo))%2 == 0 {
 				count++
 			}
 		}

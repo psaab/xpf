@@ -14,7 +14,7 @@ import (
 // such a member is therefore resolved by the kernel's l3mdev rule at pref 1000
 // (VRF-table lookup) and, on a miss, stopped by the VRF miss terminator at pref
 // 2000 (`l3mdev unreachable`, vrf_miss_terminator_9819.go). Both precede the PBR
-// band at 31000-31999 (pbrRulePriority) structurally, so a kernel FBF `ip rule`
+// band at 29000-29999 (pbrRulePriority) structurally, so a kernel FBF `ip rule`
 // scoped to that member (BuildPBRRules, #5117 iif scoping) is never consulted
 // on the kernel slow path — while the userspace helper honours the same term
 // (ingress_route_table_override returns RouteOverride::Table with explicit-PBR

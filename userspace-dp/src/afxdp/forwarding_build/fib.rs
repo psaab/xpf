@@ -419,7 +419,14 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v4(
     route
         .next_hops
         .iter()
-        .map(|nh| {
+        .enumerate()
+        .map(|(index, nh)| {
+            let weight = route
+                .next_hop_weights
+                .get(index)
+                .copied()
+                .filter(|weight| *weight != 0)
+                .unwrap_or(1);
             let (next_hop, interface) = parse_route_next_hop(nh.as_str());
             let (ifindex, tunnel_endpoint_id) = resolve_next_hop_target_v4(
                 next_hop,
@@ -433,6 +440,7 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v4(
                 next_hop,
                 ifindex,
                 tunnel_endpoint_id,
+                weight,
             }
         })
         .collect()
@@ -455,7 +463,14 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v6(
     route
         .next_hops
         .iter()
-        .map(|nh| {
+        .enumerate()
+        .map(|(index, nh)| {
+            let weight = route
+                .next_hop_weights
+                .get(index)
+                .copied()
+                .filter(|weight| *weight != 0)
+                .unwrap_or(1);
             let (next_hop, interface) = parse_route_next_hop_v6(nh.as_str());
             let (ifindex, tunnel_endpoint_id) = resolve_next_hop_target_v6(
                 next_hop,
@@ -469,6 +484,7 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v6(
                 next_hop,
                 ifindex,
                 tunnel_endpoint_id,
+                weight,
             }
         })
         .collect()

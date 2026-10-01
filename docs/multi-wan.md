@@ -339,6 +339,16 @@ uplink regardless of the master routing table, using an
 pattern. Operator recipe (two uplinks, ISP-A = master default via
 `reth0.50`, ISP-B = `reth0.80`):
 
+The exact lowercase Juniper FBF literal `then routing-instance default` selects
+the global master table (`inet.0` / `inet6.0`), not a named instance table. It
+does not require a `routing-instances default` stanza, and that declaration
+alone remains valid. If the declaration coexists with an FBF term targeting
+literal `default`, strict compilation rejects the ambiguity; tolerant load
+warns and preserves both unchanged, with the alias selecting master. Rename
+the instance and target its new name to steer to its table. Names are
+case-sensitive: `Default` targeted as `Default` remains an ordinary named
+instance steer (#11308, #11644).
+
 **A forwarding instance is statics-only, and that is now enforced (#9409,
 #11312).** Interface membership and `protocols` are REJECTED at commit under
 `instance-type forwarding`, naming the instance and offending member or
@@ -785,6 +795,13 @@ routing, and only on double fault).
   AD-200 DHCP default plus its RFC 3442 classless routes) into
   `buildRouteSnapshots`. A DHCP uplink therefore now works as a primary
   fast-path uplink without a static default.
+  - **Gateway-link scope (#9512/#11389).** Learned IPv6 link-local next-hops
+    and repeated ECMP gateways whose `LinkIndex` values identify distinct
+    links carry `gateway@<netdev>` into the Rust FIB. This preserves separate
+    egress legs for identical gateways on different uplinks; other
+    global/IPv4 gateway inference remains unchanged. If a required interface
+    name cannot be resolved, the importer declines the whole route rather than
+    publishing an ambiguous ECMP set.
   - Same-prefix import is **preference-aware**: if the best configured
     route has preference 200 or better, the imported candidate is omitted.
     Otherwise both candidates are published and the Rust FIB selects the

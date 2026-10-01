@@ -3511,6 +3511,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
+                next_hop_weights: vec![],
                 next_hops: vec![],
                 discard: false,
                 next_table: "red.inet.0".to_string(),
@@ -3521,6 +3522,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 table: "red.inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "0.0.0.0/0".to_string(),
+                next_hop_weights: vec![],
                 next_hops: vec![],
                 discard: false,
                 next_table: "inet.0".to_string(),
@@ -4320,6 +4322,7 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
+            next_hop_weights: vec![],
             // Two equal-cost next-hops, each via a distinct interface.
             next_hops: vec![
                 "192.0.2.2@ge-0/0/1".to_string(),
@@ -4443,6 +4446,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
+            next_hop_weights: vec![],
             // Member 0: explicit gateway via ge-0/0/1. Member 1: INTERFACE-ONLY
             // (empty IP part before '@') via ge-0/0/2 — `next_hop == None`.
             next_hops: vec![
@@ -4580,6 +4584,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec![
             "192.0.2.2@ge-0/0/1".to_string(), // direct
             "@gr-0/0/0.0".to_string(),        // tunnel (endpoint id 1)
@@ -4696,6 +4701,7 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec![
             "192.0.2.2@ge-0/0/1".to_string(), // direct, live
             "@gr-0/0/0.0".to_string(),        // tunnel, underlay WITHDRAWN
@@ -4784,6 +4790,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "2001:db8:dead::/48".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec![
             "2001:db8:ec::2@ge-0/0/1".to_string(), // direct
             "@gr-0/0/0.0".to_string(),             // tunnel (endpoint id 1)
@@ -4901,6 +4908,7 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
+            next_hop_weights: vec![],
             next_hops: vec![
                 "192.0.2.2@ge-0/0/1".to_string(),
                 "192.0.3.2@ge-0/0/2".to_string(),
@@ -5108,6 +5116,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
+                next_hop_weights: vec![],
                 next_hops: vec!["192.0.2.2@ge-0/0/1".to_string()],
                 discard: false,
                 next_table: String::new(),
@@ -5119,6 +5128,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 table: "inet.0".to_string(),
                 family: "inet".to_string(),
                 destination: "203.0.113.0/24".to_string(),
+                next_hop_weights: vec![],
                 next_hops: vec!["192.0.3.2@ge-0/0/2".to_string()],
                 discard: false,
                 next_table: String::new(),
@@ -5186,6 +5196,7 @@ fn select_route_next_hop_evaluates_liveness_once_per_candidate() {
     let selected = select_route_next_hop(
         &candidates,
         1,
+        |candidate| *candidate as u64,
         |_c| {
             calls.set(calls.get() + 1);
             true // all live
@@ -5198,8 +5209,10 @@ fn select_route_next_hop_evaluates_liveness_once_per_candidate() {
         "liveness predicate must be evaluated exactly once per candidate (single snapshot); \
          the reverted double-eval form calls it 2x",
     );
-    // Selection still works over the live set: ip_hash 1 % 4 live = index 1.
-    assert_eq!(selected, Some(&20));
+    assert!(
+        selected.is_some_and(|candidate| candidates.contains(candidate)),
+        "selection must return a candidate from the live set"
+    );
 }
 
 /// #2922: a candidate that flips from live→dead between the count pass and
@@ -5226,6 +5239,7 @@ fn select_route_next_hop_consistent_under_liveness_flip_between_passes() {
     let selected = select_route_next_hop(
         &candidates,
         0,
+        |candidate| *candidate as u64,
         |c| {
             let mut s = seen.borrow_mut();
             s.insert(*c) // true on first insert, false if already present
@@ -5538,6 +5552,7 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "192.168.99.0/24".to_string(),
+            next_hop_weights: vec![],
             next_hops: vec!["10.5.5.2".to_string()],
             discard: false,
             next_table: String::new(),
@@ -7232,89 +7247,23 @@ fn egress_row_zone_is_order_invariant_not_last_write_6722() {
     }
 }
 
-/// #7204 (A1-b7-F6): the liveness bitmask must pick the SAME member the
-/// collect-based implementation did, at every fanout on both sides of the
-/// 64-candidate mask boundary.
-///
-/// This is an EQUIVALENCE, not a validity check, and that distinction is the
-/// whole point. ECMP selection is flow-consistent — a given 5-tuple must keep
-/// landing on the same member — so an implementation that picked a *different*
-/// live member would still look correct to a test that only asserted "the
-/// result is live", while silently repinning every existing flow on upgrade.
-///
-/// The reference below is the pre-#7204 body verbatim. Spanning 1..=70 covers
-/// the boundary in both directions: at or below 64 the mask path runs, above it
-/// the collect fallback does, and a spill above the supported ceiling is
-/// CORRECT behaviour rather than a defect — so the fallback is asserted to
-/// still select properly instead of being pinned as unreachable.
-#[test]
-fn select_route_next_hop_bitmask_matches_collect_reference_7204() {
-    fn reference<'a, T: Copy>(
-        candidates: &'a [T],
-        ip_hash: u64,
-        is_live: impl Fn(&T) -> bool,
-    ) -> Option<&'a T> {
-        if candidates.is_empty() {
-            return None;
-        }
-        let live: Vec<&'a T> = candidates.iter().filter(|c| is_live(c)).collect();
-        if !live.is_empty() {
-            let pick = (ip_hash % live.len() as u64) as usize;
-            live.get(pick).copied()
-        } else {
-            let pick = (ip_hash % candidates.len() as u64) as usize;
-            candidates.get(pick)
-        }
-    }
 
-    for fanout in 1usize..=70 {
-        let candidates: Vec<u32> = (0..fanout as u32).collect();
-        // Several liveness shapes: all live, none live, alternating, only the
-        // last live, only the first. "None live" exercises the fallback branch,
-        // which a uniformly-live fixture would never reach.
-        let shapes: Vec<Box<dyn Fn(&u32) -> bool>> = vec![
-            Box::new(|_c: &u32| true),
-            Box::new(|_c: &u32| false),
-            Box::new(|c: &u32| c % 2 == 0),
-            Box::new(move |c: &u32| *c as usize == fanout - 1),
-            Box::new(|c: &u32| *c == 0),
-        ];
-        for (shape_idx, is_live) in shapes.iter().enumerate() {
-            for ip_hash in [0u64, 1, 2, 7, 63, 64, 65, 1_000_003, u64::MAX] {
-                let got = select_route_next_hop(&candidates, ip_hash, |c| is_live(c), |_| true);
-                let want = reference(&candidates, ip_hash, |c| is_live(c));
-                assert_eq!(
-                    got, want,
-                    "fanout={fanout} shape={shape_idx} hash={ip_hash}: the bitmask \
-                     picked a different member than the collect reference — ECMP is \
-                     flow-consistent, so a different-but-live pick silently repins \
-                     every existing flow"
-                );
-            }
-        }
-    }
-}
-
-/// #7204 (A1-b7-F6): the bitmask must not cost a second liveness evaluation.
-///
-/// The collect existed to call `is_live` exactly once per candidate — both call
-/// sites reach `tunnel_next_hop_live`, which resolves a tunnel endpoint and
-/// consults the neighbour map, so a two-pass rewrite would have traded an
-/// allocation for double that work. This pins the property the collect was
-/// bought for, at a fanout the old inline capacity could not hold.
+/// #2922/#7204: the impure neighbor-liveness predicate is evaluated exactly
+/// once per candidate on the live path, including at larger fanouts.
 #[test]
-fn select_route_next_hop_bitmask_evaluates_liveness_once_7204() {
+fn select_route_next_hop_evaluates_liveness_once_at_varied_fanouts_7204() {
     use std::cell::Cell;
 
-    for fanout in [1usize, 8, 9, 64, 65] {
+    for fanout in [1usize, 3, 8, 32, 70] {
         let candidates: Vec<u32> = (0..fanout as u32).collect();
         let calls = Cell::new(0usize);
         let _ = select_route_next_hop(
             &candidates,
             12345,
-            |c| {
+            |candidate| *candidate as u64,
+            |candidate| {
                 calls.set(calls.get() + 1);
-                c % 3 != 0
+                candidate % 3 != 0
             },
             |_| true,
         );
@@ -7325,6 +7274,148 @@ fn select_route_next_hop_bitmask_evaluates_liveness_once_7204() {
         );
     }
 }
+
+/// #11403: weighted rendezvous keeps surviving flow pins when a weighted ECMP
+/// member is removed. Only flows that selected the removed member may move.
+#[test]
+fn weighted_ecmp_member_removal_preserves_survivors_11403() {
+    #[derive(Clone, Copy)]
+    struct Candidate {
+        id: u64,
+        weight: u32,
+    }
+
+    let candidates = [
+        Candidate { id: 11, weight: 1 },
+        Candidate { id: 22, weight: 4 },
+        Candidate { id: 33, weight: 2 },
+    ];
+    let survivors = [candidates[0], candidates[2]];
+    let mut initial_counts = [0usize; 3];
+    let mut initial_winners = [0u64; 1024];
+
+    for flow_hash in 0..1024u64 {
+        let selected = select_route_next_hop_weighted(
+            &candidates,
+            flow_hash,
+            |candidate| candidate.id,
+            |candidate| candidate.weight,
+            |_| true,
+            |_| true,
+        )
+        .expect("at least one live ECMP member");
+        let slot = match selected.id {
+            11 => 0,
+            22 => 1,
+            33 => 2,
+            _ => unreachable!(),
+        };
+        initial_counts[slot] += 1;
+        initial_winners[flow_hash as usize] = selected.id;
+    }
+
+    assert!(initial_counts.iter().all(|count| *count > 0));
+    assert!(
+        initial_counts[1] > initial_counts[0] * 2,
+        "weight 4 should receive substantially more flows than weight 1: {initial_counts:?}"
+    );
+
+    for flow_hash in 0..1024u64 {
+        let after = select_route_next_hop_weighted(
+            &survivors,
+            flow_hash,
+            |candidate| candidate.id,
+            |candidate| candidate.weight,
+            |_| true,
+            |_| true,
+        )
+        .expect("surviving members remain selectable");
+        let before = initial_winners[flow_hash as usize];
+        if before == 22 {
+            assert_ne!(
+                after.id, 22,
+                "flow {flow_hash} must leave the removed member"
+            );
+        } else {
+            assert_eq!(
+                after.id, before,
+                "flow {flow_hash} must stay pinned to surviving member {before}"
+            );
+        }
+    }
+}
+
+/// #11402: missing weights normalize to one, and scaling every weight equally
+/// does not overflow or change the rendezvous ordering.
+#[test]
+fn weighted_rendezvous_normalizes_edge_weights_11402() {
+    #[derive(Clone, Copy)]
+    struct Candidate {
+        id: u64,
+        weight: u32,
+    }
+
+    let zero_weight = [
+        Candidate { id: 11, weight: 0 },
+        Candidate { id: 22, weight: 4 },
+    ];
+    let normalized = [
+        Candidate { id: 11, weight: 1 },
+        Candidate { id: 22, weight: 4 },
+    ];
+    for flow_hash in 0..64u64 {
+        let pick = |candidates: &[Candidate]| {
+            select_route_next_hop_weighted(
+                candidates,
+                flow_hash,
+                |candidate| candidate.id,
+                |candidate| candidate.weight,
+                |_| true,
+                |_| true,
+            )
+            .map(|candidate| candidate.id)
+        };
+        assert_eq!(
+            pick(&zero_weight),
+            pick(&normalized),
+            "zero weight must normalize to one at hash {flow_hash}"
+        );
+    }
+
+    let wide_weights = [
+        Candidate {
+            id: 11,
+            weight: u32::MAX,
+        },
+        Candidate {
+            id: 22,
+            weight: u32::MAX,
+        },
+    ];
+    let unit_weights = [
+        Candidate { id: 11, weight: 1 },
+        Candidate { id: 22, weight: 1 },
+    ];
+    for flow_hash in 0..64u64 {
+        let pick = |candidates: &[Candidate]| {
+            select_route_next_hop_weighted(
+                candidates,
+                flow_hash,
+                |candidate| candidate.id,
+                |candidate| candidate.weight,
+                |_| true,
+                |_| true,
+            )
+            .map(|candidate| candidate.id)
+        };
+        assert_eq!(
+            pick(&wide_weights),
+            pick(&unit_weights),
+            "uniform u32::MAX weights must preserve ordering at hash {flow_hash}"
+        );
+    }
+}
+
 
 /// #11318: the no-live fallback must hash over the ARP-drivable subset, not
 /// the full vector. Fixture: one ifindex-0 (off-link) member + one
@@ -7349,6 +7440,9 @@ fn select_route_next_hop_fallback_excludes_undrivable_11318() {
         let got = select_route_next_hop(
             &candidates,
             ip_hash,
+            |nh| {
+                ((i64::from(nh.ifindex) as u64) << 16) ^ u64::from(nh.tunnel_endpoint_id)
+            },
             |_| false, // none live: fallback path
             |nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0,
         );
@@ -7361,11 +7455,10 @@ fn select_route_next_hop_fallback_excludes_undrivable_11318() {
     }
 }
 
-/// #11318: when NOTHING is drivable the legacy full-vector fallback is
-/// preserved — something selectable beats a certain drop. All-undrivable
-/// fixture must still resolve every hash to a real candidate.
+/// #11318: when nothing is drivable, the selector still returns a real member
+/// from the full set rather than making an otherwise usable route unavailable.
 #[test]
-fn select_route_next_hop_fallback_all_undrivable_keeps_legacy_pick_11318() {
+fn select_route_next_hop_fallback_all_undrivable_returns_candidate_11318() {
     #[derive(Copy, Clone, PartialEq, Eq, Debug)]
     struct Nh {
         ifindex: i32,
@@ -7379,6 +7472,9 @@ fn select_route_next_hop_fallback_all_undrivable_keeps_legacy_pick_11318() {
         let got = select_route_next_hop(
             &candidates,
             ip_hash,
+            |nh| {
+                ((i64::from(nh.ifindex) as u64) << 16) ^ u64::from(nh.tunnel_endpoint_id)
+            },
             |_| false,
             |nh| nh.ifindex > 0 || nh.tunnel_endpoint_id != 0,
         );
@@ -7399,13 +7495,17 @@ fn select_route_next_hop_drivable_unevaluated_on_live_path_11318() {
     let selected = select_route_next_hop(
         &candidates,
         1,
+        |candidate| *candidate as u64,
         |_| true, // all live: fallback never reached
         |_| {
             calls.set(calls.get() + 1);
             true
         },
     );
-    assert_eq!(selected, Some(&20));
+    assert!(
+        selected.is_some_and(|candidate| candidates.contains(candidate)),
+        "selection must return a live candidate"
+    );
     assert_eq!(
         calls.get(),
         0,
@@ -7413,32 +7513,259 @@ fn select_route_next_hop_drivable_unevaluated_on_live_path_11318() {
     );
 }
 
-/// #7204 (A1-b7-F6): the liveness mask must cover the whole supported ECMP
-/// range, or the allocation this item removed comes back for the fanouts it no
-/// longer reaches.
-///
-/// This pins a PROPERTY, not the constant's value: lowering the mask width does
-/// not change which member is picked (the fallback is equivalence-tested above),
-/// so no behavioural test can see it. What it changes is whether a supported
-/// configuration allocates on every new-flow lookup — and the bound that makes
-/// 64 the right number is the control plane's rendered `maximum-paths`, not a
-/// preference.
+/// #11403: when one ECMP member dies, re-resolved flows pinned to surviving
+/// members must stay put. Only the dead member's original share may move.
 #[test]
-fn ecmp_liveness_mask_covers_the_rendered_maximum_paths_7204() {
-    // pkg/frr/config_render.go resolveECMP -> ecmpMaxPaths = 64, rendered by
-    // pkg/frr/protocols_render.go as `maximum-paths %d`. Junos
-    // routing-options maximum-ecmp is Missing (docs/feature-gaps.md), so 64 is
-    // a ceiling rather than a default an operator can raise.
-    const RENDERED_MAXIMUM_PATHS: usize = 64;
-    assert!(
-        crate::afxdp::forwarding::fib::MAX_SUPPORTED_ECMP_FANOUT >= RENDERED_MAXIMUM_PATHS,
-        "the ECMP liveness mask covers {} candidates but the control plane renders \
-         maximum-paths {}; fanouts in between fall back to the heap-collecting path \
-         and allocate on every new-flow FIB resolution",
-        crate::afxdp::forwarding::fib::MAX_SUPPORTED_ECMP_FANOUT,
-        RENDERED_MAXIMUM_PATHS,
-    );
+fn ecmp_member_removal_preserves_survivors_v4_v6_11403() {
+    let interface = |name: &str, linux_name: &str, ifindex, v4: &str, v6: &str, mac: &str| {
+        crate::InterfaceSnapshot {
+            name: name.to_string(),
+            zone: "wan".to_string(),
+            linux_name: linux_name.to_string(),
+            ifindex,
+            hardware_addr: mac.to_string(),
+            addresses: vec![
+                InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: v4.to_string(),
+                    scope: 0,
+                },
+                InterfaceAddressSnapshot {
+                    family: "inet6".to_string(),
+                    address: v6.to_string(),
+                    scope: 0,
+                },
+            ],
+            ..Default::default()
+        }
+    };
+    let neighbor = |interface: &str, ifindex, family: &str, ip: &str, mac: &str| {
+        NeighborSnapshot {
+            interface: interface.to_string(),
+            ifindex,
+            family: family.to_string(),
+            ip: ip.to_string(),
+            mac: mac.to_string(),
+            state: "reachable".to_string(),
+            router: true,
+            link_local: false,
+        }
+    };
+    let snapshot = crate::ConfigSnapshot {
+        zones: vec![ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            interface(
+                "ge-0/0/1",
+                "ge-0-0-1",
+                11,
+                "192.0.2.1/24",
+                "2001:db8:1::1/64",
+                "02:00:00:00:00:11",
+            ),
+            interface(
+                "ge-0/0/2",
+                "ge-0-0-2",
+                22,
+                "192.0.3.1/24",
+                "2001:db8:2::1/64",
+                "02:00:00:00:00:22",
+            ),
+            interface(
+                "ge-0/0/3",
+                "ge-0-0-3",
+                33,
+                "192.0.4.1/24",
+                "2001:db8:3::1/64",
+                "02:00:00:00:00:33",
+            ),
+        ],
+        routes: vec![
+            RouteSnapshot {
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "203.0.113.0/24".to_string(),
+                next_hops: vec![
+                    "192.0.2.2@ge-0/0/1".to_string(),
+                    "192.0.3.2@ge-0/0/2".to_string(),
+                    "192.0.4.2@ge-0/0/3".to_string(),
+                ],
+                preference: 5,
+                ..Default::default()
+            },
+            RouteSnapshot {
+                table: "inet6.0".to_string(),
+                family: "inet6".to_string(),
+                destination: "2001:db8:100::/64".to_string(),
+                next_hops: vec![
+                    "2001:db8:1::2@ge-0/0/1".to_string(),
+                    "2001:db8:2::2@ge-0/0/2".to_string(),
+                    "2001:db8:3::2@ge-0/0/3".to_string(),
+                ],
+                preference: 5,
+                ..Default::default()
+            },
+        ],
+        neighbors: vec![
+            neighbor("ge-0-0-1", 11, "inet", "192.0.2.2", "00:11:22:33:44:11"),
+            neighbor("ge-0-0-2", 22, "inet", "192.0.3.2", "00:11:22:33:44:22"),
+            neighbor("ge-0-0-3", 33, "inet", "192.0.4.2", "00:11:22:33:44:33"),
+            neighbor(
+                "ge-0-0-1",
+                11,
+                "inet6",
+                "2001:db8:1::2",
+                "00:11:22:33:66:11",
+            ),
+            neighbor(
+                "ge-0-0-2",
+                22,
+                "inet6",
+                "2001:db8:2::2",
+                "00:11:22:33:66:22",
+            ),
+            neighbor(
+                "ge-0-0-3",
+                33,
+                "inet6",
+                "2001:db8:3::2",
+                "00:11:22:33:66:33",
+            ),
+        ],
+        ..Default::default()
+    };
+    let initial = build_forwarding_state(&snapshot);
+    let mut degraded_snapshot = snapshot.clone();
+    degraded_snapshot.neighbors.retain(|neighbor| neighbor.ifindex != 22);
+    let degraded = build_forwarding_state(&degraded_snapshot);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let resolve = |state, flow: &SessionFlow| {
+        lookup_forwarding_resolution_for_session(
+            state,
+            &dynamic_neighbors,
+            flow,
+            SessionDecision {
+                resolution: no_route_resolution(None),
+                nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+        )
+    };
+    let assert_stability = |family: &str,
+                            initial,
+                            degraded,
+                            make_flow: &dyn Fn(u16) -> SessionFlow| {
+        let mut initial_counts = [0usize; 3];
+        for src_port in 1024u16..2048 {
+            let flow = make_flow(src_port);
+            let before = resolve(initial, &flow);
+            let after = resolve(degraded, &flow);
+            assert_eq!(
+                before.disposition,
+                ForwardingDisposition::ForwardCandidate,
+                "{family} flow {src_port} must resolve before the failure"
+            );
+            assert_eq!(
+                after.disposition,
+                ForwardingDisposition::ForwardCandidate,
+                "{family} flow {src_port} must resolve after the failure"
+            );
+            let before_ifindex = before.egress_ifindex;
+            let after_ifindex = after.egress_ifindex;
+            let member_slot = |ifindex| match ifindex {
+                11 => 0,
+                22 => 1,
+                33 => 2,
+                _ => panic!("{family} resolved to non-member ifindex {ifindex}"),
+            };
+            initial_counts[member_slot(before_ifindex)] += 1;
+            if before_ifindex == 22 {
+                assert_ne!(
+                    after_ifindex, 22,
+                    "{family} flow {src_port} stayed on the dead member"
+                );
+            } else {
+                assert_eq!(
+                    after_ifindex, before_ifindex,
+                    "{family} flow {src_port} moved from a surviving ECMP member"
+                );
+            }
+        }
+        assert!(
+            initial_counts.iter().all(|count| *count > 0),
+            "{family} fixture must distribute flows across all three members"
+        );
+        initial_counts
+    };
+    let make_v4_flow = |src_port| {
+        let src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5));
+        SessionFlow {
+            src_ip,
+            dst_ip,
+            forward_key: crate::session::SessionKey {
+                addr_family: libc::AF_INET as u8,
+                protocol: PROTO_TCP,
+                src_ip,
+                dst_ip,
+                src_port,
+                dst_port: 443,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+        }
+    };
+    let make_v6_flow = |src_port| {
+        let src_ip = IpAddr::V6("2001:db8:ffff::7".parse().expect("source IPv6"));
+        let dst_ip = IpAddr::V6("2001:db8:100::5".parse().expect("destination IPv6"));
+        SessionFlow {
+            src_ip,
+            dst_ip,
+            forward_key: crate::session::SessionKey {
+                addr_family: libc::AF_INET6 as u8,
+                protocol: PROTO_TCP,
+                src_ip,
+                dst_ip,
+                src_port,
+                dst_port: 443,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+        }
+    };
+
+    let _ = assert_stability("IPv4", &initial, &degraded, &make_v4_flow);
+    let _ = assert_stability("IPv6", &initial, &degraded, &make_v6_flow);
+
+    let mut weighted_snapshot = snapshot.clone();
+    for route in &mut weighted_snapshot.routes {
+        route.next_hop_weights = vec![1, 4, 2];
+    }
+    let weighted_initial = build_forwarding_state(&weighted_snapshot);
+    let mut weighted_degraded_snapshot = weighted_snapshot.clone();
+    weighted_degraded_snapshot
+        .neighbors
+        .retain(|neighbor| neighbor.ifindex != 22);
+    let weighted_degraded = build_forwarding_state(&weighted_degraded_snapshot);
+    let weighted_v4_counts =
+        assert_stability("weighted IPv4", &weighted_initial, &weighted_degraded, &make_v4_flow);
+    let weighted_v6_counts =
+        assert_stability("weighted IPv6", &weighted_initial, &weighted_degraded, &make_v6_flow);
+    for (family, counts) in [
+        ("weighted IPv4", weighted_v4_counts),
+        ("weighted IPv6", weighted_v6_counts),
+    ] {
+        assert!(
+            counts[1] > counts[0] * 2,
+            "{family} weight-4 leg should receive substantially more flows than weight-1: {counts:?}"
+        );
+    }
 }
+
 
 /// #7204 (A1-b7-F5): `canonical_route_table` must BORROW when it has nothing to
 /// rewrite, and the value it returns must be unchanged either way.

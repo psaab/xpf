@@ -10,17 +10,14 @@ kernel route table; this package owns the *interfaces* routes hang off
 of — and, since #7409, it also **reads** the kernel route table back for
 the userspace dataplane FIB (see "Kernel-learned route import" below).
 
-**Link-local next hops carry their link (#9512).** An IPv6 link-local gateway
-is meaningless without its interface. The importer publishes each such leg as
-`gateway@<netdev>` (the kernel name from the leg's `LinkIndex`), the form the
-configured-route path already uses and the helper parses. Before this, the leg's
-`LinkIndex` was dropped, and the helper bound whichever interface came first in
-its connected-prefix scan: every addressed interface contributes an `fe80::/64`,
-so every OSPFv3-learned route (RFC 5340) was bound by snapshot order. A link-local
-leg whose link cannot be named refuses the whole route (ECMP stays
-all-or-nothing), with one deduplicated warning naming the route. Global and IPv4
-gateways are unchanged: they stay scope-less, and the helper infers them from
-the connected prefix.
+**Learned next-hop scope (#9512, #11389).** IPv6 link-local gateways require
+their interface, so each learned leg is published as `gateway@<netdev>` using
+its kernel `LinkIndex`. The same scope is added to every ECMP leg for a gateway
+known on distinct positive link indexes: without it, the Rust FIB's first
+connected-prefix match gives identical gateways the same egress and collapses
+the paths. A link-local or ambiguous gateway whose link cannot be named refuses
+the whole route. Single global/IPv4 gateways and ECMP with distinct gateways
+remain bare and keep their existing connected-prefix inference.
 
 ## Structure (#1698 domain split)
 
@@ -421,16 +418,19 @@ delegate to the owning domain. Exported types:
     to keep host-originated default-instance traffic on the leak would
     reintroduce the cross-VRF hijack for every VRF-bound daemon.
 
-  The AF\_XDP fast path is instance-scoped only for **PBR-steered**
-  traffic. The userspace FIB follows a `next_table` route found in
-  whichever table a lookup runs in
-  (`userspace-dp/src/afxdp/forwarding/fib.rs`), and a transit lookup runs
-  in a per-instance table only when a PBR interface filter steers it
-  there. Without PBR the fast path does no per-instance destination-FIB
-  selection (`userspace-dp/src/afxdp/forwarding/README.md`). The exposure
-  #9420 closed was on the Linux path: host-originated traffic, slow-path
-  `XDP_PASS` packets, local delivery, and any interface without native
-  XDP where `redirect_capable` falls back to kernel forwarding.
+  The AF\_XDP fast path scopes transit lookups by **native RI membership
+  and explicit PBR (#10312)**. Without a matching PBR routing-instance
+  term, the validated ingress `routing_domain` selects its native
+  per-family table; explicit PBR takes precedence, including a terminal
+  discard/reject. Only the default domain uses global `inet.0`/`inet6.0`.
+  A nonzero domain without a current per-family table is terminal, not
+  a fallback to main. The FIB follows `next_table` in the selected table;
+  see the native RI/PBR contract in
+  `userspace-dp/src/afxdp/forwarding/README.md`.
+  The exposure #9420 closed was on the Linux path: host-originated
+  traffic, slow-path `XDP_PASS` packets, local delivery, and interfaces
+  where `redirect_capable` falls back to kernel forwarding. Native
+  userspace scoping does not replace the kernel ingress restriction.
 - `1000`: the kernel's own `l3mdev` rule (`lookup [l3mdev-table]`), added
   by the kernel when the first VRF device appears. It is not ours. It is
   listed because the next two entries are defined relative to it, and
@@ -469,9 +469,12 @@ delegate to the owning domain. Exported types:
 - `29000–29999`: PBR (firewall-filter `routing-instance` action).
   `pbrRulePriority` in `rules.go`. It follows the #9819 VRF-miss terminator
   at 2000 and precedes the shared destination-leak range, matching the
-  helper's PBR-first table-override order (#11319). The former `31000–31999`
-  range is retained only for upgrade cleanup and is never assigned to new PBR
-  rules.
+  helper's PBR-first table-override order (#11319). Each lookup is immediately
+  followed by an `iif`/family/selector-identical `unreachable` shadow (#11394),
+  so a target-table miss stops here instead of falling through to main without
+  affecting packets outside the PBR match. The band fits 500 lookup/shadow
+  pairs. The former `31000–31999` range is retained only for upgrade cleanup
+  and is never assigned to new PBR rules.
   **Kernel FBF support matrix (#3730):**
   `BuildPBRRules` mirrors only the term `from` predicates an `ip rule` can
   express — source/destination address + prefix-list, DSCP (any value
@@ -563,9 +566,11 @@ delegate to the owning domain. Exported types:
   therefore SKIPS any rule in `[PBRRulePriorityBase, +PBRRuleWindow)` and
   fails closed: the userspace FIB simply omits the leak while the kernel keeps
   applying the real, fully-qualified rule. `PBRRulePriorityBase` /
-  `PBRRuleWindow` are the SSOT in `pkg/config`, shared by the install cap
-  (`maxPBRRules`) here and the snapshot skip there so the two cannot drift.
-  **The `maxPBRRules` cap is enforced DURING expansion, not after (#5683).**
+  `PBRRuleWindow` are the SSOT in `pkg/config`, shared by the priority band
+  cleanup and the snapshot skip so the two cannot drift. The effective
+  `maxPBRSteeringRules` cap here is half the window because each lookup consumes
+  a second priority for its unreachable shadow. **That cap is enforced DURING
+  expansion, not after (#5683).**
   Each `routing-instance` term expands to a six-dimensional Cartesian product —
   DSCP × protocol × source-port × destination-port × source × destination.
   Before #5683 `buildPBRFromFilter` materialized the FULL product of every term
