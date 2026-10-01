@@ -175,31 +175,42 @@ non-trivial code. This page is the quick-reference gotcha list.
   addressed unit that has no `vlan-id`: that unit's VRRP instance is bound to
   the parent, which is otherwise left with no IPv4 source
   (`VLANParentAddresses`, #9721).
-- DHCP interfaces: the daemon's DHCP client manages the address; address
+  DHCP interfaces: the daemon's DHCP client manages the address; address
   reconciliation is skipped. DHCP-learned default routes get admin distance
   200 in FRR. A learned classless prefix is suppressed (with a visible warning)
-  when a rendered/operator static route in the same table contains it, so
-  DHCP cannot defeat the documented learned < static contract. The management
-  VRF treats only table-999 `RTPROT_STATIC` routes as operator
+  when a rendered/operator static or an installed same-VRF RIB route contains
+  it, so DHCP cannot defeat an existing path by longest-prefix match. The FRR
+  apply reads the live main/instance tables for non-static routes, including
+  BGP/OSPF/IS-IS/RIP and tunnel next-hops, and also checks the preferred-route
+  overlay. Static FIB rows are checked from renderable config instead: FRR
+  stamps its own DHCP classless routes as staticd entries, so importing those
+  would make a lease suppress itself on every later apply. A live dynamic
+  default is not classless-prefix coverage; the separate configured-static
+  default rule is unchanged. If the live-table read is incomplete, classless
+  routes fail closed while DHCP defaults keep their independent contract;
+  `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` is the explicit escape hatch.
+  The management VRF treats only table-999 `RTPROT_STATIC` routes as operator
   authority; xpf-owned `RTPROT_DHCP` and ordinary connected/kernel routes are
-  not operator authority. A gatewayless `RTPROT_KERNEL` connected prefix in
-  table 999 suppresses any DHCP classless route it contains by default
-  (#11383); `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` may restore that general
-  connected overlap with a loud security warning. As a separate non-overridable
-  hard fence (#11362), a connected prefix on a configured cluster control/fabric
-  interface suppresses any DHCP classless route it contains even with the trust
-  override set. Unexpected other-protocol routes are warned and ignored.
-  Competing eligible DHCP defaults in table 999 are resolved per family by
-  selecting the lexically first interface (gateway address breaks interface
-  ties) and warning with the candidates and winner (#11363); classless routes
-  from other leases still apply. An option-121 `/0` follows the normal
-  DHCP-default suppression contract. Unusually broad classless `/1` prefixes and
-  non-forwardable martian ranges (`0/8`, `127/8`, `169.254/16`, `224/4`,
-  `240/4`) are refused by default. The deliberate escape hatch
-  `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` restores operator-covered, general
-  connected-overlap, broad, and martian classless routes except the cluster
-  control/fabric-prefix fence, and emits a loud security warning; it is unset by
-  default.
+  not operator authority. BGP/OSPF/IS-IS/RIP routes in table 999 suppress
+  classless prefixes they contain, except a dynamic `/0`, which does not
+  protect specific option-121 destinations. A gatewayless `RTPROT_KERNEL`
+  connected prefix in table 999 suppresses any DHCP classless route it contains
+  by default (#11383); `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` may restore that
+  general connected overlap with a loud security warning. As a separate
+  non-overridable hard fence (#11362), a connected prefix on a configured
+  cluster control/fabric interface suppresses any DHCP classless route it
+  contains even with the trust override set. Unexpected other-protocol routes
+  are warned and ignored. Competing eligible DHCP defaults in table 999 are
+  resolved per family by selecting the lexically first interface (gateway
+  address breaks interface ties) and warning with the candidates and winner
+  (#11363); classless routes from other leases still apply. An option-121 `/0`
+  follows the normal DHCP-default suppression contract. Unusually broad
+  classless `/1` prefixes and non-forwardable martian ranges (`0/8`, `127/8`,
+  `169.254/16`, `224/4`, `240/4`) are refused by default. The deliberate
+  escape hatch `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` restores operator-covered,
+  dynamic-RIB-covered, general connected-overlap, broad, and martian classless
+  routes except the cluster control/fabric-prefix fence, and emits a loud
+  security warning; it is unset by default.
 
 ## XDP on SR-IOV interfaces
 

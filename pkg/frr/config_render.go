@@ -246,6 +246,54 @@ func dhcpClasslessCoveredByStatic(fc *FullConfig, dr DHCPRoute) string {
 	}
 	return ""
 }
+
+// dhcpClasslessCoveredByRIB reports a live same-VRF RIB or preferred-overlay
+// route that contains a DHCP-learned classless prefix. Static routes are handled
+// by dhcpClasslessCoveredByStatic because only renderable configured statics
+// have operator precedence; importing staticd routes here would let an already
+// installed DHCP classless route suppress itself on a later apply.
+func dhcpClasslessCoveredByRIB(fc *FullConfig, dr DHCPRoute) string {
+	if fc == nil || dr.Destination == "" {
+		return ""
+	}
+	learned, err := netip.ParsePrefix(dr.Destination)
+	if err != nil {
+		return ""
+	}
+	for _, route := range fc.RIBRoutes {
+		if route.VRF != dr.VRF {
+			continue
+		}
+		if destination := dhcpClasslessCoveredByPrefix(route.Destination, learned); destination != "" {
+			return destination
+		}
+	}
+	for _, route := range fc.PreferredRoutes {
+		if route.RoutingInstance != dr.VRF {
+			continue
+		}
+		if destination := dhcpClasslessCoveredByPrefix(route.Destination, learned); destination != "" {
+			return destination
+		}
+	}
+	return ""
+}
+
+func dhcpClasslessCoveredByPrefix(destination string, learned netip.Prefix) string {
+	prefix, err := netip.ParsePrefix(destination)
+	// A dynamic default is only the fallback path; it does not protect
+	// specific option-121 destinations. Configured static defaults retain
+	// their existing separate suppression rule.
+	if err != nil || prefix.Bits() == 0 {
+		return ""
+	}
+	if prefix.Addr().BitLen() != learned.Addr().BitLen() ||
+		prefix.Bits() > learned.Bits() || !prefix.Contains(learned.Addr()) {
+		return ""
+	}
+	return prefix.String()
+}
+
 func dhcpClasslessPrefixSafetyFailure(destination string) string {
 	prefix, err := netip.ParsePrefix(destination)
 	if err != nil {
@@ -525,10 +573,11 @@ func instanceRouteTarget(instances []InstanceConfig, name string) (vrfName strin
 // renderDHCPDefaults emits DHCP-learned routes at admin distance 200: the
 // default route (option-3 gateway or the option-121 0.0.0.0/0 entry) plus
 // RFC 3442 classless static routes (option 121 / legacy 249). A rendered
-// static route suppresses a learned classless route when it contains that
-// learned prefix, because the more-specific learned route would otherwise
-// override the operator's static route by longest-prefix match. The default
-// route keeps its existing same-prefix suppression and renderability rules.
+// static route or a live same-table RIB route suppresses a learned classless
+// route when it contains that prefix, because the more-specific learned route
+// would otherwise override the existing path by longest-prefix match. The
+// default route keeps its existing same-prefix suppression and renderability
+// rules.
 // XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1 is an explicit operator escape hatch:
 // covered classless routes render again, with a loud warning at every render.
 // Both families bind the route to the originating interface when the lease
@@ -613,6 +662,20 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 		} else {
 			safetyReason := dhcpClasslessPrefixSafetyFailure(dest)
 			staticDestination := dhcpClasslessCoveredByStatic(fc, dr)
+			ribDestination := dhcpClasslessCoveredByRIB(fc, dr)
+			if fc.RIBRouteInventoryFailed {
+				if trustClassless {
+					slog.Warn("SECURITY: DHCP classless trust override allows a route "+
+						"despite incomplete RIB inventory (#11426)",
+						"destination", dest, "gateway", dr.Gateway,
+						"env", dhcpClasslessTrustOverrideEnv, "vrf", dr.VRF)
+				} else {
+					slog.Warn("SECURITY: refusing DHCP classless route without a "+
+						"complete same-table RIB inventory (#11426)",
+						"destination", dest, "gateway", dr.Gateway, "vrf", dr.VRF)
+					continue
+				}
+			}
 			if safetyReason != "" {
 				if trustClassless {
 					slog.Warn("SECURITY: DHCP classless trust override allows "+
@@ -640,6 +703,20 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 					slog.Warn("SECURITY: suppressing DHCP classless route covered by "+
 						"a configured static route (#9943)",
 						"destination", dest, "static_destination", staticDestination,
+						"gateway", dr.Gateway, "vrf", dr.VRF)
+					continue
+				}
+			} else if ribDestination != "" {
+				if trustClassless {
+					slog.Warn("SECURITY: DHCP classless trust override allows a route "+
+						"covered by a live same-table RIB route (#11426)",
+						"destination", dest, "rib_destination", ribDestination,
+						"gateway", dr.Gateway, "env", dhcpClasslessTrustOverrideEnv,
+						"vrf", dr.VRF)
+				} else {
+					slog.Warn("SECURITY: suppressing DHCP classless route covered by "+
+						"a live same-table RIB route (#11426)",
+						"destination", dest, "rib_destination", ribDestination,
 						"gateway", dr.Gateway, "vrf", dr.VRF)
 					continue
 				}
