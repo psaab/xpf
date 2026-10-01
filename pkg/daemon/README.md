@@ -3777,3 +3777,9 @@ never lock an operator out of a remote box it manages.
   publish success, under `applySem`). The ip-monitoring engine lives
   in `pkg/ipmon`; RG transitions re-evaluate gating via
   `reconcileIPMonGating` from `reconcileRGState`.
+- `daemon_route_listener.go` filters kernel route events through
+  `routing.LearnedRouteTableIDs` and marks a `pkg/coalesce` loop rather than
+  publishing per event; subscription gaps and errors mark it as well. Coalesced
+  actuation acquires `applySem` and republishes the routes-only snapshot. A
+  confirmed changed publish is followed by a FIB-generation bump; an
+  unconfirmed bump remains retryable even when the next publish is a duplicate.
