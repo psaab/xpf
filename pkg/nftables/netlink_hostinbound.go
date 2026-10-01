@@ -10,13 +10,15 @@ package nftables
 // ruleset-parity test pins.
 
 import (
+	"fmt"
 	"sort"
-
-	"github.com/google/nftables"
 	"strconv"
 	"strings"
 
+	"github.com/google/nftables"
+	"github.com/google/nftables/expr"
 	"github.com/psaab/xpf/pkg/config"
+	"golang.org/x/sys/unix"
 )
 
 // unzonedHostInboundZoneLabel mirrors dpuserspace.UnzonedHostInboundZoneLabel:
@@ -53,17 +55,21 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
 		))
+		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), true)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		for i, prog := range spec.Programs {
 			emitJunosHostProgramJumpNetlink(p, i, prog)
 		}
+		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
 		emitHostInboundICMPAcceptsNetlink(p)
 	} else {
 		p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
 		))
+		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), true)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
+		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
 		emitHostInboundICMPAcceptsNetlink(p)
 	}
 
@@ -163,6 +169,14 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 	}
 	for _, typ := range HostInboundAcceptCounterTypes {
 		decl(HostInboundAcceptCounterName(typ))
+	}
+	for _, rule := range HostInboundScreenFloodRules(spec.Views) {
+		if rule.AggregateThreshold > 0 {
+			decl(HostInboundScreenFloodCounterName(rule, false))
+		}
+		if rule.SourceThreshold > 0 {
+			decl(HostInboundScreenFloodCounterName(rule, true))
+		}
 	}
 	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
 	for _, v := range spec.Views {
@@ -577,4 +591,176 @@ func u8ToInts(vals []uint8) []int {
 		out[i] = int(v)
 	}
 	return out
+}
+
+// emitHostInboundScreenFloodNetlink mirrors the text renderer's two-phase
+// placement: reply-direction packets are screened before their early accept,
+// while original-direction packets are screened after any fine Junos-host
+// program has run.
+func emitHostInboundScreenFloodNetlink(p *nlPlan, rules []HostInboundScreenFloodRule, repliesOnly bool) {
+	for _, screen := range rules {
+		base := func() *ruleAsm {
+			a := p.rule()
+			if repliesOnly {
+				a.ctEstablishedRelated().ctDirectionReply()
+			}
+			if len(screen.IngressNetdevs) > 0 {
+				a.iifname(screen.IngressNetdevs)
+				// Ingress names can carry both IP families; scope every
+				// family-specific source key and protocol matcher explicitly.
+				a.needNfproto(screenFloodFamily(screen))
+			} else {
+				a.daddr(screenFloodFamily(screen), screen.Addresses, false)
+			}
+			switch screen.Protocol {
+			case "udp":
+				a.needL4proto(uint8(unix.IPPROTO_UDP))
+			case "icmp":
+				a.needL4proto(uint8(unix.IPPROTO_ICMP))
+			case "icmpv6":
+				a.needL4proto(uint8(unix.IPPROTO_ICMPV6))
+			case "tcp-syn":
+				a.tcpFlags(0x02, 0x10)
+			default:
+				return nil
+			}
+			return a
+		}
+
+		if screen.SourceThreshold > 0 {
+			sourceSet := addHostInboundScreenFloodSet(p, screen, true)
+			if sourceSet == nil {
+				continue
+			}
+			perSource := base()
+			if perSource == nil {
+				continue
+			}
+			perSource.add(hostInboundScreenSourceKey(screen)).
+				add(sourceSet).
+				counterRef(HostInboundScreenFloodCounterName(screen, true))
+			if screen.AlarmWithoutDrop {
+				perSource.add(hostInboundScreenFloodAlarm(screen, true)...)
+				perSource.emit()
+			} else {
+				perSource.emit(verdictDrop()...)
+			}
+		}
+
+		if screen.AggregateThreshold > 0 && p.err == nil {
+			globalSet := addHostInboundScreenFloodSet(p, screen, false)
+			if globalSet == nil {
+				continue
+			}
+			aggregate := base()
+			if aggregate == nil {
+				continue
+			}
+			aggregate.add(hostInboundScreenAggregateKey()).
+				add(globalSet).
+				counterRef(HostInboundScreenFloodCounterName(screen, false))
+			if screen.AlarmWithoutDrop {
+				aggregate.add(hostInboundScreenFloodAlarm(screen, false)...)
+				aggregate.emit()
+			} else {
+				aggregate.emit(verdictDrop()...)
+			}
+		}
+	}
+}
+
+func screenFloodLimit(rate uint32) *expr.Limit {
+	return &expr.Limit{
+		Type:  expr.LimitTypePkts,
+		Rate:  uint64(rate),
+		Over:  true,
+		Unit:  expr.LimitTimeSecond,
+		Burst: rate,
+	}
+}
+
+func hostInboundScreenFloodAlarm(screen HostInboundScreenFloodRule, source bool) []expr.Any {
+	return []expr.Any{
+		&expr.Limit{
+			Type:  expr.LimitTypePkts,
+			Rate:  1,
+			Unit:  expr.LimitTimeSecond,
+			Burst: 1,
+		},
+		&expr.Log{
+			Level: expr.LogLevelWarning,
+			Key:   1<<unix.NFTA_LOG_PREFIX | 1<<unix.NFTA_LOG_LEVEL,
+			Data:  []byte(HostInboundScreenFloodAlarmPrefix(screen, source)),
+		},
+	}
+}
+
+func screenFloodFamily(rule HostInboundScreenFloodRule) nlFamily {
+	if rule.Family == "ip6" {
+		return famV6
+	}
+	return famV4
+}
+
+func hostInboundScreenAggregateKey() *expr.Immediate {
+	return &expr.Immediate{Register: 1, Data: []byte{0, 0, 0, 0}}
+}
+
+func hostInboundScreenSourceKey(rule HostInboundScreenFloodRule) *expr.Payload {
+	offset, length := uint32(12), uint32(4)
+	if rule.Family == "ip6" {
+		offset, length = 8, 16
+	}
+	return &expr.Payload{
+		DestRegister: 1,
+		Base:         expr.PayloadBaseNetworkHeader,
+		Offset:       offset,
+		Len:          length,
+	}
+}
+
+func addHostInboundScreenFloodSet(p *nlPlan, rule HostInboundScreenFloodRule, source bool) *expr.Dynset {
+	if p.err != nil {
+		return nil
+	}
+	setName := HostInboundScreenFloodAggregateSetName(rule)
+	keyType := nftables.TypeMark
+	size := uint32(1)
+	rate := rule.AggregateThreshold
+	if source {
+		setName = HostInboundScreenFloodSetName(rule)
+		keyType = nftables.TypeIPAddr
+		if rule.Family == "ip6" {
+			keyType = nftables.TypeIP6Addr
+		}
+		size = HostInboundScreenFloodMeterSize
+		rate = rule.SourceThreshold
+	}
+	set := p.screenFloodSets[setName]
+	if set == nil {
+		set = &nftables.Set{
+			Table:      p.table,
+			Name:       setName,
+			Dynamic:    true,
+			HasTimeout: true,
+			Timeout:    HostInboundScreenFloodMeterTimeout,
+			Size:       size,
+			KeyType:    keyType,
+		}
+		if err := p.c.AddSet(set, nil); err != nil {
+			p.fail(fmt.Errorf("add host-inbound screen flood meter set %q: %w", set.Name, err))
+			return nil
+		}
+		if p.screenFloodSets == nil {
+			p.screenFloodSets = make(map[string]*nftables.Set)
+		}
+		p.screenFloodSets[set.Name] = set
+	}
+	return &expr.Dynset{
+		SrcRegKey: 1,
+		SetID:     set.ID,
+		SetName:   set.Name,
+		Operation: uint32(unix.NFT_DYNSET_OP_UPDATE),
+		Exprs:     []expr.Any{screenFloodLimit(rate)},
+	}
 }

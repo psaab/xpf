@@ -87,6 +87,9 @@ type nlPlan struct {
 	// inline — otherwise a widened lookup set (a fail-open) would be invisible in
 	// the expr stream (the Lookup expr is identical; only the elements differ).
 	sets map[uint32][]nftables.SetElement
+	// screenFloodSets records the named dynamic sets used by the host-inbound
+	// per-source flood meters so render tests can pin their capacity and expiry.
+	screenFloodSets map[string]*nftables.Set
 }
 
 func (p *nlPlan) fail(err error) {

@@ -7,6 +7,14 @@ This specification defines an agentic validation harness for the `xpf` firewall 
 1. **Wire pcap is the sole transit oracle.** A permit/deny verdict is decided only by frames observed peer-side. DUT counters (`ReadGlobalCounter` family) are corroborating evidence, never the verdict.
 2. **Capture-liveness control is mandatory, and must be a NEAR MISS of the probe.** Every capture window MUST interleave a known-permitted control flow that is required to appear in the same pcap. The control MUST match the probe in address family, capture interface, direction, and admission by the capture filter, differing only in the field the policy under test keys on. A control that differs in any other dimension proves only that `tcpdump` is alive, not that the probe's path is capture-visible: an IPv4 control under an `ip` filter is silent about an IPv6 probe, and a tcp/80 control under a `tcp dst port 80` filter cannot see a tcp/8080 leak — in both cases a total policy bypass reads as 100% drop. Where the probe's own path carries no permit rule by construction (`wire_policy_deny`), the control MUST traverse the same ingress->egress interface pair under a narrow permit rule that belongs to the row's fixture and is asserted installed before the run; a control on any other path cannot witness that path at all. A deny row whose control flow is missing is `VOID: capture-blind`, never `PASS`. A dead tcpdump must be indistinguishable from no test having run.
 3. **Minimum-N.** Drop assertions require >= 1,000 probe frames; loss assertions require >= 10,000 frames across at least two frame sizes (64 B and 1400 B). Percentages below these floors are `VOID: under-sampled`.
+
+**Positive-leak precedence.** After numeric/shape validity, any peer-side
+observation of a prohibited frame or exposed host-inbound response MUST produce
+`FAIL` before offered-floor or capture-liveness gating, even when the leg is
+under-sampled or its near-miss control is missing. This is the exception to
+item 2's capture-blind `VOID`: floors and controls govern only whether an
+absence can be interpreted; they cannot erase observed breakage. An
+under-sampled leg with no positive breakage remains `VOID`.
 4. **Payload integrity.** Count-based assertions MUST also validate L3/L4 checksums and (for NAT/tunnel rows) address/port rewrite correctness on sampled frames. A rewrite with a broken checksum is `FAIL`, not a pass with loss.
 
 ## 3. Feature Validation Matrix

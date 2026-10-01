@@ -1819,6 +1819,7 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 	// derive the flat set from the zone map. Nothing else in this builder
 	// may use flat ports — WireGuard admission is per-zone below.
 	wgListenPorts := flatWireGuardPorts(wgZonePorts)
+	screenFloodRules := xnft.HostInboundScreenFloodRules(toNftViews(views))
 	// Pre-pass: collect the named DROP counters the chain will reference, so they
 	// can be declared at the top of the table body BEFORE the chain. A counter is
 	// emitted exactly when emitHostInboundZone emits a catch-all drop
@@ -1858,6 +1859,14 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 	// (the accept rules are global, not per-zone).
 	for _, typ := range xnft.HostInboundAcceptCounterTypes {
 		addCounter(xnft.HostInboundAcceptCounterName(typ))
+	}
+	for _, floodRule := range screenFloodRules {
+		if floodRule.AggregateThreshold > 0 {
+			addCounter(xnft.HostInboundScreenFloodCounterName(floodRule, false))
+		}
+		if floodRule.SourceThreshold > 0 {
+			addCounter(xnft.HostInboundScreenFloodCounterName(floodRule, true))
+		}
 	}
 	// #9637: a view's ingress-zone rules reference the same per-zone/family
 	// counter, possibly in a family where the view has no address of its own, so
@@ -1924,6 +1933,18 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		rules = append(rules, "  counter "+cn+" {")
 		rules = append(rules, "  }")
 	}
+	for _, floodRule := range screenFloodRules {
+		if floodRule.SourceThreshold > 0 {
+			sourceType := "ipv4_addr"
+			if floodRule.Family == "ip6" {
+				sourceType = "ipv6_addr"
+			}
+			appendHostInboundScreenFloodSet(&rules, xnft.HostInboundScreenFloodSetName(floodRule), sourceType, xnft.HostInboundScreenFloodMeterSize)
+		}
+		if floodRule.AggregateThreshold > 0 {
+			appendHostInboundScreenFloodSet(&rules, xnft.HostInboundScreenFloodAggregateSetName(floodRule), "mark", 1)
+		}
+	}
 	rules = append(rules, "  chain input {")
 	// #3364: explicit distinct priority so host-inbound evaluates AFTER xpf_lo0.
 	rules = append(rules, fmt.Sprintf("    type filter hook input priority %d; policy accept;", nftHostInboundPriority))
@@ -1955,6 +1976,7 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		rules = append(rules, hostInboundStaleReplyGuardText(
 			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
 		)...)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
 		// (2) Firewall-ORIGINATED reply traffic (host-OUTBOUND flow return).
 		// junos-host governs host-INBOUND original-direction only, so only the
 		// reply direction is admitted ahead of the fine DROP; the denied source's
@@ -1966,6 +1988,7 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		for i, p := range programs {
 			emitJunosHostProgramJump(&rules, i, p)
 		}
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
 		// (4) ND/PMTUD/ICMP-error accepts for NON-denied sources.
 		emitHostInboundICMPAccepts(&rules)
 		// #11076: no WireGuard accept here anymore. The former (4b) coarse
@@ -1988,10 +2011,12 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		rules = append(rules, hostInboundStaleReplyGuardText(
 			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
 		)...)
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
 		// Firewall-ORIGINATED reply traffic is accepted before ingress
 		// adjudication; original-direction established traffic reaches the
 		// residual accept only after the ingress-zone rules below.
 		rules = append(rules, "    ct state established,related ct direction reply accept")
+		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
 		emitHostInboundICMPAccepts(&rules)
 		// #11076: WireGuard admission is per-zone daddr-scoped in each
 		// zone's section below — the shim-steered outer transport reaches
@@ -2070,6 +2095,90 @@ func emitHostInboundICMPAccepts(rules *[]string) {
 	*rules = append(*rules, "    icmpv6 type { 1, 2, 3, 4 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6Error)+"\" accept")
 	*rules = append(*rules, "    icmpv6 type { 133, 134, 135, 136, 137 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6ND)+"\" accept")
 	*rules = append(*rules, "    icmp type { destination-unreachable, time-exceeded, parameter-problem } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP4Error)+"\" accept")
+}
+func appendHostInboundScreenFloodSet(rules *[]string, name, keyType string, size int) {
+	timeoutSeconds := int64(xnft.HostInboundScreenFloodMeterTimeout / time.Second)
+	*rules = append(*rules,
+		"  set "+name+" {",
+		"    type "+keyType,
+		"    flags dynamic",
+		"    timeout "+strconv.FormatInt(timeoutSeconds, 10)+"s",
+		"    size "+strconv.Itoa(size),
+		"  }",
+	)
+}
+
+// emitHostInboundScreenFloodText places reply-direction backstop rules before
+// the established-reply accept and original-direction rules after fine
+// junos-host policy, matching the kernel renderer.
+func emitHostInboundScreenFloodText(rules *[]string, screens []xnft.HostInboundScreenFloodRule, repliesOnly bool) {
+	for _, screen := range screens {
+		base := hostInboundScreenFloodMatchesText(screen)
+		if base == "" {
+			continue
+		}
+		prefix := ""
+		if repliesOnly {
+			prefix = "ct state established,related ct direction reply "
+		}
+		if screen.SourceThreshold > 0 {
+			source := prefix + base + " update @" + xnft.HostInboundScreenFloodSetName(screen) +
+				" { " + screen.Family + " saddr limit rate over " + strconv.FormatUint(uint64(screen.SourceThreshold), 10) +
+				"/second burst " + strconv.FormatUint(uint64(screen.SourceThreshold), 10) + " packets } counter name \"" +
+				xnft.HostInboundScreenFloodCounterName(screen, true) + "\""
+			if screen.AlarmWithoutDrop {
+				source += " limit rate 1/second burst 1 packets log prefix " +
+					strconv.Quote(xnft.HostInboundScreenFloodAlarmPrefix(screen, true)) + " level warn"
+			} else {
+				source += " drop"
+			}
+			*rules = append(*rules, "    "+source)
+		}
+		if screen.AggregateThreshold > 0 {
+			global := prefix + base + " update @" + xnft.HostInboundScreenFloodAggregateSetName(screen) +
+				" { 0 limit rate over " + strconv.FormatUint(uint64(screen.AggregateThreshold), 10) +
+				"/second burst " + strconv.FormatUint(uint64(screen.AggregateThreshold), 10) + " packets } counter name \"" +
+				xnft.HostInboundScreenFloodCounterName(screen, false) + "\""
+			if screen.AlarmWithoutDrop {
+				global += " limit rate 1/second burst 1 packets log prefix " +
+					strconv.Quote(xnft.HostInboundScreenFloodAlarmPrefix(screen, false)) + " level warn"
+			} else {
+				global += " drop"
+			}
+			*rules = append(*rules, "    "+global)
+		}
+	}
+}
+
+func hostInboundScreenFloodMatchesText(screen xnft.HostInboundScreenFloodRule) string {
+	parts := make([]string, 0, 3)
+	if len(screen.IngressNetdevs) > 0 {
+		names := make([]string, 0, len(screen.IngressNetdevs))
+		for _, name := range screen.IngressNetdevs {
+			names = append(names, strconv.Quote(name))
+		}
+		if len(names) == 1 {
+			parts = append(parts, "iifname "+names[0])
+		} else {
+			parts = append(parts, "iifname { "+strings.Join(names, ", ")+" }")
+		}
+		parts = append(parts, "meta nfproto "+junosHostNfproto(screen.Family))
+	} else {
+		parts = append(parts, screen.Family+" daddr "+nftAddrSet(screen.Addresses))
+	}
+	switch screen.Protocol {
+	case "udp":
+		parts = append(parts, "meta l4proto 17")
+	case "icmp":
+		parts = append(parts, "meta l4proto 1")
+	case "icmpv6":
+		parts = append(parts, "meta l4proto 58")
+	case "tcp-syn":
+		parts = append(parts, "tcp flags & (syn | ack) == syn")
+	default:
+		return ""
+	}
+	return strings.Join(parts, " ")
 }
 
 // emitHostInboundWireGuardAccept appends the #5582 dynamic WireGuard listen-port
