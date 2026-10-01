@@ -61,15 +61,16 @@ wire_num() {
 # returns 0/1/2 for PASS/FAIL/VOID. TOTAL: every input combination prints.
 #
 # Order is load-bearing, not aesthetic:
-#   1. under-sampled floors on OFFERED counts — a verdict about fewer
-#      frames than §2 allows is VOID before any other question is asked;
-#   2. leak — emerged probe frames are a positive observation of breakage
-#      and survive a missing control (the capture evidently saw *something*);
-#   3. capture-blind — no leak but no control either proves only that
-#      the capture saw nothing, never that the policy held;
-#   4. checksum — a rewrite with a broken checksum is FAIL (§2.4), not a pass
+#   1. numeric validity — malformed input cannot establish an observation;
+#   2. leak — any emerged probe frame is a positive FAIL, even below the
+#      offered floor or without a usable control;
+#   3. offered floors — required to interpret a no-leak result; a thin sample
+#      is VOID, but never erases an observed leak;
+#   4. capture-blind — no leak and no control proves only that capture saw
+#      nothing, never that the policy held;
+#   5. checksum — a rewrite with a broken checksum is FAIL (§2.4), not a pass
 #      with loss;
-#   5. PASS.
+#   6. PASS.
 wire_deny_verdict() {
 	local po="${1:-}" pl="${2:-}" co="${3:-}" cb="${4:-}" ck="${5:-}"
 	local metrics="probe_offered=$po probe_leaked=$pl control_offered=$co control_observed=$cb cksum_bad=$ck"
@@ -77,13 +78,13 @@ wire_deny_verdict() {
 		printf 'WIRE_GATE wire_policy_deny VOID reason=harness-void %s\n' "$metrics"
 		return 2
 	fi
-	if ((10#$po < WIRE_DROP_FLOOR)) || ((10#$co < WIRE_DROP_FLOOR)); then
-		printf 'WIRE_GATE wire_policy_deny VOID reason=under-sampled %s\n' "$metrics"
-		return 2
-	fi
 	if ((10#$pl > 0)); then
 		printf 'WIRE_GATE wire_policy_deny FAIL reason=-- %s\n' "$metrics"
 		return 1
+	fi
+	if ((10#$po < WIRE_DROP_FLOOR)) || ((10#$co < WIRE_DROP_FLOOR)); then
+		printf 'WIRE_GATE wire_policy_deny VOID reason=under-sampled %s\n' "$metrics"
+		return 2
 	fi
 	if ((10#$cb < WIRE_DROP_FLOOR)); then
 		printf 'WIRE_GATE wire_policy_deny VOID reason=capture-blind %s\n' "$metrics"
@@ -120,11 +121,11 @@ wire_routing_separation_verdict() {
 # keep full §2 drop-floor rigor: loss cannot hide a leak, and any emerged
 # deny frame is FAIL.
 #
-# Order: numeric validity; offered floors per leg (deny 1000, permit 1500 —
-# the 500-frame margin absorbs routine path loss so the OBSERVED floor, not
-# luck, decides); deny leaks (positive observations, survive everything);
-# checksums; permit-leg cross-check (an emerged twin proves the shared
-# window, so a missing twin is a drop); both-missing (capture unproven).
+# Order: numeric validity; deny leaks (positive evidence survives every
+# offered floor); offered floors per leg (deny 1000, permit 1500 — the
+# 500-frame margin absorbs routine path loss so the OBSERVED floor, not luck,
+# decides); checksums; permit-leg cross-check (an emerged twin proves the
+# shared window, so a missing twin is a drop); both-missing (capture unproven).
 wire_twins_verdict() {
 	local t80o="${1:-}" t80b="${2:-}" t88o="${3:-}" t88b="${4:-}"
 	local u53o="${5:-}" u53b="${6:-}" u35o="${7:-}" u35b="${8:-}" ck="${9:-}"
@@ -140,14 +141,14 @@ wire_twins_verdict() {
 	# NOTE: permit_missing floors each leg shortfall at zero (handshake/data
 	# inflation on permit legs must not drive it negative); the UDP leg is
 	# folded into the cross-check, not the aggregate.
+	if ((10#$t88b > 0)) || ((10#$u35b > 0)); then
+		printf 'WIRE_GATE wire_appmatch_twins FAIL reason=-- %s\n' "$metrics"
+		return 1
+	fi
 	if ((10#$t88o < WIRE_DROP_FLOOR)) || ((10#$u35o < WIRE_DROP_FLOOR)) ||
 		((10#$t80o < 1500)) || ((10#$u53o < 1500)); then
 		printf 'WIRE_GATE wire_appmatch_twins VOID reason=under-sampled %s\n' "$metrics"
 		return 2
-	fi
-	if ((10#$t88b > 0)) || ((10#$u35b > 0)); then
-		printf 'WIRE_GATE wire_appmatch_twins FAIL reason=-- %s\n' "$metrics"
-		return 1
 	fi
 	if ((10#$ck > 0)); then
 		printf 'WIRE_GATE wire_appmatch_twins FAIL reason=-- %s\n' "$metrics"
@@ -333,20 +334,23 @@ wire_matrix_verdict() {
 			fi
 		else
 			deny_cells=$((deny_cells + 1))
+			# Record prohibited frames before offered-floor gating: a leak is a
+			# measured failure even when this cell's sample is thin.
+			local cell_leaked=$((10#$p64b + 10#$p1400b))
+			leaked=$((leaked + cell_leaked))
+			if ((cell_leaked > 0)); then
+				failed=$((failed + 1))
+			fi
 			if ((10#$p64o < floor || 10#$c64o < floor ||
 					10#$p1400o < floor || 10#$c1400o < floor)); then
 				short=$((short + 1)); [[ "$reason" == "--" ]] && reason=under-sampled
 				continue
 			fi
-			local cell_leaked=$((10#$p64b + 10#$p1400b))
 			local cell_control_missing=0
-			((10#$c64b < WIRE_DROP_FLOOR)) && cell_control_missing=$((cell_control_missing + WIRE_DROP_FLOOR - 10#$c64b))
+			((10#$c64b < WIRE_DROP_FLOOR)) && cell_control_missing=$((WIRE_DROP_FLOOR - 10#$c64b))
 			((10#$c1400b < WIRE_DROP_FLOOR)) && cell_control_missing=$((cell_control_missing + WIRE_DROP_FLOOR - 10#$c1400b))
-			leaked=$((leaked + cell_leaked))
 			control_missing=$((control_missing + cell_control_missing))
-			if ((cell_leaked > 0)); then
-				failed=$((failed + 1))
-			elif ((cell_control_missing > 0)); then
+			if ((cell_leaked == 0 && cell_control_missing > 0)); then
 				blind=$((blind + 1)); [[ "$reason" == "--" ]] && reason=capture-blind
 			fi
 		fi
@@ -380,8 +384,9 @@ wire_matrix_verdict() {
 # host stack past host-inbound (or the apparatus lost its listener, which the
 # gate's ownership check fails closed on independently).
 # Prints exactly one `WIRE_GATE wire_hostinbound_deny ...` line; rc 0/1/2.
-# Order: validity; per-cell offered floors (1000); exposed and reply-frame
-# positives (FAIL, surviving everything); capture-blind; checksums; PASS.
+# Order: validity; exposed/reply positives (FAIL, independent of sample floors
+# and control liveness); per-cell offered floors (1000); capture-blind;
+# checksums; PASS.
 wire_hostinbound_verdict() {
 	local rf="${1:-}" coff="${2:-}" cobs="${3:-}" ck="${4:-}" n="${5:-}"
 	local zero="cells_measured=0 syn_offered=0 handshake_completed=0 refused_total=0 exposed_total=0 reply_frames=0 ctrl_offered=0 ctrl_observed=0 cksum_bad=0"
@@ -410,13 +415,13 @@ wire_hostinbound_verdict() {
 	done
 	local exposed=$((compsum + refsum))
 	local metrics="cells_measured=$n syn_offered=$offsum handshake_completed=$compsum refused_total=$refsum exposed_total=$exposed reply_frames=$rf ctrl_offered=$coff ctrl_observed=$cobs cksum_bad=$ck"
-	if ((short == 1)) || ((10#$coff < WIRE_DROP_FLOOR)); then
-		printf 'WIRE_GATE wire_hostinbound_deny VOID reason=under-sampled %s\n' "$metrics"
-		return 2
-	fi
 	if ((exposed > 0)) || ((10#$rf > 0)); then
 		printf 'WIRE_GATE wire_hostinbound_deny FAIL reason=-- %s\n' "$metrics"
 		return 1
+	fi
+	if ((short == 1)) || ((10#$coff < WIRE_DROP_FLOOR)); then
+		printf 'WIRE_GATE wire_hostinbound_deny VOID reason=under-sampled %s\n' "$metrics"
+		return 2
 	fi
 	if ((10#$cobs > 10#$coff)); then
 		printf 'WIRE_GATE wire_hostinbound_deny FAIL reason=-- %s\n' "$metrics"
@@ -540,10 +545,10 @@ wire_conntrack_transition_flags() {
 # burst (the near-miss: SYN-ness is the keyed field) plus the control
 # connection prove the window and the witness.
 # Prints exactly one `WIRE_GATE wire_conntrack_lifecycle ...` line; rc 0/1/2.
-# Order: validity; offered floors; uncreated subject (VOID); mid-stream
-# leaks (FAIL, surviving everything); unwitnessed (FAIL iff the witness is
-# proven alive, else VOID); control-witness; eviction (FAIL); stale wire
-# (FAIL); capture-blind; checksums; PASS.
+# Order: validity; mid-stream/stale wire leaks (FAIL, independent of floors
+# and session-table witnesses); offered floors; uncreated subject (VOID);
+# unwitnessed (FAIL iff the control witness proves the table is live, else
+# VOID); control-witness; eviction (FAIL); capture-blind; checksums; PASS.
 wire_conntrack_verdict() {
 	local cr="${1:-}" w="${2:-}" st="${3:-}" sa="${4:-}" eo="${5:-}" el="${6:-}" fo="${7:-}" fl="${8:-}" so="${9:-}" sob="${10:-}" cs="${11:-}" ck="${12:-}"
 	local zero="created=0 witnessed=0 evicted=0 subj_absent=0 stale_present=0 exp_offered=0 exp_leaked=0 fresh_offered=0 fresh_leaked=0 syn_offered=0 syn_observed=0 ctrl_sess=0 lifecycle_bad=0 cksum_bad=0"
@@ -573,6 +578,12 @@ wire_conntrack_verdict() {
 	((10#$cs == 0)) && bad=$((bad + 1))
 	((10#$sa == 0)) && bad=$((bad + 1))
 	local metrics="created=$cr witnessed=$w evicted=$evicted subj_absent=$sa stale_present=$st exp_offered=$eo exp_leaked=$el fresh_offered=$fo fresh_leaked=$fl syn_offered=$so syn_observed=$sob ctrl_sess=$cs lifecycle_bad=$bad cksum_bad=$ck"
+	# Positive stale-wire observations are failures independently of whether
+	# the offered floor or session-table witnesses were met.
+	if ((10#$el + 10#$fl > 0 || 10#$st > 0)); then
+		printf 'WIRE_GATE wire_conntrack_lifecycle FAIL reason=-- %s\n' "$metrics"
+		return 1
+	fi
 	if ((10#$eo < WIRE_DROP_FLOOR)) || ((10#$fo < WIRE_DROP_FLOOR)) || ((10#$so < WIRE_LIVENESS_OFFERED)); then
 		printf 'WIRE_GATE wire_conntrack_lifecycle VOID reason=under-sampled %s\n' "$metrics"
 		return 2
@@ -584,10 +595,6 @@ wire_conntrack_verdict() {
 		fi
 		printf 'WIRE_GATE wire_conntrack_lifecycle VOID reason=harness-void %s\n' "$metrics"
 		return 2
-	fi
-	if ((10#$el + 10#$fl > 0)); then
-		printf 'WIRE_GATE wire_conntrack_lifecycle FAIL reason=-- %s\n' "$metrics"
-		return 1
 	fi
 	if ((10#$w == 0)); then
 		if ((10#$cs > 0)); then
@@ -607,10 +614,6 @@ wire_conntrack_verdict() {
 	# retained SID is a session table that never evicted, whatever the wire
 	# did.
 	if ((10#$sa == 0)); then
-		printf 'WIRE_GATE wire_conntrack_lifecycle FAIL reason=-- %s\n' "$metrics"
-		return 1
-	fi
-	if ((10#$st > 0)); then
 		printf 'WIRE_GATE wire_conntrack_lifecycle FAIL reason=-- %s\n' "$metrics"
 		return 1
 	fi
