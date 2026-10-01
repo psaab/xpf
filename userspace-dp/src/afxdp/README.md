@@ -592,7 +592,8 @@ sync.
     transit security policy sees the translated L3 destination. Ambiguous
     L4-dependent matches are not guessed; DNAT-off precedence and the existing
     fail-closed NAT fence remain authoritative. Applied destination rewrites
-    still run the independent source-NAT fence.
+    still run the independent source-NAT fence against the post-translation
+    L3 tuple.
     NoRoute and MissingNeighbor retain their drop/retry fence because those
     slow-path dispositions cannot reapply the flowless destination rewrite.
     Regression cells cover dynamic/static VIP DNAT, post-NAT protocol policy,
