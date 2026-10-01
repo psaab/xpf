@@ -347,6 +347,61 @@ func TestBuildSamplingZonesMalformedRefSkipped(t *testing.T) {
 	}
 }
 
+func TestBuildSamplingZonesAbsentUnitDoesNotWidenExport(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		zoneRefs     []string
+		wantEligible bool
+	}{
+		{name: "absent unit", zoneRefs: []string{"ge-0/0/0.1"}},
+		{name: "defined unit", zoneRefs: []string{"ge-0/0/0.0"}, wantEligible: true},
+		{
+			name:         "absent plus defined unit",
+			zoneRefs:     []string{"ge-0/0/0.1", "ge-0/0/0.0"},
+			wantEligible: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Security: config.SecurityConfig{
+					Zones: map[string]*config.ZoneConfig{
+						"trust": {Interfaces: tc.zoneRefs},
+					},
+				},
+				Interfaces: config.InterfacesConfig{
+					Interfaces: map[string]*config.InterfaceConfig{
+						"ge-0/0/0": {Units: map[int]*config.InterfaceUnit{
+							0: {SamplingInput: true},
+						}},
+					},
+				},
+			}
+			ec := &ExportConfig{SamplingZones: BuildSamplingZones(cfg, map[string]uint16{"trust": 1})}
+			if got := ec.ShouldExport(1, 99); got != tc.wantEligible {
+				t.Fatalf("ShouldExport(trust, unrelated) = %v, want %v (sampling zones: %#v)",
+					got, tc.wantEligible, ec.SamplingZones)
+			}
+			if ec.ShouldExport(99, 99) {
+				t.Fatal("session outside the configured sampling zone was exported")
+			}
+		})
+	}
+
+	// A truly absent sampling-zone restriction intentionally retains the
+	// documented export-all behavior.
+	if !(&ExportConfig{}).ShouldExport(99, 99) {
+		t.Fatal("empty ExportConfig should remain export-all")
+	}
+
+	unrestricted := BuildSamplingZones(&config.Config{}, nil)
+	if unrestricted != nil {
+		t.Fatalf("no configured sampling restriction should produce nil zones, got %#v", unrestricted)
+	}
+	if !(&ExportConfig{SamplingZones: unrestricted}).ShouldExport(99, 99) {
+		t.Fatal("nil sampling-zone result should retain export-all behavior")
+	}
+}
+
 func TestBuildExportConfig_FlowServerSourceAddressTakesPrecedence(t *testing.T) {
 	fo := &config.ForwardingOptionsConfig{
 		Sampling: &config.SamplingConfig{

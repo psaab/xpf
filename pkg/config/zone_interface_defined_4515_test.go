@@ -106,3 +106,55 @@ func TestZoneInterfaceIPsecBindInterfaceAcceptedWithoutExplicitDef(t *testing.T)
 		t.Fatalf("strict commit rejected a zone referencing an IPsec bind-interface secure tunnel: %v", err)
 	}
 }
+
+func TestZoneInterfaceAbsentLogicalUnitFailsCommit(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set interfaces ge-0/0/0 unit 0 family inet sampling input",
+		"set security zones security-zone trust interfaces ge-0/0/0.1",
+	})
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("expected commit to reject zone reference to absent logical unit 1")
+	}
+	for _, want := range []string{"trust", "ge-0/0/0.1", "logical unit", "not configured"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not name %q", err.Error(), want)
+		}
+	}
+}
+
+func TestZoneInterfaceExistingLogicalUnitCommits(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set interfaces ge-0/0/0 unit 0 family inet sampling input",
+		"set security zones security-zone trust interfaces ge-0/0/0.0",
+	})
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("strict commit rejected a zone reference to defined logical unit 0: %v", err)
+	}
+}
+
+func TestZoneInterfaceAbsentLogicalUnitWarnsOnLenientLoad(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set interfaces ge-0/0/0 unit 0 family inet sampling input",
+		"set security zones security-zone trust interfaces ge-0/0/0.1",
+	})
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient load must warn rather than reject an absent zone unit: %v", err)
+	}
+	for _, want := range []string{
+		"zone interface defined (downgraded to warning on tolerant path)",
+		"trust", "ge-0/0/0.1", "logical unit",
+	} {
+		found := false
+		for _, warning := range cfg.Warnings {
+			if strings.Contains(warning, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("no warning contains %q: %v", want, cfg.Warnings)
+		}
+	}
+}

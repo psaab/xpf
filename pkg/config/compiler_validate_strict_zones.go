@@ -595,9 +595,9 @@ func zoneReferenceableInterfaceBases(cfg *Config) map[string]bool {
 // doctrine) — the runtime keeps its existing behavior (the unresolved member
 // carries no traffic), just with an operator-visible warning instead of a hard
 // reject. Zones are walked in sorted name order so the first-reported error is
-// deterministic. Unit suffixes are stripped exactly as the dataplane
-// interface->zone map (and the prior warn loop) do, so a `.0`/`.50` unit
-// reference resolves against its base.
+// deterministic. A bare reference resolves against its base; an explicit
+// logical-unit suffix must exist when the base has a configured interface
+// stanza, except for an interface-level tunnel's implicit unit 0 (#11433).
 func validateZoneInterfaceDefinedStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -617,6 +617,10 @@ func validateZoneInterfaceDefinedStrict(cfg *Config) error {
 			if ifName == "" {
 				continue
 			}
+			ref := cfg.SplitInterfaceUnitRef(ifName)
+			// Preserve the zone-defined gate's first-dot base identity. The
+			// splitter below is used for unit existence, where declared dotted
+			// interface names must outrank suffix parsing (#9821).
 			base := ifName
 			if idx := strings.Index(ifName, "."); idx > 0 {
 				base = ifName[:idx]
@@ -631,6 +635,25 @@ func validateZoneInterfaceDefinedStrict(cfg *Config) error {
 						"unconfigured interface DOWN, so the zone member silently "+
 						"carries no traffic)",
 					zoneName, ifName)
+			}
+			if ref.HasUnit && ref.UnitTok != "" {
+				unitNum, _, err := CanonicalLogicalUnit(ref.UnitTok)
+				if err != nil {
+					continue // The unit-reference gate reports malformed suffixes.
+				}
+				if ifCfg := cfg.Interfaces.Interfaces[ref.Base]; ifCfg != nil {
+					unit, exists := ifCfg.Units[unitNum]
+					// An interface-level tunnel with no authored logical-unit
+					// stanza is itself the implicit unit 0. In particular,
+					// WireGuard's `wgN` TUN remains referenceable as `wgN.0`.
+					implicitTunnelUnit := unitNum == 0 && ifCfg.Tunnel != nil && !ifCfg.AuthoredUnits
+					if (!exists || unit == nil) && !implicitTunnelUnit {
+						return fmt.Errorf(
+							"security zone %q references interface %q with logical unit %q, "+
+								"which is not configured under `interfaces`",
+							zoneName, ifName, ref.UnitTok)
+					}
+				}
 			}
 		}
 	}
