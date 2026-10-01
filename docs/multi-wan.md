@@ -620,12 +620,13 @@ replacement path exists) using that leak's exact incarnation. A next-hop
 change inside the leak's target table retains the incarnation and therefore
 keeps the established-flow pin; removing an unrelated leak has no effect.
 
-This is Junos parity in substance: SRX likewise does not re-route or
-re-NAT established sessions on a route change by default. Junos
-ip-monitoring has no session-clear action, and neither does xpf's
-(deliberately — a flapping probe must never mass-clear healthy
-sessions). The operator clear below is therefore THE mechanism for
-moving established flows to the surviving uplink. The operator
+The preceding description is xpf's code path, not verified Junos parity.
+Whether default same-zone ip-monitoring keeps or reroutes an established SRX
+session after a route change is unverified; a poll-loop fixture and vSRX oracle
+are still required before making that claim. The xpf `route-change-timeout`
+leaf is accepted but not enforced (#4231), so it supplies no evidence about the
+default case. The operator options below describe the available recovery
+procedure; the Junos 23.4R1 command syntax is labeled separately. The operator
 decides:
 
 - **Do nothing** — pinned sessions age out at their inactivity
