@@ -1172,6 +1172,140 @@ fn flowless_packet_gets_ba_classification_from_dscp() {
     );
 }
 
+fn scheduler_map_without_best_effort_snapshot_11428() -> ConfigSnapshot {
+    ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 202,
+            cos_shaping_rate_bytes_per_sec: 10_000_000,
+            cos_scheduler_map: "ef-nc-only".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![
+                CoSForwardingClassSnapshot {
+                    name: "expedited-forwarding".into(),
+                    queue: 5,
+                },
+                CoSForwardingClassSnapshot {
+                    name: "network-control".into(),
+                    queue: 7,
+                },
+            ],
+            schedulers: vec![
+                CoSSchedulerSnapshot {
+                    name: "ef".into(),
+                    priority: "strict-high".into(),
+                    ..Default::default()
+                },
+                CoSSchedulerSnapshot {
+                    name: "nc".into(),
+                    priority: "high".into(),
+                    ..Default::default()
+                },
+            ],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "ef-nc-only".into(),
+                entries: vec![
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "expedited-forwarding".into(),
+                        scheduler: "ef".into(),
+                    },
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "network-control".into(),
+                        scheduler: "nc".into(),
+                    },
+                ],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn scheduler_map_without_best_effort_synthesizes_be_queue_zero_11428() {
+    let forwarding = build_forwarding_state(&scheduler_map_without_best_effort_snapshot_11428());
+    let iface = forwarding
+        .cos
+        .interfaces
+        .get(&202)
+        .expect("missing CoS interface");
+
+    assert_eq!(
+        iface.default_queue, 0,
+        "a map without best-effort must synthesize queue 0, not choose the lowest queue id"
+    );
+    assert!(
+        iface
+            .queues
+            .iter()
+            .any(|queue| queue.queue_id == 0 && queue.forwarding_class == "best-effort"),
+        "the default id must be a materialized best-effort queue"
+    );
+}
+
+#[test]
+fn unclassified_traffic_uses_synthetic_be_not_q5_or_q7_11428() {
+    let forwarding = build_forwarding_state(&scheduler_map_without_best_effort_snapshot_11428());
+    let unclassified = UserspaceDpMeta {
+        ingress_ifindex: 5,
+        addr_family: libc::AF_INET as u8,
+        dscp: 0,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        resolve_cos_queue_id(&forwarding, 202, unclassified, None),
+        Some(0),
+        "unclassified traffic must not fall through to EF queue 5 or NC queue 7"
+    );
+    assert_eq!(
+        resolve_cached_cos_tx_queue_id(&forwarding, 202, unclassified, None),
+        Some(0),
+        "cached flowless unclassified traffic must use the same best-effort queue"
+    );
+}
+
+#[test]
+fn lowest_service_priority_beats_best_effort_name_when_priorities_conflict_11428() {
+    let mut snapshot = scheduler_map_without_best_effort_snapshot_11428();
+    let cos = snapshot
+        .class_of_service
+        .as_mut()
+        .expect("fixture has class-of-service state");
+    cos.forwarding_classes.push(CoSForwardingClassSnapshot {
+        name: "best-effort".into(),
+        queue: 0,
+    });
+    cos.schedulers
+        .iter_mut()
+        .find(|scheduler| scheduler.name == "nc")
+        .expect("fixture has the NC scheduler")
+        .priority = "low".into();
+    cos.schedulers.push(CoSSchedulerSnapshot {
+        name: "be".into(),
+        priority: "high".into(),
+        ..Default::default()
+    });
+    cos.scheduler_maps[0]
+        .entries
+        .push(CoSSchedulerMapEntrySnapshot {
+            forwarding_class: "best-effort".into(),
+            scheduler: "be".into(),
+        });
+
+    let forwarding = build_forwarding_state(&snapshot);
+    let iface = forwarding
+        .cos
+        .interfaces
+        .get(&202)
+        .expect("missing CoS interface");
+    assert_eq!(
+        iface.default_queue, 7,
+        "the low-priority NC queue must outrank a best-effort class configured high"
+    );
+}
+
 #[test]
 fn resolve_cos_queue_id_uses_reverse_output_source_port_filter() {
     let snapshot = ConfigSnapshot {

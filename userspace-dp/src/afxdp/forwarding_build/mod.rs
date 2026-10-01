@@ -876,10 +876,10 @@ fn build_fallible_forwarding_state(
         &snapshot.flow.lo0_filter_input_v6,
         previous.map(|state| &state.filter_state),
     )?;
-    // #2410/#2409: fail CLOSED on a CoS forwarding-class queue id outside
-    // 0..=255 (pre-fix: silently dropped), or a scheduler-map entry
-    // referencing a forwarding-class absent from the class-to-queue table
-    // (pre-fix: silently skipped → a partially-installed scheduler).
+    // #2410/#2409/#11428: fail CLOSED on an out-of-range CoS queue id, an
+    // unknown scheduler-map class, or an exhausted queue-id space without a
+    // safe best-effort / low-priority default; never install partial state or
+    // route unclassified traffic onto an expedited class.
     state.cos = cos::build_cos_state(snapshot)?;
     let has_cos_interfaces = !state.cos.interfaces.is_empty();
     // #6236 PR-2A: the output clause is now the single `has_output_needs_tx_eval`

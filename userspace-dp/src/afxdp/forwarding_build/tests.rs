@@ -1372,21 +1372,25 @@ fn build_cos_state_dangling_scheduler_reference_uses_safe_best_effort_default() 
 
     let state = build_cos_state(&snapshot);
     let iface = state.interfaces.get(&9).expect("missing CoS interface");
-    // Queue stays materialized under its real queue id / class.
-    assert_eq!(iface.queues.len(), 1);
-    assert_eq!(iface.queues[0].queue_id, 1);
-    assert_eq!(iface.queues[0].forwarding_class, "ef");
+    // Queue stays materialized under its real id/class, and the missing
+    // best-effort class is materialized as queue 0 for unclassified traffic.
+    assert_eq!(iface.queues.len(), 2);
+    assert_eq!(iface.default_queue, 0);
+    assert_eq!(iface.queues[0].queue_id, 0);
+    assert_eq!(iface.queues[0].forwarding_class, "best-effort");
+    assert_eq!(iface.queues[1].queue_id, 1);
+    assert_eq!(iface.queues[1].forwarding_class, "ef");
     // SAFE default: minimal best-effort surplus share, NOT the fail-open
     // maximum (16) the whole-interface effective rate would have derived.
     assert_eq!(
-        iface.queues[0].surplus_weight, 1,
+        iface.queues[1].surplus_weight, 1,
         "dangling scheduler reference must fail SAFE to the minimal best-effort surplus weight, not fail OPEN to the max"
     );
     // No guarantee, no exact, priority stays "low" (rank 5) — nothing is
     // fabricated for the unresolved reference.
-    assert!(!iface.queues[0].guarantee_enabled);
-    assert!(!iface.queues[0].exact);
-    assert_eq!(iface.queues[0].priority, 5, "low priority rank");
+    assert!(!iface.queues[1].guarantee_enabled);
+    assert!(!iface.queues[1].exact);
+    assert_eq!(iface.queues[1].priority, 5, "low priority rank");
 }
 
 #[test]
@@ -6086,6 +6090,52 @@ fn cos_forwarding_class_queue_out_of_range_fails_closed() {
             assert_eq!(queue, 256);
         }
         other => panic!("expected CosQueueIdOutOfRange, got {other:?}"),
+    }
+}
+
+#[test]
+fn cos_full_queue_id_space_without_low_priority_fails_closed_11428() {
+    let forwarding_classes = (0u16..=u8::MAX.into())
+        .map(|queue| CoSForwardingClassSnapshot {
+            name: format!("class-{queue}"),
+            queue: i32::from(queue),
+        })
+        .collect();
+    let entries = (0u16..=u8::MAX.into())
+        .map(|queue| CoSSchedulerMapEntrySnapshot {
+            forwarding_class: format!("class-{queue}"),
+            scheduler: "high".into(),
+        })
+        .collect();
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 62,
+            cos_shaping_rate_bytes_per_sec: 1_000_000,
+            cos_scheduler_map: "all-queue-ids".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes,
+            schedulers: vec![CoSSchedulerSnapshot {
+                name: "high".into(),
+                priority: "high".into(),
+                ..Default::default()
+            }],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "all-queue-ids".into(),
+                entries,
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    match super::cos::build_cos_state(&snapshot) {
+        Err(crate::policy::SnapshotIntegrityError::CosNoLowPriorityDefaultQueue {
+            scheduler_map,
+        }) => assert_eq!(scheduler_map, "all-queue-ids"),
+        Err(err) => panic!("unexpected CoS integrity error: {err:?}"),
+        Ok(_) => panic!("full queue-id space without a low-priority queue was accepted"),
     }
 }
 
