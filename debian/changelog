@@ -113,6 +113,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Warn about and exclude static routes without a forwarding disposition, so
     they cannot shadow an installable less-specific route in the helper FIB
     (#11327).
+  * Align userspace-dp session-sync regression fixtures with the ingress
+    identity trailer, preserve JSON/binary identity parity, and keep the
+    policy-list acknowledgement plus debug timing gates robust under runner
+    contention (#11546).
   * Reject undeclared fields in named API-auth credentials and validate
     API-auth class references; reconcile the schema-census inventories
     (#11544).

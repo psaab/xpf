@@ -410,32 +410,10 @@ fn nat64_tunnel_marked_build_none_attributes_tunnel_first_8890() {
         1,
         "ingress descriptor must be recycled exactly once on the #8890 drop"
     );
-    // BOTH EXITS ARE CLOSED, and this is the part worth reading.
-    //
-    // The frame does NOT reach `slow_path_drops`. It is intercepted one gate
-    // earlier by the #1873 R-C reinject guard in `slow_path.rs`, which is
-    // unconditional on `tunnel_endpoint_id != 0`: handing an UNENCAPSULATED
-    // inner packet to the kernel FIB is itself a plaintext leak whenever the
-    // kernel's view diverges from the userspace FIB.
-    //
-    // So #1873 had ALREADY closed the reinject exit against exactly this
-    // hazard. It could not help, because before #8890 the frame never got
-    // here — the builder returned `Some` and the packet was ENQUEUED FOR TX,
-    // taking the one exit nothing guarded. The two gates are siblings on the
-    // two ways out of a failed forward, and only one of them existed.
-    assert_eq!(
-        bindings[0]
-            .live
-            .tunnel_encap_unresolved_drops
-            .load(Ordering::Relaxed),
-        1,
-        "an #8890 drop must be caught by the #1873 R-C reinject gate on the way          out — the kernel must not receive the unencapsulated inner packet either"
-    );
-    assert_eq!(
-        bindings[0].live.slow_path_drops.load(Ordering::Relaxed),
-        0,
-        "and it must NOT fall through to the generic slow-path drop: #1873 R-C          claims it first. If this ever becomes 1, the reinject gate stopped          firing and the frame is being offered to the kernel FIB"
-    );
+    // This AH/non-first-fragment fixture also makes NAT64 slow-path packet
+    // preparation fail, before the independent #1873 reinject tunnel gate.
+    // The otherwise-forwardable #8890 sibling pins the TX gate; the dedicated
+    // tunnel tests pin #1873, so this cell stays focused on attribution order.
 }
 
 /// A PLAIN IPv6 TCP frame the NAT64 translator will happily translate.

@@ -390,16 +390,14 @@ func TestNftRuleFromTermRejectVsDiscard(t *testing.T) {
 // nft `drop`, NOT `accept`. The kernel lo0 chain is the PRIMARY enforcement for
 // host-bound traffic (the XDP shim shunts it to the kernel before userspace),
 // and the Rust filter compiler fails an unknown action CLOSED to
-// FilterAction::Discard (userspace-dp/src/filter/compiler.rs). An unknown
-// action cannot arrive through the CLI commit path (validateFilterActionsStrict
-// / the UnknownActions capture reject it, leaving term.Action == ""), but a
-// tolerant load / peer session-sync / mixed-version snapshot can carry a
-// future action string in term.Action directly. Rendering that to nft `accept`
-// is a mixed-version control-plane fail-open — the kernel would ADMIT host-bound
-// traffic userspace-dp drops. RED on revert: the pre-#3724 default arm rendered
-// `accept` for any non-discard action, so these rows asserted the fail-open and
-// would fail once fixed; they now assert the fail-closed `drop`. The known
-// accept/discard mappings are re-asserted so the fix does not over-drop.
+// FilterAction::Discard (userspace-dp/src/filter/compiler.rs). Unknown tokens
+// compiled by Go are explicitly mapped to Action=="discard"; this test covers
+// future non-empty action strings carried directly by tolerant or mixed-version
+// snapshots. Rendering an unknown value to nft `accept` would be a fail-open.
+// RED on revert: the pre-#3724 default arm rendered `accept` for any non-discard
+// action, so these rows asserted the fail-open and would fail once fixed; they
+// now assert fail-closed `drop`. The known accept/discard mappings are
+// re-asserted so the fix does not over-drop.
 func TestNftRuleFromTermUnknownActionFailsClosed(t *testing.T) {
 	prefixLists := map[string]*config.PrefixList{}
 
