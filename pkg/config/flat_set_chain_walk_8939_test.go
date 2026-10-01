@@ -466,8 +466,28 @@ func flatSetAdmitted(lines []string) bool {
 
 func flatSetCompile(lines []string) (*Config, error) {
 	tr := &ConfigTree{}
+	hasBGP, hasProcessAS := false, false
 	for _, l := range lines {
+		if strings.Contains(l, "protocols bgp") {
+			hasBGP = true
+		}
+		if strings.Contains(l, "routing-options autonomous-system") ||
+			strings.Contains(l, "protocols bgp local-as") {
+			hasProcessAS = true
+		}
 		toks, err := ParseSetCommand(l)
+		if err != nil {
+			return nil, err
+		}
+		if err := tr.SetPath(toks); err != nil {
+			return nil, err
+		}
+	}
+	// These shape censuses measure flat-set compilation, not router-AS
+	// validation. Keep unrelated BGP fixtures valid while leaving explicit
+	// process-local-AS probes AS-less so #11313 remains observable.
+	if hasBGP && !hasProcessAS {
+		toks, err := ParseSetCommand("set routing-options autonomous-system 65000")
 		if err != nil {
 			return nil, err
 		}
@@ -589,6 +609,25 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 				splitLines = append([]string{bindLine}, splitLines...)
 			}
 		}
+		// #11313: this shape census synthesizes `local-as xpfval`, which is
+		// not a valid process AS. The helper keeps direct local-AS probes
+		// AS-less, so a split candidate would otherwise be rejected before
+		// chain walking can be measured. Give packed and split forms identical
+		// root-AS context outside their measured leaf window.
+		if len(cont) >= 2 && cont[len(cont)-2] == "protocols" && cont[len(cont)-1] == "bgp" {
+			hasLocalAS := false
+			for _, lf := range leaves {
+				if lf.name == "local-as" {
+					hasLocalAS = true
+					break
+				}
+			}
+			if hasLocalAS {
+				asLine := "set routing-options autonomous-system 65000"
+				packedLines = append([]string{asLine}, packedLines...)
+				splitLines = append([]string{asLine}, splitLines...)
+			}
+		}
 		packed, ep := flatSetCompile(packedLines)
 		split, es := flatSetCompile(splitLines)
 		if ep != nil || es != nil || packed == nil || split == nil {
@@ -706,9 +745,14 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	// gate, moving one row to unmeasured (83 -> 84). The measured loser set,
 	// walked/vacuous counts, and collector reach stay unchanged.
 	// #11544: reconciling the stored snapshot with the current api-auth schema
-	// measures 39 vacuous and 86 unmeasured rows, with collector reach 388/144.
-	// The three loser rows and 112 walked count remain unchanged; this is a
+	// measures 39 vacuous and 87 unmeasured rows, with collector reach 388/144.
+	// The three loser rows and 111 walked count remain unchanged; this is a
 	// population-count refresh, not a relaxation of the loss set.
+	// #11313: the `protocols bgp` process-AS chain candidate includes
+	// synthetic `local-as xpfval`, which is invalid. Give its packed and split
+	// spellings the same root-AS context outside the measured leaf window so
+	// strict validation does not turn it into an unmeasured row. Other direct
+	// local-AS probes remain AS-less in their dedicated normalizer/gate tests.
 	//
 	// THE COUNTS ARE PART OF THE FIXTURE, and that is a mutation result, not a
 	// flourish. With only the loser set recorded, deleting the observability
