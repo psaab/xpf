@@ -28,7 +28,9 @@
 //! session for one peer. So the derivation is single-sourced here rather than
 //! duplicated across the two producers. Because both producers destructure
 //! `SessionSyncAttribution` exhaustively (without `..`), adding a field is enforced
-//! by the compiler at both sites. The behavioral
+//! by the compiler at both sites. The lifetime-tolerant
+//! `sync_attribution_exhaustive_destructure_6949` guard also checks that both
+//! producers bind all seven current fields. The behavioral
 //! `session_delta_json_and_binary_agree_on_policy_attribution_6949` test compares
 //! actual JSON and binary outputs for one non-default session.
 

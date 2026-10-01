@@ -1505,6 +1505,9 @@ the saturating ns→s timeout and the `(nat64, rewrite_src)` pool-source
 selection. Both producers destructure it EXHAUSTIVELY (no `..`), so a new field
 must be accounted for in both.
 
+The lifetime-tolerant `sync_attribution_exhaustive_destructure_6949` guard
+checks that each producer binds all seven current fields.
+
 The behavioral `session_delta_json_and_binary_agree_on_policy_attribution_6949`
 test compares actual JSON and binary outputs for one non-default session,
 including policy, rule identity, timeout, NAT64, source-NAT ICMP and ingress
