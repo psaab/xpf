@@ -776,6 +776,16 @@ devices retains only those unaffected keys. The daemon's list binder and
 cannot steal `fxp0` from `vrf-mgmt` or fight the fabric-overlay rebind for
 `fab0`/`fab1`.
 
+**Configured host-inbound lifelines stay out of tenant routing instances
+(#11364):** strict commit rejects a role-derived cluster control/fabric
+lifeline listed as a tenant-VRF member. Tolerant load/peer-sync warns and
+removes only those lifeline device keys; ordinary co-members remain assigned
+to the operator VRF and keep its normal matchable `vrf-<name>` ingress scope,
+or the #10431 fail-closed master guard when multiple zone claims make that
+master ambiguous. LOCAL_IN identifies the shared VRF master, so admitting a
+lifeline member would otherwise suppress ingress judgement for its data
+co-members.
+
 **Backup-router destination family must match the next-hop (#2911):**
 `renderBackupRouter` (`pkg/frr/config_render.go`) keys the static-route
 prefix keyword (`ip` vs `ipv6`) on the NEXT-HOP family (#2891/#2907). An

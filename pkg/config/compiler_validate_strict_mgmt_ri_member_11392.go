@@ -44,12 +44,18 @@ func runUniformGatesRIMgmtMember11392(_ *ConfigTree, cfg *Config, opts compileOp
 	return nil
 }
 
-// quarantineRIMgmtMembers11392 removes management-class devices from tolerant
-// routing-instance memberships after tail validation. Bare references that
-// also fan out to ordinary devices are rewritten to those unaffected keys only.
-func quarantineRIMgmtMembers11392(cfg *Config, tunnelNames map[string]string) {
+// quarantineRIRoleMembers removes management-class devices and configured
+// host-inbound lifelines from tolerant tenant routing-instance memberships
+// after tail validation. Bare references that fan out to ordinary devices are
+// rewritten to those unaffected keys only.
+func quarantineRIRoleMembers(cfg *Config, tunnelNames map[string]string) {
 	if cfg == nil {
 		return
+	}
+	lifelines := HostInboundLifelineSet(cfg)
+	isFencedMember := func(interfaceKey, linuxName string) bool {
+		return IsManagementIfName(linuxName) ||
+			HostInboundLifelineInterface(interfaceKey, lifelines)
 	}
 	eligibleInstances := make(map[string]struct{}, len(cfg.RoutingInstances))
 	for _, ri := range cfg.RoutingInstances {
@@ -59,14 +65,15 @@ func quarantineRIMgmtMembers11392(cfg *Config, tunnelNames map[string]string) {
 		eligibleInstances[ri.Name] = struct{}{}
 	}
 
-	// Older quarantine passes can retain primary claims from a bare member.
-	// Drop any management-class claim before the userspace/kernel consumers
-	// observe it, while leaving reserved/forwarding ownership untouched.
+	// Earlier tolerant passes can retain primary claims from a bare member.
+	// Drop management-class and configured lifeline claims before userspace /
+	// kernel consumers observe them, while leaving reserved/forwarding ownership
+	// untouched.
 	retainedClaims := cfg.QuarantinedRIMemberPrimaryClaims[:0]
 	primarySeen := make(map[string]struct{}, len(cfg.QuarantinedRIMemberPrimaryClaims))
 	for _, claim := range cfg.QuarantinedRIMemberPrimaryClaims {
 		_, eligible := eligibleInstances[claim.Instance]
-		if eligible && IsManagementIfName(claim.LinuxName) {
+		if eligible && isFencedMember(claim.InterfaceKey, claim.LinuxName) {
 			continue
 		}
 		retainedClaims = append(retainedClaims, claim)
@@ -88,20 +95,20 @@ func quarantineRIMgmtMembers11392(cfg *Config, tunnelNames map[string]string) {
 				continue
 			}
 			keys := RoutingInstanceMemberDeviceKeys(cfg, tunnelNames, member)
-			touchesManagement := false
+			touchesFencedMember := false
 			for _, key := range keys {
-				if IsManagementIfName(key.LinuxName) {
-					touchesManagement = true
+				if isFencedMember(key.InterfaceKey, key.LinuxName) {
+					touchesFencedMember = true
 					break
 				}
 			}
-			if !touchesManagement {
+			if !touchesFencedMember {
 				kept = append(kept, member)
 				continue
 			}
 
 			for _, key := range keys {
-				if key.LinuxName == "" || IsManagementIfName(key.LinuxName) {
+				if key.LinuxName == "" || isFencedMember(key.InterfaceKey, key.LinuxName) {
 					continue
 				}
 				if key.Fanout {

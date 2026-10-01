@@ -135,6 +135,12 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesRIMgmtMember11392(tree, cfg, opts); err != nil {
 		return err
 	}
+	// #11364 fences configured cluster lifelines out of tenant routing
+	// instances. Their member netdev is indistinguishable from data co-members
+	// at LOCAL_IN, where ingress identifies the shared VRF master.
+	if err := runUniformGatesRILifelineMember11364(tree, cfg, opts); err != nil {
+		return err
+	}
 	// #11313 runs after all existing tail gates so it cannot steal an
 	// established first-error diagnostic. A missing router AS is checked on
 	// the fully-derived config after routing-options inheritance is resolved.

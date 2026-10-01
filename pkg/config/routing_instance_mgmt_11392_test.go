@@ -111,7 +111,7 @@ func TestManagementClassRIMemberQuarantinePreservesUnaffectedFanout11392(t *test
 			if len(keysBefore) != 2 {
 				t.Fatalf("fixture bare-member fanout = %+v, want primary and unit key", keysBefore)
 			}
-			quarantineRIMgmtMembers11392(cfg, tunnelNames)
+			quarantineRIRoleMembers(cfg, tunnelNames)
 
 			if len(ri.Interfaces) != len(tc.wantMembers) {
 				t.Fatalf("sanitized members = %v, want %v", ri.Interfaces, tc.wantMembers)

@@ -222,6 +222,15 @@ The #1922 management lifeline / protected set is always honored regardless of
 the policy — an explicit map can NAME the management NIC but can never remove
 it from protection.
 
+Management-name class and host-inbound lifeline identity are separate: `em*`,
+`fab*`, and `fxp*` names are assigned to `vrf-mgmt`, but only `fxp0` and
+interfaces explicitly configured as cluster control/fabric links are
+host-inbound lifeline-exempt. A device-map NIC that is declared with one of
+those management-class names but is not a configured lifeline produces a
+commit warning (#11365); declare its cluster role if host-inbound exemption is
+intended. The management-VRF transit fence does not itself exempt host-bound
+traffic from a zone's host-inbound deny.
+
 ### Managed→unmapped teardown (fail-closed, #5309)
 
 When a NIC is REMOVED from the device-map under `leave-alone`, the daemon must
