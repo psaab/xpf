@@ -283,3 +283,191 @@ func TestFilterAction_UnknownRejectMessageType_RejectsAtCommit(t *testing.T) {
 		t.Fatal("expected commit to reject `then reject blorp` (unknown message-type)")
 	}
 }
+
+// #11355: SetPath can bury recognized actions beneath `next term` and
+// `reject <message-type>`. Flat-set chains and packed lines must preserve the
+// action fields; existing conflict gates or unknown-action validation then
+// determine whether the resulting term is committable.
+func TestFilterAction_TailsAreConsistentAcrossFlatAndPacked11355(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		then                string
+		wantError           string
+		wantWarning         string
+		wantActionWarning   bool
+		wantNextTerm        bool
+		wantRejectMessage   string
+		wantRoutingInstance string
+		wantCount           string
+	}{
+		{
+			name: "next term with routing-instance", then: "next term routing-instance ISP-B",
+			wantError: "routing-instance", wantWarning: "routing-instance",
+			wantNextTerm: true, wantRoutingInstance: "ISP-B",
+		},
+		{
+			name: "reject type with routing-instance", then: "reject tcp-reset routing-instance ISP-B",
+			wantError: "routing-instance", wantWarning: "routing-instance",
+			wantRejectMessage: "tcp-reset", wantRoutingInstance: "ISP-B",
+		},
+		{
+			name: "reject type with count", then: "reject tcp-reset count c1",
+			wantRejectMessage: "tcp-reset", wantCount: "c1",
+		},
+		{
+			name: "unknown action after next term", then: "next term frobnicate",
+			wantError: "frobnicate", wantWarning: "frobnicate",
+			wantActionWarning: true, wantNextTerm: true,
+		},
+		{
+			name: "unknown action after reject type", then: "reject tcp-reset frobnicate",
+			wantError: "frobnicate", wantWarning: "frobnicate",
+			wantActionWarning: true, wantRejectMessage: "tcp-reset",
+		},
+	} {
+		for _, form := range []struct {
+			name  string
+			build func(*testing.T, string) *ConfigTree
+		}{
+			{
+				name: "flat-set",
+				build: func(t *testing.T, then string) *ConfigTree {
+					commands := []string{"set routing-instances ISP-B instance-type virtual-router"}
+					commands = append(commands, filterWithThen(then)...)
+					return flatTreeFromSets(t, commands...)
+				},
+			},
+			{
+				name: "packed-line",
+				build: func(t *testing.T, then string) *ConfigTree {
+					source := `routing-instances { ISP-B { instance-type virtual-router; } } ` +
+						`firewall { family inet { filter f1 { term t1 { from { protocol tcp; } then ` +
+						then + `; } } } }`
+					return hierTree(t, source)
+				},
+			},
+		} {
+			t.Run(tc.name+"/"+form.name, func(t *testing.T) {
+				_, strictErr := CompileConfig(form.build(t, tc.then))
+				if tc.wantError == "" {
+					if strictErr != nil {
+						t.Fatalf("strict commit rejected then %q: %v", tc.then, strictErr)
+					}
+				} else {
+					if strictErr == nil {
+						t.Fatalf("strict commit accepted then %q", tc.then)
+					}
+					if !strings.Contains(strictErr.Error(), tc.wantError) {
+						t.Fatalf("strict refusal %q does not name %q", strictErr, tc.wantError)
+					}
+				}
+
+				cfg, err := CompileConfigLenient(form.build(t, tc.then))
+				if err != nil {
+					t.Fatalf("tolerant load rejected then %q: %v", tc.then, err)
+				}
+				term := cfg.Firewall.FiltersInet["f1"].Terms[0]
+				if term.NextTerm != tc.wantNextTerm ||
+					term.RejectMessageType != tc.wantRejectMessage ||
+					term.RoutingInstance != tc.wantRoutingInstance ||
+					term.Count != tc.wantCount {
+					t.Fatalf("then %q compiled fields NextTerm=%v RejectMessageType=%q RoutingInstance=%q Count=%q",
+						tc.then, term.NextTerm, term.RejectMessageType, term.RoutingInstance, term.Count)
+				}
+				if tc.wantWarning == "" {
+					if len(cfg.Warnings) != 0 {
+						t.Fatalf("valid then %q produced unexpected warnings: %v", tc.then, cfg.Warnings)
+					}
+					return
+				}
+				for _, warning := range cfg.Warnings {
+					if strings.Contains(warning, tc.wantWarning) &&
+						(!tc.wantActionWarning || strings.Contains(warning, "firewall filter action")) {
+						return
+					}
+				}
+				t.Fatalf("tolerant load did not warn about then %q: %v", tc.then, cfg.Warnings)
+			})
+		}
+	}
+}
+
+// A hierarchical action body is another tree shape where the message-type
+// owns the later action as a child rather than a direct sibling.
+func TestFilterAction_HierarchicalNestedRejectTailPreservesCount11355(t *testing.T) {
+	source := `firewall { family inet { filter f1 { term t1 { from { protocol tcp; } ` +
+		`then { reject { tcp-reset { count c1; } } } } } } }`
+	cfg, err := CompileConfig(hierTree(t, source))
+	if err != nil {
+		t.Fatalf("hierarchical reject/count action chain should compile: %v", err)
+	}
+	term := cfg.Firewall.FiltersInet["f1"].Terms[0]
+	if term.Action != "reject" || term.RejectMessageType != "tcp-reset" || term.Count != "c1" {
+		t.Fatalf("nested reject tail compiled as action=%q message=%q count=%q",
+			term.Action, term.RejectMessageType, term.Count)
+	}
+}
+
+// #11355: reject reason leaves are flags, not value lists. Extra values must
+// reach the existing strict/tolerant unknown-action gate in every authored
+// shape rather than disappearing only in flat-set brackets.
+func TestFilterAction_RejectFlagExtraValuesGuardedAcrossSpellings11355(t *testing.T) {
+	hier := func(t *testing.T, tail string) *ConfigTree {
+		t.Helper()
+		return hierTree(t, `firewall { family inet { filter f1 { term t1 { from { protocol tcp; } then { `+
+			tail+` } } } } }`)
+	}
+	flat := func(t *testing.T, commands ...string) *ConfigTree {
+		t.Helper()
+		return flatTreeFromSets(t, commands...)
+	}
+	type spelling struct {
+		name  string
+		build func(*testing.T) *ConfigTree
+	}
+	spellings := []spelling{
+		{name: "hierarchical-bracket", build: func(t *testing.T) *ConfigTree {
+			return hier(t, `reject tcp-reset [ extra-one extra-two ];`)
+		}},
+		{name: "hierarchical-block", build: func(t *testing.T) *ConfigTree {
+			return hier(t, `reject { tcp-reset { extra-one; extra-two; } }`)
+		}},
+		{name: "hierarchical-repeat", build: func(t *testing.T) *ConfigTree {
+			return hier(t, `reject tcp-reset extra-one; reject tcp-reset extra-two;`)
+		}},
+		{name: "set-bracket", build: func(t *testing.T) *ConfigTree {
+			return flat(t, filterWithThen("reject tcp-reset [ extra-one extra-two ]")...)
+		}},
+		{name: "set-repeat", build: func(t *testing.T) *ConfigTree {
+			commands := filterWithThen("reject tcp-reset extra-one")
+			commands = append(commands, "set firewall family inet filter f1 term t1 then reject tcp-reset extra-two")
+			return flat(t, commands...)
+		}},
+		{name: "hierarchical-mixed", build: func(t *testing.T) *ConfigTree {
+			return hier(t, `reject tcp-reset extra-one { extra-two; }`)
+		}},
+	}
+	for _, form := range spellings {
+		t.Run(form.name, func(t *testing.T) {
+			tree := form.build(t)
+			_, err := CompileConfig(tree)
+			if err == nil || (!strings.Contains(err.Error(), "extra-one") &&
+				!strings.Contains(err.Error(), "extra-two")) {
+				t.Fatalf("strict compile must reject the extra values with a named diagnostic, got %v", err)
+			}
+			cfg, err := CompileConfigLenient(form.build(t))
+			if err != nil {
+				t.Fatalf("tolerant compile must preserve boot availability: %v", err)
+			}
+			if term := cfg.Firewall.FiltersInet["f1"].Terms[0]; term.RejectMessageType != "tcp-reset" {
+				t.Fatalf("reject reason flag changed to %q", term.RejectMessageType)
+			}
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "extra-one") || strings.Contains(warning, "extra-two") {
+					return
+				}
+			}
+			t.Fatalf("tolerant compile did not warn about the extra values: %v", cfg.Warnings)
+		})
+	}
+}

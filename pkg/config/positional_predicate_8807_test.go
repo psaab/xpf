@@ -558,6 +558,8 @@ var converseAdjudicated8807 = map[string]converseVerdict8807{
 	"pool / static-binding":   {"unmeasured", "DHCP pool; NOT MEASURED."},
 	"route / policy":          {"unmeasured", "NOT MEASURED."},
 	"schedulers / scheduler":  {"unmeasured", "NOT MEASURED."},
+	"scheduler / start-date":  {"benign", "The #11358 scanner expands scheduler runs but only checks time boundaries; date bounds remain compiled as Scheduler.StartDate by compileSchedulers, pinned by TestCompileJunosNativeSchedulerFormatsAndPolicyBindings11305 and TestCompileJunosNativeSchedulerFormatsFlatSet11305."},
+	"scheduler / stop-date":   {"benign", "The #11358 scanner expands scheduler runs but only checks time boundaries; date bounds remain compiled as Scheduler.StopDate by compileSchedulers, pinned by TestCompileJunosNativeSchedulerFormats11305 and TestCompileJunosNativeSchedulerFormatsFlatSet11305."},
 	"vpn / traffic-selector":  {"unmeasured", "IPsec VPN; the compiler may read it through a helper rather than a .Name() clause. NOT MEASURED."},
 	"route / rib-group":       {"benign", "#11314's TestStaticRouteRibGroupHasSpecificWarning11314 measures both accepted spellings: the unsupported rib-group is named in a warning and the configured local static route remains. StaticRoute has no RibGroup field, so this raw positional candidate is deliberately not a typed compiler read."},
 }
