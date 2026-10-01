@@ -30,6 +30,7 @@ fn zero_disposition_route_falls_through_under_both_default_policies_11327() {
                 family: "inet".into(),
                 destination: "0.0.0.0/0".into(),
                 next_hops: vec!["192.0.2.1".into()],
+                mtu: 0,
                 ..Default::default()
             }],
             neighbors: vec![crate::NeighborSnapshot {

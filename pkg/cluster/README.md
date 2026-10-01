@@ -396,7 +396,9 @@ Two things the gate deliberately does NOT do, both still open:
   RG stays secondary until it becomes ready or the degraded fallback expires.
   This avoids claiming VIPs while local interfaces, VRRP, fabric or dataplane
   readiness is still missing (#10697).
-- **Session-sync readiness is not an input** to the gate — that is #110.
+- **Session-sync readiness is not an input** to the RG readiness gate (#110).
+  #11566 uses only a separate fresh receive proof to defer never-seen absence
+  confirmation.
 
 ## Peer-liveness cold-boot grace (#4386)
 
@@ -410,7 +412,7 @@ down/up — can disrupt the control-link UDP receive path for 10-15+ seconds:
   the grace, so a recovering node does not declare a still-live peer dead on
   the first dropped heartbeat. After the grace, staleness (`heartbeatStale`,
   `threshold*interval`) drives `handlePeerTimeout`.
-- **Never-seen-at-boot** (`lastSeen == 0`): single-node promotion is held
+- **Never-seen-at-boot** (`lastSeen == 0`): single-node promotion first waits
   behind the SAME floor via `neverSeenConfirmed(sinceStart, grace)`. Deciding a
   peer NEVER EXISTED is different from a peer that WAS seen then went silent —
   on a **simultaneous cold boot** the first heartbeats from a live peer are
@@ -419,13 +421,17 @@ down/up — can disrupt the control-link UDP receive path for 10-15+ seconds:
   virtual MAC — a 10-15s split-brain until the link recovers and dual-active
   resolution demotes one. The floor lets a slow-to-appear peer be heard first.
 
-The floor DELAYS the never-seen decision; it never blocks it. A genuinely
-absent peer — a single-node deployment, or a peer that will never come up —
-is confirmed once the grace elapses (`neverSeenConfirmed` returns true at
-`sinceStart >= grace`). The manager records `peerConfirmedAbsent` separately
-from `peerEverSeen`: this releases the non-preempt hold while keeping the
-cold-boot readiness gate armed. A ready node promotes normally; an unready node
-stays secondary until the degraded fallback, which marks and warns on the
+The floor releases after 30s, then #11566 checks the separate session-sync
+receive-recency proof before confirming the peer absent. A connected sync link
+with proof at most 2s old keeps `peerConfirmedAbsent` unset and the manager
+rechecks on each timeout tick; unlike `shouldSuppressPeerHeartbeatTimeout` for
+previously-seen peers, this hold has no 5s cap. If sync disconnects or the proof
+becomes stale, the never-seen path confirms absence and continues election. A
+genuinely absent or fully silent peer therefore still reaches single-node
+promotion after the startup grace. The manager records `peerConfirmedAbsent`
+separately from `peerEverSeen`: this releases the non-preempt hold while keeping
+the cold-boot readiness gate armed. A ready node promotes normally; an unready
+node stays secondary until the degraded fallback, which marks and warns on the
 degraded promotion. A peer heartbeat clears the confirmed-absent state.
 
 ### Asymmetric peer visibility (#10775)

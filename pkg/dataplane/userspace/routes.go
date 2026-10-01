@@ -21,10 +21,10 @@ var ruleListFn = netlink.RuleList
 // routeSnapshotDedupeKey returns the canonical identity used to suppress
 // duplicate route snapshots during route collection.
 func routeSnapshotDedupeKey(snap RouteSnapshot) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%d|%d",
+	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%d|%d|%d",
 		snap.Table, snap.Family, snap.Destination,
 		strings.Join(snap.NextHops, ","), snap.NextHopWeights, snap.NextTable,
-		snap.Discard, snap.Preference, snap.RulePriority)
+		snap.Discard, snap.Preference, snap.RulePriority, snap.MTU)
 }
 
 // nonDefaultRouteWeights omits the wire vector when all entries mean weight 1.
@@ -607,7 +607,10 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			// Non-discard (false) sorts before discard (true).
 			return b.Discard
 		}
-		return a.Preference < b.Preference
+		if a.Preference != b.Preference {
+			return a.Preference < b.Preference
+		}
+		return a.MTU < b.MTU
 	})
 	return out, capped, nil
 }
@@ -1278,7 +1281,10 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 		if an != bn {
 			return an < bn
 		}
-		return slices.Compare(a.NextHopWeights, b.NextHopWeights) < 0
+		if cmp := slices.Compare(a.NextHopWeights, b.NextHopWeights); cmp != 0 {
+			return cmp < 0
+		}
+		return a.MTU < b.MTU
 	})
 
 	var lastMetricKey string
@@ -1336,6 +1342,7 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			NextHops:       lr.NextHops,
 			NextHopWeights: nonDefaultRouteWeights(lr.NextHopWeights),
 			Preference:     routing.LearnedRouteImportPreference,
+			MTU:            lr.MTU,
 		})
 	}
 	return capped, nil

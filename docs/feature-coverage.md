@@ -136,7 +136,8 @@ the userspace dataplane admission boundary is in
 - **TCP MSS clamping** in the userspace AF_XDP dataplane (all-tcp,
   ipsec-vpn, and GRE gre-in/gre-out).
 - **Path MTU Discovery** on the forwarding path: a forwarded frame that
-  exceeds the egress interface MTU and is not transparently TCP-segmented
+  exceeds the effective egress MTU (the minimum of the nonzero egress
+  interface MTU and selected route RTAX_MTU) and is not transparently TCP-segmented
   (UDP, ICMP, ESP, GRE, TCP seg-miss) triggers an ICMPv4 Fragmentation
   Needed (type 3 code 4, next-hop MTU) for IPv4 DF / ICMPv6 Packet Too
   Big (type 2, MTU) for IPv6 back to the sender, instead of a silent MTU
@@ -150,9 +151,13 @@ the userspace dataplane admission boundary is in
   rewrite keyed on the generated ICMP fires, and a parse failure of the
   built bytes fails CLOSED (drop + `generated_reply_classify_parse_errors`).
   Output-filter drops of the PTB land on `ptb_output_filter_drops`.
+  An absent route MTU adds no constraint. Tunnel PMTUD keeps inner/overlay
+  and outer/transport route MTUs distinct: outer MTUs are converted through
+  the tunnel overhead/padding budget before comparing with the inner packet.
 - **Forwarded TCP over egress MTU is re-segmented, not PTB'd — including
   DF-set (#1199, #6125).** An oversize *whole* (unfragmented) transit TCP
-  datagram whose L3 length exceeds the egress interface MTU is transparently
+  datagram whose L3 length exceeds the effective egress MTU (interface plus
+  selected-route constraint) is transparently
   re-segmented into within-MTU TCP segments
   (`forwarded_tcp_may_need_segmentation` → `tx/tcp_segmentation.rs`),
   regardless of the IPv4 Don't-Fragment bit. This is a **deliberate

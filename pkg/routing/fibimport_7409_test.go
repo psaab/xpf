@@ -118,6 +118,28 @@ func TestImportCarriesKernelMetrics11388(t *testing.T) {
 	}
 }
 
+func TestImportCarriesKernelRouteMTU11411(t *testing.T) {
+	withMTU := unicast(mustCIDR(t, "198.51.100.0/24"), "192.0.2.2", unix.RTPROT_DHCP)
+	withMTU.MTU = 1400
+	withoutMTU := unicast(mustCIDR(t, "203.0.113.0/24"), "192.0.2.3", unix.RTPROT_DHCP)
+	withRouteLister(t, staticLister(v4Main(withMTU, withoutMTU)))
+
+	got, err := ImportLearnedRoutes([]int{mainTableID})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	mtus := make(map[string]int, len(got))
+	for _, route := range got {
+		mtus[route.Destination] = route.MTU
+	}
+	if mtus["198.51.100.0/24"] != 1400 {
+		t.Errorf("route MTU = %d, want 1400", mtus["198.51.100.0/24"])
+	}
+	if mtus["203.0.113.0/24"] != 0 {
+		t.Errorf("route without RTAX_MTU = %d, want unknown (0)", mtus["203.0.113.0/24"])
+	}
+}
+
 // THE DEFAULT-ROUTE NORMALISATION. The kernel may report 0.0.0.0/0 and ::/0
 // as a route with NO RTA_DST, i.e. Dst == nil — pkg/routing routeToEntry
 // already carries that same normalisation for the display path. A DHCP-learned

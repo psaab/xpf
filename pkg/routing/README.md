@@ -1134,6 +1134,11 @@ toward such a destination therefore either:
 A `nil` `Dst` is normalised to `0.0.0.0/0` / `::/0` — that is how a default
 route can arrive, and it is the route the import most exists to capture.
 
+Imported routes preserve the kernel's `RTAX_MTU` constraint into the
+userspace FIB (#11411). Zero means absent/unknown; the selected route MTU
+constrains plain forwarding, TCP segmentation, PMTU signaling, and tunnel
+inner/outer budgets alongside their relevant interface MTUs.
+
 The table set is **bounded** by `LearnedRouteTableIDs`: main plus each
 configured routing instance. The management VRF (999) is hard-excluded — it is
 not reachable from a packet reinjected on `xpf-usp0`, and importing it would

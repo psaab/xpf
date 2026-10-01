@@ -341,6 +341,8 @@ pub(super) fn build_local_time_exceeded_request(
             neighbor_mac: None,
             src_mac: Some(egress.src_mac),
             tx_vlan_id: egress.vlan_id,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 },
         apply_nat_on_fabric: false,
         expected_ports: None,

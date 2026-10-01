@@ -84,6 +84,15 @@ func (m *Manager) SetPeerTimeoutGuard(fn func() (bool, string)) {
 	m.peerTimeoutGuardFn = fn
 }
 
+// SetPeerNeverSeenSyncFreshFunc installs the sync-recency probe used before
+// confirming an unheard peer absent. It runs under m.mu and therefore must be
+// a fast, lock-free read that does not call back into Manager.
+func (m *Manager) SetPeerNeverSeenSyncFreshFunc(fn func() bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peerNeverSeenSyncFreshFn = fn
+}
+
 // SetHeartbeatRestartNotifyFunc sets the callback invoked around the
 // RestartHeartbeat socket teardown/rebind window. The daemon wires it to
 // SessionSync.SendLivenessKeepalive so the peer's heartbeat-timeout

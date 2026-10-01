@@ -2135,6 +2135,8 @@ impl ListTestWorker {
                 neighbor_mac: None,
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: crate::nat::NatDecision::default(),
             install_table_domain: 0,

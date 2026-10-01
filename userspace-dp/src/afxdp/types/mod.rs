@@ -293,6 +293,10 @@ pub(super) struct PendingNeighPacket {
 // Compile-time size guard: pending-neighbor retry carries the session key so
 // runtime TX-selection policers still meter packets after ARP/NDP resolution.
 //
+// 296 -> 304 (#11411). ForwardingResolution now carries selected-route and
+// tunnel-transport MTU constraints; PendingNeighPacket embeds the decision.
+// At the 4096-hop cap that adds ~32 KB, preserving both budgets during neighbor
+// resolution.
 // 288 -> 296 (#11064). `SessionDecision` gained the typed source-NAT ICMP
 // fingerprint; this struct embeds one, and alignment rounds the 4-byte
 // decision growth to 8 bytes. At the `MAX_PENDING_NEIGH` cap of ~4096, that is
@@ -326,7 +330,7 @@ pub(super) struct PendingNeighPacket {
 // one it belongs to.
 // #10917: the fabric stamp uses the existing tail padding, so added no size.
 const _: () = assert!(
-    core::mem::size_of::<PendingNeighPacket>() == 296,
+    core::mem::size_of::<PendingNeighPacket>() == 304,
     "PendingNeighPacket size changed — update afxdp.rs MAX_PENDING_NEIGH commentary",
 );
 

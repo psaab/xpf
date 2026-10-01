@@ -203,6 +203,8 @@ pub(in crate::afxdp) fn resolve_forwarding(
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         };
     };
     lookup_forwarding_resolution_with_dynamic(state, dynamic_neighbors, dst)
@@ -488,6 +490,8 @@ fn local_delivery_resolution_v4(
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     })
 }
 
@@ -541,6 +545,8 @@ fn local_delivery_resolution_v6(
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     })
 }
 
@@ -571,6 +577,8 @@ fn lookup_forwarding_resolution_v4_inner(
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         };
     }
     if evaluate_leaks {
@@ -613,6 +621,7 @@ fn lookup_forwarding_resolution_v4_inner(
                         dynamic_neighbors,
                         tunnel_endpoint_id,
                         depth,
+
                     )
                 } else {
                     no_route_resolution(Some(IpAddr::V4(ip)))
@@ -633,6 +642,8 @@ fn lookup_forwarding_resolution_v4_inner(
                 neighbor_mac: neighbor.map(|entry| entry.mac),
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             };
             populate_egress_resolution(state, ifindex, &mut resolution);
             resolution
@@ -649,6 +660,8 @@ fn lookup_forwarding_resolution_v4_inner(
                     neighbor_mac: None,
                     src_mac: None,
                     tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
                 };
             }
             // `select_v4_route` has already selected a member within the
@@ -660,12 +673,14 @@ fn lookup_forwarding_resolution_v4_inner(
             };
             if tunnel_endpoint_id != 0 {
                 return if allow_tunnels {
-                    resolve_tunnel_forwarding_resolution(
+                    let mut resolution = resolve_tunnel_forwarding_resolution(
                         state,
                         dynamic_neighbors,
                         tunnel_endpoint_id,
                         depth,
-                    )
+                    );
+                    resolution.route_mtu = route.mtu;
+                    resolution
                 } else {
                     no_route_resolution(next_hop.map(IpAddr::V4).or(Some(IpAddr::V4(ip))))
                 };
@@ -690,6 +705,8 @@ fn lookup_forwarding_resolution_v4_inner(
                 neighbor_mac: neighbor.map(|entry| entry.mac),
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: route.mtu,
+                transport_route_mtu: 0,
             };
             populate_egress_resolution(state, ifindex, &mut resolution);
             resolution
@@ -766,6 +783,8 @@ fn lookup_forwarding_resolution_v6_inner(
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         };
     }
     if evaluate_leaks {
@@ -825,6 +844,8 @@ fn lookup_forwarding_resolution_v6_inner(
                 neighbor_mac: neighbor.map(|entry| entry.mac),
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             };
             populate_egress_resolution(state, ifindex, &mut resolution);
             resolution
@@ -841,6 +862,8 @@ fn lookup_forwarding_resolution_v6_inner(
                     neighbor_mac: None,
                     src_mac: None,
                     tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
                 };
             }
             // See the v4 twin: preserve the preferred tier's cold-path
@@ -851,12 +874,14 @@ fn lookup_forwarding_resolution_v6_inner(
             };
             if tunnel_endpoint_id != 0 {
                 return if allow_tunnels {
-                    resolve_tunnel_forwarding_resolution(
+                    let mut resolution = resolve_tunnel_forwarding_resolution(
                         state,
                         dynamic_neighbors,
                         tunnel_endpoint_id,
                         depth,
-                    )
+                    );
+                    resolution.route_mtu = route.mtu;
+                    resolution
                 } else {
                     no_route_resolution(next_hop.map(IpAddr::V6).or(Some(IpAddr::V6(ip))))
                 };
@@ -881,6 +906,8 @@ fn lookup_forwarding_resolution_v6_inner(
                 neighbor_mac: neighbor.map(|entry| entry.mac),
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: route.mtu,
+                transport_route_mtu: 0,
             };
             populate_egress_resolution(state, ifindex, &mut resolution);
             resolution
@@ -900,6 +927,8 @@ pub(in crate::afxdp) fn no_route_resolution(next_hop: Option<IpAddr>) -> Forward
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }
 }
 
@@ -920,6 +949,8 @@ pub(in crate::afxdp) fn table_unavailable_resolution() -> ForwardingResolution {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }
 }
 
