@@ -308,6 +308,12 @@ type compileOpts struct {
 	// preserves the fail-SAFE posture on that boot. Same doctrine as
 	// lenientIPsecPolicyProposalRef.
 	lenientSchedulerMapRef bool
+	// lenientSchedulerWindowPairs11358 downgrades conflicting repeated
+	// start-time/stop-time boundaries within one scheduler day from a strict
+	// compile error to a warning on tolerant load / peer-sync paths. The typed
+	// scheduler model has one window per day, so silently accepting conflicting
+	// boundaries loses authored scheduling semantics (#11358).
+	lenientSchedulerWindowPairs11358 bool
 
 	// lenientCoSInterfaceRefs (#7337) downgrades the class-of-service
 	// INTERFACE-side reference check
@@ -2999,6 +3005,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecPolicyProposalRef:          true,
 		lenientPolicySchedulerRef:              true,
 		lenientSchedulerMapRef:                 true,
+		lenientSchedulerWindowPairs11358:       true,
 		lenientCoSInterfaceRefs:                true,
 		lenientCoSLossPriority:                 true,
 		lenientCoSUnitClassifierConflict:       true,

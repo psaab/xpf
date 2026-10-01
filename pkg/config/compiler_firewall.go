@@ -1859,6 +1859,75 @@ var rejectMessageTypes = map[string]bool{
 	"tcp-reset":                   true,
 }
 
+// compileFilterThenTail11355 preserves recognized actions nested beneath
+// `next [term]` or `reject [message-type]`. SetPath can make those tails
+// children of an otherwise valid action, so the ordinary direct-child walk
+// would miss them.
+func compileFilterThenTail11355(action *Node, term *FirewallFilterTerm) {
+	if action == nil || term == nil {
+		return
+	}
+	var keys []string
+	var children []*Node
+	switch action.Name() {
+	case "next":
+		i := 1
+		if i < len(action.Keys) && action.Keys[i] == "term" {
+			i++
+		}
+		keys = append(keys, action.Keys[i:]...)
+		for _, child := range action.Children {
+			if child == nil {
+				continue
+			}
+			if child.Name() == "term" {
+				if len(child.Keys) > 1 {
+					keys = append(keys, child.Keys[1:]...)
+				}
+				children = append(children, child.Children...)
+				continue
+			}
+			children = append(children, child)
+		}
+	case "reject":
+		i := 1
+		hasKeyedMessageType := false
+		if i < len(action.Keys) {
+			if !rejectMessageTypes[action.Keys[i]] {
+				return
+			}
+			i++
+			hasKeyedMessageType = true
+		}
+		keys = append(keys, action.Keys[i:]...)
+		for _, child := range action.Children {
+			if child == nil {
+				continue
+			}
+			if rejectMessageTypes[child.Name()] {
+				if len(child.Keys) > 1 {
+					keys = append(keys, child.Keys[1:]...)
+				}
+				children = append(children, child.Children...)
+				continue
+			}
+			if hasKeyedMessageType {
+				children = append(children, child)
+			}
+		}
+	default:
+		return
+	}
+	if len(keys) > 0 {
+		// Reuse the leaf-form action parser so arguments and unknown tails
+		// follow the same arity rules as an ordinary packed `then` run.
+		compileFilterThen(&Node{Keys: append([]string{"then"}, keys...), IsLeaf: true}, term)
+	}
+	if len(children) > 0 {
+		compileFilterThen(&Node{Children: children}, term)
+	}
+}
+
 // failClosedUnknownFilterAction turns any term with an unrecognized `then`
 // token into an explicit discard after parsing the complete statement. The
 // token remains in UnknownActions for the strict rejection / tolerant warning,
@@ -2063,6 +2132,10 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 			// `then` token for the strict commit gate instead of dropping it.
 			term.UnknownActions = append(term.UnknownActions, child.Name())
 		}
+		// #11355: preserve action tails nested under `next` or a reject
+		// message-type. The regular compiler and strict gates then see the
+		// same fields as when those actions are direct siblings.
+		compileFilterThenTail11355(child, term)
 	}
 }
 
