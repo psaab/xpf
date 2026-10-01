@@ -450,3 +450,151 @@ fn ordinary_unicast_sources_still_transit_under_any_permit_10689() {
     assert_eq!(batch_v6.session_creates, 2);
     assert_eq!(sessions_v6.len(), 2);
 }
+
+#[test]
+fn directed_broadcast_source_martian_is_routing_domain_scoped_11074() {
+    let (red_domain, _) = crate::session::install_table_identity("red");
+    let (blue_domain, _) = crate::session::install_table_identity("blue");
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules.clear();
+    snapshot.interfaces.extend([
+        crate::InterfaceSnapshot {
+            name: "red-in".to_string(),
+            zone: "lan".to_string(),
+            routing_instance: "red".to_string(),
+            routing_domain: red_domain,
+            linux_name: "red-in".to_string(),
+            ifindex: 127,
+            addresses: vec![crate::InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "10.0.0.1/24".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        crate::InterfaceSnapshot {
+            name: "blue-in".to_string(),
+            zone: "lan".to_string(),
+            routing_instance: "blue".to_string(),
+            routing_domain: blue_domain,
+            linux_name: "blue-in".to_string(),
+            hardware_addr: "02:bf:72:01:00:01".to_string(),
+            ifindex: 125,
+            addresses: vec![crate::InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "10.0.0.2/16".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        crate::InterfaceSnapshot {
+            name: "blue-out".to_string(),
+            zone: "wan".to_string(),
+            routing_instance: "blue".to_string(),
+            routing_domain: blue_domain,
+            linux_name: "blue-out".to_string(),
+            hardware_addr: "02:bf:72:00:81:08".to_string(),
+            ifindex: 126,
+            addresses: vec![crate::InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "172.16.81.2/24".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    ]);
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "blue.inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "0.0.0.0/0".to_string(),
+        next_hops: vec!["172.16.81.1@blue-out".to_string()],
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "blue-out".to_string(),
+        ifindex: 126,
+        family: "inet".to_string(),
+        ip: "172.16.81.1".to_string(),
+        mac: "00:aa:bb:cc:dd:ee".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&v5(snapshot));
+
+    // This is red's /24 directed broadcast, but a valid host address in
+    // blue's /16. Classification must use the ingress flow's routing domain.
+    let source = Ipv4Addr::new(10, 0, 0, 255);
+    assert_eq!(
+        crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 125, 0, None),
+        blue_domain,
+        "the frame's ingress must resolve to blue's routing domain"
+    );
+    assert!(
+        forwarding
+            .connected_v4_directed_broadcasts
+            .contains(&(red_domain, source)),
+        "red's /24 directed broadcast must be indexed in red"
+    );
+    assert!(
+        !forwarding
+            .connected_v4_directed_broadcasts
+            .contains(&(blue_domain, source)),
+        "red's /24 directed broadcast must not be indexed in blue"
+    );
+    assert!(
+        !crate::afxdp::frame::transit_src_is_martian(
+            &forwarding,
+            IpAddr::V4(source),
+            blue_domain
+        ),
+        "the blue-domain martian predicate must accept the /16 host source"
+    );
+    let blue_resolution =
+        crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+            &forwarding,
+            &Arc::new(crate::afxdp::ShardedNeighborMap::new()),
+            IpAddr::V4(TRANSIT_V4_DST),
+            Some("blue.inet.0"),
+        );
+    assert_eq!(
+        blue_resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "the blue route and neighbor must provide a usable transit path"
+    );
+    assert!(
+        crate::afxdp::frame::transit_src_is_martian(
+            &forwarding,
+            IpAddr::V4(source),
+            red_domain
+        ),
+        "the same source is a directed broadcast in red"
+    );
+    let meta = crate::afxdp::types::ForwardPacketMeta::from(txn_meta_v4(
+        125,
+        TCP_FLAG_SYN,
+        64,
+    ));
+    assert!(
+        !crate::afxdp::poll_descriptor::transit_source_class_drop(
+            &forwarding,
+            ForwardingDisposition::ForwardCandidate,
+            IpAddr::V4(source),
+            0,
+            meta,
+            None,
+        ),
+        "the ingress-domain fallback must classify the packet in blue"
+    );
+    assert!(
+        crate::afxdp::poll_descriptor::transit_source_class_drop(
+            &forwarding,
+            ForwardingDisposition::ForwardCandidate,
+            IpAddr::V4(source),
+            red_domain,
+            meta,
+            None,
+        ),
+        "a red-domain flow must classify the source in red"
+    );
+}
