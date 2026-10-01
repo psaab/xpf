@@ -569,37 +569,43 @@ func TestResolveRibTable(t *testing.T) {
 
 	tests := []struct {
 		ribName string
+		family  int
 		want    int
 		wantOK  bool
 	}{
-		{"inet.0", 254, true},
-		{"inet6.0", 254, true},
-		{"dmz-vr.inet.0", 101, true},
-		{"dmz-vr.inet6.0", 101, true},
-		{"tunnel-vr.inet.0", 100, true},
+		{"inet.0", unix.AF_INET, 254, true},
+		{"inet6.0", unix.AF_INET6, 254, true},
+		{"inet.0", unix.AF_INET6, 0, false},
+		{"inet6.0", unix.AF_INET, 0, false},
+		{"dmz-vr.inet.0", unix.AF_INET, 101, true},
+		{"dmz-vr.inet6.0", unix.AF_INET6, 101, true},
+		// Both Junos families share the instance's Linux table ID.
+		{"dmz-vr.inet6.0", unix.AF_INET, 101, true},
+		{"tunnel-vr.inet.0", unix.AF_INET, 100, true},
 		// #2226: unresolvable rib names report ok=false (NOT a bare
 		// table 0 the needsLeak loop would read as a real target table
 		// and spuriously leak the source table into the main lookup).
-		{"unknown-vr.inet.0", 0, false},
-		{"garbage", 0, false},
+		{"unknown-vr.inet.0", unix.AF_INET, 0, false},
+		{"garbage", unix.AF_INET, 0, false},
 		// #2253: a malformed family token whose prefix IS a defined
 		// instance must NOT resolve. A loose ".inet" substring match
 		// accepted these and mapped them onto the instance table; the
 		// exact ".inet.0" / ".inet6.0" suffix match rejects them.
-		{"dmz-vr.inet9.0", 0, false},
-		{"dmz-vr.inetX.0", 0, false},
-		{"dmz-vr.inetfoo.0", 0, false},
-		{"dmz-vr.inet60.0", 0, false},
-		{"dmz-vr.inet.0.garbage", 0, false},
-		{"dmz-vr.inet", 0, false},
-		{".inet.0", 0, false},  // empty instance prefix
-		{".inet6.0", 0, false}, // empty instance prefix
+		{"dmz-vr.inet9.0", unix.AF_INET, 0, false},
+		{"dmz-vr.inetX.0", unix.AF_INET, 0, false},
+		{"dmz-vr.inetfoo.0", unix.AF_INET, 0, false},
+		{"dmz-vr.inet60.0", unix.AF_INET, 0, false},
+		{"dmz-vr.inet.0.garbage", unix.AF_INET, 0, false},
+		{"dmz-vr.inet", unix.AF_INET, 0, false},
+		{".inet.0", unix.AF_INET, 0, false},  // empty instance prefix
+		{".inet6.0", unix.AF_INET, 0, false}, // empty instance prefix
 	}
 
 	for _, tt := range tests {
-		got, ok := resolveRibTable(tt.ribName, tableIDs)
+		got, ok := resolveRibTable(tt.ribName, tableIDs, tt.family)
 		if got != tt.want || ok != tt.wantOK {
-			t.Errorf("resolveRibTable(%q) = (%d, %v), want (%d, %v)", tt.ribName, got, ok, tt.want, tt.wantOK)
+			t.Errorf("resolveRibTable(%q, family %d) = (%d, %v), want (%d, %v)",
+				tt.ribName, tt.family, got, ok, tt.want, tt.wantOK)
 		}
 	}
 }
@@ -679,7 +685,7 @@ func TestRibGroupNeedsLeak(t *testing.T) {
 	inst := instances[1] // dmz-vr
 	needsLeak := false
 	for _, ribName := range rg.ImportRibs {
-		if t, ok := resolveRibTable(ribName, tableIDs); ok && t != inst.TableID {
+		if t, ok := resolveRibTable(ribName, tableIDs, unix.AF_INET); ok && t != inst.TableID {
 			needsLeak = true
 			break
 		}
@@ -693,7 +699,7 @@ func TestRibGroupNeedsLeak(t *testing.T) {
 	inst = instances[0] // tunnel-vr
 	needsLeak = false
 	for _, ribName := range rg.ImportRibs {
-		if t, ok := resolveRibTable(ribName, tableIDs); ok && t != inst.TableID {
+		if t, ok := resolveRibTable(ribName, tableIDs, unix.AF_INET); ok && t != inst.TableID {
 			needsLeak = true
 			break
 		}
@@ -1282,19 +1288,18 @@ func TestBuildPBRRules(t *testing.T) {
 		}
 	})
 
-	// M3 / #5683: a term whose DSCP×proto×port×src×dst product exceeds the
-	// maxPBRRules cap is dropped WHOLE (fail-safe under-steer) and reported as
-	// degraded, WITHOUT ever materializing the full product. Pre-#5683 this
-	// materialized the entire cross-product and then truncated to the cap
-	// (rules[:maxPBRRules]) — the pre-cap memory/CPU blow-up. 40×25 = 1000 is the
-	// exact boundary; 40×26 = 1040 is the first over-cap product.
+	// #5683: a term whose DSCP×proto×port×src×dst product exceeds the
+	// maxPBRSteeringRules cap is dropped WHOLE (fail-safe under-steer) and
+	// reported as degraded, WITHOUT ever materializing the full product.
+	// A steering lookup and its unreachable shadow consume two priorities, so
+	// 20×25 = 500 is the exact boundary and 20×26 = 520 is over-cap.
 	t.Run("M3 overflow term dropped without materializing product", func(t *testing.T) {
-		srcs := make([]string, 0, 40)
+		srcs := make([]string, 0, 20)
 		dsts := make([]string, 0, 26)
-		for i := 0; i < 40; i++ {
+		for i := range 20 {
 			srcs = append(srcs, fmt.Sprintf("10.%d.0.0/16", i))
 		}
-		for i := 0; i < 26; i++ {
+		for i := range 26 {
 			dsts = append(dsts, fmt.Sprintf("192.168.%d.0/24", i))
 		}
 		filter := &config.FirewallFilter{
@@ -1304,9 +1309,8 @@ func TestBuildPBRRules(t *testing.T) {
 			},
 		}
 		rules, err := BuildPBRRules(pbrTestConfig("inet", filter, instances, nil))
-		// The single over-cap term is dropped whole: 0 rules installed. Pre-#5683
-		// this asserted maxPBRRules (the truncated first-N of the materialized
-		// product), so removing the guard flips this RED.
+		// The single over-cap term is dropped whole: 0 steering rules installed.
+		// The old 1000-priority cap would accept all 520 lookup rules in this term.
 		if len(rules) != 0 {
 			t.Errorf("over-cap term must be dropped whole (0 rules), got %d", len(rules))
 		}
@@ -1318,15 +1322,15 @@ func TestBuildPBRRules(t *testing.T) {
 		}
 	})
 
-	// #5683: the boundary term whose product is EXACTLY maxPBRRules builds fully
-	// (no false overflow) — 40 src × 25 dst = 1000.
+	// #5683: the boundary term whose product is EXACTLY maxPBRSteeringRules
+	// builds fully (no false overflow) — 20 src × 25 dst = 500.
 	t.Run("5683 exact-cap term builds fully", func(t *testing.T) {
-		srcs := make([]string, 0, 40)
+		srcs := make([]string, 0, 20)
 		dsts := make([]string, 0, 25)
-		for i := 0; i < 40; i++ {
+		for i := range 20 {
 			srcs = append(srcs, fmt.Sprintf("10.%d.0.0/16", i))
 		}
-		for i := 0; i < 25; i++ {
+		for i := range 25 {
 			dsts = append(dsts, fmt.Sprintf("192.168.%d.0/24", i))
 		}
 		filter := &config.FirewallFilter{
@@ -1337,10 +1341,10 @@ func TestBuildPBRRules(t *testing.T) {
 		}
 		rules, err := BuildPBRRules(pbrTestConfig("inet", filter, instances, nil))
 		if err != nil {
-			t.Fatalf("exact-cap term (product==%d) must not degrade, got: %v", maxPBRRules, err)
+			t.Fatalf("exact-cap term (product==%d) must not degrade, got: %v", maxPBRSteeringRules, err)
 		}
-		if len(rules) != maxPBRRules {
-			t.Errorf("exact-cap term must build all %d rules, got %d", maxPBRRules, len(rules))
+		if len(rules) != maxPBRSteeringRules {
+			t.Errorf("exact-cap term must build all %d steering rules, got %d", maxPBRSteeringRules, len(rules))
 		}
 	})
 
@@ -1348,8 +1352,8 @@ func TestBuildPBRRules(t *testing.T) {
 	// must NOT be materialized — the guard aborts on the O(dimensions) size
 	// computation. Pre-#5683 this allocated ~1e6 PBRRule structs before
 	// truncating; the guard returns 0 rules + a degraded error essentially
-	// instantly. Asserting len==0 (not maxPBRRules) is the fail-on-revert: the
-	// reverted materialize-then-truncate path yields maxPBRRules.
+	// instantly. Asserting len==0 (not maxPBRSteeringRules) is the fail-on-revert:
+	// the reverted materialize-then-truncate path yields maxPBRSteeringRules.
 	t.Run("5683 astronomical product never materialized", func(t *testing.T) {
 		srcs := make([]string, 0, 1000)
 		dsts := make([]string, 0, 1000)
@@ -1647,14 +1651,16 @@ func TestBuildPBRRules(t *testing.T) {
 			t.Fatalf("Apply: %v", err)
 		}
 		got := ops.rules[unix.AF_INET]
-		if len(got) != 1 {
-			t.Fatalf("expected 1 rule, got %d", len(got))
+		if len(got) != 2 {
+			t.Fatalf("expected lookup and unreachable rules, got %d", len(got))
 		}
-		if got[0].IPProto != 6 {
-			t.Errorf("netlink rule IPProto = %d, want 6", got[0].IPProto)
-		}
-		if got[0].Dport == nil || got[0].Dport.Start != 443 || got[0].Dport.End != 443 {
-			t.Errorf("netlink rule Dport = %+v, want [443,443]", got[0].Dport)
+		for _, rule := range got {
+			if rule.IPProto != 6 {
+				t.Errorf("netlink rule IPProto = %d, want 6", rule.IPProto)
+			}
+			if rule.Dport == nil || rule.Dport.Start != 443 || rule.Dport.End != 443 {
+				t.Errorf("netlink rule Dport = %+v, want [443,443]", rule.Dport)
+			}
 		}
 	})
 }
@@ -2366,7 +2372,7 @@ func TestMultiVRFRibGroupLeaking(t *testing.T) {
 		rg := ribGroups[inst.InterfaceRoutesRibGroup]
 		needsLeak := false
 		for _, ribName := range rg.ImportRibs {
-			if t, ok := resolveRibTable(ribName, tableIDs); ok && t != inst.TableID {
+			if t, ok := resolveRibTable(ribName, tableIDs, unix.AF_INET); ok && t != inst.TableID {
 				needsLeak = true
 				break
 			}
@@ -2398,7 +2404,7 @@ func TestIPv6OnlyRibGroupLeaking(t *testing.T) {
 	rg := ribGroups[rgName]
 	needsLeak := false
 	for _, ribName := range rg.ImportRibs {
-		if t, ok := resolveRibTable(ribName, tableIDs); ok && t != inst.TableID {
+		if t, ok := resolveRibTable(ribName, tableIDs, unix.AF_INET6); ok && t != inst.TableID {
 			needsLeak = true
 			break
 		}
