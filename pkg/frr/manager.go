@@ -389,11 +389,12 @@ type InstanceConfig struct {
 	Inet6StaticRoutes []*config.StaticRoute
 }
 
-// DHCPRoute represents a route learned via DHCP. An empty Destination
-// means the default route (0.0.0.0/0 or ::/0) — the option-3 gateway or
-// the option-121 0.0.0.0/0 entry. A non-empty Destination (e.g.
-// "10.0.0.0/8") is an RFC 3442 classless static route from option 121 /
-// legacy option 249.
+// DHCPRoute represents a learned route emitted by the DHCP route renderer. An
+// empty Destination means the default route (0.0.0.0/0 or ::/0), learned as an
+// IPv4 option-3 gateway, an option-121 default, or an IPv6 RIO default. A
+// non-empty Destination (e.g. "10.0.0.0/8") is an IPv4 RFC 3442 classless
+// route (option 121 / legacy option 249) or an IPv6 Router Advertisement Route
+// Information Option (RIO).
 type DHCPRoute struct {
 	Destination string // "" = default route; else a classless-route prefix
 	Gateway     string // "10.0.2.1" or "fe80::1"
@@ -417,6 +418,15 @@ type DHCPRoute struct {
 	VRF string
 }
 
+// RIBRoute is a live same-table route that can protect an existing path from
+// being replaced by a DHCP classless route. Static routes are handled from
+// config separately so an already-installed DHCP classless route cannot
+// suppress itself on the next FRR apply.
+type RIBRoute struct {
+	Destination string
+	VRF         string
+}
+
 // FullConfig holds the complete routing config for a single FRR apply.
 type FullConfig struct {
 	OSPF              *config.OSPFConfig
@@ -428,8 +438,12 @@ type FullConfig struct {
 	Inet6StaticRoutes []*config.StaticRoute // rib inet6.0 static routes
 	GenerateRoutes    []*config.GenerateRoute
 	DHCPRoutes        []DHCPRoute
-	Instances         []InstanceConfig
-	PolicyOptions     *config.PolicyOptionsConfig
+	RIBRoutes         []RIBRoute
+	// RIBRouteInventoryFailed makes classless routes fail closed after an
+	// incomplete live-RIB read; DHCP defaults retain their independent path.
+	RIBRouteInventoryFailed bool
+	Instances               []InstanceConfig
+	PolicyOptions           *config.PolicyOptionsConfig
 
 	// ForwardingTableExport is the export policy for the forwarding table (ECMP).
 	ForwardingTableExport string

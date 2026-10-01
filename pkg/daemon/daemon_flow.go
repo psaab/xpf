@@ -448,6 +448,7 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 	needsInventory := mgmtVRFNeedsOperatorInventory(leases, mgmtSet)
 	needsControlFabricInventory := mgmtVRFNeedsControlFabricInventory(leases, mgmtSet)
 	var operatorV4, operatorV6 []netlink.Route
+	var dynamicV4, dynamicV6 []netlink.Route
 	var controlConnectedV4, controlConnectedV6 []netlink.Route
 	var connectedPrefixesV4, connectedPrefixesV6 []netip.Prefix
 	var operatorInventoryErr, controlFabricInventoryErr error
@@ -467,10 +468,10 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 		}
 	}
 	if needsInventory {
-		operatorV4, controlConnectedV4, connectedPrefixesV4, operatorInventoryErr =
+		operatorV4, dynamicV4, controlConnectedV4, connectedPrefixesV4, operatorInventoryErr =
 			mgmtVRFRouteInventory(nlh, netlink.FAMILY_V4, controlFabricLinks)
 		if operatorInventoryErr == nil {
-			operatorV6, controlConnectedV6, connectedPrefixesV6, operatorInventoryErr =
+			operatorV6, dynamicV6, controlConnectedV6, connectedPrefixesV6, operatorInventoryErr =
 				mgmtVRFRouteInventory(nlh, netlink.FAMILY_V6, controlFabricLinks)
 		}
 		if operatorInventoryErr != nil {
@@ -478,9 +479,9 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 				controlFabricInventoryErr = operatorInventoryErr
 			}
 			slog.Warn("SECURITY: refusing DHCP routes because management-VRF "+
-				"operator-route inventory failed (#9943)",
+				"route inventory failed (#9943)",
 				"table", mgmtVRFTableID, "err", operatorInventoryErr)
-			errs = append(errs, fmt.Errorf("mgmt VRF operator-route inventory: %w", operatorInventoryErr))
+			errs = append(errs, fmt.Errorf("mgmt VRF route inventory: %w", operatorInventoryErr))
 		}
 	}
 	// Resolve route-bearing management links before selecting defaults so a
@@ -594,8 +595,7 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 			if operatorInventoryErr != nil {
 				suppressDefault = true
 				slog.Warn("SECURITY: refusing management-VRF DHCP default "+
-					"without a complete operator-route inventory (#9943)",
-					"interface", lease.Interface, "gw", lease.Gateway,
+					"without a complete route inventory (#9943)",
 					"table", mgmtVRFTableID)
 			} else if staticDestination := operatorDefaults[familyIndex]; staticDestination != "" {
 				suppressDefault = true
@@ -700,13 +700,13 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 			if operatorInventoryErr != nil {
 				if !trustClassless {
 					slog.Warn("SECURITY: refusing management-VRF DHCP classless route "+
-						"without a complete operator-route inventory (#9943)",
+						"without a complete route inventory (#9943)",
 						"interface", lease.Interface, "destination", cr.Destination,
 						"table", mgmtVRFTableID)
 					continue
 				}
 				slog.Warn("SECURITY: DHCP classless trust override allows a route "+
-					"despite incomplete operator-route inventory (#9943)",
+					"despite incomplete route inventory (#9943)",
 					"interface", lease.Interface, "destination", cr.Destination,
 					"env", dhcpClasslessTrustOverrideEnv, "table", mgmtVRFTableID)
 			}
@@ -725,6 +725,28 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 					continue
 				}
 			}
+			dynamicRoutes := dynamicV4
+			if nlFamily == netlink.FAMILY_V6 {
+				dynamicRoutes = dynamicV6
+			}
+			if dynamicDestination, route, covered := mgmtRouteCoveringPrefix(
+				cr.Destination, dynamicRoutes, nlFamily); covered && dynamicDestination.Bits() > 0 {
+				if trustClassless {
+					slog.Warn("SECURITY: DHCP classless trust override allows a route "+
+						"covered by a live management-VRF RIB route (#11426)",
+						"interface", lease.Interface, "destination", cr.Destination,
+						"rib_destination", dynamicDestination, "protocol", route.Protocol,
+						"env", dhcpClasslessTrustOverrideEnv, "table", mgmtVRFTableID)
+				} else {
+					slog.Warn("SECURITY: suppressing management-VRF DHCP classless route "+
+						"covered by a live RIB route (#11426)",
+						"interface", lease.Interface, "destination", cr.Destination,
+						"rib_destination", dynamicDestination, "protocol", route.Protocol,
+						"table", mgmtVRFTableID)
+					continue
+				}
+			}
+
 			dst := &net.IPNet{
 				IP:   net.IP(cr.Destination.Addr().AsSlice()),
 				Mask: net.CIDRMask(cr.Destination.Bits(), cr.Destination.Addr().BitLen()),

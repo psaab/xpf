@@ -15,9 +15,14 @@ package frr
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -311,5 +316,149 @@ func TestDHCPClasslessMartianTrustOverrideAllows_9943(t *testing.T) {
 	}
 	if count := strings.Count(logText, "msg=\"SECURITY: DHCP classless trust override allows an unsafe"); count != 3 {
 		t.Errorf("expected one unsafe WARN per trusted martian route, got %d: %s", count, logText)
+	}
+}
+
+// A live dynamic route in the DHCP lease's VRF suppresses a covered prefix.
+// A dynamic default is deliberately not treated as destination coverage: it
+// does not establish a specific path that a classless route can hijack.
+func TestDHCPClasslessCoveredByBGPRouteSuppressed11426(t *testing.T) {
+	t.Setenv(dhcpClasslessTrustOverrideEnv, "")
+	fc := &FullConfig{
+		Instances: []InstanceConfig{{Name: "tenant", VRFName: "vrf-tenant"}},
+		RIBRoutes: []RIBRoute{
+			{Destination: "0.0.0.0/0", VRF: "tenant"},
+			{Destination: "10.0.0.0/8", VRF: "tenant"},
+			{Destination: "198.51.100.0/24", VRF: "other"},
+		},
+		DHCPRoutes: []DHCPRoute{
+			{Destination: "10.5.0.0/16", Gateway: "192.0.2.1", Interface: "ge-0-0-3", VRF: "tenant"},
+			{Destination: "203.0.113.0/24", Gateway: "192.0.2.1", Interface: "ge-0-0-3", VRF: "tenant"},
+			{Destination: "198.51.100.0/24", Gateway: "192.0.2.1", Interface: "ge-0-0-3", VRF: "tenant"},
+		},
+	}
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	got := renderDHCP9943(t, fc)
+	if strings.Contains(got, "10.5.0.0/16") {
+		t.Fatalf("same-VRF BGP-covered classless destination rendered:\n%s", got)
+	}
+	for _, route := range []string{
+		"ip route 203.0.113.0/24 192.0.2.1 ge-0-0-3 200 vrf vrf-tenant\n",
+		"ip route 198.51.100.0/24 192.0.2.1 ge-0-0-3 200 vrf vrf-tenant\n",
+	} {
+		if !strings.Contains(got, route) {
+			t.Errorf("uncovered or cross-VRF classless destination did not install %q:\n%s", route, got)
+		}
+	}
+	if !strings.Contains(logs.String(), "rib_destination=10.0.0.0/8") {
+		t.Fatalf("BGP suppression warning missing the covering route: %s", logs.String())
+	}
+}
+
+func TestDHCPClasslessCoveredByPreferredRouteSuppressed11426(t *testing.T) {
+	fc := &FullConfig{
+		PreferredRoutes: []config.RouteOverlayEntry{{
+			RoutingInstance: "tenant",
+			Destination:     "10.0.0.0/8",
+			NextHop:         "192.0.2.254",
+		}},
+		DHCPRoutes: []DHCPRoute{
+			{Destination: "10.5.0.0/16", Gateway: "192.0.2.1", Interface: "ge-0-0-3", VRF: "tenant"},
+			{Destination: "203.0.113.0/24", Gateway: "192.0.2.1", Interface: "ge-0-0-3", VRF: "tenant"},
+		},
+	}
+	got := renderDHCP9943(t, fc)
+	if strings.Contains(got, "10.5.0.0/16") {
+		t.Fatalf("same-VRF preferred-route-covered classless destination rendered:\n%s", got)
+	}
+	if !strings.Contains(got, "ip route 203.0.113.0/24 192.0.2.1 ge-0-0-3 200 vrf vrf-tenant\n") {
+		t.Fatalf("uncovered classless destination did not install:\n%s", got)
+	}
+}
+
+func TestDHCPClasslessIncompleteRIBFailsClosedButKeepsDefault11426(t *testing.T) {
+	fc := &FullConfig{
+		RIBRouteInventoryFailed: true,
+		DHCPRoutes: []DHCPRoute{
+			{Gateway: "192.0.2.1", Interface: "ge-0-0-3"},
+			{Destination: "203.0.113.0/24", Gateway: "192.0.2.1", Interface: "ge-0-0-3"},
+		},
+	}
+	got := renderDHCP9943(t, fc)
+	if !strings.Contains(got, "ip route 0.0.0.0/0 192.0.2.1 ge-0-0-3 200\n") {
+		t.Fatalf("incomplete classless RIB inventory incorrectly blocked DHCP default:\n%s", got)
+	}
+	if strings.Contains(got, "203.0.113.0/24") {
+		t.Fatalf("classless route installed without a complete RIB inventory:\n%s", got)
+	}
+}
+
+func TestDHCPClasslessTrustOverrideAllowsIncompleteRIB11426(t *testing.T) {
+	t.Setenv(dhcpClasslessTrustOverrideEnv, "1")
+	fc := &FullConfig{
+		RIBRouteInventoryFailed: true,
+		DHCPRoutes: []DHCPRoute{{
+			Destination: "203.0.113.0/24",
+			Gateway:     "192.0.2.1",
+			Interface:   "ge-0-0-3",
+		}},
+	}
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	var b strings.Builder
+	renderDHCPDefaults(&b, fc)
+	if !strings.Contains(b.String(), "ip route 203.0.113.0/24 192.0.2.1 ge-0-0-3 200\n") ||
+		!strings.Contains(logs.String(), "incomplete RIB inventory") {
+		t.Fatalf("trust override did not explicitly restore classless install: routes=%s logs=%s", b.String(), logs.String())
+	}
+}
+
+func TestFRRLoadBGPClasslessRIBSuppression11426(t *testing.T) {
+	bgp, po := bgpConfig11374(false, true)
+	fc := &FullConfig{
+		BGP:           bgp,
+		PolicyOptions: po,
+		RIBRoutes:     []RIBRoute{{Destination: "10.0.0.0/8"}},
+		DHCPRoutes: []DHCPRoute{
+			{Destination: "10.5.0.0/16", Gateway: "192.0.2.1", Interface: "ge-0-0-3"},
+			{Destination: "203.0.113.0/24", Gateway: "192.0.2.1", Interface: "ge-0-0-3"},
+		},
+	}
+	rendered := New().buildManagedSection(fc)
+	if strings.Contains(rendered, "10.5.0.0/16") ||
+		!strings.Contains(rendered, "ip route 203.0.113.0/24 192.0.2.1 ge-0-0-3 200\n") {
+		t.Fatalf("RIB coverage did not suppress only the covered classless route:\n%s", rendered)
+	}
+
+	bgpd := os.Getenv("FRR_BGPD_BINARY")
+	if bgpd == "" {
+		var err error
+		bgpd, err = exec.LookPath("bgpd")
+		if err != nil {
+			for _, candidate := range []string{"/usr/lib/frr/bgpd", "/usr/libexec/frr/bgpd"} {
+				if _, statErr := os.Stat(candidate); statErr == nil {
+					bgpd = candidate
+					break
+				}
+			}
+		}
+	}
+	if bgpd == "" {
+		t.Skip("FRR bgpd is not installed; FRR config-load validation unavailable")
+	}
+	confPath := filepath.Join(t.TempDir(), "frr.conf")
+	if err := os.WriteFile(confPath, []byte(rendered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, bgpd, "-C", "-f", confPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("FRR rejected the classless/RIB config: %v\n%s\nconfig:\n%s", err, output, rendered)
 	}
 }

@@ -11,9 +11,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// mgmtVRFNeedsOperatorInventory reports whether active management leases have
-// routes whose precedence must be checked against operator statics. The
-// inventory is needed for both a DHCP default and RFC 3442 classless routes.
+// mgmtVRFNeedsOperatorInventory reports whether active management leases need
+// a same-table route inventory for static default/classless precedence and
+// dynamic classless coverage.
 func mgmtVRFNeedsOperatorInventory(leases []*dhcp.Lease, mgmtSet map[string]bool) bool {
 	for _, lease := range leases {
 		if mgmtSet[lease.Interface] &&
@@ -85,22 +85,24 @@ func mgmtVRFControlFabricLinkIndexes(
 }
 
 // mgmtVRFRouteInventory keeps operator statics as the authority for DHCP
-// precedence (#9943), while retaining management connected kernel prefixes as
-// a classless-route fence (#11383). Connected routes on configured cluster
-// control/fabric interfaces are returned separately for the non-overridable
-// fence (#11362).
+// precedence (#9943), and returns dynamic RIB routes as classless-route
+// coverage evidence (#11426). Management connected kernel prefixes remain a
+// separate fence, with configured cluster control/fabric connected routes
+// returned separately for the non-overridable fence (#11362). xpf-owned
+// RTPROT_DHCP routes are never used as suppression evidence.
 func mgmtVRFRouteInventory(
 	nlh mgmtRouteReconciler,
 	family int,
 	controlFabricLinks map[int]string,
-) ([]netlink.Route, []netlink.Route, []netip.Prefix, error) {
+) ([]netlink.Route, []netlink.Route, []netlink.Route, []netip.Prefix, error) {
 	routes, err := nlh.RouteListFiltered(family, &netlink.Route{
 		Table: mgmtVRFTableID,
 	}, netlink.RT_FILTER_TABLE)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	operators := make([]netlink.Route, 0, len(routes))
+	dynamic := make([]netlink.Route, 0, len(routes))
 	controlFabricConnected := make([]netlink.Route, 0, len(controlFabricLinks))
 	connectedPrefixes := make([]netip.Prefix, 0)
 	for _, route := range routes {
@@ -119,16 +121,29 @@ func mgmtVRFRouteInventory(
 			}
 			continue
 		}
-		if route.Protocol != unix.RTPROT_STATIC {
-			slog.Warn("SECURITY: ignoring non-static management-VRF route for "+
-				"DHCP precedence (#9943)",
-				"destination", mgmtRoutePrefixString(route, family),
-				"protocol", route.Protocol, "table", mgmtVRFTableID)
+		if route.Protocol == unix.RTPROT_STATIC {
+			operators = append(operators, route)
 			continue
 		}
-		operators = append(operators, route)
+		if mgmtRouteIsDynamicProtocol(route.Protocol) {
+			dynamic = append(dynamic, route)
+			continue
+		}
+		slog.Warn("SECURITY: ignoring non-static management-VRF route for "+
+			"DHCP precedence (#9943)",
+			"destination", mgmtRoutePrefixString(route, family),
+			"protocol", route.Protocol, "table", mgmtVRFTableID)
 	}
-	return operators, controlFabricConnected, connectedPrefixes, nil
+	return operators, dynamic, controlFabricConnected, connectedPrefixes, nil
+}
+
+func mgmtRouteIsDynamicProtocol(protocol netlink.RouteProtocol) bool {
+	switch protocol {
+	case unix.RTPROT_BGP, unix.RTPROT_ISIS, unix.RTPROT_OSPF, unix.RTPROT_RIP:
+		return true
+	default:
+		return false
+	}
 }
 
 func mgmtRoutePrefixString(route netlink.Route, family int) string {
@@ -157,15 +172,18 @@ func mgmtRoutePrefix(route netlink.Route, family int) (netip.Prefix, bool) {
 	return netip.PrefixFrom(addr, ones).Masked(), true
 }
 
-// mgmtRouteCoveringPrefix returns the route that contains a learned prefix.
-// Only a route at least as broad as the learned prefix can override it; a
-// broader learned route does not override a more-specific route and remains
-// necessary for uncovered addresses.
+// mgmtRouteCoveringPrefix returns the most-specific route that contains a
+// learned prefix. Only a route at least as broad as the learned prefix can
+// override it; a broader learned route does not override a more-specific route
+// and remains necessary for uncovered addresses.
 func mgmtRouteCoveringPrefix(
 	learned netip.Prefix,
 	routes []netlink.Route,
 	family int,
 ) (netip.Prefix, netlink.Route, bool) {
+	var bestPrefix netip.Prefix
+	var bestRoute netlink.Route
+	found := false
 	for _, route := range routes {
 		prefix, ok := mgmtRoutePrefix(route, family)
 		if !ok || prefix.Bits() > learned.Bits() ||
@@ -173,9 +191,11 @@ func mgmtRouteCoveringPrefix(
 			!prefix.Contains(learned.Addr()) {
 			continue
 		}
-		return prefix, route, true
+		if !found || prefix.Bits() > bestPrefix.Bits() {
+			bestPrefix, bestRoute, found = prefix, route, true
+		}
 	}
-	return netip.Prefix{}, netlink.Route{}, false
+	return bestPrefix, bestRoute, found
 }
 
 func mgmtRouteCoveredByOperator(learned netip.Prefix, operators []netlink.Route, family int) string {

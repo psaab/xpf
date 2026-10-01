@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Suppress DHCP classless routes covered by same-VRF dynamic RIB or preferred
+    routes at FRR apply time; fail closed on incomplete RIB inventory without
+    letting dynamic defaults block specific destinations (#11426).
   * Deny unzoned physical ingress before destination-only host-inbound fallback,
     use sdifname for unzoned VRF slaves, and limit zone-scoped admits to
     zone-owned destination addresses (#11409).

@@ -825,6 +825,16 @@ step. Both are required — neither sees the other's case:
   previously dropped the interface — an unintended asymmetry that left the
   kernel unable to pick the correct egress in multi-WAN / shared-gateway-IP
   deployments (default-route conflicts / blackholing).
+- **DHCP classless-route precedence (#11426).** `renderDHCPDefaults` suppresses
+  a lease prefix when a renderable configured static or an installed route in
+  the same table contains it. `assembleFRRConfig` supplies live main/instance
+  RIB routes at each FRR apply; static protocol rows are excluded because
+  staticd also stamps installed DHCP classless routes, which would otherwise
+  self-suppress on the next apply. The active preferred-route overlay is checked
+  directly. A dynamic `/0` is not classless-prefix coverage. A failed/partial
+  RIB read refuses classless installs unless
+  `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` is explicitly set; DHCP defaults remain
+  on their existing path.
 - **Export references are validated at commit (#2144).** A dynamic-protocol
   `export` (OSPF/OSPFv3/BGP/IS-IS), a RIP `redistribute`, a BGP
   group/neighbor `export`, and a `routing-options forwarding-table export`

@@ -116,6 +116,61 @@ func TestMgmtVRFClasslessCoveredByStaticPrefixSuppressed_9943(t *testing.T) {
 	}
 }
 
+// A same-table BGP route must protect a classless destination it covers from
+// an untrusted management-VRF lease without blocking public routes.
+func TestMgmtVRFClasslessCoveredByBGPRouteSuppressed11426(t *testing.T) {
+	fake := &fakeMgmtProgrammer{
+		v4: []netlink.Route{
+			operatorRouteWithProtocol9943(t, "0.0.0.0/0", unix.RTPROT_BGP),
+			operatorRouteWithProtocol9943(t, "10.0.0.0/8", unix.RTPROT_BGP),
+		},
+		linkIdx: 7,
+	}
+	lease := classlessLease9943("10.5.0.0/16", "198.51.100.0/24")
+	var d Daemon
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	t.Setenv(dhcpClasslessTrustOverrideEnv, "")
+	if err := d.applyMgmtVRFRoutesTo(
+		fake, []*dhcp.Lease{lease}, map[string]bool{"fxp0": true},
+	); err != nil {
+		t.Fatalf("applyMgmtVRFRoutesTo: %v", err)
+	}
+	got := replacedDestinations9943(fake.replaced)
+	if got["10.5.0.0/16"] != 0 {
+		t.Fatalf("BGP-covered DHCP prefix reached RouteReplace: %v; warnings=%s", got, logs.String())
+	}
+	if got["198.51.100.0/24"] != 1 {
+		t.Fatalf("uncovered public DHCP prefix did not install exactly once: %v", got)
+	}
+	if !strings.Contains(logs.String(), "rib_destination=10.0.0.0/8") {
+		t.Fatalf("BGP suppression warning missing the covering route: %s", logs.String())
+	}
+}
+
+func TestMgmtVRFClasslessNotCoveredByBGPDefault11426(t *testing.T) {
+	fake := &fakeMgmtProgrammer{
+		v4: []netlink.Route{
+			operatorRouteWithProtocol9943(t, "0.0.0.0/0", unix.RTPROT_BGP),
+		},
+		linkIdx: 7,
+	}
+	lease := classlessLease9943("198.51.100.0/24")
+	var d Daemon
+	t.Setenv(dhcpClasslessTrustOverrideEnv, "")
+	if err := d.applyMgmtVRFRoutesTo(
+		fake, []*dhcp.Lease{lease}, map[string]bool{"fxp0": true},
+	); err != nil {
+		t.Fatalf("applyMgmtVRFRoutesTo: %v", err)
+	}
+	got := replacedDestinations9943(fake.replaced)
+	if got["198.51.100.0/24"] != 1 {
+		t.Fatalf("dynamic default suppressed a specific DHCP route: %v", got)
+	}
+}
+
 // A learned route broader than an operator static is still needed for the
 // uncovered portion of its address space and must install.
 func TestMgmtVRFClasslessCoveringStaticStillInstalls_9943(t *testing.T) {

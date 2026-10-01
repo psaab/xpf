@@ -162,27 +162,32 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 		}
 	}
 
+	dhcpRoutes := d.collectDHCPRoutes()
+	ribRoutes, ribRouteInventoryFailed := d.collectFRRClasslessRIBRoutes(cfg, dhcpRoutes)
+
 	fc := &frr.FullConfig{
-		OSPF:                  globalProtocols.OSPF,
-		OSPFv3:                globalProtocols.OSPFv3,
-		BGP:                   globalProtocols.BGP,
-		RIP:                   globalProtocols.RIP,
-		ISIS:                  globalProtocols.ISIS,
-		StaticRoutes:          cfg.RoutingOptions.StaticRoutes,
-		Inet6StaticRoutes:     cfg.RoutingOptions.Inet6StaticRoutes,
-		GenerateRoutes:        cfg.RoutingOptions.GenerateRoutes,
-		DHCPRoutes:            d.collectDHCPRoutes(),
-		PolicyOptions:         &cfg.PolicyOptions,
-		ForwardingTableExport: cfg.RoutingOptions.ForwardingTableExport,
-		BackupRouter:          cfg.System.BackupRouter,
-		BackupRouterDst:       cfg.System.BackupRouterDst,
-		InterfaceBandwidths:   ifaceBandwidths,
-		InterfacePointToPoint: ifaceP2P,
-		RethMap:               cfg.RethToPhysical(),
-		DeclaredNetdevs:       declaredNetdevs,
-		IPv6NextHopInterfaces: ipv6NextHopInterfaces,
-		ClusterMode:           d.cluster != nil,
-		PreferredRoutes:       overlay,
+		OSPF:                    globalProtocols.OSPF,
+		OSPFv3:                  globalProtocols.OSPFv3,
+		BGP:                     globalProtocols.BGP,
+		RIP:                     globalProtocols.RIP,
+		ISIS:                    globalProtocols.ISIS,
+		StaticRoutes:            cfg.RoutingOptions.StaticRoutes,
+		Inet6StaticRoutes:       cfg.RoutingOptions.Inet6StaticRoutes,
+		GenerateRoutes:          cfg.RoutingOptions.GenerateRoutes,
+		DHCPRoutes:              dhcpRoutes,
+		RIBRoutes:               ribRoutes,
+		RIBRouteInventoryFailed: ribRouteInventoryFailed,
+		PolicyOptions:           &cfg.PolicyOptions,
+		ForwardingTableExport:   cfg.RoutingOptions.ForwardingTableExport,
+		BackupRouter:            cfg.System.BackupRouter,
+		BackupRouterDst:         cfg.System.BackupRouterDst,
+		InterfaceBandwidths:     ifaceBandwidths,
+		InterfacePointToPoint:   ifaceP2P,
+		RethMap:                 cfg.RethToPhysical(),
+		DeclaredNetdevs:         declaredNetdevs,
+		IPv6NextHopInterfaces:   ipv6NextHopInterfaces,
+		ClusterMode:             d.cluster != nil,
+		PreferredRoutes:         overlay,
 		// #9405: protocol interface references are stored as the AUTHORED
 		// Junos reference (`ge-0/0/1.0`, `reth0.50`). The FRR renderer wrote
 		// them verbatim, so `interface ge-0/0/1.0` never bound a netdev and no
@@ -256,6 +261,77 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 		fc.Instances = append(fc.Instances, inst)
 	}
 	return fc
+}
+
+// collectFRRClasslessRIBRoutes snapshots installed same-table routes that
+// classless DHCP routes must not override. FRR's own static routes are handled
+// from config, and its DHCP classless routes are stamped as staticd routes in
+// the kernel, so importing either static protocol entry would make a learned
+// route suppress itself on the next apply. Preferred routes are already carried
+// separately in FullConfig.
+func (d *Daemon) collectFRRClasslessRIBRoutes(
+	cfg *config.Config,
+	dhcpRoutes []frr.DHCPRoute,
+) ([]frr.RIBRoute, bool) {
+	if cfg == nil {
+		return nil, false
+	}
+	hasClassless := false
+	for _, route := range dhcpRoutes {
+		if route.Destination != "" && route.Destination != "0.0.0.0/0" &&
+			route.Destination != "::/0" {
+			hasClassless = true
+			break
+		}
+	}
+	if !hasClassless {
+		return nil, false
+	}
+	if d.routing == nil {
+		slog.Warn("FRR classless route RIB inventory is unavailable (#11426)")
+		return nil, true
+	}
+
+	tables, err := d.routing.GetAllTableRoutes(cfg.RoutingInstances)
+	if err != nil {
+		slog.Warn("FRR classless route RIB inventory is partial (#11426)", "err", err)
+	}
+	var routes []frr.RIBRoute
+	for _, table := range tables {
+		vrf, ok := frrRouteTableVRF(table.Name)
+		if !ok {
+			continue
+		}
+		for _, entry := range table.Entries {
+			// Configured statics are checked against renderable config, while
+			// DHCP-owned staticd routes must not become their own suppression
+			// evidence. Other protocols, including dynamic routes over tunnels,
+			// represent paths already present in this RIB.
+			if entry.Protocol == "static" || entry.Protocol == "dhcp" {
+				continue
+			}
+			routes = append(routes, frr.RIBRoute{
+				Destination: entry.Destination,
+				VRF:         vrf,
+			})
+		}
+	}
+	return routes, err != nil
+}
+
+func frrRouteTableVRF(table string) (string, bool) {
+	switch table {
+	case "inet.0", "inet6.0":
+		return "", true
+	case "": // No unknown/empty table is allowed to alias the default VRF.
+		return "", false
+	}
+	for _, suffix := range []string{".inet.0", ".inet6.0"} {
+		if strings.HasSuffix(table, suffix) {
+			return strings.TrimSuffix(table, suffix), true
+		}
+	}
+	return "", false
 }
 
 // applyFRRConfig applies an assembled FullConfig and handles the
