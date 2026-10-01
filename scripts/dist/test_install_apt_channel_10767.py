@@ -29,6 +29,7 @@ class AptChannelBindingTests(unittest.TestCase):
         self.targets = self.root / "targets"
         self.calls = self.root / "calls"
         self.installed = self.root / "installed"
+        self.pin = self.root / "preferences" / "xpf-channel.pref"
         apt_get = bindir / "apt-get"
         apt_get.write_text(
             "#!/bin/sh\n"
@@ -54,8 +55,8 @@ class AptChannelBindingTests(unittest.TestCase):
             "PATH": str(self.bindir) + os.pathsep + env.get("PATH", ""),
         })
         p = subprocess.run(
-            ["sh", "-c", '. "$1"; CHANNEL="$2"; DRY=0; do_install',
-             "sh", str(_INSTALLSH), channel],
+            ["sh", "-c", '. "$1"; CHANNEL="$2"; DRY=0; PIN="$3"; do_install; INSTALL_OK=1',
+             "sh", str(_INSTALLSH), channel, str(self.pin)],
             capture_output=True, text=True, env=env, timeout=30)
         return p.returncode, (p.stdout or "") + (p.stderr or "")
 
@@ -81,6 +82,8 @@ class AptChannelBindingTests(unittest.TestCase):
         self.assertIn("match selected channel 'stable'", output)
         self.assertEqual(self.calls.read_text().splitlines(), ["update", "install"])
         self.assertTrue(self.installed.exists())
+        self.assertIn("# xpf appliance channel pin; Managed by install.sh (#11133)",
+                      self.pin.read_text())
 
     def test_missing_xpf_index_target_fails_closed(self):
         rc, output = self._run(_target("/etc/apt/sources.list.d/other.sources:1",
