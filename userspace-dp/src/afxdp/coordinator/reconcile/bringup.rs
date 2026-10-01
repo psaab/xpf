@@ -600,8 +600,11 @@ pub(in crate::afxdp) fn replay_preserved_sessions(
         tunnel_purge_ids,
         &coord.forwarding,
     );
-    let replayed_synced_sessions =
-        coord.replay_synced_sessions(&replay_entries, worker_command_queues.as_ref(), session_map);
+    let replayed_synced_sessions = coord.replay_synced_sessions(
+        &replay_entries,
+        worker_command_queues.as_ref(),
+        session_map,
+    );
     if replayed_synced_sessions > 0 {
         coord.last_reconcile_stage = ReconcileStage::ReplayedSynced {
             count: replayed_synced_sessions,
@@ -901,13 +904,8 @@ fn spawn_workers(
         // `Arc::clone` per field, no extra allocation. The bundles borrow
         // `coord` HERE and are then MOVED into the worker body, which
         // never touches `coord` (it must be 'static for the spawn).
-        let launch_plan = WorkerLaunchPlan::new(
-            worker_id,
-            node_id,
-            binding_plans,
-            worker_poll_mode,
-            dnat_fds,
-        );
+        let launch_plan =
+            WorkerLaunchPlan::new(worker_id, node_id, binding_plans, worker_poll_mode, dnat_fds);
         let shared_dataplane = WorkerSharedDataplane::from_coord(coord);
         let control_channels = WorkerControlChannels::new(
             commands_clone,
@@ -1024,24 +1022,29 @@ busy — forced private bind failure (test seam #6245)"
             let stub_heartbeat = heartbeat.clone();
             let stub_tx = startup_report_tx.clone();
             let stub_worker_id = worker_id;
-            spawn_supervised_worker(worker_id, runtime_atomics.clone(), panic_slot, move || {
-                startup_gate_for_stub.wait();
-                let _ = stub_tx.send(WorkerStartupReport {
-                    worker_id: stub_worker_id,
-                    bound_slots: incomplete_bound,
-                    binding_failures: stub_failures,
-                    recovered_fallbacks: Vec::new(),
-                });
-                // Heartbeat while "live-but-unbound" until the barrier
-                // stops us — bounded so a REVERTED (barrier removed) build
-                // does not leak a thread forever.
-                let mut ticks = 0u32;
-                while !stub_stop.load(std::sync::atomic::Ordering::Relaxed) && ticks < 5_000 {
-                    stub_heartbeat.store(monotonic_nanos(), std::sync::atomic::Ordering::Relaxed);
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    ticks += 1;
-                }
-            })
+            spawn_supervised_worker(
+                worker_id,
+                runtime_atomics.clone(),
+                panic_slot,
+                move || {
+                    startup_gate_for_stub.wait();
+                    let _ = stub_tx.send(WorkerStartupReport {
+                        worker_id: stub_worker_id,
+                        bound_slots: incomplete_bound,
+                        binding_failures: stub_failures,
+                        recovered_fallbacks: Vec::new(),
+                    });
+                    // Heartbeat while "live-but-unbound" until the barrier
+                    // stops us — bounded so a REVERTED (barrier removed) build
+                    // does not leak a thread forever.
+                    let mut ticks = 0u32;
+                    while !stub_stop.load(std::sync::atomic::Ordering::Relaxed) && ticks < 5_000 {
+                        stub_heartbeat.store(monotonic_nanos(), std::sync::atomic::Ordering::Relaxed);
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        ticks += 1;
+                    }
+                },
+            )
         } else if coord.force_worker_spawn_fail > 0 && coord.force_worker_spawn_fail_skip == 0 {
             // #4952 / #6242: the forced spawn failure fires once the skip credit
             // is exhausted. With `force_worker_spawn_fail_skip == 0` (the #4952
@@ -1092,7 +1095,8 @@ busy — forced private bind failure (test seam #6245)"
                 });
                 let mut ticks = 0u32;
                 while !stub_stop.load(std::sync::atomic::Ordering::Relaxed) && ticks < 5_000 {
-                    stub_heartbeat.store(monotonic_nanos(), std::sync::atomic::Ordering::Relaxed);
+                    stub_heartbeat
+                        .store(monotonic_nanos(), std::sync::atomic::Ordering::Relaxed);
                     std::thread::sleep(std::time::Duration::from_millis(1));
                     ticks += 1;
                 }
@@ -1376,9 +1380,8 @@ fn await_readiness(
             // Timed out with reports still outstanding, or every sender was
             // dropped (a worker panicked in setup before reporting). Either
             // way the missing worker(s) are treated as failed below.
-            Err(mpsc::RecvTimeoutError::Timeout) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break;
-            }
+            Err(mpsc::RecvTimeoutError::Timeout)
+            | Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
     for &worker_id in spawned_worker_ids {

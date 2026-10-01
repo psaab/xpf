@@ -108,9 +108,16 @@ const _: () = assert!(
 /// fire-and-forget unsolicited overwrite, not the race.
 pub(super) const ARP_SOLICITED_WINDOW_NS: u64 = 5_000_000_000;
 
-/// Maximum idle age for an RX source-learned entry that is not subsequently
-/// confirmed by the kernel neighbor monitor.
+/// Configured idle lease age for an RX source-learned entry that is not
+/// subsequently confirmed by the kernel neighbor monitor. Aging adds the
+/// coalescing grace below to preserve this minimum idle protection.
 pub(crate) const RX_LEARNED_NEIGHBOR_MAX_AGE_NS: u64 = 60_000_000_000;
+/// Matching packet lease writes may coalesce for this interval. The aging
+/// predicate adds the same grace so stored packet timestamps remain truthful
+/// without shortening the configured idle protection.
+pub(crate) const RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS: u64 = 1_000_000_000;
+pub(crate) const RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS: u64 =
+    RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS;
 /// Bound the delay between an entry reaching its idle age and being removed.
 pub(crate) const RX_LEARNED_NEIGHBOR_SWEEP_INTERVAL_NS: u64 = 5_000_000_000;
 
@@ -330,7 +337,8 @@ impl ShardedNeighborMap {
     /// neighbor with a different MAC.
     #[cfg(test)]
     pub(crate) fn rx_learn_overwrite_refusals(&self) -> u64 {
-        self.rx_learn_overwrite_refusals.load(Ordering::Relaxed)
+        self.rx_learn_overwrite_refusals
+            .load(Ordering::Relaxed)
     }
     /// #10854: account one pre-policy source learn refused because it would
     /// replace an existing neighbor's MAC. Kept distinct from capacity
@@ -417,8 +425,7 @@ impl ShardedNeighborMap {
 
     #[cfg(test)]
     pub(crate) fn na_unsolicited_override_refusals(&self) -> u64 {
-        self.na_unsolicited_override_refusals
-            .load(Ordering::Relaxed)
+        self.na_unsolicited_override_refusals.load(Ordering::Relaxed)
     }
 
     /// #5673: `get` plus whether the key's shard is at the per-shard learn
@@ -432,9 +439,9 @@ impl ShardedNeighborMap {
         (entry, at_cap)
     }
 
-    /// RX source-learn precheck that refreshes the lease only when the
-    /// packet's MAC agrees with the current RX-learned entry. A differing
-    /// pre-policy source must not keep a stale entry alive.
+    /// RX source-learn precheck that monotonically refreshes the lease only
+    /// when the packet's MAC agrees with the current RX-learned entry. A
+    /// differing pre-policy source must not keep a stale entry alive.
     pub(crate) fn get_with_capacity_for_rx_learn(
         &self,
         key: &(i32, IpAddr),
@@ -444,7 +451,7 @@ impl ShardedNeighborMap {
         let mut shard = self.lock_shard(shard_idx(key));
         let entry = shard.get_mut(key).map(|record| {
             if record.entry.mac == mac && record.last_rx_learned_ns.is_some() {
-                record.last_rx_learned_ns = Some(now_ns);
+                record.last_rx_learned_ns = record.last_rx_learned_ns.map(|seen| seen.max(now_ns));
             }
             record.entry
         });
@@ -504,7 +511,10 @@ impl ShardedNeighborMap {
         self.shard_mac_epochs[shard].fetch_add(1, Ordering::Relaxed);
     }
 
-    fn lock_shard(&self, idx: usize) -> MutexGuard<'_, FastMap<(i32, IpAddr), NeighborRecord>> {
+    fn lock_shard(
+        &self,
+        idx: usize,
+    ) -> MutexGuard<'_, FastMap<(i32, IpAddr), NeighborRecord>> {
         match self.shards[idx].0.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -593,7 +603,11 @@ impl ShardedNeighborMap {
     /// Insert `key → val` and return whether the cache changed.
     /// Returns `false` if the key already existed with the same MAC.
     /// Mirrors `neighbor::update_dynamic_neighbor` semantics.
-    pub(crate) fn insert_if_changed(&self, key: (i32, IpAddr), val: NeighborEntry) -> bool {
+    pub(crate) fn insert_if_changed(
+        &self,
+        key: (i32, IpAddr),
+        val: NeighborEntry,
+    ) -> bool {
         // #9893: the Override-unconditional leg of the CAS below. This is
         // used by other RX learns whose protocol allows replacement.
         // `None` arm is a defined fallback, not a panic: a future `None`
@@ -711,11 +725,12 @@ impl ShardedNeighborMap {
         removed
     }
 
-    /// Expire idle RX source-learned entries. Manager-owned keys are excluded
-    /// even if a packet learn temporarily wrote the same key into this map.
-    /// Removal advances only the affected shard's MAC epoch so cached flows
-    /// cannot continue forwarding to the aged MAC; it does not signal an
-    /// insertion to pending-neighbor sweeps.
+    /// Expire idle RX source-learned entries after the configured age plus
+    /// coalescing grace. Manager-owned keys are excluded even if a packet
+    /// learn temporarily wrote the same key into this map. Removal advances
+    /// only the affected shard's MAC epoch so cached flows cannot continue
+    /// forwarding to the aged MAC; it does not signal an insertion to pending
+    /// neighbor sweeps.
     pub(crate) fn age_rx_learned_neighbors(
         &self,
         now_ns: u64,
@@ -728,9 +743,10 @@ impl ShardedNeighborMap {
             let before = shard.len();
             shard.retain(|key, record| {
                 manager_keys.contains(key)
-                    || !record
-                        .last_rx_learned_ns
-                        .is_some_and(|seen| now_ns.saturating_sub(seen) >= max_age_ns)
+                    || !record.last_rx_learned_ns.is_some_and(|seen| {
+                        now_ns.saturating_sub(seen)
+                            >= max_age_ns.saturating_add(RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS)
+                    })
             });
             let shard_removed = before - shard.len();
             if shard_removed != 0 {
@@ -753,9 +769,10 @@ impl ShardedNeighborMap {
         }
     }
 
-    /// Refresh the lease for an unchanged RX-learned VLAN key pair. Returns
-    /// false if any key disappeared or no longer maps to the packet's MAC,
-    /// allowing the caller to fall through to the normal learn path.
+    /// Refresh the lease monotonically for an unchanged RX-learned VLAN key
+    /// pair. Returns false if any key disappeared or no longer maps to the
+    /// packet's MAC, allowing the caller to fall through to the normal learn
+    /// path.
     pub(crate) fn refresh_rx_learned_pair(
         &self,
         keys: &[(i32, IpAddr)],
@@ -771,7 +788,7 @@ impl ShardedNeighborMap {
                 return false;
             }
             if record.last_rx_learned_ns.is_some() {
-                record.last_rx_learned_ns = Some(now_ns);
+                record.last_rx_learned_ns = record.last_rx_learned_ns.map(|seen| seen.max(now_ns));
             }
         }
         !keys.is_empty()
@@ -801,10 +818,7 @@ impl ShardedNeighborMap {
             guards.push(self.lock_shard(i));
         }
         let mut bulk = BulkShardGuard {
-            guards: guards
-                .try_into()
-                .ok()
-                .expect("exactly NUM_SHARDS guards pushed"),
+            guards: guards.try_into().ok().expect("exactly NUM_SHARDS guards pushed"),
         };
         f(&mut bulk)
     }
@@ -1019,10 +1033,9 @@ impl ShardedNeighborMap {
         now_ns: u64,
     ) -> bool {
         let installed = self.with_all_shards(|bulk| {
-            if keys
-                .iter()
-                .any(|key| bulk.get(key).is_some_and(|prior| prior.mac != val.mac))
-            {
+            if keys.iter().any(|key| {
+                bulk.get(key).is_some_and(|prior| prior.mac != val.mac)
+            }) {
                 self.rx_learn_overwrite_refusals
                     .fetch_add(1, Ordering::Relaxed);
                 return false;
@@ -1115,14 +1128,21 @@ impl<'a> BulkShardGuard<'a> {
         self.guards[i].insert(key, NeighborRecord::authoritative(val));
     }
 
-    /// Insert or refresh an RX source-learned entry. A same-MAC refresh of
-    /// an entry already backed by the kernel preserves that status; a new or
-    /// changed MAC starts a userspace-only lease.
+    /// Insert or refresh an RX source-learned entry monotonically. A same-MAC
+    /// refresh of an entry already backed by the kernel preserves that status;
+    /// a new or changed MAC starts a userspace-only lease.
     fn insert_rx_learned(&mut self, key: (i32, IpAddr), val: NeighborEntry, now_ns: u64) {
         let i = shard_idx(&key);
         let last_rx_learned_ns = match self.guards[i].get(&key).copied() {
-            Some(prior) if prior.entry.mac == val.mac => prior.last_rx_learned_ns.map(|_| now_ns),
-            _ => Some(now_ns),
+            Some(prior) if prior.entry.mac == val.mac => {
+                prior.last_rx_learned_ns.map(|seen| seen.max(now_ns))
+            }
+            Some(prior) => Some(
+                prior
+                    .last_rx_learned_ns
+                    .map_or(now_ns, |seen| seen.max(now_ns)),
+            ),
+            None => Some(now_ns),
         };
         self.guards[i].insert(
             key,

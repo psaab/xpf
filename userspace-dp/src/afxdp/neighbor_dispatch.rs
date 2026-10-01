@@ -19,8 +19,10 @@
 // Pure relocation. `use super::*;` brings every type, helper,
 // and sibling-submodule item from afxdp.rs into scope.
 
+use crate::afxdp::neigh_schedule::{
+    next_due_for_pending, PENDING_NEIGH_SWEEP_BUDGET,
+};
 use super::*;
-use crate::afxdp::neigh_schedule::{PENDING_NEIGH_SWEEP_BUDGET, next_due_for_pending};
 
 /// GEMINI-NEXT.md Section 3 cold-start: re-fire ARP/NDP solicitation
 /// at exponential intervals after the initial probe in
@@ -489,16 +491,11 @@ pub(super) fn retry_pending_neigh(
             ForwardingDisposition::MissingNeighbor
                 | ForwardingDisposition::ForwardCandidate
                 | ForwardingDisposition::FabricRedirect
-        ) && pending_meta
-            .l3_addrs_unfiltered()
-            .is_some_and(|(source, destination)| {
-                forwarding.bindless_ipsec_selector_fence.matches_with_nat(
-                    source,
-                    destination,
-                    decision.nat,
-                )
-            })
-        {
+        ) && pending_meta.l3_addrs_unfiltered().is_some_and(|(source, destination)| {
+            forwarding
+                .bindless_ipsec_selector_fence
+                .matches_with_nat(source, destination, decision.nat)
+        }) {
             counters.touched = true;
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
@@ -529,15 +526,10 @@ pub(super) fn retry_pending_neigh(
         if let Some(flow_key) = pkt.flow_key.as_ref() {
             let target = decision.nat.rewrite_dst.unwrap_or(flow_key.dst_ip);
             if matches!(
-                super::session_glue::resolve_install_table_for_session(
-                    forwarding, decision, target
-                ),
+                super::session_glue::resolve_install_table_for_session(forwarding, decision, target),
                 super::session_glue::InstallTable::Unresolvable
             ) {
-                binding
-                    .live
-                    .table_unavailable_packets
-                    .fetch_add(1, Ordering::Relaxed);
+                binding.live.table_unavailable_packets.fetch_add(1, Ordering::Relaxed);
                 super::session_glue::flag_install_table_purge(binding.worker_id);
                 binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
                 continue;
@@ -975,7 +967,8 @@ pub(super) fn learn_dynamic_neighbor_from_packet(
     desc: XdpDesc,
     meta: UserspaceDpMeta,
     src_ip: IpAddr,
-    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
+    now_ns: u64,
+    last_learned_neighbor: &mut LearnedNeighborDedup,
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
 ) {
@@ -984,6 +977,7 @@ pub(super) fn learn_dynamic_neighbor_from_packet(
         desc,
         meta,
         src_ip,
+        now_ns,
         last_learned_neighbor,
         forwarding,
         dynamic_neighbors,
@@ -999,7 +993,8 @@ pub(super) fn learn_dynamic_neighbor_after_admission(
     meta: UserspaceDpMeta,
     src_ip: IpAddr,
     src_mac: [u8; 6],
-    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
+    now_ns: u64,
+    last_learned_neighbor: &mut LearnedNeighborDedup,
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
 ) {
@@ -1011,6 +1006,7 @@ pub(super) fn learn_dynamic_neighbor_after_admission(
         forwarding,
         dynamic_neighbors,
         true,
+        now_ns,
     );
 }
 
@@ -1020,7 +1016,8 @@ fn learn_dynamic_neighbor_from_frame(
     desc: XdpDesc,
     meta: UserspaceDpMeta,
     src_ip: IpAddr,
-    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
+    now_ns: u64,
+    last_learned_neighbor: &mut LearnedNeighborDedup,
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     allow_mac_change: bool,
@@ -1041,6 +1038,7 @@ fn learn_dynamic_neighbor_from_frame(
         forwarding,
         dynamic_neighbors,
         allow_mac_change,
+        now_ns,
     );
 }
 
@@ -1049,10 +1047,11 @@ fn learn_dynamic_neighbor_with_mac(
     meta: UserspaceDpMeta,
     src_ip: IpAddr,
     src_mac: [u8; 6],
-    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
+    last_learned_neighbor: &mut LearnedNeighborDedup,
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     allow_mac_change: bool,
+    now_ns: u64,
 ) {
     // #3075/#11337: skip xpf's own synthetic fabric-zone (V1) or
     // interface-scope (V2) source MAC. A forwarded admitted fabric frame
@@ -1076,7 +1075,7 @@ fn learn_dynamic_neighbor_with_mac(
         src_ip,
         src_mac,
     };
-    if last_learned_neighbor.as_ref() == Some(&learned)
+    if last_learned_neighbor.key == Some(learned)
         && neighbor_ip_is_learnable(src_ip)
         && !forwarding.owns_configured_ip(src_ip)
     {
@@ -1086,11 +1085,36 @@ fn learn_dynamic_neighbor_with_mac(
             meta.ingress_vlan_id,
             src_ip,
         );
-        if dynamic_neighbors.refresh_rx_learned_pair(&keys[..n], src_mac, monotonic_nanos()) {
+        let epochs = rx_learn_epochs(dynamic_neighbors, &keys[..n]);
+        let logical_alias_ifindex = if n == 2 { keys[1].0 } else { 0 };
+        let same_keys = last_learned_neighbor.logical_alias_ifindex == logical_alias_ifindex;
+        if same_keys
+            && now_ns.saturating_sub(last_learned_neighbor.last_refresh_ns)
+                < super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS
+            && epochs[..n] == last_learned_neighbor.epochs[..n]
+        {
+            // This local, allocation-free leg is bounded by the coalescing
+            // interval. Epoch or effective-key changes bypass it immediately.
+            return;
+        }
+        // Keep the pre-lock epochs. A concurrent prune/replacement after this
+        // snapshot makes the next packet retry rather than caching a newer
+        // epoch for a missing row.
+        if dynamic_neighbors.refresh_rx_learned_pair(&keys[..n], src_mac, now_ns) {
+            *last_learned_neighbor = rx_learn_dedup_state(
+                meta.ingress_ifindex as i32,
+                meta.ingress_vlan_id,
+                src_ip,
+                src_mac,
+                keys,
+                n,
+                now_ns,
+                epochs,
+            );
             return;
         }
     }
-    if learn_dynamic_neighbor_with_mode(
+    if let Some(refreshed) = learn_dynamic_neighbor_with_mode(
         forwarding,
         dynamic_neighbors,
         meta.ingress_ifindex as i32,
@@ -1098,8 +1122,9 @@ fn learn_dynamic_neighbor_with_mac(
         src_ip,
         src_mac,
         allow_mac_change,
+        now_ns,
     ) {
-        *last_learned_neighbor = Some(learned);
+        *last_learned_neighbor = refreshed;
     }
 }
 
@@ -1119,6 +1144,7 @@ pub(super) fn learn_dynamic_neighbor(
         src_ip,
         src_mac,
         true,
+        monotonic_nanos(),
     );
 }
 
@@ -1152,6 +1178,37 @@ fn rx_learn_keys(
     (keys, n)
 }
 
+fn rx_learn_epochs(dynamic_neighbors: &ShardedNeighborMap, keys: &[(i32, IpAddr)]) -> [u32; 2] {
+    let mut epochs = [0; 2];
+    for (slot, key) in epochs.iter_mut().zip(keys) {
+        *slot = dynamic_neighbors.mac_change_epoch_for(key);
+    }
+    epochs
+}
+
+fn rx_learn_dedup_state(
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    src_ip: IpAddr,
+    src_mac: [u8; 6],
+    keys: [(i32, IpAddr); 2],
+    key_count: usize,
+    now_ns: u64,
+    epochs: [u32; 2],
+) -> LearnedNeighborDedup {
+    LearnedNeighborDedup {
+        key: Some(LearnedNeighborKey {
+            ingress_ifindex,
+            ingress_vlan_id,
+            src_ip,
+            src_mac,
+        }),
+        last_refresh_ns: now_ns,
+        logical_alias_ifindex: if key_count == 2 { keys[1].0 } else { 0 },
+        epochs,
+    }
+}
+
 fn learn_dynamic_neighbor_with_mode(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -1160,7 +1217,8 @@ fn learn_dynamic_neighbor_with_mode(
     src_ip: IpAddr,
     src_mac: [u8; 6],
     allow_mac_change: bool,
-) -> bool {
+    now_ns: u64,
+) -> Option<LearnedNeighborDedup> {
     // #4889: illegitimate source-IP CLASS gate on the #1787 RX source-MAC
     // learn path, mirroring the #2790 unicast-only gate the ARP-reply and
     // NDP-NA learn arms already apply in poll_stages.rs. Unlike those L2
@@ -1181,7 +1239,7 @@ fn learn_dynamic_neighbor_with_mode(
     // do-not-learn only — the packet still forwards; this is a learn-path
     // guard, not a packet filter.
     if !neighbor_ip_is_learnable(src_ip) {
-        return false;
+        return None;
     }
     // #3182: anti-poisoning own-IP gate on the #1787 RX source-MAC learn
     // path, mirroring the #2851 ARP/NDP gate in poll_stages.rs. An attacker
@@ -1195,34 +1253,30 @@ fn learn_dynamic_neighbor_with_mode(
     // neither caches nor bumps `mac_change_epoch` (#3048/#3169). Genuine
     // non-own neighbors are unaffected.
     if forwarding.owns_configured_ip(src_ip) {
-        return false;
+        return None;
     }
     // #1787: stack array, no per-packet heap alloc. At most 2 keys:
     // the physical ingress ifindex plus the resolved logical (VLAN
     // sub-) ifindex when it differs. keys[1] stays an unused
     // placeholder when n == 1.
     let (keys, n) = rx_learn_keys(forwarding, ingress_ifindex, ingress_vlan_id, src_ip);
-    let now_ns = monotonic_nanos();
+    // Capture epochs before the map precheck/write. A concurrent mutation
+    // leaves this stamp stale and makes the next duplicate take the slow leg.
+    let epochs = rx_learn_epochs(dynamic_neighbors, &keys[..n]);
     // #1787 cheap-first pre-check: 1-2 single-shard reads replace the
     // unconditional 64-shard bulk acquisition in the steady state
     // (every key already maps to src_mac → return with no write, no
     // bulk lock, no alloc).
     //
-    // Linearization semantics: a no-op learn linearizes at this
-    // pre-check read. A concurrent remove (netlink FAILED/delete,
-    // resolver authoritative-FAILED revoke, manager replace/bulk
-    // remove) that lands AFTER the read wins — the elided write does
-    // not re-create the entry — and the next packet from this source
-    // that REACHES this function pre-check-misses and re-learns via
-    // the bulk path below.
+    // A no-op learn linearizes at the locked precheck. Epochs were sampled
+    // before it, so a concurrent removal/replacement advances the live stamp
+    // beyond the per-binding copy and forces the next packet through refresh
+    // or the full pair-learn path.
     //
-    // Dedup window: successful RX learns store one key per binding. Repeated
-    // identical packets still verify the current one/two map entries and
-    // refresh any RX-only age lease without taking the all-shard lock. If an
-    // age sweep removed a key or its MAC changed, that check fails and the
-    // normal pair-learn path repairs the entry. A create-only refusal leaves
-    // the key untouched, allowing a policy-admitted MAC move to retry through
-    // the post-admission path.
+    // For an unchanged source and effective VLAN alias, repeated packets use
+    // the lock-free per-binding leg for at most one second. At its boundary the
+    // existing single-shard refresh is tried; a missing or changed key falls
+    // through here to the established cap/admission-guarded pair writer.
     let mut current: [Option<[u8; 6]>; 2] = [None, None];
     // #5673: track whether EVERY candidate key is a NEW learn whose shard is
     // already at the per-shard cap. `get_with_capacity` reads the MAC and the
@@ -1240,7 +1294,16 @@ fn learn_dynamic_neighbor_with_mode(
         }
     }
     if !pair_write_needed(&current[..n], src_mac) {
-        return true;
+        return Some(rx_learn_dedup_state(
+            ingress_ifindex,
+            ingress_vlan_id,
+            src_ip,
+            src_mac,
+            keys,
+            n,
+            now_ns,
+            epochs,
+        ));
     }
     // #10854: pre-policy source learning may create a missing entry or
     // refresh the same MAC, but a transit packet must not replace a live
@@ -1252,7 +1315,7 @@ fn learn_dynamic_neighbor_with_mode(
             .any(|mac| mac.is_some_and(|mac| mac != src_mac))
     {
         dynamic_neighbors.note_rx_learn_overwrite_refusal();
-        return false;
+        return None;
     }
     // #5673: pure spoofed-source flood — every candidate key is a NEW learn
     // whose shard is at the per-shard cap, so `learn_pair_if_changed` would
@@ -1264,7 +1327,7 @@ fn learn_dynamic_neighbor_with_mode(
     // cases where a shard fills between this pre-check and the bulk lock).
     if all_new_at_cap {
         dynamic_neighbors.note_learn_cap_drop();
-        return false;
+        return None;
     }
     // #949: multi-ifindex insert atomically vs readers — both
     // ingress_ifindex and the resolved logical (VLAN sub-) ifindex
@@ -1279,7 +1342,7 @@ fn learn_dynamic_neighbor_with_mode(
     // until session expiry, the #3048 blackhole class. The bump fires
     // only on an actual MAC change; a first sighting or same-MAC re-learn
     // adds a single Relaxed read per key and no bump.
-    if allow_mac_change {
+    let installed = if allow_mac_change {
         dynamic_neighbors.learn_pair_if_changed_at(
             &keys[..n],
             NeighborEntry { mac: src_mac },
@@ -1292,6 +1355,20 @@ fn learn_dynamic_neighbor_with_mode(
             NeighborEntry { mac: src_mac },
             now_ns,
         )
+    };
+    if installed {
+        Some(rx_learn_dedup_state(
+            ingress_ifindex,
+            ingress_vlan_id,
+            src_ip,
+            src_mac,
+            keys,
+            n,
+            now_ns,
+            epochs,
+        ))
+    } else {
+        None
     }
 }
 

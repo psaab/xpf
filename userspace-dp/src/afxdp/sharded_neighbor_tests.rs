@@ -157,18 +157,18 @@ fn padded_shard_align_at_least_64() {
 #[test]
 fn shard_distribution_ipv4_24_constant_ifindex() {
     for &seed in SHARD_SEEDS_7752 {
-        let mut counts = [0usize; NUM_SHARDS];
-        for last in 0..=255u8 {
-            counts[shard_idx_with(seed, &key_v4(7, last))] += 1;
-        }
-        let max = *counts.iter().max().unwrap();
-        assert!(
-            max <= 12,
-            "shard distribution too skewed under seed {:#x}: {:?} (max {})",
-            seed,
-            counts,
-            max
-        );
+    let mut counts = [0usize; NUM_SHARDS];
+    for last in 0..=255u8 {
+        counts[shard_idx_with(seed, &key_v4(7, last))] += 1;
+    }
+    let max = *counts.iter().max().unwrap();
+    assert!(
+        max <= 12,
+        "shard distribution too skewed under seed {:#x}: {:?} (max {})",
+        seed,
+        counts,
+        max
+    );
     }
 }
 
@@ -176,21 +176,21 @@ fn shard_distribution_ipv4_24_constant_ifindex() {
 #[test]
 fn shard_distribution_ipv4_16() {
     for &seed in SHARD_SEEDS_7752 {
-        let mut counts = [0usize; NUM_SHARDS];
-        for second_last in 0..=255u16 {
-            for last in 0..=15u16 {
-                let ip = IpAddr::V4(Ipv4Addr::new(10, 0, second_last as u8, last as u8));
-                counts[shard_idx_with(seed, &(7, ip))] += 1;
-            }
+    let mut counts = [0usize; NUM_SHARDS];
+    for second_last in 0..=255u16 {
+        for last in 0..=15u16 {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 0, second_last as u8, last as u8));
+            counts[shard_idx_with(seed, &(7, ip))] += 1;
         }
-        // 4096 keys, 64 shards → ideal 64/shard. Acceptance: max ≤ 2× ideal.
-        let max = *counts.iter().max().unwrap();
-        assert!(
-            max <= 128,
-            "shard distribution too skewed under seed {:#x}: max {} (ideal 64)",
-            seed,
-            max
-        );
+    }
+    // 4096 keys, 64 shards → ideal 64/shard. Acceptance: max ≤ 2× ideal.
+    let max = *counts.iter().max().unwrap();
+    assert!(
+        max <= 128,
+        "shard distribution too skewed under seed {:#x}: max {} (ideal 64)",
+        seed,
+        max
+    );
     }
 }
 
@@ -198,30 +198,30 @@ fn shard_distribution_ipv4_16() {
 #[test]
 fn shard_distribution_ipv6_slaac() {
     for &seed in SHARD_SEEDS_7752 {
-        let mut counts = [0usize; NUM_SHARDS];
-        for i in 0..256u32 {
-            for j in 0..16u32 {
-                let ip = IpAddr::V6(Ipv6Addr::new(
-                    0xfe80,
-                    0,
-                    0,
-                    0,
-                    0xabcd,
-                    0xef01,
-                    (i & 0xFFFF) as u16,
-                    (j & 0xFFFF) as u16,
-                ));
-                counts[shard_idx_with(seed, &(7, ip))] += 1;
-            }
+    let mut counts = [0usize; NUM_SHARDS];
+    for i in 0..256u32 {
+        for j in 0..16u32 {
+            let ip = IpAddr::V6(Ipv6Addr::new(
+                0xfe80,
+                0,
+                0,
+                0,
+                0xabcd,
+                0xef01,
+                (i & 0xFFFF) as u16,
+                (j & 0xFFFF) as u16,
+            ));
+            counts[shard_idx_with(seed, &(7, ip))] += 1;
         }
-        // 4096 keys, 64 shards → ideal 64/shard. Acceptance: max ≤ 2× ideal.
-        let max = *counts.iter().max().unwrap();
-        assert!(
-            max <= 128,
-            "ipv6 shard distribution too skewed under seed {:#x}: max {} (ideal 64)",
-            seed,
-            max
-        );
+    }
+    // 4096 keys, 64 shards → ideal 64/shard. Acceptance: max ≤ 2× ideal.
+    let max = *counts.iter().max().unwrap();
+    assert!(
+        max <= 128,
+        "ipv6 shard distribution too skewed under seed {:#x}: max {} (ideal 64)",
+        seed,
+        max
+    );
     }
 }
 
@@ -259,8 +259,8 @@ fn poison_recovered_via_into_inner() {
 /// order; per-key holds at most one shard at a time, so no cycle).
 #[test]
 fn concurrent_per_key_with_bulk_replace_no_deadlock() {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
@@ -649,7 +649,7 @@ fn rx_source_learn_age_refresh_expires_and_invalidates_cached_macs_11406() {
     let manager_keys = FastSet::default();
     assert_eq!(
         map.age_rx_learned_neighbors(
-            300 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS - 1,
+            300 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS + RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS - 1,
             RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
             &manager_keys,
         ),
@@ -660,7 +660,7 @@ fn rx_source_learn_age_refresh_expires_and_invalidates_cached_macs_11406() {
 
     assert_eq!(
         map.age_rx_learned_neighbors(
-            300 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            300 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS + RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS,
             RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
             &manager_keys,
         ),
@@ -680,6 +680,34 @@ fn rx_source_learn_age_refresh_expires_and_invalidates_cached_macs_11406() {
 }
 
 #[test]
+fn rx_source_learn_timestamps_never_regress_on_older_batch_samples_11406() {
+    let map = ShardedNeighborMap::new();
+    let keys = [key_v4(7, 42), key_v4(7, 43), key_v4(7, 44)];
+    let mac = entry(0xAB);
+    map.learn_pair_if_changed_at(&keys, mac, 100);
+
+    // Exercise each unchanged-RX update path with a newer then older sample.
+    assert_eq!(
+        map.get_with_capacity_for_rx_learn(&keys[0], mac.mac, 200).0,
+        Some(mac)
+    );
+    assert!(map.refresh_rx_learned_pair(&[keys[1]], mac.mac, 200));
+    assert!(map.refresh_rx_learned_pair(&[keys[1]], mac.mac, 150));
+    map.learn_pair_if_changed_at(&[keys[2]], mac, 200);
+    map.learn_pair_if_changed_at(&[keys[2]], mac, 150);
+
+    let manager_keys = FastSet::default();
+    let age = 1_000;
+    let expiry = 200 + age + RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS;
+    assert_eq!(
+        map.age_rx_learned_neighbors(expiry - 1, age, &manager_keys),
+        0,
+        "an older batch timestamp must not shorten any RX-only lease"
+    );
+    assert_eq!(map.age_rx_learned_neighbors(expiry, age, &manager_keys), 3);
+}
+
+#[test]
 fn rx_source_learn_age_preserves_manager_and_kernel_backed_neighbors_11406() {
     let map = ShardedNeighborMap::new();
     let rx_key = key_v4(7, 42);
@@ -696,7 +724,7 @@ fn rx_source_learn_age_preserves_manager_and_kernel_backed_neighbors_11406() {
     let manager_keys = FastSet::from_iter([manager_key]);
     assert_eq!(
         map.age_rx_learned_neighbors(
-            100 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            100 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS + RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS,
             RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
             &manager_keys,
         ),
@@ -740,10 +768,7 @@ fn keys_in_shard(target_shard: usize, count: usize) -> Vec<(i32, IpAddr)> {
     let mut out = Vec::with_capacity(count);
     let mut i: u32 = 0;
     while out.len() < count {
-        let k = (
-            7,
-            IpAddr::V4(Ipv4Addr::from(0x0A00_0000u32.wrapping_add(i))),
-        );
+        let k = (7, IpAddr::V4(Ipv4Addr::from(0x0A00_0000u32.wrapping_add(i))));
         if ShardedNeighborMap::shard_index(&k) == target_shard {
             out.push(k);
         }
@@ -842,11 +867,7 @@ fn learned_source_admitted_and_update_survives_full_shard() {
     // The first key is a legitimate learn; it lands and is resolvable.
     let legit = keys[0];
     map.learn_pair_if_changed(&[legit], entry(0xAA));
-    assert_eq!(
-        map.get(&legit),
-        Some(entry(0xAA)),
-        "legit learn must be admitted"
-    );
+    assert_eq!(map.get(&legit), Some(entry(0xAA)), "legit learn must be admitted");
 
     // Fill the rest of the shard with a spoofed flood until it caps.
     for k in &keys[1..] {
@@ -916,22 +937,12 @@ fn get_with_capacity_reports_at_cap_on_full_shard() {
     let fresh = keys[MAX_DYNAMIC_NEIGHBORS_PER_SHARD];
     let (fresh_entry, fresh_at_cap) = map.get_with_capacity(&fresh);
     assert_eq!(fresh_entry, None, "the fresh key is not yet learned");
-    assert!(
-        fresh_at_cap,
-        "a full shard must report at-capacity for a new key"
-    );
+    assert!(fresh_at_cap, "a full shard must report at-capacity for a new key");
     // An EXISTING key in the same full shard still reports its entry, so the
     // caller does NOT treat it as all-new (an update is not growth).
     let (existing_entry, existing_at_cap) = map.get_with_capacity(&keys[0]);
-    assert_eq!(
-        existing_entry,
-        Some(entry(0x44)),
-        "existing key still readable at cap"
-    );
-    assert!(
-        existing_at_cap,
-        "shard is full regardless of the probed key's presence"
-    );
+    assert_eq!(existing_entry, Some(entry(0x44)), "existing key still readable at cap");
+    assert!(existing_at_cap, "shard is full regardless of the probed key's presence");
 }
 
 /// #7752: fixed seeds for the distribution tests.
@@ -1075,10 +1086,7 @@ fn empty_bulk_calls_do_not_bump_the_generation_9071() {
     // property of the empty call rather than of the fixture.
     let start = m.insert_generation();
     m.bulk_replace_neighbors(&[], &[(3, key_v4(3, 9).1, entry(0x99))]);
-    assert!(
-        m.insert_generation() > start,
-        "fixture: a real bulk insert must bump"
-    );
+    assert!(m.insert_generation() > start, "fixture: a real bulk insert must bump");
 
     let before = m.insert_generation();
     m.bulk_replace_neighbors(&[], &[]);
