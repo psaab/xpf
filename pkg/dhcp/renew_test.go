@@ -132,9 +132,10 @@ func TestBuildV6RenewMessage(t *testing.T) {
 
 // TestRunDHCPv4RenewUsesRenewNotDiscover drives the real runDHCPv4 state
 // machine through the exchange/timer seams and asserts the RFC sequence:
-// acquire (DISCOVER) → renew → renew → rebind → acquire (only after both
-// renew and rebind fail, i.e. lease expiry). Reverting T1/T2 to a full
-// DORA (exchangeAcquire) turns this RED.
+// acquire (DISCOVER) → renew → renew → rebind → acquire (after both renew
+// and rebind fail). The T2 timeout starts a fresh acquire while the current
+// lease remains active until replacement or its absolute expiry. Reverting
+// T1/T2 to a full DORA (exchangeAcquire) turns this RED.
 func TestRunDHCPv4RenewUsesRenewNotDiscover(t *testing.T) {
 	leaseA := &Lease{
 		Interface: "wan0",
@@ -142,6 +143,7 @@ func TestRunDHCPv4RenewUsesRenewNotDiscover(t *testing.T) {
 		Address:   netip.MustParsePrefix("192.0.2.50/24"),
 		serverID:  netip.MustParseAddr("192.0.2.1"),
 		LeaseTime: 100 * time.Second,
+		Obtained:  time.Now(),
 	}
 
 	type call struct {
@@ -172,9 +174,9 @@ func TestRunDHCPv4RenewUsesRenewNotDiscover(t *testing.T) {
 			return leaseA, nil
 		case 3: // T1 renew on next cycle — fails
 			return nil, context.DeadlineExceeded
-		case 4: // T2 rebind — fails → lease expiry
+		case 4: // T2 rebind — fails; the client re-acquires before expiry
 			return nil, context.DeadlineExceeded
-		default: // expiry fallback re-acquire: stop the loop
+		default: // first post-T2 re-acquire: stop the loop
 			cancel()
 			return nil, context.Canceled
 		}
@@ -206,9 +208,9 @@ func TestRunDHCPv4RenewUsesRenewNotDiscover(t *testing.T) {
 	if calls[1].prevAddr != leaseA.Address {
 		t.Errorf("T1 renew prev address = %s, want held %s", calls[1].prevAddr, leaseA.Address)
 	}
-	// Expiry fallback is a full acquire with no prior lease.
+	// The post-T2 path is a full acquire with no prior-lease argument.
 	if calls[4].mode != exchangeAcquire || calls[4].prevAddr.IsValid() {
-		t.Errorf("expiry fallback = %s prev=%s, want acquire with nil prev", calls[4].mode, calls[4].prevAddr)
+		t.Errorf("post-T2 acquire = %s prev=%s, want acquire with nil prev", calls[4].mode, calls[4].prevAddr)
 	}
 	// The held lease is preserved across the successful renew (never
 	// deleted/churned by the renewal path).
@@ -218,13 +220,15 @@ func TestRunDHCPv4RenewUsesRenewNotDiscover(t *testing.T) {
 }
 
 // TestRunDHCPv6RenewUsesRenewNotSolicit is the DHCPv6 analogue: T1 must
-// RENEW, T2 must REBIND, and only lease expiry falls back to SOLICIT.
+// RENEW and T2 must REBIND; a T2 timeout begins a fresh Solicit while the
+// prior binding is retained until replacement or its absolute expiry.
 func TestRunDHCPv6RenewUsesRenewNotSolicit(t *testing.T) {
 	leaseA := &Lease{
 		Interface: "wan0",
 		Family:    AFInet6,
 		Address:   netip.MustParsePrefix("2001:db8::5/128"),
 		LeaseTime: 100 * time.Second,
+		Obtained:  time.Now(),
 	}
 
 	var modes []dhcpExchangeMode
@@ -296,6 +300,7 @@ func TestRunDHCPv4RenewingNAKRestartsDiscover(t *testing.T) {
 		Gateway:   netip.MustParseAddr("192.0.2.1"),
 		serverID:  netip.MustParseAddr("192.0.2.1"),
 		LeaseTime: 100 * time.Second,
+		Obtained:  time.Now(),
 	}
 
 	var modes []dhcpExchangeMode
@@ -377,6 +382,7 @@ func TestRunDHCPv4RebindingNAKRestartsDiscover(t *testing.T) {
 		Gateway:   netip.MustParseAddr("192.0.2.1"),
 		serverID:  netip.MustParseAddr("192.0.2.1"),
 		LeaseTime: 100 * time.Second,
+		Obtained:  time.Now(),
 	}
 
 	var modes []dhcpExchangeMode
