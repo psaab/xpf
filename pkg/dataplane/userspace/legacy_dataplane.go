@@ -86,6 +86,15 @@ func (a *LegacyDataPlaneAdapter) SetPolicyRenameAncestry(
 	}
 }
 
+// AppliedConfig forwards the helper's last reconciled config to daemon-side
+// audits that must retain the prior snapshot across a deferred publish.
+func (a *LegacyDataPlaneAdapter) AppliedConfig() *config.Config {
+	if m := a.Manager(); m != nil {
+		return m.AppliedConfig()
+	}
+	return nil
+}
+
 // AppliedNATView exposes the manager's last-applied NAT view through the
 // adapter so the gRPC/REST/CLI deterministic-mapping lookup (#5794) can
 // reach it via a single narrow interface (no packet-path I/O). Returns an

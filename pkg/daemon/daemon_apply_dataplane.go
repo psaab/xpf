@@ -195,6 +195,8 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	if rt := d.dataplane(); rt != nil {
 		var err error
 		applyResult, err = rt.ApplyConfig(context.Background(), cfg)
+		d.retainRxVlanAppliedParents(cfg, err == nil &&
+			(applyResult == nil || !applyResult.SnapshotPublishDeferred))
 		networkdApplyResult = applyResult
 		// #9725: an apply may attach and then fail, or detach its last link
 		// while reconciling. Re-read kernel truth on both outcomes; the tick
@@ -1270,6 +1272,7 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 		}
 	}
 	res, err := rt.ApplyConfig(context.Background(), cfg)
+	d.retainRxVlanAppliedParents(cfg, err == nil && (res == nil || !res.SnapshotPublishDeferred))
 	// #9725: this re-apply can remove the last link even when it reports an
 	// error. Re-read the kernel census on both outcomes; an independent tick
 	// covers changes outside this caller.
