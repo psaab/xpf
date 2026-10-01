@@ -593,6 +593,30 @@ pub(in crate::afxdp) fn take_ready_session_import_repairs(
     (ready, ready_remains, pending)
 }
 
+/// Limit the next queue drain to the nearest pending import-repair boundary.
+/// The caller MUST hold this worker's command-queue lock so the queue prefix
+/// cannot change while its positional debt is inspected.
+#[inline]
+pub(in crate::afxdp) fn session_import_repair_drain_limit(
+    worker_id: u32,
+    max_commands: usize,
+) -> usize {
+    let Some(slot) = session_import_repair_slot(worker_id) else {
+        return max_commands;
+    };
+    let drained = SESSION_IMPORT_REPAIR_DRAINED
+        .get(worker_id as usize)
+        .map(|position| position.load(Ordering::Relaxed))
+        .unwrap_or(0);
+    let debt = lock_session_import_repair_recover(slot);
+    let Some(next_position) = debt.entries.values().map(|(position, _)| *position).min() else {
+        return max_commands;
+    };
+    next_position
+        .saturating_sub(drained)
+        .min(max_commands as u64) as usize
+}
+
 #[inline]
 pub(in crate::afxdp) fn clear_session_import_repairs(worker_id: u32) {
     if let Some(slot) = session_import_repair_slot(worker_id) {
@@ -819,7 +843,21 @@ pub(in crate::afxdp) fn drain_bounded_into(
     pending: &mut VecDeque<WorkerCommand>,
     scratch: &mut VecDeque<WorkerCommand>,
 ) -> bool {
-    let take = pending.len().min(WORKER_COMMAND_DRAIN_BUDGET);
+    drain_bounded_into_with_limit(pending, scratch, WORKER_COMMAND_DRAIN_BUDGET)
+}
+
+/// Drain a strict FIFO prefix capped by both the ordinary work budget and a
+/// caller's smaller ordering boundary.
+#[inline]
+pub(in crate::afxdp) fn drain_bounded_into_with_limit(
+    pending: &mut VecDeque<WorkerCommand>,
+    scratch: &mut VecDeque<WorkerCommand>,
+    max_commands: usize,
+) -> bool {
+    let take = pending
+        .len()
+        .min(WORKER_COMMAND_DRAIN_BUDGET)
+        .min(max_commands);
     scratch.extend(pending.drain(..take));
     !pending.is_empty()
 }

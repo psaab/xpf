@@ -1414,6 +1414,9 @@ directly:
   `WORKER_COMMAND_DRAIN_BUDGET` (256) commands into a worker-owned
   recycled scratch deque, dispatches those, and leaves the remainder in
   the shared queue for the next poll.
+  - A due session-import repair shortens the drain to its recorded FIFO
+    boundary; the loop applies it before a later pass dispatches the queued
+    suffix.
   - **It is a ring-service budget, not a fairness knob.** The worker
     does not touch its AF_XDP RX/TX rings while it dispatches commands,
     so batch size is wall-clock time the rings go unserviced. Draining
