@@ -83,6 +83,7 @@ if [[ "$MODE" == "selftest" ]]; then
 	cell "dropped permit twin (sibling emerged) maps to FAIL" FAIL 1 -- 1500 400 1000 0 1500 1350 1000 0 0
 	cell "both permit twins missing maps to VOID capture-blind" VOID 2 -- 1500 400 1000 0 1500 300 1000 0 0
 	cell "thin deny leg maps to VOID under-sampled" VOID 2 -- 1500 1400 500 0 1500 1350 1000 0 0
+	cell "under-sampled leaked deny twin fails" FAIL 1 -- 1500 1400 999 1 1500 1350 1000 0 0
 	cell "thin permit offer maps to VOID under-sampled" VOID 2 -- 1000 1000 1000 0 1500 1350 1000 0 0
 	cell "broken checksum maps to FAIL" FAIL 1 -- 1500 1400 1000 0 1500 1350 1000 0 3
 	cell "non-numeric input maps to VOID harness-void" VOID 2 -- 1500 x 1000 0 1500 1350 1000 0 0

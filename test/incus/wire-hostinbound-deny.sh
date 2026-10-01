@@ -61,6 +61,7 @@ if [[ "$MODE" == selftest ]]; then
     REFUSED=(1000 0 1 1000 0 0)
     check "RST refusal counts as exposure" FAIL 1 0 1500 1500 0 2 "${REFUSED[@]}"
     check "under-sampled cell is VOID" VOID 2 0 1500 1500 0 2 999 0 0 1000 0 0
+    check "exposure survives an under-sampled cell" FAIL 1 1 1500 1500 0 1 999 1 0
     check "missing TCP netconf control is capture-blind" VOID 2 0 1500 0 0 2 "${GOOD[@]}"
     check "duplicate control reply fails" FAIL 1 0 1500 1501 0 2 "${GOOD[@]}"
     check "bad checksum fails" FAIL 1 0 1500 1500 1 2 "${GOOD[@]}"
