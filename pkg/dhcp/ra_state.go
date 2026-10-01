@@ -1,6 +1,7 @@
 package dhcp
 
 import (
+	"context"
 	"net/netip"
 	"time"
 )
@@ -252,4 +253,49 @@ func nextIPv6RARefreshDelay(lease *Lease, now time.Time) time.Duration {
 		return 0
 	}
 	return delay
+}
+
+func (m *Manager) waitForIPv6TimerOrRA(
+	ctx context.Context,
+	timer <-chan time.Time,
+	key clientKey,
+	ifaceName string,
+	lease *Lease,
+) (*Lease, bool) {
+	for {
+		if ctx.Err() != nil {
+			return lease, false
+		}
+		select {
+		case <-timer:
+			return lease, true
+		case <-ctx.Done():
+			return lease, false
+		case <-m.afterRA(nextIPv6RARefreshDelay(lease, time.Now())):
+			var refreshed bool
+			lease, refreshed = m.refreshIPv6RouterState(ctx, key, ifaceName, lease)
+			if !refreshed {
+				return lease, false
+			}
+		}
+	}
+}
+
+func (m *Manager) refreshIPv6RouterState(ctx context.Context, key clientKey, ifaceName string, lease *Lease) (*Lease, bool) {
+	expired := *lease
+	expired.ClasslessRoutes = append([]LeaseRoute(nil), lease.ClasslessRoutes...)
+	expired.raRouteExpires = cloneRARouteExpiries(lease.raRouteExpires)
+	expireIPv6RouterState(&expired, time.Now())
+	if leaseContentChanged(lease, &expired) {
+		m.commitRouterAdvertisementState(key, &expired, lease)
+		lease = &expired
+	}
+
+	routers := m.observedRouterAdvertisements(ctx, ifaceName)
+	if ctx.Err() != nil {
+		return lease, false
+	}
+	refreshed := applyIPv6RouterAdvertisements(lease, lease, routers, time.Now())
+	m.commitRouterAdvertisementState(key, refreshed, lease)
+	return refreshed, true
 }
