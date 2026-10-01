@@ -121,6 +121,15 @@ pub(super) fn populate_routes(
                 preference: route.preference,
             });
         }
+        // #11411: a negative route MTU is invalid. Do not cast it to u32,
+        // where it would become an effectively unbounded MTU and disable PTB.
+        if route.mtu < 0 {
+            return Err(SnapshotIntegrityError::RouteMtuOutOfRange {
+                table: route.table.clone(),
+                destination: route.destination.clone(),
+                mtu: route.mtu,
+            });
+        }
         if let Ok(prefix) = route.destination.parse::<Ipv4Net>() {
             // #3771 (M4): the destination parses as IPv4 — a NON-EMPTY declared
             // family must agree ("inet"), else the route's family metadata
@@ -169,6 +178,7 @@ pub(super) fn populate_routes(
                         discard: route.discard,
                         next_table: String::new(),
                         preference: route.preference,
+                        mtu: route.mtu as u32,
                         rule_priority: route.rule_priority,
                     });
             }
@@ -218,6 +228,7 @@ pub(super) fn populate_routes(
                         discard: route.discard,
                         next_table: String::new(),
                         preference: route.preference,
+                        mtu: route.mtu as u32,
                         rule_priority: route.rule_priority,
                     });
             }

@@ -92,6 +92,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             next_table: format!("{}.inet.0", leak.target),
             preference: 0,
             rule_priority: leak.rule_priority,
+            mtu: 0,
         });
         // A route in the target table so the recursion resolves to something
         // distinguishable.
@@ -108,6 +109,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             next_table: String::new(),
             preference: 0,
             rule_priority: 0,
+            mtu: 0,
         });
     }
 
@@ -279,6 +281,7 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
@@ -354,6 +357,7 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
@@ -615,6 +619,7 @@ fn v4_leak_target_preserves_local_delivery_9955() {
             destination: "10.1.2.0/24".to_string(),
             next_table: "red.inet.0".to_string(),
             rule_priority: leak_priority(24, 32, LeakKind::NextTable),
+            mtu: 0,
             ..Default::default()
         }],
         ..Default::default()
@@ -644,6 +649,7 @@ fn v4_nat_only_leak_target_preserves_local_delivery_9955() {
             destination: "203.0.113.0/24".to_string(),
             next_table: "red.inet.0".to_string(),
             rule_priority: leak_priority(24, 32, LeakKind::NextTable),
+            mtu: 0,
             ..Default::default()
         }],
         ..Default::default()
@@ -692,6 +698,7 @@ fn v6_leak_target_preserves_local_delivery_9955() {
             destination: "2001:db8:1::/64".to_string(),
             next_table: "red.inet6.0".to_string(),
             rule_priority: leak_priority(64, 128, LeakKind::NextTable),
+            mtu: 0,
             ..Default::default()
         }],
         ..Default::default()

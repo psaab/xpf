@@ -63,6 +63,8 @@ fn decision_snatting_to(snat: Ipv4Addr, install_table_domain: u32) -> SessionDec
         neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat)), rewrite_dst: None, rewrite_src_port: Some(40000), rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain, install_table_check }
 }
 

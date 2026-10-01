@@ -143,6 +143,8 @@ fn split_owner_fabric_redirect_skips_local_reverse_placeholder() {
         neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
         ..NatDecision::default()
@@ -165,6 +167,8 @@ fn fabric_redirect_reply_from_real_fabric_ingress_keeps_local_reverse() {
         neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
         rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
@@ -269,6 +273,8 @@ fn build_live_forward_request_from_frame_uses_precomputed_hints() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let hints = PendingForwardHints {
         expected_ports: Some((12345, 5201)),
@@ -354,6 +360,8 @@ fn build_live_forward_request_threads_nat64_reverse_info_5606() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision { rewrite_src: Some(IpAddr::V6(orig_server)), rewrite_dst: Some(IpAddr::V6(orig_client)), rewrite_src_port: None, rewrite_dst_port: Some(5000), source_nat_icmp: None, nat64: true, nptv6: false }, install_table_domain: 0, install_table_check: 0 };
     let reverse_info = Nat64ReverseInfo {
         orig_src_v6: orig_client,
@@ -453,6 +461,8 @@ fn build_live_forward_request_from_frame_drops_logged_output_filter_discard() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let flow = SessionFlow {
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
@@ -624,6 +634,8 @@ fn build_live_forward_request_from_frame_output_filter_reject_sends_rst_3608() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let flow = SessionFlow {
         src_ip: IpAddr::V4(src_ip),
@@ -811,6 +823,8 @@ fn output_filter_reject_carries_the_configured_icmp_code_6854() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let flow = SessionFlow {
         src_ip: IpAddr::V4(src_ip),
@@ -1058,6 +1072,8 @@ fn output_filter_matches_post_snat_source_forward_leg_3642() {
             neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         // SNAT: source rewritten to the pool address on the wire.
         nat: NatDecision {
@@ -1191,6 +1207,8 @@ fn output_filter_matches_post_snat_dest_reverse_leg_3642() {
             neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 61,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         // Reverse of the SNAT: restore the original client as the wire dst.
         nat: NatDecision {
@@ -1320,6 +1338,8 @@ fn output_filter_matches_post_dnat_dest_3642() {
             neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 61,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         // DNAT: destination rewritten to the internal server on the wire.
         nat: NatDecision {
@@ -1727,6 +1747,8 @@ fn resolution_target_uses_rewritten_destination_for_reverse_dnat() {
         neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: None,
         rewrite_dst: Some(IpAddr::V6("2001:559:8585:ef00::100".parse().expect("lan"))),
@@ -1767,6 +1789,8 @@ fn session_resolution_falls_back_to_cached_neighbor_on_miss() {
         neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let resolved = lookup_forwarding_resolution_for_session(
         &state,
@@ -1962,6 +1986,8 @@ fn build_forwarded_frame_uses_fabric_header_without_nat() {
             neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
             src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()

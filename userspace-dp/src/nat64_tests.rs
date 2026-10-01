@@ -4928,6 +4928,8 @@ fn frag_test_decision(nat: NatDecision) -> SessionDecision {
         neighbor_mac: Some([2, 0, 0, 0, 0, 2]),
         src_mac: Some([2, 0, 0, 0, 0, 1]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat, install_table_domain: 0, install_table_check: 0 }
 }
 

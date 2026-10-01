@@ -113,6 +113,7 @@ fn base_snapshot() -> ConfigSnapshot {
             family: "inet".to_string(),
             destination: "0.0.0.0/0".to_string(),
             next_hops: vec!["203.0.113.2".to_string()],
+            mtu: 0,
             ..Default::default()
         }],
         neighbors: vec![NeighborSnapshot {
