@@ -113,14 +113,15 @@ func TestRoutingInstanceTableIDStableUnderSiblingChurn(t *testing.T) {
 	}
 }
 
-// findCollidingRoutingInstanceNames brute-forces two instance names that fold to
-// the same kernel table id (expected within ~1200 iterations for a 900k band).
-// Returns them sorted so the caller knows which is the survivor/quarantined.
+// findCollidingRoutingInstanceNames brute-forces two valid (<=11-byte) routing
+// instance names that fold to the same kernel table id (expected within ~1200
+// iterations for the 900k band). The short names keep callers focused on the
+// stable table-id gate instead of the derived VRF-name gate (#11391).
 func findCollidingRoutingInstanceNames(t *testing.T) (first, second string) {
 	t.Helper()
 	seen := make(map[int]string)
 	for i := 0; i < 5_000_000; i++ {
-		name := fmt.Sprintf("ri-collide-%08d", i)
+		name := fmt.Sprintf("ri-%07d", i)
 		id := StableRoutingInstanceTableID(name)
 		if prev, ok := seen[id]; ok {
 			if prev < name {

@@ -695,7 +695,27 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 						" its members are not bound and its routes are not programmed until it is renamed (#9622)",
 					ri.Name, reservedRoutingInstanceNames[ri.Name]))
 				// #9956 F-032: record the evictee for the snapshot builders
-				// (APPEND — the #3855 pass below appends its own).
+				// (APPEND — the #11391 and #3855 passes below append their own).
+				cfg.QuarantinedRoutingInstances = append(cfg.QuarantinedRoutingInstances, ri)
+				continue
+			}
+			kept = append(kept, ri)
+		}
+		cfg.RoutingInstances = kept
+	}
+	// #11391: the runtime creates vrf-<name> without canonicalizing the
+	// routing-instance name. Keep an uncreatable device out of the active config
+	// before the #3855 table-id pass, so it cannot claim or displace a table.
+	if len(cfg.RoutingInstances) > 0 {
+		kept := cfg.RoutingInstances[:0]
+		for _, ri := range cfg.RoutingInstances {
+			deviceName, reason := routingInstanceVRFDeviceNameIssue(ri.Name)
+			if reason != "" {
+				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
+					"routing-instance %q QUARANTINED: derived Linux VRF device name %q is invalid: %s — "+
+						"no VRF created, its members are not bound and its routes are not programmed until the name is fixed (#11391)",
+					ri.Name, deviceName, reason))
+				// #9956 F-032: record the evictee for the snapshot builders.
 				cfg.QuarantinedRoutingInstances = append(cfg.QuarantinedRoutingInstances, ri)
 				continue
 			}
@@ -729,7 +749,7 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 							" leaks are not programmed until one instance is renamed (#3855)",
 						ri.Name, ri.TableID))
 					// #9956 F-032: record the evictee for the snapshot builders
-					// (APPEND — the #9622 pass above appended its own).
+					// (APPEND — the #9622 and #11391 passes above appended their own.)
 					cfg.QuarantinedRoutingInstances = append(cfg.QuarantinedRoutingInstances, ri)
 					continue
 				}

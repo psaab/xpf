@@ -1635,6 +1635,11 @@ type compileOpts struct {
 	// compileRoutingInstances quarantines the instance with the one warning
 	// that reports it.
 	lenientReservedRoutingInstanceName bool
+	// lenientRoutingInstanceKernelName (#11391) skips the strict derived VRF
+	// device-name gate. Tolerant load and peer-sync quarantine an instance whose
+	// vrf-<name> device exceeds IFNAMSIZ or fails Linux dev_valid_name instead of
+	// rejecting an already-persisted config.
+	lenientRoutingInstanceKernelName bool
 	// lenientAddressBookNames (#3061, narrowed in #4340) downgrades the
 	// address-book / zone name gate (validateAddressBookEntryNamesStrict) from a
 	// hard compile error to a cfg.Warnings entry. The strict commit /
@@ -3108,6 +3113,7 @@ func lenientCompileOpts() compileOpts {
 		lenientZoneIDCollision:                 true,
 		lenientRoutingInstanceTableIDCollision: true,
 		lenientReservedRoutingInstanceName:     true,
+		lenientRoutingInstanceKernelName:       true,
 		lenientAddressBookNames:                true,
 		lenientReservedAddressNames:            true,
 		lenientHelperStateFile:                 true,
