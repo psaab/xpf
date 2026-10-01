@@ -8,11 +8,11 @@
 // boundary per the #6386 hot-path contract). Bodies byte-identical to
 // their prior location.
 
-use super::*;
 use super::filter::{emit_pending_filter_log, host_inbound_gated_lo0_action};
 use super::host_inbound_policy::{
     emit_host_inbound_deny, emit_junos_host_deny, junos_host_policy_eval,
 };
+use super::*;
 
 /// #3292: verdict for the FLOWLESS (no-L4) LocalDelivery security gate. A
 /// host-bound flowless packet — a non-first IPv4/IPv6 fragment, or any
@@ -147,20 +147,18 @@ pub(super) fn flowless_local_delivery_verdict(
     // NEVER installed as a session (this synthetic L3 tuple is evaluation- and
     // logging-only), so a permit simply falls through to Deliver with no
     // metadata to carry — only a deny/reject drives the flowless filter drop.
-    if let Some(result) =
-        junos_host_policy_eval(
-            forwarding,
-            flow,
-            // #9529: the flowless arm applies no destination translation (a
-            // translated flow's later fragments follow fragment association,
-            // not this arm), so its wire destination IS its post-translation one.
-            (flow.dst_ip, flow.forward_key.dst_port),
-            from_zone_id,
-            packet_len,
-            false,
-            packet_icmp,
-        )
-    {
+    if let Some(result) = junos_host_policy_eval(
+        forwarding,
+        flow,
+        // #9529: the flowless arm applies no destination translation (a
+        // translated flow's later fragments follow fragment association,
+        // not this arm), so its wire destination IS its post-translation one.
+        (flow.dst_ip, flow.forward_key.dst_port),
+        from_zone_id,
+        packet_len,
+        false,
+        packet_icmp,
+    ) {
         if !matches!(result.action, PolicyAction::Permit) {
             emit_junos_host_deny(
                 forwarding,
@@ -181,19 +179,24 @@ pub(super) fn flowless_local_delivery_verdict(
     FlowlessLocalVerdict::Deliver
 }
 
-/// #3292 / #3600 review Note 2: compute the base forwarding resolution for a
-/// FLOWLESS (no-L4) packet, mirroring the flow-backed session-miss arm's
-/// ordering. INGRESS-interface and interface-NAT local-delivery resolution are
-/// tried BEFORE the (PBR `then routing-instance` override-aware) route-table
-/// lookup, so a host-bound flowless packet whose destination is a firewall
-/// interface IP reaches `LocalDelivery` instead of being steered into a PBR
-/// override table that has no local route for it (→ `NoRoute` → drop). The PBR
-/// override governs ONLY the fallback table lookup for genuinely transit
-/// packets — exactly as
-/// `ingress_interface_local_resolution_on_session_miss(..).or_else(..)
-/// .unwrap_or_else(table)` orders it on the flow-backed arm. Extracted so the
-/// ordering is unit-testable (the poll loop body itself is un-callable); see
-/// `flowless_local_delivery_tests`.
+/// The flowless route result and any safe pre-routing destination rewrite.
+pub(super) struct FlowlessBaseResolution {
+    pub(super) resolution: ForwardingResolution,
+    pub(super) nat: NatDecision,
+    pub(super) dnat_counter: Option<std::sync::Arc<crate::nat::NatRuleCounter>>,
+}
+
+/// #3292 / #3600 / #11435: compute the base forwarding resolution for a
+/// FLOWLESS (no-L4) packet. Address-only static-DNAT, DNAT, and inbound NPTv6
+/// are resolved before local-address checks and the route lookup, matching the
+/// flow-backed pre-routing order. Ambiguous or unsupported translations are
+/// fail-closed for transit, but first retain untranslated LocalDelivery so its
+/// existing host-inbound gates still run.
+///
+/// INGRESS-interface and interface-NAT local-delivery resolution are still
+/// tried BEFORE the PBR (`then routing-instance`) override-aware route-table
+/// lookup, so a host-bound flowless packet reaches `LocalDelivery` instead of
+/// being steered into an override table that has no local route for it.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn flowless_base_resolution(
@@ -201,21 +204,36 @@ pub(super) fn flowless_base_resolution(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     now_secs: u64,
-    ingress_ifindex: i32,
-    ingress_vlan_id: u16,
-    protocol: u8,
-    dst: IpAddr,
+    l3_flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    nat_wire_info: super::frag_assoc::FlowlessNatWireInfo,
+    ingress_zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
     route_override: Option<&str>,
-) -> ForwardingResolution {
-    ingress_interface_local_resolution_on_session_miss(
+) -> Option<FlowlessBaseResolution> {
+    let (nat, dnat_counter) = match super::frag_assoc::flowless_pre_routing_destination_nat(
         forwarding,
-        ingress_ifindex,
-        ingress_vlan_id,
-        dst,
-        protocol,
-    )
-    .or_else(|| interface_nat_local_resolution_on_session_miss(forwarding, dst, protocol))
-    .unwrap_or_else(|| {
+        l3_flow,
+        meta,
+        nat_wire_info,
+        ingress_zone_override,
+        fabric_ingress_scope_ifindex,
+    ) {
+        super::frag_assoc::FlowlessPreRoutingNat::None => (NatDecision::default(), None),
+        super::frag_assoc::FlowlessPreRoutingNat::Translated { decision, counter } => {
+            (decision, counter)
+        }
+        super::frag_assoc::FlowlessPreRoutingNat::Untranslatable => {
+            let resolution = flowless_local_resolution(forwarding, meta, l3_flow.dst_ip)?;
+            return Some(FlowlessBaseResolution {
+                resolution,
+                nat: NatDecision::default(),
+                dnat_counter: None,
+            });
+        }
+    };
+    let dst = nat.rewrite_dst.unwrap_or(l3_flow.dst_ip);
+    let resolution = flowless_local_resolution(forwarding, meta, dst).unwrap_or_else(|| {
         enforce_ha_resolution_snapshot(
             forwarding,
             ha_state,
@@ -227,7 +245,36 @@ pub(super) fn flowless_base_resolution(
                 route_override,
             ),
         )
+    });
+    if nat.rewrite_dst.is_some()
+        && matches!(
+            resolution.disposition,
+            ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
+        )
+    {
+        return None;
+    }
+    Some(FlowlessBaseResolution {
+        resolution,
+        nat,
+        dnat_counter,
     })
+}
+
+#[inline]
+fn flowless_local_resolution(
+    forwarding: &ForwardingState,
+    meta: UserspaceDpMeta,
+    dst: IpAddr,
+) -> Option<ForwardingResolution> {
+    ingress_interface_local_resolution_on_session_miss(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        dst,
+        meta.protocol,
+    )
+    .or_else(|| interface_nat_local_resolution_on_session_miss(forwarding, dst, meta.protocol))
 }
 
 #[cfg(test)]

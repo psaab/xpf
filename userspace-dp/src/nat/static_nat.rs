@@ -1,7 +1,7 @@
 // Static 1:1 NAT table — bidirectional internal↔external mapping.
 
-use super::{NatCounterStore, NatDecision, NatRuleCounter};
 use super::destination::DnatTable;
+use super::{NatCounterStore, NatDecision, NatRuleCounter};
 use crate::StaticNATRuleSnapshot;
 use crate::prefix::{PrefixV4, PrefixV6};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -62,7 +62,11 @@ impl SourceConstraint {
                 },
             }
         }
-        Self { constrained, v4, v6 }
+        Self {
+            constrained,
+            v4,
+            v6,
+        }
     }
 
     /// Does `peer` satisfy the constraint?
@@ -232,21 +236,13 @@ pub(crate) struct StaticNatBlock {
 /// (release-mode masks the shift amount to 0, a no-op) so a host route
 /// (`len == 32`, no host bits) returns `0` explicitly.
 fn host_mask_v4(len: u8) -> u32 {
-    if len >= 32 {
-        0
-    } else {
-        u32::MAX >> len
-    }
+    if len >= 32 { 0 } else { u32::MAX >> len }
 }
 
 /// Host mask for an IPv6 prefix of `len` network bits. Same `len >= 128`
 /// shift guard as [`host_mask_v4`].
 fn host_mask_v6(len: u8) -> u128 {
-    if len >= 128 {
-        0
-    } else {
-        u128::MAX >> len
-    }
+    if len >= 128 { 0 } else { u128::MAX >> len }
 }
 
 /// A parsed static-NAT prefix: a canonical network base plus the prefix
@@ -434,6 +430,70 @@ impl StaticNatTable {
                 })
         })
     }
+    /// Whether an unavailable-L4 static DNAT mapping could precede an
+    /// address-only rewrite. This is DNAT-only; the paired SNAT table has a
+    /// different egress scope and must not poison pre-routing resolution.
+    pub(crate) fn flowless_l4_dnat_translation_possible(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+    ) -> bool {
+        if protocol != u8::MAX && !crate::ip_proto::has_l4_ports(protocol) {
+            return false;
+        }
+        self.dnat.iter().any(|((external_ip, port), entries)| {
+            *external_ip == dst_ip
+                && port.is_some()
+                && entries.iter().any(|entry| {
+                    static_scope_ok(
+                        &entry.from_zone,
+                        &entry.from_interface,
+                        &entry.from_routing_instance,
+                        ingress_zone,
+                        ingress_ifname,
+                        ingress_routing_instance,
+                    ) && source_ok(&entry.source, Some(src_ip))
+                })
+        })
+    }
+
+    /// Whether a non-TCP/UDP DNAT candidate would rewrite a destination port
+    /// that the flowless address-only path cannot honor. `None` means the wire
+    /// protocol was not recoverable, so every scoped destination candidate is
+    /// considered possible and fails closed.
+    pub(crate) fn flowless_non_tcp_udp_port_map_possible(
+        &self,
+        protocol: Option<u8>,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        ingress_zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+    ) -> bool {
+        if protocol.is_some_and(crate::ip_proto::has_l4_ports) {
+            return false;
+        }
+        self.dnat.iter().any(|((external_ip, port), entries)| {
+            *external_ip == dst_ip
+                && port.is_some()
+                && entries.iter().any(|entry| {
+                    entry.mapped_port.is_some()
+                        && static_scope_ok(
+                            &entry.from_zone,
+                            &entry.from_interface,
+                            &entry.from_routing_instance,
+                            ingress_zone,
+                            ingress_ifname,
+                            ingress_routing_instance,
+                        )
+                        && source_ok(&entry.source, Some(src_ip))
+                })
+        })
+    }
 
     pub(crate) fn from_snapshots(
         snaps: &[StaticNATRuleSnapshot],
@@ -500,11 +560,7 @@ impl StaticNatTable {
                          zero-length (/0) prefix that remaps the entire address \
                          family 1:1 (identity NAT shadowing all destinations) — \
                          rejected",
-                        snap.name,
-                        ext_prefix.base,
-                        ext_prefix.len,
-                        int_prefix.base,
-                        int_prefix.len
+                        snap.name, ext_prefix.base, ext_prefix.len, int_prefix.base, int_prefix.len
                     ));
                     continue;
                 }
@@ -544,12 +600,12 @@ impl StaticNatTable {
             // intentional unconstrained wildcard). The Go compiler's
             // static-NAT exclusion must reject malformed destination-port tokens
             // before they can reach this wire-level ambiguity.
-            let (match_dst_port, mapped_port) = match (snap.match_destination_port, snap.mapped_port)
-            {
-                (0, _) => (None, None),
-                (m, 0) => (Some(m), None),
-                (m, p) => (Some(m), Some(p)),
-            };
+            let (match_dst_port, mapped_port) =
+                match (snap.match_destination_port, snap.mapped_port) {
+                    (0, _) => (None, None),
+                    (m, 0) => (Some(m), None),
+                    (m, p) => (Some(m), Some(p)),
+                };
             let entry = StaticNatEntry {
                 external_ip,
                 internal_ip,
