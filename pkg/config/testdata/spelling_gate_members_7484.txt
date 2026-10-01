@@ -142,20 +142,6 @@ COMPARED	firewall family any filter <*> term <*> from source-port-except
 COMPARED	firewall family any filter <*> term <*> from source-prefix-list
 COMPARED	firewall family any filter <*> term <*> from tcp-flags
 COMPARED	firewall family any filter <*> term <*> from traffic-class
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject administratively-prohibited
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject bad-host-tos
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject bad-network-tos
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject host-prohibited
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject host-unreachable
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject network-prohibited
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject network-unreachable
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject port-unreachable
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject precedence-cutoff
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject precedence-violation
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject protocol-unreachable
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject source-host-isolated
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject source-route-failed
-flag (read, but value-less)	firewall family any filter <*> term <*> then reject tcp-reset
 flag (read, but value-less)	firewall family inet filter <*> interface-specific
 COMPARED	firewall family inet filter <*> term <*> from destination-address
 COMPARED	firewall family inet filter <*> term <*> from destination-port
@@ -179,20 +165,6 @@ COMPARED	firewall family inet filter <*> term <*> from source-port-except
 COMPARED	firewall family inet filter <*> term <*> from source-prefix-list
 COMPARED	firewall family inet filter <*> term <*> from tcp-flags
 COMPARED	firewall family inet filter <*> term <*> from traffic-class
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject administratively-prohibited
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject bad-host-tos
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject bad-network-tos
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject host-prohibited
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject host-unreachable
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject network-prohibited
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject network-unreachable
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject port-unreachable
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject precedence-cutoff
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject precedence-violation
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject protocol-unreachable
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject source-host-isolated
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject source-route-failed
-flag (read, but value-less)	firewall family inet filter <*> term <*> then reject tcp-reset
 flag (read, but value-less)	firewall family inet6 filter <*> interface-specific
 COMPARED	firewall family inet6 filter <*> term <*> from destination-address
 COMPARED	firewall family inet6 filter <*> term <*> from destination-port
@@ -216,20 +188,6 @@ COMPARED	firewall family inet6 filter <*> term <*> from source-port-except
 COMPARED	firewall family inet6 filter <*> term <*> from source-prefix-list
 COMPARED	firewall family inet6 filter <*> term <*> from tcp-flags
 COMPARED	firewall family inet6 filter <*> term <*> from traffic-class
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject administratively-prohibited
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject bad-host-tos
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject bad-network-tos
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject host-prohibited
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject host-unreachable
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject network-prohibited
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject network-unreachable
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject port-unreachable
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject precedence-cutoff
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject precedence-violation
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject protocol-unreachable
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject source-host-isolated
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject source-route-failed
-flag (read, but value-less)	firewall family inet6 filter <*> term <*> then reject tcp-reset
 flag (read, but value-less)	firewall filter <*> interface-specific
 COMPARED	firewall filter <*> term <*> from destination-address
 COMPARED	firewall filter <*> term <*> from destination-port
@@ -253,20 +211,6 @@ COMPARED	firewall filter <*> term <*> from source-port-except
 COMPARED	firewall filter <*> term <*> from source-prefix-list
 COMPARED	firewall filter <*> term <*> from tcp-flags
 COMPARED	firewall filter <*> term <*> from traffic-class
-flag (read, but value-less)	firewall filter <*> term <*> then reject administratively-prohibited
-flag (read, but value-less)	firewall filter <*> term <*> then reject bad-host-tos
-flag (read, but value-less)	firewall filter <*> term <*> then reject bad-network-tos
-flag (read, but value-less)	firewall filter <*> term <*> then reject host-prohibited
-flag (read, but value-less)	firewall filter <*> term <*> then reject host-unreachable
-flag (read, but value-less)	firewall filter <*> term <*> then reject network-prohibited
-flag (read, but value-less)	firewall filter <*> term <*> then reject network-unreachable
-flag (read, but value-less)	firewall filter <*> term <*> then reject port-unreachable
-flag (read, but value-less)	firewall filter <*> term <*> then reject precedence-cutoff
-flag (read, but value-less)	firewall filter <*> term <*> then reject precedence-violation
-flag (read, but value-less)	firewall filter <*> term <*> then reject protocol-unreachable
-flag (read, but value-less)	firewall filter <*> term <*> then reject source-host-isolated
-flag (read, but value-less)	firewall filter <*> term <*> then reject source-route-failed
-flag (read, but value-less)	firewall filter <*> term <*> then reject tcp-reset
 COMPARED	firewall policer <*> if-exceeding bandwidth-limit
 COMPARED	firewall policer <*> if-exceeding burst-size-limit
 flag (read, but value-less)	firewall policer <*> logical-interface-policer
