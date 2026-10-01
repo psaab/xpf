@@ -446,6 +446,8 @@ pub(super) fn icmp_err_resolution_v4(next_hop: Ipv4Addr) -> ForwardingResolution
         neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }
 }
 
@@ -666,6 +668,8 @@ pub(super) fn icmpv6_te_match_fixture(
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_UNTRUST_ZONE_ID,
@@ -818,10 +822,11 @@ pub(super) fn run_input_filter_accept_log_poll(
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
         next_hops: vec!["172.16.80.200@reth0.80".to_string()],
+        next_hop_weights: vec![],
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     }];
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "log-input".to_string(),
@@ -1034,6 +1039,8 @@ pub(super) fn record_noroute_with_dst(
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         64,
         None,
@@ -2083,17 +2090,15 @@ pub(super) fn tunnel_gate_test_fixture() -> (
 
 
 pub(super) fn tunnel_marked_decision(disposition: ForwardingDisposition) -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition,
-        local_ifindex: 0,
-        egress_ifindex: 6,
-        tx_ifindex: 0,
-        tunnel_endpoint_id: 824,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision { resolution: ForwardingResolution { disposition,
+    local_ifindex: 0,
+    egress_ifindex: 6,
+    tx_ifindex: 0,
+    tunnel_endpoint_id: 824,
+    next_hop: None,
+    neighbor_mac: None,
+    src_mac: None,
+    tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
 
@@ -2858,10 +2863,12 @@ pub(super) fn inbound_nptv6_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsh
         family: "inet6".to_string(),
         destination: "fd35:1940:27::/48".to_string(),
         next_hops: vec!["fd35:1940:27:100::102@reth1.0".to_string()],
+        next_hop_weights: vec![],
         discard: false,
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "reth1.0".to_string(),
@@ -2997,6 +3004,8 @@ pub(super) fn frag_test_decision() -> SessionDecision {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 

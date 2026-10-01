@@ -78,6 +78,8 @@ pub(in crate::afxdp) fn resolve_tunnel_forwarding_resolution(
         neighbor_mac: outer.neighbor_mac,
         src_mac: outer.src_mac,
         tx_vlan_id: outer.tx_vlan_id,
+        route_mtu: 0,
+        transport_route_mtu: outer.route_mtu,
     }
 }
 

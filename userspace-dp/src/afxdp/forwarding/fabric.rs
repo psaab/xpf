@@ -561,6 +561,8 @@ pub(in crate::afxdp) fn resolve_fabric_redirect_from_list(
         neighbor_mac: Some(fabric.peer_mac),
         src_mac: Some(fabric.local_mac),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     })
 }
 

@@ -1662,11 +1662,6 @@ fn record_forwarded_tcp_segmentation_miss(
     }
 }
 
-/// Resolve the egress interface MTU for a forwarding decision, preferring
-/// the egress ifindex and falling back to the tx ifindex (the same lookup
-/// `forwarded_tcp_may_need_segmentation` performs). Returns `0` when no
-/// egress entry is known, which the MTU decision treats as "no MTU known →
-/// forward unchanged".
 #[inline(always)]
 /// §8896: can this tunnel endpoint actually be encapsulated by the NAT64
 /// builder? True only for a row that EXISTS and whose mode is one the frame
@@ -1686,15 +1681,26 @@ fn nat64_tunnel_is_encapsulable(forwarding: &ForwardingState, tunnel_endpoint_id
         })
 }
 
+/// Resolve the effective egress MTU: the selected route constrains a plain
+/// forward, while tunnel transport MTUs are composed after encapsulation-aware
+/// conversion in `post_transform_inner_mtu`.
+#[inline(always)]
 fn forwarded_egress_mtu(decision: &SessionDecision, forwarding: &ForwardingState) -> usize {
-    forwarding
+    let interface_mtu = forwarding
         .egress
         .get(&decision.resolution.egress_ifindex)
         .or_else(|| forwarding.egress.get(&decision.resolution.tx_ifindex))
         .map(|egress| egress.mtu)
-        .unwrap_or(0)
-}
+        .unwrap_or(0);
+    if decision.resolution.tunnel_endpoint_id != 0 {
+        return interface_mtu;
+    }
+    crate::afxdp::forwarding::min_nonzero_mtu(
+        interface_mtu,
+        decision.resolution.route_mtu as usize,
+    )
 
+}
 /// Whether a cache hit can skip the pending-forward dispatcher.
 ///
 /// The inline rewrite path is valid only when the plain egress MTU decision is
@@ -1748,12 +1754,7 @@ fn forwarded_tcp_may_need_segmentation(
     // (real_mtu, 1280] and it was submitted OVERSIZE to AF_XDP TX. Treat 0 (no
     // egress entry / unknown MTU) as "don't segment" — forward unchanged,
     // matching the builders' now-live `mtu == 0` guard.
-    let mtu = forwarding
-        .egress
-        .get(&decision.resolution.egress_ifindex)
-        .or_else(|| forwarding.egress.get(&decision.resolution.tx_ifindex))
-        .map(|egress| egress.mtu)
-        .unwrap_or_default();
+    let mtu = forwarded_egress_mtu(decision, forwarding);
     if mtu == 0 {
         return false;
     }

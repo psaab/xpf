@@ -185,6 +185,7 @@ mod tests {
                     family: "inet".into(),
                     destination: "0.0.0.0/0".into(),
                     next_hops: vec!["172.16.50.254".into()],
+                    mtu: 0,
                     ..Default::default()
                 },
             ],
@@ -244,6 +245,7 @@ mod tests {
                     family: "inet".into(),
                     destination: "10.7.0.0/16".into(),
                     next_hops: vec!["192.0.2.1".into()],
+                    mtu: 0,
                     ..Default::default()
                 },
                 crate::RouteSnapshot {
@@ -251,6 +253,7 @@ mod tests {
                     family: "inet".into(),
                     destination: "10.116.0.0/16".into(),
                     next_hops: vec!["192.0.2.2".into()],
+                    mtu: 0,
                     ..Default::default()
                 },
             ],

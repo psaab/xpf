@@ -73,11 +73,13 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: prefix_containing_probe(leak.prefix_len),
+            next_hop_weights: vec![],
             next_hops: vec![],
             discard: false,
             next_table: format!("{}.inet.0", leak.target),
             preference: 0,
             rule_priority: leak.rule_priority,
+            mtu: 0,
         });
         // A route in the target table so the recursion resolves to something
         // distinguishable.
@@ -85,6 +87,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             table: format!("{}.inet.0", leak.target),
             family: "inet".to_string(),
             destination: "10.0.0.0/8".to_string(),
+            next_hop_weights: vec![],
             next_hops: vec![format!(
                 "172.16.{}.1@ge-0/0/{}.50",
                 leak.subnet, leak.egress_ifindex
@@ -93,6 +96,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             next_table: String::new(),
             preference: 0,
             rule_priority: 0,
+            mtu: 0,
         });
     }
 
@@ -264,11 +268,13 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "10.1.2.0/24".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
         discard: false,
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
@@ -338,11 +344,13 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "10.0.0.0/8".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["172.16.52.1@ge-0/0/14.50".to_string()],
         discard: false,
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
@@ -565,6 +573,7 @@ fn v4_leak_target_preserves_local_delivery_9955() {
             destination: "10.1.2.0/24".to_string(),
             next_table: "red.inet.0".to_string(),
             rule_priority: NEXT_TABLE_RULE_PRIORITY,
+            mtu: 0,
             ..Default::default()
         }],
         ..Default::default()
@@ -594,6 +603,7 @@ fn v4_nat_only_leak_target_preserves_local_delivery_9955() {
             destination: "203.0.113.0/24".to_string(),
             next_table: "red.inet.0".to_string(),
             rule_priority: NEXT_TABLE_RULE_PRIORITY,
+            mtu: 0,
             ..Default::default()
         }],
         ..Default::default()
@@ -642,6 +652,7 @@ fn v6_leak_target_preserves_local_delivery_9955() {
             destination: "2001:db8:1::/64".to_string(),
             next_table: "red.inet6.0".to_string(),
             rule_priority: NEXT_TABLE_RULE_PRIORITY,
+            mtu: 0,
             ..Default::default()
         }],
         ..Default::default()

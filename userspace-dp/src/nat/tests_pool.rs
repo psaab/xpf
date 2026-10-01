@@ -12266,15 +12266,16 @@ fn dense_v4_pool_9163(count: usize, base: u32) -> Vec<Ipv4Addr> {
 /// for everything else snapshot apply does under the same mutex.
 ///
 /// FAIL-ON-REVERT: the nested scan runs ~n²/2 = 2.1e9 address compares here.
-/// Measured at `--release` (which is how `make test-rust` runs): 1.2 s for the
-/// scan against ~4 ms for the indexed probe.
+/// Measured at `--release` (the full `make test-rust` leg): ~1.2 s for the
+/// oracle against ~4 ms for the indexed probe, so the release bound is 250 ms.
+/// The debug exact-test leg is substantially slower: three serial exact-test
+/// runs on an oversubscribed host measured the fixed path at 633 ms, 706 ms
+/// and 1.478 s (the oracle took 114 s, 121 s and 175 s). Its separate 2 s bound
+/// keeps the same complexity control with headroom for CPU contention.
 ///
 /// POSITIVE CONTROL, in the same run on the same machine: the oracle — a
 /// verbatim copy of the old loop — is timed over the SAME inputs and must NOT
-/// satisfy the bound. Without it a machine fast enough to run the old shape
-/// inside 250 ms would report a vacuous green, and the cell would be measuring
-/// nothing. If that control ever fires, the answer is to raise `N`, not to
-/// relax the bound.
+/// satisfy the build-profile-specific bound. If it does, raise `N`.
 #[test]
 fn retained_index_map_is_bounded_at_max_prefix_hosts_9163() {
     use std::time::{Duration, Instant};
@@ -12282,7 +12283,11 @@ fn retained_index_map_is_bounded_at_max_prefix_hosts_9163() {
     // One MAX_POOL_PREFIX_HOSTS prefix member. The aggregate gate admits 16x
     // this in a single pool.
     const N: usize = 65_536;
-    const BOUND: Duration = Duration::from_millis(250);
+    const BOUND: Duration = if cfg!(debug_assertions) {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_millis(250)
+    };
 
     let prev = dense_v4_pool_9163(N, 0x0a00_0000);
     let mut new = prev.clone();

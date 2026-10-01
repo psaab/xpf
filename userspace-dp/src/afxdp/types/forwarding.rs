@@ -956,16 +956,18 @@ pub(in crate::afxdp) struct MirrorRuntimeConfig {
     pub(in crate::afxdp) rate: u32,
 }
 
-/// One resolved equal-cost next-hop candidate for a static route (#2389).
-/// A route with multiple configured next-hops retains every resolved
-/// candidate so the lookup can distribute flows across them and skip a
-/// dead candidate. `next_hop == None` with a non-zero `ifindex` is an
-/// interface-only ("via <if>") candidate.
+/// One resolved weighted ECMP next-hop candidate for a route (#2389/#11402).
+/// A route retains every authored member so lookup can distribute flows in
+/// proportion to its weight and skip a dead candidate. `next_hop == None`
+/// with a non-zero `ifindex` is an interface-only ("via <if>") candidate.
+/// `weight` preserves this leg's Linux multipath weight; the selector treats
+/// zero defensively as 1.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::afxdp) struct RouteNextHopV4 {
     pub(in crate::afxdp) next_hop: Option<Ipv4Addr>,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
+    pub(in crate::afxdp) weight: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -973,6 +975,7 @@ pub(in crate::afxdp) struct RouteNextHopV6 {
     pub(in crate::afxdp) next_hop: Option<Ipv6Addr>,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
+    pub(in crate::afxdp) weight: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -1043,6 +1046,8 @@ pub(in crate::afxdp) struct RouteEntryV4 {
     pub(in crate::afxdp) next_table: String,
     /// #2390: Junos route preference (admin distance; lower = preferred).
     pub(in crate::afxdp) preference: i32,
+    /// Kernel-selected route MTU, in bytes. Zero means no route MTU.
+    pub(in crate::afxdp) mtu: u32,
     /// #9955: kernel ip-rule priority for a next-table leak. Zero for
     /// ordinary routes and legacy snapshots.
     pub(in crate::afxdp) rule_priority: u32,
@@ -1057,6 +1062,8 @@ pub(in crate::afxdp) struct RouteEntryV6 {
     pub(in crate::afxdp) next_table: String,
     /// #2390: Junos route preference (admin distance; lower = preferred).
     pub(in crate::afxdp) preference: i32,
+    /// Kernel-selected route MTU, in bytes. Zero means no route MTU.
+    pub(in crate::afxdp) mtu: u32,
     /// #9955: kernel ip-rule priority for a next-table leak. Zero for
     /// ordinary routes and legacy snapshots.
     pub(in crate::afxdp) rule_priority: u32,
@@ -1115,10 +1122,12 @@ impl RouteEntryV4 {
                 next_hop,
                 ifindex,
                 tunnel_endpoint_id,
+                weight: 1,
             }],
             discard,
             next_table,
             preference,
+            mtu: 0,
             rule_priority: 0,
         }
     }
@@ -1141,10 +1150,12 @@ impl RouteEntryV6 {
                 next_hop,
                 ifindex,
                 tunnel_endpoint_id,
+                weight: 1,
             }],
             discard,
             next_table,
             preference,
+            mtu: 0,
             rule_priority: 0,
         }
     }
@@ -1543,6 +1554,11 @@ pub(crate) struct ForwardingResolution {
     pub(crate) neighbor_mac: Option<[u8; 6]>,
     pub(crate) src_mac: Option<[u8; 6]>,
     pub(crate) tx_vlan_id: u16,
+    /// Selected route's L3 MTU. Zero means no route-specific constraint.
+    pub(crate) route_mtu: u32,
+    /// Outer transport route's MTU for native tunnel resolutions. Kept
+    /// distinct from `route_mtu`, which constrains the inner/overlay packet.
+    pub(crate) transport_route_mtu: u32,
 }
 
 impl ForwardingResolution {

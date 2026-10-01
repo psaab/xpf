@@ -1498,16 +1498,20 @@ It stayed invisible for four releases because a rendered `policy_id` of 0 shows
 as `unattributed` (#6851) — identical to a session no policy admitted.
 
 A divergence between the two producers is ALWAYS a bug (they describe one
-session for one peer), so the derivation is **single-sourced** in
+session for one peer), so the derivation is single-sourced in
 `session::SessionSyncAttribution::from_session` (`session/sync_attribution.rs`)
-rather than written twice and held in agreement by a test. That helper also owns
-the two non-trivial conversions — the saturating ns→s timeout and the
-`(nat64, rewrite_src)` pool-source selection — which would otherwise have been a
-second divergence waiting to happen. Both producers destructure it
-EXHAUSTIVELY (no `..`), so a new field carried by only one leg does not compile;
-`sync_attribution_exhaustive_destructure_6949` pins the absence of `..`, and
-`session_delta_json_and_binary_agree_on_policy_attribution_6949` asserts the two
-legs AGREE on one session rather than pinning either side to a literal.
+rather than duplicated. That helper owns the two non-trivial conversions —
+the saturating ns→s timeout and the `(nat64, rewrite_src)` pool-source
+selection. Both producers destructure it EXHAUSTIVELY (no `..`), so a new field
+must be accounted for in both.
+
+The lifetime-tolerant `sync_attribution_exhaustive_destructure_6949` guard
+checks that each producer binds all seven current fields.
+
+The behavioral `session_delta_json_and_binary_agree_on_policy_attribution_6949`
+test compares actual JSON and binary outputs for one non-default session,
+including policy, rule identity, timeout, NAT64, source-NAT ICMP and ingress
+identity.
 
 `serde(default)` / `omitempty` keep it rolling-upgrade safe in both directions:
 an old helper omits the keys and they decode to 0/""/false — precisely the

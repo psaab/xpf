@@ -5,8 +5,11 @@ type RouteSnapshot struct {
 	Family      string   `json:"family"`
 	Destination string   `json:"destination"`
 	NextHops    []string `json:"next_hops,omitempty"`
-	Discard     bool     `json:"discard"`
-	NextTable   string   `json:"next_table,omitempty"`
+	// NextHopWeights parallels NextHops when any weight differs from default 1;
+	// absent, short, and zero entries default to one in the Rust FIB.
+	NextHopWeights []uint32 `json:"next_hop_weights,omitempty"`
+	Discard        bool     `json:"discard"`
+	NextTable      string   `json:"next_table,omitempty"`
 	// RulePriority is the kernel ip-rule priority of a NextTable leak (#9955).
 	// The kernel resolves inter-VRF leaks in TWO stages: priority-ordered
 	// rules with fall-through on a target-table miss, then per-table
@@ -39,6 +42,10 @@ type RouteSnapshot struct {
 	// legitimate value (it deserializes back to 0 under serde default), so
 	// omitempty only suppresses the wire byte for an explicit preference 0.
 	Preference int `json:"preference,omitempty"`
+	// MTU is the selected route's route-wide L3 MTU (RTAX_MTU). Zero means
+	// absent/unknown and imposes no extra constraint. An old helper would
+	// ignore it and forward oversized DF packets, so snapshot v38 fences it.
+	MTU int `json:"mtu,omitempty"`
 }
 
 type NeighborSnapshot struct {

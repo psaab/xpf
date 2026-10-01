@@ -895,6 +895,8 @@ fn tunnel_resolution() -> ForwardingResolution {
         neighbor_mac: Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x09]),
         src_mac: Some(EGRESS_SRC_MAC),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }
 }
 
@@ -918,6 +920,8 @@ fn nat64_decision(nat64: bool) -> SessionDecision {
         neighbor_mac: Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x09]),
         src_mac: Some(EGRESS_SRC_MAC),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         nat64,
         ..NatDecision::default()
@@ -966,6 +970,42 @@ fn post_transform_inner_mtu_gre_subtracts_outer_and_gre_header() {
         inner,
         native_gre_inner_mtu(&fwd, &decision),
         "post-transform GRE inner MTU MUST equal the #2331 encap-guard SSOT"
+    );
+}
+
+#[test]
+fn post_transform_gre_converts_outer_route_mtu_once_11411() {
+    let mut forwarding = forwarding_with_egress(1500);
+    insert_tunnel_endpoint(&mut forwarding, "gre", libc::AF_INET, 0);
+    let mut decision = tunnel_decision();
+    decision.resolution.transport_route_mtu = 1400;
+
+    let inner = post_transform_inner_mtu(
+        &decision,
+        &forwarding,
+        false,
+        libc::AF_INET as u8,
+        1500,
+        None,
+    );
+    assert_eq!(
+        inner, 1376,
+        "outer route MTU 1400 is constrained by interface 1500, then GRE overhead is subtracted once"
+    );
+    assert_eq!(inner, native_gre_inner_mtu(&forwarding, &decision));
+
+    decision.resolution.route_mtu = 1350;
+    assert_eq!(
+        post_transform_inner_mtu(
+            &decision,
+            &forwarding,
+            false,
+            libc::AF_INET as u8,
+            1500,
+            None,
+        ),
+        1350,
+        "the overlay route MTU is an inner constraint, distinct from the outer route"
     );
 }
 
@@ -1323,17 +1363,24 @@ use crate::afxdp::forwarding_build::build_forwarding_state;
 /// stored tx_ifindex is unset). This is the production shape that makes
 /// `tunnel_outer_mtu` fall back to the LOGICAL MTU.
 fn wg_logical_tunnel_decision(logical_ifindex: i32, tunnel_endpoint_id: u16) -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::MissingNeighbor,
-        local_ifindex: 0,
-        egress_ifindex: logical_ifindex,
-        tx_ifindex: 0,
-        tunnel_endpoint_id,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::MissingNeighbor,
+            local_ifindex: 0,
+            egress_ifindex: logical_ifindex,
+            tx_ifindex: 0,
+            tunnel_endpoint_id,
+            next_hop: None,
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 #[test]
@@ -1435,11 +1482,12 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
         table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "2001:db8:c0::/64".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["2001:559:8585:80::1@reth0.80".to_string()],
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     }];
 
     let state = build_forwarding_state(&snap);
@@ -1558,11 +1606,12 @@ fn wg_two_peer_asymmetric_snapshot() -> crate::ConfigSnapshot {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "198.51.100.0/24".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["172.16.50.1@reth0.50".to_string()],
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     {
         let ep = &mut snap.tunnel_endpoints[0];
@@ -1699,13 +1748,48 @@ fn post_transform_inner_mtu_8896_nat64_through_gre_applies_both_budgets() {
          the family arm is not being consulted"
     );
 
+    // CONTROL: a known tunnel obeys a selected route MTU below its underlay.
+    let mut route_limited_decision = decision;
+    route_limited_decision.resolution.route_mtu = 1200;
+    assert_eq!(
+        post_transform_inner_mtu(
+            &route_limited_decision,
+            &fwd,
+            false,
+            libc::AF_INET6 as u8,
+            1400,
+            None,
+        ),
+        1200,
+        "known GRE mode must apply selected route MTU 1200",
+    );
+
     // FAIL CLOSED: an unknown mode yields 0 here exactly as the frame builders
     // drop it, rather than silently falling back to the un-composed budget.
     let mut unknown = forwarding_with_egress(1400);
     insert_tunnel_endpoint(&mut unknown, "ipsec-vti-future", libc::AF_INET, 0);
     assert_eq!(
-        post_transform_inner_mtu(&decision, &unknown, true, libc::AF_INET6 as u8, 1400, None),
+        post_transform_inner_mtu(
+            &route_limited_decision,
+            &unknown,
+            true,
+            libc::AF_INET6 as u8,
+            1400,
+            None,
+        ),
         0,
         "#2327: an unknown tunnel mode must yield no budget, not the NAT64-only one"
+    );
+    assert_eq!(
+        post_transform_inner_mtu(
+            &route_limited_decision,
+            &unknown,
+            false,
+            libc::AF_INET6 as u8,
+            1400,
+            None,
+        ),
+        0,
+        "#2327: an unknown tunnel mode must remain closed without NAT64 too",
     );
 }

@@ -141,10 +141,13 @@ const preSecureTunnelProtocolVersion = 4
 // post-teardown refusals cannot be mistaken for retained worker state.
 // #10703 moves it to v34 for TCP SYN-check session-miss admission; the
 // #10827 moved the protocol from v34 to v35 for the web-management TLS
-// credential fields. #11061 + #11064 move it to v36: the absent-fabric
-// compatibility knob changes receive security behavior, and source-NAT
-// application terms carry ICMP type/code.
-const secureTunnelSnapshotProtocolVersion = 36
+// #11061 + #11064 moved it to v36: the absent-fabric compatibility knob changes
+// receive security behavior, and source-NAT application terms carry ICMP
+// type/code.
+// #11402 moves it to v37 because an older helper ignores learned multipath
+// weights and continues equal-cost selection for unequal routes. #11411 moves
+// it to v38 so old helpers honor Linux RTAX_MTU on imported routes.
+const secureTunnelSnapshotProtocolVersion = 38
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

@@ -389,6 +389,8 @@ pub(crate) fn build_synced_session_entry(
                 neighbor_mac,
                 src_mac,
                 tx_vlan_id: req.tx_vlan_id,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: crate::nat::NatDecision {
                 rewrite_src,

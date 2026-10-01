@@ -8655,6 +8655,31 @@ covered by `pkg/config/compiler_scheduler_block_merge_5825_test.go` (two-block d
 merge, hierarchical==flat parity, across-roots merge, daily+weekday compose,
 single-block unchanged).
 
+### Repeated scheduler day-window boundaries are diagnosed (#11358)
+
+The compiled scheduler model carries one daily window and one window per
+weekday. Conflicting repeated `start-time` or `stop-time` values within the
+same effective day would require a multiple-window representation or a rule
+for combining competing boundaries. xpf stores one window per day; later
+definitions may replace earlier scalar boundary values or an entire weekday
+window. Weekday windows are assigned as whole values, not merged field by
+field. Whether Junos supports multiple window pairs is unresolved, so xpf does
+not claim conflicting repeats as a supported multiple-window representation:
+
+- Strict compilation rejects conflicting repeated time boundaries in the same
+  scheduler day window.
+- Tolerant load / peer-sync compilation warns and continues with the existing
+  single-window compiler behavior, without claiming to preserve multiple
+  windows.
+- Repeated identical boundary values are accepted because they do not lose a
+  distinct value. Separate weekday windows remain valid.
+
+The validator checks the node0 and node1 effective group expansions before
+node-local compilation, so `apply-groups "${node}"` cannot hide a peer-only
+repeated window from strict commit validation. It covers `daily`, weekday, and
+legacy direct daily leaves. Regression coverage:
+`pkg/config/compiler_scheduler_window_pairs_11358_test.go`.
+
 ### Quoted-value escape round-trip contract (#3854)
 
 When a key or value is not safe to emit bare (see the next section for the
@@ -13479,6 +13504,21 @@ on `FilterAction::Reject` today, so the type is compile-time-only (no wire
 field); and `then next term` / `then next` (explicit fall-through) commits as
 a no-op, marked `FirewallFilterTerm.NextTerm`. A token after `reject` that is
 NOT a known message-type is still a typo and IS flagged.
+
+**(11355) Flat-set action tails after `next term` / `reject <type>` were
+silently dropped.** `SetPath` can nest recognized actions beneath `next` (not a
+declared schema child) or beneath the reject-message-type node, where the
+direct-child action walk missed them. `compileFilterThen` now feeds these tails
+back through the same action parser. Recognized modifiers populate their typed
+fields, so existing validation catches contradictions such as routing-instance
+with next-term/reject. The nested `count c1` in `reject tcp-reset count c1`
+remains effective. Unknown tails continue through `UnknownActions` and
+trigger strict rejection or tolerant warning. Flat-set and packed-line forms
+share these results. Bare `next term` and a single known reject message type
+remain valid. Regression coverage:
+`pkg/config/compiler_filter_action_test.go`
+(`TestFilterAction_TailsAreConsistentAcrossFlatAndPacked11355`,
+`TestFilterAction_HierarchicalNestedRejectTailPreservesCount11355`).
 Defense-in-depth in the Rust filter: a NON-EMPTY unrecognized action (only
 reachable via a mixed-version snapshot now that commit rejects it) fails
 CLOSED to `Discard`, never `Accept`; the empty string keeps the
@@ -14505,6 +14545,17 @@ strict-vs-lenient gates:
   snapshot carried the unknown name and the dataplane steered matched packets
   toward a routing table that does not exist (silent blackhole / fall-through to
   the default table).
+  The exact lowercase target `default` is Juniper's built-in master-RIB alias:
+  strict and tolerant compiles accept it without a `routing-instances default`
+  declaration, and PBR resolves it to `inet.0` / `inet6.0` (not a synthetic
+  `default.inet[6].0`). A declaration alone is not globally reserved and
+  remains valid; if it coexists with an FBF term targeting literal `default`,
+  strict compilation rejects the ambiguity. Tolerant load warns and preserves
+  the declaration and term unchanged: the alias selects master, not the
+  declared instance's table. Rename the instance and target its new name to
+  steer to its table. Names are case-sensitive: `Default` targeted as
+  `Default` remains an ordinary named-instance steer. Other undefined names
+  retain the strict-reject / tolerant-warning behavior (#11308, #11644).
 - **#3432 — output-attached `then routing-instance` direction →
   `validateFilterRoutingInstanceDirectionStrict`.** FBF route override is an
   INGRESS-only operation: the userspace forwarding path
@@ -15880,3 +15931,29 @@ strict commit runs into.
   accept/reject table including the exact 107/108-octet boundary, plus the
   leaf driven through `SchemaValidate` + `CompileConfig` so it is pinned as
   WIRED, not merely defined).
+
+## #11346 — reject mixed zone-pair brace spelling
+
+The mixed hierarchy `from-zone { trust { to-zone untrust { policy p1 { ... } } } }`
+is not a supported zone-pair form. The parser represents its keyed `to-zone`
+below a from-zone name container, so the old #7523 guard—which inspected only
+direct `to-zone` children—missed it. If `security-zone policy` was also defined,
+the compiler could read the pair as `trust` to `policy` and produce zero
+policies; without that zone, the unrelated undefined-zone warning hid the
+shape.
+
+`validateNestedZonePairStrict` now rejects the mixed spelling at strict commit
+with a diagnostic naming both authored zones and the zero-policy effect.
+Tolerant load and peer-sync retain the no-brick behavior from #1960, but warn
+specifically that the mixed spelling is unsupported; that warning does not
+make the rule effective. Write the combined `from-zone trust to-zone untrust`
+form, or the supported fully nested container form
+`from-zone { trust { to-zone { untrust { ... } } } }`. The existing direct
+nested form `from-zone trust { to-zone untrust { ... } }` remains rejected by
+#7523.
+
+Regression coverage: `pkg/config/mixed_zonepair_brace_11346_test.go` exercises
+strict rejection with a zone named `policy` and a specific tolerant warning
+when it is undefined. The combined, flat-set, direct-nested, and fully nested
+controls remain in `pkg/config/nested_zonepair_7523_test.go`.
+

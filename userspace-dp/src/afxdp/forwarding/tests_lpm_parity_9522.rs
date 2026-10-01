@@ -139,6 +139,27 @@ fn resolve_ecmp_v4(state: &ForwardingState, dst: Ipv4Addr, hash: u64) -> Forward
     )
 }
 
+#[test]
+fn selected_route_mtu_is_stamped_on_resolution_11411() {
+    let mut constrained = v4_route("198.51.100.0/24", vec!["192.0.2.1"], 100);
+    constrained.mtu = 1400;
+    let constrained = resolve_v4(
+        &state_with(vec![constrained]),
+        Ipv4Addr::new(198, 51, 100, 23),
+    );
+    assert_eq!(constrained.route_mtu, 1400);
+
+    let unconstrained = resolve_v4(
+        &state_with(vec![v4_route(
+            "198.51.100.0/24",
+            vec!["192.0.2.1"],
+            100,
+        )]),
+        Ipv4Addr::new(198, 51, 100, 23),
+    );
+    assert_eq!(unconstrained.route_mtu, 0);
+}
+
 // ---------------------------------------------------------------------------
 // v4 longest-match / preference / stability
 // ---------------------------------------------------------------------------
@@ -279,6 +300,7 @@ fn discard_never_falls_back_to_ancestor_9522() {
         v4_route("10.0.0.0/8", vec!["192.0.2.1"], 5),
         crate::RouteSnapshot {
             discard: true,
+            mtu: 0,
             ..v4_route("10.1.0.0/16", vec![], 5)
         },
     ];
@@ -296,6 +318,7 @@ fn next_table_loses_longest_match_9522() {
     snap.routes = vec![
         crate::RouteSnapshot {
             next_table: "other.inet.0".into(),
+            mtu: 0,
             ..v4_route("10.2.0.0/16", vec!["192.0.2.1"], 5)
         },
         v4_route("10.2.3.0/24", vec!["192.0.2.1"], 5),
@@ -316,6 +339,7 @@ fn next_table_unresolvable_chain_is_noroute_9522() {
     let mut snap = base_snapshot();
     snap.routes = vec![crate::RouteSnapshot {
         next_table: "inet.0".into(),
+        mtu: 0,
         ..v4_route("10.5.0.0/16", vec![], 5)
     }];
     let state = build_forwarding_state(&snap);
@@ -334,6 +358,7 @@ fn next_table_missing_target_is_noroute_9522() {
     let mut snap = base_snapshot();
     snap.routes = vec![crate::RouteSnapshot {
         next_table: "missing.inet.0".into(),
+        mtu: 0,
         ..v4_route("10.6.0.0/16", vec![], 5)
     }];
     let state = build_forwarding_state(&snap);
@@ -473,6 +498,93 @@ fn ecmp_exact_member_at_explicit_hash_9522() {
     assert_eq!(r1.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(r0.egress_ifindex, 11);
     assert_eq!(r1.egress_ifindex, 12);
+}
+
+/// #11402: route weights stay parallel to authored legs. Missing, short, and
+/// zero entries default to one; live weighted selection preserves leg order.
+#[test]
+fn weighted_ecmp_fib_preserves_leg_order_and_1_to_4_split_11402() {
+    for (weights, expected) in [
+        (vec![], vec![1, 1, 1]),
+        (vec![2], vec![2, 1, 1]),
+        (vec![0, 4, 0], vec![1, 4, 1]),
+    ] {
+        let mut route = v4_route(
+            "203.0.114.0/24",
+            vec!["10.99.0.2", "192.0.2.1", "192.0.2.2"],
+            5,
+        );
+        route.next_hop_weights = weights;
+        let state = state_with(vec![route]);
+        let built = state.routes_v4.get("inet.0").expect("inet.0 table");
+        let legs = &built[0].next_hops;
+        assert_eq!(
+            legs.iter().map(|leg| leg.weight).collect::<Vec<_>>(),
+            expected,
+            "missing/short/zero weight entries must default to one"
+        );
+        assert_eq!(legs[0].next_hop, Some(Ipv4Addr::new(10, 99, 0, 2)));
+        assert_eq!(legs[1].next_hop, Some(Ipv4Addr::new(192, 0, 2, 1)));
+        assert_eq!(legs[2].next_hop, Some(Ipv4Addr::new(192, 0, 2, 2)));
+    }
+
+    let mut route = v4_route(
+        "203.0.115.0/24",
+        vec!["10.99.0.2", "192.0.2.1"],
+        5,
+    );
+    route.next_hop_weights = vec![1, 4];
+    let mut snapshot = base_snapshot();
+    snapshot.routes = vec![route];
+    snapshot.neighbors = vec![
+        crate::NeighborSnapshot {
+            interface: "ge-0-0-0".to_string(),
+            ifindex: 11,
+            family: "inet".to_string(),
+            ip: "10.99.0.2".to_string(),
+            mac: "00:11:22:33:44:55".to_string(),
+            state: "reachable".to_string(),
+            ..Default::default()
+        },
+        crate::NeighborSnapshot {
+            interface: "ge-0-0-1".to_string(),
+            ifindex: 12,
+            family: "inet".to_string(),
+            ip: "192.0.2.1".to_string(),
+            mac: "00:11:22:33:44:66".to_string(),
+            state: "reachable".to_string(),
+            ..Default::default()
+        },
+    ];
+    let state = build_forwarding_state(&snapshot);
+    let dst = Ipv4Addr::new(203, 0, 115, 7);
+
+    for hash in 0u64..5 {
+        let resolution = resolve_ecmp_v4(&state, dst, hash);
+        assert_eq!(
+            resolution.disposition,
+            ForwardingDisposition::ForwardCandidate,
+            "both weighted next-hop neighbors are live"
+        );
+        assert_eq!(
+            resolution.egress_ifindex,
+            if hash == 0 { 11 } else { 12 },
+            "weighted route must select its 1:4 cumulative interval at hash {hash}"
+        );
+    }
+
+    let mut first = 0usize;
+    let mut second = 0usize;
+    for hash in 0u64..100 {
+        let resolution = resolve_ecmp_v4(&state, dst, hash);
+        assert_eq!(resolution.disposition, ForwardingDisposition::ForwardCandidate);
+        match resolution.egress_ifindex {
+            11 => first += 1,
+            12 => second += 1,
+            other => panic!("weighted ECMP selected unexpected egress {other}"),
+        }
+    }
+    assert_eq!((first, second), (20, 80), "1:4 weights must split hashes 20/80");
 }
 
 /// Reordered authored slice swaps the winners — selection is authored-order

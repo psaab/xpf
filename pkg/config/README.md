@@ -154,6 +154,14 @@ distinction).
   which the userspace snapshot builder marks `TCPFlagsUnparseable` to fail
   the term CLOSED (#3367) — a deny sentinel, never a match-all widening;
   the out-of-range code-point entry is dropped (the pre-#2447 fail-safe).
+  **Unknown firewall-filter `then` actions fail closed on tolerant loads
+  (#11357):** `compileFilterThen` retains an unrecognized token in
+  `FirewallFilterTerm.UnknownActions`. Strict commit rejects it; `Store.Load`
+  and `Store.SyncApply` keep startup/HA sync bootable with a warning and compile
+  that term's action as `discard`, rather than treating the empty action as a
+  fall-through to the implicit accept. Known modifier-only terms remain
+  fall-through terms.
+
 - `ValueType` — `value_type.go`. Classifies a typed leaf's value
   (`ValueRate`, `ValueByteSizeOrPercent`, `ValueDate`, `ValueString`, ...)
   and supplies the `?`-completion placeholder via `Placeholder()`.
@@ -1217,8 +1225,19 @@ to a warning (`lenientPolicyThenDeny`) so an already-persisted or peer-synced
 config an older binary silently accepted still boots (#1960 no-brick doctrine,
 same as #3114/#3115).
 
-**All-nodes walk (#3377 review fold):** the permit/reject/deny gates iterate
-EVERY same-named action node under `then` (`FindChildren`, not `FindChild`). A
+**Inert `then count` alarm thresholds are rejected on commit and warned on
+tolerant load (#11342):** `compilePolicy` enables policy counting but does not
+implement the nested `alarm` thresholds, so `then count { alarm {
+per-minute-threshold N; } }` used to retain counting while silently dropping
+the configured alarm. `validatePolicyThenCountAlarmStrict` rejects that subtree
+on strict commit/commit-check; tolerant load and peer-sync continue to boot and
+include an explicit `#11342` diagnostic in `cfg.Warnings`. Flat-set and
+hierarchical forms are both inspected, and a bare `then count` remains
+supported.
+
+**All-nodes walk (#3377 review fold):** the permit/reject/deny gates and the
+#11342 count-alarm gate inspect EVERY same-named action node under `then`
+(`FindChildren`, not `FindChild`). A
 flat-set `set ... then permit` followed by `set ... then permit
 application-services X` produces TWO separate `then permit` nodes (a bare leaf
 plus an extended one — the split predates #3377 and is independent of the schema

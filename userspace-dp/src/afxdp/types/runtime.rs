@@ -545,6 +545,19 @@ pub(in crate::afxdp) struct LearnedNeighborKey {
     pub(in crate::afxdp) src_ip: IpAddr,
     pub(in crate::afxdp) src_mac: [u8; 6],
 }
+/// Per-binding duplicate state for RX-learn lease refresh. The owning worker
+/// is the only writer, so this remains inline and needs no synchronization.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct LearnedNeighborDedup {
+    pub(in crate::afxdp) key: Option<LearnedNeighborKey>,
+    pub(in crate::afxdp) last_refresh_ns: u64,
+    /// The resolved VLAN alias (zero means only the physical key). The source
+    /// IP and physical ifindex are already carried by `key`.
+    pub(in crate::afxdp) logical_alias_ifindex: i32,
+    /// Epochs read before the map refresh/write. A concurrent mutation only
+    /// leaves an older epoch, forcing one extra refresh.
+    pub(in crate::afxdp) epochs: [u32; 2],
+}
 
 /// #10512: the shared fence AND report for one conditional-remove fan-out.
 ///

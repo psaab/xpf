@@ -304,12 +304,15 @@ func runUniformGatesFirewallNAT2(tree *ConfigTree, cfg *Config, opts compileOpts
 	}
 
 	// #2217 Finding C: firewall-filter `then routing-instance <name>` (FBF)
-	// cross-reference. A term naming a routing-instance not defined under
-	// `routing-instances` compiled cleanly and the dataplane steered matched
-	// packets toward a routing table that does not exist — a silent blackhole
-	// / fall-through to the default table. Strict on commit / commit-check;
-	// lenient on load / peer-sync (warn — #1960). Mirrors the policer gate
-	// above.
+	// cross-reference. A term naming an undefined routing-instance compiled
+	// cleanly and the dataplane steered matched packets toward a table that
+	// does not exist — a silent blackhole / fall-through to the default table.
+	// The Juniper `default` literal is the built-in master-RIB alias and does
+	// not require a declaration. The reference validator also rejects the
+	// ambiguous combination with `routing-instances default` on strict compile;
+	// tolerant compile warns without rewriting or quarantining either object.
+	// Strict on commit / commit-check; lenient on load / peer-sync (#1960).
+	// Mirrors the policer gate above.
 	if err := validateFirewallRoutingInstanceReferencesStrict(cfg); err != nil {
 		if opts.lenientFirewallRefs {
 			cfg.Warnings = append(cfg.Warnings,
