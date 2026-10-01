@@ -308,6 +308,12 @@ type compileOpts struct {
 	// preserves the fail-SAFE posture on that boot. Same doctrine as
 	// lenientIPsecPolicyProposalRef.
 	lenientSchedulerMapRef bool
+	// lenientSchedulerWindowPairs11358 downgrades conflicting repeated
+	// start-time/stop-time boundaries within one scheduler day from a strict
+	// compile error to a warning on tolerant load / peer-sync paths. The typed
+	// scheduler model has one window per day, so silently accepting conflicting
+	// boundaries loses authored scheduling semantics (#11358).
+	lenientSchedulerWindowPairs11358 bool
 
 	// lenientCoSInterfaceRefs (#7337) downgrades the class-of-service
 	// INTERFACE-side reference check
@@ -1413,19 +1419,16 @@ type compileOpts struct {
 	// group.
 	lenientDHCPRelayChildTokens bool
 	// lenientRoutingRuleWindows (#5854) downgrades the next-table / rib-group
-	// ip-rule window over-subscription gate (validateRoutingRuleWindowsStrict)
-	// from a hard compile error to a cfg.Warnings entry. The runtime applier
-	// programs next-table and interface-routes rib-group leaks into FIXED
-	// priority windows (pkg/routing/rules.go: 100 next-table rules, 1000
-	// rib-group leak rules) and HARD-CAPS at each boundary, silently skipping any
-	// rule past it, so a config that exceeds a window commits green while the
-	// reconciler stops at the limit and returns success — the committed
-	// generation claims routes the kernel never programs (blackhole / asymmetric
+	// ip-rule admission-cap gate (validateRoutingRuleWindowsStrict) from a hard
+	// compile error to a cfg.Warnings entry. The runtime applier caps admitted
+	// rules separately from priority assignment: 100 next-table rules (including
+	// ingress-interface expansion) and 1000 rib-group connected-prefix rules.
+	// Over-limit routes used to be silently skipped, so a config could commit
+	// while claiming routes the kernel never programs (blackhole / asymmetric
 	// routing). The strict commit / commit-check path hard-rejects so the
-	// over-subscription is operator-visible; the tolerant load / peer-sync paths
-	// warn so an already-committed or peer-synced over-limit config still BOOTS
-	// (#1960) — the applier's window hard-cap keeps the excess inert. Same
-	// doctrine as lenientNextTableRefs.
+	// over-subscription is operator-visible; tolerant load / peer-sync paths warn
+	// so an already-committed or peer-synced over-limit config still BOOTS (#1960).
+	// Same doctrine as lenientNextTableRefs.
 	lenientRoutingRuleWindows bool
 	// lenientPolicyRouteMapSeq (#5701) downgrades the route-map
 	// sequence-number overflow gate (validatePolicyRouteMapSequenceBoundStrict)
@@ -2397,6 +2400,10 @@ type compileOpts struct {
 	// binary silently accepted still BOOTS (#1960). Same doctrine as
 	// lenientPolicyThenReject.
 	lenientPolicyThenDeny bool
+	// lenientPolicyThenCountAlarm (#11342) downgrades an inert `then count
+	// alarm` threshold subtree to a cfg.Warnings entry on tolerant ingress.
+	// The compiler enables counting but does not implement alarm thresholds.
+	lenientPolicyThenCountAlarm bool
 	// lenientPolicyThenSiblings (#11013/#11023) downgrades unsupported
 	// security-policy `then` siblings and unknown `then log` modes to warnings
 	// on tolerant ingress. The compiler drops both forms, so compilePolicy
@@ -2998,6 +3005,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecPolicyProposalRef:          true,
 		lenientPolicySchedulerRef:              true,
 		lenientSchedulerMapRef:                 true,
+		lenientSchedulerWindowPairs11358:       true,
 		lenientCoSInterfaceRefs:                true,
 		lenientCoSLossPriority:                 true,
 		lenientCoSUnitClassifierConflict:       true,
@@ -3153,6 +3161,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyThenPermit:                true,
 		lenientPolicyThenReject:                true,
 		lenientPolicyThenDeny:                  true,
+		lenientPolicyThenCountAlarm:            true,
 		lenientPolicyThenSiblings:              true,
 		lenientPolicyEnforcementSubtrees:       true,
 		lenientPolicyMissingMatch:              true,

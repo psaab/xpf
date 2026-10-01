@@ -786,6 +786,8 @@ fn gate_fabric_zone_override_on_owner_rg_6458() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     // Owner RG (1) locally active -> honored (legitimate punt).
     let active = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
@@ -917,7 +919,7 @@ fn zone_encoded_fabric_ingress_skips_dynamic_neighbor_learning() {
         .expect("slice")
         .copy_from_slice(&frame);
     let neighbors = Arc::new(ShardedNeighborMap::new());
-    let mut last_learned = None;
+    let mut last_learned = LearnedNeighborDedup::default();
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -934,6 +936,7 @@ fn zone_encoded_fabric_ingress_skips_dynamic_neighbor_learning() {
         },
         meta,
         IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+        super::super::neighbor::monotonic_nanos(),
         &mut last_learned,
         &state,
         &neighbors,
@@ -1528,6 +1531,8 @@ fn missing_neighbor_session_metadata_preserves_fabric_ingress() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let metadata = build_missing_neighbor_session_metadata(
@@ -1736,6 +1741,8 @@ fn embedded_icmp_to_inactive_owner_rg_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1800,6 +1807,8 @@ fn embedded_icmp_no_route_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1864,6 +1873,8 @@ fn embedded_icmp_discard_route_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1924,6 +1935,8 @@ fn embedded_icmp_from_fabric_does_not_redirect_back_to_fabric() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1971,6 +1984,8 @@ fn fabric_ingress_does_not_redirect_back_to_fabric() {
         neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
         src_mac: None,
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     assert_eq!(
         redirect_via_fabric_if_needed(&state, blocked, 21, None).disposition,
@@ -3316,6 +3331,249 @@ fn learned_ingress_neighbor_enables_reverse_lan_resolution() {
 }
 
 #[test]
+fn rx_learned_neighbor_expires_to_missing_without_host_traffic_11406() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100));
+    let mac_a = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: 24,
+        ..Default::default()
+    };
+    let mut last_learned_neighbor = LearnedNeighborDedup::default();
+    let learn_ns = 100;
+    let max_age_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS;
+    let refresh_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS;
+    let grace_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS;
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac_a,
+        learn_ns,
+        &mut last_learned_neighbor,
+        &state,
+        &dynamic_neighbors,
+    );
+
+    let before = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    assert_eq!(before.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(before.neighbor_mac, Some(mac_a));
+
+    // The packet just before the 1s boundary is intentionally coalesced.
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac_a,
+        learn_ns + refresh_ns - 1,
+        &mut last_learned_neighbor,
+        &state,
+        &dynamic_neighbors,
+    );
+    let epoch_before_expiry = dynamic_neighbors.mac_change_epoch_for(&(24, ip));
+    let before_minimum_idle = learn_ns + max_age_ns + grace_ns - 1;
+    assert_eq!(
+        dynamic_neighbors.age_rx_learned_neighbors(
+            before_minimum_idle,
+            max_age_ns,
+            &Default::default(),
+        ),
+        0,
+        "a coalesced packet cannot shorten the full 60s idle protection"
+    );
+    let expiry_ns = learn_ns + max_age_ns + grace_ns;
+    assert_eq!(
+        dynamic_neighbors.age_rx_learned_neighbors(expiry_ns, max_age_ns, &Default::default()),
+        1
+    );
+    assert_eq!(
+        dynamic_neighbors.mac_change_epoch_for(&(24, ip)),
+        epoch_before_expiry + 1,
+        "aging must invalidate cached forwarding descriptors"
+    );
+
+    let after = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    assert_eq!(
+        after.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "an idle RX-learned MAC must expire to MissingNeighbor without host traffic"
+    );
+    assert_eq!(after.neighbor_mac, None);
+
+    // The epoch/removal path makes the same-source packet re-learn immediately.
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac_a,
+        expiry_ns + 1,
+        &mut last_learned_neighbor,
+        &state,
+        &dynamic_neighbors,
+    );
+    let relearned = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    assert_eq!(
+        relearned.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(relearned.neighbor_mac, Some(mac_a));
+}
+
+#[test]
+fn rx_learned_neighbor_refreshes_at_one_second_boundary_11406() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101));
+    let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: 24,
+        ..Default::default()
+    };
+    let mut dedup = LearnedNeighborDedup::default();
+    let first_ns = 100;
+    let refresh_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS;
+    let max_age_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS;
+    let grace_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS;
+
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        first_ns,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        first_ns + refresh_ns,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+
+    let old_deadline = first_ns + max_age_ns + grace_ns;
+    assert_eq!(
+        dynamic_neighbors.age_rx_learned_neighbors(old_deadline, max_age_ns, &Default::default(),),
+        0,
+        "traffic on the throttle boundary must refresh the RX-only lease"
+    );
+    assert_eq!(
+        dynamic_neighbors.age_rx_learned_neighbors(
+            first_ns + refresh_ns + max_age_ns + grace_ns,
+            max_age_ns,
+            &Default::default(),
+        ),
+        1
+    );
+}
+
+#[test]
+fn rx_learned_neighbor_vlan_alias_remap_bypasses_coalescing_11406() {
+    let mut state = build_forwarding_state(&nat_snapshot());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ingress_ifindex = 24;
+    let vlan_id = 77;
+    let old_alias = 100;
+    let new_alias = 101;
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: ingress_ifindex as u32,
+        ingress_vlan_id: vlan_id,
+        ..Default::default()
+    };
+    state
+        .ingress_logical_ifindex
+        .insert((ingress_ifindex, vlan_id), old_alias);
+    let mut dedup = LearnedNeighborDedup::default();
+    let first_ns = 100;
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        first_ns,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+    assert_eq!(
+        dynamic_neighbors.get(&(old_alias, ip)),
+        Some(NeighborEntry { mac })
+    );
+    assert_eq!(
+        dynamic_neighbors.mac_change_epoch_for(&(ingress_ifindex, ip)),
+        0
+    );
+    assert_eq!(dynamic_neighbors.mac_change_epoch_for(&(old_alias, ip)), 0);
+    assert_eq!(dynamic_neighbors.mac_change_epoch_for(&(new_alias, ip)), 0);
+
+    // Same key count and unchanged shard epochs: only the effective alias ID
+    // can reveal the forwarding-map remap to the per-binding dedup state.
+    state
+        .ingress_logical_ifindex
+        .insert((ingress_ifindex, vlan_id), new_alias);
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        first_ns + super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS - 1,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+    assert_eq!(
+        dynamic_neighbors.get(&(new_alias, ip)),
+        Some(NeighborEntry { mac }),
+        "a changed VLAN alias must reach the full pair-learn fallback"
+    );
+}
+
+#[test]
+fn rx_learned_neighbor_relearns_immediately_after_delete_11406() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ingress_ifindex = 24;
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 103));
+    let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: ingress_ifindex as u32,
+        ..Default::default()
+    };
+    let mut dedup = LearnedNeighborDedup::default();
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        100,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+    assert!(dynamic_neighbors.remove_if_present(&(ingress_ifindex, ip)));
+    assert_eq!(
+        dynamic_neighbors.mac_change_epoch_for(&(ingress_ifindex, ip)),
+        1
+    );
+
+    // The same-source learn arrives well inside the normal 1s coalescing
+    // interval. The delete epoch must force refresh and full-learn recovery.
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        101,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+    assert_eq!(
+        dynamic_neighbors.get(&(ingress_ifindex, ip)),
+        Some(NeighborEntry { mac })
+    );
+}
+
+#[test]
 fn learned_vlan_ingress_neighbor_maps_to_logical_ifindex() {
     let state = build_forwarding_state(&nat_snapshot());
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
@@ -3516,7 +3774,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 discard: false,
                 next_table: "red.inet.0".to_string(),
                 preference: 0,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
             crate::RouteSnapshot {
                 table: "red.inet.0".to_string(),
@@ -3527,7 +3785,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 discard: false,
                 next_table: "inet.0".to_string(),
                 preference: 0,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
         ],
         ..Default::default()
@@ -4331,7 +4589,7 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         // Only the SECOND next-hop's neighbor is resolved; the first is dead.
         neighbors: vec![crate::NeighborSnapshot {
@@ -4456,7 +4714,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         // ONLY the gateway member's neighbor is resolved. The interface-only
         // member's neighbor (the per-flow destination) is deliberately absent —
@@ -4592,7 +4850,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         discard: false,
         next_table: String::new(),
         preference: 5,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -4709,7 +4967,7 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
         discard: false,
         next_table: String::new(),
         preference: 5,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -4798,7 +5056,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
         discard: false,
         next_table: String::new(),
         preference: 5,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -4916,7 +5174,7 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         // BOTH next-hop neighbors are resolved/live, so the live pool is
         // the full set of equal-cost members.
@@ -5033,10 +5291,10 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
     );
 }
 
-/// #2734: the seeded per-flow ECMP hash is deterministic within a boot
-/// (flow consistency) and spreads distinct 5-tuples across the index
-/// space. Pin the seed so the assertions are stable across the parallel
-/// runner; production folds in the per-boot process seed.
+/// Seed-parameterized ECMP core tests: an explicit seed makes the function
+/// reproducible and keeps distinct 5-tuples spread. Production must use the
+/// dedicated stable ECMP domain seed, not `hot_path_hash_seed`, so re-resolved
+/// flows retain their member across process restarts and HA peers.
 #[test]
 fn ecmp_flow_hash_is_stable_and_spreads() {
     let key_a = crate::session::SessionKey {
@@ -5063,10 +5321,83 @@ fn ecmp_flow_hash_is_stable_and_spreads() {
         ecmp_hash_flow_seeded(seed, &key_a),
         ecmp_hash_flow_seeded(seed, &key_b),
     );
-    // Cross-seed reshuffle: a different per-boot seed remaps the flow.
+    // The generic seeded core changes with an explicit seed. Production uses
+    // the dedicated ECMP seed below, never a per-process hot-path seed.
     assert_ne!(
         ecmp_hash_flow_seeded(seed, &key_a),
         ecmp_hash_flow_seeded(seed ^ 0xffff_ffff_ffff_ffff, &key_a),
+    );
+}
+
+/// #11405: separate per-process hot seeds must not change the selected ECMP
+/// member when the flow key and live candidate set are unchanged. Different
+/// hot seeds still produce different local cache placement, as they should.
+#[test]
+fn ecmp_flow_member_stays_stable_across_hot_seeds() {
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
+        src_port: 1024,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let candidates = [11u32, 22, 33, 44];
+    let select_for_hash = |hash| {
+        select_route_next_hop(
+            &candidates,
+            hash,
+            |candidate| *candidate as u64,
+            |_| true,
+            |_| true,
+        )
+            .copied()
+            .expect("the fixture has live ECMP candidates")
+    };
+
+    // Pick a deterministic second process seed that makes the old
+    // per-process ECMP hash choose a different live member. The two hot seeds
+    // also represent distinct local flow-cache placement.
+    let hot_seed_a = 0x1234_5678_9abc_def0;
+    let cache_set_a =
+        crate::afxdp::flow_cache::FlowCache::set_index_seeded(hot_seed_a, &key, 3);
+    let old_member_a = select_for_hash(ecmp_hash_flow_seeded(hot_seed_a, &key));
+    let (hot_seed_b, cache_set_b, old_member_b) =
+        (hot_seed_a + 1..=hot_seed_a + 256)
+            .find_map(|seed| {
+                let cache_set =
+                    crate::afxdp::flow_cache::FlowCache::set_index_seeded(seed, &key, 3);
+                let old_member = select_for_hash(ecmp_hash_flow_seeded(seed, &key));
+                (cache_set != cache_set_a && old_member != old_member_a)
+                    .then_some((seed, cache_set, old_member))
+            })
+            .expect("two hot seeds must model distinct cache sets and ECMP members");
+
+    assert_ne!(hot_seed_a, hot_seed_b);
+    assert_ne!(cache_set_a, cache_set_b);
+    assert_ne!(
+        old_member_a, old_member_b,
+        "the old per-process ECMP seed selects different members after restart",
+    );
+
+    let member_for_process_seed = |hot_seed| {
+        let _local_cache_set =
+            crate::afxdp::flow_cache::FlowCache::set_index_seeded(hot_seed, &key, 3);
+        select_for_hash(ecmp_hash_flow(&key))
+    };
+    let member_a = member_for_process_seed(hot_seed_a);
+    let member_b = member_for_process_seed(hot_seed_b);
+
+    assert_eq!(
+        ecmp_hash_flow(&key),
+        ecmp_hash_flow_seeded(ECMP_FLOW_HASH_SEED, &key),
+        "production ECMP must use its fixed domain seed, not a per-process seed",
+    );
+    assert_eq!(
+        member_a, member_b,
+        "the same flow and live ECMP set must keep its member across hot seeds",
     );
 }
 
@@ -5121,7 +5452,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 discard: false,
                 next_table: String::new(),
                 preference: 50,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
             // BETTER route second (lower preference).
             crate::RouteSnapshot {
@@ -5133,7 +5464,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 discard: false,
                 next_table: String::new(),
                 preference: 5,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
         ],
         neighbors: vec![
@@ -5557,7 +5888,7 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         default_policy: "deny".to_string(),
         policies: vec![match policy {

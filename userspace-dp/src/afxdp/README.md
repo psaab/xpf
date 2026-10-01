@@ -277,6 +277,18 @@ sync.
     overlap (`#3182`), NOT the source-IP class — closing that gap brings it
     to parity with the L2 advert paths. Rejection is do-not-learn only (the
     packet still forwards); this is a learn-path guard, not a packet filter.
+  - **RX-learned neighbor age (#11406):** the transit source-MAC path does
+    not program the kernel table, so its dynamic-only rows carry a monotonic
+    last-seen lease. Per-binding matching-packet lease writes are coalesced
+    for at most 1s; they reuse the poll iteration's sampled clock and keep
+    mutexes off repeated-packet hits. Lease writes use `max(old, sample)` so
+    delayed cross-worker batches cannot move the timestamp backward. The
+    neighbor-monitor sweep runs every 5s and expires at 60s idle plus a 1s
+    coalescing grace (about 60–66s after the last packet), except manager-owned
+    keys or rows subsequently confirmed by the kernel. Removal advances the
+    owning shard's MAC epoch, so cached destination MACs are discarded and
+    future resolutions enter the existing MissingNeighbor/probe path. This
+    lease is process-local and is not HA-synchronized.
   - **STALE install + NDP Override honor (`#4475`, opus-172 H-2, RFC 4861
     §7.2.5):** the own-IP gate above only protects addresses the router
     OWNS. Every OTHER same-segment next-hop — including the WAN gateway —
@@ -947,6 +959,14 @@ sync.
     descriptor; a suppressed/unbuildable reply is the fail-closed silent
     drop). The reply is built inside the `target_binding` borrow and
     enqueued onto `ingress_binding` once that borrow ends.
+    For a plain forward the effective MTU is the minimum of the nonzero
+    egress-interface MTU and the selected FIB route's optional RTAX_MTU;
+    absent/zero route MTU adds no constraint. Tunnel MTUs stay in separate
+    domains: the overlay route MTU constrains the inner packet, while the
+    route to a GRE/WireGuard outer endpoint is combined with the physical
+    interface MTU before encapsulation overhead/padding is converted into
+    an inner budget. The inner route bound also caps tunnel TCP segments;
+    PTB and encapsulation/drop guards use the same selected-route resolutions.
     **Post-transform PMTUD (#2330):** the #2301 decision above compares the
     SOURCE frame against the egress MTU, which is correct ONLY for a
     size-preserving plain forward. For the size-CHANGING paths (NAT64,

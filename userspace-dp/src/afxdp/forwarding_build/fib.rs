@@ -121,6 +121,15 @@ pub(super) fn populate_routes(
                 preference: route.preference,
             });
         }
+        // #11411: a negative route MTU is invalid. Do not cast it to u32,
+        // where it would become an effectively unbounded MTU and disable PTB.
+        if route.mtu < 0 {
+            return Err(SnapshotIntegrityError::RouteMtuOutOfRange {
+                table: route.table.clone(),
+                destination: route.destination.clone(),
+                mtu: route.mtu,
+            });
+        }
         if let Ok(prefix) = route.destination.parse::<Ipv4Net>() {
             // #3771 (M4): the destination parses as IPv4 — a NON-EMPTY declared
             // family must agree ("inet"), else the route's family metadata
@@ -169,6 +178,7 @@ pub(super) fn populate_routes(
                         discard: route.discard,
                         next_table: String::new(),
                         preference: route.preference,
+                        mtu: route.mtu as u32,
                         rule_priority: route.rule_priority,
                     });
             }
@@ -218,6 +228,7 @@ pub(super) fn populate_routes(
                         discard: route.discard,
                         next_table: String::new(),
                         preference: route.preference,
+                        mtu: route.mtu as u32,
                         rule_priority: route.rule_priority,
                     });
             }
@@ -278,8 +289,10 @@ pub(super) fn sort_routes(state: &mut ForwardingState) {
                 .then(a.preference.cmp(&b.preference))
         });
     }
-    // #9955: leaks are ip rules, not FIB routes. Their priority is the only
-    // ordering key in stage one; prefix length is deliberately ignored.
+    // #9955/#11396: leak priorities are the kernel's stage-one ordering key.
+    // The Go producer maps prefix length and leak kind into one shared LPM-first
+    // range, so more-specific leaks sort first across sources. Keep this stable
+    // priority sort and preserve producer order for equal-priority ties.
     for leaks in state.leak_rules_v4.values_mut() {
         leaks.sort_by_key(|leak| leak.rule_priority);
     }
@@ -616,8 +629,32 @@ pub(in crate::afxdp) fn infer_connected_route_target_v6(
     ip: Ipv6Addr,
     table: &str,
 ) -> Option<(i32, u16)> {
+    if ip.is_unicast_link_local() {
+        // #11322: the daemon adds a synthetic fe80::/64 candidate for every
+        // IPv6-capable interface. Mirror that with all connected IPv6 rows in
+        // this table, not only rows whose observed prefix contains the gateway:
+        // link-local addresses may be absent from a snapshot. The daemon only
+        // infers a scope when candidates collapse to one egress; returning the
+        // first sorted entry made the helper forward an ambiguous route.
+        let mut target: Option<(i32, u16)> = None;
+        for entry in state
+            .connected_v6
+            .iter()
+            .filter(|entry| entry.table == table)
+        {
+            let candidate = (entry.ifindex, entry.tunnel_endpoint_id);
+            match target {
+                Some(existing) if existing != candidate => return None,
+                Some(_) => {}
+                None => target = Some(candidate),
+            }
+        }
+        return target;
+    }
+
     // #4446: table-scoped gateway inference — see
-    // `infer_connected_route_target_v4` for the full rationale.
+    // `infer_connected_route_target_v4` for the full rationale. Global
+    // next-hops keep longest-prefix selection.
     state
         .connected_v6
         .iter()

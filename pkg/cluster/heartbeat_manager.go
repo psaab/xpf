@@ -959,16 +959,21 @@ func (m *Manager) handlePeerTimeout() {
 }
 
 // handlePeerNeverSeen is called when the heartbeat timeout expires and no
-// peer heartbeat has ever been received. This confirms the peer is truly
-// absent (not just a fresh boot race), releasing the non-preempt election hold
-// without marking the peer as ever seen. That preserves the cold-boot readiness
-// gate while keeping genuine peer loss fail-open (#10697).
+// peer heartbeat has ever been received. Recent session-sync proof means the
+// heartbeat path may be down while the peer is still active (#11566), so keep
+// the cold-boot absence hold until that proof goes stale. With no fresh proof,
+// this confirms absence without marking the peer ever seen, preserving the
+// readiness gate while allowing single-node promotion.
 func (m *Manager) handlePeerNeverSeen() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.peerEverSeen || m.peerConfirmedAbsent {
 		return // a heartbeat arrived or absence was already confirmed
+	}
+	if m.peerNeverSeenSyncFreshFn != nil && m.peerNeverSeenSyncFreshFn() {
+		slog.Debug("cluster: suppressing never-seen peer confirmation while session-sync proof is fresh")
+		return
 	}
 	m.peerConfirmedAbsent = true
 	slog.Info("cluster: peer never seen after heartbeat timeout, proceeding with election")

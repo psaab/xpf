@@ -559,12 +559,12 @@ const PENDING_NEIGH_TIMEOUT_NS: u64 = 2_000_000_000; // 2 seconds
 // (the #1782 H5 sibling-drop signal). This cap therefore bounds DISTINCT
 // unresolved next-hops per binding, and pins at most one UMEM frame per
 // hop — a SYN flood to one dead host holds 1 entry, not 4096.
-// PendingNeighPacket is 296 B on x86_64 after #11064 added the source-NAT
-// ICMP application fingerprint (the decision's 4-byte growth rounds to 8 B
-// in this aligned packet record). The worst case is ~1.16 MiB per binding —
-// reached only with 4096 *distinct* unresolved hops (a scan-shaped workload),
-// not a connect burst. The map is lazily allocated (`FastMap::default()` at
-// worker init — see worker/mod.rs), keeping idle-binding RSS near zero.
+// PendingNeighPacket is 304 B on x86_64 after #11411 added selected-route and
+// tunnel-transport MTUs to the forwarding decision. The worst case is ~1.19
+// MiB per binding — reached only with 4096 *distinct* unresolved hops (a
+// scan-shaped workload), not a connect burst. The map is lazily allocated
+// (FastMap::default() at worker init — see worker/mod.rs), keeping idle-binding
+// RSS near zero.
 // History: pre-#1771 this was a per-packet VecDeque whose cap was bumped
 // 64 → 4096 (GEMINI-NEXT.md Section 3) so failback connect storms didn't
 // drop frames; post-#1771 sibling drops are by design and counted.

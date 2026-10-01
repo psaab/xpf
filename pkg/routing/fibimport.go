@@ -136,6 +136,9 @@ type LearnedRoute struct {
 	// the route — "bgp", "ospf", "isis", "rip", "static", "dhcp",
 	// "connected". Diagnostic only; it does not reach the helper.
 	Protocol string
+	// MTU is the kernel route-wide RTA_METRICS/RTAX_MTU constraint.
+	// Zero means absent or unknown.
+	MTU int
 }
 
 // learnedRouteProtocols is the set of rtnetlink protocol values whose routes
@@ -268,6 +271,12 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 	if !ok || len(nextHops) == 0 {
 		return LearnedRoute{}, false
 	}
+	mtu := r.MTU
+	if mtu < 0 {
+		slog.Warn("ignoring negative kernel route MTU in learned route import",
+			"table", tableID, "destination", dst, "mtu", mtu)
+		mtu = 0
+	}
 	return LearnedRoute{
 		TableID:        tableID,
 		Family:         family,
@@ -276,6 +285,7 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 		NextHops:       nextHops,
 		NextHopWeights: nextHopWeights,
 		Protocol:       rtProtoName(r.Protocol),
+		MTU:            mtu,
 	}, true
 }
 

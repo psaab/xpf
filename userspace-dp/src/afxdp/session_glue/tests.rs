@@ -56,6 +56,8 @@ fn test_resolution() -> ForwardingResolution {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }
 }
 
@@ -411,6 +413,8 @@ fn test_local_delivery_decision() -> SessionDecision {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
@@ -1118,6 +1122,8 @@ fn cached_session_resolution_skips_fabric_redirect() {
         neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
 
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
@@ -3756,10 +3762,8 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
     // With #326, synced sessions are always re-resolved with local egress
     // info even on standby — so tx_vlan_id picks up the local egress VLAN.
     let expected_decision = SessionDecision {
-        resolution: ForwardingResolution {
-            tx_vlan_id: 80,
-            ..synced_decision.resolution
-        },
+        resolution: ForwardingResolution { tx_vlan_id: 80,
+        route_mtu: 0, transport_route_mtu: 0, ..synced_decision.resolution },
         ..synced_decision
     };
     assert_eq!(hit.decision, expected_decision);
@@ -5866,6 +5870,8 @@ fn apply_worker_commands_demote_split_reverse_owner_rg_rewrites_to_fabric_redire
                 neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -5951,6 +5957,8 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_rewrites_to_forward_cand
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -6041,6 +6049,8 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_updates_stale_indexed_se
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -6134,6 +6144,8 @@ fn apply_worker_commands_refresh_owner_rg_updates_reverse_session_owned_by_other
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -6227,6 +6239,8 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_remote_reverse_session_on_pee
                 neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -6315,6 +6329,8 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_shared_promote_reverse_on_pee
                 neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -6859,6 +6875,8 @@ fn session_hit_ha_inactive_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         false,
         TEST_SFMIX_ZONE_ID,
@@ -6897,6 +6915,8 @@ fn session_hit_ha_inactive_does_not_redirect_actual_fabric_ingress() {
             neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         true,
         5,
@@ -6922,6 +6942,8 @@ fn fabric_ingress_session_hit_obeys_ha_inactive_gate() {
             neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         21,
         0,
@@ -6948,6 +6970,8 @@ fn tunnel_ingress_session_hit_bypasses_unseeded_ha_during_startup_grace() {
             neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         586,
         110,
@@ -6989,6 +7013,8 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
                 neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x02]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             }, nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42))),
                 ..NatDecision::default()
@@ -7323,6 +7349,8 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             }, nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
                 ..NatDecision::default()
@@ -7467,6 +7495,8 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
         neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -10839,6 +10869,8 @@ fn synced_local_delivery_decision_unowned_egress() -> SessionDecision {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
@@ -14229,6 +14261,8 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: TRUNK_ZONED_VLAN,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat, install_table_domain: 0, install_table_check: 0 };
     // The forward flow: lan -> wan. `egress_zone` is what the #7169 arrival-zone
     // check compares against.
@@ -16398,6 +16432,8 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
             neighbor_mac: Some(mac_a),
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -16513,6 +16549,8 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
             neighbor_mac: Some(mac_a),
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,

@@ -105,7 +105,7 @@ func TestNextTableRulesFailClosedWithoutIngress_9420(t *testing.T) {
 }
 
 // TestNextTableWindowIsLeakAtomic_9420 pins that a leak whose full ingress
-// expansion does not fit the priority window is dropped WHOLE, never installed
+// expansion does not fit the admission cap is dropped WHOLE, never installed
 // on a subset of its interfaces. A partially-scoped leak works on some ingress
 // interfaces and silently not on others.
 func TestNextTableWindowIsLeakAtomic_9420(t *testing.T) {
@@ -113,7 +113,7 @@ func TestNextTableWindowIsLeakAtomic_9420(t *testing.T) {
 	nt := &nextTableManager{ops: ops}
 
 	instances := []*config.RoutingInstanceConfig{{Name: "dmz-vr", TableID: 101}}
-	// 3 interfaces × 34 leaks = 102 > the 100-slot window, so the 34th leak
+	// 3 interfaces × 34 leaks = 102 > the 100-entry cap, so the 34th leak
 	// must not install at all (33 × 3 = 99 rules).
 	iifs := []string{"ge-0-0-0", "ge-0-0-1", "ge-0-0-2"}
 	var routes []*config.StaticRoute

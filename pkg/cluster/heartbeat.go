@@ -1925,9 +1925,9 @@ func (r *heartbeatReceiver) checkTimeout() {
 		// at threshold*interval (~500ms) would then make BOTH claim primary
 		// and the RETH virtual MAC — split-brain (#4386). Hold the never-seen
 		// promotion behind the SAME cold-boot grace the seen-then-lost path
-		// uses below. A genuinely-absent peer (single-node deployment, or a
-		// peer that will never come up) still promotes once the grace elapses,
-		// so this delays the decision, it never blocks it.
+		// uses below. A fresh session-sync receive proof means the heartbeat
+		// path may be down while the peer remains active, so the manager keeps
+		// the absence hold until sync goes quiet (#11566).
 		// (r.startedAt is a direct time.Time, so time.Since uses its embedded
 		// monotonic reading — already step-safe.)
 		if neverSeenConfirmed(time.Since(r.startedAt), heartbeatStartupGrace) {
@@ -1968,8 +1968,9 @@ func (r *heartbeatReceiver) checkTimeout() {
 // correct for a peer that WAS seen then went silent, but far too aggressive
 // for deciding a peer never existed at boot, where the first heartbeats are
 // commonly dropped by the local config apply disruption (#4386). Returning
-// true once sinceStart >= grace guarantees a genuinely-absent peer still
-// promotes — the floor delays the never-seen decision, it never blocks it.
+// true once sinceStart >= grace releases only the startup floor;
+// handlePeerNeverSeen still defers confirmation while sync proof is fresh
+// (#11566).
 func neverSeenConfirmed(sinceStart, grace time.Duration) bool {
 	return sinceStart >= grace
 }

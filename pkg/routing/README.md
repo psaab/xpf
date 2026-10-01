@@ -352,29 +352,31 @@ delegate to the owning domain. Exported types:
   `pkg/config` commit validation, this package, and `pkg/rpm` all
   consume them. `ClearProbePins` sweeps the range at startup only when xpf owns
   host routing posture; uncommitted foreign-host installs preserve it.
-- `32000–32099`: next-table inter-VRF leaking (static routes with
-  `next-table` directive). `nextTableRulePriority` in `rules.go`.
-  **The window is drawn down IPv4-FIRST, and that is enforced HERE
-  (#6583).** `nextTableManager.Apply` advances one family-blind `prio` in
-  slice order, so which leaks survive the `maxNextTableRules` cap used to
-  be decided entirely by two `append` lines in
-  `pkg/daemon/daemon_apply_routing.go` (v4 statics, then v6 statics) — a
-  cross-package convention with nothing on either side binding it. The
-  userspace FIB mirrors the same cap but draws it down in its own order
+- `30000–30999`: the shared destination-leak priority range for next-table
+  inter-VRF leaks and rib-group per-prefix interface-route leaks.
+  `config.RouteLeakRulePriority` maps destination prefix length into this
+  range, with more-specific prefixes receiving lower (earlier) priorities
+  regardless of leak source. For equal prefixes, next-table precedes
+  rib-group. This makes kernel first-match routing agree with userspace
+  longest-prefix matching when leaked destinations overlap.
+  See [`docs/rib-group-route-leaking.md`](../../docs/rib-group-route-leaking.md)
+  for the supported Junos interface-route leak configuration and kernel/helper
+  precedence details.
+
+  The `maxNextTableRules` admission cap remains separate from priority
+  assignment. Its eligible routes are drawn down IPv4-first (#6583), with
+  `nextTableFamilyOrdered` preserving the caller's order within each family.
+  The userspace FIB mirrors that cap and family order
   (`pkg/dataplane/userspace/routes.go`: `addRoutes("inet.0", …)` then
-  `addRoutes("inet6.0", …)`), so the two agreed only by coincidence.
-  Swapping those appends would have installed 60 v6 + 40 v4 in the kernel
-  against 60 v4 + 40 v6 in the FIB: 40 leaks in the kernel and not the
-  FIB, 40 the reverse — a leak present only in the FIB resolves into the
-  target VRF on the AF_XDP fast path while a slow-path packet for the same
-  flow resolves in the main table (#6467's verdict split in a new shape).
-  `nextTableFamilyOrdered` makes the agreement structural instead of
-  conventional: no caller can get it wrong, and the guard cannot rot into
-  a check of one caller while a second is added elsewhere. The partition
-  is STABLE, so within a family the caller's relative order — which the
-  FIB's per-family pass also preserves — is untouched; a correct grouping
-  that shuffled inside the group would match on counts and still install
-  a different SET.
+  `addRoutes("inet6.0", …)`), so kernel and FIB admit the same route set.
+  Each admitted next-table route still expands to one scoped rule per
+  default-instance ingress interface; all copies share its prefix-derived
+  priority.
+
+  The shared priority range is wide enough for IPv6 and does not determine
+  admission order. It replaces the former independent sequential priority
+  bands, whose source-kind ordering could let a broader leak beat a more
+  specific one.
 
   **Every rule in this band carries an ingress scope (`FRA_IIFNAME`,
   #9420).** Before that, the rule was `Dst` + `Table` + `Priority` +
@@ -400,10 +402,10 @@ delegate to the owning domain. Exported types:
   default instance is the authoring instance. Consequences:
 
   - **One leak now costs one rule per default-instance ingress
-    interface**, and the 100-slot window is drawn down **leak-atomically**
-    — a leak whose full expansion does not fit is dropped whole rather
-    than installed on a subset of its interfaces. The overflow error
-    names the multiplier.
+    interface**, and the 100-entry admission cap is drawn down
+    **leak-atomically** — a leak whose full expansion does not fit is dropped
+    whole rather than installed on a subset of its interfaces. The overflow
+    error names the multiplier.
   - **Fail-closed**, matching `BuildPBRRules`: with no resolvable ingress
     interface, nothing is installed and the apply reports degraded. The
     fail-safe direction is an under-steer, never a cross-VRF over-steer.
@@ -466,13 +468,13 @@ delegate to the owning domain. Exported types:
   See `docs/rib-group-route-leaking.md`.
 - `29000–29999`: PBR (firewall-filter `routing-instance` action).
   `pbrRulePriority` in `rules.go`. It follows the #9819 VRF-miss terminator
-  at 2000 and precedes both pure leak bands, matching the helper's PBR-first
-  table-override order (#11319). Each lookup is immediately followed by an
-  `iif`/family/selector-identical `unreachable` shadow (#11394), so a target
-  table miss stops here instead of falling through to main without affecting
-  packets outside the PBR match. The band fits 500 lookup/shadow pairs. The
-  former `31000–31999` range is retained only for upgrade cleanup and is never
-  assigned to new PBR rules.
+  at 2000 and precedes the shared destination-leak range, matching the
+  helper's PBR-first table-override order (#11319). Each lookup is immediately
+  followed by an `iif`/family/selector-identical `unreachable` shadow (#11394),
+  so a target-table miss stops here instead of falling through to main without
+  affecting packets outside the PBR match. The band fits 500 lookup/shadow
+  pairs. The former `31000–31999` range is retained only for upgrade cleanup
+  and is never assigned to new PBR rules.
   **Kernel FBF support matrix (#3730):**
   `BuildPBRRules` mirrors only the term `from` predicates an `ip rule` can
   express — source/destination address + prefix-list, DSCP (any value
@@ -586,18 +588,16 @@ delegate to the owning domain. Exported types:
   (the guard never fires); an over-cap term steers nothing in the kernel mirror
   (the userspace filter path still enforces it exactly), so the operator sees the
   degraded gauge/log and authors a tighter match.
-- `30000–30999`: rib-group per-prefix interface-route leaks
-  (`ip rule to <connected-prefix> lookup <sourceTable>`). The band sits
-  after PBR and before next-table and main; see
-  `docs/rib-group-route-leaking.md` for the supported import-into-main
-  behavior and its `ribGroupLeakRulePriority`/`maxRibGroupLeakRules` bounds.
+- `32000–32099`: legacy next-table leak priorities, cleared only to remove
+  stale rules left by an in-place upgrade.
 - `33000–33099`: legacy pre-#3876 blanket rib-group rules. New rules are
   never installed in this band; `ribGroupManager.clear()` scans it only to
   remove stale rules left by an in-place upgrade.
 - main table at `32766`. The first-match order is PBR (`29000–29999`),
-  rib-group (`30000–30999`), next-table (`32000–32099`), then main.
-  Next-table runs after the kernel's VRF lookup/terminator rules; its
-  default-instance ingress selector keeps it from diverting VRF traffic.
+  shared destination leaks (`30000–30999`), then main. Within the shared
+  range, prefix length determines leak order across both sources. Next-table
+  runs after the kernel's VRF lookup/terminator rules; its default-instance
+  ingress selector keeps it from diverting VRF traffic.
 
 ### Routing-instance kernel table IDs (#3855)
 
@@ -1133,6 +1133,11 @@ toward such a destination therefore either:
 
 A `nil` `Dst` is normalised to `0.0.0.0/0` / `::/0` — that is how a default
 route can arrive, and it is the route the import most exists to capture.
+
+Imported routes preserve the kernel's `RTAX_MTU` constraint into the
+userspace FIB (#11411). Zero means absent/unknown; the selected route MTU
+constrains plain forwarding, TCP segmentation, PMTU signaling, and tunnel
+inner/outer budgets alongside their relevant interface MTUs.
 
 The table set is **bounded** by `LearnedRouteTableIDs`: main plus each
 configured routing instance. The management VRF (999) is hard-excluded — it is
