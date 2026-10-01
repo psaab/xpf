@@ -6,10 +6,10 @@ import (
 )
 
 // hostInboundIngressDestinations returns, per family, every firewall-local
-// address the host-inbound chain judges: each view's addresses, then the
-// addressed-but-unzoned ones (#4420), first-seen order, no duplicates. It is the
-// destination set of the #9637 ingress-zone rules, which judge a packet by the
-// zone it arrived on whichever of these addresses it names.
+// address the host-inbound chain must judge: each view's addresses, then the
+// addressed-but-unzoned ones (#4420), first-seen order, no duplicates. It is
+// used by unzoned and ambiguous ingress guards; ordinary zone-ingress rules
+// intentionally use only zone-owned destinations.
 func hostInboundIngressDestinations(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string) (v4, v6 []string) {
 	seen4, seen6 := map[string]bool{}, map[string]bool{}
 	add := func(out *[]string, seen map[string]bool, addrs []string) {
@@ -27,6 +27,10 @@ func hostInboundIngressDestinations(views []dpuserspace.ZoneHostInboundView, unz
 	add(&v4, seen4, unzonedV4)
 	add(&v6, seen6, unzonedV6)
 	return v4, v6
+}
+
+func hostInboundZoneIngressDestinations(views []dpuserspace.ZoneHostInboundView) (v4, v6 []string) {
+	return hostInboundIngressDestinations(views, nil, nil)
 }
 
 // hostInboundEmitsIngressDrop reports whether emitHostInboundZoneIngress emits a
@@ -52,11 +56,16 @@ func hostInboundEmitsAmbiguousIngressDrop(views []dpuserspace.ZoneHostInboundVie
 	return len(hostInboundAmbiguousIngressNetdevs(views)) > 0 && len(dests) > 0
 }
 
+func hostInboundEmitsUnzonedIngressDrop(netdevs, dests []string) bool {
+	return len(netdevs) > 0 && len(dests) > 0
+}
+
 // emitHostInboundZoneIngress emits the #9637 ingress-zone rules for one view
 // and family. Normal rules use the view's service and protocol matches, its
-// per-zone deny counter, and EVERY judged local address, not only the view's
-// own. Ambiguous netdevs are handled separately after their address-owner
-// service admits.
+// per-zone deny counter, and every zone-owned local address. Unzoned
+// destinations are denied later by their catch-all rather than admitted by an
+// unrelated ingress zone. Ambiguous netdevs are handled separately after their
+// address-owner service admits.
 //
 // Junos admits host-inbound traffic by the zone of the interface it arrives on.
 // The destination-address rules alone judged a packet by the zone that owns the
@@ -118,5 +127,28 @@ func emitHostInboundAmbiguousIngressDrop(rules *[]string, views []dpuserspace.Zo
 	}
 	cn := xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, family)
 	scope := "iifname " + nftIifnameSet(netdevs) + " " + family + " daddr " + nftAddrSet(dests)
+	*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
+}
+
+// emitHostInboundUnzonedIngressDrop denies configured unzoned physical ingress
+// before the residual established accept and destination-only zone fallback.
+// Non-physical reinjection devices are intentionally absent from netdevs.
+func emitHostInboundUnzonedIngressDrop(rules *[]string, netdevs []string, family string, dests []string) {
+	if !hostInboundEmitsUnzonedIngressDrop(netdevs, dests) {
+		return
+	}
+	cn := xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, family)
+	scope := "iifname " + nftIifnameSet(netdevs) + " " + family + " daddr " + nftAddrSet(dests)
+	*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
+}
+
+// emitHostInboundUnzonedVRFIngressDrop uses the slave name visible through
+// meta sdifname before any zone rule scoped to the shared LOCAL_IN master.
+func emitHostInboundUnzonedVRFIngressDrop(rules *[]string, slaves []string, family string, dests []string) {
+	if !hostInboundEmitsUnzonedIngressDrop(slaves, dests) {
+		return
+	}
+	cn := xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, family)
+	scope := "meta sdifname " + nftIifnameSet(slaves) + " " + family + " daddr " + nftAddrSet(dests)
 	*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
 }

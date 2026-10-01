@@ -278,11 +278,13 @@ func HostInputFenceOverlayCounterName(o HostInputFenceOverlay) string {
 // HostInboundSpec is the full host-inbound render request (plan §5.1). It is the
 // exact input set buildHostInboundFilterPayload consumes.
 type HostInboundSpec struct {
-	Views         []HostInboundZoneView
-	UnzonedV4     []string
-	UnzonedV6     []string
-	Programs      []JunosHostProgram
-	WGListenPorts []uint16
+	Views                   []HostInboundZoneView
+	UnzonedV4               []string
+	UnzonedV6               []string
+	UnzonedIngressNetdevs   []string // #11409: unzoned physical input scope, before destination fallback
+	UnzonedIngressVRFSlaves []string // #11409: LOCAL_IN slave scope before shared-master zone rules
+	Programs                []JunosHostProgram
+	WGListenPorts           []uint16
 	// WGZonePorts (#11076) scopes WireGuard admission per zone: zone name ->
 	// sorted listen ports of that zone's tunnels. Rendered as daddr-scoped
 	// accepts inside each zone's section (ordered with zone policy). Zones

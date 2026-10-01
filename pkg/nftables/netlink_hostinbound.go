@@ -87,18 +87,27 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundReinjectAcceptNetlink(p, famV4, reinjectV4)
 		emitHostInboundReinjectAcceptNetlink(p, famV6, reinjectV6)
 	}
-	// #9637: unambiguous ingress scopes take their zone's service rights first.
-	// An ambiguous target uses destination-owner rights before its counted
-	// fail-closed catch-all; the residual established accept must still follow it.
 	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
+	// #11409: VRF slave-name guards precede rules scoped to the shared
+	// LOCAL_IN master, so a zoned sibling cannot admit an unzoned member.
+	emitHostInboundUnzonedVRFIngressDropNetlink(p, spec.UnzonedIngressVRFSlaves, famV4, ingressV4)
+	emitHostInboundUnzonedVRFIngressDropNetlink(p, spec.UnzonedIngressVRFSlaves, famV6, ingressV6)
+	// #9637: unambiguous ingress scopes take their zone's service rights first.
+	// Unzoned destination addresses are excluded so a zone cannot admit another
+	// interface's address; its catch-all still denies them below.
+	zoneIngressV4, zoneIngressV6 := hostInboundZoneIngressDestinations(spec.Views)
 	for _, v := range spec.Views {
-		emitHostInboundZoneIngressNetlink(p, v, famV4, ingressV4)
-		emitHostInboundZoneIngressNetlink(p, v, famV6, ingressV6)
+		emitHostInboundZoneIngressNetlink(p, v, famV4, zoneIngressV4)
+		emitHostInboundZoneIngressNetlink(p, v, famV6, zoneIngressV6)
 	}
 	emitHostInboundAmbiguousIngressAcceptsNetlink(p, spec.Views, famV4, spec.WGZonePorts)
 	emitHostInboundAmbiguousIngressDropNetlink(p, spec.Views, famV4, ingressV4)
 	emitHostInboundAmbiguousIngressAcceptsNetlink(p, spec.Views, famV6, spec.WGZonePorts)
 	emitHostInboundAmbiguousIngressDropNetlink(p, spec.Views, famV6, ingressV6)
+	// #11409: physical ingress with no surviving zone is denied before the
+	// residual established accept and destination-only fallback.
+	emitHostInboundUnzonedIngressDropNetlink(p, spec.UnzonedIngressNetdevs, famV4, ingressV4)
+	emitHostInboundUnzonedIngressDropNetlink(p, spec.UnzonedIngressNetdevs, famV6, ingressV6)
 	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	for _, v := range spec.Views {
 		emitHostInboundZoneNetlink(p, v, famV4, v.V4Addrs, spec.WGZonePorts[v.Zone])
@@ -179,11 +188,12 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 		}
 	}
 	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
+	zoneIngressV4, zoneIngressV6 := hostInboundZoneIngressDestinations(spec.Views)
 	for _, v := range spec.Views {
-		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, ingressV4) {
+		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip"))
 		}
-		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, ingressV6) {
+		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
 	}
@@ -191,6 +201,14 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 		decl(HostInboundDenyCounterName(unzonedHostInboundZoneLabel, "ip"))
 	}
 	if hostInboundEmitsAmbiguousIngressDrop(spec.Views, ingressV6) {
+		decl(HostInboundDenyCounterName(unzonedHostInboundZoneLabel, "ip6"))
+	}
+	if hostInboundEmitsUnzonedIngressDrop(spec.UnzonedIngressNetdevs, ingressV4) ||
+		hostInboundEmitsUnzonedIngressDrop(spec.UnzonedIngressVRFSlaves, ingressV4) {
+		decl(HostInboundDenyCounterName(unzonedHostInboundZoneLabel, "ip"))
+	}
+	if hostInboundEmitsUnzonedIngressDrop(spec.UnzonedIngressNetdevs, ingressV6) ||
+		hostInboundEmitsUnzonedIngressDrop(spec.UnzonedIngressVRFSlaves, ingressV6) {
 		decl(HostInboundDenyCounterName(unzonedHostInboundZoneLabel, "ip6"))
 	}
 	// #9637 residual: the reinject-accept counter, declared exactly when the

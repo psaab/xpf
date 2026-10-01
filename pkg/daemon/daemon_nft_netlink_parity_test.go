@@ -88,6 +88,22 @@ func runNftNetlinkParityInner(t *testing.T) {
 		// and the broad zone deny (#6405 FIX-2).
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
 	})
+	t.Run("host_inbound_unzoned_ingress_11409", func(t *testing.T) {
+		issueViews := []dpuserspace.ZoneHostInboundView{{
+			Zone: "lan", SystemServices: []string{"ssh"},
+			V4Addrs: []string{"10.0.61.1"}, IngressNetdevs: []string{"fw-zone"},
+		}}
+		issueUnzonedV4 := []string{"198.51.100.1"}
+		issueUnzonedIngress := []string{"fw-unzoned"}
+		issueUnzonedVRFSlaves := []string{"vrf-unzoned"}
+		oracle := buildHostInboundFilterPayloadWithUnzonedIngress(
+			issueViews, issueUnzonedV4, nil, issueUnzonedIngress, issueUnzonedVRFSlaves, nil, nil, true, nil, nil, nil,
+		)
+		spec := toNftHostInboundSpecWithUnzonedIngress(
+			issueViews, issueUnzonedV4, nil, issueUnzonedIngress, issueUnzonedVRFSlaves, nil, nil, nil, true, nil,
+		)
+		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
+	})
 	t.Run("host_inbound_screen_alarm_mode", func(t *testing.T) {
 		alarmViews := append([]dpuserspace.ZoneHostInboundView(nil), views...)
 		alarmViews[0].AlarmWithoutDrop = true

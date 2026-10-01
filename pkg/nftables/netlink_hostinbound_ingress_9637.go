@@ -2,7 +2,9 @@ package nftables
 
 // hostInboundIngressDestinations mirrors the daemon oracle's helper of the same
 // name: every judged firewall-local address per family (each view's, then the
-// unzoned ones), first-seen order, no duplicates (#9637).
+// unzoned ones), first-seen order, no duplicates (#9637). It feeds the unzoned
+// and ambiguous guards; ordinary zone-ingress rules use only zone-owned
+// destinations.
 func hostInboundIngressDestinations(views []HostInboundZoneView, unzonedV4, unzonedV6 []string) (v4, v6 []string) {
 	seen4, seen6 := map[string]bool{}, map[string]bool{}
 	add := func(out *[]string, seen map[string]bool, addrs []string) {
@@ -20,6 +22,10 @@ func hostInboundIngressDestinations(views []HostInboundZoneView, unzonedV4, unzo
 	add(&v4, seen4, unzonedV4)
 	add(&v6, seen6, unzonedV6)
 	return v4, v6
+}
+
+func hostInboundZoneIngressDestinations(views []HostInboundZoneView) (v4, v6 []string) {
+	return hostInboundIngressDestinations(views, nil, nil)
 }
 
 // hostInboundEmitsIngressDrop mirrors the oracle's predicate: the ingress-zone
@@ -44,8 +50,12 @@ func hostInboundEmitsAmbiguousIngressDrop(views []HostInboundZoneView, dests []s
 	return len(hostInboundAmbiguousIngressNetdevs(views)) > 0 && len(dests) > 0
 }
 
-// emitHostInboundZoneIngressNetlink mirrors emitHostInboundZoneIngress (#9637):
-// normal view matches are scoped to ingress netdevs and every judged address.
+func hostInboundEmitsUnzonedIngressDrop(netdevs, dests []string) bool {
+	return len(netdevs) > 0 && len(dests) > 0
+}
+
+// emitHostInboundZoneIngressNetlink mirrors the daemon oracle: normal view
+// matches are scoped to ingress netdevs and every zone-owned destination.
 func emitHostInboundZoneIngressNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, dests []string) {
 	if len(v.IngressNetdevs) == 0 || len(dests) == 0 {
 		return
@@ -116,4 +126,24 @@ func emitHostInboundAmbiguousIngressDropNetlink(p *nlPlan, views []HostInboundZo
 	}
 	cn := HostInboundDenyCounterName(unzonedHostInboundZoneLabel, familyToken(f))
 	p.rule().iifname(netdevs).daddr(f, dests, false).counterRef(cn).emit(verdictDrop()...)
+}
+
+// emitHostInboundUnzonedIngressDropNetlink denies configured unzoned physical
+// ingress before the residual established accept and destination-only fallback.
+func emitHostInboundUnzonedIngressDropNetlink(p *nlPlan, netdevs []string, f nlFamily, dests []string) {
+	if !hostInboundEmitsUnzonedIngressDrop(netdevs, dests) {
+		return
+	}
+	cn := HostInboundDenyCounterName(unzonedHostInboundZoneLabel, familyToken(f))
+	p.rule().iifname(netdevs).daddr(f, dests, false).counterRef(cn).emit(verdictDrop()...)
+}
+
+// emitHostInboundUnzonedVRFIngressDropNetlink matches an unzoned VRF slave
+// before any zone policy scoped to the shared LOCAL_IN master.
+func emitHostInboundUnzonedVRFIngressDropNetlink(p *nlPlan, slaves []string, f nlFamily, dests []string) {
+	if !hostInboundEmitsUnzonedIngressDrop(slaves, dests) {
+		return
+	}
+	cn := HostInboundDenyCounterName(unzonedHostInboundZoneLabel, familyToken(f))
+	p.rule().sdifname(slaves).daddr(f, dests, false).counterRef(cn).emit(verdictDrop()...)
 }
