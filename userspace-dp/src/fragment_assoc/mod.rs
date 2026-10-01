@@ -1,13 +1,12 @@
-//! #2562 / #3291-stage-4: stateful cross-family fragment-association cache.
+//! #2562 / #3291-stage-4: session-bound, port-free fragment-association cache.
 //!
-//! A non-first NAT64 fragment carries NO L4 header, so it cannot find the
-//! flow/session that holds the translation the FIRST fragment resolved (the
-//! SNAT source v6->v4, or the original v6 addresses v4->v6). Without an
-//! association it is dropped fail-closed (#4617). This cache lets a non-first
-//! fragment INHERIT the first fragment's decision so the whole datagram
-//! traverses NAT64 end-to-end and reassembles at the receiver.
+//! A non-first fragment carries NO L4 header, so it cannot recover the first
+//! fragment's flow/session key. The cache lets NAT64 and same-family NAT
+//! fragments inherit their translation, and lets plain-forward fragments
+//! inherit an admitted no-NAT session decision (#11412).
 //!
 //! Design (converged /research pass; see issue #2562 / PR #4686):
+//!
 //!   * Key is PORT-FREE — `(addr_family, src, dst, ip_id, protocol,
 //!     ingress-authority)` since #5798 — so ALL fragments of one datagram
 //!     co-locate (the #2344 invariant — payload bytes are NEVER read as L4
@@ -83,6 +82,10 @@
 //! NoRoute, MissingNeighbor, HAInactive and LocalDelivery reach their own arms,
 //! none of which emits the packet natively, so they are safe for their own
 //! reasons rather than by this gate (#6835 r2).
+//! Plain/no-NAT misses still follow flowless L3 policy: an L4-only permit does
+//! not match without ports, and an explicit port-deny overlap remains fail-closed.
+//! Denied first fragments install no session-bound association, so their tails
+//! cannot inherit a permit.
 //! #6835: that was an ASPIRATION until the Pref64-destination gate on the
 //! flowless arm (`poll_descriptor/mod.rs`) existed. `nat64_consult_forward_fragment_assoc`
 //! returning `None` only means "no association"; the packet then resolved like
@@ -94,12 +97,10 @@
 //!
 //! #7899: extracted from `nat64.rs` (4537 LOC) into its own component. The
 //! cache was never NAT64-only: the ordinary same-family SNAT/DNAT/static-NAT/
-//! NPTv6 arm installs into and consults the SAME table (#5689), and the
-//! `decision.nat.nat64` discriminator on the cached value was the only hint.
-//! The data model was already family-neutral -- `FragKey` carries an
-//! `addr_family` byte and nothing NAT64-specific -- so this move CONCENTRATES a
-//! property that was already true and mislabelled by the `Nat64` type prefixes,
-//! rather than scattering one.
+//! NPTv6 arm installs into and consults the SAME table (#5689), and plain
+//! forwarding now reuses it to carry a committed no-NAT session decision
+//! (#11412). The data model is family-neutral — `FragKey` carries an
+//! `addr_family` byte and no translation-specific fields.
 //!
 //! The cache INSTANCE still hangs off `Nat64State` (`forwarding.nat64.frag_assoc`).
 //! Re-homing it is a lifecycle change, not motion: the Arc is threaded across
