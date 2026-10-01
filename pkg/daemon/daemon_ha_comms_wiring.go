@@ -16,34 +16,53 @@ import (
 )
 
 // Cluster-comms construction helpers extracted from Daemon.startClusterComms
-// (#6428). Every body below is byte-identical (modulo one level of
-// de-indentation) to the block it replaced; the call sites in
-// daemon_ha_sync.go appear in the identical order, so the startup sequence and
-// every goroutine spawn point are unchanged.
+// (#6428). Their call sites in daemon_ha_sync.go retain the same startup
+// ordering and goroutine spawn points.
 
-// resolveClusterVRFDevice determines which VRF device the cluster control /
-// fabric sockets must bind to. Extracted verbatim from startClusterComms
-// (#6428) — pure code motion, no behaviour change.
-//
-// Order contract: the caller must invoke this BEFORE spawning the heartbeat
-// goroutine and the session-sync constructor goroutine; both take the result
-// by value.
-func (d *Daemon) resolveClusterVRFDevice(cc *config.ClusterConfig) string {
-	// Determine VRF device if control/fabric interfaces are in mgmt VRF.
-	// Check mgmtVRFInterfaces first, then fall back to probing the control
-	// interface directly (handles config-only mode where applyConfig may
-	// have run but mgmtVRFInterfaces is empty due to VRF creation failure).
-	vrfDevice := ""
-	if len(d.mgmtVRFIfaceSet()) > 0 {
-		vrfDevice = config.ManagementVRFDeviceName
-	} else if cc.ControlInterface != "" {
-		// Control/fabric interfaces (em*, fab*) are always placed in
-		// vrf-mgmt by the compiler. Check if the VRF device exists.
-		if _, err := net.InterfaceByName(config.ManagementVRFDeviceName); err == nil {
-			vrfDevice = config.ManagementVRFDeviceName
+// resolveClusterVRFDevice returns vrf-mgmt only when every cluster transport
+// interface belongs to it. The published set uses post-LinuxIfName spellings;
+// an unrelated management interface must not determine a transport's routing
+// table. Non-members stay unbound so their routes resolve in the main table.
+func (d *Daemon) resolveClusterVRFDevice(transportIfaces ...string) string {
+	members := d.mgmtVRFIfaceSet()
+	hasTransport := false
+	for _, iface := range transportIfaces {
+		if iface == "" {
+			continue
 		}
+		hasTransport = true
+		linuxName := config.LinuxIfName(iface)
+		if members[linuxName] {
+			continue
+		}
+		if len(members) > 0 || config.IsManagementIfName(iface) {
+			slog.Warn("cluster transport interface is not a management VRF member; leaving sockets unbound to VRF",
+				"interface", linuxName, "vrf", config.ManagementVRFDeviceName)
+		}
+		return ""
 	}
-	return vrfDevice
+	if !hasTransport {
+		return ""
+	}
+	return config.ManagementVRFDeviceName
+}
+
+// resolveClusterSyncVRFDevice scopes CLI and gRPC peer dials to the same
+// transport selected for session sync, including a configured secondary
+// fabric when fabric transport is active.
+func (d *Daemon) resolveClusterSyncVRFDevice(cc *config.ClusterConfig) string {
+	if cc == nil {
+		return ""
+	}
+	syncIface, syncPeerAddr, syncTransport := clusterSyncTransport(cc)
+	if syncIface == "" || syncPeerAddr == "" {
+		return ""
+	}
+	transportIfaces := []string{syncIface}
+	if syncTransport == "fabric" && cc.Fabric1Interface != "" && cc.Fabric1PeerAddress != "" {
+		transportIfaces = append(transportIfaces, cc.Fabric1Interface)
+	}
+	return d.resolveClusterVRFDevice(transportIfaces...)
 }
 
 // startHAWatchdogHeartbeat starts the HA watchdog heartbeat goroutine for the

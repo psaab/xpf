@@ -1553,8 +1553,9 @@ contract** and it is documented on `startClusterComms` itself:
 
 - `beginClusterCommsEpoch` first — every goroutine below captures its
   sub-context and every publish presents its generation;
-- `resolveClusterVRFDevice` before the heartbeat goroutine and the constructor
-  goroutine (both take `vrfDevice` by value);
+- each socket path resolves membership for its own transport; heartbeat uses
+  `ControlInterface`, while session sync and gRPC use the selected sync
+  transport (and an active secondary fabric);
 - `syncRGStrictVIPOwnershipMode` before the heartbeat goroutine, so `rg_active`
   already follows VIP ownership once VRRP starts driving it;
 - `clusterCommsWG.Add(1)` on the caller's stack, never inside the goroutine, so

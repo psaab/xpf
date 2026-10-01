@@ -14,7 +14,6 @@ import (
 
 	"github.com/psaab/xpf/pkg/cli"
 	"github.com/psaab/xpf/pkg/coalesce"
-	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/dhcprelay"
@@ -927,10 +926,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return addrs
 		}, func() string {
 			if c := d.store.ActiveConfig(); c != nil && c.Chassis.Cluster != nil {
-				cc := c.Chassis.Cluster
-				if cc.ControlInterface != "" || cc.FabricInterface != "" {
-					return config.ManagementVRFDeviceName
-				}
+				return d.resolveClusterSyncVRFDevice(c.Chassis.Cluster)
 			}
 			return ""
 		}())

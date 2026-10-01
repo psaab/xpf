@@ -175,7 +175,7 @@ type Config struct {
 	RAMgr            *ra.Manager        // embedded RA sender manager
 	Version          string             // software version string
 	FabricPeerAddrFn func() []string    // returns peer fabric IPs (fab0, fab1; empty if standalone)
-	FabricVRFDevice  string             // VRF for fabric interface (e.g. "vrf-mgmt")
+	FabricVRFDevice  string             // VRF for the selected cluster transport interface(s), e.g. "vrf-mgmt"
 	FwdSampler       *fwdstatus.Sampler // #881: 5s/1m/5m CPU windows for `show chassis forwarding`
 	// ListenersFn returns the EFFECTIVE (post-clamp, post-bind) management
 	// listener addresses `show system services` reports (#6385). The daemon

@@ -292,10 +292,7 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 		},
 		FabricVRFDevice: func() string {
 			if c := d.store.ActiveConfig(); c != nil && c.Chassis.Cluster != nil {
-				cc := c.Chassis.Cluster
-				if cc.ControlInterface != "" || cc.FabricInterface != "" {
-					return config.ManagementVRFDeviceName
-				}
+				return d.resolveClusterSyncVRFDevice(c.Chassis.Cluster)
 			}
 			return ""
 		}(),
