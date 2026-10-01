@@ -367,7 +367,10 @@ const (
 	// v37 -> v38 (#11411): learned route snapshots carry kernel RTAX_MTU.
 	// A v37 helper ignores it and forwards oversized DF packets; exact equality
 	// rejects the mixed version rather than recreating the route-MTU blackhole.
-	ProtocolVersion = 38
+	// v38 -> v39 (#11434): InterfaceSnapshot.NativeVLANID maps VID-0 ingress
+	// to the matching VLAN unit. A v38 helper ignores the field and can
+	// attribute an untagged packet to the parent / unit-0 zone instead.
+	ProtocolVersion = 39
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1042,6 +1045,10 @@ type InterfaceSnapshot struct {
 	LogicalOnly     bool   `json:"logical_only,omitempty"`
 	RXQueues        int    `json:"rx_queues,omitempty"`
 	VLANID          int    `json:"vlan_id,omitempty"`
+	// NativeVLANID identifies the tagged unit that receives untagged frames
+	// on this base interface (#11434). Zero means no native VLAN; only base
+	// interface rows carry this field.
+	NativeVLANID    int    `json:"native_vlan_id,omitempty"`
 	LocalFabric     string `json:"local_fabric_member,omitempty"`
 	RedundancyGroup int    `json:"redundancy_group,omitempty"`
 	// EgressZone is the security zone this row's IFINDEX egresses into, or "" for

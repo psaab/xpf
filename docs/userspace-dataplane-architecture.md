@@ -1427,16 +1427,16 @@ Scope of the fallback:
     gap is in the commit RESPONSE path rather than in either advisory, and it is
     filed as #8484.
 
-  **What would invalidate the rationale (#4308).** Untagged frames have no
-  principled unit attribution today because `native-vlan-id` is accepted-only and
-  unenforced. If #4308 is implemented they acquire a defined unit — the native
-  VLAN — and declining to zone them becomes wrong for that unit specifically,
-  while staying right for every other contested case.
-  #11297 now fails closed before that fallback: untagged and priority-tagged
-  VID-0 frames are dropped at the common ingress boundary on tagged-only binds
-  that carry positive-VID units but no explicit untagged unit 0. Ordinary
-  untagged ports retain their physical fallback. Implementing #4308 must replace
-  this guard with explicit native-VLAN unit resolution.
+  **#11434 native VLAN resolution.** `native-vlan-id` assigns untagged VID-0
+  ingress to the logical unit whose configured `vlan-id` matches the native
+  VID. The Go snapshot carries that interface-level VID; the Rust builder
+  installs `(parent, 0) -> native-unit-ifindex`, making the untagged unit's
+  zone, routing domain, filters, and policy match tagged traffic on that unit.
+  A missing or ambiguous matching unit does not fall back to the contested
+  parent or explicit unit 0: VID 0 stays rejected.
+  #11297's tagged-only guard remains for VID 0 when there is no explicit unit 0
+  or resolvable native mapping. Ordinary untagged ports without the knob retain
+  their physical fallback; other contested parent identities remain fail-closed.
 
 
   Junos zones logical UNITS, so a gap still runs the other way: `st0.0` and

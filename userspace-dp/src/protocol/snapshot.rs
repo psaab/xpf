@@ -70,6 +70,10 @@ pub(crate) struct InterfaceSnapshot {
     pub linux_name: String,
     #[serde(rename = "parent_linux_name", default)]
     pub parent_linux_name: String,
+    /// #11434: the VLAN unit that receives untagged frames on this interface.
+    /// Zero means no native VLAN is configured; emitted on base rows only.
+    #[serde(rename = "native_vlan_id", default)]
+    pub native_vlan_id: i32,
     #[serde(default)]
     pub ifindex: i32,
     #[serde(rename = "parent_ifindex", default)]

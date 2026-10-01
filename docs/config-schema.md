@@ -11142,28 +11142,28 @@ reserved for whole-dataplane selection where a rewrite shim
   `pkg/ra/sender.go buildRA`. 0 keeps the pre-#4307 unspecified default.
   Coverage: `pkg/config/parser_routing_test.go` (compile) +
   `pkg/ra/sender_marshal_4307_test.go` (wire round-trip).
-- **#4308 (interface ARP/addressing parity knobs, fable-review-167
-  I-3):** five common Junos interface knobs were accepted by the
-  permissive parser but never modeled or compiled, so they silently
-  vanished at commit. They are now typed leaves + compiled fields +
-  carry an accepted-only advisory (the #2078 doctrine), because full
-  enforcement needs design/cluster work:
-  - `native-vlan-id <id>` (interface-level, `ValidateInteger(1, 4094)`)
-    — folds into the QinQ tagging pipeline (#2354).
+- **#4308 / #11434 (interface ARP/addressing parity knobs, fable-review-167
+  I-3):** five common Junos interface knobs were accepted by the permissive
+  parser but never modeled or compiled. They are now typed and compiled;
+  `native-vlan-id` is enforced by the userspace dataplane, while the remaining
+  four still carry an accepted-only advisory:
+  - `native-vlan-id <id>` (interface-level, `ValidateInteger(1, 4094)`) —
+    untagged VID-0 ingress resolves to the logical unit whose `vlan-id`
+    matches the configured native VLAN. If that unit is absent or ambiguous,
+    VID 0 is rejected rather than assigned the parent/unit-0 zone (#11434).
   - `gratuitous-arp-reply` / `no-gratuitous-arp-request`
-    (interface-level flags) — map to per-interface ARP sysctls the
-    interface apply path does not write yet.
+    (interface-level flags) — map to per-interface ARP sysctls the interface
+    apply path does not write yet.
   - `family inet unnumbered-address <interface>` — needs a networkd
     borrow-address implementation (resolve the donor unit's address).
-  - `family inet targeted-broadcast` — needs dataplane directed-
-    broadcast forwarding.
-  Compiled into `InterfaceConfig.{NativeVlanID,GratuitousARPReply,
-  NoGratuitousARPRequest}` and `InterfaceUnit.{UnnumberedInet,
-  TargetedBroadcast}`; `validateInterfaceParityWarnings`
-  (compiler_validate_warn.go) emits one deterministic per-interface
-  accepted-only warning at commit. Coverage:
-  `pkg/config/interface_parity_4308_test.go` (compile + advisory +
-  no-false-positive).
+  - `family inet targeted-broadcast` — needs dataplane directed-broadcast
+    forwarding.
+  The remaining four settings are compiled into
+  `InterfaceConfig.{GratuitousARPReply,NoGratuitousARPRequest}` and
+  `InterfaceUnit.{UnnumberedInet,TargetedBroadcast}`; their advisory is
+  covered by `pkg/config/interface_parity_4308_test.go`. Native mapping
+  coverage is in `pkg/dataplane/userspace/native_vlan_11434_test.go` and
+  `userspace-dp/src/afxdp/forwarding_build/tests.rs`.
 - **#4309 (DHCP relay overrides, fable-review-167 I-4):** the dhcp-relay
   `overrides` block modeled only `always-broadcast`; three standard
   relay knobs were silently dropped. Added under group `overrides`:

@@ -62,13 +62,12 @@ type InterfaceConfig struct {
 	// bit itself. Nothing is lost by not persisting it: the config DB stores
 	// the TREE, and compileInterfaces recomputes the bit on every load.
 	AuthoredUnits bool `json:"-"`
-	// #4308 (fable-review-167 I-3): parity knobs that are typed + compiled
-	// so they stop silently vanishing, but are ACCEPTED-ONLY today (a
-	// commit-time advisory warns they are not enforced). native-vlan-id
-	// needs the QinQ tagging pipeline (#2354); the gratuitous-ARP knobs
-	// map to per-interface sysctls not yet written by the interface apply
-	// path. See validateInterfaceParityWarnings.
-	NativeVlanID           int  // native-vlan-id <id> (0 = unset) — accepted-only (#4308)
+	// #4308 (fable-review-167 I-3): parity knobs are typed + compiled so
+	// they stop silently vanishing. #11434 enforces native-vlan-id: untagged
+	// frames resolve to the unit with the matching vlan-id. The remaining
+	// gratuitous-ARP, unnumbered-address, and targeted-broadcast settings stay
+	// accepted-only; see validateInterfaceParityWarnings.
+	NativeVlanID           int  // native-vlan-id <id> (0 = unset)
 	GratuitousARPReply     bool // gratuitous-arp-reply — accepted-only (#4308)
 	NoGratuitousARPRequest bool // no-gratuitous-arp-request — accepted-only (#4308)
 }

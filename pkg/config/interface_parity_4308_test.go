@@ -2,9 +2,8 @@ package config
 
 // Regression tests for #4308 (fable-review-167 I-3): five common Junos
 // interface knobs were accepted by the permissive parser but never modeled or
-// compiled, so they silently vanished at commit. They are now typed leaves,
-// compiled into the typed config, and surface a commit-time accepted-only
-// advisory (the #2078 doctrine) instead of being silently dropped.
+// compiled. They are now typed leaves; #11434 also enforces native-vlan-id,
+// while the other four still surface an accepted-only advisory.
 //
 // RED-on-revert: drop the compiler assignments and each field reads back its
 // zero value (the silent-drop); drop the validateInterfaceParityWarnings call
@@ -73,7 +72,7 @@ func TestInterfaceParityKnobsCompile_4308(t *testing.T) {
 	}
 }
 
-// Each configured knob must surface an accepted-only advisory at commit.
+// The remaining accepted-only knobs (not native-vlan-id) surface an advisory.
 func TestInterfaceParityKnobsAdvisory_4308(t *testing.T) {
 	cfg := compileTreeFromSet(t, []string{
 		"set interfaces ge-0-0-0 native-vlan-id 100",
@@ -93,11 +92,25 @@ func TestInterfaceParityKnobsAdvisory_4308(t *testing.T) {
 		t.Fatalf("expected a #4308 accepted-only advisory for ge-0-0-0, got: %v", ValidateConfig(cfg))
 	}
 	for _, knob := range []string{
-		"native-vlan-id", "gratuitous-arp-reply", "no-gratuitous-arp-request",
+		"gratuitous-arp-reply", "no-gratuitous-arp-request",
 		"unnumbered-address", "targeted-broadcast",
 	} {
 		if !strings.Contains(warn, knob) {
 			t.Errorf("advisory missing %q: %s", knob, warn)
+		}
+	}
+	if strings.Contains(warn, "native-vlan-id") {
+		t.Errorf("enforced native-vlan-id still surfaced as accepted-only: %s", warn)
+	}
+}
+
+func TestNativeVLANHasNoAcceptedOnlyAdvisory_11434(t *testing.T) {
+	cfg := compileTreeFromSet(t, []string{
+		"set interfaces ge-0-0-0 native-vlan-id 100",
+	})
+	for _, warning := range ValidateConfig(cfg) {
+		if strings.Contains(warning, "native-vlan-id") {
+			t.Fatalf("enforced native-vlan-id still warns as inert: %s", warning)
 		}
 	}
 }

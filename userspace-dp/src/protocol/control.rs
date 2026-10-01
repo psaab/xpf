@@ -223,7 +223,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v37 -> v38 (#11411): RouteSnapshot.mtu carries kernel-selected RTAX_MTU.
 // A v37 helper ignores it and forwards oversized DF packets; exact equality
 // refuses that mixed version rather than recreating the route-MTU blackhole.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 38;
+// v38 -> v39 (#11434): InterfaceSnapshot.native_vlan_id selects the VLAN unit
+// that receives VID-0 ingress; a v38 helper would use the parent / unit-0
+// identity and apply a different zone policy.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 39;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

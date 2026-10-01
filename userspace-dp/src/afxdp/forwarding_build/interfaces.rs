@@ -750,17 +750,13 @@ pub(super) fn populate_interfaces(
                 // guess after a second row contested it. Without that the
                 // outcome would depend on row order again, just less obviously.
                 //
-                // WHAT WOULD INVALIDATE THIS (#4308). Today `native-vlan-id`
-                // is accepted-only and NOT enforced (`schema_interfaces.go`,
-                // and `compiler_validate_warn_routing.go` emits a commit
-                // advisory saying so). #11297 therefore rejects VID 0 at the
-                // common poll head on tagged-only binds rather than changing
-                // this shared parent-zone derivation; an explicit untagged
-                // unit 0 is the only current exception. If #4308 is
-                // implemented, ingress must resolve untagged frames to the
-                // configured native unit and exempt only that identity.
-                // Simply bypassing the gate and reusing this parent fallback
-                // would lend sibling zone rights to ambiguous traffic.
+                // #11297 rejects VID 0 at the common poll head on tagged-only
+                // binds rather than changing this shared parent-zone derivation.
+                // #11434 adds a narrower native-VLAN mapping only when exactly
+                // one matching logical unit is present; the resolver then uses
+                // that unit's identity. A missing or ambiguous match remains
+                // rejected. Simply permitting VID 0 here would lend sibling
+                // zone rights to ambiguous traffic.
                 //
                 // SCOPE, wider than the issue's framing. #7509 describes
                 // interface-level TUNNEL units sharing a netdev. The condition
@@ -1378,6 +1374,35 @@ pub(super) fn populate_egress(
     let mut tagged_only_ingress_ifindexes = FastSet::default();
     let mut untagged_unit_ifindexes = FastSet::default();
 
+    // #11434: preserve the base interface's native VLAN selection so VID 0
+    // can resolve to the matching logical unit instead of inheriting unit 0's
+    // or the parent's zone.
+    let mut native_vlan_by_parent = BTreeMap::<i32, u16>::new();
+    let mut ambiguous_native_parents = BTreeSet::<i32>::new();
+    for iface in &snapshot.interfaces {
+        if iface.ifindex <= 0 || is_logical_unit_row(&iface.name, iface.is_unit) {
+            continue;
+        }
+        if iface.native_vlan_id < 0 || iface.native_vlan_id > 4094 {
+            return Err(
+                crate::policy::SnapshotIntegrityError::InterfaceVlanOutOfRange {
+                    interface: iface.name.clone(),
+                    vlan_id: iface.native_vlan_id,
+                },
+            );
+        }
+        let native_vlan_id =
+            super::validated::VlanId::try_from_snapshot(iface.native_vlan_id, &iface.name)?.get();
+        if native_vlan_id == 0 {
+            continue;
+        }
+        if let Some(previous) = native_vlan_by_parent.insert(iface.ifindex, native_vlan_id) {
+            if previous != native_vlan_id {
+                ambiguous_native_parents.insert(iface.ifindex);
+            }
+        }
+    }
+
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 {
             continue;
@@ -1486,7 +1511,54 @@ pub(super) fn populate_egress(
             },
         );
     }
+    // Resolve each configured native VLAN only when exactly one logical unit
+    // on that parent has the selected VID. A missing or conflicting unit must
+    // not fall back to the parent's / unit-0 identity: leave VID 0 rejected.
+    let mut native_unit_by_parent = BTreeMap::<i32, i32>::new();
+    for iface in &snapshot.interfaces {
+        if iface.ifindex <= 0
+            || iface.parent_ifindex <= 0
+            || !is_logical_unit_row(&iface.name, iface.is_unit)
+        {
+            continue;
+        }
+        let Some(native_vlan_id) = native_vlan_by_parent.get(&iface.parent_ifindex) else {
+            continue;
+        };
+        let vlan_id =
+            super::validated::VlanId::try_from_snapshot(iface.vlan_id, &iface.name)?.get();
+        if vlan_id != *native_vlan_id {
+            continue;
+        }
+        if let Some(previous) = native_unit_by_parent.insert(iface.parent_ifindex, iface.ifindex) {
+            if previous != iface.ifindex {
+                ambiguous_native_parents.insert(iface.parent_ifindex);
+            }
+        }
+    }
+
+    let mut native_vlan_without_unit = BTreeSet::new();
+    for (parent_ifindex, _) in native_vlan_by_parent {
+        if ambiguous_native_parents.contains(&parent_ifindex) {
+            state.ingress_logical_ifindex.remove(&(parent_ifindex, 0));
+            native_vlan_without_unit.insert(parent_ifindex);
+            continue;
+        }
+        match native_unit_by_parent.get(&parent_ifindex).copied() {
+            Some(native_unit_ifindex) => {
+                state
+                    .ingress_logical_ifindex
+                    .insert((parent_ifindex, 0), native_unit_ifindex);
+                tagged_only_ingress_ifindexes.remove(&parent_ifindex);
+            }
+            None => {
+                state.ingress_logical_ifindex.remove(&(parent_ifindex, 0));
+                native_vlan_without_unit.insert(parent_ifindex);
+            }
+        }
+    }
     tagged_only_ingress_ifindexes.retain(|ifindex| !untagged_unit_ifindexes.contains(ifindex));
+    tagged_only_ingress_ifindexes.extend(native_vlan_without_unit);
     state.tagged_only_ingress_ifindexes = tagged_only_ingress_ifindexes;
     Ok(())
 }
