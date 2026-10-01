@@ -724,6 +724,98 @@ mod tests {
         packet.extend_from_slice(&icmp);
         packet
     }
+    fn wg_v4_scoped_junos_host_snapshot() -> crate::afxdp::ConfigSnapshot {
+        let mut snapshot = wg_uncovered_host_snapshot("permit");
+        // Mirror production's v3 SourceLiterals shape: a v4 prefix must stay
+        // family-scoped when the policy engine sees a mapped-v6 source.
+        snapshot.policies = vec![
+            crate::PolicyRuleSnapshot {
+                name: "host-v4-deny".to_string(),
+                from_zone: "sfmix".to_string(),
+                to_zone: "junos-host".to_string(),
+                source_literals: vec!["10.123.0.0/25".to_string()],
+                destination_literals: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                application_terms: Vec::new(),
+                action: "deny".to_string(),
+                ..Default::default()
+            },
+            crate::PolicyRuleSnapshot {
+                name: "host-permit".to_string(),
+                from_zone: "sfmix".to_string(),
+                to_zone: "junos-host".to_string(),
+                source_literals: vec!["any".to_string()],
+                destination_literals: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                application_terms: Vec::new(),
+                action: "permit".to_string(),
+                ..Default::default()
+            },
+        ];
+        snapshot
+            .interfaces
+            .iter_mut()
+            .find(|interface| interface.ifindex == 400)
+            .expect("WG fixture interface")
+            .addresses
+            .push(crate::InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "2001:db8::1/64".to_string(),
+                scope: 0,
+            });
+        snapshot.tunnel_endpoints[0].wg_peers[0]
+            .wg_allowed_ips
+            .push("::ffff:10.123.0.0/120".to_string());
+        snapshot
+    }
+
+    fn wg_inner_icmp_echo_v6(src: std::net::Ipv6Addr, dst: std::net::Ipv6Addr) -> Vec<u8> {
+        let mut packet = vec![0u8; 48];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&8u16.to_be_bytes());
+        packet[6] = crate::ip_proto::PROTO_ICMPV6;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&src.octets());
+        packet[24..40].copy_from_slice(&dst.octets());
+        packet[40..48].copy_from_slice(&[128, 0, 0, 0, 0x12, 0x34, 0, 1]);
+        crate::afxdp::test_fixtures::stamp_icmpv6_checksum(&mut packet, 0, 40, 48);
+        packet
+    }
+
+    // Returns (mapped-drop count, local deliveries, policy denies, delivered,
+    // session count) after driving one WG plaintext descriptor through poll.
+    fn run_injected_scoped_junos_host(inner: Vec<u8>) -> (u64, u64, u64, bool, usize) {
+        let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(
+            &wg_v4_scoped_junos_host_snapshot(),
+        );
+        let ha_state = crate::afxdp::tests_support::txn_ha_state();
+        let mut binding = crate::afxdp::worker::BindingWorker::new_for_mirror_test(0, 0, 6, 0);
+        let mut sessions = crate::session::SessionTable::new();
+        let injected = build_injected_packet(
+            &wg_uncovered_icmp_descriptor(inner, None),
+            &forwarding,
+            wg_injected_validation(),
+            0,
+        )
+        .expect("attached WG plaintext must build a worker frame");
+        let (deliveries, rx) = wg_deliveries(400);
+        let (batch, dbg) = crate::afxdp::tests_support::txn_run_descriptor_with_injected(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            injected,
+            &deliveries,
+        );
+        (
+            batch.v4_mapped_ipv6_dropped,
+            dbg.local,
+            dbg.policy_deny,
+            rx.try_recv().is_ok(),
+            sessions.len(),
+        )
+    }
+
 
     fn wg_uncovered_icmp_descriptor(
         inner: Vec<u8>,
@@ -927,6 +1019,53 @@ mod tests {
             "policy-denied record must not install a session"
         );
     }
+    #[test]
+    fn injected_v4_source_deny_remains_a_junos_host_control_11350() {
+        let (drops, local, denied, delivered, sessions) =
+            run_injected_scoped_junos_host(wg_inner_icmp_echo(
+                [10, 123, 0, 2],
+                [10, 123, 0, 1],
+                0,
+            ));
+        assert_eq!(drops, 0);
+        assert_eq!(local, 1);
+        assert_eq!(denied, 1, "native IPv4 source must match the v4 deny");
+        assert!(!delivered, "v4-denied plaintext must not reach the tunnel");
+        assert_eq!(sessions, 0);
+    }
+
+    #[test]
+    fn injected_v4_permit_control_still_delivers_11350() {
+        let (drops, local, denied, delivered, _) =
+            run_injected_scoped_junos_host(wg_inner_icmp_echo(
+                [10, 123, 0, 130],
+                [10, 123, 0, 1],
+                0,
+            ));
+        assert_eq!(drops, 0);
+        assert_eq!(local, 1);
+        assert_eq!(denied, 0);
+        assert!(delivered, "the native IPv4 permit control must deliver");
+    }
+
+    #[test]
+    fn injected_mapped_v6_source_drops_before_junos_host_11350() {
+        let (drops, local, denied, delivered, sessions) = run_injected_scoped_junos_host(
+            wg_inner_icmp_echo_v6(
+                "::ffff:10.123.0.2".parse().unwrap(),
+                "2001:db8::1".parse().unwrap(),
+            ),
+        );
+        assert_eq!(
+            drops, 1,
+            "mapped-v6 WG plaintext must hit the ingress identity gate"
+        );
+        assert_eq!(local, 0, "the gate must precede host-inbound and junos-host");
+        assert_eq!(denied, 0, "the gate must precede the v4-scoped policy");
+        assert!(!delivered, "dropped mapped-v6 plaintext must not reach the tunnel");
+        assert_eq!(sessions, 0);
+    }
+
 
     #[test]
     fn injected_frame_recycles_tx_pool_exactly_once_10597() {

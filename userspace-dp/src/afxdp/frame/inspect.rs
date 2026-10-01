@@ -843,11 +843,13 @@ pub(in crate::afxdp) fn ipv6_addr_is_v4_mapped_or_compat(addr: Ipv6Addr) -> bool
 /// wrong-but-plausible stamp can never misread a v4 frame as v6 (#9900 idiom).
 /// A truncated base header, a non-v6 packet, or an unresolvable L3 returns
 /// `false` (no new drop — existing malformed handling owns those shapes). The
-/// base-header addresses are authoritative regardless of any extension chain,
-/// so no ext walk is needed. Callers exclude injection (`is_injected`) and rely
-/// on the addr predicate to exclude `::`/`::1`; the WG socket layer
-/// (`canonicalize_endpoint`/`wg_send_to` folding) is untouched — this gate sees
-/// only XDP wire frames, never socket-mapped endpoints.
+/// base-header addresses are authoritative regardless of any extension chain;
+/// no extension-header walk is needed.
+/// Both native RX and control-thread-injected WG plaintext use this gate; the
+/// address predicate excludes `::`/`::1`. The WG socket layer
+/// (`canonicalize_endpoint`/`wg_send_to` folding) is untouched — this gate
+/// classifies packet identities, including authenticated inner plaintext,
+/// never socket-mapped endpoints.
 #[inline]
 pub(in crate::afxdp) fn ipv6_frame_has_v4_mapped_or_compat(frame: &[u8], addr_family: u8) -> bool {
     if addr_family as i32 != libc::AF_INET6 {
