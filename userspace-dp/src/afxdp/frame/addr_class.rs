@@ -318,7 +318,11 @@ pub(in crate::afxdp) fn neighbor_ip_is_learnable(ip: IpAddr) -> bool {
 /// Hot-path: octet compares plus standard address class tests and one O(1)
 /// membership check in the build-time connected directed-broadcast index.
 #[inline]
-pub(in crate::afxdp) fn transit_src_is_martian(forwarding: &ForwardingState, ip: IpAddr) -> bool {
+pub(in crate::afxdp) fn transit_src_is_martian(
+    forwarding: &ForwardingState,
+    ip: IpAddr,
+    routing_domain: u32,
+) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -327,7 +331,9 @@ pub(in crate::afxdp) fn transit_src_is_martian(forwarding: &ForwardingState, ip:
                 || v4.is_link_local()
                 || v4.is_multicast()
                 || o[0] >= 240
-                || forwarding.connected_v4_directed_broadcasts.contains(&v4)
+                || forwarding
+                    .connected_v4_directed_broadcasts
+                    .contains(&(routing_domain, v4))
         }
         IpAddr::V6(v6) => {
             if v6.is_unspecified() || v6.is_loopback() || v6.is_multicast() {
