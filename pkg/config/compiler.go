@@ -991,6 +991,12 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if err := compileSections(tree, cfg, opts); err != nil {
 		return nil, err
 	}
+	// #11367: compilePolicies handles an ambiguous block in its own policies
+	// stanza, but repeated security roots compile in author order. Ensure no
+	// later valid default-policy can override the fail-closed tolerant result.
+	if opts.lenientDefaultPolicyBlock11367 && hasAmbiguousDefaultPolicyBlock11367(tree.Children) {
+		cfg.Security.DefaultPolicy = PolicyDeny
+	}
 
 	// P5 (#4406 step 5): cross-section derivations. Extracted into
 	// resolveDerivedConfig (compiler_derivations.go) — the contiguous,

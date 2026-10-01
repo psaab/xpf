@@ -43,8 +43,6 @@ pub(crate) const IPSEC_INNER_MAX_INFLIGHT_PER_FLOW: u32 = 128;
 pub(crate) const IPSEC_INNER_SLAB_BYTES: usize = 65_535;
 /// Maximum copied STN bytes retained in an immutable D11 descriptor.
 pub(crate) const IPSEC_INNER_STN_MAX: usize = 64;
-/// Cross-discriminator alias bucket bound (see `session` alias index).
-pub(crate) const IPSEC_INNER_ALIAS_BUCKET_BOUND: usize = 8;
 
 /// Canonical §4.1 closed u8 reason map (32-60 + legacy 5/6). Single source of
 /// truth for every Rust emitter, the admit-refusal wire value, and the event
@@ -1573,6 +1571,11 @@ mod tests {
         assert_eq!(reason_for_erow(35), Some(INPUT_BOUNDARY));
         assert_eq!(reason_for_erow(37), Some(INPUT_BOUNDARY));
         assert_eq!(reason_for_erow(19), Some(NO_ROUTE));
+        // #9506 S9.4: ambiguity/alias refusal, install rollback, and validated
+        // fragment refusal retain their closed E-row reason bytes.
+        assert_eq!(reason_for_erow(9), Some(SESSION_ALIAS));
+        assert_eq!(reason_for_erow(10), Some(INSTALL_ROLLBACK));
+        assert_eq!(reason_for_erow(30), Some(FRAGMENT_REFUSED));
     }
 
     #[test]

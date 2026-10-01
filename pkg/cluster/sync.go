@@ -1137,6 +1137,10 @@ type SessionSync struct {
 	// way. Same incarnation scoping (reset on full disconnect), plus an
 	// early clear when a capable capability frame lands.
 	bulkFencedForPeer atomic.Bool
+	// bulkFencedForIpsecPeer is the independent S9.4 refusal latch. Its
+	// eligibility is the IPsec discriminator capability, not install-table
+	// identity; either fence must be revalidated on its own bit.
+	bulkFencedForIpsecPeer atomic.Bool
 	// pbrAnnouncedForFence records that this node ANNOUNCED (sent) or
 	// INSTALLED (received) a stamped session this peer incarnation (#9752
 	// round 5 item 1). While set, a mirror-sourced (0,0) with NO memo
@@ -1152,9 +1156,14 @@ type SessionSync struct {
 	// latch below it: that one must never clear (warn-once), this one is
 	// consumed by the re-arm. Same incarnation scoping.
 	installTableSuppressDebt atomic.Bool
-	lastNewCounter           uint64
-	lastClosedCounter        uint64
-	lastSweepEmpty           bool
+	// ipsecDiscriminatorSuppressDebt records that the peer's S9.4 capability
+	// was unknown or absent when an IPsec-tagged session was withheld. A
+	// capable discovery transfers this debt into a cold-prime re-arm; the
+	// authoritative bulk then heals every withheld session at once.
+	ipsecDiscriminatorSuppressDebt atomic.Bool
+	lastNewCounter                 uint64
+	lastClosedCounter              uint64
+	lastSweepEmpty                 bool
 	// testSweepNow overrides the monotonic-seconds reading the sweep
 	// watermarks against (nil = live clock). Test-only; production never
 	// sets it. Per-instance (not a package hook) so parallel tests cannot

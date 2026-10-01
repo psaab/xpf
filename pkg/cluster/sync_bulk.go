@@ -323,6 +323,15 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 			return errBulkFencedForPeer
 		}
 	}
+	// S9.4 has a distinct fence: install-table support does not imply that
+	// an older peer can preserve IPsec if_id identity.
+	if s.bulkFencedForIpsecPeer.Load() {
+		if s.peerCapabilitiesLearned() && s.IpsecTunnelDiscriminatorCapable() {
+			s.bulkFencedForIpsecPeer.Store(false)
+		} else {
+			return errBulkFencedForPeer
+		}
+	}
 
 	conn := s.getActiveConn()
 	if conn == nil {
@@ -399,6 +408,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	slog.Info("cluster sync: bulk sync iterating v4", "epoch", epoch, "source", walk.source)
 	// Send owned v4 forward sessions.
 	fenced := false
+	fencedByIpsec := false
 	err = walk.forEachV4(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		announced := s.installTableAnnouncedV4(key)
 		if !walk.stampedAtDecision {
@@ -411,6 +421,11 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		// it. Partial upserts already written are idempotent and safe.
 		if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "bulk_v4") {
 			fenced = true
+			return false
+		}
+		if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+			fenced = true
+			fencedByIpsec = true
 			return false
 		}
 		// #9752 round 5 item 1: on a mirror-sourced walk, an unstamped
@@ -442,7 +457,11 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		return true
 	})
 	if fenced {
-		s.bulkFencedForPeer.Store(true)
+		if fencedByIpsec {
+			s.bulkFencedForIpsecPeer.Store(true)
+		} else {
+			s.bulkFencedForPeer.Store(true)
+		}
 		s.clearPendingBulkAck()
 		return fmt.Errorf("bulk sync v4: %w", errBulkFencedForPeer)
 	}
@@ -459,6 +478,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	// Send owned v6 forward sessions.
 	slog.Info("cluster sync: bulk sync iterating v6", "epoch", epoch, "source", walk.source, "sessions", count, "skipped", walk.skipped)
 	fenced = false
+	fencedByIpsec = false
 	err = walk.forEachV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 		announced := s.installTableAnnouncedV6(key)
 		if !walk.stampedAtDecision {
@@ -467,6 +487,11 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		// #9752 round 4: v6 twin of the bulk fence above — refusal aborts.
 		if s.suppressStampedInstallForIncapablePeer(val.InstallTableDomain, val.InstallTableCheck, "bulk_v6") {
 			fenced = true
+			return false
+		}
+		if s.suppressIpsecDiscriminatorInstallForIncapablePeer(val.TunnelDiscriminator) {
+			fenced = true
+			fencedByIpsec = true
 			return false
 		}
 		// #9752 round 5 item 1: v6 twin of the unannounced rule above.
@@ -491,7 +516,11 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		return true
 	})
 	if fenced {
-		s.bulkFencedForPeer.Store(true)
+		if fencedByIpsec {
+			s.bulkFencedForIpsecPeer.Store(true)
+		} else {
+			s.bulkFencedForPeer.Store(true)
+		}
 		s.clearPendingBulkAck()
 		return fmt.Errorf("bulk sync v6: %w", errBulkFencedForPeer)
 	}

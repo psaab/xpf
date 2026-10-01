@@ -12,6 +12,8 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
+// Pre-fix base 9eb577985 returned the injected status-map error without saying
+// the new generation was already enforced, and left LastApplyResult behind.
 func TestPublishedTailFailureReturnsAndRecordsEnforcedApply11080(t *testing.T) {
 	cfg := &config.Config{}
 	ucfg := deriveUserspaceConfig(cfg)
@@ -92,6 +94,8 @@ func TestPublishedTailFailureReturnsAndRecordsEnforcedApply11080(t *testing.T) {
 	}
 }
 
+// Pre-fix base 9eb577985 ran the shim hook before this snapshot collision was
+// discovered; the hook is the observable stand-in for host-mutating Phase 2.
 func TestSnapshotValidationPrecedesShimMutation11080(t *testing.T) {
 	defer forceAddressBookCollision(t)()
 
@@ -114,6 +118,9 @@ func TestSnapshotValidationPrecedesShimMutation11080(t *testing.T) {
 		t.Fatal("snapshot validation rejected the config only after the shim compile had mutated the host")
 	}
 }
+
+// Pre-fix base 9eb577985 detected this protocol mismatch only after the shim
+// hook had run, although it still disarmed the incompatible helper.
 func TestRequiredProtocolGatePrecedesShimMutation11080(t *testing.T) {
 	dir, err := os.MkdirTemp("", "x11080")
 	if err != nil {
