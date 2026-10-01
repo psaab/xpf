@@ -179,11 +179,11 @@ func TestRibGroupRulesApply_Fake(t *testing.T) {
 	ribGroups := map[string]*config.RibGroup{
 		"dmz-leak": {
 			Name:       "dmz-leak",
-			ImportRibs: []string{"dmz-vr.inet.0", "inet.0"},
+			ImportRibs: []string{"dmz-vr.inet.0", "dmz-vr.inet6.0", "inet.0", "inet6.0"},
 		},
 		"peer-leak": {
 			Name:       "peer-leak",
-			ImportRibs: []string{"peer-vr.inet.0", "inet.0"},
+			ImportRibs: []string{"peer-vr.inet.0", "peer-vr.inet6.0", "inet.0", "inet6.0"},
 		},
 		"self-only": {
 			Name:       "self-only",
@@ -382,10 +382,12 @@ func TestRibGroupRulesApply_DefinedRibStillLeaks(t *testing.T) {
 	ribGroups := map[string]*config.RibGroup{
 		"dmz-leak": {
 			Name: "dmz-leak",
-			// dmz-vr.inet.0 (self, table 101), tunnel-vr.inet.0 (defined,
-			// table 100), inet.0 (main, 254). The defined non-self ribs
-			// must drive the leak.
-			ImportRibs: []string{"dmz-vr.inet.0", "tunnel-vr.inet.0", "inet.0"},
+			// The group has both family-specific imports; the v4 and v6
+			// slots must only match their corresponding main RIB.
+			ImportRibs: []string{
+				"dmz-vr.inet.0", "tunnel-vr.inet.0", "inet.0",
+				"dmz-vr.inet6.0", "tunnel-vr.inet6.0", "inet6.0",
+			},
 		},
 	}
 	instances := []*config.RoutingInstanceConfig{
@@ -401,9 +403,8 @@ func TestRibGroupRulesApply_DefinedRibStillLeaks(t *testing.T) {
 	if err := rg.Apply(ribGroups, instances, connected); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	// The rib-group imports main (inet.0), so the per-prefix leak fires even
-	// though it ALSO names a VRF→VRF target (tunnel-vr.inet.0) that Phase 1
-	// does not install.
+	// The rib-group imports each family-specific main RIB, so the matching
+	// v4 and v6 slots leak even though VRF-to-VRF imports remain Phase 2.
 	if _, ok := ops.findDstRule(unix.AF_INET, 101, "10.0.30.0/24"); !ok {
 		t.Errorf("defined import-rib must still leak table 101 (IPv4), rules=%v", ops.rules[unix.AF_INET])
 	}
@@ -424,7 +425,7 @@ func TestRibGroupRulesApply_DefinedRibStillLeaks(t *testing.T) {
 // makes every subtest go RED (Apply returns nil).
 func TestRibGroupApplyAggregatesAddErrors(t *testing.T) {
 	ribGroups := map[string]*config.RibGroup{
-		"dmz-leak": {Name: "dmz-leak", ImportRibs: []string{"inet.0"}}, // imports main
+		"dmz-leak": {Name: "dmz-leak", ImportRibs: []string{"inet.0", "inet6.0"}},
 	}
 	instances := []*config.RoutingInstanceConfig{
 		{Name: "dmz-vr", TableID: 101,

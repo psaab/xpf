@@ -640,8 +640,8 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 		// only to non-main tables (VRF→VRF) installs nothing here and is
 		// warned at commit (Phase 2 deferral). Family gating: the v4
 		// rib-group leaks v4 connected prefixes, the v6 rib-group leaks v6.
-		leakV4 := ribGroupLeaksIntoMain(inst.InterfaceRoutesRibGroup, ribGroups, tableIDs, inst.Name)
-		leakV6 := ribGroupLeaksIntoMain(inst.InterfaceRoutesRibGroupV6, ribGroups, tableIDs, inst.Name)
+		leakV4 := ribGroupLeaksIntoMain(inst.InterfaceRoutesRibGroup, ribGroups, tableIDs, inst.Name, unix.AF_INET)
+		leakV6 := ribGroupLeaksIntoMain(inst.InterfaceRoutesRibGroupV6, ribGroups, tableIDs, inst.Name, unix.AF_INET6)
 		if !leakV4 && !leakV6 {
 			continue
 		}
@@ -757,7 +757,7 @@ func ribGroupPeerReturnPrefixes(
 			{unix.AF_INET6, peer.InterfaceRoutesRibGroupV6, len(installed[unix.AF_INET6]) > 0},
 		}
 		for _, candidate := range families {
-			if !candidate.enabled || !ribGroupLeaksIntoMain(candidate.group, ribGroups, tableIDs, peer.Name) {
+			if !candidate.enabled || !ribGroupLeaksIntoMain(candidate.group, ribGroups, tableIDs, peer.Name, candidate.family) {
 				continue
 			}
 			for _, raw := range connectedPrefixes[peer.Name] {
@@ -785,12 +785,12 @@ func ribGroupPeerReturnPrefixes(
 }
 
 // ribGroupLeaksIntoMain reports whether the named interface-routes rib-group
-// imports the main table — the #3876 Phase-1 target for per-prefix connected-
-// route leaking. It returns false for an empty name, an undefined group, or a
-// group whose import-ribs resolve only to non-main tables (a VRF→VRF import,
-// deferred to Phase 2 and warned at commit). Unresolvable import-ribs are
+// imports the main RIB for family — the #3876 Phase-1 target for per-prefix
+// connected-route leaking. It returns false for an empty name, an undefined
+// group, a group whose import-ribs resolve only to non-main tables, or main
+// RIBs belonging to the opposite address family. Unresolvable import-ribs are
 // skipped (never treated as a main-table hit) — the #2226 fail-closed guard.
-func ribGroupLeaksIntoMain(rgName string, ribGroups map[string]*config.RibGroup, tableIDs map[string]int, instName string) bool {
+func ribGroupLeaksIntoMain(rgName string, ribGroups map[string]*config.RibGroup, tableIDs map[string]int, instName string, family int) bool {
 	if rgName == "" {
 		return false
 	}
@@ -801,10 +801,14 @@ func ribGroupLeaksIntoMain(rgName string, ribGroups map[string]*config.RibGroup,
 		return false
 	}
 	for _, ribName := range rgDef.ImportRibs {
-		targetTable, ok := resolveRibTable(ribName, tableIDs)
+		targetTable, ok := resolveRibTable(ribName, tableIDs, family)
 		if !ok {
-			slog.Warn("rib-group import-rib references unknown rib; skipping (not leaking)",
-				"instance", instName, "rib-group", rgName, "import-rib", ribName)
+			// A valid main RIB for the sibling family is not unknown; it just
+			// cannot enable this family's leak.
+			if ribName != "inet.0" && ribName != "inet6.0" {
+				slog.Warn("rib-group import-rib references unknown rib; skipping (not leaking)",
+					"instance", instName, "rib-group", rgName, "import-rib", ribName)
+			}
 			continue
 		}
 		if targetTable == mainTableID {
@@ -2193,24 +2197,29 @@ func dscpValue(dscp string) (uint8, bool) {
 	return 0, false
 }
 
-// resolveRibTable maps a Junos rib name to its kernel routing table ID.
-// "<instance>.inet.0" or "<instance>.inet6.0" maps to the instance's table.
+// resolveRibTable maps a Junos rib name to its Linux routing-table ID. The
+// family argument distinguishes inet.0 from inet6.0 although both map to
+// mainTableID; named instance ribs share a Linux table ID across families.
 //
-// The boolean return distinguishes "resolved to a real table" (ok=true)
-// from "unresolvable rib name" (ok=false) — a name that is neither
-// inet.0/inet6.0 nor "<known-instance>.inet[6].0". Callers MUST treat
-// ok=false as "unknown rib": never fall back to table 0 (#2226). Before
-// this split the unresolvable case returned a bare 0, which the Apply
-// needsLeak loop read as a real (non-source) table and spuriously
-// installed an `ip rule from all lookup <sourceTable>` for a typo'd /
-// non-existent import-rib — a silent mis-leak of the source table into
-// the main lookup. Commit-time validation
-// (validateRibGroupImportRibReferencesStrict) now also rejects the
-// dangling reference; this guard is defense in depth for any reference
-// that reaches apply via the tolerant load / peer-sync path.
-func resolveRibTable(ribName string, tableIDs map[string]int) (int, bool) {
-	if ribName == "inet.0" || ribName == "inet6.0" {
-		return mainTableID, true // main table
+// The boolean return distinguishes a resolvable import from an unknown rib or
+// a valid main RIB belonging to the opposite family. Callers MUST treat
+// ok=false as a no-match; it never represents table 0 (#2226). Before this
+// split, the unknown case returned a bare 0, which Apply's needsLeak loop read
+// as a real (non-source) target and spuriously installed a lookup rule for a
+// typo'd/non-existent rib. Commit-time validation also rejects that dangling
+// reference, but this guard protects tolerant-load/peer-sync configs.
+func resolveRibTable(ribName string, tableIDs map[string]int, family int) (int, bool) {
+	switch ribName {
+	case "inet.0":
+		if family == unix.AF_INET {
+			return mainTableID, true
+		}
+		return 0, false
+	case "inet6.0":
+		if family == unix.AF_INET6 {
+			return mainTableID, true
+		}
+		return 0, false
 	}
 	// Parse "<instance>.inet.0" or "<instance>.inet6.0" with an EXACT family
 	// suffix — a loose ".inet" substring match would accept malformed names
