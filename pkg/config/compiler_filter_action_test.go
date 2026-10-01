@@ -334,3 +334,66 @@ func TestFilterAction_HierarchicalNestedRejectTailPreservesCount11355(t *testing
 			term.Action, term.RejectMessageType, term.Count)
 	}
 }
+// #11355: reject reason leaves are flags, not value lists. Extra values must
+// reach the existing strict/tolerant unknown-action gate in every authored
+// shape rather than disappearing only in flat-set brackets.
+func TestFilterAction_RejectFlagExtraValuesGuardedAcrossSpellings11355(t *testing.T) {
+	hier := func(t *testing.T, tail string) *ConfigTree {
+		t.Helper()
+		return hierTree(t, `firewall { family inet { filter f1 { term t1 { from { protocol tcp; } then { ` +
+			tail + ` } } } } }`)
+	}
+	flat := func(t *testing.T, commands ...string) *ConfigTree {
+		t.Helper()
+		return flatTreeFromSets(t, commands...)
+	}
+	type spelling struct {
+		name  string
+		build func(*testing.T) *ConfigTree
+	}
+	spellings := []spelling{
+		{name: "hierarchical-bracket", build: func(t *testing.T) *ConfigTree {
+			return hier(t, `reject tcp-reset [ extra-one extra-two ];`)
+		}},
+		{name: "hierarchical-block", build: func(t *testing.T) *ConfigTree {
+			return hier(t, `reject { tcp-reset { extra-one; extra-two; } }`)
+		}},
+		{name: "hierarchical-repeat", build: func(t *testing.T) *ConfigTree {
+			return hier(t, `reject tcp-reset extra-one; reject tcp-reset extra-two;`)
+		}},
+		{name: "set-bracket", build: func(t *testing.T) *ConfigTree {
+			return flat(t, filterWithThen("reject tcp-reset [ extra-one extra-two ]")...)
+		}},
+		{name: "set-repeat", build: func(t *testing.T) *ConfigTree {
+			commands := filterWithThen("reject tcp-reset extra-one")
+			commands = append(commands, "set firewall family inet filter f1 term t1 then reject tcp-reset extra-two")
+			return flat(t, commands...)
+		}},
+		{name: "hierarchical-mixed", build: func(t *testing.T) *ConfigTree {
+			return hier(t, `reject tcp-reset extra-one { extra-two; }`)
+		}},
+	}
+	for _, form := range spellings {
+		t.Run(form.name, func(t *testing.T) {
+			tree := form.build(t)
+			_, err := CompileConfig(tree)
+			if err == nil || (!strings.Contains(err.Error(), "extra-one") &&
+				!strings.Contains(err.Error(), "extra-two")) {
+				t.Fatalf("strict compile must reject the extra values with a named diagnostic, got %v", err)
+			}
+			cfg, err := CompileConfigLenient(form.build(t))
+			if err != nil {
+				t.Fatalf("tolerant compile must preserve boot availability: %v", err)
+			}
+			if term := cfg.Firewall.FiltersInet["f1"].Terms[0]; term.RejectMessageType != "tcp-reset" {
+				t.Fatalf("reject reason flag changed to %q", term.RejectMessageType)
+			}
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "extra-one") || strings.Contains(warning, "extra-two") {
+					return
+				}
+			}
+			t.Fatalf("tolerant compile did not warn about the extra values: %v", cfg.Warnings)
+		})
+	}
+}

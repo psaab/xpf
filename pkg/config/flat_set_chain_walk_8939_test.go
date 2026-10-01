@@ -477,6 +477,32 @@ func flatSetCompile(lines []string) (*Config, error) {
 	}
 	return CompileConfig(tr)
 }
+func flatSetCompileLenient(lines []string) (*Config, error) {
+	tr := &ConfigTree{}
+	for _, l := range lines {
+		toks, err := ParseSetCommand(l)
+		if err != nil {
+			return nil, err
+		}
+		if err := tr.SetPath(toks); err != nil {
+			return nil, err
+		}
+	}
+	return CompileConfigLenient(tr)
+}
+
+func isRejectedRejectFlagChain(cont []string, leaves []flatSetLeaf) bool {
+	if strings.Join(cont, " ") != "firewall filter arg1 term arg1 then reject" ||
+		len(leaves) < 2 || len(leaves) > 3 {
+		return false
+	}
+	for _, leaf := range leaves {
+		if !rejectMessageTypes[leaf.name] {
+			return false
+		}
+	}
+	return true
+}
 
 // TestFlatSetChainWalkRatchet8939 is the ratchet. It also carries the two
 // controls that make its numbers mean anything.
@@ -525,6 +551,7 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	// ---- the census -------------------------------------------------------
 	empty, _ := flatSetCompile(nil)
 	var losers []string
+	var preRejected []string
 	var walked, vacuous, unmeasured int
 	for _, p := range flatSetChainPairs() {
 		cont, leaves := p.container, p.leaves
@@ -565,6 +592,36 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 		packed, ep := flatSetCompile(packedLines)
 		split, es := flatSetCompile(splitLines)
 		if ep != nil || es != nil || packed == nil || split == nil {
+			if isRejectedRejectFlagChain(cont, leaves) {
+				if ep == nil || es != nil || packed != nil || split == nil ||
+					!strings.Contains(ep.Error(), leaves[1].name) {
+					t.Fatalf("reject flag chain %q must be rejected only in packed form with its first extra flag named; packed=%v split=%v",
+						strings.Join(cont, " "), ep, es)
+				}
+				lenient, err := flatSetCompileLenient(packedLines)
+				if err != nil {
+					t.Fatalf("reject flag chain %q must remain bootable in tolerant compilation: %v",
+						strings.Join(cont, " "), err)
+				}
+				warned := false
+				for _, warning := range lenient.Warnings {
+					if strings.Contains(warning, leaves[1].name) {
+						warned = true
+						break
+					}
+				}
+				if !warned {
+					t.Fatalf("reject flag chain %q lacks a tolerant warning for %q: %v",
+						strings.Join(cont, " "), leaves[1].name, lenient.Warnings)
+				}
+				names := make([]string, 0, len(leaves))
+				for _, leaf := range leaves {
+					names = append(names, leaf.name)
+				}
+				preRejected = append(preRejected, strings.Join(cont, " ")+"  ["+
+					strings.Join(names, " | ")+"]  strict-rejected by #11355, tolerant-warned")
+				continue
+			}
 			unmeasured++
 			continue
 		}
@@ -630,6 +687,11 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 			strings.Join(names, " | ")+"]  "+kind+"  "+channel)
 	}
 	sort.Strings(losers)
+	sort.Strings(preRejected)
+	if len(preRejected) != 2 {
+		t.Errorf("#11355 pre-rejection census found %d reject-flag chains, want exactly 2: %v",
+			len(preRejected), preRejected)
+	}
 
 	// #10327's four newly modeled compiler-read leaves add one reachable
 	// container to the combined-tree population: the #10078 baseline
@@ -651,13 +713,14 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	// THE COUNTS ARE PART OF THE FIXTURE, and that is a mutation result, not a
 	// flourish. With only the loser set recorded, deleting the observability
 	// vacuity control above passes: removing it moves rows between `vacuous`
-	got := fmt.Sprintf("# counts: losers=%d walked=%d vacuous=%d unmeasured=%d\n"+
+	got := fmt.Sprintf("# counts: losers=%d walked=%d vacuous=%d unmeasured=%d pre-rejected=%d\n"+
 		"# collector reach: %d containers walked, %d reached the census "+
 		"(%d dropped: no eligible leaf, %d dropped: only one)\n",
-		len(losers), walked, vacuous, unmeasured,
+		len(losers), walked, vacuous, unmeasured, len(preRejected),
 		flatSetReach.visited, flatSetReach.reached,
 		flatSetReach.zeroLeaf, flatSetReach.oneLeaf) +
-		strings.Join(losers, "\n") + "\n"
+		strings.Join(losers, "\n") + "\n# pre-rejected #11355 strict-error/tolerant-warning:\n" +
+		strings.Join(preRejected, "\n") + "\n"
 	if os.Getenv("UPDATE_8939") != "" {
 		if err := os.WriteFile(flatSetChainFixture, []byte(got), 0o644); err != nil {
 			t.Fatal(err)
