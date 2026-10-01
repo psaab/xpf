@@ -58,19 +58,22 @@ func (c *xpfCollector) initForwardingDescriptors() {
 			"readback fails — compare against xpf_pbr_rules_desired (#7422).",
 		nil, nil,
 	)
-	// #4422: number of routing-instance filter terms DROPPED from the kernel
-	// FBF mirror (fail-closed under-steer to the main table) — an
-	// unrepresentable except set, a DSCP-0 match, a contradictory
+	// #4422/#11307: number of routing-instance filter terms DROPPED from the
+	// kernel FBF mirror (fail-closed under-steer to the main table) — an
+	// unrepresentable except set or DSCP-0 match, a contradictory
 	// routing-instance+discard/reject term (#4534), an ip-rule-unrepresentable
-	// L4/per-packet predicate (#3730), or the priority-window overflow (#3430
-	// M3). Non-zero means the kernel slow path under-steers vs the userspace
-	// fast path (which still enforces every term exactly). There is no
-	// "widened" state — the builder refuses to widen an unrepresentable match.
+	// L4/per-packet predicate (#3730), an undefined routing-instance target or
+	// unconstrained routing-instance term (#11307), a loopback attachment
+	// (#9810), or the priority-window overflow (#3430 M3). Non-zero means the
+	// kernel slow path under-steers vs the userspace fast path (which still
+	// enforces every term exactly). There is no "widened" state — the builder
+	// refuses to widen an unrepresentable match.
 	c.pbrDegradedTerms = prometheus.NewDesc(
 		"xpf_pbr_degraded_terms",
 		"Number of routing-instance filter terms dropped from the kernel "+
-			"filter-based-forwarding mirror (fail-closed under-steer), because "+
-			"the term carries a predicate an ip rule cannot express (#4422).",
+			"filter-based-forwarding mirror by fail-closed handling of "+
+			"unrepresentable predicates, unconstrained terms, or undefined "+
+			"routing instances (#4422, #11307).",
 		nil, nil,
 	)
 	c.tcEgressPacketsTotal = prometheus.NewDesc(
