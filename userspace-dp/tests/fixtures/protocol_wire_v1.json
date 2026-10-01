@@ -1493,11 +1493,29 @@
     "destination": "",
     "discard": false,
     "family": "",
+    "next_hop_weights": [],
     "next_hops": [],
     "next_table": "",
     "preference": 0,
     "rule_priority": 0,
     "table": ""
+  },
+  "route_snapshot_weighted": {
+    "destination": "203.0.113.0/24",
+    "discard": false,
+    "family": "inet",
+    "next_hop_weights": [
+      1,
+      4
+    ],
+    "next_hops": [
+      "192.0.2.1",
+      "192.0.2.2"
+    ],
+    "next_table": "",
+    "preference": 0,
+    "rule_priority": 0,
+    "table": "inet.0"
   },
   "screen_missing_profile_ref": {
     "alarm_without_drop": false,
