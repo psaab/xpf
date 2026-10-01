@@ -217,6 +217,7 @@ func TestClosingTheInstanceDoesNotCloseWhatItContains9323(t *testing.T) {
 			// spelling compiles — a separate defect this cell found, tracked as
 			// #9351. Using the working spelling keeps this cell about the #9323
 			// gate instead of quietly becoming a second cell for that one.
+			"set routing-options autonomous-system 65000",
 			"set routing-instances VRF-A protocols bgp group g1 peer-as 65001",
 			"set routing-instances VRF-A protocols bgp group g1 neighbor 10.0.0.1"}},
 		{"isis-interface", []string{
