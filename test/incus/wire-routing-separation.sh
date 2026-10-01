@@ -6,10 +6,12 @@
 # from the LAN host through its existing main-table VLAN-80 path. It then
 # creates an EMPTY RI and adds an exact-match input FBF term steering the probe
 # tuple into it. The clean leg therefore reaches the userspace route miss and
-# is denied. The broken leg inserts a temporary exact explicit `accept` term
-# ahead of that FBF term, at the actual userspace enforcement point, so the
-# same owned ingress follows main's already-proven VLAN-80 route and is visible
-# at the managed peer.
+# is denied. `WIRE_BROKEN_FIXTURE=1` inserts a temporary exact explicit
+# `accept` term ahead of the FBF steer at the userspace enforcement point, so
+# the same owned ingress follows main's already-proven VLAN-80 route and is
+# visible at the managed peer. This proves capture/verdict liveness for a
+# pre-steer bypass; it does not exercise fallthrough after an empty selected-VRF
+# lookup.
 # Both bursts run under one peer-side tcpdump window; successful sender
 # sendto calls are the offered-frame count. Sender and capture mirror
 # wire-conntrack-lifecycle: LAN host (cluster-userspace-host) offers, target
@@ -146,7 +148,7 @@ if [[ "$MODE" == selftest ]]; then
         fail=$((fail + 1))
     fi
     cell "clean VRF miss passes" PASS 0 1000 0 1500 1500 0
-    cell "fault-injected miss leaks and fails" FAIL 1 1000 1 1500 1500 0
+    cell "observed probe leak fails" FAIL 1 1000 1 1500 1500 0
     cell "missing near-miss capture is VOID" VOID 2 1000 0 1500 999 0
     cell "short successful ingress burst is VOID" VOID 2 999 0 1500 1500 0
     cell "leak survives an under-sampled probe offer" FAIL 1 999 1 1000 1000 0
@@ -154,17 +156,17 @@ if [[ "$MODE" == selftest ]]; then
     cell "malformed count is VOID" VOID 2 x 0 1500 1500 0
 
     # RED→GREEN proof through the fixture parser/emitter, not just a direct
-    # reducer call: the fault transcript must fail and the baseline pass.
+    # reducer call: the leak transcript must fail and the clean baseline pass.
     good=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-good.XXXXXX")
     bad=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-bad.XXXXXX")
     printf '%s\n' 'probe_offered=1000 probe_leaked=0 control_offered=1500 control_observed=1500 cksum_bad=0' >"$good"
     printf '%s\n' 'probe_offered=1000 probe_leaked=1 control_offered=1500 control_observed=1500 cksum_bad=0' >"$bad"
     out=$("$0" --fixture "$bad"); rc=$?
     if [[ "$rc" == 1 && "$out" == *'WIRE_GATE wire_routing_separation FAIL reason=--'* ]]; then
-        echo "  PASS  broken fixture fails"
+        echo "  PASS  leaked-probe transcript fails"
         pass=$((pass + 1))
     else
-        echo "  FAIL  broken fixture did not fail (rc=$rc out=$out)"
+        echo "  FAIL  leaked-probe transcript did not fail (rc=$rc out=$out)"
         fail=$((fail + 1))
     fi
     out=$("$0" --fixture "$good"); rc=$?
