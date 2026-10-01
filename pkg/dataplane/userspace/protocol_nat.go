@@ -293,11 +293,11 @@ type DestinationNATRuleSnapshot struct {
 	MatchSourcePorts []NatPortRangeWire `json:"match_source_ports,omitempty"`
 	// MatchICMPType / MatchICMPCode carry the ICMP/ICMPv6 type[,code]
 	// constraint of the DNAT rule's `match application <app>` term (#3437,
-	// H11). An ICMP application pins a single message type (e.g. junos-ping =
-	// ICMP echo-request, type 8) and optionally a code; the pre-#3437 builder
-	// reduced the app to protocol + (absent) destination-port only, so a
-	// `match application junos-ping` DNAT rule translated EVERY ICMP type
-	// (errors, replies, non-echo) to the VIP — regressing the #3020 / #3194
+	// H11). An ICMP application can pin a single message type (for example,
+	// junos-icmp-ping = ICMP echo-request, type 8) and optionally a code; the
+	// pre-#3437 builder reduced the app to protocol + (absent) destination-port
+	// only, so a `match application junos-icmp-ping` DNAT rule translated EVERY
+	// ICMP type (errors, replies, non-echo) to the VIP — regressing the #3020 /
 	// ICMP type/code parity already enforced on the policy path. nil = no ICMP
 	// type/code constraint (match every type/code of the protocol, the
 	// historical behavior the all-ICMP aliases keep). When MatchICMPType is

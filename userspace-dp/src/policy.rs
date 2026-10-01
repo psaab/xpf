@@ -1133,9 +1133,10 @@ pub(crate) struct ApplicationMatch {
     pub(crate) source_ports: Vec<PortRange>,
     pub(crate) destination_ports: Vec<PortRange>,
     /// #3020: optional ICMP/ICMPv6 type constraint. `Some(t)` restricts the
-    /// term to ICMP messages of type `t` (e.g. junos-ping = type 8); `None`
-    /// leaves the term unconstrained on type (the all-ICMP aliases). Only
-    /// meaningful when `protocol` is ICMP/ICMPv6; ignored for TCP/UDP terms.
+    /// term to ICMP messages of type `t` (e.g. junos-icmp-ping = type 8); `None`
+    /// leaves the term unconstrained on type (including protocol-only
+    /// junos-ping/junos-pingv6, #11340). Only meaningful when `protocol` is
+    /// ICMP/ICMPv6; ignored for TCP/UDP terms.
     pub(crate) icmp_type: Option<u8>,
     /// #3020: optional ICMP/ICMPv6 code constraint, paired with `icmp_type`.
     /// `None` matches any code of the constrained type.
@@ -1175,13 +1176,13 @@ struct ProtoTerms {
     /// matching entry in the vector is the lowest-order matching range.
     range_terms: Vec<(u32, Vec<PortRange>, Vec<PortRange>, Option<u32>)>, // (order, src, dst, timeout)
     /// #3020: ICMP/ICMPv6 type[,code] constraints for icmp-constrained terms
-    /// (e.g. junos-ping = type 8). #3346: each entry is `(config-order index,
-    /// type, optional code, inactivity timeout)`. A packet matches this protocol
-    /// via the icmp path iff its type (and code, when the entry constrains it)
-    /// equals one of these entries. An UNCONSTRAINED ICMP term (junos-icmp-all)
-    /// does NOT land here — it stays a `range_terms` entry with empty ranges,
-    /// which matches every ICMP packet, so a rule citing both still matches all
-    /// ICMP. Pushed in config order. #3227 added the timeout.
+    /// (e.g. junos-icmp-ping = type 8). #3346: each entry is `(config-order
+    /// index, type, optional code, inactivity timeout)`. A packet matches this
+    /// protocol via the icmp path iff its type (and code, when constrained)
+    /// equals one of these entries. An UNCONSTRAINED ICMP term (`junos-ping`,
+    /// `junos-icmp-all`) does NOT land here — it stays a `range_terms` entry
+    /// with empty ranges, which matches every ICMP packet. Pushed in config
+    /// order. #3227 added the timeout.
     icmp_constraints: Vec<(u32, u8, Option<u8>, Option<u32>)>, // (order, type, code, timeout)
 }
 
@@ -1202,13 +1203,13 @@ impl CompiledApplications {
         // that relative order is preserved by a single monotonic counter.
         for (order, app) in (0u32..).zip(apps.iter()) {
             let entry = by_protocol.entry(app.protocol).or_default();
-            // #3020: an ICMP/ICMPv6 term with a type constraint (junos-ping)
-            // is steered to `icmp_constraints` so it matches ONLY that type
-            // (and code, when set) instead of every ICMP message. A term with
-            // NO icmp_type constraint falls through to the existing port path —
-            // an unconstrained ICMP term (junos-icmp-all) has empty ports and
-            // lands as a `range_terms` entry with empty ranges (match-all), so a
-            // rule citing both junos-ping AND junos-icmp-all still matches all
+            // #3020: an ICMP/ICMPv6 term with a type constraint (e.g.
+            // junos-icmp-ping) is steered to `icmp_constraints` so it matches
+            // ONLY that type (and code, when set) instead of every ICMP
+            // message. A term with NO icmp_type constraint falls through to
+            // the existing port path — protocol-only junos-ping and
+            // junos-icmp-all have empty ports and land as `range_terms` entries
+            // with empty ranges (match-all), so citing either also matches all
             // ICMP. (ICMP terms never carry ports in practice; the type
             // constraint takes precedence so a stray port is irrelevant here.)
             if app.icmp_type.is_some() {
@@ -1249,11 +1250,11 @@ impl CompiledApplications {
     /// #3020: `packet_icmp` carries the packet's ICMP/ICMPv6 `(type, code)` when
     /// the protocol is ICMP-family AND the bytes were safely readable (not a
     /// truncated frame or non-first fragment); `None` otherwise. It gates the
-    /// icmp-type-constrained terms (junos-ping): a constrained term matches only
-    /// when the type/code is known and equal, so an unknown type/code (or a
-    /// non-ICMP packet) fails closed for those terms. Port/range terms are
-    /// unaffected, so non-ICMP applications and the all-ICMP aliases behave
-    /// exactly as before.
+    /// icmp-type-constrained terms (for example, junos-icmp-ping): a constrained
+    /// term matches only when the type/code is known and equal, so an unknown
+    /// type/code (or a non-ICMP packet) fails closed for those terms. Port/range
+    /// terms are unaffected, so non-ICMP applications and protocol-only
+    /// junos-ping behave exactly as before.
     ///
     /// #3227: the return type carries the matched term's per-application
     /// inactivity timeout so the install path can stamp it on the session:
@@ -1332,8 +1333,8 @@ impl CompiledApplications {
                 best = Some((order, timeout));
             }
         }
-        // #3020: ICMP/ICMPv6 type[,code]-constrained terms (junos-ping). Match
-        // only when the packet's type/code is known and equals a constraint.
+        // #3020: ICMP/ICMPv6 type[,code]-constrained terms (e.g. junos-icmp-ping).
+        // Match only when the packet's type/code is known and equals a constraint.
         // When `packet_icmp` is None (non-ICMP packet, truncated frame, or
         // non-first fragment) the constrained term does NOT match — fail closed.
         if !terms.icmp_constraints.is_empty() {
@@ -1384,8 +1385,8 @@ impl CompiledApplications {
     /// known ICMP type already misses — genuinely does not apply and lets the
     /// fragment proceed.
     /// #8618: does this app set carry an ICMP/ICMPv6 TYPE-constrained term for
-    /// `protocol` — i.e. a junos-ping-style term (#3020) whose match depends on
-    /// the PACKET's icmp type/code rather than on the flow's 5-tuple?
+    /// `protocol` — i.e. a term whose match depends on the PACKET's icmp
+    /// type/code rather than on the flow's 5-tuple (#3020)?
     ///
     /// This is deliberately NARROWER than `has_l4_constrained_term`, which also
     /// answers true for port-bearing terms. The question here is specifically
@@ -1822,11 +1823,10 @@ impl PolicyState {
     /// the PACKET's icmp type/code, rather than on the flow alone?
     ///
     /// True when some active PERMIT rule carries a type-constrained term
-    /// (junos-ping, #3020). A type-blind evaluation — `packet_icmp = None`,
-    /// which is what every frame-independent caller supplies — cannot match such
-    /// a term, so a DENY it returns may be an artefact of the missing type
-    /// rather than the policy's real answer. A caller that acts on DENY must
-    /// decline when this is true.
+    /// (for example, junos-icmp-ping, #3020). A type-blind evaluation with
+    /// `packet_icmp = None`, as used by frame-independent callers, cannot match
+    /// such a term; a DENY may reflect the missing type rather than the policy's
+    /// real answer, so a caller acting on DENY must decline when this is true.
     ///
     /// False is the common case and the useful one. #9386 CORRECTS WHAT IT
     /// GUARANTEES, because the previous wording claimed VERDICT EQUIVALENCE and
@@ -3081,8 +3081,9 @@ pub(crate) fn evaluate_policy_with_len(
 
 /// Back-compat entry point with no ICMP type/code awareness (#3020): delegates
 /// to [`evaluate_policy_result_with_icmp`] with `packet_icmp = None`, so an
-/// icmp-type-constrained application term (junos-ping) does not match (fail
-/// closed) when the caller has no type/code. Non-ICMP flows are unaffected.
+/// icmp-type-constrained application term (for example, junos-icmp-ping) does
+/// not match (fail closed) when the caller has no type/code. Non-ICMP flows are
+/// unaffected.
 pub(crate) fn evaluate_policy_result_with_len(
     state: &PolicyState,
     from_id: u16,
@@ -3137,7 +3138,7 @@ impl PolicyHitCount {
 /// #3020: ICMP-aware policy evaluation. `packet_icmp` is the packet's
 /// ICMP/ICMPv6 `(type, code)` for ICMP-family flows whose L4 header was safely
 /// readable, else `None`. It gates the icmp-type-constrained application terms
-/// (junos-ping = echo-request only); non-ICMP flows pass `None` and are
+/// (for example, junos-icmp-ping); non-ICMP flows pass `None` and are
 /// unaffected. The forwarding path (poll_descriptor) calls this directly with
 /// the per-packet type/code; the back-compat `evaluate_policy_result_with_len`
 /// and the `evaluate_policy*` test/legacy wrappers pass `None`.

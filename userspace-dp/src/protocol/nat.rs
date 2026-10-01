@@ -299,7 +299,7 @@ pub(crate) struct DestinationNATRuleSnapshot {
     #[serde(rename = "match_destination_ports", default)]
     pub match_destination_ports: Vec<NatPortRangeWire>,
     /// #3437 (H11): the ICMP/ICMPv6 type[,code] constraint of the DNAT rule's
-    /// `match application` term (e.g. junos-ping = type 8). None = no ICMP
+    /// `match application` term (e.g. `junos-icmp-ping` = type 8). None = no ICMP
     /// type/code constraint (match every type/code of the protocol, the
     /// historical behavior). When `match_icmp_type` is Some the flow's ICMP
     /// type MUST equal it, and when `match_icmp_code` is also Some the code

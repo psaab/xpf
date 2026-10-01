@@ -4130,8 +4130,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // `policy_dst_port` collapse to the original dst when
                             // no inbound destination translation applies.
                             // #3020: extract the ICMP/ICMPv6 type/code so an
-                            // icmp-type-constrained application term (junos-ping
-                            // = echo-request only) is enforced. `None` for
+                            // icmp-type-constrained application term
+                            // (`junos-icmp-ping` = echo-request only) is enforced. `None` for
                             // non-ICMP flows and for ICMP frames whose L4 header
                             // is not safely readable (truncated / non-first
                             // fragment), so such terms fail closed.
@@ -7953,7 +7953,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // #3020: same ICMP type/code extraction as the
                                     // ForwardCandidate path so a denied/permitted
                                     // verdict for an icmp-type-constrained term
-                                    // (junos-ping) is identical whether or not the
+                                    // (`junos-icmp-ping`) is identical whether or not the
                                     // next-hop neighbor is already resolved.
                                     let policy_icmp = policy_packet_icmp(packet_frame, meta);
                                     let policy_result = evaluate_policy_result_with_icmp_at(

@@ -422,7 +422,11 @@ pub(crate) struct FlexMatchSnapshot {
     /// "layer-4" reach the wire. `default` + `skip_serializing_if` keep wire
     /// parity with an older control plane that omits the field (#1961) and keep
     /// the layer-3 specimen byte-identical (the protocol_wire_v1 fixture).
-    #[serde(rename = "match_start", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "match_start",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub match_start: String,
 }
 
@@ -647,8 +651,8 @@ pub(crate) struct PolicyApplicationSnapshot {
     pub destination_port: String,
     /// #3020: optional ICMP/ICMPv6 type (and code) constraint. `None` means
     /// "no constraint" — the term matches every type/code of its protocol (the
-    /// historical behavior, kept by the all-ICMP aliases). junos-ping sets
-    /// `icmp_type = Some(8)`, junos-pingv6 `Some(128)`. `#[serde(default)]`
+    /// historical behavior, kept by the all-ICMP aliases). `junos-icmp-ping` sets
+    /// `icmp_type = Some(8)`; `junos-ping` and `junos-pingv6` leave it unset
     /// makes an old Go snapshot that omits the field decode to `None` (match
     /// all ICMP — today's behavior), so version skew degrades safely rather
     /// than failing to decode. `skip_serializing_if = Option::is_none` keeps

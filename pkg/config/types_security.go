@@ -1624,10 +1624,9 @@ type Application struct {
 	ALG               string // "ssh", "ftp", etc. (informational)
 	Description       string
 	// ICMPType / ICMPCode constrain an ICMP/ICMPv6 application to a single
-	// message type (and optionally code), e.g. junos-ping = ICMP type 8
-	// (echo-request) and junos-pingv6 = ICMPv6 type 128. nil means "no
-	// constraint" — the application matches every type/code of its protocol
-	// (the historical behavior and what the all-ICMP aliases keep). #3020.
+	// message type (and optionally code), e.g. junos-icmp-ping = ICMP type 8
+	// (echo-request). nil means "no constraint" — the application matches every
+	// type/code of its protocol. #11340.
 	ICMPType *uint8
 	ICMPCode *uint8
 	// UnknownTimeouts records the raw `inactivity-timeout` / `timeout` tokens

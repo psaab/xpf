@@ -59,7 +59,7 @@
 //! that protocol alone. #8618 narrows the decline to the configs where it is
 //! actually earned: `packet_icmp` is read in exactly ONE place in policy
 //! evaluation — the `icmp_constraints` arm of `CompiledApplications::matches`
-//! (#3020, junos-ping) — and the gate arms when an active PERMIT rule carries a
+//! (#3020, `junos-icmp-ping`) — and the gate arms when an active PERMIT rule carries a
 //! type-constrained term.
 //!
 //! #9386: what the type-blind `None` guarantees within this frame-independent
@@ -80,7 +80,7 @@
 //! and revoke a flow the policy allows. That is strictly worse than the
 //! residual. The gating predicate
 //! (`PolicyState::icmp_verdict_may_depend_on_type`) is whole-snapshot and so
-//! deliberately conservative — one junos-ping permit anywhere declines ICMP
+//! deliberately conservative — one `junos-icmp-ping` permit anywhere declines ICMP
 //! box-wide, i.e. exactly #8356 — because a per-zone-pair answer would mean
 //! reproducing the five-tier applicability selection at a second site, and a
 //! tier missed there fails in the direction that revokes live flows.
@@ -430,7 +430,7 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     //
     // #8356 declined ICMP outright, and the reasoning was right as far as it
     // went: a zone policy can match on ICMP type/code via an application term
-    // (junos-ping, #3020), so where such a term exists an ICMP verdict is a
+    // (`junos-icmp-ping`, #3020), so where such a term exists an ICMP verdict is a
     // property of the PACKET, not of the flow. This derivation is deliberately
     // frame-independent and has no type to offer, so evaluating with `None`
     // would fail to match a type-specific PERMIT and manufacture a DENY for a
@@ -462,7 +462,7 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     // revoking a flow on a false DENY caused by a skipped constrained PERMIT.
     //
     // The predicate is whole-snapshot and therefore conservative (see
-    // `PolicyState::icmp_verdict_may_depend_on_type`): one junos-ping permit
+    // `PolicyState::icmp_verdict_may_depend_on_type`): one `junos-icmp-ping` permit
     // anywhere declines ICMP box-wide, which is precisely #8356's behaviour.
     // The failure mode of the coarseness is "no worse than before", never "acts
     // on a verdict it could not derive".

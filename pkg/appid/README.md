@@ -201,19 +201,17 @@ still ships its single row. Regression pins:
 `TestBuildCatalogExplicitProtocolZeroStillShips` in
 `catalog_bad_protocol_4887_test.go`.
 
-## ICMP type/code labeling (#3781 interim)
+## ICMP type/code labeling (#3781 interim, #11340)
 
 The catalog wire (`AppCatalogEntrySnapshot`, `CatalogEntry`) is **L3/L4 only** —
 it has no ICMP type/code fields — so a catalog row for an ICMP application
-matches on protocol alone (a `(0,0)` destination-port pair). Policy MATCHING for
-`junos-ping`/`junos-pingv6` is echo-only (`PolicyApplicationSnapshot.icmp_type`,
-#3020), but the AppID LABEL catalog was not: an ICMP application that carries an
-`icmp-type`/`icmp-code` constraint still shipped a protocol-only row that matched
-**every** ICMP type. A non-echo ICMP (destination-unreachable, timestamp,
-ICMPv6 ND) that correctly fell to default-deny was then LOGGED in RT_FLOW /
-`show security flow session` with `application=junos-ping` — a false label. The
-verdict engine was correct; only the audit label was wrong (log-integrity, not a
-match fail-open).
+matches on protocol alone (a `(0,0)` destination-port pair). The
+version-bounded Junos defaults cited by #11340 define `junos-ping` /
+`junos-pingv6` as protocol-only, so those rows accurately match all ICMP/ICMPv6
+types. The echo-only predefined application is `junos-icmp-ping` (ICMP type 8);
+its policy match is type-constrained, but a protocol-only catalog row would
+overmatch every ICMP type. Junos readback for the current release remains
+outstanding.
 
 **Interim (Go-only, no wire change):**
 
@@ -223,11 +221,12 @@ match fail-open).
   `CatalogEntry` for such an app, but KEEPS its `AppNames[app_id] = name` row and
   still CONSUMES the id — so the `AppNames` byte-identical parity with
   `compileApplications` (`appid_catalog_parity_test.go`) is preserved. The
-  dropped entry means the helper never stamps that id, so the name is inert: a
-  non-echo (or echo) ICMP resolves to an honest `UNKNOWN` — or to
-  `junos-icmp-all` when a protocol-only ICMP app is also referenced — instead of
-  a false `junos-ping` label. An ICMP app WITHOUT a type/code constraint
-  (`junos-icmp-all`, a user protocol-only ICMP app) is unaffected.
+  dropped entry means the helper never stamps that id, so the name is inert:
+  sessions using `junos-icmp-ping` resolve to an honest `UNKNOWN` (or to
+  protocol-only `junos-ping` / `junos-icmp-all` when one is also referenced)
+  rather than a false type-constrained label. An ICMP app WITHOUT a type/code
+  constraint (`junos-ping`, `junos-icmp-all`, a user protocol-only ICMP app) is
+  unaffected.
 - `resolveTupleFallback` (`runtime.go`) skips a type-constrained ICMP app on the
   AppID-disabled show/session-name path for the same reason (`matchTuple` is
   protocol+port only, blind to ICMP type/code).

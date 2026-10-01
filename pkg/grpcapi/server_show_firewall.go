@@ -287,9 +287,8 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 				protoErr = policymatch.ValidateProtocol(proto)
 			case "ictype":
 				// #3284: ICMP/ICMPv6 type so a type-constrained application term
-				// (junos-ping = type 8) is honored. Empty is unspecified (the term
-				// fails closed); a malformed/out-of-range value errors.
-				icmpType, icmpTypeErr = policymatch.ParseICMPValue(parts[1])
+				// (junos-icmp-ping = type 8) is honored. Empty is unspecified (the
+				// term fails closed); a malformed/out-of-range value errors.
 			case "iccode":
 				icmpCode, icmpCodeErr = policymatch.ParseICMPValue(parts[1])
 			case "frag":

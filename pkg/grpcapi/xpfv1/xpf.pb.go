@@ -7491,10 +7491,11 @@ type MatchPoliciesRequest struct {
 	// terms (#3042). 0 = unspecified (does not constrain the match).
 	SourcePort int32 `protobuf:"varint,7,opt,name=source_port,json=sourcePort,proto3" json:"source_port,omitempty"`
 	// icmp_type / icmp_code let the simulator honor ICMP/ICMPv6 type-constrained
-	// application terms (#3284, junos-ping = type 8). proto3 `optional` so the
-	// simulator can distinguish "unspecified" (a type-constrained app term then
-	// fails closed, mirroring the dataplane's packet_icmp = None) from a valid
-	// type/code 0 (ICMP type 0 = echo-reply).
+	// application terms (#3284, for example junos-icmp-ping = type 8). junos-ping
+	// is protocol-only in the version-bounded predefined definitions (#11340).
+	// proto3 `optional` preserves "unspecified" so a constrained application
+	// term fails closed (mirroring packet_icmp = None); it also distinguishes a
+	// valid type/code 0 (ICMP type 0 = echo-reply).
 	IcmpType *uint32 `protobuf:"varint,8,opt,name=icmp_type,json=icmpType,proto3,oneof" json:"icmp_type,omitempty"`
 	IcmpCode *uint32 `protobuf:"varint,9,opt,name=icmp_code,json=icmpCode,proto3,oneof" json:"icmp_code,omitempty"`
 	// non_first_fragment marks the query as a NON-FIRST IP fragment (#5572) — the

@@ -223,9 +223,9 @@ func (c *CLI) testPolicy(args []string) error {
 	// the protocol so the `test policy` verdict names the FULL tuple the
 	// simulator matched, not just the protocol. A
 	// `protocol icmp icmp-type 8 icmp-code 0` query is answered against the
-	// declared type/code (junos-ping = type 8, #3284); dropping the type/code
-	// from the echo hid WHICH ICMP packet was tested. A non-ICMP query (no
-	// type/code) prints the bare `[proto]` exactly as before.
+	// declared type/code (junos-icmp-ping = type 8, #3284); dropping the
+	// type/code from the echo hid WHICH ICMP packet was tested. A non-ICMP
+	// query (no type/code) prints the bare `[proto]` exactly as before.
 	if tail := formatQueryProtoTail(proto, icmpType, icmpCode); tail != "" {
 		fmt.Printf(" %s", tail)
 	}
