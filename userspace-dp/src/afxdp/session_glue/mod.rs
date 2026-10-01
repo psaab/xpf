@@ -1493,7 +1493,22 @@ pub(super) fn apply_worker_commands(
                 let backlogged = if pending.is_empty() {
                     false
                 } else {
-                    worker_queue::drain_bounded_into(&mut pending, scratch)
+                    // #11718: stop the budgeted slice at the nearest repair
+                    // boundary; its later FIFO suffix stays queued for after
+                    // the shared-authority repair has been applied.
+                    let drain_limit = if session_import_repair_pending {
+                        worker_queue::session_import_repair_drain_limit(
+                            worker_id,
+                            worker_queue::WORKER_COMMAND_DRAIN_BUDGET,
+                        )
+                    } else {
+                        worker_queue::WORKER_COMMAND_DRAIN_BUDGET
+                    };
+                    worker_queue::drain_bounded_into_with_limit(
+                        &mut pending,
+                        scratch,
+                        drain_limit,
+                    )
                 };
                 let drained = scratch.len() - scratch_len_before;
                 // Capture the drain while still holding the same queue lock

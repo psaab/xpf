@@ -516,8 +516,8 @@ impl SessionImportRepairDebt {
 }
 
 /// Total commands removed from this worker's queue. Import repair targets are
-/// captured under the same queue lock, so this sequence identifies their exact
-/// FIFO boundary even when the consumer drains before the producer records debt.
+/// captured and recorded under the same queue lock, so each debt slot identifies
+/// its exact FIFO boundary without an unlock gap.
 static SESSION_IMPORT_REPAIR_DRAINED: [AtomicU64;
     crate::nat::MAX_NAT_HOLDER_WORKERS as usize] =
     [const { AtomicU64::new(0) }; crate::nat::MAX_NAT_HOLDER_WORKERS as usize];
@@ -545,13 +545,19 @@ pub(in crate::afxdp) fn note_worker_commands_drained(worker_id: u32, count: usiz
     }
 }
 
-/// Record a refused upsert after its queue guard has been dropped.
+/// Record a refused upsert while holding its queue guard. Publishing the
+/// positional debt before releasing that guard prevents a consumer from
+/// draining past the boundary before the repair becomes visible.
 #[inline]
 pub(in crate::afxdp) fn record_session_import_repair(
     worker_id: u32,
     key: &SessionKey,
     position: u64,
 ) -> bool {
+    #[cfg(test)]
+    if let Some(attempts) = SESSION_IMPORT_REPAIR_RECORD_ATTEMPTS.get(worker_id as usize) {
+        attempts.fetch_add(1, Ordering::Release);
+    }
     let Some(slot) = session_import_repair_slot(worker_id) else {
         return false;
     };
@@ -593,6 +599,30 @@ pub(in crate::afxdp) fn take_ready_session_import_repairs(
     (ready, ready_remains, pending)
 }
 
+/// Limit the next queue drain to the nearest pending import-repair boundary.
+/// The caller MUST hold this worker's command-queue lock so the queue prefix
+/// cannot change while its positional debt is inspected.
+#[inline]
+pub(in crate::afxdp) fn session_import_repair_drain_limit(
+    worker_id: u32,
+    max_commands: usize,
+) -> usize {
+    let Some(slot) = session_import_repair_slot(worker_id) else {
+        return max_commands;
+    };
+    let drained = SESSION_IMPORT_REPAIR_DRAINED
+        .get(worker_id as usize)
+        .map(|position| position.load(Ordering::Relaxed))
+        .unwrap_or(0);
+    let debt = lock_session_import_repair_recover(slot);
+    let Some(next_position) = debt.entries.values().map(|(position, _)| *position).min() else {
+        return max_commands;
+    };
+    next_position
+        .saturating_sub(drained)
+        .min(max_commands as u64) as usize
+}
+
 #[inline]
 pub(in crate::afxdp) fn clear_session_import_repairs(worker_id: u32) {
     if let Some(slot) = session_import_repair_slot(worker_id) {
@@ -618,12 +648,19 @@ pub(in crate::afxdp) struct SessionImportRepair {
 const MAX_PENDING_SESSION_IMPORT_REPAIRS: usize = MAX_PENDING_WORKER_COMMANDS;
 pub(in crate::afxdp) const SESSION_IMPORT_REPAIR_DRAIN_BUDGET: usize = 256;
 
+/// Session-import repair lock order: when both locks are required, acquire
+/// the worker queue before repair debt (refusal recording and drain limiting).
+/// No repair-debt path acquires the queue while holding this mutex.
 static SESSION_IMPORT_REPAIR_DEBT: LazyLock<
     [Mutex<SessionImportRepairDebt>; crate::nat::MAX_NAT_HOLDER_WORKERS as usize],
 > = LazyLock::new(|| {
     std::array::from_fn(|_| Mutex::new(SessionImportRepairDebt::default()))
 });
 pub(in crate::afxdp) static SESSION_IMPORT_REPAIR_EPOCH: [AtomicU64;
+    crate::nat::MAX_NAT_HOLDER_WORKERS as usize] =
+    [const { AtomicU64::new(0) }; crate::nat::MAX_NAT_HOLDER_WORKERS as usize];
+#[cfg(test)]
+static SESSION_IMPORT_REPAIR_RECORD_ATTEMPTS: [AtomicU64;
     crate::nat::MAX_NAT_HOLDER_WORKERS as usize] =
     [const { AtomicU64::new(0) }; crate::nat::MAX_NAT_HOLDER_WORKERS as usize];
 
@@ -647,6 +684,23 @@ fn lock_session_import_repair_recover(
             poisoned.into_inner()
         }
     }
+}
+#[cfg(test)]
+pub(in crate::afxdp) fn session_import_repair_record_attempts_for_test(
+    worker_id: u32,
+) -> u64 {
+    SESSION_IMPORT_REPAIR_RECORD_ATTEMPTS
+        .get(worker_id as usize)
+        .map(|attempts| attempts.load(Ordering::Acquire))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn lock_session_import_repair_debt_for_test(
+    worker_id: u32,
+) -> impl Drop + 'static {
+    let slot = session_import_repair_slot(worker_id).expect("valid worker id");
+    lock_session_import_repair_recover(slot)
 }
 
 #[inline]
@@ -819,7 +873,21 @@ pub(in crate::afxdp) fn drain_bounded_into(
     pending: &mut VecDeque<WorkerCommand>,
     scratch: &mut VecDeque<WorkerCommand>,
 ) -> bool {
-    let take = pending.len().min(WORKER_COMMAND_DRAIN_BUDGET);
+    drain_bounded_into_with_limit(pending, scratch, WORKER_COMMAND_DRAIN_BUDGET)
+}
+
+/// Drain a strict FIFO prefix capped by both the ordinary work budget and a
+/// caller's smaller ordering boundary.
+#[inline]
+pub(in crate::afxdp) fn drain_bounded_into_with_limit(
+    pending: &mut VecDeque<WorkerCommand>,
+    scratch: &mut VecDeque<WorkerCommand>,
+    max_commands: usize,
+) -> bool {
+    let take = pending
+        .len()
+        .min(WORKER_COMMAND_DRAIN_BUDGET)
+        .min(max_commands);
     scratch.extend(pending.drain(..take));
     !pending.is_empty()
 }
@@ -1196,9 +1264,12 @@ mod session_import_repair_debt_tests_11360 {
         const WORKER_ID: u32 = crate::nat::MAX_NAT_HOLDER_WORKERS - 1;
         clear_session_import_repairs(WORKER_ID);
         let key = key(5000);
+        let queue = Mutex::new(VecDeque::new());
+        let pending = lock_recover(&queue);
         let target = session_import_repair_position(WORKER_ID, 4).expect("valid worker");
         note_worker_commands_drained(WORKER_ID, 4);
         assert!(record_session_import_repair(WORKER_ID, &key, target));
+        drop(pending);
 
         let (ready, ready_remains, pending) =
             take_ready_session_import_repairs(WORKER_ID, SESSION_IMPORT_REPAIR_DRAIN_BUDGET);
