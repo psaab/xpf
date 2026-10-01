@@ -15916,3 +15916,29 @@ strict commit runs into.
   accept/reject table including the exact 107/108-octet boundary, plus the
   leaf driven through `SchemaValidate` + `CompileConfig` so it is pinned as
   WIRED, not merely defined).
+
+## #11346 — reject mixed zone-pair brace spelling
+
+The mixed hierarchy `from-zone { trust { to-zone untrust { policy p1 { ... } } } }`
+is not a supported zone-pair form. The parser represents its keyed `to-zone`
+below a from-zone name container, so the old #7523 guard—which inspected only
+direct `to-zone` children—missed it. If `security-zone policy` was also defined,
+the compiler could read the pair as `trust` to `policy` and produce zero
+policies; without that zone, the unrelated undefined-zone warning hid the
+shape.
+
+`validateNestedZonePairStrict` now rejects the mixed spelling at strict commit
+with a diagnostic naming both authored zones and the zero-policy effect.
+Tolerant load and peer-sync retain the no-brick behavior from #1960, but warn
+specifically that the mixed spelling is unsupported; that warning does not
+make the rule effective. Write the combined `from-zone trust to-zone untrust`
+form, or the supported fully nested container form
+`from-zone { trust { to-zone { untrust { ... } } } }`. The existing direct
+nested form `from-zone trust { to-zone untrust { ... } }` remains rejected by
+#7523.
+
+Regression coverage: `pkg/config/mixed_zonepair_brace_11346_test.go` exercises
+strict rejection with a zone named `policy` and a specific tolerant warning
+when it is undefined. The combined, flat-set, direct-nested, and fully nested
+controls remain in `pkg/config/nested_zonepair_7523_test.go`.
+

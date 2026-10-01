@@ -2403,6 +2403,10 @@ type compileOpts struct {
 	// binary silently accepted still BOOTS (#1960). Same doctrine as
 	// lenientPolicyThenReject.
 	lenientPolicyThenDeny bool
+	// lenientPolicyThenCountAlarm (#11342) downgrades an inert `then count
+	// alarm` threshold subtree to a cfg.Warnings entry on tolerant ingress.
+	// The compiler enables counting but does not implement alarm thresholds.
+	lenientPolicyThenCountAlarm bool
 	// lenientPolicyThenSiblings (#11013/#11023) downgrades unsupported
 	// security-policy `then` siblings and unknown `then log` modes to warnings
 	// on tolerant ingress. The compiler drops both forms, so compilePolicy
@@ -3160,6 +3164,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyThenPermit:                true,
 		lenientPolicyThenReject:                true,
 		lenientPolicyThenDeny:                  true,
+		lenientPolicyThenCountAlarm:            true,
 		lenientPolicyThenSiblings:              true,
 		lenientPolicyEnforcementSubtrees:       true,
 		lenientPolicyMissingMatch:              true,
