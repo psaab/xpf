@@ -1269,6 +1269,12 @@ type compileOpts struct {
 	// loaded negative rate runs safely as sample-all. Same doctrine as
 	// lenientSamplingInstanceConflicts.
 	lenientSamplingInputRate bool
+	// lenientSamplingSourceAddress (#11445) downgrades invalid sampling flow
+	// export source-address literals or family mismatches to warnings during
+	// tolerant load / peer-sync. Strict commit rejects them because the
+	// transport cannot bind a malformed or address-family-incompatible source.
+	// Non-local but valid sources remain a separate advisory in ValidateConfig.
+	lenientSamplingSourceAddress bool
 	// lenientFlowExportSeconds (#6769) downgrades the flow-export template
 	// `seconds` range gate (validateFlowExportSecondsStrict) from a hard compile
 	// error to a cfg.Warnings entry. The strict commit / commit-check path
@@ -3094,6 +3100,7 @@ func lenientCompileOpts() compileOpts {
 		lenientFlowServerTemplateRef:           true,
 		lenientSamplingInstanceConflicts:       true,
 		lenientSamplingInputRate:               true,
+		lenientSamplingSourceAddress:           true,
 		lenientFlowExportSeconds:               true,
 		lenientApplicationSetMembers:           true,
 		lenientPolicyMatchApplications:         true,

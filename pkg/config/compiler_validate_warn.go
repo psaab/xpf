@@ -1884,6 +1884,10 @@ func ValidateConfig(cfg *Config) []string {
 	// docs/research/5837-xdp-dnat-before-local/plan.md §0a on branch
 	// research/5837-xdp-dnat-before-local.
 	warnings = append(warnings, validateNATInterfaceAddressCollisionWarnings(cfg)...)
+	// #11445: a parseable but non-local sampling source can fail the collector
+	// bind at runtime. Warn-only because an address may be supplied dynamically
+	// (for example by DHCP or an HA VIP) after compile time.
+	warnings = append(warnings, samplingSourceAddressLocalityWarnings(cfg)...)
 	// #9917 F-136: single-DES privacy is deprecated; steer to AES-128.
 	warnings = append(warnings, snmpPrivacyDESWarnings9917(cfg)...)
 
