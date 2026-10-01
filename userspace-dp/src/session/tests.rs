@@ -10213,3 +10213,181 @@ fn bare_tuple_index_tracks_scope_collisions_and_slot_reuse_11299() {
     table.delete(&second);
     assert_eq!(table.session_id_for_bare_tuple(&second), None);
 }
+fn ipsec_alias_test_key(if_id: u32, routing_domain: u32) -> SessionKey {
+    let mut key = key_v4();
+    key.discriminator = TunnelDiscriminator::Ipsec(if_id);
+    key.routing_domain = routing_domain;
+    key
+}
+
+fn install_ipsec_alias_test_session(
+    table: &mut SessionTable,
+    key: &SessionKey,
+    egress_ifindex: i32,
+) -> bool {
+    let mut decision = decision();
+    decision.resolution.egress_ifindex = egress_ifindex;
+    table.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    )
+}
+
+fn import_ipsec_alias_test_session(
+    table: &mut SessionTable,
+    key: &SessionKey,
+    egress_ifindex: i32,
+) -> bool {
+    let mut decision = decision();
+    decision.resolution.egress_ifindex = egress_ifindex;
+    table.upsert_synced_with_origin(
+        SessionInstall {
+            key: key.clone(),
+            decision,
+            metadata: metadata(),
+            origin: SessionOrigin::SyncImport,
+            now_ns: 1_000,
+            protocol: PROTO_TCP,
+            tcp_flags: TCP_SYN | TCP_ACK,
+            session_id: 1,
+            tcp_close_class: 0,
+        },
+        false,
+    )
+}
+
+fn untagged_reply_alias_test_key(key: &SessionKey, routing_domain: u32) -> SessionKey {
+    let mut reply = reverse_wire_key(key, NatDecision::default());
+    reply.discriminator = TunnelDiscriminator::None;
+    reply.routing_domain = routing_domain;
+    reply
+}
+
+#[test]
+fn ipsec_reply_alias_is_unique_or_native_miss_9506() {
+    let mut table = SessionTable::new();
+    let tunnel = ipsec_alias_test_key(71, 0);
+    assert!(install_ipsec_alias_test_session(&mut table, &tunnel, 12));
+    let reply = untagged_reply_alias_test_key(&tunnel, 0);
+    match table.lookup_ipsec_reply_alias_at(&reply, 1_100, |_| 0) {
+        IpsecReplyAliasLookup::Unique(found) => assert_eq!(found.key, tunnel),
+        other => panic!("one tunnel-scoped reverse candidate must resolve uniquely: {other:?}"),
+    }
+
+    let mut miss = reply.clone();
+    miss.dst_port += 1;
+    assert!(matches!(
+        table.lookup_ipsec_reply_alias_at(&miss, 1_100, |_| 0),
+        IpsecReplyAliasLookup::NativeMiss
+    ));
+
+    assert!(matches!(
+        table.lookup_ipsec_reply_alias_at(&reply, u64::MAX, |_| 0),
+        IpsecReplyAliasLookup::NativeMiss
+    ), "expired alias candidates must not resolve");
+}
+
+#[test]
+fn ipsec_reply_alias_index_tracks_synced_import_9506() {
+    let mut table = SessionTable::new();
+    let tunnel = ipsec_alias_test_key(73, 0);
+    assert!(import_ipsec_alias_test_session(&mut table, &tunnel, 12));
+    let reply = untagged_reply_alias_test_key(&tunnel, 0);
+    match table.lookup_ipsec_reply_alias_at(&reply, 1_100, |_| 0) {
+        IpsecReplyAliasLookup::Unique(found) => assert_eq!(found.key, tunnel),
+        other => panic!("a sync-imported IPsec session must be indexed for replies: {other:?}"),
+    }
+}
+
+#[test]
+fn ipsec_reply_alias_refuses_native_and_tunnel_ambiguity_9506() {
+    let mut table = SessionTable::new();
+    let tunnel = ipsec_alias_test_key(71, 0);
+    let mut native = tunnel.clone();
+    native.discriminator = TunnelDiscriminator::None;
+    assert!(install_ipsec_alias_test_session(&mut table, &tunnel, 12));
+    assert!(install_ipsec_alias_test_session(&mut table, &native, 12));
+    let reply = untagged_reply_alias_test_key(&tunnel, 0);
+    assert!(matches!(
+        table.lookup_ipsec_reply_alias_at(&reply, 1_100, |_| 0),
+        IpsecReplyAliasLookup::Ambiguous
+    ));
+}
+
+#[test]
+fn ipsec_reply_alias_rejects_nonzero_domain_native_collision_9506() {
+    let mut table = SessionTable::new();
+    let tunnel = ipsec_alias_test_key(71, 7);
+    let mut native = tunnel.clone();
+    native.discriminator = TunnelDiscriminator::None;
+    assert!(install_ipsec_alias_test_session(&mut table, &tunnel, 12));
+    assert!(install_ipsec_alias_test_session(&mut table, &native, 12));
+
+    let reply = untagged_reply_alias_test_key(&tunnel, 7);
+    assert!(matches!(
+        table.lookup_ipsec_reply_alias_at(&reply, 1_100, |_| 7),
+        IpsecReplyAliasLookup::Ambiguous
+    ));
+
+    table.delete(&native);
+    assert!(matches!(
+        table.lookup_ipsec_reply_alias_at(&reply, 1_100, |_| 7),
+        IpsecReplyAliasLookup::Unique(found) if found.key == tunnel
+    ));
+}
+
+
+#[test]
+fn ipsec_reply_alias_admits_only_the_matching_routing_domain_9506() {
+    let mut table = SessionTable::new();
+    let first = ipsec_alias_test_key(71, 7);
+    let second = ipsec_alias_test_key(72, 9);
+    assert!(install_ipsec_alias_test_session(&mut table, &first, 12));
+    assert!(install_ipsec_alias_test_session(&mut table, &second, 13));
+    let reply = untagged_reply_alias_test_key(&first, 7);
+    match table.lookup_ipsec_reply_alias_at(&reply, 1_100, |ifindex| match ifindex {
+        12 => 7,
+        13 => 9,
+        _ => 0,
+    }) {
+        IpsecReplyAliasLookup::Unique(found) => assert_eq!(found.key, first),
+        other => panic!("a same-tuple candidate in another routing domain must not alias: {other:?}"),
+    }
+}
+
+#[test]
+fn ipsec_reply_alias_bucket_overflow_refuses_install_9506() {
+    let mut table = SessionTable::new();
+    assert!(
+        !install_ipsec_alias_test_session(
+            &mut table,
+            &ipsec_alias_test_key(0, 0),
+            12,
+        ),
+        "zero is not a valid IPsec if_id discriminator"
+    );
+    for if_id in 1..=7 {
+        assert!(install_ipsec_alias_test_session(
+            &mut table,
+            &ipsec_alias_test_key(if_id, 0),
+            12,
+        ));
+    }
+    let mut native = ipsec_alias_test_key(71, 7);
+    native.discriminator = TunnelDiscriminator::None;
+    assert!(install_ipsec_alias_test_session(&mut table, &native, 12));
+    assert!(
+        !install_ipsec_alias_test_session(
+            &mut table,
+            &ipsec_alias_test_key(8, 0),
+            12,
+        ),
+        "a native candidate counts toward the shared bound and the ninth alias must be refused"
+    );
+    assert_eq!(table.len(), 8, "overflow must not partially install a record");
+}

@@ -7,8 +7,8 @@
 
 /// The session-identity discriminator for a tunnelled protocol.
 ///
-/// The four classes are DISJOINT ON PURPOSE (#7188 decision 6), and the two
-/// pairs that look mergeable are the two that must not merge:
+/// The session-identity classes are DISJOINT ON PURPOSE (#7188 decision 6),
+/// and the GRE pairs that look mergeable are the pairs that must not merge:
 ///
 /// * `Unkeyed` is not `Keyed(0)`. A tunnel that carries no Key and a tunnel
 ///   whose Key is literally zero are different tunnels, and RFC 2890 permits
@@ -21,8 +21,8 @@
 ///   exists to prevent.
 ///
 /// `None` is the everything-else case: a protocol with no discriminator concept
-/// at all. It is what every non-GRE session carries, so adding this field to a
-/// session key leaves every existing protocol's identity unchanged.
+/// at all. `Ipsec(if_id)` is the config-stable XFRM identity, not a live ifindex
+/// or peer address. Zero is reserved and never a valid IPsec discriminator.
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 pub(crate) enum TunnelDiscriminator {
     /// No discriminator concept for this protocol (everything but GRE today).
@@ -53,6 +53,9 @@ pub(crate) enum TunnelDiscriminator {
     /// asymmetry is resolved at PARSE time, where the association is available,
     /// rather than at reverse-key time, where it is not.
     Pptp(u32),
+    /// #9506: an XFRM interface's immutable, config-stable `if_id`, populated
+    /// from the authoritative tunnel-row snapshot.
+    Ipsec(u32),
     /// The header could not be read.
     ///
     /// Fail-closed ACROSS classes, NOT splitting WITHIN this one (#8380). The
@@ -134,6 +137,9 @@ const WIRE_KEYED_TAG: u64 = 1 << 32;
 /// not comparable — so merging their tag spaces would be the #7188 decision-6
 /// collapse in a new place.
 const WIRE_PPTP_TAG: u64 = 2 << 32;
+/// `Ipsec(if_id)` occupies the next disjoint 32-bit window. A zero payload is
+/// invalid because XFRM `if_id == 0` means no tunnel identity.
+const WIRE_IPSEC_TAG: u64 = 3 << 32;
 
 impl TunnelDiscriminator {
     /// Encode for the HA session-sync wire. Never returns [`WIRE_ABSENT`]: a
@@ -145,6 +151,7 @@ impl TunnelDiscriminator {
             TunnelDiscriminator::Unkeyed => WIRE_UNKEYED,
             TunnelDiscriminator::Keyed(key) => WIRE_KEYED_TAG | u64::from(key),
             TunnelDiscriminator::Pptp(handle) => WIRE_PPTP_TAG | u64::from(handle),
+            TunnelDiscriminator::Ipsec(if_id) => WIRE_IPSEC_TAG | u64::from(if_id),
             TunnelDiscriminator::Unparseable => WIRE_UNPARSEABLE,
         }
     }
@@ -160,18 +167,15 @@ impl TunnelDiscriminator {
             _ if wire & WIRE_KEYED_TAG != 0 && wire >> 33 == 0 => WireDiscriminator::Present(
                 TunnelDiscriminator::Keyed((wire & 0xFFFF_FFFF) as u32),
             ),
-            // #7699: the PPTP window sits at bit 33 and the keyed window at bit
-            // 32, so the two are disjoint by construction. `wire >> 34 == 0`
-            // rejects anything above this window as Unrecognized rather than
-            // truncating a future class into a PPTP handle.
-            // Handle 0 is RESERVED and decodes as Unrecognized, not as
-            // `Pptp(0)`. `PptpCall::handle` never produces 0, so a bare
-            // `WIRE_PPTP_TAG` is a value no honest peer emits — the same
-            // reasoning that makes `WIRE_ABSENT` its own state rather than
-            // `None`'s tag. It also keeps the bare tag available should the
-            // class ever need a payload-free form.
-            _ if wire & WIRE_PPTP_TAG != 0 && wire >> 34 == 0 && wire & 0xFFFF_FFFF != 0 => {
+            // Require an exact class tag, not only its high bit: the IPsec tag
+            // also has bit 33 set and must not decode as PPTP.
+            _ if wire >> 32 == 2 && wire & 0xFFFF_FFFF != 0 => {
                 WireDiscriminator::Present(TunnelDiscriminator::Pptp(
+                    (wire & 0xFFFF_FFFF) as u32,
+                ))
+            }
+            _ if wire >> 32 == 3 && wire & 0xFFFF_FFFF != 0 => {
+                WireDiscriminator::Present(TunnelDiscriminator::Ipsec(
                     (wire & 0xFFFF_FFFF) as u32,
                 ))
             }
@@ -184,10 +188,9 @@ impl TunnelDiscriminator {
 mod tests {
     use super::*;
 
-    /// The four classes are disjoint locally (decision 6); the wire encoding
-    /// must not merge any pair of them. Asserted as a SET property over every
-    /// class rather than tag-by-tag, so a future class cannot be added with a
-    /// colliding tag and still pass.
+    /// The discriminator classes are disjoint locally (decision 6); the wire
+    /// encoding must not merge any pair. Asserted as a SET property over every
+    /// class rather than tag-by-tag, so a future class cannot collide silently.
     #[test]
     fn every_class_encodes_to_a_distinct_nonzero_tag_7188() {
         let classes = [
@@ -206,6 +209,9 @@ mod tests {
             TunnelDiscriminator::Pptp(1),
             TunnelDiscriminator::Pptp(100),
             TunnelDiscriminator::Pptp(u32::MAX),
+            TunnelDiscriminator::Ipsec(1),
+            TunnelDiscriminator::Ipsec(100),
+            TunnelDiscriminator::Ipsec(u32::MAX),
         ];
         let mut seen = std::collections::HashSet::new();
         for class in classes {
@@ -217,8 +223,8 @@ mod tests {
             );
             assert!(
                 seen.insert(wire),
-                "{class:?} shares a wire tag with another class; the four \
-                 classes are disjoint on purpose (#7188 decision 6)"
+                "{class:?} shares a wire tag with another class; the classes \
+                 are disjoint on purpose (#7188 decision 6)"
             );
             assert_eq!(
                 TunnelDiscriminator::from_wire(wire),

@@ -198,6 +198,7 @@ fn tunnel_discriminators_demote_kernel_local_to_redirect_9517() {
         TunnelDiscriminator::Keyed(0),
         TunnelDiscriminator::Keyed(7),
         TunnelDiscriminator::Pptp(3),
+        TunnelDiscriminator::Ipsec(7),
         TunnelDiscriminator::Unparseable,
     ] {
         assert!(
