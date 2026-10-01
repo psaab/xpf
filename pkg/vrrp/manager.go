@@ -446,6 +446,14 @@ func (m *Manager) UpdateInstances(desired []*Instance) error {
 	desiredIfaces := make(map[string]struct{}, len(desired))
 	needsLinkWatcher := false
 	for _, inst := range desired {
+		if inst != nil {
+			virtualAddresses := dedupeVIPs(inst.VirtualAddresses)
+			if len(virtualAddresses) != len(inst.VirtualAddresses) {
+				normalized := *inst
+				normalized.VirtualAddresses = virtualAddresses
+				inst = &normalized
+			}
+		}
 		if err := validateInstanceFamily(inst); err != nil {
 			return err
 		}

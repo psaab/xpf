@@ -106,16 +106,17 @@ func CollectInstances(cfg *config.Config) []*Instance {
 				if vg == nil {
 					continue
 				}
+				vips := dedupeVIPs(vg.VirtualAddresses)
 				inst := &Instance{
 					Interface:         kernelIf,
-					Family:            vrrpGroupFamily(vg.VirtualAddresses, vgKey),
+					Family:            vrrpGroupFamily(vips, vgKey),
 					GroupID:           vg.ID,
 					Priority:          vg.Priority,
 					Preempt:           vg.Preempt,
 					PreemptHoldTime:   vg.PreemptHoldTime,
 					AcceptData:        vg.AcceptData,
 					AdvertiseInterval: vg.AdvertiseInterval,
-					VirtualAddresses:  vg.VirtualAddresses,
+					VirtualAddresses:  vips,
 					AuthType:          vg.AuthType,
 					AuthKey:           vg.AuthKey.Reveal(),
 					// TrackInterface arrives as a Junos name
@@ -259,7 +260,7 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 					AcceptData:        true,
 					AdvertiseInterval: advertInterval,
 					GARPCount:         gc,
-					VirtualAddresses:  unit.Addresses,
+					VirtualAddresses:  dedupeVIPs(unit.Addresses),
 				})
 			}
 		} else {
@@ -271,6 +272,7 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 				}
 				vips = append(vips, unit.Addresses...)
 			}
+			vips = dedupeVIPs(vips)
 			if len(vips) == 0 {
 				continue
 			}

@@ -102,6 +102,34 @@ func canonicalVIPIdentity(vip string) string {
 	return ip.String() + "/" + strconv.Itoa(ones)
 }
 
+// dedupeVIPs keeps the first spelling of each parsed address/prefix identity.
+// Invalid tokens remain distinct except for exact repeats, preserving the
+// existing actuation parse-error path while ensuring one entry per VIP.
+func dedupeVIPs(vips []string) []string {
+	if len(vips) < 2 {
+		return vips
+	}
+	seen := make(map[string]struct{}, len(vips))
+	var unique []string
+	for i, vip := range vips {
+		id := canonicalVIPIdentity(vip)
+		if _, exists := seen[id]; exists {
+			if unique == nil {
+				unique = append([]string(nil), vips[:i]...)
+			}
+			continue
+		}
+		seen[id] = struct{}{}
+		if unique != nil {
+			unique = append(unique, vip)
+		}
+	}
+	if unique != nil {
+		return unique
+	}
+	return vips
+}
+
 // resolveLocalIPv4 deterministically selects our IPv4 advert source: the
 // lowest non-VIP IPv4 currently assigned to the interface, or nil if none.
 // Deterministic (lowest) selection — mirroring resolveIPv6LinkLocal — keeps
