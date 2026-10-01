@@ -6,6 +6,11 @@ inet <rg>; } } }` with a `rib-groups { <rg> { import-rib [ <ri>.inet.0 inet.0 ];
 every secondary rib in the import list. xpf realizes the **import-into-main**
 case (the common one) with Linux policy-routing rules.
 
+The family remains part of the selector (#11395): `interface-routes rib-group
+inet` examines only `inet.0`, while `inet6` examines only `inet6.0`. Although
+both map to Linux table 254, importing one does not authorize leaking the other
+family's connected prefixes.
+
 ## Global interface-routes selectors are unsupported (#11311)
 
 `routing-options interface-routes rib-group ...` is the other direction: it
