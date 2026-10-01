@@ -1621,6 +1621,207 @@ fn build_forwarding_state_keeps_parent_bound_vlan_units_distinct() {
     assert!(state.cos.interfaces.contains_key(&20081));
 }
 
+#[test]
+fn native_vlan_untagged_uses_native_unit_policy_11434() {
+    use crate::{PolicyRuleSnapshot, ZoneSnapshot};
+    use crate::afxdp::forwarding::{
+        resolve_ingress_logical_ifindex, unknown_ingress_vlan, zone_pair_ids_for_flow,
+    };
+    use crate::policy::{evaluate_policy, PolicyAction};
+
+    const PARENT: i32 = 10;
+    const NATIVE_UNIT: i32 = 100;
+    const EGRESS: i32 = 30;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![
+            ZoneSnapshot {
+                name: "native".into(),
+                id: 11,
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "unit0".into(),
+                id: 12,
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "wan".into(),
+                id: 13,
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0-0-1".into(),
+                ifindex: PARENT,
+                native_vlan_id: 100,
+                is_unit: Some(false),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-1.0".into(),
+                zone: "unit0".into(),
+                ifindex: PARENT,
+                vlan_id: 0,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-1.100".into(),
+                zone: "native".into(),
+                ifindex: NATIVE_UNIT,
+                parent_ifindex: PARENT,
+                vlan_id: 100,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-2".into(),
+                zone: "wan".into(),
+                egress_zone: "wan".into(),
+                ifindex: EGRESS,
+                is_unit: Some(false),
+                ..Default::default()
+            },
+        ],
+        policies: vec![PolicyRuleSnapshot {
+            name: "unit0-deny".into(),
+            from_zone: "unit0".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            action: "deny".into(),
+            ..Default::default()
+        }],
+        default_policy: "permit".into(),
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    let native_ingress =
+        resolve_ingress_logical_ifindex(&state, PARENT, 0).unwrap_or(PARENT);
+    let tagged_ingress =
+        resolve_ingress_logical_ifindex(&state, PARENT, 100).unwrap_or(PARENT);
+    assert_eq!(
+        native_ingress, NATIVE_UNIT,
+        "VID-0 ingress must resolve to the unit selected by native-vlan-id"
+    );
+    assert_eq!(tagged_ingress, NATIVE_UNIT, "tagged VID 100 uses unit 100");
+    assert!(
+        !unknown_ingress_vlan(&state, PARENT, 0),
+        "configured native VLAN is a known VID-0 ingress identity"
+    );
+
+    let native_pair = zone_pair_ids_for_flow(&state, native_ingress, EGRESS);
+    let tagged_pair = zone_pair_ids_for_flow(&state, tagged_ingress, EGRESS);
+    assert_eq!(native_pair, tagged_pair, "native and tagged zone pairs match");
+    assert_eq!(native_pair, (11, 13), "native unit policy zone pair");
+    let verdict = |(from, to)| {
+        evaluate_policy(
+            &state.policy,
+            from,
+            to,
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+            6,
+            12345,
+            443,
+        )
+    };
+    assert_eq!(verdict(native_pair), PolicyAction::Permit);
+    assert_eq!(verdict(tagged_pair), PolicyAction::Permit);
+
+    let unit0_pair = zone_pair_ids_for_flow(&state, PARENT, EGRESS);
+    assert_eq!(
+        verdict(unit0_pair),
+        PolicyAction::Deny,
+        "control: the explicitly different unit-0 zone remains policy-distinct"
+    );
+}
+
+#[test]
+fn native_vlan_without_matching_unit_rejects_vid_zero_11434() {
+    use crate::afxdp::forwarding::unknown_ingress_vlan;
+
+    let state = build_forwarding_state(&ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0-0-1".into(),
+                ifindex: 10,
+                native_vlan_id: 100,
+                is_unit: Some(false),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-1.0".into(),
+                ifindex: 10,
+                vlan_id: 0,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    assert!(
+        unknown_ingress_vlan(&state, 10, 0),
+        "an absent native unit must not fall back to the explicit unit-0 identity"
+    );
+    assert!(
+        !state.ingress_logical_ifindex.contains_key(&(10, 0)),
+        "the stale unit-0 lookup must be removed when native VLAN cannot resolve"
+    );
+}
+
+#[test]
+fn native_vlan_ambiguous_matching_units_reject_vid_zero_11434() {
+    use crate::afxdp::forwarding::unknown_ingress_vlan;
+
+    let state = build_forwarding_state(&ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0-0-1".into(),
+                ifindex: 10,
+                native_vlan_id: 100,
+                is_unit: Some(false),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-1.0".into(),
+                ifindex: 10,
+                vlan_id: 0,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-1.100".into(),
+                ifindex: 100,
+                parent_ifindex: 10,
+                vlan_id: 100,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-1.200".into(),
+                ifindex: 200,
+                parent_ifindex: 10,
+                vlan_id: 100,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    assert!(
+        unknown_ingress_vlan(&state, 10, 0),
+        "a native VID shared by multiple units must remain rejected"
+    );
+    assert!(
+        !state.ingress_logical_ifindex.contains_key(&(10, 0)),
+        "ambiguous native units must not leave a last-writer-wins lookup"
+    );
+}
+
 // #3070: host-inbound-traffic enforcement. A configured zone admits only its
 // listed system-services / protocols for host-bound (local-delivery) traffic;
 // an unconfigured zone admits everything (admit-all default). Reverting the

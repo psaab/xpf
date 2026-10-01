@@ -1815,8 +1815,7 @@ func ValidateConfig(cfg *Config) []string {
 	// matrix.md "to-zone junos-host and the direct host-bound path".
 	warnings = append(warnings, validateJunosHostDirectDeliveryWarnings(cfg)...)
 
-	// #4308 (fable-review-167 I-3): interface parity knobs that are typed +
-	// compiled so they stop silently vanishing, but are ACCEPTED-ONLY today.
+	// #4308: the remaining typed interface parity knobs are still accepted-only.
 	warnings = append(warnings, validateInterfaceParityWarnings(cfg)...)
 
 	// #6544: 802.3ad link aggregation is schema-advertised and commits

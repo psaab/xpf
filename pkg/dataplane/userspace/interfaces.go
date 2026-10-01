@@ -378,6 +378,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			RoutingDomain:   routingDomainForInterfaceKey(name, ifaceRoutingInstance, quarantinedKeys),
 			LinuxName:       linuxName,
 			ParentLinuxName: "",
+			NativeVLANID:    iface.NativeVlanID,
 			Ifindex:         ifindex,
 			ParentIfindex:   0,
 			RXQueues:        userspaceRXQueueCount(linuxName),

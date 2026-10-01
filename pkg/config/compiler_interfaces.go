@@ -127,10 +127,9 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			ifc.FlexibleVlanTagging = true
 		}
 
-		// #4308 (fable-review-167 I-3): accepted-only interface-level parity
-		// knobs — typed + compiled so they stop silently vanishing, with a
-		// commit-time advisory (validateInterfaceParityWarnings) noting they
-		// are not enforced yet.
+		// #4308: typed interface settings. native-vlan-id is enforced from
+		// InterfaceSnapshot by the userspace ingress builder (#11434); the
+		// remaining ARP/addressing knobs retain their accepted-only advisory.
 		if nvNode := child.FindChild("native-vlan-id"); nvNode != nil {
 			if v := nodeVal(nvNode); v != "" {
 				if n, err := strconv.Atoi(v); err == nil {

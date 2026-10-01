@@ -146,8 +146,9 @@ const preSecureTunnelProtocolVersion = 4
 // type/code.
 // #11402 moves it to v37 because an older helper ignores learned multipath
 // weights and continues equal-cost selection for unequal routes. #11411 moves
-// it to v38 so old helpers honor Linux RTAX_MTU on imported routes.
-const secureTunnelSnapshotProtocolVersion = 38
+// it to v38 so old helpers honor Linux RTAX_MTU on imported routes; #11434
+// moves it to v39 so VID-0 ingress selects the configured native VLAN unit.
+const secureTunnelSnapshotProtocolVersion = 39
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "c02f7608e35419353529f207f34db109fb1f2a427a4d153901a8a6edd120fd45"
+	snapshotShapeGolden8892 = "1414d61377ab73115cd59481e1701090ceb8aa137d7f52d0bf2917b4f8d7d2d7"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -412,7 +412,10 @@ const (
 	// ECMP for unequal routes, so mixed versions must be refused.
 	// v37 -> v38 BUMPED (#11411): RouteSnapshot.MTU carries Linux RTAX_MTU.
 	// A v37 helper ignores it and forwards oversized DF packets.
-	snapshotShapeVersion8892 = 38
+	// v38 -> v39 BUMPED (#11434): InterfaceSnapshot.NativeVLANID selects the
+	// configured logical unit for VID-0 ingress; a v38 helper attributes those
+	// frames to the parent / unit-0 instead.
+	snapshotShapeVersion8892 = 39
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

@@ -354,10 +354,11 @@ pub(super) fn resolve_ingress_logical_ifindex(
         .copied()
 }
 
-/// #10313/#10656/#11297: true when ingress does not belong to a configured
-/// VLAN identity. A nonzero VID must resolve on the parent or configured child;
-/// VID 0 is rejected on a tagged-only bind unless an explicit untagged unit 0
-/// owns the fallback. Ordinary untagged ports keep the physical fallback.
+/// #10313/#10656/#11297/#11434: true when ingress does not belong to a
+/// configured VLAN identity. A nonzero VID must resolve on the parent or
+/// configured child; VID 0 is rejected on a tagged-only bind unless an
+/// explicit unit 0 or configured native VLAN unit owns the identity.
+/// Ordinary untagged ports keep the physical fallback.
 ///
 /// The exact `(physical_ifindex, vlan_id)` map remains the logical-ingress
 /// resolver. This predicate is its miss-path authority: unlike an ordinary

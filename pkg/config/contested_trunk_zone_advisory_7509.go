@@ -33,20 +33,21 @@ import (
 //
 // SCOPE, wider than #7509's own framing. The issue describes interface-level
 // TUNNEL units sharing one netdev. The condition is any parent whose units span
-// different zones and whose raw parent is not disambiguated by a collapsed,
-// zoned native unit 0. Only traffic that resolves to the RAW PARENT is affected
+// different zones and whose raw parent is not disambiguated by a native
+// ingress identity. Only traffic that resolves to the RAW PARENT is affected
 // — a tagged frame resolves to its own logical unit ifindex first (#3021) — so
 // in practice this is untagged traffic on a mixed-zone trunk.
 //
-// WHAT WOULD INVALIDATE IT (#4308): `native-vlan-id` is accepted-only and not
-// enforced today, so untagged frames have no defined unit. If #4308 is ever
-// implemented they acquire one, and this advisory becomes wrong for the native
-// VLAN specifically while staying right for every other contested case.
+// A configured `native-vlan-id` maps VID 0 to the matching tagged unit (#11434).
+// If the matching unit is absent or ambiguous, VID 0 is rejected rather than
+// falling back to the contested parent, so neither case can inherit a sibling
+// zone's policy.
 
-// nativeUnitZeroDisambiguatesParent reports whether native unit 0 resolves to
-// the base device and is zoned there. Its zone is the raw parent identity, so
-// sibling units on their own devices cannot make that parent a contested ifindex.
-func nativeUnitZeroDisambiguatesParent(
+// nativeIngressDisambiguatesParent reports whether untagged traffic has a
+// defined identity separate from the raw parent: a configured native VLAN is
+// either mapped to its matching unit or rejected, while legacy untagged unit 0
+// can still name the base device directly.
+func nativeIngressDisambiguatesParent(
 	cfg *Config,
 	base string,
 	zoneByIface map[string]string,
@@ -56,7 +57,13 @@ func nativeUnitZeroDisambiguatesParent(
 		return false
 	}
 	ifc := cfg.Interfaces.Interfaces[base]
-	if ifc == nil || ifc.Tunnel != nil {
+	if ifc == nil {
+		return false
+	}
+	if ifc.NativeVlanID > 0 {
+		return true
+	}
+	if ifc.Tunnel != nil {
 		return false
 	}
 	unit := ifc.Units[0]
@@ -297,7 +304,7 @@ func contestedTrunkZonesWithMaps(
 	}
 	var out map[string][]string
 	for base, zones := range byBase {
-		if len(zones) < 2 || nativeUnitZeroDisambiguatesParent(cfg, base, zoneByIface, tunnelNames) {
+		if len(zones) < 2 || nativeIngressDisambiguatesParent(cfg, base, zoneByIface, tunnelNames) {
 			continue
 		}
 		names := make([]string, 0, len(zones))
