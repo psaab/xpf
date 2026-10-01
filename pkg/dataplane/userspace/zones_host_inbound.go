@@ -40,6 +40,14 @@ type ZoneHostInboundView struct {
 	Protocols      []string
 	V4Addrs        []string // bare host IPv4 addresses (no prefix)
 	V6Addrs        []string // bare host IPv6 addresses (no prefix)
+	// Screen flood limits are mirrored into the kernel input backstop because
+	// PASS_TO_KERNEL rows bypass the userspace worker's screen stage.
+	ICMPFloodThreshold   uint32
+	UDPFloodThreshold    uint32
+	SYNFloodThreshold    uint32
+	SYNFloodSrcThreshold uint32
+	AlarmWithoutDrop     bool
+
 	// IngressNetdevs (#9637) are the kernel netdevs whose arriving host-bound
 	// packets this view judges, whichever local address they name. They come
 	// from the view's own interfaces, minus three kinds: a netdev another view
@@ -651,6 +659,11 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		sigs = append(sigs, sig)
 	}
 	ambiguousIngressNetdevs := hostInboundViewIngressDenyNetdevs(netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters)
+	screenProfilesByZone := make(map[string]ScreenProfileSnapshot)
+	for _, screen := range buildScreenSnapshots(cfg) {
+		screenProfilesByZone[screen.Zone] = screen
+	}
+
 	sort.Strings(sigs)
 	out := make([]ZoneHostInboundView, 0, len(sigs))
 	for _, sig := range sigs {
@@ -688,13 +701,18 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			v6 = withoutLifelineShared(v6, lifelineShared)
 		}
 		view := ZoneHostInboundView{
-			Zone:           g.zone,
-			Interfaces:     ifaces,
-			SystemServices: g.svc,
-			Protocols:      g.proto,
-			V4Addrs:        v4,
-			V6Addrs:        v6,
-			IngressNetdevs: hostInboundViewIngressNetdevsWithMasters(sig, netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters),
+			Zone:                 g.zone,
+			Interfaces:           ifaces,
+			SystemServices:       g.svc,
+			Protocols:            g.proto,
+			V4Addrs:              v4,
+			V6Addrs:              v6,
+			IngressNetdevs:       hostInboundViewIngressNetdevsWithMasters(sig, netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters),
+			ICMPFloodThreshold:   screenProfilesByZone[g.zone].ICMPFloodThreshold,
+			UDPFloodThreshold:    screenProfilesByZone[g.zone].UDPFloodThreshold,
+			SYNFloodThreshold:    screenProfilesByZone[g.zone].SYNFloodThreshold,
+			SYNFloodSrcThreshold: screenProfilesByZone[g.zone].SYNFloodSrcThreshold,
+			AlarmWithoutDrop:     screenProfilesByZone[g.zone].AlarmWithoutDrop,
 		}
 		if len(out) == 0 {
 			view.IngressDenyNetdevs = ambiguousIngressNetdevs

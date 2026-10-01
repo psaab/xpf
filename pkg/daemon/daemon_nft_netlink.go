@@ -99,13 +99,18 @@ func toNftViews(views []dpuserspace.ZoneHostInboundView) []xnft.HostInboundZoneV
 	out := make([]xnft.HostInboundZoneView, 0, len(views))
 	for _, v := range views {
 		out = append(out, xnft.HostInboundZoneView{
-			Zone:               v.Zone,
-			SystemServices:     v.SystemServices,
-			Protocols:          v.Protocols,
-			V4Addrs:            v.V4Addrs,
-			V6Addrs:            v.V6Addrs,
-			IngressNetdevs:     v.IngressNetdevs,
-			IngressDenyNetdevs: v.IngressDenyNetdevs,
+			Zone:                 v.Zone,
+			SystemServices:       v.SystemServices,
+			Protocols:            v.Protocols,
+			V4Addrs:              v.V4Addrs,
+			ICMPFloodThreshold:   v.ICMPFloodThreshold,
+			UDPFloodThreshold:    v.UDPFloodThreshold,
+			SYNFloodThreshold:    v.SYNFloodThreshold,
+			SYNFloodSrcThreshold: v.SYNFloodSrcThreshold,
+			AlarmWithoutDrop:     v.AlarmWithoutDrop,
+			V6Addrs:              v.V6Addrs,
+			IngressNetdevs:       v.IngressNetdevs,
+			IngressDenyNetdevs:   v.IngressDenyNetdevs,
 		})
 	}
 	return out

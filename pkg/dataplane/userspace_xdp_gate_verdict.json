@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
-  "verified_at": "2026-09-26T20:37:31.142336361Z",
-  "object_sha256": "78554f2f8bb0cfd27b78a99a064cb2e6dcd6652cfef5326c3a67a58130b822a3",
+  "verified_at": "2026-10-01T13:16:03.551507284Z",
+  "object_sha256": "4157e04d9749e89ac7d3877c77821d9e69be7c6ff7549d0e82858e228bb127a9",
   "verdict": "PASS",
   "override_consumed": false,
-  "reason": "measured headroom 28.14% meets the 15.0% floor",
+  "reason": "measured headroom 27.23% meets the 15.0% floor",
   "stats": {
     "measured": true,
-    "processed_insns": 718639,
+    "processed_insns": 727750,
     "insn_limit": 1000000,
-    "headroom_pct": 28.1361,
+    "headroom_pct": 27.225,
     "floor_pct": 15,
-    "slack_to_floor_insns": 131361
+    "slack_to_floor_insns": 122250
   }
 }
