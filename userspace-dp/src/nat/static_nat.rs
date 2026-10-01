@@ -120,27 +120,40 @@ fn static_scope_ok(
         && (from_routing_instance.is_empty() || from_routing_instance == routing_instance)
 }
 
-/// #3605: pick the best-matching entry from a per-key `Vec` of scope-differing
-/// static-NAT rules. Two tiers, mirroring the sibling [`super::DnatTable`]:
-///   1. a zone-SCOPED entry (`from_zone` non-empty) that the caller's `admit`
-///      predicate accepts — a split-horizon rule for this ingress/egress
-///      context;
-///   2. otherwise a zone-WILDCARD entry (`from_zone` empty) that `admit`
-///      accepts — the catch-all default.
-/// The specific tier wins over the wildcard tier regardless of config order,
-/// so a coexisting wildcard rule cannot shadow a matching scoped rule. Within
-/// a tier the first accepted entry (config/snapshot order) wins. `admit` folds
-/// in ALL the gates (`static_scope_ok`, i.e. zone/interface/routing-instance,
-/// plus `source_ok`); the tiering here only orders zone-scoped vs wildcard.
+#[inline]
+fn static_scope_tier(from_zone: &str, from_interface: &str, from_routing_instance: &str) -> u8 {
+    super::nat_scope_tier(from_interface, from_zone, from_routing_instance)
+}
+
+/// #11351: pick the most-specific eligible entry from a per-key `Vec` of
+/// scope-differing static-NAT rules. Precedence is interface > zone >
+/// routing-instance > unscoped, independent of config order. `admit` folds in
+/// all eligibility gates (`static_scope_ok` and `source_ok`); the first
+/// accepted entry within an equal-specificity tier preserves config order.
 fn pick_scoped<'a>(
     entries: Option<&'a Vec<StaticNatEntry>>,
     admit: impl Fn(&&StaticNatEntry) -> bool,
 ) -> Option<&'a StaticNatEntry> {
-    let entries = entries?;
-    entries
-        .iter()
-        .find(|e| !e.from_zone.is_empty() && admit(e))
-        .or_else(|| entries.iter().find(|e| e.from_zone.is_empty() && admit(e)))
+    let mut best: Option<&StaticNatEntry> = None;
+    let mut best_tier = u8::MAX;
+    for entry in entries? {
+        if !admit(&entry) {
+            continue;
+        }
+        let tier = static_scope_tier(
+            &entry.from_zone,
+            &entry.from_interface,
+            &entry.from_routing_instance,
+        );
+        if tier < best_tier {
+            best = Some(entry);
+            best_tier = tier;
+            if tier == super::NAT_SCOPE_TIER_INTERFACE {
+                break;
+            }
+        }
+    }
+    best
 }
 
 /// Static 1:1 NAT entry (bidirectional).
@@ -622,12 +635,9 @@ impl StaticNatTable {
                 hit_counter: nat_counters.rule_counter(snap.counter_id),
             };
             // DNAT keyed by the external (pre-translation) destination port.
-            // #3605: push onto the per-key Vec instead of insert() so a
-            // second rule that shares this `(external_ip, match_dst_port)` but
-            // differs by scope (zone/interface/routing-instance/source) no
-            // longer overwrites the first. Preserves config/snapshot order
-            // within the key, which the specificity tiering in the match path
-            // relies on for the wildcard fallback.
+            // #3605: preserve every scope-distinct rule in the per-key Vec.
+            // `pick_scoped` ranks eligible rules by context specificity and
+            // retains snapshot order for ties.
             table
                 .dnat
                 .entry((external_ip, match_dst_port))
@@ -738,13 +748,10 @@ impl StaticNatTable {
                 ingress_routing_instance,
             ) && source_ok(&entry.source, src_ip)
         };
-        // #3605: a key now holds a `Vec` of scope-differing rules. Within the
-        // key, prefer a zone-SCOPED entry that admits the packet over a
-        // zone-WILDCARD one (`pick_scoped`, mirroring the sibling `DnatTable`
-        // two-tier match), so a specific split-horizon rule is not shadowed by
-        // a coexisting wildcard rule regardless of config order. All the finer
-        // gates (interface/routing-instance/source) are AND-ed in via
-        // `zone_ok`.
+        // #3605/#11351: the per-key Vec retains scope-differing rules, and
+        // `pick_scoped` prefers the most-specific eligible `from` context:
+        // interface > zone > routing-instance > unscoped. Source and all
+        // context axes remain AND-ed in `zone_ok`.
         //
         // Port-specific entry takes precedence over the whole-address entry,
         // but only if one of its candidates passes the scope check. On a port
@@ -779,6 +786,8 @@ impl StaticNatTable {
         // prefix (network bits replaced, host bits preserved). The decision
         // carries only `rewrite_dst` (an `IpAddr`), so the existing host
         // static-NAT checksum fixup path applies unchanged.
+        let mut best: Option<(&StaticNatBlock, IpAddr)> = None;
+        let mut best_tier = u8::MAX;
         for blk in &self.blocks {
             if static_scope_ok(
                 &blk.from_zone,
@@ -789,18 +798,28 @@ impl StaticNatTable {
                 ingress_routing_instance,
             ) && source_ok(&blk.source, src_ip)
                 && blk.external.contains(dst_ip)
+                && let Some(translated) = remap_addr(dst_ip, &blk.external, &blk.internal)
             {
-                if let Some(translated) = remap_addr(dst_ip, &blk.external, &blk.internal) {
-                    return Some((
-                        NatDecision {
-                            rewrite_src: None,
-                            rewrite_dst: Some(translated),
-                            ..NatDecision::default()
-                        },
-                        blk.hit_counter.clone(),
-                    ));
+                let tier = static_scope_tier(
+                    &blk.from_zone,
+                    &blk.from_interface,
+                    &blk.from_routing_instance,
+                );
+                if tier < best_tier {
+                    best = Some((blk, translated));
+                    best_tier = tier;
                 }
             }
+        }
+        if let Some((blk, translated)) = best {
+            return Some((
+                NatDecision {
+                    rewrite_src: None,
+                    rewrite_dst: Some(translated),
+                    ..NatDecision::default()
+                },
+                blk.hit_counter.clone(),
+            ));
         }
         None
     }
@@ -895,9 +914,8 @@ impl StaticNatTable {
                 egress_routing_instance,
             ) && source_ok(&entry.source, dst_ip)
         };
-        // #3605: per-key `Vec` with the same two-tier specificity pick as the
-        // DNAT direction — a zone-scoped reverse mapping wins over a coexisting
-        // wildcard one, and port-specific beats whole-address.
+        // #3605/#11351: the reverse mapping uses the same static-NAT context
+        // hierarchy as DNAT; port-specific still precedes whole-address.
         if let Some(entry) = pick_scoped(self.snat.get(&(src_ip, Some(src_port))), &zone_ok)
             .or_else(|| pick_scoped(self.snat.get(&(src_ip, None)), &zone_ok))
         {
@@ -919,6 +937,8 @@ impl StaticNatTable {
         // offset map. `src_ip` in the internal prefix translates back to the
         // same offset in the external prefix, so the return path's source is
         // un-NAT'd to the public block and the reverse session key matches.
+        let mut best: Option<(&StaticNatBlock, IpAddr)> = None;
+        let mut best_tier = u8::MAX;
         for blk in &self.blocks {
             if static_scope_ok(
                 &blk.from_zone,
@@ -929,18 +949,28 @@ impl StaticNatTable {
                 egress_routing_instance,
             ) && source_ok(&blk.source, dst_ip)
                 && blk.internal.contains(src_ip)
+                && let Some(translated) = remap_addr(src_ip, &blk.internal, &blk.external)
             {
-                if let Some(translated) = remap_addr(src_ip, &blk.internal, &blk.external) {
-                    return Some((
-                        NatDecision {
-                            rewrite_src: Some(translated),
-                            rewrite_dst: None,
-                            ..NatDecision::default()
-                        },
-                        blk.hit_counter.clone(),
-                    ));
+                let tier = static_scope_tier(
+                    &blk.from_zone,
+                    &blk.from_interface,
+                    &blk.from_routing_instance,
+                );
+                if tier < best_tier {
+                    best = Some((blk, translated));
+                    best_tier = tier;
                 }
             }
+        }
+        if let Some((blk, translated)) = best {
+            return Some((
+                NatDecision {
+                    rewrite_src: Some(translated),
+                    rewrite_dst: None,
+                    ..NatDecision::default()
+                },
+                blk.hit_counter.clone(),
+            ));
         }
         None
     }

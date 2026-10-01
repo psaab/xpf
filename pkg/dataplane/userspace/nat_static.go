@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"log/slog"
+	"sort"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -74,5 +75,15 @@ func buildStaticNATSnapshots(cfg *config.Config, natCounterIDs map[string]uint32
 			})
 		}
 	}
+	// #11351: sort by the Junos from-context hierarchy. Stable sorting retains
+	// config order within a tier and keeps rules from equal-tier sets ordered.
+	sort.SliceStable(out, func(i, j int) bool {
+		return config.NATContextScopeTier(
+			out[i].FromInterface, out[i].FromZone, out[i].FromRoutingInstance,
+		) < config.NATContextScopeTier(
+			out[j].FromInterface, out[j].FromZone, out[j].FromRoutingInstance,
+		)
+	})
+
 	return out
 }

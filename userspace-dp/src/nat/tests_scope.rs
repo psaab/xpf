@@ -792,3 +792,342 @@ fn source_nat_allocator_key_ignores_routing_instances_9389() {
         "the same rule in the same instance must select the same allocator"
     );
 }
+// #11351: DNAT and static-NAT rule-set scopes use the same Junos
+// interface > zone > routing-instance > unscoped hierarchy as source NAT.
+// Keeping both scopes eligible in each probe proves precedence rather than
+// only checking the individual scope gates.
+#[derive(Clone, Copy)]
+struct NatScopePrecedenceRule11351 {
+    name: &'static str,
+    from_zone: &'static str,
+    from_interface: &'static str,
+    from_routing_instance: &'static str,
+    translation: &'static str,
+}
+
+const NAT_SCOPE_IFACE_11351: NatScopePrecedenceRule11351 = NatScopePrecedenceRule11351 {
+    name: "interface",
+    from_zone: "",
+    from_interface: "ge-0/0/1.0",
+    from_routing_instance: "",
+    translation: "10.0.0.1",
+};
+const NAT_SCOPE_ZONE_11351: NatScopePrecedenceRule11351 = NatScopePrecedenceRule11351 {
+    name: "zone",
+    from_zone: "trust",
+    from_interface: "",
+    from_routing_instance: "",
+    translation: "10.0.0.2",
+};
+const NAT_SCOPE_RI_11351: NatScopePrecedenceRule11351 = NatScopePrecedenceRule11351 {
+    name: "routing-instance",
+    from_zone: "",
+    from_interface: "",
+    from_routing_instance: "VR1",
+    translation: "10.0.0.3",
+};
+const NAT_SCOPE_ANY_11351: NatScopePrecedenceRule11351 = NatScopePrecedenceRule11351 {
+    name: "unscoped",
+    from_zone: "",
+    from_interface: "",
+    from_routing_instance: "",
+    translation: "10.0.0.4",
+};
+
+fn dnat_scope_precedence_snapshot_11351(
+    scope: NatScopePrecedenceRule11351,
+    destination_address: &str,
+    destination_prefix: &str,
+) -> DestinationNATRuleSnapshot {
+    DestinationNATRuleSnapshot {
+        name: scope.name.to_string(),
+        from_zone: scope.from_zone.to_string(),
+        from_interface: scope.from_interface.to_string(),
+        from_routing_instance: scope.from_routing_instance.to_string(),
+        destination_address: destination_address.to_string(),
+        destination_prefix: destination_prefix.to_string(),
+        destination_port: 443,
+        protocol: "tcp".to_string(),
+        pool_address: scope.translation.to_string(),
+        ..DestinationNATRuleSnapshot::default()
+    }
+}
+
+fn static_scope_precedence_snapshot_11351(
+    scope: NatScopePrecedenceRule11351,
+    external_ip: &str,
+    internal_ip: &str,
+) -> StaticNATRuleSnapshot {
+    StaticNATRuleSnapshot {
+        name: scope.name.to_string(),
+        from_zone: scope.from_zone.to_string(),
+        from_interface: scope.from_interface.to_string(),
+        from_routing_instance: scope.from_routing_instance.to_string(),
+        external_ip: external_ip.to_string(),
+        internal_ip: internal_ip.to_string(),
+        ..StaticNATRuleSnapshot::default()
+    }
+}
+
+#[test]
+fn destination_nat_context_precedence_all_pairs_both_orders_11351() {
+    let scopes = [
+        NAT_SCOPE_IFACE_11351,
+        NAT_SCOPE_ZONE_11351,
+        NAT_SCOPE_RI_11351,
+        NAT_SCOPE_ANY_11351,
+    ];
+    let pairs = [
+        (&scopes[0], &scopes[1]),
+        (&scopes[0], &scopes[2]),
+        (&scopes[0], &scopes[3]),
+        (&scopes[1], &scopes[2]),
+        (&scopes[1], &scopes[3]),
+        (&scopes[2], &scopes[3]),
+    ];
+    let counters = NatCounterStore::default();
+    let src: IpAddr = "198.51.100.1".parse().unwrap();
+    let dst: IpAddr = "203.0.113.10".parse().unwrap();
+    for (preferred, broader) in pairs {
+        for reversed in [false, true] {
+            let ordered = if reversed {
+                vec![*broader, *preferred]
+            } else {
+                vec![*preferred, *broader]
+            };
+            let snapshots: Vec<_> = ordered
+                .into_iter()
+                .map(|scope| dnat_scope_precedence_snapshot_11351(scope, "203.0.113.10", ""))
+                .collect();
+            let table = DnatTable::from_snapshots(&snapshots, &counters);
+            let got = table
+                .lookup_with_counter_scoped(
+                    PROTO_TCP,
+                    src,
+                    dst,
+                    0,
+                    443,
+                    "trust",
+                    "ge-0/0/1.0",
+                    "VR1",
+                    None,
+                )
+                .map(|(decision, _)| decision.rewrite_dst);
+            assert_eq!(
+                got,
+                Some(Some(preferred.translation.parse().unwrap())),
+                "DNAT {} must beat {} (reversed config order: {reversed})",
+                preferred.name,
+                broader.name
+            );
+        }
+    }
+}
+
+#[test]
+fn destination_nat_prefix_context_precedence_is_scope_first_11351() {
+    for reversed in [false, true] {
+        let ordered = if reversed {
+            [NAT_SCOPE_ZONE_11351, NAT_SCOPE_IFACE_11351]
+        } else {
+            [NAT_SCOPE_IFACE_11351, NAT_SCOPE_ZONE_11351]
+        };
+        let snapshots: Vec<_> = ordered
+            .into_iter()
+            .map(|scope| {
+                dnat_scope_precedence_snapshot_11351(scope, "203.0.113.0", "203.0.113.0/24")
+            })
+            .collect();
+        let table = DnatTable::from_snapshots(&snapshots, &NatCounterStore::default());
+        let got = table
+            .lookup_with_counter_scoped(
+                PROTO_TCP,
+                "198.51.100.1".parse().unwrap(),
+                "203.0.113.10".parse().unwrap(),
+                0,
+                443,
+                "trust",
+                "ge-0/0/1.0",
+                "VR1",
+                None,
+            )
+            .map(|(decision, _)| decision.rewrite_dst);
+        assert_eq!(
+            got,
+            Some(Some(NAT_SCOPE_IFACE_11351.translation.parse().unwrap())),
+            "an interface-scoped DNAT prefix must beat a zone-scoped prefix (reversed config order: {reversed})"
+        );
+    }
+}
+
+#[test]
+fn static_nat_context_precedence_all_pairs_both_orders_11351() {
+    let scopes = [
+        NAT_SCOPE_IFACE_11351,
+        NAT_SCOPE_ZONE_11351,
+        NAT_SCOPE_RI_11351,
+        NAT_SCOPE_ANY_11351,
+    ];
+    let pairs = [
+        (&scopes[0], &scopes[1]),
+        (&scopes[0], &scopes[2]),
+        (&scopes[0], &scopes[3]),
+        (&scopes[1], &scopes[2]),
+        (&scopes[1], &scopes[3]),
+        (&scopes[2], &scopes[3]),
+    ];
+    let counters = NatCounterStore::default();
+    let external: IpAddr = "203.0.113.10".parse().unwrap();
+    for (preferred, broader) in pairs {
+        for reversed in [false, true] {
+            let ordered = if reversed {
+                vec![*broader, *preferred]
+            } else {
+                vec![*preferred, *broader]
+            };
+            let snapshots: Vec<_> = ordered
+                .into_iter()
+                .map(|scope| static_scope_precedence_snapshot_11351(scope, "203.0.113.10", scope.translation))
+                .collect();
+            let table = StaticNatTable::from_snapshots(&snapshots, &counters);
+            let got = table
+                .match_dnat_with_counter_scoped(external, 0, None, "trust", "ge-0/0/1.0", "VR1")
+                .map(|(decision, _)| decision.rewrite_dst);
+            assert_eq!(
+                got,
+                Some(Some(preferred.translation.parse().unwrap())),
+                "static DNAT {} must beat {} (reversed config order: {reversed})",
+                preferred.name,
+                broader.name
+            );
+        }
+    }
+}
+
+#[test]
+fn static_nat_block_context_precedence_is_scope_first_11351() {
+    let interface = NatScopePrecedenceRule11351 {
+        translation: "10.1.0.0/24",
+        ..NAT_SCOPE_IFACE_11351
+    };
+    let zone = NatScopePrecedenceRule11351 {
+        translation: "192.0.2.0/24",
+        ..NAT_SCOPE_ZONE_11351
+    };
+    for reversed in [false, true] {
+        let ordered = if reversed {
+            [zone, interface]
+        } else {
+            [interface, zone]
+        };
+        let snapshots: Vec<_> = ordered
+            .into_iter()
+            .map(|scope| {
+                static_scope_precedence_snapshot_11351(
+                    scope,
+                    "198.51.100.0/24",
+                    scope.translation,
+                )
+            })
+            .collect();
+        let table = StaticNatTable::from_snapshots(&snapshots, &NatCounterStore::default());
+        let got = table
+            .match_dnat_with_counter_scoped(
+                "198.51.100.42".parse().unwrap(),
+                0,
+                None,
+                "trust",
+                "ge-0/0/1.0",
+                "VR1",
+            )
+            .map(|(decision, _)| decision.rewrite_dst);
+        assert_eq!(
+            got,
+            Some(Some("10.1.0.42".parse().unwrap())),
+            "interface-scoped static block must beat zone-scoped block (reversed config order: {reversed})"
+        );
+    }
+}
+
+#[test]
+fn static_nat_reverse_block_context_precedence_is_interface_first_11351() {
+    for reversed in [false, true] {
+        let interface = StaticNATRuleSnapshot {
+            name: "interface".to_string(),
+            from_interface: "ge-0/0/1.0".to_string(),
+            external_ip: "203.0.113.0/24".to_string(),
+            internal_ip: "10.0.0.0/24".to_string(),
+            ..StaticNATRuleSnapshot::default()
+        };
+        let zone = StaticNATRuleSnapshot {
+            name: "zone".to_string(),
+            from_zone: "trust".to_string(),
+            external_ip: "198.51.100.0/24".to_string(),
+            internal_ip: "10.0.0.0/24".to_string(),
+            ..StaticNATRuleSnapshot::default()
+        };
+        let snapshots = if reversed {
+            vec![zone, interface]
+        } else {
+            vec![interface, zone]
+        };
+        let table = StaticNatTable::from_snapshots(&snapshots, &NatCounterStore::default());
+        let got = table
+            .match_snat_with_counter_scoped(
+                "10.0.0.42".parse().unwrap(),
+                0,
+                None,
+                "trust",
+                "ge-0/0/1.0",
+                "VR1",
+            )
+            .map(|(decision, _)| decision.rewrite_src);
+        assert_eq!(
+            got,
+            Some(Some("203.0.113.42".parse().unwrap())),
+            "interface-scoped static reverse block must beat zone scope (reversed config order: {reversed})"
+        );
+    }
+}
+
+
+#[test]
+fn static_nat_reverse_context_precedence_is_interface_first_11351() {
+    for reversed in [false, true] {
+        let interface = StaticNATRuleSnapshot {
+            name: "interface".to_string(),
+            from_interface: "ge-0/0/1.0".to_string(),
+            external_ip: "203.0.113.1".to_string(),
+            internal_ip: "10.0.0.10".to_string(),
+            ..StaticNATRuleSnapshot::default()
+        };
+        let zone = StaticNATRuleSnapshot {
+            name: "zone".to_string(),
+            from_zone: "trust".to_string(),
+            external_ip: "203.0.113.2".to_string(),
+            internal_ip: "10.0.0.10".to_string(),
+            ..StaticNATRuleSnapshot::default()
+        };
+        let snapshots = if reversed {
+            vec![zone, interface]
+        } else {
+            vec![interface, zone]
+        };
+        let table = StaticNatTable::from_snapshots(&snapshots, &NatCounterStore::default());
+        let got = table
+            .match_snat_with_counter_scoped(
+                "10.0.0.10".parse().unwrap(),
+                0,
+                None,
+                "trust",
+                "ge-0/0/1.0",
+                "VR1",
+            )
+            .map(|(decision, _)| decision.rewrite_src);
+        assert_eq!(
+            got,
+            Some(Some("203.0.113.1".parse().unwrap())),
+            "interface-scoped static reverse NAT must beat zone scope (reversed config order: {reversed})"
+        );
+    }
+}

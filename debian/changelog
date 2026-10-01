@@ -1,5 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Honor interface > zone > routing-instance context precedence for DNAT and
+    static-NAT rule-sets regardless of configuration order (#11351).
   * Guard out-of-normalizer compact `then <head>` leaf forms so routing-instance
     steering survives direct and `apply-groups` compilation (#11354).
   * Require the FBF steering smoke to verify IPv4 and IPv6 forwarding at the
