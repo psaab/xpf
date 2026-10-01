@@ -28,7 +28,7 @@ const (
 // dhcpExchangeMode selects which RFC exchange a renewal cycle step runs.
 // The pre-#2994 client ran a full DISCOVER/Rapid-Solicit (exchangeAcquire)
 // at every T1/T2; the fix sends a true unicast RENEW at T1 and a broadcast
-// REBIND at T2, falling back to a full acquisition only on lease expiry.
+// REBIND at T2, falling back to full acquisition after T2 failure or expiry.
 type dhcpExchangeMode int
 
 const (

@@ -264,9 +264,9 @@ func TestRunDHCPv6ExpiryAfterFailedReacquire(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	m := &Manager{
-		leases:               map[clientKey]*Lease{},
-		delegatedPDs:         map[string][]DelegatedPrefix{},
-		v6opts:               map[string]*DHCPv6Options{"wan0": {
+		leases:       map[clientKey]*Lease{},
+		delegatedPDs: map[string][]DelegatedPrefix{},
+		v6opts: map[string]*DHCPv6Options{"wan0": {
 			IATypes: []string{"ia-na", "ia-pd"},
 			RAIface: "lan0",
 		}},
@@ -329,6 +329,71 @@ func TestRunDHCPv6ExpiryAfterFailedReacquire(t *testing.T) {
 	}
 	if !recompileArmed(m) {
 		t.Fatal("lease expiry must arm a recompile to withdraw DHCP routes and PDs")
+	}
+}
+
+// TestRunDHCPv6StatelessRefreshFailureRetainsOptions guards the distinct
+// stateless contract: LeaseTime is the Information-Request refresh interval,
+// not an address/PD binding lifetime. A failed refresh across that interval
+// must not drop the DNS options from Leases().
+func TestRunDHCPv6StatelessRefreshFailureRetainsOptions(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &Manager{
+		leases:       map[clientKey]*Lease{},
+		delegatedPDs: map[string][]DelegatedPrefix{},
+		v6opts:       map[string]*DHCPv6Options{"wan0": {Stateless: true}},
+		afterForTest: immediateAfter,
+		waitLinkLocalForTest: func(context.Context, string, time.Duration) error {
+			return nil
+		},
+	}
+	dns := netip.MustParseAddr("2001:db8::53")
+	var modes []dhcpExchangeMode
+	var leaseAtNextRefresh *Lease
+	m.doV6ExchangeForTest = func(_ context.Context, _ string, mode dhcpExchangeMode, _ *Lease, _ []DelegatedPrefix) (*dhcpv6Result, error) {
+		modes = append(modes, mode)
+		switch len(modes) {
+		case 1:
+			return &dhcpv6Result{lease: &Lease{
+				Interface: "wan0",
+				Family:    AFInet6,
+				DNS:       []netip.Addr{dns},
+				LeaseTime: time.Second,
+				Obtained:  time.Now(),
+			}}, nil
+		case 2, 3, 4:
+			return nil, context.DeadlineExceeded
+		default:
+			leaseAtNextRefresh = m.LeaseFor("wan0", AFInet6)
+			cancel()
+			return nil, context.Canceled
+		}
+	}
+
+	done := make(chan struct{})
+	go func() { m.runDHCPv6(ctx, "wan0"); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("runDHCPv6 did not retry the failed stateless refresh")
+	}
+	defer disarmRecompile(m)
+
+	want := []dhcpExchangeMode{
+		exchangeAcquire, exchangeRenew, exchangeRebind, exchangeAcquire, exchangeAcquire,
+	}
+	if len(modes) != len(want) {
+		t.Fatalf("exchange modes = %v, want %v", modes, want)
+	}
+	for i := range want {
+		if modes[i] != want[i] {
+			t.Errorf("exchange %d = %s, want %s", i, modes[i], want[i])
+		}
+	}
+	if leaseAtNextRefresh == nil || len(leaseAtNextRefresh.DNS) != 1 || leaseAtNextRefresh.DNS[0] != dns {
+		t.Fatalf("stateless options at next refresh = %+v, want retained DNS %s", leaseAtNextRefresh, dns)
 	}
 }
 
@@ -400,11 +465,10 @@ func TestRunDHCPv4RebindBoundByLeaseExpiry(t *testing.T) {
 	}
 }
 
-func TestRunDHCPv6RebindBoundByLeaseExpiry(t *testing.T) {
+func TestRunDHCPv6PDOnlyRebindBoundByLeaseExpiry(t *testing.T) {
 	leaseA := &Lease{
 		Interface: "wan0",
 		Family:    AFInet6,
-		Address:   netip.MustParsePrefix("2001:db8::50/128"),
 		LeaseTime: 2 * time.Second,
 		Obtained:  time.Now().Add(-1500 * time.Millisecond),
 	}
@@ -425,7 +489,7 @@ func TestRunDHCPv6RebindBoundByLeaseExpiry(t *testing.T) {
 	m := &Manager{
 		leases:               map[clientKey]*Lease{},
 		delegatedPDs:         map[string][]DelegatedPrefix{},
-		v6opts:               map[string]*DHCPv6Options{"wan0": {}},
+		v6opts:               map[string]*DHCPv6Options{"wan0": {IATypes: []string{"ia-pd"}, RAIface: "lan0"}},
 		afterForTest:         immediateAfter,
 		waitLinkLocalForTest: func(context.Context, string, time.Duration) error { return nil },
 		removeAddressForTest: func(_ string, lease *Lease) { removed = append(removed, lease) },
@@ -469,8 +533,8 @@ func TestRunDHCPv6RebindBoundByLeaseExpiry(t *testing.T) {
 		t.Fatalf("lease/PDs at re-acquire = %v/%+v, want both removed at expiry",
 			leaseAtReacquire, pdsAtReacquire)
 	}
-	if len(removed) != 1 || removed[0] != leaseA {
-		t.Fatalf("removed addresses = %v, want %p exactly once", removed, leaseA)
+	if len(removed) != 0 {
+		t.Fatalf("address removals = %v, want none for a PD-only lease", removed)
 	}
 	if gatewayChanges < 2 || !recompileArmed(m) {
 		t.Fatalf("expiry notifications: gateway changes=%d, recompile armed=%t",

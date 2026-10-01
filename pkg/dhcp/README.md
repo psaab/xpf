@@ -80,11 +80,14 @@ without DHCP no longer disables DHCP for the daemon's lifetime.
 > IA_PD with the server's DUID; at T2 the v4 client broadcasts a
 > REBINDING `DHCPREQUEST` and the v6 client multicasts a `REBIND` (no
 > server DUID). A generic T2 timeout immediately starts a fresh acquisition
-> (DISCOVER, SOLICIT, or stateless Information-Request) while retaining the
-> current lease, address, and delegated prefixes until a new reply commits or
-> the absolute `Obtained+LeaseTime` deadline arrives. If reacquisition is
-> still failing at that deadline, the lease/address/PDs are removed, and
-> gateway-change plus recompile notifications withdraw compiled state.
+> (DISCOVER, SOLICIT, or stateless Information-Request). Stateful leases
+> retain the current lease, address, and delegated prefixes until a new reply
+> commits or the absolute `Obtained+LeaseTime` deadline arrives. If
+> reacquisition is still failing at that deadline, the lease/address/PDs are
+> removed, and gateway-change plus recompile notifications withdraw compiled
+> state. Stateless DHCPv6 has no binding expiry: its synthetic `LeaseTime` is
+> only the Information-Request refresh interval, and failed refreshes retain
+> the installed options.
 > This supersedes the pre-#2994 force-DORA /
 > Rapid-Solicit-at-every-T1 behavior (the old #1832 review note), which
 > broadcast a fresh server-selection every renewal and could move the lease
@@ -449,15 +452,17 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   never touched.
 - **Lease retention and absolute expiry after T2 failure (#1844, #11382).**
   A generic T2 timeout immediately starts a fresh DORA/Solicit or stateless
-  Information-Request while the old lease, address, and delegated prefixes
-  stay active, preserving the last-known gateway during reacquisition. This
-  retention ends at the original absolute `Obtained+LeaseTime` deadline: if
-  by then, `abandonLeaseAfterExpiry` removes the lease, v6 PDs, and address,
-  fires `onGatewayChange`, and schedules `scheduleRecompile` to withdraw
-  compiled routes. An explicit **DHCPNAK is honored** (#3956, #9944): the
-  granting-server NAK deconfigures immediately through
-  `abandonLeaseAfterNAK` and returns the client to INIT; a wrong-server NAK
-  is ignored.
+  Information-Request while the old state stays active during reacquisition.
+  For stateful leases, retention ends at the original absolute
+  `Obtained+LeaseTime` deadline: if reacquisition is still failing then,
+  `abandonLeaseAfterExpiry` removes the lease, v6 PDs, and address, fires
+  `onGatewayChange`, and schedules `scheduleRecompile` to withdraw compiled
+  routes. Stateless DHCPv6 has no binding expiry; its synthetic `LeaseTime`
+  only determines refresh timing, and failed Information-Requests retain
+  installed options.
+  An explicit **DHCPNAK is honored** (#3956, #9944): the granting-server NAK
+  deconfigures immediately through `abandonLeaseAfterNAK` and returns the
+  client to INIT; a wrong-server NAK is ignored.
 - **Coupling rule (#1844, extended #4874 A2 / #11382):** the T2-expiry path
   (`abandonLeaseAfterExpiry`), terminal exits (`finishClient`), and DHCPv4
   NAK (`abandonLeaseAfterNAK`) fire both `onGatewayChange` and

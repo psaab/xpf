@@ -125,7 +125,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Route oversized same-binding flow-cache hits through pending-forward so
     normal egress MTU, PTB, and TCP-segmentation handling is preserved (#11376).
 
-  * Expire DHCPv4/v6 leases at their absolute lease deadline after failed T1/T2
-    renewal and reacquisition, removing stale addresses and delegated prefixes
-    and notifying dependent route recompilation (#11382).
+  * Expire DHCPv4/v6 stateful leases at their absolute deadline after failed
+    T1/T2 renewal and reacquisition. Remove stale addresses and delegated
+    prefixes, retain stateless DHCPv6 options across failed refreshes, and
+    notify dependent route recompilation (#11382).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
