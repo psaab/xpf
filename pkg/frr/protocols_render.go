@@ -38,6 +38,10 @@ func validFRROSPFArea(id string) bool {
 // a function-local section emitted at the end, preserving the historical
 // single-instance behavior byte-for-byte.
 func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, bgp *config.BGPConfig, rip *config.RIPConfig, isis *config.ISISConfig, vrfName string, ecmpMaxPaths int, policyOptions *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, shared ...*bfdSection) string {
+	return m.generateProtocolsWithQNH11447(ospf, ospfv3, bgp, rip, isis, vrfName, ecmpMaxPaths, policyOptions, bgpAcceptDefault, nil, shared...)
+}
+
+func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 *config.OSPFv3Config, bgp *config.BGPConfig, rip *config.RIPConfig, isis *config.ISISConfig, vrfName string, ecmpMaxPaths int, policyOptions *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricScope11447, shared ...*bfdSection) string {
 	var b strings.Builder
 	var bfd *bfdSection
 	emitLocal := false
@@ -122,7 +126,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 			fmt.Fprintf(&b, " maximum-paths %d\n", ecmpMaxPaths)
 		}
 		for _, export := range ospf.Export {
-			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf", bgpAcceptDefault))
+			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf", bgpAcceptDefault, qnhMetrics))
 		}
 		b.WriteString("exit\n!\n")
 		// OSPF interface settings + per-interface area activation. The
@@ -214,7 +218,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 			fmt.Fprintf(&b, " maximum-paths %d\n", ecmpMaxPaths)
 		}
 		for _, export := range ospfv3.Export {
-			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf6", bgpAcceptDefault))
+			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf6", bgpAcceptDefault, qnhMetrics))
 		}
 		b.WriteString("exit\n!\n")
 		// OSPFv3 interface settings + per-interface area activation. FRR
@@ -479,10 +483,10 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				kw, isProto := config.FRRRoutingProtocolKeyword(e)
 				fam, _ := config.RedistributionSourceFamilies(kw)
 				if !isProto || fam&config.FamilyIPv4 != 0 || kw == "bgp" {
-					b.WriteString(m.resolveRedistribute(e, policyOptions, "bgp", bgpAcceptDefault))
+					b.WriteString(m.resolveRedistribute(e, policyOptions, "bgp", bgpAcceptDefault, qnhMetrics))
 				}
 				if isProto && kw != "bgp" && fam&config.FamilyIPv6 != 0 {
-					bgpIPv6Redist.WriteString(m.resolveBGPIPv6Redistribute(e, policyOptions, bgpAcceptDefault))
+					bgpIPv6Redist.WriteString(m.resolveBGPIPv6Redistribute(e, policyOptions, bgpAcceptDefault, qnhMetrics))
 				}
 			}
 		}
@@ -692,7 +696,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 			fmt.Fprintf(&b, " passive-interface %s\n", iface)
 		}
 		for _, r := range rip.Redistribute {
-			b.WriteString(m.resolveRedistribute(r, policyOptions, "rip", bgpAcceptDefault))
+			b.WriteString(m.resolveRedistribute(r, policyOptions, "rip", bgpAcceptDefault, qnhMetrics))
 		}
 		b.WriteString("exit\n!\n")
 		// RIP per-interface authentication
@@ -773,7 +777,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 		}
 		for _, export := range isis.Export {
 			// #9666: isisd's grammar, not the OSPF-shaped line.
-			b.WriteString(m.resolveISISRedistribute(export, policyOptions, isis.Level, bgpAcceptDefault))
+			b.WriteString(m.resolveISISRedistribute(export, policyOptions, isis.Level, bgpAcceptDefault, qnhMetrics))
 		}
 		if isis.WideMetricsOnly {
 			b.WriteString(" metric-style wide\n")

@@ -761,13 +761,16 @@ step. Both are required — neither sees the other's case:
   folded into a single route-level `Preference`, so every next-hop rendered at
   equal cost and the floating static became equal-cost ECMP that load-balanced
   over the backup. A plain `next-hop [ a b ]` bracket LIST is equal-cost ECMP
-  (#3872) — kept distinct: no per-next-hop preference. FRR's static-route CLI
-  has no metric field, so `NextHopEntry.Metric` is carried in the typed config
-  (parity/display) but not emitted — the floating behavior is entirely the
-  per-next-hop distance. A metric-ONLY `qualified-next-hop <gw> { metric M; }`
-  (no `preference`) therefore does NOT float: with `HasPreference == false` it
-  renders at the route-level distance, equal-cost with the primary — a
-  `preference` is REQUIRED to make a qualified-next-hop a floating backup.
+- **IGP export metric (#11447).** FRR's static-route CLI still has no
+  per-next-hop metric operand, so `NextHopEntry.Metric` is not emitted on the
+  `ip route` line. For a bare `redistribute static` or a policy term whose
+  source is `static`, xpf synthesizes route-map entries that match both the
+  destination and the configured qualified next-hop before `set metric M`.
+  This keeps a plain primary for the same prefix at its own metric; later
+  authored policy terms run afterward, so an explicit `then metric` overrides
+  the QNH fallback. The metric is for IGP export, not forwarding preference.
+  `preference` remains REQUIRED to make a qualified next-hop a floating backup:
+  a metric-only QNH keeps the route-level administrative distance.
 - **Negative routes: `discard` vs `reject` (#5298).** A static route's
   terminal `discard` or `reject` action installs an ACTIVE no-next-hop route
   so matching traffic is dropped instead of following a less-specific route.

@@ -122,11 +122,11 @@ func staticRouteNode() *schemaNode {
 					"preference": {desc: "Preference", args: 1, placeholder: "<value>",
 						valueType: ValueInteger, valueDesc: "Route preference / administrative distance (0..2147483647; lower = more preferred, default 5)",
 						valueExamples: []string{"5", "100"}, validator: ValidateInteger(0, maxWireI32), children: nil},
-					// metric is carried per next-hop (NextHopEntry.Metric, #3871) but
-					// NOT rendered — FRR's static-route CLI has no metric field, so a
-					// metric-only qualified-next-hop (no preference) does NOT float;
-					// preference is what creates the floating backup.
-					"metric": {desc: "Metric", args: 1, placeholder: "<value>", children: nil},
+					// Metric is carried per qualified next-hop (NextHopEntry.Metric,
+					// #3871) and reaches IGP export through synthesized FRR
+					// redistribution route-maps (#11447). It does not affect
+					// administrative distance; `preference` controls floating.
+					"metric": {desc: "IGP export metric", args: 1, placeholder: "<value>", children: nil},
 				}},
 			"no-install": {desc: "Do not install this static route", children: nil},
 			"discard":    {desc: "Discard (blackhole) route", children: nil},

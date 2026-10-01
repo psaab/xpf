@@ -494,9 +494,9 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 		// at that distance; a plain next-hop uses the route-level distance so
 		// a `next-hop [ a b ]` list stays equal-cost ECMP. FRR installs the
 		// lowest-distance reachable next-hop and fails over to the higher-
-		// distance one only when the primary is down. FRR's static-route CLI
-		// has no metric field, so nh.Metric is not emitted — the floating
-		// behavior comes entirely from the distance.
+		// distance one only when the primary is down. QNH metric is independent
+		// of static-route distance and is applied by the IGP redistribution
+		// route-map (#11447).
 		dist := sr.Preference
 		if nh.HasPreference {
 			dist = nh.Preference

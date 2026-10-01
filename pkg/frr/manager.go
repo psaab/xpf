@@ -589,6 +589,9 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := redistAliasCollision(fc.PolicyOptions, collectAllBGPAcceptDefault(fc)); err != nil {
 			return err
 		}
+		if err := qualifiedNextHopMetricCollision11447(fc.PolicyOptions, buildQNHMetricSet11447(fc, fc.PolicyOptions)); err != nil {
+			return err
+		}
 		// #5277 render-side belt: refuse to render when a composed BGP
 		// policy-chain route-map name collides with an operator policy-statement
 		// or another chain (FRR merges same-named route-maps → silent filter
@@ -709,18 +712,25 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 	// redistribute alias, so it is computed once here and threaded into
 	// generatePolicyOptions AND generateProtocols (resolveRedistribute) below.
 	bgpAcceptDefault := collectAllBGPAcceptDefault(fc)
-	if fc.PolicyOptions != nil {
-		b.WriteString(m.generatePolicyOptions(fc.PolicyOptions, bgpAcceptDefault))
-		// Composed BGP policy-chain route-maps: an ordered `import`/`export
-		// [ A B C ]` list of >= 2 defined policy-statements is composed into a
-		// single route-map preserving Junos chain semantics (#5277). Emitted
-		// here beside the per-policy route-maps; FRR resolves the neighbor's
-		// `route-map <name>` reference regardless of definition order.
-		b.WriteString(m.renderComposedBGPChains(fc))
-		// #10129/#10821: narrowed fall-through and empty chains use a private
-		// alias with a trailing deny, preserving the kept member order and
-		// leaving standalone/composed maps shared by intact attachments.
-		b.WriteString(m.renderNarrowedAliases10129(fc))
+	qnhMetrics := buildQNHMetricSet11447(fc, fc.PolicyOptions)
+	policyOptions := fc.PolicyOptions
+	if policyOptions == nil && qnhMetrics != nil {
+		policyOptions = &config.PolicyOptionsConfig{}
+	}
+	if policyOptions != nil {
+		b.WriteString(m.generatePolicyOptionsWithQNH11447(policyOptions, bgpAcceptDefault, qnhMetrics))
+		if fc.PolicyOptions != nil {
+			// Composed BGP policy-chain route-maps: an ordered `import`/`export
+			// [ A B C ]` list of >= 2 defined policy-statements is composed into a
+			// single route-map preserving Junos chain semantics (#5277). Emitted
+			// here beside the per-policy route-maps; FRR resolves the neighbor's
+			// `route-map <name>` reference regardless of definition order.
+			b.WriteString(m.renderComposedBGPChains(fc))
+			// #10129/#10821: narrowed fall-through and empty chains use a private
+			// alias with a trailing deny, preserving the kept member order and
+			// leaving standalone/composed maps shared by intact attachments.
+			b.WriteString(m.renderNarrowedAliases10129(fc))
+		}
 	}
 	// #7625: the bounded deny an EMPTIED policy chain attaches. Emitted OUTSIDE
 	// the PolicyOptions guard above — a nil PolicyOptions makes every authored
@@ -770,21 +780,28 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 	// blocks that previously produced redundant / repeated profile defs.
 	bfdSec := newBFDSection()
 
-	// 11. Global dynamic protocols
+	var globalMetrics *qnhMetricScope11447
+	if qnhMetrics != nil {
+		globalMetrics = qnhMetrics.global
+	}
 	if fc.OSPF != nil || fc.OSPFv3 != nil || fc.BGP != nil || fc.RIP != nil || fc.ISIS != nil {
-		b.WriteString(m.generateProtocols(rOSPF, rOSPFv3, fc.BGP, rRIP, rISIS, "", ecmpMaxPaths, fc.PolicyOptions, bgpAcceptDefault, bfdSec))
+		b.WriteString(m.generateProtocolsWithQNH11447(rOSPF, rOSPFv3, fc.BGP, rRIP, rISIS, "", ecmpMaxPaths, policyOptions, bgpAcceptDefault, globalMetrics, bfdSec))
 	}
 
 	// 12. Per-VRF dynamic protocols
-	for _, inst := range fc.Instances {
+	for i, inst := range fc.Instances {
 		if inst.OSPF != nil || inst.OSPFv3 != nil || inst.BGP != nil || inst.RIP != nil || inst.ISIS != nil {
-			b.WriteString(m.generateProtocols(
+			var instanceMetrics *qnhMetricScope11447
+			if qnhMetrics != nil && i < len(qnhMetrics.instances) {
+				instanceMetrics = qnhMetrics.instances[i]
+			}
+			b.WriteString(m.generateProtocolsWithQNH11447(
 				resolveOSPFIfNames(resolveIfName, inst.OSPF),
 				resolveOSPFv3IfNames(resolveIfName, inst.OSPFv3),
 				inst.BGP,
 				resolveRIPIfNames(resolveIfName, inst.RIP),
 				resolveISISIfNames(resolveIfName, inst.ISIS),
-				inst.VRFName, ecmpMaxPaths, fc.PolicyOptions, bgpAcceptDefault, bfdSec))
+				inst.VRFName, ecmpMaxPaths, policyOptions, bgpAcceptDefault, instanceMetrics, bfdSec))
 		}
 	}
 
