@@ -175,11 +175,11 @@ pub(crate) static SHED_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// for the contended-with-empty pass, which the tunnel drain-wait makes real
 /// (`wait_for_local_tunnel_session_install` polls queues read-only).
 ///
-/// LOCK DISCIPLINE (reviews A1/B2): queue precedes repair debt whenever both
-/// locks are needed, for refusal recording and the drain-limit peek.
-/// `take_ready` releases debt before callers acquire the queue, and extraction
-/// releases it before dispatching handlers. No debt→queue path exists, so this
-/// one-way nesting adds no lock cycle.
+/// LOCK DISCIPLINE (reviews A1/B2): the debt lock is a LEAF. `record` drops
+/// the queue guard BEFORE taking it; decrement/extract releases it before
+/// dispatching (handlers run with NO debt guard held). No path ever holds
+/// the debt lock and the queue lock together, in either order — there is no
+/// new lock-graph edge for a green suite to miss.
 ///
 /// Indexed by worker id, bounded by `MAX_NAT_HOLDER_WORKERS` — the same
 /// ceiling the planner refuses to mint past. The per-command DROPPED counters
@@ -648,6 +648,9 @@ pub(in crate::afxdp) struct SessionImportRepair {
 const MAX_PENDING_SESSION_IMPORT_REPAIRS: usize = MAX_PENDING_WORKER_COMMANDS;
 pub(in crate::afxdp) const SESSION_IMPORT_REPAIR_DRAIN_BUDGET: usize = 256;
 
+/// Session-import repair lock order: when both locks are required, acquire
+/// the worker queue before repair debt (refusal recording and drain limiting).
+/// No repair-debt path acquires the queue while holding this mutex.
 static SESSION_IMPORT_REPAIR_DEBT: LazyLock<
     [Mutex<SessionImportRepairDebt>; crate::nat::MAX_NAT_HOLDER_WORKERS as usize],
 > = LazyLock::new(|| {
