@@ -625,7 +625,10 @@ pub(super) fn update_dynamic_neighbor(
     ip: IpAddr,
     entry: NeighborEntry,
 ) -> bool {
-    dynamic_neighbors.insert_if_changed((ifindex, ip), entry)
+    let key = (ifindex, ip);
+    let changed = dynamic_neighbors.insert_if_changed(key, entry);
+    dynamic_neighbors.mark_kernel_backed_if_same(&key, entry.mac);
+    changed
 }
 
 pub(super) fn remove_dynamic_neighbor(
@@ -750,7 +753,10 @@ pub(super) fn parse_neighbor_msg(
                     dynamic_neighbors.record_neighbor_probe(key, now_ns);
                 }
                 match result {
-                    Some(changed) => changed,
+                    Some(changed) => {
+                        dynamic_neighbors.mark_kernel_backed_if_same(&key, mac);
+                        changed
+                    }
                     None => {
                         report_arp_overwrite_refusal(
                             dynamic_neighbors.as_ref(),
@@ -1083,6 +1089,7 @@ pub(super) fn neigh_monitor_thread(
     // rides the existing status wire path (netlink_enobufs,
     // netlink_redumps, netlink_redump_upserts).
     counters: Arc<super::neighbor_resolver::ResolverCounters>,
+    manager_keys: Arc<Mutex<FastSet<(i32, IpAddr)>>>,
 ) {
     // Create NETLINK_ROUTE socket and subscribe to neighbor events
     let fd = unsafe {
@@ -1194,6 +1201,7 @@ pub(super) fn neigh_monitor_thread(
         &dynamic_neighbors,
         &neighbor_generation,
         &counters,
+        &manager_keys,
     );
     unsafe { libc::close(fd) };
     eprintln!("neigh_monitor: stopped");
@@ -1218,12 +1226,15 @@ pub(super) fn neigh_monitor_thread(
 /// below: a stop signalled while blocked in recv() retires this thread, so it
 /// must NOT apply the just-received (old-generation) batch to a map that
 /// `stop_inner` is about to clear / a fresh baseline is about to repopulate.
+/// A monotonic sweep between receives also expires idle RX-only source-learned
+/// entries; manager-owned keys and entries confirmed by the kernel are retained.
 fn neigh_monitor_steady_state(
     fd: i32,
     stop: &AtomicBool,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     neighbor_generation: &AtomicU64,
     counters: &super::neighbor_resolver::ResolverCounters,
+    manager_keys: &Mutex<FastSet<(i32, IpAddr)>>,
 ) {
     let mut buf = vec![0u8; 8192];
     // #1771 §2.5: throttle state for the ENOBUFS-triggered upsert re-dump.
@@ -1235,7 +1246,22 @@ fn neigh_monitor_steady_state(
     // carry seq 0 — so a seq match identifies a re-dump reply and lets
     // the parse loop below count `netlink_redump_upserts` precisely.
     let mut redump_pending: [u32; 2] = [0, 0];
+    let mut last_rx_age_sweep_ns = monotonic_nanos();
     while !stop.load(Ordering::Relaxed) {
+        let now = monotonic_nanos();
+        if now.saturating_sub(last_rx_age_sweep_ns)
+            >= super::sharded_neighbor::RX_LEARNED_NEIGHBOR_SWEEP_INTERVAL_NS
+        {
+            let manager_keys = manager_keys
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            dynamic_neighbors.age_rx_learned_neighbors(
+                now,
+                super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+                &manager_keys,
+            );
+            last_rx_age_sweep_ns = now;
+        }
         let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
         if n < 0 {
             // #1771 §2.5: distinguish ENOBUFS (the kernel dropped neighbor
@@ -2282,10 +2308,17 @@ mod monitor_lifecycle_tests_5165 {
         let generation = Arc::new(AtomicU64::new(1));
         let counters = Arc::new(super::super::neighbor_resolver::ResolverCounters::default());
         let stop = Arc::new(AtomicBool::new(false));
+        let manager_keys = Arc::new(Mutex::new(FastSet::default()));
 
         let handle = {
-            let (m, g, c, s) = (map.clone(), generation.clone(), counters.clone(), stop.clone());
-            std::thread::spawn(move || neigh_monitor_steady_state(read_fd, &s, &m, &g, &c))
+            let (m, g, c, s, k) = (
+                map.clone(),
+                generation.clone(),
+                counters.clone(),
+                stop.clone(),
+                manager_keys.clone(),
+            );
+            std::thread::spawn(move || neigh_monitor_steady_state(read_fd, &s, &m, &g, &c, &k))
         };
 
         let if1 = 101;
@@ -2400,12 +2433,18 @@ mod monitor_lifecycle_tests_5165 {
         let generation = Arc::new(AtomicU64::new(1));
         let counters = Arc::new(super::super::neighbor_resolver::ResolverCounters::default());
         let stop = Arc::new(AtomicBool::new(false));
+        let manager_keys = Arc::new(Mutex::new(FastSet::default()));
 
         let handle = {
-            let (m, g, c, s) = (map.clone(), generation.clone(), counters.clone(), stop.clone());
-            std::thread::spawn(move || neigh_monitor_steady_state(read_fd, &s, &m, &g, &c))
+            let (m, g, c, s, k) = (
+                map.clone(),
+                generation.clone(),
+                counters.clone(),
+                stop.clone(),
+                manager_keys.clone(),
+            );
+            std::thread::spawn(move || neigh_monitor_steady_state(read_fd, &s, &m, &g, &c, &k))
         };
-
         // Idle (no events); set stop and confirm the loop exits within a couple
         // of recv-timeout windows.
         std::thread::sleep(Duration::from_millis(20));
