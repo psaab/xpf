@@ -830,6 +830,13 @@ link-local prepend above, the ceiling on **configured** VIPs is:
 `MaxConfiguredVIPs(isIPv6)` (`packet.go`) derives both from
 `MaxAdvertAddrCount`, so the subtraction lives in one place.
 
+**Canonical VIP-set identity (#11482).** Virtual addresses are an ordered set:
+the first spelling of each canonical address/prefix identity is retained, and
+aliases are removed during config collection and in-place updates. Advertisement
+construction, GARP selection, and capacity checks therefore see one entry per
+VIP. Capacity is reevaluated against the canonical set, including on day-2
+updates.
+
 **Why an oversized set was more than a malformed packet.** `sendAdvert`
 discards a `Marshal` failure at `slog.Debug`, and `becomeMaster` claimed the
 VIP set and published MASTER **before** calling it. An oversized family

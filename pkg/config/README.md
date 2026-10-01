@@ -858,6 +858,11 @@ a silent non-advertiser. The cap is spelled in both packages
 behavioural agreement test in `pkg/vrrp` that measures what the real `Marshal`
 accepts rather than pinning either side to a literal. Same doctrine as #4826.
 
+Canonical CIDR aliases within a desired set are treated as one VIP (#11482):
+collection retains the first spelling, and strict capacity validation counts
+distinct canonical identities rather than repeated entries. The RETH-derived
+untagged set is canonicalized across its combined unit-address list.
+
 **No-match default-policy is fail-closed (#3065):** the sibling of #3043
 for the implicit fallback. When a flow matches NO zone-pair, global, or
 default policy, the verdict is `SecurityConfig.DefaultPolicy`. Because the

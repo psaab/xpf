@@ -11,11 +11,10 @@ import (
 // literals) into the per-family net.IP slices a VRRPv3 advertisement carries.
 // Unparseable entries are skipped, exactly as the send path has always done.
 //
-// This is the SINGLE source of the per-family address counts. sendAdvert uses
-// it to build the packets and checkAdvertCapacity uses it to decide whether those
-// packets can legally be built, so the guard and the builder can never disagree
-// about how many addresses a config yields — the counting rule is shared code,
-// not two copies of the same loop (#6779).
+// This is the SINGLE source of per-family address parsing. sendAdvert calls it
+// with the instance's canonical unique VIP set; checkAdvertCapacity canonical-
+// deduplicates first and then uses the same parser, so the capacity guard and
+// packet builder cannot disagree about the number of addresses (#6779).
 func splitVIPsByFamily(vips []string) (v4Addrs, v6Addrs []net.IP) {
 	for _, vip := range vips {
 		addr := vip
@@ -72,7 +71,7 @@ func splitVIPsByFamily(vips []string) (v4Addrs, v6Addrs []net.IP) {
 // The predicate is pure for a given VIP list. It is evaluated at construction
 // and again when updateVIPs changes the live configuration (#10780).
 func checkAdvertCapacity(vips []string) error {
-	v4Addrs, v6Addrs := splitVIPsByFamily(vips)
+	v4Addrs, v6Addrs := splitVIPsByFamily(dedupeVIPs(vips))
 
 	if n := len(v4Addrs); n > MaxConfiguredVIPs(false) {
 		return fmt.Errorf("%d IPv4 virtual addresses exceed the %d that fit in a "+

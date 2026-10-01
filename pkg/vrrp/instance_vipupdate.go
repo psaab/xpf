@@ -113,7 +113,7 @@ func vipSetDelta(old, want []string) (added, removed []string) {
 // set). Socket I/O (advert, GARP) and the state event run AFTER the unlock,
 // matching becomeMaster.
 func (vi *vrrpInstance) updateVIPs(desired []string) error {
-	want := append([]string(nil), desired...)
+	want := dedupeVIPs(append([]string(nil), desired...))
 
 	vi.vipMu.Lock()
 
@@ -125,15 +125,19 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 
 	added, removed := vipSetDelta(old, want)
 	if len(added) == 0 && len(removed) == 0 {
-		// Equivalent-address spelling or order-only change: adopt the
-		// requested representation without netlink churn or a new epoch.
-		// Keep canonical pending identities bounded to current membership;
-		// a spelling-only change does not strand in-flight completions.
+		// Canonical-equivalent spellings, duplicate aliases, or order-only
+		// changes need no netlink churn or new epoch. Keep canonical pending
+		// identities bounded to current membership so in-flight completions
+		// survive representation changes.
 		vi.pendingGARPForSetLocked(want, nil, false)
 		vi.mu.Lock()
 		if !vipsEqual(old, want) {
 			vi.cfg.VirtualAddresses = want
 		}
+		// A dedupe can shrink the raw list without changing vipSetDelta.
+		// Recompute capacity from the canonical set rather than keeping a
+		// stale entry-count result.
+		vi.advertCapacityErr = checkAdvertCapacity(want)
 		vi.mu.Unlock()
 		vi.vipMu.Unlock()
 		vi.emitEvent()

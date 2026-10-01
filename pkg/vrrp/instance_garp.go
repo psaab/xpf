@@ -217,10 +217,17 @@ func (vi *vrrpInstance) pendingGARPForSetLocked(current, added []string, include
 	}
 	vi.pendingGARPVIPs = next
 	announcements := make([]string, 0, len(next))
+	rendered := make(map[string]struct{}, len(next))
 	for _, vip := range current {
-		if _, pending := next[canonicalVIPIdentity(vip)]; pending {
-			announcements = append(announcements, vip)
+		id := canonicalVIPIdentity(vip)
+		if _, pending := next[id]; !pending {
+			continue
 		}
+		if _, duplicate := rendered[id]; duplicate {
+			continue
+		}
+		rendered[id] = struct{}{}
+		announcements = append(announcements, vip)
 	}
 	return announcements
 }

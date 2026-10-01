@@ -1256,6 +1256,9 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 			// independent of node order.
 			vg.TrackPriorityDelta = nestedTrackCost
 		}
+		// The virtual-address list is a set: aliases of the same CIDR must not
+		// survive collection as separate runtime VIPs.
+		vg.VirtualAddresses = dedupeVRRPVIPs(vg.VirtualAddresses)
 	}
 }
 

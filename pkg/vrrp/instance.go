@@ -374,6 +374,7 @@ type vrrpInstance struct {
 }
 
 func newInstance(cfg Instance, iface *net.Interface, eventCh chan<- VRRPEvent, onEventDrop func()) *vrrpInstance {
+	cfg.VirtualAddresses = dedupeVIPs(cfg.VirtualAddresses)
 	capErr := instanceAdvertCapacityErr(cfg) // #6779, advert_capacity.go
 	return &vrrpInstance{
 		cfg:               cfg,
