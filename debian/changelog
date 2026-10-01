@@ -8,6 +8,9 @@ xpf (0.0.0) unstable; urgency=medium
     retaining the non-overridable cluster control/fabric fence (#11383).
   * Reject VPNs sharing a secure-tunnel bind unless their rendered selector
     unions are provably disjoint, preventing cross-VPN SA selection (#11380).
+  * Reject exact duplicate AllowedIPs across the merged peers of an
+    interface-level WireGuard endpoint, naming the conflicting prefix and
+    peers while preserving valid overlapping prefixes (#11381).
   * Fence option-121 routes from overriding connected cluster control/fabric
     prefixes in table 999, regardless of the DHCP trust override (#11362).
   * Select a deterministic per-family management DHCP default and warn when

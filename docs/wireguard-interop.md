@@ -42,10 +42,12 @@ stanza, and what that means is now defined:
 
 - **`peer` entries are additive.** Every unit's peers are merged into the
   interface's single endpoint, de-duplicated by public key and sorted by public
-  key. A unit re-declaring an inherited peer is already refused at commit
-  (`duplicate peer public key`), so a unit's peers are always the inherited set
-  plus keys no other unit declares — the merge cannot conflict and needs no
-  precedence rule.
+  key. A unit re-declaring an inherited peer is refused at commit
+  (`duplicate peer public key`), as are cross-unit duplicate public keys.
+  Distinct peers must also have distinct exact AllowedIPs prefixes across the
+  merged set: overlapping but non-identical prefixes remain valid, while a
+  canonicalized exact duplicate is rejected naming both peers (#11381). The
+  endpoint's prefix-to-peer map cannot give an exact tie a reliable owner.
 
   Before #7786 those peers were discarded. `pkg/dataplane/userspace/tunnels.go`
   builds the wire peer set from the emitted endpoint's `TunnelConfig`, and that
