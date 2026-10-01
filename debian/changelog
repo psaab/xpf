@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Repair daemon IPsec SA test fixtures for the shared-bind selector gate:
+    give each same-config VPN its own bind so attribution cells stay green
+    (#11380).
   * Rotate capped force-probe target windows deterministically so large stale
     neighbor sets reach gateways within bounded ticks (#11407).
   * Apply RFC 7915's size-keyed DF policy to translated NAT64 IPv4 packets and

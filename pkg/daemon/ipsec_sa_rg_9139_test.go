@@ -49,11 +49,13 @@ func twoRGIPsecStore(t *testing.T) *configstore.Store {
 		"set security ike gateway gw-plain address 198.51.100.3",
 		"set security ike gateway gw-plain external-interface ge-0/0/3.0",
 		"set security ipsec vpn vpn-rg1 ike gateway gw-rg1",
+		// #11380: same-bind VPNs need disjoint selectors; these fixtures pin
+		// RG attribution, not selector overlap, so each VPN gets its own bind.
 		"set security ipsec vpn vpn-rg1 bind-interface st0",
 		"set security ipsec vpn vpn-rg2 ike gateway gw-rg2",
-		"set security ipsec vpn vpn-rg2 bind-interface st0",
+		"set security ipsec vpn vpn-rg2 bind-interface st1",
 		"set security ipsec vpn vpn-plain ike gateway gw-plain",
-		"set security ipsec vpn vpn-plain bind-interface st0",
+		"set security ipsec vpn vpn-plain bind-interface st2",
 	})
 }
 
@@ -320,7 +322,7 @@ func TestApplyRethServicesForRGReinitiatesIPsec9139(t *testing.T) {
 		"set security ipsec vpn vpn-rg1 ike gateway gw-rg1",
 		"set security ipsec vpn vpn-rg1 bind-interface st0",
 		"set security ipsec vpn vpn-rg2 ike gateway gw-rg2",
-		"set security ipsec vpn vpn-rg2 bind-interface st0",
+		"set security ipsec vpn vpn-rg2 bind-interface st1",
 	})
 	cfg := store.ActiveConfig()
 	if !cfg.Chassis.Cluster.IPsecSASync {

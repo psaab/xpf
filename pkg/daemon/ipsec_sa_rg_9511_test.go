@@ -71,13 +71,14 @@ func multiSelectorIPsecStore9511(t *testing.T) *configstore.Store {
 		"set security ipsec vpn vpn-ms traffic-selector ts2 local-ip 10.0.11.0/24",
 		"set security ipsec vpn vpn-ms traffic-selector ts2 remote-ip 10.9.2.0/24",
 		// Controls: no selector (child name == VPN name) on RG1 and RG2, and an
-		// unanchored VPN that follows RG0.
+		// unanchored VPN that follows RG0. #11380: each VPN keeps its own bind
+		// so the shared-bind selector gate stays out of these attribution cells.
 		"set security ipsec vpn vpn-rg1 ike gateway gw-rg1",
-		"set security ipsec vpn vpn-rg1 bind-interface st0",
+		"set security ipsec vpn vpn-rg1 bind-interface st1",
 		"set security ipsec vpn vpn-rg2 ike gateway gw-rg2",
-		"set security ipsec vpn vpn-rg2 bind-interface st0",
+		"set security ipsec vpn vpn-rg2 bind-interface st2",
 		"set security ipsec vpn vpn-plain ike gateway gw-plain",
-		"set security ipsec vpn vpn-plain bind-interface st0",
+		"set security ipsec vpn vpn-plain bind-interface st3",
 	))
 	cfg := store.ActiveConfig()
 	vpn := cfg.Security.IPsec.VPNs["vpn-ms"]
@@ -236,7 +237,7 @@ func TestIPsecSANameRenderedByTwoVPNsNeedsEveryCandidateRG9511(t *testing.T) {
 		"set security ipsec vpn blue traffic-selector green local-ip 10.0.21.0/24",
 		"set security ipsec vpn blue traffic-selector green remote-ip 10.9.21.0/24",
 		"set security ipsec vpn blue-red ike gateway gw-rg2",
-		"set security ipsec vpn blue-red bind-interface st0",
+		"set security ipsec vpn blue-red bind-interface st1",
 	))
 	cfg := store.ActiveConfig()
 	idx := ipsecSANameIndex(cfg)
@@ -289,9 +290,9 @@ func TestAmbiguousSANameNeedsDeclaredRG0_9511(t *testing.T) {
 		"set security ipsec vpn blue traffic-selector red local-ip 10.0.1.0/24",
 		"set security ipsec vpn blue traffic-selector red remote-ip 10.9.1.0/24",
 		"set security ipsec vpn blue-red ike gateway gw-plain",
-		"set security ipsec vpn blue-red bind-interface st0",
+		"set security ipsec vpn blue-red bind-interface st1",
 		"set security ipsec vpn lone ike gateway gw-plain",
-		"set security ipsec vpn lone bind-interface st0",
+		"set security ipsec vpn lone bind-interface st2",
 	})
 	cfg := store.ActiveConfig()
 	idx := ipsecSANameIndex(cfg)
@@ -465,7 +466,9 @@ func syncedStore9511(t *testing.T, lines []string) *configstore.Store {
 
 var blueOnRG1_9511 = []string{
 	"set security ipsec vpn blue ike gateway gw-rg1",
-	"set security ipsec vpn blue bind-interface st0",
+	// #11380: blue keeps st1 so every blue+X same-config pair spans binds;
+	// extras below stay on st0 and the selector gate stays silent.
+	"set security ipsec vpn blue bind-interface st1",
 	"set security ipsec vpn blue traffic-selector red local-ip 10.0.1.0/24",
 	"set security ipsec vpn blue traffic-selector red remote-ip 10.9.1.0/24",
 }
