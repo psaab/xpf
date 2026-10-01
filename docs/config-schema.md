@@ -14530,6 +14530,17 @@ strict-vs-lenient gates:
   snapshot carried the unknown name and the dataplane steered matched packets
   toward a routing table that does not exist (silent blackhole / fall-through to
   the default table).
+  The exact lowercase target `default` is Juniper's built-in master-RIB alias:
+  strict and tolerant compiles accept it without a `routing-instances default`
+  declaration, and PBR resolves it to `inet.0` / `inet6.0` (not a synthetic
+  `default.inet[6].0`). A declaration alone is not globally reserved and
+  remains valid; if it coexists with an FBF term targeting literal `default`,
+  strict compilation rejects the ambiguity. Tolerant load warns and preserves
+  the declaration and term unchanged: the alias selects master, not the
+  declared instance's table. Rename the instance and target its new name to
+  steer to its table. Names are case-sensitive: `Default` targeted as
+  `Default` remains an ordinary named-instance steer. Other undefined names
+  retain the strict-reject / tolerant-warning behavior (#11308, #11644).
 - **#3432 — output-attached `then routing-instance` direction →
   `validateFilterRoutingInstanceDirectionStrict`.** FBF route override is an
   INGRESS-only operation: the userspace forwarding path
