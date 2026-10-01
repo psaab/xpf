@@ -20,11 +20,10 @@ type RouteSnapshot struct {
 	// more-specific ordinary route it precedes in the kernel, and a leak
 	// into a table that misses blackholed instead of falling through. Every
 	// non-empty NextTable is a priority-ordered pre-LPM leak, never an
-	// ordinary table route; both producers below carry the ACTUAL kernel
-	// priority (config-mirror: NextTableRulePriorityBase + cumulative
-	// ingress slots in applier window order; live mirror: rule.Priority
-	// verbatim). Ordinary routes carry 0. Additive on the wire: omitempty
-	// suppresses the byte for 0, and the Rust side defaults an absent key to 0
+	// ordinary table route. Config-derived rows use the shared prefix-derived
+	// next-table priority; live rows carry rule.Priority verbatim. Ordinary
+	// routes carry 0. Additive on the wire: omitempty suppresses the byte for 0,
+	// and the Rust side defaults an absent key to 0
 	// — but an old helper that ignores the key keeps the prefix-length order
 	// that IS the defect, so the field rode the v24 bump on top of the
 	// v23 DHCPv6 relay contract. The shared protocol is now v25 for #10018's

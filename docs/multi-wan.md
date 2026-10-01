@@ -12,32 +12,26 @@ weights/load-share stage was KILLED by its own research-gate criteria
 dataplane had no ECMP next-hop selection to weight — the FIB flattened
 multi-next-hop routes to the first entry at build time. That premise has
 since shifted: #2389 retained the full equal-cost candidate vector
-(`Vec<RouteNextHopV4>`) with dead-NH fallback, and **#2734 added
-EQUAL-COST per-FLOW selection** — the session resolution path hashes the
-forward 5-tuple (the per-boot seeded `ecmp_hash_flow`) to pick a member,
-so distinct flows spread across equal-cost uplinks while a single flow
-stays pinned (flow-consistent). The seed is node-local (ECMP picks among
-THIS node's members, not wire/HA state), so there are no cross-node
-hash-symmetry invariants to maintain. **WEIGHTED** per-flow load-share
-(unequal-cost ratios) remains unimplemented; if demand materializes it is
-its own issue with its own value case — it is not a multi-WAN failover
-deliverable.
+(`Vec<RouteNextHopV4>`) with dead-next-hop fallback. #2734 added per-flow
+selection; #11405 gives that selection a fixed, ECMP-specific seed so HA
+re-resolution after restart preserves path-pinned NAT. #11403 scores each
+family-specific next-hop identity with weighted rendezvous,
+`-ln(U) / weight`, rather than reducing a flow hash modulo the live-member
+count. Removing a nonselected member leaves every survivor's score unchanged;
+adding a candidate, removing the selected member, or changing identity/weight
+can remap flows. Candidate order alone does not renumber survivors. The
+per-process hot-path seed remains in use for cache/map placement.
 
-**#2922 — single liveness snapshot in `select_route_next_hop`.** The
-equal-cost member picker (`select_route_next_hop`,
-`userspace-dp/src/afxdp/forwarding/mod.rs`) now evaluates the liveness
-predicate exactly ONCE per candidate. The predicate probes the shared
-dynamic-neighbor map, which the neighbor-monitor thread mutates
-concurrently, so it is not pure. The old two-pass form (`count()` the live
-members, then `nth()` to select) ran the predicate twice and a neighbor
-removed between the passes made the count see `live > 0` while the select
-pass yielded `None` → a spurious no-route despite a live member existing at
-count time, plus doubled hot-path neighbor probes. The picker now collects
-the live candidate references into a stack `SmallVec` in one pass and
-indexes into that materialized snapshot, so count and selection always
-agree. Selection semantics are unchanged: `ip_hash % live_count` over the
-live set in candidate order (flow-pinned), with the hashed full-vector
-fallback when no member is live.
+**#2922 — one liveness evaluation per candidate in `select_route_next_hop`.**
+The predicate probes the shared dynamic-neighbor map, which the
+neighbor-monitor thread mutates concurrently, so it is not pure. The old
+two-pass form (`count()` the live members, then `nth()` to select) could see a
+neighbor disappear between passes, causing a spurious no-route, and doubled
+the neighbor-map probes. The current selector evaluates liveness once per
+candidate while streaming weighted rendezvous scores; it uses constant stack
+space and does not allocate. If no candidate is live, the same ranking picks
+the best ARP-drivable candidate, falling back to the best overall only when
+none is drivable.
 
 **#2923 — type-aware ECMP candidate liveness (direct vs tunnel).** The
 liveness predicate `select_route_next_hop` evaluates was written for direct

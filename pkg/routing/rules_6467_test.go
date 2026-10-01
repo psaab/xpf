@@ -61,12 +61,13 @@ func TestNextTableApplyCapAggregatesDegradedError(t *testing.T) {
 	if !strings.Contains(err.Error(), fmt.Sprintf("; %d next-table route(s) beyond ", over)) {
 		t.Errorf("degraded error must name the %d dropped leaks, got %v", over, err)
 	}
-	// The cap still holds: exactly NextTableRuleWindow rules install, none beyond.
+	// The cap still holds: exactly NextTableRuleWindow rules install. Their
+	// prefix-derived priorities remain in the shared destination-leak range.
 	if total := ops.count(unix.AF_INET) + ops.count(unix.AF_INET6); total != config.NextTableRuleWindow {
 		t.Errorf("expected the cap to hold at %d installed rules, got %d",
 			config.NextTableRuleWindow, total)
 	}
-	assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+maxNextTableRules)
+	assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.RouteLeakRulePriorityWindow)
 }
 
 // TestNextTableApplyUnderCapNoError is the companion no-false-positive guard:
@@ -321,13 +322,13 @@ func TestNextTableDrawsDownV4FirstRegardlessOfCallerOrder6583(t *testing.T) {
 	for i, r := range byPrio {
 		want := v4[i].Destination
 		if got := r.Dst.String(); got != want {
-			t.Fatalf("v4 rule at window slot %d is %s, want %s — the family partition is "+
+			t.Fatalf("v4 rule at cap position %d is %s, want %s — the family partition is "+
 				"not STABLE, so the surviving set differs from the FIB's even though the "+
 				"per-family counts agree (#6583)", i, got, want)
 		}
 	}
 
-	assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+maxNextTableRules)
+	assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.RouteLeakRulePriorityWindow)
 }
 
 // TestNextTableCapHoldsOnMixedFamilyFixture6583 closes the fixture gap this
@@ -373,5 +374,5 @@ func TestNextTableCapHoldsOnMixedFamilyFixture6583(t *testing.T) {
 		t.Error("the mixed-family fixture installed ZERO v6 rules — the v6 term is still " +
 			"absent, so this guard cannot see a family-ordering change (#6583)")
 	}
-	assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+maxNextTableRules)
+	assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.RouteLeakRulePriorityWindow)
 }
