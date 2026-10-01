@@ -349,89 +349,6 @@ func dhcpConnectedCoveringPrefix(connected []netip.Prefix, learned netip.Prefix)
 const mgmtVRFTableID = config.ManagementVRFTableID
 const dhcpClasslessTrustOverrideEnv = "XPF_DHCP_TRUST_CLASSLESS_OVERRIDE"
 
-// mgmtVRFNeedsOperatorInventory reports whether active management leases have
-// routes whose precedence must be checked against operator statics. The
-// inventory is needed for both a DHCP default and RFC 3442 classless routes.
-func mgmtVRFNeedsOperatorInventory(leases []*dhcp.Lease, mgmtSet map[string]bool) bool {
-	for _, lease := range leases {
-		if mgmtSet[lease.Interface] &&
-			(lease.Gateway.IsValid() || len(lease.ClasslessRoutes) > 0) {
-			return true
-		}
-	}
-	return false
-}
-
-// mgmtVRFOperatorRoutes lists configured static routes in the management
-// table. Connected/local kernel routes are not operator-configured statics;
-// treating them as authority would suppress legitimate DHCP routes merely
-// because an interface happens to have an overlapping address.
-func mgmtVRFOperatorRoutes(nlh mgmtRouteReconciler, family int) ([]netlink.Route, error) {
-	routes, err := nlh.RouteListFiltered(family, &netlink.Route{
-		Table: mgmtVRFTableID,
-	}, netlink.RT_FILTER_TABLE)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]netlink.Route, 0, len(routes))
-	for _, route := range routes {
-		if route.Protocol == unix.RTPROT_DHCP || route.Protocol == unix.RTPROT_KERNEL {
-			continue
-		}
-		if route.Protocol != unix.RTPROT_STATIC {
-			slog.Warn("SECURITY: ignoring non-static management-VRF route for "+
-				"DHCP precedence (#9943)",
-				"destination", mgmtRoutePrefixString(route, family),
-				"protocol", route.Protocol, "table", mgmtVRFTableID)
-			continue
-		}
-		out = append(out, route)
-	}
-	return out, nil
-}
-
-func mgmtRoutePrefixString(route netlink.Route, family int) string {
-	if prefix, ok := mgmtRoutePrefix(route, family); ok {
-		return prefix.String()
-	}
-	return "<invalid>"
-}
-
-func mgmtRoutePrefix(route netlink.Route, family int) (netip.Prefix, bool) {
-	if route.Dst == nil {
-		if family == netlink.FAMILY_V6 {
-			return netip.PrefixFrom(netip.IPv6Unspecified(), 0), true
-		}
-		return netip.PrefixFrom(netip.IPv4Unspecified(), 0), true
-	}
-	addr, ok := netip.AddrFromSlice(route.Dst.IP)
-	if !ok || (family == netlink.FAMILY_V4 && !addr.Is4()) ||
-		(family == netlink.FAMILY_V6 && addr.Is4()) {
-		return netip.Prefix{}, false
-	}
-	ones, bits := route.Dst.Mask.Size()
-	if bits != addr.BitLen() {
-		return netip.Prefix{}, false
-	}
-	return netip.PrefixFrom(addr, ones).Masked(), true
-}
-
-// mgmtRouteCoveredByOperator returns the configured/operator route that
-// contains a learned classless prefix. Only a route at least as broad as the
-// learned prefix can override it; a broader learned route does not override a
-// more-specific operator route and remains necessary for uncovered addresses.
-func mgmtRouteCoveredByOperator(learned netip.Prefix, operators []netlink.Route, family int) string {
-	for _, route := range operators {
-		static, ok := mgmtRoutePrefix(route, family)
-		if !ok || static.Bits() > learned.Bits() ||
-			static.Addr().BitLen() != learned.Addr().BitLen() ||
-			!static.Contains(learned.Addr()) {
-			continue
-		}
-		return static.String()
-	}
-	return ""
-}
 func mgmtClasslessPrefixSafetyFailure(prefix netip.Prefix) string {
 	if dhcp.ClasslessRouteIsTooBroad(prefix) {
 		return "broad"
@@ -529,14 +446,36 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 	applied := make(map[string]struct{})
 	trustClassless := os.Getenv(dhcpClasslessTrustOverrideEnv) == "1"
 	needsInventory := mgmtVRFNeedsOperatorInventory(leases, mgmtSet)
+	needsControlFabricInventory := mgmtVRFNeedsControlFabricInventory(leases, mgmtSet)
 	var operatorV4, operatorV6 []netlink.Route
-	var operatorInventoryErr error
+	var controlConnectedV4, controlConnectedV6 []netlink.Route
+	var operatorInventoryErr, controlFabricInventoryErr error
+	var controlFabricInterfaces []string
+	var controlFabricLinks map[int]string
+	if needsControlFabricInventory && d.store != nil {
+		controlFabricInterfaces = mgmtVRFControlFabricInterfaces(d.store.ActiveConfig(), mgmtSet)
+		controlFabricLinks, controlFabricInventoryErr =
+			mgmtVRFControlFabricLinkIndexes(nlh, controlFabricInterfaces)
+		if controlFabricInventoryErr != nil {
+			slog.Warn("SECURITY: refusing management-VRF DHCP classless routes "+
+				"because cluster control/fabric interfaces cannot be resolved (#11362)",
+				"interfaces", controlFabricInterfaces, "table", mgmtVRFTableID,
+				"err", controlFabricInventoryErr)
+			errs = append(errs, fmt.Errorf(
+				"mgmt VRF control/fabric interface inventory: %w", controlFabricInventoryErr))
+		}
+	}
 	if needsInventory {
-		operatorV4, operatorInventoryErr = mgmtVRFOperatorRoutes(nlh, netlink.FAMILY_V4)
+		operatorV4, controlConnectedV4, operatorInventoryErr =
+			mgmtVRFRouteInventory(nlh, netlink.FAMILY_V4, controlFabricLinks)
 		if operatorInventoryErr == nil {
-			operatorV6, operatorInventoryErr = mgmtVRFOperatorRoutes(nlh, netlink.FAMILY_V6)
+			operatorV6, controlConnectedV6, operatorInventoryErr =
+				mgmtVRFRouteInventory(nlh, netlink.FAMILY_V6, controlFabricLinks)
 		}
 		if operatorInventoryErr != nil {
+			if needsControlFabricInventory {
+				controlFabricInventoryErr = operatorInventoryErr
+			}
 			slog.Warn("SECURITY: refusing DHCP routes because management-VRF "+
 				"operator-route inventory failed (#9943)",
 				"table", mgmtVRFTableID, "err", operatorInventoryErr)
@@ -689,6 +628,26 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 
 		// RFC 3442 classless static routes.
 		for _, cr := range lease.ClasslessRoutes {
+			if controlFabricInventoryErr != nil {
+				slog.Warn("SECURITY: refusing management-VRF DHCP classless route "+
+					"without a complete cluster control/fabric prefix inventory (#11362)",
+					"interface", lease.Interface, "destination", cr.Destination,
+					"table", mgmtVRFTableID, "err", controlFabricInventoryErr)
+				continue
+			}
+			controlConnected := controlConnectedV4
+			if nlFamily == netlink.FAMILY_V6 {
+				controlConnected = controlConnectedV6
+			}
+			if connectedPrefix, route, ok := mgmtRouteCoveringPrefix(
+				cr.Destination, controlConnected, nlFamily); ok {
+				slog.Warn("SECURITY: suppressing management-VRF DHCP classless route "+
+					"inside a cluster control/fabric connected prefix (#11362)",
+					"interface", lease.Interface, "destination", cr.Destination,
+					"control_interface", controlFabricLinks[route.LinkIndex],
+					"connected_prefix", connectedPrefix, "table", mgmtVRFTableID)
+				continue
+			}
 			safetyReason := mgmtClasslessPrefixSafetyFailure(cr.Destination)
 			staticDestination := ""
 			if operatorInventoryErr == nil {

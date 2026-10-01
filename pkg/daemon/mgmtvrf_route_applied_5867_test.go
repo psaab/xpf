@@ -30,6 +30,7 @@ func (l fakeMgmtLink) Type() string              { return "dummy" }
 // RouteReplace (modelling the kernel's same-destination overwrite on success).
 type fakeMgmtProgrammer struct {
 	v4, v6     []netlink.Route
+	links      map[string]int
 	linkIdx    int
 	linkErr    error
 	listErr    error
@@ -41,6 +42,12 @@ type fakeMgmtProgrammer struct {
 func (f *fakeMgmtProgrammer) LinkByName(name string) (netlink.Link, error) {
 	if f.linkErr != nil {
 		return nil, f.linkErr
+	}
+	if f.links != nil {
+		if idx, ok := f.links[name]; ok {
+			return fakeMgmtLink{idx: idx}, nil
+		}
+		return nil, errors.New("link not found")
 	}
 	return fakeMgmtLink{idx: f.linkIdx}, nil
 }
