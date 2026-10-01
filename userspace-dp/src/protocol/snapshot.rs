@@ -267,6 +267,12 @@ pub(crate) struct RouteSnapshot {
     pub destination: String,
     #[serde(rename = "next_hops", default)]
     pub next_hops: Vec<String>,
+    /// #11402: parallel per-leg ECMP weights, preserving kernel leg order.
+    /// `weight = Hops + 1` from Linux `Route.MultiPath[].Hops`, range 1..=256;
+    /// single-path routes carry weight 1. Missing/short/zero entries default
+    /// to 1 (old-helper/backward compatibility); legs are never reordered.
+    #[serde(rename = "next_hop_weights", default)]
+    pub next_hop_weights: Vec<u32>,
     #[serde(default)]
     pub discard: bool,
     #[serde(rename = "next_table", default)]
@@ -1311,5 +1317,30 @@ mod ipsec_tunnel_rows_tests {
         assert_eq!(value["ipsec_tunnel_rows"][0]["stn"], "st0");
         assert_eq!(value["ipsec_tunnel_rows"][0]["if_id"], 9);
         assert_eq!(value["ipsec_tunnel_rows"][0]["logical_ifindex"], 10);
+    }
+}
+
+#[cfg(test)]
+mod route_weight_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn next_hop_weights_decode_with_legacy_default() {
+        let legacy: RouteSnapshot = serde_json::from_str(
+            r#"{"table":"inet.0","family":"inet","destination":"203.0.113.0/24","next_hops":[]}"#,
+        )
+        .expect("legacy route snapshot decodes");
+        assert!(
+            legacy.next_hop_weights.is_empty(),
+            "missing route weights default to an empty parallel slice"
+        );
+
+        let weighted: RouteSnapshot = serde_json::from_str(
+            r#"{"table":"inet.0","family":"inet","destination":"203.0.113.0/24","next_hops":["192.0.2.1","192.0.2.2"],"next_hop_weights":[1,4]}"#,
+        )
+        .expect("weighted route snapshot decodes");
+        assert_eq!(weighted.next_hop_weights, vec![1, 4]);
+        let wire = serde_json::to_value(weighted).expect("route snapshot serializes");
+        assert_eq!(wire["next_hop_weights"], serde_json::json!([1, 4]));
     }
 }

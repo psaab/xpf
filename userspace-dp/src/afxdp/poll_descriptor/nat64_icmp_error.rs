@@ -59,6 +59,7 @@ pub(super) fn try_translate_nat64_icmp_error(
         worker_ctx.dynamic_neighbors,
         worker_ctx.shared_sessions,
         worker_ctx.shared_nat_sessions,
+        worker_ctx.shared_owner_rg_indexes,
         worker_ctx.shared_forward_wire_sessions,
         now_ns,
     ) {

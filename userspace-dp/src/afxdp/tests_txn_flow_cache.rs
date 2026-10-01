@@ -2387,6 +2387,145 @@ fn poll_descriptor_stamps_neighbor_mac_epoch_from_outer_neighbor_shard_not_logic
     );
 }
 
+/// A real RTM_DELNEIGH for the cached ECMP member must invalidate the
+/// forwarding descriptor so the next packet selects the live alternate (#11375).
+#[test]
+fn txn_flow_cache_delneigh_resolves_live_ecmp_alternate_11375() {
+    use crate::afxdp::sharded_neighbor::ShardedNeighborMap;
+    use crate::afxdp::types::NeighborEntry;
+
+    let hop_a = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1));
+    let hop_b = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 2));
+    let mut snapshot = nat_snapshot();
+    snapshot.routes[0].next_hops = vec![
+        "172.16.80.1@reth0.80".to_string(),
+        "172.16.80.2@reth0.80".to_string(),
+    ];
+    snapshot.neighbors.clear();
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let mac_a = [0xaa; 6];
+    let mac_b = [0xbb; 6];
+    neighbors.insert_if_changed((12, hop_a), NeighborEntry { mac: mac_a });
+    neighbors.insert_if_changed((12, hop_b), NeighborEntry { mac: mac_b });
+
+    let syn = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(24, TCP_FLAG_SYN, (syn.len() - 14) as u16);
+    let (_, syn_dbg) = txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        syn_meta,
+        &neighbors,
+    );
+    assert_eq!(syn_dbg.tx, 1, "the SYN must install and forward the flow");
+    assert_eq!(txn_flow_cache_entries(&binding), 0, "the SYN is not cache-eligible");
+
+    let ack = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(8, 8, 8, 8),
+        12345,
+        443,
+        0x10,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let ack_meta = txn_meta_v4(24, 0x10, (ack.len() - 14) as u16);
+    let (_, ack_dbg) = txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+        &neighbors,
+    );
+    assert_eq!(ack_dbg.tx, 1, "the first ACK must forward");
+    assert_eq!(txn_flow_cache_entries(&binding), 1, "the ACK seeds the cache");
+
+    let cached_member = binding
+        .flow
+        .flow_cache
+        .entries
+        .iter()
+        .flatten()
+        .next()
+        .expect("the ACK must cache its ECMP decision")
+        .decision
+        .resolution
+        .next_hop
+        .expect("the cached decision must have a next hop");
+    let live_alternate = if cached_member == hop_a {
+        hop_b
+    } else {
+        assert_eq!(cached_member, hop_b, "ECMP must select one fixture member");
+        hop_a
+    };
+    let live_alternate_mac = if live_alternate == hop_a { mac_a } else { mac_b };
+    let removed_ip = match cached_member {
+        IpAddr::V4(ip) => ip,
+        IpAddr::V6(_) => panic!("the fixture route is IPv4"),
+    };
+
+    let mut delneigh_body = vec![0u8; 20];
+    delneigh_body[0] = libc::AF_INET as u8;
+    delneigh_body[4..8].copy_from_slice(&12_i32.to_ne_bytes());
+    delneigh_body[12..14].copy_from_slice(&8_u16.to_ne_bytes());
+    delneigh_body[14..16].copy_from_slice(&1_u16.to_ne_bytes());
+    delneigh_body[16..20].copy_from_slice(&removed_ip.octets());
+    assert_eq!(
+        crate::afxdp::neighbor::parse_neighbor_msg(29, &delneigh_body, &neighbors),
+        crate::afxdp::neighbor::NeighborMsgEffect::Removed,
+        "RTM_DELNEIGH must remove the cached ECMP member"
+    );
+    assert!(
+        neighbors.get(&(12, cached_member)).is_none(),
+        "the removed member must no longer be live"
+    );
+
+    let (_, next_dbg) = txn_run_descriptor_with_neighbors(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+        &neighbors,
+    );
+    assert_eq!(next_dbg.tx, 1, "the next packet must forward through the alternate");
+    let refreshed = binding
+        .flow
+        .flow_cache
+        .entries
+        .iter()
+        .flatten()
+        .next()
+        .expect("the re-resolved packet must seed the flow cache");
+    assert_eq!(
+        refreshed.decision.resolution.next_hop,
+        Some(live_alternate),
+        "the next packet must not retain the deleted ECMP member"
+    );
+    assert_eq!(
+        refreshed.decision.resolution.neighbor_mac,
+        Some(live_alternate_mac),
+        "the new cached descriptor must carry the live alternate's MAC"
+    );
+}
+
 
 // I6: a MissingNeighborSeed install refused at cap must NOT buffer the
 // frame for neighbor-resolution replay (the replay would forward on the
