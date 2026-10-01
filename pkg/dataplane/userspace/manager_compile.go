@@ -286,15 +286,41 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		if preflight != nil {
 			natCounterIDs = preflight.NATCounterIDs
 		}
-		// #2514: build and discard a config-shaped snapshot before CompileConfig's
-		// Phase 2 host mutation, so address-book content-ID collisions fail
-		// without changing the host. This is only a validation pass: Phase 2 may
-		// create a VLAN whose live ifindex is needed by interface and tunnel rows.
-		if _, err := buildSnapshotWithSchedulerStateAndNATCounters(
+		// This pass is only a validation pass: Phase 2 may create a VLAN whose
+		// live ifindex is needed by interface and tunnel rows. Required protocol
+		// gates are also checked here when a manager-owned helper answers a fresh
+		// status request, so a known incompatible helper is disarmed before host
+		// mutation. Without a response there is no current helper version to
+		// decide against; do not trust stale cached status. Starting or replacing
+		// the helper here would change process/BPF state even if Phase 2 later
+		// fails, so the existing post-start gate remains authoritative for that
+		// otherwise-unknowable case.
+		preflightSnapshot, err := buildSnapshotWithSchedulerStateAndNATCounters(
 			cfg, ucfg, 0, 0, m.policySchedulerDesiredStateSnapshot(),
 			m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), natCounterIDs,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf("userspace: build config snapshot: %w", err)
+		}
+		m.mu.Lock()
+		var protocolErr error
+		if m.proc != nil && m.proc.Process != nil &&
+			m.lastStatus.ConfigSnapshotProtocolVersion != ProtocolVersion {
+			var status ProcessStatus
+			if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
+				m.recordHelperStatusLocked(&status)
+				protocolErr = m.ensureRequiredSnapshotProtocolLocked(preflightSnapshot)
+			}
+		}
+		if protocolErr != nil {
+			m.ensureStatusLoopLocked()
+			if disarmErr := m.disarmSnapshotProtocolFailureLocked(protocolErr); disarmErr != nil {
+				protocolErr = errors.Join(protocolErr, disarmErr)
+			}
+		}
+		m.mu.Unlock()
+		if protocolErr != nil {
+			return protocolErr
 		}
 		snapshotPreflightDone = true
 		return nil

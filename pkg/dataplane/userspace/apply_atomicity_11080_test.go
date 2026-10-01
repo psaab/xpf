@@ -114,6 +114,83 @@ func TestSnapshotValidationPrecedesShimMutation11080(t *testing.T) {
 		t.Fatal("snapshot validation rejected the config only after the shim compile had mutated the host")
 	}
 }
+func TestRequiredProtocolGatePrecedesShimMutation11080(t *testing.T) {
+	dir, err := os.MkdirTemp("", "x11080")
+	if err != nil {
+		t.Fatalf("create control-socket directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := dir + "/c.sock"
+	helper := startRecordingHelper6722(t, sock, preV5SnapshotProtocolVersion)
+
+	m := New()
+	m.cfg.ControlSocket = sock
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	mutated := false
+	m.compileUserspaceShimHook = func(_ *config.Config, preflight func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error) {
+		result := &dataplane.CompileResult{}
+		if err := preflight(result); err != nil {
+			return nil, err
+		}
+		mutated = true // manager-level stand-in for CompileUserspaceShim's Phase 2
+		return result, nil
+	}
+	t.Cleanup(func() {
+		m.mu.Lock()
+		cancel, done := m.syncCancel, m.syncDone
+		m.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		if done != nil {
+			<-done
+		}
+	})
+
+	_, err = m.Compile(&config.Config{})
+	if !errors.Is(err, ErrEgressZoneProtocolIncompatible) {
+		t.Fatalf("Compile error = %v, want ErrEgressZoneProtocolIncompatible", err)
+	}
+	if mutated {
+		t.Fatal("protocol rejection happened only after shim compilation mutated the host")
+	}
+	if !helper.sawDisarm() {
+		t.Fatalf("preflight gate did not preserve fail-closed disarm: %v", helper.seen())
+	}
+	if helper.sawType("apply_snapshot") {
+		t.Fatalf("preflight-rejected candidate was published: %v", helper.seen())
+	}
+}
+func TestProtocolPreflightDefersWithoutFreshHelperStatus11080(t *testing.T) {
+	phaseErr := errors.New("host compiler phase failed")
+	mutated := false
+	m := New()
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	m.lastStatus = ProcessStatus{ConfigSnapshotProtocolVersion: preV5SnapshotProtocolVersion}
+	m.helperStatusObserved = true
+	m.controlRequestHook = func(ControlRequest, *ProcessStatus) error {
+		return errors.New("helper unavailable")
+	}
+	m.compileUserspaceShimHook = func(_ *config.Config, preflight func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error) {
+		if err := preflight(&dataplane.CompileResult{}); err != nil {
+			return nil, err
+		}
+		mutated = true
+		return nil, phaseErr
+	}
+
+	_, err := m.Compile(&config.Config{})
+	if !errors.Is(err, phaseErr) {
+		t.Fatalf("Compile error = %v, want the simulated Phase 2 failure", err)
+	}
+	if errors.Is(err, ErrEgressZoneProtocolIncompatible) {
+		t.Fatalf("preflight rejected a stale cached protocol version without a live helper: %v", err)
+	}
+	if !mutated {
+		t.Fatal("missing-helper preflight did not defer to the post-start protocol gate")
+	}
+}
+
 func TestCompileUsesPostCompileVLANSnapshot11080(t *testing.T) {
 	const vlanIfindex = 42
 	cfg := &config.Config{}
