@@ -167,13 +167,14 @@ func (d *Daemon) onSessionSyncPeerDisconnected() {
 	}
 }
 
+const maxPeerSyncSilence = 2 * time.Second
+
 func (d *Daemon) shouldSuppressPeerHeartbeatTimeout() (bool, string) {
 	ss := d.getSessionSync()
 	if ss == nil || !ss.IsConnected() {
 		d.hbSuppressStart.Store(0) // reset when sync disconnected
 		return false, ""
 	}
-	const maxPeerSyncSilence = 2 * time.Second
 	age, ok := ss.LastPeerReceiveAge()
 	if !ok || age > maxPeerSyncSilence {
 		d.hbSuppressStart.Store(0) // reset when sync goes quiet

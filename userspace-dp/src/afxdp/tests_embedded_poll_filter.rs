@@ -409,6 +409,8 @@ fn same_family_icmp_quote_uses_read_only_plain_probe_9990() {
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -509,6 +511,8 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: Some(snat_port), rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -655,6 +659,8 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -1051,6 +1057,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         };
         assert!(
             !super::poll_descriptor::enforce_queued_embedded_icmp_policy(
@@ -1115,6 +1123,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: forward_nat,
             install_table_domain: 0,
@@ -1157,6 +1167,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
                     neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                     src_mac: Some(TEST_LAN_MAC),
                     tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
                 },
                 nat: forward_nat.reverse(
                     IpAddr::V4(client_ip),
@@ -1754,6 +1766,8 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
                 neighbor_mac: Some(N6472_WAN_GW_MAC),
                 src_mac: Some(N6472_WAN_SRC_MAC),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: fwd_nat,
             install_table_domain: 0,
@@ -1805,6 +1819,8 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
                 neighbor_mac: Some(N6472_CLIENT_MAC),
                 src_mac: Some(N6472_LAN_SRC_MAC),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: fwd_nat.reverse(
                 IpAddr::V6(n6472_client_v6()),
@@ -2967,6 +2983,8 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
                 neighbor_mac: Some(N6472_WAN_GW_MAC),
                 src_mac: Some(N6472_WAN_SRC_MAC),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -3125,6 +3143,8 @@ fn n6474_install_snat_session(
                 neighbor_mac: Some(N6472_WAN_GW_MAC),
                 src_mac: Some(N6472_WAN_SRC_MAC),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(snat_ip),
@@ -3638,6 +3658,8 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
                 neighbor_mac: Some(N6472_WAN_GW_MAC),
                 src_mac: Some(N6472_WAN_SRC_MAC),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: None,
@@ -4612,6 +4634,8 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
         neighbor_mac: Some([0, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
@@ -5039,6 +5063,8 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let local_metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
@@ -5349,6 +5375,8 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -5662,6 +5690,8 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -6027,6 +6057,8 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -6426,6 +6458,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 // PURE DNAT: no source rewrite at all. This is the decision
@@ -6618,6 +6652,8 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision {
             // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
             // with no L4 ports to `reserve_address_only`, which is how GRE
@@ -6765,6 +6801,8 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -6882,6 +6920,8 @@ fn the_as_is_embedded_key_carries_the_discriminator_9031() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: None,
@@ -6979,6 +7019,8 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: None,
@@ -7114,28 +7156,35 @@ fn publish_pptp_gre_session_9298(
             discriminator: TunnelDiscriminator::Pptp(handle),
             routing_domain: 0,
         },
-        decision: SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex,
-            tx_ifindex: egress_ifindex,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 80,
-        }, nat: NatDecision {
-            // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
-            // with no L4 ports to `reserve_address_only`, which is how GRE
-            // genuinely reaches same-family SNAT.
-            rewrite_src: Some(snat),
-            rewrite_dst: None,
-            rewrite_src_port: None,
-            rewrite_dst_port: None,
-            source_nat_icmp: None,
-            nat64: false,
-            nptv6: false,
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex,
+                tx_ifindex: egress_ifindex,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+                tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision {
+                // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
+                // with no L4 ports to `reserve_address_only`, which is how GRE
+                // genuinely reaches same-family SNAT.
+                rewrite_src: Some(snat),
+                rewrite_dst: None,
+                rewrite_src_port: None,
+                rewrite_dst_port: None,
+                source_nat_icmp: None,
+                nat64: false,
+                nptv6: false,
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -7475,6 +7524,8 @@ fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -7679,6 +7730,8 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -7902,6 +7955,8 @@ fn n9901_floor_fixture() -> (
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -8073,6 +8128,8 @@ fn n9901_install_snat_session(
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -8606,6 +8663,8 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
                     [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]
                 }),
                 tx_vlan_id: if reverse_half || same_zone_arrival { 0 } else { 80 },
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -9052,6 +9111,8 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
                 [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]
             }),
             tx_vlan_id: if reverse_half { 0 } else { 80 },
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -9390,6 +9451,8 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -9439,6 +9502,8 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -9717,6 +9782,8 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -9766,6 +9833,8 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,

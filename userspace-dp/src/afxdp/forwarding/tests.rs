@@ -786,6 +786,8 @@ fn gate_fabric_zone_override_on_owner_rg_6458() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     // Owner RG (1) locally active -> honored (legitimate punt).
     let active = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
@@ -1529,6 +1531,8 @@ fn missing_neighbor_session_metadata_preserves_fabric_ingress() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let metadata = build_missing_neighbor_session_metadata(
@@ -1737,6 +1741,8 @@ fn embedded_icmp_to_inactive_owner_rg_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1801,6 +1807,8 @@ fn embedded_icmp_no_route_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1865,6 +1873,8 @@ fn embedded_icmp_discard_route_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1925,6 +1935,8 @@ fn embedded_icmp_from_fabric_does_not_redirect_back_to_fabric() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1972,6 +1984,8 @@ fn fabric_ingress_does_not_redirect_back_to_fabric() {
         neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
         src_mac: None,
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     assert_eq!(
         redirect_via_fabric_if_needed(&state, blocked, 21, None).disposition,
@@ -3760,7 +3774,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 discard: false,
                 next_table: "red.inet.0".to_string(),
                 preference: 0,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
             crate::RouteSnapshot {
                 table: "red.inet.0".to_string(),
@@ -3771,7 +3785,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 discard: false,
                 next_table: "inet.0".to_string(),
                 preference: 0,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
         ],
         ..Default::default()
@@ -4575,7 +4589,7 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         // Only the SECOND next-hop's neighbor is resolved; the first is dead.
         neighbors: vec![crate::NeighborSnapshot {
@@ -4700,7 +4714,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         // ONLY the gateway member's neighbor is resolved. The interface-only
         // member's neighbor (the per-flow destination) is deliberately absent —
@@ -4836,7 +4850,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         discard: false,
         next_table: String::new(),
         preference: 5,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -4953,7 +4967,7 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
         discard: false,
         next_table: String::new(),
         preference: 5,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -5042,7 +5056,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
         discard: false,
         next_table: String::new(),
         preference: 5,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -5160,7 +5174,7 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         // BOTH next-hop neighbors are resolved/live, so the live pool is
         // the full set of equal-cost members.
@@ -5277,10 +5291,10 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
     );
 }
 
-/// #2734: the seeded per-flow ECMP hash is deterministic within a boot
-/// (flow consistency) and spreads distinct 5-tuples across the index
-/// space. Pin the seed so the assertions are stable across the parallel
-/// runner; production folds in the per-boot process seed.
+/// Seed-parameterized ECMP core tests: an explicit seed makes the function
+/// reproducible and keeps distinct 5-tuples spread. Production must use the
+/// dedicated stable ECMP domain seed, not `hot_path_hash_seed`, so re-resolved
+/// flows retain their member across process restarts and HA peers.
 #[test]
 fn ecmp_flow_hash_is_stable_and_spreads() {
     let key_a = crate::session::SessionKey {
@@ -5307,10 +5321,83 @@ fn ecmp_flow_hash_is_stable_and_spreads() {
         ecmp_hash_flow_seeded(seed, &key_a),
         ecmp_hash_flow_seeded(seed, &key_b),
     );
-    // Cross-seed reshuffle: a different per-boot seed remaps the flow.
+    // The generic seeded core changes with an explicit seed. Production uses
+    // the dedicated ECMP seed below, never a per-process hot-path seed.
     assert_ne!(
         ecmp_hash_flow_seeded(seed, &key_a),
         ecmp_hash_flow_seeded(seed ^ 0xffff_ffff_ffff_ffff, &key_a),
+    );
+}
+
+/// #11405: separate per-process hot seeds must not change the selected ECMP
+/// member when the flow key and live candidate set are unchanged. Different
+/// hot seeds still produce different local cache placement, as they should.
+#[test]
+fn ecmp_flow_member_stays_stable_across_hot_seeds() {
+    let key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
+        src_port: 1024,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let candidates = [11u32, 22, 33, 44];
+    let select_for_hash = |hash| {
+        select_route_next_hop(
+            &candidates,
+            hash,
+            |candidate| *candidate as u64,
+            |_| true,
+            |_| true,
+        )
+            .copied()
+            .expect("the fixture has live ECMP candidates")
+    };
+
+    // Pick a deterministic second process seed that makes the old
+    // per-process ECMP hash choose a different live member. The two hot seeds
+    // also represent distinct local flow-cache placement.
+    let hot_seed_a = 0x1234_5678_9abc_def0;
+    let cache_set_a =
+        crate::afxdp::flow_cache::FlowCache::set_index_seeded(hot_seed_a, &key, 3);
+    let old_member_a = select_for_hash(ecmp_hash_flow_seeded(hot_seed_a, &key));
+    let (hot_seed_b, cache_set_b, old_member_b) =
+        (hot_seed_a + 1..=hot_seed_a + 256)
+            .find_map(|seed| {
+                let cache_set =
+                    crate::afxdp::flow_cache::FlowCache::set_index_seeded(seed, &key, 3);
+                let old_member = select_for_hash(ecmp_hash_flow_seeded(seed, &key));
+                (cache_set != cache_set_a && old_member != old_member_a)
+                    .then_some((seed, cache_set, old_member))
+            })
+            .expect("two hot seeds must model distinct cache sets and ECMP members");
+
+    assert_ne!(hot_seed_a, hot_seed_b);
+    assert_ne!(cache_set_a, cache_set_b);
+    assert_ne!(
+        old_member_a, old_member_b,
+        "the old per-process ECMP seed selects different members after restart",
+    );
+
+    let member_for_process_seed = |hot_seed| {
+        let _local_cache_set =
+            crate::afxdp::flow_cache::FlowCache::set_index_seeded(hot_seed, &key, 3);
+        select_for_hash(ecmp_hash_flow(&key))
+    };
+    let member_a = member_for_process_seed(hot_seed_a);
+    let member_b = member_for_process_seed(hot_seed_b);
+
+    assert_eq!(
+        ecmp_hash_flow(&key),
+        ecmp_hash_flow_seeded(ECMP_FLOW_HASH_SEED, &key),
+        "production ECMP must use its fixed domain seed, not a per-process seed",
+    );
+    assert_eq!(
+        member_a, member_b,
+        "the same flow and live ECMP set must keep its member across hot seeds",
     );
 }
 
@@ -5365,7 +5452,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 discard: false,
                 next_table: String::new(),
                 preference: 50,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
             // BETTER route second (lower preference).
             crate::RouteSnapshot {
@@ -5377,7 +5464,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 discard: false,
                 next_table: String::new(),
                 preference: 5,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
         ],
         neighbors: vec![
@@ -5801,7 +5888,7 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         default_policy: "deny".to_string(),
         policies: vec![match policy {

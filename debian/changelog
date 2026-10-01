@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Order next-table and rib-group leak rules by destination prefix specificity
+    across leak kinds so overlapping VRF routes follow longest-prefix match
+    in both kernel and userspace dataplanes (#11396).
   * Initial xpf Debian package (increment A of #1917, subsumes #1923).
     Ships xpfd, xpf-userspace-dp, cli, the day-0 config-drive loader,
     and the systemd units. Binaries install to a dpkg-static staging
@@ -113,6 +116,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Warn about and exclude static routes without a forwarding disposition, so
     they cannot shadow an installable less-specific route in the helper FIB
     (#11327).
+  * Defer never-seen HA absence confirmation while connected session-sync
+    receive proof is fresh; preserve startup grace and readiness gates (#11566).
   * Align userspace-dp session-sync regression fixtures with the ingress
     identity trailer, preserve JSON/binary identity parity, and keep the
     policy-list acknowledgement plus debug timing gates robust under runner
@@ -139,6 +144,9 @@ xpf (0.0.0) unstable; urgency=medium
     T1/T2 renewal and reacquisition. Remove stale addresses and delegated
     prefixes, retain stateless DHCPv6 options across failed refreshes, and
     notify dependent route recompilation (#11382).
+  * Preserve Linux RTAX_MTU on imported routes through the v38 FIB snapshot,
+    applying selected-route limits to plain forwarding, tunnel budgets, TCP
+    segmentation, and PMTU signaling (#11411).
   * Refresh learned-route FIBs from coalesced kernel route events, and retry
     unresolved FIB-generation bumps without publishing once per event (#11565).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

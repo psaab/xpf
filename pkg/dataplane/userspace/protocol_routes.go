@@ -20,11 +20,10 @@ type RouteSnapshot struct {
 	// more-specific ordinary route it precedes in the kernel, and a leak
 	// into a table that misses blackholed instead of falling through. Every
 	// non-empty NextTable is a priority-ordered pre-LPM leak, never an
-	// ordinary table route; both producers below carry the ACTUAL kernel
-	// priority (config-mirror: NextTableRulePriorityBase + cumulative
-	// ingress slots in applier window order; live mirror: rule.Priority
-	// verbatim). Ordinary routes carry 0. Additive on the wire: omitempty
-	// suppresses the byte for 0, and the Rust side defaults an absent key to 0
+	// ordinary table route. Config-derived rows use the shared prefix-derived
+	// next-table priority; live rows carry rule.Priority verbatim. Ordinary
+	// routes carry 0. Additive on the wire: omitempty suppresses the byte for 0,
+	// and the Rust side defaults an absent key to 0
 	// — but an old helper that ignores the key keeps the prefix-length order
 	// that IS the defect, so the field rode the v24 bump on top of the
 	// v23 DHCPv6 relay contract. The shared protocol is now v25 for #10018's
@@ -42,6 +41,10 @@ type RouteSnapshot struct {
 	// legitimate value (it deserializes back to 0 under serde default), so
 	// omitempty only suppresses the wire byte for an explicit preference 0.
 	Preference int `json:"preference,omitempty"`
+	// MTU is the selected route's route-wide L3 MTU (RTAX_MTU). Zero means
+	// absent/unknown and imposes no extra constraint. An old helper would
+	// ignore it and forward oversized DF packets, so snapshot v38 fences it.
+	MTU int `json:"mtu,omitempty"`
 }
 
 type NeighborSnapshot struct {
