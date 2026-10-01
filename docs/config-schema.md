@@ -14555,28 +14555,37 @@ strict-vs-lenient gates:
   fall back to a `PredefinedApplicationSets` table AFTER user-defined sets —
   mirroring `ResolveApplication`'s user-then-predefined order — so the standard
   Junos `junos-defaults` bundles resolve without an operator having to redefine
-  them. Seeded from a real `show configuration groups junos-defaults` dump:
-  `junos-ms-rpc` = {`junos-ms-rpc-tcp`, `junos-ms-rpc-udp`}, `junos-sun-rpc` =
+  them. The original bundles were seeded from an SRX 15.1X49 `show
+  configuration groups junos-defaults` dump: `junos-ms-rpc` =
+  {`junos-ms-rpc-tcp`, `junos-ms-rpc-udp`}, `junos-sun-rpc` =
   {`junos-sun-rpc-tcp`, `junos-sun-rpc-udp`}, `junos-cifs` =
   {`junos-netbios-session`, `junos-smb-session`}, `junos-routing-inbound` =
   {`junos-bgp`, `junos-rip`, `junos-ldp-tcp`, `junos-ldp-udp`}, and (#5634)
   `junos-sip` = {`junos-sip-udp`, `junos-sip-tcp`} (both destination-port 5060 —
-  SIP signals over UDP by default and TCP since 12.3X48-D25 / 17.3R1). Every
-  member is in the `PredefinedApplications` table, so each set expands to >= 1
-  member and clears the empty-set fail-open gate (#3146). `junos-sip` was the
-  one predefined name MOVED from the application table to the set table:
-  `resolveUserspaceApplicationNames` resolves an application first, so a
-  UDP-only `junos-sip` application would shadow the set and re-drop TCP/5060 —
-  it must be a set only (`predefined_sip_5634_test.go`). Before #4102 only the
-  protocol-split members shipped and the bundle names were nowhere, so a stock
-  vSRX policy `match application junos-ms-rpc` hard-failed at commit
+  SIP signals over UDP by default and TCP since 12.3X48-D25 / 17.3R1). The
+  #11341 issue-cited, version-bounded defaults also define `junos-smb` =
+  {`junos-netbios-session`, `junos-smb-session`} (TCP/139, TCP/445) and
+  `junos-h323` = {`junos-h323-q931`, `junos-h323-ras`, `junos-h323-tcp-1503`,
+  `junos-h323-tcp-389`, `junos-h323-tcp-522`, `junos-h323-tcp-1731`} (TCP/1720,
+  UDP/1719, TCP/1503, TCP/389, TCP/522, TCP/1731). These two names are
+  application-sets because a single `Application` cannot represent distinct
+  term protocols/ports. Current-release vSRX readback is still outstanding;
+  these bounded captures are not a claim of current-release parity. Every member
+  is in the `PredefinedApplications` table, so each set expands to >= 1 member
+  and clears the empty-set fail-open gate (#3146). `junos-sip`, `junos-smb`, and
+  `junos-h323` are set-only names: runtime resolution checks an application
+  first, so a bare application entry would shadow its set. Before #4102 only
+  the protocol-split members shipped and the bundle names were nowhere, so a
+  stock vSRX policy `match application junos-ms-rpc` hard-failed at commit
   (`validatePolicyMatchApplicationsStrict`) and, on the tolerant path, at runtime
   (`resolveUserspaceApplicationNames` → `__unsupported__` →
   `SnapshotIntegrityError`). Both the commit gate and the runtime resolver route
   through these two functions, so the one table fixes every surface. A
   user-defined set of the same name still shadows the predefined bundle (user
-  wins), and an unknown set name still hard-fails. Coverage:
-  `predefined_app_sets_4102_test.go`.
+  wins), and an unknown set name still hard-fails. Coverage: the original
+  bundles in `predefined_app_sets_4102_test.go`; #11341 term, compile, policy,
+  and userspace-snapshot cells in the config, policymatch, and dataplane/userspace
+  `predefined_junos_apps_11341_test.go` files.
 - **Finding C — `then routing-instance <name>` (FBF) →
   `validateFirewallRoutingInstanceReferencesStrict`.** A firewall-filter term
   whose filter-based-forwarding steer names a routing-instance not defined under
@@ -14993,10 +15002,11 @@ reference would let a typo'd term-leaf silently widen a term from the moment the
 app is defined. The per-application `alg` advisory (#4337) likewise applies to
 every entry (`ValidateConfig` iterates all user apps). `cfg.Applications.
 Applications` holds ONLY user-defined applications (and the per-term apps they
-generate); PREDEFINED junos-* apps (`junos-rtsp`, `junos-h323`, ...) live in the
-separate `PredefinedApplications` table and are never in this map, so neither
-the term-leaf gate nor the `alg` advisory ever touches a predefined app that
-legitimately carries an out-of-supported-set ALG.
+generate); PREDEFINED junos-* apps and app-set members (`junos-rtsp`,
+`junos-h323-q931`, ...) live in the separate `PredefinedApplications` table and
+are never in this map, so neither the term-leaf gate nor the `alg` advisory ever
+touches a predefined app that legitimately carries an out-of-supported-set ALG.
+The `junos-h323` name itself resolves as a predefined application-set (#11341).
 
 The #3352 term-leaf gate is STRICT on the commit / commit-check path and
 downgrades to a `cfg.Warnings` entry on the tolerant load / HA peer-sync path

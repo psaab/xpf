@@ -380,10 +380,10 @@ func validateApplicationSpecsStrict(cfg *Config) error {
 // typo'd term-leaf silently widen a term, or a bogus `alg` silently no-op, from
 // the moment it is defined. The map iterated is cfg.Applications.Applications,
 // which holds ONLY user-defined applications and the per-term applications they
-// generate (`<parent>-<term>`); PREDEFINED junos-* applications (junos-rtsp /
-// junos-h323 / junos-pptp, which legitimately use ALGs outside the supported
-// set) are owned by the predefined table and are never in this map, so they are
-// never reached by the `alg` check. Iteration is sorted by name so the
+// generate (`<parent>-<term>`); PREDEFINED junos-* apps and app-set members
+// (junos-rtsp / junos-h323-q931 / junos-pptp, for example, which may carry ALGs
+// outside the supported set) are owned by the predefined table and never reach
+// the `alg` check. Iteration is sorted by name so the
 // first-reported error is deterministic.
 //
 // Strict on the commit / commit-check path; the call site (compiler.go,
