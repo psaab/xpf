@@ -117,6 +117,9 @@ xpf (0.0.0) unstable; urgency=medium
     identity trailer, preserve JSON/binary identity parity, and keep the
     policy-list acknowledgement plus debug timing gates robust under runner
     contention (#11546).
+  * Reject undeclared fields in named API-auth credentials and validate
+    API-auth class references; reconcile the schema-census inventories
+    (#11544).
   * Fail closed when an embedded ICMP quote's translated NAT tuple is ambiguous
     across routing domains, while retaining off-path reversal for unique flows
     (#11298).

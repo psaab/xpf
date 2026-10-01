@@ -631,7 +631,14 @@ pub(super) fn republish_local_delivery_sessions_for_lo0_filter(
     sessions: &SessionTable,
     session_map: SteeringMap<'_>,
     forwarding: &ForwardingState,
+    lo0_filter_changed: bool,
 ) -> usize {
+    // #11330: skip the full-table walk unless the lo0 filter changed
+    // semantically. The caller compares the old/new snapshots O(1) per
+    // family; without this gate every forwarding rotation pays O(N).
+    if !lo0_filter_changed {
+        return 0;
+    }
     let mut republished = 0usize;
     sessions.iter_with_origin(|key, decision, metadata, _origin| {
         if metadata.is_reverse
@@ -3126,6 +3133,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         sessions,
         shared_nat_sessions,
         forwarding,
+        shared_owner_rg_indexes,
         &flow.forward_key,
         reverse_ingress,
         now_ns,
