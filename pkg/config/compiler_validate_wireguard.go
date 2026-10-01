@@ -47,11 +47,11 @@ import (
 // valid WG configs overlap (a catch-all peer plus a more-specific peer),
 // and the engine LPM resolves longest-prefix deterministically. An EXACT
 // duplicate prefix (same network + length + family) on two different peers
-// IS rejected, though: the cryptokey routing table is a prefix->peer map,
-// so an exact tie has no longest-prefix winner — the engine's LPM lookup
-// resolves it by stable-sort insertion order, silently blackholing the
-// loser for that prefix (#2445). Reject it at commit so the operator's
-// intent is never masked by an implementation-defined tie-break.
+// IS rejected: the cryptokey routing table is a prefix->peer map, so an
+// exact tie has no longest-prefix winner — the engine's LPM lookup resolves
+// it by stable-sort insertion order, silently blackholing the loser (#2445).
+// The merged-view gate applies this ownership check across interface-level
+// peers and peers contributed by separate units before emission (#11381).
 func validateWireguardPeersStrict(cfg *Config, lenient bool) ([]string, error) {
 	if cfg == nil {
 		return nil, nil
@@ -119,17 +119,17 @@ func validateWireguardPeersStrict(cfg *Config, lenient bool) ([]string, error) {
 	return warnings, nil
 }
 
-// validateMergedWireguardUnitPeers rejects a peer public key authored by two
-// different units that feed one interface-level WireGuard endpoint. A unit's
-// compiled WgPeers includes the interface-level peers inherited by that unit,
-// so those parent keys are intentionally excluded from the ownership map: the
-// repeated inherited copies are expected, while two unit-owned copies are a
-// merged-view conflict.
+// validateMergedWireguardUnitPeers rejects conflicts in the peer set that feeds
+// one interface-level WireGuard endpoint: a peer public key authored by two
+// different units, or an exact AllowedIPs prefix claimed by distinct peers.
+// A unit's compiled WgPeers includes the interface-level peers inherited by
+// that unit, so repeated inherited copies are excluded from both merged-view
+// ownership checks.
 //
 // This gate is deliberately scoped to an interface-level WireGuard tunnel.
 // A WireGuard tunnel authored only at unit level emits one endpoint per unit,
-// so equal keys there do not enter mergeWireguardUnitPeers and retain the
-// existing single-tunnel behavior.
+// so its peers do not enter mergeWireguardUnitPeers and retain the existing
+// single-tunnel behavior.
 func validateMergedWireguardUnitPeers(ifName string, ifc *InterfaceConfig, unitNums []int) error {
 	if ifc == nil || ifc.Tunnel == nil || ifc.Tunnel.Mode != "wireguard" {
 		return nil
@@ -163,6 +163,45 @@ func validateMergedWireguardUnitPeers(ifName string, ifc *InterfaceConfig, unitN
 					fmt.Sprintf("%s.%d", ifName, unitNum))
 			}
 			owners[p.PublicKeyHex] = unitNum
+		}
+	}
+	// Check exact-prefix ownership on the peer set mergeWireguardUnitPeers
+	// emits: interface peers first, followed by each unit's first peer for a
+	// pubkey. Inherited unit copies are already represented by the interface
+	// peer and must not appear twice in this view.
+	prefixOwner := make(map[string]string)
+	checkPrefixes := func(p WgPeerConfig) error {
+		for _, cidr := range p.AllowedIPs {
+			canon := canonicalAllowedIPPrefix(cidr)
+			if owner, exists := prefixOwner[canon]; exists && owner != p.PublicKeyHex {
+				return duplicateWireguardAllowedIPPrefixError(canon, owner, p.PublicKeyHex)
+			}
+			if _, exists := prefixOwner[canon]; !exists {
+				prefixOwner[canon] = p.PublicKeyHex
+			}
+		}
+		return nil
+	}
+	mergedPubkeys := make(map[string]struct{}, len(ifc.Tunnel.WgPeers))
+	for _, p := range ifc.Tunnel.WgPeers {
+		if err := checkPrefixes(p); err != nil {
+			return err
+		}
+		mergedPubkeys[p.PublicKeyHex] = struct{}{}
+	}
+	for _, unitNum := range unitNums {
+		unit := ifc.Units[unitNum]
+		if unit == nil || unit.Tunnel == nil {
+			continue
+		}
+		for _, p := range unit.Tunnel.WgPeers {
+			if _, alreadyMerged := mergedPubkeys[p.PublicKeyHex]; alreadyMerged {
+				continue
+			}
+			mergedPubkeys[p.PublicKeyHex] = struct{}{}
+			if err := checkPrefixes(p); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -338,7 +377,7 @@ func validateOneWireguardTunnel(tc *TunnelConfig) error {
 			}
 			canon := canonicalAllowedIPPrefix(cidr)
 			if owner, dup := prefixOwner[canon]; dup && owner != p.PublicKeyHex {
-				return fmt.Errorf("allowed-ips prefix %s is claimed by two peers (%q and %q); the cryptokey routing table maps a prefix to exactly one peer, so an exact-duplicate prefix has no longest-prefix winner and silently strips one peer's route — give each peer distinct allowed-ips", canon, owner, p.PublicKeyHex)
+				return duplicateWireguardAllowedIPPrefixError(canon, owner, p.PublicKeyHex)
 			}
 			// First claimant wins the map entry; a same-peer repeat (the
 			// engine dedups exact entries per peer) is harmless and not a
@@ -370,6 +409,11 @@ func canonicalAllowedIPPrefix(cidr string) string {
 		return ipNet.String()
 	}
 	return cidr
+}
+
+func duplicateWireguardAllowedIPPrefixError(prefix, owner, peer string) error {
+	return fmt.Errorf("allowed-ips prefix %s is claimed by two peers (%q and %q); the cryptokey routing table maps a prefix to exactly one peer, so an exact-duplicate prefix has no longest-prefix winner and silently strips one peer's route — give each peer distinct allowed-ips",
+		prefix, owner, peer)
 }
 
 // isWireguardKeyHex reports whether s is exactly 64 hex characters (a
