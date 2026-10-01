@@ -10298,10 +10298,13 @@ fn ipsec_reply_alias_is_unique_or_native_miss_9506() {
         IpsecReplyAliasLookup::NativeMiss
     ));
 
-    assert!(matches!(
-        table.lookup_ipsec_reply_alias_at(&reply, u64::MAX, |_| 0),
-        IpsecReplyAliasLookup::NativeMiss
-    ), "expired alias candidates must not resolve");
+    assert!(
+        matches!(
+            table.lookup_ipsec_reply_alias_at(&reply, u64::MAX, |_| 0),
+            IpsecReplyAliasLookup::NativeMiss
+        ),
+        "expired alias candidates must not resolve"
+    );
 }
 
 #[test]
@@ -10368,7 +10371,9 @@ fn ipsec_reply_alias_admits_only_the_matching_routing_domain_9506() {
         _ => 0,
     }) {
         IpsecReplyAliasLookup::Unique(found) => assert_eq!(found.key, first),
-        other => panic!("a same-tuple candidate in another routing domain must not alias: {other:?}"),
+        other => {
+            panic!("a same-tuple candidate in another routing domain must not alias: {other:?}")
+        }
     }
 }
 
@@ -10376,11 +10381,7 @@ fn ipsec_reply_alias_admits_only_the_matching_routing_domain_9506() {
 fn ipsec_reply_alias_bucket_overflow_refuses_install_9506() {
     let mut table = SessionTable::new();
     assert!(
-        !install_ipsec_alias_test_session(
-            &mut table,
-            &ipsec_alias_test_key(0, 0),
-            12,
-        ),
+        !install_ipsec_alias_test_session(&mut table, &ipsec_alias_test_key(0, 0), 12,),
         "zero is not a valid IPsec if_id discriminator"
     );
     for if_id in 1..=7 {
@@ -10394,12 +10395,12 @@ fn ipsec_reply_alias_bucket_overflow_refuses_install_9506() {
     native.discriminator = TunnelDiscriminator::None;
     assert!(install_ipsec_alias_test_session(&mut table, &native, 12));
     assert!(
-        !install_ipsec_alias_test_session(
-            &mut table,
-            &ipsec_alias_test_key(8, 0),
-            12,
-        ),
+        !install_ipsec_alias_test_session(&mut table, &ipsec_alias_test_key(8, 0), 12,),
         "a native candidate counts toward the shared bound and the ninth alias must be refused"
     );
-    assert_eq!(table.len(), 8, "overflow must not partially install a record");
+    assert_eq!(
+        table.len(),
+        8,
+        "overflow must not partially install a record"
+    );
 }

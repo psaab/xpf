@@ -611,8 +611,7 @@ impl SessionTable {
                     continue;
                 };
                 let entry = &record.entry;
-                let is_ipsec =
-                    matches!(record.key.discriminator, TunnelDiscriminator::Ipsec(if_id) if if_id != 0);
+                let is_ipsec = matches!(record.key.discriminator, TunnelDiscriminator::Ipsec(if_id) if if_id != 0);
                 if entry.metadata.is_reverse
                     || !(matches!(record.key.discriminator, TunnelDiscriminator::None) || is_ipsec)
                     || !ipsec_reply_alias_keys(&record.key, entry.decision.nat)

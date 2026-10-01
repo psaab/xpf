@@ -164,20 +164,16 @@ impl TunnelDiscriminator {
             WIRE_NONE => WireDiscriminator::Present(TunnelDiscriminator::None),
             WIRE_UNKEYED => WireDiscriminator::Present(TunnelDiscriminator::Unkeyed),
             WIRE_UNPARSEABLE => WireDiscriminator::Present(TunnelDiscriminator::Unparseable),
-            _ if wire & WIRE_KEYED_TAG != 0 && wire >> 33 == 0 => WireDiscriminator::Present(
-                TunnelDiscriminator::Keyed((wire & 0xFFFF_FFFF) as u32),
-            ),
+            _ if wire & WIRE_KEYED_TAG != 0 && wire >> 33 == 0 => {
+                WireDiscriminator::Present(TunnelDiscriminator::Keyed((wire & 0xFFFF_FFFF) as u32))
+            }
             // Require an exact class tag, not only its high bit: the IPsec tag
             // also has bit 33 set and must not decode as PPTP.
             _ if wire >> 32 == 2 && wire & 0xFFFF_FFFF != 0 => {
-                WireDiscriminator::Present(TunnelDiscriminator::Pptp(
-                    (wire & 0xFFFF_FFFF) as u32,
-                ))
+                WireDiscriminator::Present(TunnelDiscriminator::Pptp((wire & 0xFFFF_FFFF) as u32))
             }
             _ if wire >> 32 == 3 && wire & 0xFFFF_FFFF != 0 => {
-                WireDiscriminator::Present(TunnelDiscriminator::Ipsec(
-                    (wire & 0xFFFF_FFFF) as u32,
-                ))
+                WireDiscriminator::Present(TunnelDiscriminator::Ipsec((wire & 0xFFFF_FFFF) as u32))
             }
             _ => WireDiscriminator::Unrecognized,
         }

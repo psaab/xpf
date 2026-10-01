@@ -3153,12 +3153,7 @@ impl SessionTable {
             || old_owner_rg != metadata.owner_rg_id;
         let reply_alias_reindex = old_nat != decision.nat || old_is_reverse != metadata.is_reverse;
         if (reply_alias_reindex || matches!(key.discriminator, TunnelDiscriminator::Ipsec(0)))
-            && !self.can_index_reply_alias(
-                key,
-                decision.nat,
-                metadata.is_reverse,
-                Some(handle),
-            )
+            && !self.can_index_reply_alias(key, decision.nat, metadata.is_reverse, Some(handle))
         {
             return false;
         }
@@ -3931,10 +3926,12 @@ impl SessionTable {
         if matches!(key.discriminator, TunnelDiscriminator::Ipsec(0)) {
             return false;
         }
-        if is_reverse || !matches!(
-            key.discriminator,
-            TunnelDiscriminator::None | TunnelDiscriminator::Ipsec(_)
-        ) {
+        if is_reverse
+            || !matches!(
+                key.discriminator,
+                TunnelDiscriminator::None | TunnelDiscriminator::Ipsec(_)
+            )
+        {
             return true;
         }
         if matches!(key.discriminator, TunnelDiscriminator::None)
@@ -4077,7 +4074,8 @@ impl SessionTable {
                 );
             }
         }
-        if !is_reverse && matches!(key.discriminator, TunnelDiscriminator::Ipsec(if_id) if if_id != 0)
+        if !is_reverse
+            && matches!(key.discriminator, TunnelDiscriminator::Ipsec(if_id) if if_id != 0)
         {
             for alias in ipsec_reply_alias_keys(key, nat) {
                 let bucket = self.reply_alias_index.entry(alias).or_default();
