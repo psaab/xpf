@@ -1401,29 +1401,30 @@ covered. The tolerant load/peer-sync path downgrades to a warning
 binary silently accepted still boots — the policy keeps its match-any-for-missing
 compilation, now flagged (#1960 no-brick doctrine, same as #3113).
 
-**Ambiguous secure-tunnel `bind-interface` aliases are rejected at commit
-(#2933):** `security ipsec vpn <name> bind-interface` is a free-form 1-arg
-string stored verbatim on the typed VPN (`compiler_ipsec.go`); the runtime
-resolves it to a Linux xfrmi device name and a stable XFRM if_id via
-`XFRMIfNameAndID` (`xfrmi.go`): `if_id = stIndex<<16 | (unit+1)`, unit
-defaulting to 0. A bare `st0` is therefore the SAME device as `st0.0` (both
-if_id 1). Two VPNs binding those two distinct strings committed cleanly but
-collide at apply time — only one xfrm device can carry the if_id, so the #2929
-pkg/routing guard refuses to create EITHER device and both tunnels go down with
-a journal ERROR (before #2929 it silently leaked one VPN's SA onto the other's
-tunnel). `validateSecureTunnelBindInterfaceAST` (`compiler_ipsec_bindiface.go`)
-turns that apply-time both-down into a commit-check error: it derives the if_id
-for every VPN's bind-interface and hard-rejects when two DISTINCT strings derive
-the SAME non-zero if_id, naming each offending string, its VPN(s), and the
-shared if_id. The gate is SURGICAL — it does NOT fire when the same string is
-shared by several VPNs (one device, one if_id) nor when a bind-interface cannot
-parse as `st<N>[.unit]` (if_id 0); an unambiguous map (st0.0 + st0.1, or st0 +
-st1) commits cleanly. It is an AST pre-walk in `compileExpanded` so an
-apply-groups-inherited bind-interface is covered and an `inactive:` VPN is
-ignored. The tolerant load/peer-sync path downgrades to a warning
-(`lenientSecureTunnelBindIface`) so an already-persisted or peer-synced config
-an older binary accepted still boots (#1960 no-brick doctrine) — the #2929
-routing guard stays the runtime backstop.
+**Shared secure-tunnel bind selectors must be disjoint (#11380):** two VPNs
+binding the same `st<N>[.unit]` share one XFRM if_id, so XFRM cannot select the
+right SA from that id alone when their rendered traffic selectors overlap.
+`validateIPsecBindTrafficSelectorOverlapStrict`
+(`compiler_validate_strict_ipsec_bind_ts_11380.go`) compares the rendered
+local/remote selector unions at strict commit. It rejects any pair whose local
+and remote address sets both intersect, including route-based VPNs whose
+omitted selectors render the dual-stack wildcard
+`0.0.0.0/0,::/0`. Prefixes, hosts, and inclusive address ranges are compared;
+an omitted or unknown side is not proof of disjointness. Sharing is admitted
+only when every pair of rendered selector unions is provably disjoint, such as
+two VPNs with non-overlapping remote prefixes. The wildcard value is a shared
+config constant consumed by the renderer and this gate, preventing the gate's
+default model from drifting from swanctl output. The tolerant load / peer-sync
+path warns (`lenientIPsecBindTSOverlap`) rather than newly bricking an
+already-persisted config (#1960). This is a static admission proof; it does not
+replace the lab check that each routed prefix is encrypted only on its own SA.
+
+The separate #2933 AST gate still rejects distinct bind-interface spellings
+such as `st0` and `st0.0` that derive the same if_id, since only one xfrmi
+device can carry that id. It runs over the group-expanded, inactive-pruned AST
+so inherited bindings are covered. Its tolerant path warns
+(`lenientSecureTunnelBindIface`), while pkg/routing retains the runtime
+fail-closed backstop for an if_id collision.
 
 The same gate carries a DISTINCT `bind-interface` fail-closed arm (#5297): a
 NON-EMPTY bind-interface that `XFRMIfNameAndID` resolves to **if_id 0** (any name

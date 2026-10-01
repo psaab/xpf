@@ -127,6 +127,19 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
+	// #11380: multiple VPNs on one XFRM bind are safe only when every rendered
+	// local/remote selector pair is disjoint. Strict commit rejects ambiguous
+	// SAs; tolerant load warns so an existing configuration still boots.
+	if err := validateIPsecBindTrafficSelectorOverlapStrict(cfg); err != nil {
+		if opts.lenientIPsecBindTSOverlap {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec shared bind traffic-selector overlap (downgraded to warning "+
+					"on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #9008 IKE/IPsec proposal `lifetime-seconds` value gate. The schema's
 	// ValidateIntegerMin(1) on both leaves is enforced only by SchemaValidate,
 	// which compileTreeStrict runs and compileTreeLenient downgrades — so a

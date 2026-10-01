@@ -87,11 +87,10 @@ func TestSecureTunnelBindIfaceCollisionRejectedAtCommit(t *testing.T) {
 	}
 }
 
-// TestSecureTunnelBindIfaceUnambiguousCommits proves the gate is surgical:
-// distinct units (st0.0 + st0.1), distinct devices (st0 + st1), and the
-// SAME string shared by two VPNs (st0.0 + st0.0 — one device, one if_id,
-// not an ambiguous alias) all commit cleanly. This is the no-over-reject
-// guard.
+// TestSecureTunnelBindIfaceUnambiguousCommits proves the alias-collision gate
+// remains surgical: distinct units and distinct devices commit cleanly, and
+// same-bind VPNs commit only when their rendered traffic-selector unions are
+// provably disjoint (#11380).
 func TestSecureTunnelBindIfaceUnambiguousCommits(t *testing.T) {
 	cases := []struct {
 		name string
@@ -112,10 +111,14 @@ func TestSecureTunnelBindIfaceUnambiguousCommits(t *testing.T) {
 			},
 		},
 		{
-			name: "same string shared by two VPNs st0.0 + st0.0",
+			name: "same bind with disjoint rendered selectors (#11380)",
 			cmds: []string{
 				"set security ipsec vpn V1 bind-interface st0.0",
+				"set security ipsec vpn V1 traffic-selector to-peer-a local-ip 10.0.0.0/24",
+				"set security ipsec vpn V1 traffic-selector to-peer-a remote-ip 198.51.100.0/24",
 				"set security ipsec vpn V2 bind-interface st0.0",
+				"set security ipsec vpn V2 traffic-selector to-peer-b local-ip 10.0.0.0/24",
+				"set security ipsec vpn V2 traffic-selector to-peer-b remote-ip 203.0.113.0/24",
 			},
 		},
 		{

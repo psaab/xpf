@@ -335,9 +335,9 @@ func BindInterfaceOwnsRef(bindIface, ref string) bool {
 // it attaches forwarding state to a device the reconciler has guaranteed is
 // absent (or, worse, to a stale leftover under that name).
 //
-// Two VPNs authoring the SAME bind-interface string are not a collision — one
-// name, one device — and routing programs it. This mirrors that: only DISTINCT
-// names for one if_id fail.
+// Two VPNs authoring the SAME bind-interface string do not collide as device
+// names — one xfrmi is programmed. Their SA selectors are checked separately
+// by the #11380 shared-bind gate; only DISTINCT names for one if_id fail here.
 //
 // Strict commit rejects such a config (#2933) and apply refuses it (#2909), so
 // this governs only the tolerant-load path — which is precisely the path that
