@@ -472,12 +472,25 @@ func (d *Daemon) reconcileSNMP(cfg *config.Config) bool {
 // closes #5110: the pre-fix serve closure discarded Agent.Start's bind error,
 // so a transient UDP/161 failure left SNMP absent while the desired hash still
 // recorded "applied", no-oping every subsequent identical commit.
+func snmpVRFDeviceForConfig(cfg *config.Config) string {
+	if len(managementVRFIfaceSet(cfg)) == 0 {
+		return ""
+	}
+	return config.ManagementVRFDeviceName
+}
+
 func (d *Daemon) startSNMPLocked(cfg *config.Config) error {
 	ctx, cancel := context.WithCancel(d.daemonCtx)
 	agent := snmp.NewAgentWithPaths(cfg.System.SNMP, d.snmpBootsPath, d.snmpEngineIDPath)
-	// Host-inbound SNMP is served from the management routing context; a
-	// wildcard UDP socket otherwise replies and emits traps through main.
-	agent.SetVRFDevice(config.ManagementVRFDeviceName)
+	// A management VRF is created only when management interfaces are
+	// configured. Keep SNMP on the main routing context otherwise, rather than
+	// failing to bind a socket to a nonexistent device.
+	vrfDevice := snmpVRFDeviceForConfig(cfg)
+	if vrfDevice == "" {
+		slog.Warn("SNMP management VRF is not configured; serving from main routing table")
+	}
+	agent.SetVRFDevice(vrfDevice)
+	agent.SetIfDataFn(buildSNMPIfData)
 
 	// The serve seam binds UDP/161 and then serves for the lifetime of ctx. It
 	// reports the bind outcome on `ready` EXACTLY ONCE — nil once the listener

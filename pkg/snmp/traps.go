@@ -302,6 +302,7 @@ func sendTrapOnVRF(target string, pkt []byte, device string) error {
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
+	defer conn.Close()
 
 	// #9025: bound the WRITE, not just the dial. A connected-UDP Write can block
 	// indefinitely on a full socket send buffer (ENOBUFS / a congested or down
