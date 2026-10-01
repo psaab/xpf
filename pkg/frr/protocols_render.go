@@ -522,11 +522,15 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 		// including neighbors with no explicit `family` (FRR default-
 		// activates those under ipv4 unicast), so route them into the
 		// ipv4 set in that case.
-		var inet4Neighbors, inet6Neighbors []*config.BGPNeighbor
+		var inet4Neighbors, inet4DisabledNeighbors, inet6Neighbors []*config.BGPNeighbor
+		// FRR's default auto-activates IPv4 peers. A neighbor pinned to only
+		// inet6 must be explicitly disabled in ipv4 unicast; otherwise it has
+		// an IPv4 session with no IPv4 route-map despite its intended inet6
+		// filters.
 		// Classify only renderable (declared) neighbors (#5518). A remote-as-0
 		// neighbor excluded from the declaration loop above must NOT be
-		// activated here — vtysh rejects `neighbor <ip> activate` for a
-		// neighbor with no `remote-as`, failing the whole managed section.
+		// activated here — vtysh rejects `neighbor <ip> activate` for an
+		// undeclared neighbor, failing the whole managed section.
 		for _, n := range validNeighbors {
 			// A neighbor lands in the ipv4 (default) AF when it explicitly
 			// declares family inet, OR when a peer-level policy must reach it
@@ -553,6 +557,9 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 			if (n.FamilyInet || (policyDefault && !n.FamilyInet6)) && !isIPv6Peer {
 				inet4Neighbors = append(inet4Neighbors, n)
 			}
+			if !isIPv6Peer && n.FamilyInet6 && !n.FamilyInet {
+				inet4DisabledNeighbors = append(inet4DisabledNeighbors, n)
+			}
 			if n.FamilyInet6 || (policyDefault && !n.FamilyInet && isIPv6Peer) {
 				inet6Neighbors = append(inet6Neighbors, n)
 			}
@@ -566,7 +573,7 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 		// reaches the IGP `maximum-paths` lines (OSPF/zebra) above via
 		// ecmpMaxPaths.
 		bgpMaxPaths := bgp.Multipath
-		if len(inet4Neighbors) > 0 || bgpMaxPaths > 1 {
+		if len(inet4Neighbors) > 0 || len(inet4DisabledNeighbors) > 0 || bgpMaxPaths > 1 {
 			b.WriteString(" !\n address-family ipv4 unicast\n")
 			if bgpMaxPaths > 1 {
 				fmt.Fprintf(&b, "  maximum-paths %d\n", bgpMaxPaths)
@@ -577,6 +584,9 @@ func (m *Manager) generateProtocols(ospf *config.OSPFConfig, ospfv3 *config.OSPF
 				if bgp.MultipathIBGP {
 					fmt.Fprintf(&b, "  maximum-paths ibgp %d\n", bgpMaxPaths)
 				}
+			}
+			for _, n := range inet4DisabledNeighbors {
+				fmt.Fprintf(&b, "  no neighbor %s activate\n", n.Address)
 			}
 			for _, n := range inet4Neighbors {
 				fmt.Fprintf(&b, "  neighbor %s activate\n", n.Address)
