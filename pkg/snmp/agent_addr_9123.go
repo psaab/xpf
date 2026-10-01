@@ -63,6 +63,10 @@ var agentAddrDialTimeout9123 = 2 * time.Second
 // RFC-sanctioned use of the value rather than the unconditional one it replaced:
 // the field genuinely cannot be filled in.
 func agentAddrForTarget(target string) [4]byte {
+	return agentAddrForTargetOnVRF(target, "")
+}
+
+func agentAddrForTargetOnVRF(target, device string) [4]byte {
 	var zero [4]byte
 	if target == "" {
 		return zero
@@ -73,7 +77,8 @@ func agentAddrForTarget(target string) [4]byte {
 		// usually is. sendTrap applies the default port the same way.
 		host, port = target, "162"
 	}
-	conn, err := net.DialTimeout("udp4", net.JoinHostPort(host, port), agentAddrDialTimeout9123)
+	dialer := net.Dialer{Timeout: agentAddrDialTimeout9123, Control: snmpVRFSocketControl(device)}
+	conn, err := dialer.Dial("udp4", net.JoinHostPort(host, port))
 	if err != nil {
 		return zero
 	}

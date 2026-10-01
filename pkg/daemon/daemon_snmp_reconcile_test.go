@@ -1,10 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"net"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -197,6 +201,103 @@ func snmpEnabledConfig() *config.Config {
 				},
 			},
 		},
+	}
+}
+
+func TestSNMPVRFDeviceForConfig11427(t *testing.T) {
+	if got := snmpVRFDeviceForConfig(nil); got != "" {
+		t.Fatalf("VRF device without management interfaces = %q, want empty", got)
+	}
+
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"fxp0": {Name: "fxp0"},
+	}
+	if got := snmpVRFDeviceForConfig(cfg); got != config.ManagementVRFDeviceName {
+		t.Fatalf("VRF device with management interfaces = %q, want %q", got, config.ManagementVRFDeviceName)
+	}
+}
+
+func snmpTestTLV11427(tag byte, body []byte) []byte {
+	out := []byte{tag, byte(len(body))}
+	return append(out, body...)
+}
+
+func snmpIfDescrGetRequest11427() []byte {
+	oid := []byte{0x2b, 0x06, 0x01, 0x02, 0x01, 0x02, 0x02, 0x01, 0x02, 0x07}
+	oidValue := snmpTestTLV11427(0x06, oid)
+	varBindBody := append(append([]byte{}, oidValue...), 0x05, 0x00)
+	varBind := snmpTestTLV11427(0x30, varBindBody)
+	varBindList := snmpTestTLV11427(0x30, varBind)
+	pduBody := append([]byte{0x02, 0x01, 0x01, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00}, varBindList...)
+	pdu := snmpTestTLV11427(0xa0, pduBody)
+	messageBody := append([]byte{0x02, 0x01, 0x01}, snmpTestTLV11427(0x04, []byte("public"))...)
+	messageBody = append(messageBody, pdu...)
+	return snmpTestTLV11427(0x30, messageBody)
+}
+
+// TestSNMPWithoutManagementVRFServesIfTableOnMain11427 exercises the daemon's
+// real listener path on a box with no configured management interfaces. The
+// test SNMP manager polls ifDescr.7 over loopback; a live response proves both
+// main-table service and the daemon's interface-table callback wiring.
+func TestSNMPWithoutManagementVRFServesIfTableOnMain11427(t *testing.T) {
+	previousLister := snmpLinkLister
+	snmpLinkLister = func() ([]netlink.Link, error) {
+		return []netlink.Link{&netlink.Dummy{LinkAttrs: netlink.LinkAttrs{
+			Index: 7, Name: "test0", Flags: net.FlagUp,
+		}}}, nil
+	}
+	defer func() { snmpLinkLister = previousLister }()
+
+	rec := &recordingSlogHandler{level: slog.LevelWarn}
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(rec))
+	defer slog.SetDefault(previousLogger)
+
+	d := &Daemon{
+		daemonCtx:        context.Background(),
+		snmpBootsPath:    filepath.Join(t.TempDir(), "engineboots"),
+		snmpEngineIDPath: filepath.Join(t.TempDir(), "engine-id"),
+	}
+	d.snmpReconMu.Lock()
+	err := d.startSNMPLocked(snmpEnabledConfig())
+	d.snmpReconMu.Unlock()
+	if err != nil {
+		if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EADDRINUSE) {
+			t.Skipf("cannot bind the real SNMP listener in this environment: %v", err)
+		}
+		t.Fatalf("start SNMP without a management VRF: %v", err)
+	}
+	t.Cleanup(d.teardownSNMP)
+
+	manager, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("listen as local SNMP manager: %v", err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	if err := manager.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	server := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 161}
+	if _, err := manager.WriteToUDP(snmpIfDescrGetRequest11427(), server); err != nil {
+		t.Fatalf("send ifDescr.7 poll: %v", err)
+	}
+	reply := make([]byte, 2048)
+	n, peer, err := manager.ReadFromUDP(reply)
+	if err != nil {
+		t.Fatalf("SNMP manager did not receive a main-routing-context reply: %v", err)
+	}
+	if !peer.IP.Equal(net.ParseIP("127.0.0.1")) || peer.Port != 161 {
+		t.Fatalf("SNMP reply source = %v, want 127.0.0.1:161", peer)
+	}
+	wantOID := snmpTestTLV11427(0x06, []byte{0x2b, 0x06, 0x01, 0x02, 0x01, 0x02, 0x02, 0x01, 0x02, 0x07})
+	wantValue := snmpTestTLV11427(0x04, []byte("test0"))
+	wantVarBind := snmpTestTLV11427(0x30, append(wantOID, wantValue...))
+	if !bytes.Contains(reply[:n], wantVarBind) {
+		t.Fatalf("ifTable response does not contain ifDescr.7 = test0: %x", reply[:n])
+	}
+	if got := rec.count("SNMP management VRF is not configured; serving from main routing table"); got != 1 {
+		t.Fatalf("SNMP main-table fallback warning count = %d, want 1", got)
 	}
 }
 

@@ -199,6 +199,7 @@ type Agent struct {
 	engineID    []byte // SNMPv3 engine ID (immutable after initEngine)
 	engineBoots int    // SNMPv3 engine boots counter (immutable after initEngine)
 	lastPacket  []byte // raw packet for v3 auth verification
+	vrfDevice   string // SO_BINDTODEVICE scope, configured before Bind
 
 	// engineBootsPath is the persistence seam for the engineBoots counter
 	// (RFC 3414 monotonicity across restarts). Empty means the default
@@ -244,11 +245,10 @@ type Agent struct {
 	privSaltMu     sync.Mutex // serializes the one-time seed draw
 
 	// Asynchronous trap delivery (#2991). Link-state traps are emitted from
-	// the daemon's netlink link-monitor goroutine; sendTrap does a blocking
-	// net.DialTimeout (and DNS resolution for an FQDN target) that, done
-	// inline, would stall link processing for up to dialTimeout × target
-	// count when a target is dead or slow. Instead sendLinkTraps enqueues a
-	// pre-built packet onto a small bounded channel drained by a single
+	// the daemon's netlink link-monitor goroutine; a bounded UDP dial and
+	// optional DNS resolution can block for up to 2s. Doing that inline would
+	// stall link processing, so sendLinkTraps enqueues a pre-built packet onto
+	// a small bounded channel drained by a single
 	// worker goroutine. The queue is started lazily (works for both NewAgent
 	// and bare-struct test agents) and is capacity-bounded: when full, the
 	// trap is dropped and trapsDropped is incremented rather than blocking
@@ -271,11 +271,11 @@ type Agent struct {
 	// per-Agent field (not a package global) so tests can inject a
 	// deliberately slow/blocking or mock sender on their OWN Agent without a
 	// cross-goroutine write to a shared global that races the running trap
-	// worker's read (#5023). Defaults to sendTrap (set by the constructors); a
-	// bare-struct test Agent may leave it nil, in which case the worker falls
-	// back to sendTrap. Production never reassigns it after construction, and
-	// the worker snapshots it once at start, so there is no shared mutable
-	// state between the worker and any injector.
+	// worker's read (#5023). Constructed Agents install the VRF-aware sender;
+	// a bare-struct test Agent may leave it nil, in which case the worker falls
+	// back to the unbound sendTrap. Production never reassigns it after
+	// construction, and the worker snapshots it once at start, so there is no
+	// shared mutable state between the worker and any injector.
 	trapSender func(target string, pkt []byte) error
 
 	// Lifecycle shutdown (#4916). Stop must cancel the context-watcher
@@ -386,9 +386,9 @@ func NewAgentWithPaths(cfg *config.SNMPConfig, bootsPath, engineIDPath string) *
 		startTime:       time.Now(),
 		engineBootsPath: bootsPath,
 		engineIDPath:    engineIDPath,
-		trapSender:      sendTrap,
 		serveBudget:     newSNMPServeBudget(),
 	}
+	a.trapSender = a.sendTrapViaVRF
 	a.initEngine()
 	a.initV3Users()
 	return a
@@ -705,6 +705,13 @@ func (a *Agent) SetIfDataFn(fn func() []IfData) {
 	a.ifDataFn = fn
 }
 
+// SetVRFDevice pins the listener and outgoing traps to the named Linux VRF
+// device. Call it before Bind; an empty device preserves the default routing
+// context.
+func (a *Agent) SetVRFDevice(device string) {
+	a.vrfDevice = device
+}
+
 // getIfData returns sorted interface data from the callback, or nil.
 //
 // The callback (buildSNMPIfData in the daemon) performs a full netlink
@@ -845,18 +852,23 @@ func (a *Agent) Start(ctx context.Context) error {
 // apply no-ops. On success the caller MUST call Serve (directly or in a
 // goroutine) to process requests and Stop to release the socket. On failure no
 // socket or goroutine is left behind (the watcher is armed only after a
-// successful ListenUDP), so the caller can retry a clean Bind.
+// successful ListenPacket), so the caller can retry a clean Bind.
 func (a *Agent) Bind(ctx context.Context) error {
 	addr, err := net.ResolveUDPAddr("udp", ":161")
 	if err != nil {
 		return fmt.Errorf("snmp: resolve address: %w", err)
 	}
 
-	conn, err := net.ListenUDP("udp", addr)
+	listener := net.ListenConfig{Control: snmpVRFSocketControl(a.vrfDevice)}
+	packetConn, err := listener.ListenPacket(ctx, "udp", addr.String())
 	if err != nil {
 		return fmt.Errorf("snmp: listen: %w", err)
 	}
-
+	conn, ok := packetConn.(*net.UDPConn)
+	if !ok {
+		packetConn.Close()
+		return fmt.Errorf("snmp: listener returned %T, want UDPConn", packetConn)
+	}
 	// Derive a lifecycle context so BOTH parent-context cancellation and an
 	// explicit day-2 Stop() unblock the watcher below (#4916). Stop calls
 	// lifeCancel; the parent ctx cancelling also propagates here.
