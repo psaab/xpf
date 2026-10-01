@@ -1002,6 +1002,18 @@ stays 0 and the dataplane applies its rate-independent
 `shaping-rate`) still inherits both the level rate and the level burst as
 a pair.
 
+### Logical units sharing a netdev ifindex (#11429)
+
+The dataplane stores interface-level CoS state by Linux `ifindex`, not by
+logical-unit name. When multiple logical-unit rows share an ifindex, they must
+materialize identical CoS interface settings and loss-priority rewrite tables.
+If one unit is configured and another is not, or their shaping, classifier,
+scheduler-map, or rewrite results differ, snapshot construction fails closed
+instead of letting the last row silently replace the others. Identical
+per-unit settings remain valid; structural base-interface rows are not treated
+as logical-unit siblings.
+
+
 ### Hierarchical traffic-control-profiles (#4315, fable-167 F-2)
 
 The Junos hierarchical shaping binding is modeled and **wired** to the

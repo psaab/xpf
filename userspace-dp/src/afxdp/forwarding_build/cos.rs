@@ -1345,6 +1345,10 @@ pub(super) fn build_cos_state(
     // expedited-as-default state.
     let tables = build_cos_classifier_tables(cos)?;
     let mut state = CoSState::default();
+    // CoS runtime state is keyed by ifindex. Logical units sharing a netdev
+    // therefore must produce the same runtime config; the base row is not a
+    // CoS unit and is deliberately excluded from this alias check.
+    let mut first_unit_by_ifindex: FastMap<i32, (&InterfaceSnapshot, bool)> = FastMap::default();
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 {
             continue;
@@ -1370,13 +1374,44 @@ pub(super) fn build_cos_state(
                 }
             );
         }
-        if let Some(cfg) = built {
-            // #3995: build the per-interface loss-priority classification +
-            // rewrite tables alongside the interface config so the DSCP rewrite
-            // resolves on (forwarding-class, loss-priority) at TX time.
-            let lp_rewrite = build_cos_lp_rewrite(iface, &cfg, &tables)?;
-            state.lp_rewrite.insert(iface.ifindex, lp_rewrite);
-            state.interfaces.insert(iface.ifindex, cfg);
+        let built = built
+            .map(|cfg| build_cos_lp_rewrite(iface, &cfg, &tables).map(|lp| (cfg, lp)))
+            .transpose()?;
+        let duplicate_unit = if iface.is_unit == Some(true) {
+            match first_unit_by_ifindex.get(&iface.ifindex).copied() {
+                Some((first_iface, first_had_cos)) => {
+                    let same_cos = first_had_cos == built.is_some()
+                        && built.as_ref().is_none_or(|(cfg, lp)| {
+                            state.interfaces.get(&iface.ifindex) == Some(cfg)
+                                && state.lp_rewrite.get(&iface.ifindex) == Some(lp)
+                        });
+                    if !same_cos {
+                        return Err(
+                            crate::policy::SnapshotIntegrityError::CosDuplicateUnitIfindex {
+                                ifindex: iface.ifindex,
+                                first_interface: first_iface.name.clone(),
+                                second_interface: iface.name.clone(),
+                            },
+                        );
+                    }
+                    true
+                }
+                None => {
+                    first_unit_by_ifindex.insert(iface.ifindex, (iface, built.is_some()));
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if let Some((cfg, lp_rewrite)) = built {
+            // Identical aliases share the first unit's already-built runtime
+            // state. Differing state was rejected above, before either
+            // ifindex-keyed table can be overwritten.
+            if !duplicate_unit {
+                state.lp_rewrite.insert(iface.ifindex, lp_rewrite);
+                state.interfaces.insert(iface.ifindex, cfg);
+            }
         }
     }
     state.dscp_classifiers = tables.dscp_classifiers;
@@ -1388,5 +1423,8 @@ pub(super) fn build_cos_state(
 #[cfg(test)]
 mod remainder_temporal_tests_6846;
 
+#[cfg(test)]
+#[path = "cos_duplicate_ifindex_11429.rs"]
+mod cos_duplicate_ifindex_11429;
 #[cfg(test)]
 mod dangling_refs_7337;
