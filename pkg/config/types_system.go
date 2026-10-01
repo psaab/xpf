@@ -1052,8 +1052,9 @@ const (
 	PBRRulePriorityBase = 29000
 	// PBRRuleWindow is the size of the PBR band; the band is
 	// [PBRRulePriorityBase, PBRRulePriorityBase+PBRRuleWindow) = 29000-29999.
-	// It also bounds the number of PBR ip rules the applier installs
-	// (pkg/routing maxPBRRules) and the priority window clear() scans.
+	// Each PBR lookup consumes two priorities (lookup and unreachable shadow),
+	// so pkg/routing caps steering rules at floor(PBRRuleWindow/2). This is
+	// also the priority window clear() scans.
 	PBRRuleWindow = 1000
 	// LegacyPBRRulePriorityBase is the former PBR band base (31000),
 	// retained only so an in-place upgrade can sweep stale rules and the

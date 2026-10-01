@@ -38,11 +38,12 @@ var errV6AddrInvalidated = errors.New("DHCPv6 reply explicitly invalidated the h
 // in stateless mode). At T1 the loop sends an RFC 8415 §18.2.4 RENEW to
 // the granting server (echoing the assigned IA_NA / IA_PD with the
 // server's DUID) and at T2 an §18.2.5 REBIND (multicast, no server DUID)
-// — NOT a fresh Solicit (#2994). A successful renew/rebind commits the
-// renewed lease (and any delegated prefixes) via commitLease and returns
-// to the T1 wait (#1777); only when both attempts fail (lease expiry)
-// does the loop fall back to a fresh solicit. Stateless mode has no
-// binding, so every refresh is an Information-Request regardless of mode.
+// — NOT a fresh Solicit (#2994). A successful renewal commits the lease
+// (and any delegated prefixes) via commitLease and returns to the T1 wait
+// (#1777). After generic T2 failure, stateful clients re-acquire while the
+// existing binding remains active through its absolute deadline. Stateless
+// mode sends an Information-Request for every refresh; its synthetic
+// LeaseTime is only a refresh interval, not an option-expiry deadline.
 func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 	key := clientKey{iface: ifaceName, family: AFInet6}
 	backoff := time.Second
@@ -61,17 +62,24 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 	}
 
 	// committed / committedPDs track the lease and delegated prefixes
-	// currently applied (nil/empty until the first success). In
-	// stateless mode the lease never carries an address, so commitLease
-	// skips the address apply/remove paths via Address.IsValid().
+	// currently applied (nil/empty until the first success). Only stateful
+	// bindings receive an absolute expiry during failed reacquisition.
 	var (
-		committed    *Lease
-		committedPDs []DelegatedPrefix
+		committed          *Lease
+		committedPDs       []DelegatedPrefix
+		leaseExpiryAt      time.Time
+		leaseExpiryPending bool
 	)
 
 	for {
 		if ctx.Err() != nil {
 			return
+		}
+		if !stateless && leaseExpiryPending && !time.Now().Before(leaseExpiryAt) {
+			m.abandonLeaseAfterExpiry(key, committed)
+			committed = nil
+			committedPDs = nil
+			leaseExpiryPending = false
 		}
 
 		if stateless {
@@ -80,22 +88,68 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 			slog.Info("DHCPv6: starting solicit", "interface", ifaceName)
 		}
 
-		result, err := m.v6Exchange(ctx, ifaceName, exchangeAcquire, nil, nil)
+		// Bound each stateful Solicit and retry backoff by the original lease
+		// deadline. Stateless Information-Requests have no binding expiry.
+		acquireCtx := ctx
+		var cancelAcquire context.CancelFunc
+		var expiryDone <-chan struct{}
+		if !stateless && leaseExpiryPending {
+			acquireCtx, cancelAcquire = context.WithDeadline(ctx, leaseExpiryAt)
+			expiryDone = acquireCtx.Done()
+		}
+		result, err := m.v6Exchange(acquireCtx, ifaceName, exchangeAcquire, nil, nil)
 		if err != nil {
 			if ctx.Err() != nil {
+				if cancelAcquire != nil {
+					cancelAcquire()
+				}
 				return
+			}
+			if !stateless && leaseExpiryPending && !time.Now().Before(leaseExpiryAt) {
+				if cancelAcquire != nil {
+					cancelAcquire()
+				}
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				committedPDs = nil
+				leaseExpiryPending = false
+				continue
 			}
 			slog.Warn("DHCPv6: solicit failed, retrying",
 				"interface", ifaceName, "err", err, "backoff", backoff)
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
+				if cancelAcquire != nil {
+					cancelAcquire()
+				}
 				return
+			case <-expiryDone:
+				if ctx.Err() != nil {
+					if cancelAcquire != nil {
+						cancelAcquire()
+					}
+					return
+				}
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				committedPDs = nil
+				leaseExpiryPending = false
+				if cancelAcquire != nil {
+					cancelAcquire()
+				}
+				continue
+			}
+			if cancelAcquire != nil {
+				cancelAcquire()
 			}
 			backoff = min(backoff*2, 60*time.Second)
 			continue
 		}
 
+		if cancelAcquire != nil {
+			cancelAcquire()
+		}
 		backoff = time.Second
 
 		// #1715: DNS install is not done here. lease.DNS is stored by
@@ -113,6 +167,7 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 		}
 		committed = result.lease
 		committedPDs = reconciledPDs
+		leaseExpiryPending = false
 
 		if stateless {
 			slog.Info("DHCPv6: stateless options obtained",
@@ -128,6 +183,7 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 
 		// Renewal cycle: stay in this loop while T1 renews / T2 rebinds
 		// keep succeeding; break out only to re-acquire from scratch.
+	renewalLoop:
 		for {
 			t1, t2Remaining, ok := renewalTimers(committed.LeaseTime)
 			if !ok {
@@ -149,42 +205,77 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 					m.mu.Unlock()
 					return
 				}
-				break
+				break renewalLoop
 			}
 
-			// Wait for T1
+			deadline := committed.Obtained.Add(committed.LeaseTime)
+			if !stateless && !time.Now().Before(deadline) {
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				committedPDs = nil
+				break renewalLoop
+			}
+			leaseCtx := ctx
+			cancelLease := func() {}
+			if !stateless {
+				leaseCtx, cancelLease = context.WithDeadline(ctx, deadline)
+			}
+
+			// Wait for T1.
 			select {
 			case <-m.after(t1):
 				slog.Info("DHCPv6: T1 expired, renewing", "interface", ifaceName)
-			case <-ctx.Done():
-				if committed.Address.IsValid() {
-					m.removeAddress(ifaceName, committed)
+			case <-leaseCtx.Done():
+				if ctx.Err() != nil {
+					cancelLease()
+					if committed.Address.IsValid() {
+						m.removeAddress(ifaceName, committed)
+					}
+					m.mu.Lock()
+					delete(m.leases, key)
+					delete(m.delegatedPDs, ifaceName)
+					m.mu.Unlock()
+					return
 				}
-				m.mu.Lock()
-				delete(m.leases, key)
-				delete(m.delegatedPDs, ifaceName)
-				m.mu.Unlock()
-				return
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				committedPDs = nil
+				cancelLease()
+				break renewalLoop
 			}
 
 			// T1 renewal attempt — RENEW to the granting server, NOT a
 			// fresh Solicit (#2994).
-			renewed, rerr := m.v6Exchange(ctx, ifaceName, exchangeRenew, committed, committedPDs)
+			renewed, rerr := m.v6Exchange(leaseCtx, ifaceName, exchangeRenew, committed, committedPDs)
 			if rerr == nil {
 				reconciledPDs, applyPDs := reconcileDelegatedPDs(committedPDs, renewed.prefixes, renewed.withdrawnPDs)
 				if cerr := m.commitLease(key, renewed.lease, committed, reconciledPDs, committedPDs, applyPDs); cerr != nil {
 					slog.Warn("DHCPv6: failed to apply renewed lease, re-acquiring",
 						"interface", ifaceName, "err", cerr)
-					break
+					if !stateless {
+						leaseExpiryAt = deadline
+						leaseExpiryPending = true
+					}
+					cancelLease()
+					break renewalLoop
 				}
 				committed = renewed.lease
 				committedPDs = reconciledPDs
+				leaseExpiryPending = false
+				cancelLease()
 				slog.Info("DHCPv6: lease renewed",
 					"interface", ifaceName,
 					"address", committed.Address,
 					"delegated_prefixes", len(renewed.prefixes),
 					"lease_time", committed.LeaseTime)
 				continue
+			}
+			if ctx.Err() == nil && leaseCtx.Err() != nil {
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				committedPDs = nil
+				cancelLease()
+				break renewalLoop
 			}
 			if errors.Is(rerr, errV6AddrInvalidated) {
 				// #5927: the server EXPLICITLY invalidated the held IA_NA
@@ -203,42 +294,66 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				delete(m.leases, key)
 				delete(m.delegatedPDs, ifaceName)
 				m.mu.Unlock()
-				break // re-acquire from a fresh solicit
+				cancelLease()
+				break renewalLoop
 			}
 			slog.Warn("DHCPv6: T1 renewal failed, waiting for T2",
 				"interface", ifaceName, "err", rerr)
 
-			// Wait for T2 (87.5% of lease) — remaining time after T1
+			// Wait for T2 (87.5% of lease) — remaining time after T1.
 			select {
 			case <-m.after(t2Remaining):
-			case <-ctx.Done():
-				if committed.Address.IsValid() {
-					m.removeAddress(ifaceName, committed)
+			case <-leaseCtx.Done():
+				if ctx.Err() != nil {
+					cancelLease()
+					if committed.Address.IsValid() {
+						m.removeAddress(ifaceName, committed)
+					}
+					m.mu.Lock()
+					delete(m.leases, key)
+					delete(m.delegatedPDs, ifaceName)
+					m.mu.Unlock()
+					return
 				}
-				m.mu.Lock()
-				delete(m.leases, key)
-				delete(m.delegatedPDs, ifaceName)
-				m.mu.Unlock()
-				return
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				committedPDs = nil
+				cancelLease()
+				break renewalLoop
 			}
 
-			// T2 rebind attempt — REBIND (multicast, no server DUID) (#2994).
-			renewed, rerr = m.v6Exchange(ctx, ifaceName, exchangeRebind, committed, committedPDs)
+			// T2 rebind attempt — REBIND (multicast, no server DUID) (#2994),
+			// bounded by the absolute lease deadline.
+			renewed, rerr = m.v6Exchange(leaseCtx, ifaceName, exchangeRebind, committed, committedPDs)
 			if rerr == nil {
 				reconciledPDs, applyPDs := reconcileDelegatedPDs(committedPDs, renewed.prefixes, renewed.withdrawnPDs)
 				if cerr := m.commitLease(key, renewed.lease, committed, reconciledPDs, committedPDs, applyPDs); cerr != nil {
 					slog.Warn("DHCPv6: failed to apply rebound lease, re-acquiring",
 						"interface", ifaceName, "err", cerr)
-					break
+					if !stateless {
+						leaseExpiryAt = deadline
+						leaseExpiryPending = true
+					}
+					cancelLease()
+					break renewalLoop
 				}
 				committed = renewed.lease
 				committedPDs = reconciledPDs
+				leaseExpiryPending = false
+				cancelLease()
 				slog.Info("DHCPv6: lease rebound",
 					"interface", ifaceName,
 					"address", committed.Address,
 					"delegated_prefixes", len(renewed.prefixes),
 					"lease_time", committed.LeaseTime)
 				continue
+			}
+			if ctx.Err() == nil && leaseCtx.Err() != nil {
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				committedPDs = nil
+				cancelLease()
+				break renewalLoop
 			}
 			if errors.Is(rerr, errV6AddrInvalidated) {
 				// #5927: explicit invalidation on REBIND too — deconfigure the
@@ -254,11 +369,20 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				delete(m.leases, key)
 				delete(m.delegatedPDs, ifaceName)
 				m.mu.Unlock()
-				break
+				cancelLease()
+				break renewalLoop
 			}
-			slog.Warn("DHCPv6: T2 rebind failed, lease will expire, re-acquiring",
-				"interface", ifaceName, "err", rerr)
-			break // fall back to a fresh solicit
+			if stateless {
+				slog.Warn("DHCPv6: T2 information-request failed, retrying options",
+					"interface", ifaceName, "err", rerr)
+			} else {
+				slog.Warn("DHCPv6: T2 rebind failed, lease will expire, re-acquiring",
+					"interface", ifaceName, "err", rerr)
+				leaseExpiryAt = deadline
+				leaseExpiryPending = true
+			}
+			cancelLease()
+			break renewalLoop
 		}
 	}
 }

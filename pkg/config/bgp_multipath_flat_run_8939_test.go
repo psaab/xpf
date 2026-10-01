@@ -20,6 +20,7 @@ import (
 func TestBGPMultipathPackedRunKeepsBothOptions8939(t *testing.T) {
 	build := func(t *testing.T, lines ...string) *Config {
 		t.Helper()
+		lines = append([]string{"set protocols bgp local-as 65001"}, lines...)
 		tr := &ConfigTree{}
 		for _, l := range lines {
 			p, err := ParseSetCommand(l)

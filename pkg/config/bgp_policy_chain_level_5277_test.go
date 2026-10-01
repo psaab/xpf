@@ -16,6 +16,7 @@ import "testing"
 func TestBGPNeighborImportReplacesGroup(t *testing.T) {
 	cfg, err := compileSet(t, []string{
 		"set protocols bgp group g1 import GROUP-IMPORT",
+		"set protocols bgp local-as 65001",
 		"set protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
 		"set protocols bgp group g1 neighbor 10.0.0.1 import [ NEIGH-A NEIGH-B ]",
 		"set policy-options policy-statement GROUP-IMPORT term t then accept",
@@ -34,6 +35,7 @@ func TestBGPNeighborImportReplacesGroup(t *testing.T) {
 // TestBGPNeighborExportReplacesGroup is the export symmetric of the import test.
 func TestBGPNeighborExportReplacesGroup(t *testing.T) {
 	cfg, err := compileSet(t, []string{
+		"set protocols bgp local-as 65001",
 		"set protocols bgp group g1 export GROUP-EXPORT",
 		"set protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
 		"set protocols bgp group g1 neighbor 10.0.0.1 export [ N-A N-B ]",
@@ -56,6 +58,7 @@ func TestBGPNeighborExportReplacesGroup(t *testing.T) {
 // replace clobbering the common inherit-only path (#5270 order-independence).
 func TestBGPNeighborInheritsGroupWhenNoOwnPolicy(t *testing.T) {
 	cfg, err := compileSet(t, []string{
+		"set protocols bgp local-as 65001",
 		"set protocols bgp group g1 import [ G-IN-A G-IN-B ]",
 		"set protocols bgp group g1 export [ G-OUT-A G-OUT-B ]",
 		"set protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
