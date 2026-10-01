@@ -54,6 +54,7 @@ COMPARED	chassis cluster redundancy-group <*> ip-monitoring family inet <*> weig
 COMPARED	chassis cluster redundancy-group <*> ip-monitoring global-threshold
 COMPARED	chassis cluster redundancy-group <*> ip-monitoring global-weight
 COMPARED	chassis cluster redundancy-group <*> node <*> priority
+flag (read, but value-less)	chassis cluster redundancy-group <*> allow-degraded-routing-takeover
 flag (read, but value-less)	chassis cluster redundancy-group <*> strict-vip-ownership
 COMPARED	chassis cluster reth-advertise-interval
 COMPARED	chassis cluster reth-count

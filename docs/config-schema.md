@@ -6906,6 +6906,30 @@ strict paths (including that a rejected bootstrap leaves no active config).
 Negative controls assert a keyed cluster, a standalone (no `chassis cluster`)
 config, and a keyed unattended bootstrap are all unaffected.
 
+## Planned HA failover requires dynamic routing evidence (#11377)
+
+Before a planned `request chassis cluster failover redundancy-group <id> node <local>`
+is sent to the peer, the target node checks every dynamic protocol scoped to
+that RG's interfaces or routing-instance membership. Each protocol must have
+at least one matching learned route in its Linux route table, or an established
+adjacency on the RG's interface/peer. This prevents a planned transfer from
+reaching VRRP master actuation and advertising VIP ownership while the target
+has no dynamic RIB. Protocols configured outside the RG's interface and
+routing-instance scope do not block that RG.
+
+If routing evidence is unavailable, the transfer is refused before the peer is
+asked to demote. Operators who intentionally accept degraded forwarding can
+opt one RG in:
+
+```text
+set chassis cluster redundancy-group 1 allow-degraded-routing-takeover
+```
+
+The override is off by default, applies only to that RG's routing check, and
+does not bypass session-sync, userspace, fabric, or VRRP readiness. This is a
+planned-transfer guard; unplanned failover after peer loss remains available
+for recovery.
+
 ## Fabric zone-stamp private-L2 advisory (#10105)
 
 The zone-encoded fabric redirect source MAC (`02:bf:72:fe:<hi>:<lo>`) is
