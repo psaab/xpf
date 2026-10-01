@@ -282,6 +282,7 @@ fn active_flow_debug_test_entry(
             tx_selection: CachedTxSelectionDescriptor {
                 queue_id: Some(2),
                 dscp_rewrite: Some(46),
+                filter_dscp_rewrite: None,
                 drop: false,
                 reject: false,
                 reject_message: crate::filter::RejectMessage::ADMIN_PROHIBITED,
