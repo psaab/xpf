@@ -2544,13 +2544,12 @@ fn dnat_6899_both_unparseable_still_drops() {
 // targets. Inbound traffic is LocalDelivered instead of routed to the real host,
 // and the operator's `show` of the NAT rules looks correct.
 //
-// WHY THE REMEDY IS NOT "WITHDRAW ANYTHING THE `off` CONTAINS". Withdrawal is
 // only correct for an `off` that WINS the match. `match_prefix_slots` decides
-// prefix-vs-prefix by (a) zone tier - the zone-SPECIFIC tier runs to exhaustion
-// before the zone-wildcard tier - and (b) longest prefix within a tier. An `off`
-// that loses leaves its addresses genuinely translated, and withdrawing them
-// breaks the DNAT they were configured for. The last two cells below are that
-// direction, and they are the ones a careless fix reds.
+// prefix-vs-prefix by (a) context tier (interface > zone > routing-instance >
+// unscoped) and (b) longest prefix within a tier. A longer `off` from a less-
+// specific context still loses, leaving its addresses genuinely translated.
+// Withdrawing them breaks the DNAT they were configured for. The last cells
+// below pin that over-withdrawal direction.
 // ---------------------------------------------------------------------------
 
 /// THE DEFECT: a `/26 off` strictly inside a `/24` translate prefix.
@@ -2699,15 +2698,13 @@ fn a_broader_prefix_off_does_not_withdraw_a_narrower_translate_9159() {
     );
 }
 
-/// ZONE-TIER CONTROL - a zone-WILDCARD `off` prefix must not withdraw from a
-/// zone-SPECIFIC translate prefix, even though it is longer.
+/// CONTEXT-TIER CONTROL - a zone-wildcard `off` (unscoped tier) must not
+/// withdraw from a zone-specific translate, even though it has a longer prefix.
 ///
-/// `match_prefix_slots` runs `best_in_tier(true)` (zone-specific) to exhaustion
-/// before `best_in_tier(false)` (zone-wildcard), so the zone-specific translate
-/// wins regardless of prefix length. This is precisely where
-/// `off_scope_superset`'s zone clause - `off.from_zone.is_empty() || ==` - is
-/// sound for an EXACT host (probed ahead of every prefix) and unsound for a
-/// prefix. Reusing it here would red this cell.
+/// `match_prefix_slots` ranks eligible contexts (interface > zone > routing-
+/// instance > unscoped) before longest-prefix matching. Here the zone-scoped
+/// translate wins. Prefix withdrawal also requires the same zone: unlike the
+/// exact-host `off_scope_superset`, a prefix-scoped `off` cannot wildcard it.
 #[test]
 fn a_zone_wildcard_prefix_off_does_not_withdraw_a_zone_scoped_translate_9159() {
     let table = DnatTable::from_snapshots(
@@ -2760,6 +2757,70 @@ fn a_zone_wildcard_prefix_off_does_not_withdraw_a_zone_scoped_translate_9159() {
          it and blackhole the translation (#9159). locals_len={}",
         locals.len()
     );
+}
+
+/// A more-specific interface prefix translate beats a longer zone-scoped
+/// `off`, so the /26 cannot withdraw hosts from the translated /24.
+#[test]
+fn lower_tier_prefix_off_does_not_withdraw_interface_translate_11351() {
+    let vip: IpAddr = "203.0.113.65".parse().unwrap();
+    for off_first in [true, false] {
+        let off = DestinationNATRuleSnapshot {
+            name: "zone-off".to_string(),
+            destination_prefix: "203.0.113.64/26".to_string(),
+            protocol: "tcp".to_string(),
+            destination_port: 80,
+            from_zone: "untrust".to_string(),
+            off: true,
+            ..DestinationNATRuleSnapshot::default()
+        };
+        let translate = DestinationNATRuleSnapshot {
+            name: "interface-pool".to_string(),
+            destination_prefix: "203.0.113.0/24".to_string(),
+            protocol: "tcp".to_string(),
+            destination_port: 80,
+            from_zone: "untrust".to_string(),
+            from_interface: "ge-0/0/1.0".to_string(),
+            pool_address: "192.168.1.10".to_string(),
+            pool_port: 8080,
+            ..DestinationNATRuleSnapshot::default()
+        };
+        let rows = if off_first {
+            vec![off, translate]
+        } else {
+            vec![translate, off]
+        };
+        let table = DnatTable::from_snapshots(
+            &rows,
+            &crate::nat::NatCounterStore::default(),
+        );
+
+        assert_eq!(
+            table
+                .lookup_with_counter_scoped(
+                    PROTO_TCP,
+                    "198.51.100.1".parse().unwrap(),
+                    vip,
+                    0,
+                    80,
+                    "untrust",
+                    "ge-0/0/1.0",
+                    "",
+                    None,
+                )
+                .map(|(decision, _)| decision),
+            Some(NatDecision {
+                rewrite_dst: Some("192.168.1.10".parse().unwrap()),
+                rewrite_dst_port: Some(8080),
+                ..NatDecision::default()
+            }),
+            "the interface-tier /24 translate must beat the longer zone-tier /26 off"
+        );
+        assert!(
+            table.destination_ips().any(|ip| ip == vip),
+            "the losing /26 off must not withdraw the translated VIP (off_first={off_first})"
+        );
+    }
 }
 
 // #9879 PIN — most-specific-wins across tiers, dataplane intentionally

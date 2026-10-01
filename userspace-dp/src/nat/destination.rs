@@ -859,9 +859,10 @@ impl DnatTable {
     /// #3096: as [`lookup_with_counter`] but additionally gates each candidate
     /// on the DNAT rule's `from interface` / `from routing-instance` scope
     /// against the packet's INGRESS interface config-name and routing-instance.
-    /// Empty scope fields are wildcards. The zone-tier precedence (zone-
-    /// specific wins over zone-wildcard) and #3164 LPM ordering are unchanged;
-    /// the scope is an additional AND filter on eligibility.
+    /// Empty scope fields are wildcards. Candidate eligibility still ANDs the
+    /// zone, interface, and routing-instance scopes; eligible candidates use
+    /// interface > zone > routing-instance > unscoped precedence. Prefixes
+    /// then use longest-prefix matching within a context tier.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn lookup_with_counter_scoped(
         &self,
@@ -1426,7 +1427,7 @@ impl DnatTable {
                         // the address genuinely translated, and withdrawing it
                         // would break the DNAT it was configured for. See
                         // `off_prefix_scope_superset` for the two match rules
-                        // (same zone tier, strictly longer prefix).
+                        // (same context tier, strictly longer prefix).
                         || prefix_off.iter().any(|(off_key, off_slot)| {
                             off_slot.contains(addr)
                                 && off_prefix_scope_superset(
@@ -1543,10 +1544,9 @@ fn off_scope_superset(
     // for a prefix-scoped one, which is why the prefix arm uses
     // `off_prefix_scope_superset` rather than this function. An exact-host entry
     // is probed before ANY prefix (`lookup_with_counter_scoped`), so it wins the
-    // match whatever tier the translate slot is in. Prefix-vs-prefix is decided
-    // by `match_prefix_slots`, which runs the zone-SPECIFIC tier to exhaustion
-    // before the zone-wildcard tier -- so a zone-wildcard `off` LOSES to a
-    // zone-specific translate prefix and must not withdraw from it.
+    // match whatever context tier the translate slot is in. Prefix-vs-prefix
+    // is decided by `match_prefix_slots`: context tier first (interface > zone
+    // > routing-instance > unscoped), then longest prefix within that tier.
     (off.from_zone.is_empty() || off.from_zone == slot.from_zone)
         && off_scope_superset_common(off_key.protocol, off_key.dst_port, off, slot_key, slot)
 }
@@ -1594,16 +1594,14 @@ fn off_scope_superset_common(
 /// Only an `off` that WINS may withdraw an address from firewall-local
 /// registration. Withdrawing one it loses is the opposite defect: the address is
 /// genuinely translated, and dropping its proxy-ARP/ND registration breaks the
-/// DNAT it was configured for. So the two match rules `match_prefix_slots`
-/// implements are reproduced here, and both are necessary:
+/// DNAT it was configured for. `match_prefix_slots` selects the most-specific
+/// eligible context tier (interface > zone > routing-instance > unscoped), then
+/// the longest matching prefix within that tier. This predicate mirrors both:
 ///
-///   * SAME TIER. `best_in_tier(true)` (zone-specific) is run to exhaustion
-///     before `best_in_tier(false)` (zone-wildcard), so a zone-wildcard `off`
-///     never beats a zone-specific translate prefix. Equality of the zone
-///     strings is the condition -- both empty, or both the same zone -- and it
-///     is STRICTER than `off_scope_superset`'s zone clause, which is correct for
-///     exact hosts (probed ahead of every prefix) and not for prefixes.
-///   * STRICTLY LONGER. Within a tier the longest prefix wins, and
+///   * SAME TIER. The scope-superset checks below require the `off` to cover
+///     every context eligible for the translate. A less-specific wildcard `off`
+///     loses to a more-specific translate even when its prefix is longer.
+///   * STRICTLY LONGER. Within the same tier, longest prefix wins and
 ///     `match_prefix_slots` keeps the FIRST slot among equal lengths. An `off`
 ///     of equal length therefore may or may not win, depending on insertion
 ///     order, so it is not withdrawn. That under-withdrawal leaves the #9159
@@ -1617,6 +1615,7 @@ fn off_prefix_scope_superset(
     slot: &DnatPrefixSlot,
 ) -> bool {
     off_slot.entry.from_zone == slot.entry.from_zone
+        && off_slot.entry.scope_tier() == slot.entry.scope_tier()
         && off_slot.prefix_len() > slot.prefix_len()
         && off_scope_superset_common(
             off_key.protocol,
