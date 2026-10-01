@@ -231,10 +231,10 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic(
     lookup_forwarding_resolution_inner(state, Some(dynamic_neighbors), dst, None)
 }
 
-/// #2734: like `lookup_forwarding_resolution_with_dynamic`, but selects an
-/// equal-cost next-hop by the per-FLOW 5-tuple hash (from the session
-/// forward key) so distinct flows to the same destination spread across
-/// ECMP members. Used by the session forwarding-resolution path.
+/// #2734/#11402: like `lookup_forwarding_resolution_with_dynamic`, but selects
+/// a weighted ECMP next-hop by the per-FLOW 5-tuple hash (from the session
+/// forward key), spreading flows across live members in proportion to weight.
+/// Used by the session forwarding-resolution path.
 pub(in crate::afxdp) fn lookup_forwarding_resolution_with_dynamic_for_flow(
     state: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -362,11 +362,10 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_inner(
     lookup_forwarding_resolution_inner_ecmp(state, dynamic_neighbors, dst, table, None)
 }
 
-/// #2734: as `lookup_forwarding_resolution_inner`, plus an optional
-/// per-flow ECMP spread key. `ecmp_flow_hash = Some(h)` selects the
-/// equal-cost member by the 5-tuple flow hash (per-flow spread); `None`
-/// falls back to the per-destination hash (#2389 behavior) for callers
-/// without a flow context.
+/// #2734/#11402: as `lookup_forwarding_resolution_inner`, plus an optional
+/// per-flow ECMP spread key. `ecmp_flow_hash = Some(h)` selects a weighted
+/// member by the 5-tuple flow hash; `None` falls back to the per-destination
+/// hash (#2389 behavior) for callers without a flow context.
 pub(in crate::afxdp) fn lookup_forwarding_resolution_inner_ecmp(
     state: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
@@ -1003,6 +1002,7 @@ fn select_v4_route<'a>(
             let selected = select_route_next_hop_with_status(
                 &route.next_hops,
                 hash,
+                |nh| nh.weight,
                 |nh| {
                     if nh.tunnel_endpoint_id != 0 {
                         return tunnel_next_hop_live(
@@ -1106,6 +1106,7 @@ fn select_v6_route<'a>(
             let selected = select_route_next_hop_with_status(
                 &route.next_hops,
                 hash,
+                |nh| nh.weight,
                 |nh| {
                     if nh.tunnel_endpoint_id != 0 {
                         return tunnel_next_hop_live(
@@ -1155,28 +1156,28 @@ fn select_v6_route<'a>(
         })
 }
 
-/// #2389/#2734: select one equal-cost next-hop candidate for a forwarding
-/// static route. Prefers a candidate whose neighbor is resolved (skips a
+/// #2389/#2734/#11402: select one ECMP next-hop candidate for a forwarding
+/// route. Prefers a candidate whose neighbor is resolved (skips a
 /// dead/unresolved first next-hop — the load-bearing correctness fix); if
-/// several resolve, distributes deterministically by the supplied
-/// `flow_hash`; if none resolve, falls back to the same hashed pick so the
-/// kernel slow-path can drive ARP/NDP.
+/// several resolve, distributes flows deterministically in proportion to their
+/// configured weights; if none resolve, falls back to the same hashed pick so
+/// the kernel slow-path can drive ARP/NDP.
 ///
 /// #2734: the spread key is now per-FLOW. The session resolution path
 /// threads the 5-tuple flow hash (`ecmp_hash_flow`, the same seeded
 /// FxHasher the flow cache already feeds the session 5-tuple — see
 /// `ecmp_hash_flow`) into `select_route_next_hop_with_status`; distinct flows
-/// to the SAME destination spread across equal-cost members while every packet
-/// of a single flow pins to one member (flow-consistent — no
-/// intra-flow reordering). Callers without a flow context (tunnel outer
-/// resolution, `inject`, bare-dst lookups) pass `None`, which falls back
-/// to the per-DESTINATION hash (`ecmp_hash_v4`/`ecmp_hash_v6`) — the
-/// #2389 behavior. The retained candidate vector (Vec<RouteNextHop>) is
+/// to the SAME destination spread across live ECMP members in proportion to
+/// their weights, while every packet of one flow remains pinned to one member
+/// (flow-consistent, with no intra-flow reordering). Callers without a flow
+/// context (tunnel outer resolution, `inject`, bare-dst lookups) pass `None`,
+/// which falls back to the per-DESTINATION hash (`ecmp_hash_v4`/`ecmp_hash_v6`)
+/// — the #2389 behavior. The retained candidate vector (Vec<RouteNextHop>) is
 /// what makes per-flow selection a localized runtime change.
 /// Deterministic ECMP spread mixer. A fixed-seed splitmix64 finalizer over
 /// the input word — used for the per-destination fallback. Stable across
 /// reloads and workers so every worker maps the same input to the same
-/// equal-cost path (a flow's packets never split across paths). Not a
+/// weighted path (a flow's packets never split across paths). Not a
 /// security hash.
 fn ecmp_hash_bytes(seed: u64) -> u64 {
     let mut z = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -1202,13 +1203,13 @@ fn ecmp_hash_v6(ip: Ipv6Addr) -> u64 {
 /// — #2364), so the cost is one already-vetted hash and the per-flow
 /// mapping reshuffles each restart (defeats offline collision construction)
 /// while staying stable for a flow's lifetime within a boot. The seed is
-/// node-local: ECMP selection picks among THIS node's equal-cost members
-/// and is not part of any wire/HA-synced structure, so a per-node seed is
-/// correct (HA peers re-derive their own pick under their own seed, exactly
-/// as the flow cache and fabric-queue hash do). Determinism within a boot
-/// guarantees flow consistency — every packet of one flow hashes to the
-/// same member, no intra-flow reordering. The status-aware
-/// `select_route_next_hop_with_status` reduces this modulo the live-member
+/// node-local: ECMP selection picks among THIS node's weighted members and is
+/// not part of any wire/HA-synced structure, so a per-node seed is correct
+/// (HA peers re-derive their own pick under their own seed, exactly as the
+/// flow cache and fabric-queue hash do). Determinism within a boot guarantees
+/// flow consistency — every packet of one flow hashes to the same member, no
+/// intra-flow reordering. The status-aware selector uses cumulative live
+/// weight to choose an authored leg.
 fn ecmp_hash_flow(key: &crate::session::SessionKey) -> u64 {
     ecmp_hash_flow_seeded(crate::hot_hash_seed::hot_path_hash_seed(), key)
 }
@@ -1224,27 +1225,21 @@ pub(in crate::afxdp) fn ecmp_hash_flow_seeded(seed: u64, key: &crate::session::S
     hasher.finish()
 }
 
-/// #2922: select one equal-cost next-hop in a SINGLE liveness pass.
+/// #2922/#11402: select one weighted ECMP next-hop in a SINGLE liveness pass.
 ///
 /// The liveness predicate (`is_live`) is NOT pure — the IPv4/IPv6 callers
 /// probe the shared dynamic-neighbor map, which the monitor thread mutates
-/// concurrently. The previous two-pass form (`count()` then `nth()`)
-/// evaluated `is_live` twice per candidate, so (a) a neighbor removed
-/// between the two passes made `live > 0` true at count time but
-/// `nth(pick)` yield `None` → spurious no-route even though a live
-/// candidate existed at count time, and (b) every session-miss ECMP
-/// lookup ran two full sets of neighbor hash probes on the hot path.
+/// concurrently. Evaluating it twice per candidate could observe different
+/// states and adds duplicate neighbor-map probes to the hot path.
 ///
-/// Fix: materialize the live candidates into a stack `SmallVec` of
-/// references in one pass, so the count and the selection observe the
-/// SAME liveness snapshot. ECMP fanout is small (a handful of equal-cost
-/// members), so the inline capacity (8) covers the common case without a
-/// heap allocation. Selection semantics are unchanged: when any member is
-/// live, the pick is `ip_hash % live_count` over the live set in original
-/// candidate order (so the same flow pins to the same member given the
-/// same liveness); when none are live, fall back to the same hashed pick
-/// over the full candidate vector so the kernel slow-path can drive
-/// ARP/NDP.
+/// The selector snapshots each liveness result once. For fanout up to the
+/// rendered maximum of 64, it uses a stack bitmask and parallel weight array;
+/// larger groups use the allocation-backed `SmallVec` fallback. Live legs are
+/// selected by cumulative weight in authored order using
+/// `ip_hash % total_live_weight`. If none are live, preserve the established
+/// ARP fallback: uniform hashing over the drivable subset, then the full
+/// authored candidate slice.
+///
 /// #2923: ECMP candidate liveness for a TUNNEL next-hop.
 ///
 /// A tunnel candidate (`tunnel_endpoint_id != 0`) is NOT a neighbor-resolved
@@ -1314,7 +1309,18 @@ pub(in crate::afxdp) fn select_route_next_hop<'a, T: Copy>(
     is_live: impl Fn(&T) -> bool,
     is_drivable: impl Fn(&T) -> bool,
 ) -> Option<&'a T> {
-    select_route_next_hop_with_status(candidates, ip_hash, is_live, is_drivable)
+    select_route_next_hop_weighted(candidates, ip_hash, |_| 1, is_live, is_drivable)
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn select_route_next_hop_weighted<'a, T: Copy>(
+    candidates: &'a [T],
+    ip_hash: u64,
+    weight_of: impl Fn(&T) -> u32,
+    is_live: impl Fn(&T) -> bool,
+    is_drivable: impl Fn(&T) -> bool,
+) -> Option<&'a T> {
+    select_route_next_hop_with_status(candidates, ip_hash, weight_of, is_live, is_drivable)
         .map(|(candidate, _)| candidate)
 }
 
@@ -1324,82 +1330,95 @@ pub(in crate::afxdp) fn select_route_next_hop<'a, T: Copy>(
 fn select_route_next_hop_with_status<'a, T: Copy>(
     candidates: &'a [T],
     ip_hash: u64,
+    weight_of: impl Fn(&T) -> u32,
     is_live: impl Fn(&T) -> bool,
     is_drivable: impl Fn(&T) -> bool,
 ) -> Option<(&'a T, bool)> {
     if candidates.is_empty() {
         return None;
     }
-    // #7204 (A1-b7-F6): record liveness in a BITMASK, not a list of references.
-    //
-    // The collection never needed the references. It is used for exactly two
-    // things — how many candidates are live, and which one is the Nth live in
-    // candidate order — and a `u64` answers both in 8 bytes with `count_ones`
-    // and a bit walk. `SmallVec<[&T; 8]>` was 64 bytes of inline stack that
-    // spilled to the heap from fanout 9 up, on the packet-driven session-miss
-    // path.
-    //
-    // WHY NOT A BIGGER INLINE ARRAY. The supported ECMP ceiling is 64
-    // (`pkg/frr/config_render.go` resolveECMP -> `maximum-paths 64`, and Junos
-    // `routing-options maximum-ecmp` is Missing per docs/feature-gaps.md, so no
-    // operator knob raises it). `[&T; 64]` would never spill, but it costs 512
-    // bytes of stack on EVERY call including the 1-4 fanout that real multi-WAN
-    // configs actually run — paying the worst case always, to avoid an
-    // allocation almost nobody reaches. The mask costs 8 bytes at every fanout
-    // and allocates at none of them, so the trade does not have to be made.
-    //
-    // WHY NOT TWO PASSES over the candidates instead. `is_live` is not a field
-    // read: both call sites reach `tunnel_next_hop_live`, which resolves a
-    // tunnel endpoint and consults the neighbour map. The original comment's
-    // "single liveness evaluation" is load-bearing, and this preserves it —
-    // `is_live` is still called exactly `candidates.len()` times.
-    //
-    // SELECTION IS UNCHANGED. The bit walk yields the pick-th SET bit in
-    // ascending index order, which is the same element `live[pick]` named.
-    // ECMP picks must stay flow-consistent, so this had to be an equivalence,
-    // not merely a valid choice.
+
+    #[inline]
+    fn choose_weighted_index(
+        mask: u64,
+        weights: &[u32; MAX_SUPPORTED_ECMP_FANOUT],
+        total_weight: u64,
+        ip_hash: u64,
+    ) -> Option<usize> {
+        if total_weight == 0 {
+            return None;
+        }
+        let mut pick = ip_hash % total_weight;
+        let mut remaining = mask;
+        while remaining != 0 {
+            let index = remaining.trailing_zeros() as usize;
+            let weight = weights[index] as u64;
+            if pick < weight {
+                return Some(index);
+            }
+            pick -= weight;
+            remaining &= remaining - 1;
+        }
+        None
+    }
+
+    #[inline]
+    fn choose_weighted_pairs(
+        pairs: &[(usize, u32)],
+        total_weight: u64,
+        ip_hash: u64,
+    ) -> Option<usize> {
+        if total_weight == 0 {
+            return None;
+        }
+        let mut pick = ip_hash % total_weight;
+        for &(index, weight) in pairs {
+            let weight = weight as u64;
+            if pick < weight {
+                return Some(index);
+            }
+            pick -= weight;
+        }
+        None
+    }
+
+    // Keep fanout <=64 allocation-free and snapshot the (potentially impure)
+    // liveness result exactly once per leg.
     const MASK_BITS: usize = MAX_SUPPORTED_ECMP_FANOUT;
     if candidates.len() <= MASK_BITS {
-        let mut live_mask: u64 = 0;
-        for (i, c) in candidates.iter().enumerate() {
-            if is_live(c) {
-                live_mask |= 1u64 << i;
+        let mut weights = [0u32; MASK_BITS];
+        let mut live_mask = 0u64;
+        let mut live_total_weight = 0u64;
+        for (index, candidate) in candidates.iter().enumerate() {
+            if is_live(candidate) {
+                let weight = weight_of(candidate).max(1);
+                live_mask |= 1u64 << index;
+                weights[index] = weight;
+                live_total_weight += weight as u64;
             }
         }
-        let live_count = live_mask.count_ones() as u64;
-        if live_count > 0 {
-            let mut pick = ip_hash % live_count;
-            let mut remaining = live_mask;
-            loop {
-                let idx = remaining.trailing_zeros() as usize;
-                if pick == 0 {
-                    return candidates.get(idx).map(|candidate| (candidate, true));
-                }
-                pick -= 1;
-                remaining &= remaining - 1;
+        if let Some(index) = choose_weighted_index(live_mask, &weights, live_total_weight, ip_hash)
+        {
+            return candidates.get(index).map(|candidate| (candidate, true));
+        }
+
+        // #11318: retain the established no-live fallback order and hashing:
+        // use the ARP-drivable subset when possible, then the full authored
+        // slice. These paths remain uniform; weight only live-member selection.
+        let mut drivable_mask = 0u64;
+        for (index, candidate) in candidates.iter().enumerate() {
+            if is_drivable(candidate) {
+                drivable_mask |= 1u64 << index;
             }
         }
-        // #11318: no-live fallback hashes over the ARP-DRIVABLE subset when one
-        // exists, not the full vector. The full-vector fallback (from #2922,
-        // whose intent assumed every member ARP-drivable — broken by #4446)
-        // resolves ~half the flows to ifindex-0 members → NoRoute, a partial
-        // ECMP blackhole beside a member that would drive ARP. `is_drivable`
-        // is evaluated ONLY here (never on the live path), so the common case
-        // costs nothing, and when NOTHING is drivable the legacy full-vector
-        // fallback is preserved (something selectable beats a certain drop).
-        let mut drivable_mask: u64 = 0;
-        for (i, c) in candidates.iter().enumerate() {
-            if is_drivable(c) {
-                drivable_mask |= 1u64 << i;
-            }
-        }
-        if drivable_mask.count_ones() > 0 {
-            let mut pick = ip_hash % drivable_mask.count_ones() as u64;
+        let drivable_count = drivable_mask.count_ones() as u64;
+        if drivable_count > 0 {
+            let mut pick = ip_hash % drivable_count;
             let mut remaining = drivable_mask;
             loop {
-                let idx = remaining.trailing_zeros() as usize;
+                let index = remaining.trailing_zeros() as usize;
                 if pick == 0 {
-                    return candidates.get(idx).map(|candidate| (candidate, false));
+                    return candidates.get(index).map(|candidate| (candidate, false));
                 }
                 pick -= 1;
                 remaining &= remaining - 1;
@@ -1409,27 +1428,36 @@ fn select_route_next_hop_with_status<'a, T: Copy>(
         return candidates.get(pick).map(|candidate| (candidate, false));
     }
 
-    // Above the supported ceiling the mask cannot represent every candidate, so
-    // fall back to the original collect. Unreachable through configuration —
-    // nothing renders more than 64 paths — but a route arriving with more must
-    // still be selected from correctly rather than silently truncated to the
-    // first 64.
-    let live: smallvec::SmallVec<[&'a T; 8]> =
-        candidates.iter().filter(|c| is_live(c)).collect();
-    if !live.is_empty() {
-        let pick = (ip_hash % live.len() as u64) as usize;
-        live.get(pick).copied().map(|candidate| (candidate, true))
-    } else {
-        // #11318 twin of the mask path above: drivable subset first, full
-        // vector only when nothing is drivable.
-        let drivable: smallvec::SmallVec<[&'a T; 8]> =
-            candidates.iter().filter(|c| is_drivable(c)).collect();
-        if !drivable.is_empty() {
-            let pick = (ip_hash % drivable.len() as u64) as usize;
-            drivable.get(pick).copied().map(|candidate| (candidate, false))
-        } else {
-            let pick = (ip_hash % candidates.len() as u64) as usize;
-            candidates.get(pick).map(|candidate| (candidate, false))
+    // Above the supported ceiling, preserve correctness and one liveness check
+    // per leg using the existing allocation-backed fallback.
+    let mut live = smallvec::SmallVec::<[(usize, u32); 8]>::new();
+    let mut live_total_weight = 0u64;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let is_candidate_live = is_live(candidate);
+        if is_candidate_live {
+            let weight = weight_of(candidate).max(1);
+            live.push((index, weight));
+            live_total_weight += weight as u64;
         }
     }
+    if let Some(index) = choose_weighted_pairs(&live, live_total_weight, ip_hash) {
+        return candidates.get(index).map(|candidate| (candidate, true));
+    }
+
+    let mut drivable = smallvec::SmallVec::<[usize; 8]>::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        if is_drivable(candidate) {
+            drivable.push(index);
+        }
+    }
+    if !drivable.is_empty() {
+        let pick = (ip_hash % drivable.len() as u64) as usize;
+        return drivable
+            .get(pick)
+            .and_then(|index| candidates.get(*index))
+            .map(|candidate| (candidate, false));
+    }
+
+    let pick = (ip_hash % candidates.len() as u64) as usize;
+    candidates.get(pick).map(|candidate| (candidate, false))
 }

@@ -59,7 +59,7 @@ func TestRouteToEntryMultiPath(t *testing.T) {
 		Priority: 170,
 		MultiPath: []*netlink.NexthopInfo{
 			{LinkIndex: 11, Gw: net.ParseIP("192.0.2.1"), Hops: 0},
-			{LinkIndex: 12, Gw: net.ParseIP("192.0.2.2"), Hops: 0},
+			{LinkIndex: 12, Gw: net.ParseIP("192.0.2.2"), Hops: 3},
 		},
 	}
 
@@ -74,8 +74,8 @@ func TestRouteToEntryMultiPath(t *testing.T) {
 	if entry.NextHops[1].Gateway != "192.0.2.2" || entry.NextHops[1].Interface != "ge-0-0-1" {
 		t.Errorf("leg 1 = %+v, want gw 192.0.2.2 via ge-0-0-1", entry.NextHops[1])
 	}
-	if entry.NextHops[0].Weight != 1 || entry.NextHops[1].Weight != 1 {
-		t.Errorf("weights = %d,%d, want 1,1 (Hops+1)", entry.NextHops[0].Weight, entry.NextHops[1].Weight)
+	if entry.NextHops[0].Weight != 1 || entry.NextHops[1].Weight != 4 {
+		t.Errorf("weights = %d,%d, want 1,4 (Hops+1)", entry.NextHops[0].Weight, entry.NextHops[1].Weight)
 	}
 	// Single-field back-fill: the first leg, not a bare "direct".
 	if entry.NextHop != "192.0.2.1" || entry.Interface != "ge-0-0-0" {

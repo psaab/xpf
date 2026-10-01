@@ -185,3 +185,208 @@ func TestMalformedPairLeavesNoPhantomContext9246(t *testing.T) {
 			zp.FromZone, zp.ToZone, len(zp.Policies))
 	}
 }
+
+func groupedSetTree11366(t *testing.T, commands []string) *ConfigTree {
+	t.Helper()
+	tree := &ConfigTree{}
+	for _, command := range commands {
+		path, quoted, grouped, err := ParseSetCommandGrouped(command)
+		if err != nil {
+			t.Fatalf("ParseSetCommandGrouped(%q): %v", command, err)
+		}
+		if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
+			t.Fatalf("SetPathQuotedGrouped(%q): %v", command, err)
+		}
+	}
+	return tree
+}
+
+func groupedPolicyZoneTree11366(t *testing.T, toZone string) *ConfigTree {
+	return groupedSetTree11366(t, []string{
+		"set security zones security-zone A",
+		"set security zones security-zone B",
+		"set security zones security-zone C",
+		"set security policies from-zone A to-zone " + toZone + " policy p1 match source-address any",
+		"set security policies from-zone A to-zone " + toZone + " policy p1 match destination-address any",
+		"set security policies from-zone A to-zone " + toZone + " policy p1 match application any",
+		"set security policies from-zone A to-zone " + toZone + " policy p1 then permit",
+	})
+}
+
+func groupedZonePairTree11366(t *testing.T) *ConfigTree {
+	return groupedPolicyZoneTree11366(t, "[ B C ]")
+}
+
+func TestGroupedToZoneMultiListRejected11366(t *testing.T) {
+	tree := groupedZonePairTree11366(t)
+	security := tree.FindChild("security")
+	if security == nil || security.FindChild("policies") == nil {
+		t.Fatal("grouped-set tree has no security policies stanza")
+	}
+	fromZones := security.FindChild("policies").FindChildren("from-zone")
+	if len(fromZones) != 1 || len(fromZones[0].Keys) != 5 ||
+		fromZones[0].Keys[3] != "B" || fromZones[0].Keys[4] != "C" {
+		t.Fatalf("grouped-set path did not preserve the complete to-zone list: %+v", fromZones)
+	}
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatalf("grouped to-zone list committed silently; tree=%s", tree.FormatSet())
+	}
+	if !strings.Contains(err.Error(), "to-zone") || !strings.Contains(err.Error(), "bracketed") {
+		t.Fatalf("grouped to-zone error must identify the invalid list, got %v", err)
+	}
+}
+
+func TestGroupedToZoneMultiListWarnsAndQuarantines11366(t *testing.T) {
+	tree := groupedZonePairTree11366(t)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant load must remain bootable: %v", err)
+	}
+	var warned bool
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "to-zone") && strings.Contains(warning, "bracketed") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("tolerant grouped to-zone load must warn with the rejected cause: %v", cfg.Warnings)
+	}
+	if len(cfg.Security.Policies) != 0 {
+		t.Fatalf("quarantined grouped policy must not partially compile for one zone: %+v", cfg.Security.Policies)
+	}
+}
+
+func TestGroupedSetSeparateZonePairsStillCompile11366(t *testing.T) {
+	commands := []string{
+		"set security zones security-zone A",
+		"set security zones security-zone B",
+		"set security zones security-zone C",
+	}
+	for _, toZone := range []string{"B", "C"} {
+		prefix := fmt.Sprintf("set security policies from-zone A to-zone %s policy p1 ", toZone)
+		commands = append(commands,
+			prefix+"match source-address any",
+			prefix+"match destination-address any",
+			prefix+"match application any",
+			prefix+"then permit",
+		)
+	}
+	cfg, err := CompileConfig(groupedSetTree11366(t, commands))
+	if err != nil {
+		t.Fatalf("separate grouped-set zone pairs must still commit: %v", err)
+	}
+	if len(cfg.Security.Policies) != 2 {
+		t.Fatalf("separate zone statements produced %d contexts, want 2: %+v",
+			len(cfg.Security.Policies), cfg.Security.Policies)
+	}
+	got := make(map[string]int, 2)
+	for _, pair := range cfg.Security.Policies {
+		got[pair.ToZone] += len(pair.Policies)
+	}
+	if got["B"] != 1 || got["C"] != 1 {
+		t.Fatalf("separate zone statements must enforce one policy on each zone, got %v", got)
+	}
+}
+
+func TestGroupedToZoneMultiListRejectedWithoutProvenance11366(t *testing.T) {
+	tree := groupedZonePairTree11366(t)
+	security := tree.FindChild("security")
+	if security == nil || security.FindChild("policies") == nil {
+		t.Fatal("grouped-set tree has no security policies stanza")
+	}
+	node := security.FindChild("policies").FindChild("from-zone")
+	if node == nil || len(node.Keys) != 5 {
+		t.Fatalf("expected grouped five-key context, got %+v", node)
+	}
+	node.KeysBracketed = nil
+	_, err := CompileConfig(tree)
+	if err == nil || !strings.Contains(err.Error(), "to-zone") ||
+		!strings.Contains(err.Error(), "extra key tokens") {
+		t.Fatalf("a provenance-less extra to-zone key must still be refused by shape, got %v", err)
+	}
+}
+
+func TestGroupedSingleZoneBracketAndPlainPairRemainValid11366(t *testing.T) {
+	for _, toZone := range []string{"[ B ]", "B"} {
+		t.Run(toZone, func(t *testing.T) {
+			cfg, err := CompileConfig(groupedPolicyZoneTree11366(t, toZone))
+			if err != nil {
+				t.Fatalf("single-zone pair %q must compile: %v", toZone, err)
+			}
+			if len(cfg.Security.Policies) != 1 {
+				t.Fatalf("single-zone pair %q compiled %d contexts, want 1",
+					toZone, len(cfg.Security.Policies))
+			}
+			pair := cfg.Security.Policies[0]
+			if pair.FromZone != "A" || pair.ToZone != "B" || len(pair.Policies) != 1 {
+				t.Fatalf("single-zone pair %q compiled incorrectly: %+v", toZone, pair)
+			}
+		})
+	}
+}
+
+func TestHierarchicalToZoneMultiListRejected11366(t *testing.T) {
+	const text = `security {
+    zones {
+        security-zone A;
+        security-zone B;
+        security-zone C;
+    }
+    policies {
+        from-zone A to-zone [ B C ] {
+            policy p1 {
+                match {
+                    source-address any;
+                    destination-address any;
+                    application any;
+                }
+                then {
+                    permit;
+                }
+            }
+        }
+    }
+}`
+	tree, parseErrs := NewParser(text).Parse()
+	if len(parseErrs) > 0 {
+		t.Fatalf("parse errors: %v", parseErrs)
+	}
+	_, err := CompileConfig(tree)
+	if err == nil || !strings.Contains(err.Error(), "to-zone") ||
+		!strings.Contains(err.Error(), "bracketed") {
+		t.Fatalf("hierarchical bracketed to-zone must be refused with cause, got %v", err)
+	}
+}
+
+func TestHierarchicalSingleLeafPolicyIsNotSilentlyDropped11366(t *testing.T) {
+	const text = `security {
+    zones {
+        security-zone A;
+        security-zone B;
+    }
+    policies {
+        from-zone A to-zone B policy p1;
+    }
+}`
+	tree, parseErrs := NewParser(text).Parse()
+	if len(parseErrs) > 0 {
+		t.Fatalf("parse errors: %v", parseErrs)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		if !strings.Contains(err.Error(), "#3044") &&
+			!strings.Contains(err.Error(), "extra key tokens") {
+			t.Fatalf("single-leaf policy was refused for an unrelated reason: %v", err)
+		}
+		return
+	}
+	if len(cfg.Security.Policies) == 0 {
+		t.Fatal("single-leaf hierarchical policy vanished without rejection or a compiled context")
+	}
+	for _, pair := range cfg.Security.Policies {
+		if len(pair.Policies) == 0 {
+			t.Fatalf("single-leaf hierarchical policy compiled as an empty context: %+v", cfg.Security.Policies)
+		}
+	}
+}
