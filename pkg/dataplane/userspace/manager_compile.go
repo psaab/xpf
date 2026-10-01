@@ -254,15 +254,23 @@ func (m *Manager) SetPolicySchedulerActiveState(activeState map[string]bool) {
 	m.policySchedulerDesiredSet = true
 }
 
+type publishedSnapshotTailError struct {
+	generation uint64
+	stage      string
+	err        error
+}
+
+func (e *publishedSnapshotTailError) Error() string {
+	return fmt.Sprintf("userspace: snapshot generation %d is already enforced; post-publish %s reconciliation failed: %v",
+		e.generation, e.stage, e.err)
+}
+
+func (e *publishedSnapshotTailError) Unwrap() error { return e.err }
+
 func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) {
-	// #7079: the XDP link-pin removal that used to be the first statement of
-	// this function now lives in dataplane.Manager.CompileUserspaceShim, after
-	// CompileConfig has accepted the config and immediately before the attach it
-	// exists for. Here it ran ahead of the #4960 validate-before-mutate
-	// pre-pass, so a config the pre-pass REJECTED still lost the host's pins for
-	// an apply that never happened. Its own comment named
-	// "BEFORE CompileUserspaceShim()" as the requirement, but the real
-	// constraint is "before AttachXDP", and that is satisfied at the new site.
+	// #7079: XDP link-pin removal belongs inside CompileUserspaceShim, after
+	// CompileConfig's pure validation and immediately before attach. The former
+	// pre-call location deleted pins even for configs rejected by validation.
 	caps := deriveUserspaceCapabilities(cfg)
 	// Userspace mode always attaches the retained XDP shim. The shim
 	// redirects to XSK when ctrl=1; when ctrl=0 it only passes proven
@@ -270,34 +278,57 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// xdp_main_prog for unsupported capabilities or failed XSK liveness: the
 	// userspace runtime must not require the legacy main XDP pipeline.
 	m.bpfShim.SelectUserspaceXDPShimEntryProgram()
+
+	ucfg := deriveUserspaceConfig(cfg)
+	snapshotPreflightDone := false
+	preflightSnapshot := func(preflight *dataplane.CompileResult) error {
+		var natCounterIDs map[string]uint32
+		if preflight != nil {
+			natCounterIDs = preflight.NATCounterIDs
+		}
+		// #2514: build and discard a config-shaped snapshot before CompileConfig's
+		// Phase 2 host mutation, so address-book content-ID collisions fail
+		// without changing the host. This is only a validation pass: Phase 2 may
+		// create a VLAN whose live ifindex is needed by interface and tunnel rows.
+		if _, err := buildSnapshotWithSchedulerStateAndNATCounters(
+			cfg, ucfg, 0, 0, m.policySchedulerDesiredStateSnapshot(),
+			m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), natCounterIDs,
+		); err != nil {
+			return fmt.Errorf("userspace: build config snapshot: %w", err)
+		}
+		snapshotPreflightDone = true
+		return nil
+	}
+
 	var result *dataplane.CompileResult
 	var err error
 	if m.compileUserspaceShimHook != nil {
-		result, err = m.compileUserspaceShimHook(cfg)
+		result, err = m.compileUserspaceShimHook(cfg, preflightSnapshot)
 	} else {
-		result, err = m.bpfShim.CompileUserspaceShim(cfg)
+		result, err = m.bpfShim.CompileUserspaceShim(cfg, preflightSnapshot)
 	}
 	if err != nil {
 		return nil, err
 	}
-	ucfg := deriveUserspaceConfig(cfg)
+	if !snapshotPreflightDone {
+		return nil, fmt.Errorf("userspace: compiler did not run config snapshot preflight")
+	}
+
 	activeState := m.policySchedulerDesiredStateSnapshot()
-	// #1827: include the cached ip-monitoring route overlay so a full
-	// apply (operator commit) while a policy is FAILED preserves the
-	// injected route instead of reverting traffic to the dead uplink.
-	// #2514: a config-shaped input (e.g. address-book content-ID
-	// collision) must reject the apply with an error rather than panic
-	// the daemon. buildSnapshot* returns the error up here; ApplyConfig
-	// fails closed and the previously published snapshot / dataplane state
-	// is retained (m.lastSnapshot is not advanced on the error path).
 	// Capture the authority callback without invoking it under m.mu. The daemon
-	// owns the S4 snapshot and may need its own locks while producing the wire
-	// epochs and P-MECH rows; the manager lock only protects callback replacement.
+	// owns the S4 snapshot and may need its own locks while producing wire epochs
+	// and P-MECH rows; the manager lock only protects callback replacement.
 	m.mu.Lock()
 	epochProvider := m.captureEpochProvider
 	m.mu.Unlock()
 	partialEpoch := m.partialUpdateEpoch.Load()
-	snap, err := buildSnapshotWithSchedulerStateAndNATCounters(cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration(), activeState, m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), result.NATCounterIDs)
+	// Rebuild from post-compile host state and the actual CompileResult. A new
+	// VLAN may have been absent during preflight, and its tunnel endpoint must
+	// not be lost just because the validation snapshot lacked a live ifindex.
+	snap, err := buildSnapshotWithSchedulerStateAndNATCounters(
+		cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration(), activeState,
+		m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), result.NATCounterIDs,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("userspace: build config snapshot: %w", err)
 	}
@@ -651,9 +682,6 @@ func (m *Manager) applyCompiledSnapshot(
 	// attachment for an interface the applied snapshot no longer adjudicates.
 	detachErr := m.syncInterfaceAttachments(result, snap)
 	m.noteDetachDebtLocked(result, detachErr)
-	if detachErr != nil {
-		m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
-	}
 	// #1197 v4: apply_snapshot succeeded — userspace-dp has the
 	// new neighbors. NOW rebuild listener caches; before this
 	// point the index would shadow events for entries the
@@ -671,8 +699,18 @@ func (m *Manager) applyCompiledSnapshot(
 	}
 	// #9684: the helper now holds exactly the sections re-sampled above.
 	m.resolvePartialOutcomesLocked(resampled)
+	// The helper accepted this generation; retain the accepted authority and
+	// start its retry consumer before any fallible post-publish reconciliation.
+	m.cfg = ucfg
+	m.publishHAWatchdogSnapshotLocked()
+	m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
+	m.ensureStatusLoopLocked()
 	if err := m.applyHelperStatusLocked(&status); err != nil {
-		return result, fmt.Errorf("sync helper status: %w", err)
+		return result, &publishedSnapshotTailError{
+			generation: snap.Generation,
+			stage:      "helper status sync",
+			err:        fmt.Errorf("sync helper status: %w", err),
+		}
 	}
 	// #1928: HA group state must only be replayed/published for chassis-cluster
 	// members. The rg_active map is a fixed-size ARRAY (16 entries, keys 0-15)
@@ -687,10 +725,18 @@ func (m *Manager) applyCompiledSnapshot(
 	// process.go); the startup path must match.
 	if m.clusterHA {
 		if err := m.refreshHAStateFromMapsLocked(); err != nil {
-			return result, fmt.Errorf("replay userspace HA state from maps: %w", err)
+			return result, &publishedSnapshotTailError{
+				generation: snap.Generation,
+				stage:      "HA map refresh",
+				err:        fmt.Errorf("replay userspace HA state from maps: %w", err),
+			}
 		}
 		if err := m.syncHAStateLocked(); err != nil {
-			return result, fmt.Errorf("publish userspace HA state: %w", err)
+			return result, &publishedSnapshotTailError{
+				generation: snap.Generation,
+				stage:      "HA state publish",
+				err:        fmt.Errorf("publish userspace HA state: %w", err),
+			}
 		}
 	} else if err := m.clearHelperHAStateWithDebtEnsureRetryLocked(); err != nil {
 		// Non-cluster node: ensure neither the manager nor the helper retains
@@ -698,25 +744,22 @@ func (m *Manager) applyCompiledSnapshot(
 		// above; this also clears any groups a prior clustered apply pushed to
 		// the helper (cluster->standalone live reconfig), which would otherwise
 		// keep the HAInactive transit-drop gate armed (Codex review #1928 Q3).
-		// On failure a retry debt is recorded (#5487) so the status poll
-		// re-attempts the idempotent clear until the helper reports no groups;
-		// the error is still surfaced so this apply fails closed.
-		// #5873: the recorded debt's ONLY retry consumer is the periodic status
-		// loop, which the success path starts below via ensureStatusLoopLocked().
-		// On first startup (or any apply with no pre-existing loop) returning
-		// here BEFORE that call would orphan the debt — no worker would ever
-		// retry the clear, so the stale helper HA groups (and the owner-RG-0
-		// transit-drop gate) would persist indefinitely. The WithDebtEnsureRetry
-		// wrapper starts the loop (idempotent) before this failure propagates.
-		return result, fmt.Errorf("clear userspace HA state: %w", err)
+		// On failure a retry debt is recorded (#5487); the status loop was
+		// started immediately after this snapshot was accepted, so it can
+		// reconcile the helper's HA state.
+		return result, &publishedSnapshotTailError{
+			generation: snap.Generation,
+			stage:      "standalone HA clear",
+			err:        fmt.Errorf("clear userspace HA state: %w", err),
+		}
 	}
 	if err := m.syncDesiredForwardingStateLocked(); err != nil {
-		return result, fmt.Errorf("sync userspace forwarding state: %w", err)
+		return result, &publishedSnapshotTailError{
+			generation: snap.Generation,
+			stage:      "desired forwarding sync",
+			err:        fmt.Errorf("sync userspace forwarding state: %w", err),
+		}
 	}
-	m.ensureStatusLoopLocked()
-	m.cfg = ucfg
-	m.publishHAWatchdogSnapshotLocked()
-	m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
 	return result, nil
 }
 

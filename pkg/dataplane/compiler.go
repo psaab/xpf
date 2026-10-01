@@ -446,7 +446,12 @@ func assignScreenIDs(result *CompileResult, cfg *config.Config) {
 // CompileConfig translates a typed Config into dataplane table entries.
 // It works with any DataPlane backend (eBPF or DPDK) via the interface.
 // The isRecompile flag triggers FIB generation bump for hitless restarts.
-func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool) (*CompileResult, error) {
+// Optional beforeMutation callbacks run after the host-pure validation pass
+// with its result and before Phase 2 touches the host.
+func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool, beforeMutation ...func(*CompileResult) error) (*CompileResult, error) {
+	if len(beforeMutation) > 1 {
+		return nil, fmt.Errorf("CompileConfig accepts at most one pre-mutation callback")
+	}
 	if cfg == nil {
 		return nil, fmt.Errorf("nil config")
 	}
@@ -472,8 +477,15 @@ func CompileConfig(dp DataPlane, cfg *config.Config, isRecompile bool) (*Compile
 	// nothing after it has an undo path, so a config that trips a later phase must be rejected here rather
 	// than half-applied. See compiler_validate_4960.go for what is and is not
 	// covered, and why this is additive rather than a reordering.
-	if err := validateBeforeMutate(cfg); err != nil {
+	preflightResult := newValidationResult()
+	if err := validateBeforeMutateWithResult(discardingDataPlane{}, cfg, preflightResult); err != nil {
 		return nil, err
+	}
+	finalizeNATCounterIDs(preflightResult)
+	if len(beforeMutation) == 1 && beforeMutation[0] != nil {
+		if err := beforeMutation[0](preflightResult); err != nil {
+			return nil, fmt.Errorf("pre-mutation check: %w", err)
+		}
 	}
 
 	// Phase 2: Compile zones — FIRST HOST MUTATION. Everything above this line

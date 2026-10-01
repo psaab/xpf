@@ -55,14 +55,18 @@ func TestApplyConfigPreservesPartialResultOnLateFailure10759(t *testing.T) {
 	}
 	// The shim leg succeeds and builds this generation's models — the day-0
 	// static-mgmt interface whose .network file must still be written.
-	m.compileUserspaceShimHook = func(*config.Config) (*dataplane.CompileResult, error) {
-		return &dataplane.CompileResult{
+	m.compileUserspaceShimHook = func(_ *config.Config, preflight func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error) {
+		result := &dataplane.CompileResult{
 			ManagedInterfaces: []networkd.InterfaceConfig{{
 				Name:      "fxp0",
 				Addresses: []string{"192.0.2.2/24"},
 			}},
 			ZoneIDs: map[string]uint16{"trust": 3},
-		}, nil
+		}
+		if err := preflight(result); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 	injected := errors.New("apply_snapshot: connection reset")
 	publishes := 0

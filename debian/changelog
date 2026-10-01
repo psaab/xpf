@@ -145,4 +145,7 @@ xpf (0.0.0) unstable; urgency=medium
     segmentation, and PMTU signaling (#11411).
   * Refresh learned-route FIBs from coalesced kernel route events, and retry
     unresolved FIB-generation bumps without publishing once per event (#11565).
+  * Preflight userspace snapshots before host-mutating compiler phases, then
+    retain and report accepted snapshot generations when post-publish
+    reconciliation fails (#11080).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000
