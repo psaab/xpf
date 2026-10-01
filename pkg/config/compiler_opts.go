@@ -1929,6 +1929,10 @@ type compileOpts struct {
 	// and a leniently-loaded bad neighbor is inert. Same doctrine as
 	// lenientRoutingExportRef.
 	lenientBGPNeighborPeerAS bool
+	// lenientBGPRouterAS (#11313) downgrades missing process-AS validation
+	// from a commit error to a warning on tolerant load / peer-sync. The FRR
+	// renderer omits the entire router BGP stanza when LocalAS is zero.
+	lenientBGPRouterAS bool
 
 	// lenientBGPDuplicateNeighbor (#9007) downgrades the duplicate BGP
 	// neighbor gate (validateBGPDuplicateNeighborStrict) from a hard compile
@@ -3115,6 +3119,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRPMHTTPGetScheme:                true,
 		lenientRPMRoutingInstance:              true,
 		lenientBGPNeighborPeerAS:               true,
+		lenientBGPRouterAS:                     true,
 		lenientBGPDuplicateNeighbor:            true,
 		lenientBGPNeighborAddress:              true,
 		lenientRouterID:                        true,
