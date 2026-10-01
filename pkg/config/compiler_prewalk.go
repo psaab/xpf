@@ -509,6 +509,16 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// #11342: `then count { alarm ... }` thresholds are not implemented by
+	// compilePolicy; counting remains active but the configured alarm is
+	// silently dropped. Reject on strict commit/commit-check and warn on
+	// tolerant load/peer-sync, where the legacy behavior remains unchanged.
+	policyThenCountAlarmWarnings, err := validatePolicyThenCountAlarmStrict(
+		tree.Children, opts.lenientPolicyThenCountAlarm)
+	if err != nil {
+		return nil, err
+	}
+
 	// #11013: security policies do not implement the firewall filter's
 	// `then next term` semantics. An unrecognized then sibling is dropped.
 	// #11023: unknown `then log` modes are also dropped because the compiler
@@ -767,6 +777,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, policyThenPermitWarnings...)
 	warnings = append(warnings, policyThenRejectWarnings...)
 	warnings = append(warnings, policyThenDenyWarnings...)
+	warnings = append(warnings, policyThenCountAlarmWarnings...)
 	warnings = append(warnings, policyThenSiblingWarnings...)
 	warnings = append(warnings, policyEnforcementWarnings...)
 	warnings = append(warnings, policyMissingMatchWarnings...)

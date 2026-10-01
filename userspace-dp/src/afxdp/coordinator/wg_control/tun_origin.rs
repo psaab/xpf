@@ -248,6 +248,8 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
             neighbor_mac: outer.neighbor_mac,
             src_mac: outer.src_mac,
             tx_vlan_id: outer.tx_vlan_id,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
     );
     // #9752 fields are inert here (0,0): Part C declines TUN-origin before
@@ -743,6 +745,8 @@ mod tests {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         };
         assert!(wg_tun_origin_outer_usable(&forwarding, &base));
         let mut missing = base;

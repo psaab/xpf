@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // maxNextTableRules and maxRibGroupLeakRules mirror the FIXED ip-rule priority
 // windows the runtime applier (pkg/routing/rules.go) programs next-table and
@@ -67,16 +70,77 @@ func nextTableRouteCount(cfg *Config) int {
 	return n
 }
 
-// ribGroupLeakPrefixCount counts the connected prefixes an interface-routes
-// rib-group would leak as ip rules (#3876 per-prefix leak), one rule per
-// prefix. It is a CONSERVATIVE upper bound computed from the same inputs the
-// applier consumes (RibGroupConnectedPrefixes) — it does not replicate the
-// applier's exact skip/dedup logic, so it may count slightly high but never
-// misses a real over-subscription.
+// ribGroupImportsMain mirrors pkg/routing.ribGroupLeaksIntoMain and
+// resolveRibTable: only an import that resolves to the selected main RIB
+// family installs a Phase-1 leak. mainRIBName is "inet.0" for the IPv4 slot
+// or "inet6.0" for the IPv6 slot. This resolver is duplicated to avoid an
+// import cycle, so keep its table-ID and exact-suffix matching in sync. A
+// sibling-family main RIB must not enable this slot; named-instance ribs still
+// resolve to their shared Linux table ID as in the applier.
+func ribGroupImportsMain(groupName string, groups map[string]*RibGroup, tableIDs map[string]int, mainRIBName string) bool {
+	if groupName == "" {
+		return false
+	}
+	group, ok := groups[groupName]
+	if !ok || group == nil {
+		return false
+	}
+	for _, ribName := range group.ImportRibs {
+		if ribName == mainRIBName {
+			return true
+		}
+		instance, ok := ribInstanceFromName(ribName)
+		if !ok {
+			continue
+		}
+		if tableID, ok := tableIDs[instance]; ok && tableID == mainRIBTableID {
+			return true
+		}
+	}
+	return false
+}
+
+// ribGroupLeakPrefixCount mirrors the forward leak set in
+// ribGroupManager.Apply. Counts are family-scoped to the corresponding
+// per-instance import-rib and once per source table (the runtime's
+// leakedTables guard). Repeated prefixes count repeatedly because the runtime
+// installs each one as a separate rule.
 func ribGroupLeakPrefixCount(cfg *Config) int {
+	if cfg == nil {
+		return 0
+	}
+	ribGroups := cfg.RoutingOptions.RibGroups
+	tableIDs := make(map[string]int, len(cfg.RoutingInstances))
+	for _, instance := range cfg.RoutingInstances {
+		if instance != nil {
+			tableIDs[instance.Name] = instance.TableID
+		}
+	}
+	connected := RibGroupConnectedPrefixes(cfg)
+	leakedTables := make(map[int]bool)
 	n := 0
-	for _, prefixes := range RibGroupConnectedPrefixes(cfg) {
-		n += len(prefixes)
+	for _, instance := range cfg.RoutingInstances {
+		if instance == nil {
+			continue
+		}
+		leakV4 := ribGroupImportsMain(instance.InterfaceRoutesRibGroup, ribGroups, tableIDs, "inet.0")
+		leakV6 := ribGroupImportsMain(instance.InterfaceRoutesRibGroupV6, ribGroups, tableIDs, "inet6.0")
+		if !leakV4 && !leakV6 {
+			continue
+		}
+		if leakedTables[instance.TableID] {
+			continue
+		}
+		leakedTables[instance.TableID] = true
+		for _, prefix := range connected[instance.Name] {
+			if strings.Contains(prefix, ":") {
+				if leakV6 {
+					n++
+				}
+			} else if leakV4 {
+				n++
+			}
+		}
 	}
 	return n
 }

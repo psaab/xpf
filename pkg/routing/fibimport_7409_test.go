@@ -90,6 +90,9 @@ func TestImportAdoptsBGPLearnedRoute(t *testing.T) {
 	if !reflect.DeepEqual(got[0].NextHops, []string{"192.0.2.1"}) {
 		t.Errorf("next-hops = %v, want [192.0.2.1]", got[0].NextHops)
 	}
+	if !reflect.DeepEqual(got[0].NextHopWeights, []uint32{1}) {
+		t.Errorf("next-hop weights = %v, want [1] for a single path", got[0].NextHopWeights)
+	}
 	if got[0].Protocol != "bgp" {
 		t.Errorf("protocol = %q, want bgp", got[0].Protocol)
 	}
@@ -112,6 +115,28 @@ func TestImportCarriesKernelMetrics11388(t *testing.T) {
 	}
 	if len(metrics) != 2 || metrics["192.0.2.2"] != 100 || metrics["192.0.2.10"] != 200 {
 		t.Fatalf("imported route metrics = %v, want .2:100 and .10:200", metrics)
+	}
+}
+
+func TestImportCarriesKernelRouteMTU11411(t *testing.T) {
+	withMTU := unicast(mustCIDR(t, "198.51.100.0/24"), "192.0.2.2", unix.RTPROT_DHCP)
+	withMTU.MTU = 1400
+	withoutMTU := unicast(mustCIDR(t, "203.0.113.0/24"), "192.0.2.3", unix.RTPROT_DHCP)
+	withRouteLister(t, staticLister(v4Main(withMTU, withoutMTU)))
+
+	got, err := ImportLearnedRoutes([]int{mainTableID})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	mtus := make(map[string]int, len(got))
+	for _, route := range got {
+		mtus[route.Destination] = route.MTU
+	}
+	if mtus["198.51.100.0/24"] != 1400 {
+		t.Errorf("route MTU = %d, want 1400", mtus["198.51.100.0/24"])
+	}
+	if mtus["203.0.113.0/24"] != 0 {
+		t.Errorf("route without RTAX_MTU = %d, want unknown (0)", mtus["203.0.113.0/24"])
 	}
 }
 
@@ -296,8 +321,8 @@ func TestImportAdoptsEveryECMPLeg(t *testing.T) {
 			Type:     unix.RTN_UNICAST,
 			Protocol: netlink.RouteProtocol(unix.RTPROT_OSPF),
 			MultiPath: []*netlink.NexthopInfo{
-				{Gw: net.ParseIP("192.0.2.1")},
-				{Gw: net.ParseIP("192.0.2.2")},
+				{Gw: net.ParseIP("192.0.2.1"), Hops: 0},
+				{Gw: net.ParseIP("192.0.2.2"), Hops: 3},
 			},
 		},
 	)))
@@ -312,6 +337,9 @@ func TestImportAdoptsEveryECMPLeg(t *testing.T) {
 	want := []string{"192.0.2.1", "192.0.2.2"}
 	if !reflect.DeepEqual(got[0].NextHops, want) {
 		t.Errorf("next-hops = %v, want %v", got[0].NextHops, want)
+	}
+	if !reflect.DeepEqual(got[0].NextHopWeights, []uint32{1, 4}) {
+		t.Errorf("next-hop weights = %v, want [1 4] in kernel leg order", got[0].NextHopWeights)
 	}
 }
 

@@ -77,11 +77,11 @@ use flowless_verdict::{
 };
 use frag_assoc::{
     flowbacked_no_route_requires_nat_translation, flowless_nat_rule_possible,
-    flowless_no_route_requires_nat_translation, flowless_requires_nat_translation,
+    flowless_nat_wire_info, flowless_no_route_requires_nat_translation,
+    flowless_requires_nat_translation, flowless_source_nat_requires_translation,
     frag_ingress_authority_with_nat_scope, nat_consult_forward_fragment_assoc,
     nat_install_forward_fragment_assoc, nat64_consult_forward_fragment_assoc,
-    nat64_install_forward_fragment_assoc,
-    session_gated_reverse_fragment_requires_nat_translation,
+    nat64_install_forward_fragment_assoc, session_gated_reverse_fragment_requires_nat_translation,
 };
 use host_inbound_policy::{
     JunosHostLocalPolicy, emit_host_inbound_deny, host_bound_policy_dst, junos_host_local_policy,
@@ -663,20 +663,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 } = stage_classify_fabric_ingress(packet_frame, &mut meta, now_secs, worker_ctx);
                 // Preserve only identities admitted by stage 9; local arrivals
                 // use their configured logical interface when creating a punt.
-                let fabric_nat_scope_ifindex_for_redirect = ingress_nat_scope_ifindex.or_else(|| {
-                    if packet_fabric_ingress {
-                        None
-                    } else {
-                        Some(
-                            resolve_ingress_logical_ifindex(
-                                worker_ctx.forwarding,
-                                meta.ingress_ifindex as i32,
-                                meta.ingress_vlan_id,
+                let fabric_nat_scope_ifindex_for_redirect =
+                    ingress_nat_scope_ifindex.or_else(|| {
+                        if packet_fabric_ingress {
+                            None
+                        } else {
+                            Some(
+                                resolve_ingress_logical_ifindex(
+                                    worker_ctx.forwarding,
+                                    meta.ingress_ifindex as i32,
+                                    meta.ingress_vlan_id,
+                                )
+                                .unwrap_or(meta.ingress_ifindex as i32),
                             )
-                            .unwrap_or(meta.ingress_ifindex as i32),
-                        )
-                    }
-                });
+                        }
+                    });
                 // #11061: an invalid zone stamp is not the legacy "unstamped"
                 // case. Drop it before neighbor/session/cache lookup so stale
                 // or forged identity cannot collapse to routing domain 0 / MAIN.
@@ -723,6 +724,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     !is_injected
                         && owned_packet_frame.is_none()
                         && !absent_fabric_ingress_suspect,
+                    now_ns,
                     &mut binding.last_learned_neighbor,
                     worker_ctx,
                 );
@@ -849,7 +851,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             continue;
                         }
                         StageOutcome::Continue(ScreenCheckOutcome::Pass) => {}
-                        StageOutcome::Continue(ScreenCheckOutcome::SynCookieChallenge(challenge)) => {
+                        StageOutcome::Continue(ScreenCheckOutcome::SynCookieChallenge(
+                            challenge,
+                        )) => {
                             enqueue_syn_cookie_reply(
                                 &mut binding.tx_pipeline,
                                 worker_ctx.forwarding,
@@ -3363,8 +3367,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         );
                         // NAT scope identity is only authoritative when its
                         // zone survived the same owner-RG gate used for policy.
-                        let ingress_nat_scope_ifindex = ingress_nat_scope_ifindex
-                            .filter(|_| ingress_zone_override.is_some());
+                        let ingress_nat_scope_ifindex =
+                            ingress_nat_scope_ifindex.filter(|_| ingress_zone_override.is_some());
                         let (from_zone_id, to_zone_id) = zone_pair_ids_for_flow_with_override(
                             worker_ctx.forwarding,
                             ingress_logical,
@@ -5459,13 +5463,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // (always in scope) rather than going through the debug
                             // struct which may not have been populated.
                             // #919/#922: ID-keyed redirect — no name lookup.
-                            if let Some(redirect) =
-                                resolve_fabric_redirect_for_ingress_identity(
-                                    worker_ctx.forwarding,
-                                    Some(from_zone_id),
-                                    fabric_nat_scope_ifindex_for_redirect,
-                                )
-                            {
+                            if let Some(redirect) = resolve_fabric_redirect_for_ingress_identity(
+                                worker_ctx.forwarding,
+                                Some(from_zone_id),
+                                fabric_nat_scope_ifindex_for_redirect,
+                            ) {
                                 decision.resolution = redirect;
                             }
                         } else if should_seed_fabric_punt(
@@ -6205,33 +6207,71 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     //     term must reach LocalDelivery, NOT be steered into an
                     //     override table that has no local route (→ NoRoute →
                     //     drop). The override governs only the transit fallback.
-                    let base_resolution = match l3_ctx.as_ref() {
-                        Some(l3_flow) => flowless_base_resolution(
-                            worker_ctx.forwarding,
-                            worker_ctx.dynamic_neighbors,
-                            worker_ctx.ha_state,
-                            now_secs,
-                            meta.ingress_ifindex as i32,
-                            meta.ingress_vlan_id,
-                            meta.protocol,
-                            l3_flow.dst_ip,
-                            route_table_override.as_deref(),
-                        ),
-                        None => enforce_ha_resolution_snapshot(
-                            worker_ctx.forwarding,
-                            worker_ctx.ha_state,
-                            now_secs,
-                            resolve_forwarding(
-                                // SAFETY: per the `area` contract in this
-                                // function's header comment.
-                                unsafe { &*area },
-                                desc,
-                                meta,
+                    let (base_resolution, flowless_nat) = match l3_ctx.as_ref() {
+                        Some(l3_flow) => {
+                            let nat_wire_info = if !worker_ctx.forwarding.static_nat.is_empty()
+                                || !worker_ctx.forwarding.dnat_table.is_empty()
+                                || !worker_ctx.forwarding.nptv6.is_empty()
+                            {
+                                flowless_nat_wire_info(packet_frame, meta)
+                            } else {
+                                Default::default()
+                            };
+                            let Some(base) = flowless_base_resolution(
                                 worker_ctx.forwarding,
                                 worker_ctx.dynamic_neighbors,
+                                worker_ctx.ha_state,
+                                now_secs,
+                                l3_flow,
+                                meta,
+                                nat_wire_info,
+                                ingress_zone_override,
+                                ingress_nat_scope_ifindex,
+                                route_table_override.as_deref(),
+                            ) else {
+                                if crate::afxdp::frame::frame_is_non_first_fragment(
+                                    packet_frame,
+                                    meta,
+                                ) {
+                                    telemetry.counters.record_nat_frag_untranslated_dropped();
+                                } else {
+                                    telemetry
+                                        .counters
+                                        .record_nat_flowless_untranslated_dropped();
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            };
+                            pre_routing_dnat_counter = base.dnat_counter;
+                            (base.resolution, base.nat)
+                        }
+                        None => (
+                            enforce_ha_resolution_snapshot(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                now_secs,
+                                resolve_forwarding(
+                                    // SAFETY: per the `area` contract in this
+                                    // function's header comment.
+                                    unsafe { &*area },
+                                    desc,
+                                    meta,
+                                    worker_ctx.forwarding,
+                                    worker_ctx.dynamic_neighbors,
+                                ),
                             ),
+                            NatDecision::default(),
                         ),
                     };
+                    let post_nat_l3_flow = flowless_nat.rewrite_dst.and_then(|dst| {
+                        l3_ctx.as_ref().map(|flow| {
+                            let mut translated = flow.clone();
+                            translated.dst_ip = dst;
+                            translated.forward_key.dst_ip = dst;
+                            translated
+                        })
+                    });
+                    let policy_l3_ctx = post_nat_l3_flow.as_ref().or(l3_ctx.as_ref());
                     let final_resolution = if base_resolution.disposition
                         == ForwardingDisposition::HAInactive
                         && !fabric_link_ingress
@@ -6336,7 +6376,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     //     for observability — same record the flow-backed deny
                     //     emits, with ports = 0.
                     if final_resolution.disposition == ForwardingDisposition::ForwardCandidate
-                        && let Some(l3_flow) = l3_ctx.as_ref()
+                        && let Some(l3_flow) = policy_l3_ctx.as_ref()
                     {
                         let ingress_logical = resolve_ingress_logical_ifindex(
                             worker_ctx.forwarding,
@@ -6378,7 +6418,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             emit_policy_deny_event(
                                 worker_ctx.event_stream,
                                 l3_flow,
-                                &NatDecision::default(),
+                                &flowless_nat,
                                 meta,
                                 from_zone_id,
                                 to_zone_id,
@@ -6403,22 +6443,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // owns protocol/extension/fragment drop attribution.
                         // Do not let a matching same-family source-NAT rule
                         // steal that verdict.
-                        let is_pref64_destination = matches!(
-                            crate::afxdp::frame::parse_packet_destination_from_frame(
-                                packet_frame,
-                                meta,
-                            ),
-                            Some(IpAddr::V6(dst_v6))
-                                if worker_ctx.forwarding.nat64.match_ipv6_dest(dst_v6).is_some()
-                        );
+                        let is_pref64_destination = flowless_nat.rewrite_dst.is_none()
+                            && matches!(
+                                crate::afxdp::frame::parse_packet_destination_from_frame(
+                                    packet_frame,
+                                    meta,
+                                ),
+                                Some(IpAddr::V6(dst_v6))
+                                    if worker_ctx.forwarding.nat64.match_ipv6_dest(dst_v6).is_some()
+                            );
                         let is_non_first =
                             crate::afxdp::frame::frame_is_non_first_fragment(packet_frame, meta);
-                        // #6122/#10679: a flowless packet with a matching
-                        // same-family NAT rule must not leave with the default
-                        // no-NAT decision. Pref64 is handled by the NAT64 gate
-                        // below and keeps that counter attribution.
-                        if !is_pref64_destination
-                            && flowless_requires_nat_translation(
+                        // #6122/#10679: an untranslated flowless NAT match must
+                        // not leave with the default no-NAT decision. Once a
+                        // safe address-only destination rewrite is applied,
+                        // route/policy use that tuple and only source NAT remains
+                        // to be fenced here.
+                        let requires_nat_translation = if flowless_nat.rewrite_dst.is_some() {
+                            flowless_source_nat_requires_translation(
+                                worker_ctx.forwarding,
+                                l3_flow,
+                                meta,
+                                ingress_nat_scope_ifindex,
+                                from_zone_id,
+                                to_zone_id,
+                                final_resolution.egress_ifindex,
+                                now_ns,
+                            )
+                        } else {
+                            flowless_requires_nat_translation(
                                 worker_ctx.forwarding,
                                 l3_flow,
                                 meta,
@@ -6429,7 +6482,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 final_resolution.egress_ifindex,
                                 now_ns,
                             )
-                        {
+                        };
+                        if !is_pref64_destination && requires_nat_translation {
                             if is_non_first {
                                 // #6122: a real fragment miss keeps its own
                                 // fragmentation-specific attribution.
@@ -6512,7 +6566,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     // and applies only to ForwardCandidate; NoRoute,
                     // MissingNeighbor, HAInactive and LocalDelivery follow their
                     // own disposition handling.
-                    if final_resolution.disposition == ForwardingDisposition::ForwardCandidate
+                    if flowless_nat.rewrite_dst.is_none()
+                        && final_resolution.disposition == ForwardingDisposition::ForwardCandidate
                         && let Some(IpAddr::V6(dst_v6)) =
                             crate::afxdp::frame::parse_packet_destination_from_frame(
                                 packet_frame,
@@ -6575,7 +6630,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     //     `any` still admit — fail-closed without over-gating. A
                     //     flowless deny is SILENT (no L4 header to reject).
                     if final_resolution.disposition == ForwardingDisposition::LocalDelivery
-                        && let Some(l3_flow) = l3_ctx.as_ref()
+                        && let Some(l3_flow) = policy_l3_ctx.as_ref()
                     {
                         let ingress_logical = resolve_ingress_logical_ifindex(
                             worker_ctx.forwarding,
@@ -6646,7 +6701,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     if is_non_first
                         && let Some(l3_flow) = l3_ctx.as_ref()
                         && session_gated_reverse_fragment_requires_nat_translation(
-                            worker_ctx.forwarding, sessions, l3_flow, meta, now_ns,
+                            worker_ctx.forwarding,
+                            sessions,
+                            l3_flow,
+                            meta,
+                            now_ns,
                         )
                     {
                         telemetry.counters.record_nat_frag_untranslated_dropped();
@@ -6671,7 +6730,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         );
                     SessionDecision {
                         resolution: final_resolution,
-                        nat: NatDecision::default(),
+                        nat: flowless_nat,
                         install_table_domain,
                         install_table_check,
                     }
@@ -7198,6 +7257,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // `None` for every non-NAT64 flow.
                         session_nat64_reverse,
                     ) {
+                        if flow.is_none()
+                            && decision.resolution.disposition
+                                == ForwardingDisposition::ForwardCandidate
+                            && let Some(counter) = pre_routing_dnat_counter.as_ref()
+                        {
+                            counter.add(desc.len as u64);
+                        }
                         // #11053: only an admitted control segment may teach
                         // a PPTP call association. A control close removes all
                         // calls learned through this channel on every worker.
@@ -7248,6 +7314,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta,
                                 flow.src_ip,
                                 src_mac,
+                                now_ns,
                                 &mut binding.last_learned_neighbor,
                                 worker_ctx.forwarding,
                                 worker_ctx.dynamic_neighbors,
@@ -8108,7 +8175,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         }
                                         let nat_translation_required = if is_non_first {
                                             session_gated_reverse_fragment_requires_nat_translation(
-                                                worker_ctx.forwarding, &*sessions, &l3_flow, meta, now_ns,
+                                                worker_ctx.forwarding,
+                                                &*sessions,
+                                                &l3_flow,
+                                                meta,
+                                                now_ns,
                                             ) || flowless_nat_rule_possible(
                                                 worker_ctx.forwarding,
                                                 &l3_flow,
@@ -8504,10 +8575,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // #5176: gate on the EGRESS zone (`to_zone`) so
                                         // a rule-set scoped `from zone X` never rewrites
                                         // the source of traffic leaving via another zone.
-                                        let nptv6_snat = if let IpAddr::V6(mut src_v6) =
-                                            nat_match_flow.src_ip
-                                        {
-                                            match worker_ctx
+                                        let nptv6_snat =
+                                            if let IpAddr::V6(mut src_v6) = nat_match_flow.src_ip {
+                                                match worker_ctx
                                                 .forwarding
                                                 .nptv6
                                                 .translate_outbound_result(&mut src_v6, to_zone)
@@ -8538,9 +8608,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                             StageOutcome::RecycleAndContinue;
                                                 }
                                             }
-                                        } else {
-                                            None
-                                        };
+                                            } else {
+                                                None
+                                            };
                                         if let Some(nptv6_decision) = nptv6_snat {
                                             // NPTv6 is the source translation and takes
                                             // precedence over static/interface SNAT; merge

@@ -361,7 +361,13 @@ const (
 	// application terms carry ICMP type/code. A v35 helper would ignore both
 	// the security setting (silently using MAIN) and the nested fields
 	// (widening the typed match); exact equality fences the mixed version.
-	ProtocolVersion = 36
+	// v36 -> v37 (#11402): learned route snapshots carry Linux multipath member
+	// weights end-to-end. A v36 helper ignores those weights and flattens an
+	// unequal group to uniform ECMP; exact equality fences the mixed contract.
+	// v37 -> v38 (#11411): learned route snapshots carry kernel RTAX_MTU.
+	// A v37 helper ignores it and forwards oversized DF packets; exact equality
+	// rejects the mixed version rather than recreating the route-MTU blackhole.
+	ProtocolVersion = 38
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

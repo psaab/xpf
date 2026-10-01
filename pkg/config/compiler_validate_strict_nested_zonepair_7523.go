@@ -2,52 +2,31 @@ package config
 
 import "fmt"
 
-// compiler_validate_strict_nested_zonepair_7523.go — #7523.
+// compiler_validate_strict_nested_zonepair_7523.go — #7523 and #11346.
 //
-// `security policies from-zone X { to-zone Y { ... } }` -- a NESTED pair of
-// containers -- was accepted at commit and then silently omitted from the
-// compiled policy set. Measured at e01427aef: the nested spelling compiles to
-// ZERO zone-pairs and ZERO policies, while the supported combined spelling of
-// the same intent compiles to one and one.
+// Two unsupported zone-pair brace spellings were accepted and silently
+// omitted: direct nesting, `from-zone X { to-zone Y { ... } }` (#7523), and
+// the mixed container/keyed spelling, `from-zone { X { to-zone Y { ... } } }`
+// (#11346). The mixed form can be interpreted as `from-zone X to-zone policy`
+// and compile an empty pair if a zone named `policy` exists; otherwise an
+// unrelated undefined-zone warning hides the malformed shape.
 //
-// THIS IS AN HONESTY GAP, NOT A PARITY GAP. Junos documents ONE combined
-// `from-zone X to-zone Y` hierarchy, so the nested shape is not something xpf
-// is missing -- it is a shape xpf accepts and does not implement. #4313 supplies
-// the closed-world doctrine; this is its concrete application to this domain.
+// Junos models one combined hierarchy, `from-zone X to-zone Y { ... }`.
+// xpf also supports the fully nested container spelling
+// `from-zone { X { to-zone { Y { ... } } } }`. That shape has a `from-zone`
+// node with one key and an unkeyed `to-zone` container, so neither key count
+// alone nor a recursive name-only search can distinguish it from #11346.
 //
-// The failure mode is the dangerous one for a security policy: the operator
-// wrote a permit-or-deny rule, the box said nothing, and the zone pair falls
-// through to the default policy. The contrast with the supported spelling makes
-// it worse -- an undefined zone in the COMBINED form already gets a precise
-// commit error (validatePolicyZoneReferencesStrict), so an operator has every
-// reason to read silence as acceptance.
+// The relevant tree shapes are:
 //
-// WHY THE DISCRIMINATOR IS "HAS A to-zone CHILD" AND NOT A Keys LENGTH. The
-// spellings were dumped rather than reasoned about, because the obvious
-// reasoning is wrong twice over:
+//	DIRECT-NESTED     Keys=[from-zone X]                children=[to-zone]
+//	COMBINED          Keys=[from-zone X to-zone Y]      children=[policy]
+//	FLAT-SET          Keys=[from-zone X to-zone Y]      children=[policy]
+//	MIXED-CONTAINER   Keys=[from-zone] -> [X] -> [to-zone Y]
+//	FULL-CONTAINER    Keys=[from-zone] -> [X] -> [to-zone] -> [Y]
 //
-//	NESTED       Keys=[from-zone trust]                  children=[to-zone]
-//	COMBINED     Keys=[from-zone trust to-zone untrust]  children=[policy]
-//	FLAT-SET     Keys=[from-zone trust to-zone untrust]  children=[policy]
-//	FZ-CONTAINER Keys=[from-zone]                        children=[trust]
-//
-// First, flat-set collapses to the SAME node shape as the combined block form,
-// so a `len(Keys)` gate cannot tell those two apart -- there is no distinction
-// there to key on.
-//
-// Second, and this is the one that matters: the fully-nested container spelling
-// `from-zone { X { to-zone { Y { ... } } } }` is SUPPORTED and compiles, and it
-// carries `len(Keys) == 1`. A gate written as "reject when len(Keys) < 4" would
-// therefore refuse a valid configuration. The mutation matrix found this: that
-// exact rewrite passed every test until a positive control for this fourth
-// shape was added, which is what TestFromZoneContainerSpellingStillCompiles7523
-// now pins.
-//
-// A `to-zone` CHILD appears in exactly one of the four.
-//
-// Reject-only: this changes nothing about what compiles, only about what is
-// refused. A bug here can produce a false rejection -- loud, and caught by the
-// positive controls -- never a silently wrong policy.
+// Reject-only on strict commit. The tolerant path retains its #1960
+// no-brick behavior and downgrades the same specific diagnostic to a warning.
 func validateNestedZonePairStrict(tree *ConfigTree) error {
 	if tree == nil {
 		return nil
@@ -63,6 +42,23 @@ func validateNestedZonePairStrict(tree *ConfigTree) error {
 			for _, fz := range policies.Children {
 				if fz.Name() != "from-zone" {
 					continue
+				}
+				if len(fz.Keys) == 1 {
+					for _, fromNode := range fz.Children {
+						from := fromNode.Name()
+						for i := 1; i+1 < len(fromNode.Keys); i++ {
+							if fromNode.Keys[i] == "to-zone" {
+								to := fromNode.Keys[i+1]
+								return mixedKeyedZonePairError11346(from, to)
+							}
+						}
+						for _, sub := range fromNode.Children {
+							if sub.Name() != "to-zone" || len(sub.Keys) < 2 {
+								continue
+							}
+							return mixedKeyedZonePairError11346(from, sub.Keys[1])
+						}
+					}
 				}
 				for _, sub := range fz.Children {
 					if sub.Name() != "to-zone" {
@@ -89,4 +85,14 @@ func validateNestedZonePairStrict(tree *ConfigTree) error {
 		}
 	}
 	return nil
+}
+
+func mixedKeyedZonePairError11346(from, to string) error {
+	return fmt.Errorf(
+		"security policies contain a MIXED zone-pair brace spelling: `to-zone %s { ... }` "+
+			"under `from-zone { %s { ... } }` is not implemented and can compile as "+
+			"`from-zone %s to-zone policy` with zero policies. Write the combined "+
+			"`from-zone %s to-zone %s` form or the fully nested `from-zone { %s { "+
+			"to-zone { %s { ... } } } }` container form (#11346)",
+		to, from, from, from, to, from, to)
 }

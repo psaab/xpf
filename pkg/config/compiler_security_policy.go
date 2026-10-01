@@ -93,23 +93,30 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 			if len(child.Keys) >= 4 {
 				// Hierarchical: Keys=["from-zone", "trust", "to-zone", "untrust"]
 				//
-				// #9246: a BRACKETED zone list lands here too, and silently.
-				// `to-zone [ untrust dmz ]` lexes to exactly this 4-key shape
-				// with the residue swallowing the whole rule onto one leaf:
+				// The #9246 ungrouped test helper builds the legacy 4-key
+				// residue shape:
 				//
 				//	[from-zone trust to-zone untrust]
 				//	  [dmz policy p1 then permit]
 				//
-				// so FindChildren("policy") below matches nothing and the pair
-				// compiles with ZERO policies -- the authored rule exists
-				// nowhere. `from-zone [ trust dmz ]` shifts the keys instead:
+				// That child is not named `policy`, so the authored rule is
+				// lost. Production grouped setters and hierarchical text
+				// instead preserve the list on the context node:
+				//
+				//	[from-zone trust to-zone untrust dmz]
+				//	  [policy p1 ...]
+				//
+				// This branch would compile only trust->untrust by reading
+				// Keys[1] and Keys[3]. malformedZonePairShape9246 rejects the
+				// extra key before it is discarded.
+				//
+				// `from-zone [ trust dmz ]` shifts the keys instead:
 				//
 				//	[from-zone trust dmz to-zone]
 				//	  [untrust policy p1 then permit]
 				//
 				// making Keys[3] the literal string "to-zone", which today is
-				// caught only by accident, as an undefined zone named
-				// "to-zone".
+				// caught only as an undefined zone named "to-zone".
 				//
 				// Junos accepts no bracketed list on from-zone/to-zone -- a
 				// policy context is ONE zone pair -- so this is refused rather
@@ -214,12 +221,11 @@ func conflictingPolicyTerminalActions(actions []PolicyAction) bool {
 }
 
 // policyThenActionNodes returns every `then` action node named `action`
-// (permit / deny / reject) across ALL `then {}` blocks under a policy term.
-// The then-action reject gates (validatePolicyThenPermitStrict #3114,
-// validatePolicyThenRejectStrict #3115, validatePolicyThenDenyStrict #3141)
-// use it so a modifier carried by a DUPLICATE `then {}` block is inspected,
-// not only the first block's action nodes (#3842). It composes with the
-// existing per-then-block FindChildren(action) two-node handling (#3377).
+// (permit / deny / reject / count) across ALL `then {}` blocks under a policy
+// term. The then-action gates use it so children carried by a DUPLICATE
+// `then {}` block are inspected, not only the first block's action nodes
+// (#3842). It composes with the existing per-then-block FindChildren(action)
+// two-node handling (#3377).
 func policyThenActionNodes(polNode *Node, action string) []*Node {
 	var out []*Node
 	for _, tn := range polNode.FindChildren("then") {

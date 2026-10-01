@@ -521,6 +521,15 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if loginShadowErr != nil {
 		return nil, loginShadowErr
 	}
+	// #11358: scheduler windows are checked across the node0 AND node1
+	// effective group expansions before this compiler chooses node0 fallback.
+	// Otherwise a peer-only repeated window can escape commit validation and
+	// arrive at the other node only through the lenient sync path.
+	schedulerWindowWarnings11358, schedulerWindowErr11358 := validateSchedulerWindowPairs11358(
+		tree, opts.lenientSchedulerWindowPairs11358)
+	if schedulerWindowErr11358 != nil {
+		return nil, schedulerWindowErr11358
+	}
 
 	usedNodeFallback := false
 
@@ -583,6 +592,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	cfg.Warnings = append(cfg.Warnings, qinqWarnings...)
 	cfg.Warnings = append(cfg.Warnings, vlanMapWarnings...)
 	cfg.Warnings = append(cfg.Warnings, loginPackedWarnings...)
+	cfg.Warnings = append(cfg.Warnings, schedulerWindowWarnings11358...)
 	appendClusterNTPAdvisoryLocked(cfg, opts)
 	appendContestedTrunkZoneAdvisoryLocked(cfg, opts)
 	appendGreUnitFilterShadowAdvisoryLocked(cfg, opts)
@@ -850,6 +860,14 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	if loginShadowErr != nil {
 		return nil, loginShadowErr
 	}
+	// #11358: evaluate both effective node views before this node-specific
+	// expansion, so a peer-only repeated scheduler window cannot bypass strict
+	// commit validation.
+	schedulerWindowWarnings11358, schedulerWindowErr11358 := validateSchedulerWindowPairs11358(
+		tree, opts.lenientSchedulerWindowPairs11358)
+	if schedulerWindowErr11358 != nil {
+		return nil, schedulerWindowErr11358
+	}
 
 	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
 	// TAGGED, as in compileConfigWithOpts (#9854 coalescing provenance).
@@ -896,6 +914,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	cfg.Warnings = append(cfg.Warnings, qinqWarnings...)
 	cfg.Warnings = append(cfg.Warnings, vlanMapWarnings...)
 	cfg.Warnings = append(cfg.Warnings, loginPackedWarnings...)
+	cfg.Warnings = append(cfg.Warnings, schedulerWindowWarnings11358...)
 	appendClusterNTPAdvisoryLocked(cfg, opts)
 	appendContestedTrunkZoneAdvisoryLocked(cfg, opts)
 	appendGreUnitFilterShadowAdvisoryLocked(cfg, opts)

@@ -735,12 +735,11 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                     extra,
                 ) {
                     Some(pbr) if pbr.action == crate::filter::FilterAction::Accept => {
-                        let identity = crate::session::install_table_identity(pbr.routing_instance);
-                        let table = if is_v6 {
-                            format!("{}.inet6.0", pbr.routing_instance)
-                        } else {
-                            format!("{}.inet.0", pbr.routing_instance)
-                        };
+                        let (table, identity) =
+                            crate::afxdp::forwarding::pbr_table_target(
+                                pbr.routing_instance,
+                                is_v6,
+                            );
                         (identity, Some(table), false)
                     }
                     Some(_) => {
@@ -2659,17 +2658,24 @@ mod filter_log_egress_zone_tests {
                 protocol: PROTO_TCP,
                 ..UserspaceDpMeta::default()
             };
-            let decision = SessionDecision { resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex,
-                tx_ifindex: egress_ifindex,
-                tunnel_endpoint_id: 0,
-                next_hop: None,
-                neighbor_mac: None,
-                src_mac: None,
-                tx_vlan_id: 0,
-            }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+            let decision = SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex,
+                    tx_ifindex: egress_ifindex,
+                    tunnel_endpoint_id: 0,
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            };
             let metadata = SessionMetadata {
                 ingress_zone: TEST_LAN_ZONE_ID,
                 // #4983: mirror the frame's own ingress binding (`meta`

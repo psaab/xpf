@@ -728,6 +728,11 @@ step. Both are required — neither sees the other's case:
   interfaces and no qualifier the next-hop is genuinely ambiguous — the
   inference refuses to guess (leaves it unresolved) rather than route to the
   wrong link, and the operator must add an interface qualifier.
+  The Rust userspace helper follows the same rule: its in-table connected
+  candidates must collapse to one egress before an unqualified link-local
+  next-hop can bind. Multiple candidates leave the helper route at ifindex 0,
+  matching the daemon's unresolved/no-route disposition rather than selecting
+  whichever address row appears first. Explicit interfaces remain authoritative.
 - **Static `next-hop [ a b ]` ECMP list (#3872).** A static route's
   `next-hop [ gw1 gw2 ]` is the canonical Junos ECMP spelling — multiple
   next-hops = equal-cost multipath. The schema `next-hop` leaf is `multi:
@@ -857,8 +862,10 @@ step. Both are required — neither sees the other's case:
   `LocalAS` from the global `autonomous-system` when `local-as` was omitted;
   `local-as` still WINS when present (Junos precedence). A per-routing-instance
   BGP without `local-as` inherits the instance's own `routing-options
-  autonomous-system` if set, else the global one. No AS anywhere leaves
-  `LocalAS == 0` and renders no `router bgp`, unchanged.
+  `autonomous-system` if set, else the global one. No AS anywhere leaves
+  `LocalAS == 0` and the renderer omits `router bgp`; #11313 now rejects this
+  on strict commit / commit-check and warns on tolerant load / peer-sync. The
+  render guard remains defense-in-depth for malformed persisted configs.
 - **A BGP neighbor's peer-as (remote-as) is validated at commit (#2963).**
   `peer-as` is optional in the parser/compiler, so a neighbor authored
   without one (and without an inherited group `peer-as`) keeps a zero

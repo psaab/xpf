@@ -56,6 +56,8 @@ fn test_resolution() -> ForwardingResolution {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }
 }
 
@@ -411,6 +413,8 @@ fn test_local_delivery_decision() -> SessionDecision {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
@@ -1118,6 +1122,8 @@ fn cached_session_resolution_skips_fabric_redirect() {
         neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
 
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
@@ -1734,16 +1740,23 @@ fn lookup_forward_nat_across_scopes_returns_shared_nat_entry() {
         tcp_close_class: 0,
     };
     let reply_key = reverse_session_key(&key, decision.nat);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
-    shared_nat_sessions
-        .lock()
-        .expect("shared nat lock")
-        .insert(reply_key.clone(), entry.clone());
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
 
     let hit = lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
         &ForwardingState::default(),
+        &shared_owner_rg_indexes,
         &reply_key,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -1795,6 +1808,7 @@ fn zone_matching_reverse_reply_uses_forward_egress_domain_11298() {
         &sessions,
         &shared_nat_sessions,
         &forwarding,
+        &SharedSessionOwnerRgIndexes::default(),
         &reply_b,
         crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
     )
@@ -1808,6 +1822,7 @@ fn zone_matching_reverse_reply_uses_forward_egress_domain_11298() {
             &sessions,
             &shared_nat_sessions,
             &forwarding,
+            &SharedSessionOwnerRgIndexes::default(),
             &reply_a,
             crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
         )
@@ -1836,6 +1851,7 @@ fn zone_matching_reverse_reply_uses_forward_egress_domain_11298() {
             &sessions,
             &shared_nat_sessions,
             &forwarding,
+            &SharedSessionOwnerRgIndexes::default(),
             &reply_b_to_default,
             crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
         )
@@ -1849,6 +1865,7 @@ fn zone_matching_reverse_reply_uses_forward_egress_domain_11298() {
             &sessions,
             &shared_nat_sessions,
             &forwarding,
+            &SharedSessionOwnerRgIndexes::default(),
             &default_reply,
             crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
         )
@@ -1904,6 +1921,7 @@ fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
         &sessions,
         &shared_nat_sessions,
         &forwarding,
+        &shared_owner_rg_indexes,
         &reply_b,
         crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
     )
@@ -1919,6 +1937,7 @@ fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
             &sessions,
             &shared_nat_sessions,
             &forwarding,
+            &shared_owner_rg_indexes,
             &reply_zero,
             crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
         )
@@ -1960,6 +1979,7 @@ fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
             &sessions,
             &shared_zero,
             &forwarding,
+            &owner_indexes_zero,
             &reverse_session_key(&forward_zero, default_egress_decision.nat),
             crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
         )
@@ -1973,12 +1993,27 @@ fn zone_matching_shared_reverse_reply_uses_forward_egress_domain_11298() {
             &sessions,
             &shared_zero,
             &forwarding,
+            &owner_indexes_zero,
             &reply_b_to_zero,
             crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
         )
         .is_none(),
         "a domain-B reply must not borrow a default-keyed/default-egress shared session"
     );
+    // Control: the same published tenant-A entry still serves a reply that
+    // arrives in domain 0. Only the both-non-zero/different case is refused.
+    let mut zero_reply = reverse_session_key(&forward, decision.nat);
+    zero_reply.routing_domain = 0;
+    let zero_hit = lookup_forward_nat_across_scopes(
+        &sessions,
+        &shared_nat_sessions,
+        &ForwardingState::default(),
+        &shared_owner_rg_indexes,
+        &zero_reply,
+        crate::afxdp::shared_ops::ReverseIngress::Zone(TEST_WAN_ZONE_ID),
+    )
+    .expect("shared non-zero-forward/zero-reply fallback must resolve");
+    assert_eq!(zero_hit.key, forward);
 }
 
 /// Embedded quote rewriting has no reverse-session admission side effect: an
@@ -2249,16 +2284,23 @@ fn lookup_forward_nat_across_scopes_prefers_shared_entry_over_fabric_wire_placeh
         tcp_close_class: 0,
     };
     let reply_key = reverse_session_key(&key, decision.nat);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
-    shared_nat_sessions
-        .lock()
-        .expect("shared nat lock")
-        .insert(reply_key.clone(), shared_entry.clone());
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &shared_entry,
+    );
 
     let hit = lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
         &ForwardingState::default(),
+        &shared_owner_rg_indexes,
         &reply_key,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -2304,6 +2346,7 @@ fn lookup_forward_nat_across_scopes_ignores_fabric_wire_placeholder_without_shar
         &sessions,
         &shared_nat_sessions,
         &ForwardingState::default(),
+        &SharedSessionOwnerRgIndexes::default(),
         &reply_key,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -2337,16 +2380,23 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
         tcp_close_class: 0,
     };
     let canonical_reply = reverse_canonical_key(&key, decision.nat);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
-    shared_nat_sessions
-        .lock()
-        .expect("shared nat lock")
-        .insert(canonical_reply.clone(), entry.clone());
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
 
     let hit = lookup_forward_nat_across_scopes(
         &sessions,
         &shared_nat_sessions,
         &ForwardingState::default(),
+        &shared_owner_rg_indexes,
         &canonical_reply,
         // #7169: these cells predate the ingress revalidation and test
         // TUPLE matching, which is a separate property. Unconstrained keeps
@@ -2358,6 +2408,156 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
     assert_eq!(hit.key, entry.key);
     assert_eq!(hit.decision, entry.decision);
     assert_eq!(hit.metadata, entry.metadata);
+}
+
+#[test]
+fn lookup_forward_nat_across_scopes_returns_nonzero_domain_canonical_reverse_entry() {
+    const DOMAIN_A: u32 = 100_061;
+
+    let sessions = SessionTable::new();
+    let mut key = test_key();
+    key.routing_domain = DOMAIN_A;
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let mut canonical_reply = reverse_canonical_key(&key, decision.nat);
+    canonical_reply.routing_domain = DOMAIN_A;
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(decision.resolution.egress_ifindex, DOMAIN_A);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+
+    let hit = lookup_forward_nat_across_scopes(
+        &sessions,
+        &shared_nat_sessions,
+        &forwarding,
+        &shared_owner_rg_indexes,
+        &canonical_reply,
+        crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+    )
+    .expect("nonzero-domain PRE-NAT canonical reply should resolve");
+    assert_eq!(hit.key, entry.key);
+    assert_eq!(hit.decision, entry.decision);
+}
+
+#[test]
+fn shared_nat_nonzero_canonical_alias_refuses_other_wire_owner() {
+    const DOMAIN_A: u32 = 100_061;
+    const DOMAIN_B: u32 = 100_062;
+
+    let mut key_a = test_key();
+    key_a.routing_domain = DOMAIN_A;
+    let nat_a = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key_a.src_port),
+        ..NatDecision::default()
+    };
+    let mut key_b = key_a.clone();
+    key_b.routing_domain = DOMAIN_B;
+    key_b.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 103));
+    key_b.src_port = key_a.src_port.wrapping_add(1);
+    let nat_b = NatDecision {
+        rewrite_src: Some(key_a.src_ip),
+        rewrite_src_port: Some(key_a.src_port),
+        ..NatDecision::default()
+    };
+    let entry = |key, nat| SyncedSessionEntry {
+        key,
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let entry_a = entry(key_a.clone(), nat_a);
+    let entry_b = entry(key_b, nat_b);
+    let mut canonical_reply = reverse_canonical_key(&key_a, nat_a);
+    canonical_reply.routing_domain = DOMAIN_A;
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(test_resolution().egress_ifindex, DOMAIN_A);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry_a,
+    );
+
+    let lookup = || {
+        lookup_forward_nat_across_scopes(
+            &SessionTable::new(),
+            &shared_nat_sessions,
+            &forwarding,
+            &shared_owner_rg_indexes,
+            &canonical_reply,
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+        )
+    };
+    assert_eq!(
+        lookup()
+            .expect("the unique canonical owner should match")
+            .key,
+        entry_a.key
+    );
+
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry_b,
+    );
+    assert!(
+        lookup().is_none(),
+        "a canonical alias cannot override a different translated-wire owner"
+    );
 }
 
 #[test]
@@ -2388,11 +2588,17 @@ fn shared_nat_fallback_does_not_borrow_main_for_quarantined_domain_11061() {
         tcp_close_class: 0,
     };
     let canonical_reply = reverse_canonical_key(&key, decision.nat);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
-    shared_nat_sessions
-        .lock()
-        .expect("shared NAT lock")
-        .insert(canonical_reply.clone(), entry);
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
     let quarantined_reply = SessionKey {
         routing_domain: crate::session::AMBIGUOUS_FABRIC_DOMAIN_BASE | 2,
         ..canonical_reply
@@ -2402,6 +2608,7 @@ fn shared_nat_fallback_does_not_borrow_main_for_quarantined_domain_11061() {
             &sessions,
             &shared_nat_sessions,
             &ForwardingState::default(),
+            &shared_owner_rg_indexes,
             &quarantined_reply,
             crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
         )
@@ -2499,6 +2706,7 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
     let alias_hit = lookup_shared_forward_nat_match(
         &ForwardingState::default(),
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &canonical_reply,
     )
     .expect("canonical reverse alias should be published");
@@ -2511,13 +2719,195 @@ fn publish_and_remove_shared_session_tracks_canonical_reverse_alias() {
         &shared_owner_rg_indexes,
         &entry.key,
     );
+    assert!(lookup_shared_forward_nat_match(
+        &ForwardingState::default(),
+        &shared_nat_sessions,
+        &shared_owner_rg_indexes,
+        &canonical_reply,
+    )
+    .is_none());
+}
+
+fn assert_shared_nat_mixed_zero_reverse_matches_worker_local_11361(
+    forward_domain: u32,
+    reply_domain: u32,
+) {
+    const DOMAIN_A: u32 = 100_061;
     assert!(
-        lookup_shared_forward_nat_match(
-            &ForwardingState::default(),
+        (forward_domain == DOMAIN_A && reply_domain == 0)
+            || (forward_domain == 0 && reply_domain == DOMAIN_A)
+    );
+
+    let mut key = test_key();
+    key.routing_domain = forward_domain;
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(49_152),
+        ..NatDecision::default()
+    };
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat,
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(decision.resolution.egress_ifindex, reply_domain);
+    let mut worker_sessions = SessionTable::new();
+    assert!(worker_sessions.install_with_protocol(
+        key.clone(),
+        decision,
+        test_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let mut reply = reverse_session_key(&key, nat);
+    reply.routing_domain = reply_domain;
+    assert_eq!(
+        worker_sessions
+            .find_forward_nat_match(&reply, |ifindex| {
+                crate::afxdp::forwarding::egress_routing_domain(&forwarding, ifindex)
+            })
+            .expect("worker-local mixed-zero reverse lookup should resolve")
+            .key,
+        key
+    );
+
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+
+    let shared_only_sessions = SessionTable::new();
+    let shared_match = lookup_forward_nat_across_scopes(
+        &shared_only_sessions,
+        &shared_nat_sessions,
+        &forwarding,
+        &shared_owner_rg_indexes,
+        &reply,
+        crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+    )
+    .expect("shared mixed-zero reverse lookup should match worker-local");
+    assert_eq!(shared_match.key, key);
+    assert_eq!(shared_match.decision, decision);
+}
+
+#[test]
+fn shared_nat_reverse_a_to_zero_matches_worker_local_11361() {
+    assert_shared_nat_mixed_zero_reverse_matches_worker_local_11361(100_061, 0);
+}
+
+#[test]
+fn shared_nat_reverse_zero_to_a_matches_worker_local_11361() {
+    assert_shared_nat_mixed_zero_reverse_matches_worker_local_11361(0, 100_061);
+}
+
+#[test]
+fn shared_nat_mixed_zero_refuses_ambiguous_tenant_alias_11361() {
+    const DOMAIN_A: u32 = 100_061;
+    const DOMAIN_B: u32 = 100_062;
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(49_152),
+        ..NatDecision::default()
+    };
+    let mut key_a = test_key();
+    key_a.routing_domain = DOMAIN_A;
+    let mut key_b = test_key();
+    key_b.routing_domain = DOMAIN_B;
+    key_b.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 103));
+
+    let entry = |key: SessionKey| SyncedSessionEntry {
+        key,
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let entry_a = entry(key_a.clone());
+    let entry_b = entry(key_b.clone());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry_a,
+    );
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry_b,
+    );
+
+    let wire_a = reverse_session_key(&key_a, nat);
+    let wire_b = reverse_session_key(&key_b, nat);
+    assert_eq!(
+        crate::session::reverse_match_key(&wire_a),
+        crate::session::reverse_match_key(&wire_b)
+    );
+    let mut zero_domain_reply = wire_a.clone();
+    zero_domain_reply.routing_domain = 0;
+    {
+        let shared_nat = shared_nat_sessions.lock().expect("shared NAT lock");
+        assert_eq!(shared_nat.get(&wire_a).expect("tenant-A wire alias").key, key_a);
+        assert_eq!(shared_nat.get(&wire_b).expect("tenant-B wire alias").key, key_b);
+        assert!(
+            !shared_nat.contains_key(&zero_domain_reply),
+            "publishing tenant aliases must not insert a colliding domain-zero wire key"
+        );
+    }
+
+    assert!(
+        lookup_forward_nat_across_scopes(
+            &SessionTable::new(),
             &shared_nat_sessions,
-            &canonical_reply,
+            &ForwardingState::default(),
+            &shared_owner_rg_indexes,
+            &zero_domain_reply,
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
         )
-        .is_none()
+        .is_none(),
+        "a domain-zero reply cannot choose between two tenant owners"
     );
 }
 
@@ -3372,10 +3762,8 @@ fn apply_worker_commands_replaces_stale_local_session_for_inactive_owner_rg() {
     // With #326, synced sessions are always re-resolved with local egress
     // info even on standby — so tx_vlan_id picks up the local egress VLAN.
     let expected_decision = SessionDecision {
-        resolution: ForwardingResolution {
-            tx_vlan_id: 80,
-            ..synced_decision.resolution
-        },
+        resolution: ForwardingResolution { tx_vlan_id: 80,
+        route_mtu: 0, transport_route_mtu: 0, ..synced_decision.resolution },
         ..synced_decision
     };
     assert_eq!(hit.decision, expected_decision);
@@ -5482,6 +5870,8 @@ fn apply_worker_commands_demote_split_reverse_owner_rg_rewrites_to_fabric_redire
                 neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -5567,6 +5957,8 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_rewrites_to_forward_cand
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -5657,6 +6049,8 @@ fn apply_worker_commands_refresh_split_reverse_owner_rg_updates_stale_indexed_se
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -5750,6 +6144,8 @@ fn apply_worker_commands_refresh_owner_rg_updates_reverse_session_owned_by_other
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -5843,6 +6239,8 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_remote_reverse_session_on_pee
                 neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -5931,6 +6329,8 @@ fn apply_worker_commands_refresh_owner_rg_rewrites_shared_promote_reverse_on_pee
                 neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: test_decision().nat.reverse(
                 forward_key.src_ip,
@@ -6475,6 +6875,8 @@ fn session_hit_ha_inactive_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         false,
         TEST_SFMIX_ZONE_ID,
@@ -6513,6 +6915,8 @@ fn session_hit_ha_inactive_does_not_redirect_actual_fabric_ingress() {
             neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         true,
         5,
@@ -6538,6 +6942,8 @@ fn fabric_ingress_session_hit_obeys_ha_inactive_gate() {
             neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         21,
         0,
@@ -6564,6 +6970,8 @@ fn tunnel_ingress_session_hit_bypasses_unseeded_ha_during_startup_grace() {
             neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         586,
         110,
@@ -6605,6 +7013,8 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
                 neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x02]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             }, nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42))),
                 ..NatDecision::default()
@@ -6939,6 +7349,8 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
                 neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                 src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             }, nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
                 ..NatDecision::default()
@@ -7083,6 +7495,8 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
         neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -10455,6 +10869,8 @@ fn synced_local_delivery_decision_unowned_egress() -> SessionDecision {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
@@ -11572,6 +11988,7 @@ fn delete_synced_frees_both_allocators_end_to_end_6211() {
 fn nat_reverse_fixture_7169() -> (
     SessionTable,
     Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    SharedSessionOwnerRgIndexes,
     SessionKey,
 ) {
     let sessions = SessionTable::new();
@@ -11602,12 +12019,18 @@ fn nat_reverse_fixture_7169() -> (
         tcp_close_class: 0,
     };
     let reply_key = reverse_session_key(&key, decision.nat);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared = Arc::new(Mutex::new(FastMap::default()));
-    shared
-        .lock()
-        .expect("shared nat lock")
-        .insert(reply_key.clone(), entry);
-    (sessions, shared, reply_key)
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+    (sessions, shared, shared_owner_rg_indexes, reply_key)
 }
 
 /// #7169 fail-on-revert: a reverse-canonical match must be REJECTED when the
@@ -11629,7 +12052,7 @@ fn nat_reverse_fixture_7169() -> (
 /// and this goes RED.
 #[test]
 fn a_reverse_match_from_the_wrong_zone_is_rejected_7169() {
-    let (sessions, shared, reply_key) = nat_reverse_fixture_7169();
+    let (sessions, shared, shared_owner_rg_indexes, reply_key) = nat_reverse_fixture_7169();
 
     // Positive control FIRST: the same lookup from the RIGHT zone matches, so
     // the rejection below is the ingress check and not a broken fixture.
@@ -11637,6 +12060,7 @@ fn a_reverse_match_from_the_wrong_zone_is_rejected_7169() {
         &sessions,
         &shared,
         &ForwardingState::default(),
+        &shared_owner_rg_indexes,
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Zone(2),
     );
@@ -11649,6 +12073,7 @@ fn a_reverse_match_from_the_wrong_zone_is_rejected_7169() {
         &sessions,
         &shared,
         &ForwardingState::default(),
+        &shared_owner_rg_indexes,
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Zone(7),
     );
@@ -11670,11 +12095,12 @@ fn a_reverse_match_from_the_wrong_zone_is_rejected_7169() {
 /// a distinct state from the deliberate exemption below.
 #[test]
 fn an_unzoned_arrival_interface_matches_nothing_7169() {
-    let (sessions, shared, reply_key) = nat_reverse_fixture_7169();
+    let (sessions, shared, shared_owner_rg_indexes, reply_key) = nat_reverse_fixture_7169();
     let out = lookup_forward_nat_across_scopes(
         &sessions,
         &shared,
         &ForwardingState::default(),
+        &shared_owner_rg_indexes,
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Unzoned,
     );
@@ -11694,11 +12120,12 @@ fn an_unzoned_arrival_interface_matches_nothing_7169() {
 /// `Unzoned` would be made permissive to keep it working.
 #[test]
 fn an_unconstrained_caller_is_exempt_7169() {
-    let (sessions, shared, reply_key) = nat_reverse_fixture_7169();
+    let (sessions, shared, shared_owner_rg_indexes, reply_key) = nat_reverse_fixture_7169();
     let out = lookup_forward_nat_across_scopes(
         &sessions,
         &shared,
         &ForwardingState::default(),
+        &shared_owner_rg_indexes,
         &reply_key,
         crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
     );
@@ -13834,6 +14261,8 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: TRUNK_ZONED_VLAN,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat, install_table_domain: 0, install_table_check: 0 };
     // The forward flow: lan -> wan. `egress_zone` is what the #7169 arrival-zone
     // check compares against.
@@ -14077,9 +14506,9 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     let sync: Vec<_> = update.iter().filter(|f| f.as_bytes()[4] == 3 /* MSG_SESSION_UPDATE; the #9412 golden lockstep pins this byte in both languages */).collect();
     assert_eq!(sync.len(), 1, "#9412: the Update must be queued to the peer exactly once as MSG_SESSION_UPDATE");
     assert_eq!(
-        sync[0].as_bytes()[sync[0].as_bytes().len() - 12], // #11064: +3 source-NAT ICMP identity behind the #9752 tail
+        sync[0].as_bytes()[sync[0].as_bytes().len() - 18],
         2,
-        "#9412/#11064: the queued Update must carry its close class 11 bytes from the end (#9752 tail + 3-byte source-NAT ICMP identity follow)"
+        "#9412/#11070: the queued Update must carry its close class before the 17-byte session-sync trailer"
     );
 }
 
@@ -16003,6 +16432,8 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
             neighbor_mac: Some(mac_a),
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -16118,6 +16549,8 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
             neighbor_mac: Some(mac_a),
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,

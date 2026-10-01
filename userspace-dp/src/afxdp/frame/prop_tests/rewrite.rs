@@ -158,6 +158,8 @@ fn make_decision(pkt: &ValidPacket, nat: NatDecision, tx_vlan: u16) -> SessionDe
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: tx_vlan,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat, install_table_domain: 0, install_table_check: 0 }
 }
 

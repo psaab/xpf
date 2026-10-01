@@ -189,9 +189,9 @@ type Manager struct {
 	peerAlive    bool
 	peerEverSeen bool // true once first heartbeat received; distinguishes "never heard" from "lost"
 	// peerConfirmedAbsent is set by handlePeerNeverSeen once the cold-boot
-	// grace elapses with no heartbeat ever received. It releases the
-	// non-preempt hold WITHOUT rewriting peerEverSeen, so the #7161
-	// readiness gate still sees a cold boot (gated) rather than a peer
+	// grace has elapsed without a heartbeat or fresh session-sync proof. It
+	// releases the non-preempt hold WITHOUT rewriting peerEverSeen, so the
+	// #7161 readiness gate still sees a cold boot (gated) rather than a peer
 	// loss (fail-open). Cleared when a peer heartbeat arrives. See #10697.
 	peerConfirmedAbsent bool
 	peerNodeID          int
@@ -509,6 +509,11 @@ type Manager struct {
 	// external signal proves the peer is still alive (for example, recent
 	// session-sync traffic on the control link).
 	peerTimeoutGuardFn func() (suppress bool, reason string)
+	// peerNeverSeenSyncFreshFn reports whether the session-sync receive proof
+	// is still fresh while no heartbeat has ever arrived. handlePeerNeverSeen
+	// calls it under m.mu; it must be a fast, lock-free probe and must not
+	// re-enter Manager.
+	peerNeverSeenSyncFreshFn func() bool
 
 	// peerHeartbeatFreshFn reports whether a peer heartbeat is currently
 	// within the timeout window (i.e. NOT stale). handlePeerTimeout consults

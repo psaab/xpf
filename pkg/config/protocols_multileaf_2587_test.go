@@ -62,6 +62,7 @@ func TestOSPFExportMultiValueHierarchical(t *testing.T) {
 
 func TestBGPExportImportMultiValueFlatSet(t *testing.T) {
 	cfg, err := compileSet(t, []string{
+		"set protocols bgp local-as 65001",
 		"set protocols bgp export [ connected static ospf ]",
 		"set protocols bgp import [ imp1 imp2 ]",
 		"set policy-options policy-statement imp1 term t then accept",
@@ -84,6 +85,7 @@ func TestBGPExportImportMultiValueFlatSet(t *testing.T) {
 func TestBGPExportImportMultiValueHierarchical(t *testing.T) {
 	src := `protocols {
     bgp {
+        local-as 65001;
         export [ connected static ospf ];
         import [ imp1 imp2 ];
     }
@@ -135,6 +137,7 @@ func bgpNeighbor(t *testing.T, cfg *Config, addr string) *BGPNeighbor {
 
 func TestBGPGroupExportImportMultiValueFlatSet(t *testing.T) {
 	cfg, err := compileSet(t, []string{
+		"set protocols bgp local-as 65001",
 		"set protocols bgp group g1 export [ OUT-A OUT-B ]",
 		"set protocols bgp group g1 import [ IN-A IN-B ]",
 		"set protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
@@ -158,6 +161,7 @@ func TestBGPGroupExportImportMultiValueFlatSet(t *testing.T) {
 func TestBGPGroupExportImportMultiValueHierarchical(t *testing.T) {
 	src := `protocols {
     bgp {
+        local-as 65001;
         group g1 {
             export [ OUT-A OUT-B ];
             import [ IN-A IN-B ];
@@ -190,6 +194,7 @@ policy-options {
 
 func TestBGPNeighborExportImportMultiValueFlatSet(t *testing.T) {
 	cfg, err := compileSet(t, []string{
+		"set protocols bgp local-as 65001",
 		"set protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
 		"set protocols bgp group g1 neighbor 10.0.0.1 export [ N-OUT-A N-OUT-B ]",
 		"set protocols bgp group g1 neighbor 10.0.0.1 import [ N-IN-A N-IN-B ]",
@@ -213,6 +218,7 @@ func TestBGPNeighborExportImportMultiValueFlatSet(t *testing.T) {
 func TestBGPNeighborExportImportMultiValueHierarchical(t *testing.T) {
 	src := `protocols {
     bgp {
+        local-as 65001;
         group g1 {
             neighbor 10.0.0.1 {
                 peer-as 65001;

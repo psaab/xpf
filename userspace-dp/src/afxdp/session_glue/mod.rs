@@ -95,6 +95,8 @@ pub(in crate::afxdp) fn local_resolution_without_install_table(
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     })
 }
 
@@ -358,12 +360,13 @@ fn lookup_forwarding_resolution_for_session_with_cache(
                 }
             }
         }
-        let resolved = super::resolve_tunnel_forwarding_resolution(
+        let mut resolved = super::resolve_tunnel_forwarding_resolution(
             forwarding,
             Some(dynamic_neighbors),
             decision.resolution.tunnel_endpoint_id,
             0,
         );
+        resolved.route_mtu = decision.resolution.route_mtu;
         return match resolved.disposition {
             ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
                 if allow_cached_fallback =>
@@ -3133,6 +3136,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         sessions,
         shared_nat_sessions,
         forwarding,
+        shared_owner_rg_indexes,
         &flow.forward_key,
         reverse_ingress,
         now_ns,

@@ -98,7 +98,7 @@ pub(super) fn stage_flow_cache_hit(
     now_ns: u64,
     now_secs: u64,
     worker_ctx: &WorkerContext,
-    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
+    last_learned_neighbor: &mut LearnedNeighborDedup,
     telemetry: &mut TelemetryContext,
 ) -> FlowCacheOutcome {
     // Re-derive packet_frame locally (matches L477 of the caller's
@@ -143,15 +143,15 @@ pub(super) fn stage_flow_cache_hit(
         &worker_ctx.rg_epochs,
         meta.pkt_len,
     ) {
-        // #3048/#5147: a kernel ARP/NDP update may have REPLACED this
-        // descriptor's next-hop MAC since it was cached (gateway VRRP
-        // failover, NIC swap). The neighbor map advances the epoch of the
-        // changed neighbor's SHARD only on a genuine MAC change — never on a
-        // same-MAC refresh — so this comparison is free of steady-state
-        // re-misses, and a MAC change to a neighbor in a DIFFERENT shard does
-        // NOT evict this flow (the #5147 map-wide-thrash fix). The check reads
-        // only this flow's own shard slot: a single indexed relaxed atomic
-        // load + compare. A mismatch means the cached dst_mac may be stale;
+        // #3048/#5147: an ARP/NDP MAC replacement or neighbor deletion may
+        // invalidate this descriptor's next-hop mapping (gateway VRRP
+        // failover, NIC swap, or DELNEIGH). The neighbor map advances only
+        // the changed neighbor's shard — same-MAC refreshes and absent-key
+        // removals do not bump — so this comparison avoids steady-state
+        // re-misses, and unrelated-shard changes do not evict this flow. The
+        // check reads only this flow's own shard slot: a single indexed
+        // relaxed atomic load + compare. A mismatch means the cached dst_mac
+        // or neighbor liveness may be stale;
         let neighbor_mac_stale = cached.neighbor_mac_epoch_stale(worker_ctx.dynamic_neighbors);
         // evict and re-resolve on the slow path.
         if neighbor_mac_stale
@@ -709,6 +709,7 @@ pub(super) fn stage_flow_cache_hit(
                 meta,
                 flow.src_ip,
                 src_mac,
+                now_ns,
                 last_learned_neighbor,
                 worker_ctx.forwarding,
                 worker_ctx.dynamic_neighbors,

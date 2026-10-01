@@ -921,12 +921,11 @@ impl Coordinator {
         // readers see either the pre-replace or post-replace state,
         // never a half-replaced set. `bulk_replace_neighbors` locks all
         // 64 shards in shard-index order (deadlock-free invariant).
-        // #3048: it also bumps `mac_change_epoch` when this Go-snapshot
-        // push REPLACES a neighbor's MAC with a different one (the
-        // fourth neighbor-MAC write path — the in-process monitor, the
-        // data-path learn, and the on-demand resolver are the other
-        // three). `old_manager_keys` is empty when `!replace`, so the
-        // removes are skipped exactly as before.
+        // #3048/#11375: it also advances per-shard neighbor epochs when this
+        // Go snapshot changes an existing MAC or removes an old manager key
+        // absent from the new snapshot. Same-MAC reinsertions and brand-new
+        // keys do not bump. `old_manager_keys` is empty when `!replace`, so
+        // the removals are skipped exactly as before.
         self.neighbors
             .dynamic
             .bulk_replace_neighbors(&old_manager_keys, neighbors);
@@ -2136,6 +2135,8 @@ impl ListTestWorker {
                 neighbor_mac: None,
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: crate::nat::NatDecision::default(),
             install_table_domain: 0,

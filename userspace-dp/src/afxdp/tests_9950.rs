@@ -1102,11 +1102,12 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["172.16.80.1@reth0.80".to_string()],
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     }];
     snapshot.neighbors = vec![
         NeighborSnapshot {
@@ -1413,11 +1414,12 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["172.16.80.1@reth0.80".to_string()],
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     }];
     snapshot.neighbors = vec![
         NeighborSnapshot {
@@ -1649,11 +1651,12 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["172.16.80.1@reth0.80".to_string()],
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     }];
     snapshot.neighbors = vec![
         NeighborSnapshot {

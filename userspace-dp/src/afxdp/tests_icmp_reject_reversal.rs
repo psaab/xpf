@@ -341,6 +341,8 @@ fn icmp_te_nat_reversal_v4_rewrites_outer_dst_and_embedded_src() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_UNTRUST_ZONE_ID,
@@ -507,6 +509,8 @@ fn icmp_te_nat_reversal_v4_with_port_snat() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_UNTRUST_ZONE_ID,
@@ -638,6 +642,8 @@ fn icmp_dest_unreach_nat_reversal_v4() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_UNTRUST_ZONE_ID,
@@ -931,6 +937,8 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_UNTRUST_ZONE_ID,
@@ -1099,6 +1107,8 @@ fn icmpv6_dnat66_reversal_v6_rewrites_embedded_dst_and_outer_src() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: icmp_err_metadata(),
         related_expected_zone: 0,
@@ -1391,6 +1401,8 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision { rewrite_src: Some(IpAddr::V6(external_client)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: true }, install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
@@ -1441,6 +1453,7 @@ fn icmpv6_te_nptv6_reverse_lookup_restores_internal_client() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -1583,6 +1596,8 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
         neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: ZONE_B_ID,
@@ -1633,6 +1648,7 @@ fn icmpv6_te_nptv6_reverse_lookup_uses_logical_vlan_unit_zone_not_physical_paren
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -1701,6 +1717,8 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision { rewrite_src: Some(IpAddr::V6(external_client)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: true }, install_table_domain: 0, install_table_check: 0 };
     let forward_metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
@@ -1732,6 +1750,8 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let reverse_decision = SessionDecision { resolution: reverse_resolution, nat: forward_decision.nat.reverse(
         forward_key.src_ip,
@@ -1788,6 +1808,7 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()

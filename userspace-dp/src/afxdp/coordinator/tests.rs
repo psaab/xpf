@@ -1359,6 +1359,8 @@ fn build_injected_packet_uses_wire_tuple_source_ipv4() {
         neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
         src_mac: Some(egress.src_mac),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
 
     let frame = build_injected_packet(&req, src, dst, 0x3456, resolution, &egress)
@@ -9675,6 +9677,8 @@ fn f4_seed_shared_only(
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: crate::nat::NatDecision {
             rewrite_src: Some(translated.ip),
             rewrite_src_port: Some(translated.port),
@@ -9933,6 +9937,8 @@ fn import_entry_9718(
                 neighbor_mac: None,
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: crate::nat::NatDecision {
                 rewrite_src: Some("203.0.113.1".parse().unwrap()),
@@ -11891,6 +11897,8 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
                     neighbor_mac: None,
                     src_mac: None,
                     tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
                 },
                 nat: crate::nat::NatDecision::default(),
                 install_table_domain: 0,

@@ -23,6 +23,91 @@ use crate::session::TunnelDiscriminator;
 use super::poll_descriptor::{try_reverse_embedded_icmp_error, EmbeddedIcmpReversal};
 
 use super::poll_descriptor::dns_reply_fastpath_admit;
+/// `reth0.80` is the tagged WAN child. Its fixtures must carry an on-wire
+/// 802.1Q VID-80 tag and matching RX metadata/offsets; VID 0 is intentionally
+/// dropped by #11297. Explicit unit-0 arrivals remain untagged.
+const EMBEDDED_POLL_TEST_WAN_VLAN_ID: u16 = 80;
+/// Give a poll fixture on `reth0.80` the same on-wire tag and offsets the XDP
+/// shim would report. A non-zero ingress VLAN in metadata cannot accompany an
+/// untagged frame: the shim derives both from the physical 802.1Q header.
+fn embedded_poll_test_tag_wan_ingress(
+    frame: &[u8],
+    mut meta: UserspaceDpMeta,
+) -> (Vec<u8>, UserspaceDpMeta) {
+    if meta.ingress_ifindex != 12 {
+        return (frame.to_vec(), meta);
+    }
+
+    let mut tagged_frame = frame.to_vec();
+    let already_tagged = tagged_frame.get(12..14) == Some(&[0x81, 0x00]);
+    if already_tagged {
+        let tci = u16::from_be_bytes([tagged_frame[14], tagged_frame[15]]);
+        assert_eq!(
+            tci & 0x0fff,
+            EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+            "WAN child packet must carry VID 80 on wire"
+        );
+    } else {
+        tagged_frame.splice(12..12, [0x81, 0x00, 0x00, 0x50]);
+    }
+
+    match meta.l3_offset {
+        14 => {
+            meta.l3_offset = 18;
+            meta.l4_offset += 4;
+            meta.payload_offset += 4;
+        }
+        18 => {}
+        offset => panic!("WAN Ethernet fixture has unexpected L3 offset {offset}"),
+    }
+    meta.ingress_vlan_id = EMBEDDED_POLL_TEST_WAN_VLAN_ID;
+    meta.ingress_vlan_present = 1;
+    meta.pkt_len = tagged_frame.len().min(u16::MAX as usize) as u16;
+    assert_eq!(&tagged_frame[12..14], &[0x81, 0x00]);
+    assert_eq!(
+        super::frame::frame_l3_offset(&tagged_frame),
+        Some(18),
+        "WAN tag must place L3 at the shim-reported offset",
+    );
+    assert_eq!(meta.l3_offset, 18);
+    (tagged_frame, meta)
+}
+
+/// Keep the checked poll fixtures wire-realistic without changing their
+/// scenario-specific packet construction or assertions.
+fn txn_run_descriptor_checked(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    expect_mac_acceptance: bool,
+) -> (BatchCounters, DebugPollCounters) {
+    if meta.ingress_ifindex != 12 {
+        return super::tests_support::txn_run_descriptor_checked(
+            binding,
+            sessions,
+            forwarding,
+            ha_state,
+            frame,
+            meta,
+            expect_mac_acceptance,
+        );
+    }
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(frame, meta);
+    super::tests_support::txn_run_descriptor_checked(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        &frame,
+        meta,
+        expect_mac_acceptance,
+    )
+}
+
+
 
 #[test]
 fn dns_query_from_port_53_requires_session_tracking_10321() {
@@ -324,6 +409,8 @@ fn same_family_icmp_quote_uses_read_only_plain_probe_9990() {
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x61, 0x01]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -351,6 +438,7 @@ fn same_family_icmp_quote_uses_read_only_plain_probe_9990() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         install_ns + 1_000_000,
     );
@@ -423,6 +511,8 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: Some(snat_port), rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -569,6 +659,8 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -613,6 +705,7 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -680,6 +773,7 @@ fn embedded_icmp_nat_match_ignores_non_error_echo() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option();
@@ -855,6 +949,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex,
+        ingress_vlan_id: if ingress_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(ingress_ifindex == 12),
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -867,6 +963,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -960,6 +1057,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         };
         assert!(
             !super::poll_descriptor::enforce_queued_embedded_icmp_policy(
@@ -1024,6 +1123,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: forward_nat,
             install_table_domain: 0,
@@ -1066,6 +1167,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
                     neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                     src_mac: Some(TEST_LAN_MAC),
                     tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
                 },
                 nat: forward_nat.reverse(
                     IpAddr::V4(client_ip),
@@ -1663,6 +1766,8 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
                 neighbor_mac: Some(N6472_WAN_GW_MAC),
                 src_mac: Some(N6472_WAN_SRC_MAC),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: fwd_nat,
             install_table_domain: 0,
@@ -1714,6 +1819,8 @@ fn n6472_install_sessions_in_domain(sessions: &mut SessionTable, now_ns: u64, do
                 neighbor_mac: Some(N6472_CLIENT_MAC),
                 src_mac: Some(N6472_LAN_SRC_MAC),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: fwd_nat.reverse(
                 IpAddr::V6(n6472_client_v6()),
@@ -1879,6 +1986,8 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: arrival_ifindex,
+        ingress_vlan_id: if arrival_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(arrival_ifindex == 12),
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -1891,6 +2000,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let (batch, dbg, event_handle, event_rx) = txn_run_descriptor_capturing_events(
         &mut binding,
         &mut sessions,
@@ -2255,6 +2365,8 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_im
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: arrival_ifindex,
+        ingress_vlan_id: if arrival_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(arrival_ifindex == 12),
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -2479,7 +2591,12 @@ fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
         );
     }
     assert_eq!(
-        crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 12, 0, None),
+        crate::afxdp::forwarding::ingress_routing_domain(
+            &forwarding,
+            12,
+            EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+            None
+        ),
         domain,
         "fixture precondition: the ICMPv4 error ingresses on reth0.80 (ifindex 12), \
          and the domain the poll loop stamps from that interface must be the domain \
@@ -2497,6 +2614,8 @@ fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -2794,6 +2913,8 @@ fn poll_descriptor_nat64_icmp_error_outer_dst_mismatch_declined_6472() {
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -2862,6 +2983,8 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
                 neighbor_mac: Some(N6472_WAN_GW_MAC),
                 src_mac: Some(N6472_WAN_SRC_MAC),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -2916,6 +3039,8 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -2940,6 +3065,7 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
         IpAddr::V4(client_ip),
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
     );
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     txn_run_descriptor_with_neighbors(
         &mut binding,
         &mut sessions,
@@ -3017,6 +3143,8 @@ fn n6474_install_snat_session(
                 neighbor_mac: Some(N6472_WAN_GW_MAC),
                 src_mac: Some(N6472_WAN_SRC_MAC),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(snat_ip),
@@ -3499,6 +3627,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -3529,6 +3658,8 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
                 neighbor_mac: Some(N6472_WAN_GW_MAC),
                 src_mac: Some(N6472_WAN_SRC_MAC),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: None,
@@ -3572,6 +3703,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -3607,6 +3739,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -4501,6 +4634,8 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
         neighbor_mac: Some([0, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
@@ -4928,6 +5063,8 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let local_metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
@@ -5100,6 +5237,8 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -5127,6 +5266,7 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
         },
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -5235,6 +5375,8 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -5410,6 +5552,8 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -5437,6 +5581,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         },
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -5545,6 +5690,8 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -5801,6 +5948,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
     meta.ingress_ifindex = 12;
     meta.config_generation = 7;
     meta.fib_generation = 9;
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -5909,6 +6057,8 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -6185,6 +6335,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -6197,6 +6349,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -6305,6 +6458,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 // PURE DNAT: no source rewrite at all. This is the decision
@@ -6497,6 +6652,8 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision {
             // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
             // with no L4 ports to `reserve_address_only`, which is how GRE
@@ -6644,6 +6801,8 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -6761,6 +6920,8 @@ fn the_as_is_embedded_key_carries_the_discriminator_9031() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: None,
@@ -6858,6 +7019,8 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: None,
@@ -6993,28 +7156,35 @@ fn publish_pptp_gre_session_9298(
             discriminator: TunnelDiscriminator::Pptp(handle),
             routing_domain: 0,
         },
-        decision: SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex,
-            tx_ifindex: egress_ifindex,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 80,
-        }, nat: NatDecision {
-            // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
-            // with no L4 ports to `reserve_address_only`, which is how GRE
-            // genuinely reaches same-family SNAT.
-            rewrite_src: Some(snat),
-            rewrite_dst: None,
-            rewrite_src_port: None,
-            rewrite_dst_port: None,
-            source_nat_icmp: None,
-            nat64: false,
-            nptv6: false,
-        }, install_table_domain: 0, install_table_check: 0 },
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex,
+                tx_ifindex: egress_ifindex,
+                tunnel_endpoint_id: 0,
+                next_hop: None,
+                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+                tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision {
+                // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
+                // with no L4 ports to `reserve_address_only`, which is how GRE
+                // genuinely reaches same-family SNAT.
+                rewrite_src: Some(snat),
+                rewrite_dst: None,
+                rewrite_src_port: None,
+                rewrite_dst_port: None,
+                source_nat_icmp: None,
+                nat64: false,
+                nptv6: false,
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
         metadata: SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
             egress_zone: TEST_WAN_ZONE_ID,
@@ -7354,6 +7524,8 @@ fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -7477,6 +7649,8 @@ fn g9528_run_nat64(term: Option<FirewallTermSnapshot>) -> (usize, usize, Option<
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -7556,6 +7730,8 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -7596,6 +7772,8 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -7777,6 +7955,8 @@ fn n9901_floor_fixture() -> (
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -7839,6 +8019,7 @@ fn full_tcp_quote_in_atomic_outer_matches_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -7871,6 +8052,7 @@ fn short_tcp_quote_in_atomic_outer_refused_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -7900,6 +8082,7 @@ fn short_tcp_quote_in_fragmented_outer_kept_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -7945,6 +8128,8 @@ fn n9901_install_snat_session(
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),
@@ -8007,6 +8192,7 @@ fn ptb_pair_same_session_both_delivered_9901() {
             &neighbors,
             &shared,
             &shared_nat,
+            &SharedSessionOwnerRgIndexes::default(),
             &shared_wire,
             1_000_000,
         );
@@ -8043,6 +8229,7 @@ fn same_router_sessions_match_independently_9901() {
             &neighbors,
             &shared,
             &shared_nat,
+            &SharedSessionOwnerRgIndexes::default(),
             &shared_wire,
             1_000_000,
         );
@@ -8059,6 +8246,7 @@ fn same_router_sessions_match_independently_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -8074,6 +8262,7 @@ fn same_router_sessions_match_independently_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -8106,6 +8295,7 @@ fn match_flood_capped_at_burst_and_counted_9901() {
             &neighbors,
             &shared,
             &shared_nat,
+            &SharedSessionOwnerRgIndexes::default(),
             &shared_wire,
             1_000_000,
         ) {
@@ -8235,6 +8425,7 @@ fn outer_slack_quote_refused_at_match_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -8333,6 +8524,8 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: arrival_ifindex as u32,
+        ingress_vlan_id: if arrival_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(arrival_ifindex == 12),
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -8347,6 +8540,7 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
     };
     meta.flow_src_addr[..4].copy_from_slice(&router_ip.octets());
     meta.flow_dst_addr[..4].copy_from_slice(&client_ip.octets());
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -8469,6 +8663,8 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
                     [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]
                 }),
                 tx_vlan_id: if reverse_half || same_zone_arrival { 0 } else { 80 },
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -8785,6 +8981,8 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -8797,6 +8995,7 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -8912,6 +9111,8 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
                 [0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]
             }),
             tx_vlan_id: if reverse_half { 0 } else { 80 },
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -9127,6 +9328,8 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -9139,6 +9342,7 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -9247,6 +9451,8 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -9296,6 +9502,8 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -9455,6 +9663,8 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -9467,6 +9677,7 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -9571,6 +9782,8 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
                 neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -9620,6 +9833,8 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,

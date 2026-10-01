@@ -250,19 +250,15 @@ pub(super) struct FlowCacheEntry {
     /// active window, so a wrapped `current_epoch` can never re-match a
     /// dead flow ("ghost resurrection" over-count).
     pub(super) last_used_epoch: u16,
-    /// #3048/#5147: the per-shard `ShardedNeighborMap` MAC-change epoch
-    /// captured (from the pre-resolve snapshot) when this descriptor was
-    /// built — the epoch of the SPECIFIC shard `neighbor_shard` this flow's
-    /// resolved next-hop lives in. The descriptor caches the resolved
-    /// next-hop `dst_mac`; if a kernel ARP/NDP update later REPLACES that
-    /// neighbor's MAC, the neighbor map advances ONLY that shard's epoch past
-    /// this stamp. The worker fast path compares the two on every hit
-    /// (`neighbor_mac_epoch_stale`) and evicts a stale descriptor so the next
-    /// packet re-resolves the current MAC — closing the post-failover
-    /// stale-MAC blackhole. A periodic refresh that re-learns the SAME MAC
-    /// does NOT advance the epoch, so steady-state traffic never re-misses;
-    /// and a MAC change to an UNRELATED neighbor (a different shard) no longer
-    /// evicts this entry (the #5147 map-wide-thrash fix).
+    /// #3048/#5147: the per-shard `ShardedNeighborMap` resolution epoch
+    /// captured from the pre-resolve snapshot when this descriptor was built.
+    /// The descriptor caches the resolved next-hop `dst_mac`; replacing that
+    /// neighbor's MAC or removing its entry advances ONLY its shard's epoch.
+    /// The worker fast path compares the stamp on every hit
+    /// (`neighbor_mac_epoch_stale`) and evicts a descriptor whose MAC or
+    /// neighbor liveness may be stale, so the next packet re-resolves. A
+    /// same-MAC refresh does NOT advance the epoch, and a mapping change in an
+    /// unrelated shard does not evict this entry (#5147).
     pub(super) neighbor_mac_epoch: u32,
     /// #5147: index of the neighbor shard `neighbor_mac_epoch` was stamped
     /// against — the shard that holds this flow's resolved next-hop
@@ -270,27 +266,26 @@ pub(super) struct FlowCacheEntry {
     /// the fast-path hit is a single indexed atomic load, no hashing.
     /// `NEIGHBOR_SHARD_NONE` marks a flow with no dynamic-neighbor dependency
     /// (no resolved next-hop, e.g. a fabric/local disposition); such a flow
-    /// is never MAC-stale.
+    /// is never neighbor-stale.
     pub(super) neighbor_shard: u16,
 }
 
 /// #5147: sentinel `neighbor_shard` for a cached flow with no resolved
-/// next-hop neighbor (no dynamic-neighbor MAC dependency). Such an entry is
-/// never invalidated by a neighbor MAC change. `NUM_SHARDS` is 64, far below
-/// this value, so it can never collide with a real shard index.
+/// next-hop neighbor (no dynamic-neighbor dependency). Such an entry is
+/// never invalidated by a neighbor mapping change. `NUM_SHARDS` is 64, far
+/// below this value, so it can never collide with a real shard index.
 pub(super) const NEIGHBOR_SHARD_NONE: u16 = u16::MAX;
 
 impl FlowCacheEntry {
-    /// #3048/#5147: true when the neighbor table has recorded a genuine MAC
-    /// change to THIS flow's next-hop neighbor since the descriptor was
-    /// cached, i.e. its captured `dst_mac` may be stale. Reads the live epoch
-    /// of only the flow's own shard (`neighbor_shard`) — a single indexed
-    /// relaxed atomic load + compare on the hot path. Equal epochs (the
-    /// steady-state case, including same-MAC ARP refreshes which never advance
-    /// the counter, AND a MAC change to any neighbor in a DIFFERENT shard)
-    /// keep the entry; an advance of this flow's own shard evicts it. A flow
-    /// with no resolved next-hop (`NEIGHBOR_SHARD_NONE`) has no
-    /// dynamic-neighbor dependency and is never MAC-stale.
+    /// #3048/#5147: true when the neighbor table has changed THIS flow's
+    /// next-hop mapping since the descriptor was cached, so its captured
+    /// `dst_mac` or liveness may be stale. Reads the live epoch of only the
+    /// flow's own shard (`neighbor_shard`) — a single indexed relaxed atomic
+    /// load + compare on the hot path. Equal epochs (including same-MAC ARP
+    /// refreshes and changes to neighbors in a DIFFERENT shard) keep the
+    /// entry; an advance of this flow's own shard evicts it. A flow with no
+    /// resolved next-hop (`NEIGHBOR_SHARD_NONE`) has no dynamic-neighbor
+    /// dependency and is never stale.
     #[inline]
     pub(super) fn neighbor_mac_epoch_stale(
         &self,
@@ -556,18 +551,18 @@ impl FlowCacheEntry {
         // — the OUTER transport ifindex for a tunnel (gr-/wg-) egress, NOT the
         // logical tunnel `egress_ifindex`. `outer_neighbor_ifindex` returns
         // `egress_ifindex` unchanged for a direct/connected/static resolution
-        // (identical to the pre-#5147-review behavior) and the outer ifindex for
-        // a tunnel, matching the `(ifindex, ip)` key `insert_if_changed` bumps
-        // on when the kernel updates the OUTER neighbor. Keying on the logical
+        // (identical to the pre-#5147-review behavior) and the outer ifindex
+        // for a tunnel, matching the `(ifindex, ip)` key whose epoch advances
+        // on a MAC replacement or actual removal. Keying on the logical
         // `egress_ifindex` for tunnels (the review MAJOR) stamped a DIFFERENT
         // shard than the bump, so a tunnel flow never evicted on its outer
-        // gateway's MAC change — a #3048 stale-MAC blackhole. `neighbor_shard`
-        // scopes the MAC-change invalidation: only a change to a neighbor in
-        // THIS shard evicts the entry (targeted, per #5147), not every neighbor
-        // change. A cacheable disposition (ForwardCandidate / FabricRedirect)
-        // always carries a next-hop; the `None` arm marks a
-        // no-dynamic-neighbor-dependency flow that is never MAC-stale. NOTE:
-        // this MUST use the IDENTICAL computation as the pre-resolve epoch
+        // gateway's mapping change — a #3048 stale-MAC blackhole.
+        // `neighbor_shard` scopes invalidation: only a MAC replacement or
+        // removal in THIS shard evicts the entry (targeted, per #5147), not
+        // every neighbor change. A cacheable disposition (ForwardCandidate /
+        // FabricRedirect) always carries a next-hop; the `None` arm marks a
+        // no-dynamic-neighbor-dependency flow that is never neighbor-stale.
+        // NOTE: this MUST use the IDENTICAL computation as the pre-resolve epoch
         // snapshot key in poll_descriptor (`outer_neighbor_ifindex(.., None,
         // ..)`), or the stamped epoch and this shard would key different shards.
         let neighbor_shard = match decision.resolution.next_hop {
@@ -664,18 +659,17 @@ impl FlowCacheEntry {
             // #1219: 0 = "never touched"; first lookup hit will stamp
             // it with the current epoch.
             last_used_epoch: 0,
-            // #3048/#3918/#5147: the neighbor-MAC-change epoch is captured by
-            // the caller BEFORE it resolves the neighbor MAC for `decision`
+            // #3048/#3918/#5147: the neighbor-resolution epoch is captured by
+            // the caller BEFORE it resolves the neighbor for `decision`
             // (the caller owns the `dynamic_neighbors` handle) and passed in
             // as `neighbor_mac_epoch` — the pre-resolve snapshot value for the
             // resolved neighbor's OWN shard (`neighbor_shard`, above). Reading
             // it pre-resolve — instead of a fresh post-resolve shard read at
-            // stamp time — closes the resolve→stamp TOCTOU: a MAC change
-            // landing between the resolve and here advances the live shard
-            // epoch past this stamped (older) value, so the entry is treated
-            // stale on its next fast-path hit (`neighbor_mac_epoch_stale`) and
-            // re-resolved to the current MAC instead of blackholing on the
-            // pre-failover MAC.
+            // stamp time — closes the resolve→stamp TOCTOU: a MAC replacement
+            // or removal landing between the resolve and here advances the
+            // live shard epoch past this stamped (older) value, so the entry
+            // is stale on its next fast-path hit (`neighbor_mac_epoch_stale`)
+            // and re-resolved to the current neighbor state.
             neighbor_mac_epoch,
             neighbor_shard,
         })
@@ -1136,7 +1130,7 @@ impl FlowCache {
     /// promote) needs no undo — the caller's `invalidate_slot` removes the
     /// entry outright, taking that state with it. Only the three tallies
     /// outlive it, so only they are corrected here. This runs on the REJECT
-    /// branch only (a neighbor MAC change / HA invalidation), never on the
+    /// branch only (a neighbor mapping change or HA invalidation), never on the
     /// steady-state hit path, so the fast path is untouched.
     #[inline]
     pub(super) fn reclassify_hit_as_miss(&mut self) {
