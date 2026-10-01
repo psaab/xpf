@@ -793,6 +793,14 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // LOCAL DELIVERY: this is for packets destined to the firewall
                 // itself (management SSH, control plane, etc.). NOT transit.
                 // Safe in strict mode — local delivery must always work.
+                // #11087: established PASS rows bypass worker stage 10, so
+                // enforce LAND here. This is intentionally unconditional and
+                // differs from the worker's profile-gated check_land: an
+                // equal-address host-bound packet is pathological, and
+                // loopback never traverses this XDP hook.
+                if parsed.src_addr == parsed.dst_addr {
+                    return Ok(xdp_action::XDP_DROP);
+                }
                 record_trace(
                     ctrl.flags,
                     ingress_ifindex,

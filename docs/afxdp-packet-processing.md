@@ -259,6 +259,34 @@ Packets that pass all checks get a `UserspaceDpMeta` header prepended via
 `bpf_xdp_adjust_meta` and are redirected to the AF_XDP socket with
 `bpf_redirect_map(&USERSPACE_XSK_MAP, slot)`.
 
+#### Kernel backstop for established local delivery (#11087)
+
+A live `USERSPACE_SESSION_ACTION_PASS_TO_KERNEL` row is terminal in the XDP shim:
+matching host-bound packets go to the kernel without reaching worker screen stage
+10. The shim now drops equal source/destination addresses on that PASS arm. This
+LAND check is intentionally unconditional, unlike the worker's profile-gated
+check; loopback traffic does not traverse the XDP hook.
+
+Flood screens are mirrored in the `inet xpf_hostinbound` **input** chain, which
+still sees XDP-passed traffic. Reply-direction rules run before the established
+reply accept; original-direction rules run after any fine `junos-host` policy.
+UDP and ICMP use per-source thresholds plus the worker's 8x zone-saturation
+ceiling; SYN uses the configured zone attack threshold and only adds a per-source
+meter when `source-threshold` is configured. The backstop does not mirror the
+worker's SYN destination or warning-band alarm subthresholds; those remain
+worker-only. These rules are input-only, so transit continues through the
+worker's original screen path.
+
+The nft backstop is not an exact replica of the worker's keyed sketches: UDP and
+ICMP's kernel primary meters key by source address, while the worker's primary
+meters key by destination (UDP destination address/port, ICMP destination
+address). This intentionally favors a bounded host-stack backstop, and may
+throttle one source talking to multiple local services sooner than the worker
+would. `alarm-without-drop` keeps the nft rules non-dropping; over-threshold
+matches increment named counters and emit rate-limited kernel warning logs, not
+userspace `ScreenAlarm` events. In SYN-cookie mode the kernel backstop drops
+above-threshold SYNs rather than issuing a cookie challenge.
+
 #### Metadata alignment (#7176 / C179-019)
 
 The shim writes `UserspaceDpMeta` with a plain aligned store; the userspace

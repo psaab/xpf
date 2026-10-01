@@ -88,6 +88,13 @@ func runNftNetlinkParityInner(t *testing.T) {
 		// and the broad zone deny (#6405 FIX-2).
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
 	})
+	t.Run("host_inbound_screen_alarm_mode", func(t *testing.T) {
+		alarmViews := append([]dpuserspace.ZoneHostInboundView(nil), views...)
+		alarmViews[0].AlarmWithoutDrop = true
+		oracle := buildHostInboundFilterPayload(alarmViews, unzonedV4, unzonedV6, programs, wgZones, true)
+		spec := toNftHostInboundSpec(alarmViews, unzonedV4, unzonedV6, programs, wg, wgZones, true)
+		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
+	})
 	t.Run("host_inbound_stale_gate_closed", func(t *testing.T) {
 		// #9637-D1: the CLOSED gate must be bit-identical on both surfaces
 		// too — a stale render is byte-identical to the pre-#9637 ruleset
@@ -591,6 +598,13 @@ var iifnameNeSetRe = regexp.MustCompile(`iifname != \{[^{}]*\}`)
 // compare directly (inline Cmp data renders intact).
 var sdifnameSetRe = regexp.MustCompile(`meta sdifname \{[^{}]*\}`)
 
+// nft's parser retains symbolic source-field names in nested meter expressions,
+// while a direct netlink payload key is dumped as bit length and network-header
+// offset. Canonicalize only the IPv4/IPv6 source-address encodings emitted by
+// host-inbound flood meters; malformed or different offsets stay visible.
+var screenFloodIPv4SourceLimitRe = regexp.MustCompile(`\{ @nh,96,32 (limit rate over [0-9]+/second burst [0-9]+ packets) \}`)
+var screenFloodIPv6SourceLimitRe = regexp.MustCompile(`\{ @nh,64,128 (limit rate over [0-9]+/second burst [0-9]+ packets) \}`)
+
 // testMetaKeySDIFNAME is NFT_META_SDIFNAME (slave device name, UAPI value
 // 34 — include/uapi/linux/netfilter/nf_tables.h), mirroring the
 // renderer's pinned constant for per-rule scope decoding.
@@ -613,10 +627,22 @@ func normalizeNftDump(s string) string {
 		ln = iifnameNeSetRe.ReplaceAllString(ln, "iifname != { IFSET }")
 		ln = iifnameSetRe.ReplaceAllString(ln, "iifname { IFSET }")
 		ln = sdifnameSetRe.ReplaceAllString(ln, "meta sdifname { IFSET }")
+		ln = screenFloodIPv4SourceLimitRe.ReplaceAllString(ln, "{ ip saddr $1 }")
+		ln = screenFloodIPv6SourceLimitRe.ReplaceAllString(ln, "{ ip6 saddr $1 }")
 		ln = braceSetRe.ReplaceAllStringFunc(ln, sortBraceSet)
 		out = append(out, ln)
 	}
 	return strings.Join(out, "\n")
+}
+
+func TestNormalizeNftDumpCanonicalizesFloodSourceKeys11087(t *testing.T) {
+	input := "update @v4 { @nh,96,32 limit rate over 20/second burst 20 packets } " +
+		"update @v6 { @nh,64,128 limit rate over 30/second burst 30 packets }"
+	want := "update @v4 { ip saddr limit rate over 20/second burst 20 packets } " +
+		"update @v6 { ip6 saddr limit rate over 30/second burst 30 packets }"
+	if got := normalizeNftDump(input); got != want {
+		t.Fatalf("normalized flood source keys = %q, want %q", got, want)
+	}
 }
 
 func sortBraceSet(set string) string {
@@ -787,7 +813,7 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 		// take, so T1 pins them rule-for-rule: a multi-netdev set (trust), the
 		// named-service union (mgmt), routing protocols (core), the ident-reset
 		// reject (edge), the empty-admit drop (quarantine) and any-service (open).
-		{Zone: "trust", SystemServices: []string{"ssh", "https", "ping", "dns"}, V4Addrs: []string{"10.0.1.1", "10.0.1.2"}, V6Addrs: []string{"2001:db8:1::1"}, IngressNetdevs: []string{"ge-0-0-0", "ge-0-0-0.10"}},
+		{Zone: "trust", SystemServices: []string{"ssh", "https", "ping", "dns"}, V4Addrs: []string{"10.0.1.1", "10.0.1.2"}, V6Addrs: []string{"2001:db8:1::1"}, IngressNetdevs: []string{"ge-0-0-0", "ge-0-0-0.10"}, ICMPFloodThreshold: 30, UDPFloodThreshold: 20, SYNFloodThreshold: 100, SYNFloodSrcThreshold: 5},
 		{Zone: "mgmt", SystemServices: []string{"all"}, V4Addrs: []string{"10.0.9.1"}, IngressNetdevs: []string{"ge-0-0-9"}},
 		{Zone: "core", Protocols: []string{"all"}, V4Addrs: []string{"10.0.5.1"}, V6Addrs: []string{"2001:db8:5::1"}, IngressNetdevs: []string{"ge-0-0-5"}},
 		{Zone: "edge", SystemServices: []string{"ident-reset", "ssh"}, V4Addrs: []string{"10.0.7.1"}, IngressNetdevs: []string{"ge-0-0-7"}},

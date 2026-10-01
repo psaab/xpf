@@ -431,3 +431,40 @@ func TestBuildScreenMissingProfileRefsNoneWhenResolved(t *testing.T) {
 		t.Fatalf("len(refs) = %d, want 0; refs=%+v", len(refs), refs)
 	}
 }
+
+func TestZoneHostInboundViewsCarryScreenFloodProfile11087(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{
+			50: {Number: 50, VlanID: 50},
+		}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"wan": {Name: "wan", Interfaces: []string{"ge-0/0/0.50"}, ScreenProfile: "flood"},
+	}
+	cfg.Security.Screen = map[string]*config.ScreenProfile{
+		"flood": {
+			Name:             "flood",
+			ICMP:             config.ICMPScreen{FloodThreshold: 31},
+			UDP:              config.UDPScreen{FloodThreshold: 41},
+			TCP:              config.TCPScreen{SynFlood: &config.SynFloodConfig{AttackThreshold: 51, SourceThreshold: 7}},
+			AlarmWithoutDrop: true,
+		},
+	}
+	views := BuildZoneHostInboundViewsFromSnapshots(cfg, []InterfaceSnapshot{{
+		Name:      "ge-0/0/0.50",
+		Zone:      "wan",
+		LinuxName: "ge-0-0-0.50",
+		IsUnit:    true,
+		Addresses: []InterfaceAddressSnapshot{{Family: "inet", Address: "192.0.2.1/24"}},
+	}})
+	if len(views) != 1 {
+		t.Fatalf("host-inbound views = %d, want one: %+v", len(views), views)
+	}
+	view := views[0]
+	if view.ICMPFloodThreshold != 31 || view.UDPFloodThreshold != 41 ||
+		view.SYNFloodThreshold != 51 || view.SYNFloodSrcThreshold != 7 ||
+		!view.AlarmWithoutDrop {
+		t.Fatalf("zone screen flood profile did not reach the host-inbound view: %+v", view)
+	}
+}
