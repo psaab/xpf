@@ -69,12 +69,9 @@ func buildNAT64Snapshots(cfg *config.Config) []NAT64RuleSnapshot {
 	}
 	// `security nat natv6v4 no-v6-frag-header` is a global option, but the
 	// dataplane consumes NAT64 state per rule-set. Replicate the flag onto
-	// every emitted rule so the IPv6->IPv4 translator can honor it. The option
-	// is an option-gated LOCAL DF policy (not the size-driven RFC 7915 5.1
-	// selection): when set the translator clears DF so the IPv4 packet stays
-	// fragmentable (DF=0, non-atomic) and carries a generated non-zero,
-	// non-repeating Identification (RFC 6864 4.1) rather than the default DF=1
-	// atomic framing.
+	// every emitted rule so the IPv6->IPv4 translator can honor the explicit
+	// DF-clear override. Without it, RFC 7915 5.1 selects DF from the translated
+	// IPv4 total length (clear through 1260 bytes, set above).
 	noV6FragHeader := cfg.Security.NAT.NATv6v4 != nil && cfg.Security.NAT.NATv6v4.NoV6FragHeader
 	out := make([]NAT64RuleSnapshot, 0, len(cfg.Security.NAT.NAT64))
 	for _, rs := range cfg.Security.NAT.NAT64 {

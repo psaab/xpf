@@ -343,12 +343,10 @@ pub(crate) struct NAT64RuleSnapshot {
         deserialize_with = "crate::protocol::null_tolerant_vec"
     )]
     pub pool_addresses: Vec<String>,
-    /// Mirrors `security nat natv6v4 no-v6-frag-header`. This is an
-    /// option-gated LOCAL DF policy (not the size-driven RFC 7915 5.1
-    /// selection): when set, the IPv6->IPv4 translator clears DF so the
-    /// translated IPv4 packet stays fragmentable (DF=0, non-atomic) and carries
-    /// a generated non-zero, non-repeating Identification (RFC 6864 4.1),
-    /// instead of the default DF=1 atomic framing.
+    /// Mirrors `security nat natv6v4 no-v6-frag-header`. This is an explicit
+    /// local override: when set, header-less IPv6->IPv4 output stays
+    /// fragmentable (DF=0) with a generated non-zero Identification regardless
+    /// of size. Otherwise RFC 7915 §5.1 selects DF from translated IPv4 length.
     #[serde(rename = "no_v6_frag_header", default)]
     pub no_v6_frag_header: bool,
     /// #4559: IPv6-subscriber deterministic CGNAT (mode 2, NAPT64) per-subscriber

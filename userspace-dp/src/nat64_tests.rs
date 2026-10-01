@@ -1546,20 +1546,15 @@ fn translate_v4_to_v6_total_len_below_ihl_returns_none() {
 }
 
 // ---------------------------------------------------------------------------
-// #2008 H16: `security nat natv6v4 no-v6-frag-header` must be honored by the
-// IPv6->IPv4 translator. Before the fix the option parsed, compiled into typed
-// config, and rode the snapshot wire but had NO runtime consumer: the global
-// flag never reached the dataplane snapshot and translate_v6_to_v4 always set
-// the Don't-Fragment (DF) bit. These tests pin the runtime enforcement: the
-// flags+frag-offset word (IPv4 header bytes 6-7) must be DF=1 (0x4000) by
-// default and DF=0 (0x0000) when the option is set. The DF clearing is an
-// option-gated LOCAL policy, not the size-driven RFC 7915 5.1 selection.
+// #2008 H16: the `security nat natv6v4 no-v6-frag-header` override reaches the
+// IPv6-to-IPv4 translator. The RFC 7915 §5.1 default is size-keyed: translated
+// IPv4 packets up to 1260 bytes are fragmentable; larger header-less packets
+// are atomic. The option remains an explicit local override that clears DF
+// even above that threshold. Real IPv6 Fragment Header fields always come from
+// the packet and preserve the mapped fragment geometry.
 //
-// They also pin the DF/Identification consistency the Copilot review on #2014
-// flagged: a DF=1 atomic datagram keeps Identification=0 (legal per RFC 6864
-// 4.1), while a DF=0 fragmentable datagram MUST carry a non-zero, non-repeating
-// Identification drawn from the per-translator generator (RFC 7915 5.1 / RFC
-// 6864 4.1) — pinning ID=0 while clearing DF was the original bug.
+// Every DF-clear output carries a generated non-zero Identification, as
+// required for fragmentable datagrams by RFC 7915 §5.1 / RFC 6864 §4.1.
 // ---------------------------------------------------------------------------
 
 /// Helper: read the IPv4 flags + fragment-offset word from a translated L3
@@ -1575,7 +1570,7 @@ fn ipv4_identification(pkt: &[u8]) -> u16 {
 }
 
 #[test]
-fn translate_v6_to_v4_default_sets_df_bit() {
+fn translate_v6_to_v4_default_clears_df_below_size_threshold() {
     let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let dst_v6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
     let snat_v4 = Ipv4Addr::new(198, 51, 100, 1);
@@ -1584,68 +1579,44 @@ fn translate_v6_to_v4_default_sets_df_bit() {
     let ipv6_pkt = make_ipv6_tcp_packet(src_v6, dst_v6, 12345, 80, b"df");
     let v4 = translate_v6_to_v4(&ipv6_pkt, snat_v4, dst_v4, false).expect("translate");
 
-    // Default (no-v6-frag-header NOT set): DF=1, no fragment offset.
-    assert_eq!(
-        ipv4_frag_word(&v4),
-        0x4000,
-        "default translation must set the DF bit (atomic, non-fragmentable)"
-    );
-    // ID=0 is legal for an ATOMIC datagram (DF=1) per RFC 6864 4.1.
-    assert_eq!(
+    assert_eq!(ipv4_frag_word(&v4), 0, "small default output must clear DF");
+    assert_ne!(
         ipv4_identification(&v4),
         0,
-        "atomic (DF=1) translation keeps Identification=0"
+        "fragmentable default output must use a generated Identification"
     );
-    // Header checksum must still verify.
     assert_eq!(checksum16(&v4[..20]), 0, "IPv4 header checksum must verify");
 }
 
 #[test]
-fn translate_v6_to_v4_no_v6_frag_header_clears_df_bit() {
+fn translate_v6_to_v4_no_v6_frag_header_overrides_size_keyed_df() {
     let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let dst_v6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
     let snat_v4 = Ipv4Addr::new(198, 51, 100, 1);
     let dst_v4 = Ipv4Addr::new(198, 51, 100, 50);
 
-    let ipv6_pkt = make_ipv6_tcp_packet(src_v6, dst_v6, 12345, 80, b"nofrag");
-    let v4 = translate_v6_to_v4(&ipv6_pkt, snat_v4, dst_v4, true).expect("translate");
+    let ipv6_pkt = make_ipv6_tcp_packet(src_v6, dst_v6, 12345, 80, &vec![0x5a; 1221]);
+    let v4 =
+        translate_v6_to_v4(&ipv6_pkt, snat_v4, dst_v4, true).expect("translate with option");
+    let v4_default =
+        translate_v6_to_v4(&ipv6_pkt, snat_v4, dst_v4, false).expect("default translation");
 
-    // With no-v6-frag-header set: DF cleared so the packet stays fragmentable.
+    assert_eq!(v4.len(), 1261);
     assert_eq!(
         ipv4_frag_word(&v4),
-        0x0000,
-        "no-v6-frag-header must clear the DF bit (fragmentable, per RFC 7915 5.1)"
-    );
-    // A fragmentable (DF=0) datagram is NON-ATOMIC. RFC 7915 5.1 sets the
-    // Identification from a per-translator generator, and RFC 6864 4.1 forbids
-    // a constant/repeated ID for non-atomic datagrams. A pinned ID=0 (the
-    // pre-fix bug) would mis-reassemble distinct datagrams when a downstream
-    // router fragments them, so the ID MUST be non-zero here.
-    assert_ne!(
-        ipv4_identification(&v4),
         0,
-        "fragmentable (DF=0) translation MUST carry a non-zero Identification \
-         (RFC 7915 5.1 / RFC 6864 4.1)"
+        "no-v6-frag-header remains an explicit DF-clear override above 1260 bytes"
     );
-    // The change must not break the IPv4 header checksum.
-    assert_eq!(checksum16(&v4[..20]), 0, "IPv4 header checksum must verify");
+    assert_ne!(ipv4_identification(&v4), 0);
+    assert_eq!(ipv4_frag_word(&v4_default), 0x4000);
+    assert_eq!(ipv4_identification(&v4_default), 0);
+    assert_eq!(checksum16(&v4[..20]), 0);
 
-    // Everything else (TTL, protocol, addresses, payload) must be unchanged
-    // relative to the default translation — only the DF bit (bytes 6-7), the
-    // Identification (bytes 4-5), and the resulting header checksum (bytes
-    // 10-11) differ.
-    let v4_default = translate_v6_to_v4(&ipv6_pkt, snat_v4, dst_v4, false).expect("translate");
-    assert_eq!(v4.len(), v4_default.len());
+    // Only the IPv4 fragmentation fields and their dependent checksum differ.
     assert_eq!(v4[8], v4_default[8], "TTL unchanged");
     assert_eq!(v4[9], v4_default[9], "protocol unchanged");
     assert_eq!(&v4[12..20], &v4_default[12..20], "src/dst addresses unchanged");
     assert_eq!(&v4[20..], &v4_default[20..], "L4 payload unchanged");
-    // The frag word is one header field that must differ.
-    assert_ne!(
-        ipv4_frag_word(&v4),
-        ipv4_frag_word(&v4_default),
-        "frag word must differ between the two modes"
-    );
 }
 
 #[test]
@@ -1966,21 +1937,24 @@ fn pseudo_header_checksum_helpers_have_no_per_packet_vec() {
 #[test]
 fn write_v6_to_v4_into_byte_identical_to_vec_translator() {
     // Differential: the allocation-free `_into` core must produce EXACTLY the
-    // same L3 bytes as the legacy Vec translator across protocols, DF modes,
-    // and traffic-class settings. (DF=0 draws a fresh Identification from the
-    // process-global generator each call, so compare those two runs with the
-    // Identification field masked out; everything else must match byte-for-byte
-    // and the DF=1 runs match in full.)
+    // same L3 bytes as the legacy Vec translator for an output above the
+    // 1260-byte threshold, comparing default DF=1 with the explicit DF=0
+    // override. The fragmentable run draws a fresh Identification each call, so
+    // mask that field and its dependent checksum; the atomic runs match in full.
     let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let snat_v4 = Ipv4Addr::new(198, 51, 100, 1);
 
-    let cases: Vec<(Ipv6Addr, Vec<u8>, Ipv4Addr)> = vec![
-        (
+    let cases: Vec<(Ipv6Addr, Vec<u8>, Ipv4Addr)> = vec![(
+        "64:ff9b::c633:6432".parse().unwrap(),
+        make_ipv6_tcp_packet(
+            src_v6,
             "64:ff9b::c633:6432".parse().unwrap(),
-            make_ipv6_tcp_packet(src_v6, "64:ff9b::c633:6432".parse().unwrap(), 12345, 80, b"abc"),
-            Ipv4Addr::new(198, 51, 100, 50),
+            12345,
+            80,
+            &vec![0x5a; 1221],
         ),
-    ];
+        Ipv4Addr::new(198, 51, 100, 50),
+    )];
     for (_dst6, pkt, dst_v4) in cases {
         // DF=1 (atomic): full byte-identity, including Identification (=0).
         let mut buf = vec![0u8; 2048];
@@ -3690,22 +3664,63 @@ fn nat64_v6_to_v4_atomic_fragment_header_df_clear_id_from_packet() {
 }
 
 #[test]
-fn nat64_v6_to_v4_unfragmented_keeps_config_df_policy() {
-    // NO-REGRESSION: a packet with NO Fragment Header keeps the option-gated
-    // atomic DF policy (DF=1 default, DF=0 + generated id with the option).
-    let src_v6: Ipv6Addr = "2001:db8::3".parse().unwrap();
-    let dst_v6: Ipv6Addr = "64:ff9b::c000:0203".parse().unwrap();
-    let snat_v4 = Ipv4Addr::new(198, 51, 100, 3);
-    let dst_v4 = Ipv4Addr::new(192, 0, 2, 3);
-    let pkt = make_ipv6_tcp_packet(src_v6, dst_v6, 1234, 80, b"plain");
+fn translate_v6_to_v4_size_keys_df_at_1260_octets() {
+    let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst_v6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
+    let snat_v4 = Ipv4Addr::new(198, 51, 100, 1);
+    let dst_v4 = Ipv4Addr::new(198, 51, 100, 50);
 
-    let df = translate_v6_to_v4(&pkt, snat_v4, dst_v4, false).expect("translate");
-    assert_eq!(ipv4_frag_word(&df), 0x4000, "default atomic DF=1");
-    assert_eq!(ipv4_identification(&df), 0, "atomic id=0");
+    // 40-byte IPv6 header + 1240-byte payload becomes a 1260-byte IPv4 packet.
+    let at_limit = make_ipv6_tcp_packet(src_v6, dst_v6, 12345, 80, &vec![0x5a; 1220]);
+    let v4_at_limit =
+        translate_v6_to_v4(&at_limit, snat_v4, dst_v4, false).expect("translate at limit");
+    assert_eq!(v4_at_limit.len(), 1260);
+    assert_eq!(
+        ipv4_frag_word(&v4_at_limit),
+        0,
+        "translated IPv4 size 1260 must be fragmentable (DF clear)"
+    );
+    assert_ne!(
+        ipv4_identification(&v4_at_limit),
+        0,
+        "fragmentable packet must have a generated non-zero identification"
+    );
+    assert_eq!(checksum16(&v4_at_limit[..20]), 0);
 
-    let nodf = translate_v6_to_v4(&pkt, snat_v4, dst_v4, true).expect("translate");
-    assert_eq!(ipv4_frag_word(&nodf), 0x0000, "no-v6-frag-header clears DF");
-    assert_ne!(ipv4_identification(&nodf), 0, "fragmentable -> non-zero generated id");
+    // One more byte crosses the RFC threshold and becomes atomic (DF set).
+    let over_limit = make_ipv6_tcp_packet(src_v6, dst_v6, 12345, 80, &vec![0x5a; 1221]);
+    let v4_over_limit =
+        translate_v6_to_v4(&over_limit, snat_v4, dst_v4, false).expect("translate over limit");
+    assert_eq!(v4_over_limit.len(), 1261);
+    assert_eq!(ipv4_frag_word(&v4_over_limit), 0x4000);
+    assert_eq!(ipv4_identification(&v4_over_limit), 0);
+    assert_eq!(checksum16(&v4_over_limit[..20]), 0);
+    let option_override =
+        translate_v6_to_v4(&over_limit, snat_v4, dst_v4, true).expect("translate with override");
+    assert_eq!(ipv4_frag_word(&option_override), 0);
+    assert_ne!(ipv4_identification(&option_override), 0);
+}
+
+#[test]
+fn nat64_v6_to_v4_output_len_matches_large_icmp_error_quote() {
+    let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst_v6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
+    let hop_v6: Ipv6Addr = "2001:db8:ffff::1".parse().unwrap();
+    let embedded_l4 = vec![0x5a; 2000];
+    let embedded = build_v6_with_l4(src_v6, dst_v6, PROTO_TCP, 64, &embedded_l4);
+    let icmp = build_icmpv6_error(1, 0, [0; 4], &embedded);
+    let mut outer = build_v6_with_l4(hop_v6, src_v6, PROTO_ICMPV6_C, 64, &icmp);
+    let checksum = checksum16_ipv6_pseudo(hop_v6, src_v6, PROTO_ICMPV6_C, &outer[40..]);
+    outer[42..44].copy_from_slice(&checksum.to_be_bytes());
+
+    let translated = translate_v6_to_v4(
+        &outer,
+        Ipv4Addr::new(198, 51, 100, 1),
+        Ipv4Addr::new(198, 51, 100, 50),
+        false,
+    )
+    .expect("translate ICMPv6 error");
+    assert_eq!(v6_to_v4_output_len(&outer), Some(translated.len()));
 }
 
 #[test]

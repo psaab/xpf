@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Apply RFC 7915's size-keyed DF policy to translated NAT64 IPv4 packets and
+    fragment eligible outputs to the egress MTU before tunnel encapsulation
+    (#11353).
   * Suppress management-VRF DHCP classless routes contained by connected
     prefixes by default, and warn when the trust override restores them while
     retaining the non-overridable cluster control/fabric fence (#11383).

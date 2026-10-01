@@ -110,3 +110,5 @@ mod cos_shared_exact;
 mod nat64_attribution_6922;
 mod ipsec_selector_fence_10683;
 mod martian_source_11074;
+#[path = "nat64_fragment_11353.rs"]
+mod nat64_fragment_11353;

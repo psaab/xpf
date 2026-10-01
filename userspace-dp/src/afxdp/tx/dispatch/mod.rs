@@ -30,6 +30,7 @@
 // symbol verbatim.
 
 use super::*;
+use smallvec::SmallVec;
 
 use super::tcp_segmentation::segment_forwarded_tcp_frames_into_prepared;
 
@@ -185,18 +186,7 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
     // and `meta.addr_family` its family. Only the WG arm
     // of `post_transform_inner_mtu` consumes this; cheap enough
     // to always derive.
-    let inner_dst = frame_l3_offset(source_frame)
-        .or_else(|| {
-            crate::afxdp::frame::nibble_trusted_stamp(
-                source_frame,
-                meta.l3_offset,
-                meta.addr_family,
-            )
-        })
-        .and_then(|l3| source_frame.get(l3..))
-        .and_then(|pkt| {
-            crate::afxdp::gre::inner_dst_ip(pkt, meta.addr_family)
-        });
+    let inner_dst = forwarded_inner_destination(source_frame, meta);
     let mtu = if is_nat64 || uses_native_tunnel {
         post_transform_inner_mtu(
             decision,
@@ -224,8 +214,36 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
             crate::afxdp::icmp_ptb::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let egress_decision =
-            forwarded_egress_mtu_decision(source_frame, l3, meta.addr_family, mtu);
+        let egress_decision = if is_nat64 && meta.addr_family as i32 == libc::AF_INET6 {
+            let translated = &source_frame[l3..];
+            match crate::nat64::v6_to_v4_output_len(translated) {
+                Some(translated_len) if mtu != 0 => {
+                    let v4_mtu = mtu.saturating_sub(20);
+                    if translated_len <= v4_mtu
+                        || translated_len <= 1260
+                        || forwarding.nat64.no_v6_frag_header
+                        || crate::nat64::ipv6_fragment_header(translated).is_some()
+                    {
+                        // RFC 7915 §5.1: the IPv4 output is fragmentable, so
+                        // fragment it to the next-hop MTU instead of reporting
+                        // an IPv6 Packet Too Big for a packet the translator
+                        // can deliver.
+                        EgressMtuDecision::Forward
+                    } else {
+                        EgressMtuDecision::EmitPacketTooBig {
+                            next_hop_mtu: crate::afxdp::icmp_ptb::clamp_next_hop_mtu(
+                                mtu,
+                                meta.addr_family,
+                            ),
+                        }
+                    }
+                }
+                Some(_) => EgressMtuDecision::Forward,
+                None => forwarded_egress_mtu_decision(source_frame, l3, meta.addr_family, mtu),
+            }
+        } else {
+            forwarded_egress_mtu_decision(source_frame, l3, meta.addr_family, mtu)
+        };
         // #10705: on a NATIVE-TUNNEL path a DF-clear oversize inner is NOT
         // forwardable — the encap builders refuse to emit it (#2331 GRE /
         // #1865 WG: the outer carries DF=1 and cannot fragment
@@ -536,14 +554,20 @@ fn enqueue_copy_fallback_frame(
     let recent_exceptions = inputs.recent_exceptions;
     let mut build_failed = false;
     let mut fallback_to_slow_path = false;
-    match if is_nat64 {
-        build_nat64_forwarded_frame(
+    let built_frames = if is_nat64 {
+        let v4_egress_mtu = if request.meta.addr_family as i32 == libc::AF_INET6 {
+            nat64_v4_egress_mtu(source_frame, request.meta, &request.decision, forwarding)
+        } else {
+            0
+        };
+        crate::afxdp::frame::build_nat64_forwarded_frames(
             source_frame,
             request.meta,
             &request.decision,
             request.nat64_reverse.as_ref(),
             forwarding.nat64.no_v6_frag_header,
             forwarding,
+            v4_egress_mtu,
         )
     } else {
         build_forwarded_frame_from_frame(
@@ -554,96 +578,114 @@ fn enqueue_copy_fallback_frame(
             request.apply_nat_on_fabric,
             expected_ports,
         )
-    } {
-        Some(frame) => {
-            if cfg!(feature = "debug-log") {
-                let source_ports =
-                    live_frame_ports_from_meta_bytes(source_frame, request.meta);
-                // #9782: compare against the POST-NAT tuple — built output
-                // carries translations. nat_applied mirrors the builders'
-                // fabric gate (build/mod.rs).
-                let nat_applied = request.decision.resolution.disposition
-                    != ForwardingDisposition::FabricRedirect
-                    || request.apply_nat_on_fabric;
-                if let Some(reason) = forward_tuple_mismatch_reason(
-                    source_ports,
-                    post_nat_expected_ports(
-                        expected_ports,
+        .map(|frame| {
+            let mut frames = SmallVec::new();
+            frames.push(frame);
+            frames
+        })
+    };
+    match built_frames {
+        Some(frames) => {
+            let mut enqueued = 0usize;
+            for frame in frames {
+                if cfg!(feature = "debug-log") && enqueued == 0 {
+                    let source_ports =
+                        live_frame_ports_from_meta_bytes(source_frame, request.meta);
+                    // #9782: compare against the POST-NAT tuple — built output
+                    // carries translations. nat_applied mirrors the builders'
+                    // fabric gate (build/mod.rs).
+                    let nat_applied = request.decision.resolution.disposition
+                        != ForwardingDisposition::FabricRedirect
+                        || request.apply_nat_on_fabric;
+                    if let Some(reason) = forward_tuple_mismatch_reason(
                         source_ports,
-                        request.decision.nat,
-                        nat_applied,
-                    ),
-                    live_frame_ports_bytes(
-                        &frame,
-                        request.meta.addr_family,
-                        request.meta.protocol,
-                    ),
-                ) {
-                    record_exception_owned(
-                recent_exceptions,
-                ingress_ident,
-                &reason,
-                frame.len() as u32,
-                Some(request.meta.into()),
-                None,
-            );
-                    // Don't continue — the frame was built successfully,
-                    // forward it anyway. Mismatch is diagnostic only.
+                        post_nat_expected_ports(
+                            expected_ports,
+                            source_ports,
+                            request.decision.nat,
+                            nat_applied,
+                        ),
+                        live_frame_ports_bytes(
+                            &frame,
+                            request.meta.addr_family,
+                            request.meta.protocol,
+                        ),
+                    ) {
+                        record_exception_owned(
+                            recent_exceptions,
+                            ingress_ident,
+                            &reason,
+                            frame.len() as u32,
+                            Some(request.meta.into()),
+                            None,
+                        );
+                        // Don't continue — the frame was built successfully,
+                        // forward it anyway. Mismatch is diagnostic only.
+                    }
                 }
-            }
-            let copy_len = frame.len();
-            if copy_frame_is_oversized(copy_len) {
-                record_exception(
-                    recent_exceptions,
-                    ingress_ident,
-                    "oversized_forward_frame",
-                    copy_len as u32,
-                    Some(request.meta.into()),
-                    None,
-                    forwarding,
-                );
-                // #2208: oversized fallback-copy frame —
-                // undeliverable. Fall through to the
-                // finalizer (recycle the ingress
-                // descriptor); the bare `continue;` here
-                // leaked it. Drop-and-recycle, no slow-path
-                // reinject (the frame is already oversized).
-                build_failed = true;
-            } else {
-                let req = TxRequest {
-                    bytes: frame,
-                    expected_ports,
-                    expected_addr_family: request.meta.addr_family,
-                    expected_protocol: request.meta.protocol,
-                    flow_key: flow_key.take(),
-                    egress_ifindex: request.decision.resolution.egress_ifindex,
-                    cos_queue_id: request.cos_queue_id,
-                    dscp_rewrite: request.dscp_rewrite,
-                    mirror_clone: false,
-                    overlap_admissions: overlap_admissions.take(),
-                    enqueue_ns: 0,
-                };
-                if enqueue_local_request_to_target_or_owner(target_binding, req)
-                    .is_err()
-                {
-                    // #2208: cross-binding CoS-owner queue
-                    // full (TX congestion). Set the
-                    // build-failure flags and FALL THROUGH
-                    // to the finalizer instead of the old
-                    // bare `continue;`, which skipped both
-                    // handle_forward_build_failure (the
-                    // slow-path reinject the flags request)
-                    // AND recycle_ingress_frame (leaking the
-                    // ingress descriptor under congestion).
+                let copy_len = frame.len();
+                if copy_frame_is_oversized(copy_len) {
+                    record_exception(
+                        recent_exceptions,
+                        ingress_ident,
+                        "oversized_forward_frame",
+                        copy_len as u32,
+                        Some(request.meta.into()),
+                        None,
+                        forwarding,
+                    );
+                    // #2208: oversized fallback-copy frame —
+                    // undeliverable. Fall through to the
+                    // finalizer (recycle the ingress
+                    // descriptor); the bare `continue;` here
+                    // leaked it. Drop-and-recycle, no slow-path
+                    // reinject (the frame is already oversized).
                     build_failed = true;
-                    fallback_to_slow_path = true;
+                    break;
                 } else {
-                    dbg.enqueue_ok += 1;
-                    dbg.enqueue_copy += 1;
-                    target_binding.tx_counters.pending_copy_tx_packets += 1;
-                    dbg.tx_bytes_total += copy_len as u64;
-                    if (copy_len as u32) > dbg.tx_max_frame {
-                        dbg.tx_max_frame = copy_len as u32;
+                    let req = TxRequest {
+                        bytes: frame,
+                        expected_ports,
+                        expected_addr_family: request.meta.addr_family,
+                        expected_protocol: request.meta.protocol,
+                        flow_key: if enqueued == 0 {
+                            flow_key.take()
+                        } else {
+                            None
+                        },
+                        egress_ifindex: request.decision.resolution.egress_ifindex,
+                        cos_queue_id: request.cos_queue_id,
+                        dscp_rewrite: request.dscp_rewrite,
+                        mirror_clone: false,
+                        overlap_admissions: if enqueued == 0 {
+                            overlap_admissions.take()
+                        } else {
+                            None
+                        },
+                        enqueue_ns: 0,
+                    };
+                    if enqueue_local_request_to_target_or_owner(target_binding, req).is_err() {
+                        // #2208: cross-binding CoS-owner queue
+                        // full (TX congestion). Set the
+                        // build-failure flags and FALL THROUGH
+                        // to the finalizer instead of the old
+                        // bare `continue;`, which skipped both
+                        // handle_forward_build_failure (the
+                        // slow-path reinject the flags request)
+                        // AND recycle_ingress_frame (leaking the
+                        // ingress descriptor under congestion).
+                        build_failed = true;
+                        fallback_to_slow_path = enqueued == 0;
+                        break;
+                    } else {
+                        dbg.enqueue_ok += 1;
+                        dbg.enqueue_copy += 1;
+                        target_binding.tx_counters.pending_copy_tx_packets += 1;
+                        dbg.tx_bytes_total += copy_len as u64;
+                        if (copy_len as u32) > dbg.tx_max_frame {
+                            dbg.tx_max_frame = copy_len as u32;
+                        }
+                        enqueued += 1;
                     }
                 }
             }
@@ -1721,6 +1763,41 @@ fn forwarded_egress_mtu(decision: &SessionDecision, forwarding: &ForwardingState
     )
 
 }
+
+#[inline(always)]
+fn forwarded_inner_destination(
+    source_frame: &[u8],
+    meta: ForwardPacketMeta,
+) -> Option<std::net::IpAddr> {
+    frame_l3_offset(source_frame)
+        .or_else(|| {
+            crate::afxdp::frame::nibble_trusted_stamp(
+                source_frame,
+                meta.l3_offset,
+                meta.addr_family,
+            )
+        })
+        .and_then(|l3| source_frame.get(l3..))
+        .and_then(|packet| crate::afxdp::gre::inner_dst_ip(packet, meta.addr_family))
+}
+
+#[inline(always)]
+fn nat64_v4_egress_mtu(
+    source_frame: &[u8],
+    meta: ForwardPacketMeta,
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+) -> usize {
+    post_transform_inner_mtu(
+        decision,
+        forwarding,
+        true,
+        meta.addr_family,
+        forwarded_egress_mtu(decision, forwarding),
+        forwarded_inner_destination(source_frame, meta),
+    )
+    .saturating_sub(20)
+}
 /// Whether a cache hit can skip the pending-forward dispatcher.
 ///
 /// The inline rewrite path is valid only when the plain egress MTU decision is
@@ -1764,7 +1841,12 @@ fn forwarded_tcp_may_need_segmentation(
     forwarding: &ForwardingState,
 ) -> bool {
     let meta = meta.into();
-    if meta.protocol != PROTO_TCP || decision.resolution.tunnel_endpoint_id != 0 {
+    // NAT64 must translate to IPv4 before applying the IPv4 egress MTU; the
+    // generic segmenters would preserve the input IPv6 family.
+    if meta.protocol != PROTO_TCP
+        || decision.nat.nat64
+        || decision.resolution.tunnel_endpoint_id != 0
+    {
         return false;
     }
     // #5159: use the ACTUAL egress MTU, in lockstep with both segmentation

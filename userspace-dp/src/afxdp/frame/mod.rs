@@ -1,4 +1,5 @@
 use super::*;
+use smallvec::SmallVec;
 
 mod byte_writes;
 pub(crate) mod checksum;
@@ -311,10 +312,41 @@ pub(super) fn build_nat64_forwarded_frame(
     no_v6_frag_header: bool,
     forwarding: &ForwardingState,
 ) -> Option<Vec<u8>> {
+    let mut frames = build_nat64_forwarded_frames(
+        frame,
+        meta,
+        decision,
+        nat64_reverse,
+        no_v6_frag_header,
+        forwarding,
+        0,
+    )?;
+    (frames.len() == 1).then(|| frames.pop()).flatten()
+}
+
+/// Build one or more frames for a NAT64 forward. `v4_egress_mtu` is the
+/// translated IPv4 packet budget; DF-clear IPv4 outputs are fragmented before
+/// any tunnel encapsulation so every emitted frame fits its next hop.
+pub(super) fn build_nat64_forwarded_frames(
+    frame: &[u8],
+    meta: impl Into<ForwardPacketMeta>,
+    decision: &SessionDecision,
+    nat64_reverse: Option<&Nat64ReverseInfo>,
+    no_v6_frag_header: bool,
+    forwarding: &ForwardingState,
+    v4_egress_mtu: usize,
+) -> Option<SmallVec<[Vec<u8>; 1]>> {
     let meta = meta.into();
     let inner = build_nat64_inner_frame(frame, meta, decision, nat64_reverse, no_v6_frag_header)?;
+    let inner_frames = if meta.addr_family as i32 == libc::AF_INET6 {
+        fragment_nat64_ipv4_frame(inner, v4_egress_mtu)?
+    } else {
+        let mut frames = SmallVec::new();
+        frames.push(inner);
+        frames
+    };
     if decision.resolution.tunnel_endpoint_id == 0 {
-        return Some(inner);
+        return Some(inner_frames);
     }
     // §8896: the inner frame's family is the TRANSLATED one, not the ingress
     // family `meta` still describes. Passing `meta` through unchanged is the
@@ -328,13 +360,79 @@ pub(super) fn build_nat64_forwarded_frame(
         .tunnel_endpoints
         .get(&decision.resolution.tunnel_endpoint_id)
         .map(|e| tunnel_mode_kind(&e.mode));
-    match kind {
-        Some(TunnelKind::WireGuard) => wg::wg_encap_frame(&inner, inner_meta, decision, forwarding),
-        Some(TunnelKind::Gre) => {
-            encapsulate_native_gre_frame(&inner, inner_meta, decision, forwarding)
-        }
-        Some(TunnelKind::Unknown) | None => None,
+    let mut frames = SmallVec::new();
+    for inner in inner_frames {
+        let frame = match kind {
+            Some(TunnelKind::WireGuard) => wg::wg_encap_frame(&inner, inner_meta, decision, forwarding)?,
+            Some(TunnelKind::Gre) => {
+                encapsulate_native_gre_frame(&inner, inner_meta, decision, forwarding)?
+            }
+            Some(TunnelKind::Unknown) | None => return None,
+        };
+        frames.push(frame);
     }
+    Some(frames)
+}
+
+/// Fragment a translated IPv4 Ethernet frame to its L3 MTU. The NAT64
+/// translator emits a fixed 20-byte IPv4 header; preserving its Identification
+/// and adding offsets to an existing fragment's offset permits correct
+/// re-fragmentation of IPv6 fragments as well as ordinary datagrams.
+fn fragment_nat64_ipv4_frame(
+    frame: Vec<u8>,
+    mtu: usize,
+) -> Option<SmallVec<[Vec<u8>; 1]>> {
+    let l3 = frame_l3_offset(&frame)?;
+    let ip = frame.get(l3..)?;
+    if ip.len() < 20 || ip[0] != 0x45 {
+        return None;
+    }
+    let total_len = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+    if !(20..=ip.len()).contains(&total_len) {
+        return None;
+    }
+    let frag_word = u16::from_be_bytes([ip[6], ip[7]]);
+    let mut frames = SmallVec::new();
+    if mtu == 0 || total_len <= mtu || frag_word & 0x4000 != 0 {
+        frames.push(frame);
+        return Some(frames);
+    }
+
+    let max_payload = mtu.saturating_sub(20) / 8 * 8;
+    if max_payload == 0 {
+        return None;
+    }
+    let l2_header = &frame[..l3];
+    let ip_header = &frame[l3..l3 + 20];
+    let payload = &frame[l3 + 20..l3 + total_len];
+    let base_offset = (frag_word & 0x1fff) as usize * 8;
+    let original_more = frag_word & 0x2000 != 0;
+    let identification = &ip[4..6];
+    let mut offset = 0usize;
+    while offset < payload.len() {
+        let payload_len = (payload.len() - offset).min(max_payload);
+        let offset_bytes = base_offset.checked_add(offset)?;
+        if offset_bytes % 8 != 0 || offset_bytes / 8 > 0x1fff {
+            return None;
+        }
+        let more = original_more || offset + payload_len < payload.len();
+        let mut fragment = Vec::with_capacity(l3 + 20 + payload_len);
+        fragment.extend_from_slice(l2_header);
+        fragment.extend_from_slice(ip_header);
+        fragment.extend_from_slice(&payload[offset..offset + payload_len]);
+        let ip_start = l3;
+        fragment[ip_start + 2..ip_start + 4]
+            .copy_from_slice(&((20 + payload_len) as u16).to_be_bytes());
+        let fragment_word = (offset_bytes / 8) as u16 | if more { 0x2000 } else { 0 };
+        fragment[ip_start + 6..ip_start + 8].copy_from_slice(&fragment_word.to_be_bytes());
+        fragment[ip_start + 10..ip_start + 12].fill(0);
+        let checksum = checksum16(&fragment[ip_start..ip_start + 20]);
+        fragment[ip_start + 10..ip_start + 12].copy_from_slice(&checksum.to_be_bytes());
+        debug_assert_eq!(&fragment[ip_start + 4..ip_start + 6], identification);
+        frames.push(fragment);
+        offset += payload_len;
+    }
+    (!frames.is_empty()).then_some(frames)
 }
 
 /// Build the translated L3 packet for a permitted NAT64 slow-path handoff.
