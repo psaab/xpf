@@ -154,6 +154,26 @@ func TestRuleDSCPRoundTripsThroughKernel7796(t *testing.T) {
 				"installs a rule that steers the wrong traffic.", prio, got, dscp, line)
 		}
 	}
+	unreachable := netlink.NewRule()
+	unreachable.Family = unix.AF_INET
+	unreachable.Priority = 31505
+	unreachable.Type = pbrTerminatorAction
+	if err := ops.RuleAddDSCP(unreachable, 46); err != nil {
+		t.Fatalf("install DSCP-qualified unreachable action: %v", err)
+	}
+	out, err = exec.Command(ip, "rule", "list").CombinedOutput()
+	if err != nil {
+		t.Fatalf("ip rule list after unreachable action: %v (%s)", err, out)
+	}
+	listing = string(out)
+	line := ruleLineForPriority7796(listing, unreachable.Priority)
+	if !strings.Contains(line, "unreachable") || !strings.Contains(line, "dscp") {
+		t.Fatalf("DSCP-qualified action was not read back as unreachable with its selector: %q", line)
+	}
+	if got, ok := dscpFromRuleLine7796(line); !ok || got != 46 {
+		t.Errorf("DSCP-qualified unreachable action has DSCP %d (valid=%v), want 46: %q",
+			got, ok, line)
+	}
 }
 
 // A rule that sets BOTH the legacy tos and a dscp must be refused rather than
