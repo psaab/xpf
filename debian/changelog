@@ -3,6 +3,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Order next-table and rib-group leak rules by destination prefix specificity
     across leak kinds so overlapping VRF routes follow longest-prefix match
     in both kernel and userspace dataplanes (#11396).
+  * Bind subsequent APT candidate selection to the installer-verified xpf
+    channel with a managed Suite/Codename pin; roll it back on failed install
+    and remove it on package removal (#11133).
   * Initial xpf Debian package (increment A of #1917, subsumes #1923).
     Ships xpfd, xpf-userspace-dp, cli, the day-0 config-drive loader,
     and the systemd units. Binaries install to a dpkg-static staging
@@ -151,6 +154,9 @@ xpf (0.0.0) unstable; urgency=medium
     segmentation, and PMTU signaling (#11411).
   * Refresh learned-route FIBs from coalesced kernel route events, and retry
     unresolved FIB-generation bumps without publishing once per event (#11565).
+  * Preflight userspace snapshots before host-mutating compiler phases, then
+    retain and report accepted snapshot generations when post-publish
+    reconciliation fails (#11080).
   * Keep selector-bearing ip rules out of destination-only FIB leaks, constrain
     explicit next hops to their route's routing instance, and scope/recheck
     transit martians on neighbor replay and final transmit (#11074).

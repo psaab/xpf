@@ -404,28 +404,37 @@ pub(super) fn stage_flow_cache_hit(
             scratch.scratch_recycle.push(desc.addr);
             return FlowCacheOutcome::Consumed;
         }
-        // #3778: behavior-aggregate (DSCP / 802.1p PCP) classifiers are
-        // per-packet in vSRX, but the cached queue was frozen from the SEED
-        // packet's DSCP/PCP (the flow-cache key excludes both). When the seed
-        // marked this descriptor `ba_reclassify` (a BA classifier is active and
-        // no filter forwarding-class pinned the queue), re-resolve THIS packet's
-        // queue from its own DSCP/PCP so a mixed-marking flow is not pinned to
-        // the first packet's queue. Otherwise the frozen queue is correct.
-        let cached_queue_id = if cached_descriptor.tx_selection.ba_reclassify {
-            reclassify_cached_ba_queue(
+        // #3778/#11430: BA classifiers select both the queue and loss-priority
+        // rewrite from each packet's DSCP/PCP, which the flow-cache key excludes.
+        // When the seed marked this descriptor `ba_reclassify`, re-resolve this
+        // packet's queue + CoS rewrite; otherwise the cached selection is stable.
+        let ba_selection = if cached_descriptor.tx_selection.ba_reclassify {
+            reclassify_cached_ba_queue_and_lp_rewrite(
                 worker_ctx.forwarding,
                 cached_decision.resolution.egress_ifindex,
                 meta.dscp,
                 meta.ingress_pcp,
                 meta.ingress_vlan_present != 0,
             )
-            .or(cached_descriptor.tx_selection.queue_id)
         } else {
-            cached_descriptor.tx_selection.queue_id
+            None
         };
-        let cached_dscp_rewrite = policer_action
-            .dscp_rewrite
-            .or(cached_descriptor.tx_selection.dscp_rewrite);
+        let cached_queue_id = ba_selection
+            .map(|(queue_id, _)| queue_id)
+            .or(cached_descriptor.tx_selection.queue_id);
+        // A per-packet policer rewrite remains highest priority. Preserve the
+        // cached filter rewrite, then use the current BA rewrite instead of the
+        // seed's CoS rewrite; non-BA flows retain the complete cached result.
+        let cached_dscp_rewrite = policer_action.dscp_rewrite.or_else(|| {
+            if cached_descriptor.tx_selection.ba_reclassify {
+                cached_descriptor
+                    .tx_selection
+                    .filter_dscp_rewrite
+                    .or_else(|| ba_selection.and_then(|(_, rewrite)| rewrite))
+            } else {
+                cached_descriptor.tx_selection.dscp_rewrite
+            }
+        });
         // #2501: account this forwarded packet against the session. The packet
         // is keyed by its OWN tuple (`flow.forward_key`); `account_packet`
         // derives the direction from the resolved entry and folds both

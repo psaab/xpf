@@ -135,8 +135,12 @@ func TestDeferredReplayRetainsMetadataAfterFirstPublishFailure(t *testing.T) {
 	if h, ok := snapshotContentHash(seed); ok {
 		m.lastSnapshotHash = h
 	}
-	m.compileUserspaceShimHook = func(*config.Config) (*dataplane.CompileResult, error) {
-		return &dataplane.CompileResult{}, nil
+	m.compileUserspaceShimHook = func(_ *config.Config, preflight func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error) {
+		result := &dataplane.CompileResult{}
+		if err := preflight(result); err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 	m.deferWorkers = true
 	m.SetPolicyRenameAncestry(
