@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Require the FBF steering smoke to verify IPv4 and IPv6 forwarding at the
+    managed VLAN-80 peer against the resolved ISP-B gateway MAC, reject drop
+    and wrong-egress cases, and discover inline/nexthop-id ECMP routes (#11306).
   * Order next-table and rib-group leak rules by destination prefix specificity
     across leak kinds so overlapping VRF routes follow longest-prefix match
     in both kernel and userspace dataplanes (#11396).
