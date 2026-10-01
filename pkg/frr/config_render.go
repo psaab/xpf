@@ -281,10 +281,10 @@ func dhcpClasslessCoveredByRIB(fc *FullConfig, dr DHCPRoute) string {
 
 func dhcpClasslessCoveredByPrefix(destination string, learned netip.Prefix) string {
 	prefix, err := netip.ParsePrefix(destination)
-	// A dynamic default is only the fallback path; it does not protect
-	// specific option-121 destinations. Configured static defaults retain
-	// their existing separate suppression rule.
-	if err != nil || prefix.Bits() == 0 {
+	// A dynamic default is only a fallback and does not protect a more-specific
+	// learned route. An equal default, however, is the same installed prefix
+	// and must participate in the live-RIB precedence check.
+	if err != nil || (prefix.Bits() == 0 && learned.Bits() != 0) {
 		return ""
 	}
 	if prefix.Addr().BitLen() != learned.Addr().BitLen() ||
@@ -639,10 +639,11 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 	}
 	wrote := false
 	for _, dr := range fc.DHCPRoutes {
-		// Destination: empty means the default route; a non-empty value is
-		// an RFC 3442 classless static route (option 121 / legacy 249).
+		// Empty Destination means the ordinary default-router gateway. A
+		// non-empty value is a classless route from DHCPv4 or IPv6 RIO;
+		// explicit IPv6 ::/0 must follow the same classless safety gates.
 		dest := dr.Destination
-		isDefault := dest == "" || dest == "0.0.0.0/0" || dest == "::/0"
+		isDefault := dest == "" || dest == "0.0.0.0/0"
 		if isDefault {
 			// A configured static default of the same family suppresses the
 			// DHCP-learned default (a static default wins). Renderability is
@@ -652,24 +653,6 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 				dest = "::/0"
 				if hasV6Default[dr.VRF] {
 					continue
-				}
-				// An explicit ::/0 is an RIO classless route, not the
-				// ordinary RA default-router gateway (which has no destination).
-				if dr.Destination == "::/0" {
-					if reason := dhcpClasslessPrefixSafetyFailure(dest); reason != "" {
-						if trustClassless {
-							slog.Warn("SECURITY: DHCP classless trust override allows "+
-								"an unsafe IPv6 RIO default route (#11425)",
-								"destination", dest, "reason", reason, "gateway", dr.Gateway,
-								"env", dhcpClasslessTrustOverrideEnv, "vrf", dr.VRF)
-						} else {
-							slog.Warn("SECURITY: refusing unsafe DHCP classless route "+
-								"(broad/martian prefix, #11425)",
-								"destination", dest, "reason", reason,
-								"gateway", dr.Gateway, "vrf", dr.VRF)
-							continue
-						}
-					}
 				}
 			} else {
 				dest = "0.0.0.0/0"

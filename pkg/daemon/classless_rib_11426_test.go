@@ -122,7 +122,10 @@ func TestCollectFRRClasslessRIBSkipsLookupWithoutClasslessRoutes11426(t *testing
 	}
 	d := &Daemon{routing: routing.NewManagerWithRouteListerForTest(lister)}
 	routes, failed := d.collectFRRClasslessRIBRoutes(
-		&config.Config{}, []frr.DHCPRoute{{Gateway: "192.0.2.1"}},
+		&config.Config{}, []frr.DHCPRoute{
+			{Gateway: "192.0.2.1"},
+			{Destination: "0.0.0.0/0", Gateway: "192.0.2.1"},
+		},
 	)
 	if failed || len(routes) != 0 {
 		t.Fatalf("default-only DHCP state queried/failed the classless RIB inventory: routes=%+v failed=%v", routes, failed)
@@ -191,5 +194,36 @@ func TestCollectFRRClasslessRIBFailsClosedWithoutRoutingManager11426(t *testing.
 	)
 	if !failed || len(routes) != 0 {
 		t.Fatalf("missing route manager did not fail closed: routes=%+v failed=%v", routes, failed)
+	}
+}
+
+func TestAssembleFRRConfigMarksUnavailableRIODefaultInventoryFailed11738(t *testing.T) {
+	store := testStoreWithSetConfig(t, []string{
+		"set interfaces ge-0/0/1 unit 0 family inet6 dhcpv6-client client-type statefull",
+	})
+	dhcpManager := dhcp.NewManagerForTesting(nil)
+	dhcpManager.SeedLeaseForTesting("ge-0-0-1", dhcp.AFInet6, &dhcp.Lease{
+		Interface: "ge-0-0-1",
+		Family:    dhcp.AFInet6,
+		ClasslessRoutes: []dhcp.LeaseRoute{{
+			Destination: netip.MustParsePrefix("::/0"),
+			Gateway:     netip.MustParseAddr("fe80::1"),
+		}},
+	})
+	d := &Daemon{store: store, dhcp: dhcpManager}
+	fc := d.assembleFRRConfig(store.ActiveConfig(), nil)
+
+	foundRIODefault := false
+	for _, route := range fc.DHCPRoutes {
+		if route.Destination == "::/0" && route.IsIPv6 {
+			foundRIODefault = true
+			break
+		}
+	}
+	if !foundRIODefault {
+		t.Fatalf("assembler dropped the DHCPv6 RIO default: %+v", fc.DHCPRoutes)
+	}
+	if !fc.RIBRouteInventoryFailed {
+		t.Fatal("unavailable RIB inventory for an RIO default must fail closed")
 	}
 }

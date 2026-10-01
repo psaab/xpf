@@ -117,28 +117,53 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 			}
 			slog.Warn("DHCPv6: solicit failed, retrying",
 				"interface", ifaceName, "err", err, "backoff", backoff)
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				if cancelAcquire != nil {
-					cancelAcquire()
+			// Keep reacquisition backoff on the production timer: unlike T1/T2,
+			// it is also the pacing boundary that lets an expiring held lease
+			// be withdrawn before another Solicit.
+			retryWait := time.After(backoff)
+			if committed != nil {
+				var waited bool
+				committed, waited = m.waitForIPv6TimerOrRA(acquireCtx, retryWait, key, ifaceName, committed)
+				if !waited {
+					if ctx.Err() != nil {
+						if cancelAcquire != nil {
+							cancelAcquire()
+						}
+						return
+					}
+					m.abandonLeaseAfterExpiry(key, committed)
+					committed = nil
+					committedPDs = nil
+					leaseExpiryPending = false
+					if cancelAcquire != nil {
+						cancelAcquire()
+					}
+					continue
 				}
-				return
-			case <-expiryDone:
-				if ctx.Err() != nil {
+			} else {
+				select {
+				case <-retryWait:
+				case <-ctx.Done():
 					if cancelAcquire != nil {
 						cancelAcquire()
 					}
 					return
+				case <-expiryDone:
+					if ctx.Err() != nil {
+						if cancelAcquire != nil {
+							cancelAcquire()
+						}
+						return
+					}
+					m.abandonLeaseAfterExpiry(key, committed)
+					committed = nil
+					committedPDs = nil
+					leaseExpiryPending = false
+					if cancelAcquire != nil {
+						cancelAcquire()
+					}
+					continue
 				}
-				m.abandonLeaseAfterExpiry(key, committed)
-				committed = nil
-				committedPDs = nil
-				leaseExpiryPending = false
-				if cancelAcquire != nil {
-					cancelAcquire()
-				}
-				continue
 			}
 			if cancelAcquire != nil {
 				cancelAcquire()
@@ -147,6 +172,30 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 			continue
 		}
 
+		if ctx.Err() != nil {
+			if cancelAcquire != nil {
+				cancelAcquire()
+			}
+			if committed != nil && committed.Address.IsValid() {
+				m.removeAddress(ifaceName, committed)
+			}
+			m.mu.Lock()
+			delete(m.leases, key)
+			delete(m.delegatedPDs, ifaceName)
+			m.mu.Unlock()
+			return
+		}
+		if !stateless && leaseExpiryPending &&
+			(acquireCtx.Err() != nil || !time.Now().Before(leaseExpiryAt)) {
+			if cancelAcquire != nil {
+				cancelAcquire()
+			}
+			m.abandonLeaseAfterExpiry(key, committed)
+			committed = nil
+			committedPDs = nil
+			leaseExpiryPending = false
+			continue
+		}
 		if cancelAcquire != nil {
 			cancelAcquire()
 		}
@@ -221,72 +270,52 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				leaseCtx, cancelLease = context.WithDeadline(ctx, deadline)
 			}
 
-			// Keep the RA state live independently of DHCP T1. The separate
-			// timer also wakes at the current router/RIO lifetime boundary.
 			t1Wait := m.after(t1)
-			for {
-				raWait := m.afterRA(nextIPv6RARefreshDelay(committed, time.Now()))
-				select {
-				case <-t1Wait:
-					slog.Info("DHCPv6: T1 expired, renewing", "interface", ifaceName)
-					goto t1Expired
-				case <-leaseCtx.Done():
-					if ctx.Err() != nil {
-						cancelLease()
-						if committed.Address.IsValid() {
-							m.removeAddress(ifaceName, committed)
-						}
-						m.mu.Lock()
-						delete(m.leases, key)
-						delete(m.delegatedPDs, ifaceName)
-						m.mu.Unlock()
-						return
+			var t1Expired bool
+			committed, t1Expired = m.waitForIPv6TimerOrRA(
+				leaseCtx, t1Wait, key, ifaceName, committed,
+			)
+			if !t1Expired {
+				if ctx.Err() != nil {
+					cancelLease()
+					if committed.Address.IsValid() {
+						m.removeAddress(ifaceName, committed)
 					}
+					m.mu.Lock()
+					delete(m.leases, key)
+					delete(m.delegatedPDs, ifaceName)
+					m.mu.Unlock()
+					return
+				}
+				m.abandonLeaseAfterExpiry(key, committed)
+				committed = nil
+				committedPDs = nil
+				cancelLease()
+				break renewalLoop
+			}
+			slog.Info("DHCPv6: T1 expired, renewing", "interface", ifaceName)
+			// T1 renewal attempt — RENEW to the granting server, NOT a
+			// fresh Solicit (#2994).
+			renewed, rerr := m.v6Exchange(leaseCtx, ifaceName, exchangeRenew, committed, committedPDs)
+			if rerr == nil {
+				if ctx.Err() != nil {
+					cancelLease()
+					if committed.Address.IsValid() {
+						m.removeAddress(ifaceName, committed)
+					}
+					m.mu.Lock()
+					delete(m.leases, key)
+					delete(m.delegatedPDs, ifaceName)
+					m.mu.Unlock()
+					return
+				}
+				if !stateless && leaseCtx.Err() != nil {
 					m.abandonLeaseAfterExpiry(key, committed)
 					committed = nil
 					committedPDs = nil
 					cancelLease()
 					break renewalLoop
-				case <-raWait:
-					expired := *committed
-					expired.ClasslessRoutes = append([]LeaseRoute(nil), committed.ClasslessRoutes...)
-					expired.raRouteExpires = cloneRARouteExpiries(committed.raRouteExpires)
-					expireIPv6RouterState(&expired, time.Now())
-					if leaseContentChanged(committed, &expired) {
-						m.commitRouterAdvertisementState(key, &expired, committed)
-						committed = &expired
-					}
-					routers := m.observedRouterAdvertisements(leaseCtx, ifaceName)
-					if ctx.Err() != nil {
-						cancelLease()
-						if committed.Address.IsValid() {
-							m.removeAddress(ifaceName, committed)
-						}
-						m.mu.Lock()
-						delete(m.leases, key)
-						delete(m.delegatedPDs, ifaceName)
-						m.mu.Unlock()
-						return
-					}
-					if !stateless && leaseCtx.Err() != nil {
-						m.abandonLeaseAfterExpiry(key, committed)
-						committed = nil
-						committedPDs = nil
-						cancelLease()
-						break renewalLoop
-					}
-					refreshed := applyIPv6RouterAdvertisements(committed, committed, routers, time.Now())
-					m.commitRouterAdvertisementState(key, refreshed, committed)
-					committed = refreshed
 				}
-			}
-
-		t1Expired:
-
-			// T1 renewal attempt — RENEW to the granting server, NOT a
-			// fresh Solicit (#2994).
-			renewed, rerr := m.v6Exchange(leaseCtx, ifaceName, exchangeRenew, committed, committedPDs)
-			if rerr == nil {
 				reconciledPDs, applyPDs := reconcileDelegatedPDs(committedPDs, renewed.prefixes, renewed.withdrawnPDs)
 				if cerr := m.commitLease(key, renewed.lease, committed, reconciledPDs, committedPDs, applyPDs); cerr != nil {
 					slog.Warn("DHCPv6: failed to apply renewed lease, re-acquiring",
@@ -339,10 +368,13 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 			slog.Warn("DHCPv6: T1 renewal failed, waiting for T2",
 				"interface", ifaceName, "err", rerr)
 
-			// Wait for T2 (87.5% of lease) — remaining time after T1.
-			select {
-			case <-m.after(t2Remaining):
-			case <-leaseCtx.Done():
+			// Keep Router Advertisement state current until the T2 attempt.
+			t2Wait := m.after(t2Remaining)
+			var t2Expired bool
+			committed, t2Expired = m.waitForIPv6TimerOrRA(
+				leaseCtx, t2Wait, key, ifaceName, committed,
+			)
+			if !t2Expired {
 				if ctx.Err() != nil {
 					cancelLease()
 					if committed.Address.IsValid() {
@@ -365,6 +397,24 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 			// bounded by the absolute lease deadline.
 			renewed, rerr = m.v6Exchange(leaseCtx, ifaceName, exchangeRebind, committed, committedPDs)
 			if rerr == nil {
+				if ctx.Err() != nil {
+					cancelLease()
+					if committed.Address.IsValid() {
+						m.removeAddress(ifaceName, committed)
+					}
+					m.mu.Lock()
+					delete(m.leases, key)
+					delete(m.delegatedPDs, ifaceName)
+					m.mu.Unlock()
+					return
+				}
+				if !stateless && leaseCtx.Err() != nil {
+					m.abandonLeaseAfterExpiry(key, committed)
+					committed = nil
+					committedPDs = nil
+					cancelLease()
+					break renewalLoop
+				}
 				reconciledPDs, applyPDs := reconcileDelegatedPDs(committedPDs, renewed.prefixes, renewed.withdrawnPDs)
 				if cerr := m.commitLease(key, renewed.lease, committed, reconciledPDs, committedPDs, applyPDs); cerr != nil {
 					slog.Warn("DHCPv6: failed to apply rebound lease, re-acquiring",

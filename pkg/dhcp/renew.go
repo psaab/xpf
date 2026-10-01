@@ -127,6 +127,9 @@ func (m *Manager) v6Exchange(ctx context.Context, ifaceName string, mode dhcpExc
 		result.routers = m.observedRouterAdvertisements(ctx, ifaceName)
 		result.raSampled = true
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	result.lease = applyIPv6RouterAdvertisements(prev, result.lease, result.routers, time.Now())
 	return result, nil
 }

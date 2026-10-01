@@ -278,8 +278,7 @@ func (d *Daemon) collectFRRClasslessRIBRoutes(
 	}
 	hasClassless := false
 	for _, route := range dhcpRoutes {
-		if route.Destination != "" && route.Destination != "0.0.0.0/0" &&
-			route.Destination != "::/0" {
+		if route.Destination != "" && route.Destination != "0.0.0.0/0" {
 			hasClassless = true
 			break
 		}
