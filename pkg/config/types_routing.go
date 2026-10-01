@@ -289,10 +289,9 @@ type NextHopEntry struct {
 	Preference    int
 	HasPreference bool
 	// Metric is this next-hop's `qualified-next-hop <gw> { metric M; }` value
-	// (#3871). Carried in the typed config for parity/display; FRR's static
-	// route CLI (`ip route NET GW [DISTANCE]`) has no per-route metric field,
-	// so the floating behavior is expressed entirely through the per-next-hop
-	// admin distance (Preference), not Metric. Valid only when HasMetric.
+	// (#3871). It is not a static-route CLI operand; #11447 carries it into
+	// IGP redistribution route-maps, where destination and next-hop matching
+	// preserve per-qualified-next-hop export costs. Valid only when HasMetric.
 	Metric    int
 	HasMetric bool
 }

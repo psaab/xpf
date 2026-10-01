@@ -234,7 +234,12 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 	if len(bgpAccept) > 0 {
 		bgpAcceptDefault = bgpAccept[0]
 	}
+	return m.generatePolicyOptionsWithQNH11447(po, bgpAcceptDefault, nil)
+}
+
+func (m *Manager) generatePolicyOptionsWithQNH11447(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, qnhMetrics *qnhMetricSet11447) string {
 	var b strings.Builder
+	b.WriteString(qnhMetrics.renderPrefixLists())
 
 	// Generate FRR prefix-lists from Junos prefix-lists
 	names := make([]string, 0, len(po.PrefixLists))
@@ -456,6 +461,13 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 				b.WriteString(renderQuarantineDenyRouteMap(redistFailClosedRouteMap(name)))
 				b.WriteString("!\n")
 			}
+			for _, scope := range qnhMetrics.scopes() {
+				if alias := scope.policyMaps[name]; alias != "" {
+					m.noteQuarantined(alias)
+					b.WriteString(renderQuarantineDenyRouteMap(alias))
+					b.WriteString("!\n")
+				}
+			}
 			continue
 		}
 		// Base route-map: Junos BGP default-accept (#2998) vs the fail-closed
@@ -473,8 +485,15 @@ func (m *Manager) generatePolicyOptions(po *config.PolicyOptionsConfig, bgpAccep
 			b.WriteString(m.renderRouteMapForPolicy(po, redistFailClosedRouteMap(name), ps, "deny"))
 			b.WriteString("!\n")
 		}
+		for _, scope := range qnhMetrics.scopes() {
+			if alias := scope.policyMaps[name]; alias != "" {
+				b.WriteString(m.renderQNHMetricPolicyMap11447(po, alias, ps, scope))
+				b.WriteString("!\n")
+			}
+		}
 	}
 
+	b.WriteString(m.generateQNHMetricStaticMaps11447(qnhMetrics))
 	return b.String()
 }
 

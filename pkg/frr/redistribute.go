@@ -86,8 +86,30 @@ type redistEntry struct {
 // resolveRedistribute renders an export as OSPF/RIP/BGP-shaped
 // `redistribute <proto> [route-map X]` lines. IS-IS has a different grammar
 // and uses resolveISISRedistribute instead (#9666).
-func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool) string {
-	return formatRedistEntries(m.redistributeEntries(export, po, self, bgpAcceptDefault))
+// The optional qualified-next-hop metric scope is passed by IGP call sites
+// only; BGP MED is distinct and must not consume the IGP export cost.
+func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool, metrics ...*qnhMetricScope11447) string {
+	return formatRedistEntries(m.redistributeEntries(export, po, self, bgpAcceptDefault, metrics...))
+}
+
+func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, entries []redistEntry) {
+	if metrics == nil {
+		return
+	}
+	routeMap := ""
+	if export == "static" && knownRedistProtocol(export) {
+		routeMap = metrics.staticMap
+	} else {
+		routeMap = metrics.policyMaps[export]
+	}
+	if routeMap == "" {
+		return
+	}
+	for i := range entries {
+		if entries[i].proto == "static" {
+			entries[i].routeMap = routeMap
+		}
+	}
 }
 
 func formatRedistEntries(entries []redistEntry) string {
@@ -120,8 +142,8 @@ func formatRedistEntries(entries []redistEntry) string {
 // the is-type line uses (#8446): level-1 -> level-1; level-1-2 -> one line per
 // level, since a router in both levels redistributes into both and each FRR
 // line names one; everything else -> the narrow level-2 default.
-func (m *Manager) resolveISISRedistribute(export string, po *config.PolicyOptionsConfig, isisLevel string, bgpAcceptDefault map[string]bool) string {
-	return isisRedistributeLines(m.redistributeEntries(export, po, "isis", bgpAcceptDefault), isisLevel)
+func (m *Manager) resolveISISRedistribute(export string, po *config.PolicyOptionsConfig, isisLevel string, bgpAcceptDefault map[string]bool, metrics ...*qnhMetricScope11447) string {
+	return isisRedistributeLines(m.redistributeEntries(export, po, "isis", bgpAcceptDefault, metrics...), isisLevel)
 }
 
 func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
@@ -163,8 +185,12 @@ func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
 	return sb.String()
 }
 
-func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool) []redistEntry {
-	return m.redistributeEntriesAt(export, po, self, self, bgpAcceptDefault)
+func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool, metrics ...*qnhMetricScope11447) []redistEntry {
+	entries := m.redistributeEntriesAt(export, po, self, self, bgpAcceptDefault)
+	if len(metrics) > 0 {
+		applyQNHMetricRouteMap11447(export, metrics[0], entries)
+	}
+	return entries
 }
 
 // resolveBGPIPv6Redistribute renders a BGP bare-token export into
@@ -173,7 +199,8 @@ func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsCon
 // grammar installed in that address family ("bgp-ipv6"), and indents the lines
 // one level deeper to sit inside the block.
 func (m *Manager) resolveBGPIPv6Redistribute(export string, po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool) string {
-	return indentFRRLines(formatRedistEntries(m.redistributeEntriesAt(export, po, "bgp", "bgp-ipv6", bgpAcceptDefault)), " ")
+	entries := m.redistributeEntriesAt(export, po, "bgp", "bgp-ipv6", bgpAcceptDefault)
+	return indentFRRLines(formatRedistEntries(entries), " ")
 }
 
 func indentFRRLines(s, prefix string) string {

@@ -1,0 +1,372 @@
+package frr
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"log/slog"
+	"net/netip"
+	"sort"
+	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
+)
+
+// qnhMetricRoute11447 is one renderable static route / qualified-next-hop
+// metric pair. Matching both the destination and the configured next hop is
+// essential: plain and qualified next hops for one prefix coexist while the
+// plain next hop is active, and a prefix-only map would assign the backup's
+// metric to the primary route as well.
+type qnhMetricRoute11447 struct {
+	destination     string
+	destinationList string
+	nextHop         string
+	nextHopList     string
+	interfaceName   string
+	metric          int
+	ipv6            bool
+}
+
+type qnhMetricScope11447 struct {
+	key        string
+	staticMap  string
+	policyMaps map[string]string
+	routes     []qnhMetricRoute11447
+}
+
+type qnhMetricSet11447 struct {
+	global    *qnhMetricScope11447
+	instances []*qnhMetricScope11447
+}
+
+func qnhMetricName11447(kind, identity string) string {
+	sum := sha256.Sum256([]byte(kind + "\x00" + identity))
+	return "xpf-qnh-" + kind + "-" + hex.EncodeToString(sum[:])[:16] + config.ReservedRedistSuffix
+}
+
+func qnhMetricPrefixListName11447(kind, identity string) string {
+	sum := sha256.Sum256([]byte(kind + "\x00" + identity))
+	return "xpf-qnh-" + kind + "-" + hex.EncodeToString(sum[:])[:16]
+}
+
+func qnhMetricScopeKey11447(index int, inst InstanceConfig) string {
+	if inst.Name != "" {
+		return fmt.Sprintf("instance:%d:%s", index, inst.Name)
+	}
+	if inst.VRFName != "" {
+		return fmt.Sprintf("instance:%d:%s", index, inst.VRFName)
+	}
+	return fmt.Sprintf("instance:%d:table:%d", index, inst.TableID)
+}
+
+func qnhMetricCandidate11447(routeSets ...[]*config.StaticRoute) bool {
+	for _, routes := range routeSets {
+		for _, route := range routes {
+			if route == nil || route.NoInstall || route.NextTable != "" {
+				continue
+			}
+			for _, nh := range route.NextHops {
+				if nh.HasMetric {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func buildQNHMetricScope11447(key string, resolveIfName func(string) string, routeSets ...[]*config.StaticRoute) *qnhMetricScope11447 {
+	byMatcher := make(map[string]qnhMetricRoute11447)
+	for _, routes := range routeSets {
+		for _, route := range routes {
+			if route == nil || route.NoInstall || route.NextTable != "" || !validFRRRoutePrefix(route.Destination) {
+				continue
+			}
+			dst, err := netip.ParsePrefix(route.Destination)
+			if err != nil {
+				addr, parseErr := netip.ParseAddr(route.Destination)
+				if parseErr != nil || addr.Is4In6() {
+					continue
+				}
+				bits := 128
+				if addr.Is4() {
+					bits = 32
+				}
+				dst = netip.PrefixFrom(addr, bits)
+			}
+			destination := dst.Masked().String()
+			for _, nh := range route.NextHops {
+				if !nh.HasMetric || nh.Metric < 0 || uint64(nh.Metric) > uint64(^uint32(0)) {
+					continue
+				}
+				entry := qnhMetricRoute11447{destination: destination, metric: nh.Metric, ipv6: dst.Addr().Is6()}
+				if nh.Address != "" {
+					gateway, err := netip.ParseAddr(nh.Address)
+					if err != nil || gateway.Is4In6() || gateway.Is6() != entry.ipv6 {
+						continue
+					}
+					entry.nextHop = gateway.String()
+					entry.nextHopList = qnhMetricPrefixListName11447("nh", key+"\x00"+destination+"\x00"+entry.nextHop+"\x00"+nh.Interface)
+				}
+				if nh.Interface != "" {
+					entry.interfaceName = nh.Interface
+					if resolveIfName != nil {
+						entry.interfaceName = resolveIfName(entry.interfaceName)
+					}
+					if strings.HasSuffix(entry.interfaceName, ".0") {
+						entry.interfaceName = strings.TrimSuffix(entry.interfaceName, ".0")
+					}
+					if !validFRRInterfaceOperand(entry.interfaceName) {
+						continue
+					}
+				}
+				if entry.nextHop == "" && entry.interfaceName == "" {
+					continue
+				}
+				entry.destinationList = qnhMetricPrefixListName11447("dst", key+"\x00"+route.Destination+"\x00"+entry.nextHop+"\x00"+entry.interfaceName)
+				matcher := route.Destination + "\x00" + entry.nextHop + "\x00" + entry.interfaceName
+				byMatcher[matcher] = entry
+			}
+		}
+	}
+	if len(byMatcher) == 0 {
+		return nil
+	}
+	scope := &qnhMetricScope11447{
+		key:       key,
+		staticMap: qnhMetricName11447("static", key),
+	}
+	for _, route := range byMatcher {
+		scope.routes = append(scope.routes, route)
+	}
+	sort.Slice(scope.routes, func(i, j int) bool {
+		a, b := scope.routes[i], scope.routes[j]
+		if a.destination != b.destination {
+			return a.destination < b.destination
+		}
+		if a.nextHop != b.nextHop {
+			return a.nextHop < b.nextHop
+		}
+		if a.interfaceName != b.interfaceName {
+			return a.interfaceName < b.interfaceName
+		}
+		return a.metric < b.metric
+	})
+	return scope
+}
+
+func buildQNHMetricSet11447(fc *FullConfig, po *config.PolicyOptionsConfig) *qnhMetricSet11447 {
+	if fc == nil {
+		return nil
+	}
+	hasCandidates := qnhMetricCandidate11447(fc.StaticRoutes, fc.Inet6StaticRoutes)
+	for _, inst := range fc.Instances {
+		hasCandidates = hasCandidates || qnhMetricCandidate11447(inst.StaticRoutes, inst.Inet6StaticRoutes)
+	}
+	if !hasCandidates {
+		return nil
+	}
+	resolveIfName := fc.ifNameResolver()
+	set := &qnhMetricSet11447{
+		global:    buildQNHMetricScope11447("global", resolveIfName, fc.StaticRoutes, fc.Inet6StaticRoutes),
+		instances: make([]*qnhMetricScope11447, len(fc.Instances)),
+	}
+	for i, inst := range fc.Instances {
+		set.instances[i] = buildQNHMetricScope11447(qnhMetricScopeKey11447(i, inst), resolveIfName, inst.StaticRoutes, inst.Inet6StaticRoutes)
+	}
+	if po != nil {
+		for _, scope := range set.scopes() {
+			scope.policyMaps = make(map[string]string)
+			for name, ps := range po.PolicyStatements {
+				if policyHasStaticSource11447(ps) {
+					scope.policyMaps[name] = qnhMetricName11447("policy", scope.key+"\x00"+name)
+				}
+			}
+		}
+	}
+	if set.global == nil {
+		any := false
+		for _, scope := range set.instances {
+			any = any || scope != nil
+		}
+		if !any {
+			return nil
+		}
+	}
+	return set
+}
+
+func (s *qnhMetricSet11447) scopes() []*qnhMetricScope11447 {
+	if s == nil {
+		return nil
+	}
+	out := make([]*qnhMetricScope11447, 0, len(s.instances)+1)
+	if s.global != nil {
+		out = append(out, s.global)
+	}
+	for _, scope := range s.instances {
+		if scope != nil {
+			out = append(out, scope)
+		}
+	}
+	return out
+}
+
+func policyHasStaticSource11447(ps *config.PolicyStatement) bool {
+	if ps == nil {
+		return false
+	}
+	for _, term := range ps.Terms {
+		for _, source := range term.FromProtocols {
+			if source == "static" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *qnhMetricSet11447) renderPrefixLists() string {
+	var b strings.Builder
+	for _, scope := range s.scopes() {
+		for _, route := range scope.routes {
+			prefixKind := "ip"
+			if route.ipv6 {
+				prefixKind = "ipv6"
+			}
+			fmt.Fprintf(&b, "%s prefix-list %s seq 5 permit %s\n", prefixKind, frrName(route.destinationList), sanitizeFRRValue(route.destination))
+			if route.nextHop != "" {
+				gateway, _ := netip.ParseAddr(route.nextHop)
+				bits := 32
+				if gateway.Is6() {
+					bits = 128
+				}
+				fmt.Fprintf(&b, "%s prefix-list %s seq 5 permit %s/%d\n", prefixKind, frrName(route.nextHopList), gateway.String(), bits)
+			}
+		}
+	}
+	if b.Len() > 0 {
+		b.WriteString("!\n")
+	}
+	return b.String()
+}
+
+func renderQNHMetricTerms11447(scope *qnhMetricScope11447, routeMap string, start int) (string, int) {
+	var b strings.Builder
+	seq := start
+	for _, route := range scope.routes {
+		family := "ip"
+		if route.ipv6 {
+			family = "ipv6"
+		}
+		fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(routeMap), seq)
+		b.WriteString(" match source-protocol static\n")
+		fmt.Fprintf(&b, " match %s address prefix-list %s\n", family, frrName(route.destinationList))
+		if route.nextHop != "" {
+			fmt.Fprintf(&b, " match %s next-hop prefix-list %s\n", family, frrName(route.nextHopList))
+		}
+		if route.interfaceName != "" {
+			fmt.Fprintf(&b, " match interface %s\n", sanitizeFRRValue(route.interfaceName))
+		}
+		fmt.Fprintf(&b, " set metric %d\n", route.metric)
+		b.WriteString(" on-match next\nexit\n")
+		seq += 10
+	}
+	return b.String(), seq
+}
+
+func qualifiedNextHopMetricCollision11447(po *config.PolicyOptionsConfig, set *qnhMetricSet11447) error {
+	if set == nil {
+		return nil
+	}
+	policyNames := make(map[string]string)
+	prefixListNames := make(map[string]string)
+	if po != nil {
+		for name := range po.PolicyStatements {
+			policyNames[frrName(name)] = name
+		}
+		for name := range po.PrefixLists {
+			prefixListNames[frrName(name)] = name
+		}
+	}
+	generatedMaps := make(map[string]string)
+	generatedLists := make(map[string]string)
+	for _, scope := range set.scopes() {
+		for _, mapName := range append([]string{scope.staticMap}, mapValues11447(scope.policyMaps)...) {
+			final := frrName(mapName)
+			if operator, ok := policyNames[final]; ok {
+				return fmt.Errorf("qualified-next-hop metric route-map %q collides with policy-statement %q after FRR name normalization", mapName, operator)
+			}
+			if previous, ok := generatedMaps[final]; ok && previous != mapName {
+				return fmt.Errorf("qualified-next-hop metric route-maps %q and %q collide after FRR name normalization", previous, mapName)
+			}
+			generatedMaps[final] = mapName
+		}
+		for _, route := range scope.routes {
+			for _, listName := range []string{route.destinationList, route.nextHopList} {
+				if listName == "" {
+					continue
+				}
+				final := frrName(listName)
+				if operator, ok := prefixListNames[final]; ok {
+					return fmt.Errorf("qualified-next-hop metric prefix-list %q collides with policy-options prefix-list %q after FRR name normalization", listName, operator)
+				}
+				if previous, ok := generatedLists[final]; ok && previous != listName {
+					return fmt.Errorf("qualified-next-hop metric prefix-lists %q and %q collide after FRR name normalization", previous, listName)
+				}
+				generatedLists[final] = listName
+			}
+		}
+	}
+	return nil
+}
+func (m *Manager) renderQNHMetricPolicyMap11447(po *config.PolicyOptionsConfig, routeMap string, ps *config.PolicyStatement, scope *qnhMetricScope11447) string {
+	if uint64(len(scope.routes))+config.RouteMapSequenceCount(po, ps) > config.MaxRouteMapSequences {
+		slog.Warn("frr: qualified-next-hop metric and policy route-map exceed FRR sequence limit; rendering a deny map",
+			"route_map", routeMap, "metric_rules", len(scope.routes), "policy", ps.Name)
+		m.noteQuarantined(routeMap)
+		return renderQuarantineDenyRouteMap(routeMap)
+	}
+	rules, next := renderQNHMetricTerms11447(scope, routeMap, 10)
+	body, seq := m.renderPolicyTermSequences(po, routeMap, routeMap, ps, next)
+	var b strings.Builder
+	b.WriteString(rules)
+	b.WriteString(body)
+	trailingAction := "deny"
+	switch ps.DefaultAction {
+	case "accept":
+		trailingAction = "permit"
+	case "reject":
+		trailingAction = "deny"
+	}
+	fmt.Fprintf(&b, "route-map %s %s %d\nexit\n", frrName(routeMap), trailingAction, seq)
+	return b.String()
+}
+
+func mapValues11447(m map[string]string) []string {
+	values := make([]string, 0, len(m))
+	for _, value := range m {
+		values = append(values, value)
+	}
+	sort.Strings(values)
+	return values
+}
+
+func (m *Manager) generateQNHMetricStaticMaps11447(set *qnhMetricSet11447) string {
+	if set == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, scope := range set.scopes() {
+		if len(scope.routes) > config.MaxRouteMapSequences {
+			slog.Warn("frr: too many qualified-next-hop metric rules; static redistribution is denied rather than emitting an invalid route-map", "count", len(scope.routes))
+			b.WriteString(renderQuarantineDenyRouteMap(scope.staticMap))
+			b.WriteString("!\n")
+			continue
+		}
+		rules, next := renderQNHMetricTerms11447(scope, scope.staticMap, 10)
+		b.WriteString(rules)
+		fmt.Fprintf(&b, "route-map %s permit %d\nexit\n!\n", frrName(scope.staticMap), next)
+	}
+	return b.String()
+}
