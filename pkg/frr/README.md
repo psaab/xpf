@@ -763,8 +763,9 @@ step. Both are required — neither sees the other's case:
   over the backup. A plain `next-hop [ a b ]` bracket LIST is equal-cost ECMP
 - **IGP export metric (#11447).** FRR's static-route CLI still has no
   per-next-hop metric operand, so `NextHopEntry.Metric` is not emitted on the
-  `ip route` line. For a bare `redistribute static` or a policy term whose
-  source is `static`, xpf synthesizes route-map entries that match both the
+  `ip route` line. It is applied to IGP redistribution only, never as BGP MED.
+  For a bare IGP `redistribute static` or a policy term whose source is
+  `static`, xpf synthesizes route-map entries that match both the
   destination and the configured qualified next-hop before `set metric M`.
   This keeps a plain primary for the same prefix at its own metric; later
   authored policy terms run afterward, so an explicit `then metric` overrides

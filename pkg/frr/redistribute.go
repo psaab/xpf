@@ -86,6 +86,8 @@ type redistEntry struct {
 // resolveRedistribute renders an export as OSPF/RIP/BGP-shaped
 // `redistribute <proto> [route-map X]` lines. IS-IS has a different grammar
 // and uses resolveISISRedistribute instead (#9666).
+// The optional qualified-next-hop metric scope is passed by IGP call sites
+// only; BGP MED is distinct and must not consume the IGP export cost.
 func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool, metrics ...*qnhMetricScope11447) string {
 	return formatRedistEntries(m.redistributeEntries(export, po, self, bgpAcceptDefault, metrics...))
 }
@@ -196,11 +198,8 @@ func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsCon
 // rules as resolveRedistribute under router bgp, but filters sources by the
 // grammar installed in that address family ("bgp-ipv6"), and indents the lines
 // one level deeper to sit inside the block.
-func (m *Manager) resolveBGPIPv6Redistribute(export string, po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool, metrics ...*qnhMetricScope11447) string {
+func (m *Manager) resolveBGPIPv6Redistribute(export string, po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool) string {
 	entries := m.redistributeEntriesAt(export, po, "bgp", "bgp-ipv6", bgpAcceptDefault)
-	if len(metrics) > 0 {
-		applyQNHMetricRouteMap11447(export, metrics[0], entries)
-	}
 	return indentFRRLines(formatRedistEntries(entries), " ")
 }
 

@@ -483,10 +483,10 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				kw, isProto := config.FRRRoutingProtocolKeyword(e)
 				fam, _ := config.RedistributionSourceFamilies(kw)
 				if !isProto || fam&config.FamilyIPv4 != 0 || kw == "bgp" {
-					b.WriteString(m.resolveRedistribute(e, policyOptions, "bgp", bgpAcceptDefault, qnhMetrics))
+					b.WriteString(m.resolveRedistribute(e, policyOptions, "bgp", bgpAcceptDefault))
 				}
 				if isProto && kw != "bgp" && fam&config.FamilyIPv6 != 0 {
-					bgpIPv6Redist.WriteString(m.resolveBGPIPv6Redistribute(e, policyOptions, bgpAcceptDefault, qnhMetrics))
+					bgpIPv6Redist.WriteString(m.resolveBGPIPv6Redistribute(e, policyOptions, bgpAcceptDefault))
 				}
 			}
 		}

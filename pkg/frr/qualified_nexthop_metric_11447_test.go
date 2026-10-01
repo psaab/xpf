@@ -81,6 +81,25 @@ func TestQualifiedNextHopMetricReachesStaticRedistribution11447(t *testing.T) {
 	}
 }
 
+func TestQualifiedNextHopMetricDoesNotSetBGPMetric11447(t *testing.T) {
+	compiled := compileQNHMetricConfig11447(t,
+		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
+		"set protocols bgp local-as 65001",
+		"set protocols bgp export static",
+	)
+	rendered := New().buildManagedSection(&FullConfig{
+		BGP:           compiled.Protocols.BGP,
+		StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
+		PolicyOptions: &compiled.PolicyOptions,
+	})
+	if !strings.Contains(rendered, "redistribute static\n") {
+		t.Fatalf("BGP static redistribution was lost:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "redistribute static route-map ") {
+		t.Fatalf("qualified-next-hop IGP metric must not become BGP MED:\n%s", rendered)
+	}
+}
+
 func TestQualifiedNextHopMetricDoesNotOverrideAuthoredPolicyMetric11447(t *testing.T) {
 	rendered := qnhMetricRender11447(t,
 		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
@@ -186,8 +205,10 @@ func TestFRRLoadQualifiedNextHopMetric11447(t *testing.T) {
 		StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
 		PolicyOptions: &compiled.PolicyOptions,
 	})
-	if !strings.Contains(rendered, "redistribute static route-map ") || !strings.Contains(rendered, "set metric 10\n") {
-		t.Fatalf("compiled BGP static export omitted the QNH metric route-map:\n%s", rendered)
+	if !strings.Contains(rendered, "redistribute static\n") ||
+		strings.Contains(rendered, "redistribute static route-map ") ||
+		!strings.Contains(rendered, "set metric 10\n") {
+		t.Fatalf("FRR check config must contain the generated metric route-map without applying IGP metric as BGP MED:\n%s", rendered)
 	}
 	confPath := filepath.Join(t.TempDir(), "frr.conf")
 	if err := os.WriteFile(confPath, []byte(rendered), 0o600); err != nil {
