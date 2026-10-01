@@ -348,12 +348,10 @@ func validatePolicyThenRejectStrict(nodes []*Node, lenient bool) ([]string, erro
 }
 
 // collapsedThenActionTokens flattens every modifier token under a single
-// `then <action>` node (permit / deny / reject) into one token sequence —
-// the action node's own Keys[1:] plus the keys of every descendant node —
-// regardless of how the flat-set parser grouped them. The parser can
-// produce three shapes: flat-onto-action (action.Keys[1:]), collapsed-child
-// (one child node carrying all tokens on its Keys), and nested (each
-// modifier its own node). Flattening makes the reject gates shape-agnostic.
+// `then <action>` node into one token sequence — the action node's own
+// Keys[1:] plus the keys of every descendant node — regardless of how the
+// flat-set parser grouped them. The parser can produce three shapes:
+// flat-onto-action, collapsed-child, and nested.
 //
 // For the deny gate this mirrors the compiler's applyCollapsedDenyModifiers
 // (compiler_security.go) exactly — action.Keys[1:] plus every descendant
@@ -362,15 +360,16 @@ func validatePolicyThenRejectStrict(nodes []*Node, lenient bool) ([]string, erro
 // token returned here is an unsupported modifier the compiler silently
 // drops and the gate rejects at commit.
 //
+// The #11342 count-alarm gate also uses this to recognize an `alarm` child
+// under `then count` regardless of its AST grouping.
+//
 // Each gate must additionally iterate ALL same-named action nodes under
 // `then` (FindChildren, not FindChild) before calling this: a flat-set
 // `set ... then permit` followed by `set ... then permit application-
 // services X` produces TWO separate `permit` nodes, and a FindChild-first
 // gate would inspect only the (valid) bare node and miss the unsupported
-// modifier on the second. The strict commit path still rejects such a
-// config via the #3043 conflicting-terminal-action gate, but only this
-// all-nodes walk surfaces the specific #3114/#3115 unsupported-modifier
-// diagnostic (and the matching lenient-path warning).
+// modifier on the second. The all-nodes walk also ensures the #11342
+// count-alarm gate reports an alarm attached to a later `count` node.
 func collapsedThenActionTokens(actionNode *Node) []string {
 	var toks []string
 	if len(actionNode.Keys) >= 2 {
@@ -387,6 +386,88 @@ func collapsedThenActionTokens(actionNode *Node) []string {
 		walk(c)
 	}
 	return toks
+}
+
+// validatePolicyThenCountAlarmStrict rejects/warns on an `alarm` subtree under
+// `then count`. The policy compiler turns counting on but does not implement
+// alarm thresholds, so the configured notification is silently dropped.
+// Strict commit/commit-check rejects it; tolerant load/peer-sync preserves
+// the existing behavior while surfacing the inert alarm in cfg.Warnings.
+func validatePolicyThenCountAlarmStrict(nodes []*Node, lenient bool) ([]string, error) {
+	var warnings []string
+	emit := func(scope, policyName string) error {
+		msg := fmt.Sprintf(
+			"security policies %s policy %q then count alarm thresholds are not implemented "+
+				"and are silently dropped; remove the alarm subtree (#11342)",
+			scope, policyName,
+		)
+		if !lenient {
+			return fmt.Errorf("%s", msg)
+		}
+		warnings = append(warnings, msg)
+		return nil
+	}
+
+	checkPolicy := func(scope, policyName string, polNode *Node) error {
+		for _, countNode := range policyThenActionNodes(polNode, "count") {
+			for _, token := range collapsedThenActionTokens(countNode) {
+				if token == "alarm" {
+					if err := emit(scope, policyName); err != nil {
+						return err
+					}
+					break
+				}
+			}
+		}
+		return nil
+	}
+
+	walkErr := forEachChild(nodes, "security", func(security *Node) error {
+		return forEachChild(security.Children, "policies", func(policies *Node) error {
+			for _, child := range policies.Children {
+				switch child.Name() {
+				case "global":
+					for _, polInst := range namedInstances(child.FindChildren("policy")) {
+						if err := checkPolicy("global", polInst.name, polInst.node); err != nil {
+							return err
+						}
+					}
+				case "from-zone":
+					type zonePair struct {
+						from, to   string
+						policyNode *Node
+					}
+					var pairs []zonePair
+					if len(child.Keys) >= 4 {
+						pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
+					} else {
+						for _, fzSub := range child.Children {
+							tzNode := fzSub.FindChild("to-zone")
+							if tzNode == nil {
+								continue
+							}
+							for _, tzSub := range tzNode.Children {
+								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							}
+						}
+					}
+					for _, zp := range pairs {
+						scope := fmt.Sprintf("from-zone %s to-zone %s", zp.from, zp.to)
+						for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
+							if err := checkPolicy(scope, polInst.name, polInst.node); err != nil {
+								return err
+							}
+						}
+					}
+				}
+			}
+			return nil
+		})
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return warnings, nil
 }
 
 // validatePolicyThenDenyStrict walks the `security policies` subtree of the
