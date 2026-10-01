@@ -2526,3 +2526,38 @@ func countAlreadyDeleted(tracked []string, desired []VRFSpec) int {
 	}
 	return count
 }
+
+func TestBuildPBRRulesDefaultRoutingInstanceUsesMainTable11308(t *testing.T) {
+	for _, tc := range []struct {
+		family     string
+		wantFamily int
+	}{
+		{family: "inet", wantFamily: unix.AF_INET},
+		{family: "inet6", wantFamily: unix.AF_INET6},
+	} {
+		t.Run(tc.family, func(t *testing.T) {
+			filter := &config.FirewallFilter{
+				Name: "default-steer",
+				Terms: []*config.FirewallFilterTerm{
+					{Name: "to-master", DSCPs: []string{"ef"}, RoutingInstance: "default"},
+				},
+			}
+			rules, err := BuildPBRRules(pbrTestConfig(tc.family, filter, nil, nil))
+			if err != nil {
+				t.Fatalf("BuildPBRRules: %v", err)
+			}
+			if len(rules) != 1 {
+				t.Fatalf("default routing-instance alias must produce one main-table rule, got %d", len(rules))
+			}
+			if rules[0].Instance != "default" {
+				t.Errorf("instance label = %q, want default", rules[0].Instance)
+			}
+			if rules[0].TableID != mainTableID {
+				t.Errorf("table ID = %d, want main table ID %d", rules[0].TableID, mainTableID)
+			}
+			if rules[0].Family != tc.wantFamily {
+				t.Errorf("family = %d, want %d", rules[0].Family, tc.wantFamily)
+			}
+		})
+	}
+}

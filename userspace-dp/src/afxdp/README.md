@@ -836,18 +836,9 @@ sync.
     `nat64_match.rs` now derives it with `ingress_routing_domain` the way
     `nat_match_v4.rs` / `nat_match_v6.rs` already did — that file previously
     contained ZERO `routing_domain` references while both siblings carried
-    one, which was the issue's own positive control. Exact lookups need the
-    arriving key domain; ordinary reverse-session admission zeroes its probe
-    and compares the reply domain with each forward candidate's egress domain
-    (`#11298`), permitting A-ingress/B-egress replies without treating domain
-    0 as a wildcard. Same-family embedded quotes instead use tuple-only lookup:
-    they rewrite a quoted packet without installing a session, and an off-path
-    router may send the error from another routing domain.
-    The NAT64 companion arm remains an exact installed-session lookup: there is
-    deliberately NO domain-0 retry there, which would name the DEFAULT instance
-    rather than perform a domain-agnostic search. An error that does not match
-    the installed session in its arrival domain declines to ordinary flowless
-    enforcement, exactly as before the stamp existed.
+    one, which was the issue's own positive control. Ordinary reverse-session admission compares each candidate's forward egress routing domain with the reply's arriving domain (`#11298`), so A-ingress/B-egress replies match in B without treating domain 0 as a wildcard. Same-family embedded quotes instead use tuple-only lookup: they rewrite a quoted packet without installing a session, and an off-path router may send the error from another routing domain. The NAT64 companion arm remains an exact installed-session lookup: there is deliberately NO domain-0 retry there, which would name the DEFAULT instance rather than perform a domain-agnostic search. An error that does not match the installed session in its arrival domain declines to ordinary flowless enforcement, exactly as before the stamp existed.
+
+- **#11361 — mixed-zero shared NAT replies need a unique owner, not a colliding alias.** The shared NAT map retains each translated reverse key in its forward session's routing domain and uses a bounded ambiguity index for the domain-neutral tuple. A mixed-zero reply can probe an owner-specific key only when that index proves the tuple has one owner; it never publishes a translated alias at domain 0, so tenant collisions cannot displace one another. Every recovered candidate still passes the #11298 forward-egress-domain admission; A→0 and 0→A resolve only when the candidate's egress domain equals the reply domain. Ambiguous or saturated ownership fails closed.
 - `frame/` — packet parsing (L2 / L3 / L4), checksum helpers, TCP MSS
   clamp. `tests.rs` was relocated out of `mod.rs` in #1046 Phase 1.
   `headers.rs` holds the consolidated outer-header serializers (#1440).

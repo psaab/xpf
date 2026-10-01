@@ -1485,7 +1485,14 @@ func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[
 			continue
 		}
 
-		tableID, ok := tableIDs[term.RoutingInstance]
+		var tableID int
+		var ok bool
+		if term.RoutingInstance == config.FBFDefaultRoutingInstance {
+			// Juniper's literal `default` alias targets the global main table.
+			tableID, ok = mainTableID, true
+		} else {
+			tableID, ok = tableIDs[term.RoutingInstance]
+		}
 		if !ok {
 			slog.Warn("PBR: routing-instance not found",
 				"filter", filter.Name, "term", term.Name,

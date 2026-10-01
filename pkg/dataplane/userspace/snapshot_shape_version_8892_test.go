@@ -99,6 +99,9 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // so no helper receives the field or the route. ConfigSnapshot embeds Config, so
 // the reflection digest still moves; the serialized shape and ProtocolVersion
 // remain unchanged.
+// v36 -> v37 (#11402): RouteSnapshot.NextHopWeights is a real wire field. A
+// v36 helper silently discards it and keeps uniform selection for unequal
+// learned ECMP, so the shape and protocol version move together intentionally.
 //
 // The digest still moved because this walk records the json TAG, deliberately:
 // adding `json:"-"` to an EXISTING wire field would be a silent removal, and
@@ -232,7 +235,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "8f5008dd22eb5c167d41c6f774c88b59b86f791c1c77ddabf17dd38d5731232e"
+	snapshotShapeGolden8892 = "857ea623c08b4dfd87a79d24cae05aab1a1f510d2885f8a3480dc6798a40bc98"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -403,7 +406,10 @@ const (
 	// applications. Without the version gate, an older helper would ignore the
 	// nested fields and widen the typed match; exact equality rejects v35
 	// before applying instead.
-	snapshotShapeVersion8892 = 36
+	// v36 -> v37 BUMPED (#11402): RouteSnapshot.NextHopWeights preserves Linux
+	// multipath member weights. A v36 helper ignores them and keeps uniform
+	// ECMP for unequal routes, so mixed versions must be refused.
+	snapshotShapeVersion8892 = 37
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
