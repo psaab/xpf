@@ -180,19 +180,22 @@ non-trivial code. This page is the quick-reference gotcha list.
   200 in FRR. A learned classless prefix is suppressed (with a visible warning)
   when a rendered/operator static route in the same table contains it, so
   DHCP cannot defeat the documented learned < static contract. The management
-  VRF treats only table-999 routes stamped `RTPROT_STATIC` as operator
-  authority; xpf-owned `RTPROT_DHCP` and connected/kernel routes are silently
-  ignored, while unexpected other-protocol routes are warned and ignored.
+  VRF treats only table-999 `RTPROT_STATIC` routes as operator
+  authority; xpf-owned `RTPROT_DHCP` and ordinary connected/kernel routes are
+  not operator authority. As a separate hard fence (#11362), a gatewayless
+  `RTPROT_KERNEL` connected prefix on a configured cluster control/fabric
+  interface suppresses any DHCP classless route it contains, independent of
+  the trust override. Unexpected other-protocol routes are warned and ignored.
   Competing eligible DHCP defaults in table 999 are resolved per family by
   selecting the lexically first interface (gateway address breaks interface
   ties) and warning with the candidates and winner (#11363); classless routes
   from other leases still apply. An option-121 `/0` follows the normal
   DHCP-default suppression contract. Unusually broad classless `/1` prefixes and
   non-forwardable martian ranges (`0/8`, `127/8`, `169.254/16`, `224/4`,
-  `240/4`) are refused by default.
-  The deliberate escape hatch `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` restores
-  covered/broad/martian classless routes and emits a loud security warning; it
-  is unset by default.
+  `240/4`) are refused by default. The deliberate escape hatch
+  `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` restores covered/broad/martian classless
+  routes except the cluster control/fabric-prefix fence, and emits a loud
+  security warning; it is unset by default.
 
 ## XDP on SR-IOV interfaces
 

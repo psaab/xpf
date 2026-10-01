@@ -1,5 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Fence option-121 routes from overriding connected cluster control/fabric
+    prefixes in table 999, regardless of the DHCP trust override (#11362).
   * Select a deterministic per-family management DHCP default and warn when
     competing leases exist, avoiding silent map-order gateway changes (#11363).
   * Honor interface > zone > routing-instance context precedence for DNAT and
