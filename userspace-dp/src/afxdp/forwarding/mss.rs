@@ -43,14 +43,14 @@ pub(in crate::afxdp) fn native_gre_inner_mtu(
     };
     // #2517: resolve the outer/transport MTU through the SAME #2300 SSOT
     // helper the WireGuard MSS clamp uses (`tunnel_outer_mtu`) so the two
-    // tunnel MSS paths cannot drift. That helper falls back to the
-    // standard 1500 underlay MTU when EVERY egress lookup misses (a
-    // transient egress-map miss during re-reconciliation / interface
-    // bringup) instead of the old `unwrap_or_default()` → 0, which made
+    // tunnel MSS paths cannot drift. That helper uses the standard 1500
+    // underlay MTU as an interface fallback when EVERY egress lookup misses
+    // (a transient egress-map miss during re-reconciliation / interface
+    // bringup), instead of the old `unwrap_or_default()` → 0, which made
     // `native_gre_tcp_mss` return 0 and silently DISABLE a configured GRE
     // outbound TCP MSS clamp until the next reconcile. `tunnel_outer_mtu`
-    // also filters out an explicitly-zero stored egress MTU, so it never
-    // returns 0; `transport_mtu` here is therefore always >= 1500.
+    // filters out an explicitly-zero stored egress MTU too, so it never
+    // returns 0; the selected outer route can still constrain it below 1500.
     let transport_mtu = tunnel_outer_mtu(forwarding, decision, endpoint);
     let outer_ip_header_len = match endpoint.outer_family {
         libc::AF_INET => 20usize,
@@ -133,9 +133,10 @@ pub(in crate::afxdp) fn tunnel_outer_mtu(
 /// A SYN clamped with the GRE value lets the peer send full-MSS data
 /// segments that the WG encap MTU guard then silently drops
 /// (`encap_mtu_drops`). Route WG-bound SYNs through `wg::mss::wg_tcp_mss`
-/// instead, derived from `tunnel_outer_mtu` (resolve the transport
+/// (#2299) instead, derived from `tunnel_outer_mtu` (resolve the transport
 /// `tx_ifindex`/`tx_vlan` → egress, falling back to `egress_ifindex`
-/// then the endpoint's `logical_ifindex`, with a 1500 floor).
+/// then the endpoint's `logical_ifindex`, with a 1500 interface fallback
+/// followed by the selected-route MTU constraint).
 ///
 /// NOTE (#2715): this is NOT the same path the encap MTU guard now
 /// reads. Post-#2715 the encap guard route-resolves the physical egress

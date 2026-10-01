@@ -436,7 +436,6 @@ func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
 			"guard that field's wire contract and can no longer see it")
 	}
 
-
 	if ProtocolVersion != snapshotShapeVersion8892 {
 		t.Fatalf("ProtocolVersion is %d but this cell's golden was recorded at %d. "+
 			"Update snapshotShapeVersion8892 AND snapshotShapeGolden8892 together, "+

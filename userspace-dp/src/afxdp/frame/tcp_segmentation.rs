@@ -140,9 +140,11 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
     // encap dispatch's Unknown-drop arm.
     let mtu = if decision.resolution.tunnel_endpoint_id != 0 {
         // For a tunnel the inner-L3 budget is the encap-mode's exact inner
-        // MTU; an Unknown/missing mode yields 0 → fail closed. Do NOT
-        // floor a tunnel budget to 1280: a tunnel with a small outer MTU
-        // has a genuinely smaller inner budget, and flooring it would
+        // MTU, constrained further by the selected overlay route's MTU when
+        // known. Unknown/missing mode or a zero inner budget still fails
+        // closed; do not let min_nonzero_mtu turn that zero into a route MTU.
+        // Do NOT floor a tunnel budget to 1280: a tunnel with a small outer
+        // MTU has a genuinely smaller inner budget, and flooring it would
         // re-introduce the oversized submission this fix exists to prevent.
         // #5159: the plain-forward path below no longer floors either — the
         // same oversized submission applies to a plain interface with a
@@ -151,7 +153,7 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
             .tunnel_endpoints
             .get(&decision.resolution.tunnel_endpoint_id)
             .map(|e| tunnel_mode_kind(&e.mode));
-        match kind {
+        let inner_mtu = match kind {
             Some(TunnelKind::Gre) => native_gre_inner_mtu(forwarding, decision),
             Some(TunnelKind::WireGuard) => {
                 let endpoint = forwarding
@@ -162,6 +164,14 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
             }
             // Unknown mode or missing endpoint row: 0 budget → None below.
             Some(TunnelKind::Unknown) | None => 0,
+        };
+        if inner_mtu == 0 {
+            0
+        } else {
+            crate::afxdp::forwarding::min_nonzero_mtu(
+                inner_mtu,
+                decision.resolution.route_mtu as usize,
+            )
         }
     } else {
         // #5159: use the ACTUAL egress MTU. The prior `.max(1280)` floored a
@@ -985,6 +995,52 @@ mod mode_aware_segmentation_tests {
             assert_eq!(seg[outer_eth + 9], PROTO_GRE, "GRE outer proto-47");
         }
     }
+
+    #[test]
+    fn gre_segmentation_obeys_selected_route_mtu_11411() {
+        // The outer interface allows 1476-byte GRE inners, but the selected
+        // inner route is tighter and must bound each emitted TCP segment.
+        let mut state = ForwardingState::default();
+        state.egress.insert(EGRESS_IFINDEX, egress_iface(1500));
+        state
+            .tunnel_endpoints
+            .insert(TUN_ID, gre_endpoint(libc::AF_INET));
+        let mut resolution = tunnel_resolution();
+        let route_mtu = 1400usize;
+        resolution.route_mtu = route_mtu as u32;
+        let decision = SessionDecision {
+            resolution,
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let frame = ipv4_tcp_frame(2000);
+        let segments = segment_forwarded_tcp_frames_from_frame(
+            &frame,
+            meta_v4(),
+            &decision,
+            &state,
+            false,
+            None,
+        )
+        .expect("GRE segmentation must produce frames");
+        assert!(segments.len() > 1);
+
+        let inner_start = 14 + 20 + 4;
+        let inner_lengths: Vec<usize> = segments
+            .iter()
+            .map(|segment| {
+                let inner = &segment[inner_start..];
+                u16::from_be_bytes([inner[2], inner[3]]) as usize
+            })
+            .collect();
+        assert!(
+            inner_lengths.iter().all(|length| *length <= route_mtu),
+            "GRE segment exceeded selected inner route MTU {route_mtu}: {inner_lengths:?}"
+        );
+        assert_eq!(inner_lengths.iter().copied().max(), Some(route_mtu));
+    }
+
 
     // ------- (b) encap dispatch -------------------------------------
 

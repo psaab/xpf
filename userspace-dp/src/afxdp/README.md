@@ -936,8 +936,8 @@ sync.
     domains: the overlay route MTU constrains the inner packet, while the
     route to a GRE/WireGuard outer endpoint is combined with the physical
     interface MTU before encapsulation overhead/padding is converted into
-    an inner budget. The PTB and encapsulation/drop guards share those same
-    selected-route resolutions.
+    an inner budget. The inner route bound also caps tunnel TCP segments;
+    PTB and encapsulation/drop guards use the same selected-route resolutions.
     **Post-transform PMTUD (#2330):** the #2301 decision above compares the
     SOURCE frame against the egress MTU, which is correct ONLY for a
     size-preserving plain forward. For the size-CHANGING paths (NAT64,

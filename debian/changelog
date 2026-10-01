@@ -129,4 +129,7 @@ xpf (0.0.0) unstable; urgency=medium
     T1/T2 renewal and reacquisition. Remove stale addresses and delegated
     prefixes, retain stateless DHCPv6 options across failed refreshes, and
     notify dependent route recompilation (#11382).
+  * Preserve Linux RTAX_MTU on imported routes through the v38 FIB snapshot,
+    applying selected-route limits to plain forwarding, tunnel budgets, TCP
+    segmentation, and PMTU signaling (#11411).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

@@ -44,7 +44,7 @@ type RouteSnapshot struct {
 	Preference int `json:"preference,omitempty"`
 	// MTU is the selected route's route-wide L3 MTU (RTAX_MTU). Zero means
 	// absent/unknown and imposes no extra constraint. An old helper would
-	// ignore it and forward oversized DF packets, so snapshot v37 fences it.
+	// ignore it and forward oversized DF packets, so snapshot v38 fences it.
 	MTU int `json:"mtu,omitempty"`
 }
 
