@@ -279,12 +279,16 @@ sync.
     packet still forwards); this is a learn-path guard, not a packet filter.
   - **RX-learned neighbor age (#11406):** the transit source-MAC path does
     not program the kernel table, so its dynamic-only rows carry a monotonic
-    last-seen lease. Matching RX learns refresh it; the neighbor-monitor sweep
-    runs every 5s and removes rows idle for 60s, except manager-owned keys or
-    rows subsequently confirmed by the kernel. Removal advances the owning
-    shard's MAC epoch, so cached destination MACs are discarded and future
-    resolutions enter the existing MissingNeighbor/probe path. This lease is
-    process-local and is not HA-synchronized.
+    last-seen lease. Per-binding matching-packet lease writes are coalesced
+    for at most 1s; they reuse the poll iteration's sampled clock and keep
+    mutexes off repeated-packet hits. Lease writes use `max(old, sample)` so
+    delayed cross-worker batches cannot move the timestamp backward. The
+    neighbor-monitor sweep runs every 5s and expires at 60s idle plus a 1s
+    coalescing grace (about 60–66s after the last packet), except manager-owned
+    keys or rows subsequently confirmed by the kernel. Removal advances the
+    owning shard's MAC epoch, so cached destination MACs are discarded and
+    future resolutions enter the existing MissingNeighbor/probe path. This
+    lease is process-local and is not HA-synchronized.
   - **STALE install + NDP Override honor (`#4475`, opus-172 H-2, RFC 4861
     §7.2.5):** the own-IP gate above only protects addresses the router
     OWNS. Every OTHER same-segment next-hop — including the WAN gateway —
