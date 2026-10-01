@@ -339,10 +339,15 @@ uplink regardless of the master routing table, using an
 pattern. Operator recipe (two uplinks, ISP-A = master default via
 `reth0.50`, ISP-B = `reth0.80`):
 
-The Juniper FBF literal `then routing-instance default` selects the global
-master table (`inet.0` / `inet6.0`) directly; it does not require a
-`routing-instances default` stanza. Use it when a matching policy should steer
-traffic back to the master table rather than into a named forwarding instance.
+The exact lowercase Juniper FBF literal `then routing-instance default` selects
+the global master table (`inet.0` / `inet6.0`), not a named instance table. It
+does not require a `routing-instances default` stanza, and that declaration
+alone remains valid. If the declaration coexists with an FBF term targeting
+literal `default`, strict compilation rejects the ambiguity; tolerant load
+warns and preserves both unchanged, with the alias selecting master. Rename
+the instance and target its new name to steer to its table. Names are
+case-sensitive: `Default` targeted as `Default` remains an ordinary named
+instance steer (#11308, #11644).
 
 **A forwarding instance is statics-only, and that is now enforced (#9409,
 #11312).** Interface membership and `protocols` are REJECTED at commit under

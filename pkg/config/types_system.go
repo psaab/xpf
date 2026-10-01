@@ -1469,11 +1469,6 @@ type ThreeColorPolicerConfig struct {
 	UnknownActions []string
 }
 
-// FBFDefaultRoutingInstance is Juniper's `then routing-instance default` target
-// alias for the global/master routing table. It is an FBF target alias, not a
-// declaration or reservation for a named routing instance.
-const FBFDefaultRoutingInstance = "default"
-
 // FirewallFilter defines a named firewall filter with ordered terms.
 type FirewallFilter struct {
 	Name  string

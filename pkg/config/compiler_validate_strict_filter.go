@@ -229,7 +229,10 @@ func validateFirewallPrefixListReferencesStrict(cfg *Config) error {
 // operator-visible at commit, consistent with the other cross-reference gates.
 //
 // The Junos FBF literal `default` is the built-in master-RIB alias and is valid
-// without a `routing-instances default` declaration.
+// without a `routing-instances default` declaration. If both the declaration
+// and that FBF target occur, strict compilation rejects the meaning collision;
+// tolerant compilation warns and preserves both, with the alias selecting
+// master as it does on every lowering path.
 //
 // Any defined routing-instance remains a valid target, regardless of
 // instance-type. Both filter families are walked in stable filter/term order;
@@ -257,9 +260,25 @@ func validateFirewallRoutingInstanceReferencesStrict(cfg *Config) error {
 				continue
 			}
 			for _, term := range filter.Terms {
-				if term == nil || term.RoutingInstance == "" ||
-					term.RoutingInstance == FBFDefaultRoutingInstance ||
-					defined[term.RoutingInstance] {
+				if term == nil || term.RoutingInstance == "" {
+					continue
+				}
+				if term.RoutingInstance == FBFDefaultRoutingInstance {
+					if defined[FBFDefaultRoutingInstance] {
+						return fmt.Errorf(
+							"firewall family %s filter %q term %q targets FBF alias %q "+
+								"while `routing-instances default` is declared: the declaration "+
+								"remains intact, but the literal selects the master table "+
+								"(inet.0 for inet, inet6.0 for inet6), not that named instance's "+
+								"table. Tolerant loads keep both the declaration and term, so "+
+								"the alias wins. Rename the instance and target its new name to "+
+								"select its table, or remove the declaration if only master "+
+								"routing is intended (#11308, #11644)",
+							family, name, term.Name, term.RoutingInstance)
+					}
+					continue
+				}
+				if defined[term.RoutingInstance] {
 					continue
 				}
 				return fmt.Errorf(

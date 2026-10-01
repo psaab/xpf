@@ -307,10 +307,12 @@ func runUniformGatesFirewallNAT2(tree *ConfigTree, cfg *Config, opts compileOpts
 	// cross-reference. A term naming an undefined routing-instance compiled
 	// cleanly and the dataplane steered matched packets toward a table that
 	// does not exist — a silent blackhole / fall-through to the default table.
-	// Juniper's literal `default` is the built-in master-RIB alias and does not
-	// require a named `routing-instances default` declaration.
-	// Strict on commit / commit-check; lenient on load / peer-sync (warn for
-	// other undefined targets — #1960). Mirrors the policer gate above.
+	// The Juniper `default` literal is the built-in master-RIB alias and does
+	// not require a declaration. The reference validator also rejects the
+	// ambiguous combination with `routing-instances default` on strict compile;
+	// tolerant compile warns without rewriting or quarantining either object.
+	// Strict on commit / commit-check; lenient on load / peer-sync (#1960).
+	// Mirrors the policer gate above.
 	if err := validateFirewallRoutingInstanceReferencesStrict(cfg); err != nil {
 		if opts.lenientFirewallRefs {
 			cfg.Warnings = append(cfg.Warnings,

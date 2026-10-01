@@ -256,6 +256,161 @@ func TestFBFDefaultRoutingInstanceAliasLenientDoesNotWarn11308(t *testing.T) {
 	}
 }
 
+func fbfDeclaredInstanceCommands11644(instance, target string) []string {
+	cmds := []string{
+		"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+		"set routing-instances " + instance + " instance-type virtual-router",
+		"set routing-instances " + instance + " interface ge-0/0/1.0",
+		"set routing-instances " + instance + " routing-options static route 198.51.100.0/24 discard",
+	}
+	if target != "" {
+		cmds = append(cmds,
+			"set firewall family inet filter f1 term t1 then routing-instance "+target,
+			"set firewall family inet filter f1 term t1 then accept",
+		)
+	}
+	return cmds
+}
+
+func requireFBFDefaultDeclarationCollision11644(t *testing.T, tree *ConfigTree, family, filter, term string) {
+	t.Helper()
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("strict compile accepted routing-instances default together with the FBF default alias")
+	}
+	for _, want := range []string{
+		"firewall family " + family,
+		"filter " + `"` + filter + `"`,
+		"term " + `"` + term + `"`,
+		"`routing-instances default` is declared",
+		"master table",
+		"not that named instance's table",
+		"Rename the instance and target its new name",
+		"#11308",
+		"#11644",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("collision error %q does not contain %q", err, want)
+		}
+	}
+}
+
+func requireDeclaredInstanceSurvives11644(t *testing.T, cfg *Config, name string) *RoutingInstanceConfig {
+	t.Helper()
+	if len(cfg.RoutingInstances) != 1 {
+		t.Fatalf("declared instance was lost or duplicated: %+v", cfg.RoutingInstances)
+	}
+	ri := cfg.RoutingInstances[0]
+	if ri.Name != name || ri.InstanceType != "virtual-router" {
+		t.Fatalf("declared instance changed: %+v", ri)
+	}
+	if ri.TableID != StableRoutingInstanceTableID(name) || ri.TableID == 254 {
+		t.Fatalf("named instance table = %d, want stable non-main table %d", ri.TableID, StableRoutingInstanceTableID(name))
+	}
+	if len(ri.Interfaces) != 1 || ri.Interfaces[0] != "ge-0/0/1.0" {
+		t.Fatalf("declared instance members were changed: %v", ri.Interfaces)
+	}
+	if len(ri.StaticRoutes) != 1 || !ri.StaticRoutes[0].Discard {
+		t.Fatalf("declared instance static route was lost: %+v", ri.StaticRoutes)
+	}
+	if len(cfg.QuarantinedRoutingInstances) != 0 {
+		t.Fatalf("declared instance was quarantined: %+v", cfg.QuarantinedRoutingInstances)
+	}
+	return ri
+}
+
+func TestFBFDefaultDeclarationCollisionRejectedStrictFlatSet11644(t *testing.T) {
+	tree := buildTree(t, fbfDeclaredInstanceCommands11644("default", "default"))
+	requireFBFDefaultDeclarationCollision11644(t, tree, "inet", "f1", "t1")
+}
+
+func TestFBFDefaultDeclarationCollisionRejectedStrictHierarchicalInet6_11644(t *testing.T) {
+	input := `routing-instances {
+    default {
+        instance-type virtual-router;
+    }
+}
+firewall {
+    family inet6 {
+        filter f6 {
+            term t6 {
+                then {
+                    routing-instance default;
+                    accept;
+                }
+            }
+        }
+    }
+}`
+	tree, errs := NewParser(input).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse errors: %v", errs)
+	}
+	requireFBFDefaultDeclarationCollision11644(t, tree, "inet6", "f6", "t6")
+}
+
+func TestFBFDefaultDeclarationCollisionTolerantWarnsAndKeeps11644(t *testing.T) {
+	tree := buildTree(t, fbfDeclaredInstanceCommands11644("default", "default"))
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile must keep the declared instance and FBF term: %v", err)
+	}
+	requireDeclaredInstanceSurvives11644(t, cfg, "default")
+	filter := cfg.Firewall.FiltersInet["f1"]
+	if filter == nil || len(filter.Terms) != 1 ||
+		filter.Terms[0].Name != "t1" || filter.Terms[0].RoutingInstance != "default" ||
+		filter.Terms[0].Action != "accept" {
+		t.Fatalf("tolerant compile rewrote or dropped the FBF term: %+v", filter)
+	}
+	var warning string
+	warningCount := 0
+	for _, candidate := range cfg.Warnings {
+		if strings.Contains(candidate, `firewall family inet filter "f1" term "t1"`) {
+			warning = candidate
+			warningCount++
+		}
+	}
+	if warningCount != 1 {
+		t.Fatalf("want one warning for the exact FBF term, got %d: %v", warningCount, cfg.Warnings)
+	}
+	for _, want := range []string{
+		"downgraded to warning on tolerant path",
+		"`routing-instances default` is declared",
+		"master table",
+		"not that named instance's table",
+		"Tolerant loads keep both the declaration and term",
+		"Rename the instance and target its new name",
+		"#11308",
+		"#11644",
+	} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("tolerant warning %q does not contain %q", warning, want)
+		}
+	}
+}
+
+func TestFBFDefaultDeclarationWithoutAliasStillCommits11644(t *testing.T) {
+	tree := buildTree(t, fbfDeclaredInstanceCommands11644("default", ""))
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("a default declaration without an FBF default target must remain valid: %v", err)
+	}
+	requireDeclaredInstanceSurvives11644(t, cfg, "default")
+}
+
+func TestFBFDefaultNameCaseVariantRemainsNamedTarget11644(t *testing.T) {
+	tree := buildTree(t, fbfDeclaredInstanceCommands11644("Default", "Default"))
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("case-variant named instance and target must remain valid: %v", err)
+	}
+	requireDeclaredInstanceSurvives11644(t, cfg, "Default")
+	filter := cfg.Firewall.FiltersInet["f1"]
+	if filter == nil || len(filter.Terms) != 1 || filter.Terms[0].RoutingInstance != "Default" {
+		t.Fatalf("case-variant FBF term did not retain its named target: %+v", filter)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Finding B — application-set member
 // ---------------------------------------------------------------------------
