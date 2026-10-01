@@ -379,8 +379,7 @@ fn build_forwarding_state_uses_fabric_snapshot_macs_without_parent_interface() {
 #[test]
 fn zone_encoded_fabric_redirect_preserves_ingress_zone() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
-    let redirected =
-        resolve_zone_encoded_fabric_redirect_by_id(&state, TEST_LAN_ZONE_ID)
+    let redirected = resolve_zone_encoded_fabric_redirect_by_id(&state, TEST_LAN_ZONE_ID)
         .expect("zone-encoded redirect");
     assert_eq!(
         redirected.disposition,
@@ -539,7 +538,13 @@ fn zone_encoded_fabric_stamp_rejected_on_non_unicast_dst_6458() {
         ..UserspaceDpMeta::default()
     };
     assert_eq!(
-        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &BTreeMap::new(), 0),
+        parse_zone_encoded_fabric_ingress_from_frame(
+            frame.as_slice(),
+            meta,
+            &state,
+            &BTreeMap::new(),
+            0
+        ),
         ZoneEncodedFabricStamp::Invalid,
         "stamp with a non-fabric destination MAC must be rejected"
     );
@@ -563,13 +568,7 @@ fn zone_stamp_parser_distinguishes_absent_and_invalid_claims_11061() {
     };
     let unstamped = vec![0u8; 64];
     assert_eq!(
-        parse_zone_encoded_fabric_ingress_from_frame(
-            &unstamped,
-            meta,
-            &state,
-            &BTreeMap::new(),
-            0,
-        ),
+        parse_zone_encoded_fabric_ingress_from_frame(&unstamped, meta, &state, &BTreeMap::new(), 0,),
         ZoneEncodedFabricStamp::Absent,
         "an ordinary fabric source MAC preserves legacy unstamped behavior"
     );
@@ -580,13 +579,7 @@ fn zone_stamp_parser_distinguishes_absent_and_invalid_claims_11061() {
         let mut frame = vec![0u8; 64];
         frame[6..12].copy_from_slice(&source_mac);
         assert_eq!(
-            parse_zone_encoded_fabric_ingress_from_frame(
-                &frame,
-                meta,
-                &state,
-                &BTreeMap::new(),
-                0,
-            ),
+            parse_zone_encoded_fabric_ingress_from_frame(&frame, meta, &state, &BTreeMap::new(), 0,),
             ZoneEncodedFabricStamp::Absent,
             "non-stamp fabric source {source_mac:02x?} must not be classified as invalid"
         );
@@ -640,7 +633,6 @@ fn zone_stamp_parser_distinguishes_absent_and_invalid_claims_11061() {
     );
 }
 
-
 // #6458 fail-on-revert: the claimed zone's RG is forwarding-active LOCALLY
 // — on this node `lan` (RG 2) traffic ingresses directly, so the peer has
 // no business stamping it. This is the single-primary-node case that
@@ -662,7 +654,13 @@ fn zone_encoded_fabric_stamp_rejected_when_claimed_zone_rg_local_6458() {
         ..UserspaceDpMeta::default()
     };
     assert_eq!(
-        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &ha_state, now_secs),
+        parse_zone_encoded_fabric_ingress_from_frame(
+            frame.as_slice(),
+            meta,
+            &state,
+            &ha_state,
+            now_secs
+        ),
         ZoneEncodedFabricStamp::Invalid,
         "stamp claiming a locally-primary zone must be rejected"
     );
@@ -690,7 +688,13 @@ fn zone_encoded_fabric_stamp_rejected_for_zone_without_rg_members_6458() {
         ..UserspaceDpMeta::default()
     };
     assert_eq!(
-        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &BTreeMap::new(), 0),
+        parse_zone_encoded_fabric_ingress_from_frame(
+            frame.as_slice(),
+            meta,
+            &state,
+            &BTreeMap::new(),
+            0
+        ),
         ZoneEncodedFabricStamp::Invalid,
         "stamp claiming a zone with no RG-bound members must be rejected"
     );
@@ -715,7 +719,13 @@ fn zone_encoded_fabric_stamp_honored_for_remote_rg_zone_6458() {
         ..UserspaceDpMeta::default()
     };
     assert_eq!(
-        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &ha_state, now_secs),
+        parse_zone_encoded_fabric_ingress_from_frame(
+            frame.as_slice(),
+            meta,
+            &state,
+            &ha_state,
+            now_secs
+        ),
         ZoneEncodedFabricStamp::Valid(TEST_LAN_ZONE_ID),
         "legitimate split-RG stamp must keep working"
     );
@@ -751,7 +761,13 @@ fn zone_encoded_fabric_stamp_honored_for_multi_rg_zone_split_6458() {
         (2, inactive_ha_runtime(now_secs)),
     ]);
     assert_eq!(
-        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &split, now_secs),
+        parse_zone_encoded_fabric_ingress_from_frame(
+            frame.as_slice(),
+            meta,
+            &state,
+            &split,
+            now_secs
+        ),
         ZoneEncodedFabricStamp::Valid(TEST_LAN_ZONE_ID),
         "multi-RG zone with a peer-active RG must keep the legitimate stamp"
     );
@@ -761,7 +777,13 @@ fn zone_encoded_fabric_stamp_honored_for_multi_rg_zone_split_6458() {
         (2, active_ha_runtime(now_secs)),
     ]);
     assert_eq!(
-        parse_zone_encoded_fabric_ingress_from_frame(frame.as_slice(), meta, &state, &all_local, now_secs),
+        parse_zone_encoded_fabric_ingress_from_frame(
+            frame.as_slice(),
+            meta,
+            &state,
+            &all_local,
+            now_secs
+        ),
         ZoneEncodedFabricStamp::Invalid,
         "multi-RG zone with every RG locally active must still reject the stamp"
     );
@@ -997,7 +1019,10 @@ fn manager_neighbor_replace_filters_connected_directed_broadcast_11033() {
         })
         .expect("connected interface snapshot must apply");
     assert!(
-        !coordinator.forwarding.neighbors.contains_key(&(13, broadcast)),
+        !coordinator
+            .forwarding
+            .neighbors
+            .contains_key(&(13, broadcast)),
         "full snapshot must not import a connected directed-broadcast neighbor"
     );
     assert!(
@@ -1010,7 +1035,10 @@ fn manager_neighbor_replace_filters_connected_directed_broadcast_11033() {
         "full snapshot must not retain a manager key for the rejected neighbor"
     );
     assert!(
-        coordinator.forwarding.neighbors.contains_key(&(99, broadcast)),
+        coordinator
+            .forwarding
+            .neighbors
+            .contains_key(&(99, broadcast)),
         "the same address remains importable as a neighbor on another egress"
     );
     assert!(
@@ -1033,15 +1061,24 @@ fn manager_neighbor_replace_filters_connected_directed_broadcast_11033() {
     ));
 
     assert!(
-        !coordinator.forwarding.neighbors.contains_key(&(13, broadcast)),
+        !coordinator
+            .forwarding
+            .neighbors
+            .contains_key(&(13, broadcast)),
         "manager replace must not import connected directed-broadcast snapshot rows"
     );
     assert!(
-        coordinator.dynamic_neighbors_ref().get(&(13, broadcast)).is_none(),
+        coordinator
+            .dynamic_neighbors_ref()
+            .get(&(13, broadcast))
+            .is_none(),
         "rejected manager row must not leak into runtime neighbor state"
     );
     assert!(
-        coordinator.dynamic_neighbors_ref().get(&(99, broadcast)).is_some(),
+        coordinator
+            .dynamic_neighbors_ref()
+            .get(&(99, broadcast))
+            .is_some(),
         "manager replace must keep the address usable on an unrelated egress"
     );
     assert!(
@@ -1205,7 +1242,9 @@ fn refresh_runtime_snapshot_clears_old_manager_neighbor_cache_entries() {
             .contains_key(&(13, target))
     );
 
-    coordinator.refresh_runtime_snapshot(&ConfigSnapshot::default()).expect("refresh_runtime_snapshot must succeed");
+    coordinator
+        .refresh_runtime_snapshot(&ConfigSnapshot::default())
+        .expect("refresh_runtime_snapshot must succeed");
 
     assert!(
         !coordinator
@@ -1412,7 +1451,6 @@ fn fabric_originated_reverse_session_uses_zone_encoded_fabric_redirect_when_clie
     );
 }
 
-
 // #4082: the cross-chassis fabric redirect must prefer a fabric whose local
 // parent carrier is UP so a dual-fabric cluster fails over to the secondary
 // when the primary parent goes down. RED-on-revert: reverting the selection to
@@ -1516,19 +1554,24 @@ fn missing_neighbor_session_metadata_preserves_fabric_ingress() {
         local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
         up: true,
     });
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::MissingNeighbor,
-        local_ifindex: 0,
-        egress_ifindex: 13,
-        tx_ifindex: 13,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V6(Ipv6Addr::new(
-            0x2001, 0x559, 0x8585, 0x50, 0, 0, 0, 0x1,
-        ))),
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::MissingNeighbor,
+            local_ifindex: 0,
+            egress_ifindex: 13,
+            tx_ifindex: 13,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V6(Ipv6Addr::new(
+                0x2001, 0x559, 0x8585, 0x50, 0, 0, 0, 0x1,
+            ))),
+            neighbor_mac: None,
+            src_mac: None,
+            tx_vlan_id: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     let metadata = build_missing_neighbor_session_metadata(
         &state,
@@ -1632,12 +1675,17 @@ fn session_hit_keeps_interface_snat_ipv4_local_delivery() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
             src_port: 5201,
             dst_port: 43600,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
-    let decision = SessionDecision { resolution: interface_nat_local_resolution(&state, flow.dst_ip)
-        .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: interface_nat_local_resolution(&state, flow.dst_ip)
+            .expect("interface nat local delivery"),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     let resolved =
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
@@ -1664,12 +1712,17 @@ fn inactive_interface_snat_session_hit_redirects_to_fabric() {
             dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
             src_port: 5201,
             dst_port: 43600,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
-    let decision = SessionDecision { resolution: interface_nat_local_resolution(&state, flow.dst_ip)
-        .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: interface_nat_local_resolution(&state, flow.dst_ip)
+            .expect("interface nat local delivery"),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     let looked_up =
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
@@ -1698,12 +1751,17 @@ fn session_hit_keeps_interface_snat_ipv6_local_delivery() {
             dst_ip: "2001:559:8585:80::8".parse().expect("dst"),
             src_port: 5201,
             dst_port: 43600,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
-    let decision = SessionDecision { resolution: interface_nat_local_resolution(&state, flow.dst_ip)
-        .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: interface_nat_local_resolution(&state, flow.dst_ip)
+            .expect("interface nat local delivery"),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     let resolved =
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
@@ -1991,8 +2049,8 @@ fn source_nat_selection_uses_interface_addresses() {
             dst_ip: "172.16.80.200".parse().expect("dst"),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let (from_zone, to_zone) = zone_pair_for_flow(&state, 24, 12);
@@ -2019,8 +2077,8 @@ fn source_nat_selection_uses_interface_addresses_v6() {
             dst_ip: "2001:559:8585:80::200".parse().expect("dst"),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let (from_zone, to_zone) = zone_pair_for_flow(&state, 24, 12);
@@ -2059,8 +2117,8 @@ fn source_nat_pool_unavailable_reports_rule_and_pool_identity() {
             dst_ip: "172.16.80.200".parse().expect("dst"),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let (from_zone, to_zone) = zone_pair_for_flow(&state, 24, 12);
@@ -2099,8 +2157,8 @@ fn source_nat_allocator_exhausted_reports_rule_and_pool_identity() {
             dst_ip: "172.16.80.200".parse().expect("dst"),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let (from_zone, to_zone) = zone_pair_for_flow(&state, 24, 12);
@@ -2186,10 +2244,8 @@ fn local_delivery_resolves_real_ifindex_for_non_slash32_interface_address_10645(
         2,
         "non-/32 v4 local delivery must attribute owner RG 2 (reth1.0), not 0"
     );
-    let resolved_v6 = lookup_forwarding_resolution(
-        &state,
-        "2001:559:8585:ef00::1".parse().expect("v6"),
-    );
+    let resolved_v6 =
+        lookup_forwarding_resolution(&state, "2001:559:8585:ef00::1".parse().expect("v6"));
     assert_eq!(
         resolved_v6.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -2735,13 +2791,18 @@ fn helper_local_session_on_miss_stays_out_of_shared_alias_maps() {
         dst_ip: "172.16.80.200".parse().expect("dst"),
         src_port: 40278,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
-    let decision = SessionDecision { resolution: ingress_interface_local_resolution_on_session_miss(
-        &state, 11, 80, key.src_ip, PROTO_TCP,
-    )
-    .expect("tcp ingress local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ingress_interface_local_resolution_on_session_miss(
+            &state, 11, 80, key.src_ip, PROTO_TCP,
+        )
+        .expect("tcp ingress local delivery"),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -2809,13 +2870,18 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
         dst_ip: "172.16.80.200".parse().expect("dst"),
         src_port: 40278,
         dst_port: 5201,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
-    let decision = SessionDecision { resolution: ingress_interface_local_resolution_on_session_miss(
-        &state, 11, 80, key.src_ip, PROTO_TCP,
-    )
-    .expect("tcp ingress local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ingress_interface_local_resolution_on_session_miss(
+            &state, 11, 80, key.src_ip, PROTO_TCP,
+        )
+        .expect("tcp ingress local delivery"),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,
@@ -2912,8 +2978,8 @@ fn unsolicited_dns_reply_respects_flow_knob() {
             dst_ip: "10.0.61.102".parse().expect("dst"),
             src_port: 53,
             dst_port: 5353,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     state.allow_dns_reply = true;
@@ -2935,8 +3001,8 @@ fn policy_selection_permits_matching_zone_pair() {
             dst_ip: "172.16.80.200".parse().expect("dst"),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let (from_id, to_id) = zone_pair_ids_for_flow(&state, 24, 12);
@@ -2968,8 +3034,8 @@ fn policy_selection_denies_on_default_policy() {
             dst_ip: "172.16.80.200".parse().expect("dst"),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let (from_id, to_id) = zone_pair_ids_for_flow(&state, 24, 12);
@@ -3019,8 +3085,8 @@ fn policy_selection_deny_emits_rt_flow_event() {
             dst_ip: "172.16.80.200".parse().expect("dst"),
             src_port: 12345,
             dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     let (from_id, to_id) = zone_pair_ids_for_flow(&state, 24, 12);
@@ -3342,8 +3408,7 @@ fn rx_learned_neighbor_expires_to_missing_without_host_traffic_11406() {
     // Drive the production expiry sweep with a future monotonic timestamp.
     // This represents an idle interval beyond the dynamic RX-learn lease
     // without a wall-clock sleep or any packets from the host.
-    let max_age_ns =
-        super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS;
+    let max_age_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS;
     let now_ns = super::super::neighbor::monotonic_nanos()
         .saturating_add(max_age_ns)
         .saturating_add(1);
@@ -3658,10 +3723,16 @@ fn outer_neighbor_ifindex_tunnel_returns_outer_vlan_subif_not_logical_or_parent(
     let resolution = resolve_tunnel_forwarding_resolution(&state, None, 1, 0);
     assert_ne!(resolution.tunnel_endpoint_id, 0);
     assert_eq!(resolution.egress_ifindex, 362);
-    assert_eq!(resolution.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(
+        resolution.disposition,
+        ForwardingDisposition::MissingNeighbor
+    );
     let neigh_if = outer_neighbor_ifindex(&state, None, &resolution);
     assert_eq!(neigh_if, 12, "outer L3 subif, not tunnel logical");
-    assert_ne!(neigh_if, resolution.egress_ifindex, "not the tunnel logical");
+    assert_ne!(
+        neigh_if, resolution.egress_ifindex,
+        "not the tunnel logical"
+    );
     assert_ne!(neigh_if, resolution.tx_ifindex, "not the VLAN parent");
 }
 
@@ -3989,10 +4060,7 @@ fn local_delivery_v6_is_table_scoped_no_cross_vrf_leak() {
         IpAddr::V6("2001:db8::1".parse().unwrap()),
         Some("tenant-b.inet6.0"),
     );
-    assert_eq!(
-        resolved_b.disposition,
-        ForwardingDisposition::LocalDelivery,
-    );
+    assert_eq!(resolved_b.disposition, ForwardingDisposition::LocalDelivery,);
     assert_eq!(
         resolved_b.local_ifindex, 402,
         "tenant-b to-self (v6) must attribute tenant-b's interface, not tenant-a's",
@@ -4079,8 +4147,7 @@ fn static_nat_local_delivery_is_table_scoped_no_cross_vrf_leak() {
     );
 
     // Default table (None → inet.0): also not the owner → no leak.
-    let dflt =
-        lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, ext, None);
+    let dflt = lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, ext, None);
     assert_ne!(
         dflt.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -4199,9 +4266,7 @@ fn nat_local_delivery_default_vrf_unchanged_and_counts_ifindex0() {
     let before = LOCAL_DELIVERY_IFINDEX0.load(std::sync::atomic::Ordering::Relaxed);
     // Default table via explicit inet.0 and via None both deliver locally.
     for table in [Some("inet.0"), None] {
-        let r = lookup_forwarding_resolution_in_table_with_dynamic(
-            &state, &neighbors, ext, table,
-        );
+        let r = lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, ext, table);
         assert_eq!(
             r.disposition,
             ForwardingDisposition::LocalDelivery,
@@ -4320,18 +4385,14 @@ fn unscoped_nat_local_delivery_is_wildcard_across_vrfs() {
     // Unscoped externals must local-deliver in EVERY table: the default table
     // AND a named non-default VRF (mirrors `scope_ok`'s wildcard).
     for table in [None, Some("inet.0"), Some("tenant-a.inet.0")] {
-        let r = lookup_forwarding_resolution_in_table_with_dynamic(
-            &state, &neighbors, ext, table,
-        );
+        let r = lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, ext, table);
         assert_eq!(
             r.disposition,
             ForwardingDisposition::LocalDelivery,
             "unscoped static-NAT external must local-deliver in table {table:?} \
              (wildcard), not fall through to NoRoute (#3769 review MINOR)",
         );
-        let d = lookup_forwarding_resolution_in_table_with_dynamic(
-            &state, &neighbors, dnat, table,
-        );
+        let d = lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, dnat, table);
         assert_eq!(
             d.disposition,
             ForwardingDisposition::LocalDelivery,
@@ -4511,10 +4572,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
             next_hop_weights: vec![],
             // Member 0: explicit gateway via ge-0/0/1. Member 1: INTERFACE-ONLY
             // (empty IP part before '@') via ge-0/0/2 — `next_hop == None`.
-            next_hops: vec![
-                "192.0.2.2@ge-0/0/1".to_string(),
-                "@ge-0/0/2".to_string(),
-            ],
+            next_hops: vec!["192.0.2.2@ge-0/0/1".to_string(), "@ge-0/0/2".to_string()],
             discard: false,
             next_table: String::new(),
             preference: 5,
@@ -4542,7 +4600,11 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
     // string-format change silently turning this into a gateway member (which
     // would make the test pass trivially).
     let route = &state.routes_v4.get("inet.0").expect("table")[0];
-    assert_eq!(route.next_hops.len(), 2, "ECMP route must retain both members");
+    assert_eq!(
+        route.next_hops.len(),
+        2,
+        "ECMP route must retain both members"
+    );
     assert!(
         route.next_hops[1].next_hop.is_none() && route.next_hops[1].ifindex == 22,
         "member 1 must be an interface-only candidate (next_hop==None, ifindex 22)",
@@ -5020,8 +5082,8 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
             dst_ip: dst,
             src_port,
             dst_port: 443,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
+            discriminator: Default::default(),
+            routing_domain: 0,
         },
     };
     // A non-LocalDelivery, non-tunnel, non-cacheable decision resolution so
@@ -5108,8 +5170,8 @@ fn ecmp_flow_hash_is_stable_and_spreads() {
         dst_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
         src_port: 1024,
         dst_port: 443,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     };
     let mut key_b = key_a.clone();
     key_b.src_port = 1025;
@@ -5828,8 +5890,7 @@ fn secure_tunnel_operator_deny_is_attributed_to_its_rule_6713() {
     );
     assert_eq!(result.action, PolicyAction::Deny);
     assert_eq!(
-        result.policy_counter_idx,
-        1,
+        result.policy_counter_idx, 1,
         "the explicit deny rule's counter handle must be selected, not the zone-0 denial",
     );
 }
@@ -5886,8 +5947,7 @@ fn unzoned_interface_with_egress_row_stays_zone_zero_6713() {
          a resolver reading either map would answer 0"
     );
 
-    let (_, to_id) =
-        zone_pair_ids_for_flow(&state, LAN_IFINDEX_6722, SHARED_TUNNEL_IFINDEX_6722);
+    let (_, to_id) = zone_pair_ids_for_flow(&state, LAN_IFINDEX_6722, SHARED_TUNNEL_IFINDEX_6722);
     assert_eq!(
         to_id, 0,
         "the egress half must read `ifindex_unambiguous_zone_id`, NOT \
@@ -5998,11 +6058,7 @@ fn assert_ambiguous_ifindex_preconditions_6722(state: &ForwardingState, ifindex:
          the #6713 fallback never fires and nothing here is exercised"
     );
     assert_eq!(
-        state
-            .ifindex_to_zone_id
-            .get(&ifindex)
-            .copied()
-            .unwrap_or(0),
+        state.ifindex_to_zone_id.get(&ifindex).copied().unwrap_or(0),
         0,
         "ifindex {ifindex} is shared by rows that do not agree about its zone, so \
          INGRESS must refuse to attribute a zone to it too (#7509) -- not only \
@@ -6459,7 +6515,10 @@ fn unzoned_iface_tunnel_unit_does_not_inherit_a_siblings_zone_via_egress_row_672
         "transit out an interface the operator left in NO zone must not be \
          adjudicated under a sibling unit's zone"
     );
-    assert_ne!(to_id, TEST_SIBLING_VPN_ZONE_ID_6722, "specifically NOT `vpnb`");
+    assert_ne!(
+        to_id, TEST_SIBLING_VPN_ZONE_ID_6722,
+        "specifically NOT `vpnb`"
+    );
     assert_eq!(
         result.policy_id,
         crate::policy::UNATTRIBUTED_POLICY_ID,
@@ -7029,8 +7088,7 @@ fn uncorroborated_egress_zone_claim_is_refused_6722() {
         "no row on this ifindex carries `wan`, so the claim is uncorroborated          and must be refused"
     );
 
-    let (_, to_id, _) =
-        adjudicate_wan_to_lan_transit_6722(&state, "10.0.61.102", LAN_IFINDEX_6722);
+    let (_, to_id, _) = adjudicate_wan_to_lan_transit_6722(&state, "10.0.61.102", LAN_IFINDEX_6722);
     assert_eq!(
         to_id, 0,
         "an uncorroborated claim must resolve the 0 sentinel; adopting it would          let a drifted snapshot CONJURE a zone the operator never put this          device in -- here `wan`, which would make WAN->LAN transit a          same-zone flow"
@@ -7103,8 +7161,7 @@ fn conflicting_egress_zone_claims_on_one_ifindex_fail_closed_6722() {
             .contains_key(&LAN_IFINDEX_6722),
         "rows on one ifindex claiming different egress zones is drift, and drift          must not be resolved by preferring whichever row is walked first"
     );
-    let (_, to_id, _) =
-        adjudicate_wan_to_lan_transit_6722(&state, "10.0.61.102", LAN_IFINDEX_6722);
+    let (_, to_id, _) = adjudicate_wan_to_lan_transit_6722(&state, "10.0.61.102", LAN_IFINDEX_6722);
     assert_eq!(
         to_id, 0,
         "a conflicting claim resolves the 0 sentinel; adopting the last writer's \
@@ -7173,18 +7230,21 @@ fn retired_wire_key_decodes_and_absent_egress_zone_fails_closed_6722() {
         // carries `reth_projection: true` and no row carries `egress_zone`.
         obj.remove("egress_zone");
         if obj.get("ifindex").and_then(|x| x.as_i64()) == Some(LAN_IFINDEX_6722 as i64)
-            && obj.get("zone").and_then(|z| z.as_str()).unwrap_or("").is_empty()
+            && obj
+                .get("zone")
+                .and_then(|z| z.as_str())
+                .unwrap_or("")
+                .is_empty()
         {
             obj.insert("reth_projection".to_string(), serde_json::json!(true));
         }
     }
 
-    let round: crate::protocol::ConfigSnapshot = serde_json::from_value(v)
-        .expect(
-            "the decoder must accept a snapshot carrying the RETIRED key; an error \
+    let round: crate::protocol::ConfigSnapshot = serde_json::from_value(v).expect(
+        "the decoder must accept a snapshot carrying the RETIRED key; an error \
              here would turn a version mismatch into a parse crash instead of the \
              clean refusal the version gate gives",
-        );
+    );
     for iface in &round.interfaces {
         if iface.ifindex == LAN_IFINDEX_6722 {
             assert_eq!(
@@ -7415,8 +7475,14 @@ fn select_route_next_hop_fallback_excludes_undrivable_11318() {
         tunnel_endpoint_id: u16,
     }
     let candidates = [
-        Nh { ifindex: 0, tunnel_endpoint_id: 0 },
-        Nh { ifindex: 7, tunnel_endpoint_id: 0 },
+        Nh {
+            ifindex: 0,
+            tunnel_endpoint_id: 0,
+        },
+        Nh {
+            ifindex: 7,
+            tunnel_endpoint_id: 0,
+        },
     ];
     for ip_hash in 0u64..64 {
         let got = select_route_next_hop(
@@ -7445,8 +7511,14 @@ fn select_route_next_hop_fallback_all_undrivable_keeps_legacy_pick_11318() {
         tunnel_endpoint_id: u16,
     }
     let candidates = [
-        Nh { ifindex: 0, tunnel_endpoint_id: 0 },
-        Nh { ifindex: 0, tunnel_endpoint_id: 0 },
+        Nh {
+            ifindex: 0,
+            tunnel_endpoint_id: 0,
+        },
+        Nh {
+            ifindex: 0,
+            tunnel_endpoint_id: 0,
+        },
     ];
     for ip_hash in 0u64..64 {
         let got = select_route_next_hop(
@@ -7694,13 +7766,22 @@ fn canonical_route_table_borrows_when_no_rewrite_is_needed_7204() {
         canonical_route_table(DEFAULT_V4_TABLE, true),
         Cow::Borrowed(_)
     ));
-    assert_eq!(canonical_route_table(DEFAULT_V4_TABLE, true), DEFAULT_V6_TABLE);
-    assert_eq!(canonical_route_table(DEFAULT_V6_TABLE, false), DEFAULT_V4_TABLE);
+    assert_eq!(
+        canonical_route_table(DEFAULT_V4_TABLE, true),
+        DEFAULT_V6_TABLE
+    );
+    assert_eq!(
+        canonical_route_table(DEFAULT_V6_TABLE, false),
+        DEFAULT_V4_TABLE
+    );
 
     // Genuine rewrites: a NEW string, so Owned is correct here and borrowing
     // would be a wrong-table bug rather than an optimisation.
     let v6 = canonical_route_table("vrf-a.inet.0", true);
-    assert!(matches!(v6, Cow::Owned(_)), "a family rewrite must produce a new string");
+    assert!(
+        matches!(v6, Cow::Owned(_)),
+        "a family rewrite must produce a new string"
+    );
     assert_eq!(v6, "vrf-a.inet6.0");
     let v4 = canonical_route_table("vrf-a.inet6.0", false);
     assert!(matches!(v4, Cow::Owned(_)));
@@ -7948,7 +8029,12 @@ fn v6_ah_meta_10729() -> crate::afxdp::types::UserspaceDpMeta {
     }
 }
 
-fn ah_parity_rule(name: &str, apps: Vec<String>, terms: Vec<crate::PolicyApplicationSnapshot>, action: &str) -> PolicyRuleSnapshot {
+fn ah_parity_rule(
+    name: &str,
+    apps: Vec<String>,
+    terms: Vec<crate::PolicyApplicationSnapshot>,
+    action: &str,
+) -> PolicyRuleSnapshot {
     PolicyRuleSnapshot {
         name: name.to_string(),
         from_zone: "lan".to_string(),
@@ -7980,7 +8066,7 @@ fn ah_term(name: &str, protocol: &str, dst_port: &str) -> crate::PolicyApplicati
 // no-match on `ah` terms), opposite to v4 in both directions.
 #[test]
 fn v6_ah_policy_parity_with_v4_ah_10729() {
-    use crate::policy::{evaluate_policy_result_l3_aware, parse_policy_state, PolicyAction};
+    use crate::policy::{PolicyAction, evaluate_policy_result_l3_aware, parse_policy_state};
     use rustc_hash::FxHashMap;
     use std::net::IpAddr;
     let mut zones = FxHashMap::default();
@@ -7996,40 +8082,70 @@ fn v6_ah_policy_parity_with_v4_ah_10729() {
     assert_eq!(v6_eff, 51, "v6+AH must evaluate as proto 51");
 
     let tcp_permit = ah_parity_rule(
-        "tcp-permit", vec!["junos-http".to_string()],
-        vec![ah_term("junos-http", "tcp", "80")], "permit",
+        "tcp-permit",
+        vec!["junos-http".to_string()],
+        vec![ah_term("junos-http", "tcp", "80")],
+        "permit",
     );
     let tcp_deny = ah_parity_rule(
-        "tcp-deny", vec!["junos-http".to_string()],
-        vec![ah_term("junos-http", "tcp", "80")], "deny",
+        "tcp-deny",
+        vec!["junos-http".to_string()],
+        vec![ah_term("junos-http", "tcp", "80")],
+        "deny",
     );
     let ah_permit = ah_parity_rule(
-        "ah-permit", vec!["ah".to_string()],
-        vec![ah_term("ah", "ah", "")], "permit",
+        "ah-permit",
+        vec!["ah".to_string()],
+        vec![ah_term("ah", "ah", "")],
+        "permit",
     );
     let ah_deny = ah_parity_rule(
-        "ah-deny", vec!["ah".to_string()],
-        vec![ah_term("ah", "ah", "")], "deny",
+        "ah-deny",
+        vec!["ah".to_string()],
+        vec![ah_term("ah", "ah", "")],
+        "deny",
     );
     let any_permit = ah_parity_rule("any", vec!["any".to_string()], vec![], "permit");
 
     for default_policy in ["deny", "permit"] {
         for (label, rules) in [
-            ("tcp-port permit", vec![tcp_permit.clone(), any_permit.clone()]),
-            ("tcp-port deny + any permit", vec![tcp_deny.clone(), any_permit.clone()]),
+            (
+                "tcp-port permit",
+                vec![tcp_permit.clone(), any_permit.clone()],
+            ),
+            (
+                "tcp-port deny + any permit",
+                vec![tcp_deny.clone(), any_permit.clone()],
+            ),
             ("ah permit", vec![ah_permit.clone()]),
             ("ah deny", vec![ah_deny.clone()]),
         ] {
             let state = parse_policy_state(default_policy, &rules, &zones);
             let v4 = evaluate_policy_result_l3_aware(
-                &state, crate::test_zone_ids::TEST_LAN_ZONE_ID,
+                &state,
+                crate::test_zone_ids::TEST_LAN_ZONE_ID,
                 crate::test_zone_ids::TEST_WAN_ZONE_ID,
-                v4_src, v4_dst, 51, 0, 0, None, 128, false,
+                v4_src,
+                v4_dst,
+                51,
+                0,
+                0,
+                None,
+                128,
+                false,
             );
             let v6 = evaluate_policy_result_l3_aware(
-                &state, crate::test_zone_ids::TEST_LAN_ZONE_ID,
+                &state,
+                crate::test_zone_ids::TEST_LAN_ZONE_ID,
                 crate::test_zone_ids::TEST_WAN_ZONE_ID,
-                v6_src, v6_dst, v6_eff, 0, 0, None, 128, false,
+                v6_src,
+                v6_dst,
+                v6_eff,
+                0,
+                0,
+                None,
+                128,
+                false,
             );
             assert_eq!(
                 v4.action, v6.action,
@@ -8041,9 +8157,21 @@ fn v6_ah_policy_parity_with_v4_ah_10729() {
     // `ah` terms fire for v6-AH transit (not just parity with v4).
     let state = parse_policy_state("deny", &[ah_permit], &zones);
     let v6 = evaluate_policy_result_l3_aware(
-        &state, crate::test_zone_ids::TEST_LAN_ZONE_ID,
+        &state,
+        crate::test_zone_ids::TEST_LAN_ZONE_ID,
         crate::test_zone_ids::TEST_WAN_ZONE_ID,
-        v6_src, v6_dst, v6_eff, 0, 0, None, 128, false,
+        v6_src,
+        v6_dst,
+        v6_eff,
+        0,
+        0,
+        None,
+        128,
+        false,
     );
-    assert_eq!(v6.action, PolicyAction::Permit, "`ah` permit must fire for v6-AH transit");
+    assert_eq!(
+        v6.action,
+        PolicyAction::Permit,
+        "`ah` permit must fire for v6-AH transit"
+    );
 }

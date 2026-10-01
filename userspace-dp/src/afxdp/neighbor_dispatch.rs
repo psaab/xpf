@@ -19,10 +19,8 @@
 // Pure relocation. `use super::*;` brings every type, helper,
 // and sibling-submodule item from afxdp.rs into scope.
 
-use crate::afxdp::neigh_schedule::{
-    next_due_for_pending, PENDING_NEIGH_SWEEP_BUDGET,
-};
 use super::*;
+use crate::afxdp::neigh_schedule::{PENDING_NEIGH_SWEEP_BUDGET, next_due_for_pending};
 
 /// GEMINI-NEXT.md Section 3 cold-start: re-fire ARP/NDP solicitation
 /// at exponential intervals after the initial probe in
@@ -491,11 +489,16 @@ pub(super) fn retry_pending_neigh(
             ForwardingDisposition::MissingNeighbor
                 | ForwardingDisposition::ForwardCandidate
                 | ForwardingDisposition::FabricRedirect
-        ) && pending_meta.l3_addrs_unfiltered().is_some_and(|(source, destination)| {
-            forwarding
-                .bindless_ipsec_selector_fence
-                .matches_with_nat(source, destination, decision.nat)
-        }) {
+        ) && pending_meta
+            .l3_addrs_unfiltered()
+            .is_some_and(|(source, destination)| {
+                forwarding.bindless_ipsec_selector_fence.matches_with_nat(
+                    source,
+                    destination,
+                    decision.nat,
+                )
+            })
+        {
             counters.touched = true;
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
@@ -526,10 +529,15 @@ pub(super) fn retry_pending_neigh(
         if let Some(flow_key) = pkt.flow_key.as_ref() {
             let target = decision.nat.rewrite_dst.unwrap_or(flow_key.dst_ip);
             if matches!(
-                super::session_glue::resolve_install_table_for_session(forwarding, decision, target),
+                super::session_glue::resolve_install_table_for_session(
+                    forwarding, decision, target
+                ),
                 super::session_glue::InstallTable::Unresolvable
             ) {
-                binding.live.table_unavailable_packets.fetch_add(1, Ordering::Relaxed);
+                binding
+                    .live
+                    .table_unavailable_packets
+                    .fetch_add(1, Ordering::Relaxed);
                 super::session_glue::flag_install_table_purge(binding.worker_id);
                 binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
                 continue;
@@ -1095,7 +1103,6 @@ fn learn_dynamic_neighbor_with_mac(
     }
 }
 
-
 pub(super) fn learn_dynamic_neighbor(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -1114,7 +1121,6 @@ pub(super) fn learn_dynamic_neighbor(
         true,
     );
 }
-
 
 /// #1787: pure decision helper for the cheap-first RX learn pre-check.
 /// `current` holds the pre-read MAC (or `None` on miss) for each

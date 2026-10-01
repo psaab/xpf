@@ -51,7 +51,6 @@ pub(super) fn report_arp_overwrite_refusal(
     }
 }
 
-
 const NA_UNSOLICITED_OVERRIDE_ALARM_INTERVAL_NS: u64 = 60_000_000_000;
 static LAST_NA_UNSOLICITED_OVERRIDE_ALARM_NS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -68,7 +67,9 @@ pub(super) fn report_na_unsolicited_override_refusal(
     let refusals = neighbors.note_na_unsolicited_override_refusal();
     let mut previous = LAST_NA_UNSOLICITED_OVERRIDE_ALARM_NS.load(Ordering::Relaxed);
     loop {
-        if previous != 0 && now_ns.saturating_sub(previous) < NA_UNSOLICITED_OVERRIDE_ALARM_INTERVAL_NS {
+        if previous != 0
+            && now_ns.saturating_sub(previous) < NA_UNSOLICITED_OVERRIDE_ALARM_INTERVAL_NS
+        {
             return;
         }
         match LAST_NA_UNSOLICITED_OVERRIDE_ALARM_NS.compare_exchange_weak(
@@ -90,7 +91,6 @@ pub(super) fn report_na_unsolicited_override_refusal(
         }
     }
 }
-
 
 pub(super) fn monotonic_timestamp_to_datetime(
     last_nanos: u64,
@@ -538,8 +538,8 @@ pub(super) fn add_kernel_neighbor(ifindex: i32, ip: IpAddr, mac: [u8; 6]) {
 #[cfg(test)]
 mod newneigh_request_tests {
     use super::{
-        build_newneigh_request, DATA_PATH_NEIGH_STATE, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST,
-        NUD_REACHABLE, NUD_STALE, RTM_NEWNEIGH,
+        DATA_PATH_NEIGH_STATE, NLM_F_CREATE, NLM_F_REPLACE, NLM_F_REQUEST, NUD_REACHABLE,
+        NUD_STALE, RTM_NEWNEIGH, build_newneigh_request,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -573,8 +573,12 @@ mod newneigh_request_tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 61, 50)),
             IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0xabcd, 0xef01, 0, 0x42)),
         ] {
-            let buf =
-                build_newneigh_request(24, ip, [0xde, 0xad, 0xbe, 0xef, 0x00, 0x18], DATA_PATH_NEIGH_STATE);
+            let buf = build_newneigh_request(
+                24,
+                ip,
+                [0xde, 0xad, 0xbe, 0xef, 0x00, 0x18],
+                DATA_PATH_NEIGH_STATE,
+            );
             assert_eq!(
                 state_of(&buf),
                 NUD_STALE,
@@ -603,11 +607,21 @@ mod newneigh_request_tests {
     fn build_newneigh_request_encodes_requested_state() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7));
         assert_eq!(
-            state_of(&build_newneigh_request(3, ip, [1, 2, 3, 4, 5, 6], NUD_REACHABLE)),
+            state_of(&build_newneigh_request(
+                3,
+                ip,
+                [1, 2, 3, 4, 5, 6],
+                NUD_REACHABLE
+            )),
             NUD_REACHABLE
         );
         assert_eq!(
-            state_of(&build_newneigh_request(3, ip, [1, 2, 3, 4, 5, 6], NUD_STALE)),
+            state_of(&build_newneigh_request(
+                3,
+                ip,
+                [1, 2, 3, 4, 5, 6],
+                NUD_STALE
+            )),
             NUD_STALE
         );
     }
@@ -1375,8 +1389,8 @@ fn neigh_monitor_steady_state(
                 buf[offset + 10],
                 buf[offset + 11],
             ]);
-            let from_redump =
-                nlmsg_seq != 0 && (nlmsg_seq == redump_pending[0] || nlmsg_seq == redump_pending[1]);
+            let from_redump = nlmsg_seq != 0
+                && (nlmsg_seq == redump_pending[0] || nlmsg_seq == redump_pending[1]);
             if nlmsg_type == 28 || nlmsg_type == 29 {
                 let effect = parse_neighbor_msg(
                     nlmsg_type,
@@ -1473,9 +1487,11 @@ pub(super) fn pin_current_thread(worker_id: u32) {
         // sees via cpu_set_t). Called once per worker at thread-start;
         // no hot-path cost.
         let mut allowed = [0u16; libc::CPU_SETSIZE as usize];
-        let Some(target) =
-            nth_allowed_cpu(worker_id, |cpu| libc::CPU_ISSET(cpu, &inherited), &mut allowed)
-        else {
+        let Some(target) = nth_allowed_cpu(
+            worker_id,
+            |cpu| libc::CPU_ISSET(cpu, &inherited),
+            &mut allowed,
+        ) else {
             return;
         };
         let mut set: libc::cpu_set_t = core::mem::zeroed();
@@ -1834,12 +1850,9 @@ mod pin_tests {
         //     xpf-userspace-w cpus_allowed=3   <-- old worker 3
         //
         // Expected NEW behaviour: workers pin to cpus_allowed=2/3/4/5.
-        for (worker_id, old_absolute_cpu, new_allowed_cpu) in [
-            (0u32, 0usize, 2usize),
-            (1, 1, 3),
-            (2, 2, 4),
-            (3, 3, 5),
-        ] {
+        for (worker_id, old_absolute_cpu, new_allowed_cpu) in
+            [(0u32, 0usize, 2usize), (1, 1, 3), (2, 2, 4), (3, 3, 5)]
+        {
             // Reconstruct the old formula verbatim. Uses the allowed-set
             // *size* (what `available_parallelism()` returned under the
             // systemd mask), not the allowed-set members.
@@ -1849,8 +1862,8 @@ mod pin_tests {
                 "old formula reconstruction drifted",
             );
 
-            let picked = nth_allowed_cpu(worker_id, &is_set, &mut buf)
-                .expect("allowed mask is non-empty");
+            let picked =
+                nth_allowed_cpu(worker_id, &is_set, &mut buf).expect("allowed mask is non-empty");
             assert_eq!(
                 picked, new_allowed_cpu,
                 "worker {worker_id} should pin to allowed CPU {new_allowed_cpu}, got {picked}",
@@ -1884,11 +1897,11 @@ mod pin_tests {
 #[cfg(test)]
 mod probe_socket_tests {
     use super::{
-        build_icmp4_echo, build_icmp6_echo, build_solicit_sockaddr_in6, select_probe_socket,
-        ProbeSockKind,
+        ProbeSockKind, build_icmp4_echo, build_icmp6_echo, build_solicit_sockaddr_in6,
+        select_probe_socket,
     };
-    use std::net::Ipv6Addr;
     use std::cell::RefCell;
+    use std::net::Ipv6Addr;
 
     /// Base socket type with the `SOCK_CLOEXEC` (and any future flag) bits
     /// masked off — `SOCK_CLOEXEC` is OR'd into the type arg at creation.
@@ -1909,7 +1922,11 @@ mod probe_socket_tests {
         });
         assert_eq!(sel, Some((42, ProbeSockKind::Raw)));
         let attempts = attempts.borrow();
-        assert_eq!(attempts.len(), 1, "DGRAM must not be attempted once raw succeeds");
+        assert_eq!(
+            attempts.len(),
+            1,
+            "DGRAM must not be attempted once raw succeeds"
+        );
         assert_eq!(base_type(attempts[0]), libc::SOCK_RAW);
         assert_ne!(
             attempts[0] & libc::SOCK_CLOEXEC,
@@ -1986,7 +2003,11 @@ mod probe_socket_tests {
         // IP header, the prior-EINVAL trap.
         assert_ne!(dgram[0], 0x45);
         // DGRAM leaves the checksum for the kernel; raw carries 0xf7ff.
-        assert_eq!(&dgram[2..4], &[0, 0], "kernel recomputes csum for ping socket");
+        assert_eq!(
+            &dgram[2..4],
+            &[0, 0],
+            "kernel recomputes csum for ping socket"
+        );
         assert_eq!(&raw[2..4], &[0xf7, 0xff], "raw must carry a valid csum");
         assert_ne!(raw, dgram, "DGRAM buffer must be distinct from raw");
     }
@@ -2118,7 +2139,13 @@ mod warmer_tests {
         let warm_generation = Arc::new(AtomicU64::new(7));
         let rg = active_rg(0);
         let stop = Arc::new(AtomicBool::new(false));
-        let handle = spawn_loop(rx, last_probed.clone(), warm_generation.clone(), rg, stop.clone());
+        let handle = spawn_loop(
+            rx,
+            last_probed.clone(),
+            warm_generation.clone(),
+            rg,
+            stop.clone(),
+        );
 
         tx.try_send(warm_item(7, 0)).expect("send");
         let key = (999, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)));
@@ -2138,7 +2165,13 @@ mod warmer_tests {
         let warm_generation = Arc::new(AtomicU64::new(10));
         let rg = active_rg(0);
         let stop = Arc::new(AtomicBool::new(false));
-        let handle = spawn_loop(rx, last_probed.clone(), warm_generation.clone(), rg, stop.clone());
+        let handle = spawn_loop(
+            rx,
+            last_probed.clone(),
+            warm_generation.clone(),
+            rg,
+            stop.clone(),
+        );
 
         // Item tagged with an OLD generation (current is 10).
         tx.try_send(warm_item(3, 0)).expect("send stale");
@@ -2165,7 +2198,13 @@ mod warmer_tests {
         // RG runtime has RG 0 active, but the item targets RG 5 (absent).
         let rg = active_rg(0);
         let stop = Arc::new(AtomicBool::new(false));
-        let handle = spawn_loop(rx, last_probed.clone(), warm_generation.clone(), rg, stop.clone());
+        let handle = spawn_loop(
+            rx,
+            last_probed.clone(),
+            warm_generation.clone(),
+            rg,
+            stop.clone(),
+        );
 
         tx.try_send(warm_item(1, 5)).expect("send inactive-rg");
         // Give the worker time to process and discard it.
@@ -2190,7 +2229,9 @@ mod warmer_tests {
         // Drop the sender WITHOUT setting stop: the recv_timeout must see
         // Disconnected and the loop must exit on its own.
         drop(tx);
-        handle.join().expect("warmer must exit cleanly on channel disconnect");
+        handle
+            .join()
+            .expect("warmer must exit cleanly on channel disconnect");
     }
 
     #[test]
@@ -2200,7 +2241,13 @@ mod warmer_tests {
         let warm_generation = Arc::new(AtomicU64::new(1));
         let rg = active_rg(0);
         let stop = Arc::new(AtomicBool::new(false));
-        let handle = spawn_loop(rx, last_probed.clone(), warm_generation.clone(), rg, stop.clone());
+        let handle = spawn_loop(
+            rx,
+            last_probed.clone(),
+            warm_generation.clone(),
+            rg,
+            stop.clone(),
+        );
 
         // Same key sent twice within the 5s window → one recorded probe.
         tx.try_send(warm_item(1, 0)).expect("send 1");
@@ -2288,8 +2335,7 @@ mod monitor_lifecycle_tests_5165 {
     #[test]
     fn steady_state_drops_batch_received_after_stop_5165() {
         let mut fds = [0i32; 2];
-        let rc =
-            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
         assert_eq!(rc, 0, "socketpair failed");
         let (write_fd, read_fd) = (fds[0], fds[1]);
         // #6621: a LONG harness receive timeout, deliberately not the
@@ -2333,7 +2379,10 @@ mod monitor_lifecycle_tests_5165 {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(applied, "steady-state loop must apply a pre-stop RTM_NEWNEIGH");
+        assert!(
+            applied,
+            "steady-state loop must apply a pre-stop RTM_NEWNEIGH"
+        );
 
         // The loop has processed event 1, looped back, and is now blocked in
         // recv() on the empty socket. Signal stop while it is blocked so the
@@ -2402,10 +2451,7 @@ mod monitor_lifecycle_tests_5165 {
             map.get(&key2).is_none(),
             "a batch received AFTER stop must NOT mutate the map (post-recv re-check)",
         );
-        assert!(
-            map.get(&key1).is_some(),
-            "the pre-stop entry must remain",
-        );
+        assert!(map.get(&key1).is_some(), "the pre-stop entry must remain",);
 
         // Both ends are ours and the loop is joined, so close both — the
         // read end used to leak for the lifetime of the test binary.
@@ -2422,8 +2468,7 @@ mod monitor_lifecycle_tests_5165 {
     #[test]
     fn steady_state_exits_on_stop_when_idle_5165() {
         let mut fds = [0i32; 2];
-        let rc =
-            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
         assert_eq!(rc, 0, "socketpair failed");
         let (write_fd, read_fd) = (fds[0], fds[1]);
         set_rcvtimeo(read_fd, 500);
@@ -2495,11 +2540,8 @@ mod noarp_listener_10690_tests {
                         },
                     );
                 }
-                let effect = parse_neighbor_msg(
-                    28,
-                    &newneigh_body(7, ip, [0xff; 6], state),
-                    &neighbors,
-                );
+                let effect =
+                    parse_neighbor_msg(28, &newneigh_body(7, ip, [0xff; 6], state), &neighbors);
                 assert_eq!(
                     effect,
                     if had_prior_row {
@@ -2566,7 +2608,10 @@ mod noarp_listener_10690_tests {
             NeighborMsgEffect::Upserted,
             "a differing MAC confirmed after a kernel probe must converge"
         );
-        assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(failover_mac));
+        assert_eq!(
+            neighbors.get(&key).map(|entry| entry.mac),
+            Some(failover_mac)
+        );
         assert_eq!(neighbors.mac_change_epoch_for(&key), epoch + 1);
         assert_eq!(neighbors.arp_overwrite_refusals(), refusals + 1);
     }

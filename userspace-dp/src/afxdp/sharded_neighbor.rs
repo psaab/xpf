@@ -330,8 +330,7 @@ impl ShardedNeighborMap {
     /// neighbor with a different MAC.
     #[cfg(test)]
     pub(crate) fn rx_learn_overwrite_refusals(&self) -> u64 {
-        self.rx_learn_overwrite_refusals
-            .load(Ordering::Relaxed)
+        self.rx_learn_overwrite_refusals.load(Ordering::Relaxed)
     }
     /// #10854: account one pre-policy source learn refused because it would
     /// replace an existing neighbor's MAC. Kept distinct from capacity
@@ -418,7 +417,8 @@ impl ShardedNeighborMap {
 
     #[cfg(test)]
     pub(crate) fn na_unsolicited_override_refusals(&self) -> u64 {
-        self.na_unsolicited_override_refusals.load(Ordering::Relaxed)
+        self.na_unsolicited_override_refusals
+            .load(Ordering::Relaxed)
     }
 
     /// #5673: `get` plus whether the key's shard is at the per-shard learn
@@ -504,10 +504,7 @@ impl ShardedNeighborMap {
         self.shard_mac_epochs[shard].fetch_add(1, Ordering::Relaxed);
     }
 
-    fn lock_shard(
-        &self,
-        idx: usize,
-    ) -> MutexGuard<'_, FastMap<(i32, IpAddr), NeighborRecord>> {
+    fn lock_shard(&self, idx: usize) -> MutexGuard<'_, FastMap<(i32, IpAddr), NeighborRecord>> {
         match self.shards[idx].0.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -596,11 +593,7 @@ impl ShardedNeighborMap {
     /// Insert `key → val` and return whether the cache changed.
     /// Returns `false` if the key already existed with the same MAC.
     /// Mirrors `neighbor::update_dynamic_neighbor` semantics.
-    pub(crate) fn insert_if_changed(
-        &self,
-        key: (i32, IpAddr),
-        val: NeighborEntry,
-    ) -> bool {
+    pub(crate) fn insert_if_changed(&self, key: (i32, IpAddr), val: NeighborEntry) -> bool {
         // #9893: the Override-unconditional leg of the CAS below. This is
         // used by other RX learns whose protocol allows replacement.
         // `None` arm is a defined fallback, not a panic: a future `None`
@@ -808,7 +801,10 @@ impl ShardedNeighborMap {
             guards.push(self.lock_shard(i));
         }
         let mut bulk = BulkShardGuard {
-            guards: guards.try_into().ok().expect("exactly NUM_SHARDS guards pushed"),
+            guards: guards
+                .try_into()
+                .ok()
+                .expect("exactly NUM_SHARDS guards pushed"),
         };
         f(&mut bulk)
     }
@@ -1023,9 +1019,10 @@ impl ShardedNeighborMap {
         now_ns: u64,
     ) -> bool {
         let installed = self.with_all_shards(|bulk| {
-            if keys.iter().any(|key| {
-                bulk.get(key).is_some_and(|prior| prior.mac != val.mac)
-            }) {
+            if keys
+                .iter()
+                .any(|key| bulk.get(key).is_some_and(|prior| prior.mac != val.mac))
+            {
                 self.rx_learn_overwrite_refusals
                     .fetch_add(1, Ordering::Relaxed);
                 return false;
@@ -1190,4 +1187,3 @@ impl<'a> BulkShardGuard<'a> {
 #[cfg(test)]
 #[path = "sharded_neighbor_tests.rs"]
 mod tests;
-
