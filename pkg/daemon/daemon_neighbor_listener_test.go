@@ -42,6 +42,80 @@ func TestProbeTierClassification(t *testing.T) {
 		})
 	}
 }
+func TestForceProbeRoundRobinReachesGatewayWithinBoundedTicks(t *testing.T) {
+	const (
+		neighborCount = 1001
+		probeCap      = 256
+		maxTicks      = 5
+	)
+	targets := make([]probeTarget, neighborCount)
+	for i := range targets {
+		targets[i] = probeTarget{
+			ip:          net.IPv4(10, byte(i>>8), byte(i), 1),
+			linkIndex:   1,
+			state:       uint16(netlink.NUD_STALE),
+			criticality: criticalityNormal,
+		}
+	}
+	gateway := net.ParseIP("192.0.2.1")
+	targets[neighborCount-1].ip = gateway
+	sortProbeTargets(targets)
+
+	d := &Daemon{}
+	for range maxTicks {
+		start, count := d.forceProbeWindow(len(targets), probeCap)
+		for i := range count {
+			index := start + i
+			if index >= len(targets) {
+				index -= len(targets)
+			}
+			if targets[index].ip.Equal(gateway) {
+				return
+			}
+		}
+	}
+	t.Fatalf("gateway was not selected within %d probe ticks", maxTicks)
+}
+
+func TestForceProbeTargetsSortDeterministically(t *testing.T) {
+	makeTarget := func(ip string, linkIndex int) probeTarget {
+		return probeTarget{
+			ip:          net.ParseIP(ip),
+			linkIndex:   linkIndex,
+			state:       uint16(netlink.NUD_STALE),
+			criticality: criticalityNormal,
+		}
+	}
+	first := []probeTarget{
+		makeTarget("192.0.2.3", 2),
+		makeTarget("192.0.2.2", 1),
+		makeTarget("192.0.2.1", 1),
+	}
+	second := []probeTarget{
+		first[2],
+		first[0],
+		first[1],
+	}
+
+	sortProbeTargets(first)
+	sortProbeTargets(second)
+	for i := range first {
+		if first[i].linkIndex != second[i].linkIndex ||
+			!first[i].ip.Equal(second[i].ip) {
+			t.Fatalf("different source orders produced different probe targets at %d: %v vs %v",
+				i, first[i], second[i])
+		}
+	}
+	if got, want := first[0].ip.String(), "192.0.2.1"; got != want {
+		t.Fatalf("first sorted target IP = %s, want %s", got, want)
+	}
+	if got, want := first[1].ip.String(), "192.0.2.2"; got != want {
+		t.Fatalf("second sorted target IP = %s, want %s", got, want)
+	}
+	if got, want := first[2].linkIndex, 2; got != want {
+		t.Fatalf("third sorted target link index = %d, want %d", got, want)
+	}
+}
 
 func TestUsableNUDMask(t *testing.T) {
 	cases := []struct {

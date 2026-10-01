@@ -346,6 +346,56 @@ func probeTier(state uint16, criticality int) int {
 	return 3
 }
 
+// sortProbeTargets orders equal-priority targets by stable keys so map-backed
+// snapshot enumeration cannot change which neighbors fall inside a capped
+// probe window.
+func sortProbeTargets(targets []probeTarget) {
+	sort.Slice(targets, func(i, j int) bool {
+		ti := probeTier(targets[i].state, targets[i].criticality)
+		tj := probeTier(targets[j].state, targets[j].criticality)
+		if ti != tj {
+			return ti < tj
+		}
+		if targets[i].criticality != targets[j].criticality {
+			return targets[i].criticality > targets[j].criticality
+		}
+		if targets[i].linkIndex != targets[j].linkIndex {
+			return targets[i].linkIndex < targets[j].linkIndex
+		}
+		return compareProbeIP(targets[i].ip, targets[j].ip) < 0
+	})
+}
+
+// compareProbeIP compares addresses without formatting them on every sort
+// comparison. IPv4 is ordered before IPv6 and is normalized across 4-byte and
+// IPv4-mapped 16-byte representations.
+func compareProbeIP(a, b net.IP) int {
+	a4, b4 := a.To4(), b.To4()
+	switch {
+	case a4 != nil && b4 != nil:
+		return bytes.Compare(a4, b4)
+	case a4 != nil:
+		return -1
+	case b4 != nil:
+		return 1
+	default:
+		return bytes.Compare(a, b)
+	}
+}
+
+// forceProbeWindow chooses this tick's bounded window within the ordered target
+// list. Advancing by one full window ensures capped sets are revisited fairly.
+func (d *Daemon) forceProbeWindow(targetCount, maxTargets int) (start, count int) {
+	if targetCount <= 0 || maxTargets <= 0 {
+		return 0, 0
+	}
+	if targetCount <= maxTargets {
+		return 0, targetCount
+	}
+	previous := d.neighborGuards.forceProbeCursor.Add(uint64(maxTargets)) - uint64(maxTargets)
+	return int(previous % uint64(targetCount)), maxTargets
+}
+
 // forceProbeNeighbors sends ARP/IPv6 NS probes for all monitored
 // neighbor targets, REGARDLESS of NUD state. Distinct from
 // resolveNeighborsInner which skips REACHABLE/STALE/PERMANENT —
@@ -353,8 +403,9 @@ func probeTier(state uint16, criticality int) int {
 // steady-state staleness reconciliation (#1197).
 //
 // Targets are tier-prioritized (stale-risk first, then critical
-// next-hops, then rest) and capped at neighborProbeMaxTargets to
-// avoid ARP/NS storms on large address-books.
+// next-hops, then rest) and capped at neighborProbeMaxTargets. The
+// capped window rotates deterministically so no equal-priority target
+// is starved by the cap.
 func (d *Daemon) forceProbeNeighbors(cfg *config.Config) {
 	if cfg == nil {
 		return
@@ -364,14 +415,19 @@ func (d *Daemon) forceProbeNeighbors(cfg *config.Config) {
 		return
 	}
 	cap := getNeighborProbeMaxTargets()
-	if len(targets) > cap {
+	start, count := d.forceProbeWindow(len(targets), cap)
+	if count < len(targets) {
 		slog.Warn("neighbor probe truncated",
 			"total", len(targets),
 			"cap", cap)
-		targets = targets[:cap]
 	}
-	slog.Info("force-probe neighbors", "count", len(targets))
-	for _, t := range targets {
+	slog.Info("force-probe neighbors", "count", count)
+	for i := range count {
+		index := start + i
+		if index >= len(targets) {
+			index -= len(targets)
+		}
+		t := targets[index]
 		link, err := netlink.LinkByIndex(t.linkIndex)
 		if err != nil {
 			continue
@@ -389,15 +445,16 @@ func (d *Daemon) forceProbeNeighbors(cfg *config.Config) {
 	}
 }
 
-// collectMonitoredNeighbors returns the deduped union of all
-// targets we want to keep ARP/NDP-warm:
+// collectMonitoredNeighbors returns the deduped union of targets we want to
+// keep ARP/NDP-warm:
 //  1. Snapshot keys (entries we've published to userspace-dp)
-//  2. Configured next-hops, NAT destinations, address-book hosts
-//     (the resolveNeighborsInner target set)
-//  3. Fabric peer IPs
+//  2. Fabric peer IPs
 //
-// Returned in PRIORITY ORDER (tier1 → tier2 → tier3) where
-// tiering is annotated by current kernel NUD state per target.
+// resolveNeighbors owns the configured-target list; this collector adds
+// snapshot entries (including configured neighbors already published) and
+// fabric peers for steady-state revalidation.
+// Targets are returned in deterministic priority order: tier, criticality, link
+// index, then IP address.
 func (d *Daemon) collectMonitoredNeighbors(cfg *config.Config) []probeTarget {
 	type key struct {
 		linkIndex int
@@ -509,15 +566,7 @@ func (d *Daemon) collectMonitoredNeighbors(cfg *config.Config) []probeTarget {
 		}
 	}
 
-	// Sort into tier order. Within tier, higher criticality first.
-	sort.SliceStable(targets, func(i, j int) bool {
-		ti := probeTier(targets[i].state, targets[i].criticality)
-		tj := probeTier(targets[j].state, targets[j].criticality)
-		if ti != tj {
-			return ti < tj
-		}
-		return targets[i].criticality > targets[j].criticality
-	})
+	sortProbeTargets(targets)
 	return targets
 }
 

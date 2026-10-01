@@ -401,6 +401,9 @@ type neighborPeriodicGuards struct {
 	resolveInFlight     atomic.Bool
 	forceProbeInFlight  atomic.Bool
 	cleanFailedInFlight atomic.Bool
+	// forceProbeCursor advances the start of each capped probe window so
+	// equal-priority neighbors are all revisited within bounded ticks.
+	forceProbeCursor atomic.Uint64
 	// *LastSuccessNanos hold the wall-clock UnixNano of each phase's last
 	// successful completion (0 = never), feeding the phase-age watchdog gauge.
 	resolveLastSuccessNanos     atomic.Int64
