@@ -810,7 +810,8 @@ func hostInboundViewIngressNetdevsWithMasters(sig string, netdevSigs map[string]
 
 // hostInboundViewIngressDenyNetdevs returns the effective netdevs whose claims
 // remain ambiguous after VRF-master normalization. The renderer attaches this
-// list to one view and emits an unconditional destination-scoped drop.
+// list to one view, applies destination-owner service rights, then emits a
+// counted fail-closed drop for unmatched traffic.
 func hostInboundViewIngressDenyNetdevs(netdevSigs map[string]map[string]bool, lifelineNetdevs, vrfEnslaved map[string]bool, vrfMasters map[string]string) []string {
 	claims := hostInboundIngressClaims(netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters)
 	var out []string
@@ -855,16 +856,13 @@ func withoutLifelineShared(addrs []string, shared map[string]bool) []string {
 	return kept
 }
 
-// UnzonedHostInboundZoneLabel is the sentinel zone label under which the kernel
-// host-inbound catch-all deny for firewall-local addresses on interfaces
-// assigned to NO security zone is counted (#4420 HI-2). It reuses the reserved
-// Junos self-traffic context token "junos-host": that token can NEVER name an
-// operator-defined security zone (validateReservedZoneNamesStrict rejects it),
-// so the nft named-counter object it yields (nftables.HostInboundDenyCounterName)
-// can never collide with a real per-zone deny counter, and the #3361 scraper
-// (ParseHostInboundDenyCounterName) recovers a stable, self-explanatory
-// zone="junos-host" label for these "traffic to the host with no source zone"
-// host-inbound drops.
+// UnzonedHostInboundZoneLabel is the reserved sentinel label for host-inbound
+// drops with no uniquely attributable source zone: addresses on interfaces
+// assigned to NO zone (#4420 HI-2) and unmatched traffic on ambiguous ingress
+// netdevs (#11331). It reuses the Junos self-traffic context token "junos-host",
+// which can NEVER name an operator-defined zone, so its nft named-counter
+// object cannot collide with a real per-zone counter. The #3361 scraper recovers
+// the stable zone="junos-host" label; unzoned and ambiguous drops aggregate there.
 const UnzonedHostInboundZoneLabel = "junos-host"
 
 // BuildUnzonedHostInboundAddrs returns the firewall-local host addresses (bare

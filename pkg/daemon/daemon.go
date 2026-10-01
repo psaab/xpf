@@ -1024,17 +1024,17 @@ type Daemon struct {
 	// active text production reads from d.store.ShowActive().
 	syncPeerForTest func()
 
-	// hostInboundFailOpen groups the three previous-apply host-inbound
+	// hostInboundFailOpen groups the four previous-apply host-inbound
 	// fail-open / ambiguity sets (#3698 addressless zones, #3710 addressless
-	// {zone,iface,family} windows, #3718 order-dependent ambiguous addresses).
-	// applyHostInboundFilter diffs the current sets against these to emit
-	// state-transition logs only, keeping the warnings low-noise across
-	// repeated commits / DHCP renewals. All three are written and read only
-	// under applySem in applyHostInboundFilter. See hostInboundFailOpenState in
-	// daemon_nft.go (the file that owns the diff/log functions). This is
-	// increment 4 of the #4407 Daemon god-struct decomposition — pure field
-	// grouping, no behavior/locking change; the fields keep their exact
-	// map[string]bool types and are reached as d.hostInboundFailOpen.<field>.
+	// {zone,iface,family} windows, #3718 order-dependent ambiguous addresses,
+	// and #10431 ambiguous ingress netdevs). applyHostInboundFilter diffs the
+	// current sets against these to emit state-transition logs only, keeping
+	// warnings low-noise across repeated commits / DHCP renewals. All four maps
+	// are written and read only under applySem in applyHostInboundFilter. See
+	// hostInboundFailOpenState in daemon_nft.go (the file that owns the
+	// diff/log functions). This is increment 4 of the #4407 Daemon god-struct
+	// decomposition; the maps keep their exact map[string]bool types and are
+	// reached as d.hostInboundFailOpen.<field>.
 	hostInboundFailOpen hostInboundFailOpenState
 
 	// hostInboundEnforced is the process-local historical gate for the #5644

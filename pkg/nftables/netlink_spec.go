@@ -43,8 +43,9 @@ type HostInboundZoneView struct {
 	V4Addrs        []string
 	V6Addrs        []string
 	IngressNetdevs []string // #9637: see dpuserspace.ZoneHostInboundView
-	// IngressDenyNetdevs is the #10431 fail-closed guard for an effective
-	// ingress netdev whose zone claims are ambiguous.
+	// IngressDenyNetdevs lists effective ingress netdevs claimed by multiple
+	// zone views (#10431). The renderer applies destination-owner service rights
+	// before a counted fail-closed catch-all on those netdevs.
 	IngressDenyNetdevs []string
 }
 

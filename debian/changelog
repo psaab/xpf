@@ -8,6 +8,9 @@ xpf (0.0.0) unstable; urgency=medium
     and remove it on package removal (#11133).
   * Count unconstrained and undefined-routing-instance filter-based-forwarding
     terms as degraded when the kernel mirror fails closed (#11307).
+  * Preserve destination-owner host-inbound service admits on VRF netdevs claimed
+    by multiple zones, then count unmatched IPv4/IPv6 packets and report the
+    ambiguous-ingress transition (#11331).
   * Initial xpf Debian package (increment A of #1917, subsumes #1923).
     Ships xpfd, xpf-userspace-dp, cli, the day-0 config-drive loader,
     and the systemd units. Binaries install to a dpkg-static staging

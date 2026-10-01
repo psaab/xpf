@@ -158,13 +158,13 @@ func TestZoneHostInboundViewLifelineSharedVRFMasterIsNotScoped10431(t *testing.T
 // TestZoneHostInboundViewSharedVRFClaimsFailClosed10431 drives the
 // production builder with two zone views whose members resolve to one VRF
 // master. Neither view may claim that shared LOCAL_IN identity; the builder
-// instead attaches one destination-scoped deny guard.
+// instead attaches one ambiguous-ingress marker for the counted renderer guard.
 func TestZoneHostInboundViewSharedVRFClaimsFailClosed10431(t *testing.T) {
 	cfg := ingressCfg9637()
 	cfg.Interfaces.Interfaces["ge-0/0/4"] = &config.InterfaceConfig{
 		Name: "ge-0/0/4",
 		Units: map[int]*config.InterfaceUnit{
-			0: {Number: 0, Addresses: []string{"10.0.63.1/24"}},
+			0: {Number: 0, Addresses: []string{"10.0.63.1/24", "fe80::64/64"}},
 		},
 	}
 	cfg.Security.Zones["sfother"] = &config.ZoneConfig{
@@ -175,13 +175,16 @@ func TestZoneHostInboundViewSharedVRFClaimsFailClosed10431(t *testing.T) {
 	cfg.RoutingInstances[0].Interfaces = append(cfg.RoutingInstances[0].Interfaces, "ge-0/0/4.0")
 	views := BuildZoneHostInboundViews(cfg)
 	foundDeny := false
-	foundSfmix, foundOther := false, false
+	foundSfmix, foundOther, foundLinkLocal := false, false, false
 	for _, view := range views {
 		if view.Zone == "sfmix" {
 			foundSfmix = true
 		}
 		if view.Zone == "sfother" {
 			foundOther = true
+			for _, addr := range view.V6Addrs {
+				foundLinkLocal = foundLinkLocal || addr == "fe80::64"
+			}
 		}
 		for _, netdev := range view.IngressNetdevs {
 			if netdev == "vrf-sfmix" {
@@ -199,6 +202,9 @@ func TestZoneHostInboundViewSharedVRFClaimsFailClosed10431(t *testing.T) {
 	}
 	if !foundDeny {
 		t.Fatalf("shared VRF master has no fail-closed deny guard: %+v", views)
+	}
+	if !foundLinkLocal {
+		t.Fatalf("configured link-local is missing from the ambiguous view's v6 destinations: %+v", views)
 	}
 }
 

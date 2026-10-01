@@ -81,12 +81,18 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundReinjectAcceptNetlink(p, famV4, reinjectV4)
 		emitHostInboundReinjectAcceptNetlink(p, famV6, reinjectV6)
 	}
-	// #9637: ingress-zone rules first, as in the oracle.
+	// #9637: unambiguous ingress scopes take their zone's service rights first.
+	// An ambiguous target uses destination-owner rights before its counted
+	// fail-closed catch-all; the residual established accept must still follow it.
 	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
 	for _, v := range spec.Views {
 		emitHostInboundZoneIngressNetlink(p, v, famV4, ingressV4)
 		emitHostInboundZoneIngressNetlink(p, v, famV6, ingressV6)
 	}
+	emitHostInboundAmbiguousIngressAcceptsNetlink(p, spec.Views, famV4, spec.WGZonePorts)
+	emitHostInboundAmbiguousIngressDropNetlink(p, spec.Views, famV4, ingressV4)
+	emitHostInboundAmbiguousIngressAcceptsNetlink(p, spec.Views, famV6, spec.WGZonePorts)
+	emitHostInboundAmbiguousIngressDropNetlink(p, spec.Views, famV6, ingressV6)
 	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	for _, v := range spec.Views {
 		emitHostInboundZoneNetlink(p, v, famV4, v.V4Addrs, spec.WGZonePorts[v.Zone])
@@ -139,10 +145,10 @@ func emitHostInboundStaleReplyGuards(p *nlPlan, guards []StaleReplyGuardRule) {
 }
 
 // declareHostInboundCounters mirrors buildHostInboundFilterPayload's counter
-// pre-pass: the 3 global ICMP-accept counters, then per-zone/family deny
-// counters, the #9637 reinject-accept counter (fresh + addressed views only),
-// the unzoned deny counters, and the junos-host deny counters, each
-// declared exactly once and in the same order.
+// pre-pass: the 3 global ICMP-accept counters, per-zone/family deny counters,
+// the ambiguous-ingress junos-host counters, the #9637 reinject-accept counter
+// (fresh + addressed views only), the unzoned deny counters, and the junos-host
+// deny counters, each declared exactly once and in the same order.
 func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 	seen := map[string]bool{}
 	decl := func(name string) {
@@ -166,6 +172,12 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, ingressV6) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
+	}
+	if hostInboundEmitsAmbiguousIngressDrop(spec.Views, ingressV4) {
+		decl(HostInboundDenyCounterName(unzonedHostInboundZoneLabel, "ip"))
+	}
+	if hostInboundEmitsAmbiguousIngressDrop(spec.Views, ingressV6) {
+		decl(HostInboundDenyCounterName(unzonedHostInboundZoneLabel, "ip6"))
 	}
 	// #9637 residual: the reinject-accept counter, declared exactly when the
 	// accept rules render (fresh + addressed views), mirroring the oracle —

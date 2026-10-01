@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 // ambiguousDaemonCfg builds a config where the SAME IPv4 (192.0.2.1) is carried
@@ -89,5 +90,53 @@ func TestLogHostInboundAmbiguousTransitions(t *testing.T) {
 	}
 	if d.hostInboundFailOpen.ambiguousAddrs["inet|192.0.2.1"] {
 		t.Errorf("state not cleared after recovery: inet|192.0.2.1 still set")
+	}
+}
+
+func TestLogHostInboundAmbiguousIngressTransitions11331(t *testing.T) {
+	sink := newCaptureSink()
+	prev := slog.Default()
+	slog.SetDefault(slog.New(capturingHandler{sink: sink}))
+	defer slog.SetDefault(prev)
+
+	d := &Daemon{}
+	views := []dpuserspace.ZoneHostInboundView{
+		{Zone: "aaa", IngressDenyNetdevs: []string{"vrf-sfmix"}},
+		{Zone: "zzz", IngressNetdevs: []string{"eth0"}},
+	}
+	d.logHostInboundAmbiguousIngressTransitions(views)
+	d.logHostInboundAmbiguousIngressTransitions(views)
+
+	warns := 0
+	for _, r := range sink.records() {
+		if r.level == slog.LevelWarn &&
+			r.msg == "host-inbound effective VRF netdev has ambiguous zone ownership — applying destination-owner service rights before a counted fail-closed drop (#11331)" {
+			warns++
+			if r.attrs["netdev"] != "vrf-sfmix" || r.attrs["counter_zone"] != dpuserspace.UnzonedHostInboundZoneLabel {
+				t.Errorf("warning attrs = %v, want netdev and counted sentinel", r.attrs)
+			}
+		}
+	}
+	if warns != 1 {
+		t.Fatalf("persistent ambiguity emitted %d warnings, want one", warns)
+	}
+	if !d.hostInboundFailOpen.ambiguousIngress["vrf-sfmix"] {
+		t.Fatal("ambiguous ingress state was not retained")
+	}
+
+	d.logHostInboundAmbiguousIngressTransitions(views[1:])
+	infos := 0
+	for _, r := range sink.records() {
+		if r.level == slog.LevelInfo &&
+			r.msg == "host-inbound ambiguous VRF netdev ownership resolved — zone-scoped ingress rules restored" &&
+			r.attrs["netdev"] == "vrf-sfmix" {
+			infos++
+		}
+	}
+	if infos != 1 {
+		t.Fatalf("ambiguity recovery emitted %d infos, want one", infos)
+	}
+	if d.hostInboundFailOpen.ambiguousIngress["vrf-sfmix"] {
+		t.Fatal("ambiguous ingress state was not cleared")
 	}
 }
