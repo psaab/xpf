@@ -2411,6 +2411,156 @@ fn lookup_forward_nat_across_scopes_returns_shared_canonical_reverse_entry() {
 }
 
 #[test]
+fn lookup_forward_nat_across_scopes_returns_nonzero_domain_canonical_reverse_entry() {
+    const DOMAIN_A: u32 = 100_061;
+
+    let sessions = SessionTable::new();
+    let mut key = test_key();
+    key.routing_domain = DOMAIN_A;
+    let decision = SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision {
+            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+            rewrite_src_port: Some(key.src_port),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision,
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let mut canonical_reply = reverse_canonical_key(&key, decision.nat);
+    canonical_reply.routing_domain = DOMAIN_A;
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(decision.resolution.egress_ifindex, DOMAIN_A);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry,
+    );
+
+    let hit = lookup_forward_nat_across_scopes(
+        &sessions,
+        &shared_nat_sessions,
+        &forwarding,
+        &shared_owner_rg_indexes,
+        &canonical_reply,
+        crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+    )
+    .expect("nonzero-domain PRE-NAT canonical reply should resolve");
+    assert_eq!(hit.key, entry.key);
+    assert_eq!(hit.decision, entry.decision);
+}
+
+#[test]
+fn shared_nat_nonzero_canonical_alias_refuses_other_wire_owner() {
+    const DOMAIN_A: u32 = 100_061;
+    const DOMAIN_B: u32 = 100_062;
+
+    let mut key_a = test_key();
+    key_a.routing_domain = DOMAIN_A;
+    let nat_a = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(key_a.src_port),
+        ..NatDecision::default()
+    };
+    let mut key_b = key_a.clone();
+    key_b.routing_domain = DOMAIN_B;
+    key_b.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 103));
+    key_b.src_port = key_a.src_port.wrapping_add(1);
+    let nat_b = NatDecision {
+        rewrite_src: Some(key_a.src_ip),
+        rewrite_src_port: Some(key_a.src_port),
+        ..NatDecision::default()
+    };
+    let entry = |key, nat| SyncedSessionEntry {
+        key,
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_FLAG_ACK,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+    };
+    let entry_a = entry(key_a.clone(), nat_a);
+    let entry_b = entry(key_b, nat_b);
+    let mut canonical_reply = reverse_canonical_key(&key_a, nat_a);
+    canonical_reply.routing_domain = DOMAIN_A;
+    let mut forwarding = ForwardingState::default();
+    forwarding.has_routing_domains = true;
+    forwarding
+        .ifindex_to_routing_domain
+        .insert(test_resolution().egress_ifindex, DOMAIN_A);
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry_a,
+    );
+
+    let lookup = || {
+        lookup_forward_nat_across_scopes(
+            &SessionTable::new(),
+            &shared_nat_sessions,
+            &forwarding,
+            &shared_owner_rg_indexes,
+            &canonical_reply,
+            crate::afxdp::shared_ops::ReverseIngress::Unconstrained,
+        )
+    };
+    assert_eq!(
+        lookup()
+            .expect("the unique canonical owner should match")
+            .key,
+        entry_a.key
+    );
+
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &entry_b,
+    );
+    assert!(
+        lookup().is_none(),
+        "a canonical alias cannot override a different translated-wire owner"
+    );
+}
+
+#[test]
 fn shared_nat_fallback_does_not_borrow_main_for_quarantined_domain_11061() {
     let sessions = SessionTable::new();
     let mut key = test_key();
