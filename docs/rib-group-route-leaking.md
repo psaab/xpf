@@ -383,17 +383,20 @@ Three consequences an operator can observe:
    VRF-bound daemon (FRR peering, DHCP relay, syslog, RPM probes, IPsec). This
    is a deliberate narrowing, recorded here rather than left to be rediscovered.
 
-The **AF_XDP fast path is instance-scoped only for PBR-steered traffic.** The
-userspace FIB follows a `next_table` route found in whichever table a lookup
-runs in (`userspace-dp/src/afxdp/forwarding/fib.rs`). A transit lookup runs in
-a per-instance table only when a PBR interface filter steers it there. Without
-PBR it runs in the global `inet.0`/`inet6.0`, whatever instance the ingress
-interface belongs to, so the fast path does no per-instance destination-FIB
-selection at all (`userspace-dp/src/afxdp/forwarding/README.md`, "PBR `then
-routing-instance` is the ONLY per-VRF forwarding path"). The exposure #9420
-closed was on the Linux path: host-originated traffic, slow-path `XDP_PASS`
-packets, local delivery, and any interface without native XDP where
-`redirect_capable` falls back to kernel forwarding.
+The **AF_XDP fast path scopes transit lookups by native routing-instance
+membership as well as explicit PBR (#10312).** A member interface's validated
+ingress `routing_domain` selects its per-family destination-FIB table when no
+PBR routing-instance term matches. Explicit PBR remains higher precedence,
+including a terminal discard/reject. Only the default routing domain uses
+global `inet.0`/`inet6.0`; a nonzero domain without a current per-family table
+is terminal rather than falling through to main. The userspace FIB follows a
+`next_table` route in the selected table
+(`userspace-dp/src/afxdp/forwarding/README.md`, native RI/PBR scoping contract).
+
+The exposure #9420 closed was on the Linux path: host-originated traffic,
+slow-path `XDP_PASS` packets, local delivery, and interfaces where
+`redirect_capable` falls back to kernel forwarding. Native userspace scoping
+does not replace the kernel rule's default-instance ingress restriction.
 
 ### Strict rejection — undefined `next-table` target (#5693)
 
