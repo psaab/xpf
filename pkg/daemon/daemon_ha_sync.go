@@ -1095,9 +1095,8 @@ func (d *Daemon) publishFabricRefreshChansIfCurrent(gen uint64, ch0, ch1 chan st
 	return true
 }
 
-// startClusterComms starts heartbeat and session sync after VRFs are created.
-// Called after applyConfig so that control/fabric interfaces are already in
-// the management VRF (if configured).
+// startClusterComms starts heartbeat and session sync after VRF membership is
+// applied, then binds each socket only to the VRF of its selected transport.
 //
 // The sub-constructions were extracted into focused builders in #6428
 // (daemon_ha_comms_wiring.go); what remains here is the control-flow spine,
@@ -1106,8 +1105,9 @@ func (d *Daemon) publishFabricRefreshChansIfCurrent(gen uint64, ch0, ch1 chan st
 //   - beginClusterCommsEpoch runs FIRST: it bumps clusterCommsGen and installs
 //     the cancellable sub-context every goroutine spawned below captures and
 //     every publish presents.
-//   - resolveClusterVRFDevice runs before the heartbeat goroutine and before
-//     the sync constructor goroutine; both take vrfDevice by value.
+//   - each socket path resolves its own transport interface membership:
+//     heartbeat uses ControlInterface; session sync and gRPC use the selected
+//     sync transport, including an active secondary fabric.
 //   - syncRGStrictVIPOwnershipMode runs before the heartbeat goroutine: once
 //     VRRP starts driving rg_active it must already follow VIP ownership.
 //   - clusterCommsWG.Add(1) executes on THIS stack, never inside the goroutine,
@@ -1157,8 +1157,6 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 		return
 	}
 
-	vrfDevice := d.resolveClusterVRFDevice(cc)
-
 	d.startHAWatchdogHeartbeat(commsCtx, cc)
 
 	// In VRRP mode, make strict VIP ownership the runtime default so
@@ -1172,7 +1170,8 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 	// Retry on bind failure: the control interface address and VRF device
 	// may not be ready during daemon startup (networkd race).
 	if cc.ControlInterface != "" && cc.PeerAddress != "" {
-		go d.startHeartbeatWithRetry(commsCtx, cc.ControlInterface, cc.PeerAddress, vrfDevice)
+		heartbeatVRFDevice := d.resolveClusterVRFDevice(cc.ControlInterface)
+		go d.startHeartbeatWithRetry(commsCtx, cc.ControlInterface, cc.PeerAddress, heartbeatVRFDevice)
 	}
 
 	syncIface, syncPeerAddr, syncTransport := clusterSyncTransport(cc)
@@ -1248,6 +1247,12 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			// concurrent stopClusterComms that nils the field cannot turn a
 			// re-dereference into a nil-deref panic, and a superseded epoch's
 			// late publish is dropped rather than clobbering the live epoch.
+			syncTransportIfaces := []string{syncIface}
+			if syncLocal1 != "" {
+				syncTransportIfaces = append(syncTransportIfaces, cc.Fabric1Interface)
+			}
+			syncVRFDevice := d.resolveClusterVRFDevice(syncTransportIfaces...)
+
 			var ss *cluster.SessionSync
 			if syncLocal1 != "" {
 				ss = cluster.NewDualSessionSync(syncLocal, syncPeer, syncLocal1, syncPeer1, nil)
@@ -1261,7 +1266,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			}
 			d.wireSessionSyncTransportRefs(ss, cc, syncTransport, syncPeerAddr, syncLocal1)
 
-			d.startFabricGRPCListeners(commsCtx, syncIP, syncLocal1, vrfDevice)
+			d.startFabricGRPCListeners(commsCtx, syncIP, syncLocal1, syncVRFDevice)
 
 			// Wire sync stats into cluster manager for CLI display.
 			d.cluster.SetSyncStats(ss)
@@ -1276,7 +1281,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 
 			d.wireClusterFenceCallbacks(commsCtx, ss)
 
-			ss.SetVRFDevice(vrfDevice)
+			ss.SetVRFDevice(syncVRFDevice)
 
 			wiredStream := d.wireUserspaceEventStreamForSync(commsCtx)
 
@@ -1368,7 +1373,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 					continue
 				}
 				slog.Info("cluster session sync started",
-					"local", syncLocal, "peer", syncPeer, "vrf", vrfDevice)
+					"local", syncLocal, "peer", syncPeer, "vrf", syncVRFDevice)
 
 				// Start the sweep and the event-stream drain now that the
 				// listeners are up. The runtime itself was wired above, before
