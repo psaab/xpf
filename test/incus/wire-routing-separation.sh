@@ -151,6 +151,7 @@ if [[ "$MODE" == selftest ]]; then
     cell "pre-steer accept bypass leaks and fails" FAIL 1 1000 1 1500 1500 0
     cell "missing near-miss capture is VOID" VOID 2 1000 0 1500 999 0
     cell "short successful ingress burst is VOID" VOID 2 999 0 1500 1500 0
+    cell "leak survives an under-sampled probe offer" FAIL 1 999 1 1000 1000 0
     cell "checksum corruption fails" FAIL 1 1000 0 1500 1500 1
     cell "malformed count is VOID" VOID 2 x 0 1500 1500 0
 

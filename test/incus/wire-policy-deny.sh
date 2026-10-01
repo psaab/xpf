@@ -82,6 +82,7 @@ if [[ "$MODE" == "selftest" ]]; then
 	cell "permit-all leak maps to FAIL" FAIL 1 -- 1000 41 1000 1000 0
 	cell "missing control maps to VOID capture-blind" VOID 2 -- 1000 0 1000 0 0
 	cell "short burst maps to VOID under-sampled" VOID 2 -- 500 0 1000 1000 0
+	cell "leak survives an under-sampled probe offer" FAIL 1 -- 999 1 1000 1000 0
 	cell "short control offer maps to VOID under-sampled" VOID 2 -- 1000 0 500 500 0
 	cell "broken checksum maps to FAIL" FAIL 1 -- 1000 0 1000 1000 2
 	cell "non-numeric input maps to VOID harness-void" VOID 2 -- x 0 1000 1000 0

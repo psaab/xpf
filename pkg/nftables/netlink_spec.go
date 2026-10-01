@@ -37,12 +37,17 @@ type PortRange struct {
 // HostInboundZoneView mirrors dpuserspace.ZoneHostInboundView. Addresses are
 // bare host IPs (no prefix), as the daemon builder guarantees.
 type HostInboundZoneView struct {
-	Zone           string
-	SystemServices []string
-	Protocols      []string
-	V4Addrs        []string
-	V6Addrs        []string
-	IngressNetdevs []string // #9637: see dpuserspace.ZoneHostInboundView
+	Zone                 string
+	SystemServices       []string
+	Protocols            []string
+	V4Addrs              []string
+	V6Addrs              []string
+	ICMPFloodThreshold   uint32
+	UDPFloodThreshold    uint32
+	SYNFloodThreshold    uint32
+	SYNFloodSrcThreshold uint32
+	AlarmWithoutDrop     bool
+	IngressNetdevs       []string // #9637: see dpuserspace.ZoneHostInboundView
 	// IngressDenyNetdevs is the #10431 fail-closed guard for an effective
 	// ingress netdev whose zone claims are ambiguous.
 	IngressDenyNetdevs []string

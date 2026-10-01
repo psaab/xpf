@@ -111,6 +111,9 @@ Total sessions: 1'
     check "missing create with control witness fails" FAIL 1 0 0 0 0 1000 0 1000 0 1500 1500 1 0
     check "missing create and control witness is void" VOID 2 0 0 0 0 1000 0 1000 0 1500 1500 0 0
     check "under-sampled post legs are void" VOID 2 1 1 0 1 999 0 1000 0 1500 1500 1 0
+    check "expired-tuple leak survives an under-sampled offer" FAIL 1 1 1 1 1 999 1 1000 0 1500 1500 1 0
+    check "fresh-tuple leak survives an under-sampled offer" FAIL 1 1 1 0 1 1000 0 999 1 1500 1500 1 0
+    check "independent stale evidence survives an under-sampled offer" FAIL 1 1 1 1 1 999 0 1000 0 1500 1500 1 0
     check "checksum corruption fails" FAIL 1 1 1 0 1 1000 0 1000 0 1500 1500 1 1
     check "malformed field is harness void" VOID 2 1 1 0 1 1000 x 1000 0 1500 1500 1 0
     out="$(wire_conntrack_verdict 1 0 0 0 1000 0 1000 0 1500 1500 1 0)"; rc=$?

@@ -79,6 +79,13 @@ if [[ "$MODE" == selftest ]]; then
     check "complete 12-cell matrix passes" PASS 0 0 12 "${MATRIX[@]}"
     BAD=("${MATRIX[@]}"); BAD[2]=1
     check "deny leak fails" FAIL 1 0 12 "${BAD[@]}"
+    BAD=("${MATRIX[@]}"); BAD[1]=999; BAD[2]=1
+    out=$(wire_matrix_verdict 0 12 "${BAD[@]}"); rc=$?
+    if [[ "$rc" == 1 && "$out" == *"WIRE_GATE wire_zone_matrix FAIL reason=--"* && "$out" == *"deny_leaked=1"* ]]; then
+        echo "  PASS  leak survives an under-sampled deny cell with its metric"; pass=$((pass + 1))
+    else
+        echo "  FAIL  leak survives an under-sampled deny cell with its metric (got '$out' rc=$rc)"; fail=$((fail + 1))
+    fi
     BAD=("${MATRIX[@]}"); BAD[56]=9999
     check "permit loss fails after proven control" FAIL 1 0 12 "${BAD[@]}"
     BAD=("${MATRIX[@]}"); BAD[56]=10001
