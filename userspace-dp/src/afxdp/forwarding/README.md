@@ -161,10 +161,12 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
   5-tuple with `ecmp_hash_flow`, using a fixed, ECMP-specific domain seed
   rather than the per-boot `hot_hash_seed`. Distinct flows to the same
   destination spread across equal-cost members while each flow remains
-  consistent. With the same ordered live-member set, the mapping survives
-  process restart and HA re-resolution, preserving path-pinned NAT. The
-  selector reduces the hash modulo the live-member count, so membership or
-  ordering changes can remap flows; this is not a persisted per-flow pin.
+  consistent. With the same live-member set, weights, and candidate identities,
+  the mapping survives process restart and HA re-resolution, preserving
+  path-pinned NAT. Weighted rendezvous scores each stable candidate identity:
+  removing a nonselected candidate leaves surviving scores unchanged, while
+  adding candidates or changing identity/weight may remap a flow. This is not
+  a persisted per-flow pin.
   Callers without a flow context (tunnel/WG outer resolution, `inject`,
   bare-dst lookups) pass `ecmp_flow_hash = None`, which falls back to the
   per-DESTINATION hash (`ecmp_hash_v4`/`ecmp_hash_v6`, the #2389 behavior).

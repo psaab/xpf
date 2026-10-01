@@ -9385,8 +9385,8 @@ fn pump_list_queues10512(
 
 /// Run list_sessions_by_policy on a thread while the main thread pumps
 /// the worker queues until it returns. Deterministic: the pump runs
-/// until the call finishes, so acks always land before the 250ms
-/// worker-ack deadline (duration varies, outcome does not).
+/// until the call returns; the bounded one-second worker-ack deadline keeps a
+/// stalled worker finite (ack timing varies, outcome does not).
 fn call_list_with_pump10512(
     domain: &super::ha::SessionDomain,
     req: &crate::protocol::SessionPolicyListRequest,
@@ -9640,8 +9640,8 @@ fn coord_list_pages_beyond_4096_10512() {
     assert_eq!(ids.len(), 4100, "all rows distinct across pages");
 }
 
-/// An unpumped (stalled) worker trips the 250ms ack deadline: the READ
-/// is incomplete with a worker-ack-timeout error, never a hang.
+/// An unpumped (stalled) worker reaches the bounded one-second ack deadline:
+/// the READ is incomplete with a worker-ack-timeout error, never a hang.
 #[test]
 fn coord_list_unacked_worker_times_out_incomplete_10512() {
     let mut coordinator = Coordinator::new();
