@@ -3,6 +3,7 @@ package userspace
 import (
 	"log/slog"
 	"net"
+	"sort"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -607,5 +608,16 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			}
 		}
 	}
+	// #11351: keep the first-match Rust table ordered by Junos context
+	// specificity. Stable sorting preserves rule-set and within-set order for
+	// equal tiers while placing interface > zone > routing-instance > unscoped.
+	sort.SliceStable(out, func(i, j int) bool {
+		return config.NATContextScopeTier(
+			out[i].FromInterface, out[i].FromZone, out[i].FromRoutingInstance,
+		) < config.NATContextScopeTier(
+			out[j].FromInterface, out[j].FromZone, out[j].FromRoutingInstance,
+		)
+	})
+
 	return out
 }

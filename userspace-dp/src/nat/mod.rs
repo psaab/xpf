@@ -186,6 +186,27 @@ mod tests_persistent_scope_10018;
 #[path = "tests_empty_match_poison_9874.rs"]
 mod tests_empty_match_poison_9874;
 
+const NAT_SCOPE_TIER_INTERFACE: u8 = 0;
+const NAT_SCOPE_TIER_ZONE: u8 = 1;
+const NAT_SCOPE_TIER_ROUTING_INSTANCE: u8 = 2;
+const NAT_SCOPE_TIER_UNSCOPED: u8 = 3;
+
+/// Junos NAT context precedence: interface > zone > routing-instance >
+/// unscoped. For malformed multi-axis scopes, the most-specific set field
+/// ranks first; the matchers still require every set field to match.
+#[inline]
+fn nat_scope_tier(from_interface: &str, from_zone: &str, from_ri: &str) -> u8 {
+    if !from_interface.is_empty() {
+        NAT_SCOPE_TIER_INTERFACE
+    } else if !from_zone.is_empty() {
+        NAT_SCOPE_TIER_ZONE
+    } else if !from_ri.is_empty() {
+        NAT_SCOPE_TIER_ROUTING_INSTANCE
+    } else {
+        NAT_SCOPE_TIER_UNSCOPED
+    }
+}
+
 /// #3096: per-flow interface / routing-instance identity passed into the NAT
 /// match path so an interface- or routing-instance-scoped rule-set matches
 /// only its named traffic. The forwarding layer resolves each ifindex to its

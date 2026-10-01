@@ -134,6 +134,16 @@ impl DnatEntry {
             && (self.from_routing_instance.is_empty()
                 || self.from_routing_instance.as_ref() == ingress_routing_instance)
     }
+    /// Scope tier within the eligible candidates. Eligibility still ANDs all
+    /// populated context axes; precedence uses the most-specific one.
+    #[inline]
+    fn scope_tier(&self) -> u8 {
+        super::nat_scope_tier(
+            &self.from_interface,
+            &self.from_zone,
+            &self.from_routing_instance,
+        )
+    }
 
     /// #2394: does the packet source IP satisfy this entry's source-address
     /// constraint?
@@ -1070,41 +1080,37 @@ impl DnatTable {
         // #2394: an entry only fires when its zone, source-address, AND #3096
         // interface/routing-instance scope all match. #3437: the application's
         // source-port (H10) and ICMP type/code (H11) constraints are AND-ed in
-        // too. Zone-specific entries still win over zone-wildcard entries, but
-        // within each tier every constraint must hold — an entry whose source,
-        // interface/RI scope, source-port, or ICMP type/code does not match the
-        // packet is skipped (no fail-open).
+        // too. Of those eligible entries, Junos context precedence is
+        // interface > zone > routing-instance > unscoped; the first entry in a
+        // tier retains config order (including `then destination-nat off`
+        // short-circuit behavior).
         //
-        // #3844: WITHIN a tier the first matching entry (zone-specific, then
-        // zone-wildcard) determines the outcome via `to_outcome` — a `then
-        // destination-nat off` entry yields `Exempt` (no translation), any
-        // other entry yields `Translate`. An `Exempt` (a `Some(..)`) halts the
-        // cross-tier `.or_else` chain, so it short-circuits the LOWER tiers.
-        // NOTE ON PRECEDENCE: across tiers this is MOST-SPECIFIC-WINS (exact
-        // (proto,dst,port) > wildcard-port > proto-any > prefix-LPM), NOT strict
-        // Junos config order. A more-specific *later* translate rule beats a
-        // broader *earlier* off rule (same tier-precedence the DnatTable applies
-        // to translate-vs-translate, #3164). To exempt traffic that a translate
-        // rule would otherwise catch, the `off` rule must be at least as
-        // specific as that translate rule (typically the same match tier).
-        entries
-            .iter()
-            .find(|entry| {
-                !entry.from_zone.is_empty()
-                    && entry.from_zone.as_ref() == ingress_zone
-                    && entry.scope_ok(ingress_ifname, ingress_routing_instance)
-                    && entry.source_matches(src_ip)
-                    && entry.l4_extra_matches(src_port, dst_port, packet_icmp)
-            })
-            .or_else(|| {
-                entries.iter().find(|entry| {
-                    entry.from_zone.is_empty()
-                        && entry.scope_ok(ingress_ifname, ingress_routing_instance)
-                        && entry.source_matches(src_ip)
-                        && entry.l4_extra_matches(src_port, dst_port, packet_icmp)
-                })
-            })
-            .map(|entry| entry.to_outcome())
+        // #3844: a matching `off` entry yields Exempt (no translation) and
+        // halts the cross-tier `.or_else` chain. Across match keys the existing
+        // precedence remains exact (proto,dst,port) > wildcard-port >
+        // proto-any > prefix-LPM. A more-specific later translate rule can
+        // still beat a broader earlier off rule; exempt traffic with the same
+        // match key using an off rule of at least equal context specificity.
+        let mut best: Option<&DnatEntry> = None;
+        let mut best_tier = u8::MAX;
+        for entry in entries {
+            if (!entry.from_zone.is_empty() && entry.from_zone.as_ref() != ingress_zone)
+                || !entry.scope_ok(ingress_ifname, ingress_routing_instance)
+                || !entry.source_matches(src_ip)
+                || !entry.l4_extra_matches(src_port, dst_port, packet_icmp)
+            {
+                continue;
+            }
+            let tier = entry.scope_tier();
+            if tier < best_tier {
+                best = Some(entry);
+                best_tier = tier;
+                if tier == super::NAT_SCOPE_TIER_INTERFACE {
+                    break;
+                }
+            }
+        }
+        best.map(DnatEntry::to_outcome)
     }
 
     /// #3164: longest-prefix-match over the non-host prefix table. Mirrors the
@@ -1171,11 +1177,10 @@ impl DnatTable {
         })
     }
 
-    /// #3164: pick the best prefix slot for a destination IP within one
-    /// proto/port bucket. Zone-specific entries win over zone-wildcard entries
-    /// (mirroring `match_entries`); within each zone tier the LONGEST matching
-    /// prefix whose source-address constraint holds wins, and the FIRST such
-    /// slot in insertion order breaks a same-length tie (deterministic).
+    /// #3164: pick the best prefix slot within one proto/port bucket. Context
+    /// specificity is ranked first (interface > zone > routing-instance >
+    /// unscoped), then the LONGEST matching prefix whose source-address
+    /// constraint holds. The first slot breaks equal-tier/equal-length ties.
     #[allow(clippy::too_many_arguments)]
     fn match_prefix_slots(
         &self,
@@ -1190,36 +1195,31 @@ impl DnatTable {
         packet_icmp: Option<(u8, u8)>,
     ) -> Option<DnatOutcome> {
         let slots = slots?;
-        let best_in_tier = |zone_specific: bool| -> Option<&DnatPrefixSlot> {
-            let mut best: Option<&DnatPrefixSlot> = None;
-            for slot in slots {
-                let zone_ok = if zone_specific {
-                    !slot.entry.from_zone.is_empty()
-                        && slot.entry.from_zone.as_ref() == ingress_zone
-                } else {
-                    slot.entry.from_zone.is_empty()
-                };
-                if !zone_ok
-                    || !slot
-                        .entry
-                        .scope_ok(ingress_ifname, ingress_routing_instance)
-                    || !slot.contains(dst_ip)
-                    || !slot.entry.source_matches(src_ip)
-                    || !slot.entry.l4_extra_matches(src_port, dst_port, packet_icmp)
-                {
-                    continue;
-                }
-                // STRICTLY-greater replacement keeps the first slot among equal
-                // prefix lengths (deterministic on overlap ambiguity).
-                if best.is_none_or(|b| slot.prefix_len() > b.prefix_len()) {
-                    best = Some(slot);
-                }
+
+        let mut best: Option<&DnatPrefixSlot> = None;
+        let mut best_scope_tier = u8::MAX;
+        for slot in slots {
+            if (!slot.entry.from_zone.is_empty()
+                && slot.entry.from_zone.as_ref() != ingress_zone)
+                || !slot
+                    .entry
+                    .scope_ok(ingress_ifname, ingress_routing_instance)
+                || !slot.contains(dst_ip)
+                || !slot.entry.source_matches(src_ip)
+                || !slot.entry.l4_extra_matches(src_port, dst_port, packet_icmp)
+            {
+                continue;
             }
-            best
-        };
-        best_in_tier(true)
-            .or_else(|| best_in_tier(false))
-            .map(|slot| slot.entry.to_outcome())
+            let tier = slot.entry.scope_tier();
+            if tier < best_scope_tier
+                || (tier == best_scope_tier
+                    && best.is_none_or(|current| slot.prefix_len() > current.prefix_len()))
+            {
+                best = Some(slot);
+                best_scope_tier = tier;
+            }
+        }
+        best.map(|slot| slot.entry.to_outcome())
     }
 
     /// #3164: dedup-insert a prefix slot. Like `insert_entry`, two slots with the

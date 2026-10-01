@@ -283,11 +283,9 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 	// plumbing (they were carried since #3096). This is why the Rust first-match
 	// loop is deliberately left unchanged: it reads a pre-tiered Vec.
 	//
-	// Scope note: DNAT (destination.rs match_entries) and static
-	// (static_nat.rs pick_scoped) tier only zone-SCOPED vs zone-WILDCARD — a
-	// narrower axis that does NOT rank interface above zone. Extending this full
-	// interface>zone>routing-instance hierarchy to them is a separate,
-	// out-of-scope follow-up.
+	// Scope note: destination NAT and static NAT use this same hierarchy. Their
+	// builders stable-sort by the single `from` context; the dataplane matchers
+	// independently apply it so direct snapshots and older helpers agree.
 	sort.SliceStable(out, func(i, j int) bool {
 		return sourceNATScopeTier(out[i]) < sourceNATScopeTier(out[j])
 	})
