@@ -5122,6 +5122,90 @@ fn static_bare_gateway_single_table_still_resolves() {
     );
 }
 
+/// #11074: an explicit `@interface` next-hop must belong to the route's
+/// routing-instance, just like bare-gateway interface inference. An interface
+/// from another VRF is unresolved rather than copied into this table's FIB.
+///
+/// RED-on-revert: the pre-fix interface arm resolves names without consulting
+/// `table`, so the first (blue) candidate is bound to ifindex 102 in red.
+#[test]
+fn static_interface_next_hop_resolves_only_within_route_table_11074() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0-0-2".into(),
+                ifindex: 102,
+                routing_instance: "blue".into(),
+                hardware_addr: "02:00:00:00:00:02".into(),
+                addresses: vec![
+                    crate::protocol::snapshot::InterfaceAddressSnapshot {
+                        family: "inet".into(),
+                        address: "192.168.0.2/24".into(),
+                        ..Default::default()
+                    },
+                    crate::protocol::snapshot::InterfaceAddressSnapshot {
+                        family: "inet6".into(),
+                        address: "2001:db8::2/64".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-1".into(),
+                ifindex: 101,
+                routing_instance: "red".into(),
+                hardware_addr: "02:00:00:00:00:01".into(),
+                addresses: vec![
+                    crate::protocol::snapshot::InterfaceAddressSnapshot {
+                        family: "inet".into(),
+                        address: "192.168.0.1/24".into(),
+                        ..Default::default()
+                    },
+                    crate::protocol::snapshot::InterfaceAddressSnapshot {
+                        family: "inet6".into(),
+                        address: "2001:db8::1/64".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        ],
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "red.inet.0".into(),
+                family: "inet".into(),
+                destination: "10.0.0.0/8".into(),
+                next_hops: vec![
+                    "192.168.0.254@ge-0-0-2".into(),
+                    "192.168.0.254@ge-0-0-1".into(),
+                ],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "red.inet6.0".into(),
+                family: "inet6".into(),
+                destination: "2001:db8:beef::/48".into(),
+                next_hops: vec![
+                    "2001:db8::254@ge-0-0-2".into(),
+                    "2001:db8::254@ge-0-0-1".into(),
+                ],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    let red_v4 = state.routes_v4.get("red.inet.0").expect("red v4 table");
+    assert_eq!(red_v4[0].next_hops[0].ifindex, 0, "foreign v4 interface fails closed");
+    assert_eq!(red_v4[0].next_hops[1].ifindex, 101, "same-table v4 interface resolves");
+
+    let red_v6 = state.routes_v6.get("red.inet6.0").expect("red v6 table");
+    assert_eq!(red_v6[0].next_hops[0].ifindex, 0, "foreign v6 interface fails closed");
+    assert_eq!(red_v6[0].next_hops[1].ifindex, 101, "same-table v6 interface resolves");
+}
+
 /// #11317: retaining a mixed direct+recursive ECMP row must preserve the
 /// directly connected member; the recursive member gets ifindex 0 and is
 /// excluded from live selection rather than blackholing the usable path.
