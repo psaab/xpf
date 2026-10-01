@@ -11,9 +11,9 @@ func u8(v uint8) *uint8 { return &v }
 
 // icmpRefConfig builds a config whose single policy references every named
 // application (predefined names included), so CatalogNames(cfg, false) returns
-// exactly that referenced set. Predefined apps (junos-ping, junos-icmp-all)
-// resolve via config.ResolveApplication even though they are not in the
-// user Applications map.
+// exactly that referenced set. Predefined apps (junos-ping, junos-icmp-ping,
+// junos-icmp-all) resolve via config.ResolveApplication even though they are not
+// in the user Applications map.
 func icmpRefConfig(userApps map[string]*config.Application, refs ...string) *config.Config {
 	return &config.Config{
 		Applications: config.ApplicationsConfig{Applications: userApps},
@@ -27,15 +27,15 @@ func icmpRefConfig(userApps map[string]*config.Application, refs ...string) *con
 
 // TestBuildCatalogTypeConstrainedICMPDropsOverMatchingRow is the #3781
 // fail-on-revert guard for the catalog builder. An ICMP/ICMPv6 application that
-// carries a type/code constraint (predefined junos-ping = icmp type 8, or a
+// carries a type/code constraint (predefined junos-icmp-ping = icmp type 8, or a
 // user-defined app with icmp-type set) MUST NOT ship a protocol-only
 // CatalogEntry — that row would match EVERY ICMP type and falsely stamp a
-// non-echo ICMP that fell to default-deny with the ping app label. The interim
-// fix drops the row while KEEPING the app_id->name row (AppNames parity with
-// compileApplications). A protocol-only ICMP app (junos-icmp-all, a user app
-// with no type) and a non-ICMP app are unaffected. Reverting the
-// icmpTypeConstrained guard re-emits junos-ping's over-matching ICMP row and
-// turns this RED.
+// non-echo ICMP that fell to default-deny with the constrained app label. The
+// interim fix drops the row while KEEPING the app_id->name row (AppNames parity
+// with compileApplications). Protocol-only ICMP apps (junos-ping,
+// junos-icmp-all, a user app with no type) and a non-ICMP app are unaffected.
+// Reverting the icmpTypeConstrained guard re-emits junos-icmp-ping's
+// over-matching ICMP row and turns this RED.
 func TestBuildCatalogTypeConstrainedICMPDropsOverMatchingRow(t *testing.T) {
 	cfg := icmpRefConfig(map[string]*config.Application{
 		// user-defined type-constrained ICMP app (echo-request only)
@@ -47,7 +47,7 @@ func TestBuildCatalogTypeConstrainedICMPDropsOverMatchingRow(t *testing.T) {
 		// non-ICMP app — unaffected
 		"my-web": {Name: "my-web", Protocol: "tcp", DestinationPort: "80"},
 	},
-		"junos-ping", "junos-icmp-all", "my-echo", "my-na", "my-icmp-any", "my-web")
+		"junos-icmp-ping", "junos-ping", "junos-pingv6", "junos-icmp-all", "my-echo", "my-na", "my-icmp-any", "my-web")
 
 	cat, err := BuildCatalog(cfg)
 	if err != nil {
@@ -56,7 +56,7 @@ func TestBuildCatalogTypeConstrainedICMPDropsOverMatchingRow(t *testing.T) {
 
 	// The type-constrained ICMP apps drop their over-matching row but KEEP the
 	// AppNames id (parity contract with compileApplications).
-	for _, name := range []string{"junos-ping", "my-echo", "my-na"} {
+	for _, name := range []string{"junos-icmp-ping", "my-echo", "my-na"} {
 		if got := entriesForName(cat, name); len(got) != 0 {
 			t.Fatalf("type-constrained ICMP app %q shipped %d catalog row(s) %+v; a protocol-only ICMP row over-matches every type and mislabels non-echo ICMP (#3781)", name, len(got), got)
 		}
@@ -65,15 +65,23 @@ func TestBuildCatalogTypeConstrainedICMPDropsOverMatchingRow(t *testing.T) {
 		}
 	}
 
-	// The protocol-only ICMP apps still ship their protocol-only row (proto 1),
-	// unaffected by the interim.
-	for _, name := range []string{"junos-icmp-all", "my-icmp-any"} {
-		got := entriesForName(cat, name)
+	// Protocol-only ICMP/ICMPv6 apps ship protocol-only rows (proto 1/58).
+	for _, tc := range []struct {
+		name     string
+		protocol uint8
+	}{
+		{"junos-ping", 1},
+		{"junos-pingv6", 58},
+		{"junos-icmp-all", 1},
+		{"my-icmp-any", 1},
+	} {
+		got := entriesForName(cat, tc.name)
 		if len(got) != 1 {
-			t.Fatalf("protocol-only ICMP app %q shipped %d rows, want 1 (must be unaffected)", name, len(got))
+			t.Fatalf("protocol-only ICMP app %q shipped %d rows, want 1", tc.name, len(got))
 		}
-		if got[0].Protocol != 1 || got[0].DstPortLow != 0 || got[0].DstPortHigh != 0 {
-			t.Fatalf("protocol-only ICMP app %q entry = %+v, want icmp(1) 0/0", name, got[0])
+		if got[0].Protocol != tc.protocol || got[0].DstPortLow != 0 || got[0].DstPortHigh != 0 {
+			t.Fatalf("protocol-only ICMP app %q entry = %+v, want protocol=%d ports=0/0",
+				tc.name, got[0], tc.protocol)
 		}
 	}
 
@@ -94,13 +102,13 @@ func TestBuildCatalogTypeConstrainedICMPDropsOverMatchingRow(t *testing.T) {
 
 // TestBuildCatalogTypeConstrainedICMPHonestUnknown proves the interim's
 // guarantee: NO FALSE LABEL. Because the interim does NOT add the deferred
-// type/code-aware catalog match, junos-ping's id is never stamped on any
-// session (its row is dropped), so a session carrying an app_id that no shipped
-// entry stamps resolves to UNKNOWN via the show path — never to junos-ping.
-// This is the "honest UNKNOWN over a false label" bar; positive echo
-// classification is deferred with the wire work.
+// type/code-aware catalog match, junos-icmp-ping's id is never stamped (its row
+// is dropped), so a session carrying an app_id that no shipped entry stamps
+// resolves to UNKNOWN via the show path — never to junos-icmp-ping. This is the
+// "honest UNKNOWN over a false label" bar; positive echo classification is
+// deferred with the wire work.
 func TestBuildCatalogTypeConstrainedICMPHonestUnknown(t *testing.T) {
-	cfg := icmpRefConfig(nil, "junos-ping", "junos-icmp-all")
+	cfg := icmpRefConfig(nil, "junos-icmp-ping", "junos-ping", "junos-pingv6", "junos-icmp-all")
 	cfg.Services.ApplicationIdentification = false // catalog resolution, not fallback
 
 	cat, err := BuildCatalog(cfg)
@@ -108,16 +116,22 @@ func TestBuildCatalogTypeConstrainedICMPHonestUnknown(t *testing.T) {
 		t.Fatalf("BuildCatalog: %v", err)
 	}
 
-	pingID, ok := appIDForName(cat, "junos-ping")
+	echoID, ok := appIDForName(cat, "junos-icmp-ping")
 	if !ok {
-		t.Fatal("junos-ping must retain an AppNames row for parity")
+		t.Fatal("junos-icmp-ping must retain an AppNames row for parity")
 	}
-	// No shipped CatalogEntry carries junos-ping's id — the helper can never
-	// stamp it, so the name is inert (resolves for no live session).
+	// No shipped CatalogEntry carries junos-icmp-ping's id — the helper can
+	// never stamp it, so the name is inert (resolves for no live session).
 	for _, e := range cat.Entries {
-		if e.AppID == pingID {
-			t.Fatalf("junos-ping id=%d has a shipped catalog entry %+v; the interim must ship none so no session is stamped junos-ping (#3781)", pingID, e)
+		if e.AppID == echoID {
+			t.Fatalf("junos-icmp-ping id=%d has a shipped catalog entry %+v; the interim must ship none so no session is stamped junos-icmp-ping (#3781)", echoID, e)
 		}
+	}
+	// junos-ping is protocol-only in the bounded Junos definitions and therefore
+	// keeps its stampable all-ICMP row.
+	ping := entriesForName(cat, "junos-ping")
+	if len(ping) != 1 || ping[0].Protocol != 1 {
+		t.Fatalf("junos-ping entries = %+v, want one protocol-only ICMP row", ping)
 	}
 	// junos-icmp-all DOES have a stampable protocol-only row.
 	icmpAllID, ok := appIDForName(cat, "junos-icmp-all")

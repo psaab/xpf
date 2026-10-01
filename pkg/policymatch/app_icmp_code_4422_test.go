@@ -18,13 +18,13 @@ import (
 // && code.map_or(true, |c| c == pcode)). So this is a COVERAGE test, not a fix.
 //
 // The gap it closes: the existing match-level tests (icmp_test.go,
-// app_junos_ping_3348_test.go) only exercise TYPE-ONLY apps (junos-ping /
-// junos-pingv6 carry ICMPType but ICMPCode==nil; junos-icmp-all is
-// unconstrained). None pins the icmp-CODE dimension through the end-to-end
-// compile -> Match path, and none uses a distinctive type!=code pair, so a
-// type<->code SWAP (or a silently-dropped / ignored code) in either the
-// compiler or the matcher would pass the current suite. These cases pin it:
-// a wrong attribution (swap, drop, or mis-range) flips an assertion.
+// app_junos_ping_3348_test.go) exercise type-constrained `junos-icmp-ping` and
+// XPF's custom alias compatibility path; `junos-ping` is protocol-only (#11340).
+// None pins the icmp-CODE dimension through the end-to-end compile -> Match
+// path, and none uses a distinctive type!=code pair, so a type<->code SWAP (or
+// a silently-dropped / ignored code) in either the compiler or matcher would
+// pass the current suite. These cases pin it: a wrong attribution (swap, drop,
+// or mis-range) flips an assertion.
 
 // TestICMPAppTypeCodeAttribution_CustomApp is the end-to-end fail-on-swap pin.
 // A custom application `icmp-guard` constrains BOTH type 3 (destination
@@ -164,18 +164,17 @@ func TestICMPAppTypeOnly_MatchesAnyCode(t *testing.T) {
 // values are pinned structurally in pkg/config/predefined_icmp_3020_test.go;
 // here we pin the OPERATOR-VISIBLE effect (the Match verdict) so a regression in
 // the builtin definitions or the matcher flips a permit/deny:
-//   - junos-ping is echo-request ONLY (type 8), and its lack of a code
+//   - junos-icmp-ping is echo-request only (type 8), and its lack of a code
 //     constraint means any code of type 8 matches (the code-agnostic contrast to
 //     the code-constrained custom app above);
-//   - junos-icmp-all is unconstrained and matches every type/code, including a
-//     nonzero code (which no existing test exercises).
+//   - junos-ping is protocol-only and permits all ICMP types.
 func TestICMPBuiltinAppsCarryCorrectTypeCode(t *testing.T) {
 	pingCfg := compileFromSet(t, []string{
 		"set security zones security-zone trust",
 		"set security zones security-zone untrust",
 		"set security policies from-zone trust to-zone untrust policy p match source-address any",
 		"set security policies from-zone trust to-zone untrust policy p match destination-address any",
-		"set security policies from-zone trust to-zone untrust policy p match application junos-ping",
+		"set security policies from-zone trust to-zone untrust policy p match application junos-icmp-ping",
 		"set security policies from-zone trust to-zone untrust policy p then permit",
 		"set security policies default-policy deny-all",
 	})
@@ -184,7 +183,7 @@ func TestICMPBuiltinAppsCarryCorrectTypeCode(t *testing.T) {
 		"set security zones security-zone untrust",
 		"set security policies from-zone trust to-zone untrust policy p match source-address any",
 		"set security policies from-zone trust to-zone untrust policy p match destination-address any",
-		"set security policies from-zone trust to-zone untrust policy p match application junos-icmp-all",
+		"set security policies from-zone trust to-zone untrust policy p match application junos-ping",
 		"set security policies from-zone trust to-zone untrust policy p then permit",
 		"set security policies default-policy deny-all",
 	})
@@ -197,14 +196,13 @@ func TestICMPBuiltinAppsCarryCorrectTypeCode(t *testing.T) {
 		wantMatched bool
 		wantAction  config.PolicyAction
 	}{
-		// junos-ping (type 8) is code-agnostic: echo-request with any code
-		// matches, but a non-echo type does not.
-		{"junos-ping type 8 code 0 permitted", pingCfg, u8(8), u8(0), true, config.PolicyPermit},
-		{"junos-ping type 8 code 5 permitted", pingCfg, u8(8), u8(5), true, config.PolicyPermit},
-		{"junos-ping type 0 (echo-reply) denied", pingCfg, u8(0), u8(0), false, config.PolicyDeny},
-		// junos-icmp-all is fully unconstrained.
-		{"junos-icmp-all type 3 code 1 permitted", allCfg, u8(3), u8(1), true, config.PolicyPermit},
-		{"junos-icmp-all type 8 code 9 permitted", allCfg, u8(8), u8(9), true, config.PolicyPermit},
+		// junos-icmp-ping is code-agnostic: any code of type 8 matches.
+		{"junos-icmp-ping type 8 code 0 permitted", pingCfg, u8(8), u8(0), true, config.PolicyPermit},
+		{"junos-icmp-ping type 8 code 5 permitted", pingCfg, u8(8), u8(5), true, config.PolicyPermit},
+		{"junos-icmp-ping type 0 (echo-reply) denied", pingCfg, u8(0), u8(0), false, config.PolicyDeny},
+		// junos-ping is protocol-only and permits any ICMP type/code.
+		{"junos-ping type 3 code 1 permitted", allCfg, u8(3), u8(1), true, config.PolicyPermit},
+		{"junos-ping type 8 code 9 permitted", allCfg, u8(8), u8(9), true, config.PolicyPermit},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

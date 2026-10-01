@@ -5,14 +5,13 @@ import (
 	"testing"
 )
 
-// #3348: a USER-DEFINED application that sets `protocol junos-ping` (or
-// junos-pingv6) was lowered to bare ICMP with no type constraint, so the
-// projected policy term matched EVERY ICMP type (unreachable / redirect /
-// timestamp / ...) — silently widening any policy that referenced it, and
-// broader than the predefined junos-ping object which carries ICMPType=8
-// (#3020). The compiler must now attach the echo-request type (8 / 128) to a
-// custom app whose protocol is the ping alias, AND support explicit
-// icmp-type/icmp-code grammar on a custom application.
+// #3348: Junos rejects a user-defined `protocol junos-ping` (or junos-pingv6)
+// leaf, but XPF retains it as a compatibility extension. Before that extension
+// attached an echo type, custom apps lowered to bare ICMP and silently widened
+// policies to every ICMP type. The compiler must keep the custom alias
+// echo-constrained AND support explicit icmp-type/icmp-code grammar on custom
+// applications. This differs from the predefined objects: junos-ping is
+// all-ICMP (#11340), while junos-icmp-ping is echo-only.
 //
 // Trees are built from flat `set` commands via flatTreeFromSets — the only
 // correct way to exercise the flat-set AST shape (see
@@ -33,9 +32,9 @@ func refApp(name string, props ...string) []string {
 	return sets
 }
 
-// Core fail-on-revert: `protocol junos-ping` must lower to ICMP type 8. Revert
-// the compiler change (alias default removed) and app.ICMPType stays nil, so
-// this assertion goes RED.
+// Core fail-on-revert: custom-app `protocol junos-ping` (XPF's compatibility
+// extension) must lower to ICMP type 8. Revert the compiler change (alias
+// default removed) and app.ICMPType stays nil, so this assertion goes RED.
 func TestApplicationJunosPing_AttachesEchoType(t *testing.T) {
 	cases := []struct {
 		proto    string
@@ -85,8 +84,8 @@ func TestApplicationJunosIcmpAll_StaysUnconstrained(t *testing.T) {
 	}
 }
 
-// Inline term: `term t protocol junos-ping` must attach the echo type to the
-// generated term application too.
+// Inline custom-app term: `term t protocol junos-ping` must attach the echo
+// type to the generated term application too.
 func TestApplicationJunosPing_InlineTerm_AttachesEchoType(t *testing.T) {
 	tree := flatTreeFromSets(t, refApp("ping-term", "term t protocol junos-ping")...)
 	cfg, err := CompileConfig(tree)
@@ -121,7 +120,7 @@ func TestApplicationExplicitICMPTypeCode(t *testing.T) {
 	}
 }
 
-// An explicit icmp-type wins over the junos-ping alias default.
+// An explicit icmp-type wins over the custom-app junos-ping alias default.
 func TestApplicationExplicitICMPTypeOverridesAlias(t *testing.T) {
 	tree := flatTreeFromSets(t, refApp("ovr", "protocol junos-ping", "icmp-type 13")...)
 	cfg, err := CompileConfig(tree)
@@ -212,13 +211,13 @@ func TestApplicationProtocolLessICMPType_RejectNamesConstraint(t *testing.T) {
 	}
 }
 
-// #3348 inline-term edge case 1 (widening INVERSION): an inline term that
-// lists BOTH a junos-ping alias AND an unconstrained ICMP alias normalizes both
-// to "icmp" and dedups to ONE term. The union of "echo" and "all-ICMP" is
+// #3348 inline-term edge case 1 (widening INVERSION): an inline term that lists
+// BOTH a custom-app junos-ping alias AND an unconstrained ICMP alias normalizes
+// both to "icmp" and dedups to ONE term. The union of "echo" and "all-ICMP" is
 // all-ICMP (the Rust matcher ORs separate app terms), so the collapsed term
-// must stay UNCONSTRAINED — the junos-ping echo type must NOT spuriously narrow
-// it. Fail-on-revert: without the unconstrainedICMP suppression the term gets
-// ICMPType=8 and this assertion goes RED.
+// must stay UNCONSTRAINED — the custom alias echo type must NOT spuriously
+// narrow it. Fail-on-revert: without the unconstrainedICMP suppression the term
+// gets ICMPType=8 and this assertion goes RED.
 func TestApplicationJunosPing_InlineTerm_MixedAllICMP_StaysUnconstrained(t *testing.T) {
 	cases := []struct {
 		name string

@@ -224,7 +224,9 @@ pub(super) fn session_count(sessions: &SessionTable) -> usize {
     n
 }
 
-fn closing_pair_keys(sessions: &SessionTable) -> (crate::session::SessionKey, crate::session::SessionKey) {
+fn closing_pair_keys(
+    sessions: &SessionTable,
+) -> (crate::session::SessionKey, crate::session::SessionKey) {
     let mut forward = None;
     sessions.iter_with_origin(|key, decision, metadata, _origin| {
         if !metadata.is_reverse {
@@ -238,7 +240,8 @@ fn closing_pair_keys(sessions: &SessionTable) -> (crate::session::SessionKey, cr
 
 fn shared_closing_copies(
     sessions: &SessionTable,
-) -> Arc<Mutex<crate::afxdp::FastMap<crate::session::SessionKey, crate::afxdp::SyncedSessionEntry>>> {
+) -> Arc<Mutex<crate::afxdp::FastMap<crate::session::SessionKey, crate::afxdp::SyncedSessionEntry>>>
+{
     let shared = Arc::new(Mutex::new(crate::afxdp::FastMap::default()));
     let mut entries = shared.lock().expect("shared session lock");
     sessions.iter_with_origin(|key, decision, metadata, origin| {
@@ -290,7 +293,14 @@ fn admitted(fw: &ForwardingState) -> SessionTable {
     let dbg = drive(
         fw,
         &mut sessions,
-        tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_FLAG_SYN, WAN_IFINDEX),
+        tcp(
+            CLIENT,
+            VIP,
+            CLIENT_PORT,
+            VIP_PORT,
+            TCP_FLAG_SYN,
+            WAN_IFINDEX,
+        ),
     );
     assert_eq!(
         dbg.tx, 1,
@@ -383,7 +393,10 @@ fn a_foreign_zones_permit_does_not_shield_the_owner_from_its_own_policy_9519() {
         ..WAN_ONLY
     });
     let foreign = drive(&live, &mut sessions, client_ack(DMZ_IFINDEX));
-    assert_eq!(foreign.session_hit, 1, "the dmz packet must HIT the wan session");
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz packet must HIT the wan session"
+    );
     assert_eq!(
         foreign.tx, 1,
         "dmz IS permitted to the server, so its packet is forwarded: a foreign \
@@ -397,7 +410,11 @@ fn a_foreign_zones_permit_does_not_shield_the_owner_from_its_own_policy_9519() {
          means dmz's permit re-derived and re-stamped wan's entry FRESH and shielded \
          it from wan's own narrowed policy (#9519)"
     );
-    assert_eq!(session_count(&sessions), 0, "the revoked pair must be torn down");
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "the revoked pair must be torn down"
+    );
 }
 
 #[test]
@@ -435,7 +452,10 @@ fn a_foreign_interfaces_static_filter_does_not_revoke_the_owners_session_9519() 
     });
     let mut sessions = admitted(&fw);
     let foreign = drive(&fw, &mut sessions, client_ack(DMZ_IFINDEX));
-    assert_eq!(foreign.session_hit, 1, "the dmz packet must HIT the wan session");
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz packet must HIT the wan session"
+    );
     assert_eq!(
         foreign.filter_revoked_sessions, 0,
         "dmz's input filter discards tcp/443 — for dmz's packets. #7212 revoked the \
@@ -514,7 +534,10 @@ fn a_foreign_zone_is_held_to_its_own_host_inbound_services_9519() {
 
     let mut control = host_bound_ssh_session(&fw);
     let owner = drive(&fw, &mut control, ssh(TCP_ACK, LAN_IFINDEX));
-    assert_eq!(owner.session_hit, 1, "control: the owner's ACK hits the session");
+    assert_eq!(
+        owner.session_hit, 1,
+        "control: the owner's ACK hits the session"
+    );
     assert_eq!(
         owner.host_inbound_deny, 0,
         "control: lan admits any-service, so the gate itself is not what denies below"
@@ -544,7 +567,11 @@ fn a_foreign_zone_is_held_to_its_own_host_inbound_services_9519() {
         "a wan copy of the tuple hits the same session"
     );
     assert_eq!(
-        (permitted.host_inbound_deny, permitted.policy_deny, permitted.local),
+        (
+            permitted.host_inbound_deny,
+            permitted.policy_deny,
+            permitted.local
+        ),
         (0, 0, 1),
         "wan DOES admit any-service, so its packet is delivered: a foreign arrival is \
          held to its own zone's services, not refused outright (#9519)"
@@ -572,9 +599,9 @@ fn icmp_type8_rule(name: &str, from_zone: &str, to_zone: &str, action: &str) -> 
         to_zone: to_zone.into(),
         source_addresses: vec!["any".into()],
         destination_addresses: vec!["any".into()],
-        applications: vec!["junos-ping".into()],
+        applications: vec!["junos-icmp-ping".into()],
         application_terms: vec![PolicyApplicationSnapshot {
-            name: "junos-ping".into(),
+            name: "junos-icmp-ping".into(),
             protocol: "icmp".into(),
             icmp_type: Some(8),
             ..Default::default()
@@ -907,7 +934,10 @@ fn a_foreign_packet_is_not_counted_against_the_owners_rule_9519() {
         "the `wan-in` rule must exist, or every delta below is read off nothing"
     );
     let foreign = drive(&fw, &mut sessions, client_ack(DMZ_IFINDEX));
-    assert_eq!(foreign.session_hit, 1, "the dmz packet must HIT the wan session");
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz packet must HIT the wan session"
+    );
     assert_eq!(
         rule_hits(&fw, "wan-in"),
         after_admit,
@@ -937,7 +967,10 @@ fn a_foreign_zone_is_held_to_its_own_junos_host_policy_9519() {
     });
     let mut sessions = host_bound_ssh_session(&fw);
     let foreign = drive(&fw, &mut sessions, ssh(TCP_ACK, DMZ_IFINDEX));
-    assert_eq!(foreign.session_hit, 1, "the dmz packet must HIT lan's host-bound session");
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the dmz packet must HIT lan's host-bound session"
+    );
     assert_eq!(
         foreign.policy_deny, 1,
         "dmz has a `to-zone junos-host` deny. 0 means junos-host policy was asked from \
@@ -972,7 +1005,11 @@ fn a_foreign_packets_lo0_discard_does_not_tear_down_the_session_9519() {
     let mut sessions = host_bound_ssh_session(&install);
     let unfiltered = drive(&install, &mut sessions, ssh(TCP_ACK, DMZ_IFINDEX));
     assert_eq!(
-        (unfiltered.session_hit, unfiltered.policy_deny, unfiltered.local),
+        (
+            unfiltered.session_hit,
+            unfiltered.policy_deny,
+            unfiltered.local
+        ),
         (1, 0, 1),
         "control: with no lo0 filter the dmz copy is delivered (dmz admits \
          any-service), so the drop below is the filter's"
@@ -982,7 +1019,10 @@ fn a_foreign_packets_lo0_discard_does_not_tear_down_the_session_9519() {
         ..WAN_ONLY
     });
     let filtered = drive(&live, &mut sessions, ssh(TCP_ACK, DMZ_IFINDEX));
-    assert_eq!(filtered.session_hit, 1, "the dmz packet must HIT the session");
+    assert_eq!(
+        filtered.session_hit, 1,
+        "the dmz packet must HIT the session"
+    );
     assert_eq!(
         (filtered.policy_deny, filtered.host_inbound_deny),
         (1, 0),
@@ -1294,7 +1334,11 @@ fn a_foreign_rst_is_dropped_without_driving_close_state_10636() {
         "precondition: the admitted session is open"
     );
 
-    let foreign = drive(&fw, &mut sessions, tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_RST, DMZ_IFINDEX));
+    let foreign = drive(
+        &fw,
+        &mut sessions,
+        tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_RST, DMZ_IFINDEX),
+    );
     assert_eq!(
         foreign.session_hit, 1,
         "the dmz RST must HIT the wan session, or this cell exercises the miss path"
@@ -1326,7 +1370,11 @@ fn a_foreign_rst_is_dropped_without_driving_close_state_10636() {
     );
 
     // The FIN half of the same defect, on the still-open session.
-    let foreign_fin = drive(&fw, &mut sessions, tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_FIN, DMZ_IFINDEX));
+    let foreign_fin = drive(
+        &fw,
+        &mut sessions,
+        tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_FIN, DMZ_IFINDEX),
+    );
     assert_eq!(foreign_fin.session_hit, 1);
     assert_eq!(foreign_fin.tx, 0, "the foreign FIN is dropped");
     assert_eq!(
@@ -1364,7 +1412,11 @@ fn an_owner_rst_still_drives_close_state_10636() {
     let (fwd_key, fwd_nat) = fwd.expect("admit must install a forward half");
     let rev_key = reverse_session_key(&fwd_key, fwd_nat);
 
-    let owner = drive(&fw, &mut sessions, tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_RST, WAN_IFINDEX));
+    let owner = drive(
+        &fw,
+        &mut sessions,
+        tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_RST, WAN_IFINDEX),
+    );
     assert_eq!(owner.session_hit, 1, "the owner RST must HIT the session");
     assert_eq!(
         sessions.close_class_wire_for(&fwd_key),
@@ -1391,10 +1443,7 @@ fn an_owner_rst_still_drives_close_state_10636() {
         1,
         "and still emits exactly one HA close Update (#9412)"
     );
-    assert_eq!(
-        updates[0].tcp_close_class, 3,
-        "carrying the Reset class"
-    );
+    assert_eq!(updates[0].tcp_close_class, 3, "carrying the Reset class");
 }
 
 /// THE GRACEFUL HALF of the control: an OWNER FIN still closes gracefully —
@@ -1404,7 +1453,11 @@ fn an_owner_rst_still_drives_close_state_10636() {
 fn an_owner_fin_still_closes_gracefully_10636() {
     let fw = forwarding(WAN_ONLY);
     let mut sessions = admitted(&fw);
-    let owner = drive(&fw, &mut sessions, tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_FIN, WAN_IFINDEX));
+    let owner = drive(
+        &fw,
+        &mut sessions,
+        tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_FIN, WAN_IFINDEX),
+    );
     assert_eq!(owner.session_hit, 1, "the owner FIN must HIT the session");
     let mut fwd = None;
     sessions.iter_with_origin(|k, _d, m, _o| {
@@ -1537,7 +1590,10 @@ fn a_foreign_bare_syn_preserves_closing_pair_and_shared_copies_10886() {
         tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_SYN, DMZ_IFINDEX),
         &shared,
     );
-    assert_eq!(foreign.session_hit, 1, "the foreign SYN must hit the closing pair");
+    assert_eq!(
+        foreign.session_hit, 1,
+        "the foreign SYN must hit the closing pair"
+    );
     assert_eq!(foreign.tx, 0, "the foreign SYN is denied by its own zone");
     assert_eq!(foreign.foreign_authority_drops, 1);
     assert_eq!(session_count(&sessions), 2);
@@ -1641,7 +1697,10 @@ fn an_owner_bare_syn_replaces_closing_pair_after_policy_permit_10886() {
         tcp(CLIENT, VIP, CLIENT_PORT, VIP_PORT, TCP_SYN, WAN_IFINDEX),
         &shared,
     );
-    assert_eq!(owner_syn.session_hit, 0, "owner reuse must take the miss path");
+    assert_eq!(
+        owner_syn.session_hit, 0,
+        "owner reuse must take the miss path"
+    );
     assert_eq!(owner_syn.tx, 1, "the policy-permitted replacement forwards");
     assert_eq!(session_count(&sessions), 2);
     assert_ne!(

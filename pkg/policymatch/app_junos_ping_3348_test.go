@@ -6,15 +6,14 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// TestCustomJunosPingApp_EchoOnly is the #3348 end-to-end fail-on-revert: a
-// USER-DEFINED application `mgmt-ping` whose protocol is the junos-ping alias,
-// referenced by an allow policy, must permit ICMP echo-request (type 8) ONLY,
-// not every ICMP type. Before the compiler attached the echo constraint to the
-// alias, the custom app lowered to bare ICMP (ICMPType nil) and the matcher
-// treated it as match-ALL ICMP, so timestamp/redirect/etc. were silently
-// permitted — the security widening this issue fixes. Reverting the
-// compiler_applications.go alias default makes the "denies timestamp" case go
-// RED (the matcher permits it).
+// TestCustomJunosPingApp_EchoOnly is the #3348 end-to-end fail-on-revert: XPF
+// preserves a compatibility extension for a USER-DEFINED application whose
+// protocol is the junos-ping alias (Junos rejects that protocol leaf). It must
+// permit ICMP echo-request (type 8) ONLY, not every ICMP type. Before the
+// compiler attached this constraint, the custom app lowered to bare ICMP
+// (ICMPType nil) and silently permitted timestamp/redirect/etc. This behavior
+// is distinct from the predefined junos-ping application, which is all-ICMP;
+// the predefined echo-only object is junos-icmp-ping (#11340).
 func TestCustomJunosPingApp_EchoOnly(t *testing.T) {
 	cfg := compileFromSet(t, []string{
 		"set applications application mgmt-ping protocol junos-ping",
@@ -47,5 +46,67 @@ func TestCustomJunosPingApp_EchoOnly(t *testing.T) {
 					tt.icmpType, res.Matched, res.Action, tt.wantMatched, tt.wantAction)
 			}
 		})
+	}
+}
+
+// The predefined application is separate from XPF's compatibility handling for
+// a user-defined `protocol junos-ping` alias above. The version-bounded Junos
+// defaults use protocol-only ICMP/ICMPv6 here, with the echo-only object named
+// `junos-icmp-ping`.
+func predefinedICMPAppCfg11340(name string) *config.Config {
+	return cfgWith(config.SecurityConfig{
+		DefaultPolicy: config.PolicyDeny,
+		Policies: []*config.ZonePairPolicies{
+			zonePair("trust", "untrust", permit("permit-predefined",
+				config.PolicyMatch{Applications: []string{name}})),
+		},
+	}, config.ApplicationsConfig{})
+}
+
+func TestPredefinedJunosPingMatchesAllICMP_11340(t *testing.T) {
+	cases := []struct {
+		name, proto string
+		types       []uint8
+	}{
+		{"junos-ping", "icmp", []uint8{0, 3, 5, 11, 13}},
+		{"junos-pingv6", "icmpv6", []uint8{1, 2, 3, 133, 134, 135}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := predefinedICMPAppCfg11340(tc.name)
+			for _, icmpType := range tc.types {
+				ty := icmpType
+				code := uint8(1)
+				res := Match(cfg, Query{
+					FromZone: "trust", ToZone: "untrust", Protocol: tc.proto,
+					ICMPType: &ty, ICMPCode: &code,
+				})
+				if res.ContentRejected || !res.Matched || res.Action != config.PolicyPermit {
+					t.Fatalf("%s type=%d/code=1: got matched=%v action=%v rejected=%v, want permit",
+						tc.name, ty, res.Matched, res.Action, res.ContentRejected)
+				}
+			}
+		})
+	}
+}
+
+func TestPredefinedJunosIcmpPingRemainsEchoOnly_11340(t *testing.T) {
+	cfg := predefinedICMPAppCfg11340("junos-icmp-ping")
+	for _, tc := range []struct {
+		icmpType uint8
+		want     config.PolicyAction
+	}{
+		{8, config.PolicyPermit},
+		{3, config.PolicyDeny},
+		{11, config.PolicyDeny},
+	} {
+		ty := tc.icmpType
+		res := Match(cfg, Query{
+			FromZone: "trust", ToZone: "untrust", Protocol: "icmp", ICMPType: &ty,
+		})
+		if res.ContentRejected || res.Action != tc.want {
+			t.Fatalf("junos-icmp-ping type=%d: got action=%v rejected=%v, want %v",
+				ty, res.Action, res.ContentRejected, tc.want)
+		}
 	}
 }

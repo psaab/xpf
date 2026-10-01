@@ -4394,10 +4394,10 @@ fn app_catalog_precedence_parity_fixture() {
 }
 
 // ---------------------------------------------------------------------------
-// #3020 — junos-ping / junos-pingv6 are echo-request ONLY (ICMP type 8 /
-// ICMPv6 type 128), not every ICMP type. The all-ICMP aliases stay
-// unconstrained. The matcher gates an icmp-type-constrained term on the
-// packet's ICMP type/code, which is threaded into
+// #3020 — junos-icmp-ping is echo-request ONLY (ICMP type 8). The
+// version-bounded predefined junos-ping/junos-pingv6 apps are protocol-only
+// (#11340), as are the explicit all-ICMP aliases. The matcher gates any
+// type-constrained term on the packet's ICMP type/code, threaded into
 // `evaluate_policy_result_with_len` as `packet_icmp`.
 // ---------------------------------------------------------------------------
 
@@ -4441,14 +4441,14 @@ fn eval_icmp(state: &PolicyState, protocol: u8, icmp_type: u8, icmp_code: u8) ->
 
 #[test]
 fn flowless_icmp_type_mismatch_deny_does_not_override_permit_10673() {
-    let mut deny_ping = icmp_app_rule("junos-ping", "icmp", Some(8));
-    deny_ping.action = "deny".to_string();
+    let mut deny_echo = icmp_app_rule("junos-icmp-ping", "icmp", Some(8));
+    deny_echo.action = "deny".to_string();
     let permit_icmp_all = || icmp_app_rule("junos-icmp-all", "icmp", None);
-    let deny_ping_rule = || deny_ping.clone();
+    let deny_echo_rule = || deny_echo.clone();
     let src = "10.0.61.100".parse().expect("src");
     let dst = "172.16.80.200".parse().expect("dst");
 
-    // RED on revert: a known type that misses junos-ping is not an L4-need;
+    // RED on revert: a known type that misses junos-icmp-ping is not an L4-need;
     // it must not poison the later junos-icmp-all permit.
     for (label, icmp_type, icmp_code) in [
         ("Frag-Needed", 3, 4),
@@ -4456,8 +4456,8 @@ fn flowless_icmp_type_mismatch_deny_does_not_override_permit_10673() {
         ("Time-Exceeded", 11, 0),
     ] {
         for (order, rules) in [
-            ("deny-ping first", vec![deny_ping_rule(), permit_icmp_all()]),
-            ("permit first", vec![permit_icmp_all(), deny_ping_rule()]),
+            ("deny-echo first", vec![deny_echo_rule(), permit_icmp_all()]),
+            ("permit first", vec![permit_icmp_all(), deny_echo_rule()]),
         ] {
             let state = parse_policy_state("deny", &rules, &test_zone_name_to_id());
             let result = evaluate_policy_result_l3_aware(
@@ -4483,7 +4483,7 @@ fn flowless_icmp_type_mismatch_deny_does_not_override_permit_10673() {
 
     let state = parse_policy_state(
         "deny",
-        &[deny_ping_rule(), permit_icmp_all()],
+        &[deny_echo_rule(), permit_icmp_all()],
         &test_zone_name_to_id(),
     );
     assert_eq!(
@@ -4502,7 +4502,7 @@ fn flowless_icmp_type_mismatch_deny_does_not_override_permit_10673() {
         )
         .action,
         PolicyAction::Deny,
-        "a known junos-ping type must still match the deny",
+        "a known junos-icmp-ping type must still match the deny",
     );
     assert_eq!(
         evaluate_policy_result_l3_aware(
@@ -4525,10 +4525,10 @@ fn flowless_icmp_type_mismatch_deny_does_not_override_permit_10673() {
 }
 
 #[test]
-fn junos_ping_matches_echo_request_only() {
+fn junos_icmp_ping_matches_echo_request_only() {
     let state = parse_policy_state(
         "deny",
-        &[icmp_app_rule("junos-ping", "icmp", Some(8))],
+        &[icmp_app_rule("junos-icmp-ping", "icmp", Some(8))],
         &test_zone_name_to_id(),
     );
     // Echo-request (type 8) is permitted.
@@ -4540,13 +4540,13 @@ fn junos_ping_matches_echo_request_only() {
 }
 
 #[test]
-fn junos_pingv6_matches_echo_request_only() {
+fn custom_icmpv6_echo_matches_echo_request_only() {
     let state = parse_policy_state(
         "deny",
-        &[icmp_app_rule("junos-pingv6", "icmpv6", Some(128))],
+        &[icmp_app_rule("custom-icmpv6-echo", "icmpv6", Some(128))],
         &test_zone_name_to_id(),
     );
-    // ICMPv6 echo-request is type 128.
+    // A custom ICMPv6 echo-request application can constrain type 128.
     assert_eq!(
         eval_icmp(&state, PROTO_ICMPV6, 128, 0),
         PolicyAction::Permit
@@ -4576,10 +4576,42 @@ fn junos_icmp_all_matches_every_type() {
 }
 
 #[test]
-fn junos_ping_with_icmp_all_matches_every_type() {
-    // A rule citing BOTH junos-ping AND junos-icmp-all matches all ICMP: the
-    // unconstrained term short-circuits the type constraint.
-    let mut rule = icmp_app_rule("ping-and-all", "icmp", Some(8));
+fn predefined_junos_ping_applications_match_all_icmp_types() {
+    let cases = [
+        (
+            "junos-ping",
+            "icmp",
+            PROTO_ICMP,
+            [(0, 0), (3, 1), (8, 9), (11, 0), (13, 0)],
+        ),
+        (
+            "junos-pingv6",
+            "icmpv6",
+            PROTO_ICMPV6,
+            [(1, 0), (2, 0), (3, 0), (134, 0), (135, 0)],
+        ),
+    ];
+    for (name, protocol_name, protocol, types) in cases {
+        let state = parse_policy_state(
+            "deny",
+            &[icmp_app_rule(name, protocol_name, None)],
+            &test_zone_name_to_id(),
+        );
+        for (icmp_type, icmp_code) in types {
+            assert_eq!(
+                eval_icmp(&state, protocol, icmp_type, icmp_code),
+                PolicyAction::Permit,
+                "{name} must match ICMP type {icmp_type}/code {icmp_code}",
+            );
+        }
+    }
+}
+
+#[test]
+fn junos_icmp_ping_with_icmp_all_matches_every_type() {
+    // A rule citing BOTH junos-icmp-ping and junos-icmp-all matches all ICMP:
+    // the unconstrained term covers the type-constrained echo term.
+    let mut rule = icmp_app_rule("junos-icmp-ping", "icmp", Some(8));
     rule.application_terms.push(PolicyApplicationSnapshot {
         name: "junos-icmp-all".to_string(),
         protocol: "icmp".to_string(),
@@ -4640,13 +4672,13 @@ fn icmp_constraint_does_not_affect_tcp_app() {
 }
 
 #[test]
-fn junos_ping_unknown_icmp_type_fails_closed() {
+fn junos_icmp_ping_unknown_icmp_type_fails_closed() {
     // When the packet's ICMP type/code is unknown (truncated frame / non-first
     // fragment → packet_icmp == None), an icmp-type-constrained term must NOT
     // match (fail closed) rather than matching a fabricated type 0.
     let state = parse_policy_state(
         "deny",
-        &[icmp_app_rule("junos-ping", "icmp", Some(8))],
+        &[icmp_app_rule("junos-icmp-ping", "icmp", Some(8))],
         &test_zone_name_to_id(),
     );
     let action = evaluate_policy_result_with_icmp(
@@ -4669,8 +4701,8 @@ fn junos_ping_unknown_icmp_type_fails_closed() {
 fn icmp_skew_old_snapshot_without_type_matches_all() {
     // Version skew: a snapshot whose application term OMITS the icmp_type field
     // (old Go control plane) decodes to icmp_type=None → the term is
-    // unconstrained and matches every ICMP type — today's pre-#3020 behavior,
-    // so skew degrades safely to match-all rather than failing to decode.
+    // unconstrained and matches every ICMP type; this remains correct for
+    // protocol-only junos-ping (#11340), not just legacy pre-#3020 snapshots.
     let json = r#"{
         "name": "legacy-ping",
         "from_zone": "lan",
@@ -7944,11 +7976,12 @@ fn app_term_single_port_range_matches_only_that_port_10649() {
 
 #[test]
 fn app_term_icmp_constrained_before_all_icmp_wins() {
-    // junos-ping (icmp type 8 → icmp_constraints) listed FIRST, junos-icmp-all
-    // (unconstrained → range_terms empty-range match-all) SECOND. For an echo
-    // (type 8) packet both match; first-term-wins → the constrained term's
-    // timeout (11). RED-on-revert: the old order checked range_terms (icmp-all)
-    // before icmp_constraints, so the all-ICMP timeout (22) wrongly won.
+    // junos-icmp-ping (icmp type 8 → icmp_constraints) listed FIRST,
+    // junos-icmp-all (unconstrained → range_terms empty-range match-all)
+    // SECOND. For an echo (type 8) packet both match; first-term-wins → the
+    // constrained term's timeout (11). RED-on-revert: the old order checked
+    // range_terms (icmp-all) before icmp_constraints, so the all-ICMP timeout
+    // (22) wrongly won.
     let ping = ApplicationMatch {
         protocol: PROTO_ICMP,
         source_ports: Vec::new(),

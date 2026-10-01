@@ -83,7 +83,7 @@ func TestBuildDNATSnapshotAppAllOutOfRangeSourcePortFailsClosed(t *testing.T) {
 }
 
 func TestBuildDNATSnapshotCarriesApplicationICMPTypeMatch(t *testing.T) {
-	typ := uint8(8) // echo-request, like junos-ping
+	typ := uint8(8) // echo-request, like junos-icmp-ping
 	cfg := dnatAppConfig("ping-app", &config.Application{
 		Name:     "ping-app",
 		Protocol: "icmp",
