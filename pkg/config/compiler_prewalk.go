@@ -518,6 +518,13 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// #11367: an ambiguous default-policy choice is strict-rejected and
+	// warned on tolerant ingress; the compiler resolves it to deny-all.
+	defaultPolicyWarnings, err := validateDefaultPolicyBlockCardinality11367(
+		tree.Children, opts.lenientDefaultPolicyBlock11367)
+	if err != nil {
+		return nil, err
+	}
 
 	// #11013: security policies do not implement the firewall filter's
 	// `then next term` semantics. An unrecognized then sibling is dropped.
@@ -778,6 +785,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, policyThenRejectWarnings...)
 	warnings = append(warnings, policyThenDenyWarnings...)
 	warnings = append(warnings, policyThenCountAlarmWarnings...)
+	warnings = append(warnings, defaultPolicyWarnings...)
 	warnings = append(warnings, policyThenSiblingWarnings...)
 	warnings = append(warnings, policyEnforcementWarnings...)
 	warnings = append(warnings, policyMissingMatchWarnings...)
