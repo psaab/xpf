@@ -38,11 +38,11 @@ use super::tests_support::*;
 use super::*;
 use crate::nat::NatDecision;
 use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
-use crate::tcp_flags::TCP_ACK;
+use crate::tcp_flags::{TCP_ACK, TCP_SYN};
 use crate::test_zone_ids::*;
 use crate::{
-    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NatAppTermWire, NeighborSnapshot,
-    PolicyRuleSnapshot, RouteSnapshot, SourceNATRuleSnapshot,
+    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NatAppTermWire,
+    NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot, SourceNATRuleSnapshot,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -113,6 +113,39 @@ fn forwarding_with_lan_rule(lan_action: Option<&str>) -> ForwardingState {
             ..Default::default()
         });
     }
+    build_forwarding_state(&snapshot)
+}
+fn forwarding_with_scheduled_lan_rule_11285() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    // Keep the TCP idle timers beyond the five-minute scheduler lease so the
+    // packet is dropped by policy expiry, not independent session aging.
+    snapshot.flow.tcp_session_timeout = 600;
+    snapshot.flow.tcp_initial_timeout = 600;
+    snapshot.policies.clear();
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "scheduled-lan-out".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        scheduler_name: "workhours".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        action: "permit".into(),
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".into(),
+        ip: DST.to_string(),
+        mac: "00:11:22:33:44:66".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
     build_forwarding_state(&snapshot)
 }
 
@@ -363,6 +396,104 @@ fn session_count(sessions: &SessionTable) -> usize {
     let mut n = 0;
     sessions.iter_with_origin(|_k, _d, _m, _o| n += 1);
     n
+}
+
+/// The real descriptor path exercises a live cached TCP session, then advances
+/// only the scheduler clock past its lease; the stale ACK must be revoked and
+/// dropped before TX.
+#[test]
+fn expired_scheduler_lease_revokes_live_cached_session_11285() {
+    let forwarding = forwarding_with_scheduled_lan_rule_11285();
+    let receipt_ns = 100_000_000_000;
+    assert!(forwarding.policy.scheduler_lease.apply(1, receipt_ns));
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let ha_state = BTreeMap::new();
+    let mut sessions = SessionTable::new();
+    sessions.set_timeouts(forwarding.session_timeouts);
+    let syn = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_SYN, syn.len() as u16);
+    let (batch, dbg) = txn_run_descriptor_at(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        syn_meta,
+        receipt_ns,
+    );
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(
+        dbg.tx,
+        1,
+        "a fresh scheduler heartbeat permits the SYN (session_miss={}, session_create={}, policy_deny={}, no_route={}, missing_neigh={}, ha_inactive={})",
+        dbg.session_miss,
+        dbg.session_create,
+        dbg.policy_deny,
+        dbg.no_route,
+        dbg.missing_neigh,
+        dbg.ha_inactive,
+    );
+    assert_eq!(session_count(&sessions), 2);
+    let ack = build_txn_tcp_syn_frame_v4(
+        SRC,
+        DST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let ack_meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, ack.len() as u16);
+
+    let (warm_batch, warm_dbg) = txn_run_descriptor_at(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+        receipt_ns + 1,
+    );
+    assert_eq!(warm_batch.validated_packets, 1);
+    assert_eq!(warm_dbg.session_hit, 1);
+    assert_eq!(
+        warm_dbg.tx, 1,
+        "an unexpired scheduled permit forwards ACKs"
+    );
+    assert!(
+        txn_flow_cache_entries(&binding) > 0,
+        "an established scheduled flow must seed the cache"
+    );
+
+    let expired_now_ns = receipt_ns + crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS + 1;
+    let (expired_batch, expired_dbg) = txn_run_descriptor_at(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ack,
+        ack_meta,
+        expired_now_ns,
+    );
+    assert_eq!(expired_batch.validated_packets, 1);
+    assert_eq!(
+        expired_dbg.session_hit, 1,
+        "the established session must reach scheduler revalidation"
+    );
+    assert_eq!(expired_dbg.policy_revoked_sessions, 1);
+    assert_eq!(
+        expired_dbg.tx, 0,
+        "expired scheduled permission must not forward"
+    );
+    assert_eq!(session_count(&sessions), 0);
 }
 
 /// THE FEATURE, AND THE WIRING. A session established under an older policy must
@@ -1164,15 +1295,8 @@ fn drive_snat_icmp_11064(
     // #11064: clustered fixture (reth RGs 1/2) needs populated HA inventory;
     // an empty map marks every RG-owned ForwardCandidate HAInactive.
     let ha_state = txn_ha_state();
-    let (_batch, dbg) = txn_run_descriptor_checked(
-        binding,
-        sessions,
-        forwarding,
-        &ha_state,
-        &frame,
-        meta,
-        true,
-    );
+    let (_batch, dbg) =
+        txn_run_descriptor_checked(binding, sessions, forwarding, &ha_state, &frame, meta, true);
     dbg
 }
 
@@ -1199,7 +1323,10 @@ fn stateful_snat_icmp_type_switch_keeps_session_mapping_11064() {
     binding.interface = Arc::<str>::from("reth1.0");
 
     let created = drive_snat_icmp_11064(&forwarding, &mut sessions, &mut binding, 8, 0x1234);
-    assert_eq!(created.session_create, 2, "the echo flow must install its pair");
+    assert_eq!(
+        created.session_create, 2,
+        "the echo flow must install its pair"
+    );
     assert_eq!(created.tx, 1, "the echo flow must translate and forward");
     let echo_nat = snat_decision_for_icmp_id_11064(&sessions, 0x1234);
     assert_eq!(
@@ -1209,7 +1336,10 @@ fn stateful_snat_icmp_type_switch_keeps_session_mapping_11064() {
     assert_eq!(echo_nat.source_nat_icmp, Some((8, 0)));
 
     let switched = drive_snat_icmp_11064(&forwarding, &mut sessions, &mut binding, 13, 0x1234);
-    assert_eq!(switched.session_hit, 1, "the type switch must hit the typeless key");
+    assert_eq!(
+        switched.session_hit, 1,
+        "the type switch must hit the typeless key"
+    );
     assert_eq!(switched.tx, 1, "the established flow must keep forwarding");
     let retained_nat = snat_decision_for_icmp_id_11064(&sessions, 0x1234);
     assert_eq!(retained_nat.rewrite_src, echo_nat.rewrite_src);
@@ -1217,10 +1347,16 @@ fn stateful_snat_icmp_type_switch_keeps_session_mapping_11064() {
     assert_eq!(retained_nat.source_nat_icmp, Some((8, 0)));
     let pools = source_nat_pool_statuses(&forwarding.source_nat_rules);
     assert_eq!(pools[0].used_ports, 1);
-    assert_eq!(pools[1].used_ports, 0, "a session hit must not rematch type 13 SNAT");
+    assert_eq!(
+        pools[1].used_ports, 0,
+        "a session hit must not rematch type 13 SNAT"
+    );
 
     let distinct = drive_snat_icmp_11064(&forwarding, &mut sessions, &mut binding, 13, 0x5678);
-    assert_eq!(distinct.session_create, 2, "a distinct identifier creates a new pair");
+    assert_eq!(
+        distinct.session_create, 2,
+        "a distinct identifier creates a new pair"
+    );
     assert_eq!(distinct.tx, 1);
     let timestamp_nat = snat_decision_for_icmp_id_11064(&sessions, 0x5678);
     assert_eq!(
@@ -1230,7 +1366,10 @@ fn stateful_snat_icmp_type_switch_keeps_session_mapping_11064() {
     assert_eq!(timestamp_nat.source_nat_icmp, Some((13, 0)));
     let pools = source_nat_pool_statuses(&forwarding.source_nat_rules);
     assert_eq!(pools[0].used_ports, 1);
-    assert_eq!(pools[1].used_ports, 1, "a new type-13 flow selects its typed pool");
+    assert_eq!(
+        pools[1].used_ports, 1,
+        "a new type-13 flow selects its typed pool"
+    );
 }
 
 #[test]

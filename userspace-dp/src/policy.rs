@@ -26,6 +26,52 @@ pub(crate) use snapshot_error::SnapshotIntegrityError;
 /// drops it to `MatchNone` and never matches real traffic.
 pub(crate) const UNREPRESENTABLE_ADDRESS_SENTINEL: &str = "__unsupported_address__";
 
+/// A scheduler publication remains authoritative for at most five minutes
+/// without a dataplane heartbeat. Version zero is reserved for helpers that
+/// have not yet received a heartbeat (including rolling upgrades from older
+/// control planes) and never expires.
+pub(crate) const SCHEDULER_HEARTBEAT_LEASE_NS: u64 = 300_000_000_000;
+
+#[derive(Debug, Default)]
+pub(crate) struct SchedulerHeartbeatLease {
+    version: AtomicU64,
+    received_at_ns: AtomicU64,
+}
+
+impl SchedulerHeartbeatLease {
+    /// Record a scheduler heartbeat unless it rolls back the accepted version.
+    /// Control requests are serialized by ServerState; packet workers only read
+    /// the receipt stamp.
+    pub(crate) fn apply(&self, version: u64, received_at_ns: u64) -> bool {
+        if version == 0 {
+            return false;
+        }
+        loop {
+            let current = self.version.load(Ordering::Acquire);
+            if version < current {
+                return false;
+            }
+            if self
+                .version
+                .compare_exchange(current, version, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.received_at_ns.store(received_at_ns, Ordering::Release);
+                return true;
+            }
+        }
+    }
+
+    #[inline]
+    pub(crate) fn expired_at(&self, now_ns: u64) -> bool {
+        if self.version.load(Ordering::Acquire) == 0 {
+            return false;
+        }
+        let received_at_ns = self.received_at_ns.load(Ordering::Acquire);
+        now_ns < received_at_ns || now_ns - received_at_ns > SCHEDULER_HEARTBEAT_LEASE_NS
+    }
+}
+
 /// #3261: true iff any of the rule's address fields (v3 literals or the legacy
 /// expanded lists, source or destination) carries the unrepresentable-address
 /// sentinel. The Go side stamps it onto BOTH shapes for the failed side, so a
@@ -900,6 +946,7 @@ impl PreparedPolicyState {
     pub(crate) fn parse_snapshot(
         snapshot: &ConfigSnapshot,
         counter_store: &PolicyCounterStore,
+        scheduler_lease: Arc<SchedulerHeartbeatLease>,
     ) -> Result<Self, SnapshotIntegrityError> {
         let tracked_ids_before = counter_store.tracked_rule_ids();
         let zones = zone_name_to_id_from_snapshot(&snapshot.zones);
@@ -910,12 +957,15 @@ impl PreparedPolicyState {
             &snapshot.address_books,
             counter_store,
         ) {
-            Ok(state) => Ok(Self {
-                state: Some(state),
-                counter_store: counter_store.clone(),
-                tracked_ids_before,
-                committed: false,
-            }),
+            Ok(mut state) => {
+                state.scheduler_lease = scheduler_lease;
+                Ok(Self {
+                    state: Some(state),
+                    counter_store: counter_store.clone(),
+                    tracked_ids_before,
+                    committed: false,
+                })
+            }
             Err(err) => {
                 counter_store.retain_rule_ids(&tracked_ids_before);
                 Err(err)
@@ -1667,6 +1717,12 @@ pub(crate) struct PolicyState {
     /// set, so a config with no junos-host policy keeps pre-#3019 host-bound
     /// behavior exactly (no risk of newly denying management traffic).
     has_junos_host_rules: bool,
+    /// True when any rule is bound to a scheduler. Lets the packet path skip
+    /// lease atomics for snapshots with no scheduled policies.
+    has_scheduled_rules: bool,
+    /// Shared across snapshot replacements so heartbeat freshness does not
+    /// depend on config generation or invalidate the flow cache.
+    pub(crate) scheduler_lease: Arc<SchedulerHeartbeatLease>,
     /// #8618: does ANY active PERMIT rule in this snapshot carry an ICMP /
     /// ICMPv6 type-constrained application term? A type-blind policy
     /// re-derivation can only manufacture a false DENY when a constrained
@@ -1733,6 +1789,8 @@ impl Default for PolicyState {
             books: Vec::new(),
             book_id_to_idx: FxHashMap::default(),
             has_junos_host_rules: false,
+            has_scheduled_rules: false,
+            scheduler_lease: Arc::new(SchedulerHeartbeatLease::default()),
             // #8618: armed in the rule loop; Default carries no rules.
             icmp_type_constrained_permit: [false; 2],
             icmp_type_constrained_term: [false; 2],
@@ -1748,6 +1806,18 @@ impl Default for PolicyState {
 }
 
 impl PolicyState {
+    #[inline]
+    pub(crate) fn scheduler_rules_expired_at(&self, now_ns: u64) -> bool {
+        self.has_scheduled_rules && self.scheduler_lease.expired_at(now_ns)
+    }
+
+    #[inline]
+    pub(crate) fn is_scheduler_policy_counter_idx(&self, counter_idx: u32) -> bool {
+        counter_idx
+            .checked_sub(1)
+            .and_then(|idx| self.rules.get(idx as usize))
+            .is_some_and(|rule| !rule.scheduler_name.is_empty())
+    }
     /// #8618: may an ICMP-family zone-policy verdict for `protocol` depend on
     /// the PACKET's icmp type/code, rather than on the flow alone?
     ///
@@ -2235,6 +2305,8 @@ pub(crate) fn parse_policy_state_with_counters(
         book_id_to_idx: FxHashMap::default(),
         // #3019: armed below if any rule names the `junos-host` self zone.
         has_junos_host_rules: false,
+        has_scheduled_rules: false,
+        scheduler_lease: Arc::new(SchedulerHeartbeatLease::default()),
         // #8618: armed in the same rule loop, same shape.
         icmp_type_constrained_permit: [false; 2],
         icmp_type_constrained_term: [false; 2],
@@ -2561,6 +2633,7 @@ pub(crate) fn parse_policy_state_with_counters(
         // apart here; the Go snapshot builder poisons it instead
         // (pkg/dataplane/userspace/policies_reject_global_sentinel_9570.go).
         let is_global = rule.from_zone == "junos-global" && rule.to_zone == "junos-global";
+        state.has_scheduled_rules |= !rule.scheduler_name.is_empty();
         state.rules.push(rule);
 
         // #3019: arm the LocalDelivery junos-host policy gate iff a rule
@@ -2981,6 +3054,14 @@ pub(crate) fn evaluate_policy(
     .action
 }
 
+#[inline]
+fn policy_scheduler_now_ns(state: &PolicyState) -> u64 {
+    if state.has_scheduled_rules {
+        crate::afxdp::monotonic_nanos()
+    } else {
+        0
+    }
+}
 pub(crate) fn evaluate_policy_with_len(
     state: &PolicyState,
     from_id: u16,
@@ -3073,10 +3154,36 @@ pub(crate) fn evaluate_policy_result_with_icmp(
     packet_icmp: Option<(u8, u8)>,
     packet_len: u64,
 ) -> PolicyEvaluationResult {
-    // Flow-backed callers always carry a real L4 header (the 5-tuple ports are
-    // authoritative), so delegate with `l4_present = true` — byte-identical to
-    // the pre-#3291 behavior.
-    evaluate_policy_result_l3_aware(
+    evaluate_policy_result_with_icmp_at(
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        policy_scheduler_now_ns(state),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_policy_result_with_icmp_at(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    now_ns: u64,
+) -> PolicyEvaluationResult {
+    evaluate_policy_result_l3_aware_at(
         state,
         from_id,
         to_id,
@@ -3088,6 +3195,7 @@ pub(crate) fn evaluate_policy_result_with_icmp(
         packet_icmp,
         packet_len,
         true,
+        now_ns,
     )
 }
 
@@ -3114,6 +3222,37 @@ pub(crate) fn evaluate_policy_result_l3_aware(
     packet_len: u64,
     l4_present: bool,
 ) -> PolicyEvaluationResult {
+    evaluate_policy_result_l3_aware_at(
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        policy_scheduler_now_ns(state),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_policy_result_l3_aware_at(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    l4_present: bool,
+    now_ns: u64,
+) -> PolicyEvaluationResult {
     evaluate_policy_result_counted(
         state,
         from_id,
@@ -3128,6 +3267,7 @@ pub(crate) fn evaluate_policy_result_l3_aware(
         l4_present,
         PolicyHitCount::Count,
         true,
+        now_ns,
     )
 }
 
@@ -3151,6 +3291,37 @@ pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress(
     packet_len: u64,
     l4_present: bool,
 ) -> PolicyEvaluationResult {
+    evaluate_policy_result_l3_aware_unresolved_egress_at(
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        policy_scheduler_now_ns(state),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress_at(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    l4_present: bool,
+    now_ns: u64,
+) -> PolicyEvaluationResult {
     evaluate_policy_result_counted(
         state,
         from_id,
@@ -3165,6 +3336,7 @@ pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress(
         l4_present,
         PolicyHitCount::Count,
         false,
+        now_ns,
     )
 }
 /// #9385: evaluate WITHOUT bumping any hit counter.
@@ -3190,6 +3362,34 @@ pub(crate) fn evaluate_policy_result_without_counting(
     dst_port: u16,
     packet_icmp: Option<(u8, u8)>,
 ) -> PolicyEvaluationResult {
+    evaluate_policy_result_without_counting_at(
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        policy_scheduler_now_ns(state),
+    )
+}
+
+/// Evaluate without hit-counter side effects at a caller-captured monotonic time.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_policy_result_without_counting_at(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    now_ns: u64,
+) -> PolicyEvaluationResult {
     evaluate_policy_result_counted(
         state,
         from_id,
@@ -3206,6 +3406,7 @@ pub(crate) fn evaluate_policy_result_without_counting(
         true,
         PolicyHitCount::Never,
         true,
+        now_ns,
     )
 }
 
@@ -3224,7 +3425,9 @@ fn evaluate_policy_result_counted(
     l4_present: bool,
     hit_count: PolicyHitCount,
     egress_resolved: bool,
+    now_ns: u64,
 ) -> PolicyEvaluationResult {
+    let scheduler_expired = state.scheduler_rules_expired_at(now_ns);
     // #3110: zone id 0 is the reserved "unknown / no zone" sentinel
     // (assigned to interfaces not bound to any security zone, and to the
     // over-cap-zone collapse-to-0 path, #2391). A flow whose ingress OR
@@ -3270,6 +3473,7 @@ fn evaluate_policy_result_counted(
                     packet_icmp,
                     packet_len,
                     l4_present,
+                    scheduler_expired,
                     hit_count,
                     !l4_present && skipped_frag_deny.is_none(),
                 ) {
@@ -3342,6 +3546,7 @@ fn evaluate_policy_result_counted(
                 packet_icmp,
                 packet_len,
                 l4_present,
+                scheduler_expired,
                 hit_count,
                 !l4_present && skipped_frag_deny.is_none(),
             ) {
@@ -3366,6 +3571,7 @@ fn evaluate_policy_result_counted(
                 packet_icmp,
                 packet_len,
                 l4_present,
+                scheduler_expired,
                 hit_count,
                 !l4_present && skipped_frag_deny.is_none(),
             ) {
@@ -3405,6 +3611,7 @@ fn evaluate_policy_result_counted(
                 packet_icmp,
                 packet_len,
                 l4_present,
+                scheduler_expired,
                 hit_count,
                 !l4_present && skipped_frag_deny.is_none(),
             ) {
@@ -3640,6 +3847,36 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
     packet_len: u64,
     l4_present: bool,
 ) -> Option<PolicyEvaluationResult> {
+    evaluate_junos_host_policy_l3_aware_at(
+        state,
+        from_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        policy_scheduler_now_ns(state),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_junos_host_policy_l3_aware_at(
+    state: &PolicyState,
+    from_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    l4_present: bool,
+    now_ns: u64,
+) -> Option<PolicyEvaluationResult> {
+    let scheduler_expired = state.scheduler_rules_expired_at(now_ns);
     // #10644: NO `from_id == 0` early return here. The old entry guard
     // skipped the from-any/global tiers for unzoned ingress, so a `from-zone
     // any to-zone junos-host` deny-all — the operator's recourse against
@@ -3677,6 +3914,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
                 packet_icmp,
                 packet_len,
                 l4_present,
+                scheduler_expired,
                 PolicyHitCount::Count,
                 !l4_present && skipped_frag_deny.is_none(),
             ) {
@@ -3713,6 +3951,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
                 packet_icmp,
                 packet_len,
                 l4_present,
+                scheduler_expired,
                 PolicyHitCount::Count,
                 !l4_present && skipped_frag_deny.is_none(),
             ) {
@@ -3756,6 +3995,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
             packet_icmp,
             packet_len,
             l4_present,
+            scheduler_expired,
             PolicyHitCount::Count,
             !l4_present && skipped_frag_deny.is_none(),
         ) {
@@ -4061,13 +4301,14 @@ fn try_match_rule(
     packet_icmp: Option<(u8, u8)>,
     packet_len: u64,
     l4_present: bool,
+    scheduler_expired: bool,
     // #9385: threaded rather than inferred from `packet_len`. A zero length means
     // "no bytes", not "no packet" -- `HitCounter::add` bumps `packets`
     // unconditionally and #6304's doc depends on that.
     hit_count: PolicyHitCount,
     track_frag_deny: bool,
 ) -> RuleMatchOutcome {
-    if rule.inactive {
+    if rule.inactive || (scheduler_expired && !rule.scheduler_name.is_empty()) {
         return RuleMatchOutcome::Miss(RuleMissReason::Inactive);
     }
     // #3227: `matches` carries the matched term's optional inactivity timeout.

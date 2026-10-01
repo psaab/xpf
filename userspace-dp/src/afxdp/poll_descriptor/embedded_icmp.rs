@@ -429,7 +429,7 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     // #10729 X2-F6: same effective-proto-51 substitution as the transit
     // flowless arms (identity today: prebuilts carry no AH).
     let policy_proto = crate::afxdp::frame::flowless_effective_protocol(queued_frame, policy_meta);
-    let policy_result = crate::policy::evaluate_policy_result_l3_aware(
+    let policy_result = crate::policy::evaluate_policy_result_l3_aware_at(
         &worker_ctx.forwarding.policy,
         from_zone_id,
         to_zone_id,
@@ -441,6 +441,7 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
         super::policy_packet_icmp(queued_frame, policy_meta),
         queued_frame.len() as u64,
         false,
+        now_ns,
     );
     if matches!(policy_result.action, PolicyAction::Permit) {
         return true;

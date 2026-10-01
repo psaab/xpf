@@ -221,3 +221,41 @@ func TestScheduler_CarriesClockHoldAndRepublishFailureAcrossReplacement(t *testi
 		t.Fatalf("inherited pending retry calls=%d state=%v, want one inactive retry", newCalls, newState)
 	}
 }
+func TestScheduler_UnchangedConvergedTickRefreshesLease(t *testing.T) {
+	now := time.Date(2026, 2, 12, 10, 0, 0, 0, time.UTC)
+	var updates, heartbeats int
+	s, _ := NewPrimed(nil, func(context.Context, map[string]bool) error {
+		updates++
+		return nil
+	}, now)
+	s.SetHeartbeatFn(func(context.Context) { heartbeats++ })
+
+	s.evaluate(context.Background(), now.Add(defaultTickInterval), true)
+	if updates != 0 {
+		t.Fatalf("unchanged tick republished state %d times, want 0", updates)
+	}
+	if heartbeats != 1 {
+		t.Fatalf("unchanged converged tick sent %d heartbeats, want 1", heartbeats)
+	}
+}
+
+func TestScheduler_PendingRepublishSuppressesLeaseHeartbeat(t *testing.T) {
+	now := time.Date(2026, 2, 12, 10, 0, 0, 0, time.UTC)
+	var updates, heartbeats int
+	s, _ := NewPrimed(nil, func(context.Context, map[string]bool) error {
+		updates++
+		return nil
+	}, now)
+	s.SetHeartbeatFn(func(context.Context) { heartbeats++ })
+	s.mu.Lock()
+	s.republishPending = true
+	s.mu.Unlock()
+
+	s.evaluate(context.Background(), now.Add(defaultTickInterval), true)
+	if updates != 1 {
+		t.Fatalf("pending tick republished %d times, want 1 retry", updates)
+	}
+	if heartbeats != 0 {
+		t.Fatalf("pending tick sent %d heartbeats, want none", heartbeats)
+	}
+}

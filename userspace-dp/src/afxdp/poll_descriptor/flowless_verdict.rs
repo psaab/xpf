@@ -158,6 +158,7 @@ pub(super) fn flowless_local_delivery_verdict(
         packet_len,
         false,
         packet_icmp,
+        now_ns,
     ) {
         if !matches!(result.action, PolicyAction::Permit) {
             emit_junos_host_deny(

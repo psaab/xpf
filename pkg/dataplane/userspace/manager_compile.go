@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1245,6 +1246,37 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 		slog.Warn("userspace: failed to sync helper status after policy scheduler publish", "err", err)
 	}
 	return nil
+}
+
+// HeartbeatPolicyScheduler refreshes the current scheduled-policy lease without
+// rebuilding a snapshot or changing its generation.
+func (m *Manager) HeartbeatPolicyScheduler(ctx context.Context) {
+	m.heartbeatPolicySchedulerAt(ctx, time.Now())
+}
+
+func (m *Manager) heartbeatPolicySchedulerAt(ctx context.Context, now time.Time) {
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+	if !m.hasScheduledPolicySnapshot || m.policySchedulerVersion == 0 {
+		return
+	}
+	if !m.lastSchedulerHeartbeatAt.IsZero() &&
+		now.Sub(m.lastSchedulerHeartbeatAt) < time.Minute {
+		return
+	}
+	if err := m.requestLocked(ControlRequest{
+		Type:           "scheduler_heartbeat",
+		Version:        m.policySchedulerVersion,
+		SuppressStatus: true,
+	}, nil); err == nil {
+		m.lastSchedulerHeartbeatAt = now
+	}
 }
 
 func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snapshot *ConfigSnapshot) error {

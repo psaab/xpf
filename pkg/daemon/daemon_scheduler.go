@@ -19,6 +19,10 @@ type policyScheduleStateUpdater interface {
 	UpdatePolicyScheduleState(*config.Config, map[string]bool) error
 }
 
+type policyScheduleHeartbeatUpdater interface {
+	HeartbeatPolicyScheduler(context.Context)
+}
+
 // reconcilePolicySchedulerLocked runs under applySem. It makes the scheduler
 // lifecycle follow committed config instead of only daemon startup, and returns
 // the active-state map that must be used for the same apply transaction.
@@ -56,6 +60,9 @@ func (d *Daemon) reconcilePolicySchedulerLockedAt(cfg *config.Config, now time.T
 		// wedged apply and shutdown never reached HA relinquish.
 		return d.publishPolicyScheduleState(ctx, epoch, activeState)
 	}, now, policySchedulerLocation(cfg, now))
+	sched.SetHeartbeatFn(func(ctx context.Context) {
+		d.heartbeatPolicySchedule(ctx, epoch)
+	})
 	sched.CarryRecoveryStateFrom(previous, now)
 	activeState = sched.ActiveState()
 	d.scheduler.Store(sched)
@@ -299,6 +306,29 @@ func (d *Daemon) publishPolicyScheduleState(ctx context.Context, epoch uint64, a
 	err := d.updatePolicyScheduleStateLocked(cfg, activeState)
 	d.recordSchedulerRepublishResult(err)
 	return err
+}
+
+// heartbeatPolicySchedule refreshes the dataplane lease on an unchanged,
+// converged scheduler tick. It is deliberately outside the republish result
+// path: a heartbeat failure must not latch scheduler snapshot failure.
+func (d *Daemon) heartbeatPolicySchedule(ctx context.Context, epoch uint64) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := d.applySem.Acquire(ctx, 1); err != nil {
+		return
+	}
+	defer d.applySem.Release(1)
+
+	if epoch != d.policySchedulerEpoch.Load() || ctx.Err() != nil {
+		return
+	}
+	if d.store.ActiveConfig() == nil {
+		return
+	}
+	if updater, ok := d.dataplane().(policyScheduleHeartbeatUpdater); ok {
+		updater.HeartbeatPolicyScheduler(ctx)
+	}
 }
 
 func (d *Daemon) seedPolicySchedulerActiveStateLocked(activeState map[string]bool) {

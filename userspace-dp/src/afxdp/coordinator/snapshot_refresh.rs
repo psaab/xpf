@@ -208,7 +208,11 @@ impl super::Coordinator {
         &self,
         snapshot: &crate::ConfigSnapshot,
     ) -> Result<crate::policy::PreparedPolicyState, crate::policy::SnapshotIntegrityError> {
-        crate::policy::PreparedPolicyState::parse_snapshot(snapshot, &self.policy_counters)
+        crate::policy::PreparedPolicyState::parse_snapshot(
+            snapshot,
+            &self.policy_counters,
+            Arc::clone(&self.scheduler_lease),
+        )
     }
     #[cfg(test)]
     pub(crate) fn policy_parse_calls_for_test(&self) -> usize {

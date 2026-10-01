@@ -453,6 +453,7 @@ pub struct Coordinator {
     /// when its rows now compare equal to the retained snapshot.
     pub(crate) fabric_plan_replan_required: bool,
     pub(crate) policy_counters: PolicyCounterStore,
+    pub(crate) scheduler_lease: Arc<crate::policy::SchedulerHeartbeatLease>,
     /// #2218: per-rule NAT translation hit counters (SNAT/DNAT/static),
     /// owned alongside `policy_counters` and threaded into the
     /// forwarding-state build so parsed rules share its `Arc`s.
@@ -696,6 +697,7 @@ impl Coordinator {
             forwarding,
             fabric_plan_replan_required: false,
             policy_counters: PolicyCounterStore::default(),
+            scheduler_lease: Arc::new(crate::policy::SchedulerHeartbeatLease::default()),
             ike_exchanges: Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new()),
             pptp_control: Arc::new(crate::session::pptp_control::PptpControlInbox::default()),
             workers,

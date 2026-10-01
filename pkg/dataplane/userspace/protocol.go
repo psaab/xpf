@@ -513,7 +513,9 @@ type DisplayLeaseWire struct {
 }
 
 type ControlRequest struct {
-	Type              string                    `json:"type"`
+	Type string `json:"type"`
+	// Version identifies a scheduler publication in scheduler_heartbeat.
+	Version           uint64                    `json:"version,omitempty"`
 	SuppressStatus    bool                      `json:"suppress_status,omitempty"`
 	Snapshot          *ConfigSnapshot           `json:"snapshot,omitempty"`
 	Forwarding        *ForwardingControlRequest `json:"forwarding,omitempty"`

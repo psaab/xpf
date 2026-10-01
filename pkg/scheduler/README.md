@@ -146,66 +146,78 @@ streak), and logs an `ERROR` on the transition into failure. See
 `pkg/daemon/daemon_scheduler.go` (`publishPolicyScheduleState`,
 `recordSchedulerRepublishResult`).
 
+## Dataplane heartbeat lease (#11285)
+
+Successful snapshots containing scheduled policies seed a versioned
+`scheduler_heartbeat`; unchanged, converged 60 s ticks renew that lease
+without rebuilding a snapshot or advancing its generation. The scheduler
+does not heartbeat while a snapshot republish is pending, so a wedged
+publisher cannot keep stale scheduled permits alive.
+
+The Rust helper records heartbeat receipt with its monotonic clock. A
+scheduled rule remains eligible at exactly 300 s and is treated as inactive
+only when the lease is older than 300 s. Lease expiry evicts cache entries
+admitted by scheduled rules and causes established sessions to revalidate;
+it does not flush the whole flow cache or change snapshot generation.
+Version zero (no heartbeat received) never expires, preserving compatibility
+with older Go publishers. An older helper rejects the new verb; Go ignores
+that best-effort refusal, so dataplane-side expiry requires a helper that
+implements #11285.
+
 ## Bounded-age FAIL-OPEN-STALE escalation (#5669, #10906)
 
-The #3780 self-heal retries a failed republish every tick, but a
-**persistently** failing republish — a wedged control socket (the shared
-helper control socket carries status poll, HA sync, session installs, and
-snapshot sync, per `CLAUDE.md`), an incompatible helper — leaves the stale
-window **fail-open** (a scheduled permit still forwarding past its close)
-for as long as the retry keeps failing, silently, with no operator signal
-beyond the climbing stale-seconds gauge.
+The #3780 self-heal retries a failed republish every tick. Until it
+converges, the last snapshot remains stale. A helper implementing #11285
+stops honoring scheduled rules after five minutes without a heartbeat;
+helpers that predate #11285 cannot independently expire that stale state.
+The daemon still surfaces the retry failure through the stale-seconds gauge.
 
 Once the failure streak exceeds `RepublishFailClosedAge` (5 min ≈ five
 60 s ticks — long enough to absorb transient control-socket contention
 without a false alarm, short enough to surface a genuinely stuck republish
 promptly), the scheduler latches `republishFailClosed` and:
 
-- emits a **one-time** `slog.Warn` alarm that the last-known schedule may
-  still permit traffic in a wedged dataplane, and
-- forces **every scheduled policy to the `inactive` (deny) disposition** in
-  the authoritative active-state map on the next evaluation, and tries to
-  republish that all-inactive snapshot.
+- emits a **one-time** `slog.Warn` alarm that the last-known scheduled
+  decision may remain enforced until its dataplane lease expires (or
+  indefinitely on a helper predating #11285), and
+- forces **every scheduled policy to the `inactive` disposition** in the
+  authoritative active-state map on the next evaluation, and tries to republish
+  that all-inactive snapshot.
 
-**What this actually buys — and what it does NOT.** Be precise about the
-packet-path effect, because the honest scope is narrower than "force
-inactive ⇒ the permit stops forwarding":
+**What this actually buys — and what it does NOT.** The forced-inactive
+snapshot still uses the same `updateFn` channel whose failures define the
+streak, so it may not reach a persistently-wedged helper. The independent
+lease expires on a #11285 helper after the last successful heartbeat; it is
+not driven by the republish latch and does not depend on a snapshot update.
+This bounds stale scheduled-rule enforcement only on helpers that implement
+the lease protocol. A legacy helper that rejects the added verb retains the
+pre-#11285 limitation until its control channel recovers.
 
-The forced-inactive snapshot is published through **the same `updateFn`
-channel** (`Manager.UpdatePolicyScheduleState` → `apply_snapshot`) whose
-failures *define* the streak. In a **persistently-wedged** dataplane — the
-exact case that latches fail-closed — that publish also fails, so the
-all-inactive snapshot **does not reach the helper**: the stale scheduled
-**permit keeps forwarding** past its window close until the control socket
-recovers. The latch does **not** itself stop packets in a wedged dataplane.
-
-So the escalation does not close the packet-path fail-open window; it
-**bounds the *silent* fail-open window** and converts it into a loud,
-observable, authoritative-deny posture. Concretely it delivers:
+Together, the republish latch and dataplane lease bound the silent
+fail-open window for scheduled permits on a current helper and convert it
+into a loud, observable inactive-state posture. Concretely it delivers:
 
 - **(a) a one-time loud alarm** (`slog.Warn`, "FAIL-OPEN-STALE") — the
-  operator is told that the last-known schedule in a wedged dataplane may
-  still permit traffic instead of only seeing a climbing stale-seconds
-  gauge;
+  operator is told that scheduled permits may remain live until the lease
+  expires, or longer on a legacy helper;
 - **(b) the `xpf_scheduler_republish_fail_open_stale` 0/1 gauge** for
   monitoring/alerting. `xpf_scheduler_republish_fail_closed` remains as a
   deprecated alias with the same value for existing alert expressions;
-- **(c) authoritative + surface deny consistency** — `ActiveState()` /
-  `IsActive()` (and any `show`/policy-match surface reading them) report the
-  scheduled policies **inactive (deny)**. This control-plane view does not
-  guarantee the wedged dataplane has stopped enforcing a last-known permit;
-- **(d) deny-lands-first on recovery** — when the republish recovers the
+- **(c) authoritative-state consistency** — `ActiveState()` / `IsActive()`
+  report scheduled policies **inactive**. The current helper independently
+  expires stale scheduled rules; a legacy helper may still enforce its
+  last-known permit until the channel recovers;
+- **(d) inactive-snapshot-first recovery** — when the republish recovers the
   scheduler first publishes the all-inactive snapshot and clears the latch,
   and only the **next** tick republishes the true (possibly reopened)
-  window. So the moment the socket unwedges, the helper receives *deny*
-  before it receives any reopened permit — the recovery cannot briefly
-  re-open a stale permit ahead of the correct state.
+  window. The helper receives the inactive scheduled-policy snapshot before
+  any reopened permit, so recovery cannot briefly reopen a stale permit.
 
 The latch clears on the next **successful** republish, after which the true
 window state is republished and any legitimately-open permit reopens (no
 permanent false-deny). Because the latch engages **only** while a republish
-is failing — enforcement is already broken — it never force-denies a
-converged, genuinely-active window (those have `republishPending == false`).
+is failing — enforcement is already broken — it never marks a converged,
+genuinely-active window inactive (those have `republishPending == false`).
 `RepublishFailClosed()` exposes the latch; the daemon's
 `SchedulerRepublishFailClosed` reads **that same latch** (not a second
 daemon-side timer) and feeds it to the
@@ -224,14 +236,13 @@ streak — but operators editing schedulers during a control-socket outage
 should watch `xpf_scheduler_republish_failed`/`_stale_seconds`, which are not
 reset by the escalation logic itself.
 
-**Limitation (block-engage scope).** The fail-closed disposition is
-`inactive` (drop the scheduled rule → default-deny), which is the correct
-fail-closed for the dominant **scheduled-permit** case. A scheduled
-**block** whose engage-activation was never published is already un-engaged
-in the wedged dataplane; forcing it `inactive` matches that state but cannot
-*engage* a block, which requires a successful publish. Actively engaging a
-stuck block would need per-policy action awareness in the dataplane, out of
-this package's scope.
+**Limitation (block-engage scope).** Lease expiry makes every
+`scheduler-name` rule ineligible in the policy walk; it cannot engage a
+scheduled deny whose activation snapshot never reached the helper. A deny
+that was active in the last snapshot is also made ineligible if its lease
+expires, because the helper cannot know the current schedule state without
+a heartbeat. A successful publish is therefore still required to engage a
+scheduled block or maintain its active state.
 
 ## Callers
 
@@ -262,9 +273,9 @@ this package's scope.
   the apply semaphore, so shutdown cancels a blocked scheduler publish
   instead of leaving a goroutine parked behind a long apply.
 - The scheduler uses wall-clock time only in the control plane to evaluate
-  Junos time windows. Packet workers must consume published active/inactive
-  booleans from the userspace snapshot and must not evaluate scheduler time in
-  the hot path.
+  Junos time windows. Packet workers must not recompute wall-clock schedules;
+  they consume published active bits and check only the monotonic dataplane
+  heartbeat lease.
 - Wall-clock discontinuities are fail-closed. Each evaluation compares
   wall elapsed time with Go's monotonic elapsed time from the previous
   evaluation; backward wall steps or drift beyond the tolerance publish

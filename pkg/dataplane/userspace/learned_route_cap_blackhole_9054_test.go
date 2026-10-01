@@ -306,8 +306,8 @@ func TestCapFlagIsWiredEndToEnd9054(t *testing.T) {
 
 	// 3. The arm calls the GATED adjudication.
 	poll := read("userspace-dp/src/afxdp/poll_descriptor/mod.rs")
-	if !strings.Contains(poll, "forwarding::noroute_policy_denial_gated(") {
-		t.Error("the NoRoute arm does not call noroute_policy_denial_gated; the cap flag is " +
+	if !strings.Contains(poll, "forwarding::noroute_policy_denial_gated_at(") {
+		t.Error("the NoRoute arm does not call noroute_policy_denial_gated_at; the cap flag is " +
 			"carried across the socket and then ignored at the one decision it exists for")
 	}
 

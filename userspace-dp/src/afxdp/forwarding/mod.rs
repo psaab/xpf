@@ -130,26 +130,68 @@ pub(in crate::afxdp) fn noroute_policy_denial(
     policy_icmp: Option<(u8, u8)>,
     packet_len: u64,
 ) -> Option<crate::policy::PolicyEvaluationResult> {
-    let l4_present = ports.is_some();
-    let (src_port, dst_port) = ports.unwrap_or((0, 0));
-    let evaluate = if egress_ifindex != 0 {
-        crate::policy::evaluate_policy_result_l3_aware
-    } else {
-        crate::policy::evaluate_policy_result_l3_aware_unresolved_egress
-    };
-    let result = evaluate(
+    noroute_policy_denial_at(
         policy,
         from_zone_id,
         to_zone_id,
+        egress_ifindex,
         src_ip,
         dst_ip,
         protocol,
-        src_port,
-        dst_port,
+        ports,
         policy_icmp,
         packet_len,
-        l4_present,
-    );
+        crate::afxdp::monotonic_nanos(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn noroute_policy_denial_at(
+    policy: &crate::policy::PolicyState,
+    from_zone_id: u16,
+    to_zone_id: u16,
+    egress_ifindex: i32,
+    src_ip: std::net::IpAddr,
+    dst_ip: std::net::IpAddr,
+    protocol: u8,
+    ports: Option<(u16, u16)>,
+    policy_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    now_ns: u64,
+) -> Option<crate::policy::PolicyEvaluationResult> {
+    let l4_present = ports.is_some();
+    let (src_port, dst_port) = ports.unwrap_or((0, 0));
+    let result = if egress_ifindex != 0 {
+        crate::policy::evaluate_policy_result_l3_aware_at(
+            policy,
+            from_zone_id,
+            to_zone_id,
+            src_ip,
+            dst_ip,
+            protocol,
+            src_port,
+            dst_port,
+            policy_icmp,
+            packet_len,
+            l4_present,
+            now_ns,
+        )
+    } else {
+        crate::policy::evaluate_policy_result_l3_aware_unresolved_egress_at(
+            policy,
+            from_zone_id,
+            to_zone_id,
+            src_ip,
+            dst_ip,
+            protocol,
+            src_port,
+            dst_port,
+            policy_icmp,
+            packet_len,
+            l4_present,
+            now_ns,
+        )
+    };
     if matches!(result.action, crate::policy::PolicyAction::Permit) {
         None
     } else {
@@ -204,10 +246,39 @@ pub(in crate::afxdp) fn noroute_policy_denial_gated(
     policy_icmp: Option<(u8, u8)>,
     packet_len: u64,
 ) -> Option<crate::policy::PolicyEvaluationResult> {
+    noroute_policy_denial_gated_at(
+        forwarding,
+        from_zone_id,
+        to_zone_id,
+        egress_ifindex,
+        src_ip,
+        dst_ip,
+        protocol,
+        ports,
+        policy_icmp,
+        packet_len,
+        crate::afxdp::monotonic_nanos(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn noroute_policy_denial_gated_at(
+    forwarding: &ForwardingState,
+    from_zone_id: u16,
+    to_zone_id: u16,
+    egress_ifindex: i32,
+    src_ip: std::net::IpAddr,
+    dst_ip: std::net::IpAddr,
+    protocol: u8,
+    ports: Option<(u16, u16)>,
+    policy_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    now_ns: u64,
+) -> Option<crate::policy::PolicyEvaluationResult> {
     // The cap is deliberately not consulted here. It remains in
     // ForwardingState for the published diagnostic and metrics, while every
     // NoRoute frame is adjudicated fail-closed by the same predicate.
-    noroute_policy_denial(
+    noroute_policy_denial_at(
         &forwarding.policy,
         from_zone_id,
         to_zone_id,
@@ -218,6 +289,7 @@ pub(in crate::afxdp) fn noroute_policy_denial_gated(
         ports,
         policy_icmp,
         packet_len,
+        now_ns,
     )
 }
 

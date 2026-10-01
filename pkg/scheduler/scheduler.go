@@ -30,6 +30,9 @@ type Scheduler struct {
 	// obligation: the next updateFn is handed the right ctx instead of having
 	// to know which of two to reach for, which is the defect itself.
 	updateFn func(ctx context.Context, activeState map[string]bool) error
+	// #11285: unchanged, converged ticks refresh the dataplane's bounded
+	// scheduled-policy lease without republishing the snapshot.
+	heartbeatFn func(ctx context.Context)
 	// #10949: a committed system time-zone change must not depend on Go's
 	// process-cached time.Local. The daemon supplies the committed location,
 	// which stays fixed for this scheduler generation. Ticks convert their
@@ -63,33 +66,21 @@ type Scheduler struct {
 	republishFailures  uint64
 	lastRepublishErr   error
 
-	// #5669: bounded-age FAIL-OPEN-STALE escalation (#10906 honest naming: the
-	// latch cannot expire the already-published schedule, so "fail-closed"
-	// overclaims the packet-path effect). The #3780 self-heal retries a failed
-	// republish every tick, but a PERSISTENTLY failing republish (a wedged
-	// control socket, an incompatible helper) leaves the stale window
-	// fail-OPEN — a scheduled permit still forwarding past its close — for as
-	// long as the retry keeps failing, silently. Once the failure streak
-	// exceeds republishFailClosedAge the streak can no longer be a single
-	// transient stall, so the scheduler latches republishFailClosed: it emits
-	// a one-time alarm AND forces every scheduled policy to the INACTIVE
-	// (deny) disposition in the authoritative active map. It also attempts to
-	// send that all-inactive snapshot, but the attempt can fail; see the owned
-	// risk below.
-	// This is safe because it engages ONLY while the republish is failing
-	// (enforcement already broken — never a converged, genuinely-active
-	// window) and clears on the next successful republish. Guarded by mu.
+	// #5669: bounded-age FAIL-OPEN-STALE escalation (#10906 honest naming:
+	// the latch alone cannot revoke an already-published schedule). The #3780
+	// self-heal retries a failed republish every tick, but a PERSISTENTLY
+	// failing republish (a wedged control socket or incompatible helper) can
+	// leave a scheduled permit live. Once the failure streak exceeds
+	// republishFailClosedAge, the scheduler latches republishFailClosed: it
+	// emits a one-time alarm, marks scheduled policies inactive in its
+	// authoritative map, and attempts to publish that snapshot.
 	//
-	// Honest scope (#10906 owned risk): the forced-inactive snapshot travels
-	// the SAME failing updateFn channel whose failures define the streak, so
-	// in a persistently-wedged dataplane it never lands and the last-known
-	// (possibly permit) schedule keeps enforcing. True fail-closed would
-	// require dataplane-side expiry of the published schedule independent of
-	// the republish channel; no such helper path exists, so the latch bounds
-	// the SILENT window (loud alarm + authoritative deny + deny-lands-first
-	// on recovery) but cannot revoke a live permit while wedged. Recorded
-	// here and in README rather than fixed: dataplane-side expiry is future
-	// work owned by the dataplane/helper surface, not this latch.
+	// The snapshot still uses the same updateFn channel whose failures define
+	// the streak. On a current #11285 helper, the independent heartbeat lease
+	// expires scheduler-bound rules if no heartbeat arrives for 300 seconds;
+	// helpers predating that protocol retain the old stale-window limitation.
+	// The latch still provides authoritative inactive state and
+	// deny-first recovery. Guarded by mu.
 	republishFailClosed bool
 }
 
@@ -215,6 +206,15 @@ func (s *Scheduler) Update(schedulers map[string]*config.SchedulerConfig) {
 	s.evaluate(context.Background(), time.Now(), true)
 }
 
+// SetHeartbeatFn installs the best-effort callback used on unchanged,
+// converged scheduler ticks. It is distinct from updateFn: heartbeat failure
+// must not latch a failed snapshot republish.
+func (s *Scheduler) SetHeartbeatFn(fn func(ctx context.Context)) {
+	s.mu.Lock()
+	s.heartbeatFn = fn
+	s.mu.Unlock()
+}
+
 // evaluate checks each scheduler against the current time and fires the
 // callback if any state changed.
 func (s *Scheduler) evaluate(ctx context.Context, now time.Time, notify bool) {
@@ -235,11 +235,12 @@ func (s *Scheduler) evaluate(ctx context.Context, now time.Time, notify bool) {
 
 	// #5669: while the republish has been failing past the bounded age
 	// (republishFailClosed, latched in recordRepublishResultLocked), force
-	// every scheduled policy to the INACTIVE (deny) disposition instead of
-	// publishing or keeping an ACTIVE permit the wedged dataplane cannot
-	// enforce. Read the latch once so the whole map is a coherent fail-closed
-	// view; it clears on the next successful republish, after which the true
-	// window state is republished and any legitimately-open permit reopens.
+	// every scheduled policy to the INACTIVE disposition in the authoritative
+	// scheduler state and attempt to publish that snapshot. The #11285
+	// heartbeat lease independently makes scheduled rules ineligible on
+	// current helpers while updates remain wedged. Read the latch once so the
+	// whole map is coherent; it clears on the next successful republish, after
+	// which the true window state is republished and any open permit reopens.
 	failClosed := s.republishFailClosed
 	for name, sched := range s.schedulers {
 		cur := false
@@ -278,7 +279,19 @@ func (s *Scheduler) evaluate(ctx context.Context, now time.Time, notify bool) {
 	// enforcement (a permit past its window / a block that never
 	// engaged) converges instead of persisting until the next unrelated
 	// state change hours away.
-	if (!changed && !s.republishPending) || !notify || s.updateFn == nil {
+	if !notify {
+		s.mu.Unlock()
+		return
+	}
+	if !changed && !s.republishPending {
+		heartbeatFn := s.heartbeatFn
+		s.mu.Unlock()
+		if heartbeatFn != nil {
+			heartbeatFn(ctx)
+		}
+		return
+	}
+	if s.updateFn == nil {
 		s.mu.Unlock()
 		return
 	}
@@ -304,12 +317,13 @@ func (s *Scheduler) recordRepublishResultLocked(err error, now time.Time) {
 		// #5669: bounded-age FAIL-OPEN-STALE escalation (#10906). Once the
 		// failure streak passes the bound, alert once and keep the scheduler's
 		// authoritative state inactive while republish remains wedged. The
-		// helper may still enforce the last-known schedule (including a permit)
-		// because this inactive snapshot uses the same failed update channel.
+		// snapshot still uses the failed update channel; heartbeat suppression
+		// lets #11285 helpers expire scheduled rules after 300 s, while a legacy
+		// helper may continue enforcing its last-known schedule.
 		if !s.republishFailClosed && !s.republishFirstFail.IsZero() &&
 			now.Sub(s.republishFirstFail) >= RepublishFailClosedAge {
 			s.republishFailClosed = true
-			slog.Warn("scheduler: republish FAIL-OPEN-STALE — enforcement has been stale past the bounded age; forcing scheduled policies inactive in the control-plane state and refusing to reopen them until republish recovers (the last-known schedule may still permit traffic in a wedged dataplane — investigate the helper/control socket)",
+			slog.Warn("scheduler: republish FAIL-OPEN-STALE — enforcement has been stale past the bounded age; forcing scheduled policies inactive in the control-plane state and refusing to reopen them until republish recovers (the heartbeat lease expires scheduled rules on current helpers; older helpers may still permit traffic — investigate the helper/control socket)",
 				"stale_for", now.Sub(s.republishFirstFail),
 				"bound", RepublishFailClosedAge,
 				"failures", s.republishFailures,
@@ -348,10 +362,10 @@ func (s *Scheduler) RepublishFailureStatus() (pending bool, failures uint64, sin
 
 // RepublishFailClosed reports whether the scheduler's bounded-age republish
 // failure latch is set. The scheduler keeps its authoritative scheduled-policy
-// state inactive while the republish remains failed, but the last-known
-// schedule in a wedged dataplane may still permit traffic because this latch
-// cannot expire a published schedule independently. It clears after a
-// successful republish. The daemon exposes this latch as the
+// state inactive while republish remains failed. On current #11285 helpers,
+// heartbeat suppression expires scheduled rules after five minutes; a legacy
+// helper may still enforce its last-known schedule until the channel recovers.
+// The latch clears after a successful republish. The daemon exposes it as the
 // xpf_scheduler_republish_fail_open_stale gauge (#5669, #10906).
 func (s *Scheduler) RepublishFailClosed() bool {
 	s.mu.RLock()

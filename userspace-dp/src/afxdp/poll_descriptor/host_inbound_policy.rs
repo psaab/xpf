@@ -77,8 +77,9 @@ pub(super) fn junos_host_policy_eval(
     packet_len: u64,
     l4_present: bool,
     packet_icmp: Option<(u8, u8)>,
+    now_ns: u64,
 ) -> Option<crate::policy::PolicyEvaluationResult> {
-    crate::policy::evaluate_junos_host_policy_l3_aware(
+    crate::policy::evaluate_junos_host_policy_l3_aware_at(
         &forwarding.policy,
         from_zone_id,
         flow.src_ip,
@@ -89,6 +90,7 @@ pub(super) fn junos_host_policy_eval(
         packet_icmp,
         packet_len,
         l4_present,
+        now_ns,
     )
 }
 
@@ -282,6 +284,7 @@ pub(super) fn junos_host_local_policy(
         // Flow-backed host-bound traffic always carries a real L4 header.
         true,
         policy_icmp,
+        now_ns,
     ) {
         // #3706: a matching PERMIT carries its `then log` selection, admitting
         // policy_id, and hit-counter handle back to the caller so the installed

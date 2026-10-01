@@ -466,6 +466,71 @@ fn evaluate_policy_skips_inactive_rules() {
 }
 
 #[test]
+fn scheduled_rule_expires_only_after_heartbeat_lease_and_heartbeat_renews() {
+    let state = parse_policy_state(
+        "deny",
+        &[scheduled_allow_snapshot("scheduled-allow", false)],
+        &test_zone_name_to_id(),
+    );
+    let first_receipt_ns = 1_000;
+    assert!(state.scheduler_lease.apply(7, first_receipt_ns));
+
+    let evaluate_at = |now_ns| {
+        evaluate_policy_result_l3_aware_at(
+            &state,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            "10.0.61.100".parse().expect("src"),
+            "172.16.80.200".parse().expect("dst"),
+            PROTO_TCP,
+            12345,
+            5201,
+            None,
+            64,
+            true,
+            now_ns,
+        )
+        .action
+    };
+
+    assert_eq!(
+        evaluate_at(first_receipt_ns + SCHEDULER_HEARTBEAT_LEASE_NS),
+        PolicyAction::Permit,
+        "the lease is still valid at exactly 300 seconds"
+    );
+    assert_eq!(
+        evaluate_at(first_receipt_ns + SCHEDULER_HEARTBEAT_LEASE_NS + 1),
+        PolicyAction::Deny,
+        "a scheduled permit must stop matching after its lease expires"
+    );
+
+    let renewed_at = first_receipt_ns + SCHEDULER_HEARTBEAT_LEASE_NS + 1;
+    assert!(state.scheduler_lease.apply(7, renewed_at));
+    assert_eq!(
+        evaluate_at(renewed_at + SCHEDULER_HEARTBEAT_LEASE_NS),
+        PolicyAction::Permit,
+        "an unchanged-version heartbeat renews the lease"
+    );
+}
+
+#[test]
+fn scheduler_lease_ignores_version_zero_and_rejects_rollback() {
+    let lease = SchedulerHeartbeatLease::default();
+    assert!(!lease.apply(0, 1));
+    assert!(
+        !lease.expired_at(u64::MAX),
+        "version zero preserves compatibility with helpers before the first heartbeat"
+    );
+
+    assert!(lease.apply(9, 100));
+    assert!(!lease.apply(8, 200), "a lower publication version is ignored");
+    assert!(
+        lease.expired_at(100 + SCHEDULER_HEARTBEAT_LEASE_NS + 1),
+        "a rejected rollback must not renew the accepted lease"
+    );
+}
+
+#[test]
 fn inactive_rule_falls_through_to_next_match() {
     let state = parse_policy_state(
         "deny",
