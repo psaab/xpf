@@ -268,6 +268,15 @@ impl SessionTable {
             self.create_drops = self.create_drops.saturating_add(1);
             return false;
         }
+        if !self.can_index_reply_alias(
+            &key,
+            decision.nat,
+            metadata.is_reverse,
+            self.key_to_handle.get(&key).copied(),
+        ) {
+            self.create_drops = self.create_drops.saturating_add(1);
+            return false;
+        }
         let session_limit_zone = metadata.ingress_zone;
         // remove_entry's three debug_assert!s catch invariant
         // violations in tests:
@@ -574,6 +583,14 @@ impl SessionTable {
         if let Some((domain, check)) = preserved {
             decision.install_table_domain = domain;
             decision.install_table_check = check;
+        }
+        if !self.can_index_reply_alias(
+            &key,
+            decision.nat,
+            metadata.is_reverse,
+            self.key_to_handle.get(&key).copied(),
+        ) {
+            return false;
         }
         let _previous = self.remove_entry(&key, RemovalKind::Replace);
         let epoch = self.next_epoch();
