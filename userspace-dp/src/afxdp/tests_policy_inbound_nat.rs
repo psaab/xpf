@@ -1227,7 +1227,7 @@ fn v4_deny_and_permit_any_controls_remain_policy_driven_10686() {
 }
 
 #[test]
-fn injected_mapped_ipv6_packet_is_outside_ingress_drop_scope_10686() {
+fn injected_mapped_ipv6_packet_hits_ingress_identity_gate_10686() {
     let forwarding = build_forwarding_state(&v4_source_deny_then_any_snapshot_10686());
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
@@ -1242,7 +1242,7 @@ fn injected_mapped_ipv6_packet_is_outside_ingress_drop_scope_10686() {
             std::collections::BTreeMap<i32, crate::afxdp::tunnel::LocalTunnelDelivery>,
         >,
     > = Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::BTreeMap::new()));
-    let (batch, _dbg) = txn_run_descriptor_with_injected(
+    let (batch, dbg) = txn_run_descriptor_with_injected(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -1251,8 +1251,8 @@ fn injected_mapped_ipv6_packet_is_outside_ingress_drop_scope_10686() {
         &deliveries,
     );
     assert_eq!(batch.validated_packets, 1);
-    assert_eq!(
-        batch.v4_mapped_ipv6_dropped, 0,
-        "the diagnostic injection leg must not use the wire-ingress gate"
-    );
+    assert_eq!(batch.v4_mapped_ipv6_dropped, 1);
+    assert_eq!(dbg.policy_deny, 0, "the ingress gate must precede policy");
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions.len(), 0);
 }
