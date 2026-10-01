@@ -1243,6 +1243,10 @@ step. Both are required — neither sees the other's case:
   an IPv4 neighbor in a v4-only or family-less group still establishes — FRR
   default `bgp default ipv4-unicast` auto-activates it, and an explicit
   `family inet` group still surfaces `FamilyInet`.
+  An IPv4 peer explicitly pinned to only inet6 also receives
+  `no neighbor <peer> activate` under ipv4 unicast (#11374), overriding FRR's
+  default IPv4 auto-activation; the IPv6 route-maps therefore cannot leave an
+  unfiltered IPv4 session active.
 - **`resolveRedistribute` never emits an invalid `redistribute <name>`
   line (#2223).** FRR's `redistribute` requires a source-protocol token
   (`connected`/`static`/`ospf`/`bgp`/`rip`/`isis`/`kernel`); a bare
