@@ -1303,6 +1303,7 @@ impl SessionDomain {
         const PAGE_ROWS: usize = 4096;
         const CAPTURE_IDLE: Duration = Duration::from_secs(30);
 
+        const WORKER_ACK_WAIT: Duration = Duration::from_secs(1);
         let now = Instant::now();
         {
             let mut captures = self
@@ -1392,9 +1393,9 @@ impl SessionDomain {
         }
         drop(records);
 
-        // Worker acknowledgements are bounded: a dead/stalled worker must
-        // produce an incomplete READ rather than hold the control socket.
-        let deadline = Instant::now() + Duration::from_millis(250);
+        // A bounded wait still prevents dead workers holding the control
+        // request, while allowing a queued worker to run under contention.
+        let deadline = Instant::now() + WORKER_ACK_WAIT;
         while pending.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }

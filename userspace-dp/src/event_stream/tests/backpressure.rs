@@ -197,6 +197,19 @@ fn paused_drain_ignores_backlog_cap_and_never_stalls() {
     assert_eq!(shared.frames_write_stalled.load(Ordering::Relaxed), 0);
 }
 
+// The writer handles EventFrame as opaque bytes. Fill its fixed wire buffer
+// with a correctly framed session-open envelope so this byte-cap test reaches
+// 16 MiB in 32K frames instead of over a million header-only frames.
+fn backpressure_frame(seq: u64) -> EventFrame {
+    let mut data = [0u8; super::codec::EVENT_FRAME_CAPACITY];
+    let payload_len = (data.len() - FRAME_HEADER_SIZE) as u32;
+    data[..4].copy_from_slice(&payload_len.to_le_bytes());
+    data[4] = super::codec::MSG_SESSION_OPEN;
+    data[8..16].copy_from_slice(&seq.to_le_bytes());
+    let len = data.len() as u16;
+    EventFrame { data, len, seq }
+}
+
 #[test]
 fn stalled_consumer_does_not_grow_backlog_unbounded_end_to_end() {
     // End-to-end: a daemon that connects but never reads (socket buffer fills
@@ -235,14 +248,13 @@ fn stalled_consumer_does_not_grow_backlog_unbounded_end_to_end() {
         )
     });
 
-    // Encode-only frame size. The wedged socket absorbs only ~130 KiB before
-    // WouldBlock, so every frame the loop drains past that point accumulates
-    // permanently in `write_buf` (it is never written out) until the drain
-    // reaches WRITE_BACKLOG_MAX_BYTES and trips the cap.
-    let frame_bytes = EventFrame::encode_drain_complete(1).as_bytes().len();
-    // Accepted sends that must accumulate before the loop's unwritten backlog
-    // reaches the 16 MiB cap (~1x cap worth of frames).
+    // Use a full-size frame so the loop must process far fewer events to reach
+    // the byte-based cap; this keeps the end-to-end liveness check useful on
+    // heavily loaded runners without changing the 16 MiB production bound.
+    let frame_bytes = backpressure_frame(1).as_bytes().len();
     let cap_frames = (WRITE_BACKLOG_MAX_BYTES / frame_bytes) as u64;
+    // Accepted sends that must accumulate before the unwritten backlog reaches
+    // the 16 MiB cap (~1x cap worth of full-size frames).
 
     // #6148: the liveness wait is PROGRESS-GATED, not a fixed wall-clock. We
     // feed a SUSTAINED source and stop as soon as the loop thread has actually
@@ -304,7 +316,7 @@ fn stalled_consumer_does_not_grow_backlog_unbounded_end_to_end() {
         // frames_dropped. Retry (loop) rather than give up so the loop always
         // has frames to migrate into write_buf.
         attempts += 1;
-        if handle.try_send(EventFrame::encode_drain_complete(sent_ok + 1)) {
+        if handle.try_send(backpressure_frame(sent_ok + 1)) {
             sent_ok += 1;
         }
         // Yield so the (possibly starved) background loop thread gets CPU to
@@ -315,9 +327,14 @@ fn stalled_consumer_does_not_grow_backlog_unbounded_end_to_end() {
     shared.stop.store(true, Ordering::Release);
     let _ = loop_join.join();
 
+    let frames_write_stalled = shared.frames_write_stalled.load(Ordering::Relaxed);
+    let frames_dropped = shared.frames_dropped.load(Ordering::Relaxed);
     assert!(
-        shared.frames_write_stalled.load(Ordering::Relaxed) > 0,
-        "a wedged reader with a sustained source must trip the backlog cap"
+        frames_write_stalled > 0,
+        "a wedged reader with a sustained source must trip the backlog cap \
+         (accepted={sent_ok}, attempts={attempts}, dropped={frames_dropped}, \
+         deadline_expired={})",
+        Instant::now() >= deadline
     );
     assert!(
         shared.frames_dropped.load(Ordering::Relaxed) > 0,
