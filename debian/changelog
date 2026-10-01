@@ -15,6 +15,9 @@ xpf (0.0.0) unstable; urgency=medium
     exemption (#11364, #11365).
   * Honor interface > zone > routing-instance context precedence for DNAT and
     static-NAT rule-sets regardless of configuration order (#11351).
+  * Apply RFC 7915's size-keyed DF policy to translated NAT64 IPv4 packets and
+    fragment eligible outputs to the egress MTU before tunnel encapsulation
+    (#11353).
   * Guard out-of-normalizer compact `then <head>` leaf forms so routing-instance
     steering survives direct and `apply-groups` compilation (#11354).
   * Require the FBF steering smoke to verify IPv4 and IPv6 forwarding at the
