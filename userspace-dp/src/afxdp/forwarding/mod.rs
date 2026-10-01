@@ -510,8 +510,8 @@ mod tests_lpm_parity_9522;
 #[cfg(test)]
 #[path = "tests_zero_disposition_11327.rs"]
 mod tests_zero_disposition_11327;
-// #9955: the overlapping-leak resolution differential (kernel rule priority vs
-// helper longest-prefix).
+// #9955/#11396: the shared prefix-derived kernel leak-priority mapping and
+// userspace resolution parity.
 #[cfg(test)]
 #[path = "tests_leak_overlap_9955.rs"]
 mod tests_leak_overlap_9955;

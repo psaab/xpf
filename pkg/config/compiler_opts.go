@@ -1419,19 +1419,16 @@ type compileOpts struct {
 	// group.
 	lenientDHCPRelayChildTokens bool
 	// lenientRoutingRuleWindows (#5854) downgrades the next-table / rib-group
-	// ip-rule window over-subscription gate (validateRoutingRuleWindowsStrict)
-	// from a hard compile error to a cfg.Warnings entry. The runtime applier
-	// programs next-table and interface-routes rib-group leaks into FIXED
-	// priority windows (pkg/routing/rules.go: 100 next-table rules, 1000
-	// rib-group leak rules) and HARD-CAPS at each boundary, silently skipping any
-	// rule past it, so a config that exceeds a window commits green while the
-	// reconciler stops at the limit and returns success — the committed
-	// generation claims routes the kernel never programs (blackhole / asymmetric
+	// ip-rule admission-cap gate (validateRoutingRuleWindowsStrict) from a hard
+	// compile error to a cfg.Warnings entry. The runtime applier caps admitted
+	// rules separately from priority assignment: 100 next-table rules (including
+	// ingress-interface expansion) and 1000 rib-group connected-prefix rules.
+	// Over-limit routes used to be silently skipped, so a config could commit
+	// while claiming routes the kernel never programs (blackhole / asymmetric
 	// routing). The strict commit / commit-check path hard-rejects so the
-	// over-subscription is operator-visible; the tolerant load / peer-sync paths
-	// warn so an already-committed or peer-synced over-limit config still BOOTS
-	// (#1960) — the applier's window hard-cap keeps the excess inert. Same
-	// doctrine as lenientNextTableRefs.
+	// over-subscription is operator-visible; tolerant load / peer-sync paths warn
+	// so an already-committed or peer-synced over-limit config still BOOTS (#1960).
+	// Same doctrine as lenientNextTableRefs.
 	lenientRoutingRuleWindows bool
 	// lenientPolicyRouteMapSeq (#5701) downgrades the route-map
 	// sequence-number overflow gate (validatePolicyRouteMapSequenceBoundStrict)

@@ -69,15 +69,9 @@ func routeSnapshotLeakIdentity(snap RouteSnapshot) string {
 	return fmt.Sprintf("%s|%s|%s|%s", snap.Table, snap.Family, destination, target)
 }
 
-// configNextTableRulePriorities mirrors nextTableManager.Apply's one shared
-// priority cursor for global static next-table leaks. The applier receives the
-// global v4 and v6 lists as one slice, stably partitions parsed IPv4 ahead of
-// parsed IPv6, and reserves one priority slot per default-instance ingress
-// interface for each eligible leak. The snapshot has one row per leak rather
-// than one row per ingress interface, so RulePriority is the FIRST slot
-// reserved for that route. StaticRouteExclusions is the shared eligibility and
-// cap verdict; consulting it here prevents the mirror from assigning a
-// priority to a route the kernel did not install.
+// configNextTableRulePriorities mirrors the kernel's next-table admission
+// order and cap. Each published row carries the shared prefix-derived
+// priority used by both next-table and rib-group rules.
 func configNextTableRulePriorities(cfg *config.Config, exclusions map[*config.StaticRoute]string) map[*config.StaticRoute]uint32 {
 	out := make(map[*config.StaticRoute]uint32)
 	if cfg == nil {
@@ -88,11 +82,8 @@ func configNextTableRulePriorities(cfg *config.Config, exclusions map[*config.St
 		return out
 	}
 
-	// Match pkg/routing.nextTableFamilyOrdered and
-	// config.nextTableWindowOrder without importing either unexported helper:
-	// all non-v6 entries (including nil and malformed destinations, which do
-	// not consume a kernel slot) retain their relative order, followed by the
-	// parsed IPv6 entries. The two config lists are one kernel sequence.
+	// The two config lists are one kernel sequence. Preserve the stable
+	// IPv4-first partition used by nextTableManager when drawing down the cap.
 	combined := make([]*config.StaticRoute, 0,
 		len(cfg.RoutingOptions.StaticRoutes)+len(cfg.RoutingOptions.Inet6StaticRoutes))
 	combined = append(combined, cfg.RoutingOptions.StaticRoutes...)
@@ -113,20 +104,22 @@ func configNextTableRulePriorities(cfg *config.Config, exclusions map[*config.St
 	}
 	ordered = append(ordered, v6...)
 
-	priority := uint32(config.NextTableRulePriorityBase)
+	admitted := 0
 	for _, route := range ordered {
 		if route == nil || route.NextTable == "" || exclusions[route] != "" {
 			continue
 		}
-		// Keep this local cap guard beside the cursor as a defence against a
-		// future caller passing a verdict map that was built from a different
-		// route sequence. Under the shared verdict it is redundant by design.
-		if uint64(priority-uint32(config.NextTableRulePriorityBase))+uint64(ingress) >
-			uint64(config.NextTableRuleWindow) {
+		_, dst, err := net.ParseCIDR(route.Destination)
+		if err != nil || dst == nil {
+			continue
+		}
+		if admitted+ingress > config.NextTableRuleWindow {
 			break
 		}
-		out[route] = priority
-		priority += uint32(ingress)
+		prefixLength, addressBits := dst.Mask.Size()
+		out[route] = uint32(config.RouteLeakRulePriority(
+			prefixLength, addressBits, config.RouteLeakNextTable))
+		admitted += ingress
 	}
 	return out
 }
@@ -563,17 +556,18 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// semantics and must not reintroduce a bare gateway.
 	qualifyForwardingInstanceNextHops(cfg, interfaces, out)
 
-	// #3770 (M10): stable sort with a TOTAL order. The old comparator
-	// keyed only on Table/Family/Destination, so two same-prefix routes
-	// (distinct after the H8 dedupe fix, e.g. a next-table leak and its
-	// ip-rule mirror, or a discard and a connected route) compared equal
-	// and their relative order followed the non-deterministic build input
-	// order (map iteration, kernel ip-rule order) under an UNSTABLE sort —
-	// producing spurious snapshot-to-snapshot diffs and ECMP-member churn
-	// that re-installed the FIB for no config change. Leak rows are stage-1
-	// rules, so RulePriority is their first tie-break after table/family/
-	// destination; ordinary rows keep the existing next-hop/weight/next-table/
-	// discard/preference order.
+	// #3770 (M10): stable ordering by table/family/destination, followed by
+	// route-specific tie-breaks. The old comparator keyed only on the first three
+	// fields, so distinct same-prefix rows (for example, a next-table leak and
+	// its ip-rule mirror, or a discard and a connected route) compared equal;
+	// their order then followed build input such as map or kernel iteration,
+	// causing snapshot diffs and ECMP-member churn.
+	//
+	// Leak rows are stage-1 rules, so RulePriority orders them at the same
+	// destination. Equal-priority leaks retain producer order because kernel
+	// rules with a shared priority are installed and observed in that order.
+	// Ordinary rows keep the existing next-hop/weight/next-table/discard/
+	// preference ordering.
 	//
 	// A NextTable row is always a leak; an ordinary route never competes with
 	// it in this priority comparison. The Rust consumer builds a separate
@@ -590,8 +584,11 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		if a.Destination != b.Destination {
 			return a.Destination < b.Destination
 		}
-		if a.NextTable != "" && b.NextTable != "" && a.RulePriority != b.RulePriority {
-			return a.RulePriority < b.RulePriority
+		if a.NextTable != "" && b.NextTable != "" {
+			if a.RulePriority != b.RulePriority {
+				return a.RulePriority < b.RulePriority
+			}
+			return false
 		}
 		an, bn := strings.Join(a.NextHops, ","), strings.Join(b.NextHops, ",")
 		if an != bn {

@@ -40,9 +40,15 @@ func TestBuildRouteSnapshotsCapturesRibGroupPerPrefixLeak(t *testing.T) {
 	ruleListFn = func(family int) ([]netlink.Rule, error) {
 		switch family {
 		case syscall.AF_INET:
-			return []netlink.Rule{{Dst: mustCIDR(t, "10.0.30.0/24"), Table: 101, Priority: 30000}}, nil
+			return []netlink.Rule{{
+				Dst: mustCIDR(t, "10.0.30.0/24"), Table: 101,
+				Priority: config.RouteLeakRulePriority(24, 32, config.RouteLeakRibGroup),
+			}}, nil
 		case syscall.AF_INET6:
-			return []netlink.Rule{{Dst: mustCIDR(t, "2001:db8:30::/64"), Table: 101, Priority: 30001}}, nil
+			return []netlink.Rule{{
+				Dst: mustCIDR(t, "2001:db8:30::/64"), Table: 101,
+				Priority: config.RouteLeakRulePriority(64, 128, config.RouteLeakRibGroup),
+			}}, nil
 		}
 		return nil, nil
 	}
