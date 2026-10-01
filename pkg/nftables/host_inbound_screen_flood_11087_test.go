@@ -139,19 +139,25 @@ func TestHostInboundScreenFloodNetlinkShape11087(t *testing.T) {
 	}
 
 	expectedRates := make(map[string]uint32)
+	expectedFamilies := make(map[string]byte)
 	for _, rule := range rules {
-		aggregate := p.screenFloodSets[HostInboundScreenFloodAggregateSetName(rule)]
+		family := screenFloodFamily(rule).nfproto
+		aggregateName := HostInboundScreenFloodAggregateSetName(rule)
+		aggregate := p.screenFloodSets[aggregateName]
 		if rule.AggregateThreshold > 0 {
-			expectedRates[HostInboundScreenFloodAggregateSetName(rule)] = rule.AggregateThreshold
+			expectedRates[aggregateName] = rule.AggregateThreshold
+			expectedFamilies[aggregateName] = family
 			if aggregate == nil || !aggregate.Dynamic || !aggregate.HasTimeout || aggregate.Timeout != HostInboundScreenFloodMeterTimeout || aggregate.Size != 1 || aggregate.KeyType != gnft.TypeMark {
 				t.Errorf("aggregate meter has wrong bound/key type: %+v", aggregate)
 			}
 		} else if aggregate != nil {
 			t.Errorf("unexpected aggregate meter for per-source screen: %+v", aggregate)
 		}
-		source := p.screenFloodSets[HostInboundScreenFloodSetName(rule)]
+		sourceName := HostInboundScreenFloodSetName(rule)
+		source := p.screenFloodSets[sourceName]
 		if rule.SourceThreshold > 0 {
-			expectedRates[HostInboundScreenFloodSetName(rule)] = rule.SourceThreshold
+			expectedRates[sourceName] = rule.SourceThreshold
+			expectedFamilies[sourceName] = family
 			wantSourceType := gnft.TypeIPAddr
 			if rule.Family == "ip6" {
 				wantSourceType = gnft.TypeIP6Addr
@@ -179,6 +185,26 @@ func TestHostInboundScreenFloodNetlinkShape11087(t *testing.T) {
 			wantRate := expectedRates[dynset.SetName]
 			if !ok || wantRate == 0 || !limit.Over || limit.Rate != uint64(wantRate) || limit.Burst != wantRate || limit.Unit != expr.LimitTimeSecond {
 				t.Errorf("dynset %q limit = %#v, want over %d/second burst %d", dynset.SetName, dynset.Exprs[0], wantRate, wantRate)
+			}
+			wantFamily, known := expectedFamilies[dynset.SetName]
+			if !known {
+				t.Errorf("dynset %q has no expected IP family", dynset.SetName)
+			} else {
+				familyGuarded := false
+				for j := 0; j+1 < i; j++ {
+					meta, ok := emitted[j].(*expr.Meta)
+					if !ok || meta.Key != expr.MetaKeyNFPROTO {
+						continue
+					}
+					cmp, ok := emitted[j+1].(*expr.Cmp)
+					if ok && cmp.Op == expr.CmpOpEq && cmp.Register == meta.Register && len(cmp.Data) == 1 && cmp.Data[0] == wantFamily {
+						familyGuarded = true
+						break
+					}
+				}
+				if !familyGuarded {
+					t.Errorf("mixed-family ingress dynset %q lacks a preceding nfproto=%d guard", dynset.SetName, wantFamily)
+				}
 			}
 			if strings.HasPrefix(dynset.SetName, "xpf_his_a_") {
 				if i == 0 {

@@ -2129,6 +2129,7 @@ func hostInboundScreenFloodMatchesText(screen xnft.HostInboundScreenFloodRule) s
 		} else {
 			parts = append(parts, "iifname { "+strings.Join(names, ", ")+" }")
 		}
+		parts = append(parts, "meta nfproto "+junosHostNfproto(screen.Family))
 	} else {
 		parts = append(parts, screen.Family+" daddr "+nftAddrSet(screen.Addresses))
 	}

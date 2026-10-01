@@ -594,6 +594,9 @@ func emitHostInboundScreenFloodNetlink(p *nlPlan, rules []HostInboundScreenFlood
 			}
 			if len(screen.IngressNetdevs) > 0 {
 				a.iifname(screen.IngressNetdevs)
+				// Ingress names can carry both IP families; scope every
+				// family-specific source key and protocol matcher explicitly.
+				a.needNfproto(screenFloodFamily(screen))
 			} else {
 				a.daddr(screenFloodFamily(screen), screen.Addresses, false)
 			}

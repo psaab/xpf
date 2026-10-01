@@ -27,13 +27,20 @@ func TestHostInboundScreenFloodTextOrder11087(t *testing.T) {
 	}
 
 	v4UDP := xnft.HostInboundScreenFloodRule{Zone: "wan", Family: "ip", Protocol: "udp", SourceThreshold: 3}
-	replyScreen := "ct state established,related ct direction reply iifname \"ge-0-0-0\" meta l4proto 17 update @" +
+	replyScreen := "ct state established,related ct direction reply iifname \"ge-0-0-0\" meta nfproto ipv4 meta l4proto 17 update @" +
 		xnft.HostInboundScreenFloodSetName(v4UDP) + " { ip saddr limit rate over 3/second burst 3 packets } counter name \"" +
 		xnft.HostInboundScreenFloodCounterName(v4UDP, true) + "\" drop"
 	if !strings.Contains(payload, "    "+replyScreen) {
-		t.Fatalf("reply-direction per-source screen is missing:\n%s", payload)
+		t.Fatalf("reply-direction per-source screen is missing its ingress-family guard:\n%s", payload)
 	}
-	replyAggregate := "ct state established,related ct direction reply iifname \"ge-0-0-0\" meta l4proto 17 update @" +
+	v6UDP := xnft.HostInboundScreenFloodRule{Zone: "wan", Family: "ip6", Protocol: "udp", SourceThreshold: 3}
+	v6ReplyScreen := "ct state established,related ct direction reply iifname \"ge-0-0-0\" meta nfproto ipv6 meta l4proto 17 update @" +
+		xnft.HostInboundScreenFloodSetName(v6UDP) + " { ip6 saddr limit rate over 3/second burst 3 packets } counter name \"" +
+		xnft.HostInboundScreenFloodCounterName(v6UDP, true) + "\" drop"
+	if !strings.Contains(payload, "    "+v6ReplyScreen) {
+		t.Fatalf("mixed-family ingress v6 screen is missing its family guard:\n%s", payload)
+	}
+	replyAggregate := "ct state established,related ct direction reply iifname \"ge-0-0-0\" meta nfproto ipv4 meta l4proto 17 update @" +
 		xnft.HostInboundScreenFloodAggregateSetName(v4UDP) + " { 0 limit rate over 24/second burst 24 packets } counter name \"" +
 		xnft.HostInboundScreenFloodCounterName(v4UDP, false) + "\" drop"
 	if !strings.Contains(payload, "    "+replyAggregate) {
@@ -46,7 +53,7 @@ func TestHostInboundScreenFloodTextOrder11087(t *testing.T) {
 		t.Fatalf("reply per-source then zone-ceiling screens must precede the early reply accept (source=%d aggregate=%d accept=%d):\n%s", replyRule, replyAggregateRule, replyAccept, payload)
 	}
 	fineJump := strings.Index(payload, "    iifname \"ge-0-0-0\" jump ")
-	originalRule := strings.Index(payload[replyAccept+len("    ct state established,related ct direction reply accept"):], "    iifname \"ge-0-0-0\" meta l4proto 17 update @")
+	originalRule := strings.Index(payload[replyAccept+len("    ct state established,related ct direction reply accept"):], "    iifname \"ge-0-0-0\" meta nfproto ipv4 meta l4proto 17 update @")
 	if originalRule >= 0 {
 		originalRule += replyAccept + len("    ct state established,related ct direction reply accept")
 	}
@@ -55,6 +62,8 @@ func TestHostInboundScreenFloodTextOrder11087(t *testing.T) {
 		t.Fatalf("original-direction screens must follow fine policy and precede global ICMP accepts (jump=%d screen=%d icmp=%d):\n%s", fineJump, originalRule, globalICMP, payload)
 	}
 	for _, fragment := range []string{
+		"meta nfproto ipv4",
+		"meta nfproto ipv6",
 		"ip saddr limit rate over 2/second burst 2 packets",
 		"ip6 saddr limit rate over 2/second burst 2 packets",
 		"meta l4proto 1",
