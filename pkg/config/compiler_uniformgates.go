@@ -128,5 +128,11 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesForwardingInstanceMembers11312(tree, cfg, opts); err != nil {
 		return err
 	}
+	// #11392 follows the existing routing-instance membership gates so their
+	// strict diagnostic priority remains unchanged. Management-class devices
+	// are owned by vrf-mgmt, never by a tenant VRF.
+	if err := runUniformGatesRIMgmtMember11392(tree, cfg, opts); err != nil {
+		return err
+	}
 	return nil
 }

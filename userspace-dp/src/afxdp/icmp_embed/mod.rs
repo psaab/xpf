@@ -89,11 +89,11 @@ pub(super) struct EmbeddedIcmpMatch {
 }
 
 /// Borrow bundle threaded through both v4/v6 NAT-match paths and the
-/// embedded-ICMP return-resolution helper. ONE struct only — both
-/// the NAT lookup path (which needs `shared_nat_sessions`) and the
-/// return-resolution path (which doesn't) share the same `&mut`
-/// borrow on `SessionTable`, so two structs holding `&mut sessions`
-/// concurrently would be a borrow-checker error.
+/// embedded-ICMP return-resolution helper. ONE struct only — both the NAT
+/// lookup path (which needs the shared NAT map and its ambiguity index) and
+/// the return-resolution path (which doesn't) share the same `&mut` borrow on
+/// `SessionTable`, so two structs holding `&mut sessions` concurrently would
+/// be a borrow-checker error.
 pub(in crate::afxdp::icmp_embed) struct NatMatchCtx<'a> {
     pub sessions: &'a mut SessionTable,
     pub forwarding: &'a ForwardingState,
@@ -318,6 +318,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
@@ -390,6 +391,7 @@ pub(super) fn try_nat64_icmp_error_match_from_frame(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
 ) -> EmbeddedMatchOutcome<Nat64IcmpErrorMatch> {

@@ -57,9 +57,9 @@ var junosHostBaseZones = []string{
 // the userspace no-match lifeline delivers, while a feed-tainted source cannot
 // be faithfully projected into the direct-path kernel chain. #11065 adds the
 // kernel terminal deny for the permit's unmatched direct traffic, but does not
-// alter the deliberate userspace behavior. #9504 moved `reject` and a `tcp-rst`
-// ingress zone OUT of this remainder; they are pinned as enforced by
-// TestJunosHostRejectAndTCPRstAreEnforced9504 below. Representable denies are
+// alter the deliberate userspace behavior. #9504 moved `reject` out of this
+// remainder; it is pinned as enforced by TestJunosHostRejectAndTCPRstPolicyDeny9504
+// below. Representable plain denies (including a deny on a `tcp-rst` zone) are
 // covered by TestJunosHostDirectDeliveryEnforcedNoWarn instead.
 func TestJunosHostDirectDeliveryWarns(t *testing.T) {
 	cases := []struct {
@@ -113,13 +113,12 @@ func TestJunosHostDirectDeliveryWarns(t *testing.T) {
 	}
 }
 
-// TestJunosHostRejectAndTCPRstAreEnforced9504 pins the two classes #9504 moved
-// out of the remainder above. A `then reject`, and a deny on a `tcp-rst` ingress
-// zone, now render with the verdict the runtime answers with rather than a silent
-// drop, so their parity warning is suppressed. The verdict is asserted, not just
-// the rendering: suppressing the warning for a rule that drops where the runtime
-// RSTs would trade a visible gap for an invisible divergence.
-func TestJunosHostRejectAndTCPRstAreEnforced9504(t *testing.T) {
+// TestJunosHostRejectAndTCPRstPolicyDeny9504 keeps #9504's active reject
+// distinct from #11304's correction: `then reject` still replies, while
+// `deny` on a `tcp-rst` zone silently drops on the direct host-bound path.
+// Both are representable, so both suppress the parity warning; the projected
+// verdict is asserted to prevent the zone setting from leaking into denies.
+func TestJunosHostRejectAndTCPRstPolicyDeny9504(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		policy  string
@@ -140,7 +139,7 @@ func TestJunosHostRejectAndTCPRstAreEnforced9504(t *testing.T) {
 		{
 			name:    "deny on a tcp-rst ingress zone",
 			policy:  "block-rst",
-			verdict: JunosHostDropTCPReset,
+			verdict: JunosHostDrop,
 			cmds: append(append([]string{}, junosHostBaseZones...),
 				"set security zones security-zone untrust tcp-rst",
 				"set security policies from-zone untrust to-zone junos-host policy block-rst match source-address bad-host",
@@ -181,9 +180,8 @@ func TestJunosHostRejectAndTCPRstAreEnforced9504(t *testing.T) {
 
 // TestJunosHostDirectDeliveryEnforcedNoWarn is the #4146 enforcement guard: a
 // REPRESENTABLE `to-zone junos-host` DENY (static-address / any source,
-// application any, no scheduler, non-tcp-rst enforceable ingress zone) is now
-// kernel-enforced on the direct host-bound path, so its parity warning is
-// SUPPRESSED. Reverting the suppression (or the BuildJunosHostDenyProjection
+// application any, no scheduler) is kernel-enforced on the direct host-bound
+// path, so its parity warning is SUPPRESSED. Reverting the suppression (or the
 // rendered-key logic) makes a warning reappear and this test goes RED.
 func TestJunosHostDirectDeliveryEnforcedNoWarn(t *testing.T) {
 	cases := []struct {

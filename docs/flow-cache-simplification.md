@@ -374,29 +374,26 @@ Validation:
 - `descriptor_generic_differential` (unmasked) — existing same-family parity
   unaffected.
 
-## Neighbor MAC-change invalidation (#3048)
+## Neighbor mapping-change invalidation (#3048/#11375)
 
 A cached `RewriteDescriptor` carries the resolved next-hop destination MAC
 (`dst_mac`, set from `decision.resolution.neighbor_mac`). The stamp gates
 (`config_generation`, `fib_generation`, the RG epoch/lease) did NOT cover a
-bare kernel ARP/NDP MAC change with the route unchanged: when an upstream
-gateway fails over (VRRP), a NIC is swapped, or a host's MAC otherwise
-changes, the `dst_mac` in every cached forwarding decision for that next-hop
-went stale and kept rewriting to the old MAC until the session expired or an
-unrelated config/route event bumped `fib_generation` — blackholing
+bare kernel ARP/NDP MAC replacement or neighbor deletion with the route
+unchanged: when an upstream gateway fails over (VRRP), a NIC is swapped, or
+the kernel removes a neighbor entry, a cached forwarding decision could keep
+rewriting to a stale MAC or deleted ECMP member until the session expired or
+an unrelated config/route event bumped `fib_generation` — blackholing
 long-lived flows.
 
-The fix adds monotonic MAC-change epochs to `ShardedNeighborMap`
-(`sharded_neighbor.rs`). **Per #5147 these are PER-SHARD**
-(`shard_mac_epochs: [AtomicU32; NUM_SHARDS]`), not a single global counter:
-a write bumps ONLY the epoch of the shard that holds the changed neighbor
-key. The epoch is bumped ONLY when a write REPLACES an existing neighbor's
-hwaddr with a DIFFERENT MAC — never on a first insert of a new neighbor (no
-cached flow can reference a MAC that did not previously exist) and never on a
-same-MAC ARP/NDP refresh (the overwhelmingly common case; bumping there would
-flush that shard's cached flows on every neighbor refresh and collapse the
-fast-path hit rate). All FIVE neighbor write paths are covered, each bumping
-the specific shard(s) it mutates:
+The fix adds per-shard neighbor-resolution epochs to `ShardedNeighborMap`
+(`sharded_neighbor.rs`): `shard_mac_epochs: [AtomicU32; NUM_SHARDS]`, not a
+single global counter. An epoch advances ONLY when an existing neighbor's MAC
+changes or an existing key is removed, and ONLY on that key's shard. It does
+not advance on a first insert, a same-MAC ARP/NDP refresh, or an attempted
+removal of an absent key. Thus a neighbor mapping change invalidates only
+flows depending on that shard without flushing unrelated cached flows. All
+FIVE neighbor write paths remain covered below, each bumping its shard(s):
 
 - the netlink monitor (`insert_if_changed`, the primary RTM_NEWNEIGH path);
 - the data-path ARP-reply / NDP-NA learn (`poll_stages.rs`), now routed
@@ -427,7 +424,9 @@ the specific shard(s) it mutates:
   differs from its snapshotted prior — one bump per changed shard, deduped
   via a `[bool; NUM_SHARDS]` mask so two changed keys colliding in one shard
   bump it once (a pure same-MAC refresh and brand-new keys with no prior do
-  NOT bump). HA peer-promoted session closes remain out of scope;
+  NOT bump). A removed existing key not reinserted also bumps its shard;
+  absent keys and same-MAC reinsertions do not. HA peer-promoted session
+  closes remain out of scope;
 - the #1787 RX source-MAC data-path learn (`learn_dynamic_neighbor` in
   `neighbor_dispatch.rs`), now routed through
   `ShardedNeighborMap::learn_pair_if_changed` (#3169). This learn snoops the
@@ -449,6 +448,16 @@ the specific shard(s) it mutates:
   sighting and same-MAC re-learn add a single Relaxed read per key and no
   bump, matching the per-key semantics.
 
+Actual deletions use the same targeted invalidation:
+
+- Kernel `RTM_DELNEIGH` and unusable `RTM_NEWNEIGH` notifications route
+  through `remove_dynamic_neighbor` → `remove_if_present`; only a present
+  entry advances its shard. The resolver's authoritative `RevokeAndProbe`
+  path uses `remove`, which shares that epoch-bumping implementation.
+- Coordinator snapshot refresh removes stale manager keys through
+  `bulk_replace_neighbors(..., &[])`; each actually removed shard advances
+  once, while absent keys do not.
+
 `FlowCacheEntry` carries a `neighbor_mac_epoch` PLUS (per #5147) a
 `neighbor_shard` — the index of the shard holding this flow's resolved
 next-hop `(egress_ifindex, next_hop)`, precomputed once at cache-miss time
@@ -456,16 +465,17 @@ next-hop `(egress_ifindex, next_hop)`, precomputed once at cache-miss time
 (`poll_descriptor/flow_cache_hit.rs`) re-reads only THAT shard's epoch on
 every hit (`FlowCacheEntry::neighbor_mac_epoch_stale` → `shard_mac_epoch`, a
 single indexed relaxed load + compare); a mismatch evicts the slot and falls
-through to the slow path, which re-resolves the current MAC. A flow with no
-resolved next-hop (`NEIGHBOR_SHARD_NONE`) has no dynamic-neighbor dependency
-and is never MAC-stale. This is the same lazy epoch-compare pattern as
-`rg_epochs` — chosen over an explicit cross-worker `FlushFlowCaches` so
-invalidation is lock-free and self-healing on the next packet.
+through to the slow path, which re-resolves the current neighbor mapping. A
+flow with no resolved next-hop (`NEIGHBOR_SHARD_NONE`) has no dynamic-neighbor
+dependency and is never neighbor-stale. This is the same lazy epoch-compare
+pattern as `rg_epochs` — chosen over an explicit cross-worker
+`FlushFlowCaches` so invalidation is lock-free and self-healing on the next
+packet.
 
 **Read-before-resolve (#3918 / #5147).** The stamped epoch is SNAPSHOTTED
-BEFORE the next-hop MAC is resolved, not re-read at insert time. Because the
-resolved shard is not known until after the resolve, `poll_descriptor/mod.rs`
-snapshots the WHOLE per-shard epoch vector
+BEFORE the next-hop neighbor mapping is resolved, not re-read at insert time.
+Because the resolved shard is not known until after the resolve,
+`poll_descriptor/mod.rs` snapshots the WHOLE per-shard epoch vector
 (`dynamic_neighbors.snapshot_shard_epochs()` → `neighbor_epoch_snapshot`) at
 the top of per-descriptor processing — before `resolve_flow_session_decision`
 / the session-miss `finalize_new_flow_ha_resolution` consult the neighbor
@@ -475,38 +485,39 @@ it into `FlowCacheEntry::from_forward_decision` (a `neighbor_mac_epoch` value
 parameter; the constructor independently derives the matching `neighbor_shard`
 from the same `decision.resolution`, and has no `dynamic_neighbors` handle so
 it cannot re-read the live epoch). Re-reading the shard epoch AT insert time
-(after the resolve) was a TOCTOU that re-opened the #3048 blackhole: a VRRP
-gateway failover landing between the resolve (which read the OLD MAC) and the
-stamp would capture the NEW shard epoch onto the cached OLD `dst_mac` — a
-fresh-looking stale entry that survives every hit until it ages out.
-Snapshotting first guarantees the stamped shard epoch is `<=` the shard epoch
-observed at resolve time, so the MAC-change bump makes the entry stale on its
-next hit and it re-resolves to the new MAC. Relaxed loads suffice: the
-snapshot and the stamp run on the one worker thread (program order sequences
-the snapshot before the resolve), and the neighbor shard `Mutex` — not these
-counters — synchronizes the MAC bytes; the epochs are monotonic invalidation
-signals needing only eventual cross-thread visibility. Mirrors the
-#2170/#3912 record-before-use discipline. The snapshot is NUM_SHARDS relaxed
-loads on the cold cache-miss/resolve path only (established flows hit the
-cache and never reach it).
+(after the resolve) was a TOCTOU that re-opened the #3048 blackhole: a MAC
+replacement or deletion landing between the resolve (which used the old
+mapping) and the stamp would capture the NEW shard epoch onto the cached OLD
+decision — a fresh-looking stale entry that survives every hit until it ages
+out. Snapshotting first guarantees the stamped shard epoch is `<=` the shard
+epoch observed at resolve time, so a mapping-change bump makes the entry stale
+on its next hit and it re-resolves. Relaxed loads suffice: the snapshot and
+the stamp run on the one worker thread (program order sequences the snapshot
+before the resolve), and the neighbor shard `Mutex` — not these counters —
+synchronizes neighbor entries and MAC bytes; the epochs are monotonic
+invalidation signals needing only eventual cross-thread visibility. Mirrors
+the #2170/#3912 record-before-use discipline. The snapshot is NUM_SHARDS
+relaxed loads on the cold cache-miss/resolve path only (established flows hit
+the cache and never reach it).
 
 **Scope / tradeoff (per #5147, superseding the #3048 global epoch):** the
 flow cache is keyed by the flow 5-tuple, not by next-hop, so it cannot key
 invalidation on the exact neighbor. #3048's first cut used a SINGLE global
-epoch, which meant ANY neighbor's MAC change lazily invalidated ALL cached
-flows. That was an attacker-driven cache-thrash / DoS: an on-link sender
-alternating one IP's MAC advanced the global epoch faster than entries could
-warm, collapsing the whole flow cache to ~1 packet (#5147). The fix stamps
-each cached flow with the epoch of the SPECIFIC shard its resolved next-hop
-lives in and bumps only the changed neighbor's shard, so a MAC change on
-neighbor A invalidates a cached flow using neighbor B only if A and B hash to
-the SAME shard (probability 1/NUM_SHARDS = 1/64), never map-wide. This trades
-exact per-neighbor precision for a fixed-size (64-slot) epoch vector that
-keeps the hot-path check to one indexed load — a genuine per-neighbor index
-would require a hashmap probe on every fast-path hit, defeating the flow
-cache. Genuine MAC changes are rare (failover / NIC swap) and same-MAC
-refreshes (which never bump) are the steady-state norm, so the residual
-1/64 same-shard collision costs at most a single spurious re-resolve.
+epoch, which meant ANY neighbor's MAC change or deletion lazily invalidated
+ALL cached flows. That was an attacker-driven cache-thrash / DoS: an on-link
+sender alternating one IP's MAC advanced the global epoch faster than entries
+could warm, collapsing the whole flow cache to ~1 packet (#5147). The fix
+stamps each cached flow with the epoch of the SPECIFIC shard its resolved
+next-hop lives in and advances only that shard on a MAC replacement or actual
+neighbor removal. A change to neighbor A invalidates a cached flow using
+neighbor B only if A and B hash to the SAME shard (probability
+1/NUM_SHARDS = 1/64), never map-wide. This trades exact per-neighbor precision
+for a fixed-size (64-slot) epoch vector that keeps the hot-path check to one
+indexed load — a genuine per-neighbor index would require a hashmap probe on
+every fast-path hit, defeating the flow cache. Genuine MAC changes and
+neighbor removals are rare, while same-MAC refreshes (which never bump) are
+the steady-state norm, so the residual 1/64 same-shard collision costs at
+most a single spurious re-resolve.
 
 Validation: `mac_change_epoch_*` (sharded_neighbor_tests.rs) cover, now
 PER-SHARD via `mac_change_epoch_for(&key)`: starts-at-zero,
@@ -542,6 +553,17 @@ blackhole).
 Reverting the fix so the constructor ignores the caller's pre-resolve epoch
 turns it RED. `flow_cache_normal_resolve_caches_and_serves_neighbor_mac` is
 the companion no-interleave case: a normal resolve must not spuriously evict.
+
+Deletion-specific guards pin the new invalidation boundary:
+`remove_if_present_bumps_epoch_only_when_present` proves actual per-key
+removal advances only its shard and absent removal is a no-op;
+`mac_change_epoch_bulk_replace_bumps_on_pure_removal_per_shard` proves a
+bulk-only removal invalidates that shard while a distinct retained neighbor
+remains valid. The end-to-end
+`txn_flow_cache_delneigh_resolves_live_ecmp_alternate_11375`
+(`tests_txn_flow_cache.rs`) seeds a cached ECMP flow, parses an actual
+`RTM_DELNEIGH` for its selected member, and verifies the next packet resolves
+through the live alternate.
 
 ## FIB-generation bump gating (#3767)
 
