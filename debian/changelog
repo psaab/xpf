@@ -1,5 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Rotate capped force-probe target windows deterministically so large stale
+    neighbor sets reach gateways within bounded ticks (#11407).
   * Apply RFC 7915's size-keyed DF policy to translated NAT64 IPv4 packets and
     fragment eligible outputs to the egress MTU before tunnel encapsulation
     (#11353).
