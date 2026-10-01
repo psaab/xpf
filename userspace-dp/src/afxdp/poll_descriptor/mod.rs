@@ -181,13 +181,25 @@ fn transit_source_class_disposition(disposition: ForwardingDisposition) -> bool 
 }
 
 #[inline]
-fn transit_source_class_drop(
+pub(in crate::afxdp) fn transit_source_class_drop(
     forwarding: &ForwardingState,
     disposition: ForwardingDisposition,
     source: IpAddr,
+    flow_routing_domain: u32,
+    meta: ForwardPacketMeta,
+    fabric_ingress_zone: Option<u16>,
 ) -> bool {
-    transit_source_class_disposition(disposition)
-        && crate::afxdp::frame::transit_src_is_martian(forwarding, source)
+    if !transit_source_class_disposition(disposition) {
+        return false;
+    }
+    let routing_domain = crate::afxdp::forwarding::effective_routing_domain_for_flow(
+        forwarding,
+        flow_routing_domain,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+        fabric_ingress_zone,
+    );
+    crate::afxdp::frame::transit_src_is_martian(forwarding, source, routing_domain)
 }
 
 #[inline]
@@ -3562,6 +3574,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.forwarding,
                             decision.resolution.disposition,
                             flow.src_ip,
+                            flow.forward_key.routing_domain,
+                            ForwardPacketMeta::from(meta),
+                            fabric_arrival_zone,
                         ) {
                             telemetry.counters.touched = true;
                             binding.scratch.scratch_recycle.push(desc.addr);
@@ -6322,6 +6337,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.forwarding,
                             final_resolution.disposition,
                             l3_flow.src_ip,
+                            l3_flow.forward_key.routing_domain,
+                            ForwardPacketMeta::from(meta),
+                            ingress_zone_override,
                         )
                     {
                         telemetry.counters.touched = true;
@@ -6808,6 +6826,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         worker_ctx.forwarding,
                         decision.resolution.disposition,
                         source,
+                        flow.as_ref()
+                            .map_or(0, |flow| flow.forward_key.routing_domain),
+                        ForwardPacketMeta::from(meta),
+                        fabric_arrival_zone,
                     )
                 }) {
                     telemetry.counters.touched = true;
