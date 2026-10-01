@@ -980,38 +980,43 @@ fn worker_queue_7201_did_work_consumes_the_backlog_signal() {
     // pins the carry the new field feeds).
     assert!(
         code.contains(
-            "commands_backlogged,\n            transition_debt_pending: transition_debt_pending_now,\n        } = command_results;"
+            "commands_backlogged,\n            transition_debt_pending: transition_debt_pending_now,\n            session_import_repair_pending: session_import_repair_pending_now,\n        } = command_results;"
         ),
-        "`commands_backlogged` and `transition_debt_pending` must be \
-         destructured out of WorkerCommandResults at the call site, not \
-         dropped by a `..` rest pattern"
+        "`commands_backlogged` and both repair-pending carries must be \
+         destructured out of WorkerCommandResults at the call site"
     );
 }
 
 #[test]
 fn worker_queue_9720_gate_truth_table() {
-    // The apply gate: queue work OR debt work. Debt work is an epoch change
-    // (a record landed, possibly while the queue sat empty) OR the carried
-    // pending flag (a contended pass deferred the debt step). Exhaustive —
-    // the wiring guard below pins that production actually calls this.
-    // (`use super::*` at the top already brings the helper into scope.)
     for has in [false, true] {
-        for changed in [false, true] {
-            for pending in [false, true] {
-                assert_eq!(
-                    should_apply_worker_commands(has, changed, pending),
-                    has || changed || pending,
-                    "gate truth table diverged at has={has} changed={changed} pending={pending}"
-                );
+        for transition_changed in [false, true] {
+            for transition_pending in [false, true] {
+                for import_changed in [false, true] {
+                    for import_pending in [false, true] {
+                        assert_eq!(
+                            should_apply_worker_commands(
+                                has,
+                                transition_changed,
+                                transition_pending,
+                                import_changed,
+                                import_pending,
+                            ),
+                            has
+                                || transition_changed
+                                || transition_pending
+                                || import_changed
+                                || import_pending,
+                            "gate truth table diverged with queue={has}, transition_changed={transition_changed}, transition_pending={transition_pending}, import_changed={import_changed}, import_pending={import_pending}"
+                        );
+                    }
+                }
             }
         }
     }
-    // The two load-bearing rows, named: debt alone (empty queue, no carry)
-    // must schedule an apply, and so must a carried pending flag with a
-    // quiet epoch.
-    assert!(should_apply_worker_commands(false, true, false));
-    assert!(should_apply_worker_commands(false, false, true));
-    assert!(!should_apply_worker_commands(false, false, false));
+    assert!(should_apply_worker_commands(false, false, false, true, false));
+    assert!(should_apply_worker_commands(false, false, false, false, true));
+    assert!(!should_apply_worker_commands(false, false, false, false, false));
 }
 
 #[test]
@@ -1033,6 +1038,9 @@ fn worker_queue_9720_loop_gate_wiring() {
         "transition_debt_epoch(worker_id)",
         "last_transition_debt_epoch",
         "transition_debt_pending",
+        "session_import_repair_epoch(worker_id)",
+        "last_session_import_repair_epoch",
+        "session_import_repair_pending",
     ] {
         assert!(
             code.contains(token),

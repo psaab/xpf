@@ -97,17 +97,25 @@ thread_local! {
 /// Reporting the refusal is therefore the whole fix on the helper side: the Go
 /// compensation already exists.
 ///
-/// The distinction between `Rejected*` and an IPC/transport failure matters on
-/// the Go side and must not be collapsed. A transport failure means the session
-/// socket is unhealthy and gates takeover-readiness (#5247); a semantic refusal
-/// is an EXPECTED answer from a healthy helper (the peer sent something stale,
-/// or this node is at its own ceiling) and marking the mirror unhealthy for it
-/// would block failover on a node that is working correctly. Go discriminates on
-/// the `SYNCED_IMPORT_REFUSED_PREFIX` token below.
+/// The distinction among `Applied`, `AppliedRepair*`, `Rejected*`, and an
+/// IPC/transport failure matters on the Go side. `AppliedRepair*` means shared
+/// authority was committed but worker-local convergence is incomplete; it must
+/// remain a non-success result without rolling shared authority back.
+/// `Rejected*` means the helper did not take the import, while a transport
+/// failure means the session socket is unhealthy and gates takeover-readiness
+/// (#5247). Go discriminates the non-applied outcomes by their stable response
+/// token below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncedImportOutcome {
-    /// The entry was published (new key, or a replace of an existing one).
+    /// Shared authority and every live worker accepted the entry.
     Applied,
+    /// Shared authority accepted the entry, but at least one worker queue
+    /// refused it and the latest-intent repair is latched out of band.
+    AppliedRepairPending,
+    /// Shared authority accepted the entry, but a full per-worker repair latch
+    /// refused another distinct key. The control response escalates this rather
+    /// than claiming that all worker tables converged.
+    AppliedRepairOverflow,
     /// #2170: a strictly-older generation than the stored entry.
     RejectedStaleGeneration,
     /// #10612: the entry names a zone absent from the current validated
@@ -164,11 +172,16 @@ pub enum SyncedImportOutcome {
     RejectedUnknownRoutingDomain,
 }
 
-/// The machine-readable prefix every semantic refusal carries in the control
-/// response's `error` field. Go matches on THIS, not on the human-readable
-/// remainder, so the sentence can be reworded without silently reclassifying a
-/// refusal as a transport failure.
+/// Machine-readable prefix for terminal semantic import refusals. Repair
+/// outcomes use a distinct prefix: older Go readers map this prefix to a
+/// rollback-class refusal, while repair means shared authority is already live.
 pub const SYNCED_IMPORT_REFUSED_PREFIX: &str = "synced-import-refused:";
+
+/// Machine-readable prefix for committed imports whose worker-local
+/// convergence is pending or could not be latched. Kept separate from the
+/// refusal prefix so older readers fail closed as an unknown error rather
+/// than rolling back the already-published shared/BPF row.
+pub const SYNCED_IMPORT_REPAIR_PREFIX: &str = "synced-import-repair:";
 
 /// #8636: the refusal prefix for a DELETE the helper cannot disambiguate.
 ///
@@ -180,10 +193,12 @@ pub const SYNCED_IMPORT_REFUSED_PREFIX: &str = "synced-import-refused:";
 pub const SYNCED_DELETE_REFUSED_PREFIX: &str = "synced-delete-refused:";
 
 impl SyncedImportOutcome {
-    /// The stable reason token, or `None` when the import applied.
+    /// Stable terminal-refusal reason, or `None` for Applied and repair states.
     pub fn refusal_reason(self) -> Option<&'static str> {
         match self {
-            SyncedImportOutcome::Applied => None,
+            SyncedImportOutcome::Applied
+            | SyncedImportOutcome::AppliedRepairPending
+            | SyncedImportOutcome::AppliedRepairOverflow => None,
             SyncedImportOutcome::RejectedStaleGeneration => Some("stale-generation"),
             SyncedImportOutcome::RejectedStaleZone => Some("stale-zone"),
             SyncedImportOutcome::RejectedCapacity => Some("capacity"),
@@ -192,6 +207,15 @@ impl SyncedImportOutcome {
             SyncedImportOutcome::RejectedGateBusy => Some("gate-busy"),
             SyncedImportOutcome::RejectedMirrorPublish => Some("mirror-write-failed"),
             SyncedImportOutcome::RejectedUnknownRoutingDomain => Some("unknown-routing-domain"),
+        }
+    }
+
+    /// Stable repair-status reason, or `None` for Applied and refusals.
+    pub fn repair_reason(self) -> Option<&'static str> {
+        match self {
+            SyncedImportOutcome::AppliedRepairPending => Some("worker-repair-pending"),
+            SyncedImportOutcome::AppliedRepairOverflow => Some("worker-repair-overflow"),
+            _ => None,
         }
     }
 }
@@ -1299,7 +1323,9 @@ impl crate::afxdp::ha::SessionDomain {
         // This is the registration-before-publication half; the late-bringup
         // reconciler handles publication-before-registration.
         let worker_records_for_fanout = Arc::clone(&self.workers.load());
-        for rec in worker_records_for_fanout.values() {
+        let mut repair_pending = false;
+        let mut repair_overflow = false;
+        for (&worker_id, rec) in worker_records_for_fanout.iter() {
             // #9900 F-093: shed dead workers — no thread will ever drain this queue.
             if rec.shed_if_dead(1 + reverse_entry.is_some() as u64) {
                 continue;
@@ -1307,18 +1333,53 @@ impl crate::afxdp::ha::SessionDomain {
             // #1790/#1807: recover-and-push instead of silently skipping a
             // poisoned queue (same policy as update_ha_state).
             let mut pending = worker_queue::lock_recover(&rec.handle.commands);
-            // #6929: bounded. A drop here is an HA upsert the worker will
-            // never see; the counter is what makes that visible instead of
-            // silent.
-            worker_queue::push_bounded(&mut pending, WorkerCommand::UpsertSynced(entry.clone()));
-            if let Some(reverse) = &reverse_entry {
-                worker_queue::push_bounded(
+            let mut forward_position = None;
+            if !worker_queue::push_bounded(
+                &mut pending,
+                WorkerCommand::UpsertSynced(entry.clone()),
+            ) {
+                forward_position =
+                    Some(worker_queue::session_import_repair_position(worker_id, pending.len()));
+            }
+            let mut reverse_position = None;
+            if let Some(reverse) = &reverse_entry
+                && !worker_queue::push_bounded(
                     &mut pending,
                     WorkerCommand::UpsertSynced(reverse.clone()),
-                );
+                )
+            {
+                reverse_position =
+                    Some(worker_queue::session_import_repair_position(worker_id, pending.len()));
+            }
+            drop(pending);
+            if let Some(position) = forward_position {
+                if position.is_none_or(|position| {
+                    !worker_queue::record_session_import_repair(worker_id, &entry.key, position)
+                }) {
+                    repair_overflow = true;
+                } else {
+                    repair_pending = true;
+                }
+            }
+            if let Some(position) = reverse_position
+                && let Some(reverse) = &reverse_entry
+            {
+                if position.is_none_or(|position| {
+                    !worker_queue::record_session_import_repair(worker_id, &reverse.key, position)
+                }) {
+                    repair_overflow = true;
+                } else {
+                    repair_pending = true;
+                }
             }
         }
-        SyncedImportOutcome::Applied
+        if repair_overflow {
+            SyncedImportOutcome::AppliedRepairOverflow
+        } else if repair_pending {
+            SyncedImportOutcome::AppliedRepairPending
+        } else {
+            SyncedImportOutcome::Applied
+        }
     }
 
     /// #8636: does the shared synced map hold an entry under EXACTLY this key?

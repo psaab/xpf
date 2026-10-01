@@ -102,7 +102,7 @@ mod ha;
 // outcome to the protocol handler and coordinator wrapper.
 pub(crate) use ha::{
     HelperMutationBegin, HelperMutationOutcome, SyncedDeleteOutcome, SyncedImportOutcome,
-    SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
+    SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
 };
 pub use ha::HA_REFRESH_NEEDS_CONTROL_SOCKET;
 // #7919: the per-session counter query's wait handle + reply row, used by the

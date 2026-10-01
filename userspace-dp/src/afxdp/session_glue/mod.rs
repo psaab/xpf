@@ -529,6 +529,9 @@ pub(super) struct WorkerCommandResults {
     /// on both sides. Same record-here/apply-where-the-handles-are split as
     /// `deleted_synced_keys` above.
     pub stale_replay_dropped_keys: Vec<SessionKey>,
+    /// #11360: position-ready imported keys repaired from shared authority.
+    /// The worker loop applies them before later queued commands.
+    pub session_import_repairs: Vec<worker_queue::SessionImportRepair>,
     pub exported_sequences: Vec<u64>,
     /// #7919: answers to `QuerySessionCounters` processed this tick. The
     /// command handler reads the table (it has `sessions` in scope); the WORKER
@@ -582,6 +585,8 @@ pub(super) struct WorkerCommandResults {
     /// folded into `did_work`: unlike a backlog, pending debt needs no
     /// immediate revisit for ring health — the next pass is one poll away.
     pub transition_debt_pending: bool,
+    /// #11360: imported-session repair debt remains latched for a future pass.
+    pub session_import_repair_pending: bool,
 }
 
 impl WorkerCommandResults {
@@ -594,6 +599,7 @@ impl WorkerCommandResults {
             cancelled_keys: Vec::new(),
             deleted_synced_keys: Vec::new(),
             stale_replay_dropped_keys: Vec::new(),
+            session_import_repairs: Vec::new(),
             exported_sequences: Vec::new(),
             session_counter_answers: Vec::new(),
             export_owner_rgs: Vec::new(),
@@ -602,6 +608,7 @@ impl WorkerCommandResults {
             vacate_all_shared_exact_slots: false,
             commands_backlogged: false,
             transition_debt_pending: false,
+            session_import_repair_pending: false,
         }
     }
 }
@@ -1334,6 +1341,67 @@ pub(crate) fn export_forward_sessions_for_owner_rgs(
     }
 }
 
+/// Apply due #11360 repairs from the current shared authority. These must run
+/// at their queue boundary and before later queued commands; stale replay
+/// filtering and eviction use the same worker-loop path as queued upserts.
+/// If a later delete removed the shared row, run the existing worker delete
+/// path so an earlier queued upsert cannot leave stale local state behind.
+pub(in crate::afxdp) fn apply_session_import_repairs(
+    repairs: &[worker_queue::SessionImportRepair],
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    stale_replay_dropped_keys: &mut Vec<SessionKey>,
+    deleted_synced_keys: &mut Vec<SessionKey>,
+    worker_id: u32,
+) {
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let entries = {
+        let shared = crate::afxdp::shared_ops::lock_shared_recover(shared_sessions);
+        repairs
+            .iter()
+            .map(|repair| (repair.clone(), shared.get(&repair.key).cloned()))
+            .collect::<Vec<_>>()
+    };
+    for (repair, entry) in entries {
+        if let Some(entry) = entry {
+            if synced_entry_is_stale_replay(entry.origin, &entry.metadata, forwarding) {
+                note_stale_replay_fence_drop();
+                stale_replay_dropped_keys.push(entry.key.clone());
+            } else {
+                commands::handle_upsert_synced(
+                    sessions,
+                    session_map,
+                    forwarding,
+                    ha_state,
+                    dynamic_neighbors,
+                    entry,
+                    now_ns,
+                    now_secs,
+                    worker_id,
+                );
+            }
+        } else {
+            commands::handle_delete_synced(
+                sessions,
+                session_map,
+                forwarding,
+                ha_state,
+                repair.key.clone(),
+                now_ns,
+                now_secs,
+                deleted_synced_keys,
+                worker_id,
+            );
+        }
+        worker_queue::complete_session_import_repair(worker_id, &repair);
+    }
+}
+
 pub(super) fn apply_worker_commands(
     commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
     sessions: &mut SessionTable,
@@ -1407,25 +1475,46 @@ pub(super) fn apply_worker_commands(
     // through with an empty scratch (a no-op dispatch) instead of returning.
     // `scratch_len_before` deltas the drain: scratch enters empty by
     // invariant, but the delta stays correct even for a test-reused buffer.
+    let (mut session_import_repairs, ready_remains_at_start, mut session_import_repair_pending) =
+        worker_queue::take_ready_session_import_repairs(
+            worker_id,
+            worker_queue::SESSION_IMPORT_REPAIR_DRAIN_BUDGET,
+        );
+    let repair_due_at_start = !session_import_repairs.is_empty() || ready_remains_at_start;
     let scratch_len_before = scratch.len();
-    let (commands_backlogged, queue_lock_acquired) = match worker_queue::try_lock_recover(commands)
-    {
-        Some(mut pending) => {
-            if pending.is_empty() {
-                (false, true)
-            } else {
-                (
-                    worker_queue::drain_bounded_into(&mut pending, scratch),
-                    true,
-                )
+    let (commands_backlogged, queue_lock_acquired) = if repair_due_at_start {
+        let backlogged = worker_queue::try_lock_recover(commands)
+            .map(|pending| !pending.is_empty())
+            .unwrap_or(false);
+        (backlogged, false)
+    } else {
+        match worker_queue::try_lock_recover(commands) {
+            Some(mut pending) => {
+                let backlogged = if pending.is_empty() {
+                    false
+                } else {
+                    worker_queue::drain_bounded_into(&mut pending, scratch)
+                };
+                let drained = scratch.len() - scratch_len_before;
+                // Capture the drain while still holding the same queue lock
+                // used by importers to assign repair positions. A refused
+                // import records its debt after releasing that lock.
+                worker_queue::note_worker_commands_drained(worker_id, drained);
+                let (ready, _, pending_repairs) =
+                    worker_queue::take_ready_session_import_repairs(
+                        worker_id,
+                        worker_queue::SESSION_IMPORT_REPAIR_DRAIN_BUDGET,
+                    );
+                session_import_repairs = ready;
+                session_import_repair_pending = pending_repairs;
+                (backlogged, true)
             }
-        }
-        None => {
-            // Could not take the lock this pass. The queue is not known to be
-            // empty — a producer holds it — but reporting a backlog here would
-            // pin the loop to `did_work` on nothing more than lock contention,
-            // so leave it to the next pass, which is one poll away.
-            (false, false)
+            None => {
+                session_import_repair_pending =
+                    worker_queue::has_session_import_repair_debt(worker_id);
+                // The queue is not known to be empty — a producer holds it.
+                (false, false)
+            }
         }
     };
     let drained = scratch.len() - scratch_len_before;
@@ -1878,6 +1967,9 @@ pub(super) fn apply_worker_commands(
     // the position is unknowable, so debt is left untouched and only the
     // carry flag is reported; the PRODUCTION scheduling (calling apply on
     // debt alone) lives in the worker loop gate, not here (SPARK-F3).
+    // #11360 repair positions are advanced while the queue lock is held above,
+    // so an importer cannot capture a prefix that the consumer has already
+    // drained without its sequence being reflected in the target.
     let transition_debt_pending = if queue_lock_acquired {
         let (ready, pending) =
             worker_queue::take_ready_transition_debt(worker_id, drained, !commands_backlogged);
@@ -1906,6 +1998,7 @@ pub(super) fn apply_worker_commands(
         cancelled_keys,
         deleted_synced_keys,
         stale_replay_dropped_keys,
+        session_import_repairs,
         exported_sequences,
         session_counter_answers,
         export_owner_rgs,
@@ -1914,6 +2007,7 @@ pub(super) fn apply_worker_commands(
         vacate_all_shared_exact_slots,
         commands_backlogged,
         transition_debt_pending,
+        session_import_repair_pending,
     }
 }
 

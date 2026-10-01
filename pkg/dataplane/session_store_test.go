@@ -2,8 +2,10 @@ package dataplane
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"net/netip"
+	"os"
 	"testing"
 	"time"
 
@@ -675,5 +677,120 @@ func TestDNATKeyForSessionPortParityWithShimReader(t *testing.T) {
 	if binary.NativeEndian.Uint16(preFixBytes[:]) == binary.NativeEndian.Uint16(shimKeyPortBytes[:]) &&
 		shimKeyPortBytes != preFixBytes {
 		t.Fatal("sanity: host and network encodings unexpectedly identical")
+	}
+}
+
+type repairOutcomeSessionStoreDP11360 struct {
+	*sessionStoreTestDP
+	err error
+}
+
+func (d *repairOutcomeSessionStoreDP11360) SetClusterSyncedSessionV4(SessionKey, SessionValue) error {
+	return d.err
+}
+
+func (d *repairOutcomeSessionStoreDP11360) SetClusterSyncedSessionV6(SessionKeyV6, SessionValueV6) error {
+	return d.err
+}
+
+func legacyRepairResponseError11360(t *testing.T) error {
+	t.Helper()
+	data, err := os.ReadFile("userspace/testdata/synced_import_repair_11360.json")
+	if err != nil {
+		t.Fatalf("read shared repair wire fixture: %v", err)
+	}
+	var fixtures map[string]struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &fixtures); err != nil {
+		t.Fatalf("decode shared repair wire fixture: %v", err)
+	}
+	pending, ok := fixtures["pending"]
+	if !ok || pending.OK || pending.Error == "" {
+		t.Fatalf("pending repair fixture is not a non-success response: %+v", pending)
+	}
+	return errors.New(pending.Error)
+}
+
+func TestPutClusterSyncedV4PreservesRowOnWorkerRepairOutcome11360(t *testing.T) {
+	key := SessionKey{
+		Protocol: 6,
+		SrcIP:    [4]byte{10, 0, 0, 1},
+		DstIP:    [4]byte{10, 0, 0, 2},
+		SrcPort:  1234,
+		DstPort:  80,
+	}
+	previous := SessionValue{
+		State:       SessStateEstablished,
+		IngressZone: 1,
+		EgressZone:  2,
+	}
+	for _, sentinel := range []error{
+		ErrSyncedImportRepairPending,
+		ErrSyncedImportRepairOverflow,
+		legacyRepairResponseError11360(t),
+	} {
+		t.Run(sentinel.Error(), func(t *testing.T) {
+			base := &sessionStoreTestDP{v4: map[SessionKey]SessionValue{key: previous}}
+			dp := &repairOutcomeSessionStoreDP11360{sessionStoreTestDP: base, err: sentinel}
+			err := NewDataPlaneSessionStore(dp).PutClusterSyncedV4(key, SessionValue{
+				State:       SessStateEstablished,
+				IngressZone: 9,
+				EgressZone:  10,
+			})
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("PutClusterSyncedV4 error = %v, want %v", err, sentinel)
+			}
+			got, getErr := base.GetSessionV4(key)
+			if getErr != nil {
+				t.Fatalf("GetSessionV4 after repair outcome: %v", getErr)
+			}
+			if got.State != previous.State ||
+				got.IngressZone != previous.IngressZone ||
+				got.EgressZone != previous.EgressZone {
+				t.Fatalf("pre-existing BPF mirror changed on non-success outcome: got %+v, want %+v",
+					got, previous)
+			}
+		})
+	}
+}
+
+func TestPutClusterSyncedV6PreservesRowOnWorkerRepairOutcome11360(t *testing.T) {
+	key := SessionKeyV6{Protocol: 6, SrcPort: 1234, DstPort: 80}
+	key.SrcIP[15] = 1
+	key.DstIP[15] = 2
+	previous := SessionValueV6{
+		State:       SessStateEstablished,
+		IngressZone: 1,
+		EgressZone:  2,
+	}
+	for _, sentinel := range []error{
+		ErrSyncedImportRepairPending,
+		ErrSyncedImportRepairOverflow,
+		legacyRepairResponseError11360(t),
+	} {
+		t.Run(sentinel.Error(), func(t *testing.T) {
+			base := &sessionStoreTestDP{v6: map[SessionKeyV6]SessionValueV6{key: previous}}
+			dp := &repairOutcomeSessionStoreDP11360{sessionStoreTestDP: base, err: sentinel}
+			err := NewDataPlaneSessionStore(dp).PutClusterSyncedV6(key, SessionValueV6{
+				State:       SessStateEstablished,
+				IngressZone: 9,
+				EgressZone:  10,
+			})
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("PutClusterSyncedV6 error = %v, want %v", err, sentinel)
+			}
+			got, getErr := base.GetSessionV6(key)
+			if getErr != nil {
+				t.Fatalf("GetSessionV6 after repair outcome: %v", getErr)
+			}
+			if got.State != previous.State ||
+				got.IngressZone != previous.IngressZone ||
+				got.EgressZone != previous.EgressZone {
+				t.Fatalf("pre-existing BPF mirror changed on non-success outcome: got %+v, want %+v",
+					got, previous)
+			}
+		})
 	}
 }

@@ -435,6 +435,11 @@ func (m *Manager) takeoverReadyLocked() (bool, []string) {
 		}
 		reasons = append(reasons, reason)
 	}
+	if m.sessionRepairOverflowErr != "" {
+		reasons = append(reasons,
+			"userspace worker-session repair overflow; full session inventory replay required: "+
+				m.sessionRepairOverflowErr)
+	}
 	// #9642: an indebted node must not advertise takeover readiness. Its
 	// classifier maps are at an unpublished plan with ctrl held at 0; handing
 	// it an RG would cut transit over until the debt converges. Name the
@@ -498,12 +503,11 @@ func (m *Manager) recordSessionMirrorFailureLocked(err error) {
 // self-heals the state without a restart. No-op when the helper is not running:
 // syncSession{V4,V6}Locked returns nil without sending in that case, so there
 // was no real mirror to prove health (and stopLocked already cleared the flag).
-// noteSyncedMirrorFailureLocked accounts a FAILED synced-session mirror for the
-// cluster install paths (#6785). It is shared by SetClusterSyncedSessionV4 and
-// V6 rather than duplicated: the two entry points would otherwise carry two
-// copies of one health decision, and a divergence between them is always a bug
-// — an IPv6-only misclassification would disarm HA takeover on exactly the
-// deployments hardest to notice it on. Callers hold m.mu.
+// noteSyncedMirrorFailureLocked classifies a FAILED session import for local
+// and cluster install paths. It is shared by the v4/v6 entry points rather than
+// duplicated: the two address families would otherwise carry two copies of one
+// health decision, and a divergence between them is always a bug. Callers hold
+// m.mu.
 //
 // The classification is the point. A SEMANTIC refusal (stale generation, import
 // cap, translated-tuple reserve) is the correct answer from a HEALTHY helper:
@@ -519,7 +523,29 @@ func (m *Manager) recordSessionMirrorFailureLocked(err error) {
 // last succeeded", and a refusal is not a mirror; clearing a sticky failure on
 // the strength of a refused write would let a helper that refuses everything
 // read as recovered.
+//
+// A worker-repair outcome is neither success nor terminal refusal: the helper
+// committed shared authority but explicitly reports incomplete worker
+// convergence. Callers keep its error (so HA does not count the session as
+// installed), while this classifier avoids treating the healthy helper response
+// as a sick control socket.
 func (m *Manager) noteSyncedMirrorFailureLocked(err error) {
+	if errors.Is(err, dataplane.ErrSyncedImportRepairPending) {
+		slog.Debug("userspace: helper committed synced import; worker repair remains pending",
+			"err", err)
+		return
+	}
+	if errors.Is(err, dataplane.ErrSyncedImportRepairOverflow) {
+		// This is not socket-health failure, but the failed key has no repair
+		// slot. A later successful import cannot prove this worker converged, so
+		// preserve a separate takeover-readiness gate until the manager is
+		// rebuilt and the cluster inventory is replayed.
+		m.sessionRepairOverflowErr = err.Error()
+		slog.Error("userspace: helper committed synced import but repair latch overflowed; "+
+			"HA takeover readiness is blocked until full session replay",
+			"err", err)
+		return
+	}
 	if errors.Is(err, dataplane.ErrSyncedImportRefused) {
 		m.syncedImportRefusals.Add(1)
 		slog.Debug("userspace: helper refused a synced session import; "+
