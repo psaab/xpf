@@ -3363,6 +3363,34 @@ pub(crate) fn evaluate_policy_result_without_counting(
     dst_port: u16,
     packet_icmp: Option<(u8, u8)>,
 ) -> PolicyEvaluationResult {
+    evaluate_policy_result_without_counting_at(
+        state,
+        from_id,
+        to_id,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        policy_scheduler_now_ns(state),
+    )
+}
+
+/// Evaluate without hit-counter side effects at a caller-captured monotonic time.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_policy_result_without_counting_at(
+    state: &PolicyState,
+    from_id: u16,
+    to_id: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    now_ns: u64,
+) -> PolicyEvaluationResult {
     evaluate_policy_result_counted(
         state,
         from_id,
@@ -3379,7 +3407,7 @@ pub(crate) fn evaluate_policy_result_without_counting(
         true,
         PolicyHitCount::Never,
         true,
-        policy_scheduler_now_ns(state),
+        now_ns,
     )
 }
 

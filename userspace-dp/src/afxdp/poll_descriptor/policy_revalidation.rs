@@ -143,7 +143,7 @@
 //!
 //! The filter needed `NonRoutingCountPolicy::Never` for precisely this reason
 //! and this module now needs the same thing: it calls
-//! `evaluate_policy_result_without_counting` (`PolicyHitCount::Never`), and the
+//! `evaluate_policy_result_without_counting_at` (`PolicyHitCount::Never`), and the
 //! freedom is bound by a counter-DELTA assertion with a positive control, not by
 //! a type signature. A stated structural guarantee that is not structural is
 //! worse than no claim, because it invites the next side effect into this path.
@@ -216,7 +216,7 @@ use super::*;
 use crate::afxdp::FastMap;
 use crate::afxdp::worker::SyncedSessionEntry;
 use crate::nat::NatDecision;
-use crate::policy::evaluate_policy_result_without_counting;
+use crate::policy::evaluate_policy_result_without_counting_at;
 use crate::session::{
     PolicyGateAnswer, PolicyGateCurrent, PolicyRevalidationKind, PolicyRevalidationTarget,
     SessionDecision, SessionKey, SessionMetadata, SessionOrigin, SessionTable,
@@ -304,6 +304,7 @@ struct PolicyJudgmentInput {
     src_port: u16,
     dst_port: u16,
     from_source: FromZoneSource,
+    now_ns: u64,
 }
 
 /// Outcome of the cold judgment. Stamping lives with the caller: PERMIT-only,
@@ -390,6 +391,7 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     fabric_link_ingress: bool,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_ns: u64,
     now_secs: u64,
     ingress_ifindex: i32,
     ha_startup_grace_until_secs: u64,
@@ -416,6 +418,7 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
             fabric_link_ingress,
             ha_state,
             dynamic_neighbors,
+            now_ns,
             now_secs,
             ingress_ifindex,
             ha_startup_grace_until_secs,
@@ -532,6 +535,7 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
                 meta,
                 from_source,
                 origin,
+                now_ns,
             );
         }
         PolicyRevalidationTarget::Stale(k) => k.clone(),
@@ -568,6 +572,7 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
                 vlan: meta.ingress_vlan_id,
             }
         },
+        now_ns,
     };
     match zone_policy_deny_on_session_hit(forwarding, &input) {
         ZonePolicyJudgment::Permit => {
@@ -629,6 +634,7 @@ pub(crate) fn revalidate_zone_policy_declines_for_test(
         0,
         0,
         0,
+        0,
         SessionOrigin::ForwardFlow,
     )
     .is_none()
@@ -662,6 +668,7 @@ pub(crate) fn revalidate_zone_policy_revokes_for_test(
         false,
         &ha_state,
         &dynamic_neighbors,
+        0,
         0,
         0,
         0,
@@ -701,6 +708,7 @@ pub(crate) fn revalidate_zone_policy_revocation_for_test(
         0,
         0,
         0,
+        0,
         SessionOrigin::ForwardFlow,
     )
     .and_then(|rev| rev.canonical_key.map(|key| (key, rev.decision)))
@@ -731,6 +739,7 @@ pub(crate) fn revalidate_zone_policy_sessionless_denies_for_test(
         false,
         &ha_state,
         &dynamic_neighbors,
+        0,
         0,
         0,
         0,
@@ -766,6 +775,7 @@ pub(crate) fn revalidate_zone_policy_canonical_key_for_test(
         false,
         &ha_state,
         &dynamic_neighbors,
+        0,
         0,
         0,
         0,
@@ -889,6 +899,7 @@ fn sessionless_zone_policy_verdict(
     meta: UserspaceDpMeta,
     from_source: FromZoneSource,
     origin: SessionOrigin,
+    now_ns: u64,
 ) -> Option<PolicyRevocation> {
     // The caller supplies authoritative FORWARD data. A reverse hit never
     // reaches this helper with its swapped row; the reverse arm resolves its
@@ -910,6 +921,7 @@ fn sessionless_zone_policy_verdict(
         src_port: flow.forward_key.src_port,
         dst_port: flow.forward_key.dst_port,
         from_source,
+        now_ns,
     };
     match zone_policy_deny_on_session_hit(forwarding, &input) {
         ZonePolicyJudgment::Permit | ZonePolicyJudgment::Decline => None,
@@ -1046,6 +1058,7 @@ fn reverse_hit_zone_policy(
     fabric_link_ingress: bool,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_ns: u64,
     now_secs: u64,
     ingress_ifindex: i32,
     ha_startup_grace_until_secs: u64,
@@ -1110,6 +1123,7 @@ fn reverse_hit_zone_policy(
                 fwd_meta,
                 from_source,
                 fwd_origin,
+                now_ns,
             )?;
             // The local forward companion is authoritative, so this uses the
             // ordinary pair-revocation shape rather than drop-only.
@@ -1288,6 +1302,7 @@ fn reverse_hit_zone_policy(
         src_port: fwd_key.src_port,
         dst_port: fwd_key.dst_port,
         from_source,
+        now_ns,
     };
     match zone_policy_deny_on_session_hit(forwarding, &input) {
         ZonePolicyJudgment::Permit => {
@@ -1485,7 +1500,7 @@ fn zone_policy_deny_on_session_hit(
         .nat
         .rewrite_dst_port
         .unwrap_or(input.dst_port);
-    let result = evaluate_policy_result_without_counting(
+    let result = evaluate_policy_result_without_counting_at(
         &forwarding.policy,
         from_id,
         to_id,
@@ -1503,6 +1518,7 @@ fn zone_policy_deny_on_session_hit(
         // a false DENY, which is what makes acting on a DENY safe. Gate 1b
         // declines the case where a PERMIT could be missed.
         None,
+        input.now_ns,
     );
     // #9381: the revoke predicate is PERMIT-or-not, mirroring admission
     // (`poll_descriptor/mod.rs`: `if let PolicyAction::Permit = policy_result.action`).

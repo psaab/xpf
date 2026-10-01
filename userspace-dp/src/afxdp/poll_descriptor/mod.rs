@@ -2214,6 +2214,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 fabric_link_ingress,
                                 worker_ctx.ha_state,
                                 worker_ctx.dynamic_neighbors,
+                                now_ns,
                                 now_secs,
                                 meta.ingress_ifindex as i32,
                                 ha_startup_grace_until_secs,
