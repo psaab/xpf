@@ -6,10 +6,12 @@
 # from the LAN host through its existing main-table VLAN-80 path. It then
 # creates an EMPTY RI and adds an exact-match input FBF term steering the probe
 # tuple into it. The clean leg therefore reaches the userspace route miss and
-# is denied. The broken leg inserts a temporary exact explicit `accept` term
-# ahead of that FBF term, at the actual userspace enforcement point, so the
-# same owned ingress follows main's already-proven VLAN-80 route and is visible
-# at the managed peer.
+# is denied. `WIRE_BROKEN_FIXTURE=1` inserts a temporary exact explicit
+# `accept` term ahead of the FBF steer at the userspace enforcement point, so
+# the same owned ingress follows main's already-proven VLAN-80 route and is
+# visible at the managed peer. This proves capture/verdict liveness for a
+# pre-steer bypass; it does not exercise fallthrough after an empty selected-VRF
+# lookup.
 # Both bursts run under one peer-side tcpdump window; successful sender
 # sendto calls are the offered-frame count. Sender and capture mirror
 # wire-conntrack-lifecycle: LAN host (cluster-userspace-host) offers, target
@@ -146,7 +148,7 @@ if [[ "$MODE" == selftest ]]; then
         fail=$((fail + 1))
     fi
     cell "clean VRF miss passes" PASS 0 1000 0 1500 1500 0
-    cell "fault-injected miss leaks and fails" FAIL 1 1000 1 1500 1500 0
+    cell "pre-steer accept bypass leaks and fails" FAIL 1 1000 1 1500 1500 0
     cell "missing near-miss capture is VOID" VOID 2 1000 0 1500 999 0
     cell "short successful ingress burst is VOID" VOID 2 999 0 1500 1500 0
     cell "checksum corruption fails" FAIL 1 1000 0 1500 1500 1
