@@ -707,6 +707,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.riMemberVRFReassertLoop(ctx)
 	}()
 
+	// #11448: fxp/em management interfaces have no owner that reasserts their
+	// vrf-mgmt membership between applies. A driver reset or out-of-band
+	// `nomaster` can otherwise leave management leases and routes in the main
+	// table until the next commit. Healthy interfaces draw only link lookups;
+	// drift is rebound and its management routes refreshed.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.mgmtVRFReassertLoop(ctx)
+	}()
+
 	// #6800: the always-on retry owner for an xpf-managed service
 	// configuration file whose RUNTIME reload failed after the file itself
 	// converged (rsyslog drop-ins, chrony sources/threshold). Started

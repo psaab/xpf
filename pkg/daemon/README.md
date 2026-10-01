@@ -3008,6 +3008,23 @@ never lock an operator out of a remote box it manages.
     fighting the fabric-overlay rebind for `fab0`/`fab1`; see
     `ri_member_mgmt_11392_test.go`.
 
+  - **Published management-VRF membership reassertion (#11448).** `fxp*` and
+    `em*` links were rebound only during config apply, so a driver re-probe,
+    networkd reload, VF reset, or out-of-band `ip link set nomaster` left the
+    published management interface outside `vrf-mgmt` until another commit.
+    The always-on `mgmtVRFReassertLoop` checks the last apply's immutable
+    `mgmtVRFIfaceSet` every 30s, compares each present link's `MasterIndex` to
+    `vrf-mgmt`, and takes `applySem` only for drift (rechecking after acquire).
+    It warns and rebinds only drifted links, then reapplies management DHCP
+    routes; failures latch #11450 management-route debt, whose 30s routing
+    owner retries without a new config or DHCP event. A healthy node makes no
+    bind or route writes. The set can include `fab*`, which the #9813 fabric
+    loop also owns; semaphore serialization and the in-lock drift check keep
+    those owners from issuing duplicate binds.
+    `mgmt_vrf_reassert_11448_test.go` covers drift, healthy-path silence, route
+    debt, cancellation, periodic convergence, and an out-of-band kernel unbind
+    in a private netns (skipped without `CAP_NET_ADMIN`).
+
   **Host-inbound conntrack revocation retry (#6802, the same recovery shape):**
   `flushDeniedHostInboundConntrack` (the #5566 reconcile) deletes established
   kernel conntrack entries for host services the operator has just removed,
