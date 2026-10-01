@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -542,7 +543,86 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 			errs = append(errs, fmt.Errorf("mgmt VRF operator-route inventory: %w", operatorInventoryErr))
 		}
 	}
-	for _, lease := range leases {
+	// Resolve route-bearing management links before selecting defaults so a
+	// missing interface cannot win and suppress a usable gateway.
+	type resolvedLeaseLink struct {
+		index int
+		found bool
+	}
+	resolvedLinks := make([]resolvedLeaseLink, len(leases))
+	for i, lease := range leases {
+		if !mgmtSet[lease.Interface] ||
+			(!lease.Gateway.IsValid() && len(lease.ClasslessRoutes) == 0) {
+			continue
+		}
+		link, err := nlh.LinkByName(lease.Interface)
+		if err != nil {
+			// A missing interface (renaming churn) is not a route-apply failure;
+			// any stale route for it is left OUT of `applied` and removed below.
+			slog.Warn("mgmt VRF route: interface not found",
+				"interface", lease.Interface, "err", err)
+			continue
+		}
+		resolvedLinks[i] = resolvedLeaseLink{index: link.Attrs().Index, found: true}
+	}
+
+	// Operator defaults suppress DHCP defaults before they are considered
+	// competitors. When several DHCP defaults remain, choose the lexically
+	// first interface independently for each address family.
+	var operatorDefaults [2]string
+	if operatorInventoryErr == nil {
+		operatorDefaults[0] = mgmtRouteCoveredByOperator(
+			netip.PrefixFrom(netip.IPv4Unspecified(), 0), operatorV4, netlink.FAMILY_V4)
+		operatorDefaults[1] = mgmtRouteCoveredByOperator(
+			netip.PrefixFrom(netip.IPv6Unspecified(), 0), operatorV6, netlink.FAMILY_V6)
+	}
+	var defaultCandidates [2][]*dhcp.Lease
+	if operatorInventoryErr == nil {
+		for i, lease := range leases {
+			if !mgmtSet[lease.Interface] || !lease.Gateway.IsValid() ||
+				!resolvedLinks[i].found {
+				continue
+			}
+			familyIndex := 0
+			if lease.Family == dhcp.AFInet6 {
+				familyIndex = 1
+			}
+			if operatorDefaults[familyIndex] == "" {
+				defaultCandidates[familyIndex] = append(defaultCandidates[familyIndex], lease)
+			}
+		}
+	}
+	var defaultWinners [2]*dhcp.Lease
+	for familyIndex, family := range [...]int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
+		candidates := defaultCandidates[familyIndex]
+		if len(candidates) == 0 {
+			continue
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			if candidates[i].Interface != candidates[j].Interface {
+				return candidates[i].Interface < candidates[j].Interface
+			}
+			return candidates[i].Gateway.Compare(candidates[j].Gateway) < 0
+		})
+		defaultWinners[familyIndex] = candidates[0]
+		if len(candidates) == 1 {
+			continue
+		}
+		familyName := "IPv4"
+		if family == netlink.FAMILY_V6 {
+			familyName = "IPv6"
+		}
+		candidateNames := make([]string, len(candidates))
+		for i, candidate := range candidates {
+			candidateNames[i] = fmt.Sprintf("%s via %s", candidate.Interface, candidate.Gateway)
+		}
+		selected := candidates[0]
+		slog.Warn("competing management-VRF DHCP defaults; selecting the lexically first interface and ignoring the rest (#11363)",
+			"family", familyName, "table", mgmtVRFTableID,
+			"selected_interface", selected.Interface, "selected_gateway", selected.Gateway,
+			"candidates", strings.Join(candidateNames, ", "))
+	}
+	for i, lease := range leases {
 		if !mgmtSet[lease.Interface] {
 			continue
 		}
@@ -553,19 +633,15 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 			continue
 		}
 		nlFamily := netlink.FAMILY_V4
+		familyIndex := 0
 		if lease.Family == dhcp.AFInet6 {
 			nlFamily = netlink.FAMILY_V6
+			familyIndex = 1
 		}
-		link, err := nlh.LinkByName(lease.Interface)
-		if err != nil {
-			// A missing interface (renaming churn) is not a route-apply failure;
-			// log and skip. Any stale route for it is left OUT of `applied`, so
-			// the cleanup pass removes it.
-			slog.Warn("mgmt VRF route: interface not found",
-				"interface", lease.Interface, "err", err)
+		if !resolvedLinks[i].found {
 			continue
 		}
-		linkIndex := link.Attrs().Index
+		linkIndex := resolvedLinks[i].index
 
 		if lease.Gateway.IsValid() {
 			var dst *net.IPNet
@@ -581,22 +657,14 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 					"without a complete operator-route inventory (#9943)",
 					"interface", lease.Interface, "gw", lease.Gateway,
 					"table", mgmtVRFTableID)
-			} else {
-				defaultPrefix := netip.PrefixFrom(netip.IPv4Unspecified(), 0)
-				operators := operatorV4
-				if nlFamily == netlink.FAMILY_V6 {
-					defaultPrefix = netip.PrefixFrom(netip.IPv6Unspecified(), 0)
-					operators = operatorV6
-				}
-				if staticDestination := mgmtRouteCoveredByOperator(defaultPrefix, operators, nlFamily); staticDestination != "" {
-					suppressDefault = true
-					slog.Warn("SECURITY: suppressing management-VRF DHCP default "+
-						"covered by an operator route (#9943)",
-						"interface", lease.Interface, "gw", lease.Gateway,
-						"operator_destination", staticDestination, "table", mgmtVRFTableID)
-				}
+			} else if staticDestination := operatorDefaults[familyIndex]; staticDestination != "" {
+				suppressDefault = true
+				slog.Warn("SECURITY: suppressing management-VRF DHCP default "+
+					"covered by an operator route (#9943)",
+					"interface", lease.Interface, "gw", lease.Gateway,
+					"operator_destination", staticDestination, "table", mgmtVRFTableID)
 			}
-			if !suppressDefault {
+			if !suppressDefault && defaultWinners[familyIndex] == lease {
 				gwSlice := lease.Gateway.AsSlice()
 				route := &netlink.Route{
 					LinkIndex: linkIndex,
