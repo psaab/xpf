@@ -15104,6 +15104,12 @@ per-instance OSPF, OSPFv3, and BGP configuration. The compiler applies it only
 where a protocol-level `router-id` is absent; explicit protocol values win.
 The existing strict/tolerant validation rejects a malformed global value at
 commit and warns on load or peer sync.
+Brace-elided global `router-id` is normalized before compilation. Flat-set
+chains containing `router-id <IPv4> autonomous-system <asn>` are split into the
+two declared sibling leaves, so both values reach the routing compiler. Braced
+configuration still requires a semicolon between the statements; a fused run
+is rejected at strict commit and warned on tolerant load.
+
 
 The other affected knobs do not have equivalent xpf consumers and must not
 look silently supported:
@@ -15124,7 +15130,8 @@ look silently supported:
   not a substitute for per-instance policy.
 
 Regression coverage: `pkg/config/routing_knobs_11314_test.go`,
-`pkg/config/routing_instance_closed_world_9323_test.go`, and
+`pkg/config/routing_instance_closed_world_9323_test.go`,
+`pkg/configstore/routing_options_leaf_run_11314_test.go`, and
 `pkg/frr/routing_options_router_id_11314_test.go`.
 
 

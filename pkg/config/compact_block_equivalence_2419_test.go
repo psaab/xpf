@@ -626,11 +626,13 @@ var filedFixed = map[string]string{
 	// that it keeps being checked after it is fixed. The class-of-service
 	// classifier binding is now normalized, so the instrument must report it
 	// CLEAN -- and if a future change re-breaks it, this entry is what says so.
-	"class-of-service interfaces xpfarg classifiers dscp": "#8690",
-	// #8690 family 4 normalized the ospf anchor family 3 had moved into
-	// filedStillOpen, so it moves here rather than being dropped -- the same
-	// rule, applied to an anchor that lived in the other map for one increment.
+	"class-of-service interfaces xpfarg classifiers dscp":                                 "#8690",
 	"protocols ospf area xpfarg interface xpfarg bfd-liveness-detection minimum-interval": "#8690",
+	// #11314's scalar global router-id is consumed by routing-options. The
+	// compact inventory found its brace-elided leaf was dropped; normalization
+	// now preserves the compiled value, and this fixed anchor keeps that repair
+	// checked in both directions.
+	"routing-options router-id": "#11314",
 }
 
 // filedByDesign is the category the inventory did not previously distinguish:

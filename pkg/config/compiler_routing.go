@@ -7,6 +7,16 @@ import (
 )
 
 func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName string) error {
+	// #11314: SetPath can encode multiple routing-options leaves as a chain
+	// under the first leaf. Split declared siblings before FindChild so a
+	// router-id does not silently swallow a following autonomous-system. Work
+	// on a shallow copy; strict gates still need the authored tree.
+	flatChildren := expandFlatRun(node.Children, schemaRoutingOptions)
+	if len(flatChildren) != len(node.Children) {
+		normalized := *node
+		normalized.Children = flatChildren
+		node = &normalized
+	}
 	// Parse autonomous-system
 	if asNode := node.FindChild("autonomous-system"); asNode != nil {
 		if v := nodeVal(asNode); v != "" {

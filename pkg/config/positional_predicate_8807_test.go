@@ -559,6 +559,7 @@ var converseAdjudicated8807 = map[string]converseVerdict8807{
 	"route / policy":          {"unmeasured", "NOT MEASURED."},
 	"schedulers / scheduler":  {"unmeasured", "NOT MEASURED."},
 	"vpn / traffic-selector":  {"unmeasured", "IPsec VPN; the compiler may read it through a helper rather than a .Name() clause. NOT MEASURED."},
+	"route / rib-group":       {"benign", "#11314's TestStaticRouteRibGroupHasSpecificWarning11314 measures both accepted spellings: the unsupported rib-group is named in a warning and the configured local static route remains. StaticRoute has no RibGroup field, so this raw positional candidate is deliberately not a typed compiler read."},
 }
 
 // converseHits8807 returns "container / head" for every head declared at a

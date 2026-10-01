@@ -63,14 +63,25 @@ func TestRoutingOptionsRouterIDInheritsIntoProtocols11314(t *testing.T) {
 }
 
 func TestRoutingOptionsRouterIDHierarchical11314(t *testing.T) {
-	tree := parseHierarchical(t, `routing-options { router-id 10.255.0.4; }
-protocols { bgp { local-as 65000; } }`)
-	cfg, err := CompileConfig(tree)
-	if err != nil {
-		t.Fatalf("CompileConfig: %v", err)
+	configs := []struct {
+		name string
+		text string
+	}{
+		{"braced", `routing-options { router-id 10.255.0.4; }
+protocols { bgp { local-as 65000; } }`},
+		{"brace-elided", `routing-options router-id 10.255.0.4;
+protocols { bgp { local-as 65000; } }`},
 	}
-	if got := cfg.Protocols.BGP.RouterID; got != "10.255.0.4" {
-		t.Fatalf("hierarchical global router-id = %q, want 10.255.0.4", got)
+	for _, tc := range configs {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := CompileConfig(parseHierarchical(t, tc.text))
+			if err != nil {
+				t.Fatalf("CompileConfig: %v", err)
+			}
+			if got := cfg.Protocols.BGP.RouterID; got != "10.255.0.4" {
+				t.Fatalf("global router-id = %q, want 10.255.0.4", got)
+			}
+		})
 	}
 }
 
@@ -204,8 +215,9 @@ func TestInstanceRoutingOptionsDroppedKnobsHaveSpecificWarnings11314(t *testing.
 
 func TestRibGroupImportPolicyIsRejectedOrWarned11314(t *testing.T) {
 	cases := []struct {
-		name string
-		tree func(*testing.T) *ConfigTree
+		name   string
+		packed bool
+		tree   func(*testing.T) *ConfigTree
 	}{
 		{
 			name: "flat-set",
@@ -224,18 +236,44 @@ func TestRibGroupImportPolicyIsRejectedOrWarned11314(t *testing.T) {
 				}`)
 			},
 		},
+		{
+			name:   "flat-set-packed",
+			packed: true,
+			tree: func(t *testing.T) *ConfigTree {
+				return buildTree(t, []string{
+					"set routing-options rib-groups leak import-rib inet.0 import-policy FILTER",
+				})
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(tc.tree(t))
-			if err == nil || !strings.Contains(err.Error(), "import-policy") || !strings.Contains(err.Error(), "leak") {
+			if err == nil {
+				t.Fatal("strict compile accepted an unsupported rib-group import-policy")
+			}
+			if tc.packed {
+				// The packed spelling is parsed as an undefined import-rib, and
+				// reference validation deterministically precedes the policy gate.
+				const packedDiagnostic = `routing-options rib-groups "leak" import-rib "import-policy" references an undefined rib`
+				if !strings.Contains(err.Error(), packedDiagnostic) {
+					t.Fatalf("strict error = %v, want packed undefined-import-rib diagnostic", err)
+				}
+			} else if !strings.Contains(err.Error(), "import-policy is not implemented") ||
+				!strings.Contains(err.Error(), "leak") {
 				t.Fatalf("strict error = %v, want targeted import-policy rejection", err)
 			}
+
 			cfg, err := CompileConfigLenient(tc.tree(t))
 			if err != nil {
 				t.Fatalf("tolerant compile rejected a persisted rib-group: %v", err)
 			}
-			if !hasRoutingKnobWarning11314(cfg, "import-policy", "leak", "not implemented") {
+			if tc.packed {
+				const packedWarning = `routing-options rib-groups "leak" import-rib "import-policy" references an undefined rib`
+				if !hasRoutingKnobWarning11314(cfg, packedWarning) {
+					t.Fatalf("tolerant warnings do not identify the packed undefined import-rib: %v", cfg.Warnings)
+				}
+			} else if !hasRoutingKnobWarning11314(cfg, "import-policy", "leak", "not implemented") {
 				t.Fatalf("tolerant warnings do not identify the ignored import-policy: %v", cfg.Warnings)
 			}
 		})
