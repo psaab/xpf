@@ -582,6 +582,25 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 				splitLines = append([]string{bindLine}, splitLines...)
 			}
 		}
+		// #11313: this shape census synthesizes `local-as xpfval`, which is
+		// not a valid process AS. The helper keeps direct local-AS probes
+		// AS-less, so a split candidate would otherwise be rejected before
+		// chain walking can be measured. Give packed and split forms identical
+		// root-AS context outside their measured leaf window.
+		if len(cont) >= 2 && cont[len(cont)-2] == "protocols" && cont[len(cont)-1] == "bgp" {
+			hasLocalAS := false
+			for _, lf := range leaves {
+				if lf.name == "local-as" {
+					hasLocalAS = true
+					break
+				}
+			}
+			if hasLocalAS {
+				asLine := "set routing-options autonomous-system 65000"
+				packedLines = append([]string{asLine}, packedLines...)
+				splitLines = append([]string{asLine}, splitLines...)
+			}
+		}
 		packed, ep := flatSetCompile(packedLines)
 		split, es := flatSetCompile(splitLines)
 		if ep != nil || es != nil || packed == nil || split == nil {
@@ -667,10 +686,11 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	// measures 39 vacuous and 87 unmeasured rows, with collector reach 388/144.
 	// The three loser rows and 111 walked count remain unchanged; this is a
 	// population-count refresh, not a relaxation of the loss set.
-	// #11313: BGP chain-shape probes now include a process AS so the new strict
-	// router-AS gate cannot preempt the census. One formerly vacuous candidate
-	// moves to unmeasured (39 -> 38, 87 -> 88); the loser set and collector
-	// reach stay unchanged, so this is an observability-count refresh.
+	// #11313: the `protocols bgp` process-AS chain candidate includes
+	// synthetic `local-as xpfval`, which is invalid. Give its packed and split
+	// spellings the same root-AS context outside the measured leaf window so
+	// strict validation does not turn it into an unmeasured row. Other direct
+	// local-AS probes remain AS-less in their dedicated normalizer/gate tests.
 	//
 	// THE COUNTS ARE PART OF THE FIXTURE, and that is a mutation result, not a
 	// flourish. With only the loser set recorded, deleting the observability
