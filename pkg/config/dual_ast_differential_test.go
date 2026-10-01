@@ -794,7 +794,8 @@ services {
 	},
 	{
 		name: "protocols-ospf-bgp",
-		hier: `protocols {
+		hier: `routing-options { autonomous-system 65000; }
+protocols {
     ospf {
         area 0.0.0.0 {
             interface ge-0/0/1.0;
