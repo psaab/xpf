@@ -97,7 +97,7 @@ else:
         sys.exit(1)
 
 if not seeds:
-    print("No changed Go source package; skipping affected Go tests.")
+    print("No changed Go source package; skipping affected Go tests.", file=sys.stderr)
     sys.exit(0)
 
 reverse_imports = {}
