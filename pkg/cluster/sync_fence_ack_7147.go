@@ -189,13 +189,17 @@ const (
 	// ConfigEpoch stamps and compares them in the authority's generation
 	// namespace. Absent => use the legacy untagged reverse stamp.
 	capFlagConfigEpochReverseTag uint8 = 1 << 6
+	// capFlagIpsecTunnelDiscriminator: the peer understands the S9.4
+	// IPsec-if_id wire class. Absent or not yet learned => an IPsec session
+	// tag may be read as an older tunnel class, so its installs are withheld.
+	capFlagIpsecTunnelDiscriminator uint8 = 1 << 7
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
 // constant: the capability is a property of the BINARY, not of runtime
 // turn off. In particular it is deliberately independent of
 // localSnapshotProtocol — see sendCapabilities for why that mattered.
-const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity | capFlagConfigAncestry | capFlagConfigEpochReverseTag
+const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capFlagPurgeRetirementForwardOnly | capFlagInstallTableIdentity | capFlagConfigAncestry | capFlagConfigEpochReverseTag | capFlagIpsecTunnelDiscriminator
 
 // FenceResult is what the local fence handler reports about what it achieved.
 // It is the daemon's answer to "how many RGs did you just drive to
@@ -399,6 +403,16 @@ func (s *SessionSync) PeerConfigEpochReverseTagCapable() bool {
 		return false
 	}
 	return uint8(s.peerCapabilityFlags.Load())&capFlagConfigEpochReverseTag != 0
+}
+
+// IpsecTunnelDiscriminatorCapable reports whether the current peer advertised
+// support for the S9.4 IPsec-if_id discriminator class. Senders must pair this
+// with peerCapabilitiesLearned and default-deny while discovery is pending.
+func (s *SessionSync) IpsecTunnelDiscriminatorCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerCapabilityFlags.Load())&capFlagIpsecTunnelDiscriminator != 0
 }
 
 // peerCapabilitiesLearned reports whether a syncMsgPeerCapabilities frame has been

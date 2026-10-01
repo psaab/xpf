@@ -166,3 +166,165 @@ func TestTunnelDiscriminatorRoundTripsV6_7188(t *testing.T) {
 			"RTFlowSessionID=%d", shortGot.IngressIfaceFold, shortGot.RTFlowSessionID)
 	}
 }
+
+// S9.4 uses a disjoint wire class in the existing opaque u64 carrier. Keep
+// both address-family codecs pinned to the exact IPsec-if_id tag.
+func TestIpsecIfIDDiscriminatorRoundTripsOnHAWire9506(t *testing.T) {
+	const tag = uint64(3)<<32 | 0x01020304
+	key4 := rtflowKeyV4(9506)
+	_, got4, ok := decodeSessionV4Payload(encodeSessionV4Payload(key4, sessionValue7188(tag)))
+	if !ok || got4.TunnelDiscriminator != tag {
+		t.Fatalf("v4 IPsec discriminator: ok=%v got=%#x want=%#x", ok, got4.TunnelDiscriminator, tag)
+	}
+
+	key6 := rtflowKeyV6(9506)
+	val6 := dataplane.SessionValueV6{TunnelDiscriminator: tag}
+	gotKey6, got6, ok := decodeSessionV6Payload(encodeSessionV6Payload(key6, val6))
+	if !ok || gotKey6 != key6 || got6.TunnelDiscriminator != tag {
+		t.Fatalf("v6 IPsec discriminator: ok=%v keyMatch=%v got=%#x want=%#x",
+			ok, gotKey6 == key6, got6.TunnelDiscriminator, tag)
+	}
+}
+
+func TestIpsecDiscriminatorInstallsRequirePeerCapability9506(t *testing.T) {
+	if localCapabilityFlags&capFlagIpsecTunnelDiscriminator == 0 {
+		t.Fatal("local capability advertisement omits the S9.4 discriminator bit")
+	}
+	const ipsecTag = uint64(3)<<32 | 71
+	const otherTunnelTag = uint64(1)<<32 | 100
+	tests := []struct {
+		name    string
+		flags   uint8
+		learned bool
+		capable bool
+	}{
+		{name: "unknown"},
+		{name: "incapable", flags: capFlagInstallTableIdentity, learned: true},
+		{name: "capable", flags: capFlagIpsecTunnelDiscriminator, learned: true, capable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ss := fenceSync9752()
+			if tt.learned {
+				ss.handleMessage(nil, syncMsgPeerCapabilities, capabilityFrame9714(t, tt.flags))
+			}
+			if ss.peerCapabilitiesLearned() != tt.learned ||
+				ss.IpsecTunnelDiscriminatorCapable() != tt.capable {
+				t.Fatalf("peer capability state: learned=%v capable=%v, want %v/%v",
+					ss.peerCapabilitiesLearned(), ss.IpsecTunnelDiscriminatorCapable(),
+					tt.learned, tt.capable)
+			}
+
+			key4 := rtflowKeyV4(9507)
+			key6 := rtflowKeyV6(9507)
+			ss.QueueSessionV4(key4, dataplane.SessionValue{})
+			ss.QueueSessionV4(key4, dataplane.SessionValue{TunnelDiscriminator: otherTunnelTag})
+			ss.QueueSessionV6(key6, dataplane.SessionValueV6{})
+			ss.QueueSessionV6(key6, dataplane.SessionValueV6{TunnelDiscriminator: otherTunnelTag})
+			if got := len(ss.sendCh); got != 4 {
+				t.Fatalf("native and GRE-class installs reached queue count %d, want 4", got)
+			}
+
+			tagged4 := dataplane.SessionValue{TunnelDiscriminator: ipsecTag}
+			tagged6 := dataplane.SessionValueV6{TunnelDiscriminator: ipsecTag}
+			if got := ss.QueueSessionV4Paced(key4, tagged4, 0); got != tt.capable {
+				t.Errorf("paced v4 IPsec install queued=%v, want %v", got, tt.capable)
+			}
+			if got := ss.QueueSessionV6Paced(key6, tagged6, 0); got != tt.capable {
+				t.Errorf("paced v6 IPsec install queued=%v, want %v", got, tt.capable)
+			}
+			ss.QueueSessionV4(key4, tagged4)
+			ss.QueueSessionV6(key6, tagged6)
+			want := 4
+			if tt.capable {
+				want += 4
+			}
+			if got := len(ss.sendCh); got != want {
+				t.Fatalf("session queue contains %d frames, want %d", got, want)
+			}
+			if !tt.capable {
+				return
+			}
+
+			for range 4 {
+				<-ss.sendCh // Native and GRE-tagged controls.
+			}
+			seenV4, seenV6 := 0, 0
+			for len(ss.sendCh) > 0 {
+				frame := <-ss.sendCh
+				switch frame[4] {
+				case syncMsgSessionV4:
+					_, got, ok := decodeSessionV4Payload(frame[syncHeaderSize:])
+					if !ok || got.TunnelDiscriminator != ipsecTag {
+						t.Fatalf("queued v4 IPsec tag: ok=%v got=%#x want=%#x",
+							ok, got.TunnelDiscriminator, ipsecTag)
+					}
+					seenV4++
+				case syncMsgSessionV6:
+					_, got, ok := decodeSessionV6Payload(frame[syncHeaderSize:])
+					if !ok || got.TunnelDiscriminator != ipsecTag {
+						t.Fatalf("queued v6 IPsec tag: ok=%v got=%#x want=%#x",
+							ok, got.TunnelDiscriminator, ipsecTag)
+					}
+					seenV6++
+				default:
+					t.Fatalf("unexpected queued message type %d", frame[4])
+				}
+			}
+			if seenV4 != 2 || seenV6 != 2 {
+				t.Fatalf("capable peer received v4/v6 IPsec frames %d/%d, want 2/2", seenV4, seenV6)
+			}
+		})
+	}
+}
+
+func TestIpsecSuppressionDebtRearmsColdPrimeOnCapableDiscovery9506(t *testing.T) {
+	ss := fenceSync9752()
+	ss.QueueSessionV4(rtflowKeyV4(9508), dataplane.SessionValue{
+		TunnelDiscriminator: uint64(3)<<32 | 72,
+	})
+	if len(ss.sendCh) != 0 || !ss.ipsecDiscriminatorSuppressDebt.Load() {
+		t.Fatalf("unlearned-peer suppression: queue=%d debt=%v, want 0/true",
+			len(ss.sendCh), ss.ipsecDiscriminatorSuppressDebt.Load())
+	}
+
+	ss.handleMessage(nil, syncMsgPeerCapabilities,
+		capabilityFrame9714(t, capFlagIpsecTunnelDiscriminator))
+	if !ss.IpsecTunnelDiscriminatorCapable() ||
+		ss.ipsecDiscriminatorSuppressDebt.Load() ||
+		!ss.needColdPrime.Load() {
+		t.Fatalf("capable discovery must transfer withheld state into cold prime: capable=%v debt=%v prime=%v",
+			ss.IpsecTunnelDiscriminatorCapable(),
+			ss.ipsecDiscriminatorSuppressDebt.Load(),
+			ss.needColdPrime.Load())
+	}
+}
+
+func TestIpsecBulkFenceRevalidatesOnlyItsCapability9506(t *testing.T) {
+	tests := []struct {
+		name        string
+		flags       uint8
+		staysFenced bool
+	}{
+		{name: "install-table-only", flags: capFlagInstallTableIdentity, staysFenced: true},
+		{name: "ipsec-only", flags: capFlagIpsecTunnelDiscriminator},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ss := fenceSync9752()
+			ss.bulkFencedForIpsecPeer.Store(true)
+			ss.handleMessage(nil, syncMsgPeerCapabilities, capabilityFrame9714(t, tt.flags))
+			if got := ss.bulkFencedForIpsecPeer.Load(); got != tt.staysFenced {
+				t.Fatalf("IPsec bulk fence remains=%v, want %v", got, tt.staysFenced)
+			}
+			err := ss.BulkSync()
+			if tt.staysFenced {
+				if err != errBulkFencedForPeer {
+					t.Fatalf("install-table-only peer must not retry an IPsec-fenced bulk: err=%v", err)
+				}
+			} else if err == nil || err.Error() != "no peer connection" {
+				t.Fatalf("IPsec-capable peer must clear only the S9.4 fence before connection check: err=%v", err)
+			}
+		})
+	}
+}

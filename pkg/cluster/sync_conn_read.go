@@ -1190,6 +1190,20 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				s.mu.Unlock()
 			}
 		}
+		if s.IpsecTunnelDiscriminatorCapable() {
+			s.bulkFencedForIpsecPeer.Store(false)
+		}
+		if s.IpsecTunnelDiscriminatorCapable() && s.ipsecDiscriminatorSuppressDebt.Load() {
+			s.mu.Lock()
+			if s.ipsecDiscriminatorSuppressDebt.Load() {
+				s.ipsecDiscriminatorSuppressDebt.Store(false)
+				if !s.needColdPrime.Load() {
+					s.armColdPrimeLocked()
+					slog.Info("cluster sync: re-arming cold prime after capable IPsec discriminator discovery")
+				}
+			}
+			s.mu.Unlock()
+		}
 		slog.Info("cluster sync: peer advertised capabilities",
 			"version", peerProto, "flags", peerFlags, "session_sync_wire", peerWire)
 	case syncMsgClockSync:
