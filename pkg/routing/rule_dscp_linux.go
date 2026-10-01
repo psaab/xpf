@@ -48,8 +48,8 @@ type dscpRuleOps struct {
 // This deliberately MIRRORS the structure, attribute widths and ordering of
 // netlink's own ruleHandle rather than inventing its own conventions — a
 // hand-rolled second encoder is only safe while it stays recognisably the same
-// shape as the one it stands in for. The differences are exactly two: the legacy
-// tos byte is never written, and FRA_DSCP is appended.
+// shape as the one it stands in for. The differences are the legacy tos byte
+// is never written, explicit rule actions are preserved, and FRA_DSCP is appended.
 //
 // Selectors this encoder does not emit are REJECTED rather than ignored
 // (rejectUnencodedRuleFields). Silently dropping a selector widens the installed
@@ -75,7 +75,12 @@ func (o dscpRuleOps) RuleAddDSCP(rule *netlink.Rule, dscp uint8) error {
 	msg.Protocol = unix.RTPROT_BOOT
 	msg.Scope = unix.RT_SCOPE_UNIVERSE
 	msg.Table = unix.RT_TABLE_UNSPEC
-	msg.Type = unix.RTN_UNICAST
+	// Match netlink's ruleHandle: preserve an explicit action and default a
+	// zero action to unicast for creation.
+	msg.Type = rule.Type
+	if msg.Type == 0 {
+		msg.Type = unix.RTN_UNICAST
+	}
 	// msg.Tos stays 0. Writing the DSCP here is the #7796 defect.
 	if rule.Family != 0 {
 		msg.Family = uint8(rule.Family)
