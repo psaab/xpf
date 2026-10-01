@@ -334,14 +334,15 @@ func TestFilterAction_HierarchicalNestedRejectTailPreservesCount11355(t *testing
 			term.Action, term.RejectMessageType, term.Count)
 	}
 }
+
 // #11355: reject reason leaves are flags, not value lists. Extra values must
 // reach the existing strict/tolerant unknown-action gate in every authored
 // shape rather than disappearing only in flat-set brackets.
 func TestFilterAction_RejectFlagExtraValuesGuardedAcrossSpellings11355(t *testing.T) {
 	hier := func(t *testing.T, tail string) *ConfigTree {
 		t.Helper()
-		return hierTree(t, `firewall { family inet { filter f1 { term t1 { from { protocol tcp; } then { ` +
-			tail + ` } } } } }`)
+		return hierTree(t, `firewall { family inet { filter f1 { term t1 { from { protocol tcp; } then { `+
+			tail+` } } } } }`)
 	}
 	flat := func(t *testing.T, commands ...string) *ConfigTree {
 		t.Helper()
