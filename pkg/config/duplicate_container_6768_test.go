@@ -136,14 +136,16 @@ func dup6768Cases() []dup6768Case {
 			kind:     "bgp group",
 			instance: "g",
 			effect:   "compiled independently",
-			dupSrc: `policy-options { policy-statement EXPORT-POLICY { then accept; } }
+			dupSrc: `routing-options { autonomous-system 65000; }
+policy-options { policy-statement EXPORT-POLICY { then accept; } }
 protocols {
     bgp {
         group g { type external; peer-as 65001; export EXPORT-POLICY; }
         group g { neighbor 10.0.0.1; }
     }
 }`,
-			oneSrc: `policy-options { policy-statement EXPORT-POLICY { then accept; } }
+			oneSrc: `routing-options { autonomous-system 65000; }
+policy-options { policy-statement EXPORT-POLICY { then accept; } }
 protocols {
     bgp {
         group g { type external; peer-as 65001; export EXPORT-POLICY; neighbor 10.0.0.1; }

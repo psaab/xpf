@@ -785,6 +785,40 @@ func validateBGPNeighborPeerASStrict(cfg *Config) error {
 	return nil
 }
 
+// validateBGPRouterASStrict rejects a compiled BGP process with no effective
+// router AS (#11313). Per-peer group/neighbor local-as and peer-as values do
+// not initialize BGPConfig.LocalAS. This runs after
+// resolveBGPAutonomousSystem, so only genuinely missing process ASes remain 0.
+//
+// Both the global `protocols bgp` and per-routing-instance scopes are checked.
+func validateBGPRouterASStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+
+	checkBGP := func(scope string, bgp *BGPConfig) error {
+		if bgp == nil || bgp.LocalAS != 0 {
+			return nil
+		}
+		return fmt.Errorf("%sprotocols bgp: missing router AS — set local-as or "+
+			"routing-options autonomous-system", scope)
+	}
+
+	if err := checkBGP("", cfg.Protocols.BGP); err != nil {
+		return err
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		scope := fmt.Sprintf("routing-instance %s ", ri.Name)
+		if err := checkBGP(scope, ri.BGP); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // validateRouterIDStrict hard-rejects an OSPF / OSPFv3 / BGP router-id that is
 // not a valid 32-bit IPv4 dotted-quad (#2980).
 //
