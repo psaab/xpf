@@ -1972,8 +1972,48 @@ fn nat64_8896_encap_ignores_every_meta_field_but_family_and_l3() {
     let out = build_nat64_forwarded_frame(&frame, poisoned, &decision, None, false, &fwd)
         .expect("the poisoned arm must still encapsulate — only unread fields were changed");
 
+    fn inner_ipv4_l3_offset(frame: &[u8]) -> usize {
+        let outer_l3 = frame_l3_offset(frame).expect("encapsulated frame has an outer L3 header");
+        let outer_ihl = usize::from(frame[outer_l3] & 0x0f) * 4;
+        let gre_start = outer_l3 + outer_ihl;
+        assert!(frame.get(gre_start..gre_start + 4).is_some(), "GRE base header exists");
+        gre_start + 4
+    }
+
+    let clean_inner_l3 = inner_ipv4_l3_offset(&clean);
+    let out_inner_l3 = inner_ipv4_l3_offset(&out);
+    assert_eq!(clean_inner_l3, out_inner_l3);
+    for (label, frame, inner_l3) in [
+        ("clean", clean.as_slice(), clean_inner_l3),
+        ("poisoned", out.as_slice(), out_inner_l3),
+    ] {
+        let ip = frame
+            .get(inner_l3..inner_l3 + 20)
+            .expect("encapsulated inner IPv4 header exists");
+        assert_eq!(ip[0] >> 4, 4, "{label} inner packet is IPv4");
+        assert_eq!(usize::from(ip[0] & 0x0f) * 4, 20, "{label} inner IHL");
+        assert_ne!(
+            u16::from_be_bytes([ip[4], ip[5]]),
+            0,
+            "{label} inner IPv4 ID is nonzero",
+        );
+        assert_eq!(checksum16(ip), 0, "{label} inner IPv4 checksum is valid");
+    }
+
+    // The size-keyed RFC 7915 DF policy assigns a fresh ID to each translated
+    // IPv4 datagram. Normalize only that ID and its dependent header checksum
+    // so this test remains focused on metadata independence.
+    let mut clean_normalized = clean.clone();
+    let mut out_normalized = out.clone();
+    for (frame, inner_l3) in [
+        (&mut clean_normalized, clean_inner_l3),
+        (&mut out_normalized, out_inner_l3),
+    ] {
+        frame[inner_l3 + 4..inner_l3 + 6].fill(0);
+        frame[inner_l3 + 10..inner_l3 + 12].fill(0);
+    }
     assert_eq!(
-        out, clean,
+        out_normalized, clean_normalized,
         "#8896: poisoning a meta field OTHER than addr_family/l3_offset changed the \
          emitted frame, so the tunnel encapsulators read more of `meta` than \
          `nat64_translated_meta` rebuilds. That function's claim — and the #8890 \
