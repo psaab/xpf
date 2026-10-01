@@ -183,9 +183,7 @@ func TestPBRClearScansTheWindowConstant_9810(t *testing.T) {
 	ops := newFakeRuleOps()
 	edge := pbrRulePriority + maxPBRRules
 	seed := func(prio int) {
-		if err := ops.RuleAdd(&netlink.Rule{Family: unix.AF_INET, Priority: prio, Table: 100}); err != nil {
-			t.Fatalf("seed prio %d: %v", prio, err)
-		}
+		seedPBRRule(ops, unix.AF_INET, prio, 100)
 	}
 	seed(pbrRulePriority)
 	seed(edge - 1)

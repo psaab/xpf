@@ -219,8 +219,8 @@ func TestClearSweepsLegacyBands11319(t *testing.T) {
 
 	t.Run("PBR sweeps stale 31000-31999", func(t *testing.T) {
 		ops := newFakeRuleOps()
-		seedRule(ops, unix.AF_INET, legacyPBR+5, 500)
-		seedRule(ops, unix.AF_INET6, legacyPBR+5, 500)
+		seedPBRRule(ops, unix.AF_INET, legacyPBR+5, 500)
+		seedPBRRule(ops, unix.AF_INET6, legacyPBR+5, 500)
 		seedRule(ops, unix.AF_INET, 0, 255)
 		seedRule(ops, unix.AF_INET, 32766, 254)
 		seedRule(ops, unix.AF_INET, 32767, 253)

@@ -110,13 +110,18 @@ func (f *fakeRuleOps) RuleDel(r *netlink.Rule) error {
 	f.dels++
 	list := f.rules[r.Family]
 	out := list[:0:0]
+	found := false
 	for _, e := range list {
 		if reflect.DeepEqual(e, *r) {
+			found = true
 			continue
 		}
 		out = append(out, e)
 	}
 	f.rules[r.Family] = out
+	if !found {
+		return unix.ENOENT
+	}
 	return nil
 }
 
@@ -1132,6 +1137,19 @@ func seedRule(ops *fakeRuleOps, family, prio, table int) {
 	})
 }
 
+// seedPBRRule inserts a PBR rule with the action encoded by its priority.
+// Current odd slots are unreachable shadows; legacy slots were lookups only.
+func seedPBRRule(ops *fakeRuleOps, family, prio, table int) {
+	ruleType := uint8(unix.RTN_UNICAST)
+	if prio >= pbrRulePriority && prio < pbrRulePriority+maxPBRRules &&
+		(prio-pbrRulePriority)%2 == 1 {
+		ruleType = uint8(pbrTerminatorAction)
+	}
+	ops.rules[family] = append(ops.rules[family], netlink.Rule{
+		Family: family, Priority: prio, Table: table, Type: ruleType,
+	})
+}
+
 // seedCurrentLeakRule inserts a destination-scoped rule owned by the
 // next-table manager when iif is set, or rib-group manager when it is empty.
 func seedCurrentLeakRule(ops *fakeRuleOps, family, priority, table int, destination, iif string) {
@@ -1221,8 +1239,8 @@ func TestRulesClearListErrorSurfaced(t *testing.T) {
 				seedCurrentLeakRule(ops, unix.AF_INET, c.inetPrio, 100, "10.1.2.0/24", "")
 				seedCurrentLeakRule(ops, unix.AF_INET6, c.inet6Prio, 101, "2001:db8:1::/64", "")
 			default:
-				seedRule(ops, unix.AF_INET, c.inetPrio, 100)
-				seedRule(ops, unix.AF_INET6, c.inet6Prio, 101)
+				seedPBRRule(ops, unix.AF_INET, c.inetPrio, 100)
+				seedPBRRule(ops, unix.AF_INET6, c.inet6Prio, 101)
 			}
 			// AF_INET dump fails transiently; AF_INET6 succeeds.
 			ops.failList(unix.AF_INET, injErr)
