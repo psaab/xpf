@@ -13,6 +13,8 @@ var predefinedApplicationSetNames5763 = []string{
 	"junos-cifs",
 	"junos-routing-inbound",
 	"junos-sip",
+	"junos-smb",
+	"junos-h323",
 }
 
 type completionPath5763 struct {

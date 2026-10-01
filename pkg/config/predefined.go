@@ -69,7 +69,6 @@ var PredefinedApplications = map[string]*Application{
 	"junos-ipip":     {Name: "junos-ipip", Protocol: "4"},
 
 	// --- Windows/SMB ---
-	"junos-smb":             {Name: "junos-smb", Protocol: "tcp", DestinationPort: "445"},
 	"junos-smb-session":     {Name: "junos-smb-session", Protocol: "tcp", DestinationPort: "445"},
 	"junos-netbios-session": {Name: "junos-netbios-session", Protocol: "tcp", DestinationPort: "139"},
 	"junos-nbname":          {Name: "junos-nbname", Protocol: "udp", DestinationPort: "137"},
@@ -103,8 +102,15 @@ var PredefinedApplications = map[string]*Application{
 	"junos-sip-tcp": {Name: "junos-sip-tcp", Protocol: "tcp", DestinationPort: "5060"},
 	"junos-mgcp-ua": {Name: "junos-mgcp-ua", Protocol: "udp", DestinationPort: "2427"},
 	"junos-mgcp-ca": {Name: "junos-mgcp-ca", Protocol: "udp", DestinationPort: "2727"},
-	"junos-h323":    {Name: "junos-h323", Protocol: "tcp", DestinationPort: "1720"},
-	"junos-sccp":    {Name: "junos-sccp", Protocol: "tcp", DestinationPort: "2000"},
+	// The #11341 Junos-defaults captures define H.323 as six terms. Represent
+	// them as individual predefined members for the junos-h323 set below.
+	"junos-h323-q931":     {Name: "junos-h323-q931", Protocol: "tcp", DestinationPort: "1720", ALG: "q931"},
+	"junos-h323-ras":      {Name: "junos-h323-ras", Protocol: "udp", DestinationPort: "1719", ALG: "ras"},
+	"junos-h323-tcp-1503": {Name: "junos-h323-tcp-1503", Protocol: "tcp", DestinationPort: "1503"},
+	"junos-h323-tcp-389":  {Name: "junos-h323-tcp-389", Protocol: "tcp", DestinationPort: "389"},
+	"junos-h323-tcp-522":  {Name: "junos-h323-tcp-522", Protocol: "tcp", DestinationPort: "522"},
+	"junos-h323-tcp-1731": {Name: "junos-h323-tcp-1731", Protocol: "tcp", DestinationPort: "1731"},
+	"junos-sccp":          {Name: "junos-sccp", Protocol: "tcp", DestinationPort: "2000"},
 
 	// --- Messaging ---
 	"junos-msn": {Name: "junos-msn", Protocol: "tcp", DestinationPort: "1863"},
@@ -153,19 +159,20 @@ var PredefinedApplications = map[string]*Application{
 	"junos-udp-any": {Name: "junos-udp-any", Protocol: "udp"},
 }
 
-// PredefinedApplicationSets contains the built-in Junos application-SET bundles
-// (the `junos-defaults` application-sets shipped on an SRX/vSRX). A canonical
-// vSRX policy references these by name — e.g.
-// `set security policies ... match application junos-ms-rpc` — so without this
-// table a migrated config hard-fails: the commit gate
-// (validatePolicyMatchApplicationsStrict) rejects the token and the runtime
-// resolver (resolveUserspaceApplicationNames) returns __unsupported__, because
-// ResolveApplicationSet used to consult ONLY user-defined sets (#4102).
+// PredefinedApplicationSets contains Junos application-set definitions from
+// version-bounded `junos-defaults` captures; it does not claim current-release
+// SRX/vSRX inventory. A canonical vSRX policy may reference these names — e.g.
+// `set security policies ... match application junos-ms-rpc` — so the table
+// makes captured Junos defaults available without operator redefinition. Before
+// #4102 ResolveApplicationSet consulted ONLY user-defined sets, so such
+// references failed at commit and runtime.
 //
-// Members are verified against a real `show configuration groups
-// junos-defaults` dump (SRX 15.1X49). Every member resolves through the
-// PredefinedApplications table above, so each set expands to >= 1 member and
-// clears the empty-set fail-open gate (#3146). ResolveApplicationSet and
+// Members for the original bundles were verified against an SRX 15.1X49
+// `show configuration groups junos-defaults` dump. #11341 adds the multi-term
+// junos-smb and junos-h323 defaults from the issue's version-bounded captures;
+// those captures do not establish current-release vSRX parity. Every member
+// resolves through PredefinedApplications, so each set expands to >= 1 member
+// and clears the empty-set fail-open gate (#3146). ResolveApplicationSet and
 // ExpandApplicationSet fall back to this table AFTER user-defined sets, so an
 // operator can still shadow or extend a bundle name (user-then-predefined
 // precedence, mirroring ResolveApplication).
@@ -201,6 +208,22 @@ var PredefinedApplicationSets = map[string]*ApplicationSet{
 		Name:         "junos-sip",
 		Applications: []string{"junos-sip-udp", "junos-sip-tcp"},
 	},
+	// The #11341 issue-cited, version-bounded Junos defaults define these as
+	// multi-term applications. They are sets because Application stores one
+	// protocol/port tuple; current-release vSRX readback remains outstanding.
+	// Keep both names out of PredefinedApplications: app-first resolution would
+	// shadow each multi-term set with the previous single-term entry.
+	"junos-smb": {
+		Name:         "junos-smb",
+		Applications: []string{"junos-netbios-session", "junos-smb-session"},
+	},
+	"junos-h323": {
+		Name: "junos-h323",
+		Applications: []string{
+			"junos-h323-q931", "junos-h323-ras", "junos-h323-tcp-1503",
+			"junos-h323-tcp-389", "junos-h323-tcp-522", "junos-h323-tcp-1731",
+		},
+	},
 }
 
 // ResolveApplication looks up an application by name, checking user-defined
@@ -219,9 +242,9 @@ func ResolveApplication(name string, userApps map[string]*Application) (*Applica
 
 // ResolveApplicationSet looks up an application-set by name, checking
 // user-defined sets first, then the built-in PredefinedApplicationSets table
-// (#4102). Mirrors ResolveApplication's user-then-predefined precedence so the
-// commit gate and the runtime resolver both recognize the standard Junos
-// bundles (junos-ms-rpc, junos-sun-rpc, junos-cifs, junos-routing-inbound).
+// (#4102, #11341). Mirrors ResolveApplication's user-then-predefined precedence
+// so the commit gate and runtime resolver recognize the Junos bundles, including
+// the version-bounded junos-smb and junos-h323 definitions.
 func ResolveApplicationSet(name string, appSets map[string]*ApplicationSet) (*ApplicationSet, bool) {
 	return lookupApplicationSet(name, appSets)
 }

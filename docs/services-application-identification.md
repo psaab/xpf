@@ -430,9 +430,10 @@ runtime effect is the L3/L4 catalog classification above
   child set. (Before #2068 the compiler silently dropped nested
   `application-set` members, so such a policy under-matched.)
   A referenced set is resolved through `config.ResolveApplicationSet`
-  (user-defined sets first, then the built-in `junos-defaults`
-  bundle table `PredefinedApplicationSets` — junos-ms-rpc,
-  junos-sun-rpc, junos-cifs, junos-routing-inbound, #4102).
+  (user-defined sets first, then the built-in `junos-defaults` bundle table
+  `PredefinedApplicationSets` — junos-ms-rpc, junos-sun-rpc, junos-cifs,
+  junos-routing-inbound, junos-sip, junos-smb, and junos-h323; #4102, #5634,
+  #11341).
   `CatalogNames` (AppID-disabled catalog) and BOTH NAT snapshot
   builders (`buildSourceNATAppTerms` / `buildDestinationNATSnapshots`,
   `pkg/dataplane/userspace/nat_source.go` / `nat_destination.go`)
