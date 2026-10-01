@@ -876,17 +876,14 @@ test-routing-kernel-lib:
 	sh ./test/routing/selftest-routing-kernel_9812.sh
 	sh ./test/routing/selftest-routing-probes_9812.sh
 
-# Self-test the #6936 FBF two-upstream steering verdicts. The defect this
-# guards is a NEGATIVE CELL THAT FAILS TO A HEALTHY VALUE: the main-table
-# pollution check counted matches, so "no leak" and "the probe returned
-# nothing" both scored 0 = PASS, and the cell certified an absence it had
-# never looked for. The verdict is now TOTAL, and the selftest table carries
-# the middle (probe-blind) row that is the only way to see the difference.
-# Hermetic — no cluster. The Go half (every test/incus script that commits
-# config through the piped CLI must use the #6440 marker gate) is
-# cmd/cli/cos_apply_markers_6440_test.go.
+# Self-tests for the #6936/#11306 FBF steering verdicts. The helper cells pin
+# fail-closed route parsing (including errors and ECMP); the peer-capture
+# fixture requires marked requests to use the resolved ISP-B gateway MAC while
+# unmarked controls use a different L2 source. Replies and term hits alone
+# cannot pass. The Go half verifies the #6440 marker gate used by Incus scripts.
 test-fbf-steering-lib:
 	bash ./test/incus/fbf-steering-selftest.sh
+	bash ./test/incus/fbf-steering-harness-selftest.sh
 	go test -count=1 -run 6440 ./cmd/cli/
 
 # Self-test the #6936 on-wire host-inbound verdicts. The defect class it

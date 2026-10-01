@@ -99,7 +99,7 @@ do_up() {
 
     echo "installing packages"
     inc exec "$ref" -- sh -c \
-        'apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq iperf3 python3 >/dev/null 2>&1' \
+        'apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq iperf3 python3 tcpdump >/dev/null 2>&1' \
         || echo "WARN: package install returned non-zero; continuing to service setup"
 
     echo "installing the address unit"
