@@ -113,12 +113,12 @@ func policy(name, src, dst, app, action string) []string {
 	}
 }
 
-// TestJunosHostResidualIsUnrenderedAndWarned6612 walks the #6612 remainder.
+// TestJunosHostResidualPathsRemainWarned6612 walks the #6612 remainder.
 //
-// #9504 removed two rows — `then reject` and a deny on a `tcp-rst` ingress zone
-// — because both render now, with the runtime's own verdict. They moved to
-// TestJunosHostRejectAndTCPRstAreEnforced9504, which asserts that verdict rather
-// than only the rendering.
+// #9504 removed `then reject` from this remainder because it renders with the
+// active reject verdict. #11304 clarifies that `tcp-rst` only affects transit
+// session misses, so a host-bound policy deny stays a silent drop; that verdict
+// is covered by TestJunosHostRejectAndTCPRstPolicyDeny9504_11304 below.
 //
 // FAIL-ON-REVERT: each row's residual attribute is the only difference from its
 // flip. Unrepresentable rows must remain rule-free and warned; the scoped permit
@@ -447,13 +447,12 @@ func TestJunosHostDestinationScopedPermitDoesNotWidenALaterDeny6612(t *testing.T
 	}
 }
 
-// TestJunosHostRejectAndTCPRstAreEnforced9504 holds the two rows #9504 moved out
-// of the residual table: they render now, with the verdict the runtime answers
-// with. Asserting the VERDICT is the point — a silent drop where the runtime
-// sends a RST trades a visible gap for an invisible divergence, and both halves
-// of the residual contract (no rule, a warning) would still look satisfied by a
-// plain drop.
-func TestJunosHostRejectAndTCPRstAreEnforced9504(t *testing.T) {
+// TestJunosHostRejectAndTCPRstPolicyDeny9504_11304 keeps explicit `reject`
+// active while a plain `deny` remains silent even in a `tcp-rst` zone. The
+// option controls transit session-miss resets, not host-bound policy denies.
+// Assert the projected verdict so a `tcp-rst`-specific deny answer cannot
+// silently reappear in the kernel path.
+func TestJunosHostRejectAndTCPRstPolicyDeny9504_11304(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		policy  string
@@ -469,7 +468,7 @@ func TestJunosHostRejectAndTCPRstAreEnforced9504(t *testing.T) {
 		{
 			name:    "deny on a tcp-rst ingress zone",
 			policy:  "rst-zone",
-			verdict: config.JunosHostDropTCPReset,
+			verdict: config.JunosHostDrop,
 			cmds: concat(residualBase,
 				[]string{"set security zones security-zone untrust tcp-rst"},
 				policy("rst-zone", "bad-host", "any", "any", "deny")),

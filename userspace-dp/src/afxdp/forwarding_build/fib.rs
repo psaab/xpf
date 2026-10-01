@@ -417,7 +417,14 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v4(
     route
         .next_hops
         .iter()
-        .map(|nh| {
+        .enumerate()
+        .map(|(index, nh)| {
+            let weight = route
+                .next_hop_weights
+                .get(index)
+                .copied()
+                .filter(|weight| *weight != 0)
+                .unwrap_or(1);
             let (next_hop, interface) = parse_route_next_hop(nh.as_str());
             let (ifindex, tunnel_endpoint_id) = resolve_next_hop_target_v4(
                 next_hop,
@@ -431,6 +438,7 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v4(
                 next_hop,
                 ifindex,
                 tunnel_endpoint_id,
+                weight,
             }
         })
         .collect()
@@ -453,7 +461,14 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v6(
     route
         .next_hops
         .iter()
-        .map(|nh| {
+        .enumerate()
+        .map(|(index, nh)| {
+            let weight = route
+                .next_hop_weights
+                .get(index)
+                .copied()
+                .filter(|weight| *weight != 0)
+                .unwrap_or(1);
             let (next_hop, interface) = parse_route_next_hop_v6(nh.as_str());
             let (ifindex, tunnel_endpoint_id) = resolve_next_hop_target_v6(
                 next_hop,
@@ -467,6 +482,7 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v6(
                 next_hop,
                 ifindex,
                 tunnel_endpoint_id,
+                weight,
             }
         })
         .collect()
@@ -600,8 +616,32 @@ pub(in crate::afxdp) fn infer_connected_route_target_v6(
     ip: Ipv6Addr,
     table: &str,
 ) -> Option<(i32, u16)> {
+    if ip.is_unicast_link_local() {
+        // #11322: the daemon adds a synthetic fe80::/64 candidate for every
+        // IPv6-capable interface. Mirror that with all connected IPv6 rows in
+        // this table, not only rows whose observed prefix contains the gateway:
+        // link-local addresses may be absent from a snapshot. The daemon only
+        // infers a scope when candidates collapse to one egress; returning the
+        // first sorted entry made the helper forward an ambiguous route.
+        let mut target: Option<(i32, u16)> = None;
+        for entry in state
+            .connected_v6
+            .iter()
+            .filter(|entry| entry.table == table)
+        {
+            let candidate = (entry.ifindex, entry.tunnel_endpoint_id);
+            match target {
+                Some(existing) if existing != candidate => return None,
+                Some(_) => {}
+                None => target = Some(candidate),
+            }
+        }
+        return target;
+    }
+
     // #4446: table-scoped gateway inference — see
-    // `infer_connected_route_target_v4` for the full rationale.
+    // `infer_connected_route_target_v4` for the full rationale. Global
+    // next-hops keep longest-prefix selection.
     state
         .connected_v6
         .iter()

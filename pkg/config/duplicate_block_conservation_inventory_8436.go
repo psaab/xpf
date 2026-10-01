@@ -249,85 +249,22 @@ var dupConservationSkipped8436 = []string{
 	"system services dhcp-local-server group xpfname pool",
 	"system services dhcpv6-local-server group xpfname pool",
 
-	// ---- "a spelling did not parse or compile" (5). ----
+	// ---- "a spelling did not parse or compile" (3). ----
 	//
 	// The synthesized duplicate did not survive commit, which is EITHER
 	// conservation by refusal OR a fixture the census cannot build. The two are
 	// indistinguishable from the census alone, so each was checked BY HAND with
 	// a complete config and the verdict recorded here.
 	//
-	// REFUSED at commit — duplicate policy name in a zone pair is a hard reject
-	// (#3473: the duplicate shares a name-keyed hit counter).
+	// #11544: after #8752 folded duplicate policy blocks on tolerant load, the
+	// from-zone and global policy containers became probeable. The pinned census
+	// now checks them; their former skip rows are removed rather than retained.
 	//
-	// #8752: THAT REASON IS A STRICT-PATH FACT, AND THIS CENSUS GOVERNS BOTH
-	// PATHS. `Store.Load` and `Store.SyncApply` compile leniently — which is the
-	// entire point of them, since they read configurations the operator did not
-	// just author — and the lenient path does NOT refuse. So both entries were
-	// exempted here on a rejection that does not happen on the path where the
-	// defect lives.
-	//
-	// THE DEFECT THAT FINDING EXPOSED IS NOW FIXED, and this note is kept
-	// because the exemption is still taken and a reader has to be able to tell
-	// which half of it was answered. As measured BEFORE the fix
-	// (TestTheDuplicatePolicyPoisonsTheSnapshot8752, since re-pointed):
-	//
-	//	policy[0] src=[10.0.0.0/8] dst=[any] app=[any] permit  dropped=false
-	//	policy[1] src=[]           dst=[]    app=[]    deny    dropped=TRUE
-	//
-	// The spurious policy sat SECOND, so it never won a first-match evaluation,
-	// and an all-empty match reads as match-ANY — a deny-all exactly where the
-	// zone pair already has an implicit default-deny. On its own that was close
-	// to inert, and "the duplicate wins" was the wrong reading: it invites
-	// making the FIRST occurrence authoritative, which would have left the real
-	// harm in place.
-	//
-	// THE OPERATIVE HARM WAS `LenientContentDropped`. compilePolicy sets it
-	// because the tolerant path accepted the policy only by dropping a required
-	// match dimension, and policies_lower.go then poisons the rule with the
-	// `__unsupported__` application sentinel SO THAT the Rust integrity
-	// preflight rejects the WHOLE SNAPSHOT — previous-good retained, fresh-boot
-	// default-deny. The consequence was therefore not an altered policy set an
-	// operator could read in `show`: it was that the operator's ENTIRE
-	// configuration did not load. On a fresh boot, a blackout.
-	//
-	// THE FIX (mergeDuplicateNamedInstances, gated on the tolerant path) folds
-	// the repeated `policy <p>` into the first occurrence, carrying its children
-	// and any packed tail onto the surviving policy. Measured after it:
-	//
-	//	security policies from-zone <a> <b> <c> policy   strict REJECTED, lenient ACCEPTED -> 1 policy
-	//	security policies global policy                  strict REJECTED, lenient ACCEPTED -> 1 policy
-	//
-	//	policy[0] src=[10.0.0.0/8] dst=[any] app=[any] deny    dropped=false
-	//
-	// — one policy, criteria intact, the poison flag CLEAR, so the snapshot
-	// loads. The terminal action resolves to the later statement's `deny`, which
-	// is what the flat `set` spelling produces for the same input, and the
-	// existing conflicting-terminal-action gate still reports the disagreement.
-	// The fold also warns, so a configuration a strict commit REJECTS does not
-	// load silently.
-	//
-	// WHAT THIS MEANS FOR THE TWO ENTRIES: the strict-path premise they are
-	// skipped on is UNCHANGED and still asserted — both are still refused at
-	// commit — so the skip remains correct. What changed is that the tolerant
-	// path now has an answer instead of an unexamined gap. The finding that
-	// produced this annotation was not that the entries were wrong to skip; it
-	// was that their stated reason could not speak for the path where the
-	// defect lived.
-	// The entries STAY — the census genuinely cannot synthesize these, so
-	// skipping is right — but the REASON is annotated rather than left standing,
-	// because a skip with a stated reason reads as settled and nobody
-	// re-derives it. A census governing two compile paths cannot take an
-	// exception justified on only one; "REFUSED at commit" is unanswerable for
-	// the tolerant path by construction.
-	"security policies from-zone xpfname xpfname xpfname policy",
-	"security policies global policy",
 	// REFUSED at commit — "duplicate expectation \"any\" conflicts with
 	// \"balanced\"".
-	// #8752: re-checked on the LENIENT path too, and this one is correctly
-	// skipped — it is refused on BOTH paths (lenient rejects it as well), so the
-	// exemption does not rest on a strict-path-only fact. Recorded so the
-	// re-check is visible: two of the three entries in this group were wrong and
-	// this one was not, which is the difference a reader needs.
+	// #8752: the fixture remains unbuildable, and a complete fixture rejects
+	// this duplicate on both strict and lenient paths. The two policy skip rows
+	// removed for #11544 are now probeable; this refusal remains recorded.
 	"class-of-service fairness rss-expectation interface xpfname queue",
 	// CONSERVES. The census fixture omits the required `match rpm-probe`; with a
 	// complete config the duplicate compiles identically to the merged form.
@@ -338,7 +275,7 @@ var dupConservationSkipped8436 = []string{
 	// This is the site that motivated pinning the skip set.
 	"services rpm probe xpfname test",
 
-	// ---- "second leaf not observable in the typed config" (13). ----
+	// ---- "second leaf not observable in the typed config" (16). ----
 	//
 	// #8662: was 15. `system login user` left this list when the compact/block
 	// census's value synthesis learned to read the schema's valueHint — its
@@ -428,6 +365,13 @@ var dupConservationSkipped8436 = []string{
 	"security log stream",
 	"system services dhcp-local-server group xpfname interface",
 	"system services dhcpv6-local-server group xpfname interface",
+	// #11544: the synthesized pair for these named credential containers is
+	// `class` + `expires`, but the compiler materializes a user/key only when
+	// its `password`/`secret` is present. Without that credential, the merged
+	// fixture is indistinguishable from its first leaf, so the census records
+	// an unobservable result rather than treating it as conservation.
+	"system services web-management api-auth key",
+	"system services web-management api-auth user",
 	"system syslog file",
 	"system syslog host",
 	"system syslog user",

@@ -1351,29 +1351,30 @@ outcome, so a reject whose reply fail-closes logs DENY, not REJECT
 (#3615). The builder gets the ingress TX pipeline + counters via the
 `ForwardRejectReply` context passed by its poll-loop callers.
 
-Zone-level Junos `tcp-rst` (#3071) reuses the policy-reply machinery through
-the unified `enqueue_deny_reply` decision helper. Both policy-deny call sites
-in `poll_descriptor/mod.rs` call `enqueue_deny_reply(..., is_reject,
-from_zone_id)`: for policy `then reject`, TCP gets an RST, UDP gets
-port-unreachable, and other protocols are silently dropped (#11303).
-Otherwise (plain `deny` / default-deny), it sends a TCP RST only when the
-flow is TCP and the INGRESS (from) zone has `tcp-rst` enabled
-(`ForwardingState::zone_tcp_rst_enabled`, populated from
-`ZoneSnapshot.tcp_rst`). Non-TCP denied traffic and a deny in a non-tcp-rst
-zone stay silent drops. A zone-tcp-rst RST is counted under
-`policy_reject_sent` — it is a policy-deny-driven reset. Junos applies
-`tcp-rst` to the source/from zone so the RST is sent back toward the
-connection initiator, whose interface is bound to the from-zone.
+Zone-level Junos `tcp-rst` (#3071/#11304) is separate from policy verdicts.
+Only `enqueue_session_miss_rst` at the strict-SYN gate in
+`poll_descriptor/mod.rs` can emit this reset, and only for a non-SYN TCP transit
+packet dropped for a missing session when its INGRESS (from) zone has
+`tcp-rst` enabled (`ForwardingState::zone_tcp_rst_enabled`, populated from
+`ZoneSnapshot.tcp_rst`). Plain policy `deny` and default-deny remain silent;
+explicit policy `then reject` still replies through `enqueue_deny_reply`.
 
-Policy and filter replies share the downstream generated-reply path:
-#2238 output-filter / CoS / DSCP classification
-(`classify_generated_reply`, keyed on the reply's OWN egress tuple), the
-SYN-cookie TX-frame budget gate, and the future per-reason generated-reply
-rate limiter (#2472). Budget exhaustion, output-filter drops, and parse
-errors retain their existing source attribution and fail-closed behavior;
-the caller still drops the packet when synthesis returns `false`. The
-RT_FLOW filter-log action maps `Reject → reject` (matching policy reject
-and Junos), `Discard → deny`.
+The session-miss path reuses `enqueue_reject_reply` for reply construction,
+output classification, the SYN-cookie TX-frame budget, and the per-zone
+generated-reject limiter (#3618). It uses `RejectReplySource::SessionMiss`, so
+it does not increment the policy/filter source counters or emit a policy-deny
+event. Junos applies `tcp-rst` to the source/from zone, whose interface is
+bound to the connection initiator.
+
+Generated replies inherit the #2238 output-filter / CoS / DSCP
+classification (`classify_generated_reply`, keyed on the reply's OWN
+egress tuple) and the SYN-cookie TX-frame budget gate. Budget exhaustion,
+output-filter drops, and parse-error drops fail closed: the caller still drops
+the triggering packet when synthesis returns `false`. Policy/filter `reject`
+replies retain their source-specific counters; session-miss resets do not.
+The RT_FLOW filter-log action
+maps `Reject → reject` (matching policy reject and Junos), `Discard →
+deny`.
 
 **Scope (resolved #3608):** output-firewall-filter `then reject` on the
 TX/CoS path is now an active reject too — see the OUTPUT-filter paragraph

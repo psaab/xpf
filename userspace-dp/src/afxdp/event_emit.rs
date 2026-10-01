@@ -149,8 +149,8 @@ pub(super) fn emit_policy_deny_event(
     // #3615: the ACTUAL outcome of the reject-reply enqueue. When `action` is
     // `Reject` but no reply was enqueued (fail-closed silent drop), the wire
     // action is downgraded to DENY so the event never claims an active reject
-    // that was not sent. Ignored for `Deny`/`Permit` (a `deny` stays DENY even
-    // when a zone `tcp-rst` RST rode out).
+    // that was not sent. Ignored for `Deny`/`Permit`; a policy `deny` remains
+    // DENY and does not enter the tcp-rst session-miss reset path.
     reject_reply_enqueued: bool,
     now_ns: u64,
 ) {

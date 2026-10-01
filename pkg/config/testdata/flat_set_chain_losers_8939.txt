@@ -1,5 +1,6 @@
-# counts: losers=3 walked=112 vacuous=36 unmeasured=84
-# collector reach: 386 containers walked, 141 reached the census (139 dropped: no eligible leaf, 106 dropped: only one)
-firewall filter arg1 term arg1 then reject  [administratively-prohibited | bad-host-tos | bad-network-tos]  total  OPERATOR
-firewall filter arg1 term arg1 then reject  [administratively-prohibited | bad-host-tos]  total  OPERATOR
+# counts: losers=1 walked=111 vacuous=39 unmeasured=87 pre-rejected=2
+# collector reach: 388 containers walked, 144 reached the census (138 dropped: no eligible leaf, 106 dropped: only one)
 services rpm probe arg1 test arg1 target  [address | url]  total  OPERATOR
+# pre-rejected #11355 strict-error/tolerant-warning:
+firewall filter arg1 term arg1 then reject  [administratively-prohibited | bad-host-tos | bad-network-tos]  strict-rejected by #11355, tolerant-warned
+firewall filter arg1 term arg1 then reject  [administratively-prohibited | bad-host-tos]  strict-rejected by #11355, tolerant-warned

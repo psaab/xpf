@@ -220,7 +220,7 @@ pub(crate) struct BindingWorker {
     /// `WorkerTimers`. Field semantics unchanged; access via
     /// `binding.timers.last_X_ns` etc.
     pub(crate) timers: WorkerTimers,
-    pub(crate) last_learned_neighbor: Option<LearnedNeighborKey>,
+    pub(crate) last_learned_neighbor: LearnedNeighborDedup,
     /// #5288: per-worker gate for the data-path ARP/NDP kernel-neighbor
     /// program. Bounds the netlink `socket()`/`sendto()`/`close()` +
     /// allocations `add_kernel_neighbor` performs so a repeat/flood of accepted
@@ -608,7 +608,7 @@ impl BindingWorker {
                 last_tx_wake_ns: init_now,
                 empty_rx_polls: 0,
             },
-            last_learned_neighbor: None,
+            last_learned_neighbor: LearnedNeighborDedup::default(),
             neigh_program_limiter: super::KernelNeighborProgramLimiter::new(),
             telemetry: WorkerTelemetry::default(),
             tx_counters: WorkerTxCounters {
@@ -748,7 +748,7 @@ impl BindingWorker {
                 last_tx_wake_ns: init_now,
                 empty_rx_polls: 0,
             },
-            last_learned_neighbor: None,
+            last_learned_neighbor: LearnedNeighborDedup::default(),
             neigh_program_limiter: super::KernelNeighborProgramLimiter::new(),
             telemetry: WorkerTelemetry::default(),
             tx_counters: WorkerTxCounters {
@@ -867,7 +867,7 @@ impl BindingWorker {
                 last_tx_wake_ns: init_now,
                 empty_rx_polls: 0,
             },
-            last_learned_neighbor: None,
+            last_learned_neighbor: LearnedNeighborDedup::default(),
             neigh_program_limiter: super::KernelNeighborProgramLimiter::new(),
             telemetry: WorkerTelemetry::default(),
             tx_counters: WorkerTxCounters {
@@ -1500,9 +1500,10 @@ pub(crate) struct BindingLiveSnapshot {
     /// #3615 (L04): FILTER-`reject` replies suppressed by TX-frame budget —
     /// the source-split sibling of `policy_reject_reply_budget_drops`.
     pub(crate) filter_reject_reply_budget_drops: u64,
-    /// #3661: POLICY-`reject` replies dropped by the shared per-reason
-    /// rate-limit bucket. Source split of the source-neutral aggregate
-    /// `reject_rate_limited_total`.
+    /// #3661: explicit POLICY-`reject` replies dropped by the shared
+    /// per-reason rate-limit bucket. Source-specific leg of
+    /// `reject_rate_limited_total`; zone `tcp-rst` session-miss resets are
+    /// counted only in the source-neutral aggregate.
     pub(crate) policy_reject_rate_limit_drops: u64,
     /// #3661: FILTER-`reject` replies dropped by the rate-limit bucket — the
     /// source-split sibling of `policy_reject_rate_limit_drops`.

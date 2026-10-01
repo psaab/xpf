@@ -113,15 +113,32 @@ xpf (0.0.0) unstable; urgency=medium
   * Warn about and exclude static routes without a forwarding disposition, so
     they cannot shadow an installable less-specific route in the helper FIB
     (#11327).
+  * Align userspace-dp session-sync regression fixtures with the ingress
+    identity trailer, preserve JSON/binary identity parity, and keep the
+    policy-list acknowledgement plus debug timing gates robust under runner
+    contention (#11546).
+  * Reject undeclared fields in named API-auth credentials and validate
+    API-auth class references; reconcile the schema-census inventories
+    (#11544).
+  * Bump the helper FIB generation after learned-route republish and retain
+    retry state when invalidation fails (#11565).
   * Fail closed when an embedded ICMP quote's translated NAT tuple is ambiguous
     across routing domains, while retaining off-path reversal for unique flows
     (#11298).
   * Index local and shared tuple identities for delayed session-close checks,
     preserving scoped-incarnation teardown while avoiding slab and shared-map
     scans under the shared-session mutex (#11299).
+  * Route oversized same-binding flow-cache hits through pending-forward so
+    normal egress MTU, PTB, and TCP-segmentation handling is preserved (#11376).
 
   * Resolve native-fragment protocol 255 from the declared IP header before
     filter, PBR, and CoS matching; unresolved sentinels no longer wildcard
     protocol-constrained terms (#11338).
 
+  * Expire DHCPv4/v6 stateful leases at their absolute deadline after failed
+    T1/T2 renewal and reacquisition. Remove stale addresses and delegated
+    prefixes, retain stateless DHCPv6 options across failed refreshes, and
+    notify dependent route recompilation (#11382).
+  * Refresh learned-route FIBs from coalesced kernel route events, and retry
+    unresolved FIB-generation bumps without publishing once per event (#11565).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 16 Jun 2026 00:00:00 +0000

@@ -40,7 +40,10 @@ mod ipv6_ext_header_drop_tests {
     fn normal_l4_chain_is_not_over_limit() {
         // next_header = TCP (6): a real L4 within the bound.
         let frame = v6_frame(6, &[0u8; 20]);
-        assert!(!crate::afxdp::frame::ipv6_ext_chain_over_limit(&frame, v6()));
+        assert!(!crate::afxdp::frame::ipv6_ext_chain_over_limit(
+            &frame,
+            v6()
+        ));
     }
 
     #[test]
@@ -49,7 +52,10 @@ mod ipv6_ext_header_drop_tests {
         // ext-header block: an in-loop short read => truncation, NOT over-limit
         // (so it keeps its existing flowless handling, undisturbed).
         let frame = v6_frame(0, &[0u8; 1]);
-        assert!(!crate::afxdp::frame::ipv6_ext_chain_over_limit(&frame, v6()));
+        assert!(!crate::afxdp::frame::ipv6_ext_chain_over_limit(
+            &frame,
+            v6()
+        ));
     }
 
     #[test]
@@ -59,7 +65,10 @@ mod ipv6_ext_header_drop_tests {
         let mut tail = vec![6u8, 0, 0, 0, 0, 0, 0, 0]; // frag: next=TCP
         tail.extend_from_slice(&[0u8; 20]);
         let frame = v6_frame(44, &tail);
-        assert!(!crate::afxdp::frame::ipv6_ext_chain_over_limit(&frame, v6()));
+        assert!(!crate::afxdp::frame::ipv6_ext_chain_over_limit(
+            &frame,
+            v6()
+        ));
     }
 
     #[test]
@@ -128,7 +137,6 @@ mod ipv6_ext_header_drop_tests {
         assert!(!counters.touched);
     }
 
-
     #[test]
     fn normal_frame_helper_neither_drops_nor_counts() {
         let frame = v6_frame(6, &[0u8; 20]);
@@ -187,8 +195,8 @@ mod flowless_local_delivery_tests {
                 dst_ip: dst,
                 src_port: 0,
                 dst_port: 0,
-                            discriminator: Default::default(),
-                            routing_domain: 0,
+                discriminator: Default::default(),
+                routing_domain: 0,
             },
         }
     }
@@ -241,7 +249,12 @@ mod flowless_local_delivery_tests {
     fn flowless_host_inbound_deny_not_delivered() {
         let fw = fw_with_host_inbound(ZONE, &["ssh"], &[]);
         assert_eq!(
-            verdict(&fw, &flowless_flow(PROTO_TCP), flowless_meta(PROTO_TCP), ZONE),
+            verdict(
+                &fw,
+                &flowless_flow(PROTO_TCP),
+                flowless_meta(PROTO_TCP),
+                ZONE
+            ),
             FlowlessLocalVerdict::HostInboundDeny,
         );
     }
@@ -304,7 +317,12 @@ mod flowless_local_delivery_tests {
     fn flowless_admit_all_delivered() {
         let fw = fw_with_host_inbound(ZONE, &["any-service"], &[]);
         assert_eq!(
-            verdict(&fw, &flowless_flow(PROTO_TCP), flowless_meta(PROTO_TCP), ZONE),
+            verdict(
+                &fw,
+                &flowless_flow(PROTO_TCP),
+                flowless_meta(PROTO_TCP),
+                ZONE
+            ),
             FlowlessLocalVerdict::Deliver,
         );
     }
@@ -346,7 +364,12 @@ mod flowless_local_delivery_tests {
         )
         .expect("lo0 filter compiles");
         assert_eq!(
-            verdict(&fw, &flowless_flow(PROTO_TCP), flowless_meta(PROTO_TCP), ZONE),
+            verdict(
+                &fw,
+                &flowless_flow(PROTO_TCP),
+                flowless_meta(PROTO_TCP),
+                ZONE
+            ),
             FlowlessLocalVerdict::Filtered,
         );
     }
@@ -454,23 +477,26 @@ mod flowless_local_delivery_tests {
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
         let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
 
+        let flow = flowless_flow(PROTO_TCP);
+        let meta = flowless_meta(PROTO_TCP);
         let resolved = flowless_base_resolution(
             &fw,
             &dynamic_neighbors,
             &ha_state,
             0,
-            INGRESS_IF,
-            0,
-            PROTO_TCP,
-            dst,
+            &flow,
+            meta,
+            Default::default(),
+            None,
+            None,
             Some("vrf-x"),
-        );
+        )
+        .expect("ordinary flowless destination resolves");
         assert_eq!(
-            resolved.disposition,
+            resolved.resolution.disposition,
             ForwardingDisposition::LocalDelivery,
             "ingress-local resolution must win over the PBR override table",
         );
-
         // The override-table lookup alone does NOT deliver this host-bound
         // packet — the bug the ordering fixes.
         let override_only = lookup_forwarding_resolution_in_table_with_dynamic(
@@ -498,19 +524,23 @@ mod flowless_local_delivery_tests {
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
         let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
 
+        let flow = flowless_flow(255);
+        let meta = flowless_meta(255);
         let resolved = flowless_base_resolution(
             &fw,
             &dynamic_neighbors,
             &ha_state,
             0,
-            INGRESS_IF,
-            0,
-            255,
-            IpAddr::V4(dst),
+            &flow,
+            meta,
+            Default::default(),
             None,
-        );
+            None,
+            None,
+        )
+        .expect("ordinary flowless destination resolves");
         assert_eq!(
-            resolved.disposition,
+            resolved.resolution.disposition,
             ForwardingDisposition::LocalDelivery,
             "the helper recognizes the interface-NAT target, but not the tail's protocol",
         );

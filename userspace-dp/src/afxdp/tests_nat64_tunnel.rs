@@ -800,6 +800,7 @@ fn txn_tunnel_marked_missing_neighbor_not_buffered() {
         table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "8.8.8.8/32".to_string(),
+        next_hop_weights: vec![],
         next_hops: vec!["@gr-0/0/0.0".to_string()],
         discard: false,
         next_table: String::new(),

@@ -275,6 +275,8 @@ var instanceNameBlindCeiling9091 = len(instanceNameBlindBaseline9091)
 // would commit clean and leave the community answering EVERY source — the
 // defect #9416 exists to close, one level deeper — so the body was declared
 // leaf-complete and armed rather than added to the blind baseline.
+// #11544 moves it 47 -> 49: the named API-auth user/key credential bodies are
+// leaf-complete, so typos inside them must be rejected rather than ignored.
 var instanceNameArmedBaseline9091 = []string{
 	"/chassis/cluster/control-ports/fpc",
 	"/chassis/cluster/redundancy-group/node",
@@ -303,6 +305,8 @@ var instanceNameArmedBaseline9091 = []string{
 	"/system/login/class",
 	"/system/services/dhcp-local-server/group/pool/static-binding",
 	"/system/services/dhcpv6-local-server/group/pool/static-binding",
+	"/system/services/web-management/api-auth/key",
+	"/system/services/web-management/api-auth/user",
 	"/security/dynamic-address/address-name",
 	"/security/dynamic-address/feed-server",
 	"/security/dynamic-address/feed-server/feed-name",

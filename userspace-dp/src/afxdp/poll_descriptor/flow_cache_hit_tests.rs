@@ -1127,7 +1127,7 @@ fn run_stage_seeded(
     let mut owned_packet_frame: Option<Vec<u8>> = None;
     let mut mirror_sample_counter = initial_sample_counter;
 
-    let mut last_learned_neighbor = None;
+    let mut last_learned_neighbor = LearnedNeighborDedup::default();
     // #6304: measure only THIS call. The fixture's own setup pushes (the AtCap
     // precondition, the interleaving-producer probes) go through the same
     // admission primitive, so the reset has to sit immediately before the call
@@ -3978,4 +3978,97 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
         lookup_present(&mut fresh_cache),
         "a current IPv6 MAC must still seed the flow cache"
     );
+}
+
+fn flow_cache_mtu_fixture_11376() -> LiveCallSiteFixture {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    fixture.forwarding.egress.insert(
+        EGRESS_IFINDEX,
+        EgressInterface {
+            bind_ifindex: EGRESS_IFINDEX,
+            vlan_id: 0,
+            mtu: 1200,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x02],
+            zone_id: TEST_UNTRUST_ZONE_ID,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    fixture
+}
+
+fn oversized_udp_v4_frame_11376(total_len: usize) -> Vec<u8> {
+    assert!(total_len >= 32 && total_len <= u16::MAX as usize);
+    let mut frame = vlan_tagged_udp_v4_frame();
+    frame.extend(std::iter::repeat_n(0u8, total_len - 32));
+    frame[20..22].copy_from_slice(&(total_len as u16).to_be_bytes());
+    frame[42..44].copy_from_slice(&((total_len - 20) as u16).to_be_bytes());
+    frame
+}
+
+fn oversized_tcp_v4_frame_11376(total_len: usize, df: bool) -> Vec<u8> {
+    assert!(total_len >= 40 && total_len <= u16::MAX as usize);
+    let mut frame = tcp_v4_ack_frame();
+    frame.extend(std::iter::repeat_n(0u8, total_len - 40));
+    frame[20..22].copy_from_slice(&(total_len as u16).to_be_bytes());
+    if !df {
+        frame[24] &= !0x40;
+    }
+    frame
+}
+
+fn run_udp_cache_hit_11376(fixture: &LiveCallSiteFixture, frame: &[u8]) -> StageRun {
+    let key = udp_test_key();
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let mut entry = cached_entry();
+    entry.key = key;
+    run_stage_seeded(
+        fixture,
+        frame,
+        udp_test_meta(frame),
+        entry,
+        0,
+        StageSeed {
+            session: Some((1_000_000, PROTO_UDP, 0)),
+            flow: Some(flow),
+            ..StageSeed::default()
+        },
+    )
+}
+
+fn assert_oversized_cache_hit_uses_pending_egress_11376(run: &StageRun) {
+    assert_eq!(
+        run.flow_cache_tallies.0, 1,
+        "the packet must exercise a flow-cache hit"
+    );
+    assert!(
+        run.tx_pipeline.pending_tx_prepared.is_empty(),
+        "oversized cache-hit packet must not be rewritten inline"
+    );
+    assert_eq!(
+        run.scratch.scratch_forwards.len(),
+        1,
+        "oversized packet must enter the pending-forward egress path"
+    );
+}
+
+#[test]
+fn flow_cache_hit_defers_oversized_udp_to_ptb_path_11376() {
+    let fixture = flow_cache_mtu_fixture_11376();
+    let frame = oversized_udp_v4_frame_11376(1500);
+    let run = run_udp_cache_hit_11376(&fixture, &frame);
+    assert_oversized_cache_hit_uses_pending_egress_11376(&run);
+}
+
+#[test]
+fn flow_cache_hit_defers_oversized_tcp_to_segmentation_path_11376() {
+    let fixture = flow_cache_mtu_fixture_11376();
+    let frame = oversized_tcp_v4_frame_11376(1500, false);
+    let run = run_stage(&fixture, &frame, 0);
+    assert_oversized_cache_hit_uses_pending_egress_11376(&run);
 }

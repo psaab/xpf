@@ -50,6 +50,7 @@ func TestPolicyReservedChainSuffixRejected(t *testing.T) {
 // exact suffix — a name merely CONTAINING "chain" is fine.
 func TestPolicyReservedChainNormalNameAccepted(t *testing.T) {
 	tree := buildTreeFromSet(t, []string{
+		"set routing-options autonomous-system 65000",
 		"set policy-options policy-statement BLOCK-PRIVATE term t1 from protocol direct",
 		"set policy-options policy-statement BLOCK-PRIVATE term t1 then reject",
 		"set policy-options policy-statement ALLOW-CUSTOMER term t1 then accept",

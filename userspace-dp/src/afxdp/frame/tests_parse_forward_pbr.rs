@@ -740,6 +740,52 @@ fn pbr_routing_instance_accept_still_forwards_no_regression() {
     }
 }
 
+#[test]
+fn pbr_routing_instance_default_targets_main_table_11308() {
+    let mut snapshot = native_gre_pbr_action_snapshot("");
+    snapshot.filters[0].terms[0].routing_instance = "default".to_string();
+    let filter_v6 = snapshot
+        .filters
+        .iter_mut()
+        .find(|filter| filter.family == "inet6")
+        .expect("fixture includes an inet6 PBR filter");
+    filter_v6.terms[0].routing_instance = "default".to_string();
+    let state = build_forwarding_state(&snapshot);
+
+    let v4 = ingress_route_table_override(
+        &state,
+        &[],
+        pbr_v4_meta(),
+        &pbr_v4_flow(),
+        None,
+        None,
+        0,
+        None,
+    );
+    let RouteOverride::Table { table, domain, check } = v4 else {
+        panic!("default routing-instance PBR must steer v4 into the main table");
+    };
+    assert_eq!(table, "inet.0");
+    assert_eq!(domain, 0, "the main table has the default routing domain");
+    assert_eq!(check, 0, "the main table has no per-instance table check");
+
+    let v6 = ingress_route_table_override(
+        &state,
+        &[],
+        pbr_v6_meta(),
+        &pbr_v6_flow(),
+        None,
+        None,
+        0,
+        None,
+    );
+    let RouteOverride::Table { table, domain, check } = v6 else {
+        panic!("default routing-instance PBR must steer v6 into the main table");
+    };
+    assert_eq!(table, "inet6.0");
+    assert_eq!(domain, 0, "the main table has the default routing domain");
+    assert_eq!(check, 0, "the main table has no per-instance table check");
+}
 
 #[test]
 fn pbr_routing_instance_reject_synthesizes_reply_on_session_miss() {

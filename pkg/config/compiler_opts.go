@@ -308,6 +308,12 @@ type compileOpts struct {
 	// preserves the fail-SAFE posture on that boot. Same doctrine as
 	// lenientIPsecPolicyProposalRef.
 	lenientSchedulerMapRef bool
+	// lenientSchedulerWindowPairs11358 downgrades conflicting repeated
+	// start-time/stop-time boundaries within one scheduler day from a strict
+	// compile error to a warning on tolerant load / peer-sync paths. The typed
+	// scheduler model has one window per day, so silently accepting conflicting
+	// boundaries loses authored scheduling semantics (#11358).
+	lenientSchedulerWindowPairs11358 bool
 
 	// lenientCoSInterfaceRefs (#7337) downgrades the class-of-service
 	// INTERFACE-side reference check
@@ -968,13 +974,11 @@ type compileOpts struct {
 	// firewall-filter `then` action gate (validateFilterActionsStrict) from a
 	// hard compile error to a cfg.Warnings entry. The strict commit /
 	// commit-check path hard-rejects a term whose `then` block carries a token
-	// that is neither a recognized terminating action (accept/reject/discard)
-	// nor a recognized modifier. Before this gate such a token was silently
-	// DROPPED at compile, leaving Action == "" which the dataplane compiler and
-	// the Rust filter both map to ACCEPT (a fail-open permit). The tolerant
-	// load / peer-sync paths downgrade to a warning so an already-persisted or
-	// peer-synced config carrying an unknown action still BOOTS (#1960
-	// no-brick). Same doctrine as lenientFilterProtocols.
+	// that is neither a recognized terminating action nor a recognized
+	// modifier. The compiler retains that token in UnknownActions and sets the
+	// typed action to `discard`, so the tolerant load / peer-sync paths warn
+	// without bricking startup while the resulting term fails closed instead
+	// of falling through to the implicit accept (#1960 no-brick).
 	lenientFilterActions bool
 	// lenientFilterMatchValues (#3205, agy-070 #07/#08) downgrades the
 	// firewall-filter symbolic-match-value gate (validateFilterMatchValuesStrict)
@@ -1931,6 +1935,10 @@ type compileOpts struct {
 	// and a leniently-loaded bad neighbor is inert. Same doctrine as
 	// lenientRoutingExportRef.
 	lenientBGPNeighborPeerAS bool
+	// lenientBGPRouterAS (#11313) downgrades missing process-AS validation
+	// from a commit error to a warning on tolerant load / peer-sync. The FRR
+	// renderer omits the entire router BGP stanza when LocalAS is zero.
+	lenientBGPRouterAS bool
 
 	// lenientBGPDuplicateNeighbor (#9007) downgrades the duplicate BGP
 	// neighbor gate (validateBGPDuplicateNeighborStrict) from a hard compile
@@ -2395,6 +2403,10 @@ type compileOpts struct {
 	// binary silently accepted still BOOTS (#1960). Same doctrine as
 	// lenientPolicyThenReject.
 	lenientPolicyThenDeny bool
+	// lenientPolicyThenCountAlarm (#11342) downgrades an inert `then count
+	// alarm` threshold subtree to a cfg.Warnings entry on tolerant ingress.
+	// The compiler enables counting but does not implement alarm thresholds.
+	lenientPolicyThenCountAlarm bool
 	// lenientPolicyThenSiblings (#11013/#11023) downgrades unsupported
 	// security-policy `then` siblings and unknown `then log` modes to warnings
 	// on tolerant ingress. The compiler drops both forms, so compilePolicy
@@ -2823,6 +2835,10 @@ type compileOpts struct {
 	// leaves the device unbound, and records alarm/metric evidence while
 	// preserving unaffected units from a bare member.
 	lenientRIDualClaim11060 bool
+	// lenientRIMgmtMember11392 warns about management-class RI list members on
+	// tolerant load/peer-sync so existing configs still boot. Strict commit
+	// rejects these members because fxp*/fab*/em* are owned by vrf-mgmt.
+	lenientRIMgmtMember11392 bool
 	// lenientRoutingInstanceType9814 (#9814) downgrades the routing-instance
 	// instance-type value-domain gate (validateRoutingInstanceTypeStrict9814)
 	// from a hard compile error to a cfg.Warnings entry. A mistyped or
@@ -2992,6 +3008,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecPolicyProposalRef:          true,
 		lenientPolicySchedulerRef:              true,
 		lenientSchedulerMapRef:                 true,
+		lenientSchedulerWindowPairs11358:       true,
 		lenientCoSInterfaceRefs:                true,
 		lenientCoSLossPriority:                 true,
 		lenientCoSUnitClassifierConflict:       true,
@@ -3096,6 +3113,7 @@ func lenientCompileOpts() compileOpts {
 		lenientHelperStateFile:                 true,
 		lenientAddressBookNameCollision:        true,
 		lenientRIDualClaim11060:                true,
+		lenientRIMgmtMember11392:               true,
 		lenientZoneInterfaceMembership:         true,
 		lenientFabricZoneRoutingInstance:       true,
 		lenientZoneInterfaceDefined:            true,
@@ -3112,6 +3130,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRPMHTTPGetScheme:                true,
 		lenientRPMRoutingInstance:              true,
 		lenientBGPNeighborPeerAS:               true,
+		lenientBGPRouterAS:                     true,
 		lenientBGPDuplicateNeighbor:            true,
 		lenientBGPNeighborAddress:              true,
 		lenientRouterID:                        true,
@@ -3145,6 +3164,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyThenPermit:                true,
 		lenientPolicyThenReject:                true,
 		lenientPolicyThenDeny:                  true,
+		lenientPolicyThenCountAlarm:            true,
 		lenientPolicyThenSiblings:              true,
 		lenientPolicyEnforcementSubtrees:       true,
 		lenientPolicyMissingMatch:              true,
