@@ -73,12 +73,12 @@ func TestMgmtVRFClasslessControlFabricConnectedPrefixesFenced11362(t *testing.T)
 	got := replacedDestinations9943(fake.replaced)
 	for _, dst := range []string{"10.77.0.42/32", "10.78.0.42/32", "10.79.0.42/32"} {
 		if got[dst] != 0 {
-			t.Errorf("option-121 route %s inside a control/fabric connected prefix reached RouteReplace: %v", dst, got)
+			t.Errorf("option-121 route %s inside a cluster control/fabric connected prefix reached RouteReplace: %v", dst, got)
 		}
 	}
 	for _, dst := range []string{"192.0.2.42/32", "10.0.0.0/8", "172.16.0.0/16"} {
 		if got[dst] != 1 {
-			t.Errorf("safe option-121 route %s must install exactly once: %v", dst, got)
+			t.Errorf("trust override or safe option-121 route %s must install exactly once: %v", dst, got)
 		}
 	}
 	for _, want := range []string{
@@ -89,6 +89,9 @@ func TestMgmtVRFClasslessControlFabricConnectedPrefixesFenced11362(t *testing.T)
 		"connected_prefix=10.78.0.0/24",
 		"control_interface=fab1",
 		"connected_prefix=10.79.0.0/24",
+		"trust override allows a route inside a connected subnet (#11383)",
+		"connected_prefix=192.0.2.0/24",
+		"env=" + dhcpClasslessTrustOverrideEnv,
 	} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("suppression alarm missing %q: %s", want, logs.String())

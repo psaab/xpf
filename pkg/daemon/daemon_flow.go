@@ -449,6 +449,7 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 	needsControlFabricInventory := mgmtVRFNeedsControlFabricInventory(leases, mgmtSet)
 	var operatorV4, operatorV6 []netlink.Route
 	var controlConnectedV4, controlConnectedV6 []netlink.Route
+	var connectedPrefixesV4, connectedPrefixesV6 []netip.Prefix
 	var operatorInventoryErr, controlFabricInventoryErr error
 	var controlFabricInterfaces []string
 	var controlFabricLinks map[int]string
@@ -466,10 +467,10 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 		}
 	}
 	if needsInventory {
-		operatorV4, controlConnectedV4, operatorInventoryErr =
+		operatorV4, controlConnectedV4, connectedPrefixesV4, operatorInventoryErr =
 			mgmtVRFRouteInventory(nlh, netlink.FAMILY_V4, controlFabricLinks)
 		if operatorInventoryErr == nil {
-			operatorV6, controlConnectedV6, operatorInventoryErr =
+			operatorV6, controlConnectedV6, connectedPrefixesV6, operatorInventoryErr =
 				mgmtVRFRouteInventory(nlh, netlink.FAMILY_V6, controlFabricLinks)
 		}
 		if operatorInventoryErr != nil {
@@ -647,6 +648,28 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 					"control_interface", controlFabricLinks[route.LinkIndex],
 					"connected_prefix", connectedPrefix, "table", mgmtVRFTableID)
 				continue
+			}
+			// The cluster control/fabric fence above never yields to this
+			// override; ordinary management connected overlaps use the same
+			// trust hatch as non-management DHCP routes (#10762).
+			connectedPrefixes := connectedPrefixesV4
+			if nlFamily == netlink.FAMILY_V6 {
+				connectedPrefixes = connectedPrefixesV6
+			}
+			if connectedPrefix := dhcpConnectedCoveringPrefix(connectedPrefixes, cr.Destination); connectedPrefix.IsValid() {
+				if trustClassless {
+					slog.Warn("SECURITY: DHCP classless trust override allows a route "+
+						"inside a connected subnet (#11383)",
+						"interface", lease.Interface, "destination", cr.Destination,
+						"connected_prefix", connectedPrefix, "env", dhcpClasslessTrustOverrideEnv,
+						"table", mgmtVRFTableID)
+				} else {
+					slog.Warn("SECURITY: suppressing management-VRF DHCP classless route "+
+						"inside a connected subnet (#11383)",
+						"interface", lease.Interface, "destination", cr.Destination,
+						"connected_prefix", connectedPrefix, "table", mgmtVRFTableID)
+					continue
+				}
 			}
 			safetyReason := mgmtClasslessPrefixSafetyFailure(cr.Destination)
 			staticDestination := ""
