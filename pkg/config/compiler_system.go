@@ -1032,10 +1032,11 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 	}
 
 	// #4306 S-5: make the grouped `system` inert knobs (login banner/retry,
-	// ntp boot-server/authentication-key/source-address, internet-options
-	// extras, ssh rate-limit) loud instead of a silent no-op.
+	// NTP boot-server/authentication-key/source-address/per-server
+	// routing-instance, internet-options extras, ssh rate-limit) loud instead
+	// of a silent no-op.
 	if cfg != nil {
-		cfg.Warnings = append(cfg.Warnings, systemInertKnobWarnings(node)...)
+		cfg.Warnings = append(cfg.Warnings, systemInertKnobWarnings(node, sys)...)
 	}
 
 	return nil
@@ -2520,10 +2521,11 @@ func snmpInertKnobWarnings(node *Node) []string {
 
 // systemInertKnobWarnings emits accept-with-advisory notes for the grouped
 // `system` knobs that commit clean but do nothing (#4306 S-5): login banners /
-// retry-options, NTP boot-server / authentication-key / source-address, and
-// `internet-options` leaves beyond the one xpf models. Messages name the
-// keyword only — never a leaf value (the NTP authentication-key is a secret).
-func systemInertKnobWarnings(sysNode *Node) []string {
+// retry-options, NTP boot-server / authentication-key / source-address and
+// per-server routing-instance, `internet-options` leaves beyond the one xpf
+// models, and ssh rate-limit. Messages name the keyword only — never a leaf
+// value (the NTP authentication-key is a secret).
+func systemInertKnobWarnings(sysNode *Node, system *SystemConfig) []string {
 	if sysNode == nil {
 		return nil
 	}
@@ -2556,6 +2558,14 @@ func systemInertKnobWarnings(sysNode *Node) []string {
 		}
 		if ntp.FindChild("source-address") != nil {
 			add("system ntp source-address: accepted but NOT bound (NTP uses the default source IP)")
+		}
+	}
+	if system != nil {
+		for _, option := range system.NTPServerOptions {
+			if option.RoutingInstance != "" {
+				add("system ntp server routing-instance: accepted but NOT enforced (NTP sources assigned to a routing-instance are queried through the default instance)")
+				break
+			}
 		}
 	}
 	if io := sysNode.FindChild("internet-options"); io != nil {

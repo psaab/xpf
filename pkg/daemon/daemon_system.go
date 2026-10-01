@@ -751,8 +751,9 @@ func renderChronySources(servers []string, opts map[string]config.NTPServerOptio
 		// #7132: per-server modifiers. Before #7132 these were absorbed into the
 		// address list as if they were extra servers, so `prefer` reached this
 		// function AS A SERVER NAME and was rendered as its own source line.
-		// `version`/`key` take chrony's own spellings; `routing-instance` has no
-		// chrony equivalent and is recorded in the typed config only.
+		// `version`/`key` take chrony's own spellings. `routing-instance` has no
+		// chrony equivalent; the compiler retains it in typed config and emits
+		// a commit advisory rather than silently applying it here.
 		opt := opts[server]
 		line := fmt.Sprintf("%s %s iburst", directive, server)
 		if opt.Version > 0 {
