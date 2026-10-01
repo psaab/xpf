@@ -8655,6 +8655,31 @@ covered by `pkg/config/compiler_scheduler_block_merge_5825_test.go` (two-block d
 merge, hierarchical==flat parity, across-roots merge, daily+weekday compose,
 single-block unchanged).
 
+### Repeated scheduler day-window boundaries are diagnosed (#11358)
+
+The compiled scheduler model carries one daily window and one window per
+weekday. Conflicting repeated `start-time` or `stop-time` values within the
+same effective day would require a multiple-window representation or a rule
+for combining competing boundaries. xpf stores one window per day; later
+definitions may replace earlier scalar boundary values or an entire weekday
+window. Weekday windows are assigned as whole values, not merged field by
+field. Whether Junos supports multiple window pairs is unresolved, so xpf does
+not claim conflicting repeats as a supported multiple-window representation:
+
+- Strict compilation rejects conflicting repeated time boundaries in the same
+  scheduler day window.
+- Tolerant load / peer-sync compilation warns and continues with the existing
+  single-window compiler behavior, without claiming to preserve multiple
+  windows.
+- Repeated identical boundary values are accepted because they do not lose a
+  distinct value. Separate weekday windows remain valid.
+
+The validator checks the node0 and node1 effective group expansions before
+node-local compilation, so `apply-groups "${node}"` cannot hide a peer-only
+repeated window from strict commit validation. It covers `daily`, weekday, and
+legacy direct daily leaves. Regression coverage:
+`pkg/config/compiler_scheduler_window_pairs_11358_test.go`.
+
 ### Quoted-value escape round-trip contract (#3854)
 
 When a key or value is not safe to emit bare (see the next section for the
@@ -13479,6 +13504,21 @@ on `FilterAction::Reject` today, so the type is compile-time-only (no wire
 field); and `then next term` / `then next` (explicit fall-through) commits as
 a no-op, marked `FirewallFilterTerm.NextTerm`. A token after `reject` that is
 NOT a known message-type is still a typo and IS flagged.
+
+**(11355) Flat-set action tails after `next term` / `reject <type>` were
+silently dropped.** `SetPath` can nest recognized actions beneath `next` (not a
+declared schema child) or beneath the reject-message-type node, where the
+direct-child action walk missed them. `compileFilterThen` now feeds these tails
+back through the same action parser. Recognized modifiers populate their typed
+fields, so existing validation catches contradictions such as routing-instance
+with next-term/reject. The nested `count c1` in `reject tcp-reset count c1`
+remains effective. Unknown tails continue through `UnknownActions` and
+trigger strict rejection or tolerant warning. Flat-set and packed-line forms
+share these results. Bare `next term` and a single known reject message type
+remain valid. Regression coverage:
+`pkg/config/compiler_filter_action_test.go`
+(`TestFilterAction_TailsAreConsistentAcrossFlatAndPacked11355`,
+`TestFilterAction_HierarchicalNestedRejectTailPreservesCount11355`).
 Defense-in-depth in the Rust filter: a NON-EMPTY unrecognized action (only
 reachable via a mixed-version snapshot now that commit rejects it) fails
 CLOSED to `Discard`, never `Accept`; the empty string keeps the

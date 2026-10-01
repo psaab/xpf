@@ -237,6 +237,8 @@ fn all_tcp_clamps_plain_forwarded_ipv6_syn() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let built = build_forwarded_frame_from_frame(&frame, meta, &decision, &forwarding, false, None)
         .expect("plain forward v6 build");
@@ -701,6 +703,8 @@ fn all_tcp_clamps_in_place_v6_syn_9954() {
             neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,

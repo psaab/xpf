@@ -298,13 +298,11 @@ fn unique_established_ri_snat_reply_is_admitted_without_stamp_11061() {
             interface.routing_domain = tenant_domain;
         }
     }
-    snapshot.routes.push(RouteSnapshot {
-        table: "tenant-a.inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: "0.0.0.0/0".to_string(),
-        next_hops: vec!["172.16.80.1@reth0.80".to_string()],
-        ..Default::default()
-    });
+    snapshot.routes.push(RouteSnapshot { table: "tenant-a.inet.0".to_string(),
+    family: "inet".to_string(),
+    destination: "0.0.0.0/0".to_string(),
+    next_hops: vec!["172.16.80.1@reth0.80".to_string()],
+    mtu: 0, ..Default::default() });
     let forwarding = build_forwarding_state(&snapshot);
     assert!(forwarding.has_routing_domains);
     assert!(!forwarding.ambiguous_fabric_zone_ids.contains(&TEST_LAN_ZONE_ID));
@@ -334,6 +332,8 @@ fn unique_established_ri_snat_reply_is_admitted_without_stamp_11061() {
             neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat,
         install_table_domain: tenant_domain,
@@ -2114,6 +2114,8 @@ fn a_fabric_punted_packet_keeps_the_entrys_ingress_zone_9384() {
                     neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
                     src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                     tx_vlan_id: 80,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
                 },
                 nat: NatDecision::default(),
                 install_table_domain: 0,
@@ -2478,6 +2480,8 @@ fn foreign_fabric_stamp_cannot_serve_reverse_cache_10670() {
             neighbor_mac: Some([0x00, 0x22, 0x33, 0x44, 0x55, 0x66]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -2915,6 +2919,8 @@ fn unstamped_parent_session_hit_not_redirected_10314() {
             neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
             tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -3181,6 +3187,8 @@ fn flowless_icmp_error_pbr_discard_on_quarantine_counts_11061() {
                 neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
                 src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
                 tx_vlan_id: 80,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision {
                 rewrite_src: Some(IpAddr::V4(snat_ip)),

@@ -78,11 +78,11 @@ func TestBuildRouteSnapshotsSkipsPBRBandRule(t *testing.T) {
 }
 
 // TestBuildRouteSnapshotsIngestsRouteLeakBandRule pins the no-regression half:
-// a genuine per-prefix route-leak-band ip rule (next-table band, priority
-// config.NextTableRulePriorityBase) with a Dst matching a routing-instance
-// table is STILL ingested as a NextTable leak. These rules carry a pure
-// per-prefix Dst with no selectors, so mirroring them into the userspace FIB
-// is correct — the PBR-band skip must not touch next-table / rib-group rules.
+// a genuine per-prefix route-leak rule with a prefix-derived next-table
+// priority and a Dst matching a routing-instance table is STILL ingested as a
+// NextTable leak. These rules carry a pure per-prefix Dst with no selectors, so
+// mirroring them into the userspace FIB is correct — the PBR-band skip must not
+// touch next-table / rib-group rules.
 func TestBuildRouteSnapshotsIngestsRouteLeakBandRule(t *testing.T) {
 	orig := ruleListFn
 	t.Cleanup(func() { ruleListFn = orig })
@@ -92,10 +92,11 @@ func TestBuildRouteSnapshotsIngestsRouteLeakBandRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantPriority := config.RouteLeakRulePriority(24, 32, config.RouteLeakNextTable)
 	ruleListFn = func(family int) ([]netlink.Rule, error) {
 		if family == syscall.AF_INET {
-			// Next-table leak band: pure per-prefix Dst, no selectors.
-			return []netlink.Rule{{Priority: config.NextTableRulePriorityBase, Dst: dst, Table: tableID}}, nil
+			// Next-table leak rule: pure per-prefix Dst, no selectors.
+			return []netlink.Rule{{Priority: wantPriority, Dst: dst, Table: tableID}}, nil
 		}
 		return nil, nil
 	}

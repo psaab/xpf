@@ -5,32 +5,24 @@ import (
 	"strings"
 )
 
-// maxNextTableRules and maxRibGroupLeakRules mirror the FIXED ip-rule priority
-// windows the runtime applier (pkg/routing/rules.go) programs next-table and
-// interface-routes rib-group leaks into. The applier HARD-CAPS at each window
-// boundary and skips any rule past it, so a config that exceeds a window has
-// the excess routes silently dropped at apply time (#5854):
+// maxNextTableRules and maxRibGroupLeakRules mirror the admission caps in
+// pkg/routing/rules.go. Both rule kinds use the same destination-leak priority
+// range, whose priorities are assigned by descending prefix length; these
+// limits instead bound how many rules each manager installs:
 //
-//   - next-table: [NextTableRulePriorityBase, +NextTableRuleWindow) — a
-//     100-rule window that clear() scans (pkg/routing/rules.go, the
-//     `prio >= nextTableRulePriority+maxNextTableRules` cap). maxNextTableRules
-//     derives from the exported NextTableRuleWindow SSOT (types_system.go) so
-//     the commit gate here, the runtime applier, AND the userspace FIB mirror
-//     (pkg/dataplane/userspace/routes.go) share one window value (#6467) —
-//     no lockstep drift possible. Since #9420 each leak costs one slot per
-//     default-instance ingress interface (#9810), so the LEAK capacity is
-//     floor(window/N), not window leaks.
-//   - rib-group:  [ribGroupLeakRulePriority, +maxRibGroupLeakRules) — a
-//     1000-rule window (pkg/routing/rules.go const maxRibGroupLeakRules = 1000,
-//     the `prio >= ribGroupLeakRulePriority+maxRibGroupLeakRules` cap). This
-//     window is NOT shared with the userspace FIB, so it stays duplicated here
-//     and MUST stay in lockstep with pkg/routing/rules.go.
+//   - next-table: NextTableRuleWindow entries. Each leak costs one rule per
+//     default-instance ingress interface (#9420), so the eligible route count
+//     is floor(window/N), with N from the shared resolver (#9810).
+//   - rib-group:  maxRibGroupLeakRules connected-prefix rules.
+//
+// The shared [NextTableRulePriorityBase, +RouteLeakRulePriorityWindow) range
+// is wide enough for IPv6 prefixes and is independent of either admission cap.
 //
 // pkg/config CANNOT import pkg/routing — pkg/routing already imports pkg/config,
 // so the reverse edge would be an import cycle. maxRibGroupLeakRules is
 // therefore duplicated here and MUST stay in lockstep with pkg/routing/rules.go:
-// if that window size changes there, change it here too or the commit-time gate
-// and the runtime applier disagree on what fits.
+// if that cap changes there, change it here too or the commit-time gate and
+// runtime applier disagree on what fits.
 const (
 	maxNextTableRules    = NextTableRuleWindow
 	maxRibGroupLeakRules = 1000
@@ -38,9 +30,9 @@ const (
 
 // nextTableRouteCount counts the static routes (global inet + inet6) that carry
 // a next-table VRF-leak target. Since #9420 the applier
-// (pkg/routing.nextTableManager) feeds each of these into its ip-rule window
+// (pkg/routing.nextTableManager) feeds each of these into its admission cap
 // once per default-instance ingress interface — one RULE per (leak, interface),
-// drawn down leak-atomically — so the window cost of a config is this count
+// drawn down leak-atomically — so the cap cost of a config is this count
 // times len(DefaultInstanceIngressIfaces(cfg)) (#9810 SYN-WIN-01).
 
 // The count stays CONSERVATIVE: it includes leaks the applier would skip
@@ -145,31 +137,30 @@ func ribGroupLeakPrefixCount(cfg *Config) int {
 	return n
 }
 
-// validateRoutingRuleWindowsStrict hard-rejects a config that would program
-// more next-table or interface-routes rib-group ip rules than the runtime's
-// FIXED priority windows can hold (#5854).
+// validateRoutingRuleWindowsStrict hard-rejects a config that would exceed the
+// next-table or interface-routes rib-group admission caps (#5854).
 //
-// The applier programs next-table leaks into a 100-rule window at one slot per
-// default-instance ingress interface per leak (#9810), and rib-group
-// connected-prefix leaks into a 1000-rule window (pkg/routing/rules.go), and
-// HARD-CAPS at each boundary — a route beyond the window is never installed. So
-// a config that exceeds a window commits green but the reconciler silently
-// stops at the limit and returns success: the committed generation CLAIMS
-// routes the kernel never programs. The result is a blackhole / asymmetric
-// routing / silent inter-VRF leak loss with no operator-visible signal, because
-// the truncation was previously only a WARNING (ValidateConfig, the pre-#5854
-// warn-only path).
+// The applier admits up to 100 next-table rules, one per default-instance
+// ingress interface per leak (#9810), and 1000 rib-group connected-prefix
+// rules (pkg/routing/rules.go). Priorities for both kinds are assigned
+// independently from the shared prefix-derived range. A route beyond an
+// admission cap is never installed, so a config that exceeds a cap used to
+// commit green while the reconciler silently stopped at the limit and returned
+// success: the committed generation CLAIMED routes the kernel never programs.
+// The result is a blackhole / asymmetric routing / silent inter-VRF leak loss
+// with no operator-visible signal, because truncation was previously only a
+// WARNING (ValidateConfig, the pre-#5854 warn-only path).
 //
-// This gate makes the over-subscription an operator-visible COMMIT ERROR on the
+// This gate makes over-subscription an operator-visible COMMIT ERROR on the
 // strict path (CompileConfig — interactive / gRPC commit + commit-check). The
-// call site (runUniformGates) downgrades it to a WARNING on the tolerant
-// load / peer-sync paths (opts.lenientRoutingRuleWindows) so an ALREADY-
-// committed or peer-synced generation that predates this rejection still boots
-// (#1960 fail-closed-on-load class) — the applier's window hard-cap keeps the
-// excess inert, exactly matching the post-fix runtime behaviour. Next-table is
-// reported before rib-group so the first-reported error is deterministic.
+// call site (runUniformGates) downgrades it to a WARNING on tolerant load /
+// peer-sync paths (opts.lenientRoutingRuleWindows) so an ALREADY-committed or
+// peer-synced generation that predates this rejection still boots (#1960
+// fail-closed-on-load class); the applier's admission caps keep excess rules
+// inert. Next-table is reported before rib-group so the first-reported error is
+// deterministic.
 //
-// The window sizes come from maxNextTableRules / maxRibGroupLeakRules, which are
+// The cap sizes come from maxNextTableRules / maxRibGroupLeakRules, which are
 // kept in lockstep with pkg/routing/rules.go (pkg/config cannot import
 // pkg/routing — see the const block above).
 func validateRoutingRuleWindowsStrict(cfg *Config) error {
@@ -177,9 +168,9 @@ func validateRoutingRuleWindowsStrict(cfg *Config) error {
 		return nil
 	}
 	if n := nextTableRouteCount(cfg); n > 0 {
-		// #9810 SYN-WIN-01: each leak costs one ip-rule slot per default-instance
+		// #9810 SYN-WIN-01: each leak costs one ip-rule entry per default-instance
 		// ingress interface (per-ingress rules since #9420), drawn down
-		// leak-atomically: what fits is floor(window/N) LEAKS, with N from the
+		// leak-atomically: what fits is floor(cap/N) LEAKS, with N from the
 		// shared resolver the applier consumes.
 		ingress := len(DefaultInstanceIngressIfaces(cfg))
 		if ingress == 0 {
@@ -202,8 +193,8 @@ func validateRoutingRuleWindowsStrict(cfg *Config) error {
 				"routing-options: %d static routes use next-table, but only %d can be "+
 					"programmed as kernel ip rules with %d default-instance ingress "+
 					"interfaces (each leak costs one rule per ingress interface: %d "+
-					"slots of the %d-rule window); routes beyond the limit would be "+
-					"dropped at apply time (the committed routes are not "+
+					"entries of the %d-rule admission cap); routes beyond the limit "+
+					"would be dropped at apply time (the committed routes are not "+
 					"programmed — blackhole / asymmetric routing). Reduce the number of "+
 					"next-table routes to at most %d.",
 				n, capacity, ingress, n*ingress, maxNextTableRules, capacity)

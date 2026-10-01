@@ -1,4 +1,4 @@
-//! #9955 — the kernel two-stage leak-resolution contract.
+//! #9955/#11396 — kernel leak-resolution priority contract.
 //!
 //! `next-table` / rib-group leaks are kernel policy-routing rules, not
 //! ordinary routes in one shared userspace LPM list:
@@ -7,16 +7,16 @@
 //!   * a target-table miss falls through to the next rule;
 //!   * stage 2 performs ordinary per-table longest-prefix matching.
 //!
-//! The Go snapshot producer carries the kernel priority through
-//! `RouteSnapshot.rule_priority`. The Rust builder partitions next-table rows
+//! The Go producer assigns both leak kinds priorities from the same
+//! prefix-derived range, so a more-specific destination precedes a broader
+//! leak regardless of source kind. The Rust builder partitions next-table rows
 //! into a priority-ordered leak index and leaves only ordinary routes in each
 //! table's LPM list. The target lookup runs stage 2 without restarting stage 1
 //! from the selected table.
 //!
-//! These tests are fail-on-revert guards for all three measured divergences:
-//! overlapping leak order, leak-versus-ordinary precedence, and fall-through
-//! when a selected target table is empty. The generated cross-language corpus
-//! adds IPv4/IPv6 coverage for the same oracle.
+//! These tests guard overlapping leak order, leak-versus-ordinary precedence,
+//! and fall-through when a selected target table is empty. The generated
+//! cross-language corpus adds IPv4/IPv6 and both declaration-order coverage.
 
 use super::super::forwarding_build::*;
 use super::*;
@@ -27,14 +27,12 @@ use crate::{
 use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr};
 
-/// One leak the operator authored: a prefix, the kernel rule priority it was
-/// installed at, and the table it redirects into.
+/// One leak the operator authored: a prefix, its kernel rule priority, and the
+/// table it redirects into.
 #[derive(Clone, Copy, Debug)]
 struct Leak {
     prefix_len: u8,
-    /// Xpf uses the next-table band at 32000-32099 and the rib-group per-prefix
-    /// band at 30000-30999, so rib-group rules precede next-table rules
-    /// regardless of prefix length.
+    /// The producer derives this from prefix length and leak kind.
     rule_priority: u32,
     /// Distinguishes which leak won: each target table routes the probe out a
     /// different ifindex.
@@ -48,9 +46,24 @@ struct Leak {
     subnet: u8,
 }
 
+#[derive(Clone, Copy)]
+enum LeakKind {
+    NextTable,
+    RibGroup,
+}
+
 const PROBE: Ipv4Addr = Ipv4Addr::new(10, 1, 2, 5);
-const NEXT_TABLE_RULE_PRIORITY: u32 = 32_000;
-const RIB_GROUP_RULE_PRIORITY: u32 = 30_000;
+const ROUTE_LEAK_PRIORITY_BASE: u32 = 30_000;
+
+fn leak_priority(prefix_len: u8, address_bits: u8, kind: LeakKind) -> u32 {
+    let kind_offset = match kind {
+        LeakKind::NextTable => 0,
+        LeakKind::RibGroup => 1,
+    };
+    ROUTE_LEAK_PRIORITY_BASE
+        + 2 * (u32::from(address_bits) - u32::from(prefix_len))
+        + kind_offset
+}
 
 fn prefix_containing_probe(len: u8) -> String {
     // Every prefix below contains PROBE, which is what makes the shapes
@@ -79,6 +92,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             next_table: format!("{}.inet.0", leak.target),
             preference: 0,
             rule_priority: leak.rule_priority,
+            mtu: 0,
         });
         // A route in the target table so the recursion resolves to something
         // distinguishable.
@@ -95,6 +109,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             next_table: String::new(),
             preference: 0,
             rule_priority: 0,
+            mtu: 0,
         });
     }
 
@@ -147,9 +162,9 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
 }
 
 /// What the KERNEL would pick: the lowest-numbered rule priority whose prefix
-/// contains the probe. Every generated prefix contains the probe by
-/// construction, so this reduces to "the lowest priority", which is exactly why
-/// prefix length is irrelevant on that side.
+/// contains the probe. The producer's shared mapping encodes prefix specificity
+/// in that priority, so this is the kernel's longest-prefix order across leak
+/// kinds.
 fn kernel_choice(leaks: &[Leak]) -> &'static str {
     leaks
         .iter()
@@ -181,36 +196,30 @@ fn helper_choice(leaks: &[Leak]) -> Option<&'static str> {
         .map(|l| l.target)
 }
 
-/// THE DIFFERENTIAL. Generated over both orderings of (prefix length, priority)
-/// so the two axes are separated: a shape where the more specific prefix is ALSO
-/// the higher-priority rule cannot distinguish the algorithms, and a shape where
-/// they disagree is the only one that can.
+/// THE DIFFERENTIAL. For each nested prefix pair, test both assignments of
+/// next-table and rib-group kind. Prefix-derived priorities must make the
+/// narrower leak win either way.
 #[test]
 fn leak_overlap_resolution_matches_the_kernel_9955() {
-    // Current bands from pkg/routing/rules.go: rib-group precedes next-table.
-    const NEXT_TABLE_PRIO: u32 = NEXT_TABLE_RULE_PRIORITY;
-    const RIB_GROUP_PRIO: u32 = RIB_GROUP_RULE_PRIORITY;
-
     let mut divergences = Vec::new();
     let mut agreements = 0usize;
     let mut checked = 0usize;
 
     for &(short_len, long_len) in &[(8u8, 24u8), (8, 16), (16, 24), (12, 28), (8, 32)] {
-        // Both priority/prefix arrangements are exercised. The current
-        // production order is the second: the broader rib-group rule wins over
-        // a more-specific next-table rule, independent of prefix length.
-        for &(short_prio, long_prio, label) in &[
+        for &(short_kind, long_kind, label) in &[
             (
-                NEXT_TABLE_PRIO,
-                RIB_GROUP_PRIO,
+                LeakKind::NextTable,
+                LeakKind::RibGroup,
                 "broad next-table + specific rib-group",
             ),
             (
-                RIB_GROUP_PRIO,
-                NEXT_TABLE_PRIO,
+                LeakKind::RibGroup,
+                LeakKind::NextTable,
                 "broad rib-group + specific next-table",
             ),
         ] {
+            let short_prio = leak_priority(short_len, 32, short_kind);
+            let long_prio = leak_priority(long_len, 32, long_kind);
             let leaks = [
                 Leak {
                     prefix_len: short_len,
@@ -254,7 +263,7 @@ fn leak_overlap_resolution_matches_the_kernel_9955() {
 fn leak_versus_ordinary_route_in_the_same_table_9955() {
     let leak = Leak {
         prefix_len: 8,
-        rule_priority: NEXT_TABLE_RULE_PRIORITY,
+        rule_priority: leak_priority(8, 32, LeakKind::NextTable),
         target: "red",
         egress_ifindex: 12,
         subnet: 50,
@@ -272,6 +281,7 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
@@ -328,7 +338,7 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
     // the assertion caught a cell that could not detect its own defect.)
     let leak = Leak {
         prefix_len: 24,
-        rule_priority: NEXT_TABLE_RULE_PRIORITY,
+        rule_priority: leak_priority(24, 32, LeakKind::NextTable),
         target: "red",
         egress_ifindex: 12,
         subnet: 50,
@@ -347,6 +357,7 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "ge-0/0/14.50".to_string(),
@@ -395,7 +406,7 @@ fn a_single_leak_resolves_the_same_either_way_9955() {
     for &len in &[8u8, 16, 24, 32] {
         let leaks = [Leak {
             prefix_len: len,
-            rule_priority: NEXT_TABLE_RULE_PRIORITY,
+            rule_priority: leak_priority(len, 32, LeakKind::NextTable),
             target: "red",
             egress_ifindex: 12,
             subnet: 50,
@@ -410,37 +421,46 @@ fn a_single_leak_resolves_the_same_either_way_9955() {
     }
 }
 
-/// Pins the current kernel band order against prefix length: a broad rib-group
-/// rule wins over a more-specific next-table rule because stage 1 follows
-/// rule priority rather than the FIB's longest-prefix order.
+/// A more-specific rule must win across both mixed leak-kind arrangements.
 #[test]
-fn the_priority_order_beats_prefix_length_9955() {
-    let leaks = [
-        Leak {
-            prefix_len: 8,
-            rule_priority: RIB_GROUP_RULE_PRIORITY,
-            target: "red",
-            egress_ifindex: 12,
-            subnet: 50,
-        },
-        Leak {
-            prefix_len: 24,
-            rule_priority: NEXT_TABLE_RULE_PRIORITY,
-            target: "blue",
-            egress_ifindex: 13,
-            subnet: 51,
-        },
-    ];
-    assert_eq!(
-        kernel_choice(&leaks),
-        "red",
-        "premise: the kernel takes the lower-numbered rule priority"
-    );
-    assert_eq!(
-        helper_choice(&leaks),
-        Some("red"),
-        "rule priority, not prefix length, must choose the target table"
-    );
+fn more_specific_leak_priority_wins_across_kinds_9955() {
+    for &(broad_kind, narrow_kind, label) in &[
+        (
+            LeakKind::RibGroup,
+            LeakKind::NextTable,
+            "broad rib-group + narrow next-table",
+        ),
+        (
+            LeakKind::NextTable,
+            LeakKind::RibGroup,
+            "broad next-table + narrow rib-group",
+        ),
+    ] {
+        let leaks = [
+            Leak {
+                prefix_len: 8,
+                rule_priority: leak_priority(8, 32, broad_kind),
+                target: "red",
+                egress_ifindex: 12,
+                subnet: 50,
+            },
+            Leak {
+                prefix_len: 24,
+                rule_priority: leak_priority(24, 32, narrow_kind),
+                target: "blue",
+                egress_ifindex: 13,
+                subnet: 51,
+            },
+        ];
+        assert!(
+            leaks[1].rule_priority < leaks[0].rule_priority,
+            "{label}: /24 priority {} must precede /8 priority {}",
+            leaks[1].rule_priority,
+            leaks[0].rule_priority
+        );
+        assert_eq!(kernel_choice(&leaks), "blue", "{label}");
+        assert_eq!(helper_choice(&leaks), Some("blue"), "{label}");
+    }
 }
 #[derive(Debug, Deserialize)]
 struct LeakCorpusRow9955 {
@@ -513,6 +533,36 @@ fn go_leak_corpus_agrees_with_rust_kernel_model_9955() {
         "corpus must include IPv4 cases"
     );
 
+    for name in [
+        "nested_rib_group_overlap_vr_a_first_11396",
+        "nested_rib_group_overlap_vr_b_first_11396",
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("issue #11396 corpus row {name} is missing"));
+        assert_eq!(
+            row.want_ifindex, 13,
+            "{name}: the more-specific VR-B /24 leak must resolve via interface 13"
+        );
+        let broad = row
+            .routes
+            .iter()
+            .find(|route| route.destination == "10.0.0.0/8" && !route.next_table.is_empty())
+            .unwrap_or_else(|| panic!("{name}: broad VR-A leak is missing"));
+        let narrow = row
+            .routes
+            .iter()
+            .find(|route| route.destination == "10.1.2.0/24" && !route.next_table.is_empty())
+            .unwrap_or_else(|| panic!("{name}: narrow VR-B leak is missing"));
+        assert!(
+            narrow.rule_priority < broad.rule_priority,
+            "{name}: /24 priority {} must precede /8 priority {}",
+            narrow.rule_priority,
+            broad.rule_priority
+        );
+    }
+
     for row in rows {
         let destination: IpAddr = row
             .destination
@@ -568,7 +618,8 @@ fn v4_leak_target_preserves_local_delivery_9955() {
             family: "inet".to_string(),
             destination: "10.1.2.0/24".to_string(),
             next_table: "red.inet.0".to_string(),
-            rule_priority: NEXT_TABLE_RULE_PRIORITY,
+            rule_priority: leak_priority(24, 32, LeakKind::NextTable),
+            mtu: 0,
             ..Default::default()
         }],
         ..Default::default()
@@ -597,7 +648,8 @@ fn v4_nat_only_leak_target_preserves_local_delivery_9955() {
             family: "inet".to_string(),
             destination: "203.0.113.0/24".to_string(),
             next_table: "red.inet.0".to_string(),
-            rule_priority: NEXT_TABLE_RULE_PRIORITY,
+            rule_priority: leak_priority(24, 32, LeakKind::NextTable),
+            mtu: 0,
             ..Default::default()
         }],
         ..Default::default()
@@ -645,7 +697,8 @@ fn v6_leak_target_preserves_local_delivery_9955() {
             family: "inet6".to_string(),
             destination: "2001:db8:1::/64".to_string(),
             next_table: "red.inet6.0".to_string(),
-            rule_priority: NEXT_TABLE_RULE_PRIORITY,
+            rule_priority: leak_priority(64, 128, LeakKind::NextTable),
+            mtu: 0,
             ..Default::default()
         }],
         ..Default::default()

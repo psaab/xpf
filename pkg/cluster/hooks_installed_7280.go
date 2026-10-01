@@ -4,7 +4,7 @@ import "time"
 
 // hooks_installed_7280.go — the #7280 observation seam.
 //
-// `Daemon.startClusterComms` installs fourteen wiring assignments into the
+// `Daemon.startClusterComms` installs wiring assignments into the
 // cluster Manager and the SessionSync. #6428 bound the seventeen sites that
 // were already observable and measured that the rest were bound by NOTHING:
 // `go tool cover -func` reported 0.0% statement coverage for every builder
@@ -44,6 +44,7 @@ const (
 	HookLocalTransferCommitRdy  = "LocalTransferCommitReadyHook"
 	HookTransferReadiness       = "TransferReadinessFunc"
 	HookPeerTimeoutGuard        = "PeerTimeoutGuard"
+	HookPeerNeverSeenSyncFresh  = "PeerNeverSeenSyncFreshFunc"
 	HookHeartbeatRestartNotify  = "HeartbeatRestartNotifyFunc"
 	HookPeerFence               = "PeerFenceFunc"
 	HookPeerFenceConfirm        = "PeerFenceConfirmFunc"
@@ -72,6 +73,7 @@ func (m *Manager) InstalledHooks() map[string]bool {
 		HookLocalTransferCommitRdy:  m.localTransferCommitReadyFn != nil,
 		HookTransferReadiness:       m.transferReadinessFn != nil,
 		HookPeerTimeoutGuard:        m.peerTimeoutGuardFn != nil,
+		HookPeerNeverSeenSyncFresh:  m.peerNeverSeenSyncFreshFn != nil,
 		HookHeartbeatRestartNotify:  m.hbRestartNotifyFn != nil,
 		HookPeerFence:               m.peerFenceFn != nil,
 		HookPeerFenceConfirm:        m.peerFenceConfirmFn != nil,

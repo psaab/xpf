@@ -139,6 +139,27 @@ fn resolve_ecmp_v4(state: &ForwardingState, dst: Ipv4Addr, hash: u64) -> Forward
     )
 }
 
+#[test]
+fn selected_route_mtu_is_stamped_on_resolution_11411() {
+    let mut constrained = v4_route("198.51.100.0/24", vec!["192.0.2.1"], 100);
+    constrained.mtu = 1400;
+    let constrained = resolve_v4(
+        &state_with(vec![constrained]),
+        Ipv4Addr::new(198, 51, 100, 23),
+    );
+    assert_eq!(constrained.route_mtu, 1400);
+
+    let unconstrained = resolve_v4(
+        &state_with(vec![v4_route(
+            "198.51.100.0/24",
+            vec!["192.0.2.1"],
+            100,
+        )]),
+        Ipv4Addr::new(198, 51, 100, 23),
+    );
+    assert_eq!(unconstrained.route_mtu, 0);
+}
+
 // ---------------------------------------------------------------------------
 // v4 longest-match / preference / stability
 // ---------------------------------------------------------------------------
@@ -279,6 +300,7 @@ fn discard_never_falls_back_to_ancestor_9522() {
         v4_route("10.0.0.0/8", vec!["192.0.2.1"], 5),
         crate::RouteSnapshot {
             discard: true,
+            mtu: 0,
             ..v4_route("10.1.0.0/16", vec![], 5)
         },
     ];
@@ -296,6 +318,7 @@ fn next_table_loses_longest_match_9522() {
     snap.routes = vec![
         crate::RouteSnapshot {
             next_table: "other.inet.0".into(),
+            mtu: 0,
             ..v4_route("10.2.0.0/16", vec!["192.0.2.1"], 5)
         },
         v4_route("10.2.3.0/24", vec!["192.0.2.1"], 5),
@@ -316,6 +339,7 @@ fn next_table_unresolvable_chain_is_noroute_9522() {
     let mut snap = base_snapshot();
     snap.routes = vec![crate::RouteSnapshot {
         next_table: "inet.0".into(),
+        mtu: 0,
         ..v4_route("10.5.0.0/16", vec![], 5)
     }];
     let state = build_forwarding_state(&snap);
@@ -334,6 +358,7 @@ fn next_table_missing_target_is_noroute_9522() {
     let mut snap = base_snapshot();
     snap.routes = vec![crate::RouteSnapshot {
         next_table: "missing.inet.0".into(),
+        mtu: 0,
         ..v4_route("10.6.0.0/16", vec![], 5)
     }];
     let state = build_forwarding_state(&snap);

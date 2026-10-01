@@ -2071,6 +2071,8 @@ impl crate::afxdp::ha::SessionDomain {
             neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
             src_mac: Some([6, 7, 8, 9, 10, 11]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         };
         let metadata = SessionMetadata {
             ingress_zone: 1,
@@ -2226,6 +2228,8 @@ mod rejected_mirror_reservation_10790_tests {
                     neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
                     src_mac: None,
                     tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
                 },
                 nat,
                 install_table_domain: 0,
@@ -2350,6 +2354,8 @@ mod rejected_mirror_reservation_10790_tests {
                     neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
                     src_mac: None,
                     tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
                 },
                 nat: NatDecision {
                     rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),

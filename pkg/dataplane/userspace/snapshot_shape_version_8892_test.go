@@ -3,6 +3,7 @@ package userspace
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -235,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "857ea623c08b4dfd87a79d24cae05aab1a1f510d2885f8a3480dc6798a40bc98"
+	snapshotShapeGolden8892 = "c02f7608e35419353529f207f34db109fb1f2a427a4d153901a8a6edd120fd45"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -409,7 +410,9 @@ const (
 	// v36 -> v37 BUMPED (#11402): RouteSnapshot.NextHopWeights preserves Linux
 	// multipath member weights. A v36 helper ignores them and keeps uniform
 	// ECMP for unequal routes, so mixed versions must be refused.
-	snapshotShapeVersion8892 = 37
+	// v37 -> v38 BUMPED (#11411): RouteSnapshot.MTU carries Linux RTAX_MTU.
+	// A v37 helper ignores it and forwards oversized DF packets.
+	snapshotShapeVersion8892 = 38
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
@@ -448,5 +451,39 @@ func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
 			"Bump ProtocolVersion (and CONFIG_SNAPSHOT_PROTOCOL_VERSION in "+
 			"userspace-dp/src/protocol/control.rs) and update both constants here.",
 			ProtocolVersion, snapshotShapeGolden8892, got)
+	}
+}
+
+func TestRouteMTUWireField11411(t *testing.T) {
+	field, ok := reflect.TypeOf(RouteSnapshot{}).FieldByName("MTU")
+	if !ok {
+		t.Fatal("RouteSnapshot is missing the selected-route MTU")
+	}
+	if field.Type.Kind() != reflect.Int || field.Tag.Get("json") != "mtu,omitempty" {
+		t.Fatalf("RouteSnapshot.MTU wire field = %s %q, want int json:mtu,omitempty",
+			field.Type, field.Tag.Get("json"))
+	}
+
+	wire, err := json.Marshal(RouteSnapshot{MTU: 1400})
+	if err != nil {
+		t.Fatalf("marshal route with MTU: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatalf("unmarshal route wire: %v", err)
+	}
+	if string(decoded["mtu"]) != "1400" {
+		t.Fatalf("serialized route MTU = %s, want 1400", decoded["mtu"])
+	}
+	wire, err = json.Marshal(RouteSnapshot{})
+	if err != nil {
+		t.Fatalf("marshal route without MTU: %v", err)
+	}
+	decoded = nil
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatalf("unmarshal default route wire: %v", err)
+	}
+	if _, present := decoded["mtu"]; present {
+		t.Fatalf("zero route MTU should be omitted from the wire: %s", wire)
 	}
 }
