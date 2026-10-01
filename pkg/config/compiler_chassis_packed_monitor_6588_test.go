@@ -1526,6 +1526,11 @@ func TestRedundancyGroupStatementsSurvivePackedLine_6588(t *testing.T) {
 				t.Fatalf("ip-monitoring lost: %+v", rg.IPMonitoring)
 			}
 		}},
+		"allow-degraded-routing-takeover": {"allow-degraded-routing-takeover", func(t *testing.T, rg *RedundancyGroup) {
+			if !rg.AllowDegradedRoutingTakeover {
+				t.Fatal("allow-degraded-routing-takeover lost")
+			}
+		}},
 	}
 
 	// This completeness check is also the trip-wire for the splitter's

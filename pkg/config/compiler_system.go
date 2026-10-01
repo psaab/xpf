@@ -3420,8 +3420,9 @@ func packedStatementPropsArity(
 //
 // Derived from the grammar the compilers actually read, and deliberately only
 // for the statements whose value slot can hold a free-form identifier or a
-// number. `preempt` and `strict-vip-ownership` take nothing, so the token after
-// them genuinely does open a statement.
+// number. `preempt`, `strict-vip-ownership`, and
+// `allow-degraded-routing-takeover` take nothing, so the token after them
+// genuinely does open a statement.
 func redundancyGroupStatementArity(tok string) int {
 	switch tok {
 	case "interface-monitor":
@@ -3597,12 +3598,13 @@ func redundancyGroupBody(rgNode *Node) []*Node {
 // preempt", and inventing one would break the multi-statement packing
 // TestRedundancyGroupStatementsSurvivePackedLine_6588 pins.
 var redundancyGroupStatements = map[string]func(rg *RedundancyGroup, child *Node){
-	"node":                 compileRGNodePriority,
-	"gratuitous-arp-count": compileRGGratuitousARPCount,
-	"preempt":              compileRGPreempt,
-	"strict-vip-ownership": compileRGStrictVIPOwnership,
-	"interface-monitor":    compileRGInterfaceMonitors,
-	"ip-monitoring":        compileRGIPMonitoring,
+	"node":                            compileRGNodePriority,
+	"gratuitous-arp-count":            compileRGGratuitousARPCount,
+	"preempt":                         compileRGPreempt,
+	"strict-vip-ownership":            compileRGStrictVIPOwnership,
+	"allow-degraded-routing-takeover": compileRGAllowDegradedRoutingTakeover,
+	"interface-monitor":               compileRGInterfaceMonitors,
+	"ip-monitoring":                   compileRGIPMonitoring,
 }
 
 // isRedundancyGroupStatement reports whether tok opens a statement in a
@@ -3674,6 +3676,12 @@ func compileRGPreempt(rg *RedundancyGroup, child *Node) {
 // switch arm it replaced (#6588).
 func compileRGStrictVIPOwnership(rg *RedundancyGroup, child *Node) {
 	rg.StrictVIPOwnership = true
+}
+
+// compileRGAllowDegradedRoutingTakeover compiles the explicit override for a
+// planned transfer whose dynamic routing evidence is unavailable.
+func compileRGAllowDegradedRoutingTakeover(rg *RedundancyGroup, child *Node) {
+	rg.AllowDegradedRoutingTakeover = true
 }
 
 // compileRGInterfaceMonitors compiles a `interface-monitor` statement of a redundancy-group body.

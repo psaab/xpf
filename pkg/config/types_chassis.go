@@ -167,13 +167,14 @@ type ClusterConfig struct {
 
 // RedundancyGroup defines a cluster redundancy group.
 type RedundancyGroup struct {
-	ID                 int
-	NodePriorities     map[int]int // node-id -> priority
-	GratuitousARPCount int
-	Preempt            bool
-	StrictVIPOwnership bool
-	InterfaceMonitors  []*InterfaceMonitor
-	IPMonitoring       *IPMonitoring
+	ID                           int
+	NodePriorities               map[int]int // node-id -> priority
+	GratuitousARPCount           int
+	Preempt                      bool
+	StrictVIPOwnership           bool
+	AllowDegradedRoutingTakeover bool `json:",omitempty"` // permit planned failover without dynamic routing evidence
+	InterfaceMonitors            []*InterfaceMonitor
+	IPMonitoring                 *IPMonitoring
 }
 
 // InterfaceMonitor defines an interface health monitor within a redundancy group.

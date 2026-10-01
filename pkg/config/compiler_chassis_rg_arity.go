@@ -5,9 +5,8 @@ import "fmt"
 // compiler_chassis_rg_arity.go carries the #6588 commit-side gate for tokens
 // attached to a redundancy-group statement that TAKES NO ARGUMENT.
 //
-// `preempt` and `strict-vip-ownership` are flags: their compilers
-// (compileRGPreempt / compileRGStrictVIPOwnership) set a bool and never look at
-// the node beyond its name. Anything else written on the statement is therefore
+// `preempt`, `strict-vip-ownership`, and `allow-degraded-routing-takeover` are
+// flags: their compilers set a bool and never look at the node beyond its name.
 // discarded in silence:
 //
 //	redundancy-group 1 preempt weight 255;      -> Preempt=true, `weight 255` gone
@@ -45,8 +44,9 @@ import "fmt"
 // the statement still compiles — it only means its trailing tokens keep being
 // ignored quietly.
 var redundancyGroupNoArgStatements = map[string]bool{
-	"preempt":              true,
-	"strict-vip-ownership": true,
+	"preempt":                         true,
+	"strict-vip-ownership":            true,
+	"allow-degraded-routing-takeover": true,
 }
 
 // validateRGNoArgStatementsAST walks the chassis cluster subtree and reports

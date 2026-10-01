@@ -271,6 +271,10 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 			// the compiler implements. Valueless flag, same shape as `preempt`
 			// above, which it sits beside in the dispatch table.
 			"strict-vip-ownership": {desc: "Only the VRRP master may hold the redundancy group's VIPs", children: nil},
+			"allow-degraded-routing-takeover": {
+				desc:     "Allow planned failover when dynamic routing evidence is unavailable",
+				children: nil,
+			},
 			// interface-monitor weight is NOT typed here: the
 			// `<ifname> weight <n>` tokens pack inline into one leaf
 			// (children==nil here); typing the weight would require a

@@ -527,9 +527,10 @@ type compileOpts struct {
 	// lenientChassisRGStatementArity (#6588) downgrades the redundancy-group
 	// no-argument statement gate (validateRGNoArgStatementsAST) from a hard
 	// compile error to a cfg.Warnings entry on the tolerant load / peer-sync
-	// paths. `preempt` and `strict-vip-ownership` compile to a bool and never
-	// read the node, so trailing tokens or a block body — including the real
-	// Junos `preempt delay <n>` that xpf does not implement — are discarded in
+	// paths. `preempt`, `strict-vip-ownership`, and
+	// `allow-degraded-routing-takeover` compile to bools and never read the
+	// node, so trailing tokens or a block body — including the real Junos
+	// `preempt delay <n>` that xpf does not implement — are discarded in
 	// silence and the operator believes they configured something that does not
 	// exist. Commit / commit-check stay strict so a new operator edit is
 	// rejected; an already-persisted or peer-synced config an older binary

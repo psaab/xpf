@@ -122,7 +122,15 @@ func (d *Daemon) userspaceTransferReadiness(rgID int) (bool, []string) {
 	if ss == nil {
 		return false, []string{"session sync disconnected"}
 	}
-	return computeUserspaceTransferReadiness(ss, d.syncPeerConnected.Load())
+	ready, reasons := computeUserspaceTransferReadiness(ss, d.syncPeerConnected.Load())
+	if !ready {
+		return false, reasons
+	}
+	routingReady, routingReasons := d.haRoutingTransferReadiness(rgID)
+	if !routingReady {
+		return false, routingReasons
+	}
+	return true, nil
 }
 
 func (d *Daemon) prepareUserspaceManualFailover(rgID int) error {

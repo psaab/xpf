@@ -127,6 +127,16 @@ type ISISAdjacency struct {
 	Raw string
 }
 
+func vrfShowCommand(vrf, base, suffix string) (string, error) {
+	if vrf == "" {
+		return base + " " + suffix, nil
+	}
+	if !validFRRInterfaceOperand(vrf) {
+		return "", fmt.Errorf("invalid routing instance %q for FRR status query", vrf)
+	}
+	return base + " vrf " + vrf + " " + suffix, nil
+}
+
 // GetISISAdjacency queries FRR for IS-IS adjacencies.
 //
 // strings.Fields splits on unicode.IsSpace ONLY, so ESC, DEL, BEL and the C1
@@ -134,7 +144,16 @@ type ISISAdjacency struct {
 // guard belongs at the display sites (see the ISISAdjacency doc); the values
 // here stay raw for machine consumers.
 func (m *Manager) GetISISAdjacency(ctx context.Context) ([]ISISAdjacency, error) {
-	output, err := m.vtysh(ctx, "show isis neighbor")
+	return m.GetISISAdjacencyVRF(ctx, "")
+}
+
+// GetISISAdjacencyVRF queries IS-IS adjacency state in one FRR routing instance.
+func (m *Manager) GetISISAdjacencyVRF(ctx context.Context, vrf string) ([]ISISAdjacency, error) {
+	command, err := vrfShowCommand(vrf, "show isis", "neighbor")
+	if err != nil {
+		return nil, err
+	}
+	output, err := m.vtysh(ctx, command)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +233,16 @@ type OSPFNeighbor struct {
 
 // GetOSPFNeighbors queries FRR for OSPF neighbor state.
 func (m *Manager) GetOSPFNeighbors(ctx context.Context) ([]OSPFNeighbor, error) {
-	output, err := m.vtysh(ctx, "show ip ospf neighbor")
+	return m.GetOSPFNeighborsVRF(ctx, "")
+}
+
+// GetOSPFNeighborsVRF queries OSPF adjacency state in one FRR routing instance.
+func (m *Manager) GetOSPFNeighborsVRF(ctx context.Context, vrf string) ([]OSPFNeighbor, error) {
+	command, err := vrfShowCommand(vrf, "show ip ospf", "neighbor")
+	if err != nil {
+		return nil, err
+	}
+	output, err := m.vtysh(ctx, command)
 	if err != nil {
 		return nil, err
 	}
@@ -240,6 +268,32 @@ func (m *Manager) GetOSPFNeighbors(ctx context.Context) ([]OSPFNeighbor, error) 
 			n.Interface = fields[len(fields)-1]
 		}
 		neighbors = append(neighbors, n)
+	}
+	return neighbors, nil
+}
+
+// GetOSPFv3NeighborsVRF queries OSPFv3 adjacency state in one FRR routing instance.
+func (m *Manager) GetOSPFv3NeighborsVRF(ctx context.Context, vrf string) ([]OSPFNeighbor, error) {
+	command, err := vrfShowCommand(vrf, "show ipv6 ospf6", "neighbor")
+	if err != nil {
+		return nil, err
+	}
+	output, err := m.vtysh(ctx, command)
+	if err != nil {
+		return nil, err
+	}
+	var neighbors []OSPFNeighbor
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 7 || fields[0] == "Neighbor" || strings.HasPrefix(line, "-") {
+			continue
+		}
+		neighbors = append(neighbors, OSPFNeighbor{
+			NeighborID: fields[0],
+			Priority:   fields[1],
+			State:      fields[3],
+			Interface:  fields[len(fields)-1],
+		})
 	}
 	return neighbors, nil
 }
@@ -304,7 +358,16 @@ type bgpPeerJSON struct {
 // of neighbors N", blank/legend lines) that the old field-count scraper
 // misparsed as phantom peers with an empty PfxRcd. #3942.
 func (m *Manager) GetBGPSummary(ctx context.Context) ([]BGPPeerSummary, error) {
-	output, err := m.vtysh(ctx, "show bgp summary json")
+	return m.GetBGPSummaryVRF(ctx, "")
+}
+
+// GetBGPSummaryVRF queries BGP peer state in one FRR routing instance.
+func (m *Manager) GetBGPSummaryVRF(ctx context.Context, vrf string) ([]BGPPeerSummary, error) {
+	command, err := vrfShowCommand(vrf, "show bgp", "summary json")
+	if err != nil {
+		return nil, err
+	}
+	output, err := m.vtysh(ctx, command)
 	if err != nil {
 		return nil, err
 	}

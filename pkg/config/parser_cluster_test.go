@@ -670,6 +670,52 @@ func TestStrictVIPOwnershipSetSyntax(t *testing.T) {
 	}
 }
 
+func TestAllowDegradedRoutingTakeoverSetSyntax(t *testing.T) {
+	commands := []string{
+		"set chassis cluster authentication-key test-cluster-psk-6611",
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster reth-count 2",
+		"set chassis cluster redundancy-group 1 allow-degraded-routing-takeover",
+	}
+	tree := &ConfigTree{}
+	for _, cmd := range commands {
+		path, err := ParseSetCommand(cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rg := range cfg.Chassis.Cluster.RedundancyGroups {
+		if rg.ID == 1 {
+			if !rg.AllowDegradedRoutingTakeover {
+				t.Fatal("routing degraded override was not compiled")
+			}
+			return
+		}
+	}
+	t.Fatal("redundancy group 1 was not compiled")
+}
+func TestAllowDegradedRoutingTakeoverRejectsArguments(t *testing.T) {
+	path, err := ParseSetCommand("set chassis cluster redundancy-group 1 allow-degraded-routing-takeover unexpected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := &ConfigTree{}
+	if err := tree.SetPath(path); err != nil {
+		t.Fatal(err)
+	}
+	_, err = CompileConfig(tree)
+	if err == nil || !strings.Contains(err.Error(), "allow-degraded-routing-takeover: takes no argument") {
+		t.Fatalf("unexpected trailing argument error = %v", err)
+	}
+}
+
 func TestStrictVIPOwnershipDefaultFalse(t *testing.T) {
 	input := `chassis {
     cluster {
