@@ -523,7 +523,10 @@ fn scheduler_lease_ignores_version_zero_and_rejects_rollback() {
     );
 
     assert!(lease.apply(9, 100));
-    assert!(!lease.apply(8, 200), "a lower publication version is ignored");
+    assert!(
+        !lease.apply(8, 200),
+        "a lower publication version is ignored"
+    );
     assert!(
         lease.expired_at(100 + SCHEDULER_HEARTBEAT_LEASE_NS + 1),
         "a rejected rollback must not renew the accepted lease"
