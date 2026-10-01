@@ -416,16 +416,19 @@ delegate to the owning domain. Exported types:
     to keep host-originated default-instance traffic on the leak would
     reintroduce the cross-VRF hijack for every VRF-bound daemon.
 
-  The AF\_XDP fast path is instance-scoped only for **PBR-steered**
-  traffic. The userspace FIB follows a `next_table` route found in
-  whichever table a lookup runs in
-  (`userspace-dp/src/afxdp/forwarding/fib.rs`), and a transit lookup runs
-  in a per-instance table only when a PBR interface filter steers it
-  there. Without PBR the fast path does no per-instance destination-FIB
-  selection (`userspace-dp/src/afxdp/forwarding/README.md`). The exposure
-  #9420 closed was on the Linux path: host-originated traffic, slow-path
-  `XDP_PASS` packets, local delivery, and any interface without native
-  XDP where `redirect_capable` falls back to kernel forwarding.
+  The AF\_XDP fast path scopes transit lookups by **native RI membership
+  and explicit PBR (#10312)**. Without a matching PBR routing-instance
+  term, the validated ingress `routing_domain` selects its native
+  per-family table; explicit PBR takes precedence, including a terminal
+  discard/reject. Only the default domain uses global `inet.0`/`inet6.0`.
+  A nonzero domain without a current per-family table is terminal, not
+  a fallback to main. The FIB follows `next_table` in the selected table;
+  see the native RI/PBR contract in
+  `userspace-dp/src/afxdp/forwarding/README.md`.
+  The exposure #9420 closed was on the Linux path: host-originated
+  traffic, slow-path `XDP_PASS` packets, local delivery, and interfaces
+  where `redirect_capable` falls back to kernel forwarding. Native
+  userspace scoping does not replace the kernel ingress restriction.
 - `1000`: the kernel's own `l3mdev` rule (`lookup [l3mdev-table]`), added
   by the kernel when the first VRF device appears. It is not ours. It is
   listed because the next two entries are defined relative to it, and

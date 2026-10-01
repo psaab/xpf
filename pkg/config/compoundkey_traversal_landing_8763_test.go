@@ -204,7 +204,7 @@ func famOnlyCases8763() []famOnlyCase8763 {
 		return "forwarding-options {\n sampling {\n  instance i1 {\n   family inet {\n" + inner + "\n   }\n  }\n }\n}\n"
 	}
 	bgp := func(inner string) string {
-		return "protocols {\n bgp {\n  group g1 {\n   type external;\n   peer-as 65001;\n   neighbor 198.51.100.90 {\n    family inet {\n     unicast {\n" + inner + "\n     }\n    }\n   }\n  }\n }\n}\n"
+		return "routing-options { autonomous-system 65000; }\nprotocols {\n bgp {\n  group g1 {\n   type external;\n   peer-as 65001;\n   neighbor 198.51.100.90 {\n    family inet {\n     unicast {\n" + inner + "\n     }\n    }\n   }\n  }\n }\n}\n"
 	}
 	vrrp := func(inner string) string {
 		return ifUnit("   family inet {\n    address 10.9.9.1/24 {\n     vrrp-group 1 " + inner + "\n    }\n   }")

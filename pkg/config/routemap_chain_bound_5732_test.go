@@ -107,6 +107,7 @@ func TestComposedChainSequenceBound_CompileReject_5732(t *testing.T) {
 // chain (both members tiny) compiles clean — no false rejection.
 func TestComposedChainSequenceBound_ShortChainPasses_5732(t *testing.T) {
 	cfg, err := compileSet(t, []string{
+		"set routing-options autonomous-system 65000",
 		"set protocols bgp group g1 neighbor 10.0.0.1 peer-as 65001",
 		"set protocols bgp group g1 neighbor 10.0.0.1 export [ A B ]",
 		"set policy-options policy-statement A term t from protocol bgp",
