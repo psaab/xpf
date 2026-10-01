@@ -18,6 +18,16 @@ pub(in crate::afxdp) fn effective_tcp_mss(forwarding: &ForwardingState) -> u16 {
     forwarding.tcp_mss_all_tcp
 }
 
+/// Combine independently known MTU constraints without treating an unknown
+/// leg (`0`) as a zero-byte budget. Returns zero only when both are unknown.
+#[inline]
+pub(in crate::afxdp) fn min_nonzero_mtu(a: usize, b: usize) -> usize {
+    match (a, b) {
+        (0, mtu) | (mtu, 0) => mtu,
+        (a, b) => a.min(b),
+    }
+}
+
 pub(in crate::afxdp) fn native_gre_inner_mtu(
     forwarding: &ForwardingState,
     decision: &SessionDecision,
@@ -33,14 +43,14 @@ pub(in crate::afxdp) fn native_gre_inner_mtu(
     };
     // #2517: resolve the outer/transport MTU through the SAME #2300 SSOT
     // helper the WireGuard MSS clamp uses (`tunnel_outer_mtu`) so the two
-    // tunnel MSS paths cannot drift. That helper falls back to the
-    // standard 1500 underlay MTU when EVERY egress lookup misses (a
-    // transient egress-map miss during re-reconciliation / interface
-    // bringup) instead of the old `unwrap_or_default()` → 0, which made
+    // tunnel MSS paths cannot drift. That helper uses the standard 1500
+    // underlay MTU as an interface fallback when EVERY egress lookup misses
+    // (a transient egress-map miss during re-reconciliation / interface
+    // bringup), instead of the old `unwrap_or_default()` → 0, which made
     // `native_gre_tcp_mss` return 0 and silently DISABLE a configured GRE
     // outbound TCP MSS clamp until the next reconcile. `tunnel_outer_mtu`
-    // also filters out an explicitly-zero stored egress MTU, so it never
-    // returns 0; `transport_mtu` here is therefore always >= 1500.
+    // filters out an explicitly-zero stored egress MTU too, so it never
+    // returns 0; the selected outer route can still constrain it below 1500.
     let transport_mtu = tunnel_outer_mtu(forwarding, decision, endpoint);
     let outer_ip_header_len = match endpoint.outer_family {
         libc::AF_INET => 20usize,
@@ -79,16 +89,17 @@ pub(in crate::afxdp) fn native_gre_tcp_mss(
     u16::try_from(max_mss).unwrap_or_default()
 }
 
-/// Resolve the real outer-link (transport) MTU for a tunnel endpoint —
+/// Resolve the effective outer-link (transport) MTU for a tunnel endpoint —
 /// the egress interface the OUTER encapped datagram leaves on, NOT the
-/// tunnel device. This is the #2300 SSOT resolver shared by BOTH tunnel
-/// MSS-clamp paths: the WireGuard clamp (#2299) and the native-GRE
-/// clamp (`native_gre_inner_mtu`, #2517). Resolution chain: transport
-/// ifindex → stored resolution egress → endpoint logical ifindex;
-/// `unwrap_or(1500)` only when every lookup misses (a transient
-/// egress-map miss must NOT zero the clamp). The `.filter(|m| *m > 0)`
-/// also coerces an explicitly-zero stored egress MTU to the 1500
-/// fallback, so this helper never returns 0.
+/// tunnel device. The selected outer-route MTU constrains that physical-link
+/// MTU before tunnel overhead is converted to an inner budget. This is the #2300
+/// SSOT resolver shared by BOTH tunnel MSS-clamp paths: the WireGuard clamp
+/// (#2299) and the native-GRE clamp (`native_gre_inner_mtu`, #2517).
+/// Resolution chain: transport ifindex → stored resolution egress → endpoint
+/// logical ifindex; `unwrap_or(1500)` only when every lookup misses (a
+/// transient egress-map miss must NOT zero the clamp). An explicitly-zero
+/// stored egress MTU is also coerced to that fallback, so this helper never
+/// returns 0.
 pub(in crate::afxdp) fn tunnel_outer_mtu(
     forwarding: &ForwardingState,
     decision: &SessionDecision,
@@ -100,14 +111,18 @@ pub(in crate::afxdp) fn tunnel_outer_mtu(
         decision.resolution.tx_vlan_id,
     )
     .unwrap_or(decision.resolution.tx_ifindex);
-    forwarding
+    let interface_mtu = forwarding
         .egress
         .get(&transport_ifindex)
         .or_else(|| forwarding.egress.get(&decision.resolution.egress_ifindex))
         .or_else(|| forwarding.egress.get(&endpoint.logical_ifindex))
         .map(|egress| egress.mtu)
         .filter(|m| *m > 0)
-        .unwrap_or(1500)
+        .unwrap_or(1500);
+    min_nonzero_mtu(
+        interface_mtu,
+        decision.resolution.transport_route_mtu as usize,
+    )
 }
 
 /// Dispatch the per-tunnel TCP MSS clamp by tunnel kind (#2299).
@@ -118,9 +133,10 @@ pub(in crate::afxdp) fn tunnel_outer_mtu(
 /// A SYN clamped with the GRE value lets the peer send full-MSS data
 /// segments that the WG encap MTU guard then silently drops
 /// (`encap_mtu_drops`). Route WG-bound SYNs through `wg::mss::wg_tcp_mss`
-/// instead, derived from `tunnel_outer_mtu` (resolve the transport
+/// (#2299) instead, derived from `tunnel_outer_mtu` (resolve the transport
 /// `tx_ifindex`/`tx_vlan` → egress, falling back to `egress_ifindex`
-/// then the endpoint's `logical_ifindex`, with a 1500 floor).
+/// then the endpoint's `logical_ifindex`, with a 1500 interface fallback
+/// followed by the selected-route MTU constraint).
 ///
 /// NOTE (#2715): this is NOT the same path the encap MTU guard now
 /// reads. Post-#2715 the encap guard route-resolves the physical egress

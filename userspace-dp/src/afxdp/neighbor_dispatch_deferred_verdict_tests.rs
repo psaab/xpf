@@ -37,6 +37,8 @@ fn deferred_decision() -> SessionDecision {
         neighbor_mac: None,
         src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 

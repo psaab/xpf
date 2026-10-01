@@ -238,16 +238,17 @@ fn outer_physical_egress_mtu(
     endpoint: &TunnelEndpoint,
     outer_dst: IpAddr,
 ) -> usize {
-    let physical_ifindex =
-        outer_physical_egress_ifindex(decision, forwarding, endpoint, outer_dst);
-    forwarding
+    let outer = outer_physical_egress_resolution(forwarding, endpoint, outer_dst);
+    let physical_ifindex = outer_egress_ifindex_or_fallback(decision, forwarding, &outer);
+    let interface_mtu = forwarding
         .egress
         .get(&physical_ifindex)
         .map(|e| e.mtu)
         .filter(|m| *m > 0)
-        .unwrap_or(1500)
-}
+        .unwrap_or(1500);
+    crate::afxdp::forwarding::min_nonzero_mtu(interface_mtu, outer.route_mtu as usize)
 
+}
 /// The peer-endpoint outer destination whose underlay MTU the PTB must
 /// derive from, for a given inner destination (#2845).
 ///
@@ -557,7 +558,11 @@ pub(super) fn wg_encap_frame(
     let physical_egress_ifindex =
         outer_egress_ifindex_or_fallback(decision, forwarding, &outer_resolution);
     let egress = forwarding.egress.get(&physical_egress_ifindex);
-    let outer_mtu = egress.map(|e| e.mtu).filter(|m| *m > 0).unwrap_or(1500);
+    let interface_mtu = egress.map(|e| e.mtu).filter(|m| *m > 0).unwrap_or(1500);
+    let outer_mtu = crate::afxdp::forwarding::min_nonzero_mtu(
+        interface_mtu,
+        outer_resolution.route_mtu as usize,
+    );
 
     // #5292: the outer L2 header follows the resolved PHYSICAL egress —
     // internally consistent with the outer IP source (#2701) — NOT

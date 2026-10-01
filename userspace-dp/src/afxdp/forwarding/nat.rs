@@ -219,6 +219,8 @@ pub(in crate::afxdp) fn interface_nat_local_resolution(
                 neighbor_mac: None,
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             }),
         IpAddr::V6(ip) => state
             .interface_nat_v6
@@ -238,6 +240,8 @@ pub(in crate::afxdp) fn interface_nat_local_resolution(
                 neighbor_mac: None,
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             }),
     }
 }

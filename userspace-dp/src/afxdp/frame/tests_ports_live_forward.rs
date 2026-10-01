@@ -145,6 +145,8 @@ fn rewrite_forwarded_frame_in_place_keeps_ipv6_tcp_ports_after_vlan_snat() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
         ..NatDecision::default()
@@ -230,6 +232,8 @@ fn build_forwarded_frame_into_keeps_ipv6_tcp_ports_after_vlan_snat() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
         ..NatDecision::default()
@@ -316,6 +320,8 @@ fn build_forwarded_frame_into_ignores_ipv6_tcp_metadata_port_mismatch() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
         ..NatDecision::default()
@@ -409,6 +415,8 @@ fn build_live_forward_request_prefers_session_flow_ports_over_frame() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
         ..NatDecision::default()
@@ -510,6 +518,8 @@ fn build_live_forward_request_uses_live_frame_ports_when_no_session_flow() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
         ..NatDecision::default()
@@ -653,6 +663,8 @@ fn build_live_forward_request_meters_non_l4_metadata_flow() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let ingress = BindingIdentity {
         slot: 0,
@@ -763,6 +775,8 @@ fn build_live_forward_request_marks_empty_cos_selection_resolved() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let ingress = BindingIdentity {
         slot: 0,
@@ -886,6 +900,8 @@ fn build_live_forward_request_emits_output_filter_log_event() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let ingress = BindingIdentity {
         slot: 0,
@@ -1024,17 +1040,24 @@ fn live_forward_filter_log_zones_6722(egress_ifindex: i32) -> (ForwardingState, 
         "precondition: the MAC-less egress interface must have NO egress row -- \
          without that hole the #6713 fallback never fires here"
     );
-    let decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex,
-        tx_ifindex: egress_ifindex,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(dst_ip)),
-        neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
-        tx_vlan_id: 0,
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex,
+            tx_ifindex: egress_ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(dst_ip)),
+            neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     let ingress = BindingIdentity {
         slot: 0,
         queue_id: 0,
@@ -1211,6 +1234,8 @@ fn build_live_forward_request_uses_flow_or_metadata_ports_when_frame_ports_unava
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
         ..NatDecision::default()
@@ -1353,6 +1378,8 @@ fn build_live_forward_request_caches_target_binding_index() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mut forwarding = ForwardingState::default();
     forwarding.egress.insert(
@@ -1511,6 +1538,8 @@ fn build_forwarded_frame_into_keeps_ipv6_ports_when_frame_and_metadata_disagree(
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
         ..NatDecision::default()
@@ -1587,6 +1616,8 @@ fn build_forwarded_frame_into_prefers_expected_ipv6_ports_over_wrong_live_ports(
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
         ..NatDecision::default()
@@ -1666,6 +1697,8 @@ fn build_forwarded_frame_into_repairs_wrong_ipv6_frame_ports_from_expected_tuple
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x80, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V6("2001:559:8585:80::8".parse().unwrap())),
         ..NatDecision::default()
@@ -1747,6 +1780,8 @@ fn build_forwarded_frame_into_ignores_wrong_ipv4_offsets() {
         neighbor_mac: Some([0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
         ..NatDecision::default()

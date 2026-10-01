@@ -26,10 +26,10 @@ import (
 // the unheld peer address forever, the ARP is never answered, and no
 // heartbeat datagram is ever delivered. Any receive-path UDP detector —
 // including the #4549 F11 same-node-id check behind the #6888 peer pin —
-// cannot fire on frames that never arrive, so both sides run never-seen,
-// promote via single-node election after the startup grace, and claim
-// PRIMARY with identical RETH MACs: the silent split-brain the README says
-// is loudly logged.
+// cannot fire on frames that never arrive, so both sides run never-seen. If
+// session sync is also silent, they promote via single-node election after the
+// startup grace and claim PRIMARY with identical RETH MACs: the silent split-
+// brain the README says is loudly logged.
 //
 // FIX. Each keyed heartbeat tenure sends a compact HMAC-authenticated identity
 // beacon to the control-link subnet broadcast address on a dedicated UDP port.

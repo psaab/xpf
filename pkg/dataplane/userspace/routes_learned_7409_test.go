@@ -124,6 +124,51 @@ func TestLearnedRouteReachesTheSnapshot(t *testing.T) {
 	}
 }
 
+func TestLearnedRouteMTUReachesSnapshot11411(t *testing.T) {
+	withMTU := learnedV4("10.20.31.0/24", "192.0.2.1")
+	withMTU.MTU = 1400
+	withoutMTU := learnedV4("10.20.32.0/24", "192.0.2.2")
+	withLearnedRoutes(t, fixedLearned(withMTU, withoutMTU))
+
+	out, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	withMTURoute := snapshotFor(t, "inet.0", "inet", "10.20.31.0/24", out)
+	if len(withMTURoute) != 1 || withMTURoute[0].MTU != 1400 {
+		t.Fatalf("route with MTU did not reach snapshot: %+v", withMTURoute)
+	}
+	withoutMTURoute := snapshotFor(t, "inet.0", "inet", "10.20.32.0/24", out)
+	if len(withoutMTURoute) != 1 || withoutMTURoute[0].MTU != 0 {
+		t.Fatalf("route without MTU must preserve unknown/zero: %+v", withoutMTURoute)
+	}
+}
+
+func TestLearnedRouteMTUDoesNotOverrideNextHopOrdering11411(t *testing.T) {
+	firstHop := learnedV4("198.51.100.0/24", "192.0.2.1")
+	firstHop.Metric = 100
+	firstHop.MTU = 1500
+	secondHop := learnedV4("198.51.100.0/24", "192.0.2.2")
+	secondHop.Metric = 100
+	secondHop.MTU = 1300
+	withLearnedRoutes(t, fixedLearned(secondHop, firstHop))
+
+	out, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	hits := snapshotFor(t, "inet.0", "inet", "198.51.100.0/24", out)
+	if len(hits) != 2 {
+		t.Fatalf("want both equal-metric next hops, got %+v", hits)
+	}
+	if !reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) || hits[0].MTU != 1500 {
+		t.Fatalf("next-hop order must precede route-MTU ordering: %+v", hits)
+	}
+	if !reflect.DeepEqual(hits[1].NextHops, []string{"192.0.2.2"}) || hits[1].MTU != 1300 {
+		t.Fatalf("second equal-metric route lost its MTU: %+v", hits)
+	}
+}
+
 func TestLearnedRouteLowestKernelMetricWinsSamePrefix11388(t *testing.T) {
 	const destination = "198.51.100.0/24"
 	lowMetric := routing.LearnedRoute{

@@ -62,6 +62,8 @@ fn resolution() -> ForwardingResolution {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }
 }
 
@@ -1595,10 +1597,17 @@ fn expire_stale_entries_returns_helper_only_local_sessions() {
     let key = key_v4();
     let then = 1_000_000_000u64;
     let local_metadata = metadata();
-    let local_decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::LocalDelivery,
-        ..resolution()
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let local_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+            ..resolution()
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     // Install with SyncImport origin to mark as peer-synced
     assert!(table.install_with_protocol_with_origin(
         key.clone(),
@@ -1624,10 +1633,17 @@ fn take_synced_local_only_removes_helper_local_sessions() {
     let key = key_v4();
     let now = 1_000_000_000u64;
     let local_metadata = metadata();
-    let local_decision = SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::LocalDelivery,
-        ..resolution()
-    }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let local_decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::LocalDelivery,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+            ..resolution()
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
     // Install with SyncImport origin so it's considered peer-synced
     assert!(table.install_with_protocol_with_origin(
         key.clone(),
@@ -4416,10 +4432,8 @@ fn refresh_local_skips_peer_synced_entries() {
         0x10,
     ));
     let new_decision = SessionDecision {
-        resolution: ForwardingResolution {
-            egress_ifindex: 99,
-            ..decision().resolution
-        },
+        resolution: ForwardingResolution { egress_ifindex: 99,
+        route_mtu: 0, transport_route_mtu: 0, ..decision().resolution },
         ..decision()
     };
     // refresh_local should return false for peer-synced sessions
@@ -4445,10 +4459,8 @@ fn refresh_for_ha_activation_updates_peer_synced_entries() {
         0x10,
     ));
     let new_decision = SessionDecision {
-        resolution: ForwardingResolution {
-            egress_ifindex: 99,
-            ..decision().resolution
-        },
+        resolution: ForwardingResolution { egress_ifindex: 99,
+        route_mtu: 0, transport_route_mtu: 0, ..decision().resolution },
         ..decision()
     };
     // refresh_for_ha_activation should succeed even for peer-synced sessions

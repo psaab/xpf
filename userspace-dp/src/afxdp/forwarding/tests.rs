@@ -786,6 +786,8 @@ fn gate_fabric_zone_override_on_owner_rg_6458() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     // Owner RG (1) locally active -> honored (legitimate punt).
     let active = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
@@ -1529,6 +1531,8 @@ fn missing_neighbor_session_metadata_preserves_fabric_ingress() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let metadata = build_missing_neighbor_session_metadata(
@@ -1737,6 +1741,8 @@ fn embedded_icmp_to_inactive_owner_rg_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1801,6 +1807,8 @@ fn embedded_icmp_no_route_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1865,6 +1873,8 @@ fn embedded_icmp_discard_route_uses_zone_encoded_fabric_redirect() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1925,6 +1935,8 @@ fn embedded_icmp_from_fabric_does_not_redirect_back_to_fabric() {
             neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
             src_mac: Some([0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         metadata: SessionMetadata {
             ingress_zone: TEST_WAN_ZONE_ID,
@@ -1972,6 +1984,8 @@ fn fabric_ingress_does_not_redirect_back_to_fabric() {
         neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
         src_mac: None,
         tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     assert_eq!(
         redirect_via_fabric_if_needed(&state, blocked, 21, None).disposition,
@@ -3760,7 +3774,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 discard: false,
                 next_table: "red.inet.0".to_string(),
                 preference: 0,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
             crate::RouteSnapshot {
                 table: "red.inet.0".to_string(),
@@ -3771,7 +3785,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
                 discard: false,
                 next_table: "inet.0".to_string(),
                 preference: 0,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
         ],
         ..Default::default()
@@ -4575,7 +4589,7 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         // Only the SECOND next-hop's neighbor is resolved; the first is dead.
         neighbors: vec![crate::NeighborSnapshot {
@@ -4700,7 +4714,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         // ONLY the gateway member's neighbor is resolved. The interface-only
         // member's neighbor (the per-flow destination) is deliberately absent —
@@ -4836,7 +4850,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         discard: false,
         next_table: String::new(),
         preference: 5,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -4953,7 +4967,7 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
         discard: false,
         next_table: String::new(),
         preference: 5,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -5042,7 +5056,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
         discard: false,
         next_table: String::new(),
         preference: 5,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     let state = build_forwarding_state(&snapshot);
 
@@ -5160,7 +5174,7 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         // BOTH next-hop neighbors are resolved/live, so the live pool is
         // the full set of equal-cost members.
@@ -5365,7 +5379,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 discard: false,
                 next_table: String::new(),
                 preference: 50,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
             // BETTER route second (lower preference).
             crate::RouteSnapshot {
@@ -5377,7 +5391,7 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
                 discard: false,
                 next_table: String::new(),
                 preference: 5,
-                rule_priority: 0,
+                rule_priority: 0, mtu: 0,
             },
         ],
         neighbors: vec![
@@ -5801,7 +5815,7 @@ fn secure_tunnel_snapshot_6713(policy: TunnelPolicy6713) -> ConfigSnapshot {
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0,
+            rule_priority: 0, mtu: 0,
         }],
         default_policy: "deny".to_string(),
         policies: vec![match policy {

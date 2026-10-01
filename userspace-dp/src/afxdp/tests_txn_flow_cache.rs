@@ -3149,6 +3149,7 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
             next_table: String::new(),
             preference: 0,
             rule_priority: 0,
+            mtu: 0,
         },
         RouteSnapshot {
             table: "inet6.0".to_string(),
@@ -3160,6 +3161,7 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
             next_table: String::new(),
             preference: 0,
             rule_priority: 0,
+            mtu: 0,
         },
     ]);
     snapshot.source_nat_rules.clear();
