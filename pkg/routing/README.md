@@ -540,6 +540,14 @@ delegate to the owning domain. Exported types:
   #3308) rejects such a term at commit, but is lenient on load / peer-sync
   (#1960 no-brick), so a persisted / peer-synced contradiction can still reach
   the builder — hence the runtime skip.
+  **Term order protects carved-out traffic (#11325).** Linux ip rules cannot
+  express first-match firewall-filter precedence. A later routing-instance
+  term is dropped from the mirror, with a degraded build error, whenever a
+  preceding terminating term may match the same packet. The builder keeps a
+  later steer only when positive address, DSCP, protocol, or port selectors
+  prove the terms disjoint; unknown, unrepresentable, prefix-list, and except
+  predicates are treated as possible overlap. A non-denying earlier steer to the
+  same instance is safe because it selects the same routing table.
   **Userspace FIB snapshot skips this band (#4479).** The userspace
   route-snapshot builder (`buildRouteSnapshots`,
   `pkg/dataplane/userspace/routes.go`) mirrors kernel ip rules whose Dst maps
@@ -825,6 +833,14 @@ when the existing kernel link is genuinely incompatible:
     pass stays best-effort at WARN like 0a: a routing-instance `interface` list
     can legitimately name an interface genuinely absent on this chassis, and
     failing the commit on that would reject configs correct for the fleet.
+  - **Removed routing-instance list members (#11390).** Apply and periodic
+    reassert scan the enslaved links of surviving configured VRFs; links no
+    longer claimed by an RI list or tunnel stanza are detached through the
+    same master-ifindex check. This also catches stale memberships left across
+    a daemon restart without detaching a device moved to another RI or a link
+    on an unrelated master. The reassert pass uses the active desired set, so
+    removed members are detached, never rebound.
+
 - **Keepalives** (BOTH the anchor and the legacy branch, #4071): runners
   are reconciled by normalized identity `(remote, source, interval,
   retry<=0→3)` and survive unrelated applies; `LinkSetUp` is SKIPPED

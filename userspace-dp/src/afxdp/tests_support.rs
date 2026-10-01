@@ -818,6 +818,7 @@ pub(super) fn run_input_filter_accept_log_poll(
         family: "inet".to_string(),
         destination: "0.0.0.0/0".to_string(),
         next_hops: vec!["172.16.80.200@reth0.80".to_string()],
+        next_hop_weights: vec![],
         discard: false,
         next_table: String::new(),
         preference: 0,
@@ -1607,6 +1608,7 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path(
         None,
         123_000_000_000,
         123,
+        None,
     )
 }
 
@@ -1638,6 +1640,7 @@ pub(super) fn txn_run_descriptor_with_shared_nat(
         Some(shared_owner_rg_indexes),
         123_000_000_000,
         123,
+        None,
     )
 }
 
@@ -1676,8 +1679,43 @@ pub(super) fn txn_run_descriptor_at(
         None,
         now_ns,
         123,
+        None,
     )
 }
+
+/// Descriptor driver variant that preserves a caller-owned screen runtime
+/// across packets, for poll-order and screen-state regression cells.
+pub(super) fn txn_run_descriptor_with_screen_state(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    screen: &mut ScreenState,
+) -> (BatchCounters, DebugPollCounters) {
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_descriptor_inner_with_slow_path_impl(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        None,
+        None,
+        None,
+        None,
+        123_000_000_000,
+        123,
+        Some(screen),
+    )
+}
+
 
 pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
     binding: &mut BindingWorker,
@@ -1708,6 +1746,7 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
         None,
         123_000_000_000,
         123,
+        None,
     )
 }
 
@@ -1727,6 +1766,7 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
     shared_owner_rg_indexes_override: Option<&SharedSessionOwnerRgIndexes>,
     now_ns: u64,
     now_secs: u64,
+    screen_state: Option<&mut ScreenState>,
 ) -> (BatchCounters, DebugPollCounters) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -1797,7 +1837,8 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
-    let mut screen = ScreenState::new();
+    let mut default_screen = ScreenState::new();
+    let screen = screen_state.unwrap_or(&mut default_screen);
     let mut batch = BatchCounters::default();
     let mut dbg = DebugPollCounters::default();
     let mut telemetry = TelemetryContext {
@@ -1811,7 +1852,7 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
         area_ptr,
         1,
         sessions,
-        &mut screen,
+        screen,
         ValidationState {
             snapshot_installed: true,
             config_generation: 7,
@@ -2812,6 +2853,7 @@ pub(super) fn inbound_nptv6_snapshot(policy: PolicyRuleSnapshot) -> ConfigSnapsh
         family: "inet6".to_string(),
         destination: "fd35:1940:27::/48".to_string(),
         next_hops: vec!["fd35:1940:27:100::102@reth1.0".to_string()],
+        next_hop_weights: vec![],
         discard: false,
         next_table: String::new(),
         preference: 0,

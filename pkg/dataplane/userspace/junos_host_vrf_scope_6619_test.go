@@ -3,6 +3,7 @@ package userspace
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -81,11 +82,10 @@ func vrfScopeProgram(t *testing.T, cfg *config.Config, zone string) (JunosHostPr
 	return JunosHostProgram{}, false
 }
 
-// compileLegacyVRFScopeConfig6619 uses the tolerant load path for a mixed-
-// routing-instance zone that strict commits now reject. Persisted configs
-// from before that gate can still reach this runtime projection.
+// compileLegacyVRFScopeConfig6619 uses the tolerant load path for legacy
+// routing-instance shapes that strict commits now reject. Persisted configs
+// can still reach this runtime projection.
 func compileLegacyVRFScopeConfig6619(t *testing.T, cmds []string) *config.Config {
-	t.Helper()
 	tree := &config.ConfigTree{}
 	for _, cmd := range cmds {
 		path, err := config.ParseSetCommand(cmd)
@@ -114,6 +114,9 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 		policyName     string
 		cmds           []string
 		compileLenient bool
+		// wantConfigWarning is the expected tolerant-load warning for a legacy
+		// shape that strict commits now reject.
+		wantConfigWarning string
 		// wantScoped is the zone's resolved iifname set, asserted exactly: a
 		// count would pass for the right number of wrong netdevs, and the whole
 		// defect is that a rule names a netdev traffic never arrives on.
@@ -199,10 +202,12 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 			wantWarn:   1,
 		},
 		{
-			// `instance-type forwarding` creates NO VRF device and enslaves
-			// nothing (applyVRFReconcile skips it), so its members stay scopable.
-			// Without this row the fix would read as "any routing-instance
-			// membership breaks the scope", which is a different and wrong rule.
+			// #11312 rejects forwarding-instance interface members on strict
+			// commits. Persisted configs still reach this runtime projection
+			// through tolerant load, where the warning records the new contract.
+			// The member is not VRF-bound, so its kernel device remains scopable.
+			// Keep this control to distinguish instance-type forwarding from
+			// virtual-router membership without relying on newly committed config.
 			name:       "instance-type forwarding is not a VRF — scope intact",
 			zone:       "zoneA",
 			policyName: "denyA",
@@ -213,9 +218,11 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 					"set routing-instances fwd interface ge-0/0/1.0",
 				},
 				vrfScopeDeny("zoneA", "denyA")),
-			wantScoped: []string{"ge-0-0-1"},
-			wantRules:  true,
-			wantWarn:   0,
+			compileLenient:    true,
+			wantConfigWarning: "forwarding-instance interface membership",
+			wantScoped:        []string{"ge-0-0-1"},
+			wantRules:         true,
+			wantWarn:          0,
 		},
 		{
 			// member 8 via AMBIGUITY on an OWN netdev, no VRF involved. zoneA
@@ -295,6 +302,19 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 				cfg = compileLegacyVRFScopeConfig6619(t, row.cmds)
 			} else {
 				cfg = residualCfg(t, row.cmds)
+			}
+			if row.wantConfigWarning != "" {
+				found := false
+				for _, warning := range cfg.Warnings {
+					if strings.Contains(warning, row.wantConfigWarning) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("tolerant compile did not report %q; warnings=%v",
+						row.wantConfigWarning, cfg.Warnings)
+				}
 			}
 
 			if got := config.JunosHostZoneIngressNetdevs(cfg)[zone]; !slices.Equal(got, row.wantScoped) {

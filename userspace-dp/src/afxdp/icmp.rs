@@ -584,8 +584,8 @@ pub(super) fn build_local_icmp_error_v6(
 /// a Destination Unreachable in reply to an inbound ICMP/ICMPv6 *error*
 /// message (RFC 792 / RFC 4443). The reject guard suppresses ICMPv4 types
 /// {3,4,5,11,12} and ALL ICMPv6 types < 128 (the ICMPv6 error range). ICMP
-/// *query* types (echo request/reply, etc.) are NOT suppressed: a rejected
-/// echo gets an unreachable, matching Junos.
+/// *query* types (echo request/reply, etc.) are not suppressed here: firewall
+/// filter rejects can answer an echo, while policy rejects drop it (#11303).
 ///
 /// #2393: the ICMPv4 set here now matches [`is_icmp_error`]
 /// ({3,4,5,11,12}) — both follow the full RFC 792 quoted-datagram error
@@ -605,10 +605,12 @@ pub(super) fn reject_icmp_reply_suppressed(protocol: u8, icmp_type: u8) -> bool 
     }
 }
 
-/// Build the #2089 policy-`reject` ICMP/ICMPv6 Destination Unreachable
-/// (administratively prohibited) reply for a rejected non-TCP flow:
-/// ICMPv4 type 3 code 13, or ICMPv6 type 1 code 1 — the codes the
-/// retired eBPF reject path used ("matching Junos reject behavior").
+/// Build the ICMP/ICMPv6 Destination Unreachable reply for a rejected non-TCP
+/// packet using the caller's resolved message type. Policy rejects (#11303)
+/// call this only for UDP and pass port-unreachable; other non-TCP policy
+/// protocols are silently dropped before reaching this builder. Firewall-filter
+/// rejects continue to use their configured message type (admin-prohibited by
+/// default).
 ///
 /// Returns `None` (caller fail-closes to a silent drop) when the shared
 /// [`can_generate_icmp_error_reply`] gate (#2237) suppresses the reply:
@@ -635,9 +637,9 @@ pub(super) fn build_reject_icmp_unreachable(
     }
     match meta.addr_family as i32 {
         // ICMPv4 Destination Unreachable (type 3). The CODE comes from the
-        // term's `then reject <message-type>` (#6854); a term with no
-        // message-type resolves to 13, "communication administratively
-        // prohibited", which is what every reject carried before.
+        // caller's resolved message type: #6854 resolves a filter term's
+        // configured value, with 13 ("communication administratively
+        // prohibited") as the default; policy UDP rejects pass code 3.
         libc::AF_INET => build_local_icmp_error_v4(
             frame,
             meta,

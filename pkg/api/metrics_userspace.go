@@ -168,17 +168,15 @@ func (c *xpfCollector) emitFabricTrustBoundaryCounters(
 	)
 }
 
-// emitRejectObservability exposes the #3657 source-split reject reply
-// telemetry: sent, TX-frame reply-budget drops, egress output-filter drops,
-// and (#3661) rate-limit drops, each labeled source=policy|filter. These
-// per-BindingStatus counters (wired by #3615/#3661) are summed across
-// bindings. The aggregate xpf_userspace_reject_rate_limited_total is emitted
-// elsewhere and stays for back-compat; #3661 splits the rate-limit drop leg
-// by source at the helper consume site (both sources still share the one
-// global-per-reason bucket, so policy+filter sum to the aggregate). All eight
-// series are emitted unconditionally so a 0 is a real "no reject activity"
-// signal (alerting can distinguish policy-reject from filter-reject
-// starvation, and success from suppression).
+// emitRejectObservability exposes the #3657 source-split telemetry for
+// explicit policy/filter rejects: sent replies, TX-frame budget drops,
+// egress output-filter drops, and (#3661) rate-limit drops, each labeled
+// source=policy|filter. These per-BindingStatus counters are summed across
+// bindings. Zone `tcp-rst` session-miss resets share the rate-limit buckets
+// but are not source-attributed, so the source split may be below the
+// source-neutral aggregate xpf_userspace_reject_rate_limited_total. All eight
+// series are emitted unconditionally so a 0 is a real "no explicit reject
+// activity" signal.
 func (c *xpfCollector) emitRejectObservability(ch chan<- prometheus.Metric, status dpuserspace.ProcessStatus) {
 	var policySent, filterSent uint64
 	var policyBudget, filterBudget uint64

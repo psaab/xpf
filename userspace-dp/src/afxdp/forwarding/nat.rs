@@ -12,9 +12,10 @@ use super::*;
 /// #9956 F-052: the INGRESS scope resolves on the LOGICAL unit
 /// (`resolve_ingress_logical_ifindex`), exactly like the zone / filter /
 /// pre-routing-NAT admission sites (#3021/#5802) — the scope maps are keyed by
-/// logical unit ifindex, and scoping on the raw physical parent lets one
-/// trunk unit match another unit's `from interface` / `from routing-instance`
-/// rule. An untagged port resolves logical == physical (byte-identical).
+/// logical unit ifindex; scoping on a raw physical parent can make one trunk
+/// unit match another unit's `from interface` / `from routing-instance` rule.
+/// #11337: a validated V2 fabric identity takes precedence and maps the
+/// peer's stable interface/RI scope to this node's equivalent logical unit.
 /// `egress_ifindex` is already a resolved logical egress — connected routes
 /// carry their unit row's own ifindex (`forwarding_build/interfaces.rs`) and
 /// static next-hops resolve through the unit-name map — and is used as-is.
@@ -22,6 +23,7 @@ pub(in crate::afxdp) fn nat_scope_ctx_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
+    fabric_ingress_scope_ifindex: Option<i32>,
     egress_ifindex: i32,
     // #9062: SessionKey.routing_domain, passed through rather than re-derived.
     // Re-deriving it here would also need the fabric-encoded zone, and a value
@@ -29,9 +31,10 @@ pub(in crate::afxdp) fn nat_scope_ctx_for_flow(
     // fail to match the flow the active reserved.
     routing_domain: u32,
 ) -> crate::nat::NatScopeCtx<'_> {
-    let logical_ingress =
+    let logical_ingress = fabric_ingress_scope_ifindex.unwrap_or_else(|| {
         resolve_ingress_logical_ifindex(forwarding, ingress_ifindex, ingress_vlan_id)
-            .unwrap_or(ingress_ifindex);
+            .unwrap_or(ingress_ifindex)
+    });
     let name = |ifindex: i32| -> &str {
         forwarding
             .ifindex_to_config_name
@@ -63,6 +66,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
@@ -73,6 +77,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow(
         forwarding,
         ingress_ifindex,
         ingress_vlan_id,
+        fabric_ingress_scope_ifindex,
         egress_ifindex,
         flow.forward_key.routing_domain,
     );
@@ -105,6 +110,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result(
         forwarding,
         ingress_ifindex,
         ingress_vlan_id,
+        None,
         from_zone,
         to_zone,
         egress_ifindex,
@@ -124,6 +130,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result_at(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
+    fabric_ingress_scope_ifindex: Option<i32>,
     from_zone: &str,
     to_zone: &str,
     egress_ifindex: i32,
@@ -148,6 +155,7 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result_at(
         forwarding,
         ingress_ifindex,
         ingress_vlan_id,
+        fabric_ingress_scope_ifindex,
         egress_ifindex,
         flow.forward_key.routing_domain,
     );

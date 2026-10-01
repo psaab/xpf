@@ -1,8 +1,12 @@
 package userspace
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -48,6 +52,12 @@ func learnedV4(dst, gw string) routing.LearnedRoute {
 		Destination: dst, NextHops: []string{gw}, Protocol: "bgp",
 	}
 }
+func learnedV6(dst, gw string) routing.LearnedRoute {
+	return routing.LearnedRoute{
+		TableID: 254, Family: netlink.FAMILY_V6,
+		Destination: dst, NextHops: []string{gw}, Protocol: "bgp",
+	}
+}
 
 // cfgWithStaticDefault returns a config carrying a v4 static default, the
 // shape almost every shipped xpf config has.
@@ -79,7 +89,9 @@ func snapshotFor(t *testing.T, table, family, dest string, out []RouteSnapshot) 
 // is exactly the state in which the dataplane resolves NoRoute for it and
 // hands the packet to the kernel unadjudicated.
 func TestLearnedRouteReachesTheSnapshot(t *testing.T) {
-	withLearnedRoutes(t, fixedLearned(learnedV4("10.20.30.0/24", "192.0.2.1")))
+	learned := learnedV4("10.20.30.0/24", "192.0.2.1")
+	learned.NextHopWeights = []uint32{1}
+	withLearnedRoutes(t, fixedLearned(learned))
 
 	out, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
 	if err != nil {
@@ -92,9 +104,140 @@ func TestLearnedRouteReachesTheSnapshot(t *testing.T) {
 	if !reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) {
 		t.Errorf("next-hops = %v, want [192.0.2.1]", hits[0].NextHops)
 	}
+	if len(hits[0].NextHopWeights) != 0 {
+		t.Errorf("default weight vector = %v, want implicit weight 1 omitted from snapshot", hits[0].NextHopWeights)
+	}
+	body, err := json.Marshal(hits[0])
+	if err != nil {
+		t.Fatalf("marshal single-path route snapshot: %v", err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("unmarshal single-path route snapshot: %v", err)
+	}
+	if _, ok := wire["next_hop_weights"]; ok {
+		t.Errorf("default single-path weights should be omitted from wire: %s", body)
+	}
 	if hits[0].Preference != routing.LearnedRouteImportPreference {
 		t.Errorf("preference = %d, want the learned-route preference %d",
 			hits[0].Preference, routing.LearnedRouteImportPreference)
+	}
+}
+
+func TestLearnedRouteLowestKernelMetricWinsSamePrefix11388(t *testing.T) {
+	const destination = "198.51.100.0/24"
+	lowMetric := routing.LearnedRoute{
+		TableID: 254, Family: netlink.FAMILY_V4, Metric: 100,
+		Destination: destination, NextHops: []string{"192.0.2.2"}, Protocol: "dhcp",
+	}
+	highMetric := routing.LearnedRoute{
+		TableID: 254, Family: netlink.FAMILY_V4, Metric: 200,
+		Destination: destination, NextHops: []string{"192.0.2.10"}, Protocol: "dhcp",
+	}
+	for _, tc := range []struct {
+		name   string
+		routes []routing.LearnedRoute
+	}{
+		{name: "lexicographic gateway arrives first", routes: []routing.LearnedRoute{highMetric, lowMetric}},
+		{name: "lower metric arrives first", routes: []routing.LearnedRoute{lowMetric, highMetric}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withLearnedRoutes(t, fixedLearned(tc.routes...))
+			out, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			hits := snapshotFor(t, "inet.0", "inet", destination, out)
+			if len(hits) != 1 {
+				t.Fatalf("want one imported candidate at the lowest metric, got %+v", hits)
+			}
+			if !reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.2"}) {
+				t.Errorf("kernel metric 100 route lost to lexicographic tie-break: %+v", hits[0])
+			}
+			if hits[0].Preference != routing.LearnedRouteImportPreference {
+				t.Errorf("preference = %d, want fixed learned-route preference %d",
+					hits[0].Preference, routing.LearnedRouteImportPreference)
+			}
+		})
+	}
+}
+
+// Weighted learned ECMP keeps Linux member order through the Go snapshot wire.
+// Two otherwise identical rows with different weights must also remain distinct.
+func TestLearnedECMPWeightsReachSnapshotAndDedupeByWeight(t *testing.T) {
+	first := learnedV4("10.20.30.0/24", "192.0.2.1")
+	first.NextHops = []string{"192.0.2.1", "192.0.2.2"}
+	first.NextHopWeights = []uint32{1, 4}
+	second := first
+	second.NextHopWeights = []uint32{4, 1}
+	withLearnedRoutes(t, fixedLearned(first, second))
+
+	out, _, err := buildRouteSnapshots(&config.Config{}, nil, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	hits := snapshotFor(t, "inet.0", "inet", "10.20.30.0/24", out)
+	if len(hits) != 2 {
+		t.Fatalf("same next-hops with distinct weights collapsed: got %d snapshots (%+v)", len(hits), hits)
+	}
+	wantWeights := [][]uint32{{1, 4}, {4, 1}}
+	for i, hit := range hits {
+		if !reflect.DeepEqual(hit.NextHops, []string{"192.0.2.1", "192.0.2.2"}) {
+			t.Errorf("snapshot %d next-hops = %v, want both kernel legs in order", i, hit.NextHops)
+		}
+		if !reflect.DeepEqual(hit.NextHopWeights, wantWeights[i]) {
+			t.Errorf("snapshot %d weights = %v, want %v", i, hit.NextHopWeights, wantWeights[i])
+		}
+		if i == 0 {
+			body, err := json.Marshal(hit)
+			if err != nil {
+				t.Fatalf("marshal weighted route snapshot: %v", err)
+			}
+			var wire struct {
+				NextHopWeights []uint32 `json:"next_hop_weights"`
+			}
+			if err := json.Unmarshal(body, &wire); err != nil {
+				t.Fatalf("unmarshal weighted route snapshot: %v", err)
+			}
+			if !reflect.DeepEqual(wire.NextHopWeights, []uint32{1, 4}) {
+				t.Errorf("wire next_hop_weights = %v, want [1 4] in route order", wire.NextHopWeights)
+			}
+		}
+	}
+}
+
+// The populated Rust route wire specimen pins the same JSON key and ordered
+// weight vector used by Go, so serde renames cannot silently split the contract.
+func TestRouteSnapshotWeightWireKeyAgreesWithRustFixture11402(t *testing.T) {
+	fixture := filepath.Join("..", "..", "..", "userspace-dp", "tests", "fixtures", "protocol_wire_v1.json")
+	raw, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatalf("read Rust route snapshot fixture %s: %v", fixture, err)
+	}
+	var wire struct {
+		RouteSnapshotWeighted map[string]json.RawMessage `json:"route_snapshot_weighted"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("decode Rust route snapshot fixture: %v", err)
+	}
+	field, ok := reflect.TypeOf(RouteSnapshot{}).FieldByName("NextHopWeights")
+	if !ok {
+		t.Fatal("RouteSnapshot.NextHopWeights field is missing")
+	}
+	key := strings.Split(field.Tag.Get("json"), ",")[0]
+	if key != "next_hop_weights" {
+		t.Fatalf("Go weight JSON key = %q, want next_hop_weights", key)
+	}
+	encodedWeights, ok := wire.RouteSnapshotWeighted[key]
+	if !ok {
+		t.Fatalf("Rust weighted route specimen lacks Go key %q", key)
+	}
+	var weights []uint32
+	if err := json.Unmarshal(encodedWeights, &weights); err != nil {
+		t.Fatalf("decode Rust next_hop_weights: %v", err)
+	}
+	if !reflect.DeepEqual(weights, []uint32{1, 4}) {
+		t.Errorf("Rust next_hop_weights = %v, want [1 4] in route order", weights)
 	}
 }
 
@@ -361,5 +504,199 @@ func TestGapFillMatchesANonCanonicalConfigPrefix(t *testing.T) {
 	if !reflect.DeepEqual(forPrefix[0].NextHops, []string{"192.0.2.1"}) {
 		t.Fatalf("surviving next-hop = %v, want the operator's [192.0.2.1]",
 			forPrefix[0].NextHops)
+	}
+}
+
+// A recursive config static is not a usable helper next-hop: the Rust FIB
+// resolves bare gateways only through a connected prefix in the same table.
+// Keep the kernel's resolved copy instead of letting the config coverage key
+// hide it (#11317).
+func TestRecursiveStaticRouteKeepsKernelResolvedGapFill11317(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
+		{
+			Destination: "10.10.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "192.0.2.1"}},
+		},
+		{
+			Destination: "10.20.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "10.10.0.1"}},
+		},
+	}
+	interfaces := []InterfaceSnapshot{{
+		Name:    "eth0",
+		Ifindex: 42,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family:  "inet",
+			Address: "192.0.2.10/24",
+		}},
+	}}
+	withLearnedRoutes(t, fixedLearned(learnedV4("10.20.0.0/24", "192.0.2.1")))
+
+	out, _, err := buildRouteSnapshots(cfg, interfaces, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	hits := snapshotFor(t, "inet.0", "inet", "10.20.0.0/24", out)
+	if len(hits) != 1 || hits[0].Preference != routing.LearnedRouteImportPreference ||
+		!reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) {
+		t.Fatalf("recursive static must yield to the resolved kernel copy, got %+v", hits)
+	}
+}
+
+func TestRecursiveViaRecursiveStaticsKeepKernelResolvedGapFills11317(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
+		{
+			Destination: "10.10.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "192.0.2.1"}},
+		},
+		{
+			Destination: "10.20.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "10.10.0.1"}},
+		},
+		{
+			Destination: "10.30.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "10.20.0.1"}},
+		},
+	}
+	interfaces := []InterfaceSnapshot{{
+		Name:    "eth0",
+		Ifindex: 42,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family:  "inet",
+			Address: "192.0.2.10/24",
+		}},
+	}}
+	withLearnedRoutes(t, fixedLearned(
+		learnedV4("10.20.0.0/24", "192.0.2.1"),
+		learnedV4("10.30.0.0/24", "192.0.2.1"),
+	))
+
+	out, _, err := buildRouteSnapshots(cfg, interfaces, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for _, destination := range []string{"10.20.0.0/24", "10.30.0.0/24"} {
+		hits := snapshotFor(t, "inet.0", "inet", destination, out)
+		if len(hits) != 1 || hits[0].Preference != routing.LearnedRouteImportPreference ||
+			!reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) {
+			t.Errorf("%s must use its resolved kernel copy, got %+v", destination, hits)
+		}
+	}
+	direct := snapshotFor(t, "inet.0", "inet", "10.10.0.0/24", out)
+	if len(direct) != 1 || direct[0].Preference != 0 ||
+		!reflect.DeepEqual(direct[0].NextHops, []string{"192.0.2.1"}) {
+		t.Fatalf("the directly connected first hop route must remain configured, got %+v", direct)
+	}
+}
+
+func TestRecursiveIPv6StaticKeepsKernelResolvedGapFill11317(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.Inet6StaticRoutes = []*config.StaticRoute{
+		{
+			Destination: "2001:db8:10::/64",
+			NextHops:    []config.NextHopEntry{{Address: "2001:db8:1::2"}},
+		},
+		{
+			Destination: "2001:db8:20::/64",
+			NextHops:    []config.NextHopEntry{{Address: "2001:db8:10::1"}},
+		},
+	}
+	interfaces := []InterfaceSnapshot{{
+		Name:    "eth0",
+		Ifindex: 42,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family:  "inet6",
+			Address: "2001:db8:1::1/64",
+		}},
+	}}
+	withLearnedRoutes(t, fixedLearned(learnedV6("2001:db8:20::/64", "2001:db8:1::2")))
+
+	out, _, err := buildRouteSnapshots(cfg, interfaces, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	hits := snapshotFor(t, "inet6.0", "inet6", "2001:db8:20::/64", out)
+	if len(hits) != 1 || hits[0].Preference != routing.LearnedRouteImportPreference ||
+		!reflect.DeepEqual(hits[0].NextHops, []string{"2001:db8:1::2"}) {
+		t.Fatalf("recursive IPv6 static must yield to its resolved kernel copy, got %+v", hits)
+	}
+}
+
+func TestDirectAndExplicitStaticGatewaysRemainConfigured11317(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
+		{
+			Destination: "10.40.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "192.0.2.1"}},
+		},
+		{
+			Destination: "10.50.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "198.51.100.1", Interface: "eth1"}},
+		},
+	}
+	interfaces := []InterfaceSnapshot{{
+		Name:    "eth0",
+		Ifindex: 42,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family:  "inet",
+			Address: "192.0.2.10/24",
+		}},
+	}}
+	withLearnedRoutes(t, fixedLearned(
+		learnedV4("10.40.0.0/24", "192.0.2.254"),
+		learnedV4("10.50.0.0/24", "198.51.100.254"),
+	))
+
+	out, _, err := buildRouteSnapshots(cfg, interfaces, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for destination, nextHop := range map[string]string{
+		"10.40.0.0/24": "192.0.2.1",
+		"10.50.0.0/24": "198.51.100.1@eth1",
+	} {
+		hits := snapshotFor(t, "inet.0", "inet", destination, out)
+		if len(hits) != 1 || hits[0].Preference != 0 ||
+			!reflect.DeepEqual(hits[0].NextHops, []string{nextHop}) {
+			t.Errorf("%s must retain configured gateway %s, got %+v", destination, nextHop, hits)
+		}
+	}
+}
+
+func TestMixedDirectAndRecursiveStaticECMPKeepsDirectPath11317(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.StaticRoutes = []*config.StaticRoute{
+		{
+			Destination: "10.10.0.0/24",
+			NextHops:    []config.NextHopEntry{{Address: "192.0.2.1"}},
+		},
+		{
+			Destination: "10.20.0.0/24",
+			NextHops: []config.NextHopEntry{
+				{Address: "192.0.2.1"},
+				{Address: "10.10.0.1"},
+			},
+		},
+	}
+	interfaces := []InterfaceSnapshot{{
+		Name:    "eth0",
+		Ifindex: 42,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family:  "inet",
+			Address: "192.0.2.10/24",
+		}},
+	}}
+	withLearnedRoutes(t, fixedLearned(learnedV4("10.20.0.0/24", "192.0.2.1")))
+
+	out, _, err := buildRouteSnapshots(cfg, interfaces, nil)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	hits := snapshotFor(t, "inet.0", "inet", "10.20.0.0/24", out)
+	if len(hits) != 1 || hits[0].Preference != 0 ||
+		!reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1", "10.10.0.1"}) {
+		t.Fatalf("mixed ECMP must retain its directly connected member, got %+v", hits)
 	}
 }

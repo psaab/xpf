@@ -23,6 +23,91 @@ use crate::session::TunnelDiscriminator;
 use super::poll_descriptor::{try_reverse_embedded_icmp_error, EmbeddedIcmpReversal};
 
 use super::poll_descriptor::dns_reply_fastpath_admit;
+/// `reth0.80` is the tagged WAN child. Its fixtures must carry an on-wire
+/// 802.1Q VID-80 tag and matching RX metadata/offsets; VID 0 is intentionally
+/// dropped by #11297. Explicit unit-0 arrivals remain untagged.
+const EMBEDDED_POLL_TEST_WAN_VLAN_ID: u16 = 80;
+/// Give a poll fixture on `reth0.80` the same on-wire tag and offsets the XDP
+/// shim would report. A non-zero ingress VLAN in metadata cannot accompany an
+/// untagged frame: the shim derives both from the physical 802.1Q header.
+fn embedded_poll_test_tag_wan_ingress(
+    frame: &[u8],
+    mut meta: UserspaceDpMeta,
+) -> (Vec<u8>, UserspaceDpMeta) {
+    if meta.ingress_ifindex != 12 {
+        return (frame.to_vec(), meta);
+    }
+
+    let mut tagged_frame = frame.to_vec();
+    let already_tagged = tagged_frame.get(12..14) == Some(&[0x81, 0x00]);
+    if already_tagged {
+        let tci = u16::from_be_bytes([tagged_frame[14], tagged_frame[15]]);
+        assert_eq!(
+            tci & 0x0fff,
+            EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+            "WAN child packet must carry VID 80 on wire"
+        );
+    } else {
+        tagged_frame.splice(12..12, [0x81, 0x00, 0x00, 0x50]);
+    }
+
+    match meta.l3_offset {
+        14 => {
+            meta.l3_offset = 18;
+            meta.l4_offset += 4;
+            meta.payload_offset += 4;
+        }
+        18 => {}
+        offset => panic!("WAN Ethernet fixture has unexpected L3 offset {offset}"),
+    }
+    meta.ingress_vlan_id = EMBEDDED_POLL_TEST_WAN_VLAN_ID;
+    meta.ingress_vlan_present = 1;
+    meta.pkt_len = tagged_frame.len().min(u16::MAX as usize) as u16;
+    assert_eq!(&tagged_frame[12..14], &[0x81, 0x00]);
+    assert_eq!(
+        super::frame::frame_l3_offset(&tagged_frame),
+        Some(18),
+        "WAN tag must place L3 at the shim-reported offset",
+    );
+    assert_eq!(meta.l3_offset, 18);
+    (tagged_frame, meta)
+}
+
+/// Keep the checked poll fixtures wire-realistic without changing their
+/// scenario-specific packet construction or assertions.
+fn txn_run_descriptor_checked(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    expect_mac_acceptance: bool,
+) -> (BatchCounters, DebugPollCounters) {
+    if meta.ingress_ifindex != 12 {
+        return super::tests_support::txn_run_descriptor_checked(
+            binding,
+            sessions,
+            forwarding,
+            ha_state,
+            frame,
+            meta,
+            expect_mac_acceptance,
+        );
+    }
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(frame, meta);
+    super::tests_support::txn_run_descriptor_checked(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        &frame,
+        meta,
+        expect_mac_acceptance,
+    )
+}
+
+
 
 #[test]
 fn dns_query_from_port_53_requires_session_tracking_10321() {
@@ -240,7 +325,14 @@ fn no_match_embedded_icmp_returns_none() {
 
     let mut sessions = SessionTable::new();
     // Don't install any sessions
-    let result = try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 1_000_000, 0);
+    let result = try_embedded_icmp_session_match_from_frame(
+        &frame,
+        meta,
+        &ForwardingState::default(),
+        &mut sessions,
+        1_000_000,
+        0,
+    );
     assert!(
         result.is_none(),
         "should return None when no session matches"
@@ -344,6 +436,7 @@ fn same_family_icmp_quote_uses_read_only_plain_probe_9990() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         install_ns + 1_000_000,
     );
@@ -454,7 +547,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         &entry,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -462,6 +555,7 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -605,6 +699,7 @@ fn embedded_icmp_nat_match_translates_redirect_v4() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -672,6 +767,7 @@ fn embedded_icmp_nat_match_ignores_non_error_echo() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option();
@@ -847,6 +943,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex,
+        ingress_vlan_id: if ingress_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(ingress_ifindex == 12),
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -859,6 +957,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -1871,6 +1970,8 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: arrival_ifindex,
+        ingress_vlan_id: if arrival_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(arrival_ifindex == 12),
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -1883,6 +1984,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let (batch, dbg, event_handle, event_rx) = txn_run_descriptor_capturing_events(
         &mut binding,
         &mut sessions,
@@ -2247,6 +2349,8 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_im
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: arrival_ifindex,
+        ingress_vlan_id: if arrival_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(arrival_ifindex == 12),
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -2471,7 +2575,12 @@ fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
         );
     }
     assert_eq!(
-        crate::afxdp::forwarding::ingress_routing_domain(&forwarding, 12, 0, None),
+        crate::afxdp::forwarding::ingress_routing_domain(
+            &forwarding,
+            12,
+            EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+            None
+        ),
         domain,
         "fixture precondition: the ICMPv4 error ingresses on reth0.80 (ifindex 12), \
          and the domain the poll loop stamps from that interface must be the domain \
@@ -2489,6 +2598,8 @@ fn n9162_run_v4_to_v6(domain: u32) -> N9162Outcome {
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -2786,6 +2897,8 @@ fn poll_descriptor_nat64_icmp_error_outer_dst_mismatch_declined_6472() {
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -2908,6 +3021,8 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -2932,6 +3047,7 @@ fn poll_descriptor_same_family_reversal_not_stolen_by_nat64_arm_6472() {
         IpAddr::V4(client_ip),
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
     );
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     txn_run_descriptor_with_neighbors(
         &mut binding,
         &mut sessions,
@@ -3354,9 +3470,8 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v4_in_routing_instance_9162() 
     assert_eq!(
         &ip[12..16],
         &snat_ip.octets(),
-        "#9162: outer src re-NAT'd to the SNAT address. A domain-0 reply key \
-         misses the domain-7 session, the outbound-SNAT mark never fires, and \
-         the #5690 reversal puts the INTERNAL client address on the wire"
+        "#9162: the recovered forward NAT session must re-NAT the outer source; \
+         a lookup miss leaves the internal client address on the wire"
     );
     let icmp = &ip[20..];
     let emb = &icmp[8..];
@@ -3440,8 +3555,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_in_routing_instance_9162() 
     assert_eq!(
         &ip[8..24],
         &snat_v6.octets(),
-        "#9162: outer src re-NAT'd to the SNAT66 address. With a domain-0 reply \
-         key the domain-7 session is unreachable and the internal source leaks"
+        "#9162: the recovered forward NAT66 session must re-NAT the outer source"
     );
     let icmp = &ip[40..];
     let emb = &icmp[8..];
@@ -3493,6 +3607,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -3566,6 +3681,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -3601,6 +3717,7 @@ fn embedded_icmp_outbound_snat_marker_scoping_6474() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -5094,6 +5211,8 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -5121,6 +5240,7 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
         },
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -5404,6 +5524,8 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -5431,6 +5553,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         },
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -5795,6 +5918,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
     meta.ingress_ifindex = 12;
     meta.config_generation = 7;
     meta.fib_generation = 9;
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -6179,6 +6303,8 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -6191,6 +6317,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -6540,7 +6667,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         &entry,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -6548,6 +6675,7 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -6676,7 +6804,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
     );
 
     assert!(
-        try_embedded_icmp_nat_match_from_frame(
+        try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
             &frame,
             meta,
             &mut sessions,
@@ -6684,6 +6812,7 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
             &neighbors,
             &shared_sessions,
             &shared_nat_sessions,
+            &shared_owner_rg_indexes,
             &shared_forward_wire_sessions,
             1_000_000,
         ).into_option()
@@ -6790,7 +6919,14 @@ fn the_as_is_embedded_key_carries_the_discriminator_9031() {
     ));
 
     assert!(
-        try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 123_100_000_000, 0)
+        try_embedded_icmp_session_match_from_frame(
+            &frame,
+            meta,
+            &ForwardingState::default(),
+            &mut sessions,
+            123_100_000_000,
+            0,
+        )
             .is_some(),
         "#9031: the as-is embedded key found no session for a quoted GRE tunnel \
          whose session is keyed on exactly that tuple. SessionKey's Eq includes \
@@ -6880,7 +7016,14 @@ fn the_as_is_embedded_key_does_not_cross_tunnels_9031() {
     ));
 
     assert!(
-        try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 123_100_000_000, 0)
+        try_embedded_icmp_session_match_from_frame(
+            &frame,
+            meta,
+            &ForwardingState::default(),
+            &mut sessions,
+            123_100_000_000,
+            0,
+        )
             .is_none(),
         "#9031: a quote naming tunnel key 40001 matched the session for tunnel \
          key 40000. GRE has no L4 ports, so without the discriminator the two \
@@ -6952,7 +7095,7 @@ fn publish_pptp_gre_session_9298(
     snat: IpAddr,
     handle: u32,
     egress_ifindex: i32,
-) {
+) -> SharedSessionOwnerRgIndexes {
     let entry = SyncedSessionEntry {
         key: SessionKey {
             addr_family: if client.is_ipv4() {
@@ -7027,6 +7170,7 @@ fn publish_pptp_gre_session_9298(
         &shared_owner_rg_indexes,
         &entry,
     );
+    shared_owner_rg_indexes
 }
 
 /// FAIL-ON-REVERT (IPv4 arm): reds if `nat_match_v4`'s REPLY key goes back to
@@ -7075,7 +7219,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    publish_pptp_gre_session_9298(
+    let shared_owner_rg_indexes = publish_pptp_gre_session_9298(
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -7086,7 +7230,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
         12,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -7094,6 +7238,7 @@ fn embedded_icmp_resolves_a_pptp_call_v4_9298() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -7158,7 +7303,7 @@ fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    publish_pptp_gre_session_9298(
+    let shared_owner_rg_indexes = publish_pptp_gre_session_9298(
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -7169,7 +7314,7 @@ fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
         12,
     );
 
-    let icmp_match = try_embedded_icmp_nat_match_from_frame(
+    let icmp_match = try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
         &frame,
         meta,
         &mut sessions,
@@ -7177,6 +7322,7 @@ fn embedded_icmp_resolves_a_pptp_call_v6_9298() {
         &neighbors,
         &shared_sessions,
         &shared_nat_sessions,
+        &shared_owner_rg_indexes,
         &shared_forward_wire_sessions,
         1_000_000,
     ).into_option()
@@ -7235,7 +7381,7 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-    publish_pptp_gre_session_9298(
+    let shared_owner_rg_indexes = publish_pptp_gre_session_9298(
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
@@ -7247,7 +7393,7 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
     );
 
     assert!(
-        try_embedded_icmp_nat_match_from_frame(
+        try_embedded_icmp_nat_match_from_frame_with_owner_indexes(
             &frame,
             meta,
             &mut sessions,
@@ -7255,6 +7401,7 @@ fn embedded_icmp_does_not_cross_pptp_calls_9298() {
             &neighbors,
             &shared_sessions,
             &shared_nat_sessions,
+            &shared_owner_rg_indexes,
             &shared_forward_wire_sessions,
             1_000_000,
         ).into_option()
@@ -7357,7 +7504,14 @@ fn embedded_icmp_session_match_resolves_a_pptp_call_9298() {
     ));
 
     assert!(
-        try_embedded_icmp_session_match_from_frame(&frame, meta, &mut sessions, 123_100_000_000, 0)
+        try_embedded_icmp_session_match_from_frame(
+            &frame,
+            meta,
+            &ForwardingState::default(),
+            &mut sessions,
+            123_100_000_000,
+            0,
+        )
             .is_some(),
         "#9298: the as-is embedded key found no session for a quoted PPTP data \
          packet whose session is keyed on exactly that tuple. SessionKey's Eq \
@@ -7444,6 +7598,8 @@ fn g9528_run_nat64(term: Option<FirewallTermSnapshot>) -> (usize, usize, Option<
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -7563,6 +7719,8 @@ fn g9528_run_same_family(term: Option<FirewallTermSnapshot>) -> (usize, usize, O
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -7806,6 +7964,7 @@ fn full_tcp_quote_in_atomic_outer_matches_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -7838,6 +7997,7 @@ fn short_tcp_quote_in_atomic_outer_refused_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -7867,6 +8027,7 @@ fn short_tcp_quote_in_fragmented_outer_kept_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -7974,6 +8135,7 @@ fn ptb_pair_same_session_both_delivered_9901() {
             &neighbors,
             &shared,
             &shared_nat,
+            &SharedSessionOwnerRgIndexes::default(),
             &shared_wire,
             1_000_000,
         );
@@ -8010,6 +8172,7 @@ fn same_router_sessions_match_independently_9901() {
             &neighbors,
             &shared,
             &shared_nat,
+            &SharedSessionOwnerRgIndexes::default(),
             &shared_wire,
             1_000_000,
         );
@@ -8026,6 +8189,7 @@ fn same_router_sessions_match_independently_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -8041,6 +8205,7 @@ fn same_router_sessions_match_independently_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -8073,6 +8238,7 @@ fn match_flood_capped_at_burst_and_counted_9901() {
             &neighbors,
             &shared,
             &shared_nat,
+            &SharedSessionOwnerRgIndexes::default(),
             &shared_wire,
             1_000_000,
         ) {
@@ -8202,6 +8368,7 @@ fn outer_slack_quote_refused_at_match_9901() {
         &neighbors,
         &shared,
         &shared_nat,
+        &SharedSessionOwnerRgIndexes::default(),
         &shared_wire,
         1_000_000,
     );
@@ -8300,6 +8467,8 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: arrival_ifindex as u32,
+        ingress_vlan_id: if arrival_ifindex == 12 { EMBEDDED_POLL_TEST_WAN_VLAN_ID } else { 0 },
+        ingress_vlan_present: u8::from(arrival_ifindex == 12),
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -8314,6 +8483,7 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
     };
     meta.flow_src_addr[..4].copy_from_slice(&router_ip.octets());
     meta.flow_dst_addr[..4].copy_from_slice(&client_ip.octets());
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -8752,6 +8922,8 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -8764,6 +8936,7 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -9094,6 +9267,8 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -9106,6 +9281,7 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -9422,6 +9598,8 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         version: USERSPACE_META_VERSION,
         length: meta_len as u16,
         ingress_ifindex: 12,
+        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
+        ingress_vlan_present: 1,
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -9434,6 +9612,7 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
+    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let meta_bytes = unsafe {
         std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
     };
@@ -9854,4 +10033,300 @@ fn rx_source_learn_cannot_pre_policy_overwrite_live_v6_neighbor() {
             );
         }
     }
+}
+
+#[test]
+fn zone_tcp_rst_only_resets_tcp_session_misses_11304() {
+    use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
+
+    let cases = [
+        ("ACK session miss", true, TCP_ACK, false, false, true),
+        ("FIN session miss", true, TCP_FIN | TCP_ACK, false, false, true),
+        ("tcp-rst disabled", false, TCP_ACK, false, false, false),
+        ("incoming RST", true, TCP_RST | TCP_ACK, false, false, false),
+        ("SYN policy deny", true, TCP_SYN, true, false, false),
+        (
+            "no-syn-check policy deny",
+            true,
+            TCP_ACK,
+            true,
+            true,
+            false,
+        ),
+    ];
+
+    for (name, tcp_rst, flags, policy_deny, no_syn_check, expect_rst) in cases {
+        let mut snapshot = nat_snapshot();
+        snapshot.zones[0].tcp_rst = tcp_rst;
+        snapshot.flow.tcp_no_syn_check = no_syn_check;
+        if policy_deny {
+            snapshot.policies[0].action = "deny".to_string();
+        }
+        let forwarding = build_forwarding_state(&snapshot);
+        let ha_state = txn_ha_state();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            Ipv4Addr::new(198, 51, 100, 20),
+            49152,
+            443,
+            flags,
+            TEST_LAN_MAC,
+        );
+        let meta = txn_meta_v4(24, flags, frame.len() as u16);
+
+        let (batch, _) = txn_run_descriptor(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+        );
+        assert_eq!(
+            binding.tx_pipeline.pending_tx_local.len(),
+            usize::from(expect_rst),
+            "{name}: unexpected local reply count"
+        );
+        if expect_rst {
+            let reply = &binding
+                .tx_pipeline
+                .pending_tx_local
+                .front()
+                .expect("session-miss RST")
+                .bytes;
+            assert_ne!(
+                reply[14 + 20 + 13] & TCP_RST,
+                0,
+                "{name}: reply must be RST"
+            );
+        }
+        assert_eq!(
+            batch.policy_reject_sent, 0,
+            "{name}: a session-miss RST is not a policy reject"
+        );
+    }
+}
+
+// #11332: filtered SYNs must be excluded from screen sketches and cookie
+// replies, while packets admitted by the same filter still exercise screens.
+fn g11332_runtime(
+    term: Option<FirewallTermSnapshot>,
+) -> (ForwardingState, ScreenState) {
+    let mut snapshot = nat_snapshot();
+    if let Some(term) = term {
+        g9528_attach(&mut snapshot, false, term);
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let mut profiles = FxHashMap::default();
+    profiles.insert(
+        "lan".to_string(),
+        crate::screen::ScreenProfile {
+            syn_flood_threshold: 1,
+            syn_cookie: true,
+            ..crate::screen::ScreenProfile::default()
+        },
+    );
+    let mut screen = ScreenState::new();
+    screen.update_profiles(profiles);
+    screen.update_syn_cookie_master_key(Some([0x42; 16]));
+    (forwarding, screen)
+}
+
+fn g11332_send_syn(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    screen: &mut ScreenState,
+    source: Ipv4Addr,
+) -> BatchCounters {
+    let frame = build_txn_tcp_syn_frame_v4(
+        source,
+        Ipv4Addr::new(198, 51, 100, 20),
+        49152,
+        443,
+        0x02,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(24, 0x02, frame.len() as u16);
+    let (batch, _) = txn_run_descriptor_with_screen_state(
+        binding,
+        sessions,
+        forwarding,
+        &txn_ha_state(),
+        &frame,
+        meta,
+        screen,
+    );
+    batch
+}
+
+#[test]
+fn filtered_syns_do_not_charge_screens_or_receive_syn_cookies_11332() {
+    let denied_source = Ipv4Addr::new(203, 0, 113, 10);
+    let permitted_source = Ipv4Addr::new(192, 0, 2, 10);
+    let mut term = g9528_term("discard", "");
+    term.source_addresses = vec![format!("{denied_source}/32")];
+    let (forwarding, mut screen) = g11332_runtime(Some(term));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+
+    // The first two SYNs would cross the threshold and challenge the second
+    // one if the input filter were evaluated only after screens. Both still
+    // reach the ordinary counted filter enforcement site.
+    for expected_count in 1..=2 {
+        let batch = g11332_send_syn(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &mut screen,
+            denied_source,
+        );
+        assert_eq!(batch.syn_cookie_challenges, 0);
+        assert_eq!(batch.syn_cookie_syn_ack_sent, 0);
+        assert!(
+            binding.tx_pipeline.pending_tx_local.is_empty(),
+            "a filter-discarded SYN must not elicit a reflected SYN-ACK",
+        );
+        assert_eq!(
+            g9528_packets(&forwarding),
+            expected_count,
+            "the normal input-filter evaluator still counts each denied SYN once",
+        );
+    }
+
+    // The same destination's sketch starts with the first filter-admitted SYN:
+    // it passes, and only the next admitted SYN triggers the configured cookie.
+    let first_permitted = g11332_send_syn(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        permitted_source,
+    );
+    assert_eq!(first_permitted.syn_cookie_challenges, 0);
+    assert!(binding.tx_pipeline.pending_tx_local.is_empty());
+    let second_permitted = g11332_send_syn(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        permitted_source,
+    );
+    assert_eq!(second_permitted.syn_cookie_challenges, 1);
+    assert_eq!(second_permitted.syn_cookie_syn_ack_sent, 1);
+    let challenge = binding
+        .tx_pipeline
+        .pending_tx_local
+        .front()
+        .expect("admitted SYN must still receive the configured cookie challenge");
+    assert_eq!(
+        &challenge.bytes[30..34],
+        &permitted_source.octets(),
+        "the cookie reply destination must be the admitted source, never the filtered one",
+    );
+}
+
+#[test]
+fn pbr_discard_is_applied_before_screen_sketches_11332() {
+    let denied_source = Ipv4Addr::new(203, 0, 113, 11);
+    let mut term = g9528_term("discard", "scrub");
+    term.source_addresses = vec![format!("{denied_source}/32")];
+    let (forwarding, mut screen) = g11332_runtime(Some(term));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let batch = g11332_send_syn(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        denied_source,
+    );
+    assert_eq!(batch.syn_cookie_challenges, 0);
+    assert!(binding.tx_pipeline.pending_tx_local.is_empty());
+    assert_eq!(
+        g9528_packets(&forwarding),
+        1,
+        "the PBR discard term is counted once by the normal route evaluator",
+    );
+}
+
+#[test]
+fn filtered_cookie_ack_cannot_reflect_rst_before_input_filter_11332() {
+    let denied_source = Ipv4Addr::new(203, 0, 113, 12);
+    let server = Ipv4Addr::new(198, 51, 100, 20);
+    let (open_forwarding, mut screen) = g11332_runtime(None);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut syn_sessions = SessionTable::new();
+
+    // Establish a real cookie for this tuple before installing the deny, as
+    // can happen when an operator changes the input filter mid-handshake.
+    let _ = g11332_send_syn(
+        &mut binding,
+        &mut syn_sessions,
+        &open_forwarding,
+        &mut screen,
+        denied_source,
+    );
+    let challenged = g11332_send_syn(
+        &mut binding,
+        &mut syn_sessions,
+        &open_forwarding,
+        &mut screen,
+        denied_source,
+    );
+    assert_eq!(challenged.syn_cookie_challenges, 1);
+    let challenge = binding
+        .tx_pipeline
+        .pending_tx_local
+        .front()
+        .expect("the unfiltered SYN must produce a cookie SYN-ACK");
+    let cookie_isn = u32::from_be_bytes(
+        challenge.bytes[38..42]
+            .try_into()
+            .expect("SYN-ACK sequence field"),
+    );
+    binding.tx_pipeline.pending_tx_local.clear();
+
+    let mut term = g9528_term("discard", "");
+    term.source_addresses = vec![format!("{denied_source}/32")];
+    let (filtered_forwarding, _unused_screen) = g11332_runtime(Some(term));
+    let mut ack_frame = build_txn_tcp_syn_frame_v4(
+        denied_source,
+        server,
+        49152,
+        443,
+        0x10,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    ack_frame[38..42].copy_from_slice(&2u32.to_be_bytes());
+    ack_frame[42..46].copy_from_slice(&cookie_isn.wrapping_add(1).to_be_bytes());
+    crate::afxdp::frame::recompute_l4_checksum_ipv4(&mut ack_frame[14..], 20, PROTO_TCP, false)
+        .expect("valid cookie ACK checksum");
+    let ack_meta = txn_meta_v4(24, 0x10, ack_frame.len() as u16);
+    let mut ack_sessions = SessionTable::new();
+    let (batch, _) = txn_run_descriptor_with_screen_state(
+        &mut binding,
+        &mut ack_sessions,
+        &filtered_forwarding,
+        &txn_ha_state(),
+        &ack_frame,
+        ack_meta,
+        &mut screen,
+    );
+    assert_eq!(batch.syn_cookie_ack_valid, 0);
+    assert!(
+        binding.tx_pipeline.pending_tx_local.is_empty(),
+        "a filter-discarded cookie ACK must not elicit a reflected RST",
+    );
+    assert_eq!(
+        g9528_packets(&filtered_forwarding),
+        1,
+        "the normal input-filter evaluator must count the denied ACK",
+    );
 }

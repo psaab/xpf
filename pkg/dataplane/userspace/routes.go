@@ -21,10 +21,22 @@ var ruleListFn = netlink.RuleList
 // routeSnapshotDedupeKey returns the canonical identity used to suppress
 // duplicate route snapshots during route collection.
 func routeSnapshotDedupeKey(snap RouteSnapshot) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%s|%t|%d|%d",
+	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%d|%d",
 		snap.Table, snap.Family, snap.Destination,
-		strings.Join(snap.NextHops, ","), snap.NextTable,
+		strings.Join(snap.NextHops, ","), snap.NextHopWeights, snap.NextTable,
 		snap.Discard, snap.Preference, snap.RulePriority)
+}
+
+// nonDefaultRouteWeights omits the wire vector when all entries mean weight 1.
+// The Rust FIB defaults absent, short, and zero weights to 1; retaining the
+// full vector here would needlessly grow common single-path snapshot publishes.
+func nonDefaultRouteWeights(weights []uint32) []uint32 {
+	for _, weight := range weights {
+		if weight > 1 {
+			return weights
+		}
+	}
+	return nil
 }
 
 // routeSnapshotLeakIdentity canonicalizes only the target-table spelling and
@@ -177,12 +189,13 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				"family", snap.Family, "discard", snap.Discard)
 			return
 		}
-		// #3770 (H8): the dedupe key MUST include Discard, Preference, and
-		// RulePriority. A discard (blackhole) route and a normal route to the
-		// same prefix are DISTINCT forwarding decisions — omitting Discard let
+		// #3770 (H8): the dedupe key includes NextHopWeights, Discard,
+		// Preference, and RulePriority. An otherwise identical ECMP group with
+		// a different weight vector is a distinct forwarding decision;
+		// omitting weights would flatten it. A discard (blackhole) route and
+		// a normal route to the same prefix are distinct: omitting Discard let
 		// one silently hide the other. Two routes differing only in preference
-		// (e.g. a static next-table route at its configured preference and the
-		// kernel ip-rule mirror at preference 0) likewise remain distinct.
+		// likewise remain distinct.
 		// RulePriority is the kernel rule identity for a NextTable leak:
 		// collapsing rows that share a prefix and target but have different
 		// priorities would discard one stage-1 candidate and make the helper
@@ -242,7 +255,40 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// per-route causes, and the show surfaces consult the same function.
 	staticRouteExclusions := config.StaticRouteExclusions(cfg)
 	nextTableRulePriorities := configNextTableRulePriorities(cfg, staticRouteExclusions)
-	addRoutes := func(table, family string, routes []*config.StaticRoute, perInstance bool) {
+	connectedNetworks := make(map[routeSnapshotTableFamily][]*net.IPNet)
+	interfaceTablesV4, interfaceTablesV6 := buildInterfaceRouteTables(cfg)
+	addConnectedRoutes := func(table, family string, prefixes []string) {
+		for _, prefix := range prefixes {
+			addSnapshot(RouteSnapshot{
+				Table:       table,
+				Family:      family,
+				Destination: prefix,
+			})
+			_, network, err := net.ParseCIDR(prefix)
+			if err != nil {
+				continue
+			}
+			key := routeSnapshotTableFamily{table: table, family: family}
+			connectedNetworks[key] = append(connectedNetworks[key], network)
+		}
+	}
+	for _, iface := range interfaces {
+		if iface.Name == "" {
+			continue
+		}
+		v4Table := interfaceTablesV4[iface.Name]
+		if v4Table == "" {
+			v4Table = "inet.0"
+		}
+		v6Table := interfaceTablesV6[iface.Name]
+		if v6Table == "" {
+			v6Table = "inet6.0"
+		}
+		v4Prefixes, v6Prefixes := connectedPrefixesForInterface(iface)
+		addConnectedRoutes(v4Table, "inet", v4Prefixes)
+		addConnectedRoutes(v6Table, "inet6", v6Prefixes)
+	}
+	addRoutes := func(table, family string, routes []*config.StaticRoute, instanceName, instanceType string) {
 		for _, route := range routes {
 			if route == nil {
 				continue
@@ -262,6 +308,16 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				continue
 			}
 			tableName, familyName := normalizeRouteSnapshotFamily(table, family, route.Destination)
+			if staticRouteHasOnlyUnresolvedBareGateways(
+				route, tableName, familyName, instanceName, instanceType,
+				connectedNetworks, interfaces,
+			) {
+				// When every bare gateway is recursive, the config row would
+				// resolve with ifindex 0 and suppress the kernel's resolved
+				// copy in the learned-route gap fill (#11317). Mixed rows stay:
+				// Rust's live selection can still use a resolvable member.
+				continue
+			}
 			base := RouteSnapshot{
 				Table:       tableName,
 				Family:      familyName,
@@ -345,19 +401,8 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			}
 		}
 	}
-	interfaceTablesV4, interfaceTablesV6 := buildInterfaceRouteTables(cfg)
-	addConnectedRoutes := func(family, table string, prefixes []string) {
-		for _, prefix := range prefixes {
-			snap := RouteSnapshot{
-				Table:       table,
-				Family:      family,
-				Destination: prefix,
-			}
-			addSnapshot(snap)
-		}
-	}
-	addRoutes("inet.0", "inet", cfg.RoutingOptions.StaticRoutes, false)
-	addRoutes("inet6.0", "inet6", cfg.RoutingOptions.Inet6StaticRoutes, false)
+	addRoutes("inet.0", "inet", cfg.RoutingOptions.StaticRoutes, "", "")
+	addRoutes("inet6.0", "inet6", cfg.RoutingOptions.Inet6StaticRoutes, "", "")
 
 	if len(cfg.RoutingInstances) > 0 {
 		insts := make([]*config.RoutingInstanceConfig, 0, len(cfg.RoutingInstances))
@@ -368,25 +413,9 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		}
 		sort.Slice(insts, func(i, j int) bool { return insts[i].Name < insts[j].Name })
 		for _, ri := range insts {
-			addRoutes(ri.Name+".inet.0", "inet", ri.StaticRoutes, true)
-			addRoutes(ri.Name+".inet6.0", "inet6", ri.Inet6StaticRoutes, true)
+			addRoutes(ri.Name+".inet.0", "inet", ri.StaticRoutes, ri.Name, ri.InstanceType)
+			addRoutes(ri.Name+".inet6.0", "inet6", ri.Inet6StaticRoutes, ri.Name, ri.InstanceType)
 		}
-	}
-	for _, iface := range interfaces {
-		if iface.Name == "" {
-			continue
-		}
-		v4Table := interfaceTablesV4[iface.Name]
-		if v4Table == "" {
-			v4Table = "inet.0"
-		}
-		v6Table := interfaceTablesV6[iface.Name]
-		if v6Table == "" {
-			v6Table = "inet6.0"
-		}
-		v4Prefixes, v6Prefixes := connectedPrefixesForInterface(iface)
-		addConnectedRoutes("inet", v4Table, v4Prefixes)
-		addConnectedRoutes("inet6", v6Table, v6Prefixes)
 	}
 
 	// Add synthetic routes for ip-rule entries that implement inter-VRF
@@ -543,7 +572,7 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// producing spurious snapshot-to-snapshot diffs and ECMP-member churn
 	// that re-installed the FIB for no config change. Leak rows are stage-1
 	// rules, so RulePriority is their first tie-break after table/family/
-	// destination; ordinary rows keep the existing next-hop/next-table/
+	// destination; ordinary rows keep the existing next-hop/weight/next-table/
 	// discard/preference order.
 	//
 	// A NextTable row is always a leak; an ordinary route never competes with
@@ -567,6 +596,9 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		an, bn := strings.Join(a.NextHops, ","), strings.Join(b.NextHops, ",")
 		if an != bn {
 			return an < bn
+		}
+		if weights := slices.Compare(a.NextHopWeights, b.NextHopWeights); weights != 0 {
+			return weights < 0
 		}
 		if a.NextTable != b.NextTable {
 			return a.NextTable < b.NextTable
@@ -808,10 +840,13 @@ func canonicalRoutePrefix(s string) string {
 	return n.String()
 }
 
-// #9132: visit every routing-instance member twice — explicit refs first, then
-// generated keys from a bare-member fanout. The shared config resolver supplies
-// both snapshot keys and kernel-device identities, preserving one alias and
-// tunnel interpretation across validation, binding, and userspace maps.
+// #9132: visit each routing-instance member twice — explicit refs first, then
+// generated keys from bare-member fanout. The shared config resolver supplies
+// both snapshot keys and kernel-device identities, preserving one alias/tunnel
+// interpretation across validation, binding, and userspace maps.
+// #11312: forwarding instances have no VRF device; skip their member keys so
+// tolerant loads keep connected routes and ingress scope in the kernel's
+// default instance. Strict config commits reject the unsupported membership.
 func forEachRoutingInstanceInterfaceKey(cfg *config.Config, bind func(riName, key string)) {
 	if cfg == nil {
 		return
@@ -825,6 +860,9 @@ func forEachRoutingInstanceInterfaceKey(cfg *config.Config, bind func(riName, ke
 	members := make([]memberKeys, 0)
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.Name == "" {
+			continue
+		}
+		if ri.InstanceType == "forwarding" {
 			continue
 		}
 		for _, member := range ri.Interfaces {
@@ -888,6 +926,8 @@ func buildInterfaceRouteTables(cfg *config.Config) (map[string]string, map[strin
 // owning routing table (#2388): without it, the Rust connected store is
 // global and a per-table (VRF / next-table) FIB lookup can match a
 // connected prefix owned by a different routing-instance.
+// Forwarding-instance member keys are excluded above: the daemon leaves those
+// devices in default, so they retain the default routing domain on tolerant loads.
 func buildInterfaceRoutingInstances(cfg *config.Config) map[string]string {
 	out := make(map[string]string)
 	forEachRoutingInstanceInterfaceKey(cfg, func(riName, key string) {
@@ -979,6 +1019,60 @@ func routingInstanceDomain(name string) uint32 {
 		return 0
 	}
 	return uint32(config.StableRoutingInstanceTableID(name))
+}
+
+type routeSnapshotTableFamily struct {
+	table  string
+	family string
+}
+
+func staticRouteHasOnlyUnresolvedBareGateways(
+	route *config.StaticRoute,
+	table, family, instanceName, instanceType string,
+	connectedNetworks map[routeSnapshotTableFamily][]*net.IPNet,
+	interfaces []InterfaceSnapshot,
+) bool {
+	// Without an interface inventory there is no evidence that a gateway is
+	// recursive; preserve the config-only snapshot behavior for callers that
+	// intentionally build a partial route view.
+	if route == nil || len(interfaces) == 0 || route.Discard || route.Reject ||
+		route.NextTable != "" || len(route.NextHops) == 0 {
+		return false
+	}
+	networks := connectedNetworks[routeSnapshotTableFamily{table: table, family: family}]
+	hasBare, hasDirect := false, false
+	for _, nextHop := range route.NextHops {
+		if nextHop.Interface != "" {
+			// An explicit interface is already a qualified egress path. Keep
+			// mixed ECMP rows that have one alongside a recursive bare gateway.
+			hasDirect = true
+			continue
+		}
+		if nextHop.Address == "" {
+			continue
+		}
+		gateway := net.ParseIP(nextHop.Address)
+		if gateway == nil || (family == "inet" && gateway.To4() == nil) ||
+			(family == "inet6" && gateway.To4() != nil) {
+			continue
+		}
+		hasBare = true
+		direct := false
+		for _, network := range networks {
+			if network.Contains(gateway) {
+				direct = true
+				break
+			}
+		}
+		if !direct && instanceType == "forwarding" {
+			// Forwarding instances have no VRF connected table of their own;
+			// the existing qualifier explicitly scopes gateways reachable via
+			// an interface in this instance or in the default instance.
+			direct = forwardingGatewayInterface(instanceName, family, gateway, interfaces) != ""
+		}
+		hasDirect = hasDirect || direct
+	}
+	return hasBare && !hasDirect
 }
 
 func connectedPrefixesForInterface(iface InterfaceSnapshot) ([]string, []string) {
@@ -1160,12 +1254,10 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 		}
 	}
 
-	// Deterministic emission order. The kernel dump order is not a stable
-	// function of content, and the caller's final sort tie-breaks on
-	// next-hops/next-table/discard/preference — all of which two learned
-	// routes for different prefixes share — so leaving kernel order to leak
-	// through would produce snapshot-to-snapshot diffs (and a needless FIB
-	// re-install) for an unchanged routing table.
+	// Deterministic emission order. The kernel dump order is not stable, so
+	// order by table, family, destination, metric, next-hops, and their parallel
+	// weights. This keeps lowest-metric selection and weighted snapshots stable
+	// when dump ordering changes.
 	sorted := make([]routing.LearnedRoute, len(learned))
 	copy(sorted, learned)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -1179,9 +1271,19 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 		if a.Destination != b.Destination {
 			return a.Destination < b.Destination
 		}
-		return strings.Join(a.NextHops, ",") < strings.Join(b.NextHops, ",")
+		if a.Metric != b.Metric {
+			return a.Metric < b.Metric
+		}
+		an, bn := strings.Join(a.NextHops, ","), strings.Join(b.NextHops, ",")
+		if an != bn {
+			return an < bn
+		}
+		return slices.Compare(a.NextHopWeights, b.NextHopWeights) < 0
 	})
 
+	var lastMetricKey string
+	var lowestMetric int
+	haveMetricKey := false
 	for _, lr := range sorted {
 		family := "inet"
 		if lr.Family == netlink.FAMILY_V6 {
@@ -1206,6 +1308,19 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			continue
 		}
 		key := learnedRouteGapKey(table, family, dest)
+		// Imported destinations are canonical CIDRs, so the table/family/
+		// destination sort above keeps every same-prefix metric group adjacent.
+		// Keep equal-metric entries (including same-cost paths), but discard
+		// strictly worse kernel metrics before stamping the shared preference.
+		if haveMetricKey && key == lastMetricKey {
+			if lr.Metric > lowestMetric {
+				continue
+			}
+		} else {
+			lastMetricKey = key
+			lowestMetric = lr.Metric
+			haveMetricKey = true
+		}
 		if best, ok := configuredPreference[key]; ok &&
 			best <= routing.LearnedRouteImportPreference {
 			// The configured route is at least as preferred as the imported
@@ -1215,11 +1330,12 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			continue
 		}
 		addSnapshot(RouteSnapshot{
-			Table:       table,
-			Family:      family,
-			Destination: dest,
-			NextHops:    lr.NextHops,
-			Preference:  routing.LearnedRouteImportPreference,
+			Table:          table,
+			Family:         family,
+			Destination:    dest,
+			NextHops:       lr.NextHops,
+			NextHopWeights: nonDefaultRouteWeights(lr.NextHopWeights),
+			Preference:     routing.LearnedRouteImportPreference,
 		})
 	}
 	return capped, nil

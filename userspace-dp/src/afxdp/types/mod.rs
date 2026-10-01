@@ -1,4 +1,7 @@
 use super::*;
+use std::collections::{HashMap, HashSet};
+use crate::session::{BareSessionTuple, SessionScope};
+use rustc_hash::FxSeededState;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // #1035 P4: shared CoS lease + V_min coordination types split into a
@@ -98,9 +101,121 @@ impl SharedNatAmbiguityIndex {
             && matches!(self.aliases.get(key), Some(Some(candidate)) if candidate == owner)
     }
 
+    pub(super) fn unique_owner(&self, key: &SessionKey) -> Option<&SessionKey> {
+        if self.saturated {
+            return None;
+        }
+        self.aliases.get(key).and_then(Option::as_ref)
+    }
+
     pub(super) fn clear(&mut self) {
         self.aliases.clear();
         self.saturated = false;
+    }
+}
+
+enum SharedBareTupleScopes {
+    One(SessionScope),
+    Many(HashSet<SessionScope, FxSeededState>),
+}
+
+impl SharedBareTupleScopes {
+    fn insert(&mut self, scope: SessionScope, state: &FxSeededState) {
+        let replacement = match self {
+            Self::One(existing) if *existing == scope => return,
+            Self::One(existing) => {
+                let mut scopes = HashSet::with_hasher(state.clone());
+                scopes.insert(*existing);
+                scopes.insert(scope);
+                Some(Self::Many(scopes))
+            }
+            Self::Many(scopes) => {
+                scopes.insert(scope);
+                None
+            }
+        };
+        if let Some(replacement) = replacement {
+            *self = replacement;
+        }
+    }
+
+    /// Remove a scope. Returns true when its tuple bucket becomes empty.
+    fn remove(&mut self, scope: SessionScope) -> bool {
+        let (empty, collapse_to) = match self {
+            Self::One(existing) => return *existing == scope,
+            Self::Many(scopes) => {
+                if !scopes.remove(&scope) {
+                    return false;
+                }
+                (
+                    scopes.is_empty(),
+                    (scopes.len() == 1).then(|| *scopes.iter().next().expect("one scope remains")),
+                )
+            }
+        };
+        if let Some(only) = collapse_to {
+            *self = Self::One(only);
+        }
+        empty
+    }
+
+    fn has_other_scope(&self, scope: SessionScope) -> bool {
+        match self {
+            Self::One(existing) => *existing != scope,
+            Self::Many(scopes) => {
+                !scopes.is_empty() && (scopes.len() > 1 || !scopes.contains(&scope))
+            }
+        }
+    }
+}
+
+pub(super) struct SharedSessionBareTupleIndex {
+    scopes: HashMap<BareSessionTuple, SharedBareTupleScopes, FxSeededState>,
+    state: FxSeededState,
+}
+
+impl Default for SharedSessionBareTupleIndex {
+    fn default() -> Self {
+        let state = FxSeededState::with_seed(
+            crate::hot_hash_seed::hot_path_hash_seed() as usize,
+        );
+        Self {
+            scopes: HashMap::with_hasher(state.clone()),
+            state,
+        }
+    }
+}
+
+impl SharedSessionBareTupleIndex {
+    pub(super) fn insert(&mut self, key: &SessionKey) {
+        let bare_tuple = key.bare_tuple();
+        let scope = key.scope();
+        self.scopes
+            .entry(bare_tuple)
+            .and_modify(|scopes| scopes.insert(scope, &self.state))
+            .or_insert(SharedBareTupleScopes::One(scope));
+    }
+
+    pub(super) fn remove(&mut self, key: &SessionKey) {
+        let bare_tuple = key.bare_tuple();
+        let scope = key.scope();
+        let remove_tuple = self
+            .scopes
+            .get_mut(&bare_tuple)
+            .is_some_and(|scopes| scopes.remove(scope));
+        if remove_tuple {
+            self.scopes.remove(&bare_tuple);
+        }
+    }
+
+    pub(super) fn has_other_scope(&self, key: &SessionKey) -> bool {
+        self.scopes
+            .get(&key.bare_tuple())
+            .is_some_and(|scopes| scopes.has_other_scope(key.scope()))
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.scopes.clear();
     }
 }
 
@@ -111,6 +226,7 @@ pub(super) struct SharedSessionOwnerRgIndexes {
     pub(super) forward_wire_sessions: Arc<Mutex<OwnerRgSessionIndex>>,
     pub(super) reverse_prewarm_sessions: Arc<Mutex<OwnerRgSessionIndex>>,
     pub(super) nat_ambiguities: Arc<Mutex<SharedNatAmbiguityIndex>>,
+    pub(super) bare_tuple_sessions: Arc<Mutex<SharedSessionBareTupleIndex>>,
 }
 
 impl Default for SharedSessionOwnerRgIndexes {
@@ -121,6 +237,7 @@ impl Default for SharedSessionOwnerRgIndexes {
             forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
             reverse_prewarm_sessions: Arc::new(Mutex::new(FastMap::default())),
             nat_ambiguities: Arc::new(Mutex::new(SharedNatAmbiguityIndex::default())),
+            bare_tuple_sessions: Arc::new(Mutex::new(SharedSessionBareTupleIndex::default())),
         }
     }
 }
@@ -132,7 +249,20 @@ impl SharedSessionOwnerRgIndexes {
     /// empty the maps and leave an index populated (or the reverse) — the
     /// indexes exist to mirror the maps, and a poisoned one that survives
     /// teardown is precisely the divergence they cannot represent.
-    pub(super) fn clear(&self) {
+    pub(super) fn clear(
+        &self,
+        shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    ) {
+        // Keep the primary map and bare-tuple index paired under the same
+        // lock order used by publish, removal, and close validation.
+        let mut sessions = crate::afxdp::shared_ops::lock_shared_recover(shared_sessions);
+        let mut bare_tuple_sessions =
+            crate::afxdp::shared_ops::lock_shared_recover(&self.bare_tuple_sessions);
+        sessions.clear();
+        bare_tuple_sessions.clear();
+        drop(bare_tuple_sessions);
+        drop(sessions);
+
         crate::afxdp::shared_ops::lock_shared_recover(&self.sessions).clear();
         crate::afxdp::shared_ops::lock_shared_recover(&self.nat_sessions).clear();
         crate::afxdp::shared_ops::lock_shared_recover(&self.forward_wire_sessions).clear();

@@ -9,13 +9,15 @@ import (
 
 // #1827 PR-2 — FBF (filter-based forwarding) compiled-snapshot shape.
 //
-// The dataplane side of FBF predates PR-2: buildRouteSnapshots files
-// EVERY routing instance's statics under `<ri>.inet.0` regardless of
-// instance-type (routes.go does not branch on InstanceType), and the
-// Rust PBR path looks up `<ri>.inet.0` for `then routing-instance`
-// filter hits. PR-2 fixed the KERNEL side (FRR `table <id>`) to agree
-// with this. These tests pin the dataplane half of that contract so a
-// future routes.go refactor cannot silently re-open the divergence.
+// The dataplane side of FBF: buildRouteSnapshots files every routing
+// instance's statics under `<ri>.inet.0` regardless of instance-type.
+// #11312 excludes forwarding-instance members from connected-route and
+// routing-domain maps, matching the daemon's no-VRF binding behavior for
+// interfaces. The Rust PBR path looks up `<ri>.inet.0` for `then
+// routing-instance` filter hits. PR-2 fixed the KERNEL side (FRR `table <id>`)
+// to agree with the static-route path. These tests pin the dataplane half of
+// that contract so a future routes.go refactor cannot silently re-open the
+// divergence.
 
 func fbfTestConfig() *config.Config {
 	cfg := &config.Config{}
@@ -112,6 +114,7 @@ func TestFBFQualificationLeavesVirtualRouterBare(t *testing.T) {
 		RoutingInstances: []*config.RoutingInstanceConfig{{
 			Name:         "VRF-A",
 			InstanceType: "virtual-router",
+			Interfaces:   []string{"reth0.80"},
 			StaticRoutes: []*config.StaticRoute{{
 				Destination: "0.0.0.0/0",
 				NextHops:    []config.NextHopEntry{{Address: "172.16.80.1"}},

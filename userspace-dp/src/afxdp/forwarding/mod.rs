@@ -282,29 +282,33 @@ pub(super) fn resolve_ingress_logical_ifindex(
         .copied()
 }
 
-/// #10313/#10656: true when a tagged frame's VID is not configured on its
-/// ingress bind and the ingress ifindex is not already its logical VLAN child.
+/// #10313/#10656/#11297: true when ingress does not belong to a configured
+/// VLAN identity. A nonzero VID must resolve on the parent or configured child;
+/// VID 0 is rejected on a tagged-only bind unless an explicit untagged unit 0
+/// owns the fallback. Ordinary untagged ports keep the physical fallback.
 ///
 /// The exact `(physical_ifindex, vlan_id)` map remains the logical-ingress
 /// resolver. This predicate is its miss-path authority: unlike an ordinary
-/// untagged miss, a tagged miss is an UNKNOWN identity and must be rejected
-/// before cache/session/ARP/decap can observe a fallback zone — whether the
-/// bind is a trunk parent (the #10313 shape, inheriting the agreed sibling
-/// zone) or a unit-less port (the #10656 shape, inheriting the port's own
-/// zone). XDP can also deliver on a configured VLAN child's own ifindex; the
+/// untagged-port miss, an unknown VID or VID 0 on a tagged-only bind must be
+/// rejected before cache/session/ARP/decap can observe a fallback zone —
+/// whether the fallback is an inherited sibling zone or the port's own zone.
+/// XDP can also deliver on a configured VLAN child's own ifindex; the
 /// parent-keyed resolver has no `(child_ifindex, VID)` row, so only that
-/// child's configured VID is admitted on this miss path. VID 0 (untagged and
-/// 802.1p priority-tagged, #2145) always resolves through the normal fallback.
+/// child's configured VID is admitted on this miss path.
 #[inline]
 pub(in crate::afxdp) fn unknown_ingress_vlan(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
 ) -> bool {
-    if ingress_vlan_id == 0
-        || forwarding
-            .ingress_logical_ifindex
-            .contains_key(&(ingress_ifindex, ingress_vlan_id))
+    if ingress_vlan_id == 0 {
+        return forwarding
+            .tagged_only_ingress_ifindexes
+            .contains(&ingress_ifindex);
+    }
+    if forwarding
+        .ingress_logical_ifindex
+        .contains_key(&(ingress_ifindex, ingress_vlan_id))
     {
         return false;
     }
@@ -370,6 +374,24 @@ pub(in crate::afxdp) fn ingress_routing_domain(
     forwarding
         .ifindex_to_routing_domain
         .get(&logical)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Resolve the routing-instance identity of a forward session's egress
+/// interface. Reverse-path admission compares the reply's arriving domain with
+/// this value, not the forward key's ingress domain or its PBR install table.
+#[inline]
+pub(in crate::afxdp) fn egress_routing_domain(
+    forwarding: &ForwardingState,
+    egress_ifindex: i32,
+) -> u32 {
+    if !forwarding.has_routing_domains {
+        return 0;
+    }
+    forwarding
+        .ifindex_to_routing_domain
+        .get(&egress_ifindex)
         .copied()
         .unwrap_or(0)
 }

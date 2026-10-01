@@ -1043,17 +1043,24 @@ fn three_color_runtime_ids_and_miss_path_counters_are_stable() {
         ],
     );
 
-    let ids = state
-        .three_color_policers
-        .iter()
-        .map(|runtime| (runtime.id, runtime.name.as_ref().to_string()))
-        .collect::<Vec<_>>();
+    let alpha_scope = PolicerRuntimeScope::for_term("inet", "policed", "meter", "alpha");
+    let alpha_runtime = state
+        .three_color_policer_by_scope
+        .get(&alpha_scope)
+        .expect("referenced alpha runtime");
+    let zeta_scope = PolicerRuntimeScope::unreferenced("zeta");
+    let zeta_runtime = state
+        .three_color_policer_by_scope
+        .get(&zeta_scope)
+        .expect("unreferenced zeta status runtime");
     assert_eq!(
-        ids,
-        vec![
-            (three_color_policer_runtime_id("alpha"), "alpha".into()),
-            (three_color_policer_runtime_id("zeta"), "zeta".into()),
-        ]
+        zeta_runtime.id,
+        three_color_policer_runtime_id("zeta"),
+        "unreferenced definitions retain their name-derived status ID"
+    );
+    assert_ne!(
+        alpha_runtime.id, zeta_runtime.id,
+        "distinct scopes need distinct cache-dedup identities"
     );
 
     let filter = state.filters.get("inet:policed").unwrap();
@@ -1087,6 +1094,9 @@ fn three_color_runtime_ids_and_miss_path_counters_are_stable() {
     assert!(second.policer_drop);
 
     let status = state.three_color_policer_statuses();
+    assert_eq!(status.len(), 2);
+    let zeta = status.iter().find(|item| item.name == "zeta").unwrap();
+    assert_eq!(zeta.id, zeta_runtime.id);
     let alpha = status.iter().find(|item| item.name == "alpha").unwrap();
     assert_eq!(alpha.mode, "single-rate");
     assert!(alpha.color_blind);
@@ -1096,6 +1106,57 @@ fn three_color_runtime_ids_and_miss_path_counters_are_stable() {
     assert_eq!(alpha.red_bytes, 51);
     assert_eq!(alpha.drop_packets, 1);
     assert_eq!(alpha.drop_bytes, 51);
+}
+
+#[test]
+fn single_rate_policer_instances_are_term_scoped_11333() {
+    let state = make_filter_state(
+        &[FirewallFilterSnapshot {
+            name: "legacy-rl".into(),
+            family: "inet".into(),
+            terms: vec![
+                FirewallTermSnapshot {
+                    name: "meter-first".into(),
+                    policer: "shared-legacy".into(),
+                    ..Default::default()
+                },
+                FirewallTermSnapshot {
+                    name: "meter-second".into(),
+                    action: "accept".into(),
+                    policer: "shared-legacy".into(),
+                    ..Default::default()
+                },
+            ],
+        }],
+        &[PolicerSnapshot {
+            name: "shared-legacy".into(),
+            bandwidth_bps: 8_000,
+            burst_bytes: 1_000,
+            discard_excess: true,
+        }],
+    );
+    let filter = state.filters.get("inet:legacy-rl").expect("compiled filter");
+    let result = evaluate_filter_ref_tx_selection_runtime_counted(
+        filter,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+        TermMatchExtra::default(),
+        1_000,
+        0,
+    );
+    assert!(!result.policer_drop, "each term starts with its own bucket");
+    assert_eq!(result.action, FilterAction::Accept);
+    let status = state.three_color_policer_statuses();
+    assert_eq!(status.len(), 1);
+    assert_eq!(status[0].name, "shared-legacy");
+    assert_eq!(status[0].green_packets, 2);
+    assert_eq!(status[0].green_bytes, 2_000);
+    assert_eq!(status[0].red_packets, 0);
+    assert_eq!(status[0].drop_packets, 0);
 }
 
 #[test]
@@ -1423,22 +1484,20 @@ fn three_color_adding_lower_sorted_policer_does_not_reset_existing_runtime() {
         Some(&state),
     )
     .expect("filter state compiles");
+    let scope = PolicerRuntimeScope::for_term("inet", "policed", "meter", "stable-pol");
     let previous_runtime = state
-        .three_color_policer_by_name
-        .get("stable-pol")
+        .three_color_policer_by_scope
+        .get(&scope)
         .expect("previous runtime");
     let refreshed_runtime = refreshed
-        .three_color_policer_by_name
-        .get("stable-pol")
+        .three_color_policer_by_scope
+        .get(&scope)
         .expect("refreshed runtime");
     assert!(
         std::sync::Arc::ptr_eq(previous_runtime, refreshed_runtime),
         "adding an alphabetically earlier policer must not reset stable-pol"
     );
-    assert_eq!(
-        refreshed_runtime.id,
-        three_color_policer_runtime_id("stable-pol")
-    );
+    assert_eq!(refreshed_runtime.id, previous_runtime.id);
 
     let refreshed_filter = refreshed.filters.get("inet:policed").unwrap();
     let second = evaluate_filter_ref_tx_selection_runtime_counted(
@@ -1875,18 +1934,25 @@ fn three_color_empty_then_action_uses_default_discard() {
 }
 
 #[test]
-fn cached_three_color_descriptor_dedupes_without_vec_allocation() {
+fn cached_three_color_policer_instances_are_term_scoped_11333() {
     let state = make_filter_state_with_three_color(
         &[
             FirewallFilterSnapshot {
                 name: "in".into(),
                 family: "inet".into(),
-                terms: vec![FirewallTermSnapshot {
-                    name: "meter-in".into(),
-                    action: "accept".into(),
-                    policer: "same-pol".into(),
-                    ..Default::default()
-                }],
+                terms: vec![
+                    FirewallTermSnapshot {
+                        name: "meter-in-a".into(),
+                        policer: "same-pol".into(),
+                        ..Default::default()
+                    },
+                    FirewallTermSnapshot {
+                        name: "meter-in-b".into(),
+                        action: "accept".into(),
+                        policer: "same-pol".into(),
+                        ..Default::default()
+                    },
+                ],
             },
             FirewallFilterSnapshot {
                 name: "out".into(),
@@ -1903,16 +1969,39 @@ fn cached_three_color_descriptor_dedupes_without_vec_allocation() {
             name: "same-pol".into(),
             mode: "single-rate".into(),
             color_blind: true,
-            committed_rate_bytes_per_sec: 1,
-            committed_burst_bytes: 100,
-            peak_or_excess_burst_bytes: 50,
+            committed_rate_bytes_per_sec: 1_000,
+            committed_burst_bytes: 1_000,
+            peak_or_excess_burst_bytes: 1,
             then_action: "discard".into(),
             ..Default::default()
         }],
     );
+    let input = state.filters.get("inet:in").unwrap();
+    let output = state.filters.get("inet:out").unwrap();
+    let meter_drops = |filter: &Filter, now_ns| {
+        evaluate_filter_ref_tx_selection_runtime_counted(
+            filter,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            PROTO_UDP,
+            12345,
+            5000,
+            0,
+            TermMatchExtra::default(),
+            1_000,
+            now_ns,
+        )
+        .policer_drop
+    };
 
-    let mut combined = evaluate_filter_ref_tx_selection_cached(
-        state.filters.get("inet:out").unwrap(),
+    assert!(!meter_drops(input, 0));
+    assert!(!meter_drops(output, 0));
+    // Each term independently refills at the configured 1,000 bytes/sec.
+    assert!(!meter_drops(input, 1_000_000_000));
+    assert!(!meter_drops(output, 1_000_000_000));
+
+    let cached_input = evaluate_filter_ref_tx_selection_cached(
+        input,
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         PROTO_UDP,
@@ -1921,22 +2010,30 @@ fn cached_three_color_descriptor_dedupes_without_vec_allocation() {
         0,
     )
     .three_color_policers;
-    combined.extend(
-        evaluate_filter_ref_tx_selection_cached(
-            state.filters.get("inet:in").unwrap(),
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            PROTO_UDP,
-            12345,
-            5000,
-            0,
-        )
-        .three_color_policers,
+    let cached_output = evaluate_filter_ref_tx_selection_cached(
+        output,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        PROTO_UDP,
+        12345,
+        5000,
+        0,
+    )
+    .three_color_policers;
+    let mut combined = cached_input.clone();
+    combined.extend(cached_input.clone());
+    combined.extend(cached_output);
+    assert!(
+        !apply_cached_three_color_policers(&combined, 2_000_000_000, 1_000).drop,
+        "cached replay meters each distinct term once, despite repeated references"
     );
-
-    assert_eq!(combined.len(), 1);
-    assert!(!apply_cached_three_color_policers(&combined, 0, 100).drop);
-    assert!(apply_cached_three_color_policers(&combined, 0, 51).drop);
+    let status = state.three_color_policer_statuses();
+    assert_eq!(status.len(), 1, "status remains grouped by configured name");
+    assert_eq!(status[0].name, "same-pol");
+    assert_eq!(status[0].green_packets, 9);
+    assert_eq!(status[0].green_bytes, 9_000);
+    assert_eq!(status[0].red_packets, 0);
+    assert_eq!(status[0].drop_packets, 0);
 }
 
 #[test]
@@ -4046,6 +4143,146 @@ fn input_dscp_filter_families_changed_detects_filter_removed_from_interface() {
     assert_eq!(
         input_dscp_filter_families_changed(&old, &new),
         (true, false)
+    );
+}
+
+// #11330: local-delivery sessions only need republishing when the lo0 filter's
+// match/action semantics change. These helpers build the real compiler output,
+// so independently parsed states have fresh Filter Arcs and compiler IDs.
+fn make_lo0_filter_state(
+    filters: &[FirewallFilterSnapshot],
+    lo0_v4: &str,
+    lo0_v6: &str,
+) -> FilterState {
+    parse_filter_state(filters, &[], &[], lo0_v4, lo0_v6).expect("lo0 filter state compiles")
+}
+
+fn lo0_test_filter(name: &str, family: &str, action: &str) -> FirewallFilterSnapshot {
+    FirewallFilterSnapshot {
+        name: name.into(),
+        family: family.into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "term".into(),
+            action: action.into(),
+            ..Default::default()
+        }],
+    }
+}
+
+#[test]
+fn lo0_filter_families_changed_ignores_fresh_identical_filters_and_positional_ids_11330() {
+    let v4 = lo0_test_filter("protect-v4", "inet", "accept");
+    let v6 = lo0_test_filter("protect-v6", "inet6", "accept");
+    let unrelated = lo0_test_filter("unrelated", "inet", "accept");
+
+    // Reordering changes both lo0 filters' compiler-positional IDs, while their
+    // independently compiled filter contents remain semantically identical.
+    let old = make_lo0_filter_state(
+        &[v4.clone(), v6.clone(), unrelated.clone()],
+        "protect-v4",
+        "protect-v6",
+    );
+    let new = make_lo0_filter_state(
+        &[unrelated, v4, v6],
+        "protect-v4",
+        "protect-v6",
+    );
+
+    assert_ne!(
+        old.lo0_filter_v4_fast.as_ref().unwrap().id,
+        new.lo0_filter_v4_fast.as_ref().unwrap().id,
+        "test setup must shift the inet lo0 filter ID"
+    );
+    assert_ne!(
+        old.lo0_filter_v6_fast.as_ref().unwrap().id,
+        new.lo0_filter_v6_fast.as_ref().unwrap().id,
+        "test setup must shift the inet6 lo0 filter ID"
+    );
+    assert!(
+        !std::sync::Arc::ptr_eq(
+            old.lo0_filter_v4_fast.as_ref().unwrap(),
+            new.lo0_filter_v4_fast.as_ref().unwrap()
+        ),
+        "test setup must compile a fresh inet lo0 filter"
+    );
+    assert!(
+        !std::sync::Arc::ptr_eq(
+            old.lo0_filter_v6_fast.as_ref().unwrap(),
+            new.lo0_filter_v6_fast.as_ref().unwrap()
+        ),
+        "test setup must compile a fresh inet6 lo0 filter"
+    );
+    assert_eq!(lo0_filter_families_changed(&old, &new), (false, false));
+}
+
+#[test]
+fn lo0_filter_families_changed_detects_semantic_content_changes_11330() {
+    let v4 = lo0_test_filter("protect-v4", "inet", "accept");
+    let v6 = lo0_test_filter("protect-v6", "inet6", "accept");
+    let changed_v4 = lo0_test_filter("protect-v4", "inet", "discard");
+    let changed_v6 = lo0_test_filter("protect-v6", "inet6", "discard");
+    let old = make_lo0_filter_state(
+        &[v4.clone(), v6.clone()],
+        "protect-v4",
+        "protect-v6",
+    );
+    let v4_changed = make_lo0_filter_state(
+        &[changed_v4, v6.clone()],
+        "protect-v4",
+        "protect-v6",
+    );
+    let v6_changed = make_lo0_filter_state(
+        &[v4, changed_v6],
+        "protect-v4",
+        "protect-v6",
+    );
+
+    assert_eq!(
+        lo0_filter_families_changed(&old, &v4_changed),
+        (true, false),
+        "inet semantic changes must be reported independently"
+    );
+    assert_eq!(
+        lo0_filter_families_changed(&old, &v6_changed),
+        (false, true),
+        "inet6 semantic changes must be reported independently"
+    );
+}
+
+#[test]
+fn lo0_filter_families_changed_detects_presence_transitions_11330() {
+    let absent = make_lo0_filter_state(&[], "", "");
+    let present_v4 = make_lo0_filter_state(
+        &[lo0_test_filter("protect-v4", "inet", "accept")],
+        "protect-v4",
+        "",
+    );
+    let present_v6 = make_lo0_filter_state(
+        &[lo0_test_filter("protect-v6", "inet6", "accept")],
+        "",
+        "protect-v6",
+    );
+
+    assert_eq!(
+        lo0_filter_families_changed(&absent, &present_v4),
+        (true, false)
+    );
+    assert_eq!(
+        lo0_filter_families_changed(&present_v4, &absent),
+        (true, false)
+    );
+    assert_eq!(
+        lo0_filter_families_changed(&absent, &present_v6),
+        (false, true)
+    );
+    assert_eq!(
+        lo0_filter_families_changed(&present_v6, &absent),
+        (false, true)
+    );
+    assert_eq!(
+        lo0_filter_families_changed(&absent, &absent),
+        (false, false),
+        "None/None in both families is unchanged"
     );
 }
 
@@ -10223,8 +10460,11 @@ fn defined_single_rate_policer_ref_6540_compiles() {
     )
     .expect("a defined single-rate policer reference must compile");
     assert!(
-        state.three_color_policer_by_name.contains_key("rl-1m"),
-        "the #4514 lowering must place a healthy single-rate policer in the runtime map"
+        state
+            .three_color_policers
+            .iter()
+            .any(|runtime| runtime.name.as_ref() == "rl-1m"),
+        "the #4514 lowering must place a healthy single-rate policer in the runtime list"
     );
 }
 
@@ -10256,14 +10496,14 @@ fn defined_three_color_policer_ref_6540_compiles() {
 /// The cell that distinguishes this fix from the naive one.
 ///
 /// #6540 as filed prescribes rejecting when the term's policer is absent from
-/// the compiled `three_color_policer_by_name` map. That predicate is WRONG:
-/// `lower_single_rate_policer_runtimes` (#4514) deliberately SKIPS a degenerate
+/// the compiled `three_color_policer_by_scope` map. That predicate is WRONG:
+/// `lower_single_rate_policer_templates` (#4514) deliberately SKIPS a degenerate
 /// zero-rate METER-ONLY policer, on the stated grounds that it has no action to
 /// enforce. Such a policer IS defined and boots fine today, so keying the
 /// rejection on the map would refuse a working config — a brick, not a fix.
 ///
 /// This asserts both halves of that distinction: the policer is genuinely
-/// ABSENT from the runtime map, AND the snapshot still compiles. Re-key the
+/// ABSENT from the scope map, AND the snapshot still compiles. Re-key the
 /// preflight to the map and this cell reds.
 #[test]
 fn degenerate_meter_only_policer_ref_6540_is_defined_and_must_not_be_rejected() {
@@ -10285,11 +10525,11 @@ fn degenerate_meter_only_policer_ref_6540_is_defined_and_must_not_be_rejected() 
          #4514 skips it on purpose and this config boots today",
     );
     assert!(
-        !state.three_color_policer_by_name.contains_key("meter-only"),
+        state.three_color_policer_by_scope.is_empty(),
         "fixture no longer exercises the map/definedness distinction: #4514 is \
-         expected to SKIP this policer, so it must be absent from the runtime \
-         map. If it is present, this cell has gone vacuous and no longer \
-         guards against re-keying the preflight to the map."
+         expected to SKIP this policer, so the runtime map must be empty. If it \
+         is populated, this cell has gone vacuous and no longer guards against \
+         re-keying the preflight to the map."
     );
 }
 

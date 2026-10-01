@@ -1,5 +1,12 @@
 package config
 
+type protocolScopeOpts struct {
+	// lenientProtocolInterfaceMembership11310 downgrades global/RI protocol
+	// interface ownership mismatches to warnings during tolerant loading. The
+	// strict commit and commit-check paths reject the same cross-scope refs.
+	lenientProtocolInterfaceMembership11310 bool
+}
+
 // compileOpts carries per-call compilation policy. It is threaded into
 // compileExpanded so the strict commit path and the tolerant
 // load/peer-sync path can share the identical compile + group-expansion
@@ -1352,6 +1359,10 @@ type compileOpts struct {
 	// guard skips the phantom rib and installs no rule, so a leniently-loaded
 	// config is already inert. Same doctrine as lenientRoutingExportRef.
 	lenientRibGroupRefs bool
+	// lenientGlobalInterfaceRoutesRibGroup (#11311) downgrades the unsupported
+	// global main-to-instance connected-route import gate to a warning on
+	// tolerant loads, so a previously persisted config remains bootable.
+	lenientGlobalInterfaceRoutesRibGroup bool
 	// lenientNextTableRefs (#5693) downgrades the next-table target
 	// definedness gate (validateNextTableTargetReferencesStrict) from a hard
 	// compile error to a cfg.Warnings entry. A static route whose
@@ -1380,7 +1391,12 @@ type compileOpts struct {
 	// merging them, so a leniently-loaded config is already inert. Same
 	// doctrine as lenientNextTableRefs.
 	lenientForwardingInstanceProtocols bool
+	// lenientForwardingInstanceMembers (#11312) warns for legacy or peer-synced
+	// forwarding members. The userspace maps leave those interfaces in the
+	// default domain, matching the daemon's no-VRF binding behavior.
+	lenientForwardingInstanceMembers bool
 
+	protocolScopeOpts
 	// lenientDHCPRelayDHCPv6 (#9553) downgrades validateDHCPRelayDHCPv6AST from
 	// a hard compile error to a cfg.Warnings entry. The implemented RFC 8415
 	// subset is compiled into the typed DHCPv6 relay configuration and excluded
@@ -2807,6 +2823,10 @@ type compileOpts struct {
 	// leaves the device unbound, and records alarm/metric evidence while
 	// preserving unaffected units from a bare member.
 	lenientRIDualClaim11060 bool
+	// lenientRIMgmtMember11392 warns about management-class RI list members on
+	// tolerant load/peer-sync so existing configs still boot. Strict commit
+	// rejects these members because fxp*/fab*/em* are owned by vrf-mgmt.
+	lenientRIMgmtMember11392 bool
 	// lenientRoutingInstanceType9814 (#9814) downgrades the routing-instance
 	// instance-type value-domain gate (validateRoutingInstanceTypeStrict9814)
 	// from a hard compile error to a cfg.Warnings entry. A mistyped or
@@ -3051,8 +3071,11 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyMatchAddressSetMembers:    true,
 		lenientAddressSetMembersDefined:        true,
 		lenientRibGroupRefs:                    true,
+		lenientGlobalInterfaceRoutesRibGroup:   true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
+		lenientForwardingInstanceMembers:       true,
+		protocolScopeOpts:                      protocolScopeOpts{lenientProtocolInterfaceMembership11310: true},
 		lenientDHCPRelayDHCPv6:                 true,
 		lenientWireguardRoutingInstance:        true,
 		lenientDHCPRelayChildTokens:            true,
@@ -3077,6 +3100,7 @@ func lenientCompileOpts() compileOpts {
 		lenientHelperStateFile:                 true,
 		lenientAddressBookNameCollision:        true,
 		lenientRIDualClaim11060:                true,
+		lenientRIMgmtMember11392:               true,
 		lenientZoneInterfaceMembership:         true,
 		lenientFabricZoneRoutingInstance:       true,
 		lenientZoneInterfaceDefined:            true,

@@ -372,6 +372,17 @@ impl ThreeColorPolicerState {
         self.config.color_blind
     }
 
+    /// Create an independent token bucket with this immutable config shape.
+    pub(crate) fn fresh_instance(&self) -> Self {
+        Self {
+            config: self.config,
+            hot: ThreeColorPolicerHot::new(
+                self.config.committed_burst_bytes,
+                self.config.peak_or_excess_burst_bytes,
+            ),
+        }
+    }
+
     /// Two runtimes are shape-equivalent (token/counter state reusable across a
     /// snapshot refresh) iff their immutable configs match. No lock: `config`
     /// is plain data.

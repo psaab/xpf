@@ -47,6 +47,13 @@ pub(in crate::afxdp) struct InstallTables {
     pub(in crate::afxdp) h2: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct FabricNatScopeIdentity {
+    pub(in crate::afxdp) zone_id: u16,
+    pub(in crate::afxdp) ifindex: i32,
+    pub(in crate::afxdp) redundancy_group: i32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) local_v4: FastSet<Ipv4Addr>,
@@ -181,6 +188,13 @@ pub(in crate::afxdp) struct ForwardingState {
     /// `from`/`to routing-instance` scope against the flow's ingress/egress
     /// interface VRF. An ifindex absent here resolves to "" (default).
     pub(in crate::afxdp) ifindex_to_routing_instance: FastMap<i32, String>,
+    /// Stable fabric-stamp id for each logical ingress interface whose
+    /// zone/interface/routing-instance identity is unambiguous.
+    pub(in crate::afxdp) ifindex_to_fabric_nat_scope_id: FastMap<i32, u32>,
+    /// Receiver-side resolution for the 24-bit fabric NAT-scope stamp.
+    /// The value is this node's local logical ifindex for the same configured
+    /// zone/interface/routing-instance identity.
+    pub(in crate::afxdp) fabric_nat_scope_id_to_identity: FastMap<u32, FabricNatScopeIdentity>,
     /// #7160 (#2387): LOGICAL ifindex -> routing DOMAIN id, the numeric twin of
     /// `ifindex_to_routing_instance` above. Built at config-commit from
     /// `InterfaceSnapshot::routing_domain`, which Go derives from the instance
@@ -305,13 +319,13 @@ pub(in crate::afxdp) struct ForwardingState {
     /// falls back to the zone-keyed check (pre-#3362 behaviour).
     pub(in crate::afxdp) ifindex_host_inbound: FastMap<i32, ZoneHostInbound>,
     /// #3071: zone IDs (from `ZoneSnapshot.tcp_rst`) with Junos `tcp-rst`
-    /// enabled. A TCP flow DENIED by policy/default-deny whose ingress
-    /// (from) zone is present here is answered with a TCP RST toward the
-    /// source instead of a silent drop. Absent zone ⇒ tcp-rst off.
+    /// enabled. A non-SYN TCP transit packet dropped for a session miss whose
+    /// ingress (from) zone is present here may receive a TCP RST toward the
+    /// source. Policy denies stay silent. Absent zone ⇒ tcp-rst off.
     pub(in crate::afxdp) zone_tcp_rst: FastMap<u16, bool>,
-    /// #3618: per-(from-)zone rate-limit buckets for locally-generated `reject`
+    /// #3618: per-(from-)zone rate-limit buckets for locally-generated reject
     /// replies (policy `then reject`, firewall-filter / lo0 `then reject`, and
-    /// a zone `tcp-rst` deny). One GCRA `TokenBucket` per CONFIGURED zone id,
+    /// zone `tcp-rst` session-miss resets). One GCRA `TokenBucket` per CONFIGURED zone id,
     /// built in `populate_zones` from the SAME validated zone set as
     /// `zone_id_to_name` (cardinality = configured zones, Go-capped ≤ 65533 —
     /// not attacker-growable). Before #3618 a SINGLE process-global bucket
@@ -357,6 +371,10 @@ pub(in crate::afxdp) struct ForwardingState {
         FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
     pub(in crate::afxdp) egress: FastMap<i32, EgressInterface>,
     pub(in crate::afxdp) ingress_logical_ifindex: FastMap<(i32, u16), i32>,
+    /// #11297: ingress ifindexes for tagged-only trunks. Contains each
+    /// physical bind target and tagged VLAN child; VID 0 there cannot inherit
+    /// a sibling unit's zone. An explicit untagged unit 0 exempts its parent.
+    pub(in crate::afxdp) tagged_only_ingress_ifindexes: FastSet<i32>,
     pub(in crate::afxdp) fabrics: Vec<FabricLink>,
     /// #3773 (M13): fabric links this build/refresh pass SKIPPED because a
     /// value was malformed (`parent_ifindex <= 0`, an unparseable
@@ -724,8 +742,8 @@ impl ZoneHostInbound {
 
 impl ForwardingState {
     /// #3071: true iff zone `zone_id` has Junos `tcp-rst` enabled. Used by the
-    /// policy-deny path to decide whether a denied TCP flow whose ingress
-    /// (from) zone is `zone_id` gets a TCP RST instead of a silent drop. An
+    /// strict-SYN transit session-miss path to decide whether a non-SYN TCP
+    /// packet whose ingress (from) zone is `zone_id` gets a TCP RST. An
     /// unconfigured / unknown zone (e.g. `0`) is always tcp-rst off.
     pub(in crate::afxdp) fn zone_tcp_rst_enabled(&self, zone_id: u16) -> bool {
         self.zone_tcp_rst.get(&zone_id).copied().unwrap_or(false)
@@ -938,16 +956,18 @@ pub(in crate::afxdp) struct MirrorRuntimeConfig {
     pub(in crate::afxdp) rate: u32,
 }
 
-/// One resolved equal-cost next-hop candidate for a static route (#2389).
-/// A route with multiple configured next-hops retains every resolved
-/// candidate so the lookup can distribute flows across them and skip a
-/// dead candidate. `next_hop == None` with a non-zero `ifindex` is an
-/// interface-only ("via <if>") candidate.
+/// One resolved weighted ECMP next-hop candidate for a route (#2389/#11402).
+/// A route retains every authored member so lookup can distribute flows in
+/// proportion to its weight and skip a dead candidate. `next_hop == None`
+/// with a non-zero `ifindex` is an interface-only ("via <if>") candidate.
+/// `weight` preserves this leg's Linux multipath weight; the selector treats
+/// zero defensively as 1.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::afxdp) struct RouteNextHopV4 {
     pub(in crate::afxdp) next_hop: Option<Ipv4Addr>,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
+    pub(in crate::afxdp) weight: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -955,6 +975,7 @@ pub(in crate::afxdp) struct RouteNextHopV6 {
     pub(in crate::afxdp) next_hop: Option<Ipv6Addr>,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
+    pub(in crate::afxdp) weight: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -1097,6 +1118,7 @@ impl RouteEntryV4 {
                 next_hop,
                 ifindex,
                 tunnel_endpoint_id,
+                weight: 1,
             }],
             discard,
             next_table,
@@ -1123,6 +1145,7 @@ impl RouteEntryV6 {
                 next_hop,
                 ifindex,
                 tunnel_endpoint_id,
+                weight: 1,
             }],
             discard,
             next_table,

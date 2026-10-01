@@ -8312,6 +8312,22 @@ which IS the defect the marker closes. Fail-on-revert:
 `pkg/config/firewall_from_unrepresentable_9875_test.go`), and
 `from_unrepresentable_marker_*` (Rust).
 
+**Literal firewall address `except` is recognized but unsupported (#11334).**
+For example, `from source-address 10.0.0.0/8 except` used to pass `except`
+through the literal-address classifier as though it were an IP/CIDR, producing
+a misleading strict `malformed address` error and setting
+`address_unrepresentable` on tolerant load. The compiler now separates that
+modifier before address classification and records the full literal-address
+`except` construct as an unsupported `from` predicate: strict commit names it
+as unsupported, while tolerant load warns and sets the existing
+`from_unrepresentable` marker so the whole userspace snapshot and kernel lo0
+plan fail closed. This deliberately does NOT implement literal-address except
+matching; `except` on a prefix-list remains supported. The change reuses the
+existing wire marker, so no protocol-version change is needed. Covered by
+`TestFirewallLiteralAddressExceptNamedUnsupported11334` (Go config compiler)
+and `TestFilterSnapshotLiteralAddressExceptFailsClosed11334` (Go snapshot
+builder).
+
 ### `firewall ... from` cross-field satisfiability — port/tcp-flags/icmp must match the protocol (#3723)
 
 A firewall-filter `from` block can combine a `protocol` (or the inet6
@@ -15460,6 +15476,24 @@ packed the whole line onto one leaf node and the compiler dropped it.
   per-day evaluation: `pkg/scheduler/scheduler_3849_test.go` and the
   updated `pkg/scheduler/scheduler_test.go`
   (`TestIsWithinWindow_NoWindowFailsClosed`).
+
+### #11305 — Junos-native scheduler time and date-time forms
+
+Junos accepts daily and per-weekday `start-time`/`stop-time` values in
+`HH:MM` form (seconds default to `:00`) as well as the previously supported
+`HH:MM:SS` form. Absolute bounds also accept native local date-time values:
+`start-date YYYY-MM-DD.HH:MM` and `stop-date YYYY-MM-DD.HH:MM`.
+
+Both strict schema validation and tolerant `SyncApply` compilation preserve
+these values for the scheduler runtime. `HH:MM` windows retain the daily
+`[start, stop)` behavior. Date-only start bounds begin at local midnight and
+date-only stop bounds remain inclusive through that date; date-time starts
+are inclusive and date-time stops are exclusive. All boundaries use the
+committed Junos local time zone. The strict and flat-set compiler cells are
+in `pkg/config/compiler_scheduler_junos_time_11305_test.go`; tolerant policy
+permit/deny application is exercised in
+`pkg/configstore/scheduler_junos_time_11305_test.go`, with local-time boundary
+cells in `pkg/scheduler/scheduler_junos_time_11305_test.go`.
 
 ## fable-167 F-2 / F-3: CoS traffic-control-profiles + filter/CoS schema gaps
 

@@ -53,6 +53,7 @@ pub(super) fn prerouting_ingress_scope(
     physical_ifindex: i32,
     ingress_vlan_id: u16,
     zone_override: Option<u16>,
+    fabric_ingress_scope_ifindex: Option<i32>,
 ) -> PreroutingIngressScope<'_> {
     let logical_ifindex =
         resolve_ingress_logical_ifindex(forwarding, physical_ifindex, ingress_vlan_id)
@@ -84,16 +85,18 @@ pub(super) fn prerouting_ingress_scope(
         })
         .unwrap_or("");
     // #3096: ingress interface config-name + routing-instance for the DNAT
-    // `from interface` / `from routing-instance` scope. DNAT translates on
-    // inbound, so only the ingress identity matters. Empty = unscoped.
+    // `from interface` / `from routing-instance` scope. A validated V2 fabric
+    // identity names the original peer ingress unit; the local logical unit
+    // remains authoritative for zone and filter policy.
+    let nat_scope_ifindex = fabric_ingress_scope_ifindex.unwrap_or(logical_ifindex);
     let ifname = forwarding
         .ifindex_to_config_name
-        .get(&logical_ifindex)
+        .get(&nat_scope_ifindex)
         .map(|s| s.as_str())
         .unwrap_or("");
     let routing_instance = forwarding
         .ifindex_to_routing_instance
-        .get(&logical_ifindex)
+        .get(&nat_scope_ifindex)
         .map(|s| s.as_str())
         .unwrap_or("");
     PreroutingIngressScope {

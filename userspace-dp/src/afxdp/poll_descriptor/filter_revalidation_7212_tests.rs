@@ -1589,6 +1589,7 @@ fn a_stale_pbr_steer_to_empty_vrf_does_not_keep_main_10467() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
         decision(),
+        false,
     )
     .expect("the stale PBR term must produce a route-transition result");
     assert_eq!(route.canonical_key, flow.forward_key);
@@ -1627,6 +1628,7 @@ fn a_per_packet_pbr_route_is_revalidated_from_the_hit_frame_10467() {
         hit_meta,
         Some(TEST_LAN_ZONE_ID),
         decision(),
+        false,
     )
     .expect("a matching per-packet PBR term must revalidate the fresh hit");
     assert_eq!(
@@ -1637,11 +1639,13 @@ fn a_per_packet_pbr_route_is_revalidated_from_the_hit_frame_10467() {
     );
 }
 
-/// A FRESH NAT-alias HIT still carries the canonical session key into the
-/// per-packet route check. The wire tuple is not a teardown key: using it for
-/// revocation would leave the reverse entry alive after the steer changes.
+/// A FRESH NAT-alias HIT still resolves to the canonical reverse entry, but a
+/// reply-ingress PBR match must steer rather than tear down that entry. The
+/// old #10467 test pinned the bug by expecting the reverse companion to be
+/// revoked whenever its forward-stamped native identity differed from the
+/// arrival's PBR identity.
 #[test]
-fn a_fresh_per_packet_pbr_nat_alias_hit_revokes_canonical_key_10467() {
+fn a_fresh_per_packet_pbr_nat_alias_hit_steers_reverse_without_revoking_11324() {
     let forwarding = forwarding_with_empty_blue_per_packet_pbr();
     let reverse_key = SessionKey {
         addr_family: libc::AF_INET as u8,
@@ -1694,15 +1698,43 @@ fn a_fresh_per_packet_pbr_nat_alias_hit_revokes_canonical_key_10467() {
         &frame(),
         hit_meta,
         Some(TEST_LAN_ZONE_ID),
-        decision(),
+        reverse_decision,
+        true,
     )
-    .expect("a matching fresh per-packet PBR alias must revalidate");
-    assert_eq!(route.canonical_key, reverse_key);
-    assert_eq!(route.revoked_key.as_ref(), Some(&reverse_key));
+    .expect("a matching reverse PBR term must steer the reply");
+    assert!(route.revoked_key.is_none());
+    assert!(route.steer_only);
+    assert_eq!(
+        (route.install_table_domain, route.install_table_check),
+        crate::session::install_table_identity("blue")
+    );
     assert_eq!(
         route.resolution.disposition,
         crate::afxdp::ForwardingDisposition::NoRoute,
         "the empty blue table must win over the cached MAIN route"
+    );
+    assert!(
+        sessions.lookup(&reverse_key, 2_000, 0).is_some(),
+        "the reply steer must preserve the reverse companion"
+    );
+    assert!(sessions.update_reverse_route_on_filter_hit(
+        &reverse_key,
+        LAN_IFINDEX,
+        route.resolution,
+        route.install_table_domain,
+        route.install_table_check,
+    ));
+    let updated = sessions
+        .lookup(&reverse_key, 2_000, 0)
+        .expect("the reverse companion remains installed");
+    assert_eq!(updated.decision.resolution, route.resolution);
+    assert_eq!(
+        (updated.decision.install_table_domain, updated.decision.install_table_check),
+        crate::session::install_table_identity("blue")
+    );
+    assert!(
+        !sessions.filter_revalidation_stale(&reverse_key, LAN_IFINDEX),
+        "the updated steer is stamped for this ingress and generation"
     );
 }
 
@@ -1728,6 +1760,7 @@ fn a_per_packet_pbr_no_local_entry_derives_without_revocation_10467() {
         hit_meta,
         Some(TEST_LAN_ZONE_ID),
         decision(),
+        false,
     )
     .expect("a matching PBR packet must derive its empty-VRF route");
     assert!(route.revoked_key.is_none());
@@ -1760,6 +1793,7 @@ fn a_per_packet_pbr_no_local_nonmatch_keeps_default_route_10467() {
             hit_meta,
             Some(TEST_LAN_ZONE_ID),
             decision(),
+            false,
         )
         .is_none(),
         "a nonmatching sessionless packet must keep native MAIN route handling"
@@ -1794,6 +1828,7 @@ fn a_zero_port_pbr_term_is_not_selected_on_a_hit_9894() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
             decision(),
+            false,
         )
         .is_none(),
         "synthetic (0,0) ports must not match a port-constrained PBR term"
@@ -1824,11 +1859,75 @@ fn a_stale_native_ri_session_keeps_its_table_10312() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
             native_decision,
+            false,
         )
         .is_none(),
         "an unchanged native RI must not be torn down on a generation bump"
     );
 }
+/// A reverse companion keeps the native identity of its FORWARD ingress.
+/// The reply below arrives on the MAIN/WAN interface although the admitted
+/// forward flow came from a blue-member interface; deriving the desired
+/// identity from this packet's ingress used to revoke the companion on every
+/// reply (#10312/#10467 interaction).
+#[test]
+fn a_cross_domain_reverse_hit_keeps_the_forward_stamped_native_identity_11324() {
+    let forwarding = forwarding_with_native_blue_ri();
+    let (domain, check) = crate::session::install_table_identity("blue");
+    let forward = v4_flow(5201);
+    let reply = SessionFlow {
+        src_ip: forward.dst_ip,
+        dst_ip: forward.src_ip,
+        forward_key: SessionKey {
+            src_ip: forward.dst_ip,
+            dst_ip: forward.src_ip,
+            src_port: forward.forward_key.dst_port,
+            dst_port: forward.forward_key.src_port,
+            routing_domain: 0,
+            ..forward.forward_key.clone()
+        },
+    };
+    let mut reverse_key = reply.forward_key.clone();
+    reverse_key.routing_domain = domain;
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    let mut reverse_decision = decision();
+    reverse_decision.install_table_domain = domain;
+    reverse_decision.install_table_check = check;
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse_key.clone(),
+        reverse_decision,
+        reverse_metadata,
+        SessionOrigin::ReverseFlow,
+        1_000,
+        PROTO_TCP,
+        0,
+    ));
+
+    assert!(
+        revalidate_static_pbr_route_on_session_hit(
+            &forwarding,
+            &std::sync::Arc::new(ShardedNeighborMap::new()),
+            &sessions,
+            &reverse_key,
+            &reply,
+            &frame(),
+            meta(12, 0, false),
+            Some(TEST_WAN_ZONE_ID),
+            reverse_decision,
+            true,
+        )
+        .is_none(),
+        "the reply's MAIN ingress must not replace the forward-stamped blue identity"
+    );
+    assert!(
+        sessions.lookup(&reverse_key, 2_000, 0).is_some(),
+        "a stable cross-domain reverse companion must remain installed"
+    );
+}
+
 
 /// A `then { routing-instance blue; reject; }` term is the other half of #4392's
 /// DROP set, and `enqueue_filter_reject_reply` keys on `FilterAction::Reject`,
@@ -1904,6 +2003,7 @@ fn push_gre_underlay_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnaps
         table: "inet.0".into(),
         family: "inet".into(),
         destination: "203.0.113.0/24".into(),
+        next_hop_weights: vec![],
         next_hops: vec!["172.16.80.1@reth0.80".into()],
         discard: false,
         next_table: String::new(),
@@ -1987,6 +2087,7 @@ fn forwarding_with_blue_pbr_tunnel_10630() -> ForwardingState {
         table: "blue.inet.0".into(),
         family: "inet".into(),
         destination: "172.16.80.0/24".into(),
+        next_hop_weights: vec![],
         next_hops: vec!["@gr-0/0/0.0".into()],
         discard: false,
         next_table: String::new(),
@@ -2030,6 +2131,7 @@ fn forwarding_with_green_pbr_native_10630() -> ForwardingState {
         table: "green.inet.0".into(),
         family: "inet".into(),
         destination: "172.16.80.0/24".into(),
+        next_hop_weights: vec![],
         next_hops: vec!["172.16.80.1@reth0.80".into()],
         discard: false,
         next_table: String::new(),
@@ -2084,6 +2186,7 @@ fn forwarding_with_green_pbr_tunnel_10630() -> ForwardingState {
         table: "green.inet.0".into(),
         family: "inet".into(),
         destination: "172.16.80.0/24".into(),
+        next_hop_weights: vec![],
         next_hops: vec!["@gr-0/0/0.1".into()],
         discard: false,
         next_table: String::new(),
@@ -2150,6 +2253,7 @@ fn a_steady_state_tunneled_pbr_steer_stays_pinned_10630() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
             tunneled,
+            false,
         )
         .is_none(),
         "a tunneled decision whose live table still resolves the same tunnel \
@@ -2198,6 +2302,7 @@ fn a_tunneled_pbr_steer_whose_table_lost_its_route_revokes_10630() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
         tunneled,
+        false,
     )
     .expect("a tunneled steer whose table lost its route must revoke");
     assert_eq!(route.canonical_key, flow.forward_key);
@@ -2255,6 +2360,7 @@ fn a_tunneled_pbr_steer_retargeted_to_native_revokes_10630() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
         tunneled,
+        false,
     )
     .expect("a tunnel->native Accept->Accept retarget must revoke");
     assert_eq!(route.canonical_key, flow.forward_key);
@@ -2315,6 +2421,7 @@ fn a_tunneled_pbr_steer_retargeted_to_a_different_tunnel_revokes_10630() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
         tunneled,
+        false,
     )
     .expect("a tunnel-824->tunnel-825 retarget must revoke");
     assert_eq!(route.canonical_key, flow.forward_key);
@@ -2392,6 +2499,7 @@ fn a_tunneled_pbr_steer_whose_pbr_term_was_removed_revokes_10630() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
         tunneled,
+        false,
     )
     .expect("removing the PBR term under a tunneled flow must revoke");
     assert_eq!(route.canonical_key, flow.forward_key);
@@ -2440,6 +2548,7 @@ fn a_tunneled_steer_with_unresolvable_native_fallback_revokes_10630() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
         tunneled,
+        false,
     )
     .expect("an unresolvable native fallback under a tunneled flow must revoke");
     assert_eq!(route.canonical_key, flow.forward_key);
@@ -2533,6 +2642,7 @@ fn an_untunneled_pbr_steer_still_revalidates_on_hit_10605() {
         meta(LAN_IFINDEX as u32, 0, false),
         Some(TEST_LAN_ZONE_ID),
         decision(),
+        false,
     )
     .expect("an untunneled stale PBR steer must produce a route-transition result");
     assert_eq!(route.canonical_key, flow.forward_key);
@@ -2567,6 +2677,7 @@ fn a_tunneled_pbr_drop_still_denies_via_the_ordinary_evaluator_10605() {
             meta(LAN_IFINDEX as u32, 0, false),
             Some(TEST_LAN_ZONE_ID),
             tunneled,
+            false,
         )
         .is_none(),
         "a Drop PBR term produces no route-transition result (owned by the \

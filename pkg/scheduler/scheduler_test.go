@@ -388,6 +388,8 @@ func TestParseTimeOfDay(t *testing.T) {
 		{"08:00:00", false, tod{8, 0, 0}},
 		{"23:59:59", false, tod{23, 59, 59}},
 		{"00:00:00", false, tod{0, 0, 0}},
+		{"08:30", false, tod{8, 30, 0}},
+		{"23:59", false, tod{23, 59, 0}},
 		{"invalid", true, tod{}},
 		{"8:00", true, tod{}},
 	}

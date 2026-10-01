@@ -1293,6 +1293,15 @@ pub(crate) fn worker_loop(
                     &forwarding.filter_state,
                     &new_forwarding.filter_state,
                 );
+            // #11330: lo0 republish scans the full session table. Compare
+            // semantic filter content before assignment so unchanged rotations
+            // can skip that walk; positional filter ids are not semantics.
+            let (lo0_filter_changed_v4, lo0_filter_changed_v6) =
+                crate::filter::lo0_filter_families_changed(
+                    &forwarding.filter_state,
+                    &new_forwarding.filter_state,
+                );
+            let lo0_filter_changed = lo0_filter_changed_v4 || lo0_filter_changed_v6;
             // #2362: a per-packet-L4 (tcp-flags / is-fragment / icmp-type /
             // icmp-code) input filter rotation has the same revalidation
             // requirement as a DSCP filter rotation — established sessions whose
@@ -1519,6 +1528,7 @@ pub(crate) fn worker_loop(
                 &sessions,
                 session_map.handle(),
                 &forwarding,
+                lo0_filter_changed,
             );
             if republished > 0 {
                 debug_log!(
@@ -1850,6 +1860,7 @@ pub(crate) fn worker_loop(
                         &mut shared_recycles,
                         &shared_runtime,
                         &shared_sessions,
+                        &shared_owner_rg_indexes,
                         &deltas,
                         Some(&mut sessions),
                     );
@@ -1966,6 +1977,7 @@ pub(crate) fn worker_loop(
                     &mut shared_recycles,
                     &shared_runtime,
                     &shared_sessions,
+                    &shared_owner_rg_indexes,
                     deltas,
                     Some(&mut sessions),
                 );
@@ -2612,6 +2624,7 @@ pub(crate) fn worker_loop(
                 &mut shared_recycles,
                 &shared_runtime,
                 &shared_sessions,
+                &shared_owner_rg_indexes,
                 &deltas,
                 Some(&mut sessions),
             );
