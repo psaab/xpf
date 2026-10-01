@@ -3423,6 +3423,76 @@ fn repair_boundary_precedes_later_upsert_within_drain_budget_11718() {
     crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
 }
 
+/// A worker cannot unlock the refused-import prefix before its positional
+/// repair is visible; otherwise repeated drains can cross the boundary while
+/// the producer is descheduled between queue unlock and debt recording.
+#[test]
+fn refused_import_records_repair_before_queue_unlock_11718() {
+    const WORKER_ID: u32 = 125;
+    crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        WORKER_ID,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+        None,
+    );
+    {
+        let mut pending = commands.lock().expect("worker commands");
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+        }
+    }
+    let coordinator = Arc::new(coordinator);
+    let attempts_before =
+        crate::afxdp::worker_queue::session_import_repair_record_attempts_for_test(WORKER_ID);
+    let repair_debt_guard =
+        crate::afxdp::worker_queue::lock_session_import_repair_debt_for_test(WORKER_ID);
+    let mut refused = synced_entry_port(52_124, 0);
+    refused.generation = 1;
+    let import_coordinator = Arc::clone(&coordinator);
+    let producer = std::thread::spawn(move || import_coordinator.upsert_synced_session(refused));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while crate::afxdp::worker_queue::session_import_repair_record_attempts_for_test(WORKER_ID)
+        == attempts_before
+        && Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    let reached_record = crate::afxdp::worker_queue::session_import_repair_record_attempts_for_test(
+        WORKER_ID,
+    ) > attempts_before;
+    let queue_still_locked = if reached_record {
+        match commands.try_lock() {
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                drop(poisoned.into_inner());
+                false
+            }
+            Ok(pending) => {
+                drop(pending);
+                false
+            }
+        }
+    } else {
+        false
+    };
+    drop(repair_debt_guard);
+    let outcome = producer.join().expect("import producer");
+    assert!(reached_record, "producer did not reach repair recording");
+    assert!(
+        queue_still_locked,
+        "consumer could acquire the full queue after refusal but before repair debt became visible"
+    );
+    assert_eq!(
+        outcome,
+        SyncedImportOutcome::AppliedRepairPending,
+        "the refusal must leave repair debt after the producer releases its queue guard"
+    );
+    crate::afxdp::worker_queue::clear_session_import_repairs(WORKER_ID);
+}
+
 
 /// A full per-worker repair latch escalates the shared-only import explicitly.
 #[test]
@@ -3441,6 +3511,7 @@ fn full_worker_repair_latch_reports_overflow_instead_of_applied_11360() {
             pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
         }
     }
+    let pending = crate::afxdp::worker_queue::lock_recover(&commands);
     for offset in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
         let key = synced_entry_port(20_000 + offset as u16, 0).key;
         assert!(
@@ -3452,6 +3523,7 @@ fn full_worker_repair_latch_reports_overflow_instead_of_applied_11360() {
             "fixture: repair slot {offset} must fit within the bound"
         );
     }
+    drop(pending);
 
     let entry = synced_entry_port(52_121, 0);
     let key = entry.key.clone();

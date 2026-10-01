@@ -1351,7 +1351,9 @@ impl crate::afxdp::ha::SessionDomain {
                 reverse_position =
                     Some(worker_queue::session_import_repair_position(worker_id, pending.len()));
             }
-            drop(pending);
+            // #11718: publish positional repair debt before releasing `pending`;
+            // otherwise repeated drains can cross the refused-import boundary
+            // while this producer is descheduled.
             if let Some(position) = forward_position {
                 if position.is_none_or(|position| {
                     !worker_queue::record_session_import_repair(worker_id, &entry.key, position)
@@ -1372,6 +1374,7 @@ impl crate::afxdp::ha::SessionDomain {
                     repair_pending = true;
                 }
             }
+            drop(pending);
         }
         if repair_overflow {
             SyncedImportOutcome::AppliedRepairOverflow
