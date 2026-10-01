@@ -1937,9 +1937,10 @@ fn nat64_8896_unknown_mode_and_missing_row_still_fail_closed() {
 /// #8896: the composition claims the encapsulators read exactly two meta
 /// fields — `addr_family` and `l3_offset`. This binds that claim.
 ///
-/// Every OTHER field is poisoned with a value unlike the real one; the emitted
-/// bytes must not change. If a third field is ever read, this reds and the
-/// `nat64_translated_meta` doc comment stops being true silently.
+/// Every OTHER field is poisoned with a value unlike the real one. After
+/// normalizing the generated IPv4 ID and its dependent header checksum, the
+/// emitted bytes must remain identical. If a third field is ever read, this
+/// reds and the `nat64_translated_meta` doc comment stops being true silently.
 #[test]
 fn nat64_8896_encap_ignores_every_meta_field_but_family_and_l3() {
     let client: Ipv6Addr = "2001:db8::1".parse().unwrap();
