@@ -111,13 +111,13 @@ pub(crate) struct SessionKey {
     ///
     /// **It is NOT reply-direction symmetric, and phase 2 (#7160) does not
     /// pretend otherwise.** A reply ingresses on the forward flow's EGRESS
-    /// interface, and this dataplane's transit route lookup is not VRF-isolated
-    /// — it uses the DEFAULT table unless a PBR term overrides it
-    /// (`poll_descriptor/mod.rs`, and plan §3; per-VRF default FIB is Track
-    /// B-ext, explicitly NOT a prerequisite). So a flow that ingresses on a
-    /// routing-instance member interface and egresses out of the default
-    /// instance is a real, working configuration whose two directions resolve
-    /// DIFFERENT domains.
+    /// interface. Under #10312, that interface's native routing-instance
+    /// selects the reply's transit table when no explicit PBR
+    /// `then routing-instance` term matches; a matching PBR override still wins.
+    /// Thus, absent PBR, a flow that ingresses on a routing-instance member
+    /// and egresses through the default instance can resolve the forward and
+    /// reply packets in DIFFERENT domains. A per-VRF default FIB remains Track
+    /// B-ext and is not required for native per-instance transit lookups.
     ///
     /// That is why the transforms in this file split into two groups, and the
     /// split is load-bearing in both directions:

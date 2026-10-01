@@ -2187,15 +2187,14 @@ defined pairs.
 
 #### Static NAT zone scoping (`nat/static_nat.rs`)
 
-A static 1:1 rule-set may carry a `from zone <name>` scope. The dataplane
-enforces it on the inbound (DNAT) direction only: `match_dnat` skips an entry
-whose `from_zone` does not exactly match the ingress zone name. The outbound
-(SNAT) direction is intentionally not zone-filtered — the internal-IP match is
-sufficient since the host originates the traffic regardless of ingress zone.
-Because a typo'd or undefined zone produces a rule that silently matches no
-inbound traffic, the Go compiler validates static-NAT `from-zone` references
-against the defined zones at commit and warns on an undefined zone (mirroring
-the source-NAT zone validation). Junos static NAT has no `to` clause.
+A static 1:1 rule-set may carry a `from zone <name>` scope. On inbound
+translation, `match_dnat` applies it to the ingress zone. On reverse outbound
+SNAT, `match_snat_with_counter_scoped` applies that same scope to the egress
+zone: an egress-zone mismatch cannot use the scoped mapping. Unscoped rules
+remain wildcards. When scoped and wildcard candidates coexist, the scoped
+candidate is tried first. The Go compiler validates static-NAT `from-zone`
+references against the defined zones at commit and warns on an undefined zone
+(mirroring the source-NAT zone validation). Junos static NAT has no `to` clause.
 
 **Pre-routing scope keys on the LOGICAL VLAN unit (#5802, security).** The
 inbound DNAT / static-NAT / NPTv6 pre-routing lookups run before the FIB/zone

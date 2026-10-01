@@ -6,6 +6,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Bind subsequent APT candidate selection to the installer-verified xpf
     channel with a managed Suite/Codename pin; roll it back on failed install
     and remove it on package removal (#11133).
+  * Count unconstrained and undefined-routing-instance filter-based-forwarding
+    terms as degraded when the kernel mirror fails closed (#11307).
   * Initial xpf Debian package (increment A of #1917, subsumes #1923).
     Ships xpfd, xpf-userspace-dp, cli, the day-0 config-drive loader,
     and the systemd units. Binaries install to a dpkg-static staging
