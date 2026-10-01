@@ -2660,20 +2660,25 @@ fn write_v6_to_v4_translate(
     Some(ipv4_total_len)
 }
 /// Length-only mirror of the v6→v4 translator for its pre-build MTU decision.
-/// It shares the extension-header and ICMP quote conversion rules, while
-/// avoiding a heap allocation or a copy of the ordinary transport payload.
+/// It shares extension-header, non-first-fragment payload, and ICMP quote
+/// conversion rules without copying payload bytes.
 pub(crate) fn v6_to_v4_output_len(packet: &[u8]) -> Option<usize> {
     if packet.len() < 40 || nat64_v6_translation_ineligible(packet) || packet[7] <= 1 {
         return None;
     }
     let payload_len = u16::from_be_bytes([packet[4], packet[5]]) as usize;
     let (l4_offset, l4_protocol) = ipv6_l4_offset_and_protocol(packet)?;
-    if ipv6_is_non_first_fragment(packet) {
-        return None;
-    }
     let l4_end = 40usize.checked_add(payload_len)?;
     if l4_offset > l4_end {
         return None;
+    }
+    if ipv6_is_non_first_fragment(packet) {
+        let fragment = ipv6_fragment_header(packet)?;
+        if fragment.offset_units == 0 || !matches!(l4_protocol, PROTO_TCP | PROTO_UDP) {
+            return None;
+        }
+        let total_len = 20usize.checked_add(l4_end - l4_offset)?;
+        return (total_len <= u16::MAX as usize).then_some(total_len);
     }
     let l4_payload = packet.get(l4_offset..l4_end)?;
     let l4_len = match l4_protocol {
