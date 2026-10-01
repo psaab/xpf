@@ -478,6 +478,27 @@ them. When both C-tag and S-tag offloads need disabling, the query plus two
 disables each occupy their own interval; the unbounded per-VLAN-child loop
 still has its existing renewal after the tail.
 
+### RX VLAN reset audit (#11446)
+
+Compile-time and post-RETH-cycle checks keep `rx-vlan-offload` disabled, but a
+driver reset or external `ethtool` change can re-enable stripping without a
+configuration apply. The daemon therefore audits every physical parent of a
+configured VLAN unit at link-up and every 10 seconds, using the same
+`ethtool -k` classification and conditional `ethtool -K <parent> rxvlan off`
+repair. RETH VLAN units resolve to this node's selected physical member; plain
+trunks are audited directly. The audit retains parents from the last accepted
+dataplane snapshot across a failed or deferred replacement, when the config
+store may already contain the next tree.
+
+If a parent still reports unknown/on after the disable attempt fails, the
+daemon installs the unconditional transit barrier before detaching that
+ifindex's XDP bind, then rebuilds the fence from the remaining kernel-proven
+links. If the barrier or detach cannot be established, transit stays closed
+until a complete audit proves the VLAN parents safe; a failed barrier install
+also attempts to administratively isolate the affected parent. This prevents
+the old allowlist from continuing to admit a parent whose frames may have had
+their VLAN tag stripped.
+
 ### S-tag offload probe (#10915)
 
 `rx-vlan-stag-hw-parse` is PF-advertised on iavf VFs, so probe each physical

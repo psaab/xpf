@@ -921,6 +921,11 @@ type Daemon struct {
 	// to the client when the lock holder is slow, instead of
 	// hanging the request indefinitely.
 	applySem *semaphore.Weighted
+	// rxVlanAppliedParents retains physical VLAN parents from the last accepted
+	// dataplane snapshot. During a failed/deferred replacement, the config store
+	// may already name the new tree while the previous XDP policy is still live.
+	// Read and written only while applySem is held.
+	rxVlanAppliedParents map[string]struct{}
 	// resetting enters the TERMINAL factory-reset (zeroize) generation
 	// (#5281). A gRPC-initiated zeroize (factoryReset) sets it true while it
 	// holds applySem and erases on-disk state, and — on a successful wipe —

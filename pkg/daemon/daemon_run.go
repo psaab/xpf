@@ -613,6 +613,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		// always on for an armed dataplane, independent of SNMP and HA; its
 		// post-subscribe re-read also repairs notification gaps after ENOBUFS.
 		d.startTransitGateLinkWatch(ctx, &wg)
+		// #11446: RX VLAN stripping can re-enable after a driver reset without
+		// an ApplyConfig; audit every configured VLAN parent on link-up and
+		// periodically, detaching an unsafe XDP bind behind the transit fence.
+		d.startRxVlanAuditLoop(ctx, &wg)
 
 		// #2197 item 2: always-on proxy-ARP/NDP re-assert. Started
 		// unconditionally (independent of ActiveConfig at start, which it

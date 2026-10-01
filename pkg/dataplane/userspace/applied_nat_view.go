@@ -129,6 +129,18 @@ func (m *Manager) markAppliedSnapshotLocked() {
 	}
 }
 
+// AppliedConfig returns the config from the helper's last reconciled full
+// snapshot. It is nil before a full apply lands. The snapshot is immutable once
+// published and remains the authority while a replacement publish is deferred.
+func (m *Manager) AppliedConfig() *config.Config {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.appliedSnapshot.Config
+}
+
 // AppliedNATView returns the generation-coherent NAT view for the #2079
 // pool-utilization-alarm monitor: the helper's last-applied config paired
 // with the deduplicated pool counters from the same applied generation. It
