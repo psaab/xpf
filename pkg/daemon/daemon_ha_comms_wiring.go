@@ -497,6 +497,12 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	// not apply the newest config this node sent.
 	d.cluster.SetPeerConfigStaleFunc(d.peerConfigStale)
 	d.cluster.SetPeerTimeoutGuard(d.shouldSuppressPeerHeartbeatTimeout)
+	// #11566: a fresh session-sync receive proof prevents the never-seen
+	// heartbeat path from confirming the peer absent. Unlike the established-
+	// peer timeout guard, this remains in effect while the proof stays fresh.
+	d.cluster.SetPeerNeverSeenSyncFreshFunc(func() bool {
+		return ss.IsConnected() && ss.PeerRecentlyActive(maxPeerSyncSilence)
+	})
 	// #7367: surface the dataplane's view of each RG in the status render.
 	d.cluster.SetRGForwardingFunc(d.rgForwardingStatus)
 	// #1792: while our heartbeat sockets restart (VRF rebind),

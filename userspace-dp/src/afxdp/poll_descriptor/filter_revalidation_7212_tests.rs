@@ -300,6 +300,8 @@ fn decision() -> SessionDecision {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
 }
 
@@ -2039,7 +2041,7 @@ fn push_gre_underlay_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnaps
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     snapshot.neighbors.push(crate::NeighborSnapshot {
         interface: "ge-0-0-0.80".into(),
@@ -2123,7 +2125,7 @@ fn forwarding_with_blue_pbr_tunnel_10630() -> ForwardingState {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     for iface in snapshot.interfaces.iter_mut() {
         if iface.ifindex == LAN_IFINDEX {
@@ -2167,7 +2169,7 @@ fn forwarding_with_green_pbr_native_10630() -> ForwardingState {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     snapshot.neighbors.push(crate::NeighborSnapshot {
         interface: "ge-0-0-0.80".into(),
@@ -2222,7 +2224,7 @@ fn forwarding_with_green_pbr_tunnel_10630() -> ForwardingState {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     });
     for iface in snapshot.interfaces.iter_mut() {
         if iface.ifindex == LAN_IFINDEX {
@@ -2602,17 +2604,15 @@ fn a_tunneled_steer_with_unresolvable_native_fallback_revokes_10630() {
 #[test]
 fn tunneled_hit_stays_pinned_truth_table_10630() {
     use ForwardingDisposition::*;
-    let res = |id: u16, disposition: ForwardingDisposition, egress: i32| ForwardingResolution {
-        disposition,
-        local_ifindex: 0,
-        egress_ifindex: egress,
-        tx_ifindex: 12,
-        tunnel_endpoint_id: id,
-        next_hop: None,
-        neighbor_mac: None,
-        src_mac: None,
-        tx_vlan_id: 0,
-    };
+    let res = |id: u16, disposition: ForwardingDisposition, egress: i32| ForwardingResolution { disposition,
+    local_ifindex: 0,
+    egress_ifindex: egress,
+    tx_ifindex: 12,
+    tunnel_endpoint_id: id,
+    next_hop: None,
+    neighbor_mac: None,
+    src_mac: None,
+    tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 };
     // Steady egress is the tunnel netdev on both sides (77); rows that vary
     // it pin the #10793 egress-identity arm.
     let cases = [

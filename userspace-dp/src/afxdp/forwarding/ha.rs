@@ -130,6 +130,8 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
         {
             return ForwardingResolution {
                 disposition: ForwardingDisposition::HAInactive,
+                route_mtu: 0,
+                transport_route_mtu: 0,
                 ..resolution
             };
         }
@@ -138,12 +140,16 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
     let Some(group) = ha_state.get(&owner_rg_id) else {
         return ForwardingResolution {
             disposition: ForwardingDisposition::HAInactive,
+            route_mtu: 0,
+            transport_route_mtu: 0,
             ..resolution
         };
     };
     if !group.is_forwarding_active(now_secs) {
         return ForwardingResolution {
             disposition: ForwardingDisposition::HAInactive,
+            route_mtu: 0,
+            transport_route_mtu: 0,
             ..resolution
         };
     }

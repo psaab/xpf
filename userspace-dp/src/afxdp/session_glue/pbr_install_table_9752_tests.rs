@@ -108,6 +108,7 @@ fn pbr_snapshot() -> ConfigSnapshot {
             family: "inet".to_string(),
             destination: "8.8.8.8/32".to_string(),
             next_hops: vec!["172.16.50.254".to_string()],
+            mtu: 0,
             ..Default::default()
         },
         RouteSnapshot {
@@ -115,6 +116,7 @@ fn pbr_snapshot() -> ConfigSnapshot {
             family: "inet".to_string(),
             destination: "0.0.0.0/0".to_string(),
             next_hops: vec!["172.16.60.254".to_string()],
+            mtu: 0,
             ..Default::default()
         },
     ];
@@ -219,6 +221,8 @@ fn unusable_resolution() -> ForwardingResolution {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }
 }
 
@@ -886,6 +890,8 @@ fn validation_judges_installing_table_candidate() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let target_default_only = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
     assert!(
@@ -1012,6 +1018,8 @@ fn install_table_precedence_pins() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let resolved = lookup_forwarding_resolution_for_session(
         &empty,
@@ -1137,16 +1145,14 @@ fn pbr_key_for(src_port: u16, dst: Ipv4Addr) -> SessionKey {
 #[test]
 fn ecmp_spread_preserved_within_installing_table() {
     let mut snapshot = pbr_snapshot();
-    snapshot.routes.push(RouteSnapshot {
-        table: "blue.inet.0".to_string(),
-        family: "inet".to_string(),
-        destination: "9.9.9.9/32".to_string(),
-        next_hops: vec![
-            "172.16.50.253".to_string(),
-            "172.16.50.254".to_string(),
-        ],
-        ..Default::default()
-    });
+    snapshot.routes.push(RouteSnapshot { table: "blue.inet.0".to_string(),
+    family: "inet".to_string(),
+    destination: "9.9.9.9/32".to_string(),
+    next_hops: vec![
+        "172.16.50.253".to_string(),
+        "172.16.50.254".to_string(),
+    ],
+    mtu: 0, ..Default::default() });
     snapshot.neighbors.push(NeighborSnapshot {
         interface: "ge-0-0-2".to_string(),
         ifindex: BLUE_IFINDEX,
@@ -1308,6 +1314,8 @@ fn tunnel_resolution_bypasses_install_table() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let stamped = lookup_forwarding_resolution_for_session(
         &forwarding,

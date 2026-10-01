@@ -65,6 +65,8 @@ mod new_flow_session_limit_tests {
             neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
     }
 
@@ -334,6 +336,8 @@ mod tcp_syn_check_tests {
             neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: crate::nat::NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
     }
 
