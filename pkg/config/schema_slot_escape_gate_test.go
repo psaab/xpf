@@ -131,13 +131,30 @@ import (
 
 func slotEscapeCommitSet(cmds []string) error {
 	tree := &ConfigTree{}
+	hasBGP, hasProcessAS := false, false
 	for _, c := range cmds {
+		if strings.Contains(c, "protocols bgp") {
+			hasBGP = true
+		}
+		if strings.Contains(c, "routing-options autonomous-system") ||
+			strings.Contains(c, "protocols bgp local-as") {
+			hasProcessAS = true
+		}
 		p, err := ParseSetCommand(c)
 		if err != nil {
 			return fmt.Errorf("parse %q: %w", c, err)
 		}
 		if err := tree.SetPath(p); err != nil {
 			return fmt.Errorf("setpath %q: %w", c, err)
+		}
+	}
+	if hasBGP && !hasProcessAS {
+		p, err := ParseSetCommand("set routing-options autonomous-system 65000")
+		if err != nil {
+			return err
+		}
+		if err := tree.SetPath(p); err != nil {
+			return err
 		}
 	}
 	if err := SchemaValidate(tree, nil); err != nil {
@@ -152,6 +169,17 @@ func slotEscapeCommitBrace(body string) error {
 	tree, errs := p.Parse()
 	if len(errs) > 0 {
 		return fmt.Errorf("parse: %v", errs)
+	}
+	formatted := tree.Format()
+	if strings.Contains(formatted, "protocols") && strings.Contains(formatted, "bgp") &&
+		!strings.Contains(formatted, "autonomous-system") && !strings.Contains(formatted, "local-as") {
+		set, err := ParseSetCommand("set routing-options autonomous-system 65000")
+		if err != nil {
+			return err
+		}
+		if err := tree.SetPath(set); err != nil {
+			return err
+		}
 	}
 	if err := SchemaValidate(tree, nil); err != nil {
 		return err

@@ -857,8 +857,10 @@ step. Both are required — neither sees the other's case:
   `LocalAS` from the global `autonomous-system` when `local-as` was omitted;
   `local-as` still WINS when present (Junos precedence). A per-routing-instance
   BGP without `local-as` inherits the instance's own `routing-options
-  autonomous-system` if set, else the global one. No AS anywhere leaves
-  `LocalAS == 0` and renders no `router bgp`, unchanged.
+  `autonomous-system` if set, else the global one. No AS anywhere leaves
+  `LocalAS == 0` and the renderer omits `router bgp`; #11313 now rejects this
+  on strict commit / commit-check and warns on tolerant load / peer-sync. The
+  render guard remains defense-in-depth for malformed persisted configs.
 - **A BGP neighbor's peer-as (remote-as) is validated at commit (#2963).**
   `peer-as` is optional in the parser/compiler, so a neighbor authored
   without one (and without an inherited group `peer-as`) keeps a zero
