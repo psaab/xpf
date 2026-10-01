@@ -3041,30 +3041,33 @@ never lock an operator out of a remote box it manages.
   their fn, and are OMITTED rather than published as `0` when unwired — the #6828
   absent-vs-zero distinction).
 
-  **Routing reconcile retry owner (#9693).** Every apply reconciles the kernel
-  policy-routing rules (`applyPolicyRoutingRules`: next-table, rib-group and
-  firewall-filter PBR), republishes the userspace route snapshot from that
-  kernel state (`reconcileRouteLeakSnapshot`), and maintains the managed VRF
-  miss-terminator desired state after networkd activation
-  (`ReassertVRFMissTerminator`). #5844, #5696, #10421, and #10458 make failures
-  visible as deferred commit errors, while this owner retries the three
-  idempotent reconciles. A transient failure previously left stale or missing
-  cross-VRF policy, a stale userspace FIB, or a missing VRF miss terminator until
-  an unrelated apply, and on applies nobody waits on (boot, DHCP lease, feed,
-  config-poll) it was only logged. The apply now latches
-  `routingReconcileDebt` (`noteRoutingReconcileResult`). The always-on
-  `routingReconcileReassertLoop` re-runs the policy and route-leak reconciles
-  every 30 s while debt is owed, and reasserts the VRF terminator on every
+  **Routing reconcile retry owner (#9693, #11450).** Each config apply
+  reconciles kernel policy-routing rules (`applyPolicyRoutingRules`: next-table,
+  rib-group and firewall-filter PBR), republishes the userspace route snapshot
+  (`reconcileRouteLeakSnapshot`), and maintains the managed VRF miss-terminator
+  desired state after networkd activation (`ReassertVRFMissTerminator`). #5844,
+  #5696, #10421, and #10458 make those failures visible as deferred commit
+  errors, while this owner retries the idempotent reconciles. DHCP-learned
+  management-VRF routes in table 999 are also reconciled before networkd; their
+  error is latched into a separate management-route leg of the same routing
+  debt, including errors from management-only DHCP callbacks. After networkd
+  rebinds the management interfaces, the full apply reconciles those routes
+  again so any state lost during reconfigure is restored before completion.
+  The always-on `routingReconcileReassertLoop` retries only the owed domains
+  every 30 s: generic routing debt re-runs policy and route-leak reconciles,
+  while management-route debt re-runs `applyMgmtVRFRoutes` without rewriting
+  unrelated policy-routing state. It also reasserts the VRF terminator on every
   eligible tick outside bootstrap. A no-debt tick uses `TryAcquire` to avoid
   queueing behind an active commit, then takes `applySem` before reading the
-  active config; it invokes only the VRF callback unless debt is still owed.
-  A post-success asynchronous networkd delete is therefore repaired even when
-  the preceding apply had no error debt, while duplicate adds remain harmless
-  through the kernel's idempotent `EEXIST` behavior. Bootstrap mode suppresses
-  the VRF takeover write, and canceled ticks return before the fast path. It
-  never re-runs the FRR apply, whose manager owns its own degraded retry.
-  `RoutingReconcileDebt()` reports the latch, a monotonic failure count and the
-  last error.
+  active config; a commit that converges an owed domain discharges only that
+  domain's debt. A post-success asynchronous networkd delete is therefore
+  repaired even when the preceding apply had no error debt, while duplicate
+  adds remain harmless through the kernel's idempotent `EEXIST` behavior.
+  Bootstrap mode suppresses the VRF takeover write, and canceled ticks return
+  before the fast path. The owner never re-runs the FRR apply, whose manager
+  owns its own degraded retry. `RoutingReconcileDebt()` reports aggregate
+  outstanding routing debt, failed attempts across its domains, and the most
+  recent outstanding error.
 
   **Managed service-file reload debt (#6800, the recovery half of #6791/#6793
   applied to the two managed-FILE appliers):** `applySyslogFiles` and

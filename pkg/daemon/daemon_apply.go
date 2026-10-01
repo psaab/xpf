@@ -484,11 +484,13 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// keys the protect-set on the full route identity, so the stale route is
 	// cleaned up) — and the failure is threaded into the tail commit-error join
 	// below so the commit fails closed instead of acknowledging a management
-	// route pinned to a stale/de-authorized gateway. The management DNS ip-rule
-	// reconcile shares this deferred error so a failed lease-lifetimed steering
-	// update is not acknowledged either. Deferred (not fatal here) exactly like
-	// ifaceErr/routeLeakErr/routingRuleErr: the rest of the apply still runs.
-	mgmtRouteErr := errors.Join(d.applyMgmtVRFRoutes(), d.applyMgmtDNSRules())
+	// route pinned to a stale/de-authorized gateway. #11450 also latches route
+	// failures into the management-route leg of routing debt; it is retried by
+	// the existing 30s owner. The DNS ip-rule error remains part of the commit
+	// result but is not misclassified as route debt.
+	mgmtRouteApplyErr := d.applyMgmtVRFRoutes()
+	d.noteMgmtRouteReconcileResult(mgmtRouteApplyErr)
+	mgmtRouteErr := errors.Join(mgmtRouteApplyErr, d.applyMgmtDNSRules())
 
 	// #5310: capture the interface-reconcile failure (xfrmi/bond/tunnel/legacy-
 	// reth) and thread it into the tail commit-error join so a genuine reconcile
@@ -610,10 +612,11 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// this reconcile has no dirty-retry owner, so a swallowed failure would keep
 	// the stale leak on a "successful" commit.
 	routeLeakErr := d.reconcileRouteLeakSnapshot(cfg, commitOverlay)
-	// #9693: latch (or discharge) routing reconcile debt. Policy-routing,
-	// route-leak, and post-networkd VRF miss-terminator failures are retried by
-	// the same owner; FRR remains deliberately separate because it owns its own
-	// degraded retry.
+	// #9693: latch (or discharge) policy-routing, route-leak, and
+	// post-networkd VRF miss-terminator debt. Management DHCP routes have their
+	// own leg within this owner and are reported by their pre/post-networkd
+	// reconciles above. FRR remains deliberately separate because it owns its
+	// own degraded retry.
 	d.noteRoutingReconcileResult(routingRuleErr, routeLeakErr, vrfTermErr)
 	vrfErr = errors.Join(vrfErr, vrfTermErr)
 
