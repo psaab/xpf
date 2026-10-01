@@ -2475,6 +2475,10 @@ fn retry_blanket_nat_fragment_10957(proto: u8) -> (BatchCounters, Vec<u8>) {
     let (left, rest) = bindings.split_at_mut(0);
     let (ingress, right) = rest.split_first_mut().expect("ingress binding");
     let mut retry_counters = BatchCounters::default();
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut debug_counters = crate::afxdp::DebugPollCounters::default();
     retry_pending_neigh(
         ingress,
         left,
@@ -2490,6 +2494,8 @@ fn retry_blanket_nat_fragment_10957(proto: u8) -> (BatchCounters, Vec<u8>) {
         &mut shared_recycles,
         None,
         &mut retry_counters,
+        &recent_exceptions,
+        &mut debug_counters,
     );
     assert!(
         bindings[0].pending_neigh.is_empty(),

@@ -403,6 +403,10 @@ fn non_host_l2_group_unicast_missing_neighbor_drops_before_replay_10966() {
     let (left, rest) = bindings.split_at_mut(0);
     let (binding, right) = rest.split_first_mut().expect("ingress binding");
     let mut retry_counters = BatchCounters::default();
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut debug_counters = crate::afxdp::DebugPollCounters::default();
     crate::afxdp::neighbor_dispatch::retry_pending_neigh(
         binding,
         left,
@@ -420,6 +424,8 @@ fn non_host_l2_group_unicast_missing_neighbor_drops_before_replay_10966() {
         &mut shared_recycles,
         None,
         &mut retry_counters,
+        &recent_exceptions,
+        &mut debug_counters,
     );
 
     let retry_tx_requests: usize = bindings
