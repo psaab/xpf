@@ -2404,6 +2404,9 @@ type compileOpts struct {
 	// alarm` threshold subtree to a cfg.Warnings entry on tolerant ingress.
 	// The compiler enables counting but does not implement alarm thresholds.
 	lenientPolicyThenCountAlarm bool
+	// lenientDefaultPolicyBlock11367 warns and keeps tolerant loads bootable;
+	// the compiler forces the ambiguous no-match policy to deny.
+	lenientDefaultPolicyBlock11367 bool
 	// lenientPolicyThenSiblings (#11013/#11023) downgrades unsupported
 	// security-policy `then` siblings and unknown `then log` modes to warnings
 	// on tolerant ingress. The compiler drops both forms, so compilePolicy
@@ -3162,6 +3165,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyThenReject:                true,
 		lenientPolicyThenDeny:                  true,
 		lenientPolicyThenCountAlarm:            true,
+		lenientDefaultPolicyBlock11367:         true,
 		lenientPolicyThenSiblings:              true,
 		lenientPolicyEnforcementSubtrees:       true,
 		lenientPolicyMissingMatch:              true,
