@@ -111,8 +111,9 @@ sync.
       - **#3026 / #6102 — generated ICMP error (Time Exceeded + egress-MTU
         Packet-Too-Big):** `icmp.rs`
         (`build_local_time_exceeded_request`) and the TX dispatch PTB path
-        (`compute_forwarded_egress_ptb` build + `enqueue_pending_forwards`
-        classify) resolve the LOGICAL egress unit ifindex once via the SSOT
+        (`compute_forwarded_egress_ptb` build +
+        `enqueue_forwarded_ptb_reply` classify) resolve the LOGICAL egress unit
+        ifindex once via the SSOT
         (`resolve_ingress_logical_ifindex`, from the physical
         `ingress_ident.ifindex` + `meta.ingress_vlan_id`) and key the egress
         lookup, the reply BUILD, and the output-filter/CoS classify off THAT,
@@ -125,6 +126,10 @@ sync.
         parent's filter/CoS. `target_ifindex` (physical) is still used for the
         XSK transmit, and the #5856 per-zone rate-limit bucket deliberately
         stays keyed on the PHYSICAL `ingress_ident.ifindex`.
+      - **#11410 — cold-neighbor replay:** `neighbor_dispatch.rs::retry_pending_neigh`
+        uses the same PTB build/classify helpers after the replay output-filter
+        drop verdict, so permitted oversized packets are signalled and dropped
+        before direct TX.
       - **#3035 — generated SYN-cookie / reject reply:**
         `poll_descriptor/cookie_reply.rs` (SYN-cookie SYN-ACK / ACK-RST)
         `poll_descriptor/reject_reply.rs` (policy/filter `reject` TCP RST or
@@ -710,7 +715,7 @@ sync.
     been post-NAT for any NAT since #7656 (`forward_wire_key` rewrites
     `src`/`dst` unconditionally; only family and the ICMP/ICMPv6 swap are gated
     on `nat.nat64`) — but every #7656 cell is NAT64, so that was right by side
-    effect and unbound: narrowing `l3_wire_session_flow_from_meta` to
+    effect and unbound: narrowing `l3_wire_session_flow_from_frame` to
     `if nat.nat64 { forward_wire_key(..) }` left 5251 of 5252 cells green.
     Cells: `flowless_snat_egress_output_filter_matches_the_postnat_tuple_8367`
     (`tests_fragment.rs`, end-to-end interface SNAT, address-bearing terms on

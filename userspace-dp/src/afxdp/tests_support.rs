@@ -2678,6 +2678,10 @@ pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id
     let area = bindings[0].umem.area() as *const MmapArea;
     let (left, rest) = bindings.split_at_mut(0);
     let (binding, right) = rest.split_first_mut().expect("ingress binding");
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut debug_counters = crate::afxdp::DebugPollCounters::default();
     retry_pending_neigh(
         binding,
         left,
@@ -2697,6 +2701,8 @@ pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id
         &mut shared_recycles,
         None,
         &mut BatchCounters::default(),
+        &recent_exceptions,
+        &mut debug_counters,
     );
     for (i, b) in bindings.iter().enumerate() {
         assert!(

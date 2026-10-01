@@ -3340,6 +3340,10 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
         dynamic_neighbors.get(&pending_key).is_some(),
         "{case_name}: resolved neighbor must be visible under the pending key"
     );
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut debug_counters = crate::afxdp::DebugPollCounters::default();
     retry_pending_neigh(
         ingress,
         left,
@@ -3358,6 +3362,8 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
         &mut shared_recycles,
         None,
         &mut BatchCounters::default(),
+        &recent_exceptions,
+        &mut debug_counters,
     );
     assert!(
         bindings[0].pending_neigh.is_empty(),

@@ -410,20 +410,84 @@ pub(crate) fn ipv6_ah_sighted(buf: &[u8], addr_family: u8, l3: usize) -> bool {
     walk_ipv6_ext_chain(buf, l3).ah_present
 }
 
-/// The protocol identity a FLOWLESS policy evaluation must use (#10729 X2-F6).
-/// A v6 chain sighting AH evaluates as proto 51 (ports 0, `l4_present=false`),
-/// symmetric with v4 where the shim leaves AH terminal. Every other packet
-/// keeps its stamped protocol. Callers MUST use this (not `meta.protocol`)
-/// at each flowless `*_l3_aware` evaluation so v6-AH transit matches `ah`
-/// terms and fails closed on port terms exactly like v4-AH. The sighting
-/// walks from the verified L3 so a lying stamp cannot make AH transparent.
+/// The protocol identity a flowless L3-aware evaluation must use (#10729 X2-F6,
+/// #11338). Callers MUST use this instead of `meta.protocol`: AH-sighted IPv6
+/// chains retain protocol-51 identity, while native-fragment sentinel packets
+/// recover their protocol from the declared IP header. An unreadable header
+/// remains the sentinel so constrained protocol terms fail closed.
 #[inline(always)]
 pub(in crate::afxdp) fn flowless_effective_protocol(frame: &[u8], meta: UserspaceDpMeta) -> u8 {
+    if meta.protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4 {
+        return fragment_protocol_from_frame(frame, meta.l3_offset, meta.addr_family)
+            .unwrap_or(meta.protocol);
+    }
     let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
     if ipv6_ah_sighted(frame, meta.addr_family, l3) {
         crate::ip_proto::PROTO_AH
     } else {
         meta.protocol
+    }
+}
+
+/// Resolve the protocol carried by a frame whose shim metadata contains the
+/// native-fragment no-L4 sentinel. IPv4 reads the IP Protocol byte; IPv6
+/// non-first fragments use the Fragment header's Next Header byte. An AH
+/// header before the Fragment header retains protocol-51 classification.
+#[inline]
+pub(in crate::afxdp) fn fragment_protocol_from_frame(
+    frame: &[u8],
+    l3_offset: u16,
+    addr_family: u8,
+) -> Option<u8> {
+    let l3 = verified_l3_or_stamp(frame, l3_offset, addr_family);
+    let end = ip_declared_end(frame, l3, addr_family)?;
+    let packet = frame.get(l3..end)?;
+    protocol_from_declared_packet(packet, addr_family)
+}
+
+#[inline]
+fn protocol_from_declared_packet(packet: &[u8], addr_family: u8) -> Option<u8> {
+    match addr_family as i32 {
+        libc::AF_INET => {
+            let first = *packet.first()?;
+            let header_len = usize::from(first & 0x0f) * 4;
+            if first >> 4 != 4 || header_len < 20 || packet.len() < header_len {
+                return None;
+            }
+            packet.get(9).copied()
+        }
+        libc::AF_INET6 => {
+            if packet.len() < 40 || packet[0] >> 4 != 6 {
+                return None;
+            }
+            let walk = walk_ipv6_ext_chain(packet, 0);
+            if let Some(fragment) = walk.fragment {
+                let bytes = fragment.bytes?;
+                let offset_flags = u16::from_be_bytes([bytes[2], bytes[3]]);
+                if offset_flags & 0xfff8 != 0 {
+                    // Preserve AH only from the safe pre-Fragment prefix. The
+                    // generic walk may have followed payload after this header.
+                    if ipv6_ah_sighted(packet.get(..fragment.header_offset)?, addr_family, 0) {
+                        return Some(crate::ip_proto::PROTO_AH);
+                    }
+                    return Some(bytes[0]);
+                }
+                // A later non-first Fragment sighting after an atomic/first
+                // Fragment is malformed; do not derive protocol from payload.
+                if walk.non_first_fragment_offset_seen {
+                    return None;
+                }
+            }
+            if walk.ah_present {
+                return Some(crate::ip_proto::PROTO_AH);
+            }
+            match walk.outcome {
+                ExtChainOutcome::L4(_, protocol) => Some(protocol),
+                ExtChainOutcome::NoNextHeader => Some(59),
+                ExtChainOutcome::Truncated | ExtChainOutcome::OverLimit => None,
+            }
+        }
+        _ => None,
     }
 }
 /// #10665/#10661: record all status derived from one declared Fragment
@@ -1167,6 +1231,13 @@ pub(in crate::afxdp) fn term_match_extra_from_frame(
     // set the bit themselves (`poll_descriptor/mod.rs`, `forwarding/pbr.rs`).
     // Deriving it here would over-gate real flows and under-gate L3 contexts
     // evaluated against frames with present-but-unevaluated L4 bytes.
+    let native_fragment_sentinel =
+        meta.protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+    let fragment_protocol = if native_fragment_sentinel {
+        l3_declared.and_then(|packet| protocol_from_declared_packet(packet, meta.addr_family))
+    } else {
+        None
+    };
     crate::filter::TermMatchExtra {
         tcp_flags,
         is_fragment,
@@ -1205,6 +1276,8 @@ pub(in crate::afxdp) fn term_match_extra_from_frame(
         // #7992: these callers DO have real ports (flowless sites that do not
         // set the bit themselves — see above).
         ports_unknown: false,
+        native_fragment_sentinel,
+        fragment_protocol,
     }
 }
 
@@ -1261,6 +1334,8 @@ pub(in crate::afxdp) fn term_match_extra_from_meta(
         // term fails closed.
         flex_l4: None,
         // #7992: these callers DO have real ports.
+        native_fragment_sentinel: meta.protocol == crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+        fragment_protocol: None,
         ports_unknown: false,
     }
 }

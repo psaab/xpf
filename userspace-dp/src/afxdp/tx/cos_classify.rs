@@ -143,7 +143,7 @@ pub(in crate::afxdp) enum CachedTxTuple<'a> {
     /// error/control packet, both of which carry no usable L4 ports
     /// (#2344/#3290). `wire_l3` is the POST-NAT L3-only on-wire tuple, built the
     /// way the flow-bearing path builds its wire key
-    /// (`forward_request::l3_wire_session_flow_from_meta` -> `forward_wire_key`),
+    /// (`forward_request::l3_wire_session_flow_from_frame` -> `forward_wire_key`),
     /// so family, addresses and protocol move together BY CONSTRUCTION rather
     /// than as three reads that can drift apart. Its ports are never read: this
     /// arm evaluates through the PORTLESS evaluator (#7992).
@@ -172,7 +172,7 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
 /// #8367: cached TX-selection for a FLOWLESS packet. `wire_l3` is REQUIRED and
 /// must be the POST-NAT on-wire L3 tuple — the same value the flow-bearing seed
 /// path derives with `forward_wire_key(&flow.forward_key, decision.nat)` and the
-/// fresh flowless arm derives with `l3_wire_session_flow_from_meta` (#7656).
+/// fresh flowless arm derives with `l3_wire_session_flow_from_frame` (#7656).
 /// Passing the raw ingress `meta` tuple here for a NAT'd packet reintroduces the
 /// #8367 defect; there is deliberately no entry point that lets the key be
 /// omitted, because "no tuple" and "the pre-NAT tuple" are not the same answer
