@@ -154,6 +154,7 @@ type Manager struct {
 	// routerAdvertisementsForTest replaces live RS/RA I/O in router
 	// discovery tests. nil in production.
 	routerAdvertisementsForTest func(ctx context.Context, ifaceName string) []observedRouter
+	raAfterForTest              func(time.Duration) <-chan time.Time
 }
 
 // RenewalBindingStats reports renewal replies that were ignored because

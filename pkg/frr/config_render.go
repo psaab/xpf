@@ -653,6 +653,24 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 				if hasV6Default[dr.VRF] {
 					continue
 				}
+				// An explicit ::/0 is an RIO classless route, not the
+				// ordinary RA default-router gateway (which has no destination).
+				if dr.Destination == "::/0" {
+					if reason := dhcpClasslessPrefixSafetyFailure(dest); reason != "" {
+						if trustClassless {
+							slog.Warn("SECURITY: DHCP classless trust override allows "+
+								"an unsafe IPv6 RIO default route (#11425)",
+								"destination", dest, "reason", reason, "gateway", dr.Gateway,
+								"env", dhcpClasslessTrustOverrideEnv, "vrf", dr.VRF)
+						} else {
+							slog.Warn("SECURITY: refusing unsafe DHCP classless route "+
+								"(broad/martian prefix, #11425)",
+								"destination", dest, "reason", reason,
+								"gateway", dr.Gateway, "vrf", dr.VRF)
+							continue
+						}
+					}
+				}
 			} else {
 				dest = "0.0.0.0/0"
 				if hasV4Default[dr.VRF] {

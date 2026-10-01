@@ -64,8 +64,8 @@ func (m *Manager) runDHCPv4(ctx context.Context, ifaceName string) {
 	// until the first successful acquisition). During T2-failure
 	// reacquisition, leaseExpiryAt remains its absolute expiry deadline.
 	var (
-		committed         *Lease
-		leaseExpiryAt     time.Time
+		committed          *Lease
+		leaseExpiryAt      time.Time
 		leaseExpiryPending bool
 	)
 
@@ -639,14 +639,12 @@ func classlessStaticRoutes(ack *dhcpv4.DHCPv4) (routes []LeaseRoute, defaultGW n
 	return routes, defaultGW, present
 }
 
-// ClasslessRouteIsTooBroad reports whether an option-121 destination is broad
-// enough to act as a default-route replacement. Prefixes /0 and /1 cover half
-// or all of IPv4 and are refused by the route consumers unless the operator
-// explicitly enables XPF_DHCP_TRUST_CLASSLESS_OVERRIDE. Option-121 /0 entries
-// normally populate Lease.Gateway before this helper is reached; retaining the
-// predicate here keeps the safety rule shared for direct LeaseRoute producers.
+// ClasslessRouteIsTooBroad reports whether a classless destination is broad
+// enough to replace a normal route policy. /0 and /1 cover at least half the
+// address family and are refused unless the operator enables the explicit
+// XPF_DHCP_TRUST_CLASSLESS_OVERRIDE escape hatch.
 func ClasslessRouteIsTooBroad(prefix netip.Prefix) bool {
-	return prefix.IsValid() && prefix.Addr().BitLen() == 32 && prefix.Bits() <= 1
+	return prefix.IsValid() && prefix.Bits() <= 1
 }
 
 var classlessV4MartianPrefixes = [...]netip.Prefix{
@@ -657,17 +655,33 @@ var classlessV4MartianPrefixes = [...]netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"), // reserved
 }
 
-// ClasslessRouteIsMartian reports whether an IPv4 classless destination
-// intersects a non-forwardable special-use range. RFC1918 private space is
-// intentionally not included: private networks are a legitimate DHCP-learned
-// destination in enterprise/WAN deployments.
+var classlessV6MartianPrefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("::/128"),        // unspecified
+	netip.MustParsePrefix("::1/128"),       // loopback
+	netip.MustParsePrefix("::ffff:0:0/96"), // IPv4-mapped
+	netip.MustParsePrefix("fe80::/10"),     // link-local
+	netip.MustParsePrefix("ff00::/8"),      // multicast
+}
+
+// ClasslessRouteIsMartian reports whether a classless destination intersects
+// a non-forwardable special-use range. Private-use IPv4 and IPv6 space is
+// intentionally allowed for enterprise and WAN routes.
 func ClasslessRouteIsMartian(prefix netip.Prefix) bool {
-	if !prefix.IsValid() || prefix.Addr().BitLen() != 32 {
+	if !prefix.IsValid() {
 		return false
 	}
-	for _, martian := range classlessV4MartianPrefixes {
-		if prefix.Contains(martian.Addr()) || martian.Contains(prefix.Addr()) {
-			return true
+	switch prefix.Addr().BitLen() {
+	case 32:
+		for _, martian := range classlessV4MartianPrefixes {
+			if prefix.Contains(martian.Addr()) || martian.Contains(prefix.Addr()) {
+				return true
+			}
+		}
+	case 128:
+		for _, martian := range classlessV6MartianPrefixes {
+			if prefix.Contains(martian.Addr()) || martian.Contains(prefix.Addr()) {
+				return true
+			}
 		}
 	}
 	return false

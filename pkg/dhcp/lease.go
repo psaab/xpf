@@ -20,16 +20,18 @@ type Lease struct {
 	LeaseTime time.Duration
 	Obtained  time.Time
 
-	// ClasslessRoutes holds the RFC 3442 classless static routes learned
-	// from DHCPv4 option 121 (or the legacy Microsoft option 249) in the
-	// ACK. Per RFC 3442, when the server sends option 121 the client MUST
-	// ignore the option-3 Router default: the 0.0.0.0/0 entry (if any) in
-	// this set populates Gateway instead, and every more-specific route is
-	// held here so it is programmed alongside the lease and withdrawn on
-	// lease change/expiry, exactly like the default route. Nil for DHCPv6
-	// or when the server sends no option 121/249. IPv4 only — RFC 3442 is
-	// a DHCPv4 option.
+	// ClasslessRoutes holds RFC 3442 routes learned from DHCPv4 option 121/249
+	// and IPv6 Route Information options learned from Router Advertisements.
+	// The default route, when represented here, is programmed through the same
+	// DHCP route consumers as more-specific routes.
 	ClasslessRoutes []LeaseRoute
+
+	// raGatewayExpiresAt is the absolute Router Advertisement expiry for
+	// Gateway. It is bounded by the current DHCP lease deadline when used.
+	raGatewayExpiresAt  time.Time
+	raGatewayPreference int
+	raRouteExpires      map[raRouteKey]time.Time
+	leaseExpiryApplies  bool
 
 	// serverID is the DHCPv4 server-identifier (option 54) from the ACK
 	// that granted this lease. It is the unicast destination for the
@@ -55,10 +57,9 @@ func sameDUID(a, b dhcpv6.DUID) bool {
 	return a.Equal(b)
 }
 
-// LeaseRoute is one RFC 3442 classless static route (destination prefix
-// plus gateway) learned from DHCPv4 option 121 / legacy option 249. It is
-// comparable (netip.Prefix and netip.Addr are comparable), so a slice of
-// LeaseRoute is diffable with slices.Equal for leaseContentChanged.
+// LeaseRoute is one classless static route (destination prefix plus gateway)
+// learned from DHCPv4 option 121/249 or an IPv6 Route Information option.
+// The comparable fields are the route identity consumed by downstream code.
 type LeaseRoute struct {
 	Destination netip.Prefix
 	Gateway     netip.Addr

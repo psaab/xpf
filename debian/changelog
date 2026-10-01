@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Retain DHCPv6 router-advertisement gateways through RA silence, re-solicit
+    independently of DHCP T1, withdraw on lifetime zero, and parse RIO routes
+    with classless safety gates (#11425).
   * Suppress DHCP classless routes covered by same-VRF dynamic RIB or preferred
     routes at FRR apply time; fail closed on incomplete RIB inventory without
     letting dynamic defaults block specific destinations (#11426).
