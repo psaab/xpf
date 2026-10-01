@@ -735,12 +735,11 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                     extra,
                 ) {
                     Some(pbr) if pbr.action == crate::filter::FilterAction::Accept => {
-                        let identity = crate::session::install_table_identity(pbr.routing_instance);
-                        let table = if is_v6 {
-                            format!("{}.inet6.0", pbr.routing_instance)
-                        } else {
-                            format!("{}.inet.0", pbr.routing_instance)
-                        };
+                        let (table, identity) =
+                            crate::afxdp::forwarding::pbr_table_target(
+                                pbr.routing_instance,
+                                is_v6,
+                            );
                         (identity, Some(table), false)
                     }
                     Some(_) => {

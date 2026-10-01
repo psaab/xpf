@@ -10248,6 +10248,66 @@ fn learned_link_local_next_hop_binds_its_own_link_in_any_order_9512() {
     }
 }
 
+/// #11389: identical IPv4 ECMP gateways on distinct links must retain their
+/// kernel-selected egresses when the wire next hop carries `@<linux-name>`.
+#[test]
+fn learned_same_gateway_ecmp_binds_each_link_11389() {
+    let iface = |name: &str, linux_name: &str, ifindex: i32, address: &str| {
+        InterfaceSnapshot {
+            name: name.into(),
+            linux_name: linux_name.into(),
+            ifindex,
+            hardware_addr: format!("02:00:00:00:11:{:02x}", ifindex & 0xff),
+            addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: address.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    };
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![
+            iface("ge-0/0/1.0", "wan-a", 11, "192.0.2.1/24"),
+            iface("ge-0/0/2.0", "wan-b", 12, "192.0.2.2/24"),
+        ],
+        routes: vec![crate::RouteSnapshot {
+            table: "inet.0".into(),
+            family: "inet".into(),
+            destination: "198.51.100.0/24".into(),
+            next_hops: vec![
+                "192.0.2.254@wan-a".into(),
+                "192.0.2.254@wan-b".into(),
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let state = build_forwarding_state(&snapshot);
+    let route = state
+        .routes_v4
+        .get("inet.0")
+        .expect("inet.0 table")
+        .iter()
+        .find(|route| route.prefix.contains(Ipv4Addr::new(198, 51, 100, 1)))
+        .expect("same-gateway ECMP route");
+    let gateways: Vec<_> = route
+        .next_hops
+        .iter()
+        .map(|next_hop| (next_hop.next_hop, next_hop.ifindex))
+        .collect();
+    assert_eq!(
+        gateways,
+        vec![
+            (Some(Ipv4Addr::new(192, 0, 2, 254)), 11),
+            (Some(Ipv4Addr::new(192, 0, 2, 254)), 12),
+        ],
+        "the repeated gateway must preserve both kernel-selected egresses"
+    );
+}
+
+
 // #9173: the published key-ring bases reach the forwarding state, and one
 // malformed base leaves the ring present with no base, so it fails closed.
 #[test]
