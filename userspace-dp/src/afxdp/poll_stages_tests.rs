@@ -4288,13 +4288,14 @@ mod pptp_dispatch_join_tests_7699 {
             len: frame.len() as u32,
             options: 0,
         };
-        let mut last_learned = None;
+        let mut last_learned = LearnedNeighborDedup::default();
         stage_parse_flow_and_learn(
             &area,
             desc,
             frame,
             meta,
             false,
+            super::super::neighbor::monotonic_nanos(),
             &mut last_learned,
             ctx,
         )
