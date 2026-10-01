@@ -80,8 +80,7 @@ use frag_assoc::{
     flowless_nat_wire_info, flowless_no_route_requires_nat_translation,
     flowless_requires_nat_translation, flowless_source_nat_requires_translation,
     frag_ingress_authority_with_nat_scope, nat64_consult_forward_fragment_assoc,
-    nat64_install_forward_fragment_assoc,
-    same_family_or_plain_consult_forward_fragment_assoc,
+    nat64_install_forward_fragment_assoc, same_family_or_plain_consult_forward_fragment_assoc,
     same_family_or_plain_install_forward_fragment_assoc,
     session_gated_reverse_fragment_requires_nat_translation,
 };
@@ -738,9 +737,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     desc,
                     packet_frame,
                     meta,
-                    !is_injected
-                        && owned_packet_frame.is_none()
-                        && !absent_fabric_ingress_suspect,
+                    !is_injected && owned_packet_frame.is_none() && !absent_fabric_ingress_suspect,
                     now_ns,
                     &mut binding.last_learned_neighbor,
                     worker_ctx,
@@ -6418,8 +6415,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // stamped inner protocol), symmetric with v4+AH.
                         let policy_proto =
                             crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
-                        let policy_result =
-                            crate::policy::evaluate_policy_result_l3_aware_at(
+                        let policy_result = crate::policy::evaluate_policy_result_l3_aware_at(
                             &worker_ctx.forwarding.policy,
                             from_zone_id,
                             to_zone_id,
@@ -6433,7 +6429,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // #3291: L4 header ABSENT — port-bearing app terms
                             // fail closed; address/protocol/`any` still match.
                             false,
-                                now_ns,
+                            now_ns,
                         );
                         if !matches!(policy_result.action, PolicyAction::Permit) {
                             let owner_rg_id =

@@ -56,8 +56,7 @@ impl SchedulerHeartbeatLease {
                 .compare_exchange(current, version, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                self.received_at_ns
-                    .store(received_at_ns, Ordering::Release);
+                self.received_at_ns.store(received_at_ns, Ordering::Release);
                 return true;
             }
         }
