@@ -121,6 +121,79 @@ func TestDefaultPolicyBlockRejectsAmbiguousAndInvalid_6774(t *testing.T) {
 	}
 }
 
+func TestDefaultPolicyAmbiguityStrictAndLenient11367(t *testing.T) {
+	const ambiguous = `security {
+    policies {
+        default-policy {
+            permit-all;
+            deny-all;
+        }
+    }
+}`
+	const diagnostic = "expected exactly one block value, found 2 children"
+
+	tree := mustParseTree6774(t, ambiguous)
+	strictCompilers := []struct {
+		name    string
+		compile func(*ConfigTree) (*Config, error)
+	}{
+		{name: "generic", compile: CompileConfig},
+		{name: "node-aware", compile: func(tree *ConfigTree) (*Config, error) {
+			return CompileConfigForNode(tree, 0)
+		}},
+	}
+	for _, tc := range strictCompilers {
+		t.Run("strict-"+tc.name, func(t *testing.T) {
+			if _, err := tc.compile(tree); err == nil || !strings.Contains(err.Error(), diagnostic) {
+				t.Fatalf("strict compile error = %v, want ambiguous default-policy rejection", err)
+			}
+		})
+	}
+
+	lenientCompilers := []struct {
+		name    string
+		compile func(*ConfigTree) (*Config, error)
+	}{
+		{name: "generic", compile: CompileConfigLenient},
+		{name: "node-aware", compile: func(tree *ConfigTree) (*Config, error) {
+			return CompileConfigForNodeLenient(tree, 0)
+		}},
+	}
+	for _, tc := range lenientCompilers {
+		t.Run("lenient-"+tc.name, func(t *testing.T) {
+			cfg, err := tc.compile(tree)
+			if err != nil {
+				t.Fatalf("tolerant compile rejected persisted ambiguity: %v", err)
+			}
+			if cfg == nil || cfg.Security.DefaultPolicy != PolicyDeny {
+				t.Fatalf("tolerant default-policy = %+v, want PolicyDeny", cfg)
+			}
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, diagnostic) && strings.Contains(warning, "#11367") {
+					return
+				}
+			}
+			t.Fatalf("tolerant compile omitted #11367 warning: %v", cfg.Warnings)
+		})
+	}
+
+	// A later duplicate security root must not override the fail-closed result.
+	ambiguousThenPermit := mustParseTree6774(t, ambiguous+`
+security {
+    policies {
+        default-policy permit-all;
+    }
+}`)
+	cfg, err := CompileConfigLenient(ambiguousThenPermit)
+	if err != nil {
+		t.Fatalf("tolerant compile rejected duplicate security roots: %v", err)
+	}
+	if cfg.Security.DefaultPolicy != PolicyDeny {
+		t.Fatalf("later explicit permit overrode ambiguous default-policy: got %v, want PolicyDeny",
+			cfg.Security.DefaultPolicy)
+	}
+}
+
 // TestBlockValueIsOptInNotBlanketRelaxation is the over-application control,
 // and the most important cell here. A census of setSchema found 42 distinct
 // typed leaves where the COMPILER tolerates a block form (incidentally, via

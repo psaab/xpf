@@ -1106,8 +1106,9 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 	// compiler compiles correctly and the tolerated load path applies.
 	//
 	// EXACTLY ONE child carrying EXACTLY ONE token is accepted. More than one
-	// child gets an explicit cardinality diagnostic; it must never bind only the
-	// first action and let an ambiguous block fail open.
+	// child returns the cardinality diagnostic: strict commit/commit-check
+	// rejects, while tolerant Load/SyncApply logs it and continues. The #11367
+	// compiler prewalk also warns and forces the no-match default to deny.
 	if len(values) == 0 && leafSchema.blockValue {
 		if len(node.Children) > 1 {
 			return typedLeafErrorf(path, defaultPolicyAmbiguousBlockDiagnostic, len(node.Children))
