@@ -262,7 +262,7 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 	}
 	nextHops, nextHopWeights, ok, unscoped := learnedRouteNextHops(r, linkName)
 	if unscoped != nil {
-		warnUnscopedLinkLocalOnce(tableID, dst, unscoped, r)
+		warnUnscopedLearnedGatewayOnce(tableID, dst, unscoped, r)
 		return LearnedRoute{}, false
 	}
 	if !ok || len(nextHops) == 0 {
@@ -317,18 +317,22 @@ func learnedRouteDestination(r netlink.Route, family int) (string, bool) {
 // name the helper resolves through its linux-name map. A link-local leg whose
 // link cannot be named makes the whole route unimportable (unscoped is set):
 // a scope-less link-local next hop has no correct binding to fall back to.
-// This is deliberately NOT extended to GLOBAL (or IPv4) gateways. A scope-less
-// global gateway is legitimate and correctly inferred from the connected
-// prefix today, and refusing or rescoping it would change working routes.
+//
+// #11389: an ECMP gateway shared by legs on distinct links is also scoped.
+// Without the link, identical `gateway` strings resolve by first matching
+// connected prefix and collapse those legs onto one egress. Other global and
+// IPv4 gateways remain bare so their existing connected-prefix inference is
+// unchanged.
 func learnedRouteNextHops(r netlink.Route, linkName func(int) (string, bool)) (nhs []string, weights []uint32, ok bool, unscoped net.IP) {
 	if len(r.MultiPath) > 0 {
 		nhs = make([]string, 0, len(r.MultiPath))
 		weights = make([]uint32, 0, len(r.MultiPath))
+		gatewayLinks := learnedRouteGatewayLinks(r.MultiPath)
 		for _, nh := range r.MultiPath {
 			if nh == nil || nh.Gw == nil {
 				return nil, nil, false, nil
 			}
-			leg, scoped := scopeLearnedGateway(nh.Gw, nh.LinkIndex, linkName)
+			leg, scoped := scopeLearnedGateway(nh.Gw, nh.LinkIndex, linkName, gatewayLinks[nh.Gw.String()].ambiguous)
 			if !scoped {
 				return nil, nil, false, nh.Gw
 			}
@@ -340,18 +344,47 @@ func learnedRouteNextHops(r netlink.Route, linkName func(int) (string, bool)) (n
 	if r.Gw == nil {
 		return nil, nil, true, nil
 	}
-	leg, scoped := scopeLearnedGateway(r.Gw, r.LinkIndex, linkName)
+	leg, scoped := scopeLearnedGateway(r.Gw, r.LinkIndex, linkName, false)
 	if !scoped {
 		return nil, nil, false, r.Gw
 	}
 	return []string{leg}, []uint32{1}, true, nil
 }
 
-// scopeLearnedGateway renders one gateway leg. Only an IPv6 link-local
-// gateway is scoped; scoped=false means it is link-local and its link has no
-// resolvable name.
-func scopeLearnedGateway(gw net.IP, linkIndex int, linkName func(int) (string, bool)) (string, bool) {
-	if gw.To4() != nil || !gw.IsLinkLocalUnicast() {
+// learnedGatewayLinkState records whether an ECMP gateway is known on multiple
+// distinct interfaces. Missing indexes are not evidence of ambiguity.
+type learnedGatewayLinkState struct {
+	firstLinkIndex int
+	ambiguous      bool
+}
+
+func learnedRouteGatewayLinks(nextHops []*netlink.NexthopInfo) map[string]learnedGatewayLinkState {
+	if len(nextHops) < 2 {
+		return nil
+	}
+	links := make(map[string]learnedGatewayLinkState, len(nextHops))
+	for _, nh := range nextHops {
+		if nh == nil || nh.Gw == nil || nh.LinkIndex <= 0 {
+			continue
+		}
+		gateway := nh.Gw.String()
+		state := links[gateway]
+		if state.firstLinkIndex == 0 {
+			state.firstLinkIndex = nh.LinkIndex
+		} else if state.firstLinkIndex != nh.LinkIndex {
+			state.ambiguous = true
+		}
+		links[gateway] = state
+	}
+	return links
+}
+
+// scopeLearnedGateway renders one gateway leg. IPv6 link-local gateways always
+// require an interface; other gateways require one only when an ECMP set has
+// the same gateway on distinct links. scoped=false means the required link has
+// no resolvable name.
+func scopeLearnedGateway(gw net.IP, linkIndex int, linkName func(int) (string, bool), ambiguous bool) (string, bool) {
+	if !ambiguous && (gw.To4() != nil || !gw.IsLinkLocalUnicast()) {
 		return gw.String(), true
 	}
 	if linkIndex <= 0 || linkName == nil {
@@ -392,20 +425,19 @@ func (c linkNameCache) lookup(index int) (string, bool) {
 	return name, name != ""
 }
 
-// unscopedLinkLocalWarned dedups the refusal diagnostic. The importer runs on
-// every route-snapshot build, so an unlogged refusal would be silent and a
-// logged-every-time one would repeat at build rate. Keyed on the route and its
-// leg, so a different failure warns again. It grows only with distinct refused
-// routes.
-var unscopedLinkLocalWarned sync.Map
+// unscopedLearnedGatewayWarned dedups refusals when a link-local or ambiguous
+// gateway has no resolvable interface. The importer runs at snapshot-build
+// rate, so an unlogged refusal is silent and a logged-every-time one repeats.
+// The key names the route and gateway, so a different failure warns again.
+var unscopedLearnedGatewayWarned sync.Map
 
-func warnUnscopedLinkLocalOnce(tableID int, dst string, gw net.IP, r netlink.Route) {
+func warnUnscopedLearnedGatewayOnce(tableID int, dst string, gw net.IP, r netlink.Route) {
 	key := strconv.Itoa(tableID) + "|" + dst + "|" + gw.String()
-	if _, loaded := unscopedLinkLocalWarned.LoadOrStore(key, true); loaded {
+	if _, loaded := unscopedLearnedGatewayWarned.LoadOrStore(key, true); loaded {
 		return
 	}
-	slog.Warn("refusing a kernel-learned route: its IPv6 link-local next hop has no resolvable "+
-		"interface, and a link-local next hop without one cannot be bound correctly (#9512)",
+	slog.Warn("refusing a kernel-learned route: a link-local or ambiguous multipath "+
+		"gateway has no resolvable interface, so its egress cannot be preserved (#9512/#11389)",
 		"destination", dst, "table", tableID, "gateway", gw.String(),
 		"protocol", rtProtoName(r.Protocol))
 }

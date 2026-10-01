@@ -41,7 +41,7 @@ func TestFBFOnRoutingInstanceMemberIsGatedAtCommit11321(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%s FBF on a VRF member committed even though the kernel l3mdev rule and miss terminator precede the PBR band", family)
 			}
-			for _, want := range []string{"#11321", "routing-instance member interface", "member-ri", "pref 1000", "pref 2000", "31000-31999"} {
+			for _, want := range []string{"#11321", "routing-instance member interface", "member-ri", "pref 1000", "pref 2000", "29000-29999"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("commit error %q does not name %q", err, want)
 				}
@@ -65,7 +65,7 @@ func TestFBFOnRoutingInstanceMemberWarnsOnTolerantLoad11321(t *testing.T) {
 			strings.Contains(warning, `filter "member-fbf"`) &&
 			strings.Contains(warning, `term "steer"`) &&
 			strings.Contains(warning, `member-ri`) &&
-			strings.Contains(warning, "31000-31999") {
+			strings.Contains(warning, "29000-29999") {
 			found = true
 			break
 		}
