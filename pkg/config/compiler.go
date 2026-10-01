@@ -406,6 +406,14 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 			return nil, err
 		}
 	}
+	// #11391: strict commit also verifies that each routing instance can become
+	// its derived vrf-<name> Linux device. Tolerant paths skip this gate and
+	// quarantine invalid names in compileRoutingInstances.
+	if !opts.lenientRoutingInstanceKernelName {
+		if err := validateRoutingInstanceKernelNameAST(tree, nil); err != nil {
+			return nil, err
+		}
+	}
 
 	// #5180: duplicate hierarchical named-block gate. Runs PRE-expansion on the
 	// top-level stanzas (never a group body — apply-groups deep-merges rather
@@ -753,6 +761,13 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	// compileRoutingInstances quarantines the instance with one warning.
 	if !opts.lenientReservedRoutingInstanceName {
 		if err := validateReservedRoutingInstanceNamesAST(tree, &nodeID); err != nil {
+			return nil, err
+		}
+	}
+	// #11391: same expanded-name gate as the generic compiler above, including
+	// names from both cluster-node group expansions.
+	if !opts.lenientRoutingInstanceKernelName {
+		if err := validateRoutingInstanceKernelNameAST(tree, &nodeID); err != nil {
 			return nil, err
 		}
 	}
