@@ -154,6 +154,14 @@ distinction).
   which the userspace snapshot builder marks `TCPFlagsUnparseable` to fail
   the term CLOSED (#3367) — a deny sentinel, never a match-all widening;
   the out-of-range code-point entry is dropped (the pre-#2447 fail-safe).
+  **Unknown firewall-filter `then` actions fail closed on tolerant loads
+  (#11357):** `compileFilterThen` retains an unrecognized token in
+  `FirewallFilterTerm.UnknownActions`. Strict commit rejects it; `Store.Load`
+  and `Store.SyncApply` keep startup/HA sync bootable with a warning and compile
+  that term's action as `discard`, rather than treating the empty action as a
+  fall-through to the implicit accept. Known modifier-only terms remain
+  fall-through terms.
+
 - `ValueType` — `value_type.go`. Classifies a typed leaf's value
   (`ValueRate`, `ValueByteSizeOrPercent`, `ValueDate`, `ValueString`, ...)
   and supplies the `?`-completion placeholder via `Placeholder()`.
@@ -756,6 +764,17 @@ device is left unbound in the default routing context.
 warning and apply-time ERROR log name the device and competing claims, and
 `xpf_routing_instance_member_device_conflicts` remains alertable for the active
 config (`> 0` means a tolerant-load quarantine is in effect).
+
+**Management-class links remain in the management VRF (#11392):** strict
+commit validation rejects routing-instance interface-list devices resolved by
+`RoutingInstanceMemberDeviceKeysForInstance` whose Linux name matches
+`IsManagementIfName` (`fxp*`, `fab*`, `em*`); tolerant load/peer-sync warns
+and removes management-class references from the compiled tenant memberships
+after tail validation. A bare reference that also fans out to ordinary
+devices retains only those unaffected keys. The daemon's list binder and
+`riMemberVRFReassertLoop` also skip this class, so tenant route/domain maps
+cannot steal `fxp0` from `vrf-mgmt` or fight the fabric-overlay rebind for
+`fab0`/`fab1`.
 
 **Backup-router destination family must match the next-hop (#2911):**
 `renderBackupRouter` (`pkg/frr/config_render.go`) keys the static-route

@@ -228,16 +228,16 @@ func validateFirewallPrefixListReferencesStrict(cfg *Config) error {
 // blackhole / fall-through to the default table. This gate makes the typo
 // operator-visible at commit, consistent with the other cross-reference gates.
 //
-// Any defined routing-instance is a valid steer target (Junos FBF accepts
-// virtual-router / vrf / forwarding instances alike); the gap closed here is
-// strictly the dangling-name case, so instance-type is intentionally not
-// constrained.
+// The Junos FBF literal `default` is the built-in master-RIB alias and is valid
+// without a `routing-instances default` declaration. If both the declaration
+// and that FBF target occur, strict compilation rejects the meaning collision;
+// tolerant compilation warns and preserves both, with the alias selecting
+// master as it does on every lowering path.
 //
-// Both filter families are walked, sorted by filter name then by term position
-// for a deterministic first-error. On the tolerant load / peer-sync paths the
-// call site downgrades to a warning (opts.lenientFirewallRefs) so an already-
-// persisted or peer-synced config still BOOTS (#1960). Mirrors
-// validateFirewallPolicerReferencesStrict.
+// Any defined routing-instance remains a valid target, regardless of
+// instance-type. Both filter families are walked in stable filter/term order;
+// on tolerant load and peer-sync the call site downgrades failures to warnings
+// so an already-persisted or peer-synced config still boots (#1960).
 func validateFirewallRoutingInstanceReferencesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -260,7 +260,25 @@ func validateFirewallRoutingInstanceReferencesStrict(cfg *Config) error {
 				continue
 			}
 			for _, term := range filter.Terms {
-				if term == nil || term.RoutingInstance == "" || defined[term.RoutingInstance] {
+				if term == nil || term.RoutingInstance == "" {
+					continue
+				}
+				if term.RoutingInstance == FBFDefaultRoutingInstance {
+					if defined[FBFDefaultRoutingInstance] {
+						return fmt.Errorf(
+							"firewall family %s filter %q term %q targets FBF alias %q "+
+								"while `routing-instances default` is declared: the declaration "+
+								"remains intact, but the literal selects the master table "+
+								"(inet.0 for inet, inet6.0 for inet6), not that named instance's "+
+								"table. Tolerant loads keep both the declaration and term, so "+
+								"the alias wins. Rename the instance and target its new name to "+
+								"select its table, or remove the declaration if only master "+
+								"routing is intended (#11308, #11644)",
+							family, name, term.Name, term.RoutingInstance)
+					}
+					continue
+				}
+				if defined[term.RoutingInstance] {
 					continue
 				}
 				return fmt.Errorf(
@@ -713,23 +731,17 @@ func validateFilterCrossFieldStrict(cfg *Config) error {
 // forwarding-class/loss-priority/dscp/traffic-class/policer/routing-instance)
 // — #2399 finding 032-16.
 //
-// Before this gate, compileFilterThen silently DROPPED an unrecognized or
-// misspelled `then` token. The term's Action stayed "", which the dataplane
-// compiler (pkg/dataplane/compiler_filter.go) and the Rust filter
-// (userspace-dp/src/filter/compiler.rs parse_term) BOTH map to
-// FilterAction::Accept — a fail-open permit. An operator who typed `then
-// frobnicate` (or a future action a peer node understands) got an ACCEPT for a
-// filter term they intended to deny. In Junos an unknown filter action is a
-// commit error, so the safe behavior is fail-CLOSED: refuse the commit and
-// name the offending token rather than silently permit.
+// An unknown token must not be allowed to become the empty action, which the
+// dataplane interprets as fall-through to implicit accept. `compileFilterThen`
+// retains it in `UnknownActions`; `compileFirewall` sets the final action to
+// `discard` after all `then` blocks have contributed, so the tolerant uniform
+// gate warns and fails closed. Strict commit still refuses the unknown token
+// and names it rather than installing a behavior the operator did not author.
 //
 // The walk is deterministic (filters sorted by name, terms in config order)
 // so the first-reported error is stable across runs, matching
 // validateFilterProtocolsStrict. On the tolerant load / peer-sync path the
-// caller downgrades the returned error to a warning (#1960 no-brick); the
-// dataplane still has no representation for the unknown token, so the
-// leniently-loaded term defaults to accept independently — but the operator
-// never reaches that state through a commit.
+// caller downgrades the returned error to a warning (#1960 no-brick).
 func validateFilterActionsStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil

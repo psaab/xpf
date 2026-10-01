@@ -263,7 +263,8 @@ func TestElidedRoutingInstanceCompilesLikeBraced9620(t *testing.T) {
 
 func compileInstance9620(t *testing.T, label, instance string, lenient bool) (*RoutingInstanceConfig, bool) {
 	t.Helper()
-	text := `interfaces { ge-0/0/1 { unit 0 { family inet { address 10.1.0.1/24; } } } ` +
+	text := `routing-options { autonomous-system 65000; } ` +
+		`interfaces { ge-0/0/1 { unit 0 { family inet { address 10.1.0.1/24; } } } ` +
 		`ge-0/0/2 { unit 0 { family inet { address 10.2.0.1/24; } } } } ` +
 		`routing-instances { ` + instance + ` }`
 	tr, perrs := NewParser(text).Parse()

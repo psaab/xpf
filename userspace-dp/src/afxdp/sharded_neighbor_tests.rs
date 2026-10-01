@@ -45,21 +45,26 @@ fn get_returns_none_for_missing_key() {
 }
 
 #[test]
-fn remove_clears_entry() {
+fn remove_clears_entry_and_advances_neighbor_epoch() {
     let map = ShardedNeighborMap::new();
     let k = key_v4(7, 42);
     map.insert(k, entry(0xAB));
+    assert_eq!(map.mac_change_epoch_for(&k), 0);
     map.remove(&k);
     assert_eq!(map.get(&k), None);
+    assert_eq!(map.mac_change_epoch_for(&k), 1);
 }
 
 #[test]
-fn remove_if_present_returns_true_when_existing_false_when_absent() {
+fn remove_if_present_bumps_epoch_only_when_present() {
     let map = ShardedNeighborMap::new();
     let k = key_v4(7, 42);
     map.insert(k, entry(0xAB));
+    assert_eq!(map.mac_change_epoch_for(&k), 0);
     assert!(map.remove_if_present(&k));
+    assert_eq!(map.mac_change_epoch_for(&k), 1);
     assert!(!map.remove_if_present(&k));
+    assert_eq!(map.mac_change_epoch_for(&k), 1);
 }
 
 #[test]
@@ -313,15 +318,15 @@ fn concurrent_per_key_with_bulk_replace_no_deadlock() {
     assert!(map.len() > 0);
 }
 
-// ── #3048/#5147: PER-SHARD neighbor MAC-change epoch ──────────────────
+// ── #3048/#5147: PER-SHARD neighbor-resolution epoch ──────────────────
 // The worker flow cache stamps the epoch of the SPECIFIC shard its
 // resolved next-hop lives in (`FlowCacheEntry::neighbor_shard`) and
 // re-reads that one slot on every fast-path hit. A shard's epoch MUST
-// advance only on a genuine MAC CHANGE to a neighbor IN THAT SHARD, so a
-// stale cached dst_mac is evicted; it MUST NOT advance on a first insert
-// or a same-MAC refresh, and a change to a neighbor in a DIFFERENT shard
-// MUST leave this shard's epoch untouched (#5147 — the old single global
-// epoch let one neighbor's MAC flap invalidate every cached flow).
+// advance on a genuine MAC replacement or actual removal in THAT SHARD,
+// so a stale cached destination MAC or deleted next-hop is re-resolved.
+// It MUST NOT advance on a first insert, same-MAC refresh, absent-key
+// removal, or change to a neighbor in a DIFFERENT shard (#5147 — the old
+// single global epoch let one neighbor's MAC flap invalidate every flow).
 // Reverting any `bump_shard_epoch` makes the corresponding "change bumps"
 // assertion fail (RED); the isolation test fails if a change bumps a
 // shard other than its own.
@@ -470,6 +475,21 @@ fn mac_change_epoch_bulk_replace_no_bump_on_same_mac() {
 }
 
 #[test]
+fn mac_change_epoch_bulk_replace_bumps_on_pure_removal_per_shard() {
+    let map = ShardedNeighborMap::new();
+    let (removed, untouched) = keys_in_distinct_shards();
+    map.insert(removed, entry(0x11));
+    map.insert(untouched, entry(0x22));
+
+    map.bulk_replace_neighbors(&[removed], &[]);
+
+    assert_eq!(map.get(&removed), None);
+    assert_eq!(map.mac_change_epoch_for(&removed), 1);
+    assert_eq!(map.get(&untouched), Some(entry(0x22)));
+    assert_eq!(map.mac_change_epoch_for(&untouched), 0);
+}
+
+#[test]
 fn mac_change_epoch_bulk_replace_no_bump_on_brand_new_keys() {
     let map = ShardedNeighborMap::new();
     // A snapshot that only ADDS neighbors with no prior entry: no cached
@@ -611,6 +631,117 @@ fn mac_change_epoch_rx_learn_pair_bumps_each_key_shard() {
     // two ifindexes happen to hash to the same shard).
     assert!(map.mac_change_epoch_for(&phys) >= 1);
     assert!(map.mac_change_epoch_for(&logical) >= 1);
+}
+
+#[test]
+fn rx_source_learn_age_refresh_expires_and_invalidates_cached_macs_11406() {
+    let map = ShardedNeighborMap::new();
+    let key = key_v4(7, 42);
+    let mac = entry(0xAB);
+    map.learn_pair_if_changed_at(&[key], mac, 100);
+    let insert_generation = map.insert_generation();
+
+    assert_eq!(
+        map.get_with_capacity_for_rx_learn(&key, mac.mac, 200).0,
+        Some(mac)
+    );
+    assert!(map.refresh_rx_learned_pair(&[key], mac.mac, 300));
+    let manager_keys = FastSet::default();
+    assert_eq!(
+        map.age_rx_learned_neighbors(
+            300 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS + RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS - 1,
+            RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            &manager_keys,
+        ),
+        0,
+        "a matching RX learn must refresh its idle lease"
+    );
+    assert_eq!(map.get(&key), Some(mac));
+
+    assert_eq!(
+        map.age_rx_learned_neighbors(
+            300 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS + RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS,
+            RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            &manager_keys,
+        ),
+        1
+    );
+    assert_eq!(map.get(&key), None);
+    assert_eq!(
+        map.mac_change_epoch_for(&key),
+        1,
+        "aging must evict cached forwarding descriptors for the removed MAC"
+    );
+    assert_eq!(
+        map.insert_generation(),
+        insert_generation,
+        "removal is not a new neighbor insertion"
+    );
+}
+
+#[test]
+fn rx_source_learn_timestamps_never_regress_on_older_batch_samples_11406() {
+    let map = ShardedNeighborMap::new();
+    let keys = [key_v4(7, 42), key_v4(7, 43), key_v4(7, 44)];
+    let mac = entry(0xAB);
+    map.learn_pair_if_changed_at(&keys, mac, 100);
+
+    // Exercise each unchanged-RX update path with a newer then older sample.
+    assert_eq!(
+        map.get_with_capacity_for_rx_learn(&keys[0], mac.mac, 200).0,
+        Some(mac)
+    );
+    assert!(map.refresh_rx_learned_pair(&[keys[1]], mac.mac, 200));
+    assert!(map.refresh_rx_learned_pair(&[keys[1]], mac.mac, 150));
+    map.learn_pair_if_changed_at(&[keys[2]], mac, 200);
+    map.learn_pair_if_changed_at(&[keys[2]], mac, 150);
+
+    let manager_keys = FastSet::default();
+    let age = 1_000;
+    let expiry = 200 + age + RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS;
+    assert_eq!(
+        map.age_rx_learned_neighbors(expiry - 1, age, &manager_keys),
+        0,
+        "an older batch timestamp must not shorten any RX-only lease"
+    );
+    assert_eq!(map.age_rx_learned_neighbors(expiry, age, &manager_keys), 3);
+}
+
+#[test]
+fn rx_source_learn_age_preserves_manager_and_kernel_backed_neighbors_11406() {
+    let map = ShardedNeighborMap::new();
+    let rx_key = key_v4(7, 42);
+    let manager_key = key_v4(7, 43);
+    let kernel_key = key_v4(8, 44);
+    let confirmed_key = key_v4(9, 45);
+    let mac = entry(0xAB);
+    map.learn_pair_if_changed_at(&[rx_key, manager_key], mac, 100);
+    map.insert(kernel_key, mac);
+    map.learn_pair_if_changed_at(&[kernel_key], mac, 100);
+    map.learn_pair_if_changed_at(&[confirmed_key], mac, 100);
+    map.mark_kernel_backed_if_same(&confirmed_key, mac.mac);
+
+    let manager_keys = FastSet::from_iter([manager_key]);
+    assert_eq!(
+        map.age_rx_learned_neighbors(
+            100 + RX_LEARNED_NEIGHBOR_MAX_AGE_NS + RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS,
+            RX_LEARNED_NEIGHBOR_MAX_AGE_NS,
+            &manager_keys,
+        ),
+        1
+    );
+    assert_eq!(map.get(&rx_key), None);
+    assert_eq!(map.get(&manager_key), Some(mac));
+    assert_eq!(
+        map.get(&kernel_key),
+        Some(mac),
+        "same-MAC RX traffic must not turn a kernel-backed entry into an aged entry"
+    );
+    assert_eq!(
+        map.get(&confirmed_key),
+        Some(mac),
+        "a matching kernel monitor update must stop the RX-only age lease"
+    );
 }
 
 // ---------------------------------------------------------------------------

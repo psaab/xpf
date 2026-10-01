@@ -2997,6 +2997,15 @@ never lock an operator out of a remote box it manages.
     shared `config.RoutingInstanceMemberLinuxNames` helper, so both passes reason
     about ONE device set. It takes `applySem` before the config read that drives
     the binding (#4001). Tests: `ri_member_vrf_reassert_9813_test.go`, including a kernel cell.
+  - Management-class RI list members (`fxp*`, `fab*`, `em*`) remain owned by
+    `vrf-mgmt` (#11392). Strict compilation rejects them and tolerant
+    load/peer-sync warns while quarantining the management-class references
+    from compiled tenant memberships, so userspace route/domain and table-ID
+    maps cannot assign them to a tenant. Both `bindRoutingInstanceMembers` and
+    periodic reassert also use `config.IsManagementIfName` to skip tenant binds.
+    This keeps `fxp0` in `vrf-mgmt` across ticks and prevents the RI loop from
+    fighting the fabric-overlay rebind for `fab0`/`fab1`; see
+    `ri_member_mgmt_11392_test.go`.
 
   **Host-inbound conntrack revocation retry (#6802, the same recovery shape):**
   `flushDeniedHostInboundConntrack` (the #5566 reconcile) deletes established
@@ -3278,7 +3287,8 @@ never lock an operator out of a remote box it manages.
   `pkg/dataplane/userspace/filters.go` `NextTerm` field records the advisory
   wire bit for snapshot/render disclosure, but it MUST NOT override a real
   action. A term with NO terminating action is a Junos FALL-THROUGH (explicit
-  `then next term` or a modifier-only term): it emits no TERMINATING verdict
+  `then next term` or a well-formed known modifier-only term): it emits no
+  TERMINATING verdict
   and the subsequent terms run. Pre-#3445 such a term emitted NOTHING; now it emits
   its honored modifiers (`then log`/`then count`, see the modifier bullet below) as a
   NON-TERMINATING rule (modifier statements, no verdict) so the per-term log / count
@@ -3315,21 +3325,24 @@ never lock an operator out of a remote box it manages.
   `TestNftRoutingInstanceWithNextTermStillTerminatesMirroringRust9140` and
   `TestLo0PayloadRoutingInstanceNextTermShadowsLaterDeny9140`
   (`lo0_ri_nextterm_mirror_9140_test.go`).
-  **Unknown terminating action fails CLOSED (#3724 M08):** the terminating
-  verdict switch mirrors the Rust filter compiler
+  **Unknown terminating action fails CLOSED (#3724 M08, #11357):** the
+  terminating verdict switch mirrors the Rust filter compiler
   (`userspace-dp/src/filter/compiler.rs`) EXACTLY — `discard` → `drop`,
   `accept` (and the empty-action routing-instance PBR term) → `accept`, and any
-  OTHER non-empty action → `drop`. An unknown / unhandled action cannot arrive
-  through the CLI commit path (`validateFilterActionsStrict` plus the
-  `UnknownActions` capture in `compileFilterThen` leave `term.Action == ""`), but
-  a tolerant load / peer session-sync / mixed-version snapshot can carry a future
-  action string directly in `term.Action`. The Rust compiler fails such a term
-  CLOSED to `FilterAction::Discard`; the kernel mirror — the PRIMARY host-bound
-  enforcement — MUST match, or it would ADMIT host-bound traffic userspace-dp
-  drops (a mixed-version control-plane fail-OPEN). The pre-#3724 default arm
-  rendered nft `accept` for any non-`discard` action; it now renders `drop` and
-  logs the drift. Pinned by `TestNftRuleFromTermUnknownActionFailsClosed`
-  (known accept/discard still map correctly; unknown actions render `drop`).
+  OTHER non-empty action → `drop`. Strict commit rejects an unknown `then`
+  token. On tolerant load / peer-sync, `compileFilterThen` records it in
+  `UnknownActions`; `compileFirewall` finalizes the complete term to `discard`
+  after all `then` blocks contribute, and the uniform action gate warns.
+  Well-formed known modifier-only terms remain empty-action fall-through;
+  malformed operands on recognized modifiers (#8971, e.g. extra count tokens)
+  and unknown reject-message types also enter `UnknownActions` and therefore
+  become `discard` on tolerant load / peer-sync.
+  A future unknown non-empty action arriving directly in a mixed-version
+  snapshot also fails closed: Rust maps it to `FilterAction::Discard`, and
+  the kernel mirror — PRIMARY host-bound enforcement — renders `drop` and
+  logs the drift. Pinned by
+  `TestNftRuleFromTermUnknownActionFailsClosed` (known accept/discard still map
+  correctly; unknown actions render `drop`).
 
   **Non-terminating `then` modifier policy (#3445):** the kernel lo0 chain is
   the PRIMARY enforcement for host-bound traffic, so a term's non-terminating
@@ -3768,3 +3781,9 @@ never lock an operator out of a remote box it manages.
   publish success, under `applySem`). The ip-monitoring engine lives
   in `pkg/ipmon`; RG transitions re-evaluate gating via
   `reconcileIPMonGating` from `reconcileRGState`.
+- `daemon_route_listener.go` filters kernel route events through
+  `routing.LearnedRouteTableIDs` and marks a `pkg/coalesce` loop rather than
+  publishing per event; subscription gaps and errors mark it as well. Coalesced
+  actuation acquires `applySem` and republishes the routes-only snapshot. A
+  confirmed changed publish is followed by a FIB-generation bump; an
+  unconfirmed bump remains retryable even when the next publish is a duplicate.

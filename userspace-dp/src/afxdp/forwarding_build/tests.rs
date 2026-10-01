@@ -4799,6 +4799,220 @@ fn static_bare_gateway_infers_ifindex_in_own_table_v6() {
     );
 }
 
+/// #11322: the daemon refuses to infer an interface for a bare IPv6
+/// link-local static next-hop when multiple IPv6 interfaces are in the route's
+/// table. The helper must not turn its snapshot-order first match into a
+/// fast-path route the kernel/FRR did not install.
+#[test]
+fn static_bare_link_local_gateway_refuses_ambiguous_interfaces_11322() {
+    fn iface(
+        name: &str,
+        linux_name: &str,
+        ifindex: i32,
+        global: &str,
+        link_local: &str,
+    ) -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            name: name.into(),
+            linux_name: linux_name.into(),
+            ifindex,
+            hardware_addr: format!("02:00:00:00:32:{:02x}", ifindex & 0xff),
+            addresses: vec![
+                crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: global.into(),
+                    ..Default::default()
+                },
+                crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: link_local.into(),
+                    scope: 253, // Linux RT_SCOPE_LINK.
+                },
+            ],
+            ..Default::default()
+        }
+    }
+    let route = |destination: &str, next_hop: &str| crate::RouteSnapshot {
+        table: "inet6.0".into(),
+        family: "inet6".into(),
+        destination: destination.into(),
+        next_hops: vec![next_hop.into()],
+        ..Default::default()
+    };
+    let one = iface(
+        "ge-0/0/1.0",
+        "ge-0-0-1",
+        101,
+        "2001:db8:1::1/64",
+        "fe80::1/64",
+    );
+    let two = iface(
+        "ge-0/0/2.0",
+        "ge-0-0-2",
+        102,
+        "2001:db8:2::1/64",
+        "fe80::2/64",
+    );
+    let mut one_without_observed_link_local = one.clone();
+    one_without_observed_link_local.addresses.truncate(1);
+    let neighbors = vec![
+        crate::NeighborSnapshot {
+            interface: one.linux_name.clone(),
+            ifindex: 101,
+            family: "inet6".into(),
+            ip: "fe80::254".into(),
+            mac: "02:00:00:00:32:01".into(),
+            state: "reachable".into(),
+            ..Default::default()
+        },
+        crate::NeighborSnapshot {
+            interface: two.linux_name.clone(),
+            ifindex: 102,
+            family: "inet6".into(),
+            ip: "fe80::254".into(),
+            mac: "02:00:00:00:32:02".into(),
+            state: "reachable".into(),
+            ..Default::default()
+        },
+    ];
+
+    for (label, interfaces) in [
+        ("first interface first", vec![one.clone(), two.clone()]),
+        ("second interface first", vec![two.clone(), one.clone()]),
+        (
+            "one interface has no observed fe80 address",
+            vec![one_without_observed_link_local, two.clone()],
+        ),
+    ] {
+        let snapshot = ConfigSnapshot {
+            interfaces,
+            neighbors: neighbors.clone(),
+            routes: vec![
+                route("2001:db8:beef::/48", "fe80::254"),
+                route("2001:db8:cafe::/48", "fe80::254@ge-0-0-2"),
+            ],
+            ..Default::default()
+        };
+        let state = build_forwarding_state(&snapshot);
+        let table = state.routes_v6.get("inet6.0").expect("inet6.0 table");
+        let find_route = |destination: &str| {
+            let destination = destination.parse::<std::net::Ipv6Addr>().unwrap();
+            table
+                .iter()
+                .find(|route| route.prefix.contains(destination))
+                .expect("static route present")
+        };
+        let ambiguous = find_route("2001:db8:beef::5");
+        assert_eq!(
+            ambiguous.next_hops[0].ifindex, 0,
+            "{label}: an ambiguous bare link-local gateway must not bind by snapshot order"
+        );
+        let unresolved = lookup_forwarding_resolution_v6(
+            &state,
+            None,
+            "2001:db8:beef::5".parse().unwrap(),
+            "inet6.0",
+            0,
+            true,
+            None,
+        );
+        assert_eq!(
+            unresolved.disposition,
+            ForwardingDisposition::NoRoute,
+            "{label}: ambiguous static route must match the daemon/FRR no-route disposition"
+        );
+        assert_eq!(unresolved.egress_ifindex, 0);
+
+        let explicit = find_route("2001:db8:cafe::5");
+        assert_eq!(
+            explicit.next_hops[0].ifindex, 102,
+            "{label}: an explicit link-local interface must remain authoritative"
+        );
+        let resolved = lookup_forwarding_resolution_v6(
+            &state,
+            None,
+            "2001:db8:cafe::5".parse().unwrap(),
+            "inet6.0",
+            0,
+            true,
+            None,
+        );
+        assert_eq!(
+            resolved.disposition,
+            ForwardingDisposition::ForwardCandidate,
+            "{label}: explicit link-local scope remains forwardable"
+        );
+        assert_eq!(resolved.egress_ifindex, 102);
+    }
+}
+
+/// #11322 control: a bare link-local static gateway remains usable when one
+/// IPv6-capable egress is the only candidate, even without an observed fe80
+/// address in the snapshot.
+#[test]
+fn static_bare_link_local_gateway_resolves_unique_interface_11322() {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0-0-1".into(),
+            ifindex: 101,
+            hardware_addr: "02:00:00:00:32:01".into(),
+            addresses: vec![
+                crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: "2001:db8:1::1/64".into(),
+                    ..Default::default()
+                },
+                crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: "2001:db8:2::1/64".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }],
+        neighbors: vec![crate::NeighborSnapshot {
+            interface: "ge-0-0-1".into(),
+            ifindex: 101,
+            family: "inet6".into(),
+            ip: "fe80::254".into(),
+            mac: "02:00:00:00:32:fe".into(),
+            state: "reachable".into(),
+            ..Default::default()
+        }],
+        routes: vec![crate::RouteSnapshot {
+            table: "inet6.0".into(),
+            family: "inet6".into(),
+            destination: "2001:db8:beef::/48".into(),
+            next_hops: vec!["fe80::254".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    let route = state
+        .routes_v6
+        .get("inet6.0")
+        .expect("inet6.0 table")
+        .iter()
+        .find(|route| route.prefix.contains("2001:db8:beef::5".parse().unwrap()))
+        .expect("static route present");
+    assert_eq!(route.next_hops[0].ifindex, 101);
+    let resolved = lookup_forwarding_resolution_v6(
+        &state,
+        None,
+        "2001:db8:beef::5".parse().unwrap(),
+        "inet6.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "the unique link-local scope remains forwardable"
+    );
+    assert_eq!(resolved.egress_ifindex, 101);
+}
 /// #4446 anti-regression: the common single-table (default-instance) case is
 /// unaffected — a bare-gateway static route still resolves its gateway to the
 /// sole connected interface. A legitimate cross-table reach is expressed as a
@@ -10188,6 +10402,66 @@ fn learned_link_local_next_hop_binds_its_own_link_in_any_order_9512() {
         assert_eq!(legs("2001:db8:ab::"), vec![102], "{label}: a scope-less global gateway still infers its connected link");
     }
 }
+
+/// #11389: identical IPv4 ECMP gateways on distinct links must retain their
+/// kernel-selected egresses when the wire next hop carries `@<linux-name>`.
+#[test]
+fn learned_same_gateway_ecmp_binds_each_link_11389() {
+    let iface = |name: &str, linux_name: &str, ifindex: i32, address: &str| {
+        InterfaceSnapshot {
+            name: name.into(),
+            linux_name: linux_name.into(),
+            ifindex,
+            hardware_addr: format!("02:00:00:00:11:{:02x}", ifindex & 0xff),
+            addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: address.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    };
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![
+            iface("ge-0/0/1.0", "wan-a", 11, "192.0.2.1/24"),
+            iface("ge-0/0/2.0", "wan-b", 12, "192.0.2.2/24"),
+        ],
+        routes: vec![crate::RouteSnapshot {
+            table: "inet.0".into(),
+            family: "inet".into(),
+            destination: "198.51.100.0/24".into(),
+            next_hops: vec![
+                "192.0.2.254@wan-a".into(),
+                "192.0.2.254@wan-b".into(),
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let state = build_forwarding_state(&snapshot);
+    let route = state
+        .routes_v4
+        .get("inet.0")
+        .expect("inet.0 table")
+        .iter()
+        .find(|route| route.prefix.contains(Ipv4Addr::new(198, 51, 100, 1)))
+        .expect("same-gateway ECMP route");
+    let gateways: Vec<_> = route
+        .next_hops
+        .iter()
+        .map(|next_hop| (next_hop.next_hop, next_hop.ifindex))
+        .collect();
+    assert_eq!(
+        gateways,
+        vec![
+            (Some(Ipv4Addr::new(192, 0, 2, 254)), 11),
+            (Some(Ipv4Addr::new(192, 0, 2, 254)), 12),
+        ],
+        "the repeated gateway must preserve both kernel-selected egresses"
+    );
+}
+
 
 // #9173: the published key-ring bases reach the forwarding state, and one
 // malformed base leaves the ring present with no base, so it fails closed.

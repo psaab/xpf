@@ -277,6 +277,18 @@ sync.
     overlap (`#3182`), NOT the source-IP class — closing that gap brings it
     to parity with the L2 advert paths. Rejection is do-not-learn only (the
     packet still forwards); this is a learn-path guard, not a packet filter.
+  - **RX-learned neighbor age (#11406):** the transit source-MAC path does
+    not program the kernel table, so its dynamic-only rows carry a monotonic
+    last-seen lease. Per-binding matching-packet lease writes are coalesced
+    for at most 1s; they reuse the poll iteration's sampled clock and keep
+    mutexes off repeated-packet hits. Lease writes use `max(old, sample)` so
+    delayed cross-worker batches cannot move the timestamp backward. The
+    neighbor-monitor sweep runs every 5s and expires at 60s idle plus a 1s
+    coalescing grace (about 60–66s after the last packet), except manager-owned
+    keys or rows subsequently confirmed by the kernel. Removal advances the
+    owning shard's MAC epoch, so cached destination MACs are discarded and
+    future resolutions enter the existing MissingNeighbor/probe path. This
+    lease is process-local and is not HA-synchronized.
   - **STALE install + NDP Override honor (`#4475`, opus-172 H-2, RFC 4861
     §7.2.5):** the own-IP gate above only protects addresses the router
     OWNS. Every OTHER same-segment next-hop — including the WAN gateway —
@@ -593,6 +605,23 @@ sync.
     any untranslatable candidate; raw ESP/AH remains unchanged for Stage-11
     passthrough and reassembly. Plain no-NAT fragments still use the normal
     buffer-and-retry path.
+  - **#11435 — address-only DNAT/NPTv6 before flowless route and policy:** the
+    flowless base resolver applies the flow-backed pre-routing order (static
+    DNAT, dynamic DNAT, inbound NPTv6) before local/route resolution, and transit
+    policy sees the translated L3 destination. Ambiguous L4-dependent rules,
+    selected port mappings, AH/ESP, and address-rewrite protocols without a
+    proven checksum-safe path fail closed; unmatched packets remain unchanged.
+    IPv4 VRRP rewriting is limited to version 2. A selected but unsupported
+    rewrite preserves an original LocalDelivery target so host-inbound, lo0, and
+    junos-host gates still run; transit is dropped and counted once. The static
+    pre-route ambiguity probe is DNAT-only, so unrelated static SNAT cannot
+    preempt a destination rewrite. A selected translated NoRoute or
+    MissingNeighbor is dropped before cold policy, neighbor probing/buffering,
+    or kernel reinjection because those paths cannot carry the rewrite. Plain
+    no-NAT cold traffic retains its existing retry/reinjection behavior.
+    Regression cells cover local ambiguity, both cold dispositions, checksum
+    protocol boundaries, non-first fragments, port maps, NPTv6, and SNAT
+    preservation.
   - **#5467 — egress `filter output` on the flowless TX path:** the #3291 gate
     above enforces the INGRESS input filter / PBR / zone policy on a flowless
     packet, but the EGRESS interface `filter output` was evaluated only on the
@@ -843,18 +872,21 @@ sync.
     `nat64_match.rs` now derives it with `ingress_routing_domain` the way
     `nat_match_v4.rs` / `nat_match_v6.rs` already did — that file previously
     contained ZERO `routing_domain` references while both siblings carried
-    one, which was the issue's own positive control. Exact lookups need the
-    arriving key domain; ordinary reverse-session admission zeroes its probe
-    and compares the reply domain with each forward candidate's egress domain
-    (`#11298`), permitting A-ingress/B-egress replies without treating domain
-    0 as a wildcard. Same-family embedded quotes instead use tuple-only lookup:
-    they rewrite a quoted packet without installing a session, and an off-path
-    router may send the error from another routing domain.
-    The NAT64 companion arm remains an exact installed-session lookup: there is
-    deliberately NO domain-0 retry there, which would name the DEFAULT instance
-    rather than perform a domain-agnostic search. An error that does not match
-    the installed session in its arrival domain declines to ordinary flowless
-    enforcement, exactly as before the stamp existed.
+    one, which was the issue's own positive control. Ordinary reverse-session admission compares each candidate's forward egress routing domain with the reply's arriving domain (`#11298`), so A-ingress/B-egress replies match in B without treating domain 0 as a wildcard. Same-family embedded quotes instead use tuple-only lookup: they rewrite a quoted packet without installing a session, and an off-path router may send the error from another routing domain. The NAT64 companion arm remains an exact installed-session lookup: there is deliberately NO domain-0 retry there, which would name the DEFAULT instance rather than perform a domain-agnostic search. An error that does not match the installed session in its arrival domain declines to ordinary flowless enforcement, exactly as before the stamp existed.
+
+- **#11361 — mixed-zero shared NAT replies need a unique owner, not a colliding
+  alias.** The shared NAT map keeps translated reverse aliases in their forward
+  session's routing domain and uses a bounded ambiguity index for neutral wire
+  owners and alias collisions. Mixed-zero wire replies recover only when the index
+  proves one owner. Translated aliases retain their owner's actual domain,
+  including domain 0; they are not additionally normalized to domain 0. A nonzero-
+  domain PRE-NAT reply may use the stored domain-zero canonical alias only when
+  its translated-wire owner is unique and the canonical tuple has no displacement
+  or conflicting wire-owner history. Every ordinary reverse-session candidate
+  still passes the #11298 forward-egress-domain admission; A→0 and 0→A resolve
+  only when the candidate's egress domain equals the reply domain. Ambiguous or
+  saturated ownership fails closed. The existing tuple-only embedded-ICMP quote
+  admission is unchanged.
 - `frame/` — packet parsing (L2 / L3 / L4), checksum helpers, TCP MSS
   clamp. `tests.rs` was relocated out of `mod.rs` in #1046 Phase 1.
   `headers.rs` holds the consolidated outer-header serializers (#1440).
