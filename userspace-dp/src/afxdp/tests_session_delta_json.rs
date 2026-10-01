@@ -180,13 +180,10 @@ fn session_delta_info_zero_session_id_is_the_no_id_sentinel_6312() {
 
 use crate::event_stream::codec::{EventFrame, FLAG_NAT64, FRAME_HEADER_SIZE};
 
-/// One session carrying a DISTINCTIVE, non-zero attribution on every field.
-///
-/// `policy_id` is deliberately NOT 0. A rendered 0 displays as `unattributed`
-/// (#6851) and is also what a dropped field decodes to, so a fixture whose
-/// correct `policy_id` is 0 cannot tell "attributed to policy 0" from
-/// "attribution lost" — the exact confusion that hid this defect. It is a
-/// NAT64 v6 session so `nat64` / `nat64_snat_v4` carry real values too.
+/// Base attribution fixture with non-zero policy, counter index, timeout and
+/// NAT64 fields, plus non-default routing-domain and ingress identity.
+/// `policy_id` is non-zero to distinguish a carried policy from the legitimate
+/// zero/unattributed value (#6851). The parity test adds rule-ID and ICMP values.
 fn delta_with_attribution() -> SessionDelta {
     use std::net::Ipv6Addr;
     let mut delta = delta_with_session_id(0x5EED_5EED);
@@ -204,6 +201,8 @@ fn delta_with_attribution() -> SessionDelta {
     // ABOUT. With 0 here both legs would emit the same encoded default marker
     // and a leg that dropped the field entirely would still look equal.
     delta.key.routing_domain = 100_007;
+    delta.metadata.ingress_ifindex = 4242;
+    delta.metadata.ingress_vlan_id = 51;
     delta.metadata.policy_id = 4242;
     delta.metadata.policy_counter_idx = 9;
     // 1800 s, expressed in ns: exercises the ns -> s conversion rather than a
@@ -218,20 +217,20 @@ fn delta_with_attribution() -> SessionDelta {
 ///
 /// Parsed from the frame bytes, not from the encoder's inputs: this is the leg
 /// the JSON leg has to agree WITH, so it must be read the way the Go decoder
-/// reads it (`pkg/dataplane/userspace/eventstream.go`). The #3301 block is the
-/// last thing on the frame apart from the #4565 snat_v4, the #5212 session id
-/// and the #7188 tunnel discriminator, so it is addressed from the END.
+/// reads it (`pkg/dataplane/userspace/eventstream.go`). The fixed tail follows
+/// the routing domain; a length-prefixed policy-rule ID follows that tail.
 struct BinaryAttribution {
     policy_id: u32,
+    policy_rule_id: String,
+    source_nat_icmp: Option<(u8, u8)>,
+    ingress_ifindex: u32,
+    ingress_vlan_id: u16,
     policy_counter_idx: u32,
     app_timeout: u32,
     nat64: bool,
     nat64_snat_v4: String,
-    /// #7188: the tunnel session-identity discriminator, the frame's last
-    /// field. It joins this struct because it is the newest thing BOTH legs
-    /// carry, and because it is the one field here that is part of session
-    /// IDENTITY rather than attribution — a divergence between the legs would
-    /// not mis-label a session, it would merge two.
+    /// #7188: session-identity discriminator, carried before routing domain
+    /// and the close-class/install-table/ICMP/ingress identity trailers.
     tunnel_discriminator: u64,
 }
 
@@ -248,19 +247,61 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
         0, // #9412: tcp_close_class
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    // #9412 + #9752: discount the trailing close-class byte and install-table
-    // pair. The fields below are read end-relative, and the open frame now
-    // ends nine bytes after the routing domain.
-    let n = payload.len() - 12; // #11064: +3 trailing source-NAT ICMP identity bytes
+    // The length-prefixed policy rule ID follows the fixed close/install/ICMP/
+    // ingress tail. The fixture supplies the expected length so the parser can
+    // locate and independently check the encoded prefix and bytes.
+    let expected_rule_id = delta
+        .metadata
+        .policy_counter
+        .as_ref()
+        .map_or("", |counter| counter.rule_id());
+    let (rule_id_prefix, policy_rule_id) = if expected_rule_id.is_empty() {
+        (payload.len(), String::new())
+    } else {
+        let id_start = payload.len() - expected_rule_id.len();
+        let len_start = id_start - 2;
+        let encoded_len = u16::from_le_bytes(
+            payload[len_start..id_start]
+                .try_into()
+                .expect("2 policy-rule-id length bytes"),
+        ) as usize;
+        assert_eq!(
+            encoded_len,
+            expected_rule_id.len(),
+            "binary trailer must carry the policy rule ID length"
+        );
+        let policy_rule_id = std::str::from_utf8(&payload[id_start..])
+            .expect("policy rule ID is UTF-8")
+            .to_string();
+        (len_start, policy_rule_id)
+    };
+    // `n` points immediately after the routing-domain field; the close class,
+    // install-table stamp, ICMP identity, ingress identity and rule-ID trailer
+    // follow it.
+    let n = rule_id_prefix - 18; // fixed close/install/ICMP/ingress tail
     let u32_at = |off: usize| -> u32 {
         u32::from_le_bytes(payload[off..off + 4].try_into().expect("4 bytes"))
     };
-    // [n-32..n-28] policy_id, [n-28..n-24] policy_counter_idx,
-    // [n-24..n-20] inactivity secs, [n-20..n-16] snat_v4,
-    // [n-16..n-8] session id, [n-8..n] #7188 tunnel discriminator.
     let snat = &payload[n - 24..n - 20];
+    let source_nat_icmp = if payload[n + 9] != 0 {
+        Some((payload[n + 10], payload[n + 11]))
+    } else {
+        None
+    };
     BinaryAttribution {
         policy_id: u32_at(n - 36),
+        policy_rule_id,
+        source_nat_icmp,
+        ingress_ifindex: u32::from_le_bytes(
+            payload[rule_id_prefix - 6..rule_id_prefix - 2]
+                .try_into()
+                .expect("4 ingress-ifindex bytes"),
+        ),
+        ingress_vlan_id: u16::from_le_bytes(
+            payload[rule_id_prefix - 2..rule_id_prefix]
+                .try_into()
+                .expect("2 ingress-VLAN bytes"),
+        ),
         policy_counter_idx: u32_at(n - 32),
         app_timeout: u32_at(n - 28),
         nat64: payload[26] & FLAG_NAT64 != 0,
@@ -283,15 +324,14 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
 /// THE SAME SESSION, which is the actual contract — the Go control plane reads
 /// whichever leg delivered the delta and cannot tell them apart afterwards.
 ///
-/// RED AT MASTER: at master `session_delta_info` emits none of these keys, so
-/// every `.get()` below is `None` and the JSON side reads as 0/""/false against
-/// a binary side carrying 4242/9/1800/true/203.0.113.5.
+/// RED AT MASTER: the JSON producer omits these keys, so its values diverge
+/// from a binary side carrying policy, rule, timeout, NAT64, ICMP and ingress identity.
 ///
 /// NOTE on what an agreement assertion can and cannot see. A mutation INSIDE
 /// the shared derivation (return `policy_id: 0` from
 /// `SessionSyncAttribution::from_session`) moves BOTH legs together, so the
-/// five equality assertions below all still hold — two legs can agree on a
-/// wrong value. Measured as cell M6 of the #6949 matrix: what actually reds is
+/// all parity assertions below still hold — two legs can agree on a wrong
+/// value. Measured as cell M6 of the #6949 matrix: what actually reds is
 /// the POSITIVE CONTROL at the end (`want.policy_id == 4242`), alongside the
 /// pre-existing binary-side `test_encode_session_open_carries_policy_fields_3301`.
 /// That is why the controls are assertions and not a comment, and why the
@@ -299,7 +339,11 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
 /// half of this guard and must not be deleted.
 #[test]
 fn session_delta_json_and_binary_agree_on_policy_attribution_6949() {
-    let delta = delta_with_attribution();
+    let mut delta = delta_with_attribution();
+    delta.metadata.policy_counter = Some(std::sync::Arc::new(
+        crate::policy::PolicyRuleCounter::with_rule_id("lan->wan/allow-web"),
+    ));
+    delta.decision.nat.source_nat_icmp = Some((13, 7));
     let want = binary_attribution(&delta);
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
     let v: serde_json::Value = serde_json::to_value(&info).expect("serialize SessionDeltaInfo");
@@ -324,6 +368,37 @@ fn session_delta_json_and_binary_agree_on_policy_attribution_6949() {
          through the JSON leg would render `unattributed` (#6851 renders 0 that way) and be \
          skipped by the commit-time deletion-clear and the #4234 policy-rematch, both of which \
          exclude id 0"
+    );
+    assert_eq!(
+        v.get("policy_rule_id").and_then(|x| x.as_str()),
+        Some(want.policy_rule_id.as_str()),
+        "the JSON and binary legs disagree on stable policy rule identity"
+    );
+    assert_eq!(
+        v.get("ingress_ifindex").and_then(|x| x.as_u64()),
+        Some(want.ingress_ifindex as u64),
+        "the JSON and binary legs disagree on ingress ifindex"
+    );
+    assert_eq!(
+        v.get("ingress_vlan_id").and_then(|x| x.as_u64()),
+        Some(want.ingress_vlan_id as u64),
+        "the JSON and binary legs disagree on ingress VLAN identity"
+    );
+    let (icmp_type, icmp_code) = want.source_nat_icmp.unwrap_or_default();
+    assert_eq!(
+        v.get("source_nat_icmp_valid").and_then(|x| x.as_bool()),
+        Some(want.source_nat_icmp.is_some()),
+        "the JSON and binary legs disagree on ICMP identity presence"
+    );
+    assert_eq!(
+        v.get("source_nat_icmp_type").and_then(|x| x.as_u64()),
+        Some(icmp_type as u64),
+        "the JSON and binary legs disagree on source-NAT ICMP type"
+    );
+    assert_eq!(
+        v.get("source_nat_icmp_code").and_then(|x| x.as_u64()),
+        Some(icmp_code as u64),
+        "the JSON and binary legs disagree on source-NAT ICMP code"
     );
     assert_eq!(
         u32_key("policy_counter_idx"),
@@ -366,6 +441,18 @@ fn session_delta_json_and_binary_agree_on_policy_attribution_6949() {
     // Positive controls: the binary side really did carry the fixture, so an
     // equality above cannot be two legs agreeing on nothing.
     assert_eq!(want.policy_id, 4242, "binary leg carried the fixture policy");
+    assert_eq!(want.ingress_ifindex, 4242, "binary leg carried ingress ifindex");
+    assert_eq!(want.ingress_vlan_id, 51, "binary leg carried ingress VLAN");
+    assert_eq!(
+        want.policy_rule_id,
+        "lan->wan/allow-web",
+        "binary leg carried the stable rule ID"
+    );
+    assert_eq!(
+        want.source_nat_icmp,
+        Some((13, 7)),
+        "binary leg carried the source-NAT ICMP query identity"
+    );
     assert_ne!(
         want.tunnel_discriminator, 0,
         "binary leg must STATE a discriminator class; 0 is the reserved \
@@ -423,90 +510,88 @@ fn session_delta_info_zero_attribution_is_present_not_absent_6949() {
 
 /// The single-source seam is only load-bearing while BOTH producers destructure
 /// `SessionSyncAttribution` EXHAUSTIVELY. A `..` in either destructure restores
-/// the pre-#6949 escape hatch: a field added to the struct would then be
-/// carried by whichever producer happened to be updated, and nothing would fail
-/// to compile — which is precisely how policy_id, policy_counter_idx,
-/// app_timeout, nat64 and nat64_snat_v4 came to ride only one of the two legs.
-///
-/// Textual because the property is about the ABSENCE of a token; there is no
-/// value to observe at runtime. Comment lines are stripped before matching so
-/// this gate cannot be satisfied by prose that quotes the pattern it looks for.
+/// the pre-#6949 escape hatch: a field added to the struct could then be carried
+/// by whichever producer happened to be updated, and nothing would fail to
+/// compile.
 #[test]
 fn sync_attribution_exhaustive_destructure_6949() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let read_code = |rel: &str| -> String {
-        let p = root.join(rel);
-        let src = std::fs::read_to_string(&p)
-            .unwrap_or_else(|e| panic!("read {}: {e} (the #6949 seam guard cannot run)", p.display()));
-        src.lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
+        let path = root.join(rel);
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "read {}: {error} (the #6949 seam guard cannot run)",
+                path.display()
+            )
+        });
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n")
     };
 
-    // The field set is read from the definition, never restated here: a
-    // constant written down twice is two constants.
-    let def = read_code("src/session/sync_attribution.rs");
-    let body = def
-        .split_once("pub(crate) struct SessionSyncAttribution {")
+    // Match the struct name independently of its lifetime parameters.
+    let definition = read_code("src/session/sync_attribution.rs");
+    let fields = definition
+        .split_once("pub(crate) struct SessionSyncAttribution")
         .expect("SessionSyncAttribution definition")
         .1
+        .split_once('{')
+        .expect("SessionSyncAttribution fields")
+        .1
         .split_once("\n}")
-        .expect("end of the struct definition")
+        .expect("end of SessionSyncAttribution")
         .0;
-    let mut want: Vec<String> = body
+    let mut expected: Vec<String> = fields
         .lines()
-        .filter_map(|l| l.trim().strip_suffix(','))
-        .filter_map(|l| l.strip_prefix("pub(crate) "))
-        .map(|l| l.split(':').next().unwrap_or_default().trim().to_string())
-        .filter(|n| !n.is_empty())
+        .filter_map(|line| line.trim().strip_suffix(','))
+        .filter_map(|line| line.strip_prefix("pub(crate) "))
+        .map(|field| field.split(':').next().unwrap_or_default().trim().to_string())
+        .filter(|field| !field.is_empty())
         .collect();
-    want.sort();
+    expected.sort();
     assert_eq!(
-        want.len(),
-        6,
-        "expected the 6 HA-carried attribution fields, parsed {want:?}"
+        expected.len(),
+        7,
+        "expected the seven HA-carried attribution fields, parsed {expected:?}"
     );
 
     for producer in [
         "src/afxdp/session_delta.rs",
         "src/event_stream/codec/session_sync.rs",
     ] {
-        let src = read_code(producer);
-        let block = src
+        let source = read_code(producer);
+        let block = source
             .split_once("let SessionSyncAttribution {")
             .unwrap_or_else(|| {
                 panic!(
-                    "{producer} no longer destructures SessionSyncAttribution. If this producer \
-                     stopped deriving its attribution from the shared helper, the two \
-                     session-delta legs can silently diverge again (#6949) — restore the \
-                     destructure or UPDATE this guard, do not delete it"
+                    "{producer} no longer destructures SessionSyncAttribution; \
+                     restore the shared-helper seam instead of deleting this guard"
                 )
             })
             .1
             .split_once('}')
-            .expect("end of the destructure")
+            .expect("end of SessionSyncAttribution destructure")
             .0;
         assert!(
             !block.contains(".."),
-            "{producer} destructures SessionSyncAttribution with `..`, so a field added to the \
-             struct would be carried by only one of the two session-delta legs and still \
-             compile — the #6949 defect, restored silently: {block}"
+            "{producer} uses `..`, allowing a new attribution field to silently \
+             ride only one session-delta leg: {block}"
         );
-        let mut got: Vec<String> = block
+        let mut actual: Vec<String> = block
             .split(',')
-            .map(|f| f.trim().to_string())
-            .filter(|f| !f.is_empty())
+            .map(|field| field.trim())
+            .filter(|field| !field.is_empty())
+            .map(|field| field.to_string())
             .collect();
-        got.sort();
+        actual.sort();
         assert_eq!(
-            got, want,
-            "{producer} binds {got:?} of SessionSyncAttribution's {want:?}"
+            actual, expected,
+            "{producer} does not bind every SessionSyncAttribution field"
         );
     }
 }
-
-// --- #7188: the JSON leg carries the tunnel session-identity discriminator ---
 
 /// A keyed-GRE delta: protocol 47, no L4 ports, and a discriminator that is the
 /// only thing distinguishing it from another tunnel between the same endpoints.
@@ -626,10 +711,9 @@ fn session_delta_json_and_binary_agree_on_the_routing_domain_7239() {
         0, // #9412: tcp_close_class
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    // #9412 + #9752: discount the trailing close-class byte and install-table
-    // pair. The fields below are read end-relative, and the open frame now
-    // ends nine bytes after the routing domain.
-    let n = payload.len() - 12; // #11064: +3 trailing source-NAT ICMP identity bytes
+    // `n` points immediately after the routing-domain field; the close class,
+    // install-table stamp, ICMP identity and #11070 ingress identity follow it.
+    let n = payload.len() - 18; // 1 + 8 + 3 + 6 trailing bytes
     let binary = u32::from_le_bytes(payload[n - 4..n].try_into().expect("4 bytes"));
 
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
@@ -711,12 +795,11 @@ fn session_delta_json_and_binary_agree_on_the_install_table_9752() {
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
     let n = payload.len();
-    // #11064: install_table sits ahead of the trailing 3-byte source-NAT
-    // ICMP identity (valid, type, code).
+    // #11070's six-byte ingress identity follows the #11064 ICMP identity.
     let binary_domain =
-        u32::from_le_bytes(payload[n - 11..n - 7].try_into().expect("4 bytes"));
+        u32::from_le_bytes(payload[n - 17..n - 13].try_into().expect("4 bytes"));
     let binary_check =
-        u32::from_le_bytes(payload[n - 7..n - 3].try_into().expect("4 bytes"));
+        u32::from_le_bytes(payload[n - 13..n - 9].try_into().expect("4 bytes"));
 
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
     let json = serde_json::to_value(info).expect("delta serializes");

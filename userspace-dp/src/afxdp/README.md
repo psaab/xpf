@@ -586,6 +586,23 @@ sync.
     any untranslatable candidate; raw ESP/AH remains unchanged for Stage-11
     passthrough and reassembly. Plain no-NAT fragments still use the normal
     buffer-and-retry path.
+  - **#11435 — address-only DNAT/NPTv6 before flowless route and policy:** the
+    flowless base resolver applies the flow-backed pre-routing order (static
+    DNAT, dynamic DNAT, inbound NPTv6) before local/route resolution, and transit
+    policy sees the translated L3 destination. Ambiguous L4-dependent rules,
+    selected port mappings, AH/ESP, and address-rewrite protocols without a
+    proven checksum-safe path fail closed; unmatched packets remain unchanged.
+    IPv4 VRRP rewriting is limited to version 2. A selected but unsupported
+    rewrite preserves an original LocalDelivery target so host-inbound, lo0, and
+    junos-host gates still run; transit is dropped and counted once. The static
+    pre-route ambiguity probe is DNAT-only, so unrelated static SNAT cannot
+    preempt a destination rewrite. A selected translated NoRoute or
+    MissingNeighbor is dropped before cold policy, neighbor probing/buffering,
+    or kernel reinjection because those paths cannot carry the rewrite. Plain
+    no-NAT cold traffic retains its existing retry/reinjection behavior.
+    Regression cells cover local ambiguity, both cold dispositions, checksum
+    protocol boundaries, non-first fragments, port maps, NPTv6, and SNAT
+    preservation.
   - **#5467 — egress `filter output` on the flowless TX path:** the #3291 gate
     above enforces the INGRESS input filter / PBR / zone policy on a flowless
     packet, but the EGRESS interface `filter output` was evaluated only on the
