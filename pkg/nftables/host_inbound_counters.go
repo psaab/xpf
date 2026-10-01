@@ -22,11 +22,10 @@ const HostInboundTableName = "xpf_hostinbound"
 const hostInboundDenyCounterPrefix = "xpfhi_"
 
 // HostInboundDenyCounterName returns the deterministic nft named-counter object
-// name attached to the catch-all host-inbound DROP rule for a given zone and
-// family ("ip" or "ip6"). The kernel nft host-inbound chain drops host-bound
-// traffic that no host-inbound-traffic service/protocol opened with an UNCOUNTED
-// catch-all drop before #3361; attaching a named counter makes those drops
-// scrapeable per zone/family.
+// name attached to a host-inbound catch-all DROP for a zone and family ("ip" or
+// "ip6"). These counters expose drops that were previously uncounted (#3361).
+// Callers use the reserved "junos-host" label when no unique source zone can be
+// attributed (currently unzoned and ambiguous-ingress catch-all drops).
 //
 // Encoding is xpfhi_<family>_<len>_<zone> where <zone> is the zone name passed
 // through sanitizeNftIdent and <len> is its byte length. The length prefix

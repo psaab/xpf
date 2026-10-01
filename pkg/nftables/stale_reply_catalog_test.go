@@ -385,3 +385,40 @@ func guardRuleHasTuple(rules []StaleReplyGuardRule, address, family string, prot
 	}
 	return false
 }
+func TestHostInboundStaleReplyAmbiguousIngressUsesOwnerRights11331(t *testing.T) {
+	views := []HostInboundZoneView{
+		{
+			Zone:               "ssh",
+			SystemServices:     []string{"ssh"},
+			V4Addrs:            []string{"192.0.2.30"},
+			V6Addrs:            []string{"fe80::30"},
+			IngressDenyNetdevs: []string{"vrf-sfmix"},
+		},
+		{
+			Zone:           "ping",
+			SystemServices: []string{"ping"},
+			V4Addrs:        []string{"192.0.2.31"},
+			V6Addrs:        []string{"2001:db8::31"},
+		},
+	}
+	rules := HostInboundStaleReplyGuardRules(views, nil, nil, nil, false)
+	for _, tc := range []struct {
+		address string
+		family  string
+		proto   uint8
+		port    uint16
+		guarded bool
+	}{
+		{"192.0.2.30", "ip", config.HostInboundProtoTCP, 22, false},
+		{"192.0.2.30", "ip", config.HostInboundProtoUDP, 500, true},
+		{"192.0.2.31", "ip", config.HostInboundProtoTCP, 22, true},
+		{"fe80::30", "ip6", config.HostInboundProtoTCP, 22, false},
+		{"fe80::30", "ip6", config.HostInboundProtoUDP, 500, true},
+		{"2001:db8::31", "ip6", config.HostInboundProtoTCP, 22, true},
+	} {
+		got := guardRuleHasIngressTuple(rules, []string{"vrf-sfmix"}, false, tc.address, tc.family, tc.proto, tc.port)
+		if got != tc.guarded {
+			t.Errorf("ambiguous ingress guard for %s %s/%d = %v, want %v", tc.address, tc.family, tc.port, got, tc.guarded)
+		}
+	}
+}

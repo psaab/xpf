@@ -89,37 +89,97 @@ func TestHostInboundIngressRulesShape9637(t *testing.T) {
 	}
 }
 
-// TestHostInboundSharedParentOnlyDoesNotFallThrough10431 is the #10431
-// shared-parent-only cell. A netdev claimed by two zones gets a fail-closed
-// drop over every judged destination before destination-only rules.
-func TestHostInboundSharedParentOnlyDoesNotFallThrough10431(t *testing.T) {
-	views := []dpuserspace.ZoneHostInboundView{
+// ambiguousParentViews11331 supplies v4 and v6 destination-owner rights plus
+// an ambiguous shared ingress netdev; the configured IPv6 address is link-local.
+func ambiguousParentViews11331() []dpuserspace.ZoneHostInboundView {
+	return []dpuserspace.ZoneHostInboundView{
 		{
 			Zone:               "trusted",
 			SystemServices:     []string{"ssh"},
 			V4Addrs:            []string{"10.0.1.1"},
+			V6Addrs:            []string{"fe80::1"},
 			IngressDenyNetdevs: []string{"shared"},
 		},
 		{
 			Zone:           "untrusted",
 			SystemServices: []string{"ping"},
 			V4Addrs:        []string{"10.0.2.1"},
+			V6Addrs:        []string{"2001:db8:2::1"},
 		},
 	}
+}
+
+// TestHostInboundSharedParentOnlyDoesNotFallThrough10431 is the #10431
+// shared-parent-only cell. A netdev claimed by two zones gets per-zone
+// service admits before a counted fail-closed drop over every judged destination.
+func TestHostInboundSharedParentOnlyDoesNotFallThrough10431(t *testing.T) {
+	views := ambiguousParentViews11331()
 	payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
-	deny := `    iifname "shared" ip daddr { 10.0.1.1, 10.0.2.1 } drop`
-	if !strings.Contains(payload, deny) {
-		t.Fatalf("shared-parent guard missing:\n%s", payload)
-	}
-	denyAt := strings.Index(payload, deny)
-	for _, accept := range []string{
-		"    ip daddr 10.0.1.1 tcp dport 22 accept",
-		"    ip daddr 10.0.2.1 icmp type echo-request accept",
+	for _, family := range []struct {
+		token string
+		addrs []string
+		admit []string
+	}{
+		{
+			token: "ip",
+			addrs: []string{"10.0.1.1", "10.0.2.1"},
+			admit: []string{
+				`    iifname "shared" ip daddr 10.0.1.1 tcp dport 22 accept`,
+				`    iifname "shared" ip daddr 10.0.2.1 icmp type echo-request accept`,
+			},
+		},
+		{
+			token: "ip6",
+			addrs: []string{"fe80::1", "2001:db8:2::1"},
+			admit: []string{
+				`    iifname "shared" ip6 daddr fe80::1 tcp dport 22 accept`,
+				`    iifname "shared" ip6 daddr 2001:db8:2::1 icmpv6 type echo-request accept`,
+			},
+		},
 	} {
-		if acceptAt := strings.Index(payload, accept); acceptAt < 0 || denyAt > acceptAt {
-			t.Fatalf("shared-parent guard must precede destination-only accept %q:\n%s", accept, payload)
+		cn := xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, family.token)
+		deny := `    iifname "shared" ` + family.token + ` daddr ` + nftAddrSet(family.addrs) +
+			` counter name "` + cn + `" drop`
+		if !strings.Contains(payload, deny) {
+			t.Fatalf("shared-parent guard missing or uncounted:\nwant %s\npayload:\n%s", deny, payload)
+		}
+		denyAt := strings.Index(payload, deny)
+		for _, accept := range family.admit {
+			if acceptAt := strings.Index(payload, accept); acceptAt < 0 || acceptAt > denyAt {
+				t.Errorf("shared-parent guard must follow per-zone service admit %q:\n%s", accept, payload)
+			}
+		}
+		decl := "  counter " + cn + " {"
+		if count := strings.Count(payload, decl); count != 1 {
+			t.Errorf("shared-parent guard counter declaration count = %d, want 1 for %s:\n%s", count, family.token, payload)
+		}
+		for _, zoneDeny := range []string{
+			`counter name "` + xnft.HostInboundDenyCounterName("trusted", family.token) + `" drop`,
+			`counter name "` + xnft.HostInboundDenyCounterName("untrusted", family.token) + `" drop`,
+		} {
+			if denyAt >= strings.Index(payload, zoneDeny) {
+				t.Errorf("shared-parent guard must deny before destination-only fallback %q:\n%s", zoneDeny, payload)
+			}
 		}
 	}
+}
+
+func TestHostInboundSharedParentPayloadParses11331(t *testing.T) {
+	nftPath := findNft()
+	if nftPath == "" {
+		t.Skip("nft not found; rule shape is covered by TestHostInboundSharedParentOnlyDoesNotFallThrough10431")
+	}
+	payload := buildHostInboundFilterPayload(ambiguousParentViews11331(), nil, nil, nil, nil, true)
+	cmd := exec.Command(nftPath, "-c", "-f", "-")
+	cmd.Stdin = strings.NewReader(payload)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return
+	}
+	if strings.Contains(string(out), "syntax error") {
+		t.Fatalf("nft -c rejected the ambiguous-ingress host-inbound payload:\n%s\npayload:\n%s", out, payload)
+	}
+	t.Logf("nft -c parsed the payload; non-syntax error (expected without CAP_NET_ADMIN): %v\n%s", err, out)
 }
 
 // TestHostInboundEstablishedReevaluatesIngressBeforeResidualAccept10431 closes

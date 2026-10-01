@@ -626,6 +626,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// peer-synced load can slip one through, and it is NOT self-healing — so log
 	// the state transition and export it as xpf_host_inbound_ambiguous_addresses.
 	d.logHostInboundAmbiguousTransitions(cfg)
+	d.logHostInboundAmbiguousIngressTransitions(views)
 	// #4146: the effective `to-zone junos-host` DENY programs, projected per
 	// ingress zone and scoped by kernel iifname. This is the fine-grained
 	// per-source / per-application host-inbound DENY the coarse per-zone
@@ -1549,14 +1550,9 @@ func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListen
 	return strings.Join(rules, "\n") + "\n"
 }
 
-// hostInboundFailOpenState groups the three previous-apply host-inbound
+// hostInboundFailOpenState groups the four previous-apply host-inbound
 // fail-open / ambiguity sets used purely for low-noise state-transition
-// logging. It is increment 4 of the #4407 Daemon god-struct decomposition —
-// the fields moved verbatim from flat Daemon fields (dropping the redundant
-// hostInbound prefix), no behavior/locking change. Every access site is bounded
-// to this file (the diff/log functions below) plus its 3698/3718 tests, so a
-// named sub-field on Daemon (d.hostInboundFailOpen.<field>) is used rather than
-// an embed. All three maps are written and read only under applySem via
+// logging. All maps are written and read only under applySem via
 // applyHostInboundFilter.
 type hostInboundFailOpenState struct {
 	// addresslessZones is the set of configured host-inbound-enforcing zones
@@ -1584,6 +1580,12 @@ type hostInboundFailOpenState struct {
 	// tolerant / peer-synced load (#1960) can slip one through, and unlike the
 	// addressless window it is NOT self-healing.
 	ambiguousAddrs map[string]bool
+
+	// ambiguousIngress is the set of effective VRF netdevs observed on the
+	// PREVIOUS apply whose claims span multiple host-inbound views (#10431). The
+	// kernel cannot distinguish their ingress zones; destination-owner service
+	// rights precede a counted fail-closed catch-all.
+	ambiguousIngress map[string]bool
 }
 
 // logHostInboundAddresslessTransitions emits a state-transition log whenever a
@@ -1690,6 +1692,28 @@ func (d *Daemon) logHostInboundAmbiguousTransitions(cfg *config.Config) {
 		}
 	}
 	d.hostInboundFailOpen.ambiguousAddrs = current
+}
+
+// logHostInboundAmbiguousIngressTransitions warns when a shared effective
+// netdev enters or leaves the ambiguous-claim set. The renderer applies
+// destination-owner service rights before a counted fail-closed drop; log only
+// state transitions so repeated config applies do not flood the operator.
+func (d *Daemon) logHostInboundAmbiguousIngressTransitions(views []dpuserspace.ZoneHostInboundView) {
+	current := make(map[string]bool)
+	for _, netdev := range hostInboundAmbiguousIngressNetdevs(views) {
+		current[netdev] = true
+		if !d.hostInboundFailOpen.ambiguousIngress[netdev] {
+			slog.Warn("host-inbound effective VRF netdev has ambiguous zone ownership — applying destination-owner service rights before a counted fail-closed drop (#11331)",
+				"netdev", netdev, "counter_zone", dpuserspace.UnzonedHostInboundZoneLabel)
+		}
+	}
+	for netdev := range d.hostInboundFailOpen.ambiguousIngress {
+		if !current[netdev] {
+			slog.Info("host-inbound ambiguous VRF netdev ownership resolved — zone-scoped ingress rules restored",
+				"netdev", netdev)
+		}
+	}
+	d.hostInboundFailOpen.ambiguousIngress = current
 }
 
 // hostInboundHasEnforceableView reports whether at least one view in this
@@ -1856,6 +1880,14 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
 	}
+	// Ambiguous ingress drops share the reserved junos-host counter with
+	// addressed-but-unzoned drops; both lack a unique zone attribution.
+	if hostInboundEmitsAmbiguousIngressDrop(views, ingressV4) {
+		addCounter(xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip"))
+	}
+	if hostInboundEmitsAmbiguousIngressDrop(views, ingressV6) {
+		addCounter(xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip6"))
+	}
 	// #9637 residual: the reinject-accept counter is declared exactly when the
 	// accept rules below render (fresh + addressed views) — the deny-counter
 	// declaration discipline, not the unconditional ICMP-accept one. A stale
@@ -2003,17 +2035,18 @@ func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboun
 		emitHostInboundReinjectAccept(&rules, "ip", reinjectV4)
 		emitHostInboundReinjectAccept(&rules, "ip6", reinjectV6)
 	}
-	// #9637: the ingress-zone rules come first. A packet that arrives on a
-	// view's own netdev is judged by that view's zone, whichever judged address
-	// it names, and ends here: a listed service accepts it, or the drop does. An
-	// ambiguous effective netdev gets a fail-closed drop instead of a
-	// destination-only fallback. A packet on any other netdev reaches the
-	// residual established accept (after ingress judgement) or the
-	// destination-address rules below.
+	// #9637: judge unambiguous netdevs by ingress-zone service rights first.
+	// Ambiguous effective netdevs cannot identify one ingress zone, so grant
+	// each destination owner's configured rights before their counted catch-all
+	// drop. This preserves destination-only per-zone fallback for other netdevs.
 	for _, v := range views {
 		emitHostInboundZoneIngress(&rules, v, "ip", ingressV4)
 		emitHostInboundZoneIngress(&rules, v, "ip6", ingressV6)
 	}
+	emitHostInboundAmbiguousIngressAccepts(&rules, views, "ip", wgZonePorts)
+	emitHostInboundAmbiguousIngressDrop(&rules, views, "ip", ingressV4)
+	emitHostInboundAmbiguousIngressAccepts(&rules, views, "ip6", wgZonePorts)
+	emitHostInboundAmbiguousIngressDrop(&rules, views, "ip6", ingressV6)
 	// Original-direction established host traffic reaches this residual accept
 	// only after ingress-zone judgement. This preserves established sessions on
 	// admitted ingress scopes while stale cross-zone sessions hit their drop.

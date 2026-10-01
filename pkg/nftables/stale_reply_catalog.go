@@ -158,23 +158,22 @@ type staleReplyAdmit struct {
 //   - per-ingress-view rules: `iifname <view netdevs> daddr <all judged
 //     dests> dport <denied by that view>` — the view's own policy judges
 //     every destination, matching emitHostInboundZoneIngress;
-//   - ambiguous-ingress rules: `iifname <deny netdevs> daddr <all dests>
-//     dport <full catalog>` — fail-closed, matching the unconditional
-//     IngressDenyNetdevs drop;
+//   - ambiguous-ingress rules: `iifname <deny netdevs> daddr <owner address>
+//     dport <denied by destination-owner policy>` — the same rights used by
+//     the per-address admits before the counted ambiguous catch-all;
 //   - uncovered-ingress fallback: `iifname != <covered+deny[+reinject]> daddr
-//     <owner address> dport <denied by owner union>` — packets arriving
-//     where no ingress view judges fall back to destination-owner policy.
-//     The trusted reinject TUN (xpf-usp0) is excluded only when
-//     trustedReinject is true (the chain will actually render the reinject
-//     accept: dataplane fresh AND addressed views). When stale or
-//     viewless, TUN packets are guarded like any other uncovered arrival
-//     since no exemption exists to preserve.
+//     <owner address> dport <denied by owner policy>` — packets arriving where
+//     no ingress view judges fall back to destination-owner policy. The trusted
+//     reinject TUN (xpf-usp0) is excluded only when trustedReinject is true (the
+//     chain will actually render the reinject accept: dataplane fresh AND
+//     addressed views). When stale or viewless, TUN packets are guarded like any
+//     other uncovered arrival since no exemption exists to preserve.
 //
-// An address admitted by any-service is omitted from the fallback, matching
-// the chain's address-level union semantics; a view admitting any-service
-// emits no per-ingress guard. Unzoned addresses are covered with an empty
-// owner admit set in the fallback and are included in every per-ingress
-// destination set. WG listen ports remain globally admitted.
+// An address admitted by any-service is omitted from ambiguous and uncovered
+// guards, matching the chain's address-level union semantics. A view admitting
+// any-service emits no per-ingress guard. Unzoned addresses have an empty owner
+// admit set and are included in every per-ingress destination set. WG listen
+// ports remain globally admitted.
 func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, trustedReinject bool) []StaleReplyGuardRule {
 	wg := make(map[uint16]bool, len(wgListenPorts))
 	for _, port := range wgListenPorts {
@@ -225,44 +224,10 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 			}
 		}
 	}
-	// Ambiguous-ingress fail-closed guards.
-	if deny := staleReplySortedUniqueStrings(collectIngressDenyNetdevs(views)); len(deny) > 0 {
-		for _, fam := range []struct {
-			name  string
-			dests []string
-		}{
-			{"ip", sortedV4},
-			{"ip6", sortedV6},
-		} {
-			if len(fam.dests) == 0 {
-				continue
-			}
-			catalog := HostInboundStaleReplyCatalog(fam.name)
-			for _, pair := range []struct {
-				proto uint8
-				ports []uint16
-			}{
-				{config.HostInboundProtoTCP, catalog.TCP},
-				{config.HostInboundProtoUDP, catalog.UDP},
-			} {
-				denied := staleReplyDeniedPorts(pair.ports, nil, pair.proto, wg)
-				if len(denied) > 0 {
-					out = append(out, StaleReplyGuardRule{
-						Family: fam.name, Proto: pair.proto, Ports: denied,
-						Addresses: append([]string(nil), fam.dests...),
-						Ingress:   append([]string(nil), deny...),
-					})
-				}
-			}
-		}
-	}
-	// Uncovered-ingress fallback (destination-owner policy).
-	covered := staleReplySortedUniqueStrings(collectIngressNetdevs(views))
-	fallbackIngress := append([]string(nil), covered...)
-	if trustedReinject {
-		fallbackIngress = append(fallbackIngress, HostInboundReinjectIfname)
-	}
-	fallbackIngress = staleReplySortedUniqueStrings(fallbackIngress)
+	// Ambiguous ingress has no unique view, so stale reply guards use the same
+	// destination-owner rights that the chain applies before the counted
+	// ambiguous catch-all. This protects denied reply tuples without shadowing
+	// services admitted for the destination address.
 	admit, allowsAll := staleReplyOwnerAdmits(views, unzonedV4, unzonedV6)
 	for ip := range allowsAll {
 		delete(admit, ip)
@@ -272,30 +237,43 @@ func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unz
 		addrs = append(addrs, ip)
 	}
 	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Less(addrs[j]) })
-	for _, ip := range addrs {
-		a := admit[ip]
-		family := "ip"
-		if ip.Is6() {
-			family = "ip6"
-		}
-		catalog := HostInboundStaleReplyCatalog(family)
-		for _, pair := range []struct {
-			proto uint8
-			ports []uint16
-			allow []config.PortRange
-		}{
-			{config.HostInboundProtoTCP, catalog.TCP, a.tcp},
-			{config.HostInboundProtoUDP, catalog.UDP, a.udp},
-		} {
-			denied := staleReplyDeniedPorts(pair.ports, pair.allow, pair.proto, wg)
-			if len(denied) > 0 {
-				out = append(out, StaleReplyGuardRule{
-					Family: family, Proto: pair.proto, Ports: denied, Addresses: []string{ip.String()},
-					Ingress: append([]string(nil), fallbackIngress...), IngressNegated: true,
-				})
+	appendOwnerGuards := func(ingress []string, ingressNegated bool) {
+		for _, ip := range addrs {
+			a := admit[ip]
+			family := "ip"
+			if ip.Is6() {
+				family = "ip6"
+			}
+			catalog := HostInboundStaleReplyCatalog(family)
+			for _, pair := range []struct {
+				proto uint8
+				ports []uint16
+				allow []config.PortRange
+			}{
+				{config.HostInboundProtoTCP, catalog.TCP, a.tcp},
+				{config.HostInboundProtoUDP, catalog.UDP, a.udp},
+			} {
+				denied := staleReplyDeniedPorts(pair.ports, pair.allow, pair.proto, wg)
+				if len(denied) > 0 {
+					out = append(out, StaleReplyGuardRule{
+						Family: family, Proto: pair.proto, Ports: denied, Addresses: []string{ip.String()},
+						Ingress: append([]string(nil), ingress...), IngressNegated: ingressNegated,
+					})
+				}
 			}
 		}
 	}
+	if deny := staleReplySortedUniqueStrings(collectIngressDenyNetdevs(views)); len(deny) > 0 {
+		appendOwnerGuards(deny, false)
+	}
+	// Uncovered-ingress fallback (destination-owner policy).
+	covered := staleReplySortedUniqueStrings(collectIngressNetdevs(views))
+	fallbackIngress := append([]string(nil), covered...)
+	if trustedReinject {
+		fallbackIngress = append(fallbackIngress, HostInboundReinjectIfname)
+	}
+	fallbackIngress = staleReplySortedUniqueStrings(fallbackIngress)
+	appendOwnerGuards(fallbackIngress, true)
 	return out
 }
 

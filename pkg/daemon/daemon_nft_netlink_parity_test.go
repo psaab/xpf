@@ -812,12 +812,14 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 		// #9637: IngressNetdevs on every rendering branch the ingress-zone rules
 		// take, so T1 pins them rule-for-rule: a multi-netdev set (trust), the
 		// named-service union (mgmt), routing protocols (core), the ident-reset
-		// reject (edge), the empty-admit drop (quarantine) and any-service (open).
+		// reject (edge), the empty-admit drop (quarantine), any-service (open),
+		// and the v6-only view.
+		// The shared VRF pair pins destination-owner admits plus counted v4/v6 drops.
 		{Zone: "trust", SystemServices: []string{"ssh", "https", "ping", "dns"}, V4Addrs: []string{"10.0.1.1", "10.0.1.2"}, V6Addrs: []string{"2001:db8:1::1"}, IngressNetdevs: []string{"ge-0-0-0", "ge-0-0-0.10"}, ICMPFloodThreshold: 30, UDPFloodThreshold: 20, SYNFloodThreshold: 100, SYNFloodSrcThreshold: 5},
 		{Zone: "mgmt", SystemServices: []string{"all"}, V4Addrs: []string{"10.0.9.1"}, IngressNetdevs: []string{"ge-0-0-9"}},
 		{Zone: "core", Protocols: []string{"all"}, V4Addrs: []string{"10.0.5.1"}, V6Addrs: []string{"2001:db8:5::1"}, IngressNetdevs: []string{"ge-0-0-5"}},
 		{Zone: "edge", SystemServices: []string{"ident-reset", "ssh"}, V4Addrs: []string{"10.0.7.1"}, IngressNetdevs: []string{"ge-0-0-7"}},
-		{Zone: "quarantine", V4Addrs: []string{"10.0.8.1"}, V6Addrs: []string{"2001:db8:8::1"}, IngressNetdevs: []string{"ge-0-0-8"}, IngressDenyNetdevs: []string{"shared-parent"}},
+		{Zone: "quarantine", V4Addrs: []string{"10.0.8.1"}, V6Addrs: []string{"2001:db8:8::1"}, IngressNetdevs: []string{"ge-0-0-8"}},
 		{Zone: "open", SystemServices: []string{"any-service"}, V4Addrs: []string{"10.0.6.1"}, IngressNetdevs: []string{"ge-0-0-6"}},
 		// A v6-only view with an ingress scope. Its ip (v4) ingress drop is the
 		// ONLY reason its v4 deny counter is declared, so a counter pre-pass
@@ -826,6 +828,8 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 		// addresses and cannot show that (mutation M7 of #9637 escaped without
 		// this row).
 		{Zone: "v6only", SystemServices: []string{"ping"}, V6Addrs: []string{"2001:db8:66::1"}, IngressNetdevs: []string{"ge-0-0-66"}},
+		{Zone: "shared-trust", SystemServices: []string{"ssh"}, V4Addrs: []string{"10.0.91.1"}, V6Addrs: []string{"fe80::91"}, IngressDenyNetdevs: []string{"shared-parent"}},
+		{Zone: "shared-untrust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.92.1"}, V6Addrs: []string{"2001:db8:92::1"}},
 	}
 	unzonedV4 = []string{"10.0.99.1"}
 	unzonedV6 = []string{"2001:db8:99::1"}
