@@ -649,6 +649,8 @@ fn established_icmp_hit(is_reverse: bool) -> (SessionKey, SessionTable) {
             neighbor_mac: Some(mac),
             src_mac: Some(mac),
             tx_vlan_id: vlan,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat,
         install_table_domain: 0,
