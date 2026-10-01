@@ -152,5 +152,16 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #11445: appended after all existing uniform gates so sampling source
+	// validation cannot change which established error wins. Tolerant loads
+	// retain the invalid value with a warning (#1960).
+	if err := validateSamplingSourceAddressesStrict(cfg); err != nil {
+		if opts.lenientSamplingSourceAddress {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("sampling source-address (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	return nil
 }

@@ -68,8 +68,12 @@ func TestSamplingOutputPackedRun8939(t *testing.T) {
 	for _, fam := range []string{"inet", "inet6"} {
 		t.Run(fam, func(t *testing.T) {
 			base := "set forwarding-options sampling instance I family " + fam + " output "
-			split := build8939i(t, base+"inline-jflow", base+"source-address 10.0.0.1")
-			packed := build8939i(t, base+"inline-jflow source-address 10.0.0.1")
+			source := "10.0.0.1"
+			if fam == "inet6" {
+				source = "2001:db8::1"
+			}
+			split := build8939i(t, base+"inline-jflow", base+"source-address "+source)
+			packed := build8939i(t, base+"inline-jflow source-address "+source)
 			if !reflect.DeepEqual(packed, split) {
 				t.Errorf("packed and split differ for family %s", fam)
 			}
@@ -78,6 +82,24 @@ func TestSamplingOutputPackedRun8939(t *testing.T) {
 			s := split.ForwardingOptions.Sampling
 			if s == nil || len(s.Instances) == 0 {
 				t.Fatalf("the SPLIT control compiled no sampling instance")
+			}
+			inst := s.Instances["I"]
+			if inst == nil {
+				t.Fatal("the SPLIT control omitted sampling instance I")
+			}
+			compiledFamily := inst.FamilyInet
+			if fam == "inet6" {
+				compiledFamily = inst.FamilyInet6
+			}
+			if compiledFamily == nil {
+				t.Fatalf("the SPLIT control omitted family %s", fam)
+			}
+			if compiledFamily.SourceAddress != source {
+				t.Errorf("split source-address = %q, want %q", compiledFamily.SourceAddress, source)
+			}
+			if compiledFamily.InlineJflowSourceAddress != source {
+				t.Errorf("split inline-jflow source-address = %q, want %q",
+					compiledFamily.InlineJflowSourceAddress, source)
 			}
 		})
 	}

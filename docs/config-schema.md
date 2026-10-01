@@ -14120,6 +14120,14 @@ the value sits in a single typed slot:
     per-collector source is surfaced in the health surfaces (CLI `... source
     <src>`, REST `source_address`, and the `source` label on the
     `xpf_flow_export_collector_*` Prometheus metrics).
+  - The sampling source-address forms above, including `inline-jflow
+    source-address` (#11445), are strict-validated as IP literals. Each must
+    match its `family inet` / `family inet6` stanza and any IP-literal collector
+    it binds to; a collector hostname has no commit-time family to compare.
+    Tolerant load / peer-sync warns rather than bricking an already-persisted
+    config. A separate warning identifies parseable sources not found among
+    configured interface addresses or VRRP virtual addresses; this stays
+    advisory because DHCP and HA addresses can become local at runtime.
   - `forwarding-options allow-dataplane-sleep` (#2008 H13 Stage 1) — a
     presence-only flag (no value, `children: nil`). Previously accepted via the
     no-schema-match fall-through and silently dropped; now a typed leaf that

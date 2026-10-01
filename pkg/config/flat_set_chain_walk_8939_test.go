@@ -575,6 +575,16 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	var walked, vacuous, unmeasured int
 	for _, p := range flatSetChainPairs() {
 		cont, leaves := p.container, p.leaves
+		// #11445: the inet6 output source-address candidate needs an IPv6 value;
+		// generic address synthesis defaults to IPv4 and the strict family gate
+		// would otherwise make this valid chain-walk probe unmeasured.
+		if strings.Join(cont, " ") == "forwarding-options sampling instance arg1 family inet6 output" {
+			for i := range leaves {
+				if leaves[i].name == "source-address" {
+					leaves[i].example = "2001:db8::1"
+				}
+			}
+		}
 		base := "set " + strings.Join(cont, " ")
 
 		packedLine := base
@@ -744,10 +754,10 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	// certificate/interface candidate fail the required certificate/key-pair
 	// gate, moving one row to unmeasured (83 -> 84). The measured loser set,
 	// walked/vacuous counts, and collector reach stay unchanged.
-	// #11544: reconciling the stored snapshot with the current api-auth schema
-	// measures 39 vacuous and 87 unmeasured rows, with collector reach 388/144.
-	// The three loser rows and 111 walked count remain unchanged; this is a
-	// population-count refresh, not a relaxation of the loss set.
+	// #11544 reconciles the stored snapshot with the api-auth schema, measuring
+	// 39 vacuous rows. The current master has 88 unmeasured rows (one more than
+	// that snapshot); the three loser rows and 111 walked count remain unchanged.
+	// This is a population-count refresh, not a relaxation of the loss set.
 	// #11313: the `protocols bgp` process-AS chain candidate includes
 	// synthetic `local-as xpfval`, which is invalid. Give its packed and split
 	// spellings the same root-AS context outside the measured leaf window so

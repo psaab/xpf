@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -883,4 +884,221 @@ func validateSamplingInputRateStrict(cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// validateSamplingSourceAddressesStrict rejects source-address values that
+// cannot be bound by the flow exporter (#11445). Sampling source addresses
+// belong to an explicit inet/inet6 family, and a literal collector address
+// must use the same family as the selected source. Hostname collectors have
+// no commit-time family to compare, just as RPM source-address validation
+// skips hostnames.
+func validateSamplingSourceAddressesStrict(cfg *Config) error {
+	if cfg == nil || cfg.ForwardingOptions.Sampling == nil {
+		return nil
+	}
+
+	insts := cfg.ForwardingOptions.Sampling.Instances
+	names := make([]string, 0, len(insts))
+	for name := range insts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		inst := insts[name]
+		if inst == nil {
+			continue
+		}
+		families := []struct {
+			name string
+			v6   bool
+			cfg  *SamplingFamily
+		}{
+			{name: "inet", cfg: inst.FamilyInet},
+			{name: "inet6", v6: true, cfg: inst.FamilyInet6},
+		}
+		for _, family := range families {
+			if family.cfg == nil {
+				continue
+			}
+			outputIP, err := validateSamplingSourceAddressFamily(name, family.name,
+				"output", family.cfg.SourceAddress, family.v6)
+			if err != nil {
+				return err
+			}
+			inlineIP, err := validateSamplingSourceAddressFamily(name, family.name,
+				"inline-jflow", family.cfg.InlineJflowSourceAddress, family.v6)
+			if err != nil {
+				return err
+			}
+
+			for _, server := range family.cfg.FlowServers {
+				if server == nil {
+					continue
+				}
+				serverIP, err := validateSamplingSourceAddressFamily(name, family.name,
+					fmt.Sprintf("flow-server %q", server.Address), server.SourceAddress, family.v6)
+				if err != nil {
+					return err
+				}
+
+				source, sourceIP := server.SourceAddress, serverIP
+				if source == "" {
+					source, sourceIP = family.cfg.SourceAddress, outputIP
+				}
+				if source == "" {
+					source, sourceIP = family.cfg.InlineJflowSourceAddress, inlineIP
+				}
+				if sourceIP == nil {
+					continue
+				}
+				collectorIP := samplingCollectorIP(server.Address)
+				if collectorIP != nil && (sourceIP.To4() == nil) != (collectorIP.To4() == nil) {
+					return fmt.Errorf("forwarding-options sampling instance %q family %s "+
+						"flow-server %q: source-address %q address family does not match "+
+						"collector family", name, family.name, server.Address, source)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateSamplingSourceAddressFamily(instance, family, location, source string, v6 bool) (net.IP, error) {
+	if source == "" {
+		return nil, nil
+	}
+	ip := net.ParseIP(source)
+	if ip == nil {
+		return nil, fmt.Errorf("forwarding-options sampling instance %q family %s %s "+
+			"source-address: invalid IP address %q", instance, family, location, source)
+	}
+	if (ip.To4() == nil) != v6 {
+		return nil, fmt.Errorf("forwarding-options sampling instance %q family %s %s "+
+			"source-address %q address family does not match family %s",
+			instance, family, location, source, family)
+	}
+	return ip, nil
+}
+
+func samplingCollectorIP(address string) net.IP {
+	if strings.HasPrefix(address, "[") && strings.HasSuffix(address, "]") {
+		address = address[1 : len(address)-1]
+	}
+	if ip := net.ParseIP(address); ip != nil {
+		return ip
+	}
+	if i := strings.LastIndexByte(address, '%'); i > 0 {
+		return net.ParseIP(address[:i])
+	}
+	return nil
+}
+
+// samplingSourceAddressLocalityWarnings reports parseable sampling source
+// addresses that are not among configured interface addresses or VRRP
+// virtual addresses. This remains an advisory because dynamic addresses may
+// only become local after a runtime lease or failover.
+func samplingSourceAddressLocalityWarnings(cfg *Config) []string {
+	if cfg == nil || cfg.ForwardingOptions.Sampling == nil {
+		return nil
+	}
+	local := make(map[string]struct{})
+	if len(cfg.Interfaces.Interfaces) > 0 {
+		for _, iface := range cfg.Interfaces.Interfaces {
+			if iface == nil {
+				continue
+			}
+			for _, unit := range iface.Units {
+				if unit == nil {
+					continue
+				}
+				for _, address := range unit.Addresses {
+					if ip := samplingConfiguredIP(address); ip != nil {
+						local[samplingAddressKey(ip)] = struct{}{}
+					}
+				}
+				for _, group := range unit.VRRPGroups {
+					if group == nil {
+						continue
+					}
+					for _, address := range group.VirtualAddresses {
+						if ip := samplingConfiguredIP(address); ip != nil {
+							local[samplingAddressKey(ip)] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	insts := cfg.ForwardingOptions.Sampling.Instances
+	names := make([]string, 0, len(insts))
+	for name := range insts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var warnings []string
+	for _, name := range names {
+		inst := insts[name]
+		if inst == nil {
+			continue
+		}
+		families := []struct {
+			name string
+			cfg  *SamplingFamily
+		}{
+			{name: "inet", cfg: inst.FamilyInet},
+			{name: "inet6", cfg: inst.FamilyInet6},
+		}
+		for _, family := range families {
+			if family.cfg == nil {
+				continue
+			}
+			seen := make(map[string]struct{})
+			warnIfNonlocal := func(source string) {
+				ip := net.ParseIP(source)
+				if ip == nil || ip.IsLoopback() {
+					return
+				}
+				key := samplingAddressKey(ip)
+				if _, ok := local[key]; ok {
+					return
+				}
+				if _, ok := seen[key]; ok {
+					return
+				}
+				seen[key] = struct{}{}
+				warnings = append(warnings, fmt.Sprintf(
+					"forwarding-options sampling instance %q family %s: source-address %q "+
+						"is not configured on a local interface or VRRP address",
+					name, family.name, source))
+			}
+			warnIfNonlocal(family.cfg.SourceAddress)
+			warnIfNonlocal(family.cfg.InlineJflowSourceAddress)
+			for _, server := range family.cfg.FlowServers {
+				if server != nil {
+					warnIfNonlocal(server.SourceAddress)
+				}
+			}
+		}
+	}
+	return warnings
+}
+
+func samplingConfiguredIP(address string) net.IP {
+	if ip := net.ParseIP(address); ip != nil {
+		return ip
+	}
+	ip, _, err := net.ParseCIDR(address)
+	if err != nil {
+		return nil
+	}
+	return ip
+}
+
+func samplingAddressKey(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.To16().String()
 }
