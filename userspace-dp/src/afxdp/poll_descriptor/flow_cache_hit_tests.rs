@@ -1129,7 +1129,7 @@ fn run_stage_seeded(
     let mut owned_packet_frame: Option<Vec<u8>> = None;
     let mut mirror_sample_counter = initial_sample_counter;
 
-    let mut last_learned_neighbor = None;
+    let mut last_learned_neighbor = LearnedNeighborDedup::default();
     // #6304: measure only THIS call. The fixture's own setup pushes (the AtCap
     // precondition, the interleaving-producer probes) go through the same
     // admission primitive, so the reset has to sit immediately before the call

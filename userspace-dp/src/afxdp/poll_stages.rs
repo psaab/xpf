@@ -436,7 +436,8 @@ pub(super) fn stage_parse_flow_and_learn(
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
     learn_from_live_frame: bool,
-    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
+    now_ns: u64,
+    last_learned_neighbor: &mut LearnedNeighborDedup,
     worker_ctx: &WorkerContext,
 ) -> Option<SessionFlow> {
     let flow = parse_session_flow_from_bytes(packet_frame, meta);
@@ -463,6 +464,7 @@ pub(super) fn stage_parse_flow_and_learn(
             desc,
             meta,
             flow.src_ip,
+            now_ns,
             last_learned_neighbor,
             worker_ctx.forwarding,
             worker_ctx.dynamic_neighbors,

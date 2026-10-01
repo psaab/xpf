@@ -919,7 +919,7 @@ fn zone_encoded_fabric_ingress_skips_dynamic_neighbor_learning() {
         .expect("slice")
         .copy_from_slice(&frame);
     let neighbors = Arc::new(ShardedNeighborMap::new());
-    let mut last_learned = None;
+    let mut last_learned = LearnedNeighborDedup::default();
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
@@ -936,6 +936,7 @@ fn zone_encoded_fabric_ingress_skips_dynamic_neighbor_learning() {
         },
         meta,
         IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+        super::super::neighbor::monotonic_nanos(),
         &mut last_learned,
         &state,
         &neighbors,
@@ -3326,6 +3327,249 @@ fn learned_ingress_neighbor_enables_reverse_lan_resolution() {
     assert_eq!(
         resolved.neighbor_mac,
         Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+    );
+}
+
+#[test]
+fn rx_learned_neighbor_expires_to_missing_without_host_traffic_11406() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100));
+    let mac_a = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: 24,
+        ..Default::default()
+    };
+    let mut last_learned_neighbor = LearnedNeighborDedup::default();
+    let learn_ns = 100;
+    let max_age_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS;
+    let refresh_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS;
+    let grace_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS;
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac_a,
+        learn_ns,
+        &mut last_learned_neighbor,
+        &state,
+        &dynamic_neighbors,
+    );
+
+    let before = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    assert_eq!(before.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(before.neighbor_mac, Some(mac_a));
+
+    // The packet just before the 1s boundary is intentionally coalesced.
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac_a,
+        learn_ns + refresh_ns - 1,
+        &mut last_learned_neighbor,
+        &state,
+        &dynamic_neighbors,
+    );
+    let epoch_before_expiry = dynamic_neighbors.mac_change_epoch_for(&(24, ip));
+    let before_minimum_idle = learn_ns + max_age_ns + grace_ns - 1;
+    assert_eq!(
+        dynamic_neighbors.age_rx_learned_neighbors(
+            before_minimum_idle,
+            max_age_ns,
+            &Default::default(),
+        ),
+        0,
+        "a coalesced packet cannot shorten the full 60s idle protection"
+    );
+    let expiry_ns = learn_ns + max_age_ns + grace_ns;
+    assert_eq!(
+        dynamic_neighbors.age_rx_learned_neighbors(expiry_ns, max_age_ns, &Default::default()),
+        1
+    );
+    assert_eq!(
+        dynamic_neighbors.mac_change_epoch_for(&(24, ip)),
+        epoch_before_expiry + 1,
+        "aging must invalidate cached forwarding descriptors"
+    );
+
+    let after = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    assert_eq!(
+        after.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "an idle RX-learned MAC must expire to MissingNeighbor without host traffic"
+    );
+    assert_eq!(after.neighbor_mac, None);
+
+    // The epoch/removal path makes the same-source packet re-learn immediately.
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac_a,
+        expiry_ns + 1,
+        &mut last_learned_neighbor,
+        &state,
+        &dynamic_neighbors,
+    );
+    let relearned = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    assert_eq!(
+        relearned.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(relearned.neighbor_mac, Some(mac_a));
+}
+
+#[test]
+fn rx_learned_neighbor_refreshes_at_one_second_boundary_11406() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101));
+    let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: 24,
+        ..Default::default()
+    };
+    let mut dedup = LearnedNeighborDedup::default();
+    let first_ns = 100;
+    let refresh_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS;
+    let max_age_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_MAX_AGE_NS;
+    let grace_ns = super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_COALESCE_GRACE_NS;
+
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        first_ns,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        first_ns + refresh_ns,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+
+    let old_deadline = first_ns + max_age_ns + grace_ns;
+    assert_eq!(
+        dynamic_neighbors.age_rx_learned_neighbors(old_deadline, max_age_ns, &Default::default(),),
+        0,
+        "traffic on the throttle boundary must refresh the RX-only lease"
+    );
+    assert_eq!(
+        dynamic_neighbors.age_rx_learned_neighbors(
+            first_ns + refresh_ns + max_age_ns + grace_ns,
+            max_age_ns,
+            &Default::default(),
+        ),
+        1
+    );
+}
+
+#[test]
+fn rx_learned_neighbor_vlan_alias_remap_bypasses_coalescing_11406() {
+    let mut state = build_forwarding_state(&nat_snapshot());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ingress_ifindex = 24;
+    let vlan_id = 77;
+    let old_alias = 100;
+    let new_alias = 101;
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: ingress_ifindex as u32,
+        ingress_vlan_id: vlan_id,
+        ..Default::default()
+    };
+    state
+        .ingress_logical_ifindex
+        .insert((ingress_ifindex, vlan_id), old_alias);
+    let mut dedup = LearnedNeighborDedup::default();
+    let first_ns = 100;
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        first_ns,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+    assert_eq!(
+        dynamic_neighbors.get(&(old_alias, ip)),
+        Some(NeighborEntry { mac })
+    );
+    assert_eq!(
+        dynamic_neighbors.mac_change_epoch_for(&(ingress_ifindex, ip)),
+        0
+    );
+    assert_eq!(dynamic_neighbors.mac_change_epoch_for(&(old_alias, ip)), 0);
+    assert_eq!(dynamic_neighbors.mac_change_epoch_for(&(new_alias, ip)), 0);
+
+    // Same key count and unchanged shard epochs: only the effective alias ID
+    // can reveal the forwarding-map remap to the per-binding dedup state.
+    state
+        .ingress_logical_ifindex
+        .insert((ingress_ifindex, vlan_id), new_alias);
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        first_ns + super::super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS - 1,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+    assert_eq!(
+        dynamic_neighbors.get(&(new_alias, ip)),
+        Some(NeighborEntry { mac }),
+        "a changed VLAN alias must reach the full pair-learn fallback"
+    );
+}
+
+#[test]
+fn rx_learned_neighbor_relearns_immediately_after_delete_11406() {
+    let state = build_forwarding_state(&nat_snapshot());
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let ingress_ifindex = 24;
+    let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 103));
+    let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let meta = super::super::types::UserspaceDpMeta {
+        ingress_ifindex: ingress_ifindex as u32,
+        ..Default::default()
+    };
+    let mut dedup = LearnedNeighborDedup::default();
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        100,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+    assert!(dynamic_neighbors.remove_if_present(&(ingress_ifindex, ip)));
+    assert_eq!(
+        dynamic_neighbors.mac_change_epoch_for(&(ingress_ifindex, ip)),
+        1
+    );
+
+    // The same-source learn arrives well inside the normal 1s coalescing
+    // interval. The delete epoch must force refresh and full-learn recovery.
+    super::super::neighbor_dispatch::learn_dynamic_neighbor_after_admission(
+        meta,
+        ip,
+        mac,
+        101,
+        &mut dedup,
+        &state,
+        &dynamic_neighbors,
+    );
+    assert_eq!(
+        dynamic_neighbors.get(&(ingress_ifindex, ip)),
+        Some(NeighborEntry { mac })
     );
 }
 
