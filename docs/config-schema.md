@@ -2105,6 +2105,17 @@ class):
   therefore matched on the spelling, so `bind-interface st05` does not claim an
   interface named `st5`.
 
+For an explicit numeric unit suffix, the gate also requires that logical unit
+to exist when the interface has a configured `interfaces` stanza. Thus a zone
+member `ge-0/0/0.1` is rejected when `ge-0/0/0` defines only unit 0, even though
+the physical base exists. Unit resolution uses `SplitInterfaceUnitRef` and
+`CanonicalLogicalUnit`; the existing first-dot base-name admission gate is
+unchanged. An interface-level tunnel with no authored units retains its
+implicit unit 0, while dynamic loopback / IPsec references without a local
+interface stanza remain admitted by the base-name union above. This also
+prevents an absent sampled unit from being skipped by `BuildSamplingZones` and
+turning an empty zone map into an export-all decision (#11433).
+
 The tolerant load / peer-sync path downgrades to a warning
 (`opts.lenientZoneInterfaceDefined`) so an already-persisted or peer-synced
 config an older binary accepted still boots (#1960 no-brick); runtime behavior on

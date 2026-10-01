@@ -1,5 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Reject zone references to absent logical units and keep flow-sampling
+    restrictions fail-closed rather than widening exports (#11433).
   * Retain DHCPv6 router-advertisement gateways through RA silence, re-solicit
     independently of DHCP T1, withdraw on lifetime zero, and parse RIO routes
     with classless safety gates (#11425).

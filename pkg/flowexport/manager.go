@@ -73,7 +73,7 @@ type ExportConfig struct {
 	FlowActiveTimeout   time.Duration
 	FlowInactiveTimeout time.Duration
 	TemplateRefreshRate time.Duration
-	SamplingZones       map[uint16]SamplingDir // zone ID -> sampling directions
+	SamplingZones       map[uint16]SamplingDir // nil=unrestricted; non-nil empty=deny
 	SamplingRate        int                    // 1-in-N sampling (0 = export all)
 	// ServesInet / ServesInet6 record which address families this instance
 	// has a SURVIVING collector group for (#2462, narrowed by #9172): a family
@@ -714,9 +714,12 @@ func BuildIPFIXExportConfig(svc *config.ServicesConfig, fo *config.ForwardingOpt
 
 // BuildSamplingZones builds a map of zone ID to sampling direction flags.
 // For each zone, it checks whether any interface in that zone has
-// sampling input or output enabled on its unit.
+// sampling input or output enabled on its unit. A nil result means no
+// effective zone restriction is configured (export-all); a non-nil empty
+// result means a sampled interface was referenced through an absent unit and
+// must fail closed rather than widening to export-all.
 func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) map[uint16]SamplingDir {
-	result := make(map[uint16]SamplingDir)
+	var result map[uint16]SamplingDir
 	for zoneName, zone := range cfg.Security.Zones {
 		// A nil zone value is reachable on the tolerant/programmatic/
 		// HA-peer-sync config path (the same nil-slot invariant the
@@ -748,7 +751,15 @@ func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) map[uint1
 				continue
 			}
 			unit, ok := ifCfg.Units[unitNum]
-			if !ok {
+			if !ok || unit == nil {
+				// A well-formed zone ref can survive tolerant loading even
+				// though its logical unit is absent. If sampling is enabled
+				// on another unit of this interface, retain an explicit
+				// empty restriction so ShouldExport cannot interpret the
+				// filtered result as export-all.
+				if interfaceHasSampling(ifCfg) && result == nil {
+					result = make(map[uint16]SamplingDir)
+				}
 				continue
 			}
 			if unit.SamplingInput {
@@ -759,20 +770,32 @@ func BuildSamplingZones(cfg *config.Config, zoneIDs map[string]uint16) map[uint1
 			}
 		}
 		if dir.Input || dir.Output {
+			if result == nil {
+				result = make(map[uint16]SamplingDir)
+			}
 			result[zid] = dir
 		}
 	}
 	return result
 }
 
+func interfaceHasSampling(ifCfg *config.InterfaceConfig) bool {
+	for _, unit := range ifCfg.Units {
+		if unit != nil && (unit.SamplingInput || unit.SamplingOutput) {
+			return true
+		}
+	}
+	return false
+}
+
 // ShouldExport checks whether a session close event should be exported based
 // on the ingress/egress zone sampling configuration and sampling rate.
 // A session is exported if the ingress zone has sampling input enabled OR
-// the egress zone has sampling output enabled. If no SamplingZones are
-// configured, all sessions are eligible. When SamplingRate > 0, only
-// 1-in-N eligible sessions are actually exported.
+// the egress zone has sampling output enabled. A nil SamplingZones means no
+// zone restriction is configured; a non-nil empty map fails closed. When
+// SamplingRate > 0, only 1-in-N eligible sessions are actually exported.
 func (ec *ExportConfig) ShouldExport(inZone, outZone uint16) bool {
-	if len(ec.SamplingZones) > 0 {
+	if ec.SamplingZones != nil {
 		eligible := false
 		if d, ok := ec.SamplingZones[inZone]; ok && d.Input {
 			eligible = true

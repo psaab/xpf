@@ -1204,6 +1204,14 @@ moment any caller sampled off the copy (#2224).
   `foo` and an empty suffix became unit 0, `-1` became unit 1 — so
   sampling could be enabled on the wrong unit or silently on unit 0,
   diverging from the operator's interface list.
+- On a configured interface, a well-formed explicit logical-unit suffix must
+  name an existing unit; a unitless interface-level tunnel retains implicit
+  unit 0. The strict config compiler rejects other absent units at commit.
+  If a tolerant load still carries an absent-unit zone ref while sampling is
+  configured on another unit of that interface, `BuildSamplingZones` preserves
+  a non-nil empty restriction and `ShouldExport` denies sessions rather than
+  interpreting the filtered result as export-all. A nil `SamplingZones` map
+  continues to mean that no zone restriction is configured.
 - `ExportSessionClose` builds the flow record synchronously from the
   event-reader callback. The export goroutine (started in `Run(ctx)`)
   is what actually transmits and refreshes templates; record assembly
