@@ -419,6 +419,11 @@ How it lands (the `instance-type forwarding` divergence fix):
   and marks the build degraded rather than widening a constrained term
   to an address-only rule that would steer traffic the operator
   excluded. The userspace fast path still enforces the term exactly.
+  An unconstrained `then routing-instance` term is also dropped and
+  marked degraded rather than installing an interface-wide catch-all
+  rule. A leniently loaded filter that references an undefined
+  routing-instance is likewise dropped and marked degraded because the
+  kernel mirror cannot resolve its target table.
   Each `ip rule` is also scoped to the ingress interface the steering
   filter is attached to via `IifName`/`FRA_IIFNAME` (#5117) — a filter
   bound to `reth1 unit 0` only steers traffic ingressing `reth1`, so a
