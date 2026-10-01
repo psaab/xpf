@@ -98,7 +98,7 @@ pub(super) fn stage_flow_cache_hit(
     now_ns: u64,
     now_secs: u64,
     worker_ctx: &WorkerContext,
-    last_learned_neighbor: &mut Option<LearnedNeighborKey>,
+    last_learned_neighbor: &mut LearnedNeighborDedup,
     telemetry: &mut TelemetryContext,
 ) -> FlowCacheOutcome {
     // Re-derive packet_frame locally (matches L477 of the caller's
@@ -700,6 +700,7 @@ pub(super) fn stage_flow_cache_hit(
                 meta,
                 flow.src_ip,
                 src_mac,
+                now_ns,
                 last_learned_neighbor,
                 worker_ctx.forwarding,
                 worker_ctx.dynamic_neighbors,
