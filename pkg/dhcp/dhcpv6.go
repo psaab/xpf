@@ -221,28 +221,67 @@ func (m *Manager) runDHCPv6(ctx context.Context, ifaceName string) {
 				leaseCtx, cancelLease = context.WithDeadline(ctx, deadline)
 			}
 
-			// Wait for T1.
-			select {
-			case <-m.after(t1):
-				slog.Info("DHCPv6: T1 expired, renewing", "interface", ifaceName)
-			case <-leaseCtx.Done():
-				if ctx.Err() != nil {
-					cancelLease()
-					if committed.Address.IsValid() {
-						m.removeAddress(ifaceName, committed)
+			// Keep the RA state live independently of DHCP T1. The separate
+			// timer also wakes at the current router/RIO lifetime boundary.
+			t1Wait := m.after(t1)
+			for {
+				raWait := m.afterRA(nextIPv6RARefreshDelay(committed, time.Now()))
+				select {
+				case <-t1Wait:
+					slog.Info("DHCPv6: T1 expired, renewing", "interface", ifaceName)
+					goto t1Expired
+				case <-leaseCtx.Done():
+					if ctx.Err() != nil {
+						cancelLease()
+						if committed.Address.IsValid() {
+							m.removeAddress(ifaceName, committed)
+						}
+						m.mu.Lock()
+						delete(m.leases, key)
+						delete(m.delegatedPDs, ifaceName)
+						m.mu.Unlock()
+						return
 					}
-					m.mu.Lock()
-					delete(m.leases, key)
-					delete(m.delegatedPDs, ifaceName)
-					m.mu.Unlock()
-					return
+					m.abandonLeaseAfterExpiry(key, committed)
+					committed = nil
+					committedPDs = nil
+					cancelLease()
+					break renewalLoop
+				case <-raWait:
+					expired := *committed
+					expired.ClasslessRoutes = append([]LeaseRoute(nil), committed.ClasslessRoutes...)
+					expired.raRouteExpires = cloneRARouteExpiries(committed.raRouteExpires)
+					expireIPv6RouterState(&expired, time.Now())
+					if leaseContentChanged(committed, &expired) {
+						m.commitRouterAdvertisementState(key, &expired, committed)
+						committed = &expired
+					}
+					routers := m.observedRouterAdvertisements(leaseCtx, ifaceName)
+					if ctx.Err() != nil {
+						cancelLease()
+						if committed.Address.IsValid() {
+							m.removeAddress(ifaceName, committed)
+						}
+						m.mu.Lock()
+						delete(m.leases, key)
+						delete(m.delegatedPDs, ifaceName)
+						m.mu.Unlock()
+						return
+					}
+					if !stateless && leaseCtx.Err() != nil {
+						m.abandonLeaseAfterExpiry(key, committed)
+						committed = nil
+						committedPDs = nil
+						cancelLease()
+						break renewalLoop
+					}
+					refreshed := applyIPv6RouterAdvertisements(committed, committed, routers, time.Now())
+					m.commitRouterAdvertisementState(key, refreshed, committed)
+					committed = refreshed
 				}
-				m.abandonLeaseAfterExpiry(key, committed)
-				committed = nil
-				committedPDs = nil
-				cancelLease()
-				break renewalLoop
 			}
+
+		t1Expired:
 
 			// T1 renewal attempt — RENEW to the granting server, NOT a
 			// fresh Solicit (#2994).
@@ -393,12 +432,11 @@ type dhcpv6Result struct {
 	// prefixes holds the LIVE delegated prefixes (valid-lifetime > 0).
 	prefixes []DelegatedPrefix
 	// withdrawnPDs holds prefixes the reply carried with valid-lifetime 0
-	// — an RFC 8415 §12.1 explicit withdrawal (#4874 B). They are never
-	// stored or re-advertised; the commit-path reconcile removes them from
-	// the held set rather than re-granting them at the RA sender's 30-day
-	// defaults. Distinguishing an explicit withdrawal from an absent/empty
-	// IA_PD (silence) keeps the #1844 anti-outage retain-on-silence rule.
+	// — an RFC 8415 §12.1 explicit withdrawal (#4874 B).
 	withdrawnPDs []DelegatedPrefix
+	// routers is the complete observation from this exchange's RS/RA window.
+	routers   []observedRouter
+	raSampled bool
 }
 
 // doDHCPv6 performs one DHCPv6 exchange. Acquisition attempts rapid commit
@@ -464,7 +502,7 @@ func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExcha
 			Interface: ifaceName,
 			Family:    AFInet6,
 			Obtained:  time.Now(),
-			LeaseTime: 3600 * time.Second, // 1-hour refresh for stateless
+			LeaseTime: time.Hour,
 		}
 		if dnsOpt := resp.Options.DNS(); len(dnsOpt) > 0 {
 			for _, dns := range dnsOpt {
@@ -473,7 +511,9 @@ func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExcha
 				}
 			}
 		}
-		return &dhcpv6Result{lease: lease}, nil
+
+		routers := m.observedRouterAdvertisements(ctx, ifaceName)
+		return &dhcpv6Result{lease: lease, routers: routers, raSampled: true}, nil
 	}
 
 	var adv *dhcpv6.Message
@@ -500,11 +540,14 @@ func (m *Manager) doDHCPv6(ctx context.Context, ifaceName string, mode dhcpExcha
 		}
 	}
 
-	// Every path — acquire, renew, rebind — commits only IAs whose IAIDs
-	// match what this client solicited, and only on message+IA Success
-	// status; anything else is a rejection, never a partial commit (#10858).
 	wantNA := v6IANAIAID(client.InterfaceAddr())
-	return m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, &wantNA, &v6IAPDIAID)
+	result, err := m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, &wantNA, &v6IAPDIAID)
+	if err != nil {
+		return nil, err
+	}
+	result.routers = m.observedRouterAdvertisements(ctx, ifaceName)
+	result.raSampled = true
+	return result, nil
 }
 
 const v6AdvertiseCollectionTime = time.Second
@@ -750,7 +793,14 @@ func selectIANAAddress(adv *dhcpv6.Message, expectedIAID ...*[4]byte) (addr neti
 // parseV6Reply extracts DHCPv6 options for unit callers that do not have an
 // interface IAID. Production exchanges use parseV6ReplyChecked below.
 func (m *Manager) parseV6Reply(ctx context.Context, ifaceName string, adv *dhcpv6.Message, v6opts *DHCPv6Options) (*dhcpv6Result, error) {
-	return m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, nil, nil)
+	result, err := m.parseV6ReplyChecked(ctx, ifaceName, adv, v6opts, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	result.routers = m.observedRouterAdvertisements(ctx, ifaceName)
+	result.raSampled = true
+	result.lease = applyIPv6RouterAdvertisements(nil, result.lease, result.routers, time.Now())
+	return result, nil
 }
 func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv *dhcpv6.Message, v6opts *DHCPv6Options, expectedNA, expectedPD *[4]byte) (*dhcpv6Result, error) {
 	if err := v6MessageStatusError(adv); err != nil {
@@ -833,9 +883,10 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 	}
 
 	lease := &Lease{
-		Interface: ifaceName,
-		Family:    AFInet6,
-		Obtained:  now,
+		Interface:          ifaceName,
+		Family:             AFInet6,
+		Obtained:           now,
+		leaseExpiryApplies: true,
 	}
 
 	// Server identifier (DUID) — echoed in the next RENEW so the original
@@ -872,11 +923,8 @@ func (m *Manager) parseV6ReplyChecked(ctx context.Context, ifaceName string, adv
 		}
 	}
 
-	// DHCPv6 doesn't provide a default router; solicit and parse RAs
-	// directly because managed interfaces disable kernel RA acceptance.
-	if gw := m.discoverIPv6Router(ctx, ifaceName); gw.IsValid() {
-		lease.Gateway = gw
-	}
+	// Router Advertisements are sampled by the exchange wrapper and applied
+	// with the prior lease there so silence can retain a live gateway.
 
 	result.lease = lease
 	return result, nil
@@ -1122,30 +1170,6 @@ func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Ti
 		}
 	}
 	return live, withdrawn
-}
-
-// discoverIPv6Router sends Router Solicitations and chooses an eligible
-// Router Advertisement source. Unlike IPv6AcceptRA, this client-owned
-// exchange works on managed interfaces where kernel RA processing is off.
-func (m *Manager) discoverIPv6Router(ctx context.Context, ifaceName string) netip.Addr {
-	var routers []observedRouter
-	if m.routerAdvertisementsForTest != nil {
-		routers = m.routerAdvertisementsForTest(ctx, ifaceName)
-	} else if m.nlHandle == nil {
-		// A nil netlink handle is the test-only Manager shape; preserve its
-		// no-I/O behavior unless a router-discovery seam is explicitly set.
-		return netip.Addr{}
-	} else {
-		routers = m.routerAdvertisements(ctx, ifaceName)
-	}
-	if gw := selectRAObservedRouter(routers); gw.IsValid() {
-		return gw
-	}
-	if ctx.Err() == nil {
-		slog.Warn("DHCPv6: no eligible IPv6 default router found",
-			"interface", ifaceName)
-	}
-	return netip.Addr{}
 }
 
 // waitForLinkLocal waits until the interface has a link-local IPv6 address.

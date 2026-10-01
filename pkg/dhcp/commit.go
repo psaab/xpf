@@ -103,9 +103,21 @@ func leaseContentChanged(prev, next *Lease) bool {
 	return prev.Address != next.Address ||
 		prev.Gateway != next.Gateway ||
 		!slices.Equal(prev.DNS, next.DNS) ||
-		!slices.Equal(prev.ClasslessRoutes, next.ClasslessRoutes) ||
+		!sameLeaseRoutes(prev.ClasslessRoutes, next.ClasslessRoutes) ||
 		prev.serverID != next.serverID ||
 		!sameDUID(prev.v6ServerDUID, next.v6ServerDUID)
+}
+
+func sameLeaseRoutes(a, b []LeaseRoute) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Destination != b[i].Destination || a[i].Gateway != b[i].Gateway {
+			return false
+		}
+	}
+	return true
 }
 
 // delegatedPrefixesChanged reports whether the delegated-prefix set
@@ -230,21 +242,27 @@ func (m *Manager) commitLease(key clientKey, lease, prev *Lease, prefixes, prevP
 	}
 	m.mu.Unlock()
 
-	// #1844: gateway-change hook for ip-monitoring interface-typed
-	// next-hops. Strictly narrower than leaseContentChanged —
-	// address/DNS-only deltas do not fire. Fired outside m.mu (see
-	// fireGatewayChange) and undebounced: the consumer is the ipmon
-	// engine's dirty-bit + debounce/throttle queue, which absorbs it.
+	m.notifyLeaseStateChanged(prev, lease, applyPDs && delegatedPrefixesChanged(prevPDs, prefixes))
+	return nil
+}
+
+// commitRouterAdvertisementState stores a lease update whose only source is
+// RA observation. Address application and PD reconciliation belong to DHCP
+// exchanges, not the independent Router-Solicitation timer.
+func (m *Manager) commitRouterAdvertisementState(key clientKey, lease, prev *Lease) {
+	m.mu.Lock()
+	m.leases[key] = lease
+	m.mu.Unlock()
+	m.notifyLeaseStateChanged(prev, lease, false)
+}
+
+func (m *Manager) notifyLeaseStateChanged(prev, lease *Lease, pdChanged bool) {
+	// Gateway-only changes are relevant to interface-typed ip-monitoring
+	// next-hops; address/DNS-only changes do not fire this hook.
 	if prev == nil || prev.Gateway != lease.Gateway {
 		m.fireGatewayChange()
 	}
-
-	// A PD change (including a withdrawal that empties the set) must
-	// re-render RA. Gate on applyPDs so a retain-on-silence commit does not
-	// diff against an empty prefixes arg and spuriously fire (#4874 B).
-	pdChanged := applyPDs && delegatedPrefixesChanged(prevPDs, prefixes)
 	if prev == nil || leaseContentChanged(prev, lease) || pdChanged {
 		m.scheduleRecompile()
 	}
-	return nil
 }

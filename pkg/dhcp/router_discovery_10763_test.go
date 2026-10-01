@@ -128,12 +128,23 @@ func TestCollectRouterAdvertisementsSolicitsAndSelects10763(t *testing.T) {
 		HardwareAddr: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x07},
 	}
 	cm := &ipv6.ControlMessage{IfIndex: ifi.Index, HopLimit: ndp.HopLimit}
-	conn := &fakeRouterDiscoveryConn{reads: []routerAdvertisementRead{
-		{message: &ndp.RouterAdvertisement{RouterLifetime: 0, RouterSelectionPreference: ndp.High}, cm: cm, source: netip.MustParseAddr("fe80::1%wan0")},
-		{message: &ndp.RouterAdvertisement{RouterLifetime: time.Hour, RouterSelectionPreference: ndp.Medium}, cm: cm, source: netip.MustParseAddr("fe80::2%wan0")},
-		{message: &ndp.RouterAdvertisement{RouterLifetime: time.Second, RouterSelectionPreference: ndp.High}, cm: cm, source: netip.MustParseAddr("fe80::3%wan0")},
-	}}
-	routers := collectRouterAdvertisements(context.Background(), ifi, conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readCount := 0
+	conn := &fakeRouterDiscoveryConn{
+		reads: []routerAdvertisementRead{
+			{message: &ndp.RouterAdvertisement{RouterLifetime: 0, RouterSelectionPreference: ndp.High}, cm: cm, source: netip.MustParseAddr("fe80::1%wan0")},
+			{message: &ndp.RouterAdvertisement{RouterLifetime: time.Hour, RouterSelectionPreference: ndp.Medium}, cm: cm, source: netip.MustParseAddr("fe80::2%wan0")},
+			{message: &ndp.RouterAdvertisement{RouterLifetime: time.Second, RouterSelectionPreference: ndp.High}, cm: cm, source: netip.MustParseAddr("fe80::3%wan0")},
+		},
+		onRead: func() {
+			readCount++
+			if readCount == 3 {
+				cancel()
+			}
+		},
+	}
+	routers := collectRouterAdvertisements(ctx, ifi, conn)
 	if len(conn.writes) != 1 {
 		t.Fatalf("Router Solicitations sent = %d, want 1", len(conn.writes))
 	}

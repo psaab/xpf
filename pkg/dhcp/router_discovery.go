@@ -24,21 +24,21 @@ type observedRouter struct {
 	addr     netip.Addr
 	lifetime time.Duration
 	pref     int
+	observed time.Time
+	routes   []observedRouteInformation
+}
+
+type observedRouteInformation struct {
+	destination netip.Prefix
+	lifetime    time.Duration
+	observed    time.Time
 }
 
 // selectRAObservedRouter accepts only link-local default routers (positive
 // Router Lifetime, RFC 4861 §4.2) and chooses the highest RFC 4191 preference.
 // Equal-preference routers retain first-seen order.
 func selectRAObservedRouter(routers []observedRouter) netip.Addr {
-	best := -1
-	for i, r := range routers {
-		if !r.addr.Is6() || !r.addr.IsLinkLocalUnicast() || r.lifetime <= 0 {
-			continue
-		}
-		if best < 0 || r.pref > routers[best].pref {
-			best = i
-		}
-	}
+	best := bestObservedRouter(routers)
 	if best < 0 {
 		return netip.Addr{}
 	}
@@ -56,7 +56,28 @@ func raPreferenceRank(pref ndp.Preference) int {
 	}
 }
 
+func routeInformationOptions(options []ndp.Option, observed time.Time) []observedRouteInformation {
+	var routes []observedRouteInformation
+	for _, option := range options {
+		ri, ok := option.(*ndp.RouteInformation)
+		if !ok || int(ri.PrefixLength) > 128 || !ri.Prefix.Is6() {
+			continue
+		}
+		prefix := netip.PrefixFrom(ri.Prefix, int(ri.PrefixLength))
+		if !prefix.IsValid() {
+			continue
+		}
+		routes = append(routes, observedRouteInformation{
+			destination: prefix.Masked(),
+			lifetime:    ri.RouteLifetime,
+			observed:    observed,
+		})
+	}
+	return routes
+}
+
 // routerDiscoveryConn is the subset of ndp.Conn needed to solicit and
+
 // collect Router Advertisements. Keeping the collector independent of the
 // privileged socket makes its wire decisions testable without CAP_NET_RAW.
 type routerDiscoveryConn interface {
@@ -66,6 +87,16 @@ type routerDiscoveryConn interface {
 	WriteTo(ndp.Message, *ipv6.ControlMessage, netip.Addr) error
 	SetReadDeadline(time.Time) error
 	ReadFrom() (ndp.Message, *ipv6.ControlMessage, netip.Addr, error)
+}
+
+func (m *Manager) observedRouterAdvertisements(ctx context.Context, ifaceName string) []observedRouter {
+	if m.routerAdvertisementsForTest != nil {
+		return m.routerAdvertisementsForTest(ctx, ifaceName)
+	}
+	if m.nlHandle == nil {
+		return nil
+	}
+	return m.routerAdvertisements(ctx, ifaceName)
 }
 
 // routerAdvertisements solicits routers directly; it does not depend on
@@ -118,14 +149,20 @@ func collectRouterAdvertisements(ctx context.Context, ifi *net.Interface, conn r
 
 	result := make([]observedRouter, 0, 2)
 	bySource := make(map[netip.Addr]int)
-	record := func(addr netip.Addr, lifetime time.Duration, pref int) bool {
+	record := func(addr netip.Addr, lifetime time.Duration, pref int, options []ndp.Option) {
+		now := time.Now()
+		routes := routeInformationOptions(options, now)
 		if i, ok := bySource[addr]; ok {
-			result[i].lifetime, result[i].pref = lifetime, pref
+			routes = mergeObservedRouteInformation(result[i].routes, routes)
+			result[i] = observedRouter{
+				addr: addr, lifetime: lifetime, pref: pref, observed: now, routes: routes,
+			}
 		} else {
 			bySource[addr] = len(result)
-			result = append(result, observedRouter{addr: addr, lifetime: lifetime, pref: pref})
+			result = append(result, observedRouter{
+				addr: addr, lifetime: lifetime, pref: pref, observed: now, routes: routes,
+			})
 		}
-		return lifetime > 0 && pref == raPrefHigh
 	}
 
 	deadline := time.Now().Add(raCollectWindow)
@@ -168,9 +205,7 @@ func collectRouterAdvertisements(ctx context.Context, ifi *net.Interface, conn r
 		if !src.Is6() || !src.IsLinkLocalUnicast() {
 			continue
 		}
-		if record(src, ra.RouterLifetime, raPreferenceRank(ra.RouterSelectionPreference)) {
-			return result
-		}
+		record(src, ra.RouterLifetime, raPreferenceRank(ra.RouterSelectionPreference), ra.Options)
 	}
 	return result
 }

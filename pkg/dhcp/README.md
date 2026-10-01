@@ -136,13 +136,22 @@ the debounced `onAddressChange` callback when content changed.
   `LeaseTime == 0 → 3600s` default in `parseV6Reply` is NOT this path — it
   only applies to a degenerate no-IA config; the explicit-0 invalidation
   is handled before it.
-- **DHCPv6 default-router discovery (#10763)**: because DHCPv6 carries no
-  default-router option and managed interfaces disable kernel RA
-  acceptance, the client sends Router Solicitations and reads the
-  answering RAs directly. Only link-local RA sources with a positive
-  Router Lifetime are eligible; among them the highest RFC 4191 router
-  preference wins. A router-flagged neighbor entry alone is not enough to
-  install a default gateway.
+- **DHCPv6 default-router discovery (#10763, #11425)**: because DHCPv6
+  carries no default-router option and managed interfaces disable kernel RA
+  acceptance, the client sends Router Solicitations and reads answering RAs
+  directly. Only link-local RA sources with a positive Router Lifetime are
+  eligible; the highest RFC 4191 preference wins, and a router-flagged neighbor
+  entry alone is not enough to install a default gateway. The client
+  re-solicits independently of DHCP T1 (at most every 30 seconds and at
+  gateway/RIO lifetime boundaries), retains a live gateway on RA silence,
+  and withdraws it immediately on a matching Router-Lifetime-0 advertisement.
+  For stateful DHCPv6, a learned gateway expires at the earlier of its RA
+  lifetime and the DHCP lease deadline; stateless mode has no DHCP binding
+  deadline.
+  Route Information options are retained as IPv6 `ClasslessRoutes`; their
+  per-route lifetime zero withdraws only the matching destination/next-hop,
+  silence retains an unexpired route, and the shared classless broad/martian
+  gates protect both FRR and management-VRF installation.
 
 - **Successful T1 renew / T2 rebind is committed**, and the run loop
   returns to the T1 wait with timers recomputed from the renewed
@@ -406,19 +415,17 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   EGRESSES malformed to the upstream server. Either way the guard was
   incidental: it depended on a downstream check noticing rather than on
   the value being rejected where the operator typed it.
-- **RFC 3442 classless static routes (option 121 / legacy 249, #4118).**
-  `leaseFromACKv4` parses option 121 (the standard `ClasslessStaticRoute`
-  accessor) and falls back to the legacy Microsoft option 249 (raw
-  `GenericOptionCode(249)` decoded with the identical
-  `{mask-length, significant-prefix-octets, gateway}` encoding). Per RFC
-  3442 **precedence, option 121/249 SUPERSEDES option 3**: when it is
-  present the client MUST ignore the option-3 Router default entirely.
-  The `0.0.0.0/0` entry (if any) in the option supplies `lease.Gateway`
-  (so every existing gateway consumer — FRR default route, neighbor
-  resolution, ip-monitoring next-hop — is unchanged); every more-specific
-  route lands on `lease.ClasslessRoutes`. When option 121/249 is absent
-  the client falls back to option 3 exactly as before. The classless
-  routes are programmed through the same paths as the default route:
+- **Classless routes from DHCPv4 and IPv6 RIO (#4118, #11425).** `leaseFromACKv4`
+  parses option 121 (the standard `ClasslessStaticRoute` accessor) and falls
+  back to the legacy Microsoft option 249 (raw `GenericOptionCode(249)`) using
+  the `{mask-length, significant-prefix-octets, gateway}` encoding. Per RFC
+  3442, option 121/249 **supersedes option 3**: when present, the client MUST
+  ignore the option-3 Router default. The option's `0.0.0.0/0` supplies
+  `lease.Gateway`; more-specific routes land on `lease.ClasslessRoutes`. IPv6
+  Route Information options are recorded in that same route list with the
+  advertising router as next hop and expire or withdraw independently by
+  destination/next-hop. When option 121/249 is absent, DHCPv4 still falls back
+  to option 3 as before. Both families use the same route installation paths:
   `collectDHCPRoutes` emits one `frr.DHCPRoute` per route (with a non-empty
   `Destination`), and `renderDHCPDefaults` writes
   `ip route <dest> <gw> [<iface>] 200`. Before emission, a connected prefix
@@ -433,8 +440,11 @@ External only: `github.com/insomniacslk/dhcp`, `github.com/vishvananda/netlink`.
   xpf-owned `RTPROT_DHCP` and connected/kernel routes are silently ignored,
   while unexpected other-protocol routes are warned and ignored rather than
   becoming static precedence authority. An option-121 `0.0.0.0/0` follows the
-  normal DHCP-default suppression behavior. `/1` and non-forwardable martian
-  classless prefixes are refused by default. `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1`
+  normal DHCP-default suppression behavior, as does an ordinary RA
+  default-router gateway (it is not an RIO route). Explicit IPv6 RIO `::/0`
+  and IPv4/IPv6 `/1` classless routes, plus non-forwardable destinations in
+  either family (including IPv6 link-local and multicast prefixes), are
+  refused by default. `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1`
   is an explicit, unset-by-default escape hatch that permits connected-covered,
   static-covered, broad, or martian classless routes and emits a loud security
   warning at each use.

@@ -111,10 +111,24 @@ func (m *Manager) v4Exchange(ctx context.Context, ifaceName string, mode dhcpExc
 // v6Exchange dispatches one DHCPv6 exchange through the test seam when
 // set, else the real wire path.
 func (m *Manager) v6Exchange(ctx context.Context, ifaceName string, mode dhcpExchangeMode, prev *Lease, prevPDs []DelegatedPrefix) (*dhcpv6Result, error) {
+	var (
+		result *dhcpv6Result
+		err    error
+	)
 	if m.doV6ExchangeForTest != nil {
-		return m.doV6ExchangeForTest(ctx, ifaceName, mode, prev, prevPDs)
+		result, err = m.doV6ExchangeForTest(ctx, ifaceName, mode, prev, prevPDs)
+	} else {
+		result, err = m.doDHCPv6(ctx, ifaceName, mode, prev, prevPDs)
 	}
-	return m.doDHCPv6(ctx, ifaceName, mode, prev, prevPDs)
+	if err != nil || result == nil || result.lease == nil {
+		return result, err
+	}
+	if !result.raSampled {
+		result.routers = m.observedRouterAdvertisements(ctx, ifaceName)
+		result.raSampled = true
+	}
+	result.lease = applyIPv6RouterAdvertisements(prev, result.lease, result.routers, time.Now())
+	return result, nil
 }
 
 // after returns the renewal-wait channel, routed through the test seam
@@ -123,6 +137,13 @@ func (m *Manager) v6Exchange(ctx context.Context, ifaceName string, mode dhcpExc
 func (m *Manager) after(d time.Duration) <-chan time.Time {
 	if m.afterForTest != nil {
 		return m.afterForTest(d)
+	}
+	return time.After(d)
+}
+
+func (m *Manager) afterRA(d time.Duration) <-chan time.Time {
+	if m.raAfterForTest != nil {
+		return m.raAfterForTest(d)
 	}
 	return time.After(d)
 }
