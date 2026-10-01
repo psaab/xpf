@@ -306,12 +306,11 @@ impl Clone for Nat64Prefix {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Nat64State {
     pub(crate) prefixes: Vec<Nat64Prefix>,
-    /// Mirrors the global `security nat natv6v4 no-v6-frag-header` option. When
-    /// set, the IPv6->IPv4 translator emits a fragmentable (DF=0, non-atomic)
-    /// IPv4 packet per RFC 7915 5.1 rather than the default DF=1 atomic framing.
-    /// The option is configured once at the natv6v4 level; the Go side
-    /// replicates it onto every NAT64 rule snapshot, so any rule carrying it
-    /// enables it globally.
+    /// Mirrors the global `security nat natv6v4 no-v6-frag-header` option.
+    /// When set, header-less IPv6→IPv4 outputs stay fragmentable regardless of
+    /// size. Otherwise RFC 7915 §5.1 keys DF on the translated IPv4 total length
+    /// (DF clear through 1260 bytes, set above it). The Go side replicates the
+    /// global option onto every NAT64 rule snapshot.
     pub(crate) no_v6_frag_header: bool,
     /// #2562: cross-family fragment-association cache. Lets non-first NAT64
     /// fragments inherit the first fragment's translation instead of being
@@ -1984,25 +1983,15 @@ use std::sync::atomic::AtomicU32;
 /// `1280 + 20`.
 const MAX_EMBEDDED_LEN: usize = 1280 + NAT64_HEADER_DELTA as usize;
 
-/// Process-global IPv4 Fragment Identification generator for translated,
-/// *fragmentable* (DF=0) IPv6->IPv4 packets.
+/// Process-global IPv4 Identification generator for header-less translated
+/// datagrams that leave DF clear. RFC 7915 §5.1 requires it for translated
+/// IPv4 packets up to 1260 bytes; the local no-v6-frag-header option also uses
+/// it when explicitly keeping larger packets fragmentable.
 ///
-/// Whenever this translator emits a DF=0 (non-atomic) datagram it draws the
-/// Identification from a per-translator generator, as RFC 7915 5.1 prescribes
-/// for the no-Fragment-Header case. RFC 6864 4.1 then *requires* that a source
-/// emitting non-atomic datagrams (DF=0) MUST NOT repeat the ID for a given
-/// source/destination/protocol tuple within one Maximum Datagram Lifetime. A
-/// constant ID (e.g. 0) violates that: if a downstream router fragments two
-/// such datagrams between the same hosts, their fragments share an ID and
-/// reassemble incorrectly. A monotonically incrementing counter is a
-/// conforming, cheap generator. Atomic datagrams (DF=1) are exempt — RFC 6864
-/// lets them carry any ID, so the default DF=1 path keeps ID=0.
-///
-/// Note this generator only governs the *Identification* value. WHEN DF is
-/// cleared is a deliberate LOCAL policy (the operator-gated
-/// `no-v6-frag-header` option), not the size-driven DF selection RFC 7915 5.1
-/// itself describes (clear DF only when the translated IPv4 packet is <= 1260
-/// bytes); see `translate_v6_to_v4`.
+/// RFC 6864 §4.1 requires a source emitting non-atomic datagrams (DF=0) not
+/// to repeat IDs for a given source/destination/protocol tuple within one
+/// Maximum Datagram Lifetime. A monotonically incrementing counter is a cheap
+/// generator; atomic datagrams (DF=1) are exempt and keep ID=0.
 static NAT64_FRAG_ID: AtomicU32 = AtomicU32::new(0);
 
 /// Return the next non-zero 16-bit Fragment Identification value for a
@@ -2049,21 +2038,17 @@ fn map_frag_id(raw: u32) -> u16 {
 /// `snat_v4` = pool IPv4 source, `dst_v4` = extracted destination.
 ///
 /// `no_v6_frag_header` mirrors the `security nat natv6v4 no-v6-frag-header`
-/// option and selects between two DF policies. This is a deliberate LOCAL,
-/// option-gated choice — NOT the literal RFC 7915 5.1 algorithm, which keys DF
-/// off the *translated* IPv4 size (clear DF only when the result is <= 1260
-/// bytes). The two modes are:
-///   * `false` (the default): emit an *atomic* datagram — set the
-///     Don't-Fragment (DF) flag and leave Identification at 0 (RFC 6864 4.1
-///     permits any ID for an atomic datagram).
-///   * `true`: clear DF so the packet stays fragmentable in transit (the
-///     operator opts into this when downstream PMTU handling needs it).
+/// option. It is an explicit local override: when true, header-less
+/// IPv6→IPv4 output stays fragmentable regardless of size. Otherwise RFC 7915
+/// §5.1 selects DF from the translated IPv4 total length: DF is clear through
+/// 1260 bytes (with a generated non-zero Identification) and set above 1260
+/// (with Identification 0). If an IPv6 Fragment Header is present, its
+/// Identification and fragment geometry are preserved regardless of the option.
 ///
-/// Whichever mode clears DF, the Identification MUST stay consistent with it: a
-/// DF=0 datagram is non-atomic, so RFC 6864 4.1 forbids a constant/repeated ID
-/// and RFC 7915 5.1 prescribes drawing it from a per-translator generator
-/// (`next_frag_id`) so a downstream fragmenter produces reassemblable fragments
-/// rather than colliding on a constant ID.
+/// Whichever path clears DF, the Identification MUST be consistent with it: a
+/// DF=0 datagram is non-atomic, so RFC 6864 §4.1 forbids a constant/repeated ID;
+/// header-less outputs use the per-translator generator so downstream fragments
+/// remain reassemblable rather than colliding on a constant ID.
 ///
 /// Returns the translated IPv4 packet (L3 only, no Ethernet header).
 ///
@@ -2583,37 +2568,12 @@ fn write_v6_to_v4_translate(
     // known, since an ICMP-error translation can shrink the L4).
     out[0] = 0x45; // version=4, IHL=5
     out[1] = traffic_class; // DSCP/ECN copied from IPv6 traffic class (RFC 7915 §5)
-    // #2488: if the IPv6 datagram carries a Fragment Header, the IPv4
-    // fragmentation fields MUST be derived from THE PACKET (RFC 7915 §5), not
-    // the local no-v6-frag-header policy — otherwise a real first fragment is
-    // mistranslated into an atomic (MF=0) datagram and a receiver accepts the
-    // truncated first fragment as a complete datagram. When no Fragment Header
-    // is present the datagram is atomic and the existing option-gated LOCAL DF
-    // policy applies. Either way the flags+frag-offset word (bytes 6-7) and the
-    // Identification field (bytes 4-5) must stay mutually consistent:
-    //   * Atomic, default (DF=1, 0x4000): non-fragmentable. RFC 6864 4.1
-    //     permits any ID for an atomic datagram, so leave ID=0.
-    //   * Atomic, no-v6-frag-header (DF=0, 0x0000): a *fragmentable*
-    //     (non-atomic) datagram. A non-atomic datagram MUST carry a non-zero
-    //     Identification from a per-translator generator (RFC 7915 5.1 / RFC
-    //     6864 4.1) so a downstream fragmenter does not collide distinct
-    //     datagrams on a constant ID. Pinning ID=0 here while clearing DF was
-    //     the bug fixed in #2008 H16.
-    //   * Real fragment (Fragment Header present): DF=0, MF copied from the
-    //     IPv6 M flag, the 13-bit fragment offset copied verbatim (both fields
-    //     count 8-byte units), and the Identification taken from the low 16
-    //     bits of the Fragment Header's 32-bit Identification.
+    // #2488: preserve the IPv6 Fragment Header's fragment geometry and
+    // Identification. Without one, RFC 7915 §5.1 keys DF on the translated
+    // IPv4 packet length: packets up to 1260 bytes stay fragmentable, while
+    // larger packets are atomic. The local no-v6-frag-header option remains
+    // an explicit override that keeps header-less packets fragmentable.
     let frag_info = ipv6_fragment_header(packet);
-    let (frag_word, identification): (u16, u16) = match frag_info {
-        Some(info) => {
-            let mf = if info.more { 0x2000u16 } else { 0 };
-            (mf | (info.offset_units & 0x1FFF), (info.ident & 0xFFFF) as u16)
-        }
-        None if no_v6_frag_header => (0x0000, next_frag_id()),
-        None => (0x4000, 0),
-    };
-    out[4..6].copy_from_slice(&identification.to_be_bytes()); // identification
-    out[6..8].copy_from_slice(&frag_word.to_be_bytes()); // flags + frag offset
     out[8] = new_ttl;
     out[9] = ipv4_protocol;
     out[10..12].copy_from_slice(&[0, 0]); // header checksum = 0 (computed below)
@@ -2644,6 +2604,16 @@ fn write_v6_to_v4_translate(
         return None;
     }
     out[2..4].copy_from_slice(&(ipv4_total_len as u16).to_be_bytes());
+    let (frag_word, identification): (u16, u16) = match frag_info {
+        Some(info) => {
+            let mf = if info.more { 0x2000u16 } else { 0 };
+            (mf | (info.offset_units & 0x1FFF), (info.ident & 0xFFFF) as u16)
+        }
+        None if no_v6_frag_header || ipv4_total_len <= 1260 => (0x0000, next_frag_id()),
+        None => (0x4000, 0),
+    };
+    out[4..6].copy_from_slice(&identification.to_be_bytes());
+    out[6..8].copy_from_slice(&frag_word.to_be_bytes());
 
     // L4 checksum after the IPv6→IPv4 pseudo-header change. The L4 payload is
     // byte-identical across NAT64 translation (verbatim copy for TCP/UDP), and
@@ -2689,6 +2659,50 @@ fn write_v6_to_v4_translate(
 
     Some(ipv4_total_len)
 }
+/// Length-only mirror of the v6→v4 translator for its pre-build MTU decision.
+/// It shares the extension-header and ICMP quote conversion rules, while
+/// avoiding a heap allocation or a copy of the ordinary transport payload.
+pub(crate) fn v6_to_v4_output_len(packet: &[u8]) -> Option<usize> {
+    if packet.len() < 40 || nat64_v6_translation_ineligible(packet) || packet[7] <= 1 {
+        return None;
+    }
+    let payload_len = u16::from_be_bytes([packet[4], packet[5]]) as usize;
+    let (l4_offset, l4_protocol) = ipv6_l4_offset_and_protocol(packet)?;
+    if ipv6_is_non_first_fragment(packet) {
+        return None;
+    }
+    let l4_end = 40usize.checked_add(payload_len)?;
+    if l4_offset > l4_end {
+        return None;
+    }
+    let l4_payload = packet.get(l4_offset..l4_end)?;
+    let l4_len = match l4_protocol {
+        PROTO_TCP | PROTO_UDP => l4_payload.len(),
+        PROTO_ICMPV6 => {
+            if ipv6_fragment_header(packet)
+                .is_some_and(|info| info.more || info.offset_units != 0)
+            {
+                return None;
+            }
+            match l4_payload.first().copied()? {
+                ICMPV6_ECHO_REQUEST | ICMPV6_ECHO_REPLY if l4_payload.len() >= 4 => {
+                    l4_payload.len()
+                }
+                ICMPV6_PACKET_TOO_BIG
+                | ICMPV6_DEST_UNREACHABLE
+                | ICMPV6_TIME_EXCEEDED
+                | ICMPV6_PARAMETER_PROBLEM => {
+                    translated_icmpv6_error_l4_len(l4_payload)?
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let total_len = 20usize.checked_add(l4_len)?;
+    (total_len <= u16::MAX as usize).then_some(total_len)
+}
+
 
 /// Translate an IPv4 packet to IPv6 (reverse direction: server→client reply).
 ///
@@ -3131,6 +3145,74 @@ struct EmbeddedV6ToV4 {
     mapped_embedded_dst_port: Option<u16>,
 }
 
+/// Borrowed translated-header view shared by the ICMP quote writer and its
+/// allocation-free MTU length preflight.
+struct EmbeddedV6ToV4Layout<'a> {
+    l4: &'a [u8],
+    traffic_class: u8,
+    hop_limit: u8,
+    ipv4_protocol: u8,
+    advertised_total: usize,
+    fragment_word: u16,
+    identification: u16,
+    l4_protocol: u8,
+}
+
+fn embedded_v6_to_v4_layout<'a>(embedded: &'a [u8]) -> Option<EmbeddedV6ToV4Layout<'a>> {
+    if embedded.len() < 40 {
+        return None;
+    }
+    // Clamp hostile or large quotes to the fixed stack-scratch contract. A
+    // shorter ICMP quote is always legal.
+    let quote_in = &embedded[..embedded.len().min(MAX_EMBEDDED_LEN)];
+    let payload_len = u16::from_be_bytes([quote_in[4], quote_in[5]]) as usize;
+    let hop_limit = quote_in[7];
+    let traffic_class = ((quote_in[0] & 0x0f) << 4) | (quote_in[1] >> 4);
+    let (l4_offset, l4_protocol) = ipv6_l4_offset_and_protocol(quote_in)?;
+    if ipv6_is_non_first_fragment(quote_in) {
+        return None;
+    }
+    let ipv4_protocol = match l4_protocol {
+        PROTO_ICMPV6 => PROTO_ICMP,
+        PROTO_TCP | PROTO_UDP => l4_protocol,
+        _ => return None,
+    };
+
+    let stripped_ext_len = l4_offset.checked_sub(40)?;
+    let translated_payload_len = payload_len.checked_sub(stripped_ext_len)?;
+    let advertised_total = 20usize.checked_add(translated_payload_len)?;
+    if advertised_total > u16::MAX as usize {
+        return None;
+    }
+    let payload_end = 40usize.checked_add(payload_len)?;
+    let quoted_end = payload_end.min(quote_in.len());
+    if l4_offset > quoted_end {
+        return None;
+    }
+    let l4 = quote_in.get(l4_offset..quoted_end)?;
+
+    // RFC 7915 §5.2 defers to §5.1 for embedded fragmentation fields. A
+    // non-first fragment was rejected above; copy the available first/atomic
+    // fragment geometry or keep header-less quote behavior unchanged.
+    let (fragment_word, identification) = match ipv6_fragment_header(quote_in) {
+        Some(info) => {
+            let more = if info.more { 0x2000u16 } else { 0 };
+            (more | (info.offset_units & 0x1FFF), (info.ident & 0xFFFF) as u16)
+        }
+        None => (0x4000, 0),
+    };
+    Some(EmbeddedV6ToV4Layout {
+        l4,
+        traffic_class,
+        hop_limit,
+        ipv4_protocol,
+        advertised_total,
+        fragment_word,
+        identification,
+        l4_protocol,
+    })
+}
+
 /// Address mapping for the embedded (quoted) packet of an ICMPv4 error being
 /// translated v4->v6. The embedded packet is the RETURN-direction original
 /// packet: its IPv4 source (our SNAT pool) maps to the original v6 client
@@ -3152,6 +3234,21 @@ struct EmbeddedV4ToV6 {
     mapped_embedded_src_port: Option<u16>,
 }
 
+
+fn translated_icmpv6_error_l4_len(src: &[u8]) -> Option<usize> {
+    let icmpv6_type = *src.first()?;
+    let icmpv6_code = *src.get(1)?;
+    if src.len() < 8 {
+        return None;
+    }
+    if icmpv6_type != ICMPV6_PACKET_TOO_BIG {
+        map_icmpv6_error_to_icmpv4(icmpv6_type, icmpv6_code)?;
+    }
+    let quote = embedded_v6_to_v4_layout(src.get(8..)?)?;
+    8usize
+        .checked_add(20)?
+        .checked_add(quote.l4.len())
+}
 /// Translate a complete ICMPv6 message (`src`, starting at the ICMPv6 type
 /// byte) into ICMPv4 in `dst`, returning the written ICMPv4 message length.
 ///
@@ -3369,63 +3466,8 @@ fn translate_embedded_v6_to_v4(
     embedded: &[u8],
     map: &EmbeddedV6ToV4,
 ) -> Option<usize> {
-    if embedded.len() < 40 {
-        return None; // need a full IPv6 header to translate
-    }
-    // Clamp the quoted bytes to the scratch capacity (a hostile or large quote
-    // must not overflow the fixed buffer); a clamp shortens the quote, which is
-    // always legal for an ICMP error.
-    let quote_in = &embedded[..embedded.len().min(MAX_EMBEDDED_LEN)];
-
-    let payload_len = u16::from_be_bytes([quote_in[4], quote_in[5]]) as usize;
-    let hop_limit = quote_in[7];
-    let traffic_class = ((quote_in[0] & 0x0f) << 4) | (quote_in[1] >> 4);
-
-    // #2290: walk the quoted IPv6 packet's extension-header chain to find the
-    // terminal L4 offset/protocol rather than assuming L4 at byte 40. The
-    // quote is frequently truncated (often to 8 bytes of L4), so the walk may
-    // run off the end of `quote_in`; in that case `ipv6_l4_offset_and_protocol`
-    // returns `None` and we fail closed — the same drop the outer translator
-    // takes — rather than misreading ext-header bytes as a transport header.
-    let (l4_offset, l4_protocol) = ipv6_l4_offset_and_protocol(quote_in)?;
-
-    // A non-first fragment carries no L4 header — its bytes are payload. Do
-    // not read them as L4 (drop), matching the outer translator (#2290).
-    if ipv6_is_non_first_fragment(quote_in) {
-        return None;
-    }
-
-    // Map protocol (same set the outer translator supports) from the terminal
-    // L4. An embedded packet carrying an unsupported protocol can't be
-    // faithfully translated -> drop.
-    let ipv4_protocol = match l4_protocol {
-        PROTO_ICMPV6 => PROTO_ICMP,
-        PROTO_TCP | PROTO_UDP => l4_protocol,
-        _ => return None,
-    };
-
-    // The quoted L4 starts at the walked offset and runs to the end of the
-    // advertised IPv6 payload (`40 + payload_len`), capped by the bytes
-    // actually quoted. The IPv6 extension headers between byte 40 and
-    // `l4_offset` are stripped, mirroring the outer translation.
-    //
-    // Keep the advertised IPv4 Total Length separate from the emitted quote
-    // length. RFC 7915 §5.2 preserves the original inner datagram's payload
-    // length after stripping extension headers; an ICMP error commonly carries
-    // only the IP header plus 8 L4 bytes.
-    let stripped_ext_len = l4_offset.checked_sub(40)?;
-    let translated_payload_len = payload_len.checked_sub(stripped_ext_len)?;
-    let advertised_total = 20usize.checked_add(translated_payload_len)?;
-    if advertised_total > u16::MAX as usize {
-        return None;
-    }
-    let payload_end = 40usize.checked_add(payload_len)?;
-    let quoted_end = payload_end.min(quote_in.len());
-    if l4_offset > quoted_end {
-        return None; // ext-header chain overran the quoted bytes
-    }
-    let l4 = quote_in.get(l4_offset..quoted_end)?;
-    let l4_len = l4.len();
+    let layout = embedded_v6_to_v4_layout(embedded)?;
+    let l4_len = layout.l4.len();
 
     // `total` is the bytes physically emitted into the fixed scratch buffer,
     // not the advertised length above. Never size this slice from a truncated
@@ -3433,8 +3475,8 @@ fn translate_embedded_v6_to_v4(
     let total = 20usize.checked_add(l4_len)?;
     let out = dst.get_mut(..total)?;
     out[0] = 0x45;
-    out[1] = traffic_class;
-    out[2..4].copy_from_slice(&(advertised_total as u16).to_be_bytes());
+    out[1] = layout.traffic_class;
+    out[2..4].copy_from_slice(&(layout.advertised_total as u16).to_be_bytes());
     // #9128: carry the quoted packet's fragmentation fields instead of pinning
     // ID=0 / DF=1 unconditionally. RFC 7915 §5.2 defers to §5.1 for the
     // embedded header, and §5.1 requires -- when a Fragment Header is present
@@ -3443,33 +3485,24 @@ fn translate_embedded_v6_to_v4(
     // this (see the `frag_word` computation in write_v6_to_v4_translate); only
     // the embedded twin pinned the fields.
     //
-    // Scope is narrow by construction: `ipv6_is_non_first_fragment` above
-    // already drops an offset != 0 quote (#2290), so the only quote that
-    // reaches here with a Fragment Header is a FIRST fragment -- offset 0,
-    // M=1. Copying the offset anyway keeps this arm correct rather than
-    // correct-only-because-of-a-guard-elsewhere.
+    // Non-first fragments are rejected by the shared layout; first and atomic
+    // Fragment Header geometry reaches the copy below.
     //
     // The unfragmented case is byte-identical to before (0x4000, ID 0), and
     // deliberately does NOT borrow the outer translator's `next_frag_id()`
     // arm: that mints a fresh Identification for a datagram this box is about
     // to send, whereas a quote describes a packet that already exists on the
     // wire. Inventing an ID for it would be a fabrication, not a translation.
-    let (embedded_frag_word, embedded_ident): (u16, u16) =
-        match ipv6_fragment_header(quote_in) {
-            Some(info) => {
-                let mf = if info.more { 0x2000u16 } else { 0 };
-                (mf | (info.offset_units & 0x1FFF), (info.ident & 0xFFFF) as u16)
-            }
-            None => (0x4000, 0),
-        };
+    let embedded_frag_word = layout.fragment_word;
+    let embedded_ident = layout.identification;
     out[4..6].copy_from_slice(&embedded_ident.to_be_bytes()); // identification
     out[6..8].copy_from_slice(&embedded_frag_word.to_be_bytes()); // flags+offset
-    out[8] = hop_limit; // embedded hop limit copied verbatim (NOT decremented)
-    out[9] = ipv4_protocol;
+    out[8] = layout.hop_limit; // embedded hop limit copied verbatim (NOT decremented)
+    out[9] = layout.ipv4_protocol;
     out[10..12].copy_from_slice(&[0, 0]); // header checksum (computed below)
     out[12..16].copy_from_slice(&map.mapped_embedded_src.octets());
     out[16..20].copy_from_slice(&map.mapped_embedded_dst.octets());
-    out[20..total].copy_from_slice(l4);
+    out[20..total].copy_from_slice(layout.l4);
 
     // #6472: restore the quoted L4 destination port / echo identifier to the
     // TRANSLATED (pool) value the v4 server replied to. The quoted L4
@@ -3478,9 +3511,9 @@ fn translate_embedded_v6_to_v4(
     // these bytes). A truncated quote (< the port/id bytes) skips the
     // rewrite, exactly like the non-matching-protocol case.
     if let Some(port) = map.mapped_embedded_dst_port {
-        if matches!(l4_protocol, PROTO_TCP | PROTO_UDP) && l4_len >= 4 {
+        if matches!(layout.l4_protocol, PROTO_TCP | PROTO_UDP) && l4_len >= 4 {
             out[22..24].copy_from_slice(&port.to_be_bytes());
-        } else if l4_protocol == PROTO_ICMPV6 && l4_len >= 6 {
+        } else if layout.l4_protocol == PROTO_ICMPV6 && l4_len >= 6 {
             out[24..26].copy_from_slice(&port.to_be_bytes());
         }
     }
@@ -3489,7 +3522,7 @@ fn translate_embedded_v6_to_v4(
     // quoted v4 packet is internally consistent (the quoted L4 checksum is left
     // as-is — it is not validated by a receiver). Only the leading type/code are
     // touched; a fuller embedded-ICMP translation is unnecessary for the quote.
-    if l4_protocol == PROTO_ICMPV6 && l4_len >= 2 {
+    if layout.l4_protocol == PROTO_ICMPV6 && l4_len >= 2 {
         if let Some((t, c)) = embedded_icmpv6_type_to_icmpv4(out[20]) {
             out[20] = t;
             out[21] = c;

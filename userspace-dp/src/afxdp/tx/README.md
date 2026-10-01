@@ -119,23 +119,19 @@ CoS guarantee-guard.
 
 - **Increment 1** — `compute_forwarded_egress_ptb`: the #2301/#2330/#2845
   Path-MTU-Discovery block. Given the source (inner) frame, meta, and
-  decision it derives the inner-source MTU, runs
-  `forwarded_egress_mtu_decision`, builds the ICMP Frag-Needed (v4) /
-  Packet-Too-Big (v6) reply (subject to RFC / #2472 rate-limit
-  suppression), and records the `egress_mtu_exceeded` exception. Returns
-  `(ptb_reply, mtu_signalled)`; the caller drops the oversized original
-  when `mtu_signalled` and enqueues `ptb_reply` at the finalizer.
+  decision it derives the inner-source MTU and builds the ICMP Frag-Needed
+  (v4) / Packet-Too-Big (v6) reply subject to RFC / #2472 rate-limit
+  suppression. NAT64 v6→v4 instead sizes the translated IPv4 packet: DF-clear
+  output is fragmented by the NAT64 builder when needed; oversized DF-set
+  output returns an IPv6 Packet-Too-Big. Both paths record their MTU outcome.
 
-  **The DF-CLEAR IPv4 oversize case is FORWARDED and now RECORDED (#9328).**
-  There is no IPv4 transit fragmenter in this dataplane. Verified by a
-  positive-controlled grep for MF/offset WRITERS: it finds the three in
-  `nat64.rs` (which copy MF and offset verbatim from an existing IPv6
-  Fragment Header — none splits a datagram) and nothing else, and nothing
-  in `tx/transmit/`, `tx/rings.rs` or `tx/drain/` compares a frame against
-  an MTU. The only length guard on the forward path is
-  `copy_frame_is_oversized`, which tests the UMEM chunk (4096), not the
-  egress MTU. So an oversized DF-clear datagram is submitted at full
-  length; what happens to it next is stated on `ForwardOversizeNoDf`.
+  **Ordinary DF-CLEAR IPv4 oversize forwards remain recorded (#9328); NAT64
+  v6→v4 is the fragmenting exception.** There is no general IPv4 transit
+  fragmenter for ordinary IPv4-to-IPv4 forwarding. The NAT64 v6→v4 builder
+  fragments its DF-clear translated output to the IPv4 next-hop MTU before
+  tunnel encapsulation. Other oversized DF-clear IPv4 datagrams are still
+  submitted at full length; what happens next is stated on
+  `ForwardOversizeNoDf`.
 
   Before #9328 that outcome was the SAME `EgressMtuDecision::Forward`
   value as a frame that fits, so it was booked as `enqueue_ok`,

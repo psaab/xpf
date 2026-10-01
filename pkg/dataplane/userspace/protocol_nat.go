@@ -341,13 +341,12 @@ type NAT64RuleSnapshot struct {
 	Prefix        string   `json:"prefix"`         // e.g. "64:ff9b::/96"
 	PoolAddresses []string `json:"pool_addresses"` // resolved IPv4 pool addresses
 	// NoV6FragHeader mirrors the global `security nat natv6v4
-	// no-v6-frag-header` knob. This is an option-gated LOCAL DF policy (not the
-	// size-driven RFC 7915 5.1 selection): when set, the IPv6->IPv4 translator
-	// clears DF so the translated IPv4 packet stays fragmentable (DF=0,
-	// non-atomic) and carries a generated non-zero, non-repeating
-	// Identification (RFC 6864 4.1) instead of the default DF=1 atomic framing.
-	// Replicated onto every NAT64 rule because the option is configured once at
-	// the natv6v4 level, not per rule-set.
+	// no-v6-frag-header` knob. When set, it is an explicit local override that
+	// keeps header-less IPv6->IPv4 outputs fragmentable (DF=0) regardless of
+	// size and carries a generated non-zero Identification. Otherwise RFC 7915
+	// §5.1 selects DF from the translated IPv4 total length. The flag is
+	// replicated onto every NAT64 rule because it is configured at the
+	// natv6v4 level, not per rule-set.
 	NoV6FragHeader bool `json:"no_v6_frag_header,omitempty"`
 	// #4559: IPv6-subscriber deterministic CGNAT (mode 2, NAPT64). These carry
 	// the referenced source pool's `port deterministic` block-allocation params
