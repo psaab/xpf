@@ -1112,8 +1112,8 @@ test-harness-ledger-lib:
 	@python3 -m unittest discover -s test/incus -p ledger_compare_test.py
 
 # Compare the newest run of GATE against the band over the last K>=3 green runs
-# at the same env. Exit 0 = within band / improved, 1 = regression or a FAIL
-# row, 2 = VOID / NO-BASELINE (undetermined -- NOT a pass).
+# at the same env and measurement scope. Exit 0 = within band / improved,
+# 1 = regression or a FAIL row, 2 = VOID / NO-BASELINE (undetermined -- NOT a pass).
 #   make harness-compare GATE=test-failover [ENV=loss-userspace-cluster]
 harness-compare:
 	@test -n "$(GATE)" || { echo "usage: make harness-compare GATE=<gate> [ENV=<env>]" >&2; exit 2; }

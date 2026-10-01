@@ -203,8 +203,14 @@ MUTATIONS = {
     ),
     "coverage-recipe-filter-dropped": (
         PY_FILE, "py",
-        '        ln for ln in makefile_text.splitlines() if ln.startswith("\\t")',
-        "        ln for ln in makefile_text.splitlines()",
+        """    recipe_text = "\\n".join(
+        ln for ln in makefile_text.splitlines() if ln.startswith("\\t")
+    )
+    wrapped = sorted(""",
+        """    recipe_text = "\\n".join(
+        ln for ln in makefile_text.splitlines()
+    )
+    wrapped = sorted(""",
         "the recipe-line restriction: comment prose mentioning --gate becomes "
         "a wrapped gate (#9922 F-087)",
     ),
@@ -390,6 +396,24 @@ MUTATIONS = {
         "        if isinstance(v, bool) or not isinstance(v, (int, float)):",
         "        if False:",
         "the numeric-metric contract in ledger-lint",
+    ),
+    "measurement-scope-filter-dropped": (
+        PY_FILE, "py",
+        "    matching = [\n        r for r in matching if _measurement_scope(r) == measurement_scope\n    ]",
+        "    matching = list(matching)",
+        "the same-scope restriction: a hermetic fixture enters a cluster baseline (#11343)",
+    ),
+    "coverage-scope-filter-dropped": (
+        PY_FILE, "py",
+        "        grows = [\n            r for r in all_grows if _measurement_scope(r) in expected_scopes\n        ]",
+        "        grows = list(all_grows)",
+        "the Makefile-scope restriction: a hermetic fixture satisfies a cluster gate (#11343)",
+    ),
+    "aggregate-selects-latest-scope": (
+        PY_FILE, "py",
+        '        scope = "cluster" if "cluster" in scopes else "hermetic"',
+        "        scope = _measurement_scope(rows_by_pair[pair][-1])",
+        "cluster red-watch selection: a later fixture hides an earlier live FAIL (#11343)",
     ),
 }
 

@@ -101,10 +101,40 @@ so a thirteenth gate added later cannot accumulate uncovered.
  "headline_metric":"throughput_gbps","headline_direction":"higher-better",
  "metrics":{"cells_passed":21,"cells_failed":0,"throughput_gbps":23.1},
  "build_git_sha":"1a56c19dc…","build_exe_sha256":"…","running_exe_sha256":"…",
- "exe_check":"MATCH","duration_s":412,"artifacts":null,"adapter":"ha-smoke",
+ "exe_check":"MATCH","measurement_scope":"cluster","duration_s":412,"artifacts":null,"adapter":"ha-smoke",
  "node":"loss:xpf-userspace-fw0","node_peer":"loss:xpf-userspace-fw1",
  "running_exe_sha256_peer":"…","exe_scope":"both"}
 ```
+
+### Measurement scope: cluster vs. hermetic
+
+`measurement_scope` says what produced the verdict: `cluster` for an actual
+cluster run, `hermetic` for a local fixture or other hermetic run. After parsing
+the wrapper flags, `harness_result_run` scans the child argv after `--` for the
+exact `--fixture` argument. If present, it runs and records the verdict as
+hermetic even when the wrapper was invoked with `--cluster`; cluster node
+readbacks and node attribution are disabled. The fixture verdict is retained,
+but it cannot claim that live traffic was measured.
+
+This is separate from `exe_scope`, which describes how much of the cluster a
+binary attestation covered. The cited legacy row
+`9c85fc15e973d2d4` therefore keeps its historical `exe_scope=both` readback
+while being tagged `measurement_scope=hermetic`: the readback names the images,
+but its metrics came from a fixture transcript.
+
+`ledger_compare` never bands rows of different measurement scopes together and
+prints the scope it compared. Its `--all` red-watch prefers the cluster series
+when one exists for a gate/environment pair, so a later fixture cannot hide an
+older live cluster failure; a hermetic-only pair remains visibly hermetic.
+Coverage reads each wrapper's `--cluster`/`--hermetic` mode from the Makefile
+recipe and counts only matching rows. A wrong-scope row is reported as
+`SCOPE-MISMATCH` and cannot satisfy cluster coverage.
+
+For additive compatibility, rows predating `measurement_scope` remain valid:
+`exe_scope=n/a` or `exe_check=NOT-APPLICABLE` is treated as hermetic; other
+legacy rows are treated as cluster rows. Known historic fixture rows are
+explicitly tagged in the ledger rather than inferred from binary-attestation
+fields.
 
 ### Provenance: which build actually produced the measurement
 
@@ -181,9 +211,10 @@ would red exactly the gates whose job is to kill a node — the same mistake the
 exit-status rule below refuses to make. That case records `exe_scope=local-only`
 instead, which a reader can tell apart from a whole-cluster `MATCH`.
 
-Both new fields are **additive**: `REQUIRED_KEYS` is unchanged, so every row
-already emitted still lints. An old row carries neither key, which is exactly
-the state it was emitted in — a single-node attestation with no way to say so.
+Peer-attestation and `measurement_scope` fields are **additive**:
+`REQUIRED_KEYS` is unchanged, so older rows still lint. A row without
+`measurement_scope` uses the legacy inference above; rows from before #9044
+also lack peer readback fields and retain their single-node meaning.
 
 ### The row's verdict and the gate's exit status are separate
 
@@ -264,8 +295,8 @@ Three rules carry the design:
    no dispersion, and a band drawn through them is a number wearing the shape
    of evidence.
 
-Rows from another env, another gate, a `FAIL` run, or a run whose headline
-metric was something else do not enter the baseline.
+Rows from another env, another gate, another measurement scope, a `FAIL` run,
+or a run whose headline metric was something else do not enter the baseline.
 
 FAIL rows inside the baseline window never enter the band, but they are
 counted and rendered (`window_fails` plus timestamps): a gate failing every
@@ -322,6 +353,13 @@ normal state of young gates. Each pair prints its full single-gate render
 (band, pinned baseline, window FAILs, invariants), then a summary counts
 red / undetermined / green.
 
+When a pair has both kinds of history, `--all` selects its cluster series for
+the red-watch; this ensures that a newer hermetic PASS or VOID cannot hide an
+older live cluster FAIL. Hermetic-only pairs remain in the aggregate with
+`measurement_scope=hermetic`. A single-gate comparison labels the scope of the
+newest row it compares.
+
+
 `--expected-red` tolerates known reds, one `gate env reason...` per line
 (the reason is REQUIRED — it is what makes a tolerated red reviewable).
 Exit 1 on an undeclared red pair OR a stale declaration: a tolerated red
@@ -339,6 +377,11 @@ expansions (the `harness-compare` recipe's `$(GATE)`) are excluded. Reached
 means a PASS or FAIL row in the gate's NEWEST env inside the trailing
 COVERAGE_WINDOW (5) ledger rows — one old measurement in a retired env, or
 outside the window, reports as STALE, never as covered.
+The expected scope comes from the corresponding Makefile wrapper mode. A
+hermetic `--fixture` row never satisfies a cluster recipe; it is surfaced as
+`SCOPE-MISMATCH` (and remains unreached) instead of being counted as cluster
+coverage.
+
 
 VOID rows do NOT count: a gate whose rows are all VOID never measured
 anything, and counting them would let it read green here and in the
@@ -446,6 +489,9 @@ which removes one guard at a time and asserts the cell suite goes RED:
 | `coverage-missing-check-dropped` | the missing half of the coverage census (F-087) |
 | `coverage-stale-check-dropped` | the shrink-only half of the coverage census (F-087) |
 | `coverage-recipe-filter-dropped` | the recipe-line restriction on the wrapped set (F-087) |
+| `measurement-scope-filter-dropped` | hermetic fixtures enter a cluster baseline (#11343) |
+| `coverage-scope-filter-dropped` | hermetic fixtures satisfy a cluster recipe (#11343) |
+| `aggregate-selects-latest-scope` | a newer fixture hides an older live failure (#11343) |
 | `ha-iperf-cell-prefix-dropped` | the cell-line anchor on throughput cells (F-155) |
 | `ha-iperf-last-match-dropped` | the LAST-match on throughput cells (F-155) |
 | `ha-pass-without-figure-scored-as-a-pass` | the no-figure VOID on iperf PASS (F-155) |

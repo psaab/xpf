@@ -956,7 +956,7 @@ import json,sys
 sys.path.insert(0, sys.argv[3])
 import ledger_compare as lc
 rows=lc._sorted_rows([json.loads(l) for l in lc.load_ledger_text(sys.argv[1]).splitlines() if l.strip()])
-print(rows[-1][sys.argv[2]] if rows else '<no rows>')
+print(rows[-1].get(sys.argv[2], '<missing>') if rows else '<no rows>')
 " "$LEDGER" "$1" "$SCRIPT_DIR"; }
 
 rm -rf "$LEDGER"
@@ -1207,6 +1207,26 @@ if [[ "$(last_row_field exe_scope)" == "local-only" ]]; then
 	ok "#9044: an unreadable peer records exe_scope=local-only, so a partial attestation is visibly partial"
 else
 	bad "#9044: exe_scope is '$(last_row_field exe_scope)', expected local-only — without it this row is indistinguishable from a whole-cluster MATCH, which IS the finding"
+fi
+
+# #11343. The child selects a hermetic fixture despite a cluster wrapper:
+# this verdict must not claim that either cluster node produced it.
+wire_fixture="$WORK/wire-routing-fixture.tsv"
+printf 'probe_offered=1000 probe_leaked=0 control_offered=1500 control_observed=1500 cksum_bad=0\n' >"$wire_fixture"
+incus() { echo "$fake_sha  /proc/1234/exe"; }
+(harness_result_run --ledger "$LEDGER" --cluster --env testenv --gate wire_routing_separation \
+	--adapter wire-gate --node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
+	-- bash "$SCRIPT_DIR/wire-routing-separation.sh" --fixture "$wire_fixture" >/dev/null 2>&1)
+fixture_rc=$?
+if [[ "$fixture_rc" == "0" &&
+	"$(last_row_field verdict)" == "PASS" &&
+	"$(last_row_field measurement_scope)" == "hermetic" &&
+	"$(last_row_field exe_check)" == "NOT-APPLICABLE" &&
+	"$(last_row_field exe_scope)" == "n/a" &&
+	"$(last_row_field node)" == "None" ]]; then
+	ok "#11343: --fixture under --cluster records a hermetic verdict, not a cluster measurement"
+else
+	bad "#11343: fixture rc=$fixture_rc scope=$(last_row_field measurement_scope) exe_check=$(last_row_field exe_check) exe_scope=$(last_row_field exe_scope) node=$(last_row_field node)"
 fi
 
 wire_target=$(sed -n '/^test-wire-routing-separation:/,/^$/p' \
