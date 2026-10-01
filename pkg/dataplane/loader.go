@@ -269,12 +269,20 @@ var shimPrePublishLoad = func(m *Manager) error {
 
 // CompileUserspaceShim runs the shared config compiler for its Linux interface
 // setup and metadata, but suppresses writes to legacy eBPF dataplane maps and
-// attaches only the retained userspace XDP shim. This keeps normal AF_XDP
-// startup independent from xdp_main and TC program objects.
-func (m *Manager) CompileUserspaceShim(cfg *config.Config) (*CompileResult, error) {
+// attaches only the retained userspace XDP shim. The optional beforeMutation
+// callback validates the userspace snapshot after the compiler's pure pre-pass
+// and before CompileConfig's first host mutation.
+func (m *Manager) CompileUserspaceShim(cfg *config.Config, beforeMutation ...func(*CompileResult) error) (*CompileResult, error) {
+	if len(beforeMutation) > 1 {
+		return nil, fmt.Errorf("CompileUserspaceShim accepts at most one pre-mutation callback")
+	}
+	var preMutationCheck func(*CompileResult) error
+	if len(beforeMutation) == 1 {
+		preMutationCheck = beforeMutation[0]
+	}
 	m.SelectUserspaceXDPShimEntryProgram()
 	compilerDP := userspaceShimCompileDataplane{Manager: m}
-	result, err := CompileConfig(compilerDP, cfg, m.lastCompile != nil)
+	result, err := CompileConfig(compilerDP, cfg, m.lastCompile != nil, preMutationCheck)
 	if err != nil {
 		return nil, err
 	}

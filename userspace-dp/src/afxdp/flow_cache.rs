@@ -51,6 +51,9 @@ pub(super) fn rg_epoch_index(owner_rg_id: i32) -> usize {
 pub(super) struct CachedTxSelectionDescriptor {
     pub(super) queue_id: Option<u8>,
     pub(super) dscp_rewrite: Option<u8>,
+    // #11430: preserve the filter-originating rewrite separately from the
+    // combined seed rewrite, so BA hits can replace only the stale CoS value.
+    pub(super) filter_dscp_rewrite: Option<u8>,
     pub(super) drop: bool,
     // #3608: `drop` collapses `then discard` and `then reject` (both
     // non-`Accept` terminal actions) into one bit. `reject` isolates the
@@ -67,15 +70,14 @@ pub(super) struct CachedTxSelectionDescriptor {
     pub(super) filter_counters: crate::filter::CachedFilterCounters,
     pub(super) three_color_policers: crate::filter::CachedThreeColorPolicers,
     pub(super) filter_log: Option<crate::filter::FilterLogMatch>,
-    // #3778: the cached `queue_id` is resolved from the SEED packet's DSCP /
-    // 802.1p PCP. Behavior-aggregate (BA) classifiers are per-packet in vSRX
-    // and the flow-cache key excludes DSCP/PCP, so when the queue was chosen by
-    // a BA classifier (NOT a 5-tuple-stable filter forwarding-class) it must be
-    // re-resolved per packet on the hit path. True iff a BA classifier is
-    // configured on the egress interface AND no filter forwarding-class pinned
-    // the queue; false keeps the frozen `queue_id` (default-queue / filter-FC /
-    // no-CoS flows), so the per-packet re-classify cost is paid only when it can
-    // change the queue.
+    // #3778/#11430: DSCP/PCP-based BA classifiers select both queue and
+    // loss-priority rewrite per packet; both fields are excluded from the flow
+    // cache key. When this flag is set, hits re-resolve the current queue and
+    // CoS rewrite. The separate `filter_dscp_rewrite` preserves filter
+    // precedence; when false, queue and combined rewrite remain seed-cached.
+    // True iff a BA classifier is configured on egress AND no 5-tuple-stable
+    // filter forwarding-class pinned the queue. This keeps default-queue,
+    // filter-FC, and no-CoS flows off the per-packet reclassification path.
     pub(super) ba_reclassify: bool,
 }
 

@@ -138,6 +138,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Route oversized same-binding flow-cache hits through pending-forward so
     normal egress MTU, PTB, and TCP-segmentation handling is preserved (#11376).
 
+  * Resolve native-fragment protocol 255 from the declared IP header before
+    filter, PBR, and CoS matching; unresolved sentinels no longer wildcard
+    protocol-constrained terms (#11338).
+
   * Expire DHCPv4/v6 stateful leases at their absolute deadline after failed
     T1/T2 renewal and reacquisition. Remove stale addresses and delegated
     prefixes, retain stateless DHCPv6 options across failed refreshes, and
@@ -147,6 +151,9 @@ xpf (0.0.0) unstable; urgency=medium
     segmentation, and PMTU signaling (#11411).
   * Refresh learned-route FIBs from coalesced kernel route events, and retry
     unresolved FIB-generation bumps without publishing once per event (#11565).
+  * Preflight userspace snapshots before host-mutating compiler phases, then
+    retain and report accepted snapshot generations when post-publish
+    reconciliation fails (#11080).
   * Keep selector-bearing ip rules out of destination-only FIB leaks, constrain
     explicit next hops to their route's routing instance, and scope/recheck
     transit martians on neighbor replay and final transmit (#11074).

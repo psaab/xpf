@@ -636,7 +636,7 @@ fn protocol_matching() {
 }
 
 #[test]
-fn protocol_bitmap_native_fragment_matches_unknown_protocol_v4_and_v6() {
+fn protocol_bitmap_rejects_unresolved_fragment_header_protocol_v4_and_v6_11338() {
     let state = make_filter_state(
         &[
             FirewallFilterSnapshot {
@@ -659,12 +659,23 @@ fn protocol_bitmap_native_fragment_matches_unknown_protocol_v4_and_v6() {
                     ..Default::default()
                 }],
             },
+            FirewallFilterSnapshot {
+                name: "proto-255".into(),
+                family: "inet".into(),
+                terms: vec![FirewallTermSnapshot {
+                    name: "deny-255".into(),
+                    protocols: vec!["255".into()],
+                    action: "discard".into(),
+                    ..Default::default()
+                }],
+            },
         ],
         &[],
     );
     let fragment_extra = || TermMatchExtra {
         is_fragment: true,
         l4_present: false,
+        native_fragment_sentinel: true,
         ..Default::default()
     };
 
@@ -681,8 +692,47 @@ fn protocol_bitmap_native_fragment_matches_unknown_protocol_v4_and_v6() {
             fragment_extra(),
         )
         .action,
+        FilterAction::Accept,
+        "unresolved native-fragment protocol must not match a TCP term"
+    );
+    assert_eq!(
+        evaluate_filter(
+            &state,
+            "inet:proto-255",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            0,
+            0,
+            0,
+            fragment_extra(),
+        )
+        .action,
+        FilterAction::Accept,
+        "unresolved sentinel 255 must not match the authorable protocol 255 term"
+    );
+    let actual_255_extra = TermMatchExtra {
+        is_fragment: true,
+        l4_present: false,
+        native_fragment_sentinel: true,
+        fragment_protocol: Some(255),
+        ..Default::default()
+    };
+    assert_eq!(
+        evaluate_filter(
+            &state,
+            "inet:proto-255",
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            0,
+            0,
+            0,
+            actual_255_extra,
+        )
+        .action,
         FilterAction::Discard,
-        "native-255 fragment must match the TCP protocol bitmap"
+        "a recovered wire protocol 255 must remain matchable"
     );
     assert_eq!(
         evaluate_filter(
@@ -729,8 +779,8 @@ fn protocol_bitmap_native_fragment_matches_unknown_protocol_v4_and_v6() {
             fragment_extra(),
         )
         .action,
-        FilterAction::Discard,
-        "native-255 IPv6 fragment must match the TCP protocol bitmap"
+        FilterAction::Accept,
+        "unresolved native-fragment protocol must not match an IPv6 TCP term"
     );
     assert_eq!(
         evaluate_filter(
@@ -3763,7 +3813,7 @@ fn lo0_filter_evaluation() {
 }
 
 #[test]
-fn lo0_protocol_filter_matches_native_255_and_keeps_decapped_protocol_exact_10676() {
+fn lo0_protocol_filter_does_not_wildcard_unresolved_native_fragment_11338() {
     let state = parse_filter_state(
         &[FirewallFilterSnapshot {
             name: "protect-fragments".into(),
@@ -3786,14 +3836,15 @@ fn lo0_protocol_filter_matches_native_255_and_keeps_decapped_protocol_exact_1067
     let fragment_extra = || TermMatchExtra {
         is_fragment: true,
         l4_present: false,
+        native_fragment_sentinel: true,
         ..Default::default()
     };
 
     for (label, protocol, expected) in [
         (
-            "native-255",
+            "unresolved-native-255",
             crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
-            FilterAction::Discard,
+            FilterAction::Accept,
         ),
         ("decapped-tcp", crate::ip_proto::PROTO_TCP, FilterAction::Discard),
         ("decapped-udp", crate::ip_proto::PROTO_UDP, FilterAction::Accept),

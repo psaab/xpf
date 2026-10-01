@@ -143,7 +143,7 @@ pub(in crate::afxdp) enum CachedTxTuple<'a> {
     /// error/control packet, both of which carry no usable L4 ports
     /// (#2344/#3290). `wire_l3` is the POST-NAT L3-only on-wire tuple, built the
     /// way the flow-bearing path builds its wire key
-    /// (`forward_request::l3_wire_session_flow_from_meta` -> `forward_wire_key`),
+    /// (`forward_request::l3_wire_session_flow_from_frame` -> `forward_wire_key`),
     /// so family, addresses and protocol move together BY CONSTRUCTION rather
     /// than as three reads that can drift apart. Its ports are never read: this
     /// arm evaluates through the PORTLESS evaluator (#7992).
@@ -172,7 +172,7 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_selection(
 /// #8367: cached TX-selection for a FLOWLESS packet. `wire_l3` is REQUIRED and
 /// must be the POST-NAT on-wire L3 tuple — the same value the flow-bearing seed
 /// path derives with `forward_wire_key(&flow.forward_key, decision.nat)` and the
-/// fresh flowless arm derives with `l3_wire_session_flow_from_meta` (#7656).
+/// fresh flowless arm derives with `l3_wire_session_flow_from_frame` (#7656).
 /// Passing the raw ingress `meta` tuple here for a NAT'd packet reintroduces the
 /// #8367 defect; there is deliberately no entry point that lets the key be
 /// omitted, because "no tuple" and "the pre-NAT tuple" are not the same answer
@@ -240,7 +240,7 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_queue_id(
 /// shape of a refactor. It is NOT the file's only spelling of the chain —
 /// `resolve_cos_tx_selection_internal`'s flowless arm takes a
 /// `ForwardPacketMeta` rather than a `UserspaceDpMeta`, and
-/// `reclassify_cached_ba_queue` ends the chain with `.or(Some(default))`
+/// `reclassify_cached_ba_queue_and_lp_rewrite` ends the chain with `.or(Some(default))`
 /// instead of `.unwrap_or(default)` because its caller needs the `Option`.
 /// Folding those in is a separate change with its own risk.
 fn flowless_cos_ba_queue_id(iface: &CoSInterfaceConfig, meta: UserspaceDpMeta) -> u8 {
@@ -398,6 +398,7 @@ fn cached_cos_tx_selection_flowless(
     CachedTxSelectionDescriptor {
         queue_id,
         dscp_rewrite,
+        filter_dscp_rewrite: None,
         drop,
         reject,
         reject_message,
@@ -579,13 +580,10 @@ fn resolve_cached_cos_tx_selection_impl(
                 || !iface.inet_precedence_classifier.is_empty()
         });
 
-    // #3995: fold the loss-priority-aware CoS rewrite-rule DSCP for the chosen
-    // queue (filter DSCP rewrite keeps precedence). The loss-priority derives
-    // from the seed packet's ingress DSCP/PCP; for a BA-reclassify flow the
-    // frozen queue may shift per packet, so the resolved rewrite reflects the
-    // seed packet's queue/loss-priority (correct for the common stable-marking
-    // flow; a mixed-marking flow keeps the seed rewrite rather than tracking
-    // every packet's loss-priority).
+    // #3995/#11430: include the seed packet's CoS rewrite for the resolved
+    // queue/loss-priority pair. The cache hit re-resolves that CoS part when
+    // `ba_reclassify` is set; `effective_dscp_rewrite` remains separate in the
+    // descriptor so a filter rewrite continues to take precedence.
     let cos_rewrite = queue_id.and_then(|queue_id| {
         resolve_cos_queue_lp_rewrite(
             forwarding,
@@ -600,6 +598,7 @@ fn resolve_cached_cos_tx_selection_impl(
     CachedTxSelectionDescriptor {
         queue_id,
         dscp_rewrite: effective_dscp_rewrite.or(cos_rewrite),
+        filter_dscp_rewrite: effective_dscp_rewrite,
         drop: output_result.action != crate::filter::FilterAction::Accept,
         // #3608: the cached-descriptor `drop` above is the OUTPUT filter's
         // terminal action only (the three-color policer runs separately at
@@ -621,34 +620,44 @@ fn resolve_cached_cos_tx_selection_impl(
     }
 }
 
-/// #3778: re-resolve the per-packet behavior-aggregate (DSCP / IEEE 802.1p PCP)
-/// classifier queue on a flow-cache HIT. The cached TX-selection descriptor
-/// froze the SEED packet's queue, but BA classifiers select the egress queue
-/// from EACH packet's DSCP / PCP (the flow-cache key excludes both), so a
-/// mixed-marking flow would otherwise be pinned to the first packet's queue.
-/// Called on the hit path ONLY when the descriptor set `ba_reclassify` (a BA
-/// classifier is active AND no filter forwarding-class pinned the queue), so
-/// the common no-CoS / filter-FC / default-queue flows never pay for it. One
-/// FastMap lookup + two array reads, allocation-free. Precedence matches the
-/// seed-time resolution: DSCP classifier, then 802.1p, then default queue.
-pub(in crate::afxdp) fn reclassify_cached_ba_queue(
+/// #3778/#11430: re-resolve the per-packet BA queue and its CoS loss-priority
+/// DSCP rewrite on a flow-cache HIT. The queue and rewrite both depend on this
+/// packet's DSCP/PCP, neither of which is part of the flow-cache key. The seed
+/// path uses the same `resolve_cos_queue_lp_rewrite` lookup; the hit path calls
+/// this helper only when the descriptor set `ba_reclassify` (a BA classifier is
+/// active and no filter forwarding-class pinned the queue).
+///
+/// Returns `None` only when the egress interface has no CoS state. Otherwise
+/// returns the packet's queue and the `(queue, loss-priority)` rewrite, if one
+/// is configured. The caller retains cached filter rewrite precedence and does
+/// not fall back to a seed CoS rewrite when this lookup has no result.
+pub(in crate::afxdp) fn reclassify_cached_ba_queue_and_lp_rewrite(
     forwarding: &ForwardingState,
     egress_ifindex: i32,
     dscp: u8,
     ingress_pcp: u8,
     ingress_vlan_present: bool,
-) -> Option<u8> {
+) -> Option<(u8, Option<u8>)> {
     forwarding
         .cos
         .interfaces
         .get(&egress_ifindex)
         .and_then(|iface| {
-            resolve_cos_dscp_classifier_queue_id(iface, dscp)
+            let queue_id = resolve_cos_dscp_classifier_queue_id(iface, dscp)
                 .or_else(|| resolve_cos_inet_precedence_classifier_queue_id(iface, dscp))
                 .or_else(|| {
                     resolve_cos_ieee8021_classifier_queue_id(iface, ingress_pcp, ingress_vlan_present)
                 })
-                .or(Some(iface.default_queue))
+                .or(Some(iface.default_queue))?;
+            let dscp_rewrite = resolve_cos_queue_lp_rewrite(
+                forwarding,
+                egress_ifindex,
+                queue_id,
+                dscp,
+                ingress_pcp,
+                ingress_vlan_present,
+            );
+            Some((queue_id, dscp_rewrite))
         })
 }
 
@@ -1185,13 +1194,12 @@ fn resolve_cos_loss_priority(
     0
 }
 
-/// #3995: resolve the egress DSCP rewrite for (this packet's egress queue, this
-/// packet's classifier loss-priority). Returns `None` when the interface has no
-/// loss-priority rewrite tables, or the (queue, loss-priority) pair has no
-/// configured code-point — so the caller keeps any filter DSCP rewrite / no
-/// rewrite. This is deterministic per flow (the loss-priority derives from the
-/// flow's ingress code-point) and is therefore cached per-flow exactly like the
-/// pre-existing filter DSCP rewrite.
+/// #3995/#11430: resolve the egress DSCP rewrite for this packet's egress
+/// queue and classifier loss-priority. Returns `None` when the interface has
+/// no loss-priority rewrite table or the current `(queue, loss-priority)` pair
+/// has no configured code-point. BA cache hits call this with the current
+/// packet's DSCP/PCP and re-resolved queue; a filter DSCP rewrite still takes
+/// precedence over this CoS result.
 fn resolve_cos_queue_lp_rewrite(
     forwarding: &ForwardingState,
     egress_ifindex: i32,

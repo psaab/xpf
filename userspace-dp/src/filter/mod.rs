@@ -483,18 +483,25 @@ pub(crate) struct TermMatchExtra<'a> {
     /// zeroed value is indistinguishable from a real one. Ports were the case
     /// that rule had not been applied to.
     pub(crate) ports_unknown: bool,
+    /// Whether packet metadata carried the XDP shim's native-fragment no-L4
+    /// sentinel. When the matcher argument is 255, constrained protocol terms
+    /// use `fragment_protocol`; `None` means the IP header could not be resolved
+    /// and those terms fail closed. `Some(255)` represents an actual wire
+    /// protocol 255, distinct from an unresolved sentinel.
+    pub(crate) native_fragment_sentinel: bool,
+    /// Protocol recovered from the IP header for a frame-backed native sentinel.
+    pub(crate) fragment_protocol: Option<u8>,
 }
 
-// #7212 CONTRACT, stated here because this is where the next author looks.
-// `Filter::varies_per_packet_within_flow()` summarises the reads of this struct
-// made by `per_packet_l4_matches` ALONE. It does NOT summarise
-// `port_terms_match`, which reads `is_fragment` / `l4_present` /
-// `ports_unknown` gated on a PORT constraint. The static input-filter
-// revalidation depends on knowing exactly which reads that predicate covers, so
-// it passes `TermMatchExtra::default()` and derives the flow's 5-tuple verdict
-// rather than this packet's. A new read of this struct from outside
-// `per_packet_l4_matches` must be re-checked against that argument — see the
-// `Never` bullet in `filter/README.md`.
+// #7212/#11338 CONTRACT, stated here because this is where the next author looks.
+// `Filter::varies_per_packet_within_flow()` summarises reads of this struct
+// made by `per_packet_l4_matches` ALONE. `port_terms_match` also reads
+// `is_fragment` / `l4_present` / `ports_unknown` when a PORT constraint exists.
+// The protocol matcher reads the sentinel marker here too; the frame builder
+// supplies the recovered header value when available. Session revalidation
+// evaluates the flow key's protocol with `TermMatchExtra::default()`, not the
+// metadata sentinel. Any new read of this struct outside those consumers must
+// be checked against static revalidation and the `Never` bullet in `filter/README.md`.
 
 
 impl<'a> TermMatchExtra<'a> {
@@ -514,6 +521,8 @@ impl<'a> TermMatchExtra<'a> {
             icmp_type: self.icmp_type,
             icmp_code: self.icmp_code,
             ports_unknown: self.ports_unknown,
+            native_fragment_sentinel: self.native_fragment_sentinel,
+            fragment_protocol: self.fragment_protocol,
             l4_present: self.l4_present,
             flex_l3: None,
             // #3232: drop the borrowed L4 slice too — a deferred path cannot

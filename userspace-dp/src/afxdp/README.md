@@ -111,8 +111,9 @@ sync.
       - **#3026 / #6102 — generated ICMP error (Time Exceeded + egress-MTU
         Packet-Too-Big):** `icmp.rs`
         (`build_local_time_exceeded_request`) and the TX dispatch PTB path
-        (`compute_forwarded_egress_ptb` build + `enqueue_pending_forwards`
-        classify) resolve the LOGICAL egress unit ifindex once via the SSOT
+        (`compute_forwarded_egress_ptb` build +
+        `enqueue_forwarded_ptb_reply` classify) resolve the LOGICAL egress unit
+        ifindex once via the SSOT
         (`resolve_ingress_logical_ifindex`, from the physical
         `ingress_ident.ifindex` + `meta.ingress_vlan_id`) and key the egress
         lookup, the reply BUILD, and the output-filter/CoS classify off THAT,
@@ -125,6 +126,10 @@ sync.
         parent's filter/CoS. `target_ifindex` (physical) is still used for the
         XSK transmit, and the #5856 per-zone rate-limit bucket deliberately
         stays keyed on the PHYSICAL `ingress_ident.ifindex`.
+      - **#11410 — cold-neighbor replay:** `neighbor_dispatch.rs::retry_pending_neigh`
+        uses the same PTB build/classify helpers after the replay output-filter
+        drop verdict, so permitted oversized packets are signalled and dropped
+        before direct TX.
       - **#3035 — generated SYN-cookie / reject reply:**
         `poll_descriptor/cookie_reply.rs` (SYN-cookie SYN-ACK / ACK-RST)
         `poll_descriptor/reject_reply.rs` (policy/filter `reject` TCP RST or
@@ -710,7 +715,7 @@ sync.
     been post-NAT for any NAT since #7656 (`forward_wire_key` rewrites
     `src`/`dst` unconditionally; only family and the ICMP/ICMPv6 swap are gated
     on `nat.nat64`) — but every #7656 cell is NAT64, so that was right by side
-    effect and unbound: narrowing `l3_wire_session_flow_from_meta` to
+    effect and unbound: narrowing `l3_wire_session_flow_from_frame` to
     `if nat.nat64 { forward_wire_key(..) }` left 5251 of 5252 cells green.
     Cells: `flowless_snat_egress_output_filter_matches_the_postnat_tuple_8367`
     (`tests_fragment.rs`, end-to-end interface SNAT, address-bearing terms on
@@ -1199,23 +1204,22 @@ sync.
   the captured set is deduped against `tx_selection.filter_counters`
   (`retain_absent_from`) so a count-plus-forwarding-class input term the cos
   TX-selection rebuild already folded in is not recorded twice.
-  **Per-packet CoS BA classifier on cache hits (#3778):** DSCP / IEEE 802.1p
-  behavior-aggregate classifiers pick the egress queue from EACH packet's
-  DSCP / PCP, but the flow-cache key excludes both, so the cached TX-selection
-  froze the SEED packet's queue. `resolve_cached_cos_tx_selection` now sets
-  `CachedTxSelectionDescriptor::ba_reclassify` when the queue was NOT pinned by
-  a (5-tuple-stable) filter forwarding-class AND a BA classifier is configured
-  on the egress interface; `flow_cache_hit.rs` then re-resolves the queue per
-  packet via `reclassify_cached_ba_queue` (one FastMap lookup + two array
-  reads, gated by the flag so filter-FC-pinned / default-queue / no-CoS flows
-  keep the frozen queue for free). A `then forwarding-class` filter term stays
-  cached (its queue is 5-tuple-stable); only the DSCP/PCP-derived queue is
-  per-packet. The IEEE 802.1p (PCP) arm of `reclassify_cached_ba_queue` is
-  pinned by `txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422` (#4422): a
-  priority-tagged (VID 0) PCP-0 packet seeds the default queue and a same-5-tuple
-  PCP-5 hit must re-classify to the EF queue on an interface carrying ONLY an
-  802.1p classifier — the DSCP arm was already pinned by
-  `..._ba_dscp_..._3778`.
+  **Per-packet CoS BA queue and LP rewrite on cache hits (#3778/#11430):** DSCP /
+  IEEE 802.1p behavior-aggregate classifiers select each packet's egress queue
+  and classifier-assigned loss priority; the flow-cache key excludes DSCP/PCP.
+  When the seed sets `CachedTxSelectionDescriptor::ba_reclassify` (a BA
+  classifier is configured and no filter forwarding-class pinned the queue),
+  `flow_cache_hit.rs` re-resolves this packet's queue and `(queue,
+  loss-priority)` CoS rewrite. The cached filter rewrite is retained separately
+  and keeps precedence; absent a filter rewrite, the per-packet CoS result
+  replaces the seed's CoS rewrite. Default-queue, filter-FC-pinned, and no-CoS
+  flows keep their cached selection. The reclassification remains allocation-
+  free and gated by `ba_reclassify`.
+  `txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778` pins the DSCP queue
+  arm; `txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422` pins the PCP
+  queue arm; `txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430`
+  covers BE/EF transitions in both seed orders, all four queue/LP cells, and
+  filter rewrite precedence.
   **TTL/hop-limit precedes egress accounting on cache hits (#3779):** the
   cache-hit path used to run the output `then count` replay, the policy hit
   counter, the three-color policers, the filter logs, and the terminal drop
@@ -1242,17 +1246,16 @@ sync.
   single `FilterLogMatch` (`cached_descriptor.input_filter_log` /
   `tx_selection.filter_log`) frozen when the flow was cached from its SEED
   packet, so every hit logs the seed's matched `then log` term. This is a
-  deliberate caching approximation in the same family as the frozen SEED queue
-  (#3778): the flow-cache key excludes DSCP/PCP, so a filter whose `then log`
-  term selection turns on a per-packet field (DSCP) logs the seed's term for
-  the whole cached flow rather than re-evaluating the filter on each hit. The
-  5-tuple-stable common case is exact; re-running the cold-path filter
-  evaluation per packet purely to correct a `then log` term would defeat the
-  cache. Contrast the `then count` side, which #2573 (output) and #3777 (input)
-  fixed to replay EVERY matched counter — a count is a cheap handle bump, a log
-  is a full RT_FLOW event, so the count/log asymmetry is intentional. Per-packet
-  BA-classifier queue selection is already corrected (#3778, above); the
-  per-packet filter-log term is not.
+  deliberate caching approximation limited to filter-log term selection: the
+  BA queue and CoS rewrite are re-resolved per packet (#3778/#11430 above), but a
+  filter whose `then log` term selection turns on a per-packet field (DSCP) logs
+  the seed's term for the whole cached flow rather than re-evaluating the filter
+  on each hit. The 5-tuple-stable common case is exact; re-running the cold-path
+  filter evaluation per packet purely to correct a `then log` term would defeat
+  the cache. Contrast the `then count` side, which #2573 (output) and #3777
+  (input) fixed to replay EVERY matched counter — a count is a cheap handle bump,
+  a log is a full RT_FLOW event, so the count/log asymmetry is intentional.
+  Per-packet filter-log term selection remains seed-captured.
   **DSCP-rewrite `let _` is a benign no-op, not a silent failure (#4423
   M3/M4):** `apply_dscp_rewrite_to_frame` (`frame/mod.rs`) returns `None` when
   the frame has no IPv4/IPv6 DSCP field to rewrite — a non-IP frame (ARP, etc.)
