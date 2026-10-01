@@ -113,6 +113,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Warn about and exclude static routes without a forwarding disposition, so
     they cannot shadow an installable less-specific route in the helper FIB
     (#11327).
+  * Defer never-seen HA absence confirmation while connected session-sync
+    receive proof is fresh; preserve startup grace and readiness gates (#11566).
   * Reject undeclared fields in named API-auth credentials and validate
     API-auth class references; reconcile the schema-census inventories
     (#11544).
