@@ -71,11 +71,13 @@ func nextTableRouteCount(cfg *Config) int {
 }
 
 // ribGroupImportsMain mirrors pkg/routing.ribGroupLeaksIntoMain and
-// resolveRibTable: only an import that resolves to the main table installs a
-// phase-one leak. This resolver is duplicated to avoid an import cycle, so
-// keep its table-ID and exact-suffix matching in sync. Unknown imports remain
-// fail-closed, as in the applier.
-func ribGroupImportsMain(groupName string, groups map[string]*RibGroup, tableIDs map[string]int) bool {
+// resolveRibTable: only an import that resolves to the selected main RIB
+// family installs a Phase-1 leak. mainRIBName is "inet.0" for the IPv4 slot
+// or "inet6.0" for the IPv6 slot. This resolver is duplicated to avoid an
+// import cycle, so keep its table-ID and exact-suffix matching in sync. A
+// sibling-family main RIB must not enable this slot; named-instance ribs still
+// resolve to their shared Linux table ID as in the applier.
+func ribGroupImportsMain(groupName string, groups map[string]*RibGroup, tableIDs map[string]int, mainRIBName string) bool {
 	if groupName == "" {
 		return false
 	}
@@ -84,7 +86,7 @@ func ribGroupImportsMain(groupName string, groups map[string]*RibGroup, tableIDs
 		return false
 	}
 	for _, ribName := range group.ImportRibs {
-		if ribName == "inet.0" || ribName == "inet6.0" {
+		if ribName == mainRIBName {
 			return true
 		}
 		instance, ok := ribInstanceFromName(ribName)
@@ -121,8 +123,8 @@ func ribGroupLeakPrefixCount(cfg *Config) int {
 		if instance == nil {
 			continue
 		}
-		leakV4 := ribGroupImportsMain(instance.InterfaceRoutesRibGroup, ribGroups, tableIDs)
-		leakV6 := ribGroupImportsMain(instance.InterfaceRoutesRibGroupV6, ribGroups, tableIDs)
+		leakV4 := ribGroupImportsMain(instance.InterfaceRoutesRibGroup, ribGroups, tableIDs, "inet.0")
+		leakV6 := ribGroupImportsMain(instance.InterfaceRoutesRibGroupV6, ribGroups, tableIDs, "inet6.0")
 		if !leakV4 && !leakV6 {
 			continue
 		}

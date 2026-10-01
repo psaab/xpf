@@ -298,4 +298,19 @@ func TestRibGroupWindowGateVRFOnlyAndMainImport11397(t *testing.T) {
 			t.Fatalf("1500 main-table leaks must be rejected with their count, got %v", err)
 		}
 	})
+	t.Run("sibling-family main import counts zero and commits", func(t *testing.T) {
+		cfg := mkLeakingInstance(1500, "inet")
+		cfg.RoutingOptions.RibGroups["leak"].ImportRibs = []string{"inet6.0"}
+		if got := ribGroupLeakPrefixCount(cfg); got != 0 {
+			t.Fatalf("v4 slot importing only inet6.0 counts %d leaks, want 0", got)
+		}
+		if err := validateRoutingRuleWindowsStrict(cfg); err != nil {
+			t.Fatalf("v4 slot importing only inet6.0 must not consume leak slots: %v", err)
+		}
+
+		sets := ribGroupPrefixSets(1500, "inet6.0")
+		if _, err := CompileConfig(flatTreeFromSets(t, sets...)); err != nil {
+			t.Fatalf("1500 v4 prefixes imported only from inet6.0 must commit: %v", err)
+		}
+	})
 }
