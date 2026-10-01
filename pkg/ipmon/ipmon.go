@@ -539,7 +539,11 @@ func (e *Engine) HandleTransition(t rpm.Transition) {
 	}
 	e.failedTests[t.ProbeName][t.TestName] = t.Status == "fail"
 	changed := e.evaluateLocked(e.now())
-	e.markDirtyLocked(changed)
+	if changed && t.TakeoverBurst && t.Status == "fail" {
+		e.loop.MarkImmediately()
+	} else {
+		e.markDirtyLocked(changed)
+	}
 	e.mu.Unlock()
 	if changed {
 		e.kickLoop()
@@ -547,9 +551,9 @@ func (e *Engine) HandleTransition(t rpm.Transition) {
 }
 
 // SetPublishEnabled gates overlay publication (HA primary-only, §4.4).
-// Flipping the gate triggers an actuation: on standby the baseline is
-// published; on takeover the baseline goes out first and the overlay
-// follows fresh probe results.
+// A gate flip immediately reconciles the baseline/overlay, subject to the
+// shared actuation throttle; a takeover cannot leave traffic on the baseline
+// for an additional debounce window after its fresh failure verdict.
 func (e *Engine) SetPublishEnabled(enabled bool) {
 	e.mu.Lock()
 	if e.publishEnabled == enabled {
@@ -557,7 +561,7 @@ func (e *Engine) SetPublishEnabled(enabled bool) {
 		return
 	}
 	e.publishEnabled = enabled
-	e.markDirtyLocked(true)
+	e.loop.MarkImmediately()
 	e.mu.Unlock()
 	e.kickLoop()
 	slog.Info("ip-monitoring overlay publication gate changed", "enabled", enabled)

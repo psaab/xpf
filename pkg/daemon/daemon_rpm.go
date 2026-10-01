@@ -374,6 +374,16 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 // transition. Safe to call from applyConfigLocked AND from other
 // reconcile paths; rpmMu serializes callers.
 func (d *Daemon) reconcileRPM(cfg *config.Config) bool {
+	return d.reconcileRPMMode(cfg, false)
+}
+
+// reconcileRPMForHATransition re-evaluates probes after an RG state change;
+// newly enabled ip-monitoring probes get an immediate initial burst.
+func (d *Daemon) reconcileRPMForHATransition(cfg *config.Config) bool {
+	return d.reconcileRPMMode(cfg, true)
+}
+
+func (d *Daemon) reconcileRPMMode(cfg *config.Config, haTransition bool) bool {
 	if d.rpm == nil || d.daemonCtx == nil || cfg == nil {
 		return false
 	}
@@ -381,6 +391,10 @@ func (d *Daemon) reconcileRPM(cfg *config.Config) bool {
 	defer d.rpmMu.Unlock()
 
 	effective := d.effectiveRPMConfig(cfg)
+	var burstProbeNames map[string]struct{}
+	if haTransition {
+		burstProbeNames = newlyEnabledIPMonProbeNames(cfg, d.rpmEffective, effective)
+	}
 	rethMap := cfg.RethToPhysical()
 	h := rpmConfigHash(effective, rethMap)
 	applyPins := d.probePinApplyFn()
@@ -393,20 +407,16 @@ func (d *Daemon) reconcileRPM(cfg *config.Config) bool {
 	}
 
 	// Pin state follows the prober lifecycle: clear-and-program the
-	// reserved band alongside every probe re-apply. ONE ordering for
-	// every full apply (installer or not, Codex PR #1899 r2/r3):
-	// hold the union of old (live) and new pinned tests FIRST, mutate
-	// state (kernel band reprogram, or nothing when no installer
-	// exists), and publish the real per-pin results only AFTER
-	// rpm.Apply — old goroutines (old marks, possibly removed keys)
-	// stay held until Apply's StopAll drains them, and the new
-	// goroutines start against the pre-hold map and pick up the real
-	// results on their next gate check. First probe cycle after an
-	// RPM config change may therefore hold — bounded by one
-	// test-interval, the safe direction. With no installer at all,
-	// every configured pin is failed by definition
-	// (errNoProbePinInstaller) — never let a next-hop test probe with
-	// a marked-but-unbacked socket.
+	// reserved band alongside every probe re-apply. Hold the union of
+	// old (live) and new pinned tests FIRST, then mutate the kernel band.
+	// A regular Apply publishes results afterwards: old goroutines stay
+	// held until StopAll drains them, and new goroutines see the real
+	// results on their next gate check. The HA burst apply publishes
+	// results after StopAll but before starting new goroutines, so the
+	// burst cannot be consumed by the temporary reprogram hold. With no
+	// installer, every configured pin is failed by definition
+	// (errNoProbePinInstaller) — never let a next-hop test probe with a
+	// marked-but-unbacked socket.
 	d.rpm.HoldPinsForReprogram(probePinKeys(pins), errProbePinReprogram)
 	var failed map[string]error
 	if applyPins != nil {
@@ -426,8 +436,12 @@ func (d *Daemon) reconcileRPM(cfg *config.Config) bool {
 	d.maybeStartPinRetryLoopLocked()
 
 	d.rpm.SetRethMap(rethMap)
-	d.rpm.Apply(d.daemonCtx, effective)
-	d.rpm.SetPinInstallResults(failed)
+	if len(burstProbeNames) > 0 {
+		d.rpm.ApplyWithProbeBurst(d.daemonCtx, effective, burstProbeNames, failed)
+	} else {
+		d.rpm.Apply(d.daemonCtx, effective)
+		d.rpm.SetPinInstallResults(failed)
+	}
 	d.activeRPMHash = h
 	probes := 0
 	if effective != nil {
@@ -435,4 +449,31 @@ func (d *Daemon) reconcileRPM(cfg *config.Config) bool {
 	}
 	slog.Info("RPM probe set applied", "probes", probes)
 	return true
+}
+func newlyEnabledIPMonProbeNames(cfg *config.Config, previous, effective *config.RPMConfig) map[string]struct{} {
+	if cfg == nil || previous == nil || effective == nil || cfg.Services.IPMonitoring == nil {
+		return nil
+	}
+	gated := rpmProbeGatingRGs(cfg)
+	var burst map[string]struct{}
+	for _, policy := range cfg.Services.IPMonitoring.Policies {
+		if policy == nil || policy.MatchRPMProbe == "" {
+			continue
+		}
+		name := policy.MatchRPMProbe
+		if _, isHAGated := gated[name]; !isHAGated {
+			continue
+		}
+		if _, wasActive := previous.Probes[name]; wasActive {
+			continue
+		}
+		if probe, nowActive := effective.Probes[name]; !nowActive || probe == nil {
+			continue
+		}
+		if burst == nil {
+			burst = make(map[string]struct{})
+		}
+		burst[name] = struct{}{}
+	}
+	return burst
 }

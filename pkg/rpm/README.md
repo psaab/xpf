@@ -27,8 +27,13 @@ out-of-range value to a warning.
   (#1827). The generation orders snapshots from concurrent test goroutines
   for `pkg/ipmon`, which ignores callbacks older than one already accepted.
 - `New()` — `rpm.go`.
-- `Apply(ctx context.Context, cfg *config.RPMConfig)` — `rpm.go`.
-- `StopAll()` — `rpm.go`.
+- `Apply(ctx, cfg)` — `rpm.go`. Starts the configured probes on their normal
+  cadence.
+- `ApplyWithProbeBurst(ctx, cfg, probeNames, pinFailures)` — `rpm.go`. On
+  HA promotion, the daemon passes only ip-monitoring probes that were gated off
+  on standby. The pin-install results are published before new loops start;
+  selected probes establish their first pass/fail verdict from back-to-back
+  initial test cycles, while every other probe keeps ordinary cadence.
 - `Results()` — `rpm.go`.
 - `SetEventCallback(fn)` — `rpm.go`. Registers the event-options callback.
   Events emitted BEFORE a callback is registered (a first probe cycle that ran
@@ -99,6 +104,18 @@ out-of-range value to a warning.
   `fireEvent` buffers any event fired while `onEvent` is nil and
   `SetEventCallback` replays it, so a boot-time failover edge is never dropped
   (#3755). Regression-locked by `TestFireEventBufferedUntilCallbackRegistered`.
+
+- **HA takeover probe bursts (#11414).** A newly promoted primary has no
+  authoritative standby verdict for probes that were HA-gated off. The daemon
+  uses `ApplyWithProbeBurst` for only those newly active ip-monitoring probes;
+  it installs pin results after old loops stop and before starting the burst, so
+  a temporary pin-reprogram hold cannot consume the initial attempt. Initial
+  test cycles skip configured inter-probe and test-interval waits until the
+  first verdict; a setup failure remains neutral and returns to normal cadence.
+  Burst-derived failure transitions are marked `TakeoverBurst`, allowing
+  ip-monitoring to publish them without its normal debounce while retaining the
+  shared actuation throttle. Later cycles and unrelated probes retain configured
+  cadence.
 - **icmp-ping sends a real ICMP echo since #1827** (raw socket, id/seq
   matching, 3 s timeout). The pre-#1827 prober never put a packet on
   the wire (raw-IP dial + UDP connect fallback — a route-existence
