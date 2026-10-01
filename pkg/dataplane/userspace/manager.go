@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os/exec"
 	"slices"
@@ -90,9 +91,9 @@ func Boot() dataplane.RuntimeDataPlane {
 type Manager struct {
 	bpfShim *dataplane.Manager
 	// compileUserspaceShimHook is nil in production. Tests use it to bypass
-	// the privileged XDP compile/attach leg while still driving Manager.Compile
-	// through snapshot construction and apply_snapshot publication.
-	compileUserspaceShimHook func(*config.Config) (*dataplane.CompileResult, error)
+	// the privileged XDP compile/attach leg while exercising pre-mutation
+	// snapshot validation and apply_snapshot publication.
+	compileUserspaceShimHook func(*config.Config, func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error)
 
 	mu        sync.Mutex
 	sessionMu sync.Mutex // separate lock for session sync requests (Phase 3)
@@ -736,6 +737,10 @@ func (m *Manager) ApplyConfig(ctx context.Context, cfg *config.Config) (*datapla
 	}
 	compiled, err := m.Compile(cfg)
 	if err != nil {
+		var tailErr *publishedSnapshotTailError
+		if errors.As(err, &tailErr) {
+			return m.LastApplyResult(), err
+		}
 		// Compile can fail after it has built the desired interface models,
 		// e.g. when the helper cannot start or accept the snapshot. Preserve
 		// those models for independent daemon reconciles such as networkd;
