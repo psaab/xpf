@@ -2227,7 +2227,7 @@ fn flowless_v4_meta(dst: [u8; 4]) -> UserspaceDpMeta {
 /// REQUIRES alongside `flowless_v4_meta`.
 ///
 /// These fixtures are NON-NAT, so the post-NAT tuple IS the meta tuple with
-/// ports 0 — bit-identical to what `l3_wire_session_flow_from_meta` produces
+/// ports 0 — bit-identical to what `l3_wire_session_flow_from_frame` produces
 /// when the packet's `NatDecision` rewrites nothing. Every cell migrated onto
 /// this helper therefore keeps asserting exactly what it asserted while the key
 /// was implicit; the NAT'd case (where the two tuples differ, and the point of
@@ -2321,7 +2321,7 @@ fn resolve_cos_tx_selection_flowless_enforces_output_discard() {
 }
 
 #[test]
-fn flowless_output_protocol_filter_matches_native_255_and_keeps_decapped_proto_exact_10676() {
+fn flowless_output_protocol_filter_uses_native_fragment_header_11338() {
     let dst = [172, 16, 80, 200];
     let snapshot = ConfigSnapshot {
         interfaces: vec![InterfaceSnapshot {
@@ -2347,36 +2347,53 @@ fn flowless_output_protocol_filter_matches_native_255_and_keeps_decapped_proto_e
     };
     let forwarding = build_forwarding_state(&snapshot);
 
-    for (label, protocol, should_drop) in [
-        (
-            "native-255",
-            crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
-            true,
-        ),
-        ("decapped-tcp", PROTO_TCP, true),
-        ("decapped-udp", PROTO_UDP, false),
+    for (label, wire_protocol, should_drop) in [
+        ("native-tcp", PROTO_TCP, true),
+        ("native-udp", PROTO_UDP, false),
     ] {
+        let mut frame = crate::afxdp::tests_support::eth_ipv4_frag_frame(
+            0x0001,
+            &[0; 8],
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        frame[23] = wire_protocol;
         let mut meta = flowless_v4_meta(dst);
-        meta.protocol = protocol;
-        let runtime = resolve_cos_tx_selection(
+        meta.protocol = crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+        meta.l3_offset = 14;
+        meta.l4_offset = 34;
+        let flowless_wire_flow =
+            crate::afxdp::forward_request::l3_wire_session_flow_from_frame(
+                &frame,
+                meta,
+                crate::nat::NatDecision::default(),
+            )
+            .expect("native fragment protocol must resolve from its frame");
+        let wire_key = flowless_wire_flow.forward_key;
+        assert_eq!(
+            wire_key.protocol, wire_protocol,
+            "{label}: output wire key must use the fragment header protocol"
+        );
+        let extra = crate::afxdp::frame::term_match_extra_from_frame(&frame, meta);
+        let runtime = resolve_cos_tx_selection_at_prenat(
             &forwarding,
             202,
             meta,
             None,
-            flowless_extra(),
+            None,
+            extra,
+            0,
+            Some(&wire_key),
         );
         assert_eq!(
             runtime.drop, should_drop,
-            "#10676 runtime output filter: {label} protocol result"
+            "{label}: runtime output filter must use the fragment header protocol"
         );
 
-        let mut wire_key = flowless_v4_wire_key(dst);
-        wire_key.protocol = protocol;
         let cached =
             resolve_cached_cos_tx_selection_flowless(&forwarding, 202, meta, &wire_key);
         assert_eq!(
             cached.drop, should_drop,
-            "#10676 cached output filter: {label} protocol result"
+            "{label}: cached flowless output filter must use the fragment header protocol"
         );
     }
 }

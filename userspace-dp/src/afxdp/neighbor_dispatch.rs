@@ -775,7 +775,11 @@ pub(super) fn retry_pending_neigh(
         // the same synthesized post-NAT tuple rather than a `None` that would
         // leave this path quietly wrong.
         let flowless_wire_flow = if pkt.flow_key.is_none() {
-            crate::afxdp::forward_request::l3_wire_session_flow_from_meta(pkt.meta, decision.nat)
+            crate::afxdp::forward_request::l3_wire_session_flow_from_frame(
+                source_frame,
+                pkt.meta,
+                decision.nat,
+            )
         } else {
             None
         };

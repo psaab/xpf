@@ -710,7 +710,7 @@ sync.
     been post-NAT for any NAT since #7656 (`forward_wire_key` rewrites
     `src`/`dst` unconditionally; only family and the ICMP/ICMPv6 swap are gated
     on `nat.nat64`) — but every #7656 cell is NAT64, so that was right by side
-    effect and unbound: narrowing `l3_wire_session_flow_from_meta` to
+    effect and unbound: narrowing `l3_wire_session_flow_from_frame` to
     `if nat.nat64 { forward_wire_key(..) }` left 5251 of 5252 cells green.
     Cells: `flowless_snat_egress_output_filter_matches_the_postnat_tuple_8367`
     (`tests_fragment.rs`, end-to-end interface SNAT, address-bearing terms on

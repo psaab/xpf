@@ -138,6 +138,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Route oversized same-binding flow-cache hits through pending-forward so
     normal egress MTU, PTB, and TCP-segmentation handling is preserved (#11376).
 
+  * Resolve native-fragment protocol 255 from the declared IP header before
+    filter, PBR, and CoS matching; unresolved sentinels no longer wildcard
+    protocol-constrained terms (#11338).
+
   * Expire DHCPv4/v6 stateful leases at their absolute deadline after failed
     T1/T2 renewal and reacquisition. Remove stale addresses and delegated
     prefixes, retain stateless DHCPv6 options across failed refreshes, and
