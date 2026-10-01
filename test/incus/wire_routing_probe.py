@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Counted, tagged UDP bursts for wire_routing_separation (#10136).
+"""Counted, tagged UDP bursts for the wire_routing_separation gate (#10136).
 
-The sender runs inside a temporary namespace with one fixed source address
-and source port for both phases. The control burst uses the veth while it is
-unbound (main-table near miss); the owned `wire-10136` routing-instance then
-creates the manager-owned empty `vrf-wire-10136`, and the identical probe
-burst uses that same veth after it is enslaved to the empty VRF. A clean
-VRF miss terminates at pref-2000; the fault fixture removes and restores only
-that terminator so the miss can fall through to the proven main route. A
-successful ``sendto`` is a frame handed to that ingress veth (the OFFERED
-side); local errors are not counted and therefore cannot manufacture a PASS.
-The tag is carried in the payload solely to separate the two bursts in one
-capture window.
+The harness sender on the LAN host offers both bursts toward the product-owned
+LAN ingress, using the same source address and port and destination and port.
+It first sends a near-miss control (tag C) over the existing main-table route,
+clears the matching sessions, then installs an exact-match input-filter term
+steering the probe (tag P) into an owned, manager-created empty routing
+instance. The peer-side capture spans both bursts; a clean run expects the
+control to be observed and the probe not to emerge.
+
+With WIRE_BROKEN_FIXTURE=1, the harness inserts a temporary explicit accept
+before the routing-instance term. That intentionally bypasses steering to the
+proven main route. It demonstrates capture/verdict liveness, but does not test
+fallthrough from an empty selected-VRF table to main.
+
+A successful sendto counts as OFFERED, not proof that the dataplane received
+the frame; only peer-side capture counts as observed. Payload tags distinguish
+the bursts in the shared capture window.
 """
 
 from __future__ import annotations
