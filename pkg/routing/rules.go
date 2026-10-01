@@ -1230,11 +1230,12 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 //     unrepresentable `except` set, an unknown DSCP name, a contradictory
 //     `routing-instance` + `discard`/`reject` term (#4534), a later term that
 //     may overlap a preceding terminator (#11325), an ip-rule-unrepresentable
-//     L4/per-packet predicate (#3730), a loopback attachment carrying
-//     routing-instance terms (#9810 LEAD-O4, one per attachment, not per term),
-//     or the maxPBRSteeringRules overflow (#3430 M3, counted as one condition). A
-//     non-zero value means the kernel slow path under-steers vs the userspace
-//     fast path (which still enforces every term exactly).
+//     L4/per-packet predicate (#3730), an undefined routing-instance target or
+//     unconstrained routing-instance term (#11307), a loopback attachment
+//     carrying routing-instance terms (#9810 LEAD-O4, one per attachment, not
+//     per term), or the maxPBRSteeringRules overflow (#3430 M3, counted as one
+//     condition). A non-zero value means the kernel slow path under-steers vs
+//     the userspace fast path (which still enforces every term exactly).
 //
 // There is deliberately no "widened" count: BuildPBRRules REFUSES to widen an
 // unrepresentable match to an address-only over-steer (fail-closed drop), so an
@@ -1353,9 +1354,10 @@ func sortAttachments(atts []pbrAttachment) {
 
 // buildPBRFromFilter extracts PBR rules from a single firewall filter.
 // The returned error slice carries per-term DEGRADED conditions (an
-// unrepresentable predicate, an unknown DSCP name, a shadowing preceding
-// terminating term — #11325, or an ip-rule-unrepresentable L4 predicate);
-// buildable rules are still returned.
+// unrepresentable predicate, an unknown DSCP name, an undefined routing-
+// instance target, an unconstrained routing-instance term, a shadowing
+// preceding terminating term — #11325, or an ip-rule-unrepresentable L4
+// predicate); buildable rules are still returned.
 //
 // budget is the number of steering rules the caller can still install before
 // the paired-rule PBR priority window is full. Before expanding a term's
@@ -1440,6 +1442,11 @@ func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[
 			slog.Warn("PBR: routing-instance not found",
 				"filter", filter.Name, "term", term.Name,
 				"instance", term.RoutingInstance)
+			errs = append(errs, fmt.Errorf(
+				"PBR filter %s term %s references undefined routing-instance %q; the "+
+					"kernel mirror cannot resolve its target table, so steering is dropped "+
+					"(fail-safe under-steer to the main table)",
+				filter.Name, term.Name, term.RoutingInstance))
 			continue
 		}
 
@@ -1558,6 +1565,11 @@ func buildPBRFromFilter(filter *config.FirewallFilter, family int, tableIDs map[
 			// behavior; the userspace filter path still enforces the term exactly.
 			slog.Warn("PBR: filter term has routing-instance but no ip-rule-compatible criteria (dscp, address, protocol, port)",
 				"filter", filter.Name, "term", term.Name)
+			errs = append(errs, fmt.Errorf(
+				"PBR filter %s term %s has an unconstrained routing-instance %q; the "+
+					"kernel mirror refuses an interface-wide catch-all ip rule, so "+
+					"steering is dropped (fail-safe under-steer to the main table)",
+				filter.Name, term.Name, term.RoutingInstance))
 			continue
 		}
 
