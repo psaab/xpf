@@ -115,6 +115,53 @@ func TestColdBootNeverSeenFloorSuppressesPromotion(t *testing.T) {
 	}
 }
 
+// #11566: a recent sync receive proof means no heartbeat has been observed,
+// but the peer is not confirmed absent. The suppression has no fixed cap:
+// repeated fresh proof keeps the never-seen election hold in place.
+func TestColdBootNeverSeenSyncFreshSuppressesPromotion11566(t *testing.T) {
+	m := coldBootManager(t)
+	m.SetPeerNeverSeenSyncFreshFunc(func() bool { return true })
+	m.SetRGReady(0, true, nil)
+
+	r := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
+	for _, elapsed := range []time.Duration{
+		heartbeatStartupGrace + time.Second,
+		heartbeatStartupGrace + 6*time.Second,
+	} {
+		r.startedAt = time.Now().Add(-elapsed)
+		r.checkTimeout()
+		if peerConfirmedAbsent(m) {
+			t.Fatalf("fresh sync proof confirmed peer absent at %s", elapsed)
+		}
+		if peerEverSeen(m) {
+			t.Fatalf("fresh sync proof rewrote peer-ever-seen state at %s", elapsed)
+		}
+		if m.IsLocalPrimary(0) {
+			t.Fatalf("node promoted while sync proof remained fresh at %s", elapsed)
+		}
+	}
+}
+
+// #11566: once the sync receive proof is silent, the never-seen path must
+// retain its existing eventual single-node promotion behavior.
+func TestColdBootNeverSeenSilentSyncAllowsPromotion11566(t *testing.T) {
+	m := coldBootManager(t)
+	m.SetPeerNeverSeenSyncFreshFunc(func() bool { return false })
+	m.SetRGReady(0, true, nil)
+
+	r := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
+	r.startedAt = time.Now().Add(-(heartbeatStartupGrace + time.Second))
+	r.checkTimeout()
+
+	if !peerConfirmedAbsent(m) || peerEverSeen(m) {
+		t.Fatalf("silent sync produced wrong never-seen state: confirmedAbsent=%v everSeen=%v",
+			peerConfirmedAbsent(m), peerEverSeen(m))
+	}
+	if !m.IsLocalPrimary(0) {
+		t.Fatal("ready node did not promote after silent sync and the startup grace")
+	}
+}
+
 // TestColdBootNeverSeenReadinessGate10697 drives the real checkTimeout →
 // handlePeerNeverSeen → electSingleNode path. Confirming absence must release
 // the non-preempt hold without bypassing readiness; the node promotes only

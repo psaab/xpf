@@ -116,6 +116,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Warn about and exclude static routes without a forwarding disposition, so
     they cannot shadow an installable less-specific route in the helper FIB
     (#11327).
+  * Defer never-seen HA absence confirmation while connected session-sync
+    receive proof is fresh; preserve startup grace and readiness gates (#11566).
   * Align userspace-dp session-sync regression fixtures with the ingress
     identity trailer, preserve JSON/binary identity parity, and keep the
     policy-list acknowledgement plus debug timing gates robust under runner
