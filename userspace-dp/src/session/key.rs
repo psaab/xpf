@@ -58,6 +58,9 @@ fn reverse_direction_discriminator(d: TunnelDiscriminator) -> TunnelDiscriminato
         // until the representation was changed to one for which the obvious
         // answer is correct.
         TunnelDiscriminator::Pptp(handle) => TunnelDiscriminator::Pptp(handle),
+        // An XFRM `if_id` is symmetric: both directions remain scoped to the
+        // same immutable tunnel identity.
+        TunnelDiscriminator::Ipsec(if_id) => TunnelDiscriminator::Ipsec(if_id),
         TunnelDiscriminator::Unparseable => TunnelDiscriminator::Unparseable,
     }
 }
@@ -575,6 +578,8 @@ mod discriminator_carry_tests_8103 {
             TunnelDiscriminator::Keyed(100),
             TunnelDiscriminator::Keyed(u32::MAX),
             TunnelDiscriminator::Unparseable,
+            TunnelDiscriminator::Ipsec(1),
+            TunnelDiscriminator::Ipsec(u32::MAX),
         ] {
             let k = gre_key(disc);
             for (name, got) in [
@@ -680,6 +685,8 @@ mod discriminator_carry_tests_8103 {
             TunnelDiscriminator::Keyed(0),
             TunnelDiscriminator::Keyed(7),
             TunnelDiscriminator::Unparseable,
+            TunnelDiscriminator::Ipsec(1),
+            TunnelDiscriminator::Ipsec(u32::MAX),
         ] {
             assert_eq!(reverse_direction_discriminator(disc), disc);
         }

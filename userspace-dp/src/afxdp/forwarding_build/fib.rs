@@ -121,6 +121,15 @@ pub(super) fn populate_routes(
                 preference: route.preference,
             });
         }
+        // #11411: a negative route MTU is invalid. Do not cast it to u32,
+        // where it would become an effectively unbounded MTU and disable PTB.
+        if route.mtu < 0 {
+            return Err(SnapshotIntegrityError::RouteMtuOutOfRange {
+                table: route.table.clone(),
+                destination: route.destination.clone(),
+                mtu: route.mtu,
+            });
+        }
         if let Ok(prefix) = route.destination.parse::<Ipv4Net>() {
             // #3771 (M4): the destination parses as IPv4 — a NON-EMPTY declared
             // family must agree ("inet"), else the route's family metadata
@@ -169,6 +178,7 @@ pub(super) fn populate_routes(
                         discard: route.discard,
                         next_table: String::new(),
                         preference: route.preference,
+                        mtu: route.mtu as u32,
                         rule_priority: route.rule_priority,
                     });
             }
@@ -218,6 +228,7 @@ pub(super) fn populate_routes(
                         discard: route.discard,
                         next_table: String::new(),
                         preference: route.preference,
+                        mtu: route.mtu as u32,
                         rule_priority: route.rule_priority,
                     });
             }
@@ -278,8 +289,10 @@ pub(super) fn sort_routes(state: &mut ForwardingState) {
                 .then(a.preference.cmp(&b.preference))
         });
     }
-    // #9955: leaks are ip rules, not FIB routes. Their priority is the only
-    // ordering key in stage one; prefix length is deliberately ignored.
+    // #9955/#11396: leak priorities are the kernel's stage-one ordering key.
+    // The Go producer maps prefix length and leak kind into one shared LPM-first
+    // range, so more-specific leaks sort first across sources. Keep this stable
+    // priority sort and preserve producer order for equal-priority ties.
     for leaks in state.leak_rules_v4.values_mut() {
         leaks.sort_by_key(|leak| leak.rule_priority);
     }
@@ -392,18 +405,15 @@ pub(super) fn populate_fabrics(
 }
 
 /// #2389: resolve EVERY configured next-hop of a static route into a
-/// `RouteNextHopV4` candidate. A discard / next-table route has no
-/// forwarding next-hop (returns empty). Each candidate resolves its egress
-/// ifindex from an explicit `@interface` spec, else by inferring the
-/// connected interface that contains the gateway IP — scoped to the
-/// route's own canonical `table` (#4446) so a gateway is never resolved
-/// against another routing-instance's overlapping connected prefix. This
-/// mirrors the #2388 lookup-site connected filter, applied here at BUILD
-/// time so the correct ifindex is baked into `RouteEntryV4.next_hops` (the
-/// lookup consumes `nh.ifindex` verbatim, so a wrong build-time bind could
-/// not be corrected at lookup). Candidates whose interface fails to resolve
-/// are still retained with ifindex 0 (matching the pre-#2389 single-next-hop
-/// fallback, which kept next_hop with ifindex 0).
+/// `RouteNextHopV4` candidate. A discard / next-table route has no forwarding
+/// next-hop (returns empty). An explicit `@interface` resolves only when that
+/// interface belongs to the route's canonical table; an unknown or foreign
+/// interface stays unresolved and never falls back to gateway inference.
+/// Without an explicit interface, infer the connected interface that contains
+/// the gateway IP, scoped to the route's own canonical `table` (#4446). This
+/// keeps the egress ifindex baked into `RouteEntryV4.next_hops` consistent with
+/// the route's routing instance; lookup consumes `nh.ifindex` verbatim.
+/// Candidates whose interface fails to resolve are retained with ifindex 0.
 pub(in crate::afxdp) fn resolve_route_next_hops_v4(
     route: &RouteSnapshot,
     names: &BTreeMap<String, i32>,
@@ -445,9 +455,9 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v4(
 }
 
 /// #2389/#4446: v6 twin of [`resolve_route_next_hops_v4`]. `table` is the
-/// route's canonical install table; a bare-gateway static route infers its
-/// egress ifindex only from a connected prefix in that table (never a
-/// different routing-instance's overlapping prefix).
+/// route's canonical install table; explicit interfaces must belong to its
+/// routing instance, and bare gateways infer egress only from connected
+/// prefixes in that table.
 pub(in crate::afxdp) fn resolve_route_next_hops_v6(
     route: &RouteSnapshot,
     names: &BTreeMap<String, i32>,
@@ -488,6 +498,32 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v6(
         .collect()
 }
 
+fn route_table_instance(table: &str) -> Option<&str> {
+    if table == "inet.0" || table == "inet6.0" {
+        return Some("");
+    }
+    let instance = table
+        .strip_suffix(".inet.0")
+        .or_else(|| table.strip_suffix(".inet6.0"))?;
+    (!instance.is_empty()).then_some(instance)
+}
+
+fn explicit_ifindex_in_route_table(
+    name: &str,
+    names: &BTreeMap<String, i32>,
+    linux_names: &BTreeMap<String, i32>,
+    state: &ForwardingState,
+    table: &str,
+) -> Option<i32> {
+    let route_instance = route_table_instance(table)?;
+    let ifindex = resolve_ifindex(name, names, linux_names)?;
+    state
+        .ifindex_to_routing_instance
+        .get(&ifindex)
+        .is_some_and(|interface_instance| interface_instance == route_instance)
+        .then_some(ifindex)
+}
+
 fn resolve_next_hop_target_v4(
     next_hop: Option<Ipv4Addr>,
     interface: Option<&str>,
@@ -496,19 +532,22 @@ fn resolve_next_hop_target_v4(
     state: &ForwardingState,
     table: &str,
 ) -> (i32, u16) {
-    interface
-        .and_then(|name| resolve_ifindex(name, names, linux_names))
-        .map(|ifindex| {
-            (
-                ifindex,
-                state
-                    .tunnel_endpoint_by_ifindex
-                    .get(&ifindex)
-                    .copied()
-                    .unwrap_or(0),
-            )
-        })
-        .or_else(|| next_hop.and_then(|ip| infer_connected_route_target_v4(state, ip, table)))
+    if let Some(name) = interface {
+        return explicit_ifindex_in_route_table(name, names, linux_names, state, table)
+            .map(|ifindex| {
+                (
+                    ifindex,
+                    state
+                        .tunnel_endpoint_by_ifindex
+                        .get(&ifindex)
+                        .copied()
+                        .unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0));
+    }
+    next_hop
+        .and_then(|ip| infer_connected_route_target_v4(state, ip, table))
         .unwrap_or((0, 0))
 }
 
@@ -520,19 +559,22 @@ fn resolve_next_hop_target_v6(
     state: &ForwardingState,
     table: &str,
 ) -> (i32, u16) {
-    interface
-        .and_then(|name| resolve_ifindex(name, names, linux_names))
-        .map(|ifindex| {
-            (
-                ifindex,
-                state
-                    .tunnel_endpoint_by_ifindex
-                    .get(&ifindex)
-                    .copied()
-                    .unwrap_or(0),
-            )
-        })
-        .or_else(|| next_hop.and_then(|ip| infer_connected_route_target_v6(state, ip, table)))
+    if let Some(name) = interface {
+        return explicit_ifindex_in_route_table(name, names, linux_names, state, table)
+            .map(|ifindex| {
+                (
+                    ifindex,
+                    state
+                        .tunnel_endpoint_by_ifindex
+                        .get(&ifindex)
+                        .copied()
+                        .unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0));
+    }
+    next_hop
+        .and_then(|ip| infer_connected_route_target_v6(state, ip, table))
         .unwrap_or((0, 0))
 }
 

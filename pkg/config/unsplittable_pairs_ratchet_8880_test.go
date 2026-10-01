@@ -371,7 +371,12 @@ func TestUnsplittablePairRatchet8880(t *testing.T) {
 		// structural — the container still cannot split — so the pair stays
 		// counted; its residue is closed in the reader, the flattenThenChain8939
 		// / expandRunChildren9235 shape rather than the splitter shape.
-		wantArgs1 = 451
+		// #11314 adds `routing-options router-id` to the brace-elision scope.
+		// Its args:1 leaf adds one args>=1 pair, not args>=2. This structural
+		// census records the new scope entry; the flat-set routing-options reader
+		// expands its declared sibling run, and #8437 rejects the fused braced
+		// spelling, so this is not an additional observed runtime loss.
+		wantArgs1 = 452
 	)
 	pairs2, _ := unsplittablePairs8880(2)
 	pairs1, conflict1 := unsplittablePairs8880(1)

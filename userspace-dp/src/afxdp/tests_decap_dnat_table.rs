@@ -93,6 +93,10 @@ fn txn_non_decap_missing_neighbor_buffers_and_retries_correctly() {
     let area = bindings[0].umem.area() as *const MmapArea;
     let (left, rest) = bindings.split_at_mut(0);
     let (binding, right) = rest.split_first_mut().expect("ingress binding");
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut debug_counters = crate::afxdp::DebugPollCounters::default();
     retry_pending_neigh(
         binding,
         left,
@@ -109,6 +113,8 @@ fn txn_non_decap_missing_neighbor_buffers_and_retries_correctly() {
         &mut shared_recycles,
         None,
         &mut BatchCounters::default(),
+        &recent_exceptions,
+        &mut debug_counters,
     );
     assert!(
         bindings[0].pending_neigh.is_empty(),
@@ -189,11 +195,11 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
         neighbor_mac: Some([2, 0, 0, 0, 0, 9]),
         src_mac: Some([2, 0, 0, 0, 0, 1]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
-    let plain_resolution = ForwardingResolution {
-        tunnel_endpoint_id: 0,
-        ..tunnel_resolution
-    };
+    let plain_resolution = ForwardingResolution { tunnel_endpoint_id: 0,
+    route_mtu: 0, transport_route_mtu: 0, ..tunnel_resolution };
     let make =
         |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry {
             key: key.clone(),
@@ -317,6 +323,8 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
         neighbor_mac: Some([2, 0, 0, 0, 0, 9]),
         src_mac: Some([2, 0, 0, 0, 0, 1]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let make = |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| {
         SyncedSessionEntry {
@@ -1058,6 +1066,8 @@ fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
         neighbor_mac: Some([2, 0, 0, 0, 0, 9]),
         src_mac: Some([2, 0, 0, 0, 0, 1]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let make = |key: &SessionKey,
                 tunnel_endpoint_id: u16,

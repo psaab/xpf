@@ -1363,6 +1363,11 @@ type compileOpts struct {
 	// guard skips the phantom rib and installs no rule, so a leniently-loaded
 	// config is already inert. Same doctrine as lenientRoutingExportRef.
 	lenientRibGroupRefs bool
+	// lenientRibGroupImportPolicy (#11314) downgrades an unsupported RIB-group
+	// import-policy rejection to a warning on tolerant loads. The existing
+	// runtime cannot apply the policy, so the warning names the possible
+	// over-broad leak while preserving the no-brick load/peer-sync contract.
+	lenientRibGroupImportPolicy bool
 	// lenientGlobalInterfaceRoutesRibGroup (#11311) downgrades the unsupported
 	// global main-to-instance connected-route import gate to a warning on
 	// tolerant loads, so a previously persisted config remains bootable.
@@ -1419,19 +1424,16 @@ type compileOpts struct {
 	// group.
 	lenientDHCPRelayChildTokens bool
 	// lenientRoutingRuleWindows (#5854) downgrades the next-table / rib-group
-	// ip-rule window over-subscription gate (validateRoutingRuleWindowsStrict)
-	// from a hard compile error to a cfg.Warnings entry. The runtime applier
-	// programs next-table and interface-routes rib-group leaks into FIXED
-	// priority windows (pkg/routing/rules.go: 100 next-table rules, 1000
-	// rib-group leak rules) and HARD-CAPS at each boundary, silently skipping any
-	// rule past it, so a config that exceeds a window commits green while the
-	// reconciler stops at the limit and returns success — the committed
-	// generation claims routes the kernel never programs (blackhole / asymmetric
+	// ip-rule admission-cap gate (validateRoutingRuleWindowsStrict) from a hard
+	// compile error to a cfg.Warnings entry. The runtime applier caps admitted
+	// rules separately from priority assignment: 100 next-table rules (including
+	// ingress-interface expansion) and 1000 rib-group connected-prefix rules.
+	// Over-limit routes used to be silently skipped, so a config could commit
+	// while claiming routes the kernel never programs (blackhole / asymmetric
 	// routing). The strict commit / commit-check path hard-rejects so the
-	// over-subscription is operator-visible; the tolerant load / peer-sync paths
-	// warn so an already-committed or peer-synced over-limit config still BOOTS
-	// (#1960) — the applier's window hard-cap keeps the excess inert. Same
-	// doctrine as lenientNextTableRefs.
+	// over-subscription is operator-visible; tolerant load / peer-sync paths warn
+	// so an already-committed or peer-synced over-limit config still BOOTS (#1960).
+	// Same doctrine as lenientNextTableRefs.
 	lenientRoutingRuleWindows bool
 	// lenientPolicyRouteMapSeq (#5701) downgrades the route-map
 	// sequence-number overflow gate (validatePolicyRouteMapSequenceBoundStrict)
@@ -1638,6 +1640,11 @@ type compileOpts struct {
 	// compileRoutingInstances quarantines the instance with the one warning
 	// that reports it.
 	lenientReservedRoutingInstanceName bool
+	// lenientRoutingInstanceKernelName (#11391) skips the strict derived VRF
+	// device-name gate. Tolerant load and peer-sync quarantine an instance whose
+	// vrf-<name> device exceeds IFNAMSIZ or fails Linux dev_valid_name instead of
+	// rejecting an already-persisted config.
+	lenientRoutingInstanceKernelName bool
 	// lenientAddressBookNames (#3061, narrowed in #4340) downgrades the
 	// address-book / zone name gate (validateAddressBookEntryNamesStrict) from a
 	// hard compile error to a cfg.Warnings entry. The strict commit /
@@ -2407,6 +2414,9 @@ type compileOpts struct {
 	// alarm` threshold subtree to a cfg.Warnings entry on tolerant ingress.
 	// The compiler enables counting but does not implement alarm thresholds.
 	lenientPolicyThenCountAlarm bool
+	// lenientDefaultPolicyBlock11367 warns and keeps tolerant loads bootable;
+	// the compiler forces the ambiguous no-match policy to deny.
+	lenientDefaultPolicyBlock11367 bool
 	// lenientPolicyThenSiblings (#11013/#11023) downgrades unsupported
 	// security-policy `then` siblings and unknown `then log` modes to warnings
 	// on tolerant ingress. The compiler drops both forms, so compilePolicy
@@ -3084,6 +3094,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyMatchAddressSetMembers:    true,
 		lenientAddressSetMembersDefined:        true,
 		lenientRibGroupRefs:                    true,
+		lenientRibGroupImportPolicy:            true,
 		lenientGlobalInterfaceRoutesRibGroup:   true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
@@ -3108,6 +3119,7 @@ func lenientCompileOpts() compileOpts {
 		lenientZoneIDCollision:                 true,
 		lenientRoutingInstanceTableIDCollision: true,
 		lenientReservedRoutingInstanceName:     true,
+		lenientRoutingInstanceKernelName:       true,
 		lenientAddressBookNames:                true,
 		lenientReservedAddressNames:            true,
 		lenientHelperStateFile:                 true,
@@ -3165,6 +3177,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyThenReject:                true,
 		lenientPolicyThenDeny:                  true,
 		lenientPolicyThenCountAlarm:            true,
+		lenientDefaultPolicyBlock11367:         true,
 		lenientPolicyThenSiblings:              true,
 		lenientPolicyEnforcementSubtrees:       true,
 		lenientPolicyMissingMatch:              true,

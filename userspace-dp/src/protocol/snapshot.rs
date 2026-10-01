@@ -293,6 +293,15 @@ pub(crate) struct RouteSnapshot {
     /// is unchanged).
     #[serde(default)]
     pub preference: i32,
+    /// Kernel-selected route MTU (RTAX_MTU), route-wide rather than per
+    /// next-hop. Zero/absent means no route-specific constraint. Mirrors
+    /// Go RouteSnapshot.MTU and is fenced by protocol v38.
+    #[serde(rename = "mtu", default, skip_serializing_if = "is_zero_i32")]
+    pub mtu: i32,
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -1342,5 +1351,27 @@ mod route_weight_snapshot_tests {
         assert_eq!(weighted.next_hop_weights, vec![1, 4]);
         let wire = serde_json::to_value(weighted).expect("route snapshot serializes");
         assert_eq!(wire["next_hop_weights"], serde_json::json!([1, 4]));
+    }
+}
+#[cfg(test)]
+mod route_mtu_wire_tests {
+    use super::*;
+
+    #[test]
+    fn route_mtu_round_trips_and_zero_is_omitted() {
+        let route = RouteSnapshot {
+            mtu: 1400,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&route).expect("serialize route");
+        assert_eq!(value["mtu"], 1400);
+        let decoded: RouteSnapshot = serde_json::from_value(value).expect("deserialize route");
+        assert_eq!(decoded.mtu, 1400);
+
+        let value = serde_json::to_value(RouteSnapshot::default()).expect("serialize default route");
+        assert!(
+            value.get("mtu").is_none(),
+            "an unknown route MTU must keep the wire field absent"
+        );
     }
 }

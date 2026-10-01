@@ -365,6 +365,10 @@ fn f035_parked_fragment_overlap_is_rechecked_on_retry_10659() {
         let (left, rest) = bindings.split_at_mut(0);
         let (binding, right) = rest.split_first_mut().expect("parked ingress binding");
         let mut retry_counters = BatchCounters::default();
+        let retry_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::afxdp::ExceptionEventRing::new(),
+        ));
+        let mut retry_dbg = crate::afxdp::DebugPollCounters::default();
         retry_pending_neigh(
             binding,
             left,
@@ -382,6 +386,8 @@ fn f035_parked_fragment_overlap_is_rechecked_on_retry_10659() {
             &mut shared_recycles,
             None,
             &mut retry_counters,
+            &retry_exceptions,
+            &mut retry_dbg,
         );
 
         assert!(bindings[0].pending_neigh.is_empty(), "{label}: retry consumes the parked entry");
@@ -542,6 +548,10 @@ fn f035_fabric_parked_fragment_uses_encoded_zone_overlap_domain_10917() {
     let (left, rest) = bindings.split_at_mut(0);
     let (binding, right) = rest.split_first_mut().expect("parked fabric binding");
     let mut retry_counters = BatchCounters::default();
+    let fabric_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut fabric_dbg = crate::afxdp::DebugPollCounters::default();
     retry_pending_neigh(
         binding,
         left,
@@ -559,6 +569,8 @@ fn f035_fabric_parked_fragment_uses_encoded_zone_overlap_domain_10917() {
         &mut shared_recycles,
         None,
         &mut retry_counters,
+        &fabric_exceptions,
+        &mut fabric_dbg,
     );
 
     assert!(bindings[0].pending_neigh.is_empty());
@@ -1107,7 +1119,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     }];
     snapshot.neighbors = vec![
         NeighborSnapshot {
@@ -1419,7 +1431,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     }];
     snapshot.neighbors = vec![
         NeighborSnapshot {
@@ -1656,7 +1668,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0,
+        rule_priority: 0, mtu: 0,
     }];
     snapshot.neighbors = vec![
         NeighborSnapshot {

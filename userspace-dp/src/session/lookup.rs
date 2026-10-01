@@ -65,6 +65,15 @@ pub enum ExportWalkOutcome {
     Complete,
 }
 
+/// Result of resolving an untagged reply against the bounded native/IPsec
+/// alias set. Ambiguity is distinct from a miss so callers can emit E9.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum IpsecReplyAliasLookup {
+    NativeMiss,
+    Unique(ForwardSessionMatch),
+    Ambiguous,
+}
+
 impl SessionTable {
     #[inline]
     fn resolve_lookup_handle(&self, key: &SessionKey) -> Option<(u32, bool)> {
@@ -571,6 +580,75 @@ impl SessionTable {
             let _ = self.remove_entry(&pair.companion, RemovalKind::Replace);
         }
         Some((pair.forward, pair.reverse))
+    }
+
+    /// S9.4 cross-discriminator reverse probe for an untagged reply.
+    ///
+    /// Native forward candidates come from `nat_reverse_index`; IPsec
+    /// candidates come from the bounded alias index. Validate both against
+    /// the complete reverse tuple, expiry, and existing routing-domain rules.
+    /// Ambiguity is fail-closed and remains distinct from a true miss so the
+    /// packet path can emit E9 instead of selecting an arbitrary owner.
+    pub(crate) fn lookup_ipsec_reply_alias_at<F>(
+        &self,
+        reply_key: &SessionKey,
+        now_ns: u64,
+        egress_routing_domain: F,
+    ) -> IpsecReplyAliasLookup
+    where
+        F: Fn(i32) -> u32,
+    {
+        if !matches!(reply_key.discriminator, TunnelDiscriminator::None) {
+            return IpsecReplyAliasLookup::NativeMiss;
+        }
+        let probe = normalized_reply_alias_key(reply_key);
+        let native_bucket = self.nat_reverse_index.get(&probe);
+        let ipsec_bucket = self.reply_alias_index.get(&probe);
+        let mut candidate = None;
+        for bucket in [native_bucket, ipsec_bucket].into_iter().flatten() {
+            for &handle in bucket {
+                let Some(record) = self.entries.get(handle as usize) else {
+                    continue;
+                };
+                let entry = &record.entry;
+                let is_ipsec = matches!(record.key.discriminator, TunnelDiscriminator::Ipsec(if_id) if if_id != 0);
+                if entry.metadata.is_reverse
+                    || !(matches!(record.key.discriminator, TunnelDiscriminator::None) || is_ipsec)
+                    || !ipsec_reply_alias_keys(&record.key, entry.decision.nat)
+                        .iter()
+                        .any(|alias| alias == &probe)
+                    || now_ns.saturating_sub(entry.last_seen_ns) > entry.expires_after_ns
+                {
+                    continue;
+                }
+                let forward_domain = record.key.routing_domain;
+                if (crate::session::is_quarantined_routing_domain(forward_domain)
+                    || crate::session::is_quarantined_routing_domain(reply_key.routing_domain))
+                    && forward_domain != reply_key.routing_domain
+                {
+                    continue;
+                }
+                if !crate::session::is_quarantined_routing_domain(forward_domain)
+                    && !crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
+                    && egress_routing_domain(entry.decision.resolution.egress_ifindex)
+                        != reply_key.routing_domain
+                {
+                    continue;
+                }
+                if candidate.is_some() {
+                    return IpsecReplyAliasLookup::Ambiguous;
+                }
+                candidate = Some(record);
+            }
+        }
+        let Some(record) = candidate else {
+            return IpsecReplyAliasLookup::NativeMiss;
+        };
+        IpsecReplyAliasLookup::Unique(ForwardSessionMatch {
+            key: record.key.clone(),
+            decision: record.entry.decision,
+            metadata: record.entry.metadata.clone(),
+        })
     }
 
     pub fn find_forward_nat_match<F>(
@@ -1429,6 +1507,8 @@ mod export_unresolved_sessions_10790_tests {
                     .then_some([0, 1, 2, 3, 4, 5]),
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,

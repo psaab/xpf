@@ -49,6 +49,29 @@ type SeededForwardWireIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>
 type SeededReverseTranslatedIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
 /// #10130/#10674: address-only index key for session-gated reply fragments.
 type SeededL3ReverseIndex = HashMap<L3ReverseKey, NatIndexBucket, FxSeededState>;
+/// S9.4 bounds the combined native/IPsec reply-alias population per tuple.
+pub(crate) const IPSEC_INNER_ALIAS_BUCKET_BOUND: usize = 8;
+/// The alias index stores only tunnel-scoped forward candidates. Native
+/// candidates already live in `nat_reverse_index` and are merged at lookup.
+type SeededReplyAliasIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
+
+fn normalized_reply_alias_key(key: &SessionKey) -> SessionKey {
+    SessionKey {
+        discriminator: TunnelDiscriminator::None,
+        routing_domain: 0,
+        ..key.clone()
+    }
+}
+
+fn ipsec_reply_alias_keys(key: &SessionKey, nat: NatDecision) -> SmallVec<[SessionKey; 2]> {
+    let mut aliases = SmallVec::new();
+    aliases.push(normalized_reply_alias_key(&reverse_wire_key(key, nat)));
+    let canonical = normalized_reply_alias_key(&reverse_canonical_key(key, nat));
+    if canonical != aliases[0] {
+        aliases.push(canonical);
+    }
+    aliases
+}
 /// The slab scan order for a bare tuple is ascending handle order. Keep the
 /// common one-session case allocation-free; only true scope collisions need a
 /// tree so lookup and removal stay logarithmically bounded.
@@ -623,7 +646,7 @@ mod install;
 mod lookup;
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
-pub(crate) use lookup::ExportWalkOutcome;
+pub(crate) use lookup::{ExportWalkOutcome, IpsecReplyAliasLookup};
 use lookup::TcpStatePropagation;
 
 /// #7212: the `(config generation, logical ingress interface)` pair a session's
@@ -1271,6 +1294,11 @@ pub(crate) struct SessionTable {
     /// earlier one. `find_forward_nat_match` validates each candidate against
     /// the full reply tuple.
     nat_reverse_index: SeededReverseIndex,
+    /// #9506: IPsec forward candidates indexed by their reverse tuple with the
+    /// discriminator removed. Native candidates stay in `nat_reverse_index`,
+    /// avoiding a second full-population index while the reply resolver merges
+    /// both buckets under `IPSEC_INNER_ALIAS_BUCKET_BOUND`.
+    reply_alias_index: SeededReplyAliasIndex,
     /// #4438: `forward_wire_index` is a 1:N multimap (`SeededForwardWireIndex`)
     /// — a bucket of forward handles per forward-wire key — so a forward-wire
     /// collision (interface-mode SNAT with no port translation, and the other
@@ -1603,6 +1631,7 @@ impl SessionTable {
             nat_reverse_index: HashMap::with_hasher(state.clone()),
             forward_wire_index: HashMap::with_hasher(state.clone()),
             reverse_translated_index: HashMap::with_hasher(state.clone()),
+            reply_alias_index: HashMap::with_hasher(state.clone()),
             l3_reverse_index: HashMap::with_hasher(state.clone()),
             leak_incarnations: HashMap::with_hasher(state.clone()),
             // owner_rg_sessions is keyed by i32 RG/ifindex (not an
@@ -3122,6 +3151,12 @@ impl SessionTable {
         let reindex = old_nat != decision.nat
             || old_is_reverse != metadata.is_reverse
             || old_owner_rg != metadata.owner_rg_id;
+        let reply_alias_reindex = old_nat != decision.nat || old_is_reverse != metadata.is_reverse;
+        if (reply_alias_reindex || matches!(key.discriminator, TunnelDiscriminator::Ipsec(0)))
+            && !self.can_index_reply_alias(key, decision.nat, metadata.is_reverse, Some(handle))
+        {
+            return false;
+        }
         if reindex {
             self.remove_forward_nat_index_parts(key, handle, old_nat, old_is_reverse);
             remove_owner_rg_index_entry(&mut self.owner_rg_sessions, old_owner_rg, handle);
@@ -3525,6 +3560,12 @@ impl SessionTable {
 
         let reindex =
             old_nat != new_nat || old_is_reverse != new_is_reverse || old_owner_rg != new_owner_rg;
+        let reply_alias_reindex = old_nat != new_nat || old_is_reverse != new_is_reverse;
+        if (reply_alias_reindex || matches!(key.discriminator, TunnelDiscriminator::Ipsec(0)))
+            && !self.can_index_reply_alias(key, new_nat, new_is_reverse, Some(handle))
+        {
+            return false;
+        }
         if reindex {
             self.remove_forward_nat_index_parts(key, handle, old_nat, old_is_reverse);
             remove_owner_rg_index_entry(&mut self.owner_rg_sessions, old_owner_rg, handle);
@@ -3845,6 +3886,12 @@ impl SessionTable {
     /// test reference logic (not conditionally compiled out).
     #[cfg_attr(not(test), allow(dead_code))]
     fn restore_entry(&mut self, key: SessionKey, entry: SessionEntry) -> Option<SessionEntry> {
+        debug_assert!(self.can_index_reply_alias(
+            &key,
+            entry.decision.nat,
+            entry.metadata.is_reverse,
+            None,
+        ));
         let record = SessionRecord {
             key: key.clone(),
             entry,
@@ -3863,6 +3910,54 @@ impl SessionTable {
         };
         self.index_forward_nat_key(&key, handle, decision, &metadata);
         None
+    }
+
+    /// Refuse zero-valued IPsec discriminators and keep a live IPsec alias
+    /// bucket bounded across both native and tunnel-scoped forward sessions.
+    /// Native-only collision buckets retain their pre-S9.4 behavior until an
+    /// IPsec candidate actually needs the shared bounded resolver.
+    fn can_index_reply_alias(
+        &self,
+        key: &SessionKey,
+        nat: NatDecision,
+        is_reverse: bool,
+        replacing: Option<u32>,
+    ) -> bool {
+        if matches!(key.discriminator, TunnelDiscriminator::Ipsec(0)) {
+            return false;
+        }
+        if is_reverse
+            || !matches!(
+                key.discriminator,
+                TunnelDiscriminator::None | TunnelDiscriminator::Ipsec(_)
+            )
+        {
+            return true;
+        }
+        if matches!(key.discriminator, TunnelDiscriminator::None)
+            && self.reply_alias_index.is_empty()
+        {
+            return true;
+        }
+        for alias in ipsec_reply_alias_keys(key, nat) {
+            let ipsec_bucket = self.reply_alias_index.get(&alias);
+            if matches!(key.discriminator, TunnelDiscriminator::None) && ipsec_bucket.is_none() {
+                continue;
+            }
+            let native_bucket = self.nat_reverse_index.get(&alias);
+            let mut population = native_bucket.map_or(0, NatIndexBucket::len)
+                + ipsec_bucket.map_or(0, NatIndexBucket::len);
+            if replacing.is_some_and(|handle| {
+                native_bucket.is_some_and(|bucket| bucket.contains(&handle))
+                    || ipsec_bucket.is_some_and(|bucket| bucket.contains(&handle))
+            }) {
+                population = population.saturating_sub(1);
+            }
+            if population >= IPSEC_INNER_ALIAS_BUCKET_BOUND {
+                return false;
+            }
+        }
+        true
     }
 
     /// #964 Step 1: insert all secondary indices for a freshly-stored
@@ -3979,6 +4074,17 @@ impl SessionTable {
                 );
             }
         }
+        if !is_reverse
+            && matches!(key.discriminator, TunnelDiscriminator::Ipsec(if_id) if if_id != 0)
+        {
+            for alias in ipsec_reply_alias_keys(key, nat) {
+                let bucket = self.reply_alias_index.entry(alias).or_default();
+                if !bucket.contains(&handle) {
+                    bucket.push(handle);
+                }
+                debug_assert!(bucket.len() <= IPSEC_INNER_ALIAS_BUCKET_BOUND);
+            }
+        }
         if !is_reverse && let Some(l3_key) = l3_reverse_key_for_forward(key, nat) {
             // #10130/#10674: the index buckets by family and reverse addresses;
             // its real protocol is validated at lookup, with 255 acting as the
@@ -4052,6 +4158,11 @@ impl SessionTable {
             &reverse_canonical_key(key, nat),
             handle,
         );
+        if matches!(key.discriminator, TunnelDiscriminator::Ipsec(if_id) if if_id != 0) {
+            for alias in ipsec_reply_alias_keys(key, nat) {
+                nat_index_bucket_remove(&mut self.reply_alias_index, &alias, handle);
+            }
+        }
         // #4438: forward_wire_index gets the identical per-handle removal.
         nat_index_bucket_remove(
             &mut self.forward_wire_index,
@@ -4077,6 +4188,10 @@ impl SessionTable {
             // stored scalar.
             && !self
                 .nat_reverse_index
+                .values()
+                .any(|bucket| bucket.contains(&handle))
+            && !self
+                .reply_alias_index
                 .values()
                 .any(|bucket| bucket.contains(&handle))
             && !self

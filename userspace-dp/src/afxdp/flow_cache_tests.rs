@@ -50,17 +50,15 @@ fn make_descriptor() -> RewriteDescriptor {
 }
 
 fn make_resolution(disposition: ForwardingDisposition) -> ForwardingResolution {
-    ForwardingResolution {
-        disposition,
-        local_ifindex: 0,
-        egress_ifindex: 6,
-        tx_ifindex: 6,
-        tunnel_endpoint_id: 0,
-        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-        neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
-        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
-        tx_vlan_id: 0,
-    }
+    ForwardingResolution { disposition,
+    local_ifindex: 0,
+    egress_ifindex: 6,
+    tx_ifindex: 6,
+    tunnel_endpoint_id: 0,
+    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+    neighbor_mac: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01]),
+    src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
+    tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 }
 }
 
 fn make_decision(disposition: ForwardingDisposition) -> SessionDecision {
@@ -655,6 +653,8 @@ fn from_forward_decision_round_trip() {
         neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
         tx_vlan_id: 50,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8))),
         rewrite_dst: None,
@@ -820,6 +820,8 @@ fn make_v4_round_trip_inputs() -> (
         neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
         tx_vlan_id: 50,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8))),
         rewrite_dst: None,
@@ -1289,6 +1291,8 @@ fn make_v6_round_trip_inputs() -> (
         neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
         src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x01, 0x01]),
         tx_vlan_id: 50,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision {
         rewrite_src: None,
         rewrite_dst: None,
@@ -1614,6 +1618,8 @@ fn fabric_redirect_cache_entry_uses_flow_owner_rg_for_epoch_invalidation() {
         neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
         src_mac: Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mut forwarding = ForwardingState::default();
     forwarding.fabrics.push(FabricLink {

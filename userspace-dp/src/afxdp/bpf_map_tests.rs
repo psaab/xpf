@@ -21,6 +21,8 @@ fn local_delivery_decision(tunnel_endpoint_id: u16) -> SessionDecision {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,
@@ -198,6 +200,7 @@ fn tunnel_discriminators_demote_kernel_local_to_redirect_9517() {
         TunnelDiscriminator::Keyed(0),
         TunnelDiscriminator::Keyed(7),
         TunnelDiscriminator::Pptp(3),
+        TunnelDiscriminator::Ipsec(7),
         TunnelDiscriminator::Unparseable,
     ] {
         assert!(
@@ -461,6 +464,8 @@ fn session_map_redirect_keys_for_forward_session_include_nat_aliases() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
@@ -524,6 +529,8 @@ fn session_map_redirect_keys_for_kernel_local_synced_session_delete_superset() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
@@ -728,6 +735,8 @@ fn refresh_bpf_conntrack_last_seen_is_budgeted_across_slices() {
                 neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -1302,6 +1311,8 @@ fn a_refresh_slice_reports_the_largest_session_volume_it_walked_7919() {
             neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 0,

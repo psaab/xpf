@@ -899,7 +899,7 @@ pub(super) fn populate_interfaces(
                         let directed_broadcast = prefix.directed_broadcast();
                         state
                             .connected_v4_directed_broadcasts
-                            .insert(directed_broadcast);
+                            .insert((iface.routing_domain, directed_broadcast));
                         state
                             .connected_v4_directed_broadcast_neighbor_keys
                             .insert((iface.ifindex, directed_broadcast));

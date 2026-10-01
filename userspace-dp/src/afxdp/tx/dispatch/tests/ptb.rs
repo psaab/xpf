@@ -132,13 +132,28 @@ fn run_ptb_dispatch_full(
     BatchCounters,
     Vec<String>,
 ) {
+    run_ptb_dispatch_with_mtu(forwarding, ingress_vlan_id, df, tunnel_endpoint_id, 1600, 0)
+}
+
+fn run_ptb_dispatch_with_mtu(
+    forwarding: ForwardingState,
+    ingress_vlan_id: u16,
+    df: bool,
+    tunnel_endpoint_id: u16,
+    l3_len: usize,
+    route_mtu: u32,
+) -> (
+    Vec<BindingWorker>,
+    DebugPollCounters,
+    BatchCounters,
+    Vec<String>,
+) {
     let mut bindings = vec![
         BindingWorker::new_for_mirror_test(0, 0, 11, 0),
         BindingWorker::new_for_mirror_test(1, 0, 22, 0),
     ];
-    // 1600-byte L3 payload -> 1614-byte frame. Fits a 4096 UMEM frame but
-    // exceeds a 1400 egress MTU.
-    let frame = large_udp_v4_frame(1600, df);
+    // The fixture can vary packet and selected-route MTUs without changing its dispatch path.
+    let frame = large_udp_v4_frame(l3_len, df);
     unsafe { bindings[0].umem.area().slice_mut_unchecked(0, frame.len()) }
         .expect("ingress frame")
         .copy_from_slice(&frame);
@@ -157,6 +172,7 @@ fn run_ptb_dispatch_full(
     req.meta.pkt_len = frame.len() as u16;
     req.meta.ingress_vlan_id = ingress_vlan_id;
     req.decision.resolution.tunnel_endpoint_id = tunnel_endpoint_id;
+    req.decision.resolution.route_mtu = route_mtu;
     let mut pending = vec![req];
     let mut post_recycles = Vec::new();
     let ingress_ident = bindings[0].identity();
@@ -260,6 +276,66 @@ fn oversized_forward_emits_ptb_and_drops_original() {
         !reasons.iter().any(|r| r == "oversized_forward_frame"),
         "MTU drop must not be miscounted as a descriptor-capacity overflow: {reasons:?}"
     );
+}
+
+#[test]
+fn selected_route_mtu_triggers_ptb_with_unchanged_interface_mtu_11411() {
+    let frame = large_udp_v4_frame(1450, true);
+    let meta = ForwardPacketMeta {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        l3_offset: 14,
+        pkt_len: frame.len() as u16,
+        ..ForwardPacketMeta::default()
+    };
+    let forwarding = forwarding_for_ptb(1500);
+    let mut decision = test_forwarding_decision_to_bound_ifindex(22);
+    decision.resolution.route_mtu = 1400;
+    assert!(flow_cache_hit_requires_pending_forward(
+        &frame,
+        meta,
+        &decision,
+        &forwarding,
+    ));
+    decision.resolution.route_mtu = 0;
+    assert!(!flow_cache_hit_requires_pending_forward(
+        &frame,
+        meta,
+        &decision,
+        &forwarding,
+    ));
+
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let (bindings, _dbg, _counters, reasons) =
+        run_ptb_dispatch_with_mtu(forwarding_for_ptb(1500), 0, true, 0, 1450, 1400);
+
+    let ingress_tx = &bindings[0].tx_pipeline.pending_tx_local;
+    assert_eq!(ingress_tx.len(), 1, "route MTU violation emits one PTB");
+    let icmp = 14 + 20;
+    assert_eq!(ingress_tx[0].bytes[icmp], 3);
+    assert_eq!(ingress_tx[0].bytes[icmp + 1], 4);
+    assert_eq!(
+        u16::from_be_bytes([ingress_tx[0].bytes[icmp + 6], ingress_tx[0].bytes[icmp + 7]]),
+        1400,
+        "PTB advertises the selected route MTU"
+    );
+    assert_eq!(bindings[1].tx_pipeline.pending_tx_local.len(), 0);
+    assert_eq!(bindings[1].tx_pipeline.pending_tx_prepared.len(), 0);
+    assert!(reasons.iter().any(|reason| reason == "egress_mtu_exceeded"));
+
+    let (bindings, _dbg, _counters, reasons) =
+        run_ptb_dispatch_with_mtu(forwarding_for_ptb(1500), 0, true, 0, 1450, 0);
+    assert!(
+        bindings[0].tx_pipeline.pending_tx_local.is_empty(),
+        "unknown route MTU leaves the packet below the interface MTU and emits no PTB"
+    );
+    assert_eq!(
+        bindings[1].tx_pipeline.pending_tx_local.len()
+            + bindings[1].tx_pipeline.pending_tx_prepared.len(),
+        1,
+        "the 1450-byte packet forwards with interface MTU 1500"
+    );
+    assert!(!reasons.iter().any(|reason| reason == "egress_mtu_exceeded"));
 }
 
 #[test]

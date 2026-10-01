@@ -1556,10 +1556,16 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		s.installTableSuppressionWarned.Store(false)
 		// #9752 round 4: same for the bulk-refusal latch.
 		s.bulkFencedForPeer.Store(false)
+		// #9506: the discriminator refusal latch is separate from the
+		// install-table latch and resets with this peer incarnation.
+		s.bulkFencedForIpsecPeer.Store(false)
 		// #9752 round 5 item 1: same for the PBR-announced latch.
 		s.pbrAnnouncedForFence.Store(false)
 		// #9752 round 5 item 5: same for the suppress-debt latch.
 		s.installTableSuppressDebt.Store(false)
+		// #9506: the S9.4 withheld-install debt belongs to this peer
+		// incarnation; the full-disconnect cold prime covers the next one.
+		s.ipsecDiscriminatorSuppressDebt.Store(false)
 		// #7990: same incarnation scoping. A retained sync-wire version is the
 		// worst of the three to keep: it would let the LANE-1 drain gate certify
 		// compatibility against a version the reconnected (possibly downgraded)

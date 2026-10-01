@@ -237,7 +237,7 @@ pub(super) fn evaluate_non_pbr_input_filter(
         is_v6,
         flow.src_ip,
         flow.dst_ip,
-        meta.protocol,
+        flow.forward_key.protocol,
         flow.forward_key.src_port,
         flow.forward_key.dst_port,
         meta.dscp,
@@ -309,7 +309,7 @@ pub(super) fn input_filter_would_deny_before_screen(
         filter,
         flow.src_ip,
         flow.dst_ip,
-        meta.protocol,
+        flow.forward_key.protocol,
         flow.forward_key.src_port,
         flow.forward_key.dst_port,
         meta.dscp,
@@ -329,7 +329,7 @@ pub(super) fn input_filter_would_deny_before_screen(
     ) else {
         return false;
     };
-    let eval_protocol = crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
+    let eval_protocol = flow.forward_key.protocol;
     crate::filter::evaluate_filter_ref_routing_instance_uncounted(
         route_filter,
         flow.src_ip,
@@ -369,7 +369,7 @@ pub(super) fn evaluate_non_pbr_input_filter_log_only(
         is_v6,
         flow.src_ip,
         flow.dst_ip,
-        meta.protocol,
+        flow.forward_key.protocol,
         flow.forward_key.src_port,
         flow.forward_key.dst_port,
         meta.dscp,
@@ -415,7 +415,7 @@ pub(super) fn evaluate_non_pbr_input_filter_counters_cached(
         is_v6,
         flow.src_ip,
         flow.dst_ip,
-        meta.protocol,
+        flow.forward_key.protocol,
         flow.forward_key.src_port,
         flow.forward_key.dst_port,
         meta.dscp,
@@ -728,7 +728,7 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                     filter,
                     flow.src_ip,
                     flow.dst_ip,
-                    meta.protocol,
+                    flow.forward_key.protocol,
                     flow.forward_key.src_port,
                     flow.forward_key.dst_port,
                     meta.dscp,
@@ -1133,7 +1133,7 @@ fn static_input_filter_deny_eval(
             filter,
             flow.src_ip,
             flow.dst_ip,
-            meta.protocol,
+            flow.forward_key.protocol,
             flow.forward_key.src_port,
             flow.forward_key.dst_port,
             meta.dscp,
@@ -1153,7 +1153,7 @@ fn static_input_filter_deny_eval(
             filter,
             flow.src_ip,
             flow.dst_ip,
-            meta.protocol,
+            flow.forward_key.protocol,
             flow.forward_key.src_port,
             flow.forward_key.dst_port,
             meta.dscp,
@@ -1181,7 +1181,7 @@ fn static_input_filter_deny_eval(
         filter,
         flow.src_ip,
         flow.dst_ip,
-        meta.protocol,
+        flow.forward_key.protocol,
         flow.forward_key.src_port,
         flow.forward_key.dst_port,
         meta.dscp,
@@ -1506,7 +1506,7 @@ pub(super) fn apply_lo0_filter_action(
         is_v6,
         flow.src_ip,
         flow.dst_ip,
-        meta.protocol,
+        flow.forward_key.protocol,
         flow.forward_key.src_port,
         flow.forward_key.dst_port,
         meta.dscp,
@@ -2658,17 +2658,24 @@ mod filter_log_egress_zone_tests {
                 protocol: PROTO_TCP,
                 ..UserspaceDpMeta::default()
             };
-            let decision = SessionDecision { resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex,
-                tx_ifindex: egress_ifindex,
-                tunnel_endpoint_id: 0,
-                next_hop: None,
-                neighbor_mac: None,
-                src_mac: None,
-                tx_vlan_id: 0,
-            }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+            let decision = SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex,
+                    tx_ifindex: egress_ifindex,
+                    tunnel_endpoint_id: 0,
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            };
             let metadata = SessionMetadata {
                 ingress_zone: TEST_LAN_ZONE_ID,
                 // #4983: mirror the frame's own ingress binding (`meta`

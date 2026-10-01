@@ -806,6 +806,7 @@ fn txn_tunnel_marked_missing_neighbor_not_buffered() {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
+        mtu: 0,
     });
     // No neighbors: the tunnel's OUTER destination (203.0.113.9 via the
     // 172.16.80.1 default gateway) is unresolved -> MissingNeighbor
@@ -3081,7 +3082,7 @@ fn nat64_frag_assoc_miss_must_drop_with_default_route_6927() {
 /// # What #7656 fixed, and why it is not just the family
 ///
 /// The flowless arm now receives a synthesized POST-NAT L3 wire key
-/// (`l3_wire_session_flow_from_meta`), put through the same `forward_wire_key`
+/// (`l3_wire_session_flow_from_frame`), put through the same `forward_wire_key`
 /// the flow-bearing path uses. Family, addresses and protocol therefore move
 /// together BY CONSTRUCTION, including the NAT64 `ICMPV6`<->`ICMP` swap.
 ///
@@ -3635,7 +3636,7 @@ fn nat64_flowless_fragment_output_filter_matches_the_postnat_tuple_7656() {
              the post-NAT family but still MATCHED against the pre-NAT v6 \
              addresses -- the family-only half-fix. Family, tuple and protocol \
              must all come from the synthesized post-NAT wire key \
-             (l3_wire_session_flow_from_meta), not three separate reads"
+             (l3_wire_session_flow_from_frame), not three separate reads"
         );
     }
 }

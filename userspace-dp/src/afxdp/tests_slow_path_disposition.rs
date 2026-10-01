@@ -58,6 +58,8 @@ fn maybe_reinject_slow_path_ignores_forward_candidate_disposition() {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     maybe_reinject_slow_path(
@@ -150,17 +152,15 @@ fn maybe_reinject_slow_path_drops_ineligible_dispositions() {
             protocol: PROTO_ICMP,
             ..UserspaceDpMeta::default()
         };
-        let decision = SessionDecision { resolution: ForwardingResolution {
-            disposition,
-            local_ifindex: 0,
-            egress_ifindex: 6,
-            tx_ifindex: 6,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-            src_mac: Some([6, 7, 8, 9, 10, 11]),
-            tx_vlan_id: 0,
-        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+        let decision = SessionDecision { resolution: ForwardingResolution { disposition,
+        local_ifindex: 0,
+        egress_ifindex: 6,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+        neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+        src_mac: Some([6, 7, 8, 9, 10, 11]),
+        tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
         maybe_reinject_slow_path(
             &binding,
@@ -231,6 +231,8 @@ fn maybe_reinject_slow_path_records_extract_failure_for_invalid_desc() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     // Addr beyond the registered UMEM length forces an extract failure.
@@ -293,6 +295,8 @@ fn maybe_reinject_slow_path_from_frame_records_unavailable() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     maybe_reinject_slow_path_from_frame(
@@ -382,17 +386,15 @@ fn route_identity_is_dropped_before_any_slow_path_outlet_11326() {
             ..UserspaceDpMeta::default()
         };
         let decision = SessionDecision {
-            resolution: ForwardingResolution {
-                disposition,
-                local_ifindex: 0,
-                egress_ifindex: 12,
-                tx_ifindex: 12,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                src_mac: Some([6, 7, 8, 9, 10, 11]),
-                tx_vlan_id: 0,
-            },
+            resolution: ForwardingResolution { disposition,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: Some([6, 7, 8, 9, 10, 11]),
+            tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 },
             nat: NatDecision::default(),
             install_table_domain: table_domain,
             install_table_check: table_check,
@@ -469,6 +471,8 @@ fn handle_forward_build_failure_records_build_and_slow_path_failures() {
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
@@ -545,6 +549,8 @@ fn stamped_route_identity_build_failure_does_not_reinject_11326() {
             neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
             src_mac: Some([6, 7, 8, 9, 10, 11]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision::default(),
         install_table_domain: 123,
@@ -620,6 +626,8 @@ fn handle_forward_build_failure_without_fallback_only_records_build_failure() {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
@@ -692,6 +700,8 @@ fn handle_forward_build_failure_drops_fabric_redirect_fail_closed() {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
@@ -776,6 +786,8 @@ fn handle_forward_build_failure_still_reinjects_forward_candidate() {
         neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
         src_mac: Some([6, 7, 8, 9, 10, 11]),
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let mut dbg = DebugPollCounters::default();
     let local_tunnel_reinjectors = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
@@ -874,6 +886,8 @@ fn disposition_counters_hot_accumulates_in_batch_not_live() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         64,
         None,
@@ -938,6 +952,8 @@ fn disposition_counters_cold_writes_live_immediately() {
             neighbor_mac: None,
             src_mac: None,
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         64,
         None,
@@ -1308,17 +1324,15 @@ fn next_table_unsupported_is_dropped_and_counted_permit_no_route_still_delegates
         // egress_ifindex 0 mirrors what the FIB actually builds for both of
         // these dispositions (there is no egress interface), so the harness
         // is not quietly kinder to them than production is.
-        let decision = SessionDecision { resolution: ForwardingResolution {
-            disposition,
-            local_ifindex: 0,
-            egress_ifindex: 0,
-            tx_ifindex: 0,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-        }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+        let decision = SessionDecision { resolution: ForwardingResolution { disposition,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0, route_mtu: 0, transport_route_mtu: 0 }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
         maybe_reinject_slow_path(
             &binding,
@@ -1681,6 +1695,8 @@ fn reinject_primitive_routes_each_path_to_its_outlet_9637() {
                 neighbor_mac: None,
                 src_mac: None,
                 tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
             nat: NatDecision::default(),
             install_table_domain: 0,
@@ -3324,6 +3340,10 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
         dynamic_neighbors.get(&pending_key).is_some(),
         "{case_name}: resolved neighbor must be visible under the pending key"
     );
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut debug_counters = crate::afxdp::DebugPollCounters::default();
     retry_pending_neigh(
         ingress,
         left,
@@ -3342,6 +3362,8 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
         &mut shared_recycles,
         None,
         &mut BatchCounters::default(),
+        &recent_exceptions,
+        &mut debug_counters,
     );
     assert!(
         bindings[0].pending_neigh.is_empty(),

@@ -111,8 +111,9 @@ sync.
       - **#3026 / #6102 — generated ICMP error (Time Exceeded + egress-MTU
         Packet-Too-Big):** `icmp.rs`
         (`build_local_time_exceeded_request`) and the TX dispatch PTB path
-        (`compute_forwarded_egress_ptb` build + `enqueue_pending_forwards`
-        classify) resolve the LOGICAL egress unit ifindex once via the SSOT
+        (`compute_forwarded_egress_ptb` build +
+        `enqueue_forwarded_ptb_reply` classify) resolve the LOGICAL egress unit
+        ifindex once via the SSOT
         (`resolve_ingress_logical_ifindex`, from the physical
         `ingress_ident.ifindex` + `meta.ingress_vlan_id`) and key the egress
         lookup, the reply BUILD, and the output-filter/CoS classify off THAT,
@@ -125,6 +126,10 @@ sync.
         parent's filter/CoS. `target_ifindex` (physical) is still used for the
         XSK transmit, and the #5856 per-zone rate-limit bucket deliberately
         stays keyed on the PHYSICAL `ingress_ident.ifindex`.
+      - **#11410 — cold-neighbor replay:** `neighbor_dispatch.rs::retry_pending_neigh`
+        uses the same PTB build/classify helpers after the replay output-filter
+        drop verdict, so permitted oversized packets are signalled and dropped
+        before direct TX.
       - **#3035 — generated SYN-cookie / reject reply:**
         `poll_descriptor/cookie_reply.rs` (SYN-cookie SYN-ACK / ACK-RST)
         `poll_descriptor/reject_reply.rs` (policy/filter `reject` TCP RST or
@@ -578,12 +583,19 @@ sync.
     fail closed (a flowless packet's port 0 can never confirm an
     `application junos-http` or a `destination-port 80` term), while
     `application any` / address / protocol / `is-fragment` terms still
-    match — so legitimately-permitted flowless forwarding survives. KNOWN
-    LIMITATION: a flow PERMITTED only by an L4-specific term (e.g.
-    `application junos-https`) has its non-first fragments fall to the
-    default policy (fail-closed drop) until the deferred
-    fragment-association-cache stage of the #3291 plan carries the first
-    fragment's verdict; tracked as the deferred fragment-association-cache stage of #3291.
+    match — so legitimately-permitted flowless forwarding survives.
+    **Plain-session fragments (#11412):** a flow permitted only by an
+    L4-specific term used to lose its decision on the first non-first fragment
+    because that packet has no recoverable ports. A plain-forward first
+    fragment now installs the committed session decision in the shared
+    authority-keyed fragment-association cache, with a default (no-NAT)
+    `NatDecision`; later middle/last fragments inherit that decision through
+    the same session-liveness, generation, authority, and HA fences as NAT
+    associations. Installation is post-commit, so a first fragment denied by
+    a port-specific rule installs neither a session nor an association; the
+    flowless skipped-fragment-deny override keeps its tails denied. An
+    association miss still uses the existing flowless L3 policy path, where
+    an L4-only permit fails closed under default-deny.
     The #10660 MissingNeighbor gate runs before the neighbor
     probe/seed/buffer: an unassociated non-first fragment is dropped and
     counted as `nat_frag_untranslated_dropped` when a live forward NAT
@@ -703,7 +715,7 @@ sync.
     been post-NAT for any NAT since #7656 (`forward_wire_key` rewrites
     `src`/`dst` unconditionally; only family and the ICMP/ICMPv6 swap are gated
     on `nat.nat64`) — but every #7656 cell is NAT64, so that was right by side
-    effect and unbound: narrowing `l3_wire_session_flow_from_meta` to
+    effect and unbound: narrowing `l3_wire_session_flow_from_frame` to
     `if nat.nat64 { forward_wire_key(..) }` left 5251 of 5252 cells green.
     Cells: `flowless_snat_egress_output_filter_matches_the_postnat_tuple_8367`
     (`tests_fragment.rs`, end-to-end interface SNAT, address-bearing terms on
@@ -959,6 +971,14 @@ sync.
     descriptor; a suppressed/unbuildable reply is the fail-closed silent
     drop). The reply is built inside the `target_binding` borrow and
     enqueued onto `ingress_binding` once that borrow ends.
+    For a plain forward the effective MTU is the minimum of the nonzero
+    egress-interface MTU and the selected FIB route's optional RTAX_MTU;
+    absent/zero route MTU adds no constraint. Tunnel MTUs stay in separate
+    domains: the overlay route MTU constrains the inner packet, while the
+    route to a GRE/WireGuard outer endpoint is combined with the physical
+    interface MTU before encapsulation overhead/padding is converted into
+    an inner budget. The inner route bound also caps tunnel TCP segments;
+    PTB and encapsulation/drop guards use the same selected-route resolutions.
     **Post-transform PMTUD (#2330):** the #2301 decision above compares the
     SOURCE frame against the egress MTU, which is correct ONLY for a
     size-preserving plain forward. For the size-CHANGING paths (NAT64,

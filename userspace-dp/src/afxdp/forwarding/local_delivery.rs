@@ -191,6 +191,8 @@ pub(in crate::afxdp) fn ingress_interface_local_resolution(
         neighbor_mac: None,
         src_mac: None,
         tx_vlan_id: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     })
 }
 

@@ -115,13 +115,13 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) interface_nat_v4: FastMap<Ipv4Addr, i32>,
     pub(in crate::afxdp) interface_nat_v6: FastMap<Ipv6Addr, i32>,
     pub(in crate::afxdp) connected_v4: Vec<ConnectedRouteV4>,
-    /// #10689: build-time index of the IPv4 connected-prefix directed
-    /// broadcasts. Transit source classification uses one set lookup instead
-    /// of scanning every connected route on each packet.
-    pub(in crate::afxdp) connected_v4_directed_broadcasts: FastSet<Ipv4Addr>,
+    /// #10689: build-time index of IPv4 connected-prefix directed broadcasts,
+    /// keyed by routing domain so overlapping prefixes do not poison other
+    /// routing instances.
+    pub(in crate::afxdp) connected_v4_directed_broadcasts: FastSet<(u32, Ipv4Addr)>,
     /// #11033: egress-scoped index for rejecting neighbor resolution of a
     /// connected subnet-directed broadcast on its own interface. Unlike the
-    /// address-only source martian index above, this key includes ifindex.
+    /// domain-keyed source martian index above, this key includes ifindex.
     pub(in crate::afxdp) connected_v4_directed_broadcast_neighbor_keys: FastSet<(i32, Ipv4Addr)>,
     pub(in crate::afxdp) connected_v6: Vec<ConnectedRouteV6>,
     pub(in crate::afxdp) routes_v4: FastMap<String, Vec<RouteEntryV4>>,
@@ -1046,6 +1046,8 @@ pub(in crate::afxdp) struct RouteEntryV4 {
     pub(in crate::afxdp) next_table: String,
     /// #2390: Junos route preference (admin distance; lower = preferred).
     pub(in crate::afxdp) preference: i32,
+    /// Kernel-selected route MTU, in bytes. Zero means no route MTU.
+    pub(in crate::afxdp) mtu: u32,
     /// #9955: kernel ip-rule priority for a next-table leak. Zero for
     /// ordinary routes and legacy snapshots.
     pub(in crate::afxdp) rule_priority: u32,
@@ -1060,6 +1062,8 @@ pub(in crate::afxdp) struct RouteEntryV6 {
     pub(in crate::afxdp) next_table: String,
     /// #2390: Junos route preference (admin distance; lower = preferred).
     pub(in crate::afxdp) preference: i32,
+    /// Kernel-selected route MTU, in bytes. Zero means no route MTU.
+    pub(in crate::afxdp) mtu: u32,
     /// #9955: kernel ip-rule priority for a next-table leak. Zero for
     /// ordinary routes and legacy snapshots.
     pub(in crate::afxdp) rule_priority: u32,
@@ -1123,6 +1127,7 @@ impl RouteEntryV4 {
             discard,
             next_table,
             preference,
+            mtu: 0,
             rule_priority: 0,
         }
     }
@@ -1150,6 +1155,7 @@ impl RouteEntryV6 {
             discard,
             next_table,
             preference,
+            mtu: 0,
             rule_priority: 0,
         }
     }
@@ -1548,6 +1554,11 @@ pub(crate) struct ForwardingResolution {
     pub(crate) neighbor_mac: Option<[u8; 6]>,
     pub(crate) src_mac: Option<[u8; 6]>,
     pub(crate) tx_vlan_id: u16,
+    /// Selected route's L3 MTU. Zero means no route-specific constraint.
+    pub(crate) route_mtu: u32,
+    /// Outer transport route's MTU for native tunnel resolutions. Kept
+    /// distinct from `route_mtu`, which constrains the inner/overlay packet.
+    pub(crate) transport_route_mtu: u32,
 }
 
 impl ForwardingResolution {

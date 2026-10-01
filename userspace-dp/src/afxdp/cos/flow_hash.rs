@@ -103,6 +103,10 @@ fn exact_cos_flow_bucket(queue_seed: u64, flow_key: Option<&SessionKey>) -> u16 
             mix_cos_flow_bucket(&mut seed, 4);
             mix_u32_halves_for_cos_bucket(&mut seed, handle);
         }
+        TunnelDiscriminator::Ipsec(if_id) => {
+            mix_cos_flow_bucket(&mut seed, 6);
+            mix_u32_halves_for_cos_bucket(&mut seed, if_id);
+        }
         TunnelDiscriminator::Unparseable => mix_cos_flow_bucket(&mut seed, 5),
     }
     seed as u16

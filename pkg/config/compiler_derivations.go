@@ -25,10 +25,9 @@ import "strings"
 //     the fabric fixup (step 6, `SlotToNodeID(member) == cc.NodeID`) AND
 //     validateDeviceMapStrict (later, in the P6b uniform gates) both read
 //     cc.NodeID.
-//  2. resolveBGPAutonomousSystem — resolve the BGP local-AS from
-//     `routing-options autonomous-system` when `protocols bgp local-as` was
-//     omitted; runs after the child loop so routing-options and
-//     protocols/routing-instances are both populated.
+//  2. resolveBGPAutonomousSystem and resolveRoutingOptionsRouterID — resolve
+//     the global BGP local-AS and routing-options router-id defaults after
+//     protocols/routing-instances and routing-options have both been populated.
 //  3. lo0 filter extract — hoist the lo0 unit-0 input filter names into
 //     SystemConfig for the host-inbound-filter machinery.
 //  4. applyCoSInterfaceLevelBindings — fold interface-level CoS bindings into
@@ -96,6 +95,10 @@ func resolveDerivedConfig(cfg *Config, opts compileOpts) {
 	// after the child loop so both routing-options and protocols/
 	// routing-instances are populated regardless of their order under root.
 	resolveBGPAutonomousSystem(cfg)
+
+	// #11314: apply the global Junos router-id default after protocols and
+	// routing instances have been compiled, preserving explicit protocol IDs.
+	resolveRoutingOptionsRouterID(cfg)
 
 	// Extract lo0 filter input from parsed interfaces into SystemConfig.
 	if lo0 := cfg.Interfaces.Interfaces["lo0"]; lo0 != nil {

@@ -1,6 +1,7 @@
-// #6386 leaf extraction: the NAT / NAT64 forward fragment-association
-// install & consult helpers (#2562/#5146/#5624/#5689) plus the #6122/#10679
-// fail-closed flowless NAT discriminator, lifted out of poll_descriptor/mod.rs.
+// #6386 leaf extraction: the NAT64, same-family NAT, and plain-forward
+// fragment-association install & consult helpers (#2562/#5146/#5624/#5689/
+// #11412) plus the #6122/#10679 fail-closed flowless NAT discriminator, lifted
+// out of poll_descriptor/mod.rs.
 // The four association helpers keep their #[inline]; flowless_requires_nat_translation
 // keeps its deliberate #[cold] #[inline(never)].
 
@@ -102,8 +103,8 @@ pub(in crate::afxdp) fn frag_ingress_authority_with_nat_scope(
 /// install to the commit points makes the association visible ONLY on the outcome the
 /// anchor fragment actually authorized. Self-gated on `decision.nat.nat64` so it is
 /// safe to call unconditionally at the shared sites next to
-/// `nat_install_forward_fragment_assoc`; the two are mutually exclusive (NAT64 vs
-/// ordinary same-family), so exactly one fires. #9950/#10132: the hit tail gates
+/// `same_family_or_plain_install_forward_fragment_assoc`; their NAT64 vs
+/// same-family-or-plain gates are mutually exclusive, so at most one fires.
 /// v6-side installs on AF_INET6 and carries `Nat64ReverseInfo` for AF_INET reply
 /// associations, which the flowless reverse consult returns to the NAT64 builder.
 #[inline]
@@ -119,9 +120,9 @@ pub(super) fn nat64_install_forward_fragment_assoc(
     now_ns: u64,
     nat64_reverse: Option<Nat64ReverseInfo>,
 ) -> bool {
-    // ordinary same-family NAT / NPTv6 association is installed by
-    // `nat_install_forward_fragment_assoc` (which self-gates the other way), so
-    // both can be called at one commit site and exactly one populates the table.
+    // same-family NAT / NPTv6 or plain forwarding is installed by
+    // `same_family_or_plain_install_forward_fragment_assoc` (which self-gates
+    // the other way), so both can be called at one commit site.
     if !decision.nat.nat64 {
         return false;
     }
@@ -197,32 +198,29 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
     Some((decision, reverse))
 }
 
-/// #5689: on a FIRST fragment of an ORDINARY same-family NAT / NPTv6 flow that
-/// translated and will forward, install a fragment association keyed by
-/// `(family, src, dst, ip_id, protocol, authority)` (#5798 widened the original
-/// `(family, src, dst, ip_id)`) so its non-first fragments inherit `decision`
-/// and translate L3-only (address-only rewrite) instead of being forwarded
-/// UNTRANSLATED (the #5689 leak). Mirrors [`nat64_install_forward_fragment_assoc`]
-/// but for the SNAT / DNAT / static-NAT / NPTv6 path. It REUSES the generic
-/// `FragAssoc` cache: the key + value are family-agnostic and the `nat64`
-/// flag on the cached decision distinguishes a NAT64 entry from an ordinary one
-/// (a given datagram installs exactly one entry, so the two never alias). The
-/// shared cache is stamped with `build_generation` — which advances on EVERY
-/// config commit (`snapshot.generation`), not only NAT64 changes — so a SNAT /
-/// DNAT rule change invalidates a stale ordinary-NAT association on lookup.
+/// #5689/#11412: on a FIRST fragment of an ordinary same-family NAT / NPTv6
+/// flow or a plain no-NAT flow that will forward, install a fragment association
+/// keyed by `(family, src, dst, ip_id, protocol, authority)` (#5798 widened the
+/// original `(family, src, dst, ip_id)`). Non-first fragments inherit the
+/// committed decision, so translated fragments receive their address-only L3
+/// rewrite and plain fragments retain their first fragment's forwarding verdict.
+/// This REUSES the generic `FragAssoc` cache; NAT64 decisions have their own
+/// install helper. The shared cache is stamped with `build_generation`, which
+/// advances on EVERY config commit, invalidating stale associations.
 /// #9950: fires at BOTH the new-flow commit AND the session-hit tail (forward hits
 /// of existing flows + reverse replies, owner-only, post-gate). The hit decision for
 /// a reply is already the reverse via `NatDecision::reverse`, keyed by the reply's
 /// own tuple + authority — the "forward" in the name means "same-tuple".
 ///
-/// Only a first fragment (offset 0, MF=1) carrying a same-family address
-/// rewrite whose resolution is a ForwardCandidate with a resolved neighbor
-/// installs; a NAT64 decision (it has its own install), a decision
-/// with no address rewrite, or one that will not forward is never cached, so an
-/// unassociated non-first fragment still falls to the flowless default policy.
+/// Only a first fragment (offset 0, MF=1) carrying either a same-family
+/// address rewrite or an exact-default no-NAT decision whose resolution is a
+/// ForwardCandidate with a resolved neighbor installs. NAT64, other decisions
+/// without an address rewrite, and decisions that will not forward are never
+/// cached; a plain fragment therefore receives an association only after its
+/// actual forwarding decision has committed.
 #[inline]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn nat_install_forward_fragment_assoc(
+pub(super) fn same_family_or_plain_install_forward_fragment_assoc(
     forwarding: &ForwardingState,
     l3_packet: &[u8],
     addr_family: i32,
@@ -232,16 +230,14 @@ pub(super) fn nat_install_forward_fragment_assoc(
     admitting_session_id: u64,
     now_ns: u64,
 ) -> bool {
-    // Cross-family NAT64 has its own install; here we cache only an ordinary
-    // same-family address rewrite.
-    //
-    // #7899: same-family entries deliberately pass `reverse: None`. NAT64
-    // uses the sibling helper above; #10132 supplies `Nat64ReverseInfo` only
-    // for its AF_INET reply association, because the v4->v6 builder needs the
-    // original v6 endpoints while same-family replies use their own decision.
-    if decision.nat.nat64
-        || (decision.nat.rewrite_src.is_none() && decision.nat.rewrite_dst.is_none())
-    {
+    // NAT64 has its own install. For this path accept either the prior
+    // same-family address-rewrite decisions or an exactly-default no-NAT
+    // decision; port-only and other metadata-only decisions are not safe to
+    // inherit on a later L3-only fragment.
+    let plain = decision.nat == crate::nat::NatDecision::default();
+    let same_family_address_rewrite =
+        decision.nat.rewrite_src.is_some() || decision.nat.rewrite_dst.is_some();
+    if decision.nat.nat64 || (!plain && !same_family_address_rewrite) {
         return false;
     }
     if decision.resolution.disposition != ForwardingDisposition::ForwardCandidate
@@ -265,19 +261,16 @@ pub(super) fn nat_install_forward_fragment_assoc(
     false
 }
 
-/// #5689: consult the fragment association for a NON-first ORDINARY same-family
-/// NAT / NPTv6 fragment (forward OR reply — #9950 installs reply entries at the
-/// session-hit tail, keyed by the reply's own tuple + authority, so the "forward"
-/// in the name means "same-tuple"). On a hit whose cached decision carries a
-/// same-family address rewrite (SNAT / DNAT / static-NAT / NPTv6, NOT NAT64),
-/// return that decision so the flowless arm inherits the first fragment's
-/// permitted verdict + egress resolution and the forward-build path
-/// L3-translates the fragment (address-only: `apply_nat_ipv4` / `apply_nat_ipv6`
-/// skip the L4-checksum + port rewrite for a non-first fragment). A miss returns
-/// `None` and the caller falls through to the flowless L3 enforcement (default
-/// policy). Unlike the NAT64 forward consult (v6-only) this works for BOTH IPv4
-/// and IPv6.
-///
+/// #5689/#11412: consult the fragment association for a NON-first same-family
+/// NAT / NPTv6 fragment or a plain no-NAT fragment (forward OR reply — #9950
+/// installs reply entries at the session-hit tail, keyed by the reply's own
+/// tuple + authority). Same-family address-rewrite decisions retain their
+/// existing behavior; an exact-default no-NAT decision is returned only when
+/// its reverse metadata is also `None`. NAT64 and port-only/other decisions
+/// are rejected. A hit gives the flowless arm the first fragment's committed
+/// verdict and egress resolution; the build path performs address-only L3
+/// translation for NAT fragments. A miss returns `None` for normal enforcement.
+/// Unlike the NAT64 forward consult (v6-only) this works for BOTH IPv4 and IPv6.
 /// FAIL-CLOSED MISS (#6122, closing the #5689 residual). On a consult MISS —
 /// fragment reorder (non-first before first), TTL straddle (> the ~2s
 /// `FragAssoc` TTL between first and non-first), shard-cap eviction under a
@@ -298,7 +291,7 @@ pub(super) fn nat_install_forward_fragment_assoc(
 /// the discriminator is what finally makes the miss fail-closed without
 /// over-dropping.
 #[inline]
-pub(super) fn nat_consult_forward_fragment_assoc(
+pub(super) fn same_family_or_plain_consult_forward_fragment_assoc(
     forwarding: &ForwardingState,
     l3_packet: &[u8],
     addr_family: i32,
@@ -322,11 +315,14 @@ pub(super) fn nat_consult_forward_fragment_assoc(
                 .is_some_and(|group| group.is_forwarding_active(now_secs))
         },
     )?;
-    // Only an ordinary same-family NAT / NPT rewrite routes here; a NAT64
-    // (cross-family) association is handled by `nat64_consult_forward_fragment_assoc`.
-    if decision.nat.nat64
-        || (decision.nat.rewrite_src.is_none() && decision.nat.rewrite_dst.is_none())
-    {
+    // NAT64 is handled by `nat64_consult_forward_fragment_assoc`. Accept the
+    // existing same-family address rewrites, or exact-default no-NAT only if
+    // no NAT64 reverse metadata was stored. This excludes port-only decisions.
+    let plain = decision.nat == crate::nat::NatDecision::default() && _reverse.is_none();
+    let same_family_address_rewrite =
+        !decision.nat.nat64
+            && (decision.nat.rewrite_src.is_some() || decision.nat.rewrite_dst.is_some());
+    if !plain && !same_family_address_rewrite {
         return None;
     }
     Some(decision)

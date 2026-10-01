@@ -245,6 +245,34 @@ fn every_discriminator_class_survives_the_sync_path_distinctly_7188() {
     }
 }
 
+#[test]
+fn ipsec_if_id_sync_tag_round_trips_and_unknown_tags_refuse_import_9506() {
+    let if_id = 0x1234_5678;
+    let mut req = gre_sync_req(
+        PROTO_TCP,
+        TunnelDiscriminator::Ipsec(if_id).to_wire(),
+    );
+    req.src_port = 50_123;
+    req.dst_port = 443;
+    let key = build_synced_session_key(&req, 0, SyncedKeyIntent::Install)
+        .expect("a known nonzero IPsec if_id must import");
+    assert_eq!(key.discriminator, TunnelDiscriminator::Ipsec(if_id));
+
+    let zero_if_id = 3u64 << 32;
+    assert_eq!(
+        TunnelDiscriminator::from_wire(zero_if_id),
+        crate::session::WireDiscriminator::Unrecognized,
+        "if_id zero cannot create an unscoped IPsec session"
+    );
+    let unknown_tag = (4u64 << 32) | u64::from(if_id);
+    let mut unknown = gre_sync_req(PROTO_TCP, unknown_tag);
+    unknown.src_port = 50_123;
+    unknown.dst_port = 443;
+    let err = build_synced_session_key(&unknown, 0, SyncedKeyIntent::Install)
+        .expect_err("a future discriminator must not be coerced to a known class");
+    assert!(err.contains("tunnel-discriminator-unrecognized"));
+}
+
 /// #7699: a PPTP record whose call-id pair was not carried is WITHHELD.
 ///
 /// The handle in the discriminator is derived from the pair, so a record with

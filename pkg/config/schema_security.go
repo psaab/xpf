@@ -172,6 +172,9 @@ func policyThenSchemaChildren() map[string]*schemaNode {
 	}
 }
 
+// #11367: shared strict and compiler diagnostic for an ambiguous choice block.
+const defaultPolicyAmbiguousBlockDiagnostic = "expected exactly one block value, found %d children"
+
 var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: true, children: map[string]*schemaNode{
 	// #9878: closed-world arm. Leaf-completeness audit (the schema.go
 	// contract: only flip a LEAF-COMPLETE subtree). zones children =

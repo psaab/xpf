@@ -406,6 +406,14 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 			return nil, err
 		}
 	}
+	// #11391: strict commit also verifies that each routing instance can become
+	// its derived vrf-<name> Linux device. Tolerant paths skip this gate and
+	// quarantine invalid names in compileRoutingInstances.
+	if !opts.lenientRoutingInstanceKernelName {
+		if err := validateRoutingInstanceKernelNameAST(tree, nil); err != nil {
+			return nil, err
+		}
+	}
 
 	// #5180: duplicate hierarchical named-block gate. Runs PRE-expansion on the
 	// top-level stanzas (never a group body — apply-groups deep-merges rather
@@ -756,6 +764,13 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 			return nil, err
 		}
 	}
+	// #11391: same expanded-name gate as the generic compiler above, including
+	// names from both cluster-node group expansions.
+	if !opts.lenientRoutingInstanceKernelName {
+		if err := validateRoutingInstanceKernelNameAST(tree, &nodeID); err != nil {
+			return nil, err
+		}
+	}
 
 	// #5180: duplicate hierarchical named-block gate — see compileConfigWithOpts.
 	// Pre-expansion, top-level stanzas only; strict rejects, lenient warns. Also
@@ -990,6 +1005,12 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// P5 cross-section derivations below.
 	if err := compileSections(tree, cfg, opts); err != nil {
 		return nil, err
+	}
+	// #11367: compilePolicies handles an ambiguous block in its own policies
+	// stanza, but repeated security roots compile in author order. Ensure no
+	// later valid default-policy can override the fail-closed tolerant result.
+	if opts.lenientDefaultPolicyBlock11367 && hasAmbiguousDefaultPolicyBlock11367(tree.Children) {
+		cfg.Security.DefaultPolicy = PolicyDeny
 	}
 
 	// P5 (#4406 step 5): cross-section derivations. Extracted into

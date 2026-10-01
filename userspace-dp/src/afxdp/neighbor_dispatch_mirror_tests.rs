@@ -46,6 +46,8 @@
             neighbor_mac: None,
             src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 }
     }
 
@@ -112,9 +114,21 @@
         let area = bindings[0].umem.area() as *const MmapArea;
         let (left, rest) = bindings.split_at_mut(0);
         let (binding, right) = rest.split_first_mut().expect("binding");
+        let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::afxdp::ExceptionEventRing::new(),
+        ));
+        let mut retry_dbg = crate::afxdp::DebugPollCounters::default();
         retry_pending_neigh(
-            binding, left, 0, right, &lookup, &mirror_targets, &forwarding,
-            dynamic_neighbors, None, now_ns,
+            binding,
+            left,
+            0,
+            right,
+            &lookup,
+            &mirror_targets,
+            &forwarding,
+            dynamic_neighbors,
+            None,
+            now_ns,
             // SAFETY: `area` was cast from the &MmapArea borrowed out of
             // bindings[0].umem above; the allocation outlives this call, the
             // split borrows cover disjoint binding state, and this is
@@ -123,6 +137,8 @@
             &mut shared_recycles,
             None,
             &mut BatchCounters::default(),
+            &recent_exceptions,
+            &mut retry_dbg,
         );
     }
 
@@ -480,26 +496,52 @@
             let area = bindings[0].umem.area() as *const MmapArea;
 
             let reps = if n > 512 { 200 } else { 5_000 };
+            let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+                crate::afxdp::ExceptionEventRing::new(),
+            ));
+            let mut retry_dbg = crate::afxdp::DebugPollCounters::default();
             let (left, rest) = bindings.split_at_mut(0);
             let (binding, right) = rest.split_first_mut().expect("binding");
             // Warm.
             for _ in 0..(reps / 10).max(1) {
                 retry_pending_neigh(
-                    binding, left, 0, right, &lookup, &mirror_targets, &forwarding,
-                    &dynamic_neighbors, None, 1_000_000_100, unsafe { &*area },
+                    binding,
+                    left,
+                    0,
+                    right,
+                    &lookup,
+                    &mirror_targets,
+                    &forwarding,
+                    &dynamic_neighbors,
+                    None,
+                    1_000_000_100,
+                    unsafe { &*area },
                     &mut shared_recycles,
                     None,
                     &mut BatchCounters::default(),
+                    &recent_exceptions,
+                    &mut retry_dbg,
                 );
             }
             let t0 = Instant::now();
             for _ in 0..reps {
                 retry_pending_neigh(
-                    binding, left, 0, right, &lookup, &mirror_targets, &forwarding,
-                    &dynamic_neighbors, None, 1_000_000_100, unsafe { &*area },
+                    binding,
+                    left,
+                    0,
+                    right,
+                    &lookup,
+                    &mirror_targets,
+                    &forwarding,
+                    &dynamic_neighbors,
+                    None,
+                    1_000_000_100,
+                    unsafe { &*area },
                     &mut shared_recycles,
                     None,
                     &mut BatchCounters::default(),
+                    &recent_exceptions,
+                    &mut retry_dbg,
                 );
             }
             let per = t0.elapsed().as_nanos() as f64 / reps as f64;
@@ -521,11 +563,22 @@
             let due_now = 1_000_000_000 + PROBE_SCHEDULE_NS[0] + 5_000_000;
             let t1 = Instant::now();
             retry_pending_neigh(
-                binding, left, 0, right, &lookup, &mirror_targets, &forwarding,
-                &dynamic_neighbors, None, due_now, unsafe { &*area },
+                binding,
+                left,
+                0,
+                right,
+                &lookup,
+                &mirror_targets,
+                &forwarding,
+                &dynamic_neighbors,
+                None,
+                due_now,
+                unsafe { &*area },
                 &mut shared_recycles,
                 None,
                 &mut BatchCounters::default(),
+                &recent_exceptions,
+                &mut retry_dbg,
             );
             let per_due = t1.elapsed().as_nanos() as f64;
             let visited = n.min(PENDING_NEIGH_SWEEP_BUDGET);
@@ -625,6 +678,10 @@
         let (left, rest) = bindings.split_at_mut(0);
         let (binding, right) = rest.split_first_mut().expect("ingress binding");
 
+        let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::afxdp::ExceptionEventRing::new(),
+        ));
+        let mut retry_dbg = crate::afxdp::DebugPollCounters::default();
         retry_pending_neigh(
             binding,
             left,
@@ -645,6 +702,8 @@
             &mut shared_recycles,
             None,
             &mut BatchCounters::default(),
+            &recent_exceptions,
+            &mut retry_dbg,
         );
 
         assert!(bindings[0].pending_neigh.is_empty());
@@ -742,6 +801,10 @@
 
         // now_ns just past the 2s fallback timeout.
         let now_ns = PENDING_NEIGH_TIMEOUT_NS + 1;
+        let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::afxdp::ExceptionEventRing::new(),
+        ));
+        let mut retry_dbg = crate::afxdp::DebugPollCounters::default();
         retry_pending_neigh(
             binding,
             left,
@@ -762,6 +825,8 @@
             &mut shared_recycles,
             None,
             &mut BatchCounters::default(),
+            &recent_exceptions,
+            &mut retry_dbg,
         );
 
         // The packet was dropped (recycled to fill ring, queue drained).
@@ -893,6 +958,10 @@
         let (binding, right) = rest.split_first_mut().expect("ingress binding");
 
         let now_ns = queued_ns + dwell_ns;
+        let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::afxdp::ExceptionEventRing::new(),
+        ));
+        let mut retry_dbg = crate::afxdp::DebugPollCounters::default();
         retry_pending_neigh(
             binding,
             left,
@@ -913,6 +982,8 @@
             &mut shared_recycles,
             None,
             &mut BatchCounters::default(),
+            &recent_exceptions,
+            &mut retry_dbg,
         );
 
         assert!(bindings[0].pending_neigh.is_empty(), "packet must dispatch");
@@ -985,6 +1056,10 @@
         let (binding, right) = rest.split_first_mut().expect("ingress binding");
 
         let now_ns = PENDING_NEIGH_TIMEOUT_NS + 1;
+        let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::afxdp::ExceptionEventRing::new(),
+        ));
+        let mut retry_dbg = crate::afxdp::DebugPollCounters::default();
         retry_pending_neigh(
             binding,
             left,
@@ -1005,6 +1080,8 @@
             &mut shared_recycles,
             None,
             &mut BatchCounters::default(),
+            &recent_exceptions,
+            &mut retry_dbg,
         );
 
         assert!(
@@ -1105,6 +1182,10 @@
         let area = bindings[0].umem.area() as *const MmapArea;
         let (left, rest) = bindings.split_at_mut(0);
         let (binding, right) = rest.split_first_mut().expect("binding");
+        let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::afxdp::ExceptionEventRing::new(),
+        ));
+        let mut retry_dbg = crate::afxdp::DebugPollCounters::default();
         retry_pending_neigh(
             binding,
             left,
@@ -1121,6 +1202,8 @@
             &mut shared_recycles,
             None,
             &mut BatchCounters::default(),
+            &recent_exceptions,
+            &mut retry_dbg,
         );
     }
 
@@ -1225,14 +1308,28 @@
         let area = bindings[0].umem.area() as *const MmapArea;
         let (left, rest) = bindings.split_at_mut(0);
         let (binding, right) = rest.split_first_mut().expect("binding");
+        let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::afxdp::ExceptionEventRing::new(),
+        ));
+        let mut retry_dbg = crate::afxdp::DebugPollCounters::default();
         retry_pending_neigh(
-            binding, left, 0, right, &lookup, &mirror_targets, forwarding,
-            dynamic_neighbors, None, now_ns,
+            binding,
+            left,
+            0,
+            right,
+            &lookup,
+            &mirror_targets,
+            forwarding,
+            dynamic_neighbors,
+            None,
+            now_ns,
             // SAFETY: same shape as sweep_7156 above.
             unsafe { &*area },
             &mut shared_recycles,
             None,
             &mut BatchCounters::default(),
+            &recent_exceptions,
+            &mut retry_dbg,
         );
     }
 

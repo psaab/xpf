@@ -1310,10 +1310,11 @@ first fragment and not the rest — and a v6 filter matched a packet that
 left as IPv4, which is a *wrong* record rather than a missing one.
 
 The fix synthesizes an L3-only post-NAT wire key
-(`forward_request::l3_wire_session_flow_from_meta`) from `meta` + this
-packet's `decision.nat`, put through the same `forward_wire_key` the
-flow-bearing path uses. The NAT decision does not depend on there being a
-flow, so the egress family is derivable exactly where it was previously
+(`forward_request::l3_wire_session_flow_from_frame`) from the verified frame,
+`meta` and this packet's `decision.nat`, put through the same `forward_wire_key`
+the flow-bearing path uses. A native-fragment sentinel is resolved from the IP
+header before the wire key is built. The NAT decision does not depend on there
+being a flow, so the egress family is derivable exactly where it was previously
 guessed. Family, addresses and protocol — including the NAT64
 `ICMPV6`<->`ICMP` swap — therefore move **together by construction**,
 across all four consumers: the per-family tx-selection enable gate, the
@@ -1348,14 +1349,14 @@ before someone re-derives it.
 
 **The fresh flowless arm was already correct — and untested.**
 `forward_request.rs` builds `flowless_wire_flow` with
-`l3_wire_session_flow_from_meta(meta, decision.nat)`, and the
+`l3_wire_session_flow_from_frame(frame, meta, decision.nat)`, and the
 `forward_wire_key` inside it rewrites `src_ip`/`dst_ip` from
 `nat.rewrite_src`/`rewrite_dst` **unconditionally** — only the address
 FAMILY and the ICMP/ICMPv6 protocol swap sit behind `if nat.nat64`. So
 #7656 fixed plain SNAT/DNAT on this arm as a side effect the day it
 landed. But every #7656 cell is NAT64, so the behaviour was right *by side
 effect* with nothing to notice it regressing: narrowing
-`l3_wire_session_flow_from_meta` to `if nat.nat64 { forward_wire_key(..) }
+`l3_wire_session_flow_from_frame` to `if nat.nat64 { forward_wire_key(..) }
 else { pre.forward_key }` — the exact scope boundary #7656's own body drew
 — left the whole suite green.
 

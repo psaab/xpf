@@ -814,6 +814,13 @@ pub(crate) enum SnapshotIntegrityError {
         destination: String,
         preference: i32,
     },
+    /// #11411: a negative RouteSnapshot MTU cannot be represented as a
+    /// usable L3 constraint and must not be coerced into a huge unsigned MTU.
+    RouteMtuOutOfRange {
+        table: String,
+        destination: String,
+        mtu: i32,
+    },
     /// #3771 (M11): a `NeighborSnapshot` carried a NON-EMPTY `family` that does
     /// not match the address family of its parsed `ip` (e.g. family="inet" with
     /// an IPv6 address). The pre-fix `populate_neighbors` installed the neighbor
@@ -1181,6 +1188,15 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "route {:?} in table {:?} has negative preference {} — Junos preference is a non-negative admin distance; a negative value would sort ahead of every route in the FIB tie-break",
                 destination, table, preference
+            ),
+            Self::RouteMtuOutOfRange {
+                table,
+                destination,
+                mtu,
+            } => write!(
+                f,
+                "route {:?} in table {:?} has negative route MTU {} — refusing to turn an invalid kernel MTU into a large or unconstrained FIB budget",
+                destination, table, mtu
             ),
             Self::NeighborFamilyMismatch {
                 interface,

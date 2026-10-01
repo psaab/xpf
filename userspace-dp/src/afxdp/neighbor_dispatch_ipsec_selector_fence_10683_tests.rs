@@ -72,6 +72,8 @@ fn retry_pending_neighbor_rechecks_selector_after_nat_10683() {
             neighbor_mac: None,
             src_mac: Some([0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]),
             tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(10, 20, 0, 8))),
@@ -124,6 +126,10 @@ fn retry_pending_neighbor_rechecks_selector_after_nat_10683() {
     let (binding, right) = rest.split_first_mut().expect("ingress binding");
     let mut counters = BatchCounters::default();
 
+    let recent_exceptions = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::afxdp::ExceptionEventRing::new(),
+    ));
+    let mut debug_counters = crate::afxdp::DebugPollCounters::default();
     retry_pending_neigh(
         binding,
         left,
@@ -139,6 +145,8 @@ fn retry_pending_neighbor_rechecks_selector_after_nat_10683() {
         &mut shared_recycles,
         None,
         &mut counters,
+        &recent_exceptions,
+        &mut debug_counters,
     );
 
     assert!(bindings[0].pending_neigh.is_empty(), "resolved entry is consumed");
