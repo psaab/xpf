@@ -172,7 +172,12 @@ impl DnatEntry {
     /// range (the wide-range DNAT representation); empty is a wildcard.
     ///
     /// All axes are AND-ed (mirroring Junos and the source-NAT path #3429).
-    fn l4_extra_matches(&self, src_port: u16, dst_port: u16, packet_icmp: Option<(u8, u8)>) -> bool {
+    fn l4_extra_matches(
+        &self,
+        src_port: u16,
+        dst_port: u16,
+        packet_icmp: Option<(u8, u8)>,
+    ) -> bool {
         if !self.match_dst_ports.is_empty() && !port_in_ranges(dst_port, &self.match_dst_ports) {
             return false;
         }
@@ -297,9 +302,9 @@ impl DnatTable {
         self.entries.values().map(|v| v.len()).sum::<usize>()
             + self.prefix_entries.values().map(|v| v.len()).sum::<usize>()
     }
-    /// Does an L4-scoped DNAT translation remain possible for a flowless
-    /// packet? Protocol 255 is the non-first-fragment unknown sentinel; it is
-    /// treated as possible without recovering protocol or ports from bytes.
+    /// Can a flowless packet match an L4-scoped DNAT translation?
+    /// Protocol 255 is the non-first-fragment unknown sentinel; it is treated
+    /// as possible without recovering protocol or ports from bytes.
     pub(crate) fn flowless_l4_translation_possible(
         &self,
         protocol: u8,
@@ -309,10 +314,54 @@ impl DnatTable {
         ingress_ifname: &str,
         ingress_routing_instance: &str,
     ) -> bool {
+        self.flowless_l4_rule_possible(
+            protocol,
+            src_ip,
+            dst_ip,
+            zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            false,
+        )
+    }
+
+    /// Could an unavailable-L4 DNAT rule, including an explicit `off`
+    /// exemption, take precedence over an address-only match?
+    pub(crate) fn flowless_l4_precedence_possible(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+    ) -> bool {
+        self.flowless_l4_rule_possible(
+            protocol,
+            src_ip,
+            dst_ip,
+            zone,
+            ingress_ifname,
+            ingress_routing_instance,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn flowless_l4_rule_possible(
+        &self,
+        protocol: u8,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+        include_off: bool,
+    ) -> bool {
         let protocol_unknown = protocol == u8::MAX;
         let carries_ports = protocol_unknown || crate::ip_proto::has_l4_ports(protocol);
         let entry_possible = |entry: &DnatEntry, entry_protocol: u16, entry_port: u16| {
-            if entry.off
+            if (entry.off && !include_off)
                 || (!entry.from_zone.is_empty() && entry.from_zone.as_ref() != zone)
                 || !entry.scope_ok(ingress_ifname, ingress_routing_instance)
                 || !entry.source_matches(src_ip)
@@ -356,9 +405,10 @@ impl DnatTable {
             }
             entry.match_dst_ports.is_empty()
                 || entry_port == 0
-                || entry.match_dst_ports.iter().any(|(low, high)| {
-                    low <= high && *low <= entry_port && entry_port <= *high
-                })
+                || entry
+                    .match_dst_ports
+                    .iter()
+                    .any(|(low, high)| low <= high && *low <= entry_port && entry_port <= *high)
         };
 
         self.entries.iter().any(|(key, entries)| {
@@ -370,6 +420,58 @@ impl DnatTable {
             slots.iter().any(|slot| {
                 slot.contains(dst_ip) && entry_possible(&slot.entry, key.protocol, key.dst_port)
             })
+        })
+    }
+    /// Whether a non-TCP/UDP DNAT candidate would rewrite a destination port
+    /// that the flowless address-only path cannot honor. `None` means the wire
+    /// protocol was not recoverable, so all protocol tiers remain possible.
+    pub(crate) fn flowless_non_tcp_udp_port_map_possible(
+        &self,
+        protocol: Option<u8>,
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        zone: &str,
+        ingress_ifname: &str,
+        ingress_routing_instance: &str,
+    ) -> bool {
+        if protocol.is_some_and(crate::ip_proto::has_l4_ports) {
+            return false;
+        }
+        let entry_possible = |entry: &DnatEntry, entry_protocol: u16| {
+            if entry.off
+                || entry.value.new_dst_port == 0
+                || (!entry.from_zone.is_empty() && entry.from_zone.as_ref() != zone)
+                || !entry.scope_ok(ingress_ifname, ingress_routing_instance)
+                || !entry.source_matches(src_ip)
+                || protocol.is_some_and(|protocol| {
+                    entry_protocol != PROTO_ANY && entry_protocol != u16::from(protocol)
+                })
+                || (!entry.match_src_ports.is_empty()
+                    && !entry.match_src_ports.iter().any(|(low, high)| low <= high))
+                || (!entry.match_dst_ports.is_empty()
+                    && !entry.match_dst_ports.iter().any(|(low, high)| low <= high))
+                || ((entry.match_icmp_type.is_some() || entry.match_icmp_code.is_some())
+                    && protocol.is_some_and(|protocol| {
+                        !matches!(
+                            protocol,
+                            crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
+                        )
+                    }))
+            {
+                return false;
+            }
+            true
+        };
+
+        self.entries.iter().any(|(key, entries)| {
+            key.dst_ip == dst_ip
+                && entries
+                    .iter()
+                    .any(|entry| entry_possible(entry, key.protocol))
+        }) || self.prefix_entries.iter().any(|(key, slots)| {
+            slots
+                .iter()
+                .any(|slot| slot.contains(dst_ip) && entry_possible(&slot.entry, key.protocol))
         })
     }
 
@@ -619,7 +721,8 @@ impl DnatTable {
             // #3437: parse the application-derived L4 match constraints. A
             // source-port range with low > high is the never-match sentinel and
             // is preserved verbatim (it can never satisfy `port_in_ranges`).
-            let mut match_src_ports: Vec<(u16, u16)> = Vec::with_capacity(snap.match_source_ports.len());
+            let mut match_src_ports: Vec<(u16, u16)> =
+                Vec::with_capacity(snap.match_source_ports.len());
             for r in &snap.match_source_ports {
                 match_src_ports.push((r.low, r.high));
             }
@@ -909,9 +1012,7 @@ impl DnatTable {
         let fragment_sentinel = u16::from(crate::session::SHIM_PROTO_FRAGMENT_NO_L4);
         let mut configured_protocols = [0u64; 4];
         for key in self.entries.keys() {
-            if key.protocol < fragment_sentinel
-                && key.dst_ip == dst_ip
-                && key.dst_port == dst_port
+            if key.protocol < fragment_sentinel && key.dst_ip == dst_ip && key.dst_port == dst_port
             {
                 let protocol = key.protocol as usize;
                 configured_protocols[protocol / 64] |= 1u64 << (protocol % 64);
@@ -952,7 +1053,6 @@ impl DnatTable {
         }
         false
     }
-
 
     #[allow(clippy::too_many_arguments)]
     fn match_entries(
@@ -1026,10 +1126,8 @@ impl DnatTable {
         packet_icmp: Option<(u8, u8)>,
     ) -> Option<DnatOutcome> {
         self.match_prefix_slots(
-            self.prefix_entries.get(&DnatProtoPortKey {
-                protocol,
-                dst_port,
-            }),
+            self.prefix_entries
+                .get(&DnatProtoPortKey { protocol, dst_port }),
             dst_ip,
             src_ip,
             src_port,
@@ -1102,7 +1200,9 @@ impl DnatTable {
                     slot.entry.from_zone.is_empty()
                 };
                 if !zone_ok
-                    || !slot.entry.scope_ok(ingress_ifname, ingress_routing_instance)
+                    || !slot
+                        .entry
+                        .scope_ok(ingress_ifname, ingress_routing_instance)
                     || !slot.contains(dst_ip)
                     || !slot.entry.source_matches(src_ip)
                     || !slot.entry.l4_extra_matches(src_port, dst_port, packet_icmp)
@@ -1358,9 +1458,7 @@ impl DnatTable {
                     (Some(p), _) => {
                         let hosts = host_count_v4(p.prefix_len());
                         if hosts <= Self::MAX_LOCAL_PREFIX_HOSTS {
-                            if let Ok(net) =
-                                Ipv4Net::new(p.addr(), p.prefix_len())
-                            {
+                            if let Ok(net) = Ipv4Net::new(p.addr(), p.prefix_len()) {
                                 for host in net.hosts() {
                                     let ip = IpAddr::V4(host);
                                     if !shadowed(ip) {
@@ -1375,9 +1473,7 @@ impl DnatTable {
                         // anything shorter is astronomically large.
                         let hosts = host_count_v6(p.prefix_len());
                         if hosts.is_some_and(|h| h <= u128::from(Self::MAX_LOCAL_PREFIX_HOSTS)) {
-                            if let Ok(net) =
-                                Ipv6Net::new(p.addr(), p.prefix_len())
-                            {
+                            if let Ok(net) = Ipv6Net::new(p.addr(), p.prefix_len()) {
                                 for host in net.hosts() {
                                     let ip = IpAddr::V6(host);
                                     if !shadowed(ip) {

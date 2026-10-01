@@ -563,17 +563,14 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	//   - ""  (routing-instance PBR terminate-as-accept, #3427) -> accept
 	//   - any OTHER non-empty -> drop   (FAIL CLOSED, #3724 M08)
 	//
-	// An unknown / unhandled NON-EMPTY action can only reach here from a tolerant
-	// load, a peer session-sync, or a mixed-version snapshot: the strict commit
-	// gate (validateFilterActionsStrict, plus the UnknownActions capture in
-	// compileFilterThen which leaves term.Action == "") rejects an unknown `then`
-	// token before it is ever persisted through the CLI path. The Rust compiler
-	// fails such a term CLOSED to FilterAction::Discard; the kernel mirror MUST
-	// match that. The pre-#3724 code defaulted the unknown case to nft `accept`,
-	// which fails OPEN on the primary host-bound enforcement path — the kernel
-	// would ADMIT host-bound traffic the operator's lo0 filter meant to drop
-	// while userspace-dp drops it (a mixed-version control-plane fail-open). Fail
-	// closed to `drop` and log the drift so the divergence is observable.
+	// An unknown / unhandled NON-EMPTY action can reach here from a tolerant
+	// load, a peer sync, or a mixed-version snapshot. The Go compiler maps a
+	// term with UnknownActions to Action=="discard" on the tolerant path, so
+	// that term takes the known drop arm below; the Rust filter compiler also
+	// maps non-empty unknown actions to Discard. This fallback still fails
+	// closed for a future action string carried directly by a mixed-version
+	// snapshot. The pre-#3724 code defaulted the unknown case to nft `accept`,
+	// which admitted host-bound traffic the userspace dataplane drops.
 	var action string
 	switch term.Action {
 	case "discard":

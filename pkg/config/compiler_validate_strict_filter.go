@@ -731,23 +731,17 @@ func validateFilterCrossFieldStrict(cfg *Config) error {
 // forwarding-class/loss-priority/dscp/traffic-class/policer/routing-instance)
 // — #2399 finding 032-16.
 //
-// Before this gate, compileFilterThen silently DROPPED an unrecognized or
-// misspelled `then` token. The term's Action stayed "", which the dataplane
-// compiler (pkg/dataplane/compiler_filter.go) and the Rust filter
-// (userspace-dp/src/filter/compiler.rs parse_term) BOTH map to
-// FilterAction::Accept — a fail-open permit. An operator who typed `then
-// frobnicate` (or a future action a peer node understands) got an ACCEPT for a
-// filter term they intended to deny. In Junos an unknown filter action is a
-// commit error, so the safe behavior is fail-CLOSED: refuse the commit and
-// name the offending token rather than silently permit.
+// An unknown token must not be allowed to become the empty action, which the
+// dataplane interprets as fall-through to implicit accept. `compileFilterThen`
+// retains it in `UnknownActions`; `compileFirewall` sets the final action to
+// `discard` after all `then` blocks have contributed, so the tolerant uniform
+// gate warns and fails closed. Strict commit still refuses the unknown token
+// and names it rather than installing a behavior the operator did not author.
 //
 // The walk is deterministic (filters sorted by name, terms in config order)
 // so the first-reported error is stable across runs, matching
 // validateFilterProtocolsStrict. On the tolerant load / peer-sync path the
-// caller downgrades the returned error to a warning (#1960 no-brick); the
-// dataplane still has no representation for the unknown token, so the
-// leniently-loaded term defaults to accept independently — but the operator
-// never reaches that state through a commit.
+// caller downgrades the returned error to a warning (#1960 no-brick).
 func validateFilterActionsStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
