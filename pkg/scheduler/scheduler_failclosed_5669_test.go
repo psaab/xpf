@@ -15,10 +15,10 @@ import (
 // TestScheduler_RepublishFailClosedAfterBoundedAge pins the #5669 bounded-age
 // latch and the #10906 honesty correction. Persistent republish failure forces
 // scheduled policies inactive in the authoritative control-plane state and
-// emits one alarm, but cannot expire the already-published schedule in a
-// wedged dataplane; a last-known permit may still be forwarding. The name of
-// the scheduler latch remains for compatibility, while its alarm and gauge
-// communicate FAIL-OPEN-STALE.
+// emits one alarm. A current helper's #11285 heartbeat lease independently
+// expires scheduler-bound rules; older helpers can retain the last-known
+// schedule. The name of the scheduler latch remains for compatibility, while
+// its alarm and gauge communicate FAIL-OPEN-STALE.
 //
 // The test also verifies the latch holds the inactive scheduler state until
 // republish succeeds, then permits a legitimately open window to recover.
@@ -92,32 +92,23 @@ func TestScheduler_RepublishFailClosedAfterBoundedAge(t *testing.T) {
 	if got := strings.Count(logBuf.String(), "FAIL-OPEN-STALE"); got != 1 {
 		t.Fatalf("fail-open-stale must emit exactly one alarm, got %d\nlog:\n%s", got, logBuf.String())
 	}
-	if !strings.Contains(logBuf.String(), "last-known schedule may still permit traffic") {
-		t.Fatalf("alarm must explain that the last-known schedule may still permit traffic, log:\n%s", logBuf.String())
-	}
 
 	// The permit's window LEGITIMATELY reopens the next day (09:00-17:00),
-	// desired active=true — but enforcement is still wedged, so fail-closed
-	// must build an INACTIVE (deny) snapshot and report the permit inactive on
-	// the authoritative state, refusing to reopen it, until a republish
-	// succeeds again.
+	// desired active=true — but enforcement is still wedged, so the scheduler
+	// must build an INACTIVE snapshot and report the permit inactive in its
+	// authoritative state until a republish succeeds again.
 	//
-	// Scope note (honest): this asserts the CONTROL-PLANE disposition — the
-	// published snapshot and the authoritative ActiveState/IsActive both say
-	// DENY. It does NOT prove the packet path stops forwarding: that same
-	// snapshot is pushed through the same failing updateFn channel that defines
-	// the streak, so in a persistently-wedged dataplane it never reaches the
-	// helper and the stale permit keeps forwarding until the socket recovers.
-	// The value of fail-closed is the loud alarm + authoritative deny +
-	// deny-lands-first-on-recovery, not packet-path enforcement in a wedged
-	// dataplane (see README "Bounded-age fail-closed").
+	// This test asserts the CONTROL-PLANE disposition only. The independent
+	// #11285 heartbeat-lease enforcement on current helpers is covered by the
+	// dataplane tests; a legacy helper may still enforce its last-known
+	// snapshot while the shared control channel remains wedged.
 	reopen := time.Date(2026, 2, 13, 10, 0, 0, 0, time.UTC)
 	s.evaluate(context.Background(), reopen, true)
 	if lastState["workhours"] {
-		t.Fatal("fail-closed must build the permit INACTIVE (deny) in the published snapshot even when its window reopens")
+		t.Fatal("fail-closed must build the permit INACTIVE in the published snapshot even when its window reopens")
 	}
 	if s.IsActive("workhours") {
-		t.Fatal("fail-closed authoritative state must report the permit inactive (deny)")
+		t.Fatal("fail-closed authoritative state must report the permit inactive")
 	}
 
 	// Republish recovers. The next successful publish clears fail-closed; the

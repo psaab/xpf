@@ -362,6 +362,10 @@ pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) struct ControlRequest {
     #[serde(rename = "type")]
     pub request_type: String,
+    /// #11285: monotonic publication version for the lightweight scheduler
+    /// lease heartbeat. Older helpers ignore the added wire field.
+    #[serde(default)]
+    pub version: u64,
     #[serde(rename = "suppress_status", default)]
     pub suppress_status: bool,
     #[serde(default)]

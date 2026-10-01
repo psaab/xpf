@@ -279,6 +279,12 @@ pub(crate) fn handle_stream(
         }
         match request.request_type.as_str() {
             "ping" => {}
+            "scheduler_heartbeat" => {
+                guard.afxdp.scheduler_lease.apply(
+                    request.version,
+                    crate::afxdp::monotonic_nanos(),
+                );
+            }
             "status" => {
                 // #9629 (Spark MAJOR-2): the status loop is the bounded
                 // observability heartbeat (1s in production). Persisting its

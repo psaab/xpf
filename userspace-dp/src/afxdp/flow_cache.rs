@@ -950,7 +950,7 @@ impl FlowCache {
         now_secs: u64,
         rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
     ) -> Option<&FlowCacheEntry> {
-        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0)
+        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, 0, None, false)
     }
 
     #[inline]
@@ -962,9 +962,42 @@ impl FlowCache {
         rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
         packet_len: u16,
     ) -> Option<&FlowCacheEntry> {
-        self.lookup_with_observed_bytes(key, lookup, now_secs, rg_epochs, u64::from(packet_len))
+        self.lookup_with_observed_bytes(
+            key,
+            lookup,
+            now_secs,
+            rg_epochs,
+            u64::from(packet_len),
+            None,
+            false,
+        )
     }
 
+    /// #11285: force an admitted scheduler-bound entry back through session
+    /// revalidation once its heartbeat lease expires. Other cached verdicts
+    /// keep the ordinary fast path.
+    #[inline]
+    pub(super) fn lookup_counted_with_scheduler_expiry(
+        &mut self,
+        key: &crate::session::SessionKey,
+        lookup: FlowCacheLookup,
+        now_secs: u64,
+        rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
+        packet_len: u16,
+        policy: &crate::policy::PolicyState,
+        scheduler_expired: bool,
+    ) -> Option<&FlowCacheEntry> {
+        self.lookup_with_observed_bytes(
+            key,
+            lookup,
+            now_secs,
+            rg_epochs,
+            u64::from(packet_len),
+            Some(policy),
+            scheduler_expired,
+        )
+
+    }
     #[inline]
     fn lookup_with_observed_bytes(
         &mut self,
@@ -973,6 +1006,8 @@ impl FlowCache {
         now_secs: u64,
         rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
         observed_bytes: u64,
+        policy: Option<&crate::policy::PolicyState>,
+        scheduler_expired: bool,
     ) -> Option<&FlowCacheEntry> {
         let set = Self::set_index(key, lookup.ingress_ifindex);
         let base = set * FLOW_CACHE_WAYS;
@@ -1020,6 +1055,17 @@ impl FlowCache {
                 }
                 if entry.stamp.owner_rg_lease_until != 0
                     && now_secs > entry.stamp.owner_rg_lease_until
+                {
+                    self.entries[entry_idx] = None;
+                    self.evictions += 1;
+                    self.demote_lru(set, way as u8);
+                    self.misses += 1;
+                    return None;
+                }
+                if scheduler_expired
+                    && policy.is_some_and(|policy| {
+                        policy.is_scheduler_policy_counter_idx(entry.metadata.policy_counter_idx)
+                    })
                 {
                     self.entries[entry_idx] = None;
                     self.evictions += 1;

@@ -133,7 +133,7 @@ pub(super) fn stage_flow_cache_hit(
         false
     };
 
-    if let Some(cached) = flow_state.flow_cache.lookup_counted(
+    if let Some(cached) = flow_state.flow_cache.lookup_counted_with_scheduler_expiry(
         &flow.forward_key,
         // #5139: resolve the LOGICAL (VLAN-selecting) ingress ifindex into the
         // lookup identity so co-parented VLANs don't alias — `worker_ctx.
@@ -142,6 +142,11 @@ pub(super) fn stage_flow_cache_hit(
         now_secs,
         &worker_ctx.rg_epochs,
         meta.pkt_len,
+        &worker_ctx.forwarding.policy,
+        worker_ctx
+            .forwarding
+            .policy
+            .scheduler_rules_expired_at(now_ns),
     ) {
         // #3048/#5147: an ARP/NDP MAC replacement or neighbor deletion may
         // invalidate this descriptor's next-hop mapping (gateway VRRP

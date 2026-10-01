@@ -925,6 +925,7 @@ pub(in crate::afxdp) fn fabric_punt_seed_metadata(
     dst_port: u16,
     packet_icmp: Option<(u8, u8)>,
     packet_len: u64,
+    now_ns: u64,
 ) -> Option<SessionMetadata> {
     // #3110: 0 is the "unknown zone" sentinel, against which policy evaluation
     // matches no rule and falls to the default. Refusing to seed on an
@@ -935,7 +936,7 @@ pub(in crate::afxdp) fn fabric_punt_seed_metadata(
     if from_zone_id == 0 || to_zone_id == 0 {
         return None;
     }
-    let policy_result = crate::policy::evaluate_policy_result_with_icmp(
+    let policy_result = crate::policy::evaluate_policy_result_with_icmp_at(
         &forwarding.policy,
         from_zone_id,
         to_zone_id,
@@ -946,6 +947,7 @@ pub(in crate::afxdp) fn fabric_punt_seed_metadata(
         dst_port,
         packet_icmp,
         packet_len,
+        now_ns,
     );
     if !matches!(policy_result.action, crate::policy::PolicyAction::Permit) {
         return None;

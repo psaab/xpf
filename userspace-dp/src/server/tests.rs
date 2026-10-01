@@ -8421,3 +8421,46 @@ fn clear_persistent_nat_leases_control_verb_is_dispatched_10784() {
         "the helper display must no longer publish bindings after a clear"
     );
 }
+
+#[test]
+fn scheduler_heartbeat_renews_lease_without_snapshot_status_or_persistence() {
+    let state = new_state(ProcessStatus::default());
+    let status_before = serde_json::to_value(&state.lock().expect("state").status)
+        .expect("serialize initial status");
+    let state_file = unique_state_file("scheduler-heartbeat");
+    let mut request = req("scheduler_heartbeat");
+    request.version = 9;
+    request.suppress_status = true;
+
+    let response = run_request_on_file(state.clone(), request, &state_file);
+    assert!(response.ok, "unexpected heartbeat refusal: {}", response.error);
+    assert!(
+        response.status.is_none(),
+        "a lease heartbeat must not request or attach status"
+    );
+    assert!(
+        !std::path::Path::new(&state_file).exists(),
+        "a lease heartbeat must not persist state"
+    );
+
+    let guard = state.lock().expect("state");
+    assert!(
+        guard.snapshot.is_none(),
+        "a heartbeat must not synthesize or replace a snapshot"
+    );
+    assert_eq!(
+        serde_json::to_value(&guard.status).expect("serialize status after heartbeat"),
+        status_before,
+        "a heartbeat must not refresh process status"
+    );
+    assert!(
+        !guard.afxdp.scheduler_lease.apply(8, 0),
+        "the helper must retain the received publication version"
+    );
+    assert!(
+        guard.afxdp.scheduler_lease.expired_at(u64::MAX),
+        "the control verb must install a nonzero scheduler lease"
+    );
+    drop(guard);
+    let _ = std::fs::remove_file(state_file);
+}

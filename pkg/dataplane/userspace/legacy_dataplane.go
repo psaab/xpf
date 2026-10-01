@@ -315,6 +315,13 @@ func (a *LegacyDataPlaneAdapter) UpdatePolicyScheduleState(cfg *config.Config, a
 	return m.UpdatePolicyScheduleState(cfg, activeState)
 }
 
+func (a *LegacyDataPlaneAdapter) HeartbeatPolicyScheduler(ctx context.Context) {
+	m, err := a.managerOrErr()
+	if err == nil {
+		m.HeartbeatPolicyScheduler(ctx)
+	}
+}
+
 func (a *LegacyDataPlaneAdapter) SetPolicySchedulerActiveState(activeState map[string]bool) {
 	m, err := a.managerOrErr()
 	if err != nil {

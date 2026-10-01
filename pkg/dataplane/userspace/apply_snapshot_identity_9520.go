@@ -96,7 +96,11 @@ func (m *Manager) requestApplySnapshotLocked(snap *ConfigSnapshot, status *Proce
 	}
 	defer func() { m.recordApplySnapshotOutcomeLocked(err) }()
 	err = m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: snap}, status)
-	if err == nil || !isSnapshotContentConflict(err) {
+	if err == nil {
+		m.recordSchedulerSnapshotAppliedLocked(snap)
+		return nil
+	}
+	if !isSnapshotContentConflict(err) {
 		return err
 	}
 	held := snap.Generation
@@ -114,6 +118,9 @@ func (m *Manager) requestApplySnapshotLocked(snap *ConfigSnapshot, status *Proce
 		"(an earlier publish landed without a response); republishing on the next generation",
 		"held_generation", held, "generation", snap.Generation, "err", err)
 	err = m.requestLocked(ControlRequest{Type: "apply_snapshot", Snapshot: snap}, status)
+	if err == nil {
+		m.recordSchedulerSnapshotAppliedLocked(snap)
+	}
 	if isSnapshotContentConflict(err) && m.generation < snap.Generation {
 		// A second conflict proves the helper holds this generation too. It is not
 		// chased with a third round trip, but it is consumed, so the next publish
@@ -121,6 +128,38 @@ func (m *Manager) requestApplySnapshotLocked(snap *ConfigSnapshot, status *Proce
 		m.generation = snap.Generation
 	}
 	return err
+}
+
+// recordSchedulerSnapshotAppliedLocked seeds a fresh dataplane lease after a
+// successful scheduled-policy snapshot. The extra control verb is best-effort:
+// older helpers reject it, while the accepted snapshot remains successful.
+func (m *Manager) recordSchedulerSnapshotAppliedLocked(snap *ConfigSnapshot) {
+	hasScheduledPolicies := false
+	if snap != nil {
+		for _, policy := range snap.Policies {
+			if policy.SchedulerName != "" {
+				hasScheduledPolicies = true
+				break
+			}
+		}
+	}
+	m.hasScheduledPolicySnapshot = hasScheduledPolicies
+	if !hasScheduledPolicies {
+		return
+	}
+	if m.policySchedulerVersion < ^uint64(0) {
+		m.policySchedulerVersion++
+	}
+	if m.policySchedulerVersion == 0 {
+		m.policySchedulerVersion = 1
+	}
+	if err := m.requestLocked(ControlRequest{
+		Type:           "scheduler_heartbeat",
+		Version:        m.policySchedulerVersion,
+		SuppressStatus: true,
+	}, nil); err == nil {
+		m.lastSchedulerHeartbeatAt = time.Now()
+	}
 }
 
 // recordApplySnapshotOutcomeLocked tracks whether the helper may hold content

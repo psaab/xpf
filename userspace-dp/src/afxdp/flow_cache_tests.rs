@@ -3140,3 +3140,82 @@ fn tunnel_flow_cache_keys_mac_change_shard_on_outer_neighbor_not_logical_ifindex
          forever (#5147 review MAJOR)"
     );
 }
+
+#[test]
+fn expired_scheduler_lease_evicts_only_scheduled_policy_cache_entries() {
+    let mut zones = rustc_hash::FxHashMap::default();
+    zones.insert("trust".to_string(), TEST_TRUST_ZONE_ID);
+    zones.insert("untrust".to_string(), TEST_UNTRUST_ZONE_ID);
+    let policy = crate::policy::parse_policy_state(
+        "deny",
+        &[crate::PolicyRuleSnapshot {
+            name: "scheduled-allow".to_string(),
+            from_zone: "trust".to_string(),
+            to_zone: "untrust".to_string(),
+            scheduler_name: "workhours".to_string(),
+            source_addresses: vec!["any".to_string()],
+            destination_addresses: vec!["any".to_string()],
+            applications: vec!["any".to_string()],
+            action: "permit".to_string(),
+            ..Default::default()
+        }],
+        &zones,
+    );
+    assert!(policy.scheduler_lease.apply(1, 100));
+    let scheduler_expired = policy
+        .scheduler_rules_expired_at(100 + crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS + 1);
+    assert!(scheduler_expired);
+
+    let rg_epochs = default_rg_epochs();
+    let stamp = FlowCacheStamp {
+        config_generation: 5,
+        fib_generation: 3,
+        owner_rg_id: 1,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let scheduled_key = make_key();
+    let mut scheduled_entry = make_entry(scheduled_key.clone(), stamp, 1);
+    scheduled_entry.metadata.policy_counter_idx = 1;
+    let mut default_key = scheduled_key.clone();
+    default_key.src_port += 1;
+    let default_entry = make_entry(default_key.clone(), stamp, 1);
+    let mut cache = FlowCache::new();
+    cache.insert(scheduled_entry);
+    cache.insert(default_entry);
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        logical_ingress_ifindex: 7,
+        config_generation: 5,
+        fib_generation: 3,
+    };
+
+    assert!(
+        cache
+            .lookup_counted_with_scheduler_expiry(
+                &scheduled_key,
+                lookup,
+                0,
+                &rg_epochs,
+                64,
+                &policy,
+                scheduler_expired,
+            )
+            .is_none(),
+        "a cache hit admitted by a scheduled rule must miss after lease expiry"
+    );
+    assert!(
+        cache
+            .lookup_counted_with_scheduler_expiry(
+                &default_key,
+                lookup,
+                0,
+                &rg_epochs,
+                64,
+                &policy,
+                scheduler_expired,
+            )
+            .is_some(),
+        "expiry must not evict a flow not admitted by a scheduler-bound rule"
+    );
+}

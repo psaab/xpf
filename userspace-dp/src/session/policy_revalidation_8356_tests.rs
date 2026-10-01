@@ -100,9 +100,9 @@ fn a_new_session_starts_unvalidated_for_policy_8356() {
     );
 }
 
-/// The steady state: re-stamped once, then FRESH for the rest of the
-/// generation. This is what makes the feature once-per-session-per-commit
-/// rather than per-packet.
+/// The steady state: re-stamped once, then FRESH while both the config
+/// generation and scheduler-lease phase remain unchanged. This is what makes
+/// the feature once-per-session-per-transition rather than per-packet.
 #[test]
 fn a_re_stamped_session_is_fresh_until_the_generation_moves_8356() {
     let (mut table, k) = table_with_one_session(41);
@@ -126,8 +126,43 @@ fn a_re_stamped_session_is_fresh_until_the_generation_moves_8356() {
     );
 }
 
-/// The stamp is keyed on the GENERATION ALONE, unlike the filter's, which is
-/// keyed `(generation, logical ingress ifindex)`.
+#[test]
+fn scheduler_lease_phase_invalidates_and_refreshes_policy_stamps() {
+    let (mut table, key) = table_with_one_session(41);
+    table.mark_policy_revalidated(&key, PolicyRevalidationKind::LiveEgress);
+    assert_eq!(
+        table.policy_revalidation_target(&key),
+        PolicyRevalidationTarget::Fresh
+    );
+
+    table.set_policy_revalidation_phase(41, true);
+    assert_eq!(
+        table.policy_revalidation_target(&key),
+        PolicyRevalidationTarget::Stale(key.clone()),
+        "lease expiry must make an established scheduled permit revalidate"
+    );
+    assert_eq!(
+        table
+            .policy_revalidation_gate(&key, PolicyGateCurrent::LocalForwarding)
+            .target,
+        PolicyRevalidationTarget::Stale(key.clone())
+    );
+
+    table.mark_policy_revalidated(&key, PolicyRevalidationKind::LiveEgress);
+    assert_eq!(
+        table.policy_revalidation_target(&key),
+        PolicyRevalidationTarget::Fresh
+    );
+    table.set_policy_revalidation_phase(41, false);
+    assert_eq!(
+        table.policy_revalidation_target(&key),
+        PolicyRevalidationTarget::Stale(key.clone()),
+        "a renewed lease also triggers revalidation of the prior expired-phase verdict"
+    );
+}
+
+/// The stamp varies with config generation and scheduler-lease phase, but not
+/// with the arrival interface.
 ///
 /// This cell used to justify that by saying the verdict's zones "both come from
 /// the ENTRY — never from the interface a given packet arrived on". #9384 made
@@ -136,16 +171,13 @@ fn a_re_stamped_session_is_fresh_until_the_generation_moves_8356() {
 /// ANOTHER zone reached the re-derivation, revoked the entry on a deny, and
 /// re-stamped it fresh on a permit (#9519).
 ///
-/// Generation-only is still right, for a reason that now holds by
-/// construction. Only an OWNER reaches the re-derivation
-/// (`afxdp/poll_descriptor/session_hit_authority.rs`), and an owner arrived IN
-/// the entry's admitting zone. A stamped fabric owner carries a validated
-/// matching zone; an unstamped overlay retains #9519's exemption, while a
-/// foreign stamp takes the packet-only verdict. Every packet that can read or
-/// write this stamp therefore judges from the same from-zone within a
-/// generation, and an ifindex in the key would only re-walk terms for a LAG
-/// member or an ECMP path in that zone. What varies with the arrival interface
-/// is the authority check, not the stamp.
+/// A session stamp also distinguishes the active vs expired scheduler-lease
+/// phase, which determines whether schedule-bound rules are eligible. Within
+/// one phase, it remains keyed only on the zone-policy inputs rather than
+/// logical ingress ifindex: re-derivation always judges from the same zone for
+/// an owner, and an ifindex in the key would only re-walk terms for a LAG member
+/// or ECMP path in that zone. What varies with arrival interface is the
+/// authority check, not the policy stamp.
 #[test]
 fn the_policy_stamp_does_not_vary_with_the_arrival_interface_8356() {
     let (mut table, k) = table_with_one_session(41);
@@ -155,7 +187,7 @@ fn the_policy_stamp_does_not_vary_with_the_arrival_interface_8356() {
     assert_eq!(
         table.policy_revalidation_target(&k),
         PolicyRevalidationTarget::Fresh,
-        "the policy stamp must be generation-only"
+        "the policy stamp must not vary by arrival interface"
     );
     assert!(
         table.filter_revalidation_stale(&k, IF_A + 1),

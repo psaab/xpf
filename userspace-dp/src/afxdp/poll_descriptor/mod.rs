@@ -105,7 +105,7 @@ use super::poll_stages::{
     stage_screen_syn_cookie_ack_on_session_miss, stage_wg_decap,
 };
 use super::*;
-use crate::policy::evaluate_policy_result_with_icmp;
+use crate::policy::evaluate_policy_result_with_icmp_at;
 
 /// #11053: close the PPTP control channel locally, purge buffered Reply
 /// segments, and queue a channel-scoped forget for every peer worker. Full
@@ -457,7 +457,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     // be compared against generations from different publishes. They stay
     // SEPARATE stamps — sharing one would let a filter ACCEPT re-stamp suppress
     // a pending policy re-derivation, and vice versa.
-    sessions.set_policy_revalidation_gen(validation.config_generation);
+    sessions.set_policy_revalidation_phase(
+        validation.config_generation,
+        worker_ctx
+            .forwarding
+            .policy
+            .scheduler_rules_expired_at(now_ns),
+    );
     // Load the immutable SA payload once for this RX batch. Stage 11 performs
     // only plain map lookups against this guard, never another ArcSwap load.
     let ipsec_sa_snapshot = worker_ctx.forwarding.ipsec_sa.load_snapshot();
@@ -4132,7 +4138,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // is not safely readable (truncated / non-first
                             // fragment), so such terms fail closed.
                             let policy_icmp = policy_packet_icmp(packet_frame, meta);
-                            let policy_result = evaluate_policy_result_with_icmp(
+                            let policy_result = evaluate_policy_result_with_icmp_at(
                                 &worker_ctx.forwarding.policy,
                                 from_zone_id,
                                 to_zone_id,
@@ -4143,6 +4149,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 policy_dst_port,
                                 policy_icmp,
                                 desc.len as u64,
+                                now_ns,
                             );
                             // #1620: cold-path latency histogram post-eval record.
                             // q32-skip + wrapper_underflow_count per plan v4 §4.4.
@@ -5543,6 +5550,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 flow.forward_key.dst_port,
                                 policy_packet_icmp(packet_frame, meta),
                                 desc.len as u64,
+                                now_ns,
                             ) {
                                 // `fabric_punt_seed_metadata` has already
                                 // adjudicated policy. Do not create a local
@@ -6409,7 +6417,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // stamped inner protocol), symmetric with v4+AH.
                         let policy_proto =
                             crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
-                        let policy_result = crate::policy::evaluate_policy_result_l3_aware(
+                        let policy_result =
+                            crate::policy::evaluate_policy_result_l3_aware_at(
                             &worker_ctx.forwarding.policy,
                             from_zone_id,
                             to_zone_id,
@@ -6423,6 +6432,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // #3291: L4 header ABSENT — port-bearing app terms
                             // fail closed; address/protocol/`any` still match.
                             false,
+                                now_ns,
                         );
                         if !matches!(policy_result.action, PolicyAction::Permit) {
                             let owner_rg_id =
@@ -7618,7 +7628,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 });
                                 let policy_icmp = policy_packet_icmp(packet_frame, meta);
                                 if let Some(policy_result) =
-                                    crate::afxdp::forwarding::noroute_policy_denial_gated(
+                                    crate::afxdp::forwarding::noroute_policy_denial_gated_at(
                                         worker_ctx.forwarding,
                                         from_zone_id,
                                         to_zone_id,
@@ -7629,6 +7639,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         ports,
                                         policy_icmp,
                                         desc.len as u64,
+                                        now_ns,
                                     )
                                 {
                                     let app_id = ports
@@ -7948,7 +7959,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // (junos-ping) is identical whether or not the
                                     // next-hop neighbor is already resolved.
                                     let policy_icmp = policy_packet_icmp(packet_frame, meta);
-                                    let policy_result = evaluate_policy_result_with_icmp(
+                                    let policy_result = evaluate_policy_result_with_icmp_at(
                                         &worker_ctx.forwarding.policy,
                                         from_zone_id,
                                         to_zone_id,
@@ -7959,6 +7970,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         policy_dst_port,
                                         policy_icmp,
                                         desc.len as u64,
+                                        now_ns,
                                     );
                                     seed_inactivity_timeout = policy_result.inactivity_timeout;
                                     if cp_sample_tag {
@@ -8099,7 +8111,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta,
                                             );
                                         let policy_result =
-                                            crate::policy::evaluate_policy_result_l3_aware(
+                                            crate::policy::evaluate_policy_result_l3_aware_at(
                                                 &worker_ctx.forwarding.policy,
                                                 from_zone_id,
                                                 to_zone_id,
@@ -8113,6 +8125,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 // L4 header ABSENT — port-bearing app
                                                 // terms fail closed.
                                                 false,
+                                                now_ns,
                                             );
                                         if !matches!(policy_result.action, PolicyAction::Permit) {
                                             let owner_rg_id = owner_rg_for_resolution(

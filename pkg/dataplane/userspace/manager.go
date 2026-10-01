@@ -234,7 +234,12 @@ type Manager struct {
 	// Guarded by m.mu, like lastStatus itself.
 	lastStatusSeq uint64
 	lastSnapshot  *ConfigSnapshot
-	lastApply     *dataplane.ApplyResult
+	// policySchedulerVersion identifies successful scheduled-policy snapshot
+	// publications; unchanged scheduler ticks refresh its dataplane lease.
+	policySchedulerVersion     uint64
+	lastSchedulerHeartbeatAt   time.Time
+	hasScheduledPolicySnapshot bool
+	lastApply                  *dataplane.ApplyResult
 	// policyRenameAncestry and policySessionRebinds are daemon-provided
 	// pre-publication metadata consumed by the Rust rotation path.
 	policyRenameAncestry []PolicyRenameAncestry

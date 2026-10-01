@@ -956,15 +956,11 @@ struct SessionEntry {
     /// starting at 1, and `classify_metadata` additionally requires
     /// `snapshot_installed`.
     ///
-    /// GENERATION-ONLY, deliberately unlike `filter_revalidated`, which is keyed
-    /// `(generation, logical ingress ifindex)`. An input filter is a
-    /// per-INTERFACE object, so the same session reached on a different ingress
-    /// has a different filter to re-derive. A zone-policy verdict is keyed on
-    /// the (from_zone, to_zone) PAIR, and BOTH come from this entry —
-    /// `metadata.ingress_zone` and `decision.resolution.egress_ifindex` — never
-    /// from the interface a given packet happened to arrive on. Adding the
-    /// ifindex to this key would only make the stamp go spuriously stale and
-    /// re-walk policy terms that cannot produce a different verdict.
+    /// Freshness also includes `policy_scheduler_expired`, the lease phase
+    /// sampled for the current poll pass. Unlike `filter_revalidated`, policy
+    /// freshness is not keyed by logical ingress ifindex: a zone-policy verdict
+    /// uses the entry's (from_zone, to_zone) pair, not the interface a packet
+    /// happened to arrive on.
     ///
     /// Read only for the FORWARD direction. The reverse companion carries
     /// SWAPPED zones (`afxdp/shared_ops.rs`, `afxdp/poll_descriptor/mod.rs`
@@ -978,6 +974,9 @@ struct SessionEntry {
     /// `SessionEntry` carries no serde, so this is on no wire and is not part of
     /// session identity.
     policy_revalidated_gen: u64,
+    /// Whether this entry's scheduler-bound policy was validated during an
+    /// expired scheduler-lease phase.
+    policy_scheduler_expired: bool,
     /// #10507: receiver-local provenance for the zone-policy stamp. This is
     /// intentionally not carried on the HA wire.
     policy_revalidation_kind: PolicyRevalidationKind,
@@ -1363,6 +1362,9 @@ pub(crate) struct SessionTable {
     /// share a stamp, or one verdict's re-stamp suppresses the other's
     /// re-derivation.
     policy_revalidation_gen: u64,
+    /// Scheduler-lease phase sampled once per poll pass. Together with the
+    /// config generation, it determines zone-policy stamp freshness.
+    policy_scheduler_expired: bool,
     epoch_counter: u64,
     expired: u64,
     create_drops: u64,
@@ -1650,6 +1652,7 @@ impl SessionTable {
             // #7212: no poll pass has published a generation yet.
             filter_revalidation_gen: 0,
             policy_revalidation_gen: 0,
+            policy_scheduler_expired: false,
             epoch_counter: 0,
             expired: 0,
             create_drops: 0,
@@ -2061,11 +2064,21 @@ impl SessionTable {
         )
     }
 
-    /// #8356: publish the live generation zone-policy verdicts are judged
-    /// against. Called from the same place, and with the same value, as
-    /// `set_filter_revalidation_gen`.
+    /// Test/setup convenience for a non-scheduled phase; production publishes
+    /// both fields through `set_policy_revalidation_phase`.
     pub(crate) fn set_policy_revalidation_gen(&mut self, generation: u64) {
         self.policy_revalidation_gen = generation;
+    }
+
+    /// #8356/#11285: publish the live config generation and scheduler-lease
+    /// phase zone-policy verdicts are judged against for this poll pass.
+    pub(crate) fn set_policy_revalidation_phase(
+        &mut self,
+        generation: u64,
+        scheduler_expired: bool,
+    ) {
+        self.policy_revalidation_gen = generation;
+        self.policy_scheduler_expired = scheduler_expired;
     }
 
     #[cfg(test)]
@@ -2095,18 +2108,20 @@ impl SessionTable {
     /// the two features cannot drift on WHICH entry a tuple names — including
     /// the stale-handle guard and the NAT reverse-translated alias path, both of
     /// which took a bug to get right (#7212, #8114 item 2). Only the staleness
-    /// COMPARISON differs, and it is made here against the generation-only
-    /// stamp.
+    /// phase comparison differs: policy freshness is keyed by config generation
+    /// and scheduler-lease phase, not by arrival interface.
     ///
-    /// #10507: production now answers through `policy_revalidation_gate`
-    /// (freshness AND authority, one probe); this accessor is retained for
-    /// test assertions of the generation-only stamp shape.
+    /// #10507: production answers through `policy_revalidation_gate`
+    /// (freshness and authority in one probe); this accessor is retained for
+    /// test assertions.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn policy_revalidation_target(&self, key: &SessionKey) -> PolicyRevalidationTarget {
         let Some(record) = self.revalidation_record(key) else {
             return PolicyRevalidationTarget::NoLocalEntry;
         };
-        if record.entry.policy_revalidated_gen == self.policy_revalidation_gen {
+        if record.entry.policy_revalidated_gen == self.policy_revalidation_gen
+            && record.entry.policy_scheduler_expired == self.policy_scheduler_expired
+        {
             PolicyRevalidationTarget::Fresh
         } else {
             PolicyRevalidationTarget::Stale(record.key.clone())
@@ -2150,7 +2165,8 @@ impl SessionTable {
                 fail_closed_icmp: false,
             };
         };
-        let fresh = record.entry.policy_revalidated_gen == self.policy_revalidation_gen;
+        let fresh = record.entry.policy_revalidated_gen == self.policy_revalidation_gen
+            && record.entry.policy_scheduler_expired == self.policy_scheduler_expired;
         let kind = record.entry.policy_revalidation_kind;
         let target = if fresh {
             PolicyRevalidationTarget::Fresh
@@ -2211,7 +2227,8 @@ impl SessionTable {
         ) || (matches!(
             record.entry.policy_revalidation_kind,
             PolicyRevalidationKind::Unvalidated
-        ) && record.entry.policy_revalidated_gen == self.policy_revalidation_gen)
+        ) && record.entry.policy_revalidated_gen == self.policy_revalidation_gen
+            && record.entry.policy_scheduler_expired == self.policy_scheduler_expired)
     }
 
     /// #8356/#10507: record that this entry's zone-policy verdict has been
@@ -2228,6 +2245,7 @@ impl SessionTable {
             && record.key == *key
         {
             record.entry.policy_revalidated_gen = live_gen;
+            record.entry.policy_scheduler_expired = self.policy_scheduler_expired;
             record.entry.policy_revalidation_kind = kind;
         }
     }
