@@ -3,6 +3,7 @@ package routing
 import (
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"testing"
 
@@ -109,13 +110,18 @@ func (f *fakeRuleOps) RuleDel(r *netlink.Rule) error {
 	f.dels++
 	list := f.rules[r.Family]
 	out := list[:0:0]
+	found := false
 	for _, e := range list {
-		if e.Priority == r.Priority {
+		if reflect.DeepEqual(e, *r) {
+			found = true
 			continue
 		}
 		out = append(out, e)
 	}
 	f.rules[r.Family] = out
+	if !found {
+		return unix.ENOENT
+	}
 	return nil
 }
 
@@ -241,8 +247,9 @@ func TestRibGroupRulesApply_Fake(t *testing.T) {
 	if v4.Priority >= 32766 {
 		t.Errorf("IPv4 leak rule pref %d must be BEFORE main (32766) so it wins over a default route (#3876)", v4.Priority)
 	}
-	if v4.Priority < ribGroupLeakRulePriority || v4.Priority >= ribGroupLeakRulePriority+maxRibGroupLeakRules {
-		t.Errorf("IPv4 leak rule pref %d outside the #3876 window [%d,%d)", v4.Priority, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules)
+	if v4.Priority < ribGroupLeakRulePriority || v4.Priority >= ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow {
+		t.Errorf("IPv4 leak rule pref %d outside the shared leak range [%d,%d)", v4.Priority,
+			ribGroupLeakRulePriority, ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow)
 	}
 	v6, ok := ops.findDstRule(unix.AF_INET6, 101, "2001:db8:30::/64")
 	if !ok {
@@ -271,7 +278,7 @@ func TestRibGroupRulesApply_Fake(t *testing.T) {
 			t.Errorf("dmz-vr return rule is not scoped to the other leaked prefix: %+v", rule)
 		}
 	}
-	if got := rulesInWindow9819(ops, unix.AF_INET, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules); got != 2 {
+	if got := rulesInWindow9819(ops, unix.AF_INET, ribGroupLeakRulePriority, ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow); got != 2 {
 		t.Errorf("expected exactly 2 IPv4 leak rules, got %d", got)
 	}
 	if got := ops.count(unix.AF_INET); got != 6 {
@@ -613,13 +620,12 @@ func TestNextTableApplyIdempotentReapply(t *testing.T) {
 	}
 }
 
-// TestNextTableRulesPriorityCap exercises the #1706 hard cap: programming
-// more next-table routes than the clear() window (100 priorities) must
-// stop at the boundary so every programmed rule stays inside the range
-// clear() scans — otherwise rules at prio >= 200 leak permanently. The
-// boundary case (exactly 100 routes) programs the full set; one over
+// TestNextTableAdmissionCap exercises the #1706 hard cap: at most
+// NextTableRuleWindow next-table leaks are admitted. Prefix-derived priorities
+// are independent of the cap and remain inside the shared clear() range.
+// The boundary case (exactly 100 routes) admits the full set; one over
 // triggers the cap.
-func TestNextTableRulesPriorityCap(t *testing.T) {
+func TestNextTableAdmissionCap(t *testing.T) {
 	mkRoutes := func(n int) []*config.StaticRoute {
 		routes := make([]*config.StaticRoute, n)
 		for i := 0; i < n; i++ {
@@ -644,7 +650,7 @@ func TestNextTableRulesPriorityCap(t *testing.T) {
 		if total != config.NextTableRuleWindow {
 			t.Fatalf("expected all %d routes programmed at the limit, got %d", config.NextTableRuleWindow, total)
 		}
-		assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.NextTableRuleWindow)
+		assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.RouteLeakRulePriorityWindow)
 	})
 
 	// One over the window: cap fires, only 100 admitted, none out of range,
@@ -661,7 +667,7 @@ func TestNextTableRulesPriorityCap(t *testing.T) {
 		if total != config.NextTableRuleWindow {
 			t.Fatalf("expected cap to hold at %d programmed rules, got %d", config.NextTableRuleWindow, total)
 		}
-		assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.NextTableRuleWindow)
+		assertAllRulesInRange(t, ops, nextTableRulePriority, nextTableRulePriority+config.RouteLeakRulePriorityWindow)
 
 		// Re-apply must leave no residue: every programmed rule is inside
 		// clear()'s window, so clear-then-add keeps the count stable. A
@@ -677,12 +683,11 @@ func TestNextTableRulesPriorityCap(t *testing.T) {
 	})
 }
 
-// TestRibGroupRulesPriorityCap exercises the #3876 hard cap for the
-// per-prefix rib-group leak. One rule is programmed per connected prefix, and
-// the total is bounded by maxRibGroupLeakRules; prefixes beyond the window
-// must be dropped (with a degraded Apply error) and every programmed rule
-// must stay inside the window clear() scans so nothing leaks across applies.
-func TestRibGroupRulesPriorityCap(t *testing.T) {
+// TestRibGroupAdmissionCap exercises the #3876 hard cap for per-prefix
+// rib-group leaks. The cap counts connected prefixes independently of their
+// prefix-derived priorities; every installed priority stays inside the shared
+// route-leak range that clear() scans.
+func TestRibGroupAdmissionCap(t *testing.T) {
 	// One instance leaking into main, with n distinct v4 connected prefixes.
 	mkConfig := func(n int) (map[string]*config.RibGroup, []*config.RoutingInstanceConfig, map[string][]string) {
 		ribGroups := map[string]*config.RibGroup{
@@ -720,17 +725,16 @@ func TestRibGroupRulesPriorityCap(t *testing.T) {
 		if err := rg.Apply(ribGroups, instances, connected); err == nil {
 			t.Fatal("over-limit Apply must return a degraded error naming the cap")
 		}
-		if got := rulesInWindow9819(ops, unix.AF_INET, ribGroupLeakRulePriority, ribGroupLeakRulePriority+maxRibGroupLeakRules); got != maxRibGroupLeakRules {
+		if got := rulesInWindow9819(ops, unix.AF_INET, ribGroupLeakRulePriority, ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow); got != maxRibGroupLeakRules {
 			t.Fatalf("expected cap to hold at %d leak rules, got %d", maxRibGroupLeakRules, got)
 		}
 		if got := ops.count(unix.AF_INET); got != maxRibGroupLeakRules {
 			t.Fatalf("expected %d leak rules and no return rules without peers, got %d", maxRibGroupLeakRules, got)
 		}
 		assertRibGroupRulesInClearedWindows9819(t, ops)
-		// The rule beyond the window (pref ribGroupLeakRulePriority+1000) must be absent.
-		if hasPriority(ops, unix.AF_INET, ribGroupLeakRulePriority+maxRibGroupLeakRules) {
-			t.Errorf("a rule leaked beyond the cleared window (slot %d present)",
-				ribGroupLeakRulePriority+maxRibGroupLeakRules)
+		// The cap keeps every admitted rule inside clear()'s shared priority range.
+		if hasPriority(ops, unix.AF_INET, ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow) {
+			t.Errorf("a rule leaked beyond the shared clear range")
 		}
 
 		// Re-apply must not leak: all programmed rules are inside the
@@ -1060,8 +1064,11 @@ func TestNextTableRibGroupClearDelFailureSurfaced(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ops := newFakeRuleOps()
-			// A stale rule inside the managed window clear() scans.
-			seedRule(ops, unix.AF_INET, c.prio, 100)
+			if c.name == "next-table" {
+				seedCurrentLeakRule(ops, unix.AF_INET, c.prio, 100, "10.1.2.0/24", "ge-0-0-0")
+			} else {
+				seedCurrentLeakRule(ops, unix.AF_INET, c.prio, 100, "10.1.2.0/24", "")
+			}
 			// RuleDel returns a REAL failure: the rule exists but cannot be
 			// removed, so it lingers as an active route-leak instruction.
 			ops.delErr = errors.New("netlink EBUSY")
@@ -1103,7 +1110,11 @@ func TestNextTableRibGroupClearDelNotFoundIdempotent(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ops := newFakeRuleOps()
-			seedRule(ops, unix.AF_INET, c.prio, 100)
+			if c.name == "next-table" {
+				seedCurrentLeakRule(ops, unix.AF_INET, c.prio, 100, "10.1.2.0/24", "ge-0-0-0")
+			} else {
+				seedCurrentLeakRule(ops, unix.AF_INET, c.prio, 100, "10.1.2.0/24", "")
+			}
 			// RuleDel reports the rule is already absent — the delete's goal
 			// (rule gone) is met, so this must NOT surface as an apply error.
 			ops.delErr = unix.ENOENT
@@ -1123,6 +1134,31 @@ func seedRule(ops *fakeRuleOps, family, prio, table int) {
 		Family:   family,
 		Priority: prio,
 		Table:    table,
+	})
+}
+
+// seedPBRRule inserts a PBR rule with the action encoded by its priority.
+// Current odd slots are unreachable shadows; legacy slots were lookups only.
+func seedPBRRule(ops *fakeRuleOps, family, prio, table int) {
+	ruleType := uint8(unix.RTN_UNICAST)
+	if prio >= pbrRulePriority && prio < pbrRulePriority+maxPBRRules &&
+		(prio-pbrRulePriority)%2 == 1 {
+		ruleType = uint8(pbrTerminatorAction)
+	}
+	ops.rules[family] = append(ops.rules[family], netlink.Rule{
+		Family: family, Priority: prio, Table: table, Type: ruleType,
+	})
+}
+
+// seedCurrentLeakRule inserts a destination-scoped rule owned by the
+// next-table manager when iif is set, or rib-group manager when it is empty.
+func seedCurrentLeakRule(ops *fakeRuleOps, family, priority, table int, destination, iif string) {
+	_, dst, err := net.ParseCIDR(destination)
+	if err != nil {
+		panic(err)
+	}
+	ops.rules[family] = append(ops.rules[family], netlink.Rule{
+		Family: family, Priority: priority, Table: table, Dst: dst, IifName: iif,
 	})
 }
 
@@ -1193,9 +1229,19 @@ func TestRulesClearListErrorSurfaced(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ops := newFakeRuleOps()
-			// One managed-window rule per family.
-			seedRule(ops, unix.AF_INET, c.inetPrio, 100)
-			seedRule(ops, unix.AF_INET6, c.inet6Prio, 101)
+			// One managed-window rule per family. Destination-bearing route
+			// leaks carry the selector that identifies their owning manager.
+			switch c.name {
+			case "next-table":
+				seedCurrentLeakRule(ops, unix.AF_INET, c.inetPrio, 100, "10.1.2.0/24", "ge-0-0-0")
+				seedCurrentLeakRule(ops, unix.AF_INET6, c.inet6Prio, 101, "2001:db8:1::/64", "ge-0-0-0")
+			case "rib-group":
+				seedCurrentLeakRule(ops, unix.AF_INET, c.inetPrio, 100, "10.1.2.0/24", "")
+				seedCurrentLeakRule(ops, unix.AF_INET6, c.inet6Prio, 101, "2001:db8:1::/64", "")
+			default:
+				seedPBRRule(ops, unix.AF_INET, c.inetPrio, 100)
+				seedPBRRule(ops, unix.AF_INET6, c.inet6Prio, 101)
+			}
 			// AF_INET dump fails transiently; AF_INET6 succeeds.
 			ops.failList(unix.AF_INET, injErr)
 

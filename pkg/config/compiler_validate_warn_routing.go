@@ -205,13 +205,13 @@ func validateLinkAggregationWarnings(cfg *Config) []string {
 	return warnings
 }
 
-// Note: the next-table / rib-group ip-rule WINDOW over-subscription check that
-// used to live here (validateRoutingRuleWindowWarnings, warn-only) moved to the
-// strict commit gate validateRoutingRuleWindowsStrict
+// Note: the next-table / rib-group ip-rule admission-cap over-subscription
+// check that used to live here (validateRoutingRuleWindowWarnings, warn-only)
+// moved to the strict commit gate validateRoutingRuleWindowsStrict
 // (compiler_validate_strict_routing_windows.go, wired in runUniformGates) in
-// #5854: a config that exceeds the applier's fixed 100 next-table / 1000
-// rib-group ip-rule windows is now HARD-REJECTED at commit / commit-check
-// (silent apply-time truncation = routes claimed but not programmed) and only
+// #5854: configs exceeding the applier's separate 100 next-table and 1000
+// rib-group admission caps are HARD-REJECTED at commit / commit-check (silent
+// apply-time truncation = routes claimed but not programmed) and only
 // downgraded to a warning on the tolerant load / peer-sync paths. The
 // leak-cannot-be-realized advisory below is a DIFFERENT check and is unchanged.
 

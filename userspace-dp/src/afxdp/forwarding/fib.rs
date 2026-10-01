@@ -1271,29 +1271,27 @@ fn ecmp_candidate_id_v6(candidate: &RouteNextHopV6) -> u64 {
     )
 }
 
-/// #2734: per-FLOW ECMP spread key over the full 5-tuple.
+/// #2734/#11405: stable per-FLOW ECMP spread key over the session 5-tuple.
 ///
-/// Hashes the session forward 5-tuple (`addr_family`/`protocol`/`src_ip`/
-/// `dst_ip`/`src_port`/`dst_port`) with the SAME per-boot, per-process
-/// seeded `FxHasher` the flow cache uses (`hot_hash_seed::hot_path_hash_seed`
-/// — #2364), so the cost is one already-vetted hash and the per-flow
-/// mapping reshuffles each restart (defeats offline collision construction)
-/// while staying stable for a flow's lifetime within a boot. The seed is
-/// node-local: ECMP selection picks among THIS node's weighted members and
-/// is not part of any wire/HA-synced structure, so a per-node seed is correct
-/// (HA peers re-derive their own pick under their own seed, exactly as the
-/// flow cache and fabric-queue hash do). Determinism within a boot guarantees
-/// flow consistency — every packet of one flow scores each candidate identity
-/// consistently and pins to one member, without modulo-based renumbering when
-/// the live set changes.
-fn ecmp_hash_flow(key: &crate::session::SessionKey) -> u64 {
-    ecmp_hash_flow_seeded(crate::hot_hash_seed::hot_path_hash_seed(), key)
+/// Hashes (`addr_family`/`protocol`/`src_ip`/`dst_ip`/`src_port`/`dst_port`)
+/// with a fixed, ECMP-domain-separated `FxHasher` seed. Unlike hot-path cache
+/// placement, ECMP selection must remain stable across process restarts and HA
+/// re-resolution: a per-process seed can change the selected route while the
+/// stored SNAT rewrite remains unchanged. The hot-path secret remains in use
+/// for attacker-amplifiable cache/map placement; this public fixed seed is
+/// intentionally limited to stable route selection. With the same tuple,
+/// candidate identities, and weights, selection is stable across processes.
+/// Removing a nonselected candidate leaves surviving scores unchanged; adding
+/// a candidate or changing an identity/weight can remap a flow.
+pub(in crate::afxdp) const ECMP_FLOW_HASH_SEED: u64 = 0x4543_4d50_0000_0001;
+
+pub(in crate::afxdp) fn ecmp_hash_flow(key: &crate::session::SessionKey) -> u64 {
+    ecmp_hash_flow_seeded(ECMP_FLOW_HASH_SEED, key)
 }
 
-/// Seed-parameterized core of `ecmp_hash_flow`. Split out so tests can pin
-/// the seed and assert (a) intra-seed stability (flow consistency) and
-/// (b) that distinct 5-tuples spread. Production calls through
-/// `ecmp_hash_flow`, which supplies the per-boot process seed.
+/// Seed-parameterized core of `ecmp_hash_flow`. Production supplies the fixed
+/// `ECMP_FLOW_HASH_SEED`; explicit seeds remain available for reproducibility
+/// and for tests of the core's hash behavior.
 pub(in crate::afxdp) fn ecmp_hash_flow_seeded(seed: u64, key: &crate::session::SessionKey) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = rustc_hash::FxHasher::with_seed(seed as usize);

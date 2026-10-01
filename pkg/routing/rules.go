@@ -32,59 +32,38 @@ type ruleOps interface {
 	RuleAddDSCP(rule *netlink.Rule, dscp uint8) error
 }
 
-// nextTableRulePriority is the base priority for next-table ip rules.
-// Lower values = higher priority. The current 32000-32099 range follows
-// PBR and rib-group leak rules, matching the helper's PBR-first precedence
-// while remaining before the kernel's main rule (32766). The base + window
-// are the SSOT in pkg/config (NextTableRulePriorityBase /
-// NextTableRuleWindow) so the install cap here, the commit-time gate
-// (pkg/config maxNextTableRules), and the userspace FIB mirror
-// (pkg/dataplane/userspace/routes.go) all cap at the same boundary (#6467) —
-// floor(window/N) LEAKS with N from the shared ingress resolver (#9810).
+// nextTableRulePriority is the shared base for destination-scoped next-table
+// and rib-group leak rules. RouteLeakRulePriority maps every parsed prefix into
+// one LPM-first range, with a kind tie-break only for equal-length prefixes.
 const nextTableRulePriority = config.NextTableRulePriorityBase
 
-// legacyNextTableRulePriority is the pre-#11319 next-table band. It is
-// scanned only to remove rules left by an in-place upgrade; new rules use
-// nextTableRulePriority.
+// previousNextTableRulePriority is the post-#11319 next-table band retained
+// only so clear() removes rules left by an in-place upgrade.
+const previousNextTableRulePriority = 32000
+
+// legacyNextTableRulePriority is the pre-#11319 next-table band.
 const legacyNextTableRulePriority = 100
 
-// maxNextTableRules bounds the number of next-table inter-VRF leak ip rules the
-// applier installs, matching the nextTableRulePriority window clear() scans
-// ([nextTableRulePriority, nextTableRulePriority+maxNextTableRules)). One leak
-// costs one rule per default-instance ingress interface (#9420), so a larger
-// leak set is truncated LEAK-ATOMICALLY and reported as a degraded apply
-// (mirroring maxPBRRules / maxRibGroupLeakRules) rather than silently dropping
-// later leaks with a bare Warn (#6467). The userspace FIB config-static mirror
-// caps LEAKS at floor(window/N) of the SAME window (config.NextTableRuleWindow
-// via the shared verdict) so the kernel ip-rule table and the userspace
-// dataplane FIB agree on which leaks survive truncation (#9810).
+// maxNextTableRules caps next-table rule entries, not their priority values.
+// One leak costs one rule per default-instance ingress interface (#9420); the
+// cap is shared with config validation and the userspace FIB mirror.
 const maxNextTableRules = config.NextTableRuleWindow
 
 // ribGroupRulePriority is the LEGACY base priority for the pre-#3876
 // rib-group `from all lookup <sourceTable>` blanket rules. It sat AFTER the
 // main table (32766), so any main-table default route was matched first and
-// the rule was never consulted — the rib-group import leak was a silent
-// no-op in every deployment carrying a default route (#3876). It is retained
-// ONLY so clear() removes any stale rule an in-place upgrade left behind; no
-// new rule is programmed in this window.
+// the rule was never consulted. It is retained only for stale-rule cleanup.
 const ribGroupRulePriority = 33000
 
-// ribGroupLeakRulePriority is the base priority for the #3876 rib-group
-// per-prefix import leak rules: `ip rule to <connected-prefix> lookup
-// <sourceTable>`. It sits after PBR (29000-29999) but before next-table
-// (32000-32099) and the main table (32766). The ordering matches the helper:
-// explicit PBR steering is applied before its destination FIB lookup, then
-// the pure per-prefix leak rules are consulted in priority order.
-// We use 30000-30999 (maxRibGroupLeakRules priorities).
-const ribGroupLeakRulePriority = 30000
+// ribGroupLeakRulePriority shares the destination-leak priority range with
+// next-table rules. RouteLeakRulePriority places longer prefixes first across
+// both kinds and source tables; the kind offset applies only at equal prefix
+// length.
+const ribGroupLeakRulePriority = config.NextTableRulePriorityBase
 
-// maxRibGroupLeakRules bounds the number of per-prefix rib-group leak ip
-// rules the applier installs, matching the ribGroupLeakRulePriority window
-// clear() scans ([ribGroupLeakRulePriority, ribGroupLeakRulePriority+1000)).
-// A larger connected-prefix set is truncated and reported as a degraded
-// apply (mirroring maxPBRRules) rather than programming a rule the clear()
-// pass could not later remove. ValidateConfig emits a commit-time warning
-// before this cap is reached.
+// maxRibGroupLeakRules bounds the number of per-prefix rib-group leak rules
+// installed. The shared current leak-rule clear range is sized by
+// config.RouteLeakRulePriorityWindow, independently of the admission cap.
 const maxRibGroupLeakRules = 1000
 
 // mainTableID is the Linux main routing table (RT_TABLE_MAIN). The #3876
@@ -95,24 +74,16 @@ const maxRibGroupLeakRules = 1000
 const mainTableID = 254
 
 // pbrRulePriority is the base priority for policy-based routing ip rules.
-// It is after the VRF miss terminator (2000) and before both route-leak
-// bands and main. This keeps the kernel's first-match order aligned with
-// the helper's PBR-first route-table override (#11319).
-// We use the 29000-29999 range. The band constant is the SSOT in pkg/config
-// so the userspace FIB snapshot ingest (pkg/dataplane/userspace/routes.go)
-// can skip current and legacy PBR bands without drifting from the install side
-// (#4479).
+// It is after the VRF miss terminator and before the shared route-leak range.
 const pbrRulePriority = config.PBRRulePriorityBase
 
-// Priority order is part of the kernel/helper contract (#11319). Keep each
-// complete band disjoint and ordered before Linux's main-table rule. These
-// constant expressions intentionally fail compilation if a band is retuned
-// into an overlap or if a later priority pushes route leaks behind main.
+// Keep the complete shared leak range after PBR and before Linux's main rule,
+// and ensure its maximum IPv6 prefix/kind offset fits inside the range. Leak
+// priority space is independent of the managers' admission caps.
 const (
-	_ = uint(pbrRulePriority - vrfMissTerminatorPriority - 1)
 	_ = uint(ribGroupLeakRulePriority - (pbrRulePriority + maxPBRRules))
-	_ = uint(nextTableRulePriority - (ribGroupLeakRulePriority + maxRibGroupLeakRules))
-	_ = uint(32766 - (nextTableRulePriority + maxNextTableRules))
+	_ = uint(config.RouteLeakRulePriorityWindow - (2*128 + int(config.RouteLeakRibGroup) + 1))
+	_ = uint(32766 - (nextTableRulePriority + config.RouteLeakRulePriorityWindow))
 )
 
 // nextTableManager reconciles next-table inter-VRF route-leak ip rules.
@@ -155,10 +126,11 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		tableIDs[inst.Name] = inst.TableID
 	}
 
-	// Clean up both next-table windows: current (32000-32099) and
-	// pre-#11319 (100-199). The old band outranked PBR, so an in-place
-	// upgrade must remove it before routing is considered converged. A
-	// failed per-family list does NOT abort the apply — we still re-add
+	// Clear this manager's rules in the shared current LPM range, the prior
+	// #11319 next-table range (32000-32099), and the pre-#11319 range
+	// (100-199). The current shared range is ownership-filtered so it leaves
+	// rib-group rules intact.
+	// A failed per-family list does NOT abort the apply — we still re-add
 	// every desired rule below so forward progress is preserved on the
 	// common path. The clear error is captured and returned at the end so
 	// the caller can observe (and a future caller retry) instead of leaving
@@ -182,28 +154,9 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		errs = append(errs, clearErr)
 	}
 
-	// #6583: draw the priority window down IPv4-FIRST, independent of the
-	// caller's slice order.
-	//
-	// This loop advances ONE family-blind `prio` in slice order, so which
-	// leaks survive the maxNextTableRules cap was decided entirely by the two
-	// `append` lines in pkg/daemon/daemon_apply_routing.go — v4 statics before
-	// v6 statics. The userspace FIB mirrors the same cap but draws it down in
-	// its OWN order (routes.go: addRoutes("inet.0", ...) then
-	// addRoutes("inet6.0", ...)), so the two sides agreed only by convention
-	// across a package boundary, with nothing on either side binding it.
-	// Swapping those two appends would have installed 60 v6 + 40 v4 rules in
-	// the kernel against 60 v4 + 40 v6 in the FIB: 40 leaks in the kernel and
-	// not the FIB, 40 in the FIB and not the kernel — the #6467 kernel/FIB
-	// verdict split in a new shape, where a leak present only in the FIB
-	// resolves into the target VRF on the AF_XDP fast path while a slow-path
-	// packet for the same flow resolves in the main table.
-	//
-	// Ordering HERE rather than asserting on the caller makes the agreement
-	// structural: no caller can get it wrong, and the guard cannot rot into a
-	// check of one caller while a second caller is added elsewhere. The
-	// partition is STABLE, so within a family the caller's relative order —
-	// which is what the FIB's per-family pass also preserves — is untouched.
+	// Preserve the established IPv4-first order for the next-table admission
+	// cap. Rule priority itself is derived from prefix length below, so this
+	// ordering only decides which leaks survive an over-cap configuration.
 	routes = nextTableFamilyOrdered(routes)
 
 	// #9420 fail-closed gate. An empty ingress set means we cannot scope the
@@ -222,12 +175,8 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		return errors.Join(errs...)
 	}
 
-	prio := nextTableRulePriority
-	// admitted counts SLOTS RESERVED by admitted leaks — the applier-side twin
-	// of the L*N the strict gate and StaticRouteExclusions compute. It advances
-	// once per admitted leak, independent of install/rollback outcome (see the
-	// admission check below). prio is only the install cursor: where the next
-	// leak's rules are programmed, reusing slots a rollback freed.
+	// Admission counts rule slots reserved by each eligible leak. It is
+	// independent of rule priority and install/rollback outcome.
 	admitted := 0
 	for i, sr := range routes {
 		if sr == nil || sr.NoInstall || sr.NextTable == "" {
@@ -246,50 +195,21 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 			continue
 		}
 
+		prefixLength, addressBits := dst.Mask.Size()
 		family := unix.AF_INET
 		if dst.IP.To4() == nil {
 			family = unix.AF_INET6
 		}
+		priority := config.RouteLeakRulePriority(prefixLength, addressBits, config.RouteLeakNextTable)
 
-		// Hard-cap the priority inside the window that clear() scans
-		// ([nextTableRulePriority, nextTableRulePriority+maxNextTableRules)).
-		// A rule programmed at or beyond the upper bound would never be
-		// removed on a later apply and would leak permanently. Stop
-		// programming further next-table routes once the window is exhausted,
-		// matching the pbrManager cap pattern below.
-		//
-		// #6467: aggregate a degraded error (mirroring the rib-group and PBR
-		// caps below) instead of a bare Warn+break. A silent truncation let
-		// Apply report success while dropping a security-relevant inter-VRF
-		// routing control AND diverging the kernel from the userspace FIB
-		// (which mirrors the same cap). Name how many next-table routes past
-		// the cap are not leaked so the operator sees the degraded result.
-		// The strict commit gate (validateRoutingRuleWindowsStrict, #5854)
-		// rejects an over-subscribed config up front; this belt catches the
-		// tolerant-load / peer-sync path where that gate is downgraded to a
-		// warning.
-		// #9420: the window is drawn down LEAK-ATOMICALLY. One leak now costs
-		// len(ingressIfaces) priorities, so a leak whose full ingress expansion
-		// does not fit is dropped WHOLE rather than installed on a subset of its
-		// interfaces — a partially-scoped leak would work on some ingress
-		// interfaces and silently not on others, which is harder to diagnose
-		// than a leak that is reported as not installed.
-		// #9810 GPT-1: admission is INDEPENDENT of install/rollback accounting.
-		// The install cursor prio lags behind whenever a rollback frees slots,
-		// so gating overflow on prio would admit a verdict-EXCLUDED tail leak
-		// after any earlier fault (and live-rule ingestion would publish it
-		// too) — the previous implementation consumed the reservation. Gate on
-		// the admitted counter instead: exactly the verdict set is admitted,
-		// and a fault can only under-install it, never extend it.
-		// Window safety follows from the reservation: per-leak prio advance is
-		// N on success and survivors<N on failure, so prio never exceeds
-		// base+admitted, and this check keeps every emitted priority
-		// (prio+added, added<N) inside the window clear() scans.
+		// The cap limits admitted rule entries; the prefix-derived priority
+		// remains within the shared next-table/rib-group range. Admission is
+		// leak-atomic so every ingress interface shares the same verdict.
 		if admitted+len(ingressIfaces) > maxNextTableRules {
 			// Count only ELIGIBLE routes past the cap — those the applier WOULD
 			// have installed (known instance + parseable CIDR). An
 			// unknown-instance or unparseable route is skipped above (no
-			// reservation), so it never consumes a window slot and is not a
+			// reservation), so it never consumes an admission-cap slot and is not a
 			// "dropped leak"; the
 			// tableIDs + net.ParseCIDR gates here mirror the per-route eligibility
 			// checks at the top of this loop so the "N not leaked" count is
@@ -320,48 +240,22 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 		// later fault/rollback cannot admit a further leak past it (GPT-1).
 		admitted += len(ingressIfaces)
 
-		// One rule per ingress interface of the authoring instance (#9420).
-		// ingressIfaces is pre-sorted and de-duplicated by
-		// DefaultInstanceIngressIfaces so the priorities are stable across
-		// applies despite Go map-iteration order.
-		// #9810 SYN-C-LEAK-05: the per-ingress expansion is FAULT-ATOMIC. A
-		// RuleAdd failure used to still count the slot (added++) and continue
-		// with the next interface, leaving the leak installed on a subset of
-		// its interfaces while the userspace mirror follows it on all of them.
-		// Now the first failure stops this leak and rolls its partial install
-		// back; the freed slots are reused by the next leak, and prio advances
-		// only past slots still occupied — rollback survivors plus
-		// EEXIST-retained slots. Survivors can sit at ARBITRARY positions in
-		// the failed range (not a prefix), so a scalar cursor is approximate
-		// by construction: the next leak may pack at a priority an orphan
-		// still holds (duplicate priorities, which the kernel permits) or skip
-		// a freed slot (gap waste). Both desync the cursor from exact occupancy
-		// under delete faults; the joined error plus the #9693 retry heals it.
-		// Admission is unaffected — the reservation above is consumed
-		// regardless — so a fault can only under-install the verdict set,
-		// never admit beyond it. EEXIST-counted rules are NOT rolled back:
-		// that content pre-exists (a stale survivor of a failed clear at the
-		// attempted priority under the deterministic layout, owned by clear()
-		// which is already loud), and deleting converged content to satisfy
-		// atomicity purity only loses coverage.
-		added := 0
-		eexist := 0
+		// One rule per ingress interface scopes the leak to the default
+		// instance. Every copy shares the route's prefix-derived priority.
+		// The expansion remains fault-atomic: the first add failure rolls back
+		// successful siblings, while the admission reservation stays consumed.
 		leakFailed := false
 		var leakRules []*netlink.Rule
 		for _, iif := range ingressIfaces {
 			rule := netlink.NewRule()
 			rule.Dst = dst
 			rule.Table = tableID
-			rule.Priority = prio + added
+			rule.Priority = priority
 			rule.Family = family
 			rule.IifName = iif
 
 			if err := n.ops.RuleAdd(rule); err != nil {
 				if isRuleAlreadyPresent(err) {
-					// EEXIST: the desired content is already in the kernel —
-					// converged, not a fault. Count the slot and continue.
-					added++
-					eexist++
 					continue
 				}
 				errs = append(errs, fmt.Errorf(
@@ -371,28 +265,20 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 				break
 			}
 			leakRules = append(leakRules, rule)
-			added++
 		}
 		if leakFailed {
-			// Rollback survivors still occupy kernel slots the cursor must
-			// skip; EEXIST-retained slots likewise (counted above, never
-			// deleted). Successfully-deleted slots are freed for reuse.
-			survivors := eexist
 			for _, rule := range leakRules {
 				if err := n.ops.RuleDel(rule); err != nil && !isRuleAlreadyGone(err) {
-					survivors++
 					errs = append(errs, fmt.Errorf(
 						"roll back next-table rule destination %s instance %s table %d iif %s: %w",
 						sr.Destination, sr.NextTable, tableID, rule.IifName, err))
 				}
 			}
-			prio += survivors
 			continue
 		}
 		slog.Info("next-table rule added",
 			"destination", sr.Destination, "instance", sr.NextTable, "table", tableID,
 			"ingress_interfaces", len(ingressIfaces))
-		prio += added
 	}
 	// Desired rules are re-added; surface any clear/add/return failure.
 	return errors.Join(errs...)
@@ -407,8 +293,8 @@ func (n *nextTableManager) Apply(routes []*config.StaticRoute, instances []*conf
 // exist.
 //
 // The CIDR parse is deliberately not re-checked here: an unparseable
-// destination is skipped by the loop with a Warn and consumes no window slot,
-// so treating it as eligible only risks arming the gate one config earlier —
+// destination is skipped by the loop with a Warn and consumes no admission-cap
+// slot, so treating it as eligible only risks arming the gate one config earlier —
 // the fail-safe direction — and keeps this predicate cheap.
 func hasEligibleNextTableRoute(routes []*config.StaticRoute, tableIDs map[string]int) bool {
 	for _, sr := range routes {
@@ -456,14 +342,14 @@ func DefaultInstanceIngressIfaces(cfg *config.Config) []string {
 }
 
 // nextTableFamilyOrdered returns routes stably partitioned IPv4-first, so the
-// next-table priority window is drawn down in the same family order the
-// userspace FIB uses (#6583).
+// next-table admission cap is applied in the same family order as the
+// userspace FIB (#6583).
 //
 // A nil entry or an unparseable destination keeps its position in the FIRST
 // group: both are skipped by Apply's own eligibility checks, so grouping them
 // with v4 costs nothing and avoids inventing a third bucket whose ordering
 // would itself be unspecified. It also preserves the pre-#6583 property that
-// such an entry never consumes a window slot.
+// such an entry never consumes an admission-cap slot.
 func nextTableFamilyOrdered(routes []*config.StaticRoute) []*config.StaticRoute {
 	out := make([]*config.StaticRoute, 0, len(routes))
 	var v6 []*config.StaticRoute
@@ -501,9 +387,14 @@ func (n *nextTableManager) clear() error {
 			continue
 		}
 		for _, r := range rules {
-			inCurrent := r.Priority >= nextTableRulePriority && r.Priority < nextTableRulePriority+maxNextTableRules
+			inCurrent := r.Priority >= nextTableRulePriority &&
+				r.Priority < nextTableRulePriority+config.RouteLeakRulePriorityWindow &&
+				r.Dst != nil && r.IifName != ""
+			inPrevious := r.Priority >= previousNextTableRulePriority &&
+				r.Priority < previousNextTableRulePriority+maxNextTableRules &&
+				r.Dst != nil && r.IifName != ""
 			inLegacy := r.Priority >= legacyNextTableRulePriority && r.Priority < legacyNextTableRulePriority+maxNextTableRules
-			if inCurrent || inLegacy {
+			if inCurrent || inPrevious || inLegacy {
 				if err := n.ops.RuleDel(&r); err != nil {
 					if isRuleAlreadyGone(err) {
 						// The rule is already absent (ENOENT / no such
@@ -565,9 +456,10 @@ type ribGroupManager struct {
 //
 // #3876: this is done PER CONNECTED PREFIX with a rule that sits BEFORE the
 // main table (priority < 32766), so a specific imported prefix wins over a
-// main-table default route:
+// main-table default route. The shared route-leak mapping also orders these
+// prefixes against next-table leaks:
 //
-//	ip rule to <connected-prefix> lookup <sourceTable> pref 30000
+//	ip rule to <connected-prefix> lookup <sourceTable> pref RouteLeakRulePriority(prefix)
 //
 // This replaces the pre-#3876 `from all lookup <sourceTable> pref 33000`
 // blanket rule, which (a) sat AFTER main so any default route shadowed it —
@@ -629,7 +521,7 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 	// duplicate rules if two instances share a table ID).
 	leakedTables := make(map[int]bool)
 
-	prio := ribGroupLeakRulePriority
+	admitted := 0
 	capped := false
 	for _, inst := range instances {
 		if capped {
@@ -675,11 +567,10 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 
 		installed := map[int][]*net.IPNet{}
 		for _, lr := range toInstall {
-			// Hard-cap at the priority window clear() scans. A rule at or
-			// beyond the upper bound would never be removed on a later apply
-			// and would leak permanently. ValidateConfig warns before this
-			// point is reached; mirror the maxPBRRules/next-table caps.
-			if prio >= ribGroupLeakRulePriority+maxRibGroupLeakRules {
+			// Admission and priority are separate: this cap bounds installed
+			// rules, while prefix length determines each rule's shared-band
+			// priority.
+			if admitted >= maxRibGroupLeakRules {
 				errs = append(errs, fmt.Errorf(
 					"rib-group leak rule limit (%d) reached; connected prefixes beyond "+
 						"the limit are not leaked — reduce the number of interface-routes "+
@@ -694,12 +585,14 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 					lr.prefix, inst.Name, err))
 				continue
 			}
+			admitted++
+			prefixLength, addressBits := dst.Mask.Size()
+			priority := config.RouteLeakRulePriority(prefixLength, addressBits, config.RouteLeakRibGroup)
 			rule := netlink.NewRule()
 			rule.Dst = dst
 			rule.Table = sourceTable
-			rule.Priority = prio
+			rule.Priority = priority
 			rule.Family = lr.family
-
 			familyStr := "inet"
 			if lr.family == unix.AF_INET6 {
 				familyStr = "inet6"
@@ -708,14 +601,12 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 				errs = append(errs, fmt.Errorf(
 					"add rib-group leak rule prefix %s instance %s table %d family %s: %w",
 					lr.prefix, inst.Name, sourceTable, familyStr, err))
-				prio++
 				continue
 			}
 			installed[lr.family] = append(installed[lr.family], dst)
 			slog.Info("rib-group leak rule added",
 				"instance", inst.Name, "prefix", lr.prefix,
-				"table", sourceTable, "family", familyStr, "pref", prio)
-			prio++
+				"table", sourceTable, "family", familyStr, "pref", priority)
 		}
 		// Return to other leaking instances through their own tables, but only
 		// for their leaked prefixes. Main-only destinations remain subject to
@@ -834,11 +725,12 @@ func splitConnectedPrefixesByFamily(prefixes []string) (v4, v6 []string) {
 	return v4, v6
 }
 
-// clear removes all ip rules in the rib-group priority ranges. It scans
-// THREE windows so an in-place binary upgrade removes stale rules from every
-// generation of this reconciler:
-//   - [ribGroupLeakRulePriority, +maxRibGroupLeakRules): the current #3876
-//     per-prefix leak window (30000-30999).
+// clear removes this manager's destination-only rules from the shared leak
+// priority range plus the two legacy rib-group windows. It scans three windows
+// so an in-place binary upgrade removes stale rules from every generation:
+//   - [ribGroupLeakRulePriority, +RouteLeakRulePriorityWindow): the current
+//     shared next-table/rib-group range, filtered to rules without IifName so
+//     next-table rules owned by the other manager survive.
 //   - [ribGroupRulePriority, +100): the pre-#3876 `from all lookup <table>`
 //     blanket window (33000-33099). Removing these on reconcile is what
 //     prevents an upgrade from leaving a shadowed-by-default blanket rule
@@ -859,7 +751,9 @@ func (rg *ribGroupManager) clear() error {
 			continue
 		}
 		for _, r := range rules {
-			inCurrent := r.Priority >= ribGroupLeakRulePriority && r.Priority < ribGroupLeakRulePriority+maxRibGroupLeakRules
+			inCurrent := r.Priority >= ribGroupLeakRulePriority &&
+				r.Priority < ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow &&
+				r.Dst != nil && r.IifName == ""
 			inOldBlanket := r.Priority >= ribGroupRulePriority && r.Priority < ribGroupRulePriority+100
 			inLegacy := r.Priority >= 200 && r.Priority < 300
 			inReturn := r.Priority == RibGroupReturnRulePriority // #9819

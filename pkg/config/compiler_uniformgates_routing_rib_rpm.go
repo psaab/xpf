@@ -93,23 +93,23 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
-	// #5854: next-table / interface-routes rib-group ip-rule WINDOW gate. The
-	// runtime applier programs these leaks into FIXED priority windows
-	// (pkg/routing/rules.go: 100 next-table rules, 1000 rib-group leak rules) and
-	// HARD-CAPS at each boundary, silently skipping any rule past it. A config
-	// that exceeds a window therefore commits green but the reconciler stops at
-	// the limit and returns success — the committed generation CLAIMS routes the
-	// kernel never programs (blackhole / asymmetric routing / silent inter-VRF
-	// leak loss). This was previously WARN-only (ValidateConfig). Strict on
-	// commit / commit-check (hard reject so the over-subscription is
-	// operator-visible before it truncates); lenient on load / peer-sync (warn —
-	// #1960; the applier's window hard-cap keeps the excess inert, so an
-	// already-committed or peer-synced over-limit generation still boots).
+	// #5854: next-table / interface-routes rib-group admission-cap gate. The
+	// runtime applier has separate caps (100 next-table entries including
+	// ingress-interface expansion, 1000 rib-group connected-prefix rules) and
+	// silently skips rules beyond them. A config exceeding a cap therefore used
+	// to commit green while the reconciler stopped at the limit and returned
+	// success — the committed generation CLAIMED routes the kernel never
+	// programs (blackhole / asymmetric routing / silent inter-VRF leak loss).
+	// This was previously WARN-only (ValidateConfig). Strict on commit /
+	// commit-check (hard reject so the over-subscription is operator-visible
+	// before it truncates); lenient on load / peer-sync (warn — #1960; the
+	// applier's admission caps keep the excess inert, so an already-committed or
+	// peer-synced over-limit generation still boots).
 	// Mirrors validateNextTableTargetReferencesStrict.
 	if err := validateRoutingRuleWindowsStrict(cfg); err != nil {
 		if opts.lenientRoutingRuleWindows {
 			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("routing-rule window over-subscription (downgraded to warning on tolerant path): %v", err))
+				fmt.Sprintf("routing-rule admission-cap overflow (downgraded to warning on tolerant path): %v", err))
 		} else {
 			return err
 		}
