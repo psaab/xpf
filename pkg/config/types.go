@@ -460,14 +460,14 @@ type Config struct {
 	Protocols        ProtocolsConfig
 	RoutingInstances []*RoutingInstanceConfig
 	// QuarantinedRoutingInstances records the instances dropped from
-	// RoutingInstances by the #9622 (reserved name) and #3855 (stable table-id
-	// collision) quarantine passes in compileRoutingInstances, WITH their
-	// interface membership. The snapshot builders need the membership to bind
-	// (not drop) a quarantined member's interfaces: without it the domain map
-	// misses and the interface inherits the default session domain 0 (#9956
-	// F-032). Drop-time objects (later phases mutate survivors only; the
-	// binder reads Name/Interfaces, populated pre-filter), APPENDED at both
-	// drop sites, rebuilt per compile like Warnings.
+	// RoutingInstances by #9622 (reserved name), #11391 (invalid kernel VRF
+	// device name), and #3855 (stable table-id collision) quarantine passes in
+	// compileRoutingInstances, WITH their interface membership. The snapshot
+	// builders need the membership to bind (not drop) a quarantined member's
+	// interfaces: without it the domain map misses and the interface inherits
+	// the default session domain 0 (#9956 F-032). Drop-time objects (later phases
+	// mutate survivors only; the binder reads Name/Interfaces, populated
+	// pre-filter), APPENDED at all drop sites, rebuilt per compile like Warnings.
 	//
 	// `json:"-"` per the #9246 MalformedZonePairs precedent: a COMPILE-TIME
 	// record consumed only by the Go snapshot builders. Nothing transmits it

@@ -1076,15 +1076,15 @@ fn stamped_fabric_frag_meta() -> UserspaceDpMeta {
 ///
 /// This drives the ORDINARY same-family (interface-SNAT) association, not the
 /// cross-family NAT64 one, and that is sufficient for the ARGUMENT under test:
-/// each site computes `frag_authority` ONCE and hands the same value to both
-/// helpers — `nat64_install_forward_fragment_assoc` and
-/// `nat_install_forward_fragment_assoc` at the install site,
-/// `nat64_consult_forward_fragment_assoc` and its `.or_else`
-/// `nat_consult_forward_fragment_assoc` at the consult site. Severing the
-/// argument therefore severs both arms together, so binding either arm binds
-/// the argument. What a same-family fixture additionally buys is a REACHABLE
-/// gateway and a real SNAT rewrite to observe (`nat_applied_snat`), where the
-/// v6 NAT64 fixtures deliberately strip the inet6 routes.
+/// the install sites compute `frag_authority` once and pass it to both
+/// `nat64_install_forward_fragment_assoc` and
+/// `same_family_or_plain_install_forward_fragment_assoc`; the consult site
+/// passes the same value to `nat64_consult_forward_fragment_assoc` and its
+/// `same_family_or_plain_consult_forward_fragment_assoc` fallback. Severing the
+/// authority argument therefore severs both install/consult arms together.
+/// What a same-family fixture additionally buys is a REACHABLE gateway and a
+/// real SNAT rewrite to observe (`nat_applied_snat`), where the v6 NAT64
+/// fixtures deliberately strip the inet6 routes.
 ///
 /// RED on revert:
 ///   - both override arguments -> `None`: the foreign fragment's authority

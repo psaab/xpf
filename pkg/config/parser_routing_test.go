@@ -222,10 +222,10 @@ func TestNextTableStaticRoutes(t *testing.T) {
 	setCommands := []string{
 		// The next-table target routing-instance must be defined or the
 		// #5693 definedness gate rejects the commit.
-		"set routing-instances Comcast-GigabitPro instance-type virtual-router",
+		"set routing-instances Comcast-GP instance-type virtual-router",
 		// #9810: one unclaimed unit (N=1) so the per-ingress window gate admits the leak.
 		"set interfaces ge-0/0/0 unit 0",
-		"set routing-options static route 0.0.0.0/0 next-table Comcast-GigabitPro.inet.0",
+		"set routing-options static route 0.0.0.0/0 next-table Comcast-GP.inet.0",
 		"set routing-options static route 10.1.10.0/24 next-hop 50.247.115.22",
 	}
 	for _, cmd := range setCommands {
@@ -245,8 +245,8 @@ func TestNextTableStaticRoutes(t *testing.T) {
 	if r0.Destination != "0.0.0.0/0" {
 		t.Errorf("route 0 dest: %s", r0.Destination)
 	}
-	if r0.NextTable != "Comcast-GigabitPro" {
-		t.Errorf("route 0 next-table: got %q, want %q", r0.NextTable, "Comcast-GigabitPro")
+	if r0.NextTable != "Comcast-GP" {
+		t.Errorf("route 0 next-table: got %q, want %q", r0.NextTable, "Comcast-GP")
 	}
 	if len(r0.NextHops) != 0 {
 		t.Errorf("route 0 should have no next-hops, got %v", r0.NextHops)
@@ -261,7 +261,7 @@ func TestNextTableStaticRoutes(t *testing.T) {
 	// The next-table target routing-instance must be defined or the #5693
 	// definedness gate rejects the commit.
 	hierInput := `routing-instances {
-    Comcast-GigabitPro {
+    Comcast-GP {
         instance-type virtual-router;
     }
 }
@@ -273,12 +273,12 @@ interfaces {
 routing-options {
     static {
         route 0.0.0.0/0 {
-            next-table Comcast-GigabitPro.inet.0;
+            next-table Comcast-GP.inet.0;
         }
     }
     rib inet6.0 {
         static {
-            route ::/0 next-table Comcast-GigabitPro.inet6.0;
+            route ::/0 next-table Comcast-GP.inet6.0;
         }
     }
 }`
@@ -294,13 +294,13 @@ routing-options {
 	if len(hierCfg.RoutingOptions.StaticRoutes) != 1 {
 		t.Fatalf("expected 1 inet route, got %d", len(hierCfg.RoutingOptions.StaticRoutes))
 	}
-	if hierCfg.RoutingOptions.StaticRoutes[0].NextTable != "Comcast-GigabitPro" {
+	if hierCfg.RoutingOptions.StaticRoutes[0].NextTable != "Comcast-GP" {
 		t.Errorf("inet next-table: got %q", hierCfg.RoutingOptions.StaticRoutes[0].NextTable)
 	}
 	if len(hierCfg.RoutingOptions.Inet6StaticRoutes) != 1 {
 		t.Fatalf("expected 1 inet6 route, got %d", len(hierCfg.RoutingOptions.Inet6StaticRoutes))
 	}
-	if hierCfg.RoutingOptions.Inet6StaticRoutes[0].NextTable != "Comcast-GigabitPro" {
+	if hierCfg.RoutingOptions.Inet6StaticRoutes[0].NextTable != "Comcast-GP" {
 		t.Errorf("inet6 next-table: got %q", hierCfg.RoutingOptions.Inet6StaticRoutes[0].NextTable)
 	}
 }
@@ -422,7 +422,7 @@ func TestNestedAddressSetCycleDetection(t *testing.T) {
 
 func TestRoutingInstances(t *testing.T) {
 	tree := &ConfigTree{}
-	setCommands := []string{"set routing-instances Comcast-GigabitPro instance-type virtual-router", "set routing-instances Comcast-GigabitPro interface enp7s0.100", "set routing-instances Comcast-GigabitPro interface enp7s0.200", "set routing-instances Comcast-GigabitPro routing-options static route 0.0.0.0/0 next-hop 74.93.96.1", "set routing-instances Comcast-GigabitPro routing-options static route 0.0.0.0/0 preference 10", "set routing-instances ATT instance-type virtual-router", "set routing-instances ATT interface enp8s0", "set routing-instances ATT routing-options static route 0.0.0.0/0 next-hop 192.168.1.254", "set routing-instances ATT protocols bgp local-as 65001", "set routing-instances ATT protocols bgp group upstream peer-as 7018", "set routing-instances ATT protocols bgp group upstream neighbor 192.168.1.254"}
+	setCommands := []string{"set routing-instances Comcast-GP instance-type virtual-router", "set routing-instances Comcast-GP interface enp7s0.100", "set routing-instances Comcast-GP interface enp7s0.200", "set routing-instances Comcast-GP routing-options static route 0.0.0.0/0 next-hop 74.93.96.1", "set routing-instances Comcast-GP routing-options static route 0.0.0.0/0 preference 10", "set routing-instances ATT instance-type virtual-router", "set routing-instances ATT interface enp8s0", "set routing-instances ATT routing-options static route 0.0.0.0/0 next-hop 192.168.1.254", "set routing-instances ATT protocols bgp local-as 65001", "set routing-instances ATT protocols bgp group upstream peer-as 7018", "set routing-instances ATT protocols bgp group upstream neighbor 192.168.1.254"}
 	for _, cmd := range setCommands {
 		path, err := ParseSetCommand(cmd)
 		if err != nil {
@@ -445,14 +445,14 @@ func TestRoutingInstances(t *testing.T) {
 	// Find the two instances (order not guaranteed).
 	for _, ri := range cfg.RoutingInstances {
 		switch ri.Name {
-		case "Comcast-GigabitPro":
+		case "Comcast-GP":
 			comcast = ri
 		case "ATT":
 			att = ri
 		}
 	}
 	if comcast == nil {
-		t.Fatal("missing routing instance Comcast-GigabitPro")
+		t.Fatal("missing routing instance Comcast-GP")
 	}
 	if comcast.InstanceType != "virtual-router" {
 		t.Errorf("Comcast instance-type: %s", comcast.InstanceType)
@@ -494,7 +494,7 @@ func TestRoutingInstances(t *testing.T) {
 		t.Errorf("ATT BGP neighbor: addr=%s as=%d", att.BGP.Neighbors[0].Address, att.BGP.Neighbors[0].PeerAS)
 	}
 	hierInput := `routing-instances {
-    Comcast-GigabitPro {
+    Comcast-GP {
         instance-type virtual-router;
         interface enp7s0.100;
         routing-options {
@@ -518,7 +518,7 @@ func TestRoutingInstances(t *testing.T) {
 	if len(hierCfg.RoutingInstances) != 1 {
 		t.Fatalf("hierarchical: expected 1 instance, got %d", len(hierCfg.RoutingInstances))
 	}
-	if hierCfg.RoutingInstances[0].Name != "Comcast-GigabitPro" {
+	if hierCfg.RoutingInstances[0].Name != "Comcast-GP" {
 		t.Errorf("hierarchical instance name: %s", hierCfg.RoutingInstances[0].Name)
 	}
 }
@@ -2786,7 +2786,7 @@ func TestGlobalInterfaceRoutesRibGroup(t *testing.T) {
 	input := `routing-instances {
     Comcast-BCI { instance-type virtual-router; }
     ATT { instance-type virtual-router; }
-    Atherton-Fiber { instance-type virtual-router; }
+    Atherton { instance-type virtual-router; }
     sfmix { instance-type virtual-router; }
 }
 routing-options {
@@ -2798,10 +2798,10 @@ routing-options {
     }
     rib-groups {
         Other-ISPS {
-            import-rib [ Comcast-BCI.inet.0 inet.0 ATT.inet.0 Atherton-Fiber.inet.0 sfmix.inet.0 ];
+            import-rib [ Comcast-BCI.inet.0 inet.0 ATT.inet.0 Atherton.inet.0 sfmix.inet.0 ];
         }
         Other-ISP6 {
-            import-rib [ Comcast-BCI.inet6.0 inet6.0 ATT.inet6.0 Atherton-Fiber.inet6.0 ];
+            import-rib [ Comcast-BCI.inet6.0 inet6.0 ATT.inet6.0 Atherton.inet6.0 ];
         }
     }
 }`
@@ -2845,13 +2845,13 @@ func TestGlobalInterfaceRoutesRibGroupSetSyntax(t *testing.T) {
 		// Define the ISP instances so the import-rib references resolve
 		// (#2226 strict gate); the test's purpose is the parse shape.
 		"set routing-instances Comcast-BCI instance-type virtual-router",
-		"set routing-instances Other-GigabitPro instance-type virtual-router",
-		"set routing-instances bv-firehouse-vpn instance-type virtual-router",
-		"set routing-instances Comcast-GigabitPro instance-type virtual-router",
+		"set routing-instances Other-GP instance-type virtual-router",
+		"set routing-instances firehouse instance-type virtual-router",
+		"set routing-instances Comcast-GP instance-type virtual-router",
 		"set routing-instances ATT instance-type virtual-router",
-		"set routing-instances Atherton-Fiber instance-type virtual-router",
+		"set routing-instances Atherton instance-type virtual-router",
 		"set routing-instances sfmix instance-type virtual-router",
-		"set routing-options interface-routes rib-group inet Other-ISPS", "set routing-options interface-routes rib-group inet6 Other-ISP6", "set routing-options rib-groups Other-ISPS import-rib Comcast-BCI.inet.0", "set routing-options rib-groups Other-ISPS import-rib inet.0", "set routing-options rib-groups Other-ISPS import-rib Other-GigabitPro.inet.0", "set routing-options rib-groups Other-ISPS import-rib bv-firehouse-vpn.inet.0", "set routing-options rib-groups Other-ISPS import-rib Comcast-GigabitPro.inet.0", "set routing-options rib-groups Other-ISPS import-rib ATT.inet.0", "set routing-options rib-groups Other-ISPS import-rib Atherton-Fiber.inet.0", "set routing-options rib-groups Other-ISPS import-rib sfmix.inet.0", "set routing-options rib-groups Other-ISP6 import-rib Comcast-BCI.inet6.0", "set routing-options rib-groups Other-ISP6 import-rib inet6.0", "set routing-options rib-groups Other-ISP6 import-rib Comcast-GigabitPro.inet6.0", "set routing-options rib-groups Other-ISP6 import-rib ATT.inet6.0", "set routing-options rib-groups Other-ISP6 import-rib Atherton-Fiber.inet6.0"}
+		"set routing-options interface-routes rib-group inet Other-ISPS", "set routing-options interface-routes rib-group inet6 Other-ISP6", "set routing-options rib-groups Other-ISPS import-rib Comcast-BCI.inet.0", "set routing-options rib-groups Other-ISPS import-rib inet.0", "set routing-options rib-groups Other-ISPS import-rib Other-GP.inet.0", "set routing-options rib-groups Other-ISPS import-rib firehouse.inet.0", "set routing-options rib-groups Other-ISPS import-rib Comcast-GP.inet.0", "set routing-options rib-groups Other-ISPS import-rib ATT.inet.0", "set routing-options rib-groups Other-ISPS import-rib Atherton.inet.0", "set routing-options rib-groups Other-ISPS import-rib sfmix.inet.0", "set routing-options rib-groups Other-ISP6 import-rib Comcast-BCI.inet6.0", "set routing-options rib-groups Other-ISP6 import-rib inet6.0", "set routing-options rib-groups Other-ISP6 import-rib Comcast-GP.inet6.0", "set routing-options rib-groups Other-ISP6 import-rib ATT.inet6.0", "set routing-options rib-groups Other-ISP6 import-rib Atherton.inet6.0"}
 	tree := &ConfigTree{}
 	for _, line := range lines {
 		cmd, err := ParseSetCommand(line)
@@ -2894,13 +2894,13 @@ func TestIPv6NextTableStaticRoutes(t *testing.T) {
 	lines := []string{
 		// The next-table target routing-instances must be defined or the
 		// #5693 definedness gate rejects the commit.
-		"set routing-instances Comcast-GigabitPro instance-type virtual-router",
+		"set routing-instances Comcast-GP instance-type virtual-router",
 		"set routing-instances ATT instance-type virtual-router",
 		// #9810: one unclaimed unit (N=1) so the per-ingress window gate admits the leaks.
 		"set interfaces ge-0/0/0 unit 0",
-		"set routing-options rib inet6.0 static route ::/0 next-table Comcast-GigabitPro.inet6.0",
+		"set routing-options rib inet6.0 static route ::/0 next-table Comcast-GP.inet6.0",
 		"set routing-options rib inet6.0 static route 2001:db8::/32 next-table ATT.inet6.0",
-		"set routing-options static route 0.0.0.0/0 next-table Comcast-GigabitPro.inet.0",
+		"set routing-options static route 0.0.0.0/0 next-table Comcast-GP.inet.0",
 	}
 	tree := &ConfigTree{}
 	for _, line := range lines {
@@ -2921,8 +2921,8 @@ func TestIPv6NextTableStaticRoutes(t *testing.T) {
 	if r0.Destination != "::/0" {
 		t.Errorf("v6 route 0 dest = %q, want ::/0", r0.Destination)
 	}
-	if r0.NextTable != "Comcast-GigabitPro" {
-		t.Errorf("v6 route 0 next-table = %q, want Comcast-GigabitPro", r0.NextTable)
+	if r0.NextTable != "Comcast-GP" {
+		t.Errorf("v6 route 0 next-table = %q, want Comcast-GP", r0.NextTable)
 	}
 	r1 := cfg.RoutingOptions.Inet6StaticRoutes[1]
 	if r1.NextTable != "ATT" {
@@ -2931,7 +2931,7 @@ func TestIPv6NextTableStaticRoutes(t *testing.T) {
 	if len(cfg.RoutingOptions.StaticRoutes) != 1 {
 		t.Fatalf("StaticRoutes = %d, want 1", len(cfg.RoutingOptions.StaticRoutes))
 	}
-	if cfg.RoutingOptions.StaticRoutes[0].NextTable != "Comcast-GigabitPro" {
+	if cfg.RoutingOptions.StaticRoutes[0].NextTable != "Comcast-GP" {
 		t.Errorf("v4 route next-table = %q", cfg.RoutingOptions.StaticRoutes[0].NextTable)
 	}
 }

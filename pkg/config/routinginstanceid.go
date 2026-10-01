@@ -171,6 +171,13 @@ func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, compiledNode *
 		if IsReservedRoutingInstanceName(name) {
 			continue
 		}
+		// #11391: invalid derived VRF names are quarantined before the runtime
+		// table-id pass too, so they must not claim or displace a table here.
+		// The strict kernel-name gate reports them; tolerant compiles
+		// quarantine them before the runtime collision pass.
+		if _, reason := routingInstanceVRFDeviceNameIssue(name); reason != "" {
+			continue
+		}
 		sorted = append(sorted, name)
 	}
 	if len(sorted) < 2 {
@@ -258,7 +265,7 @@ func QuarantinedRoutingInstanceNames(names []string) map[string]struct{} {
 }
 
 // routingInstanceNameUnionAST is the union of routing-instance names the name
-// gates judge (#3855, #9622): every name some compile path can land.
+// gates judge (#3855, #9622, #11391): every name some compile path can land.
 //
 //   - Every top-level "routing-instances" root, across all roots (#5691).
 //   - The names after the generic compile's own group expansion

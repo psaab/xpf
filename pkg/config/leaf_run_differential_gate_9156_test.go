@@ -580,8 +580,8 @@ func TestTunnelSchemaResolvesBothPositions9156(t *testing.T) {
 //     RECORDS it in UnknownLeaves rather than dropping it silently, which makes
 //     this row a lower severity than the two above.
 //
-// The remaining 23 are UNTRIAGED and #9391 says so. Adding a row here without
-// measuring it records the debt instead of paying it.
+// The original 23 remaining rows are UNTRIAGED and #9391 says so. Adding a row
+// here without measuring it records debt instead of paying it.
 //
 // A row leaves this map by being FIXED, and the ratchet above fails if one
 // starts agreeing while still listed — so the register cannot outlive the

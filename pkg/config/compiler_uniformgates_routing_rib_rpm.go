@@ -29,6 +29,18 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// #11314: a RIB-group import-policy cannot be evaluated by the route-leak
+	// path. Strict commits reject it rather than silently leaking routes the
+	// policy excludes; tolerant loads warn and preserve the pre-existing config.
+	if err := validateRibGroupImportPolicyStrict(tree); err != nil {
+		if opts.lenientRibGroupImportPolicy {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("rib-group import-policy (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #11311: the global selector imports main-table connected routes into
 	// routing instances, but the runtime path only implements per-instance
 	// imports into main. Strict commits reject this shape so FBF traffic

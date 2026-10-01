@@ -78,7 +78,7 @@ func TestFirewallFilter(t *testing.T) {
                     dscp ef;
                 }
                 then {
-                    routing-instance Comcast-GigabitPro;
+                    routing-instance Comcast-GP;
                 }
             }
             term ip-to-atherton-fiber {
@@ -89,7 +89,7 @@ func TestFirewallFilter(t *testing.T) {
                     }
                 }
                 then {
-                    routing-instance Atherton-Fiber;
+                    routing-instance Atherton;
                 }
             }
             term default {
@@ -132,10 +132,10 @@ func TestFirewallFilter(t *testing.T) {
     }
 }
 routing-instances {
-    Comcast-GigabitPro {
+    Comcast-GP {
         instance-type virtual-router;
     }
-    Atherton-Fiber {
+    Atherton {
         instance-type virtual-router;
     }
 }
@@ -162,8 +162,8 @@ routing-instances {
 	if len(dscpFilter.Terms[0].DSCPs) != 1 || dscpFilter.Terms[0].DSCPs[0] != "ef" {
 		t.Errorf("expected dscp [ef], got %q", dscpFilter.Terms[0].DSCPs)
 	}
-	if dscpFilter.Terms[0].RoutingInstance != "Comcast-GigabitPro" {
-		t.Errorf("expected routing-instance Comcast-GigabitPro, got %q", dscpFilter.Terms[0].RoutingInstance)
+	if dscpFilter.Terms[0].RoutingInstance != "Comcast-GP" {
+		t.Errorf("expected routing-instance Comcast-GP, got %q", dscpFilter.Terms[0].RoutingInstance)
 	}
 	if len(dscpFilter.Terms[1].SourceAddresses) != 2 {
 		t.Errorf("expected 2 source addresses, got %d", len(dscpFilter.Terms[1].SourceAddresses))

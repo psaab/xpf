@@ -62,10 +62,10 @@ func TestNextTableUndefinedTargetRejected_5693(t *testing.T) {
 // populated.
 func TestNextTableDefinedTargetAccepted_5693(t *testing.T) {
 	tree := flatTreeFromSets(t,
-		"set routing-instances Comcast-GigabitPro instance-type virtual-router",
+		"set routing-instances Comcast-GP instance-type virtual-router",
 		// #9810: one unclaimed unit (N=1) so the per-ingress window gate admits the leak.
 		"set interfaces ge-0/0/0 unit 0",
-		"set routing-options static route 0.0.0.0/0 next-table Comcast-GigabitPro.inet.0",
+		"set routing-options static route 0.0.0.0/0 next-table Comcast-GP.inet.0",
 	)
 	cfg, err := CompileConfig(tree)
 	if err != nil {
@@ -75,12 +75,12 @@ func TestNextTableDefinedTargetAccepted_5693(t *testing.T) {
 		t.Fatalf("StaticRoutes = %d, want 1", len(cfg.RoutingOptions.StaticRoutes))
 	}
 	sr := cfg.RoutingOptions.StaticRoutes[0]
-	if sr.NextTable != "Comcast-GigabitPro" {
-		t.Errorf("NextTable = %q, want Comcast-GigabitPro", sr.NextTable)
+	if sr.NextTable != "Comcast-GP" {
+		t.Errorf("NextTable = %q, want Comcast-GP", sr.NextTable)
 	}
 	// #5693 grammar preservation: the raw token survives to validation.
-	if sr.NextTableRaw != "Comcast-GigabitPro.inet.0" {
-		t.Errorf("NextTableRaw = %q, want Comcast-GigabitPro.inet.0", sr.NextTableRaw)
+	if sr.NextTableRaw != "Comcast-GP.inet.0" {
+		t.Errorf("NextTableRaw = %q, want Comcast-GP.inet.0", sr.NextTableRaw)
 	}
 }
 

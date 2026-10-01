@@ -79,9 +79,11 @@ use frag_assoc::{
     flowbacked_no_route_requires_nat_translation, flowless_nat_rule_possible,
     flowless_nat_wire_info, flowless_no_route_requires_nat_translation,
     flowless_requires_nat_translation, flowless_source_nat_requires_translation,
-    frag_ingress_authority_with_nat_scope, nat_consult_forward_fragment_assoc,
-    nat_install_forward_fragment_assoc, nat64_consult_forward_fragment_assoc,
-    nat64_install_forward_fragment_assoc, session_gated_reverse_fragment_requires_nat_translation,
+    frag_ingress_authority_with_nat_scope, nat64_consult_forward_fragment_assoc,
+    nat64_install_forward_fragment_assoc,
+    same_family_or_plain_consult_forward_fragment_assoc,
+    same_family_or_plain_install_forward_fragment_assoc,
+    session_gated_reverse_fragment_requires_nat_translation,
 };
 use host_inbound_policy::{
     JunosHostLocalPolicy, emit_host_inbound_deny, host_bound_policy_dst, junos_host_local_policy,
@@ -2681,10 +2683,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // first fragments (forward hits of existing flows + reverse replies).
                         // Post-gate (after revocation/TTL/host-inbound/input-filter above),
                         // owner-only (foreign arrivals must not publish, #9519). Reuses the
-                        // commit-site helpers: they self-gate on first-fragment + rewrite +
-                        // ForwardCandidate + neighbor, and store the hit decision (which for a
-                        // reply is already the reverse via NatDecision::reverse). NAT64 gated
-                        // on v6 (v4 installs carry the reverse info for #10132).
+                        // commit-site helpers: they self-gate on a first fragment with
+                        // either a same-family address rewrite or exact-default no-NAT
+                        // decision, plus ForwardCandidate and resolved neighbor; they
+                        // store the hit decision (which for a reply is already the
+                        // reverse via NatDecision::reverse). NAT64 remains separate;
+                        // v4 installs carry reverse info for #10132.
                         if resolved.session_id != 0
                             && !resolved.install_failed
                             && foreign_arrival_zone.is_none()
@@ -2721,7 +2725,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             ) {
                                 telemetry.counters.record_nat64_frag_assoc_evicted();
                             }
-                            if nat_install_forward_fragment_assoc(
+                            if same_family_or_plain_install_forward_fragment_assoc(
                                 worker_ctx.forwarding,
                                 l3_packet,
                                 meta.addr_family as i32,
@@ -4920,18 +4924,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         if let Some(c) = source_nat_counter.as_ref() {
                                             c.add(nat_hit_len);
                                         }
-                                        // #5689: install the ordinary same-family
-                                        // NAT / NPTv6 fragment association for a
-                                        // FIRST fragment of this now-committed
-                                        // flow, so its non-first fragments inherit
-                                        // this translation on the flowless arm
-                                        // (address-only L3 rewrite) instead of
-                                        // being forwarded UNTRANSLATED. No-op
-                                        // unless this packet is a first fragment
-                                        // (offset 0, MF=1) carrying a same-family
-                                        // rewrite; the cross-family NAT64 path
-                                        // installs its own association (with
-                                        // reverse info) at the same commit site.
+                                        // #5689/#11412: install a same-family NAT /
+                                        // NPTv6 OR plain-forward fragment association
+                                        // for the FIRST fragment of this committed flow.
+                                        // Non-first fragments inherit the committed
+                                        // decision: translated fragments get the
+                                        // address-only rewrite and plain fragments
+                                        // inherit the forwarding verdict. NAT64 has its
+                                        // own association (with reverse info) at the
+                                        // same commit site.
                                         if let Some(l3_packet) = packet_frame.get(
                                             verified_l3_or_stamp(
                                                 packet_frame,
@@ -4939,14 +4940,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.addr_family,
                                             )..,
                                         ) {
-                                            // #5146: publish the NAT64 (cross-
-                                            // family) first-fragment association
-                                            // after the flow has COMMITTED
-                                            // (past `can_admit` and a successful
-                                            // forward session install).
-                                            // Both helpers self-gate (NAT64 vs
-                                            // ordinary same-family), so exactly
-                                            // one fires for a given fragment.
+                                            // #5146: publish the NAT64 association after
+                                            // the flow has COMMITTED (past `can_admit`
+                                            // and a successful forward session install).
+                                            // NAT64 and same-family-or-plain helpers
+                                            // self-gate; at most one installs for any
+                                            // given first fragment.
                                             let frag_authority =
                                                 frag_ingress_authority_with_nat_scope(
                                                     worker_ctx.forwarding,
@@ -4972,7 +4971,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                         .counters
                                                         .record_nat64_frag_assoc_evicted();
                                                 }
-                                                if nat_install_forward_fragment_assoc(
+                                                if same_family_or_plain_install_forward_fragment_assoc(
                                                     worker_ctx.forwarding,
                                                     l3_packet,
                                                     meta.addr_family as i32,
@@ -5605,17 +5604,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     .get(verified_l3_or_stamp(packet_frame, meta.l3_offset, meta.addr_family)..)
                     .and_then(|l3| {
                         // #2562: NAT64 forward non-first fragment fast path. A
-                        // cached association (installed by the FIRST fragment on
-                        // the cold path above) lets this non-first fragment
-                        // inherit the first fragment's permitted verdict, egress
-                        // resolution, AND NAT64 translation, so the whole
-                        // datagram traverses NAT64 and reassembles at the
-                        // receiver instead of the non-first fragments dropping
-                        // fail-closed (#4617). A MISS falls through to the normal
-                        // flowless L3 enforcement below (which drops an
-                        // unassociated NAT64 fragment fail-closed). The consult is
-                        // gated on a non-first fragment carrying a NAT64-decision
-                        // cache hit, so no other flowless traffic is touched.
+                        // NAT64 association (installed by the FIRST fragment on
+                        // the cold path above) lets that fragment inherit the
+                        // first fragment's permitted verdict, egress resolution,
+                        // AND NAT64 translation so the datagram reassembles at the
+                        // receiver instead of dropping fail-closed (#4617). An
+                        // unassociated NAT64 fragment falls through to normal
+                        // flowless L3 enforcement and drops fail-closed. The
+                        // generic same-family/plain consult below also handles
+                        // non-first NAT and plain fragments; only non-first
+                        // fragment keys reach either cache lookup.
                         // #5798: consult under THIS fragment's OWN ingress
                         // authority. A fragment from a different security domain
                         // that merely reproduces (src, dst, ident) now builds a
@@ -5653,16 +5651,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             session_nat64_reverse = reverse;
                             decision
                         })
-                        // #5689: fall back to the ORDINARY same-family NAT /
-                        // NPTv6 fragment association so a non-first fragment of
-                        // a SNAT/DNAT/static-NAT/NPTv6 flow inherits its
-                        // translation (address-only L3 rewrite) instead of being
-                        // forwarded UNTRANSLATED (the #5689 leak). NAT64
-                        // (cross-family) is tried first; a given datagram
-                        // installs exactly one association, so at most one
-                        // consult returns a hit.
+                        // #5689/#11412: fall back to the same-family NAT / NPTv6
+                        // OR plain-forward fragment association. NAT fragments
+                        // inherit their address-only rewrite, while a plain
+                        // fragment's exact-default decision preserves the
+                        // first-fragment forwarding verdict. NAT64 is tried first;
+                        // each datagram installs one association and only one
+                        // helper can return a decision.
                         .or_else(|| {
-                            nat_consult_forward_fragment_assoc(
+                            same_family_or_plain_consult_forward_fragment_assoc(
                                 worker_ctx.forwarding,
                                 l3,
                                 meta.addr_family as i32,
