@@ -86,12 +86,12 @@ func TestDefaultPolicyBlockAndFlatFormsAgree_6774(t *testing.T) {
 func TestDefaultPolicyBlockRejectsAmbiguousAndInvalid_6774(t *testing.T) {
 	cases := []struct{ name, cfg, wantSubstr string }{
 		{
-			// The compiler reads Children[0] and silently DISCARDS the rest, so
-			// this does not do what it reads as and must not commit.
+			// Two choices are ambiguous and must be rejected with a
+			// cardinality diagnostic instead of being treated as missing.
 			name: "two-actions",
 			cfg: "security {\n    policies {\n        default-policy {\n" +
 				"            deny-all;\n            permit-all;\n        }\n    }\n}",
-			wantSubstr: "missing value",
+			wantSubstr: "expected exactly one block value, found 2 children",
 		},
 		{
 			// The block value must be VALIDATED, not merely accepted.
@@ -111,13 +111,86 @@ func TestDefaultPolicyBlockRejectsAmbiguousAndInvalid_6774(t *testing.T) {
 			cfg, _ := CompileConfig(tree)
 			err := SchemaValidate(tree, cfg)
 			if err == nil {
-				t.Fatalf("strict validation ACCEPTED %s; the compiler discards all "+
-					"but the first token, so this config does not do what it reads as", tc.name)
+				t.Fatalf("strict validation ACCEPTED %s; malformed block form must be rejected",
+					tc.name)
 			}
 			if !strings.Contains(err.Error(), tc.wantSubstr) {
 				t.Fatalf("error %q does not mention %q", err, tc.wantSubstr)
 			}
 		})
+	}
+}
+
+func TestDefaultPolicyAmbiguityStrictAndLenient11367(t *testing.T) {
+	const ambiguous = `security {
+    policies {
+        default-policy {
+            permit-all;
+            deny-all;
+        }
+    }
+}`
+	const diagnostic = "expected exactly one block value, found 2 children"
+
+	tree := mustParseTree6774(t, ambiguous)
+	strictCompilers := []struct {
+		name    string
+		compile func(*ConfigTree) (*Config, error)
+	}{
+		{name: "generic", compile: CompileConfig},
+		{name: "node-aware", compile: func(tree *ConfigTree) (*Config, error) {
+			return CompileConfigForNode(tree, 0)
+		}},
+	}
+	for _, tc := range strictCompilers {
+		t.Run("strict-"+tc.name, func(t *testing.T) {
+			if _, err := tc.compile(tree); err == nil || !strings.Contains(err.Error(), diagnostic) {
+				t.Fatalf("strict compile error = %v, want ambiguous default-policy rejection", err)
+			}
+		})
+	}
+
+	lenientCompilers := []struct {
+		name    string
+		compile func(*ConfigTree) (*Config, error)
+	}{
+		{name: "generic", compile: CompileConfigLenient},
+		{name: "node-aware", compile: func(tree *ConfigTree) (*Config, error) {
+			return CompileConfigForNodeLenient(tree, 0)
+		}},
+	}
+	for _, tc := range lenientCompilers {
+		t.Run("lenient-"+tc.name, func(t *testing.T) {
+			cfg, err := tc.compile(tree)
+			if err != nil {
+				t.Fatalf("tolerant compile rejected persisted ambiguity: %v", err)
+			}
+			if cfg == nil || cfg.Security.DefaultPolicy != PolicyDeny {
+				t.Fatalf("tolerant default-policy = %+v, want PolicyDeny", cfg)
+			}
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, diagnostic) && strings.Contains(warning, "#11367") {
+					return
+				}
+			}
+			t.Fatalf("tolerant compile omitted #11367 warning: %v", cfg.Warnings)
+		})
+	}
+
+	// A later duplicate security root must not override the fail-closed result.
+	ambiguousThenPermit := mustParseTree6774(t, ambiguous+`
+security {
+    policies {
+        default-policy permit-all;
+    }
+}`)
+	cfg, err := CompileConfigLenient(ambiguousThenPermit)
+	if err != nil {
+		t.Fatalf("tolerant compile rejected duplicate security roots: %v", err)
+	}
+	if cfg.Security.DefaultPolicy != PolicyDeny {
+		t.Fatalf("later explicit permit overrode ambiguous default-policy: got %v, want PolicyDeny",
+			cfg.Security.DefaultPolicy)
 	}
 }
 

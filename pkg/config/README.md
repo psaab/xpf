@@ -866,6 +866,12 @@ userspace dataplane via the `ConfigSnapshot.DefaultPolicy` string
 the no-match verdict). The `default-policy` leaf is a typed `ValueEnumOf`
 in `schema_security.go`, so a bogus value fails `commit check`. See
 `docs/config-schema.md` "#3065".
+**Ambiguous default-policy blocks are strict-rejected and tolerant-load safe (#11367):**
+Junos's block spelling (`default-policy { deny-all; }`) remains supported when
+it contains exactly one action value. A block with multiple children is rejected
+at `commit check` and strict compilation. Tolerant `Load` and `SyncApply` warn
+and keep the node bootable; the no-match default is forced to `deny-all`, never
+selected by first-child order.
 **Implicit default-policy RT_FLOW logging (#3534):** `set security policies
 default-policy-log session-init|session-close` emits RT_FLOW session logs for
 the implicit default verdict, mirroring a named policy's `then log`. It is a
