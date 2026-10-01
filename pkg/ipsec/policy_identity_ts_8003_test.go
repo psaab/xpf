@@ -100,8 +100,8 @@ func TestRouteBasedDefaultTrafficSelector(t *testing.T) {
 		wantLocalTS, wantRemoteTS string
 	}{
 		// The subject: route-based, nothing else specified.
-		{"route-based, no selector", "st0.0", "", "", routeBasedDefaultTS, routeBasedDefaultTS},
-		{"route-based, unit-less bind", "st0", "", "", routeBasedDefaultTS, routeBasedDefaultTS},
+		{"route-based, no selector", "st0.0", "", "", config.IPsecRouteBasedDefaultTrafficSelector, config.IPsecRouteBasedDefaultTrafficSelector},
+		{"route-based, unit-less bind", "st0", "", "", config.IPsecRouteBasedDefaultTrafficSelector, config.IPsecRouteBasedDefaultTrafficSelector},
 
 		// POLICY-based: no if_id, so the selector is the enforcement boundary
 		// and this default must NOT apply. Widening here would be a real
@@ -115,13 +115,13 @@ func TestRouteBasedDefaultTrafficSelector(t *testing.T) {
 		// The operator said what they wanted: a selector-shaped identity still
 		// wins over the default, on either side independently.
 		{"identity wins over default", "st0.0", "10.0.0.0/24", "10.1.0.0/24", "10.0.0.0/24", "10.1.0.0/24"},
-		{"local identity only", "st0.0", "10.0.0.0/24", "", "10.0.0.0/24", routeBasedDefaultTS},
+		{"local identity only", "st0.0", "10.0.0.0/24", "", "10.0.0.0/24", config.IPsecRouteBasedDefaultTrafficSelector},
 
 		// A non-selector identity is dropped by the belt, and because BOTH
 		// sides then end up empty the route-based default applies -- which is
 		// the desired outcome: an FQDN identity on a route-based VPN yields a
 		// working wildcard tunnel instead of a discarded connection.
-		{"fqdn identity falls through to default", "st0.0", "vpn.example.com", "peer.example.com", routeBasedDefaultTS, routeBasedDefaultTS},
+		{"fqdn identity falls through to default", "st0.0", "vpn.example.com", "peer.example.com", config.IPsecRouteBasedDefaultTrafficSelector, config.IPsecRouteBasedDefaultTrafficSelector},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vpn := &config.IPsecVPN{
@@ -154,7 +154,7 @@ func TestRouteBasedDefaultNotAppliedWithExplicitSelectors(t *testing.T) {
 		},
 	}
 	for _, sel := range effectiveTrafficSelectors("v1", vpn) {
-		if sel.LocalTS == routeBasedDefaultTS || sel.RemoteTS == routeBasedDefaultTS {
+		if sel.LocalTS == config.IPsecRouteBasedDefaultTrafficSelector || sel.RemoteTS == config.IPsecRouteBasedDefaultTrafficSelector {
 			t.Fatalf("route-based default overrode an explicit traffic-selector: %+v", sel)
 		}
 	}

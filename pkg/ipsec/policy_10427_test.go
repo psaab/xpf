@@ -8,8 +8,8 @@ import (
 
 // TestEffectiveTrafficSelectorsOneSidedWildcard10427 covers the half-empty gap
 // left by #8003 at the rendered swanctl layer: in route-based mode (if_id > 0)
-// EACH empty side defaults to routeBasedDefaultTS independently. An operator
-// who sets local-identity to a selector-shaped CIDR while omitting
+// EACH empty side defaults to the shared route-based selector independently.
+// An operator who sets local-identity to a selector-shaped CIDR while omitting
 // remote-identity must get a wildcard remote_ts — not an omitted key that
 // strongSwan resolves to the peer's /32 endpoint address (measured on
 // strongSwan 6.0.5), silently blackholing routed transit traffic.
@@ -25,16 +25,16 @@ func TestEffectiveTrafficSelectorsOneSidedWildcard10427(t *testing.T) {
 		wantLocalTS, wantRemoteTS string
 	}{
 		// The subjects: one-sided identities on a route-based VPN.
-		{"route-based local-only gets remote wildcard", "st0.0", "10.10.0.0/16", "", "10.10.0.0/16", routeBasedDefaultTS},
-		{"route-based remote-only gets local wildcard", "st0.0", "", "10.20.0.0/16", routeBasedDefaultTS, "10.20.0.0/16"},
+		{"route-based local-only gets remote wildcard", "st0.0", "10.10.0.0/16", "", "10.10.0.0/16", config.IPsecRouteBasedDefaultTrafficSelector},
+		{"route-based remote-only gets local wildcard", "st0.0", "", "10.20.0.0/16", config.IPsecRouteBasedDefaultTrafficSelector, "10.20.0.0/16"},
 
 		// Controls: both-empty and both-set behavior is unchanged.
-		{"route-based both-empty stays dual wildcard", "st0.0", "", "", routeBasedDefaultTS, routeBasedDefaultTS},
+		{"route-based both-empty stays dual wildcard", "st0.0", "", "", config.IPsecRouteBasedDefaultTrafficSelector, config.IPsecRouteBasedDefaultTrafficSelector},
 		{"route-based both-set unchanged", "st0.0", "10.10.0.0/16", "10.20.0.0/16", "10.10.0.0/16", "10.20.0.0/16"},
 
 		// Belt interaction: a non-selector remote is dropped by the #8003
 		// belt, leaving that side empty, so the per-side default fills it.
-		{"route-based local cidr remote fqdn gets remote wildcard", "st0.0", "10.10.0.0/16", "peer.example.com", "10.10.0.0/16", routeBasedDefaultTS},
+		{"route-based local cidr remote fqdn gets remote wildcard", "st0.0", "10.10.0.0/16", "peer.example.com", "10.10.0.0/16", config.IPsecRouteBasedDefaultTrafficSelector},
 
 		// Policy-based VPNs are untouched: the selector IS the enforcement
 		// boundary there, so no default may apply on either side.

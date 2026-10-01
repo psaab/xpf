@@ -30,10 +30,10 @@ import (
 // error (candidate rejected, live config untouched). The #2929 routing guard
 // stays as the runtime backstop.
 //
-// Scope — surgical: the if_id-collision arm fires ONLY when two DISTINCT
-// bind-interface strings derive the SAME non-zero if_id. It does NOT fire when
-// the same bind-interface string is shared by multiple VPNs (that is one
-// device, one if_id — not the ambiguous-alias case #2929 named).
+// Scope — surgical: this AST if_id-collision arm fires ONLY when two DISTINCT
+// bind-interface strings derive the SAME non-zero if_id. Same-string sharing
+// is handled separately by the #11380 typed-config gate, which permits it only
+// when the rendered traffic-selector unions are provably disjoint.
 //
 // An unambiguous map (st0.0 + st0.1, or st0 + st1) commits cleanly.
 //
@@ -67,7 +67,8 @@ import (
 // devices.
 func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string, error) {
 	// bindRef tracks the VPN(s) that configured one distinct bind-interface
-	// string (a single string may legitimately be shared by several VPNs).
+	// string. Multiple VPNs may share it only when the #11380 rendered-selector
+	// check proves their traffic-selector unions disjoint.
 	type bindRef struct {
 		vpns []string
 	}
@@ -237,8 +238,9 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 	for _, ifID := range order {
 		group := byID[ifID]
 		if len(group) < 2 {
-			// One distinct bind-interface string for this if_id (possibly
-			// shared by several VPNs) — not the ambiguous-alias case.
+			// One distinct bind-interface string for this if_id. Same-string
+			// sharing is accepted only when the #11380 typed gate proves the
+			// rendered selector unions disjoint.
 			continue
 		}
 		// Two or more DISTINCT bind-interface strings collide on this if_id.

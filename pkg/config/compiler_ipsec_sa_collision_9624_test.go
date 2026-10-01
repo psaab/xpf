@@ -35,6 +35,8 @@ func vpn9624(name string, selectors ...string) []string {
 }
 
 func TestIPsecSANameCollisionsFailCommit9624(t *testing.T) {
+	distinctNames := append(vpn9624("east", "lan"), vpn9624("west", "lan")...)
+	distinctNames = append(distinctNames, "set security ipsec vpn west traffic-selector lan remote-ip 10.9.2.0/24")
 	for _, tc := range []struct {
 		name    string
 		lines   []string
@@ -47,8 +49,7 @@ func TestIPsecSANameCollisionsFailCommit9624(t *testing.T) {
 			[]string{"a", "a-b"}, true, "a-b-c", `"a", "a-b"`},
 		{"connection/child: blue+red vs blue-red", append(vpn9624("blue", "red"), vpn9624("blue-red")...),
 			[]string{"blue", "blue-red"}, true, "blue-red", `"blue", "blue-red"`},
-		{"distinct names", append(vpn9624("east", "lan"), vpn9624("west", "lan")...),
-			[]string{"east", "west"}, false, "", ""},
+		{"distinct names", distinctNames, []string{"east", "west"}, false, "", ""},
 		{"within-VPN #5122 collision is disambiguated, not rejected", vpn9624("site", "x/a", "x:a"),
 			[]string{"site"}, false, "", ""},
 	} {
