@@ -133,6 +133,11 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 	}
 	protocolOwners := config.RoutingInstanceMemberDeviceOwnersForRefs(cfg, protocolRefs)
 	globalProtocols := filterFRRProtocolInterfaces11310(cfg.Protocols, "", protocolOwners)
+	// FRR protocols follow the cluster ownership of their configured RETHs.
+	// The helper clones protocol objects so this runtime filter cannot mutate
+	// the committed config used by other reconcilers.
+	haState := newFRRHADemotionState(d, cfg)
+	globalProtocols = haState.filterProtocols(cfg, globalProtocols, nil)
 
 	// Collect interface bandwidths and point-to-point flags for FRR.
 	ifaceBandwidths := make(map[string]uint64)
@@ -207,6 +212,7 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 		if !forwarding {
 			instanceProtocols = filterFRRProtocolInterfaces11310(instanceProtocols, ri.Name, protocolOwners)
 		}
+		instanceProtocols = haState.filterProtocols(cfg, instanceProtocols, ri.Interfaces)
 		inst := frr.InstanceConfig{
 			Name:              ri.Name,
 			VRFName:           vrfName,

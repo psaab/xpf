@@ -636,6 +636,11 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 	d.setLocalFailoverCommitReady(ev.GroupID, false)
 	s := d.getOrCreateRGState(ev.GroupID)
 	tr := s.SetCluster(isPrimary)
+	clusterOwnershipEdge := ev.OldState != ev.NewState &&
+		(ev.OldState == cluster.StatePrimary || ev.NewState == cluster.StatePrimary)
+	if clusterOwnershipEdge && !isPrimary {
+		d.scheduleFRRHAReconcile("cluster-state")
+	}
 	if isPrimary {
 		// Activation: enable forwarding first.
 		// Re-read desired state to guard against a
@@ -825,6 +830,11 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 	// neither initiates the other's tunnels.
 	if ev.GroupID == 0 {
 		d.applyRG0OwnershipTransition(ev.NewState)
+	}
+	if clusterOwnershipEdge && isPrimary {
+		// A promotion may need to install RETH addresses before FRR can
+		// establish its restored sessions, so reconcile after ownership work.
+		d.scheduleFRRHAReconcile("cluster-state")
 	}
 	return vrrpTimer
 }
@@ -1477,6 +1487,7 @@ func (d *Daemon) reconcileRGState() {
 	// gating — gated probes run (and the overlay publishes) only on
 	// the data-RG primary; the standby reverts to the config baseline.
 	if anyRGChanged {
+		d.scheduleFRRHAReconcile("rg-state-reconcile")
 		d.reconcileIPMonGating()
 	}
 

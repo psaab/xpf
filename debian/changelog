@@ -3,6 +3,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Deny unzoned physical ingress before destination-only host-inbound fallback,
     use sdifname for unzoned VRF slaves, and limit zone-scoped admits to
     zone-owned destination addresses (#11409).
+  * Reconcile FRR protocol state with HA redundancy-group ownership on primary
+    transitions, withdrawing demoted-node peers and restoring sessions on
+    promotion (#11415).
   * Burst newly enabled ip-monitoring probes on HA promotion so preferred
     routes follow current path health without waiting for normal test
     intervals (#11414).
