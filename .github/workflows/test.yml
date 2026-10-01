@@ -1,0 +1,59 @@
+# These checks report on every PR but do not block merges until status contexts
+# are required in master branch rulesets. Do not require the Go job while
+# ordinary affected-package selections are red on master.
+# Owner action, once those baselines are green: require `CI tests / Go build
+# and affected tests` and `CI tests / Rust workspace compile check`.
+#
+# The full Go suite is currently red on master, so the Go test step selects the
+# changed packages and their reverse dependents. Once `go test ./... -count=1`
+# is green on master, replace that selector with the full-suite command.
+# The Rust workspace test suite is also red on master (baseline evidence and
+# the full-test expansion path are recorded in this PR); keep the all-targets
+# compile check until `cargo test --workspace` is green, then promote it here.
+name: CI tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go build and affected tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build all Go packages
+        run: go build ./...
+      - name: Test affected Go packages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci_affected_go_tests.sh "$BASE_SHA" "$HEAD_SHA"
+
+  rust:
+    name: Rust workspace compile check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libelf-dev libxdp-dev pkg-config zlib1g-dev libzstd-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: userspace-dp
+      - name: Check Rust workspace and all targets
+        run: cargo check --manifest-path userspace-dp/Cargo.toml --workspace --all-targets
