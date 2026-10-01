@@ -620,11 +620,7 @@ pub(super) fn republish_bpf_session_entries_for_owner_rgs(
     for (key, decision, metadata, origin) in &entries {
         // #10612 (N1): skip stale-zone rows (fence BEFORE the BPF publish,
         // mirroring prewarm). BPF-only gap: narrow race, heals on demotion.
-        if crate::afxdp::session_glue::synced_entry_is_stale_replay(
-            *origin,
-            metadata,
-            forwarding,
-        ) {
+        if crate::afxdp::session_glue::synced_entry_is_stale_replay(*origin, metadata, forwarding) {
             crate::afxdp::session_glue::note_stale_replay_fence_drop();
             continue;
         }
@@ -733,11 +729,33 @@ fn lookup_shared_forward_nat_match_with_admission(
         }
     }
 
-    // The neutral tuple may be recovered only if the sticky ambiguity index
-    // proves one forward entry. Probe that owner's domain-qualified wire key
-    // for either reply domain; never select a colliding domain-zero alias.
+    // A nonzero PRE-NAT reply can hit the domain-zero canonical alias directly.
+    // Its candidate still needs a unique translated-wire owner and no conflicting
+    // owner history for the canonical tuple.
     let probe = crate::session::reverse_match_key(reply_key);
     let indexes = shared_owner_rg_indexes?;
+    if reply_key.routing_domain != 0 {
+        let canonical_candidate = {
+            let map = lock_shared_recover(shared_nat_sessions);
+            map.get(&probe).cloned()
+        };
+        if let Some(candidate) = canonical_candidate {
+            if reverse_canonical_key(&candidate.key, candidate.decision.nat) == probe {
+                if candidate.metadata.is_reverse
+                    || !shared_forward_nat_candidate_is_unique(
+                        shared_nat_sessions,
+                        indexes,
+                        &probe,
+                        &candidate.key,
+                        candidate.decision.nat,
+                    )
+                {
+                    return None;
+                }
+                return matches_reply_domain(&candidate, false).then_some(candidate);
+            }
+        }
+    }
     let owner = lock_shared_recover(&indexes.nat_ambiguities)
         .unique_owner(&probe)
         .cloned()?;
@@ -755,8 +773,7 @@ fn lookup_shared_forward_nat_match_with_admission(
         map.get(&lookup_key).cloned()?
     };
     let wire_key = crate::session::reverse_session_key(&candidate.key, candidate.decision.nat);
-    let wire_key_matches = wire_key == lookup_key;
-    if candidate.metadata.is_reverse || candidate.key != owner || !wire_key_matches {
+    if candidate.metadata.is_reverse || candidate.key != owner || wire_key != lookup_key {
         return None;
     }
     if !shared_forward_nat_candidate_is_unique(
@@ -772,9 +789,9 @@ fn lookup_shared_forward_nat_match_with_admission(
 }
 
 /// Prove that the shared reverse index contains the expected forward entry
-/// and that its domain-neutral translated tuple has only ever named that
-/// owner. Legacy canonical aliases are accepted only when no displacement was
-/// recorded for their tuple. Saturation or any collision fails closed.
+/// and its domain-neutral translated tuple has only ever named that owner.
+/// A canonical alias also fails closed on displacement or a different wire
+/// owner for the same tuple. Saturation or any collision fails closed.
 pub(super) fn shared_forward_nat_candidate_is_unique(
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
@@ -805,7 +822,11 @@ pub(super) fn shared_forward_nat_candidate_is_unique(
     }
     let ambiguities = lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities);
     ambiguities.is_unique_for(&wire_probe, expected_forward_key)
-        && (probe == wire_probe || !ambiguities.contains(&probe))
+        && (probe == wire_probe
+            || (!ambiguities.contains(&probe)
+                && ambiguities
+                    .unique_owner(&probe)
+                    .map_or(true, |owner| owner == expected_forward_key)))
 }
 
 pub(super) fn lookup_shared_forward_wire_match(
@@ -1133,7 +1154,9 @@ pub(super) fn lookup_session_across_scopes_with_shared(
     // #10636: defer TCP close-state until the #9519 authority verdict names
     // the owner (applied by `apply_deferred_owner_close` after an Owner
     // verdict). A foreign RST/FIN must not drive close state it is dropped for.
-    if let Some((lookup, origin)) = sessions.lookup_with_origin_deferring_close(key, now_ns, tcp_flags) {
+    if let Some((lookup, origin)) =
+        sessions.lookup_with_origin_deferring_close(key, now_ns, tcp_flags)
+    {
         if is_fabric_wire_placeholder(
             lookup.metadata.fabric_ingress,
             lookup.metadata.is_reverse,
@@ -2081,11 +2104,10 @@ pub(super) fn publish_shared_session(
         // Keep translated aliases domain-stamped. The ambiguity index, not a
         // colliding domain-zero map key, carries the neutral lookup identity.
         let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
-        lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
-            .observe(
-                crate::session::reverse_match_key(&reverse_wire),
-                entry.key.clone(),
-            );
+        lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities).observe(
+            crate::session::reverse_match_key(&reverse_wire),
+            entry.key.clone(),
+        );
         let mut sessions = lock_shared_publish(shared_nat_sessions);
         let displaced = sessions.insert(reverse_wire.clone(), entry.clone());
         record_shared_nat_displacement(displaced.as_ref(), entry);
@@ -2093,7 +2115,8 @@ pub(super) fn publish_shared_session(
             .as_ref()
             .is_some_and(|existing| existing.key != entry.key)
         {
-            lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities).mark(reverse_wire.clone());
+            lock_shared_recover(&shared_owner_rg_indexes.nat_ambiguities)
+                .mark(reverse_wire.clone());
         }
         let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
         update_owner_rg_index(
