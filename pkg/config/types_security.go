@@ -1924,7 +1924,9 @@ type IPsecPolicyDef struct {
 	// Proposals is the ordered list of IPsec (ESP) proposal references.
 	// Junos `proposals [ p1 p2 ]` offers every listed proposal; the
 	// pre-#3904 scalar truncated to the first, narrowing negotiation.
-	// Rendered comma-joined into the swanctl `esp_proposals =` line.
+	// Rendered comma-joined into the swanctl `esp_proposals =` line. Since
+	// swanctl emits one child `rekey_time`, all renderable proposals in the
+	// list must agree on LifetimeSeconds.
 	Proposals []string
 }
 

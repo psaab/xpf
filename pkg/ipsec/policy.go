@@ -439,8 +439,9 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			// unquoted list slot; a legitimate proposal / comma-list renders
 			// byte-identical (#6469).
 			fmt.Fprintf(&b, "        esp_proposals = %s\n", sanitizeSwanctlValue(espProposals))
-			// #9919 F-163: no rand_time beside the child rekey_time either
-			// (same de-jitter as the IKE connection above).
+			// swanctl's child-SA lifetime is one rekey_time for the whole
+			// comma-joined proposal list. resolveESPSettings rejects divergent
+			// lifetimes among renderable proposals before this single emission.
 			if espLifetime > 0 {
 				fmt.Fprintf(&b, "        rekey_time = %ds\n", clampIPsecLifetimeSeconds(espLifetime))
 			}

@@ -32,9 +32,10 @@ import (
 // On the tolerant load / peer-sync paths the call site downgrades this
 // to a warning (opts.lenientIPsecPolicyProposalRef) so an already-
 // persisted or peer-synced config still boots; the render-path belt in
-// pkg/ipsec (resolveESPSettings -> errESPChainUnresolved -> renderConfig
-// skips the VPN) keeps the bad tunnel out of the generated config rather
-// than emitting a fabricated suite.
+// pkg/ipsec (resolveESPSettings -> errESPChainUnresolved or
+// errProposalUnresolved -> renderConfig skips the VPN) keeps the bad tunnel
+// out of the generated config rather than emitting a fabricated suite or
+// applying the first proposal's lifetime to its differently-timed sibling.
 func validateIPsecPolicyProposalReferencesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -82,6 +83,9 @@ func validateIPsecPolicyProposalReferencesStrict(cfg *Config) error {
 				"(no `proposals` reference and no proposal named %q) — define a "+
 				"proposal or reference one", pol.Name, pol.Name)
 		}
+		if err := validateIPsecProposalSettingsAgree(pol.Name, propRefs, proposals); err != nil {
+			return err
+		}
 	}
 	// #9919 F-090: the vpn→policy link. A VPN whose `ipsec-policy` names
 	// neither a defined ipsec-policy nor (legacy form) a defined ESP
@@ -111,6 +115,32 @@ func validateIPsecPolicyProposalReferencesStrict(cfg *Config) error {
 			"(neither a defined ipsec-policy nor a proposal of that name; the "+
 			"VPN would be skipped at render rather than negotiate a fabricated "+
 			"suite — fix the reference)", name, vpn.IPsecPolicy)
+	}
+	return nil
+}
+
+// validateIPsecProposalSettingsAgree rejects policy proposal lists whose
+// child-SA-level lifetime would otherwise be taken from one proposal and
+// silently applied to the others.
+func validateIPsecProposalSettingsAgree(policyName string, refs []string, proposals map[string]*IPsecProposal) error {
+	var firstName string
+	var firstLifetime int
+	found := false
+	for _, ref := range refs {
+		proposal := proposals[ref]
+		if proposal == nil {
+			continue
+		}
+		if !found {
+			firstName, firstLifetime = ref, proposal.LifetimeSeconds
+			found = true
+			continue
+		}
+		if proposal.LifetimeSeconds != firstLifetime {
+			return fmt.Errorf(
+				"ipsec policy %q proposals %q and %q have different lifetime-seconds values (%d and %d); swanctl lifetime is child-SA-level",
+				policyName, firstName, ref, firstLifetime, proposal.LifetimeSeconds)
+		}
 	}
 	return nil
 }
