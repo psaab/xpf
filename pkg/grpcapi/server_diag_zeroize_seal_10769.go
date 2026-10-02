@@ -461,6 +461,11 @@ func zeroizeFinalEraseVerification(completion zeroizeCompletion) error {
 			errs = append(errs, fmt.Errorf("zeroize: helper state temps present at final verification for %s: dead=%v live=%v", helperPath, dead, live))
 		}
 	}
+	if !completion.pending {
+		if err := zeroizeVerifyPersistentNatGenerationState(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errors.Join(errs...)
 }
 

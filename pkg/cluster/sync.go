@@ -908,10 +908,10 @@ type SessionSync struct {
 	// callback order, #9915 F-117 review): it must not reenter DHCP receive
 	// paths. No production consumer exists — the daemon flows via the held set.
 	OnDHCPLeasesReceived func(family int, leases []dhcpserver.SyncLease)
-	// OnPersistentNatLeasesReceived is called when a peer's full IDLE
-	// persistent-NAT lease set arrives (#8121). The daemon installs it into the
-	// local helper; nothing here interprets the records.
-	OnPersistentNatLeasesReceived func(leases []userspace.IdleLeaseWire)
+	// OnPersistentNatLeasesReceived is called for one sender-originated idle
+	// lease batch. Its durable clear generation is interpreted by the daemon's
+	// userspace manager before any record reaches the helper.
+	OnPersistentNatLeasesReceived func(batch userspace.PersistentNatLeaseBatch)
 	// OnRemoteFailover is called when the peer requests a transfer-out for one RG.
 	// reqID is the request-scoped identifier carried on the wire; the demoted
 	// owner binds its auto-restore lease to it so a stale commit cannot clear a

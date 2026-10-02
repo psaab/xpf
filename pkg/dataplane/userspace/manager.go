@@ -160,11 +160,16 @@ type Manager struct {
 	// restartTimerFn overrides how a crash restart is armed. Production leaves
 	// it nil (time.AfterFunc); a test injects a synchronous or recording timer.
 	// Per-Manager, not a package var — see scheduleRestartTimer.
-	restartTimerFn            func(time.Duration, func())
-	cfg                       config.UserspaceConfig
-	clusterHA                 bool
-	captureEpochProvider      CaptureEpochProvider
-	captureAuthorityCommitter func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64)
+	restartTimerFn func(time.Duration, func())
+	// persistentNatLeaseGeneration is the durable HA revocation watermark for
+	// idle persistent-NAT imports. Guarded by mu alongside helper control I/O.
+	persistentNatLeaseGeneration       persistentNatLeaseGenerationState
+	persistentNatLeaseGenerationLoaded bool
+	persistentNatLeaseGenerationPath   string
+	cfg                                config.UserspaceConfig
+	clusterHA                          bool
+	captureEpochProvider               CaptureEpochProvider
+	captureAuthorityCommitter          func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64)
 	// helperHAStatePublished records whether THIS helper process has been sent a
 	// clustered HA inventory at least once (a successful update_ha_state with a
 	// non-empty group set). It is NOT derivable from len(m.haGroups): that is the

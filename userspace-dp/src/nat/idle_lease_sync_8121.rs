@@ -147,7 +147,8 @@ impl PortAllocator {
     /// rebuilds it from sessions, and sending both would race two mechanisms
     /// onto one key.
     pub(crate) fn export_idle_leases(&self, now_ns: u64) -> Vec<IdleLeaseRecord> {
-        let live = self.lock_live();
+        let mut live = self.lock_live();
+        live.prune_expired_persistent_nat_clear_fences(now_ns);
         live.persistent_by_source
             .iter()
             .filter(|(_, lease)| {
@@ -190,7 +191,8 @@ impl PortAllocator {
     /// this type to that one exists, so the count is not merely unused on the
     /// import path — it is unrepresentable there.
     pub(crate) fn export_display_leases(&self, now_ns: u64) -> Vec<DisplayLeaseRecord> {
-        let live = self.lock_live();
+        let mut live = self.lock_live();
+        live.prune_expired_persistent_nat_clear_fences(now_ns);
         live.persistent_by_source
             .iter()
             .filter(|(_, lease)| {

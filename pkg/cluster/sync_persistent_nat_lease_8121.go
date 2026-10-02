@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -46,15 +47,18 @@ const (
 	// reserved so a new receiver can explicitly ignore an old sender's
 	// unscoped records rather than decoding them as domain 0.
 	syncMsgPersistentNatLease = 38
-	// syncMsgPersistentNatLeaseScoped carries the v25 lease set whose records
-	// include routing_scope. Old peers do not have a receive arm for 39 and
-	// therefore ignore the new frame fail-closed.
+	// syncMsgPersistentNatLeaseScoped is the retired additive v25 form. It has
+	// no durable revocation generation and is therefore ignored by receivers.
 	syncMsgPersistentNatLeaseScoped = 39
+	// syncMsgPersistentNatLeaseGeneration carries an origin and durable clear
+	// generation ahead of the v25 lease payload. A pre-feature peer ignores the
+	// unknown type; a new peer can reject delayed pre-clear records indefinitely.
+	syncMsgPersistentNatLeaseGeneration = 41
 )
 
-// encodePersistentNatLeasePayload serializes a batch of v25 idle-lease
-// advertisements. Imports are additive; records not present in a later batch
-// are not retracted from the receiver.
+// encodePersistentNatLeasePayload serializes the v25 idle-lease set inside the
+// generation-bearing envelope. Records are additive within one generation;
+// advancing the envelope generation clears the receiver before import.
 //
 // Records are encoded FIRST so an unencodable one drops individually while the
 // count prefix stays consistent with what was actually emitted — the #4892
@@ -186,6 +190,45 @@ func decodePersistentNatLeasePayload(buf []byte) ([]userspace.IdleLeaseWire, boo
 	return out, true
 }
 
+// encodePersistentNatLeaseBatchPayload wraps the scoped lease rows with the
+// sender's stable origin and durable clear generation. Empty lease sets are
+// meaningful: they still carry the generation barrier after a clear.
+func encodePersistentNatLeaseBatchPayload(batch userspace.PersistentNatLeaseBatch) ([]byte, error) {
+	if len(batch.OriginID) != 32 {
+		return nil, errors.New("persistent-NAT batch origin must be 16-byte hex")
+	}
+	if _, err := hex.DecodeString(batch.OriginID); err != nil {
+		return nil, fmt.Errorf("persistent-NAT batch origin: %w", err)
+	}
+	b, err := putLeaseString(nil, batch.OriginID)
+	if err != nil {
+		return nil, fmt.Errorf("encode persistent-NAT batch origin: %w", err)
+	}
+	b = binary.LittleEndian.AppendUint64(b, batch.Generation)
+	return append(b, encodePersistentNatLeasePayload(batch.Leases)...), nil
+}
+
+func decodePersistentNatLeaseBatchPayload(buf []byte) (userspace.PersistentNatLeaseBatch, bool) {
+	var batch userspace.PersistentNatLeaseBatch
+	origin, off, ok := getLeaseString(buf, 0)
+	if !ok || len(origin) != 32 {
+		return batch, false
+	}
+	if _, err := hex.DecodeString(origin); err != nil {
+		return batch, false
+	}
+	if len(buf)-off < 8 {
+		return batch, false
+	}
+	batch.OriginID = origin
+	batch.Generation = binary.LittleEndian.Uint64(buf[off:])
+	batch.Leases, ok = decodePersistentNatLeasePayload(buf[off+8:])
+	if !ok {
+		return userspace.PersistentNatLeaseBatch{}, false
+	}
+	return batch, true
+}
+
 func decodeOnePersistentNatLease(buf []byte) (userspace.IdleLeaseWire, bool) {
 	var l userspace.IdleLeaseWire
 	off := 0
@@ -256,20 +299,24 @@ func decodeOnePersistentNatLease(buf []byte) (userspace.IdleLeaseWire, bool) {
 	return l, off == len(buf)
 }
 
-// QueuePersistentNatLeases sends this node's additive idle-lease advertisements
-// to the peer. Missing records never retract receiver state. A write error
-// disconnects the conn and NEVER blocks NAT allocation; unlike DHCP/IPsec, NAT
-// re-advertisement has no reconnect-edge nudge and waits for the next 30s tick,
-// so reconnect can leave a gap of up to 30 seconds.
-func (s *SessionSync) QueuePersistentNatLeases(leases []userspace.IdleLeaseWire) {
+// QueuePersistentNatLeaseBatch sends one sender-origin/generation snapshot.
+// Empty batches are sent too so a clear generation reaches the peer even when
+// no idle leases remain.
+func (s *SessionSync) QueuePersistentNatLeaseBatch(batch userspace.PersistentNatLeaseBatch) {
 	conn := s.getActiveConn()
 	if conn == nil {
 		return
 	}
+	base, err := encodePersistentNatLeaseBatchPayload(batch)
+	if err != nil {
+		slog.Warn("cluster sync: refusing invalid persistent-NAT lease batch", "err", err)
+		s.stats.MalformedRecordsDropped.Add(1)
+		return
+	}
 	seq := s.persistentNatLeaseSeqCounter.Add(1)
-	payload := appendFullSetSeq(encodePersistentNatLeasePayload(leases), s.syncEpoch, seq)
+	payload := appendFullSetSeq(base, s.syncEpoch, seq)
 	s.writeMu.Lock()
-	err := writeMsg(conn, syncMsgPersistentNatLeaseScoped, payload)
+	err = writeMsg(conn, syncMsgPersistentNatLeaseGeneration, payload)
 	s.writeMu.Unlock()
 	if err != nil {
 		slog.Warn("cluster sync: persistent-NAT lease send error", "err", err)
@@ -277,5 +324,6 @@ func (s *SessionSync) QueuePersistentNatLeases(leases []userspace.IdleLeaseWire)
 		s.handleDisconnect(conn)
 		return
 	}
-	slog.Debug("cluster sync: persistent-NAT idle lease set sent", "count", len(leases))
+	slog.Debug("cluster sync: persistent-NAT lease generation batch sent",
+		"count", len(batch.Leases), "generation", batch.Generation)
 }

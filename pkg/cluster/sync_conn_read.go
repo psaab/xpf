@@ -747,42 +747,35 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			s.OnIPsecSAReceived(names)
 		}
 	case syncMsgPersistentNatLease:
-		// #10018 migration fence: type 38 is the pre-scope format. Never
-		// decode or advance the v25 receive guard for it — interpreting its
-		// omitted routing scope as domain 0 would recreate the cross-VRF
-		// collision, and a high legacy sequence must not suppress a later
-		// scoped type-39 set.
+		// #10018 migration fence: type 38 is the pre-scope format.
 		slog.Warn("cluster sync: ignoring legacy unscoped persistent-NAT lease set",
 			"bytes", len(payload))
 	case syncMsgPersistentNatLeaseScoped:
-		// #8121/#10018: one scoped batch of IDLE persistent-NAT lease
-		// advertisements. Imports are additive: a record's absence does not
-		// delete it on the receiver. Decode the whole batch before callback so a
-		// truncated payload cannot install only a prefix, and retain sequence
-		// ordering so an older reordered advertisement cannot be applied later.
+		// Type 39 predates durable clear generations. Admitting it would
+		// bypass the receiver's permanent replay floor.
+		slog.Warn("cluster sync: ignoring persistent-NAT lease set without clear generation",
+			"bytes", len(payload))
+	case syncMsgPersistentNatLeaseGeneration:
+		// #11486: generation-bearing idle-lease batch. Sequence ordering handles
+		// transport reordering within one peer incarnation; the daemon persists
+		// origin generation independently across reconnects and process restarts.
 		base, incarnation, seq := stripFullSetSeq(payload)
-		// Check the high-water mark before decode, but advance it only after a
-		// complete batch is accepted. A malformed high-sequence frame must not
-		// wedge the standby against a later valid lower-sequence advertisement.
 		s.recvSeqMu.Lock()
 		admit := s.persistentNatLeaseRecvSeq.newer(incarnation, seq)
 		commitEpoch := s.recvEpoch
 		s.recvSeqMu.Unlock()
 		if !admit {
-			slog.Warn("cluster sync: dropping out-of-order scoped persistent-NAT lease set (stale sequence)",
+			slog.Warn("cluster sync: dropping out-of-order persistent-NAT generation batch",
 				"incarnation", incarnation, "seq", seq)
 			return
 		}
-		leases, ok := decodePersistentNatLeasePayload(base)
+		batch, ok := decodePersistentNatLeaseBatchPayload(base)
 		if !ok {
 			s.stats.MalformedRecordsDropped.Add(1)
-			slog.Warn("cluster sync: dropping malformed scoped persistent-NAT lease set",
+			slog.Warn("cluster sync: dropping malformed persistent-NAT generation batch",
 				"incarnation", incarnation, "seq", seq, "bytes", len(base))
 			return
 		}
-		// Serialize commit order and callback order across both receive loops,
-		// and fence a reset that raced decode, exactly as the DHCP full-set
-		// arms do below.
 		s.persistentNatLeaseApplyMu.Lock()
 		s.recvSeqMu.Lock()
 		applied := s.recvEpoch == commitEpoch &&
@@ -790,14 +783,15 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		s.recvSeqMu.Unlock()
 		if !applied {
 			s.persistentNatLeaseApplyMu.Unlock()
-			slog.Warn("cluster sync: dropping out-of-order scoped persistent-NAT lease set (stale sequence)",
+			slog.Warn("cluster sync: dropping out-of-order persistent-NAT generation batch",
 				"incarnation", incarnation, "seq", seq)
 			return
 		}
-		slog.Debug("cluster sync: received scoped persistent-NAT idle lease set",
-			"count", len(leases), "incarnation", incarnation, "seq", seq)
+		slog.Debug("cluster sync: received persistent-NAT generation batch",
+			"count", len(batch.Leases), "generation", batch.Generation,
+			"incarnation", incarnation, "seq", seq)
 		if s.OnPersistentNatLeasesReceived != nil {
-			s.OnPersistentNatLeasesReceived(leases)
+			s.OnPersistentNatLeasesReceived(batch)
 		}
 		s.persistentNatLeaseApplyMu.Unlock()
 	case syncMsgDHCPLeaseV4:

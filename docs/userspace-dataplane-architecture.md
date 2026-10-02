@@ -1227,6 +1227,14 @@ the NAT module applies it:
   sides. Imported
   leases also check live address-only and PAT owners across exact, target-host,
   and any-remote scopes.
+  HA idle-lease batches carry a sender origin and durable clear generation.
+  Managers persist both outbound generations and each peer's high-water mark in
+  `/var/lib/xpf/persistent-nat-lease-generation.json`; a newer generation
+  clears receiver leases before importing the batch, while older delayed batches
+  remain rejected across daemon and helper restarts. Empty batches carry clear
+  barriers, and generation-less legacy lease messages are ignored. Rust retains
+  its bounded 60-second fence for session-derived/direct helper imports and
+  prunes expired fences during the periodic idle/display snapshot refresh.
 - **Rule-set precedence — most-specific-scope-wins (#4161).** When several
   source-NAT rule-sets overlap on a flow, selection follows Junos: the rule-set
   whose match CONTEXT is most specific wins — **interface > zone >

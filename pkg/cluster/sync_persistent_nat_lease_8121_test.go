@@ -43,6 +43,50 @@ func sampleIdleLease() userspace.IdleLeaseWire {
 	}
 }
 
+func sampleIdleLeaseBatch11486(leases ...userspace.IdleLeaseWire) userspace.PersistentNatLeaseBatch {
+	return userspace.PersistentNatLeaseBatch{
+		OriginID:   "0123456789abcdef0123456789abcdef",
+		Generation: 4,
+		Leases:     leases,
+	}
+}
+
+func encodeTestLeaseBatch11486(t *testing.T, batch userspace.PersistentNatLeaseBatch) []byte {
+	t.Helper()
+	payload, err := encodePersistentNatLeaseBatchPayload(batch)
+	if err != nil {
+		t.Fatalf("encode persistent-NAT lease batch: %v", err)
+	}
+	return payload
+}
+
+func TestPersistentNatLeaseGenerationBatchRoundTrip11486(t *testing.T) {
+	for _, batch := range []userspace.PersistentNatLeaseBatch{
+		sampleIdleLeaseBatch11486(sampleIdleLease()),
+		sampleIdleLeaseBatch11486(),
+	} {
+		got, ok := decodePersistentNatLeaseBatchPayload(encodeTestLeaseBatch11486(t, batch))
+		if !ok {
+			t.Fatalf("generation batch failed to decode: %+v", batch)
+		}
+		if got.OriginID != batch.OriginID || got.Generation != batch.Generation ||
+			len(got.Leases) != len(batch.Leases) {
+			t.Fatalf("generation batch metadata/size = %+v, want %+v", got, batch)
+		}
+		for i := range batch.Leases {
+			if !equalIdleLeaseWire(got.Leases[i], batch.Leases[i]) {
+				t.Fatalf("lease %d = %+v, want %+v", i, got.Leases[i], batch.Leases[i])
+			}
+		}
+	}
+
+	bad := sampleIdleLeaseBatch11486()
+	bad.OriginID = "not-an-origin"
+	if _, err := encodePersistentNatLeaseBatchPayload(bad); err == nil {
+		t.Fatal("invalid origin identity was encoded")
+	}
+}
+
 // #8121: every field survives the wire. A field silently dropped here becomes a
 // zero on the standby — and a zero `RemainingNs` is not an obvious failure, it
 // is a lease the receiver discards, so the symptom would be "the feature does
@@ -200,49 +244,51 @@ func TestPersistentNatLeaseEncodeRejectsMissingScope10018(t *testing.T) {
 	}
 }
 
-// #10018 migration fence: a pre-v25 type-38 frame is ignored as a whole. It
-// must not invoke the receive callback and must not advance the scoped
-// sequence guard, because doing either would let an unscoped high-water mark
-// suppress a later scoped type-39 set.
-func TestPersistentNatLeaseSyncIgnoresRetiredUnscopedType10018(t *testing.T) {
+// Legacy unscoped and generation-less formats are ignored, while the
+// generation-bearing format retains the existing incarnation/sequence guard.
+func TestPersistentNatLeaseSyncRequiresClearGeneration11486(t *testing.T) {
 	ss := &SessionSync{}
+	var got userspace.PersistentNatLeaseBatch
 	sets := 0
-	ss.OnPersistentNatLeasesReceived = func([]userspace.IdleLeaseWire) { sets++ }
-	payload := appendFullSetSeq(
+	ss.OnPersistentNatLeasesReceived = func(batch userspace.PersistentNatLeaseBatch) {
+		sets++
+		got = batch
+	}
+	oldPayload := appendFullSetSeq(
 		encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{sampleIdleLease()}),
 		9000,
 		99,
 	)
-
-	ss.handleMessage(nil, syncMsgPersistentNatLease, payload)
+	ss.handleMessage(nil, syncMsgPersistentNatLease, oldPayload)
+	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped, oldPayload)
 	if sets != 0 {
-		t.Fatalf("retired unscoped type-38 frame invoked callback %d times", sets)
+		t.Fatalf("generation-less lease frames invoked callback %d times", sets)
 	}
 
-	// A scoped frame with a deliberately lower sequence must still apply. If
-	// the retired arm touched persistentNatLeaseRecvSeq, this would be dropped.
-	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped,
-		appendFullSetSeq(encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{
-			sampleIdleLease(),
-		}), 1, 1))
+	valid := encodeTestLeaseBatch11486(t, sampleIdleLeaseBatch11486(sampleIdleLease()))
+	ss.handleMessage(nil, syncMsgPersistentNatLeaseGeneration,
+		appendFullSetSeq(valid, 1, 1))
 	if sets != 1 {
-		t.Fatalf("scoped type-39 frame was suppressed by retired type-38 sequence state; sets=%d", sets)
+		t.Fatalf("generation-bearing frame was suppressed by retired formats; callbacks=%d", sets)
+	}
+	if got.OriginID != "0123456789abcdef0123456789abcdef" || got.Generation != 4 ||
+		len(got.Leases) != 1 || !equalIdleLeaseWire(got.Leases[0], sampleIdleLease()) {
+		t.Fatalf("received batch = %+v", got)
 	}
 }
 
-func TestPersistentNatLeaseMalformedSetDoesNotAdvanceSequence10018(t *testing.T) {
+func TestPersistentNatLeaseMalformedSetDoesNotAdvanceSequence11486(t *testing.T) {
 	ss := &SessionSync{}
 	sets := 0
-	ss.OnPersistentNatLeasesReceived = func([]userspace.IdleLeaseWire) { sets++ }
+	ss.OnPersistentNatLeasesReceived = func(userspace.PersistentNatLeaseBatch) { sets++ }
+	valid := encodeTestLeaseBatch11486(t, sampleIdleLeaseBatch11486(sampleIdleLease()))
 
 	// A high-sequence malformed lease batch must be a no-op, not become the
 	// high-water mark that blocks a later valid lower-sequence advertisement.
-	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped,
+	ss.handleMessage(nil, syncMsgPersistentNatLeaseGeneration,
 		appendFullSetSeq([]byte{1, 2, 3}, 9000, 99))
-	ss.handleMessage(nil, syncMsgPersistentNatLeaseScoped,
-		appendFullSetSeq(encodePersistentNatLeasePayload([]userspace.IdleLeaseWire{
-			sampleIdleLease(),
-		}), 1, 1))
+	ss.handleMessage(nil, syncMsgPersistentNatLeaseGeneration,
+		appendFullSetSeq(valid, 1, 1))
 	if sets != 1 {
 		t.Fatalf("valid lower-sequence set was suppressed after malformed high-sequence input; sets=%d", sets)
 	}

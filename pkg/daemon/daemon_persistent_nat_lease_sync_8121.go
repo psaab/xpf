@@ -47,16 +47,17 @@ func (d *Daemon) persistentNatLeaseManager() *dpuserspace.Manager {
 // wirePersistentNatLeaseCallbacks installs the receive side. Must be called
 // before ss.Start, with the other ss.On* callbacks.
 func (d *Daemon) wirePersistentNatLeaseCallbacks(ss *cluster.SessionSync) {
-	ss.OnPersistentNatLeasesReceived = func(leases []dpuserspace.IdleLeaseWire) {
+	ss.OnPersistentNatLeasesReceived = func(batch dpuserspace.PersistentNatLeaseBatch) {
 		mgr := d.persistentNatLeaseManager()
 		if mgr == nil {
 			return
 		}
-		if err := mgr.ImportIdleLeases(leases); err != nil {
+		if err := mgr.ImportPersistentNatLeaseBatch(batch); err != nil {
 			// Debug, not Info: this fires on every peer push, and the
 			// import is advisory — failing to rebuild an idle lease costs
 			// one client its port on takeover, it does not drop traffic.
-			slog.Debug("persistent-NAT idle lease import failed", "count", len(leases), "err", err)
+			slog.Debug("persistent-NAT idle lease batch import failed",
+				"count", len(batch.Leases), "generation", batch.Generation, "err", err)
 		}
 	}
 }
@@ -74,11 +75,11 @@ func (d *Daemon) wirePersistentNatLeaseCallbacks(ss *cluster.SessionSync) {
 // so an imported idle lease on a newly-mastered RG remains suppressed until
 // locally used.
 //
-// A peer running the old helper can echo records during a rolling upgrade; the
-// accepted bounded window ends when that peer upgrades/restarts. A copy already
-// received by a peer can remain usable until its derived expiry after A retires
-// it early: this additive channel has no retract/tombstone. Config sync still
-// converges configuration, while the stale peer copy ages out.
+// A rolling-upgrade peer cannot read the generation-bearing frame; the new
+// receiver therefore ignores its generation-less advertisements rather than
+// allowing them to bypass the replay floor. Idle-lease sync resumes when both
+// nodes run the new protocol. A lease already installed on an old peer can remain
+// usable until its derived expiry if that peer cannot process a clear.
 func (d *Daemon) runPersistentNatLeaseSyncLoop(ctx context.Context) {
 	ticker := time.NewTicker(persistentNatLeaseSyncInterval)
 	defer ticker.Stop()
@@ -98,18 +99,15 @@ func (d *Daemon) runPersistentNatLeaseSyncLoop(ctx context.Context) {
 			if mgr == nil {
 				continue
 			}
-			leases, err := mgr.ExportIdleLeases()
+			batch, err := mgr.ExportPersistentNatLeaseBatch()
 			if err != nil {
 				slog.Debug("persistent-NAT idle lease export failed", "err", err)
 				continue
 			}
-			// This is additive state, not a full-set replacement: an empty
-			// batch cannot retract a peer copy and is not sent. Re-advertise
-			// nonempty local leases each slow tick so a reconnecting peer can
-			// learn them; early retirements converge by expiry, not retraction.
-			if len(leases) != 0 {
-				ss.QueuePersistentNatLeases(leases)
-			}
+			// Empty batches carry the sender's durable clear generation. The
+			// peer needs that barrier even when the cleared allocator has no
+			// remaining idle leases to advertise.
+			ss.QueuePersistentNatLeaseBatch(batch)
 		}
 	}
 }
