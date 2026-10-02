@@ -363,6 +363,9 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 		}
 		linuxName := snapshotLinuxName(cfg, name, iface, nil)
 		ifindex, mtu, hardwareAddr, addresses := buildLinkSnapshot(linuxName)
+		if iface.Disable {
+			addresses = nil
+		}
 		// Use the interface's own RG, or inherit from RETH parent.
 		rg := iface.RedundancyGroup
 		if rg <= 0 {
@@ -380,6 +383,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			ParentLinuxName: "",
 			NativeVLANID:    iface.NativeVlanID,
 			Ifindex:         ifindex,
+			AdminDisabled:   iface.Disable,
 			ParentIfindex:   0,
 			RXQueues:        userspaceRXQueueCount(linuxName),
 			VLANID:          0,
@@ -446,6 +450,9 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 				}
 			}
 			addresses = mergeInterfaceAddressSnapshots(addresses, buildConfiguredAddressSnapshots(unit.Addresses))
+			if iface.Disable {
+				addresses = nil
+			}
 			out = append(out, InterfaceSnapshot{
 				Name:                      unitName,
 				IsUnit:                    true,
@@ -455,6 +462,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 				LinuxName:                 linuxUnit,
 				ParentLinuxName:           parentLinux,
 				Ifindex:                   ifindex,
+				AdminDisabled:             iface.Disable,
 				ParentIfindex:             parentIfindex,
 				LogicalOnly:               logicalOnly,
 				RXQueues:                  rxQueues,

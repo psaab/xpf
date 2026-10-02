@@ -11850,3 +11850,64 @@ fn unzoned_tagged_vlan_unit_denies_host_inbound_10644() {
         "single-sibling parent must still inherit the sibling zone"
     );
 }
+#[test]
+fn admin_disabled_interface_addresses_do_not_enter_fib_state_11463() {
+    fn snapshot(admin_disabled: bool) -> ConfigSnapshot {
+        ConfigSnapshot {
+            interfaces: vec![InterfaceSnapshot {
+                name: "ge-0/0/2.0".into(),
+                ifindex: 27,
+                hardware_addr: "02:00:00:00:00:27".into(),
+                admin_disabled,
+                addresses: vec![crate::InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.9.0.1/24".into(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    let host = Ipv4Addr::new(10, 9, 0, 1);
+    let disabled = build_forwarding_state(&snapshot(true));
+    assert!(
+        disabled
+            .egress
+            .get(&27)
+            .and_then(|egress| egress.primary_v4)
+            .is_none(),
+        "disabled interface address must not be selected as an egress primary"
+    );
+
+    assert!(
+        disabled.connected_v4.is_empty(),
+        "disabled member address must not create a connected FIB route"
+    );
+    assert!(
+        !disabled.local_v4.contains(&host),
+        "disabled member address must not be registered for local delivery"
+    );
+    assert!(
+        !disabled.configured_iface_v4.contains(&host),
+        "disabled member address must not enter configured-interface address ownership"
+    );
+
+    let enabled = build_forwarding_state(&snapshot(false));
+    assert_eq!(
+        enabled.egress.get(&27).and_then(|egress| egress.primary_v4),
+        Some(host),
+        "enabled control must retain its egress primary address"
+    );
+
+    assert_eq!(
+        enabled.connected_v4.len(),
+        1,
+        "enabled control must retain its connected route"
+    );
+    assert!(
+        enabled.local_v4.contains(&host),
+        "enabled control must retain local-delivery registration"
+    );
+}

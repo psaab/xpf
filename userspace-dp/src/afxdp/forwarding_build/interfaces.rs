@@ -856,6 +856,9 @@ pub(super) fn populate_interfaces(
         // fail-closed sentinel installed after this loop.
         let mut registered_local = false;
         for addr in &iface.addresses {
+            if iface.admin_disabled {
+                continue;
+            }
             // #2409: fail CLOSED on an unparseable interface address rather
             // than silently `continue`-ing past it. The pre-fix skip lost the
             // connected route / local-address / interface-NAT material for
@@ -1786,6 +1789,10 @@ fn is_zone_gated_host_inbound_name(name: &str) -> bool {
 }
 
 pub(in crate::afxdp) fn pick_interface_v4(iface: &InterfaceSnapshot) -> Option<Ipv4Addr> {
+    if iface.admin_disabled {
+        return None;
+    }
+
     let mut fallback = None;
     for addr in &iface.addresses {
         if addr.family != "inet" {
@@ -1806,6 +1813,9 @@ pub(in crate::afxdp) fn pick_interface_v4(iface: &InterfaceSnapshot) -> Option<I
 }
 
 pub(in crate::afxdp) fn pick_interface_v6(iface: &InterfaceSnapshot) -> Option<Ipv6Addr> {
+    if iface.admin_disabled {
+        return None;
+    }
     let mut fallback = None;
     for addr in &iface.addresses {
         if addr.family != "inet6" {

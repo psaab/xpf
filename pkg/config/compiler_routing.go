@@ -1659,6 +1659,14 @@ func RoutingInstanceConnectedPrefixes(cfg *Config) map[string][]string {
 		}
 		var prefixes []string
 		for _, member := range ri.Interfaces {
+			// A disabled interface is administratively inactive even though
+			// its configured unit addresses remain in the typed config. Do not
+			// publish those prefixes to rib-group derivation (the same set is
+			// used to install connected routes and leak rules).
+			memberBase := cfg.SplitInterfaceUnitRef(member).Base
+			if iface := cfg.Interfaces.Interfaces[memberBase]; iface != nil && iface.Disable {
+				continue
+			}
 			// #9809: every configured unit of a bare member, as the FIB binds it.
 			for _, mu := range RoutingInstanceMemberUnits(cfg, member) {
 				for _, addr := range mu.Addresses {

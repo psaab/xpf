@@ -74,6 +74,11 @@ pub(crate) struct InterfaceSnapshot {
     /// Zero means no native VLAN is configured; emitted on base rows only.
     #[serde(rename = "native_vlan_id", default)]
     pub native_vlan_id: i32,
+    /// The interface is administratively disabled in the committed config.
+    /// Go omits its configured and live addresses from the snapshot, and Rust
+    /// honors the flag when deriving connected/local/egress-primary state.
+    #[serde(rename = "admin_disabled", default)]
+    pub admin_disabled: bool,
     #[serde(default)]
     pub ifindex: i32,
     #[serde(rename = "parent_ifindex", default)]

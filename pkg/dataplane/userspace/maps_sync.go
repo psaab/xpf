@@ -1399,7 +1399,7 @@ func buildLocalAddressEntries(snapshot *ConfigSnapshot) []userspaceLocalAddressE
 	seenV6 := make(map[[16]byte]bool)
 	out := make([]userspaceLocalAddressEntry, 0)
 	for _, iface := range snapshot.Interfaces {
-		if unresolvedLo0LocalAddressOwner(iface) {
+		if iface.AdminDisabled || unresolvedLo0LocalAddressOwner(iface) {
 			continue
 		}
 		for _, addr := range iface.Addresses {
@@ -1823,6 +1823,9 @@ func buildNATTranslatedLocalAddressExclusions(snapshot *ConfigSnapshot) (map[uin
 }
 
 func pickInterfaceSnapshotV4(iface InterfaceSnapshot) net.IP {
+	if iface.AdminDisabled {
+		return nil
+	}
 	var fallback net.IP
 	for _, addr := range iface.Addresses {
 		if addr.Family != "inet" {
@@ -1847,6 +1850,9 @@ func pickInterfaceSnapshotV4(iface InterfaceSnapshot) net.IP {
 }
 
 func pickInterfaceSnapshotV6(iface InterfaceSnapshot) net.IP {
+	if iface.AdminDisabled {
+		return nil
+	}
 	var fallback net.IP
 	for _, addr := range iface.Addresses {
 		if addr.Family != "inet6" {
