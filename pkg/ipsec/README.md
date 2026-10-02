@@ -319,6 +319,12 @@ all files stay in `package ipsec`, so the public API is unchanged.
   reject values above the bound; tolerant loads warn and cap an over-limit
   lifetime at 86400 seconds, and the renderer also caps direct or pre-fix
   configs before emitting `rekey_time`.
+- **ESP proposal lifetime agreement (#11690).** swanctl emits one
+  child-level `rekey_time` for the whole `esp_proposals` list, so every
+  proposal in an IPsec policy must agree on `lifetime-seconds`. Strict
+  commits reject divergence; tolerant loads warn, and the render belt
+  compares only proposals that survive normal ESP filtering before
+  skipping a VPN with conflicting survivor lifetimes.
 - XFRM interface ID is derived from the bind-interface name via
   `xfrmiIfID()`. The same name → same numeric ID across reboots — don't
   rename a bind interface without expecting a reset of the SAs that ride

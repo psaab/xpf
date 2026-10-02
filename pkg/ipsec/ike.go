@@ -368,6 +368,7 @@ func resolveESPSettings(cfg *config.IPsecConfig, vpn *config.IPsecVPN) (string, 
 		pfsGroup := ipsecPol.PFSGroup
 		var built []string
 		var firstLifetime int
+		var firstProposal string
 		var dhSkipped []string
 		var proposalSkipped []string
 		for _, r := range good {
@@ -390,6 +391,11 @@ func resolveESPSettings(cfg *config.IPsecConfig, vpn *config.IPsecVPN) (string, 
 			}
 			if len(built) == 0 {
 				firstLifetime = r.prop.LifetimeSeconds
+				firstProposal = r.ref
+			} else if firstLifetime != r.prop.LifetimeSeconds {
+				return "", 0, fmt.Errorf(
+					"%w: ipsec-policy %q proposals %q and %q have different lifetime-seconds values (%d and %d); lifetime is child-SA-level in swanctl",
+					errProposalUnresolved, vpn.IPsecPolicy, firstProposal, r.ref, firstLifetime, r.prop.LifetimeSeconds)
 			}
 			built = append(built, builtProposal)
 		}
