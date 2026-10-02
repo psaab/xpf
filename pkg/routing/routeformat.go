@@ -152,7 +152,7 @@ func FormatRouteDestination(allTables []TableRoutes, destination, modifier strin
 			return matches[i].Preference < matches[j].Preference
 		})
 
-		formatTableJunos(&buf, table.Name, len(table.Entries), matches)
+		formatTableJunos(&buf, table.Name, matches)
 	}
 
 	if buf.Len() == 0 {
@@ -181,7 +181,7 @@ func FormatRouteSummary(allTables []TableRoutes, routerID string) string {
 			byProto[junosProtoName(e.Protocol)]++
 		}
 		fmt.Fprintf(&buf, "\n%s: %d destinations, %d routes (%d active, 0 holddown, 0 hidden)\n",
-			table.Name, len(table.Entries), len(table.Entries), len(table.Entries))
+			table.Name, distinctDestinationCount(table.Entries), len(table.Entries), len(table.Entries))
 		formatSummaryProtos(&buf, byProto)
 		totalRoutes += len(table.Entries)
 		totalFIB += len(table.Entries)
@@ -225,7 +225,7 @@ func FormatAllRoutes(allTables []TableRoutes) string {
 			}
 			return sorted[i].Preference < sorted[j].Preference
 		})
-		formatTableJunos(&buf, table.Name, len(table.Entries), sorted)
+		formatTableJunos(&buf, table.Name, sorted)
 	}
 	if buf.Len() == 0 {
 		return "no routes\n"
@@ -233,10 +233,22 @@ func FormatAllRoutes(allTables []TableRoutes) string {
 	return buf.String()
 }
 
+// distinctDestinationCount returns the number of distinct destination strings
+// in the entries. Multiple route rows for a destination are distinct routes,
+// but do not represent additional destinations (#11696).
+func distinctDestinationCount(entries []RouteEntry) int {
+	destinations := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		destinations[entry.Destination] = struct{}{}
+	}
+	return len(destinations)
+}
+
 // formatTableJunos writes a Junos-style routing table section.
-func formatTableJunos(buf *strings.Builder, tableName string, totalDests int, entries []RouteEntry) {
+func formatTableJunos(buf *strings.Builder, tableName string, entries []RouteEntry) {
+	routes := len(entries)
 	fmt.Fprintf(buf, "\n%s: %d destinations, %d routes (%d active, 0 holddown, 0 hidden)\n",
-		tableName, totalDests, totalDests, totalDests)
+		tableName, distinctDestinationCount(entries), routes, routes)
 	buf.WriteString("+ = Active Route, - = Last Active, * = Both\n\n")
 
 	for _, e := range entries {
