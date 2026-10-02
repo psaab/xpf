@@ -7,7 +7,7 @@ package policymatch
 // set-lines with the strict Go compiler and drives Match. No Go generator or
 // expectation-only oracle is used here.
 //
-// Normal CI consumes the committed seed rows (48 pure-agreement rows at land).
+// Normal CI consumes the committed seed rows (52 pure-agreement rows at land).
 // Operators can point the test at an emitted directory with
 // XPF_POLICY_ROWS_DIR. The Rust module honors PROPTEST_CASES for soak runs;
 // record the effective cases, rows, and disagreement count. Any disagreement
@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 const (
@@ -38,17 +39,19 @@ type generatedPolicyManifest10587 struct {
 }
 
 type generatedPolicyQuery10587 struct {
-	FromZone  string `json:"from_zone"`
-	ToZone    string `json:"to_zone"`
-	SrcIP     string `json:"src_ip"`
-	DstIP     string `json:"dst_ip"`
-	Protocol  string `json:"protocol"`
-	SrcPort   int    `json:"src_port"`
-	DstPort   int    `json:"dst_port"`
-	Frag      bool   `json:"frag"`
-	L4Present bool   `json:"l4_present"`
-	ICMPType  *uint8 `json:"icmp_type"`
-	ICMPCode  *uint8 `json:"icmp_code"`
+	FromZone        string              `json:"from_zone"`
+	ToZone          string              `json:"to_zone"`
+	SrcIP           string              `json:"src_ip"`
+	DstIP           string              `json:"dst_ip"`
+	Protocol        string              `json:"protocol"`
+	SrcPort         int                 `json:"src_port"`
+	DstPort         int                 `json:"dst_port"`
+	Frag            bool                `json:"frag"`
+	L4Present       bool                `json:"l4_present"`
+	ICMPType        *uint8              `json:"icmp_type"`
+	ICMPCode        *uint8              `json:"icmp_code"`
+	SchedulerActive map[string]bool     `json:"scheduler_active,omitempty"`
+	FeedOverlay     map[string][]string `json:"feed_overlay,omitempty"`
 }
 
 type generatedPolicyVerdict10587 struct {
@@ -134,24 +137,37 @@ func generatedSeedManifestIDs10587(t *testing.T) []string {
 	if manifest.SchemaVersion != 1 {
 		t.Fatalf("seed_manifest.json schema = %d, want 1", manifest.SchemaVersion)
 	}
-	if len(manifest.IDs) != 48 {
-		t.Fatalf("seed_manifest.json has %d IDs, want exactly 48", len(manifest.IDs))
+	if len(manifest.IDs) != 52 {
+		t.Fatalf("seed_manifest.json has %d IDs, want exactly 52", len(manifest.IDs))
 	}
 	return manifest.IDs
 }
 
 func assertGeneratedSeedCoverage10587(t *testing.T, rows []generatedPolicyRow10587) {
 	t.Helper()
-	if len(rows) < 48 {
-		t.Fatalf("generated policy row contract collapsed to %d (want >=48)", len(rows))
+	if len(rows) < 52 {
+		t.Fatalf("generated policy row contract collapsed to %d (want >=52)", len(rows))
 	}
-	seen := make(map[string]bool, len(rows))
+	seen := make(map[string]generatedPolicyRow10587, len(rows))
 	for _, row := range rows {
-		seen[row.ID] = true
+		seen[row.ID] = row
 	}
 	for _, id := range generatedSeedManifestIDs10587(t) {
-		if !seen[id] {
+		if _, ok := seen[id]; !ok {
 			t.Fatalf("generated policy row contract is missing committed seed %q", id)
+		}
+	}
+	if active, ok := seen["inactive-permit-falls-to-deny"].Query.SchedulerActive["business-hours"]; !ok || active {
+		t.Fatalf("inactive-permit-falls-to-deny lacks business-hours inactive query state: %v", seen["inactive-permit-falls-to-deny"].Query.SchedulerActive)
+	}
+	if active, ok := seen["active-permit-matches"].Query.SchedulerActive["business-hours"]; !ok || !active {
+		t.Fatalf("active-permit-matches lacks business-hours active query state: %v", seen["active-permit-matches"].Query.SchedulerActive)
+	}
+	for _, id := range []string{"feed-backed-match", "feed-backed-miss"} {
+		row := seen[id]
+		prefixes, ok := row.Query.FeedOverlay["bad-actors"]
+		if !ok || len(prefixes) != 1 || prefixes[0] != "198.51.100.0/24" {
+			t.Fatalf("%s lacks its feed overlay query: %v", id, row.Query.FeedOverlay)
 		}
 	}
 }
@@ -217,6 +233,8 @@ func generatedQuery10587(t *testing.T, q generatedPolicyQuery10587) Query {
 		ICMPType:         q.ICMPType,
 		ICMPCode:         q.ICMPCode,
 		NonFirstFragment: q.Frag,
+		PolicyInactiveFn: dpuserspace.PolicyInactiveFn(q.SchedulerActive),
+		FeedOverlay:      q.FeedOverlay,
 	}
 }
 
@@ -250,8 +268,8 @@ func compareGeneratedVerdicts10587(t *testing.T, row generatedPolicyRow10587, go
 func TestPolicyGeneratedDifferential10587(t *testing.T) {
 	rows := readGeneratedRows10587(t, generatedRowsDir10587())
 	assertGeneratedSeedCoverage10587(t, rows)
-	if os.Getenv("XPF_POLICY_ROWS_DIR") == "" && len(rows) != 48 {
-		t.Fatalf("committed generated policy row contract has %d rows, want exactly 48", len(rows))
+	if os.Getenv("XPF_POLICY_ROWS_DIR") == "" && len(rows) != 52 {
+		t.Fatalf("committed generated policy row contract has %d rows, want exactly 52", len(rows))
 	}
 	for _, row := range rows {
 		if row.SchemaVersion != 1 {
@@ -302,8 +320,8 @@ func TestPolicyGeneratedSeedIsFresh10587(t *testing.T) {
 	}
 	rows := readGeneratedRows10587(t, policyGeneratedRowsDir10587)
 	assertGeneratedSeedCoverage10587(t, rows)
-	if len(rows) != 48 {
-		t.Fatalf("committed generated policy row contract has %d rows, want exactly 48", len(rows))
+	if len(rows) != 52 {
+		t.Fatalf("committed generated policy row contract has %d rows, want exactly 52", len(rows))
 	}
 	blob, err := os.ReadFile(filepath.Join(policyGeneratedCorpusDir10587, "seed_rows.json"))
 	if err != nil {
@@ -313,8 +331,8 @@ func TestPolicyGeneratedSeedIsFresh10587(t *testing.T) {
 	if err := json.Unmarshal(blob, &aggregate); err != nil {
 		t.Fatalf("seed_rows.json is invalid JSON: %v", err)
 	}
-	if aggregate.SchemaVersion != 1 || len(aggregate.Rows) != 48 {
-		t.Fatalf("seed_rows.json has schema %d and %d rows, want schema 1 and exactly 48",
+	if aggregate.SchemaVersion != 1 || len(aggregate.Rows) != 52 {
+		t.Fatalf("seed_rows.json has schema %d and %d rows, want schema 1 and exactly 52",
 			aggregate.SchemaVersion, len(aggregate.Rows))
 	}
 	if len(rows) != len(aggregate.Rows) {

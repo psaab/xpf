@@ -8,13 +8,14 @@ input or uses a second expectation-only matcher.
 ## Row schema
 
 Each `rows/*.json` file is one pure policy-agreement row. The committed seed
-contains exactly 48 rows: the #9167 corpus plus generated boundary shapes for
+contains exactly 52 rows: the #9167 corpus plus generated boundary shapes for
 tiers, address families, exclusions, applications, ports, fragments, ICMP,
-defaults, and ordering. `seed_manifest.json` is the pinned 48-ID contract.
-Every gate requires all manifest IDs; committed-seed gates also require the
-directory to contain exactly 48 rows. To grow the corpus, add the row file,
-update `seed_manifest.json`, regenerate `seed_rows.json`, and rerun all three
-Rust/Go seed gates before committing the complete set.
+defaults, ordering, active/inactive scheduler state, and feed-backed addresses.
+`seed_manifest.json` is the pinned 52-ID contract. Every gate requires all
+manifest IDs; committed-seed gates also require the directory to contain
+exactly 52 rows. To grow the corpus, add the row file, update
+`seed_manifest.json`, regenerate `seed_rows.json`, and rerun all three Rust/Go
+seed gates before committing the complete set.
 
 ```json
 {
@@ -26,14 +27,21 @@ Rust/Go seed gates before committing the complete set.
     "src_ip": "10.0.1.5", "dst_ip": "10.0.2.5",
     "protocol": "tcp", "src_port": 1234, "dst_port": 80,
     "frag": false, "l4_present": true,
-    "icmp_type": null, "icmp_code": null
+    "icmp_type": null, "icmp_code": null,
+    "scheduler_active": {"business-hours": false},
+    "feed_overlay": {"bad-actors": ["198.51.100.0/24"]}
   },
   "rust_verdict": {
     "action": "permit", "matched": true,
     "default_used": false, "policy_name": "p-allow", "policy_id": 42
   }
 }
+
 ```
+`query.scheduler_active` carries the runtime state for named schedulers; an
+absent or false entry makes that scheduler inactive. `query.feed_overlay`
+supplies resolved prefixes for named dynamic address books. Both fields are
+optional; omitted fields mean no active schedulers and no feed prefixes.
 
 `go_verdict` is present in committed seed rows as a reviewed seed expectation;
 rows emitted by a fresh property run MAY omit it. The consumer always computes
@@ -61,7 +69,7 @@ configuration and asserts `UnsupportedTupleFamily` directly.
 
 * `rows/*.json` — pure policy-agreement seed rows.
 * `boundaries/*.json` — named pre-policy forwarding contracts.
-* `seed_manifest.json` — exact 48-ID seed contract used by every gate.
+* `seed_manifest.json` — exact 52-ID seed contract used by every gate.
 * `seed_rows.json` — canonical aggregate included by the Rust test binary. The
   Go freshness test requires it to match `rows/*.json` exactly, including
   snapshots.
@@ -125,9 +133,8 @@ passes `config.CompileConfig`, and every query uses concrete, same-family
 addresses.
 
 The Rust harness uses `PROPTEST_CASES` as a soak override. Normal CI uses
-bounded per-property defaults. P2/P4/P7 each accept only 2 of the 48 seed rows;
+bounded per-property defaults. P2/P4/P7 each accept only 2 of the 52 seed rows;
 with proptest's default 65,536 local-reject budget, approximately 2,500 cases
-is the practical ceiling for those filtered properties. `PROPTEST_CASES=1000`
 is the supported soak used for this harness. A deep run records the effective
 case count, row count, and disagreement count in the PR/issue report;
 disagreements are filed as bugs, not allowlist entries.

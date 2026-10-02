@@ -1,4 +1,7 @@
 {
+  "schema_version": 1,
+  "id": "boundary-port-1",
+  "source_case": "port-boundary",
   "config_set_lines": [
     "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
     "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
@@ -10,43 +13,50 @@
     "set security policies from-zone trust to-zone untrust policy p-allow match application any",
     "set security policies from-zone trust to-zone untrust policy p-allow then permit"
   ],
-  "go_verdict": {
-    "action": "permit",
-    "default_used": false,
-    "matched": true,
-    "policy_id": 0,
-    "policy_name": "p-allow"
-  },
-  "id": "boundary-port-1",
   "query": {
+    "from_zone": "trust",
+    "to_zone": "untrust",
+    "src_ip": "10.0.1.5",
     "dst_ip": "10.0.2.5",
+    "protocol": "tcp",
+    "src_port": 1,
     "dst_port": 1,
     "frag": false,
-    "from_zone": "trust",
-    "icmp_code": null,
-    "icmp_type": null,
     "l4_present": true,
-    "protocol": "tcp",
-    "src_ip": "10.0.1.5",
-    "src_port": 1,
-    "to_zone": "untrust"
+    "icmp_type": null,
+    "icmp_code": null
+  },
+  "go_verdict": {
+    "action": "permit",
+    "matched": true,
+    "default_used": false,
+    "unsupported_tuple_family": false,
+    "policy_name": "p-allow",
+    "policy_id": 0
   },
   "rust_verdict": {
     "action": "permit",
-    "default_used": false,
     "matched": true,
-    "policy_id": 0,
-    "policy_name": "p-allow"
+    "default_used": false,
+    "unsupported_tuple_family": false,
+    "policy_name": "p-allow",
+    "policy_id": 0
   },
-  "schema_version": 1,
   "snapshot": {
     "default_policy": "deny",
     "rules": [
       {
-        "rule_id": "trust-\u003euntrust/p-allow",
+        "rule_id": "trust->untrust/p-allow",
+        "policy_id": 0,
         "name": "p-allow",
         "from_zone": "trust",
         "to_zone": "untrust",
+        "scheduler_name": "",
+        "inactive": false,
+        "source_addresses": [],
+        "destination_addresses": [],
+        "source_book_ids": [],
+        "destination_book_ids": [],
         "source_literals": [
           "any"
         ],
@@ -56,21 +66,36 @@
         "applications": [
           "any"
         ],
-        "action": "permit"
+        "application_terms": [],
+        "action": "permit",
+        "source_address_excluded": false,
+        "destination_address_excluded": false,
+        "log_session_init": false,
+        "log_session_close": false,
+        "match_from_zone": "",
+        "match_to_zone": "",
+        "match_from_zones": [],
+        "match_to_zones": []
       }
     ],
     "zones": [
       {
         "name": "trust",
         "id": 50675,
-        "host_inbound_configured": true
+        "host_inbound_configured": true,
+        "host_inbound_system_services": [],
+        "host_inbound_protocols": [],
+        "tcp_rst": false
       },
       {
         "name": "untrust",
         "id": 20665,
-        "host_inbound_configured": true
+        "host_inbound_configured": true,
+        "host_inbound_system_services": [],
+        "host_inbound_protocols": [],
+        "tcp_rst": false
       }
-    ]
-  },
-  "source_case": "port-boundary"
+    ],
+    "address_books": []
+  }
 }
