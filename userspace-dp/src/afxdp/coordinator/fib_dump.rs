@@ -1,5 +1,26 @@
 use super::*;
 use crate::protocol::{FibNextHopWire, FibRouteWire};
+use std::io::Write;
+
+struct RouteSizeCounter(usize);
+
+impl Write for RouteSizeCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_route_len(route: &FibRouteWire) -> Result<usize, String> {
+    let mut counter = RouteSizeCounter(0);
+    serde_json::to_writer(&mut counter, route)
+        .map_err(|error| format!("serialize FIB route: {error}"))?;
+    Ok(counter.0)
+}
 
 const FIB_DUMP_RESPONSE_RESERVE_BYTES: usize = 1024 * 1024;
 
@@ -33,11 +54,10 @@ impl super::Coordinator {
         macro_rules! push_route {
             ($route:expr) => {{
                 let route = $route;
-                let row_bytes = serde_json::to_vec(&route)
-                    .map_err(|error| format!("serialize FIB route: {error}"))?
-                    .len();
-                let next_bytes =
-                    route_bytes.saturating_add(row_bytes + usize::from(!routes.is_empty()));
+                let row_bytes = serialized_route_len(&route)?;
+                let next_bytes = route_bytes
+                    .saturating_add(row_bytes)
+                    .saturating_add(usize::from(!routes.is_empty()));
                 if next_bytes > route_byte_limit {
                     return Err(format!(
                         "fib_dump route rows exceed the {}-byte control response budget \
@@ -258,12 +278,7 @@ mod tests {
             .expect("publish the test snapshot");
         // Diverge the retained candidate halves AFTER the publish: the dump
         // must keep reading the published RuntimeView, not these fields.
-        coordinator.forwarding.routes_v4.clear();
-        coordinator.forwarding.routes_v6.clear();
-        coordinator.forwarding.connected_v4.clear();
-        coordinator.forwarding.connected_v6.clear();
-        coordinator.forwarding.leak_rules_v4.clear();
-        coordinator.forwarding.leak_rules_v6.clear();
+        coordinator.forwarding = Default::default();
         coordinator.validation.fib_generation = 10;
 
         let (generation, rows) = coordinator.dump_fib().expect("dump fits");
