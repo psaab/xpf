@@ -1565,6 +1565,25 @@ d11_restore_verdict() {
     fi
     printf '%s %s' "$verdict" "$reason"
 }
+# t12_deployed_exe_sha <root> <checkout_sha>
+# Return the manifest artifact only when it belongs to this checkout. Missing,
+# malformed, or stale provenance is reported as unknown for the live gate.
+t12_deployed_exe_sha() {
+    local root="$1" checkout_sha="$2" sha="" rc=0
+    if sha="$(deploy_manifest_sha xpfd "$root" "$checkout_sha" 2>/dev/null)"; then
+        printf '%s\n' "$sha"
+        return 0
+    else
+        rc=$?
+    fi
+    case "$rc" in
+        1) echo "T12_G2_ATTEST deploy manifest missing; executable identity is unavailable" >&2 ;;
+        3) echo "T12_G2_ATTEST deploy manifest belongs to a different checkout; executable identity is unavailable" >&2 ;;
+        *) echo "T12_G2_ATTEST deploy manifest invalid; executable identity is unavailable" >&2 ;;
+    esac
+    printf 'unknown\n'
+}
+
 # The selftest is hermetic: it must not source cluster-env, call incus, or
 # create ledger rows.  It checks the conservative refusal model and cell shape.
 if [[ "$MODE" == selftest ]]; then
@@ -1576,6 +1595,36 @@ if [[ "$MODE" == selftest ]]; then
         local label="$1" want="$2" got="$3"
         if [[ "$want" == "$got" ]]; then ok "$label"; else bad "$label (got=$got want=$want)"; fi
     }
+    # deploy-lib is declarative when sourced; this checks the actual manifest
+    # reader used by the live attestation without touching Incus.
+    # shellcheck source=test/incus/deploy-lib.sh
+    source "${SCRIPT_DIR}/deploy-lib.sh"
+    manifest_fixture="$(mktemp -d)"
+    manifest_root="$manifest_fixture/root"
+    manifest_path="$manifest_fixture/deploy-manifest.json"
+    mkdir -p "$manifest_root"
+    printf 'deployed xpfd\n' >"$manifest_root/xpfd"
+    manifest_sha="$(sha256sum "$manifest_root/xpfd" | awk '{print $1}')"
+    python3 - "$manifest_path" "$manifest_sha" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump({"schema": 1, "build_git_sha": "fixture-checkout",
+               "binaries": {"xpfd": sys.argv[2]}}, f)
+PY
+    selected_sha="$(XPF_DEPLOY_MANIFEST="$manifest_path" \
+        t12_deployed_exe_sha "$manifest_root" fixture-checkout 2>/dev/null)"
+    expect "T12 selects the deploy-manifest SHA for this checkout" \
+        "$manifest_sha" "$selected_sha"
+    stale_sha="$(XPF_DEPLOY_MANIFEST="$manifest_path" \
+        t12_deployed_exe_sha "$manifest_root" newer-checkout 2>/dev/null)"
+    expect "T12 rejects a deploy manifest from a different checkout" \
+        "unknown" "$stale_sha"
+    rm -f "$manifest_path"
+    missing_sha="$(XPF_DEPLOY_MANIFEST="$manifest_path" \
+        t12_deployed_exe_sha "$manifest_root" fixture-checkout 2>/dev/null)"
+    expect "T12 has no local rebuild fallback when the manifest is missing" \
+        "unknown" "$missing_sha"
+    rm -rf "$manifest_fixture"
     cell_verdict() {
         local fence="$1" divert="$2" fixture="$3" sha="$4"
         if [[ "$sha" != MATCH/both ]]; then
@@ -2256,7 +2305,7 @@ PY
         node-0 node-1 "$parser_dir/ledger0.json" "$parser_dir/ledger1.json")"
     expect "D11 final parser rejects same node twice" "0" "$sn_final_ok"
     expect "D11 final parser node check rejects same node" "0" "$sn_final_nodes"
-    if [[ "$fail" == 0 && "$pass" == 101 ]]; then
+    if [[ "$fail" == 0 && "$pass" == 104 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
@@ -2891,12 +2940,8 @@ normalize_config() {
 }
 
 # Determine the source/build identity before any live verdict is emitted.
-GIT_SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf unknown)"
-LOCAL_EXE="${XPF_9506_LOCAL_EXE:-$ROOT/xpfd}"
-LOCAL_SHA="unknown"
-if [[ -f "$LOCAL_EXE" ]]; then
-    LOCAL_SHA="$(sha256sum "$LOCAL_EXE" 2>/dev/null | awk '{print $1}')"
-fi
+GIT_SHA="$(harness_build_git_sha "$ROOT" || printf unknown)"
+LOCAL_SHA="$(t12_deployed_exe_sha "$ROOT" "$GIT_SHA")"
 REMOTE0_SHA="$(deploy_running_xpfd_sha256 "$NODE0" 3 2>/dev/null || true)"
 REMOTE1_SHA="$(deploy_running_xpfd_sha256 "$NODE1" 3 2>/dev/null || true)"
 if [[ -n "$LOCAL_SHA" && "$LOCAL_SHA" != unknown && "$REMOTE0_SHA" == "$LOCAL_SHA" && "$REMOTE1_SHA" == "$LOCAL_SHA" ]]; then

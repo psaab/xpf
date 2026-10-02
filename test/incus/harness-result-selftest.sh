@@ -1111,6 +1111,111 @@ if [[ "$(last_row_field verdict)" == "VOID" && "$(last_row_field exe_check)" == 
 else
 	bad "run wrapper: stale-binary node gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check)"
 fi
+# #11765: cluster executable identity requires a deploy manifest matching this
+# checkout. Missing, corrupt, or stale provenance must not fall back to a local
+# rebuild, even if that file happens to match the live readback.
+MANIFEST_LEDGER="$LEDGER"
+LEDGER="$WORK/manifest-ledger"
+MANIFEST_ROOT="$WORK/manifest-root"
+mkdir -p "$MANIFEST_ROOT"
+cp "$WORK/xpfd" "$MANIFEST_ROOT/xpfd"
+manifest_root_sha=$(sha256sum "$MANIFEST_ROOT/xpfd" | awk '{print $1}')
+incus() { echo "$manifest_root_sha  /proc/1234/exe"; }
+rm -rf "$LEDGER"
+(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/no-manifest.json" \
+	BPFRX_CLUSTER_ENV='' harness_result_run --ledger "$LEDGER" --cluster \
+	--env testenv --gate manifest-missing --adapter smoke-cells \
+	--node fake:fw0 --node-peer fake:fw1 -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "VOID" &&
+	"$(last_row_field exe_check)" == "UNAVAILABLE" ]]; then
+	ok "#11765: missing deploy manifest fails closed despite a matching local rebuild"
+else
+	bad "#11765: missing manifest gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check)"
+fi
+
+printf 'fresh local rebuild with a different buildTime\n' >"$MANIFEST_ROOT/xpfd"
+local_rebuild_sha=$(sha256sum "$MANIFEST_ROOT/xpfd" | awk '{print $1}')
+manifest_helper_file="$WORK/deployed-helper"
+printf 'helper exactly as deployed\n' >"$manifest_helper_file"
+manifest_helper_sha=$(sha256sum "$manifest_helper_file" | awk '{print $1}')
+printf 'helper rebuilt after deployment\n' >"$MANIFEST_ROOT/xpf-userspace-dp"
+write_manifest_fixture() {
+	python3 - "$WORK/deploy-manifest.json" "$manifest_root_sha" \
+		"$manifest_helper_sha" "$1" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump({"schema": 1, "build_git_sha": sys.argv[4], "version": "fixture",
+               "build_time": "2026-10-01T00:00:00Z", "mode": "raw",
+               "deb": None, "binaries": {"xpfd": sys.argv[2], "cli": None,
+                   "xpf-userspace-dp": sys.argv[3]}}, f)
+    f.write("\n")
+PY
+}
+write_manifest_fixture stale-checkout
+rm -rf "$LEDGER"
+(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+	BPFRX_CLUSTER_ENV='' harness_result_run --ledger "$LEDGER" --cluster \
+	--env testenv --gate manifest-stale-checkout --adapter smoke-cells \
+	--node fake:fw0 --node-peer fake:fw1 -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "VOID" &&
+	"$(last_row_field exe_check)" == "UNAVAILABLE" ]]; then
+	ok "#11765: a stale manifest from another checkout fails closed"
+else
+	bad "#11765: stale checkout manifest gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check)"
+fi
+
+write_manifest_fixture unknown
+incus() {
+	case "$*" in
+	*'pidof xpf-userspace-dp'*) echo "$manifest_helper_sha  /proc/9876/exe" ;;
+	*) echo "$manifest_root_sha  /proc/1234/exe" ;;
+	esac
+}
+rm -rf "$LEDGER"
+(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+	BPFRX_CLUSTER_ENV='' harness_result_run --ledger "$LEDGER" --cluster \
+	--env testenv --gate manifest-match --adapter smoke-cells \
+	--node fake:fw0 --node-peer fake:fw1 -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "PASS" &&
+	"$(last_row_field exe_check)" == "MATCH" &&
+	"$(last_row_field schema)" == "2" &&
+	"$(last_row_field build_exe_sha256)" == "$manifest_root_sha" &&
+	"$local_rebuild_sha" != "$manifest_root_sha" ]]; then
+	ok "#11765: matching deploy sha yields PASS/schema 2 despite a different local rebuild"
+else
+	bad "#11765: manifest match gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) schema=$(last_row_field schema) build_sha=$(last_row_field build_exe_sha256)"
+fi
+
+rm -rf "$LEDGER"
+(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+	BPFRX_CLUSTER_ENV='' harness_result_run --ledger "$LEDGER" --cluster \
+	--require-helper-attestation --env testenv --gate manifest-helper-match \
+	--adapter smoke-cells --node fake:fw0 --node-peer fake:fw1 \
+	-- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "PASS" &&
+	"$(last_row_field helper_exe_check)" == "MATCH" &&
+	"$(last_row_field build_helper_exe_sha256)" == "$manifest_helper_sha" ]]; then
+	ok "#11765: required helper attestation also uses the deploy manifest sha"
+else
+	bad "#11765: manifest helper match gave verdict=$(last_row_field verdict) helper_exe_check=$(last_row_field helper_exe_check)"
+fi
+
+printf '{invalid json\n' >"$WORK/deploy-manifest.json"
+rm -rf "$LEDGER"
+(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+	BPFRX_CLUSTER_ENV='' harness_result_run --ledger "$LEDGER" --cluster \
+	--env testenv --gate manifest-invalid --adapter smoke-cells \
+	--node fake:fw0 --node-peer fake:fw1 -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "VOID" &&
+	"$(last_row_field exe_check)" == "UNAVAILABLE" ]]; then
+	ok "#11765: a corrupt present manifest fails closed instead of trusting a rebuild"
+else
+	bad "#11765: corrupt manifest gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check)"
+fi
+
+rm -rf "$LEDGER"
+LEDGER="$MANIFEST_LEDGER"
+unset MANIFEST_LEDGER
 unset -f incus
 
 # ── 10d-g. #9044: the attestation must cover BOTH nodes of a cluster gate ──
