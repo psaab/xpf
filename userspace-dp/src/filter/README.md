@@ -1105,20 +1105,24 @@ over-dropped with no signal past the boot warning. One wire bool closes it,
 same shape as the family (Go builder sets, `parse_term` rejects the whole
 snapshot; strict commit gates are the primary defense):
 
-- **`from_unrepresentable` (#9875/#11334):** set for an unenforced `from`
-  leaf or literal-address `except` on `term.UnknownFrom`, or a valueless leaf
-  on `term.ValuelessFrom`; `parse_term` raises
-  `SnapshotIntegrityError::UnrepresentableFilterFrom`.
+- **`from_unrepresentable` (#9875/#11334/#11896):** set for an unenforced
+  `from` leaf or literal-address `except` on `term.UnknownFrom`, a valueless
+  leaf on `term.ValuelessFrom`, OR conflicting terminal actions (#11896).
+  `parse_term` raises `SnapshotIntegrityError::UnrepresentableFilterFrom`.
 
-Whole-snapshot rejection — not term poisoning — because poisoning a
-discard/reject term to match-nothing would let its traffic fall through to
-the implicit accept (fail-OPEN); only refusing the snapshot is
-action-agnostic.
+Whole-candidate-snapshot rejection (the reconcile preflight retains the
+previous good state) — not term poisoning — because poisoning a discard/reject
+term to match-nothing would let its traffic fall through to implicit accept
+(fail-OPEN). It also prevents #11893's conservative conflict `discard` from
+becoming a newly installed drop. This keeps tolerant peer-sync bootable without
+wedging subsequent sync: the rejected candidate never replaces the last-good
+generation.
 
 Tests: `from_unrepresentable_marker_*`,
 `firewall_term_snapshot_from_unrepresentable_wire_key_9875` (Rust) and
 `TestFilterSnapshotFromUnrepresentable*`,
 `TestFilterSnapshotLiteralAddressExceptFailsClosed11334`,
+`TestFilterTerminalConflictSetsFromUnrepresentable11896`,
 `TestFirewallTermSnapshotFromUnrepresentableWireKey_9875` (Go), plus strict /
 tolerant compiler diagnostics in `TestFirewallLiteralAddressExceptNamedUnsupported11334`
 (fail-on-revert).

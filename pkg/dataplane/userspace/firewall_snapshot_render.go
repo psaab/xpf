@@ -43,12 +43,12 @@ func RenderFirewallFilterSnapshot(snap *FirewallFilterSnapshot) string {
 		if term.AddressUnrepresentable {
 			fmt.Fprintf(&b, "    from address <unrepresentable — snapshot fails closed>\n")
 		}
-		// #9875: a whole `from` leaf the dataplane does not enforce (or a
-		// value-bearing leaf written with no operand) — the snapshot carrying
-		// this term is refused, so `effective` shows the refusal, never the
-		// widened match the pre-fix builder shipped.
+		// #9875/#11334/#11896: an unenforced `from` leaf OR conflicting
+		// terminal actions make this term's candidate snapshot unrepresentable.
+		// The renderer cannot disambiguate which marker caused refusal, so show
+		// the generic enforcement reason rather than claiming a missing `from`.
 		if term.FromUnrepresentable {
-			fmt.Fprintf(&b, "    from <unrepresentable — snapshot fails closed>\n")
+			fmt.Fprintf(&b, "    match/action <unrepresentable — snapshot fails closed>\n")
 		}
 		for _, p := range term.Protocols {
 			fmt.Fprintf(&b, "    from protocol %s\n", p)

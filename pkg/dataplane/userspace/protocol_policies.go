@@ -195,29 +195,23 @@ type FirewallTermSnapshot struct {
 	// whole snapshot instead. omitempty + the Rust serde default keep wire
 	// parity with an older control plane that omits the field (#1961).
 	AddressUnrepresentable bool `json:"address_unrepresentable,omitempty"`
-	// FromUnrepresentable (#9875/#11334) is set true when the term's `from`
+	// FromUnrepresentable (#9875/#11334/#11896) is set when the term's `from`
 	// block carries a constraint the dataplane does NOT enforce: an unrecognized
-	// leaf (recorded on term.UnknownFrom, #3307), the literal-address `except`
-	// construct (recorded on term.UnknownFrom, #11334), or a value-bearing leaf
-	// written with NO operand (recorded on term.ValuelessFrom, #8480 — `from
-	// protocol;`). Both compile to a term missing a constraint the operator
-	// authored; the strict commit gates reject them, so a committed config never
-	// sets this. It is the helper-boundary fail-closed marker for tolerant load /
-	// peer-sync. Without it the snapshot carried only the surviving match set —
-	// byte-identical to a term authored without the constraint — so an accept
-	// term over-permitted and a discard/reject term over-dropped with no signal
-	// past the boot warning. With this flag the Rust filter compiler raises
-	// SnapshotIntegrityError::UnrepresentableFilterFrom
-	// and rejects the whole snapshot instead (the reconcile preflight
-	// keeps the previous good filter state). Whole-snapshot rejection —
-	// not term poisoning — because poisoning a discard/reject term to
-	// match-nothing would let its traffic fall through to the implicit
-	// accept (fail-OPEN); only refusing the snapshot is action-agnostic.
-	// omitempty + the Rust serde default keep wire parity with an older
-	// control plane that omits the field (#1961); the version BUMP (v20,
-	// not a STANDS entry) is what refuses a mixed pair, because an old
-	// helper that ignores this field enforces the widened term — the
-	// defect itself (#8892 v10/v11 arm, #5488 v4 rule).
+	// leaf (term.UnknownFrom, #3307), a literal-address `except` construct
+	// (term.UnknownFrom, #11334), or a value-bearing leaf written with NO operand
+	// (term.ValuelessFrom, #8480); it is also set when the term has conflicting
+	// terminal actions (#11896). Those shapes compile to a missing or ambiguous
+	// enforcement intent. Strict commit rejects them; the tolerant load /
+	// peer-sync paths warn and preserve a conservative internal discard for a
+	// conflict, but must not install the candidate as a fresh drop. The Rust
+	// filter compiler rejects the whole snapshot and reconcile retains the
+	// previous good filter state. Whole-snapshot rejection — not term poisoning —
+	// because poisoning a discard/reject term to match-nothing would let its
+	// traffic fall through to implicit accept; refusal is action-agnostic.
+	// `omitempty` plus Rust `serde(default)` preserve legacy decode (#1961).
+	// v20 remains the required compatibility boundary: an old helper that ignores
+	// this field can still enforce the widened / ambiguous term (#8892 v10/v11,
+	// #5488 v4 rule).
 	FromUnrepresentable bool `json:"from_unrepresentable,omitempty"`
 	// FlexMatch is the Junos `from flexible-match-range` byte-offset match
 	// (#3077). Before this wiring it was parsed + compiled for the retired

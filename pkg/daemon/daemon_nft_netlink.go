@@ -241,15 +241,17 @@ func toNftLo0Term(term *config.FirewallFilterTerm, pl map[string]*config.PrefixL
 		// FlexMatchUnrepresentable line below (#6804).
 		ICMPTypeUnrepresentable: len(term.UnknownICMPTypes) > 0,
 		ICMPCodeUnrepresentable: len(term.UnknownICMPCodes) > 0,
-		// #9875/#11334: an unrecognized `from` leaf (term.UnknownFrom, #3307),
-		// an unsupported literal-address `except` construct (#11334), or a
-		// value-bearing leaf written with NO operand (term.ValuelessFrom, #8480)
-		// vanishes at this boundary unless its marker is carried too — every
-		// field above is a surviving predicate. Without this line the mirror
-		// rendered the term WITHOUT its authored constraint while the userspace
-		// mirror set the same wire field and failed the snapshot closed.
-		FromUnrepresentable: len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0,
-		TCPFlags:            term.TCPFlags,
+		// #9875/#11334/#11896: an unrecognized `from` leaf (term.UnknownFrom,
+		// #3307), an unsupported literal-address `except` construct (#11334),
+		// a value-bearing leaf written with NO operand (term.ValuelessFrom,
+		// #8480), OR conflicting terminal actions (#11896). A missing `from`
+		// constraint would widen the term; a terminal conflict must not install
+		// the lenient compiler's conservative discard as a new drop. Carry the
+		// marker shared with the userspace snapshot so the netlink builder refuses
+		// the whole plan and retains prior-good state.
+		FromUnrepresentable: len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0 ||
+			config.FilterHasConflictingTerminalActions(term.TerminalActions),
+		TCPFlags: term.TCPFlags,
 		// #6804: carry the flexible-match-range so the kernel mirror renders the
 		// term's narrowing. Before this the spec had no field for it, so the
 		// predicate was dropped at this boundary and the term rendered WIDER

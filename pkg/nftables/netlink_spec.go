@@ -171,17 +171,13 @@ type Lo0FilterTerm struct {
 	// #3307 — ttl / source-mac-address / ip-options / fragment-offset /
 	// hop-limit / ...) or a value-bearing leaf written with NO operand
 	// (config.FirewallFilterTerm.ValuelessFrom, #8480 — `from protocol;`).
-	// Both compile to a term missing an entire authored constraint; without
-	// the marker the mirror renders only the surviving predicates —
-	// byte-identical to a term authored without the leaf — so an accept term
-	// over-permits and a discard/reject term over-drops on the chain that is
-	// the PRIMARY enforcement for host traffic. The name matches the
-	// userspace wire field
-	// (dpuserspace.FirewallTermSnapshot.FromUnrepresentable) so the two
-	// mirrors of the same config term are greppable as one contract. Strict
-	// commit rejects both spellings; the tolerant load / peer-sync paths only
-	// warn (#1960), so the mirror must still decide. It fails the netlink
-	// plan CLOSED — see buildLo0TermNetlink (#9875).
+	// #11896 reuses the same refusal channel for conflicting terminal actions:
+	// applying their conservative internal discard would install a fresh drop.
+	// The marker shares the userspace wire field
+	// (dpuserspace.FirewallTermSnapshot.FromUnrepresentable) so both mirrors
+	// refuse the same candidate. Strict commit rejects these shapes; tolerant
+	// load / peer-sync warns (#1960) and refuses the netlink plan CLOSED, retaining
+	// the existing ruleset.
 	FromUnrepresentable bool
 
 	Log   bool

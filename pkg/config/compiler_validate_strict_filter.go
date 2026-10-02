@@ -1508,9 +1508,10 @@ func validateFilterRoutingInstanceConflictStrict(cfg *Config) error {
 // The walk is deterministic (filters sorted by name, terms in config order) so
 // the first-reported error is stable across runs. On the tolerant load /
 // peer-sync path the caller downgrades the returned error to a warning (#1960
-// no-brick) and replaces conflicting term actions with discard, so an authored
-// last-wins accept cannot be installed. The operator never reaches that state
-// through a commit. Mirrors validateFilterRoutingInstanceConflictStrict.
+// no-brick) and retains discard as a conservative internal action. The userspace
+// and lo0 snapshots also set FromUnrepresentable for the conflict, refusing the
+// candidate whole and retaining prior-good state (#11896). The operator never
+// reaches that state through a commit. Mirrors validateFilterRoutingInstanceConflictStrict.
 func validateFilterTerminalConflictStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -1530,7 +1531,7 @@ func validateFilterTerminalConflictStrict(cfg *Config) error {
 				if term == nil {
 					continue
 				}
-				if filterHasConflictingTerminalActions(term.TerminalActions) {
+				if FilterHasConflictingTerminalActions(term.TerminalActions) {
 					// Collect distinct terminals in first-seen order so the
 					// error is stable and reads in the order the operator
 					// wrote them.

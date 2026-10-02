@@ -261,18 +261,14 @@ const (
 	//
 	// v20 (issue 9875): `FirewallTermSnapshot.FromUnrepresentable`, set when
 	// the term's `from` carried a match leaf the dataplane does not enforce
-	// (term.UnknownFrom, #3307) or a value-bearing leaf written with no
-	// operand (term.ValuelessFrom, #8480). BUMPED on the merits under the
-	// v9 rule: an old helper ignores the new key and enforces the SURVIVING
-	// match set — byte-identical to a term authored without the leaf — so
-	// an accept term over-permits and a discard/reject term over-drops,
-	// which IS the defect the marker closes (the #3406/#6459/#6463 family
-	// rode without bumps only because all of them predate the #8892 cell;
-	// the v4 rule above — "a compatibility extension that changes
-	// deny/reject COVERAGE must not be silently ignorable" — governs now).
-	// A new helper under an old daemon reads the key absent (false) and
-	// enforces the widened term exactly as before — the pre-fix window,
-	// closed on upgrade. Exact equality refuses both pairings; the #8892
+	// (term.UnknownFrom, #3307) or a value-bearing leaf written with no operand
+	// (term.ValuelessFrom, #8480). #11896 reuses this already-versioned field
+	// for conflicting terminal actions, so the helper still rejects the whole
+	// candidate snapshot and retains prior-good state rather than installing
+	// the lenient compiler's fallback discard as a new drop. No wire field or
+	// protocol-version change is needed: v20 already requires the helper to
+	// honor the marker. An old helper ignores the key and enforces the widened /
+	// ambiguous term exactly as before.
 	// digest moves with it (a real, transmitted field).
 	//
 	// v21 (issue 9821): `InterfaceSnapshot.IsUnit`, the STRUCTURAL row
