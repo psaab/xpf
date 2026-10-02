@@ -840,24 +840,6 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }
-        if let Some(result) = enqueue_sampled_mirror_clone(
-            left,
-            binding_index,
-            binding,
-            right,
-            binding_lookup,
-            mirror_targets,
-            forwarding,
-            pkt.meta.ingress_ifindex as i32,
-            pkt.meta.ingress_vlan_id,
-            ingress_queue,
-            source_frame,
-            pkt.meta.into(),
-            pkt.flow_key.as_ref(),
-            now_ns,
-        ) {
-            record_mirror_clone_result(&binding.live, result, source_frame.len());
-        }
         let target_ifindex = if decision.resolution.tx_ifindex > 0 {
             decision.resolution.tx_ifindex
         } else {
@@ -905,6 +887,15 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }
+        let staged_mirror = stage_sampled_mirror_clone(
+            forwarding,
+            pkt.meta.ingress_ifindex as i32,
+            pkt.meta.ingress_vlan_id,
+            binding.mirror_sample_counter,
+            source_frame,
+            pkt.meta.into(),
+            pkt.flow_key.as_ref(),
+        );
         let selected_tcp_mss = select_tcp_mss(forwarding, &decision, &pkt.meta.into());
         let Some(rewrite_result) = rewrite_forwarded_frame_in_place(
             &*area,
@@ -937,12 +928,14 @@ pub(super) fn retry_pending_neigh(
             overlap_admissions: retry_overlap_admissions_10659.take(),
             enqueue_ns: 0,
         };
+        let mut forwarded = false;
         if target_idx == binding_index {
             binding.tx_pipeline.pending_tx_prepared.push_back(req);
             binding.tx_counters.pending_in_place_tx_packets += 1;
             binding
                 .tx_counters
                 .record_in_place_l2_rewrite(rewrite_result.l2_rewrite);
+            forwarded = true;
         } else if let Some(target) =
             binding_by_index_mut(left, binding_index, binding, right, target_idx)
         {
@@ -973,6 +966,7 @@ pub(super) fn retry_pending_neigh(
             // that is already off the fast path. Recycling it to fill instead
             // would drop a packet the dataplane went to some trouble to hold.
             if target.umem.shares_allocation_with(&ingress_umem) {
+                forwarded = true;
                 target.tx_pipeline.pending_tx_prepared.push_back(req);
                 bound_pending_tx_prepared(target, Some(shared_recycles));
                 target.tx_counters.pending_in_place_tx_packets += 1;
@@ -995,6 +989,7 @@ pub(super) fn retry_pending_neigh(
                     overlap_admissions: req.overlap_admissions.take(),
                     enqueue_ns: req.enqueue_ns,
                 });
+                forwarded = true;
                 target.tx_counters.neighbor_retry_cross_umem_copies += 1;
                 // The ingress descriptor is ours to recycle: the copy owns the
                 // bytes now, so the frame goes back to this binding's fill
@@ -1007,6 +1002,22 @@ pub(super) fn retry_pending_neigh(
             }
         } else {
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
+        }
+        if forwarded {
+            if let Some(staged) = staged_mirror {
+                commit_staged_mirror_clone(
+                    left,
+                    binding_index,
+                    binding,
+                    right,
+                    binding_lookup,
+                    mirror_targets,
+                    forwarding,
+                    ingress_queue,
+                    staged,
+                    now_ns,
+                );
+            }
         }
     }
     apply_shared_recycles(

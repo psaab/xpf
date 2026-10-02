@@ -52,7 +52,7 @@
     }
 
     fn pending_neighbor_meta(frame_len: usize) -> UserspaceDpMeta {
-        UserspaceDpMeta {
+        let mut meta = UserspaceDpMeta {
             ingress_ifindex: 11,
             l3_offset: 14,
             l4_offset: 34,
@@ -60,7 +60,10 @@
             addr_family: libc::AF_INET as u8,
             protocol: PROTO_TCP,
             ..UserspaceDpMeta::default()
-        }
+        };
+        meta.flow_src_addr[..4].copy_from_slice(&[10, 0, 0, 1]);
+        meta.flow_dst_addr[..4].copy_from_slice(&[10, 0, 0, 2]);
+        meta
     }
 
     /// #7156 fixture: `n` distinct unresolved next-hops on one binding, all
@@ -706,14 +709,14 @@
             &mut retry_dbg,
         );
 
-        assert!(bindings[0].pending_neigh.is_empty());
-        assert_eq!(bindings[0].live.mirrored_packets.load(Ordering::Relaxed), 1);
+        assert!(binding.pending_neigh.is_empty());
+        assert_eq!(binding.live.mirrored_packets.load(Ordering::Relaxed), 1);
         assert_eq!(
-            bindings[0].live.mirrored_bytes.load(Ordering::Relaxed),
+            binding.live.mirrored_bytes.load(Ordering::Relaxed),
             original_frame.len() as u64
         );
 
-        let mirror_req = bindings[2]
+        let mirror_req = right[1]
             .tx_pipeline
             .pending_tx_prepared
             .front()
@@ -722,7 +725,7 @@
         assert_eq!(mirror_req.egress_ifindex, 33);
         assert_eq!(mirror_req.len, original_frame.len() as u32);
         assert_eq!(
-            bindings[2]
+            right[1]
                 .umem
                 .area()
                 .slice(mirror_req.offset as usize, mirror_req.len as usize)
@@ -731,7 +734,7 @@
             "deferred neighbor path must mirror pre-rewrite L2 bytes",
         );
 
-        let forwarded_req = bindings[1]
+        let forwarded_req = right[0]
             .tx_pipeline
             .pending_tx_prepared
             .front()
@@ -740,6 +743,67 @@
             !forwarded_req.mirror_clone,
             "primary forwarding request must not inherit mirror identity",
         );
+        // A malformed deferred packet cannot be rewritten or forwarded. It
+        // must not advance the mirror sample counter or add an analyzer clone.
+        let failed_next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+        forwarding.neighbors.insert(
+            (80, failed_next_hop),
+            NeighborEntry {
+                mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            },
+        );
+        let failed_addr = 1u64 << UMEM_FRAME_SHIFT;
+        let failed_len = 10;
+        // SAFETY: frame 1 is within the test UMEM, disjoint from the live frame
+        // at offset zero; this short extent is only read by the retry below.
+        unsafe {
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(failed_addr as usize, failed_len)
+        }
+        .expect("failed ingress frame")
+        .copy_from_slice(&original_frame[..failed_len]);
+        push_pending(
+            binding,
+            PendingNeighPacket {
+                addr: failed_addr,
+                desc: XdpDesc {
+                    addr: failed_addr,
+                    len: failed_len as u32,
+                    options: 0,
+                },
+                meta: pending_neighbor_meta(failed_len),
+                fabric_ingress_zone: None,
+                decision: resolved_neighbor_decision(failed_next_hop),
+                flow_key: Some(test_session_key(12345, 443)),
+                queued_ns: 0,
+                probe_attempts: 0,
+            },
+        );
+        retry_pending_neigh(
+            binding,
+            left,
+            0,
+            right,
+            &lookup,
+            &mirror_targets,
+            &forwarding,
+            &dynamic_neighbors,
+            None,
+            1,
+            // SAFETY: same retained ingress UMEM allocation as above.
+            unsafe { &*area },
+            &mut shared_recycles,
+            None,
+            &mut BatchCounters::default(),
+            &recent_exceptions,
+            &mut retry_dbg,
+        );
+        assert!(binding.pending_neigh.is_empty());
+        assert_eq!(binding.mirror_sample_counter, 0);
+        assert_eq!(binding.live.mirrored_packets.load(Ordering::Relaxed), 1);
+        assert_eq!(right[1].tx_pipeline.pending_tx_prepared.len(), 1);
     }
 
     /// #1651 B3: a never-resolving pending packet that crosses the timeout

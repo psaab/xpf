@@ -963,24 +963,8 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             }
             PendingForwardFrame::Prebuilt(_) => unreachable!(),
         };
-        if let Some(result) = enqueue_sampled_mirror_clone(
-            left,
-            ingress_index,
-            ingress_binding,
-            right,
-            binding_lookup,
-            mirror_targets,
-            forwarding,
-            request.meta.ingress_ifindex as i32,
-            request.meta.ingress_vlan_id,
-            request.ingress_queue_id,
-            source_frame,
-            request.meta,
-            request.flow_key.as_ref(),
-            now_ns,
-        ) {
-            record_mirror_clone_result(&ingress_binding.live, result, source_frame.len());
-        }
+        let enqueue_count_before = dbg.enqueue_ok;
+        let mirror_sample_counter = ingress_binding.mirror_sample_counter;
         let expected_ports = request.expected_ports;
         let ingress_umem_ptr = ingress_binding.umem.allocation_ptr();
         let Some(target_binding) = resolve_pending_forward_target_binding(
@@ -1046,6 +1030,15 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
         };
+        let staged_mirror = stage_sampled_mirror_clone(
+            forwarding,
+            request.meta.ingress_ifindex as i32,
+            request.meta.ingress_vlan_id,
+            mirror_sample_counter,
+            source_frame,
+            request.meta,
+            request.flow_key.as_ref(),
+        );
         let mut build_failed = false;
         let mut fallback_to_slow_path = false;
         let mut copied_source_frame = false;
@@ -1627,6 +1620,22 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
         }
         if !retained_source_frame {
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
+        }
+        if !mtu_signalled && dbg.enqueue_ok > enqueue_count_before {
+            if let Some(staged) = staged_mirror {
+                commit_staged_mirror_clone(
+                    left,
+                    ingress_index,
+                    ingress_binding,
+                    right,
+                    binding_lookup,
+                    mirror_targets,
+                    forwarding,
+                    request.ingress_queue_id,
+                    staged,
+                    now_ns,
+                );
+            }
         }
     }
     while !ingress_binding.tx_pipeline.pending_fill_frames.is_empty() {
