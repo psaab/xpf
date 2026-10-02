@@ -116,15 +116,21 @@ func TestControlRequestAboveNewCapStillRejected(t *testing.T) {
 }
 
 // TestControlRequestCapLockstepWithRust documents and pins the lockstep
-// relationship between the Go sender's pre-flight ceiling and the Rust
-// receiver's MAX_CONTROL_REQUEST_BYTES. The two MUST be identical: a sender
-// that emits a body larger than the receiver's cap is rejected at the read.
-// If you change one, change the other (and update this expected value).
+// relationship between the Go request/response ceilings and the Rust
+// MAX_CONTROL_REQUEST_BYTES/MAX_CONTROL_RESPONSE_BYTES. Each direction has a
+// bounded body, so both pairs must be identical across the protocol boundary.
+// If either ceiling changes, update the corresponding expected value here.
 func TestControlRequestCapLockstepWithRust(t *testing.T) {
 	const rustMaxControlRequestBytes = 64 * 1024 * 1024 // userspace-dp/src/protocol/control.rs
 	if MaxControlRequestBytes != rustMaxControlRequestBytes {
 		t.Fatalf("Go MaxControlRequestBytes=%d must equal Rust MAX_CONTROL_REQUEST_BYTES=%d "+
 			"(lockstep, see userspace-dp/src/protocol/control.rs)",
 			MaxControlRequestBytes, rustMaxControlRequestBytes)
+	}
+	const rustMaxControlResponseBytes = 64 * 1024 * 1024 // userspace-dp/src/protocol/control.rs
+	if MaxControlResponseBytes != rustMaxControlResponseBytes {
+		t.Fatalf("Go MaxControlResponseBytes=%d must equal Rust MAX_CONTROL_RESPONSE_BYTES=%d "+
+			"(lockstep, see userspace-dp/src/protocol/control.rs)",
+			MaxControlResponseBytes, rustMaxControlResponseBytes)
 	}
 }

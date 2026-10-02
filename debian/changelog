@@ -1,5 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Read helper FIB dumps from one published RuntimeView and reject responses
+    above the control cap instead of returning a partial route list (#11767).
   * Persist HA persistent-NAT clear generations and peer replay floors so
     delayed idle-lease batches cannot restore mappings after an operator clear
     or daemon/helper restart; reclaim expired allocator clear fences (#11486).

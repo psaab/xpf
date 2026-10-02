@@ -72,6 +72,40 @@ fn fabric_plan_changed(previous: &[crate::FabricSnapshot], next: &[crate::Fabric
     })
 }
 
+#[derive(Default)]
+struct ResponseByteCounter(usize);
+
+impl Write for ResponseByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn enforce_fib_response_cap(
+    response: &mut ControlResponse,
+    max_bytes: usize,
+) -> Result<(), String> {
+    let mut response_size = ResponseByteCounter::default();
+    serde_json::to_writer(&mut response_size, response)
+        .map_err(|err| format!("measure helper FIB response size: {err}"))?;
+    if response_size.0 >= max_bytes {
+        response.ok = false;
+        response.error = format!(
+            "helper FIB dump exceeds the {}-byte control-response cap; no partial FIB was returned",
+            max_bytes
+        );
+        response.status = None;
+        response.fib_generation = 0;
+        response.fib_routes.clear();
+    }
+    Ok(())
+}
+
 pub(crate) fn handle_stream(
     stream: UnixStream,
     state_file: &str,
@@ -162,6 +196,7 @@ pub(crate) fn handle_stream(
     // is byte-identical, but reading it up front insulates the
     // dispatcher from future partial-move concerns on `request`.
     let suppress_status = request.suppress_status;
+    let is_fib_dump = request.request_type == "fib_dump";
     let neighbor_replace = request.neighbor_replace;
     // #7919: two-phase like the exports — the locked arm only KICKS the
     // broadcast; the bounded wait runs after the lock drops, so a stalled
@@ -298,11 +333,16 @@ pub(crate) fn handle_stream(
                 persist_state = true;
             }
 
-            "fib_dump" => {
-                let (generation, routes) = guard.afxdp.dump_fib();
-                response.fib_generation = generation;
-                response.fib_routes = routes;
-            }
+            "fib_dump" => match guard.afxdp.dump_fib() {
+                Ok((generation, routes)) => {
+                    response.fib_generation = generation;
+                    response.fib_routes = routes;
+                }
+                Err(err) => {
+                    response.ok = false;
+                    response.error = err;
+                }
+            },
             "apply_snapshot" => snapshot::apply(
                 &mut guard,
                 request.snapshot,
@@ -581,6 +621,13 @@ pub(crate) fn handle_stream(
         }
     }
 
+    // Go bounds helper responses at MAX_CONTROL_RESPONSE_BYTES. Refuse an
+    // oversized FIB response before writing so it cannot be mistaken for an
+    // empty or complete route list after truncation.
+    if is_fib_dump {
+        enforce_fib_response_cap(&mut response, MAX_CONTROL_RESPONSE_BYTES)?;
+    }
+
     // #5294: the state-file persist must NOT gate delivery of the response.
     // `drain_session_deltas` (session_deltas::drain) and the owner-RG export
     // mirror (export::owner_rg_collect) DESTRUCTIVELY drain deltas out of the
@@ -616,4 +663,42 @@ pub(crate) fn handle_stream(
     // drained session deltas — has been flushed to the peer.
     persist_result?;
     Ok(())
+}
+
+#[cfg(test)]
+mod fib_response_cap_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_at_response_cap_without_returning_partial_fib() {
+        let response = ControlResponse {
+            ok: true,
+            fib_generation: 9,
+            fib_routes: (0..8)
+                .map(|index| FibRouteWire {
+                    table: format!("table-{index}"),
+                    destination: format!("10.{index}.0.0/16"),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut serialized = ResponseByteCounter::default();
+        serde_json::to_writer(&mut serialized, &response).expect("serialize FIB response");
+
+        let mut at_cap = response.clone();
+        enforce_fib_response_cap(&mut at_cap, serialized.0).expect("measure FIB response");
+        assert!(!at_cap.ok);
+        assert!(at_cap.error.contains("no partial FIB was returned"));
+        assert!(at_cap.status.is_none());
+        assert_eq!(at_cap.fib_generation, 0);
+        assert!(at_cap.fib_routes.is_empty());
+
+        let mut below_cap = response;
+        enforce_fib_response_cap(&mut below_cap, serialized.0 + 1)
+            .expect("measure FIB response below cap");
+        assert!(below_cap.ok);
+        assert_eq!(below_cap.fib_generation, 9);
+        assert_eq!(below_cap.fib_routes.len(), 8);
+    }
 }

@@ -156,6 +156,9 @@ next-hop details. This is a read-only helper query, not a reconstruction from
 the routing manager, kernel routes, or FRR. The local CLI and remote gRPC CLI
 share one renderer so they display the same helper snapshot.
 
+The helper refuses a dump that exceeds its bounded control-response budget;
+it returns an explicit error and no partial route list.
+
 ## Callers
 
 `cmd/cli` (remote client), `cmd/xpfd` (when stdin is a TTY).

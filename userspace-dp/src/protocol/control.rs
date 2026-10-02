@@ -360,6 +360,10 @@ pub(crate) struct ZoneFloodCounterStatus {
 /// rejected at the read, so the two caps must move together. The Go side
 /// pins the relationship in `TestControlRequestCapLockstepWithRust`.
 pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// Single control-response ceiling, in lockstep with Go's
+/// `MaxControlResponseBytes`. FIB dumps refuse oversized snapshots instead of
+/// letting the Go bounded decoder see a truncated route list.
+pub(crate) const MAX_CONTROL_RESPONSE_BYTES: usize = MAX_CONTROL_REQUEST_BYTES;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ControlRequest {

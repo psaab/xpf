@@ -3,10 +3,12 @@ package userspace
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,5 +92,52 @@ func TestDumpFIBRequestsAndDecodesHelperSnapshot11370(t *testing.T) {
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatalf("write helper response: %v", err)
+	}
+}
+
+func TestDumpFIBSurfacesBoundedHelperRefusal11370(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "control.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen control socket: %v", err)
+	}
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		var req ControlRequest
+		if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&req); err != nil {
+			serverErr <- err
+			return
+		}
+		if req.Type != "fib_dump" || !req.SuppressStatus {
+			serverErr <- fmt.Errorf("unexpected request: %+v", req)
+			return
+		}
+		err = json.NewEncoder(conn).Encode(ControlResponse{
+			OK:    false,
+			Error: "helper FIB dump exceeds the 67108864-byte control-response cap; no partial FIB was returned",
+		})
+		serverErr <- err
+	}()
+
+	manager := New()
+	manager.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	manager.cfg.ControlSocket = socket
+	generation, routes, err := manager.DumpFIB()
+	if err == nil || !strings.Contains(err.Error(), "control-response cap") {
+		t.Fatalf("DumpFIB error = %v, want visible control-response cap refusal", err)
+	}
+	if generation != 0 || routes != nil {
+		t.Fatalf("DumpFIB returned partial data after refusal: generation=%d routes=%d", generation, len(routes))
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("write helper refusal: %v", err)
 	}
 }
