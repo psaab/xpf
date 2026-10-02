@@ -67,7 +67,7 @@ func TestPersistentNatClearGenerationSurvivesManagerRestart11486(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clear persistent NAT: %v", err)
 	}
-	if count != 3 || generation != 1 || len(origin) != 32 {
+	if count != 3 || generation != 2 || len(origin) != 32 {
 		t.Fatalf("clear result = count %d origin %q generation %d", count, origin, generation)
 	}
 	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
@@ -155,9 +155,33 @@ func TestPersistentNatEmptyBatchCarriesAndPersistsClearBarrier11486(t *testing.T
 		t.Fatalf("persisted generation barrier allowed %d stale helper requests", got)
 	}
 }
+func TestPersistentNatGenerationOneClearsBeforeFirstAdvertisement11486(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nat-generation.json")
+	m, helper := persistentNatGenerationManager11486(t, path)
+	batch, err := m.ExportPersistentNatLeaseBatch()
+	if err != nil {
+		t.Fatalf("first generation export: %v", err)
+	}
+	if batch.Generation != 1 || len(batch.OriginID) != 32 {
+		t.Fatalf("first batch origin/generation = %q/%d, want origin and generation 1",
+			batch.OriginID, batch.Generation)
+	}
+	for _, want := range []string{"clear_persistent_nat_leases", "export_idle_leases"} {
+		if got := (<-helper.requests).Type; got != want {
+			t.Fatalf("first generation helper request = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestPersistentNatGenerationZeroDoesNotImplyClear11486(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nat-generation.json")
 	m, helper := persistentNatGenerationManager11486(t, path)
+	if _, _, _, err := m.ClearPersistentNATLeasesWithGeneration("", 0); err != nil {
+		t.Fatalf("initialize local replay floor: %v", err)
+	}
+	if got := (<-helper.requests).Type; got != "clear_persistent_nat_leases" {
+		t.Fatalf("initialize helper request = %q, want local clear", got)
+	}
 	batch := PersistentNatLeaseBatch{
 		OriginID: "0123456789abcdef0123456789abcdef",
 		Leases:   []IdleLeaseWire{scopedLease10018()},

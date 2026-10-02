@@ -112,7 +112,9 @@ func (m *Manager) loadPersistentNatLeaseGenerationLocked() error {
 	}
 	state := persistentNatLeaseGenerationState{
 		OriginID:          origin,
+		Generation:        1,
 		RemoteGenerations: make(map[string]uint64),
+		PendingLocalClear: true,
 		PendingRemote:     make(map[string]bool),
 	}
 	if err := m.persistPersistentNatLeaseGenerationLocked(state); err != nil {
