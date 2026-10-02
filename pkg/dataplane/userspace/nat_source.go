@@ -458,6 +458,17 @@ func buildSourceNATAppTerms(cfg *config.Config, appNames []string) []NatAppTermW
 		if appName == "" || appName == "any" {
 			continue
 		}
+		// #11587: lenient compilation may leave a syntactically usable
+		// application after dropping one or more authored match constraints.
+		// A protocol-only ICMP term would then match every type, so refuse the
+		// whole reference with the same never-match sentinel used for an
+		// unresolvable application. This also covers nested application sets.
+		if drops := config.ApplicationReferenceMatchDrops(appName, &cfg.Applications); len(drops) > 0 {
+			slog.Warn("userspace snapshot: source NAT application has dropped match constraints; emitting a never-match term (fail-closed, #11587)",
+				"application", appName, "drops", drops)
+			terms = append(terms, NatAppTermWire{Protocol: natProtoNever})
+			continue
+		}
 		if app, found := config.ResolveApplication(appName, userApps); found {
 			addApp(app)
 		} else if _, isSet := config.ResolveApplicationSet(appName, cfg.Applications.ApplicationSets); isSet {

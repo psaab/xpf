@@ -318,6 +318,19 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			if appConfigured {
 				userApps := cfg.Applications.Applications
 				for _, appName := range rule.Match.ApplicationList() {
+					// #11587: a tolerated application may look like an unconstrained
+					// ICMP term after its authored type/code was dropped. Keep the
+					// reference in the union, but poison it with an impossible port
+					// range so it cannot widen this DNAT rule; this also refuses a
+					// nested application-set reference as a whole.
+					if drops := config.ApplicationReferenceMatchDrops(appName, &cfg.Applications); len(drops) > 0 {
+						slog.Warn("userspace snapshot: destination NAT application has dropped match constraints; emitting a never-match term (fail-closed, #11587)",
+							"application", appName, "drops", drops)
+						appTerms = append(appTerms, appTerm{
+							srcPorts: []NatPortRangeWire{natNeverMatchPortRange},
+						})
+						continue
+					}
 					app, found := config.ResolveApplication(appName, userApps)
 					if found {
 						appTerms = append(appTerms, appTermFor(app))
