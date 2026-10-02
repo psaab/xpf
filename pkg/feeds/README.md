@@ -38,9 +38,10 @@ Refusal does not replace the installed set, stamp success, or publish to the
 dataplane. `LastError`, `StaleSince`, `show security dynamic-address`, and the
 per-feed refusal metrics identify the held candidate. The zero-prefix,
 truncation, and whole-address-space guards remain independent and unchanged.
-High-water history survives same-name reconfiguration and removal/recreation
-for the lifetime of the manager. It is not durable across a manager/process
-restart; a cold bootstrap after restart has no remembered size to audit.
+High-water history survives same-name reconfiguration and removal/recreation,
+and the daemon durably stores each feed's count and hash in
+`/var/lib/xpf/feed-shrink-history.json`. A cold boot restores that epoch before
+starting producers, so its first successful bootstrap is audited against it.
 
 Thresholds are runtime `feed-server` configuration, not build-time variables:
 
@@ -90,8 +91,8 @@ normal successful install clears a pending acknowledgement; `Manager.Apply`
 drops it when producer config is replaced. An explicit positive
 `hold-interval` also applies to a refusal: once it expires, the shared hold
 policy drops the last-good set and publishes the configured hold-expiry result.
-The next successful fetch is a bootstrap; if it is below the retained
-manager-lifetime high-water threshold, it installs with the same audit warning.
+The next successful fetch is a bootstrap; if it is below the remembered epoch
+high-water threshold, it installs with the same audit warning.
 
 The guard logs an initial Warn and re-Warns at most hourly for a persistent
 refusal. Prometheus exposes an active gauge and a per-feed counter for refused
@@ -123,9 +124,9 @@ groups:
 The #11489 bypasses are now guarded: cumulative under-floor shrinkage is
 compared with the epoch high-water baseline, and low-overlap content changes
 are refused. A same-manager delete/re-add retains the high-water count and
-warns on a smaller or changed same-sized bootstrap candidate. This memory is not
-durable across a manager/process restart. Keep the source feed's own
-integrity/monitoring controls in place.
+warns on a smaller or changed same-sized bootstrap candidate. The daemon also
+persists that per-feed count and hash across process restarts. Keep the source
+feed's own integrity/monitoring controls in place.
 
 ## Day-2 reconcile (#5036)
 

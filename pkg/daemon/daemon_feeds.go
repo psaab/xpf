@@ -2,13 +2,25 @@ package daemon
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/feeds"
+	"github.com/psaab/xpf/pkg/fsatomic"
+)
+
+// Keep guard epochs outside active config so same-name feeds retain their
+// review baseline across both config removal and daemon restart.
+var (
+	feedShrinkHistoryPath      = "/var/lib/xpf/feed-shrink-history.json"
+	feedShrinkHistoryWriteLock sync.Mutex
 )
 
 // ensureFeedManager lazily constructs the dynamic-address feed manager with the
@@ -23,7 +35,49 @@ func (d *Daemon) ensureFeedManager() {
 	if d.feeds != nil {
 		return
 	}
-	d.feeds = feeds.New(d.onFeedUpdate)
+	manager := feeds.New(d.onFeedUpdate)
+	manager.RestoreShrinkHighWater(readFeedShrinkHistory())
+	manager.SetShrinkHighWaterChangedCallback(func() {
+		persistFeedShrinkHistory(manager)
+	})
+	d.feeds = manager
+}
+
+func readFeedShrinkHistory() []feeds.ShrinkHighWater {
+	data, err := os.ReadFile(feedShrinkHistoryPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		slog.Warn("dynamic-address: failed to read persisted shrink high-water history", "path", feedShrinkHistoryPath, "err", err)
+		return nil
+	}
+	var records []feeds.ShrinkHighWater
+	if err := json.Unmarshal(data, &records); err != nil {
+		slog.Warn("dynamic-address: invalid persisted shrink high-water history", "path", feedShrinkHistoryPath, "err", err)
+		return nil
+	}
+	return records
+}
+
+func persistFeedShrinkHistory(manager *feeds.Manager) {
+	if manager == nil {
+		return
+	}
+	feedShrinkHistoryWriteLock.Lock()
+	defer feedShrinkHistoryWriteLock.Unlock()
+	data, err := json.Marshal(manager.ShrinkHighWaterSnapshot())
+	if err != nil {
+		slog.Warn("dynamic-address: failed to encode shrink high-water history", "err", err)
+		return
+	}
+	if err := fsatomic.MkdirAllDurable(filepath.Dir(feedShrinkHistoryPath), 0o700); err != nil {
+		slog.Warn("dynamic-address: failed to create shrink high-water history directory", "path", feedShrinkHistoryPath, "err", err)
+		return
+	}
+	if err := fsatomic.WriteFileDurable(feedShrinkHistoryPath, data, 0o600); err != nil {
+		slog.Warn("dynamic-address: failed to persist shrink high-water history", "path", feedShrinkHistoryPath, "err", err)
+	}
 }
 
 // onFeedUpdate is the dynamic-address feed manager's publication callback.
