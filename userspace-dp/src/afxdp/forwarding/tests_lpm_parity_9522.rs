@@ -197,6 +197,23 @@ fn same_prefix_lowest_preference_wins_9522() {
     assert_eq!(r.egress_ifindex, 11, "lowest preference (5) must win");
 }
 
+/// #11454 agreement cell: preference 1 is emitted as FRR distance 1 and
+/// remains the most-preferred ordinary route in the Rust FIB when compared
+/// with a preference-5 route for the same prefix.
+#[test]
+fn preference_one_is_more_preferred_than_five_11454() {
+    let state = state_with(vec![
+        v4_route("172.16.0.0/12", vec!["192.0.2.1"], 5),
+        v4_route("172.16.0.0/12", vec!["10.99.0.2"], 1),
+    ]);
+    let r = resolve_v4(&state, Ipv4Addr::new(172, 16, 5, 5));
+    assert_eq!(r.disposition, ForwardingDisposition::MissingNeighbor);
+    assert_eq!(
+        r.egress_ifindex, 11,
+        "Rust preference 1 must win over preference 5, matching FRR distance 1"
+    );
+}
+
 /// NOVEL: equal (prefix, preference) keeps insertion order (stable sort +
 /// first match). Listed first: 192.0.2.1 (egress 12).
 #[test]

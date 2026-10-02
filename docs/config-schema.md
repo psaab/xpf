@@ -15505,22 +15505,25 @@ of installing silently and then vanishing from the dataplane.
   `qualified-next-hop ... interface ...` are declared children of the `route`
   node, so a no-next-hop blackhole/leak route and the link-local-IPv6
   qualified-next-hop form still commit.
-- **preference (#3771, #3827)** — BOTH the route-level `preference` leaf
-  (#3771) AND the `qualified-next-hop <addr> preference <n>` leaf (#3827) are
-  typed `ValueInteger` + `ValidateInteger(0, maxWireI32)`: a non-negative
+- **preference (#3771, #3827, #11454)** — BOTH the route-level `preference`
+  leaf (#3771) AND the `qualified-next-hop <addr> preference <n>` leaf (#3827)
+  use `ValueInteger` + `ValidateInteger(1, maxWireI32)`: a strictly positive
   administrative distance representable on the i32 wire field the compiler
-  folds every preference into (`route.Preference`, compiler_routing.go). A
-  negative (would sort ahead of every route in the Rust FIB tie-break),
-  non-numeric, or i32-overflowing preference is a commit error naming the
-  leaf. This is the primary gate; the Rust helper backstops the wire bound
-  (`RoutePreferenceOutOfRange`) with a fail-closed snapshot rejection for a
-  corrupt / version-drifted snapshot. Typing the qualified-next-hop leaf
-  (#3827) closed the completeness gap where a bad preference expressed via the
-  qualified-next-hop syntax skipped the Go gate and reached only the opaque
-  Rust backstop (retained-prior-state instead of a commit diagnostic).
+  folds every preference into (`route.Preference`, compiler_routing.go).
+  Preference 0 is rejected at commit because the FRR renderers omit the
+  distance operand at 0, which selects FRR's default distance 1, while the
+  Rust FIB preserves 0. Negative, non-numeric, and i32-overflowing preferences
+  are also commit errors naming the leaf. The Rust helper backstops the wire
+  bound (`RoutePreferenceOutOfRange`) with a fail-closed snapshot rejection
+  for a corrupt / version-drifted snapshot. The existing qualified-next-hop
+  type gate (#3827) closes the completeness gap where invalid preference
+  syntax bypassed the route-level Go gate and reached only the opaque Rust
+  backstop (retained-prior-state instead of a commit diagnostic).
   Fail-on-revert tests: `pkg/config/schema_route_preference_3771_test.go`
   (route-level) and `pkg/config/schema_route_qnh_preference_3827_test.go`
-  (qualified-next-hop).
+  (qualified-next-hop); FRR distance-1 rendering is pinned in
+  `pkg/frr/frr_test.go` and Rust preference-1 ordering in
+  `userspace-dp/src/afxdp/forwarding/tests_lpm_parity_9522.rs`.
 
 Before #2448 both leaves were accepted untyped: the Rust FIB builder
 (`userspace-dp forwarding_build/fib.rs populate_routes`) soft-skips a

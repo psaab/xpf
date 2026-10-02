@@ -5,18 +5,15 @@ import (
 	"testing"
 )
 
-// #3771 (L1): the route `preference` leaf is a typed integer bounded to
-// [0, 2147483647] at the Go commit boundary. Junos route preference is a
-// non-negative admin distance, and the snapshot serializes it as a Rust i32,
-// so a negative value (the documented defect — it would sort ahead of every
-// route in the Rust FIB tie-break) or an i32-overflowing value is rejected at
-// commit. The Rust helper backstops the lower bound too
-// (RoutePreferenceOutOfRange).
+// #3771/#11454: the route `preference` leaf is a typed integer bounded to
+// [1, 2147483647] at the Go commit boundary. FRR defaults an omitted static
+// distance to 1 while the Rust FIB preserves preference 0, so accepting 0
+// would silently change the route's meaning at render time. Reject it at
+// commit, uniformly with the qualified-next-hop preference leaf.
 //
 // FAIL-ON-REVERT: dropping the `valueType: ValueInteger, validator:
-// ValidateInteger(0, maxWireI32)` on the schema `preference` leaf makes the
-// untyped leaf accept any token again, so the negative/overflow reject
-// assertions below fire RED.
+// ValidateInteger(1, maxWireI32)` on the schema `preference` leaf lets
+// preference 0 through, diverging from FRR's default distance 1.
 func TestStaticRoutePreference_SchemaGate(t *testing.T) {
 	reject := func(val string) {
 		t.Helper()
@@ -34,12 +31,12 @@ func TestStaticRoutePreference_SchemaGate(t *testing.T) {
 			t.Fatalf("preference %q: expected SchemaValidate to accept, got %v", val, err)
 		}
 	}
-	// Negative (the #3771 defect), non-numeric, and i32-overflow reject.
-	for _, val := range []string{"-1", "-2147483648", "notanumber", "2147483648", "4294967295"} {
+	// Zero, negative, non-numeric, and i32-overflow reject.
+	for _, val := range []string{"0", "-1", "-2147483648", "notanumber", "2147483648", "4294967295"} {
 		reject(val)
 	}
-	// 0 (most-preferred) and normal values through the i32 ceiling accept.
-	for _, val := range []string{"0", "1", "5", "100", "2147483647"} {
+	// Preference 1 is accepted explicitly and remains a Rust value of 1.
+	for _, val := range []string{"1", "5", "100", "2147483647"} {
 		accept(val)
 	}
 }

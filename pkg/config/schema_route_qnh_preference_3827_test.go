@@ -5,20 +5,15 @@ import (
 	"testing"
 )
 
-// #3827 (Low, #3771/#3826 follow-up): the qualified-next-hop `preference`
-// leaf is a typed integer bounded to [0, 2147483647] at the Go commit
-// boundary, mirroring the route-level `preference` leaf (#3771). The
-// compiler folds a qualified-next-hop preference into the same route.Preference
-// i32 wire field (compiler_routing.go), so an untyped qnh preference let a
-// negative / i32-overflow value slip past the primary Go gate and land on the
-// Rust snapshot backstop (RoutePreferenceOutOfRange) — an opaque
-// snapshot-rejection with retained-prior-state instead of a clean commit error
-// naming the leaf.
+// #3827/#11454: the qualified-next-hop `preference` leaf uses the same
+// [1, 2147483647] commit-time range as route-level preference. The compiler
+// folds it into the same route.Preference i32 field; accepting 0 here while
+// rejecting it at the route level would leave another route to diverge from
+// FRR, whose omitted static distance defaults to 1.
 //
 // FAIL-ON-REVERT: dropping the `valueType: ValueInteger, validator:
-// ValidateInteger(0, maxWireI32)` on the qualified-next-hop `preference` leaf
-// makes the untyped leaf accept any token again, so the negative/overflow
-// reject assertions below fire RED.
+// ValidateInteger(1, maxWireI32)` on the qualified-next-hop `preference`
+// leaf lets a zero preference through to FRR without an explicit distance.
 func TestStaticRouteQualifiedNextHopPreference_SchemaGate(t *testing.T) {
 	reject := func(val string) {
 		t.Helper()
@@ -36,12 +31,12 @@ func TestStaticRouteQualifiedNextHopPreference_SchemaGate(t *testing.T) {
 			t.Fatalf("qualified-next-hop preference %q: expected SchemaValidate to accept, got %v", val, err)
 		}
 	}
-	// Negative (the primary-gate gap), non-numeric, and i32-overflow reject.
-	for _, val := range []string{"-1", "-2147483648", "notanumber", "2147483648", "4294967295"} {
+	// Zero, negative, non-numeric, and i32-overflow reject.
+	for _, val := range []string{"0", "-1", "-2147483648", "notanumber", "2147483648", "4294967295"} {
 		reject(val)
 	}
-	// 0 (most-preferred) and normal values through the i32 ceiling accept.
-	for _, val := range []string{"0", "1", "5", "100", "2147483647"} {
+	// Preference 1 is the minimum distance shared with route-level preference.
+	for _, val := range []string{"1", "5", "100", "2147483647"} {
 		accept(val)
 	}
 }

@@ -67,6 +67,51 @@ func TestGenerateStaticRoute_Preference(t *testing.T) {
 	}
 }
 
+func TestGenerateStaticRoutePreferenceOneRendersDistance11454(t *testing.T) {
+	m := New()
+	cases := []struct {
+		name string
+		sr   *config.StaticRoute
+		want string
+	}{
+		{
+			name: "route-level next hop",
+			sr: &config.StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []config.NextHopEntry{{Address: "192.168.1.1"}},
+				Preference:  1,
+			},
+			want: "ip route 10.0.0.0/8 192.168.1.1 1\n",
+		},
+		{
+			name: "qualified next hop",
+			sr: &config.StaticRoute{
+				Destination: "10.1.0.0/16",
+				NextHops: []config.NextHopEntry{{
+					Address: "192.168.2.1", Preference: 1, HasPreference: true,
+				}},
+			},
+			want: "ip route 10.1.0.0/16 192.168.2.1 1\n",
+		},
+		{
+			name: "discard",
+			sr: &config.StaticRoute{
+				Destination: "10.2.0.0/16",
+				Discard:     true,
+				Preference:  1,
+			},
+			want: "ip route 10.2.0.0/16 Null0 1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := m.generateStaticRoute(tc.sr, "", nil, nil, nil); got != tc.want {
+				t.Fatalf("rendered route = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestGenerateStaticRoute_LinkLocalInferredScope proves the #2452 fix end to
 // end at the renderer: an unqualified link-local next-hop whose interface was
 // resolved by inference (passed via ipv6NextHopInterfaces) renders WITH the
