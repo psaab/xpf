@@ -51,8 +51,8 @@ import (
 //     anyway.
 //   - Local key + valid token: accept, and record that the peer holds the key.
 //   - Local key + present-but-invalid token: reject (Unauthenticated).
-//   - Local key + no token + enforcement NOT armed: accept (grace window while
-//     the config-synced key propagates to the peer).
+//   - Local key + no token + enforcement NOT armed: accept read-only fabric
+//     RPCs during rollout; state-changing RPCs still require a valid token.
 //   - Local key + no token + enforcement armed: reject — a downgrade to
 //     tokenless once both nodes are keyed is an attack.
 //
@@ -62,12 +62,13 @@ import (
 // off the fabric token would be LAZY: nothing periodically dials the fabric
 // listener, so after a keyed node restarts there is a window — until the peer
 // next proxies an on-demand RPC (operator show/clear/failover) — where the
-// fabric would grace-accept tokenless ClearSessions / cross-node-failover from
-// any on-segment host. Heartbeats flow continuously at ~200ms, so arming off the
+// fabric would grace-accept tokenless read-only calls from any on-segment host.
+// Heartbeats flow continuously at ~200ms, so arming off the
 // heartbeat closes that window to ~one interval. The rolling-upgrade grace is
-// preserved: a not-yet-keyed peer is not signing heartbeats either, so neither
-// source arms during the transition. Independently, an unkeyed listener remains
-// GetStatus-only and never opens that grace for other RPCs.
+// preserved for read-only RPCs: a not-yet-keyed peer is not signing heartbeats
+// either, so neither source arms during the transition. Independently, an
+// unkeyed listener remains GetStatus-only and never opens that grace for other
+// RPCs.
 //
 // Residual 1 (same-args replay): the token is HMAC(PSK, domain ||
 // method-length || method || request-digest || window), where window =
@@ -306,6 +307,25 @@ func verifyFabricStreamArgsToken(keys [][]byte, token, method string, req interf
 	return false
 }
 
+// fabricAuthGraceAllowed limits the keyed-node rollout grace to read-only
+// fabric RPCs. The default is deliberately false so a newly admitted method
+// cannot inherit tokenless grace accidentally. All accepted SystemAction
+// verbs and ClearSessions mutate cluster state and are excluded.
+func fabricAuthGraceAllowed(method string, req interface{}) bool {
+	switch method {
+	case pb.BpfrxService_GetStatus_FullMethodName,
+		pb.BpfrxService_GetSessions_FullMethodName,
+		pb.BpfrxService_GetSessionSummary_FullMethodName,
+		pb.BpfrxService_GetZonePairSummary_FullMethodName,
+		pb.BpfrxService_MonitorInterface_FullMethodName:
+		return true
+	case pb.BpfrxService_ShowText_FullMethodName:
+		return isFabricSafeShowText(req)
+	default:
+		return false
+	}
+}
+
 // fabricAuthDecision applies the #4107 dual-accept policy for one inbound fabric
 // RPC and returns whether to accept it (and, when rejected, a short reason for
 // logging — never the token or key). It mirrors cluster.heartbeatAuthDecision so
@@ -320,13 +340,10 @@ func verifyFabricStreamArgsToken(keys [][]byte, token, method string, req interf
 //	                subsequent tokenless call is a downgrade attack, not a
 //	                rollout gap.
 //
-// #10698: the !keyConfigured accept-all branch below survives ONLY for the
-// GetStatus health probe. checkFabricAuth — the sole production caller of
-// this function — rejects every other unkeyed method before consulting it.
-// The restriction lives there (not here) because it is method-aware and this
-// function deliberately is not: it mirrors cluster.heartbeatAuthDecision,
-// and heartbeats need dual-accept for liveness while destructive RPCs must
-// not have it.
+// #10698: checkFabricAuthRequest first restricts the unkeyed listener to
+// GetStatus. With a key configured, it also applies fabricAuthGraceAllowed so
+// only read-only methods receive unarmed, tokenless rollout grace. This
+// method-independent helper continues to mirror cluster.heartbeatAuthDecision.
 func fabricAuthDecision(keyConfigured, present, tokenOK, enforceArmed bool) (bool, string) {
 	if !keyConfigured {
 		return true, ""
@@ -391,8 +408,9 @@ func (s *Server) fabricAcceptedKeys() [][]byte {
 // signal for the fabric downgrade-guard. Heartbeats flow continuously (~200ms),
 // so this arms within one interval of a keyed peer coming up, whereas the
 // fabric's own sticky flag arms only when the peer next dials an on-demand RPC
-// (an operator show/clear/failover) — which may be a long time, leaving a
-// post-restart window where the fabric would grace-accept tokenless calls.
+// (operator show/clear/failover) — which may be a long time, leaving a
+// post-restart window where the fabric would grace-accept tokenless read-only
+// calls.
 // heartbeatAuthSeenFn is a test seam; production reads the cluster manager.
 func (s *Server) heartbeatPeerAuthSeen() bool {
 	if s.heartbeatAuthSeenFn != nil {
@@ -462,11 +480,15 @@ func (s *Server) checkFabricAuthRequest(ctx context.Context, method string, req 
 		// what closes the post-restart window: after a keyed node restarts,
 		// nothing dials its fabric listener on-demand to arm the sticky flag,
 		// but its heartbeat receiver re-authenticates the peer within ~one
-		// interval and arms enforcement immediately. In a rolling upgrade
-		// where the peer is not yet keyed, the peer is not signing heartbeats
-		// either, so neither source arms and the dual-accept grace still holds.
+		// interval and arms enforcement immediately. In a rolling upgrade where
+		// the peer is not yet keyed, it is not signing heartbeats either,
+		// so the read-only rollout grace still holds.
 		armed := s.fabricPeerAuthSeen.Load() || s.heartbeatPeerAuthSeen()
-		accept, reason = fabricAuthDecision(keyConfigured, present, tokenOK, armed)
+		if !present && !armed && !fabricAuthGraceAllowed(method, req) {
+			accept, reason = false, "missing auth token (rollout grace is read-only)"
+		} else {
+			accept, reason = fabricAuthDecision(keyConfigured, present, tokenOK, armed)
+		}
 	}
 	if !accept {
 		// #6708: a present-but-invalid token may be a forgery, a wrong PSK, or

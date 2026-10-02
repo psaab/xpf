@@ -11,6 +11,8 @@ xpf (0.0.0) unstable; urgency=medium
   * Require a live VRF link type for tunnel bind, claim observation, and
     claim-lapse unbind; derive NAT egress diagnostics from quarantine-safe
     routing-instance ownership (#11494).
+  * Require authenticated tokens for fabric state changes during dual-accept
+    rollout grace while preserving grace for read-only peer RPCs (#11487).
   * Reject zone references to absent logical units and keep flow-sampling
     restrictions fail-closed rather than widening exports (#11433).
   * Retain DHCPv6 router-advertisement gateways through RA silence, re-solicit
