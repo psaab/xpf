@@ -602,6 +602,74 @@ func TestExportOwnerRGSessionsGetsAWorkDeadlineFloor9344(t *testing.T) {
 	}
 }
 
+// TestFibDumpGetsAResponseWorkDeadlineFloor11840 mirrors the helper's response
+// cap and proves a maximum fib_dump has time to serialize and write its JSON.
+func TestFibDumpGetsAResponseWorkDeadlineFloor11840(t *testing.T) {
+	src, err := os.ReadFile("../../../userspace-dp/src/protocol/control.rs")
+	if err != nil {
+		t.Fatalf("read helper protocol source: %v — cannot check fib_dump's response bound", err)
+	}
+	requestCapRE := regexp.MustCompile(`(?m)^\s*pub\(crate\)\s+const\s+MAX_CONTROL_REQUEST_BYTES:\s*usize\s*=\s*([0-9]+(?:\s*\*\s*[0-9]+)*);`)
+	requestMatch := requestCapRE.FindSubmatch(src)
+	if requestMatch == nil {
+		t.Fatal("could not find MAX_CONTROL_REQUEST_BYTES in helper source")
+	}
+	parseBytes := func(expression []byte) int {
+		value := 1
+		for _, factorText := range strings.Split(string(expression), "*") {
+			var factor int
+			if _, err := fmt.Sscanf(strings.TrimSpace(factorText), "%d", &factor); err != nil || factor <= 0 {
+				t.Fatalf("parse Rust byte-cap factor %q: %v", factorText, err)
+			}
+			value *= factor
+		}
+		return value
+	}
+	rustRequestCap := parseBytes(requestMatch[1])
+	responseCapRE := regexp.MustCompile(`(?m)^\s*pub\(crate\)\s+const\s+MAX_CONTROL_RESPONSE_BYTES:\s*usize\s*=\s*(MAX_CONTROL_REQUEST_BYTES|[0-9]+(?:\s*\*\s*[0-9]+)*);`)
+	responseMatch := responseCapRE.FindSubmatch(src)
+	if responseMatch == nil {
+		t.Fatal("could not find MAX_CONTROL_RESPONSE_BYTES in helper protocol source")
+	}
+	rustResponseCap := rustRequestCap
+	if string(responseMatch[1]) != "MAX_CONTROL_REQUEST_BYTES" {
+		rustResponseCap = parseBytes(responseMatch[1])
+	}
+	if rustResponseCap != MaxControlResponseBytes {
+		t.Fatalf("helper MAX_CONTROL_RESPONSE_BYTES=%d but Go MaxControlResponseBytes=%d",
+			rustResponseCap, MaxControlResponseBytes)
+	}
+
+	const (
+		assumedWorstCaseBytesPerSecond = 6 * 1024 * 1024
+		responseWorkPasses             = 3
+	)
+	wantWorkBudget := time.Duration((rustResponseCap*responseWorkPasses+assumedWorstCaseBytesPerSecond-1)/assumedWorstCaseBytesPerSecond) * time.Second
+	wantFloor := wantWorkBudget + controlBaseDeadline
+	if got := controlRoundtripDeadline(60); got != controlBaseDeadline {
+		t.Fatalf("60-byte fib_dump request body gets %v base deadline, want %v; test no longer exercises a small request",
+			got, controlBaseDeadline)
+	}
+	got := controlWorkDeadline("fib_dump", 60)
+	if got != wantFloor {
+		t.Errorf("fib_dump deadline = %v, want full serialize/write budget %v plus margin %v (%v)",
+			got, wantWorkBudget, controlBaseDeadline, wantFloor)
+	}
+	if floor := controlVerbDeadlineFloors9344["fib_dump"]; floor != wantFloor {
+		t.Errorf("fib_dump floor = %v, want response work budget %v plus margin %v (%v)",
+			floor, wantWorkBudget, controlBaseDeadline, wantFloor)
+	}
+	if wantFloor >= controlMaxDeadline/3 {
+		t.Errorf("fib_dump floor %v is not far below controlMaxDeadline %v", wantFloor, controlMaxDeadline)
+	}
+	for _, verb := range []string{"status", "apply_snapshot", "drain_session_deltas"} {
+		if d := controlWorkDeadline(verb, 60); d != controlBaseDeadline {
+			t.Errorf("%q with a small body = %v, want the %v base unchanged",
+				verb, d, controlBaseDeadline)
+		}
+	}
+}
+
 // TestRequestDetailedArmsTheWorkDeadline9344 binds the WIRING, not the sizing
 // function.
 //
@@ -631,10 +699,11 @@ func TestRequestDetailedArmsTheWorkDeadline9344(t *testing.T) {
 		m.cfg.ControlSocket = sock
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if _, err := m.requestDetailedLocked(ControlRequest{
-			Type:          verb,
-			SessionExport: &SessionExportRequest{OwnerRGs: []int{1}},
-		}); err != nil {
+		req := ControlRequest{Type: verb}
+		if verb == "export_owner_rg_sessions" {
+			req.SessionExport = &SessionExportRequest{OwnerRGs: []int{1}}
+		}
+		if _, err := m.requestDetailedLocked(req); err != nil {
 			t.Fatalf("%s round trip: %v", verb, err)
 		}
 		m.ctrlIOMu.Lock()
@@ -657,5 +726,9 @@ func TestRequestDetailedArmsTheWorkDeadline9344(t *testing.T) {
 	}
 	if want := controlVerbDeadlineFloors9344["export_owner_rg_sessions"]; got != want {
 		t.Errorf("export_owner_rg_sessions armed %v, want the declared floor %v", got, want)
+	}
+	got = arm(t, "fib_dump")
+	if want := controlVerbDeadlineFloors9344["fib_dump"]; got != want {
+		t.Errorf("fib_dump armed %v, want the declared response-work floor %v", got, want)
 	}
 }
