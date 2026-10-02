@@ -241,15 +241,17 @@ func toNftLo0Term(term *config.FirewallFilterTerm, pl map[string]*config.PrefixL
 		// FlexMatchUnrepresentable line below (#6804).
 		ICMPTypeUnrepresentable: len(term.UnknownICMPTypes) > 0,
 		ICMPCodeUnrepresentable: len(term.UnknownICMPCodes) > 0,
-		// #9875/#11334/#11896: an unrecognized `from` leaf (term.UnknownFrom,
-		// #3307), an unsupported literal-address `except` construct (#11334),
-		// a value-bearing leaf written with NO operand (term.ValuelessFrom,
+		// #9875/#11334/#11451/#11896: an unrecognized `from` leaf
+		// (term.UnknownFrom, #3307), an unsupported literal-address `except`
+		// construct (#11334), unresolved except prefix-lists (#11451), a
+		// value-bearing leaf written with NO operand (term.ValuelessFrom,
 		// #8480), OR conflicting terminal actions (#11896). A missing `from`
 		// constraint would widen the term; a terminal conflict must not install
 		// the lenient compiler's conservative discard as a new drop. Carry the
 		// marker shared with the userspace snapshot so the netlink builder refuses
 		// the whole plan and retains prior-good state.
 		FromUnrepresentable: len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0 ||
+			lo0HasUnresolvedPrefixListExcept(term, pl) ||
 			config.FilterHasConflictingTerminalActions(term.TerminalActions),
 		TCPFlags: term.TCPFlags,
 		// #6804: carry the flexible-match-range so the kernel mirror renders the

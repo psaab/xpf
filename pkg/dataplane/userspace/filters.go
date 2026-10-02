@@ -201,19 +201,22 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		if len(term.UnknownAddresses) > 0 {
 			snap.AddressUnrepresentable = true
 		}
-		// #9875/#11334/#11896: refuse the whole snapshot when a `from`
+		// #9875/#11334/#11451/#11896: refuse the whole snapshot when a `from`
 		// predicate is unenforced — either an unrecognized leaf
 		// (term.UnknownFrom, #3307), the recognized-but-unsupported
-		// literal-address `except` construct (#11334), or a value-bearing leaf
-		// written with NO operand (term.ValuelessFrom, #8480) — OR the term has
-		// conflicting terminal actions (#11896; see TerminalActions). The
-		// strict commit gates reject each shape; on lenient load / peer-sync the
-		// marker makes the Rust filter compiler reject this candidate snapshot,
-		// so reconcile retains the previous good state. Action-agnostic whole-
-		// snapshot refusal is required here: changing a conflicting terminal to
-		// discard would install a new drop, while poisoning a discard/reject term
-		// to match-nothing would let its traffic fall through to implicit accept.
+		// literal-address `except` construct (#11334), an unresolved except
+		// prefix-list (#11451), or a value-bearing leaf written with NO operand
+		// (#8480) — OR the term has conflicting terminal actions (#11896; see
+		// TerminalActions). The strict commit gates reject each shape; on lenient
+		// load / peer-sync the marker makes the Rust filter compiler reject this
+		// candidate snapshot, so reconcile retains the previous good state.
+		// Action-agnostic whole-snapshot refusal is required here: changing a
+		// conflicting terminal to discard would install a new drop, while
+		// poisoning a discard/reject term to match-nothing would let its traffic
+		// fall through to implicit accept.
 		if len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0 ||
+			hasUnresolvedPrefixListExcept(term.SourcePrefixLists, cfg) ||
+			hasUnresolvedPrefixListExcept(term.DestPrefixLists, cfg) ||
 			config.FilterHasConflictingTerminalActions(term.TerminalActions) {
 			snap.FromUnrepresentable = true
 		}
@@ -468,8 +471,8 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 //     them. NAME empty -> "match sources in {}" = match NOTHING (fail-closed).
 //   - `source-prefix-list NAME except` means "match every source EXCEPT those
 //     in NAME". Represented as the expanded prefixes plus `except=true`; the
-//     matcher evaluates `(addr ∈ prefixes) XOR except`. NAME empty -> "match
-//     sources NOT in {}" = match ALL.
+//     matcher evaluates `(addr ∈ prefixes) XOR except`. A DEFINED-empty NAME
+//     matches all, while an unresolved NAME is lowered fail-closed by action.
 //
 // Scope (this PR): the two clean, common cases are wired through —
 //  1. positive prefix-lists (with or without literal addresses), and
@@ -481,30 +484,29 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 // set). This shape is hard-rejected at commit by
 // config.validateFilterAddressExceptStrict (#3359); it reaches here only on the
 // tolerant load / peer-sync path (an already-persisted or peer-synced config —
-// #1960 no-brick). The resolution is POSITIVE-WINS: the except prefixes are
-// IGNORED (never folded into the positive set) and a warning is emitted. The
-// earlier behavior folded the except prefixes INTO the positive set, which was
-// fail-OPEN: a `discard`/`reject` term then no longer dropped the traffic the
-// operator carved out via `except`, and an `accept` term ADMITTED the prefixes
-// the operator wrote to exclude. Positive-wins keeps an `accept` term's admit
-// set no wider than the operator's positive scope and keeps a `discard`/`reject`
-// term dropping at least the positive set — fail-safe in both directions.
-// Sibling of the #3297 port-except positive-wins fallback. The faithful
-// structured representation (a positive set AND a negated set per direction) is
-// a documented follow-up.
+// #1960 no-brick). When every reference resolves, the resolution is
+// POSITIVE-WINS: the except prefixes are IGNORED (never folded into the positive
+// set) and a warning is emitted. An unresolved except is different: #11451
+// lowers it fail-closed by action instead of applying positive-wins or treating
+// the unknown set as defined-empty. The earlier behavior folded resolved except
+// prefixes INTO the positive set, which was fail-OPEN. Sibling of the #3297
+// port-except positive-wins fallback. The faithful structured representation (a
+// positive set AND a negated set per direction) is a documented follow-up.
 //
 // An undefined prefix-list reference is NOT silently dropped here — it is a
 // strict commit-time error (validateFirewallPrefixListReferencesStrict, #1960
-// strict/lenient pattern). On the tolerant load / peer-sync path that gate
-// downgrades to a warning and an unresolved reference contributes no prefixes;
-// because the reference still makes the direction `constrained`, the matcher
-// fails closed (positive) / match-all (except) per the empty-set semantics
-// above rather than collapsing to match-any.
+// strict/lenient pattern). On the tolerant load / peer-sync path it contributes
+// no prefixes, but the explicit `constrained` bit prevents it collapsing to
+// match-any. An unresolved positive reference matches nothing. An unresolved
+// except reference is distinguished from a defined-empty one and lowered
+// fail-closed by action (non-deny matches nothing; deny matches all); the
+// snapshot builder also marks the candidate unrepresentable so the dataplane
+// keeps its previous good snapshot (#11451).
 //
 // `action` is the term's terminating action ("accept"/"discard"/"reject"/"").
-// It only affects the #5225 action-aware fail-closed lowering of an UNRESOLVED
-// positive prefix-list ref combined with an `except` ref (see
-// ResolveFilterPrefixListAddrs); every other shape is action-independent.
+// It controls unresolved-reference lowering and the #5225 action-aware handling
+// of unresolved positive+resolved-except composition (see
+// ResolveFilterPrefixListAddrs).
 func resolvePrefixListAddrs(
 	literal []string,
 	refs []config.PrefixListRef,
@@ -516,6 +518,19 @@ func resolvePrefixListAddrs(
 		prefixLists = cfg.PolicyOptions.PrefixLists
 	}
 	return ResolveFilterPrefixListAddrs(literal, refs, prefixLists, filterName, termName, direction, action)
+}
+
+func hasUnresolvedPrefixListExcept(refs []config.PrefixListRef, cfg *config.Config) bool {
+	var prefixLists map[string]*config.PrefixList
+	if cfg != nil {
+		prefixLists = cfg.PolicyOptions.PrefixLists
+	}
+	for _, ref := range refs {
+		if ref.Except && prefixLists[ref.Name] == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // filterAddrIsReal mirrors the Rust matcher's addr_is_real (userspace-dp
@@ -568,14 +583,11 @@ func portsHaveReal(ports []string) bool {
 
 // firewallFilterActionDenies reports whether a firewall-filter term's terminating
 // action DROPS the packet — Junos `discard` (silent drop) or `reject` (drop with
-// an ICMP/TCP-RST notification). It gates the #5225 action-aware fail-closed
-// lowering of an UNRESOLVED positive prefix-list ref combined with an `except`
-// ref (ResolveFilterPrefixListAddrs): a deny term fails closed by matching ALL
-// (drop broadly, so a later permit cannot leak the traffic the deny was written
-// to stop); every other action — `accept`, a routing-instance (PBR) redirect, or
-// a modifier-only fall-through (Action == "") — fails closed by matching NOTHING,
-// because an unresolvable positive scope must never be admitted, redirected, or
-// counted as a match. The action strings match FirewallFilterTerm.Action /
+// an ICMP/TCP-RST notification). It gates action-aware fail-closed lowering in
+// ResolveFilterPrefixListAddrs: unresolved positive / except scopes match NOTHING
+// for every non-deny action, preventing admission or PBR steering of traffic
+// whose scope cannot be resolved; a deny matches ALL so it cannot fall through
+// to a later permit. The action strings match FirewallFilterTerm.Action /
 // FirewallTermSnapshot.Action ("accept"/"discard"/"reject"/"").
 func firewallFilterActionDenies(action string) bool {
 	return action == "discard" || action == "reject"
@@ -590,10 +602,8 @@ func firewallFilterActionDenies(action string) bool {
 // concatenation (#3433). resolvePrefixListAddrs delegates here; see the doc on
 // resolvePrefixListAddrs for the full empty-set / except / mixed semantics.
 // `action` is the term's terminating action ("accept"/"discard"/"reject"/"").
-// It participates in exactly ONE decision: the #5225 action-aware fail-closed
-// lowering of an UNRESOLVED positive prefix-list ref combined with an `except`
-// ref (see the compose gate below). Every other shape is action-independent, so
-// callers that do not care (or lack an action) may pass "".
+// It gates the fail-closed lowering of unresolved references; callers that do not
+// care (or lack an action) may pass "".
 func ResolveFilterPrefixListAddrs(
 	literal []string,
 	refs []config.PrefixListRef,
@@ -635,6 +645,7 @@ func ResolveFilterPrefixListAddrs(
 	var exceptPrefixes []string
 	hasExcept := false
 	hasPositiveRef := false
+	hasUnresolvedExceptRef := false
 	// hasUnresolvedPositiveRef records that a PLAIN (non-except) prefix-list ref
 	// failed to resolve (pl == nil) on the tolerant path. It is distinct from
 	// hasPositiveRef (a RESOLVED positive ref): an unresolved positive ref
@@ -648,41 +659,21 @@ func ResolveFilterPrefixListAddrs(
 		pl := prefixLists[ref.Name]
 		if pl == nil {
 			// Undefined reference. The strict gate rejects this at commit; on
-			// the tolerant path it is a warning and we contribute no prefixes
-			// for it — but the direction stays `constrained` (set above), so the
-			// matcher fails closed rather than matching any.
+			// the tolerant path it is a warning and contributes no prefixes,
+			// while the direction remains constrained (set above).
 			//
-			// #5097: still record the reference's POLARITY before skipping it.
-			// An unresolved `except` ref contributes no prefixes but MUST set
-			// hasExcept so a SOLE unresolved except lowers to the empty-set
-			// complement (nil, true, true) = "match every address NOT in {}" =
-			// match ALL, exactly like the resolved-but-empty except case below.
-			// The pre-#5097 `continue` skipped this before the ref.Except check,
-			// so hasExcept stayed false and a sole unresolved except collapsed to
-			// (nil, false, true) = match NOTHING — which turned a `discard`/
-			// `reject` term into a no-op on the tolerant/peer-sync path (the deny
-			// matched no packet and traffic fell through to a later permit), a
-			// fail-OPEN for the deny it was written to enforce. Recording
-			// hasExcept keeps the empty except set matching broadly (fail
-			// CLOSED). A positive ref contributes no prefixes: an unresolved
-			// positive scope with NO accompanying except correctly lowers to
-			// (nil, false, true) = match NOTHING, already fail-closed for positive
-			// membership.
-			//
-			// #5225: record an unresolved POSITIVE ref so the compose gate below
-			// can tell a genuine match-any positive (`0.0.0.0/0`, empty literal)
-			// apart from a positive set that is empty ONLY because a positive ref
-			// did not resolve. Without this the ref's absence from `positive` let
-			// addrsAllMatchAny return true and the `hasExcept` set (recorded above
-			// or by a sibling except ref) fired the "any except X" compose, which
-			// lowered the direction to match-ALL. For an `accept` term that is
-			// admit-ALL = fail-OPEN — the term admitted every packet instead of the
-			// intended (unresolvable, so empty) set.
+			// Record reference polarity before skipping. An unresolved except is
+			// NOT treated like a defined-empty except (#11451): it is lowered
+			// fail-closed by action after all refs have been examined. An
+			// unresolved positive ref is tracked separately so the #5225 compose
+			// gate does not confuse a missing positive set with a genuine match-any
+			// literal.
 			slog.Warn("firewall filter prefix-list reference unresolved",
 				"filter", filterName, "term", termName, "direction", direction,
 				"prefix-list", ref.Name)
 			if ref.Except {
 				hasExcept = true
+				hasUnresolvedExceptRef = true
 			} else {
 				hasUnresolvedPositiveRef = true
 			}
@@ -695,6 +686,19 @@ func ResolveFilterPrefixListAddrs(
 			hasPositiveRef = true
 			positive = append(positive, pl.Prefixes...)
 		}
+	}
+	if hasUnresolvedExceptRef {
+		// An unresolved negative set is NOT a defined-empty negative set: an
+		// empty except would match everything, potentially admitting or
+		// redirecting traffic the missing list intended to exclude. Keep the
+		// action-specific fail-closed direction: denies match all to prevent
+		// fall-through to a later permit; every non-deny action matches nothing.
+		// BuildFirewallFilterSnapshots also marks the candidate snapshot
+		// unrepresentable (#11451), so the fast-path keeps its prior good state.
+		if firewallFilterActionDenies(action) {
+			return nil, true, true
+		}
+		return nil, false, true
 	}
 
 	// Clean except case: an `except` prefix-list is the sole address source for
