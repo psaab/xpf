@@ -1350,7 +1350,7 @@ pub(in crate::afxdp) fn term_match_extra_from_meta(
 pub(in crate::afxdp) use super::addr_class::{
     dest_is_directed_broadcast, dest_is_multicast_or_broadcast, l2_dst_is_group_or_broadcast,
     neighbor_ip_is_learnable, neighbor_mac_is_learnable, source_is_invalid_for_icmp_error,
-    src_is_directed_broadcast, transit_src_is_martian,
+    src_is_directed_broadcast, transit_dst_is_martian, transit_src_is_martian,
 };
 
 /// Is the shim-stamped metadata tuple a RESOLVED flow identity, or only the

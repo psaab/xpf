@@ -198,6 +198,17 @@ pub(super) fn stage_flow_cache_hit(
         let cached_decision = cached.decision;
         let cached_descriptor = &cached.descriptor;
         let cached_metadata = &cached.metadata;
+        // #11413: a Consumed FlowCache hit bypasses the slow-path destination
+        // class gate, so reject it before liveness, rewrite, accounting or TX.
+        if transit_destination_class_drop(
+            cached_decision.resolution.disposition,
+            flow.dst_ip,
+            cached_decision.nat.rewrite_dst,
+        ) {
+            scratch.scratch_recycle.push(desc.addr);
+            telemetry.counters.record_martian_drop();
+            return FlowCacheOutcome::Consumed;
+        }
         // #10683: cached transit decisions still require the immutable
         // bind-less selector fence; an SA-up transition never authorizes
         // bypassing policy-based XFRM through AF_XDP.

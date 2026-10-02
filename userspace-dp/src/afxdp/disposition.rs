@@ -681,10 +681,8 @@ impl DispositionCounters<'_> {
             }
         }
     }
-    /// #4743: a NoRoute drop whose destination is a martian address. A strict
-    /// sub-breakout of `bump_route_miss` — the caller bumps BOTH, so
-    /// `martian_dropped <= route_miss_packets` always holds (mirrors how
-    /// `screen_reason_drops` break out `screen_drops`).
+    /// #4743: record a NoRoute destination-martian drop. This remains a subset
+    /// of route misses; the #11413 transit gate records its drops independently.
     #[inline]
     fn bump_martian(&mut self) {
         match self {
@@ -892,13 +890,10 @@ pub(super) fn record_forwarding_disposition(
         ForwardingDisposition::NoRoute => {
             update_last_resolution(last_resolution, resolution, debug, forwarding);
             counters.bump_route_miss();
-            // #4743: a NoRoute drop whose destination is a martian address is
-            // ALSO counted distinctly so an operator can tell it apart from an
-            // ordinary route miss (and correlate it with the filter-`accept`
-            // log). A martian dst simply misses the FIB and drops as NoRoute —
-            // there is no separate martian rejection site — so this classifies
-            // off the resolution's destination (from the debug tuple) and bumps
-            // martian_dropped IN ADDITION to route_miss_packets.
+            // #4743: a NoRoute martian destination still increments the shared
+            // `martian_dropped` counter, in addition to `route_miss_packets`.
+            // Post-FIB transit martian drops use the same tally without a
+            // route-miss increment.
             if debug
                 .and_then(|d| d.dst_ip)
                 .is_some_and(is_martian_dst)

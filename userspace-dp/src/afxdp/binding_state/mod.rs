@@ -123,13 +123,9 @@ pub(in crate::afxdp) struct BindingLiveState {
     pub(super) flowless_forward_packets: AtomicU64,
     pub(super) flowless_forward_bytes: AtomicU64,
     pub(super) route_miss_packets: AtomicU64,
-    /// #4743: cumulative NoRoute drops whose destination is a MARTIAN address
-    /// (IPv4 multicast/broadcast/unspecified/loopback, IPv6
-    /// multicast/unspecified/loopback). A strict sub-breakout of
-    /// `route_miss_packets` (a martian dst misses the FIB and drops as NoRoute,
-    /// so it bumps BOTH) — mirrors how `screen_reason_drops` break out
-    /// `screen_drops`. Lets an operator tell a martian-dst drop apart from an
-    /// ordinary route miss and correlate it with the filter-`accept` log.
+    /// #4743/#11413: cumulative destination-martian drops, including NoRoute
+    /// classifications and post-FIB transit rejections. Only NoRoute martians
+    /// increment `route_miss_packets` as well.
     /// Surfaced as the `Martian drops` operator counter.
     pub(super) martian_dropped: AtomicU64,
     /// #4743/#10665: cumulative fail-closed drops of IPv6 packets whose

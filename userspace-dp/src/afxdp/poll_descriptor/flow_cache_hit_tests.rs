@@ -3655,6 +3655,47 @@ fn cached_martian_source_is_dropped_before_forward_side_effects_10689() {
     assert_eq!(run.sessions.len(), 1, "the gate must preserve the live session");
 }
 
+#[test]
+fn cached_martian_destination_is_dropped_before_forward_side_effects_11413() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let destination = Ipv4Addr::new(224, 0, 0, 1);
+    let mut frame = tcp_v4_ack_frame();
+    frame[34..38].copy_from_slice(&destination.octets());
+    let mut meta = test_meta(&frame);
+    meta.flow_dst_addr[..4].copy_from_slice(&destination.octets());
+
+    let mut key = test_key();
+    key.dst_ip = IpAddr::V4(destination);
+    let mut entry = cached_entry();
+    entry.key = key.clone();
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key,
+    };
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed {
+            flow: Some(flow),
+            ..StageSeed::default()
+        },
+    );
+
+    assert_eq!(run.flow_cache_tallies, (1, 0, 0), "must be a real cache hit");
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(run.scratch.scratch_recycle.len(), 1);
+    assert!(run.scratch.scratch_forwards.is_empty());
+    assert!(run.tx_pipeline.pending_tx_prepared.is_empty());
+    assert_eq!(run.dbg_forward, 0);
+    assert_eq!(run.dbg_tx, 0);
+    assert_eq!(run.counters.martian_dropped, 1);
+    assert_eq!(run.sessions.len(), 1, "the gate must preserve the live session");
+}
+
 /// #10854: the admitted cache-hit learn must retain the original RX source MAC
 /// even though the same-binding fast path rewrites the Ethernet source to the
 /// router's egress MAC in place.

@@ -821,6 +821,24 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
         }
+        // #11413: keep a final destination-class backstop for live transit
+        // requests that wait in this queue while forwarding state changes.
+        if !matches!(&request.frame, PendingForwardFrame::Prebuilt(_))
+            && request
+                .meta
+                .l3_addrs_unfiltered()
+                .is_some_and(|(_, destination)| {
+                    crate::afxdp::poll_descriptor::transit_destination_class_drop(
+                        request.decision.resolution.disposition,
+                        destination,
+                        request.decision.nat.rewrite_dst,
+                    )
+                })
+        {
+            counters.record_martian_drop();
+            recycle_ingress_frame(ingress_binding, source_offset, now_ns);
+            continue;
+        }
         let ingress_slot = ingress_binding.slot;
         // #hb166 T-7: the deferred CoS-TX-selection resolution that used to
         // live here was DEAD. Every PendingForwardRequest is constructed
