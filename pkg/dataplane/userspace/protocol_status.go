@@ -514,6 +514,9 @@ type ProcessStatus struct {
 	// egress-MTU decision ran with no known MTU and fail-opened to Forward.
 	// Surfaced as xpf_userspace_egress_mtu_unknown_forward_total.
 	EgressMTUUnknownForwardTotal uint64 `json:"egress_mtu_unknown_forward_total,omitempty"`
+	// PTBUnbuildableTotal counts dropped oversized packets whose ICMP error
+	// could not be constructed. Surfaced as xpf_userspace_ptb_unbuildable_total.
+	PTBUnbuildableTotal uint64 `json:"ptb_unbuildable_total,omitempty"`
 	// EmbeddedQuoteSubminimalRefusedTotal is #9901 (F-077): embedded ICMP
 	// error quotes refused by the 8-byte quoted-L4 adequacy floor.
 	// Surfaced as xpf_userspace_embedded_quote_subminimal_refused_total.

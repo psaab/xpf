@@ -14,13 +14,13 @@
 // shell can call into `server::lifecycle::run`.
 
 use super::super::*;
-use std::time::Instant;
-use arc_swap::ArcSwapOption;
 use crate::server::reinject_9506::{
-    derive_reinject_complete_path, derive_reinject_submit_path, spawn_reinject_socket_servers,
-    ReinjectSocketServers,
+    ReinjectSocketServers, derive_reinject_complete_path, derive_reinject_submit_path,
+    spawn_reinject_socket_servers,
 };
 use crate::slowpath::SlowPathReinjector;
+use arc_swap::ArcSwapOption;
+use std::time::Instant;
 
 // Target for the kernel socket-buffer sysctls, in bytes. MUST match the Go
 // control plane's `tuneSocketBuffers` target (`pkg/dataplane/userspace/
@@ -431,6 +431,7 @@ pub(crate) fn run() -> Result<(), String> {
             nat64_frag_protocol_alias_misses_total: 0,
             frag_max_lifetime_evictions_total: 0,
             egress_mtu_unknown_forward_total: 0,
+            ptb_unbuildable_total: 0,
             embedded_quote_subminimal_refused_total: 0,
             embedded_error_per_session_suppressed_total: 0,
             interface_snat_identity_exhaustion_total: 0,
@@ -648,14 +649,13 @@ pub(crate) fn run() -> Result<(), String> {
     let reinject_handoff = Arc::new(std::sync::Mutex::new(()));
     let reinject_target: Arc<ArcSwapOption<SlowPathReinjector>> =
         Arc::new(ArcSwapOption::new(None));
-    let reinject_servers: ReinjectSocketServers =
-        spawn_reinject_socket_servers(
-            &args.control_socket,
-            reinject_core,
-            reinject_target.clone(),
-            running.clone(),
-            reinject_handoff.clone(),
-        )?;
+    let reinject_servers: ReinjectSocketServers = spawn_reinject_socket_servers(
+        &args.control_socket,
+        reinject_core,
+        reinject_target.clone(),
+        running.clone(),
+        reinject_handoff.clone(),
+    )?;
     eprintln!(
         "xpf-userspace-dp: reinject sockets at {} and {}",
         reinject_servers.submit_path, reinject_servers.complete_path
@@ -750,9 +750,7 @@ pub(crate) fn run() -> Result<(), String> {
                             // #9003: prove the peer before dispatching. A
                             // connectable session socket installs and reads
                             // sessions.
-                            if let Err(err) =
-                                reject_unprivileged_peer("session socket", &stream)
-                            {
+                            if let Err(err) = reject_unprivileged_peer("session socket", &stream) {
                                 eprintln!("xpf-userspace-dp: {err}");
                                 continue;
                             }
@@ -868,9 +866,7 @@ pub(crate) fn run() -> Result<(), String> {
     // best-effort posture — a cleanup failure logs a warning and does not
     // fail shutdown.
     if let Err(e) = remove_stale_socket(&reinject_submit_socket) {
-        eprintln!(
-            "xpf-userspace-dp: reinject submit socket cleanup {reinject_submit_socket}: {e}"
-        );
+        eprintln!("xpf-userspace-dp: reinject submit socket cleanup {reinject_submit_socket}: {e}");
     }
     if let Err(e) = remove_stale_socket(&reinject_complete_socket) {
         eprintln!(
@@ -1286,7 +1282,7 @@ mod sockbuf_raise_only_tests {
     // wrote 16 MiB to rmem_default/rmem_max, clobbering the 64 MiB the Go
     // control plane had just raised them to. These tests pin the raise-only
     // contract: revert to the unconditional write and they go RED.
-    use super::{raise_only_value, raise_sysctl, SOCKBUF_TARGET};
+    use super::{SOCKBUF_TARGET, raise_only_value, raise_sysctl};
     use std::fs;
 
     // 16 MiB — the value the pre-#2970 helper unconditionally forced.
@@ -1314,9 +1310,15 @@ mod sockbuf_raise_only_tests {
     #[test]
     fn raises_a_lower_value_to_target() {
         // Kernel default 208 KiB → raised to 64 MiB.
-        assert_eq!(raise_only_value("212992", SOCKBUF_TARGET), Some(SOCKBUF_TARGET));
+        assert_eq!(
+            raise_only_value("212992", SOCKBUF_TARGET),
+            Some(SOCKBUF_TARGET)
+        );
         // The pre-#2970 forced 16 MiB is itself below target → would be raised.
-        assert_eq!(raise_only_value("16777216", SOCKBUF_TARGET), Some(SOCKBUF_TARGET));
+        assert_eq!(
+            raise_only_value("16777216", SOCKBUF_TARGET),
+            Some(SOCKBUF_TARGET)
+        );
     }
 
     #[test]
@@ -1368,7 +1370,10 @@ mod sockbuf_raise_only_tests {
 
         let after: i64 = fs::read_to_string(p).unwrap().trim().parse().unwrap();
         let _ = fs::remove_file(p);
-        assert_eq!(after, SOCKBUF_TARGET, "raise_sysctl must raise a low value to target");
+        assert_eq!(
+            after, SOCKBUF_TARGET,
+            "raise_sysctl must raise a low value to target"
+        );
     }
 }
 

@@ -59,11 +59,23 @@ pub(crate) struct ProcessStatus {
     pub linked_libxdp_version: String,
     #[serde(rename = "linked_libbpf_version", default)]
     pub linked_libbpf_version: String,
-    #[serde(rename = "linked_libelf_version", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "linked_libelf_version",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub linked_libelf_version: String,
-    #[serde(rename = "linked_zlib_version", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "linked_zlib_version",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub linked_zlib_version: String,
-    #[serde(rename = "linked_zstd_version", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "linked_zstd_version",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub linked_zstd_version: String,
     #[serde(rename = "build_host_libbpf_version", default)]
     pub build_host_libbpf_version: String,
@@ -162,6 +174,10 @@ pub(crate) struct ProcessStatus {
     /// known MTU and fail-opened to `Forward`. Additive + `default`ed (#1961).
     #[serde(rename = "egress_mtu_unknown_forward_total", default)]
     pub egress_mtu_unknown_forward_total: u64,
+    /// #11437: PTB errors that could not be built; the original oversized
+    /// packet was dropped without a PMTU signal. Additive + `default`ed.
+    #[serde(rename = "ptb_unbuildable_total", default)]
+    pub ptb_unbuildable_total: u64,
     /// #9901 (F-077): embedded quotes refused by the 8-byte quoted-L4 floor.
     /// Additive + `default`ed (#1961).
     #[serde(rename = "embedded_quote_subminimal_refused_total", default)]
@@ -233,7 +249,11 @@ pub(crate) struct ProcessStatus {
     /// Presence-tracked and omitted when `None`: older Go helpers that ignore
     /// the key retain the #9696 ACK-equality fallback, while Go reads a
     /// missing key as the legacy/no-outcome case.
-    #[serde(rename = "neighbor_replace_applied", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "neighbor_replace_applied",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub neighbor_replace_applied: Option<bool>,
     #[serde(rename = "route_entries", default)]
     pub route_entries: usize,
@@ -1114,7 +1134,11 @@ pub(crate) struct ProcessStatus {
     /// #10478: q0 reinject authority, terminal outcomes, and bounded
     /// provenance. The block is absent until the daemon has announced the
     /// run/generation join key; zero counters in a present block are real.
-    #[serde(rename = "s5_reinject", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "s5_reinject",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub s5_reinject: Option<S5ReinjectStatus>,
     #[serde(rename = "debug_worker_threads", default)]
     pub debug_worker_threads: usize,

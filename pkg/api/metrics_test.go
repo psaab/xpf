@@ -1059,6 +1059,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspacePTBUnbuildable: prometheus.NewDesc(
+			"xpf_userspace_ptb_unbuildable_total",
+			"Oversized forwarded packets dropped because the ICMP Fragmentation "+
+				"Needed or Packet Too Big error could not be constructed; no PMTU "+
+				"signal was sent.",
+			nil,
+			nil,
+		),
 		userspaceEmbeddedQuoteSubminimalRefused: prometheus.NewDesc(
 			"xpf_userspace_embedded_quote_subminimal_refused_total",
 			"embedded subminimal quote refusals",
@@ -1634,6 +1642,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// field swaps two numbers that differ.
 		FragMaxLifetimeEvictionsTotal:               37,
 		EgressMTUUnknownForwardTotal:                43,
+		PTBUnbuildableTotal:                         61,
 		EmbeddedQuoteSubminimalRefusedTotal:         47,
 		EmbeddedErrorPerSessionSuppressedTotal:      59,
 		InterfaceSNATIdentityExhaustionTotal:        19,
@@ -1756,13 +1765,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// +1 for #10729 X2-F6's AH-flowless total = 89; +1 for #10865 GRE
 	// PT/nibble mismatch refusals = 90 (asserted below).
 	// #10788-F1: strict mirror refusal plus republished/deleted/failed restore
-	// outcomes add four distinct lifetime counters, for 94 total.
+	// outcomes add four distinct lifetime counters, for 94 total; #11437's
+	// unbuildable-PTB counter adds one more, for 95.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 94 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 94 metrics, got %d", len(got))
+	if len(got) != 95 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 95 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1793,6 +1803,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// alone would pass against emits wired to the wrong field.
 	assertCounterClose(t, got, c.userspaceFragMaxLifetimeEvictions, nil, 37)
 	assertCounterClose(t, got, c.userspaceEgressMTUUnknownForward, nil, 43)
+	assertCounterClose(t, got, c.userspacePTBUnbuildable, nil, 61)
 	assertCounterClose(t, got, c.userspaceEmbeddedQuoteSubminimalRefused, nil, 47)
 	assertCounterClose(t, got, c.userspaceEmbeddedErrorPerSessionSuppressed, nil, 59)
 	assertCounterClose(t, got, c.userspaceInterfaceSNATIdentityExhaustion, nil, 19)

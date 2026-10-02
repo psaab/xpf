@@ -329,16 +329,30 @@ mod exception_ring_merge_6101 {
         let base = Instant::now();
 
         // Control-thread ring: one event at t+30ms.
-        coord.recent_exceptions.lock().expect("control ring").push(
-            ExceptionEvent::for_test(base + Duration::from_millis(30), "control_ev", "ctl"),
-        );
+        coord
+            .recent_exceptions
+            .lock()
+            .expect("control ring")
+            .push(ExceptionEvent::for_test(
+                base + Duration::from_millis(30),
+                "control_ev",
+                "ctl",
+            ));
 
         // Worker 0 ring: events at t+10ms and t+50ms.
         let w0 = Arc::new(Mutex::new(ExceptionEventRing::new()));
         {
             let mut g = w0.lock().expect("w0");
-            g.push(ExceptionEvent::for_test(base + Duration::from_millis(10), "w0_a", "w0"));
-            g.push(ExceptionEvent::for_test(base + Duration::from_millis(50), "w0_b", "w0"));
+            g.push(ExceptionEvent::for_test(
+                base + Duration::from_millis(10),
+                "w0_a",
+                "w0",
+            ));
+            g.push(ExceptionEvent::for_test(
+                base + Duration::from_millis(50),
+                "w0_b",
+                "w0",
+            ));
         }
         insert_worker_with_exception_ring(&mut coord, 0, w0);
 
@@ -346,8 +360,16 @@ mod exception_ring_merge_6101 {
         let w1 = Arc::new(Mutex::new(ExceptionEventRing::new()));
         {
             let mut g = w1.lock().expect("w1");
-            g.push(ExceptionEvent::for_test(base + Duration::from_millis(20), "w1_a", "w1"));
-            g.push(ExceptionEvent::for_test(base + Duration::from_millis(40), "w1_b", "w1"));
+            g.push(ExceptionEvent::for_test(
+                base + Duration::from_millis(20),
+                "w1_a",
+                "w1",
+            ));
+            g.push(ExceptionEvent::for_test(
+                base + Duration::from_millis(40),
+                "w1_b",
+                "w1",
+            ));
         }
         insert_worker_with_exception_ring(&mut coord, 1, w1);
 
@@ -411,7 +433,10 @@ mod exception_ring_merge_6101 {
         // of worker 0; the 8 oldest worker-0 events are dropped by the cap.
         let w1_count = merged.iter().filter(|s| s.reason == "w1_ev").count();
         let w0_count = merged.iter().filter(|s| s.reason == "w0_ev").count();
-        assert_eq!(w1_count, 20, "all 20 newest (worker 1) events survive the cap");
+        assert_eq!(
+            w1_count, 20,
+            "all 20 newest (worker 1) events survive the cap"
+        );
         assert_eq!(
             w0_count,
             EXCEPTION_RING_CAPACITY - 20,
@@ -425,8 +450,10 @@ mod exception_ring_merge_6101 {
         let base = Instant::now();
 
         // Control slot: t+10ms, egress 10.
-        *coord.last_resolution.lock().expect("control") =
-            Some(ResolutionEvent::for_test(base + Duration::from_millis(10), 10));
+        *coord.last_resolution.lock().expect("control") = Some(ResolutionEvent::for_test(
+            base + Duration::from_millis(10),
+            10,
+        ));
         // Worker 0 slot: t+30ms, egress 30 (the newest).
         insert_worker_with_last_resolution(
             &mut coord,
@@ -520,8 +547,14 @@ fn wg_tunnel_status_carries_endpoint_resolver_counters_7936() {
     let telemetry = std::sync::Arc::new(WgEndpointResolverTelemetry::default());
     telemetry.counters.resolve_ok.store(11, Ordering::Relaxed);
     telemetry.counters.resolve_fail.store(12, Ordering::Relaxed);
-    telemetry.counters.family_mismatch.store(13, Ordering::Relaxed);
-    telemetry.counters.endpoint_changed.store(14, Ordering::Relaxed);
+    telemetry
+        .counters
+        .family_mismatch
+        .store(13, Ordering::Relaxed);
+    telemetry
+        .counters
+        .endpoint_changed
+        .store(14, Ordering::Relaxed);
     *telemetry.last_error.lock().expect("last_error") =
         Some("vpn.example.com: no AAAA for a v6 socket".to_string());
 
@@ -600,7 +633,11 @@ fn wg_tunnel_status_reports_zeros_without_a_resolver_7936() {
     );
     // No wg_control_threads entry at all.
     let rows = coord.wg_tunnel_statuses();
-    assert_eq!(rows.len(), 1, "a row is never dropped for missing telemetry");
+    assert_eq!(
+        rows.len(),
+        1,
+        "a row is never dropped for missing telemetry"
+    );
     assert_eq!(rows[0].endpoint_resolve_ok, 0);
     assert_eq!(rows[0].endpoint_family_mismatch, 0);
     assert!(rows[0].endpoint_last_error.is_empty());

@@ -231,6 +231,11 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		float64(status.EgressMTUUnknownForwardTotal),
 	)
 	ch <- prometheus.MustNewConstMetric(
+		c.userspacePTBUnbuildable,
+		prometheus.CounterValue,
+		float64(status.PTBUnbuildableTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
 		c.userspaceEmbeddedQuoteSubminimalRefused,
 		prometheus.CounterValue,
 		float64(status.EmbeddedQuoteSubminimalRefusedTotal),

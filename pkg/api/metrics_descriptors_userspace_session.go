@@ -128,6 +128,13 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"tunnel kind) behind healthy-looking forwards.",
 		nil, nil,
 	)
+	c.userspacePTBUnbuildable = prometheus.NewDesc(
+		"xpf_userspace_ptb_unbuildable_total",
+		"Oversized forwarded packets dropped because the ICMP Fragmentation "+
+			"Needed or Packet Too Big error could not be constructed; no PMTU "+
+			"signal was sent.",
+		nil, nil,
+	)
 	c.userspaceInterfaceSNATPATCollisions = prometheus.NewDesc(
 		"xpf_userspace_interface_snat_pat_collisions_total",
 		"#6751: interface-mode source-NAT admissions whose PRESERVED "+

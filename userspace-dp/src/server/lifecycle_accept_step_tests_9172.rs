@@ -79,7 +79,11 @@ fn the_session_loop_never_takes_forwarding_down_9172() {
 #[test]
 fn nothing_pending_keeps_the_loops_poll_interval_9172() {
     let mut b = AcceptBackoff::new();
-    let d = session(&mut b, Err(std::io::ErrorKind::WouldBlock.into()), Instant::now());
+    let d = session(
+        &mut b,
+        Err(std::io::ErrorKind::WouldBlock.into()),
+        Instant::now(),
+    );
     match d.step {
         AcceptStep::Sleep(s) => assert_eq!(s, Duration::from_millis(10)),
         other => panic!("WouldBlock must poll, got {other:?}"),
@@ -107,7 +111,9 @@ fn failures_back_off_to_a_ceiling_and_reset_on_success_9172() {
     assert_eq!(delays, vec![50, 100, 200, 400, 800, 1000, 1000]);
     let served = control(&mut b, Ok(()), at);
     assert!(matches!(served.step, AcceptStep::Serve(())));
-    let line = served.log.expect("a recovery after failures writes a recovery line");
+    let line = served
+        .log
+        .expect("a recovery after failures writes a recovery line");
     assert!(line.contains("recovered after 7 failure(s)"), "{line:?}");
     match control(&mut b, os(libc::EMFILE), at).step {
         AcceptStep::Sleep(d) => {
@@ -136,21 +142,30 @@ fn a_persistent_resource_failure_never_exits_and_logs_once_9172() {
         );
         lines += d.log.is_some() as usize;
     }
-    assert_eq!(lines, 1, "a persistent failure must not write a line per retry");
+    assert_eq!(
+        lines, 1,
+        "a persistent failure must not write a line per retry"
+    );
 }
 
 #[test]
 fn a_quiet_gap_between_failures_starts_a_new_episode_9172() {
     let t0 = Instant::now();
     let mut b = AcceptBackoff::new();
-    assert!(matches!(control(&mut b, os(libc::EMFILE), t0).step, AcceptStep::Sleep(_)));
+    assert!(matches!(
+        control(&mut b, os(libc::EMFILE), t0).step,
+        AcceptStep::Sleep(_)
+    ));
     let d = control(&mut b, os(libc::EMFILE), t0 + Duration::from_secs(600));
     match d.step {
         AcceptStep::Sleep(s) => assert_eq!(s, AcceptBackoff::INITIAL),
         other => panic!("a failure after a quiet gap must start a new episode, got {other:?}"),
     }
     let line = d.log.expect("the new episode writes its onset line");
-    assert!(line.contains("previous episode of 1 failure(s) ended"), "{line:?}");
+    assert!(
+        line.contains("previous episode of 1 failure(s) ended"),
+        "{line:?}"
+    );
 }
 
 #[test]
@@ -169,12 +184,21 @@ fn both_accept_loops_are_wired_through_accept_step_9172() {
     let total = src.matches(bare.as_str()).count();
     let mut calls = Vec::new();
     for (i, _) in src.match_indices(call.as_str()) {
-        let args_end = src[i..].find(");").map(|e| i + e).expect("unterminated accept_step call");
+        let args_end = src[i..]
+            .find(");")
+            .map(|e| i + e)
+            .expect("unterminated accept_step call");
         calls.push(&src[i + call.len()..args_end]);
     }
     let wired = calls.iter().filter(|a| a.contains(bare.as_str())).count();
-    assert_eq!(total, 2, "run() must accept on exactly the two listeners, found {total}");
-    assert_eq!(wired, total, "every accept() result must go through accept_step");
+    assert_eq!(
+        total, 2,
+        "run() must accept on exactly the two listeners, found {total}"
+    );
+    assert_eq!(
+        wired, total,
+        "every accept() result must go through accept_step"
+    );
     let session_call = calls
         .iter()
         .find(|a| a.contains("\"session socket\""))
@@ -183,6 +207,18 @@ fn both_accept_loops_are_wired_through_accept_step_9172() {
         .iter()
         .find(|a| a.contains("\"control socket\""))
         .expect("control accept_step call");
-    assert!(session_call.trim_end().trim_end_matches(',').ends_with("true"), "session loop must retry unclassified errors");
-    assert!(control_call.trim_end().trim_end_matches(',').ends_with("false"), "control loop must fail on unclassified errors");
+    assert!(
+        session_call
+            .trim_end()
+            .trim_end_matches(',')
+            .ends_with("true"),
+        "session loop must retry unclassified errors"
+    );
+    assert!(
+        control_call
+            .trim_end()
+            .trim_end_matches(',')
+            .ends_with("false"),
+        "control loop must fail on unclassified errors"
+    );
 }

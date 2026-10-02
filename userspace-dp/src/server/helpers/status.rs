@@ -92,8 +92,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     }
     state.status.io_uring_retained_buffers_total =
         crate::io_uring_write::process_retained().buffers();
-    state.status.io_uring_retained_bytes_total =
-        crate::io_uring_write::process_retained().bytes();
+    state.status.io_uring_retained_bytes_total = crate::io_uring_write::process_retained().bytes();
     // #7944: capacity refusals, same process-global sink.
     state.status.io_uring_write_refused_total =
         crate::io_uring_write::process_retained().refused_writes();
@@ -115,8 +114,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // from the same coordinator status surface as the existing neighbor
     // counters, then carried in ProcessStatus for Prometheus.
     state.status.ndp_na_frag_refused_total = state.afxdp.ndp_na_frag_refused_total();
-    state.status.ndp_na_bad_source_refused_total =
-        state.afxdp.ndp_na_bad_source_refused_total();
+    state.status.ndp_na_bad_source_refused_total = state.afxdp.ndp_na_bad_source_refused_total();
     state.status.route_change_unrejudged_sessions_total =
         state.afxdp.route_change_unrejudged_sessions_total();
     // #1789: total failed USERSPACE_SESSIONS BPF-map publishes
@@ -175,8 +173,9 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.frag_max_lifetime_evictions_total();
     // #9901 (F-074): unknown-MTU fail-open forwards — the configuration /
     // tunnel-kind signal, distinct from in-MTU fast-path forwards.
-    state.status.egress_mtu_unknown_forward_total =
-        state.afxdp.egress_mtu_unknown_forward_total();
+    state.status.egress_mtu_unknown_forward_total = state.afxdp.egress_mtu_unknown_forward_total();
+    // #11437: PTB packets dropped because their ICMP error could not be built.
+    state.status.ptb_unbuildable_total = state.afxdp.ptb_unbuildable_total();
     // #9901 (F-077): subminimal-quote refusals — the forged-short-quote
     // signal, distinct from matched-error delivery.
     state.status.embedded_quote_subminimal_refused_total =
@@ -220,7 +219,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     state.status.zone_gate_no_generation_total = ipsec_inner.zone_gate_no_generation_total;
     state.status.ipsec_inner_parse_drops_total = ipsec_inner.ipsec_inner_parse_drops_total;
     state.status.ipsec_inner_ecn_illegal_drops = ipsec_inner.ipsec_inner_ecn_illegal_drops;
-    state.status.ipsec_inner_worker_queue_full_total = ipsec_inner.ipsec_inner_worker_queue_full_total;
+    state.status.ipsec_inner_worker_queue_full_total =
+        ipsec_inner.ipsec_inner_worker_queue_full_total;
     state.status.ipsec_inner_verdict_queue_full_total =
         ipsec_inner.ipsec_inner_verdict_queue_full_total;
     state.status.ipsec_inner_slab_exhausted_total = ipsec_inner.ipsec_inner_slab_exhausted_total;
@@ -269,10 +269,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // assigned into ProcessStatus, so they reached no operator through status,
     // gRPC or Prometheus. They are the queue the UNSURFACED allowlist below
     // existed to hold; wiring them is what empties it.
-    state.status.session_install_stale_ignored =
-        state.afxdp.session_install_stale_ignored_total();
-    state.status.session_delete_stale_ignored =
-        state.afxdp.session_delete_stale_ignored_total();
+    state.status.session_install_stale_ignored = state.afxdp.session_install_stale_ignored_total();
+    state.status.session_delete_stale_ignored = state.afxdp.session_delete_stale_ignored_total();
     state.status.session_delete_refused_identity =
         state.afxdp.session_delete_refused_identity_total();
     state.status.policy_batch_count = state.afxdp.policy_batch_count_total();
@@ -282,10 +280,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.session_delete_dropped_released_total();
     state.status.tunnel_purge_reservations_released =
         state.afxdp.tunnel_purge_reservations_released_total();
-    state.status.synced_import_reserve_refused =
-        state.afxdp.synced_import_reserve_refused_total();
-    state.status.synced_import_mirror_refused =
-        state.afxdp.synced_import_mirror_refused_total();
+    state.status.synced_import_reserve_refused = state.afxdp.synced_import_reserve_refused_total();
+    state.status.synced_import_mirror_refused = state.afxdp.synced_import_mirror_refused_total();
     state.status.mirror_restore_republished = state.afxdp.mirror_restore_republished_total();
     state.status.mirror_restore_deleted = state.afxdp.mirror_restore_deleted_total();
     state.status.mirror_restore_failed = state.afxdp.mirror_restore_failed_total();
@@ -298,8 +294,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.synced_import_unknown_routing_domain_total();
     // #10720 F4: synced imports refused because their tuple cannot form a
     // complete packet-path key.
-    state.status.synced_import_incomplete_key =
-        state.afxdp.synced_import_incomplete_key_total();
+    state.status.synced_import_incomplete_key = state.afxdp.synced_import_incomplete_key_total();
     // #7209: peer-synced imports whose zone pair did not resolve, so the
     // source-NAT reservation skipped #6211's narrowing. Expected nonzero while
     // a config apply is in flight (sync_session reads the PUBLISHED forwarding
@@ -337,8 +332,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // captured via recvmsg IP_RECVTOS/IPV6_RECVTCLASS, over a Not-ECT
     // inner). Nonzero = a misbehaving WG ingress CE-marked the outer for
     // un-ECN inner traffic on a congested path.
-    state.status.wg_decap_ecn_illegal_drops_total =
-        state.afxdp.wg_decap_ecn_illegal_drops_total();
+    state.status.wg_decap_ecn_illegal_drops_total = state.afxdp.wg_decap_ecn_illegal_drops_total();
     // #2331: native-GRE encap DF-set oversized-outer drops. Nonzero =
     // inner flows whose encapped size exceeds the tunnel path MTU; the
     // builder refused to emit the un-fragmentable DF outer (blackhole)
@@ -367,8 +361,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // #2472: locally-generated error-reply per-reason token-bucket drops.
     // Nonzero = an error-amplification / reflection flood (or a routing loop)
     // being clamped before it emits unbounded generated ICMP/RST errors.
-    state.status.time_exceeded_rate_limited_total =
-        state.afxdp.time_exceeded_rate_limited_total();
+    state.status.time_exceeded_rate_limited_total = state.afxdp.time_exceeded_rate_limited_total();
     state.status.packet_too_big_rate_limited_total =
         state.afxdp.packet_too_big_rate_limited_total();
     state.status.reject_rate_limited_total = state.afxdp.reject_rate_limited_total();
@@ -619,7 +612,9 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         // its contended half (or the reverse) is not interpretable, and the
         // #4800 analyzer refuses a ratio when the denominator is zero rather
         // than reporting 0.0.
-        state.status.event_stream_producer_seq_lock_acquisitions_total =
+        state
+            .status
+            .event_stream_producer_seq_lock_acquisitions_total =
             es_stats.producer_seq_lock_acquisitions;
         state.status.event_stream_producer_seq_lock_contended_total =
             es_stats.producer_seq_lock_contended;

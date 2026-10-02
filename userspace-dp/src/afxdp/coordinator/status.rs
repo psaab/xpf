@@ -367,7 +367,9 @@ impl super::Coordinator {
 
     /// #10512 scoped HA deletes refused on identity mismatch.
     pub fn session_delete_refused_identity_total(&self) -> u64 {
-        self.sessions.delete_refused_identity.load(Ordering::Relaxed)
+        self.sessions
+            .delete_refused_identity
+            .load(Ordering::Relaxed)
     }
 
     /// #10512: micro-batches that reached a Finalizing gate lease (holds
@@ -468,9 +470,7 @@ impl super::Coordinator {
     /// #10788-F1: refused imports whose overwritten forward mirror was deleted
     /// because no authoritative survivor existed.
     pub fn mirror_restore_deleted_total(&self) -> u64 {
-        self.sessions
-            .mirror_restore_deleted
-            .load(Ordering::Relaxed)
+        self.sessions.mirror_restore_deleted.load(Ordering::Relaxed)
     }
 
     /// #10788-F1: best-effort rollback actions that failed (per action, not per
@@ -545,7 +545,12 @@ impl super::Coordinator {
     /// healthy-looking forwards. Surfaced as
     /// `xpf_userspace_egress_mtu_unknown_forward_total`.
     pub fn egress_mtu_unknown_forward_total(&self) -> u64 {
-        crate::afxdp::icmp_ptb::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL.load(Ordering::Relaxed)
+        crate::afxdp::icmp_ptb::counters::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL.load(Ordering::Relaxed)
+    }
+    /// #11437: PTB errors that could not be built, so the original
+    /// oversized packet was dropped without a PMTU signal.
+    pub fn ptb_unbuildable_total(&self) -> u64 {
+        crate::afxdp::icmp_ptb::counters::PTB_UNBUILDABLE_TOTAL.load(Ordering::Relaxed)
     }
 
     /// #9901 (F-077): embedded quotes refused by the 8-byte quoted-L4
@@ -824,7 +829,9 @@ impl super::Coordinator {
     /// nonzero value flags a peer offering PPTP to a GRE tunnel endpoint
     /// xpf has no ALG to terminate.
     pub fn gre_decap_unsupported_version_refusals_total(&self) -> u64 {
-        self.forwarding.gre_decap_counters.unsupported_version_refusals()
+        self.forwarding
+            .gre_decap_counters
+            .unsupported_version_refusals()
     }
 
     /// #10865: configured native-GRE endpoints that refused decapsulation
@@ -1439,7 +1446,10 @@ impl super::Coordinator {
                 continue;
             }
             let id = *worker_id;
-            freed += self.forwarding.iface_nat_allocators.retire_worker(id, now_ns);
+            freed += self
+                .forwarding
+                .iface_nat_allocators
+                .retire_worker(id, now_ns);
             freed += crate::nat::retire_worker_from_pool_rules(
                 &self.forwarding.source_nat_rules,
                 id,
@@ -1699,7 +1709,6 @@ impl super::Coordinator {
             })
             .collect()
     }
-
 
     pub fn identity_count(&self) -> usize {
         self.workers.identities.len()
