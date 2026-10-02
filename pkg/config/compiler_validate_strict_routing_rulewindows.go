@@ -13,7 +13,7 @@ import (
 //   - next-table: NextTableRuleWindow entries. Each leak costs one rule per
 //     default-instance ingress interface (#9420), so the eligible route count
 //     is floor(window/N), with N from the shared resolver (#9810).
-//   - rib-group:  maxRibGroupLeakRules connected-prefix rules.
+//   - rib-group:  maxRibGroupLeakRules connected-prefix rules per family.
 //
 // The shared [NextTableRulePriorityBase, +RouteLeakRulePriorityWindow) range
 // is wide enough for IPv6 prefixes and is independent of either admission cap.
@@ -97,9 +97,9 @@ func ribGroupImportsMain(groupName string, groups map[string]*RibGroup, tableIDs
 // per-instance import-rib and once per source table (the runtime's
 // leakedTables guard). Repeated prefixes count repeatedly because the runtime
 // installs each one as a separate rule.
-func ribGroupLeakPrefixCount(cfg *Config) int {
+func ribGroupLeakPrefixCount(cfg *Config) (inet, inet6 int) {
 	if cfg == nil {
-		return 0
+		return 0, 0
 	}
 	ribGroups := cfg.RoutingOptions.RibGroups
 	tableIDs := make(map[string]int, len(cfg.RoutingInstances))
@@ -110,7 +110,6 @@ func ribGroupLeakPrefixCount(cfg *Config) int {
 	}
 	connected := RibGroupConnectedPrefixes(cfg)
 	leakedTables := make(map[int]bool)
-	n := 0
 	for _, instance := range cfg.RoutingInstances {
 		if instance == nil {
 			continue
@@ -127,14 +126,14 @@ func ribGroupLeakPrefixCount(cfg *Config) int {
 		for _, prefix := range connected[instance.Name] {
 			if strings.Contains(prefix, ":") {
 				if leakV6 {
-					n++
+					inet6++
 				}
 			} else if leakV4 {
-				n++
+				inet++
 			}
 		}
 	}
-	return n
+	return inet, inet6
 }
 
 // validateRoutingRuleWindowsStrict hard-rejects a config that would exceed the
@@ -142,11 +141,12 @@ func ribGroupLeakPrefixCount(cfg *Config) int {
 //
 // The applier admits up to 100 next-table rules, one per default-instance
 // ingress interface per leak (#9810), and 1000 rib-group connected-prefix
-// rules (pkg/routing/rules.go). Priorities for both kinds are assigned
-// independently from the shared prefix-derived range. A route beyond an
-// admission cap is never installed, so a config that exceeds a cap used to
-// commit green while the reconciler silently stopped at the limit and returned
-// success: the committed generation CLAIMED routes the kernel never programs.
+// rules per address family (pkg/routing/rules.go). Priorities for both kinds
+// are assigned independently from the shared prefix-derived range. A route
+// beyond an admission cap is never installed. A config exceeding a cap used
+// to commit green while the reconciler silently stopped at its cap and
+// returned success: the committed generation CLAIMED routes the kernel never
+// programs.
 // The result is a blackhole / asymmetric routing / silent inter-VRF leak loss
 // with no operator-visible signal, because truncation was previously only a
 // WARNING (ValidateConfig, the pre-#5854 warn-only path).
@@ -157,8 +157,8 @@ func ribGroupLeakPrefixCount(cfg *Config) int {
 // peer-sync paths (opts.lenientRoutingRuleWindows) so an ALREADY-committed or
 // peer-synced generation that predates this rejection still boots (#1960
 // fail-closed-on-load class); the applier's admission caps keep excess rules
-// inert. Next-table is reported before rib-group so the first-reported error is
-// deterministic.
+// inert. Next-table is reported before rib-group; an overflowing IPv4 family
+// is reported before IPv6 so the first-reported cap error is deterministic.
 //
 // The cap sizes come from maxNextTableRules / maxRibGroupLeakRules, which are
 // kept in lockstep with pkg/routing/rules.go (pkg/config cannot import
@@ -200,14 +200,22 @@ func validateRoutingRuleWindowsStrict(cfg *Config) error {
 				n, capacity, ingress, n*ingress, maxNextTableRules, capacity)
 		}
 	}
-	if n := ribGroupLeakPrefixCount(cfg); n > maxRibGroupLeakRules {
-		return fmt.Errorf(
-			"routing-options: interface-routes rib-group would leak %d connected "+
-				"prefixes as kernel ip rules, but only %d can be programmed; prefixes "+
-				"beyond the limit would be silently dropped at apply time (the leak "+
-				"rules are claimed but not programmed). Reduce the number of "+
-				"rib-group-leaked interface prefixes to at most %d.",
-			n, maxRibGroupLeakRules, maxRibGroupLeakRules)
+	inetCount, inet6Count := ribGroupLeakPrefixCount(cfg)
+	for _, family := range []struct {
+		name  string
+		count int
+	}{
+		{name: "inet", count: inetCount},
+		{name: "inet6", count: inet6Count},
+	} {
+		if family.count > maxRibGroupLeakRules {
+			return fmt.Errorf(
+				"routing-options: interface-routes rib-group would leak %d connected prefixes "+
+					"in family %s as kernel ip rules, but only %d per family can be programmed; "+
+					"prefixes beyond the limit would be dropped at apply time. Reduce the %s "+
+					"rib-group-leaked interface prefixes to at most %d.",
+				family.count, family.name, maxRibGroupLeakRules, family.name, maxRibGroupLeakRules)
+		}
 	}
 	return nil
 }

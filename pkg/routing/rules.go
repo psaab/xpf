@@ -62,8 +62,8 @@ const ribGroupRulePriority = 33000
 const ribGroupLeakRulePriority = config.NextTableRulePriorityBase
 
 // maxRibGroupLeakRules bounds the number of per-prefix rib-group leak rules
-// installed. The shared current leak-rule clear range is sized by
-// config.RouteLeakRulePriorityWindow, independently of the admission cap.
+// installed per address family. The shared current leak-rule clear range is
+// sized by config.RouteLeakRulePriorityWindow, independently of the cap.
 const maxRibGroupLeakRules = 1000
 
 // mainTableID is the Linux main routing table (RT_TABLE_MAIN). The #3876
@@ -521,12 +521,12 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 	// duplicate rules if two instances share a table ID).
 	leakedTables := make(map[int]bool)
 
-	admitted := 0
-	capped := false
+	// Kernel rule-priority spaces are family-specific. Exhausting one family's
+	// rule budget must not suppress the other family's connected-prefix leaks.
+
+	admitted := map[int]int{unix.AF_INET: 0, unix.AF_INET6: 0}
+	capped := map[int]bool{}
 	for _, inst := range instances {
-		if capped {
-			break
-		}
 		sourceTable := inst.TableID
 
 		// Phase 1 leaks ONLY into main. A rib-group whose import-ribs resolve
@@ -570,13 +570,20 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 			// Admission and priority are separate: this cap bounds installed
 			// rules, while prefix length determines each rule's shared-band
 			// priority.
-			if admitted >= maxRibGroupLeakRules {
+			if capped[lr.family] {
+				continue
+			}
+			if admitted[lr.family] >= maxRibGroupLeakRules {
+				familyStr := "inet"
+				if lr.family == unix.AF_INET6 {
+					familyStr = "inet6"
+				}
 				errs = append(errs, fmt.Errorf(
-					"rib-group leak rule limit (%d) reached; connected prefixes beyond "+
+					"rib-group leak rule limit (%d) reached for family %s; connected prefixes beyond "+
 						"the limit are not leaked — reduce the number of interface-routes "+
-						"rib-group prefixes", maxRibGroupLeakRules))
-				capped = true
-				break
+						"rib-group prefixes", maxRibGroupLeakRules, familyStr))
+				capped[lr.family] = true
+				continue
 			}
 			_, dst, err := net.ParseCIDR(lr.prefix)
 			if err != nil || dst == nil {
@@ -585,7 +592,7 @@ func (rg *ribGroupManager) Apply(ribGroups map[string]*config.RibGroup, instance
 					lr.prefix, inst.Name, err))
 				continue
 			}
-			admitted++
+			admitted[lr.family]++
 			prefixLength, addressBits := dst.Mask.Size()
 			priority := config.RouteLeakRulePriority(prefixLength, addressBits, config.RouteLeakRibGroup)
 			rule := netlink.NewRule()

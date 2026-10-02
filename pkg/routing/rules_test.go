@@ -703,6 +703,43 @@ func TestRibGroupAdmissionCap(t *testing.T) {
 		return ribGroups, instances, map[string][]string{"leak-vr": prefixes}
 	}
 
+	t.Run("600 routes per family fit independently", func(t *testing.T) {
+		ops := newFakeRuleOps()
+		rg := &ribGroupManager{ops: ops}
+		ribGroups := map[string]*config.RibGroup{
+			"leak": {Name: "leak", ImportRibs: []string{"inet.0", "inet6.0"}},
+		}
+		instances := []*config.RoutingInstanceConfig{
+			{
+				Name:                      "leak-vr",
+				TableID:                   1000,
+				InterfaceRoutesRibGroup:   "leak",
+				InterfaceRoutesRibGroupV6: "leak",
+			},
+		}
+		prefixes := make([]string, 0, 1200)
+		for i := range 600 {
+			prefixes = append(prefixes,
+				fmt.Sprintf("10.%d.%d.0/24", i/256, i%256),
+				fmt.Sprintf("2001:db8:%x::/64", i))
+		}
+		if err := rg.Apply(ribGroups, instances, map[string][]string{"leak-vr": prefixes}); err != nil {
+			t.Fatalf("Apply with 600 prefixes per family: %v", err)
+		}
+		for _, family := range []struct {
+			name  string
+			value int
+		}{
+			{"IPv4", unix.AF_INET},
+			{"IPv6", unix.AF_INET6},
+		} {
+			if got := ops.count(family.value); got != 600 {
+				t.Errorf("%s leak rules = %d, want all 600 prefixes installed", family.name, got)
+			}
+		}
+		assertRibGroupRulesInClearedWindows9819(t, ops)
+	})
+
 	t.Run("at-limit", func(t *testing.T) {
 		ops := newFakeRuleOps()
 		rg := &ribGroupManager{ops: ops}
