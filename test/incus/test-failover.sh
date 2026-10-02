@@ -42,6 +42,8 @@ source "${SCRIPT_DIR}/deploy-lib.sh"
 source "${SCRIPT_DIR}/iperf-throughput-lib.sh"
 # shellcheck source=test/incus/failover-client-lib.sh
 source "${SCRIPT_DIR}/failover-client-lib.sh"
+# shellcheck source=test/incus/failover-clock-lib.sh
+source "${SCRIPT_DIR}/failover-clock-lib.sh"
 
 IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 # #6934: the IPv6 transit target. cluster-env.sh has exported IPERF_TARGET6 all
@@ -638,6 +640,17 @@ if $fw0_back; then
 else
 	fail "fw0 xpfd did not come back within ${REBOOT_WAIT}s"
 fi
+
+# #11872: no NTP runs in the loss lab. A crash reboot can leave fw0 minutes
+# behind, making fabric-auth and heartbeat freshness fail and blocking the
+# pending-bulk peer barrier. Set BOTH clocks from one host UTC reading before
+# the rejoin/failback checks.
+if failover_resync_node_clocks "$FW0" "$FW1"; then
+	pass "both firewall clocks resynced from host UTC after crash reboot"
+else
+	fail "could not resync both firewall clocks from host UTC after crash reboot"
+fi
+
 
 # Wait for cluster to stabilize (gRPC takes ~15s after systemctl active)
 sleep 20
