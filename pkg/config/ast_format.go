@@ -678,16 +678,17 @@ func (t *ConfigTree) FormatJSON() string {
 	return string(data) + "\n"
 }
 
-// FormatPathJSON renders a subtree as a JSON object.
+// FormatPathJSON renders a subtree as JSON.
 func (t *ConfigTree) FormatPathJSON(path []string) string {
 	if len(path) == 0 {
 		return t.FormatJSON()
 	}
-	matches := navigatePath(t.Children, path)
+	matches, consumed := navigatePathWidth(t.Children, path)
 	if len(matches) == 0 {
 		return ""
 	}
-	obj := nodesToJSON(matches)
+	parentPath := strings.Join(path[:len(path)-consumed], " ")
+	obj := nodesToJSONAt(matches, parentPath)
 	data, err := json.MarshalIndent(obj, "", "  ")
 	if err != nil {
 		return "{}"
@@ -859,13 +860,19 @@ func xmlEscape(s string) string {
 	return b.String()
 }
 
-// nodesToJSON converts a list of AST nodes to a nested map structure.
+// nodesToJSON converts a list of AST nodes to a nested JSON structure. Security
+// policy siblings are represented as ordered arrays rather than name-keyed maps,
+// whose marshaled key order is sorted and loses Junos rule order.
 //
 // A deactivated node (#2008 H1) additionally emits a collision-safe marker
 // entry `"<keypath> @inactive": "inactive"` alongside its normal entry. The
 // `@` sigil is not a valid Junos identifier character (lexer.isIdentChar),
 // so the marker key can never collide with a real configuration key.
 func nodesToJSON(nodes []*Node) map[string]interface{} {
+	return nodesToJSONAt(nodes, "")
+}
+
+func nodesToJSONAt(nodes []*Node, parentPath string) map[string]interface{} {
 	result := make(map[string]interface{})
 
 	for _, n := range nodes {
@@ -911,7 +918,21 @@ func nodesToJSON(nodes []*Node) map[string]interface{} {
 				qualifier = strings.Join(n.Keys[1:], " ")
 			}
 
-			children := nodesToJSON(n.Children)
+			nodePath := n.KeyPath()
+			if parentPath != "" {
+				nodePath = parentPath + " " + nodePath
+			}
+			children := nodesToJSONAt(n.Children, nodePath)
+
+			if qualifier != "" && name == "policy" && orderedSecurityPolicySiblings(parentPath) {
+				entry := map[string]interface{}{qualifier: children}
+				if existing, ok := result[name].([]interface{}); ok {
+					result[name] = appendOrderedPolicyJSON(existing, entry)
+				} else {
+					result[name] = []interface{}{entry}
+				}
+				continue
+			}
 
 			if qualifier != "" {
 				// Named instance: e.g. "interface trust0" → {"interface": {"trust0": {...}}}
@@ -944,11 +965,17 @@ func nodesToJSON(nodes []*Node) map[string]interface{} {
 	return result
 }
 
+func orderedSecurityPolicySiblings(parentPath string) bool {
+	return parentPath == "security policies global" ||
+		strings.HasPrefix(parentPath, "security policies from-zone ")
+}
+
 // mergeJSONObjects combines repeated containers using Junos' merge semantics.
 // Nested containers merge recursively; duplicate leaves accumulate in document
-// order just like the repeated-leaf projection above. Container objects take
-// precedence over leaf values on malformed mixed shapes, matching nodesToJSON's
-// existing leaf/container collision behavior.
+// order just like the repeated-leaf projection above. Ordered policy arrays
+// merge same-named policy blocks in place and append new siblings in source
+// order. Container objects take precedence over leaf values on malformed mixed
+// shapes, matching nodesToJSON's existing leaf/container collision behavior.
 func mergeJSONObjects(dst, src map[string]interface{}) {
 	for key, incoming := range src {
 		existing, ok := dst[key]
@@ -956,8 +983,51 @@ func mergeJSONObjects(dst, src map[string]interface{}) {
 			dst[key] = incoming
 			continue
 		}
+		if key == "policy" {
+			existingPolicies, existingIsList := existing.([]interface{})
+			incomingPolicies, incomingIsList := incoming.([]interface{})
+			if existingIsList && incomingIsList {
+				dst[key] = mergeOrderedPolicyJSON(existingPolicies, incomingPolicies)
+				continue
+			}
+		}
 		dst[key] = mergeJSONValues(existing, incoming)
 	}
+}
+
+func appendOrderedPolicyJSON(policies []interface{}, incoming interface{}) []interface{} {
+	incomingEntry, ok := incoming.(map[string]interface{})
+	if !ok || len(incomingEntry) != 1 {
+		return append(policies, incoming)
+	}
+	for name, incomingChildren := range incomingEntry {
+		for _, existing := range policies {
+			existingEntry, ok := existing.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			existingChildren, ok := existingEntry[name]
+			if !ok {
+				continue
+			}
+			existingObject, existingIsObject := existingChildren.(map[string]interface{})
+			incomingObject, incomingIsObject := incomingChildren.(map[string]interface{})
+			if existingIsObject && incomingIsObject {
+				mergeJSONObjects(existingObject, incomingObject)
+			} else {
+				existingEntry[name] = incomingChildren
+			}
+			return policies
+		}
+	}
+	return append(policies, incoming)
+}
+
+func mergeOrderedPolicyJSON(existing, incoming []interface{}) []interface{} {
+	for _, policy := range incoming {
+		existing = appendOrderedPolicyJSON(existing, policy)
+	}
+	return existing
 }
 
 func mergeJSONValues(existing, incoming interface{}) interface{} {
