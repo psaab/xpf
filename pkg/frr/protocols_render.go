@@ -468,15 +468,6 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			if n.BFD {
 				fmt.Fprintf(&b, " neighbor %s bfd\n", n.Address)
 			}
-			if n.RouteReflectorClient {
-				fmt.Fprintf(&b, " neighbor %s route-reflector-client\n", n.Address)
-			}
-			if n.AllowASIn > 0 {
-				fmt.Fprintf(&b, " neighbor %s allowas-in %d\n", n.Address, n.AllowASIn)
-			}
-			if n.RemovePrivateAS {
-				fmt.Fprintf(&b, " neighbor %s remove-private-AS\n", n.Address)
-			}
 		}
 		// A global `protocols bgp export <token>` has TWO legitimate
 		// shapes that render differently (#2473):
@@ -630,7 +621,12 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			// set instead so it activates under ipv6 unicast (#2941).
 			isIPv6Peer := strings.Contains(n.Address, ":")
 			policyDefault := len(globalExportChain) > 0 || len(globalImportChain) > 0 || hasOwnPolicy
-			if (n.FamilyInet || (policyDefault && !n.FamilyInet6)) && !isIPv6Peer {
+			hasAFNeighborAttributes := n.RouteReflectorClient || n.AllowASIn > 0 || n.RemovePrivateAS
+			// Router-level emission of these controls configures IPv4 unicast
+			// by default in FRR. Keep family-less IPv4 neighbors in an explicit
+			// AF block so their existing IPv4 behavior is preserved when the
+			// controls are rendered in their actual address family below.
+			if (n.FamilyInet || ((policyDefault || hasAFNeighborAttributes) && !n.FamilyInet6)) && !isIPv6Peer {
 				inet4Neighbors = append(inet4Neighbors, n)
 			}
 			if !isIPv6Peer && n.FamilyInet6 && !n.FamilyInet {
@@ -666,6 +662,15 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			}
 			for _, n := range inet4Neighbors {
 				fmt.Fprintf(&b, "  neighbor %s activate\n", n.Address)
+				if n.RouteReflectorClient {
+					fmt.Fprintf(&b, "  neighbor %s route-reflector-client\n", n.Address)
+				}
+				if n.AllowASIn > 0 {
+					fmt.Fprintf(&b, "  neighbor %s allowas-in %d\n", n.Address, n.AllowASIn)
+				}
+				if n.RemovePrivateAS {
+					fmt.Fprintf(&b, "  neighbor %s remove-private-AS\n", n.Address)
+				}
 				if n.DefaultOriginate {
 					fmt.Fprintf(&b, "  neighbor %s default-originate\n", n.Address)
 				}
@@ -727,6 +732,15 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			b.WriteString(bgpIPv6Redist.String())
 			for _, n := range inet6Neighbors {
 				fmt.Fprintf(&b, "  neighbor %s activate\n", n.Address)
+				if n.RouteReflectorClient {
+					fmt.Fprintf(&b, "  neighbor %s route-reflector-client\n", n.Address)
+				}
+				if n.AllowASIn > 0 {
+					fmt.Fprintf(&b, "  neighbor %s allowas-in %d\n", n.Address, n.AllowASIn)
+				}
+				if n.RemovePrivateAS {
+					fmt.Fprintf(&b, "  neighbor %s remove-private-AS\n", n.Address)
+				}
 				if n.DefaultOriginate {
 					fmt.Fprintf(&b, "  neighbor %s default-originate\n", n.Address)
 				}

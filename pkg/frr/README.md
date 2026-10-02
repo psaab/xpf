@@ -1337,6 +1337,17 @@ step. Both are required — neither sees the other's case:
   session drops prefixes. The ipv4 fall-through is now gated on the peer
   address family, and a family-less-but-policied IPv6 peer is routed into the
   ipv6 set so it activates (with its `route-map out`/`in`) under ipv6 unicast.
+
+- **BGP neighbor control attributes are address-family scoped (#11460).**
+  `route-reflector-client`, `allowas-in`, and `remove-private-AS` belong in
+  the IPv4/IPv6 unicast block for the neighbor activated in that family; FRR's
+  router node defaults to IPv4, so router-level emission silently misses IPv6
+  peers. A family-less IPv4 neighbor carrying one of these controls is explicitly
+  activated under IPv4 to preserve its prior default-family behavior. Dual-stack
+  peers receive the setting in each activated AF. The
+  `TestGenerateProtocols_BGPNeighborAttributesAreAddressFamilyScoped11460`
+  render cells check IPv4, default IPv4, and IPv6 placement.
+
 - **IS-IS per-interface `isis bfd` is emitted INSIDE the interface block
   (#2942).** `isis bfd` / `isis bfd profile <name>` are interface-scoped
   commands; the IS-IS interface loop now writes them before the interface
