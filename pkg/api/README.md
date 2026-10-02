@@ -560,23 +560,33 @@ An **`api-auth` identity** is the second identity, and it is scoped like a
 `system login user`: Basic users and named API keys carry a login class, while
 legacy repeated `api-key` tokens inherit the `api-auth` default. The default
 class is `read-only`; a class granting maintenance authority must be selected
-explicitly. Every identity needs a UTC `expires YYYY-MM-DD` date, inherited
-from `api-auth expires` when configured there. Basic passwords must be at least
-12 characters and API keys at least 16. Compiled credentials and persisted
-active, rollback, and pending-confirm config trees contain tagged salted bcrypt
-verifiers (SHA-256 prehashed for bcrypt's fixed input limit), never configured
-plaintext. Loading a legacy database migrates those trees before they can serve
-or roll back; the confirm-record hash transition preserves the auto-rollback
-window if a restart interrupts that migration.
+explicitly. Every identity needs a UTC `expires YYYY-MM-DD` date. Basic
+passwords must be at least 12 characters and API keys at least 16. Compiled
+credentials and persisted active, rollback, and pending-confirm config trees
+contain tagged salted bcrypt verifiers (SHA-256 prehashed for bcrypt's fixed
+input limit), never configured plaintext. New cleartext credentials use bcrypt
+cost 12 (four times the work of the former cost 10). Existing cost-10 tagged
+verifiers remain valid until rotated: their cost cannot be raised without the
+original cleartext. Loading a legacy database migrates cleartext trees at the
+current cost before they can serve or roll back; the confirm-record hash
+transition preserves the auto-rollback window if a restart interrupts that
+migration.
 
 Named API-key `secret` leaves are also masked in raw-AST config displays,
 exports, searches, and control-character diagnostics. The generic keyword is
 recognized only below `api-auth key`, avoiding false redaction of unrelated
 identifiers.
 
-REST authentication failures are throttled per source/account (5 failures in
-10 minutes locks the pair for 5 minutes with exponential re-locks, capped at
-one hour) and per source (20 failures in 10 minutes) to stop username rotation.
+REST authentication failures are throttled in three ways: five failures for a
+source/account pair in 10 minutes; five failures for a claimed Basic username
+across all source addresses in 10 minutes; and 20 failures from one source in
+10 minutes, regardless of account. Each lockout begins at 5 minutes, doubles
+on consecutive lockouts, and caps at one hour. IPv4 sources are exact
+addresses; IPv6 sources aggregate by /64. A clean Basic success clears that
+username's pair and server-wide account budgets, while source failures remain
+so a successful login does not erase unrelated attempts from its source.
+Non-Basic identity namespaces retain the existing per-source/account and source
+budgets; only claimed Basic usernames receive the cross-source account budget.
 Failures and lockout refusals increment the fixed `rest_api_auth` audit counter.
 
 A bad `Authorization` header remains a charged failed attempt even when a valid
@@ -586,9 +596,15 @@ source-level budget is below its cap.
 
 When no credential authorizes a request, REST responds with HTTP 401; a
 throttle refusal is HTTP 429 with a `Retry-After` header. Throttle state is
-in-memory and local to one REST middleware/`Server` instance: HA peers and a
-restarted process start with fresh independent budgets, so this is not a
-cluster-wide or restart-persistent attempt quota.
+in-memory and local to one REST middleware/`Server` instance. “Across all
+sources” means across the HTTP and HTTPS legs sharing that `Server`; separate
+server instances, process restarts, and HA peers have fresh independent
+budgets, so this is not a cluster-wide or restart-persistent attempt quota.
+
+The shared tracker is bounded to 4096 buckets per middleware/Server; under
+high-cardinality pressure, completed buckets may be evicted after an expiry
+sweep, forgiving failures early rather than allowing attacker-chosen identities
+to grow memory without bound.
 Credentials are not accepted over clear HTTP: strict compile rejects explicit
 HTTP plus api-auth, and runtime disables the HTTP leg whenever an api-auth
 identity is active; use HTTPS for credentialed REST access.

@@ -1,9 +1,12 @@
 package config
 
 import (
+	"crypto/sha256"
 	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func parseAPIAuthSecretsTree10825(t *testing.T, commands ...string) *ConfigTree {
@@ -436,5 +439,49 @@ func TestConfigTreesEquivalentForSyncUsesExactGroupScope10825(t *testing.T) {
 	}
 	if ConfigTreesEquivalentForSync(unrelatedActive, unrelatedIncoming) {
 		t.Fatal("DDNS password below a group named api-auth was treated as an API-auth credential")
+	}
+}
+
+func TestHashAPIAuthSecretUsesReviewedCost11492(t *testing.T) {
+	const password = "a sufficiently long authentication secret"
+
+	encoded, err := HashAPIAuthSecret(password)
+	if err != nil {
+		t.Fatalf("HashAPIAuthSecret: %v", err)
+	}
+	if !IsAPIAuthSecretHash(encoded) || !VerifyAPIAuthSecret(encoded, password) {
+		t.Fatal("newly hashed API-auth secret is not a usable tagged verifier")
+	}
+	cost, err := bcrypt.Cost([]byte(strings.TrimPrefix(encoded, apiAuthBcryptPrefix)))
+	if err != nil {
+		t.Fatalf("bcrypt.Cost: %v", err)
+	}
+	if cost != 12 {
+		t.Fatalf("new API-auth bcrypt cost = %d, want reviewed cost 12", cost)
+	}
+}
+
+func TestHashAPIAuthSecretPreservesExistingCost10Verifier11492(t *testing.T) {
+	const password = "previously stored authentication secret"
+	prehash := sha256.Sum256([]byte(password))
+	legacy, err := bcrypt.GenerateFromPassword(prehash[:], 10)
+	if err != nil {
+		t.Fatalf("generate legacy cost-10 verifier: %v", err)
+	}
+	stored := apiAuthBcryptPrefix + string(legacy)
+
+	got, err := HashAPIAuthSecret(stored)
+	if err != nil {
+		t.Fatalf("HashAPIAuthSecret(existing verifier): %v", err)
+	}
+	if got != stored {
+		t.Fatal("existing cost-10 verifier changed without its cleartext secret")
+	}
+	if !VerifyAPIAuthSecret(got, password) {
+		t.Fatal("existing cost-10 verifier is no longer usable")
+	}
+	cost, err := bcrypt.Cost([]byte(strings.TrimPrefix(got, apiAuthBcryptPrefix)))
+	if err != nil || cost != 10 {
+		t.Fatalf("existing verifier cost = %d, err = %v; want preserved cost 10", cost, err)
 	}
 }

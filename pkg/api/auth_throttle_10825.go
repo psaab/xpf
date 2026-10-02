@@ -7,19 +7,19 @@
 // and #10832's counted audit (denyaudit.SurfaceRESTAPIAuthFail) observed the
 // failures without ever stopping them.
 //
-// The throttle is TWO budgets, and both must exist:
+// The throttle has THREE budgets, all checked before credential verification:
 //
-//   - per-source+account: 5 failures in 10 minutes locks that (IP, account)
-//     pair for 5 minutes, doubling per consecutive lockout (cap 1h). A success
-//     clears the pair outright, so a legit caller with correct credentials
-//     never trips it and recovers immediately.
-//   - per-source: 20 failures in 10 minutes from one IP (ANY account) locks
-//     the whole source. Without this an attacker rotates Basic usernames (or
-//     Bearer values) and no single compound key ever fills. A success clears
-//     only the pair, never the source: a success proves nothing about the
-//     other failures from that IP.
+//   - per-source+account: 5 failures in 10 minutes locks that (source, account)
+//     pair for 5 minutes, doubling per consecutive lockout (cap 1h). A clean
+//     success clears the pair outright.
+//   - global claimed Basic username: 5 failures in 10 minutes lock that
+//     username across every source handled by this middleware/Server. A clean
+//     Basic success clears this bucket; other identities do not.
+//   - per-source-prefix: 20 failures in 10 minutes from one IPv4 address or
+//     IPv6 /64 (ANY account) locks the whole source. A success never clears
+//     source failures, which still protect against username/token rotation.
 //
-// Both budgets are checked BEFORE the credential verify, so a locked-out
+// All three budgets are checked BEFORE the credential verify, so a locked-out
 // caller never reaches the (post-#10826 bcrypt) compare — the lockout is what
 // bounds attacker-driven verify CPU. Every lockout rejection is still counted
 // under the existing rest_api_auth surface (a lockout rejection IS an
@@ -47,6 +47,7 @@ import (
 	"encoding/base64"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,19 +58,20 @@ const (
 	// authThrottleAccountFailures is the per-(source, account) failure budget
 	// within authThrottleWindow before that pair locks.
 	authThrottleAccountFailures = 5
-	// authThrottleSourceFailures is the per-source failure budget within
-	// authThrottleWindow before the whole source IP locks. Higher than the
-	// pair budget: it exists to catch username/token rotation, not to punish
-	// one fat-fingered account.
+	// authThrottleGlobalBasicFailures locks a claimed Basic username across
+	// sources after the same number of failures as the existing pair budget.
+	authThrottleGlobalBasicFailures = authThrottleAccountFailures
+	// authThrottleSourceFailures is the per-source-prefix failure budget within
+	// authThrottleWindow before the whole source locks. IPv6 sources use /64.
 	authThrottleSourceFailures = 20
-	// authThrottleWindow is the rolling window both budgets are counted in.
+	// authThrottleWindow is the rolling window for all failure budgets.
 	authThrottleWindow = 10 * time.Minute
 	// authThrottleBaseLockout is the first lockout duration; consecutive
 	// lockouts double up to authThrottleMaxLockout.
 	authThrottleBaseLockout = 5 * time.Minute
 	authThrottleMaxLockout  = time.Hour
-	// authThrottleMaxEntries bounds each tracker table. Past it, an insert
-	// sweeps expired buckets and then evicts arbitrarily — eviction only
+	// authThrottleMaxEntries bounds the combined tracker tables. Past it, an
+	// insert sweeps expired buckets and then evicts arbitrarily — eviction only
 	// forgives failures early (fail-open on memory pressure, never fail-closed
 	// into a permanent lockout).
 	authThrottleMaxEntries = 4096
@@ -83,10 +85,10 @@ const (
 	authThrottleAPIKeyAccount               = "api-key"
 )
 
-// authFailureBucket is one lockout cell: either a (source, account) pair or a
-// whole source IP. inFlight counts reservations admitted but not yet completed;
-// it bounds concurrent verifier work and is never cleared by success or window
-// resets, only by completion.
+// authFailureBucket is one lockout cell: a (source, account) pair, a global
+// claimed Basic account, or a whole source prefix. inFlight counts reservations
+// admitted but not yet completed; it bounds concurrent verifier work and is
+// never cleared by success or window resets, only by completion.
 type authFailureBucket struct {
 	failures    int
 	windowStart time.Time
@@ -96,13 +98,15 @@ type authFailureBucket struct {
 	inFlight    int // admitted reservations awaiting completion
 }
 
-// authFailureTracker counts REST credential failures against the two #10825
-// budgets. The zero value is not usable; build with newAuthFailureTracker.
+// authFailureTracker counts REST credential failures against the #10825
+// source/pair budgets and #11492 global Basic-account budget. The zero value is
+// not usable; build with newAuthFailureTracker.
 type authFailureTracker struct {
-	mu       sync.Mutex
-	now      func() time.Time
-	accounts map[string]*authFailureBucket
-	sources  map[string]*authFailureBucket
+	mu             sync.Mutex
+	now            func() time.Time
+	accounts       map[string]*authFailureBucket
+	globalAccounts map[string]*authFailureBucket
+	sources        map[string]*authFailureBucket
 }
 
 func newAuthFailureTracker(clock func() time.Time) *authFailureTracker {
@@ -110,9 +114,10 @@ func newAuthFailureTracker(clock func() time.Time) *authFailureTracker {
 		clock = time.Now
 	}
 	return &authFailureTracker{
-		now:      clock,
-		accounts: make(map[string]*authFailureBucket),
-		sources:  make(map[string]*authFailureBucket),
+		now:            clock,
+		accounts:       make(map[string]*authFailureBucket),
+		globalAccounts: make(map[string]*authFailureBucket),
+		sources:        make(map[string]*authFailureBucket),
 	}
 }
 
@@ -124,16 +129,19 @@ func (t *authFailureTracker) setClockForTest(clock func() time.Time) {
 	t.now = clock
 }
 
-// locked reports whether (source, account) is currently locked under either
-// budget, and how long until the governing lockout lifts. Read-only: checking
-// never extends a lockout.
+// locked reports whether the source/account, global Basic-account, or source
+// prefix is currently locked. Read-only: checking never extends a lockout.
 func (t *authFailureTracker) locked(source, account string) (bool, time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
 	longest := time.Duration(0)
 	locked := false
-	for _, b := range [2]*authFailureBucket{t.accounts[source+"\x00"+account], t.sources[source]} {
+	for _, b := range [3]*authFailureBucket{
+		t.accounts[source+"\x00"+account],
+		t.globalAccounts[globalBasicAccountKey(account)],
+		t.sources[source],
+	} {
 		if b == nil {
 			continue
 		}
@@ -148,14 +156,15 @@ func (t *authFailureTracker) locked(source, account string) (bool, time.Duration
 }
 
 // authThrottleReservation owns one admitted verifier attempt until exactly one
-// completion records its outcome. Both bucket reservations are made under the
-// same mutex, so concurrent bcrypt work cannot exceed either failure budget.
+// completion records its outcome. All applicable bucket reservations are made
+// under the same mutex, so concurrent bcrypt work cannot exceed any budget.
 type authThrottleReservation struct {
-	source       string
-	claimed      string
-	account      *authFailureBucket
-	sourceBucket *authFailureBucket
-	completed    bool
+	source        string
+	claimed       string
+	account       *authFailureBucket
+	globalAccount *authFailureBucket
+	sourceBucket  *authFailureBucket
+	completed     bool
 }
 
 // reserve atomically checks active lockouts and reserves one slot in each
@@ -168,15 +177,19 @@ func (t *authFailureTracker) reserve(source, account string) (authThrottleReserv
 
 	now := t.now()
 	accountKey := source + "\x00" + account
+	globalKey := globalBasicAccountKey(account)
 	accountBucket := t.accounts[accountKey]
+	globalBucket := t.globalAccounts[globalKey]
 	sourceBucket := t.sources[source]
-	if wait := authThrottleWaitLocked(now, accountBucket, sourceBucket); wait > 0 {
+	if wait := authThrottleWaitLocked(now, accountBucket, globalBucket, sourceBucket); wait > 0 {
 		return authThrottleReservation{}, wait
 	}
 	resetExpiredFailuresLocked(accountBucket, now)
+	resetExpiredFailuresLocked(globalBucket, now)
 	resetExpiredFailuresLocked(sourceBucket, now)
 
 	if (accountBucket != nil && accountBucket.failures+accountBucket.inFlight >= authThrottleAccountFailures) ||
+		(globalBucket != nil && globalBucket.failures+globalBucket.inFlight >= authThrottleGlobalBasicFailures) ||
 		(sourceBucket != nil && sourceBucket.failures+sourceBucket.inFlight >= authThrottleSourceFailures) {
 		return authThrottleReservation{}, time.Second
 	}
@@ -184,15 +197,22 @@ func (t *authFailureTracker) reserve(source, account string) (authThrottleReserv
 	if accountBucket == nil {
 		needed++
 	}
+	if globalKey != "" && globalBucket == nil {
+		needed++
+	}
 	if sourceBucket == nil {
 		needed++
 	}
-	if !t.makeRoomLocked(needed, now, accountBucket, sourceBucket) {
+	if !t.makeRoomLocked(needed, now, accountBucket, globalBucket, sourceBucket) {
 		return authThrottleReservation{}, time.Second
 	}
 	if accountBucket == nil {
 		accountBucket = &authFailureBucket{windowStart: now}
 		t.accounts[accountKey] = accountBucket
+	}
+	if globalKey != "" && globalBucket == nil {
+		globalBucket = &authFailureBucket{windowStart: now}
+		t.globalAccounts[globalKey] = globalBucket
 	}
 	if sourceBucket == nil {
 		sourceBucket = &authFailureBucket{windowStart: now}
@@ -200,18 +220,22 @@ func (t *authFailureTracker) reserve(source, account string) (authThrottleReserv
 	}
 
 	accountBucket.inFlight++
+	if globalBucket != nil {
+		globalBucket.inFlight++
+	}
 	sourceBucket.inFlight++
 	return authThrottleReservation{
-		source:       source,
-		claimed:      account,
-		account:      accountBucket,
-		sourceBucket: sourceBucket,
+		source:        source,
+		claimed:       account,
+		account:       accountBucket,
+		globalAccount: globalBucket,
+		sourceBucket:  sourceBucket,
 	}, 0
 }
 
-func authThrottleWaitLocked(now time.Time, account, source *authFailureBucket) time.Duration {
+func authThrottleWaitLocked(now time.Time, account, globalAccount, source *authFailureBucket) time.Duration {
 	wait := time.Duration(0)
-	for _, bucket := range [2]*authFailureBucket{account, source} {
+	for _, bucket := range [3]*authFailureBucket{account, globalAccount, source} {
 		if bucket == nil {
 			continue
 		}
@@ -242,10 +266,11 @@ func resetExpiredFailuresLocked(bucket *authFailureBucket, now time.Time) {
 	bucket.windowStart = now
 }
 
-// complete releases both reservations. Clean success clears the claimed and
-// verified account buckets, never source failures. When a bad Authorization
-// header falls back to a valid X-API-Key, it charges the failed claimed account
-// and source while clearing a distinct, successfully verified key bucket.
+// complete releases all reservations. Clean Basic success clears that account
+// across sources; all clean successes clear their source/account pair but
+// never source failures. When a bad Authorization header falls back to a valid
+// X-API-Key, it charges the failed identity and source while clearing only the
+// successfully verified key bucket.
 func (t *authFailureTracker) complete(reservation *authThrottleReservation, authorized bool, verified string, authorizationFailed bool) {
 	if reservation == nil {
 		return
@@ -258,9 +283,13 @@ func (t *authFailureTracker) complete(reservation *authThrottleReservation, auth
 	reservation.completed = true
 	now := t.now()
 	reservation.account.inFlight--
+	if reservation.globalAccount != nil {
+		reservation.globalAccount.inFlight--
+	}
 	reservation.sourceBucket.inFlight--
 	if authorized && !authorizationFailed {
 		t.clearAccountLocked(reservation.source, reservation.claimed, now)
+		t.clearGlobalBasicAccountLocked(reservation.claimed, now)
 		if verified != "" && verified != reservation.claimed {
 			t.clearAccountLocked(reservation.source, verified, now)
 		}
@@ -275,6 +304,9 @@ func (t *authFailureTracker) complete(reservation *authThrottleReservation, auth
 		t.clearAccountLocked(reservation.source, verified, now)
 	}
 	t.chargeLocked(reservation.account, now, authThrottleAccountFailures)
+	if reservation.globalAccount != nil {
+		t.chargeLocked(reservation.globalAccount, now, authThrottleGlobalBasicFailures)
+	}
 	t.chargeLocked(reservation.sourceBucket, now, authThrottleSourceFailures)
 }
 
@@ -284,46 +316,61 @@ func (t *authFailureTracker) clearAccountLocked(source, account string, now time
 	if bucket == nil {
 		return
 	}
-	bucket.failures = 0
-	bucket.lockouts = 0
-	bucket.lockedUntil = time.Time{}
-	bucket.lastFailure = time.Time{}
-	bucket.windowStart = now
+	clearAuthThrottleBucket(bucket, now)
 	if bucket.inFlight == 0 {
 		delete(t.accounts, key)
 	}
 }
 
-// makeRoomLocked keeps the tracker bounded without evicting buckets with
-// admitted verifier work or buckets participating in this admission.
-func (t *authFailureTracker) makeRoomLocked(needed int, now time.Time, protectAccount, protectSource *authFailureBucket) bool {
-	if len(t.accounts)+len(t.sources)+needed <= authThrottleMaxEntries {
-		return true
+func (t *authFailureTracker) clearGlobalBasicAccountLocked(account string, now time.Time) {
+	key := globalBasicAccountKey(account)
+	bucket := t.globalAccounts[key]
+	if bucket == nil {
+		return
 	}
-	sweepAuthThrottleBuckets(t.accounts, now, protectAccount, protectSource)
-	sweepAuthThrottleBuckets(t.sources, now, protectAccount, protectSource)
-	for key, bucket := range t.accounts {
-		if len(t.accounts)+len(t.sources)+needed <= authThrottleMaxEntries {
-			return true
-		}
-		if authThrottleBucketEvictable(bucket, protectAccount, protectSource) {
-			delete(t.accounts, key)
-		}
+	clearAuthThrottleBucket(bucket, now)
+	if bucket.inFlight == 0 {
+		delete(t.globalAccounts, key)
 	}
-	for key, bucket := range t.sources {
-		if len(t.accounts)+len(t.sources)+needed <= authThrottleMaxEntries {
-			return true
-		}
-		if authThrottleBucketEvictable(bucket, protectAccount, protectSource) {
-			delete(t.sources, key)
-		}
-	}
-	return len(t.accounts)+len(t.sources)+needed <= authThrottleMaxEntries
 }
 
-func sweepAuthThrottleBuckets(buckets map[string]*authFailureBucket, now time.Time, protectAccount, protectSource *authFailureBucket) {
+func clearAuthThrottleBucket(bucket *authFailureBucket, now time.Time) {
+	bucket.failures = 0
+	bucket.lockouts = 0
+	bucket.lockedUntil = time.Time{}
+	bucket.lastFailure = time.Time{}
+	bucket.windowStart = now
+}
+
+// makeRoomLocked keeps the combined tracker bounded without evicting buckets
+// with admitted verifier work or buckets participating in this admission.
+func (t *authFailureTracker) makeRoomLocked(needed int, now time.Time, protected ...*authFailureBucket) bool {
+	if t.entryCountLocked()+needed <= authThrottleMaxEntries {
+		return true
+	}
+	sweepAuthThrottleBuckets(t.accounts, now, protected...)
+	sweepAuthThrottleBuckets(t.globalAccounts, now, protected...)
+	sweepAuthThrottleBuckets(t.sources, now, protected...)
+	for _, buckets := range []map[string]*authFailureBucket{t.accounts, t.globalAccounts, t.sources} {
+		for key, bucket := range buckets {
+			if t.entryCountLocked()+needed <= authThrottleMaxEntries {
+				return true
+			}
+			if authThrottleBucketEvictable(bucket, protected...) {
+				delete(buckets, key)
+			}
+		}
+	}
+	return t.entryCountLocked()+needed <= authThrottleMaxEntries
+}
+
+func (t *authFailureTracker) entryCountLocked() int {
+	return len(t.accounts) + len(t.globalAccounts) + len(t.sources)
+}
+
+func sweepAuthThrottleBuckets(buckets map[string]*authFailureBucket, now time.Time, protected ...*authFailureBucket) {
 	for key, bucket := range buckets {
-		if authThrottleBucketEvictable(bucket, protectAccount, protectSource) &&
+		if authThrottleBucketEvictable(bucket, protected...) &&
 			now.After(bucket.lockedUntil) &&
 			now.Sub(authThrottleQuietSince(bucket)) > authThrottleWindow {
 			delete(buckets, key)
@@ -331,8 +378,16 @@ func sweepAuthThrottleBuckets(buckets map[string]*authFailureBucket, now time.Ti
 	}
 }
 
-func authThrottleBucketEvictable(bucket, protectAccount, protectSource *authFailureBucket) bool {
-	return bucket.inFlight == 0 && bucket != protectAccount && bucket != protectSource
+func authThrottleBucketEvictable(bucket *authFailureBucket, protected ...*authFailureBucket) bool {
+	if bucket.inFlight != 0 {
+		return false
+	}
+	for _, active := range protected {
+		if bucket == active {
+			return false
+		}
+	}
+	return true
 }
 
 func authThrottleQuietSince(bucket *authFailureBucket) time.Time {
@@ -379,23 +434,27 @@ func (t *authFailureTracker) chargeLocked(b *authFailureBucket, now time.Time, t
 	b.windowStart = b.lockedUntil
 }
 
-// recordFailure charges both independent budgets. The compound account key is
-// caller-claimed, so the source-only bucket remains necessary to stop username
-// rotation.
+// recordFailure charges the per-source/account pair, global claimed Basic
+// account when applicable, and source-prefix budgets.
 func (t *authFailureTracker) recordFailure(source, account string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
 	t.chargeLocked(t.accountBucketLocked(source+"\x00"+account), now, authThrottleAccountFailures)
+	if key := globalBasicAccountKey(account); key != "" {
+		t.chargeLocked(t.globalAccountBucketLocked(key), now, authThrottleGlobalBasicFailures)
+	}
 	t.chargeLocked(t.sourceBucketLocked(source), now, authThrottleSourceFailures)
 }
 
-// recordSuccess clears the (source, account) pair outright — a success proves
-// the pair's recent failures are over — and leaves the source budget alone.
+// recordSuccess clears the source/account pair and the corresponding global
+// Basic bucket, but leaves source-prefix failures alone.
 func (t *authFailureTracker) recordSuccess(source, account string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.clearAccountLocked(source, account, t.now())
+	now := t.now()
+	t.clearAccountLocked(source, account, now)
+	t.clearGlobalBasicAccountLocked(account, now)
 }
 
 func (t *authFailureTracker) accountBucketLocked(key string) *authFailureBucket {
@@ -404,6 +463,16 @@ func (t *authFailureTracker) accountBucketLocked(key string) *authFailureBucket 
 		t.sweepIfFullLocked()
 		b = &authFailureBucket{windowStart: t.now()}
 		t.accounts[key] = b
+	}
+	return b
+}
+
+func (t *authFailureTracker) globalAccountBucketLocked(key string) *authFailureBucket {
+	b := t.globalAccounts[key]
+	if b == nil {
+		t.sweepIfFullLocked()
+		b = &authFailureBucket{windowStart: t.now()}
+		t.globalAccounts[key] = b
 	}
 	return b
 }
@@ -418,30 +487,25 @@ func (t *authFailureTracker) sourceBucketLocked(source string) *authFailureBucke
 	return b
 }
 
-// sweepIfFullLocked keeps the tables bounded. Expired buckets go first; if
-// the tables are still over budget the remainder is evicted arbitrarily (map
-// order), which only forgives failures early.
+// sweepIfFullLocked keeps all tracker tables within the shared entry budget.
+// Expired buckets go first; the remainder is evicted arbitrarily, which only
+// forgives failures early.
 func (t *authFailureTracker) sweepIfFullLocked() {
-	if len(t.accounts)+len(t.sources) < authThrottleMaxEntries {
+	if t.entryCountLocked() < authThrottleMaxEntries {
 		return
 	}
 	now := t.now()
-	sweepAuthThrottleBuckets(t.accounts, now, nil, nil)
-	sweepAuthThrottleBuckets(t.sources, now, nil, nil)
-	for k, b := range t.accounts {
-		if len(t.accounts)+len(t.sources) < authThrottleMaxEntries {
-			return
-		}
-		if authThrottleBucketEvictable(b, nil, nil) {
-			delete(t.accounts, k)
-		}
-	}
-	for k, b := range t.sources {
-		if len(t.accounts)+len(t.sources) < authThrottleMaxEntries {
-			return
-		}
-		if authThrottleBucketEvictable(b, nil, nil) {
-			delete(t.sources, k)
+	sweepAuthThrottleBuckets(t.accounts, now)
+	sweepAuthThrottleBuckets(t.globalAccounts, now)
+	sweepAuthThrottleBuckets(t.sources, now)
+	for _, buckets := range []map[string]*authFailureBucket{t.accounts, t.globalAccounts, t.sources} {
+		for key, bucket := range buckets {
+			if t.entryCountLocked() < authThrottleMaxEntries {
+				return
+			}
+			if authThrottleBucketEvictable(bucket) {
+				delete(buckets, key)
+			}
 		}
 	}
 }
@@ -459,15 +523,13 @@ func (s *Server) throttle() *authFailureTracker {
 	return s.authThrottle
 }
 
-// throttleIdentity derives the (source, account) pair a request is budgeted
-// under. Source is the TCP peer IP (RemoteAddr without the port). Basic
-// usernames, Bearer presentations, and malformed/unsupported Authorization
-// headers use fixed namespaces distinct from the API-key account bucket.
+// throttleIdentity derives the source-prefix and claimed account a request is
+// budgeted under. IPv6 addresses sharing a /64 use the same source bucket;
+// Basic usernames also have a source-independent global account bucket.
+// Bearer presentations and malformed/unsupported Authorization headers use
+// fixed namespaces distinct from API-key identity.
 func throttleIdentity(r *http.Request) (source, account string) {
-	source = r.RemoteAddr
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		source = host
-	}
+	source = normalizeAuthThrottleSource(r.RemoteAddr)
 	account = "none"
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, "Basic ") {
@@ -488,6 +550,37 @@ func throttleIdentity(r *http.Request) (source, account string) {
 		account = authThrottleAPIKeyAccount
 	}
 	return source, account
+}
+
+func globalBasicAccountKey(account string) string {
+	if strings.HasPrefix(account, authThrottleBasicAccountPrefix) &&
+		len(account) > len(authThrottleBasicAccountPrefix) {
+		return account
+	}
+	return ""
+}
+
+func normalizeAuthThrottleSource(remoteAddr string) string {
+	host := remoteAddr
+	if parsedHost, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = parsedHost
+	} else {
+		trimmed := strings.Trim(remoteAddr, "[]")
+		if _, err := netip.ParseAddr(trimmed); err != nil {
+			return remoteAddr
+		}
+		host = trimmed
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return remoteAddr
+	}
+	addr = addr.Unmap()
+	if addr.Is6() {
+		addr = addr.WithZone("")
+		return netip.PrefixFrom(addr, 64).Masked().String()
+	}
+	return addr.String()
 }
 
 // writeAuthLockedOut emits the 429 + Retry-After response for a request

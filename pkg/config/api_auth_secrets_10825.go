@@ -13,6 +13,9 @@ import (
 const (
 	apiAuthBcryptPrefix        = "$xpf-bcrypt$"
 	apiAuthInvalidBcryptPrefix = "$xpf-invalid$"
+	// Cost 12 raises API-auth offline-guessing work fourfold over the
+	// previous cost 10 while keeping admission throttling ahead of compares.
+	apiAuthBcryptCost = 12
 )
 
 // APIAuthBasicPasswordMinRunes is the strict-commit minimum for an api-auth
@@ -124,7 +127,7 @@ func hashAPIAuthSecretAtMinimum(raw string, minimum int) (string, error) {
 		prefix = apiAuthInvalidBcryptPrefix
 	}
 	prehash := sha256.Sum256([]byte(raw))
-	hash, err := bcrypt.GenerateFromPassword(prehash[:], bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword(prehash[:], apiAuthBcryptCost)
 	if err != nil {
 		return "", fmt.Errorf("hashing api-auth secret failed")
 	}
