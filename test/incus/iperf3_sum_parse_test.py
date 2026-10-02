@@ -274,6 +274,107 @@ kill -0 "$pool_pid" 2>/dev/null || exit 16
             )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_timeout_kills_hung_final_exchange_and_cleanup_uses_pidfile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.makedirs(bin_dir)
+            incus = os.path.join(bin_dir, "incus")
+            iperf = os.path.join(bin_dir, "iperf3")
+            with open(incus, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/usr/bin/env bash\n"
+                    '[[ "$1" == exec && "$3" == -- ]] || exit 90\n'
+                    "shift 3\n"
+                    'exec "$@"\n'
+                )
+            with open(iperf, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/usr/bin/env python3\n"
+                    "import os, signal, sys, time\n"
+                    "args = sys.argv[1:]\n"
+                    "port = args[args.index('-p') + 1]\n"
+                    "duration = args[args.index('-t') + 1]\n"
+                    "with open(os.path.join(os.environ['TEST_CHILD_PID_DIR'], port), 'w') as out:\n"
+                    "    out.write(str(os.getpid()))\n"
+                    "print('[  8] 118.00-119.00 sec 1.00 GBytes 8.00 Gbits/sec', flush=True)\n"
+                    "if port == '5210' or duration != '1':\n"
+                    "    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+                    "else:\n"
+                    "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    "while True:\n"
+                    "    time.sleep(1)\n"
+                )
+            os.chmod(incus, 0o755)
+            os.chmod(iperf, 0o755)
+            env = os.environ.copy()
+            env["PATH"] = bin_dir + os.pathsep + env["PATH"]
+            env["TEST_CHILD_PID_DIR"] = tmp
+            script = r'''
+source "$1"
+CLUSTER_LAN_HOST=mock-lan
+export FAILOVER_IPERF_TIMEOUT_MARGIN=0
+test_dir="$2"
+main_pidfile="$test_dir/main.pid"
+cleanup_clients() {
+    if declare -F failover_stop_main_iperf >/dev/null; then
+        failover_stop_main_iperf "$main_pidfile" 192.0.2.1 5211 8
+        failover_stop_main_iperf "$test_dir/main-cleanup.pid" 192.0.2.1 5211 8
+        failover_stop_main_iperf "$test_dir/pool.pid" 192.0.2.1 5210 2
+    else
+        for pidfile in "$main_pidfile" "$test_dir/main-cleanup.pid" "$test_dir/pool.pid"; do
+            pid=$(cat "$pidfile" 2>/dev/null || true)
+            [[ "$pid" =~ ^[0-9]+$ ]] && kill -KILL "$pid" 2>/dev/null || true
+        done
+    fi
+}
+trap cleanup_clients EXIT
+failover_start_main_iperf 1 192.0.2.1 5211 8 "$2/hung.log" "$main_pidfile"
+main_pid=$(cat "$main_pidfile")
+[[ "$main_pid" =~ ^[0-9]+$ ]] || exit 31
+failover_main_iperf_running "$main_pidfile" 192.0.2.1 5211 8 || exit 32
+for _ in {1..100}; do
+    if ! failover_main_iperf_running "$main_pidfile" 192.0.2.1 5211 8; then break; fi
+    sleep 0.1
+done
+if failover_main_iperf_running "$main_pidfile" 192.0.2.1 5211 8; then exit 33; fi
+grep -q '118.00-119.00' "$2/hung.log" || exit 34
+if grep -Eq 'sender|iperf Done' "$2/hung.log"; then exit 35; fi
+hung_child=$(cat "$TEST_CHILD_PID_DIR/5211")
+if kill -0 "$hung_child" 2>/dev/null; then exit 36; fi
+
+export FAILOVER_IPERF_TIMEOUT_MARGIN=30
+main_pidfile="$2/main-cleanup.pid"
+pool_pidfile="$2/pool.pid"
+failover_start_main_iperf 60 192.0.2.1 5211 8 "$2/main-cleanup.log" "$main_pidfile"
+main_pid=$(cat "$main_pidfile")
+failover_start_main_iperf 60 192.0.2.1 5210 2 "$2/pool.log" "$pool_pidfile"
+pool_pid=$(cat "$pool_pidfile")
+failover_main_iperf_running "$main_pidfile" 192.0.2.1 5211 8 || exit 37
+failover_main_iperf_running "$pool_pidfile" 192.0.2.1 5210 2 || exit 38
+failover_stop_main_iperf "$main_pidfile" 192.0.2.1 5211 8
+if failover_main_iperf_running "$main_pidfile" 192.0.2.1 5211 8; then exit 39; fi
+failover_main_iperf_running "$pool_pidfile" 192.0.2.1 5210 2 || exit 40
+failover_stop_main_iperf "$pool_pidfile" 192.0.2.1 5210 2
+if kill -0 "$main_pid" 2>/dev/null || kill -0 "$pool_pid" 2>/dev/null; then exit 41; fi
+'''
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    script,
+                    "test",
+                    os.path.join(os.path.dirname(__file__), "failover-client-lib.sh"),
+                    tmp,
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=20,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+
 
 
 class FailoverClientCompletionTests(unittest.TestCase):
