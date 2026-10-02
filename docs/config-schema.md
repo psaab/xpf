@@ -15003,19 +15003,18 @@ gaps lived under that opacity:
   a typo (`alg ftpp`) committed cleanly and the operator believed an ALG was
   pinned when none existed. #3353 first made an unsupported name (outside the
   SSOT set `dns`/`ftp`/`sip`/`tftp`) a hard commit error. **#4337 relaxes that
-  to an accepted-but-inert advisory**: a per-application ALG is NOT carried into
-  the userspace dataplane snapshot at all (the only ALG signal on the wire is
-  the *global* `alg_disable_flags` bitfield, `userspace-dp` `snapshot.rs`), so
-  even a KNOWN name is informational today — hard-rejecting an UNKNOWN one
-  blocked real vSRX drop-in configs that tag applications with ALGs xpf does not
-  implement (e.g. `alg ssh`) for a knob with no functional effect. The unknown
-  name now commits, and `ValidateConfig` (`compiler_validate_warn.go`) emits an
-  advisory naming the unenforced alg — `application <a>: alg "<name>" accepted
-  but not enforced …` — mirroring the global `security alg` accepted-but-inert
-  advisory (#4232). A KNOWN name (case-insensitive, via
-  `supportedApplicationALGs` in `compiler_applications.go`) commits silently and
-  keeps its (informational) behavior. This covers both the top-level `app.ALG`
-  and the inline-term `alg` (the term app carries it).
+  to an accepted-but-inert advisory. A per-application ALG is NOT carried as a
+  matching rule in the userspace dataplane snapshot (the only ALG config
+  signal on the wire is the global `alg_disable_flags` bitfield); conntrack
+  tagging is inferred from well-known tuple ports only: FTP TCP/21, DNS UDP/53,
+  and SIP TCP/UDP/5060. An unsupported name still commits with an advisory
+  naming the unenforced ALG. A supported name normally commits silently, but
+  `ValidateConfig` now warns when its configured protocol/destination-port has
+  no matching session tag — for example, `alg ftp destination-port 2121` is
+  accepted but the FTP pin has no dataplane effect. TFTP also warns because
+  xpf has no TFTP session tagging at any port. This covers top-level `app.ALG`
+  and inline-term `alg` (the term app carries it); no dataplane behavior is
+  changed.
 
   **Enforcement remains deferred.** Wiring per-application ALG (e.g. `alg ftp
   destination-port 2121`) through to enforcement needs a new snapshot field plus
@@ -15054,6 +15053,9 @@ rejected referenced AND unreferenced, well-formed term keeps its port
 constraint, unknown alg accepted-with-advisory top-level + inline-term +
 unreferenced, supported alg names accepted on both paths, predefined-app
 reference not rejected).
+`pkg/config/compiler_application_alg_customport_11673_test.go` additionally
+pins known custom-port and TFTP inert-pin warnings plus well-known-port silent
+controls (#11673).
 
 ### #4336 — application `source-port` / `destination-port` `0-N` range floor
 

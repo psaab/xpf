@@ -1155,21 +1155,20 @@ func validatePortSpec(spec string) error {
 // `alg` names xpf recognizes. It MIRRORS the global `security alg <proto>`
 // control surface (schema_security.go `alg` children + algDisableFlags in
 // pkg/dataplane/userspace/flow.go), which exposes exactly DNS / FTP / SIP / TFTP.
-// A name outside this set is a silent operator error today: before #3353 the
-// per-application `alg` leaf was a raw `args:1` string with no validator, so a
-// typo (`alg ftpp`) committed cleanly and the operator believed an ALG was
-// pinned when none existed.
+// A name outside this set was a silent operator error before #3353: the raw
+// `alg` leaf accepted typos like `ftpp`, leaving the operator to believe an ALG
+// was pinned when none existed. #4337 keeps unsupported names accepted for
+// vSRX drop-in compatibility but warns about the inert name.
 //
-// #3353 ships VALIDATION only. The per-application ALG is recorded on
-// Application.ALG but is NOT carried into the userspace dataplane snapshot — the
-// only ALG signal on the wire is the global alg_disable_flags bitfield
-// (userspace-dp snapshot.rs), there is no per-application ALG / custom-port pin.
-// Wiring per-application ALG (e.g. `alg ftp destination-port 2121`) through to
-// enforcement is a genuine dataplane fork (it needs a new snapshot field plus
-// Rust session-metadata handling) and is the per-application slice of the
-// broader ALG parity tracked under #2008; it is deliberately deferred. Until
-// then this gate makes an unsupported name an operator-visible commit error
-// instead of a silent no-op.
+// The per-application ALG is recorded on Application.ALG but is NOT carried as
+// a matching rule in the userspace dataplane snapshot; the only ALG config
+// signal on the wire is the global alg_disable_flags bitfield. Conntrack
+// tagging is inferred from standard service tuples only (FTP TCP/21, DNS UDP/53,
+// SIP TCP/UDP/5060), so a known pin such as `alg ftp destination-port 2121`
+// has no dataplane effect. TFTP has no conntrack tag at any port. #11673 warns
+// on such inert pins; wiring a per-application ALG through to enforcement needs
+// a new snapshot field plus Rust session-metadata handling, a genuine dataplane
+// fork deliberately deferred to the per-application slice of broader #2008.
 var supportedApplicationALGs = map[string]bool{
 	"dns":  true,
 	"ftp":  true,
