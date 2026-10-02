@@ -41,11 +41,12 @@ var controlVerbDeadlineFloors9344 = map[string]time.Duration{
 	// fit without changing the global control deadline.
 	"export_owner_rg_sessions": ownerRGExportAckWait + controlBaseDeadline,
 	// #11840: fib_dump is requested with ~60 bytes but may return a full
-	// MAX_CONTROL_RESPONSE_BYTES JSON body. Budget three response-sized
-	// passes (per-route size measurement, response serialization, and socket
-	// write) at a pessimistic 6 MiB/s, then add one ordinary round trip as
-	// margin. This covers the helper's worst-case response work without
-	// raising the #7675 reachable bound or slowing unrelated small verbs.
+	// MAX_CONTROL_RESPONSE_BYTES JSON body. Budget five response-sized
+	// passes: route-row size measurement, response-cap counting, response
+	// encoding, socket write, and Go response decode/framing. Estimate this
+	// work at a pessimistic 10 MiB/s, then add one ordinary round trip as
+	// margin. This covers the helper's and caller's full-response work
+	// without raising the #7675 reachable bound or slowing unrelated verbs.
 	"fib_dump": fibDumpWorstCaseResponseWork11840 + controlBaseDeadline,
 }
 
@@ -59,11 +60,12 @@ var controlVerbDeadlineFloors9344 = map[string]time.Duration{
 // is a number that will drift.
 const ownerRGExportAckWait = 15 * time.Second
 const (
-	// The helper serializes each route once to measure its response budget,
-	// then serializes and writes the complete response. Keep the full-cap
-	// work estimate tied to Go's cap; the agreement test reads the Rust cap.
-	fibDumpWorstCaseResponseBytesPerSecond11840 = 6 * 1024 * 1024
-	fibDumpWorstCaseResponseWorkPasses11840     = 3
+	// Two helper-side JSON traversals (per-route sizing and full-response
+	// cap counting), response encoding/write, and Go response
+	// decode/framing account for five full-response-sized work passes.
+	// The agreement test reads the Rust cap that sizes this budget.
+	fibDumpWorstCaseResponseBytesPerSecond11840 = 10 * 1024 * 1024
+	fibDumpWorstCaseResponseWorkPasses11840     = 5
 	fibDumpWorstCaseResponseWork11840           = time.Duration((MaxControlResponseBytes*fibDumpWorstCaseResponseWorkPasses11840+
 		fibDumpWorstCaseResponseBytesPerSecond11840-1)/fibDumpWorstCaseResponseBytesPerSecond11840) * time.Second
 )

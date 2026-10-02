@@ -602,8 +602,8 @@ func TestExportOwnerRGSessionsGetsAWorkDeadlineFloor9344(t *testing.T) {
 	}
 }
 
-// TestFibDumpGetsAResponseWorkDeadlineFloor11840 mirrors the helper's response
-// cap and proves a maximum fib_dump has time to serialize and write its JSON.
+// TestFibDumpGetsAResponseWorkDeadlineFloor11840 reads the helper response cap
+// and bounds the helper's JSON traversals, socket write, and Go-side decode.
 func TestFibDumpGetsAResponseWorkDeadlineFloor11840(t *testing.T) {
 	src, err := os.ReadFile("../../../userspace-dp/src/protocol/control.rs")
 	if err != nil {
@@ -641,8 +641,8 @@ func TestFibDumpGetsAResponseWorkDeadlineFloor11840(t *testing.T) {
 	}
 
 	const (
-		assumedWorstCaseBytesPerSecond = 6 * 1024 * 1024
-		responseWorkPasses             = 3
+		assumedWorstCaseBytesPerSecond = 10 * 1024 * 1024
+		responseWorkPasses             = 5
 	)
 	wantWorkBudget := time.Duration((rustResponseCap*responseWorkPasses+assumedWorstCaseBytesPerSecond-1)/assumedWorstCaseBytesPerSecond) * time.Second
 	wantFloor := wantWorkBudget + controlBaseDeadline
@@ -652,7 +652,7 @@ func TestFibDumpGetsAResponseWorkDeadlineFloor11840(t *testing.T) {
 	}
 	got := controlWorkDeadline("fib_dump", 60)
 	if got != wantFloor {
-		t.Errorf("fib_dump deadline = %v, want full serialize/write budget %v plus margin %v (%v)",
+		t.Errorf("fib_dump deadline = %v, want full response-work budget %v plus margin %v (%v)",
 			got, wantWorkBudget, controlBaseDeadline, wantFloor)
 	}
 	if floor := controlVerbDeadlineFloors9344["fib_dump"]; floor != wantFloor {
