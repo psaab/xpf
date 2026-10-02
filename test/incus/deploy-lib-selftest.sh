@@ -1495,8 +1495,23 @@ test_rejoin_site_uses_the_scoped_predicate() {
 	fi
 }
 
+test_manifest_node_index_maps_configured_instances() {
+	local fw0="custom-remote:primary-node-alpha"
+	local fw1="custom-remote:secondary-node-beta"
+	local got0 got1
+	if got0=$(deploy_manifest_node_index "$fw0" "$fw0" "$fw1") &&
+		got1=$(deploy_manifest_node_index "$fw1" "$fw0" "$fw1") &&
+		[[ "$got0" == 0 && "$got1" == 1 ]] &&
+		! deploy_manifest_node_index "unrecognized-custom-node" "$fw0" "$fw1" >/dev/null 2>&1; then
+		ok "deploy manifest node mapping: configured names select stable slots and unknown names are refused"
+	else
+		bad "deploy manifest node mapping: configured names did not select stable slots or unknown name was accepted"
+	fi
+}
+
 test_manifest_raw_records_verified_binary_hashes() {
-	local fixture root manifest xpfd_sha helper_sha before after got_sha got_helper rc
+	local fixture root manifest xpfd_sha0 xpfd_sha1 helper_sha0 helper_sha1
+	local before after got0 got1 got_helper0 got_helper1 rc
 	fixture=$(mktemp -d)
 	root="$fixture/root"
 	mkdir -p "$root"
@@ -1505,41 +1520,66 @@ test_manifest_raw_records_verified_binary_hashes() {
 	git -C "$root" config user.name t
 	printf 'tracked build source\n' >"$root/source"
 	git -C "$root" add source && git -C "$root" commit -qm init
-	printf 'raw xpfd artifact\n' >"$root/xpfd"
-	printf 'raw cli artifact\n' >"$root/cli"
-	printf 'raw helper artifact\n' >"$root/xpf-userspace-dp"
-	xpfd_sha=$(sha256sum "$root/xpfd" | awk '{print $1}')
-	helper_sha=$(sha256sum "$root/xpf-userspace-dp" | awk '{print $1}')
 	before=$(deploy_build_git_sha "$root")
 	mkdir -p "$root/test/results/ledger.d"
 	printf '{"run_id":"previous-row"}\n' >"$root/test/results/ledger.d/previous.json"
 	after=$(deploy_build_git_sha "$root")
 	manifest="$fixture/raw-manifest.json"
+
+	printf 'raw xpfd build for fw0\n' >"$root/xpfd"
+	printf 'raw cli build for fw0\n' >"$root/cli"
+	printf 'raw helper build for fw0\n' >"$root/xpf-userspace-dp"
+	xpfd_sha0=$(sha256sum "$root/xpfd" | awk '{print $1}')
+	helper_sha0=$(sha256sum "$root/xpf-userspace-dp" | awk '{print $1}')
 	if [[ "$before" != "$after" ]]; then
 		bad "manifest git identity: an existing ledger row made the deploy look dirty"
-	elif ! XPF_DEPLOY_MANIFEST="$manifest" deploy_write_manifest "$root"; then
-		bad "raw deploy manifest: writer refused a verified xpfd artifact"
-	elif ! got_sha=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "$after") ||
-		[[ "$got_sha" != "$xpfd_sha" ]]; then
-		bad "raw deploy manifest: recorded xpfd sha $got_sha, expected $xpfd_sha"
-	elif ! got_helper=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpf-userspace-dp "$root" "$after") ||
-		[[ "$got_helper" != "$helper_sha" ]]; then
-		bad "raw deploy manifest: recorded helper sha $got_helper, expected $helper_sha"
-	elif ! python3 - "$manifest" "$after" "$xpfd_sha" "$helper_sha" <<'PY'
+	elif ! XPF_DEPLOY_MANIFEST="$manifest" deploy_write_manifest "$root" "" "$after" 0; then
+		bad "raw deploy manifest: writer refused fw0's verified xpfd artifact"
+	elif ! got0=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "$after" 0) ||
+		[[ "$got0" != "$xpfd_sha0" ]]; then
+		bad "raw deploy manifest: fw0 slot contains $got0, expected $xpfd_sha0"
+	else
+		ok "raw deploy manifest: first node deploy records its artifact in slot 0"
+	fi
+
+	printf 'raw xpfd rebuild for fw1 (different BUILD_TIME)\n' >"$root/xpfd"
+	printf 'raw cli rebuild for fw1\n' >"$root/cli"
+	printf 'raw helper rebuild for fw1\n' >"$root/xpf-userspace-dp"
+	xpfd_sha1=$(sha256sum "$root/xpfd" | awk '{print $1}')
+	helper_sha1=$(sha256sum "$root/xpf-userspace-dp" | awk '{print $1}')
+	if [[ "$xpfd_sha0" == "$xpfd_sha1" || "$helper_sha0" == "$helper_sha1" ]]; then
+		bad "rolling deploy fixture: per-node rebuilds must have different bytes"
+	elif ! XPF_DEPLOY_MANIFEST="$manifest" deploy_write_manifest "$root" "" "$after" 1; then
+		bad "raw deploy manifest: writer refused fw1's verified xpfd artifact"
+	elif ! got0=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "$after" 0) ||
+		[[ "$got0" != "$xpfd_sha0" ]]; then
+		bad "rolling deploy manifest: fw1 deploy overwrote fw0 slot with $got0"
+	elif ! got1=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "$after" 1) ||
+		[[ "$got1" != "$xpfd_sha1" ]]; then
+		bad "rolling deploy manifest: fw1 slot contains $got1, expected $xpfd_sha1"
+	elif ! got_helper0=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpf-userspace-dp "$root" "$after" 0) ||
+		[[ "$got_helper0" != "$helper_sha0" ]]; then
+		bad "rolling deploy manifest: fw0 helper slot contains $got_helper0, expected $helper_sha0"
+	elif ! got_helper1=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpf-userspace-dp "$root" "$after" 1) ||
+		[[ "$got_helper1" != "$helper_sha1" ]]; then
+		bad "rolling deploy manifest: fw1 helper slot contains $got_helper1, expected $helper_sha1"
+	elif ! python3 - "$manifest" "$after" "$xpfd_sha0" "$xpfd_sha1" "$helper_sha0" "$helper_sha1" <<'PY'
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
-assert doc["schema"] == 1 and doc["mode"] == "raw"
-assert doc["build_git_sha"] == sys.argv[2]
-assert doc["binaries"]["xpfd"] == sys.argv[3]
-assert doc["binaries"]["xpf-userspace-dp"] == sys.argv[4]
-assert doc["deb"] is None
+assert doc["schema"] == 2 and set(doc["nodes"]) == {"0", "1"}
+for i, xpfd, helper in (("0", sys.argv[3], sys.argv[5]), ("1", sys.argv[4], sys.argv[6])):
+    record = doc["nodes"][i]
+    assert record["build_git_sha"] == sys.argv[2]
+    assert record["mode"] == "raw" and record["deb"] is None
+    assert record["binaries"]["xpfd"] == xpfd
+    assert record["binaries"]["xpf-userspace-dp"] == helper
 PY
 	then
-		bad "raw deploy manifest: metadata does not describe the shipped raw binaries"
+		bad "raw deploy manifest: rolling slots do not carry their respective shipped binaries"
 	else
-		ok "raw deploy manifest: atomic record carries shipped xpfd/helper shas and ignores ledger dirtiness"
+		ok "rolling raw deploy manifest: NODE=0 then NODE=1 preserves both distinct slots and helpers"
 	fi
-	if got_sha=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "different-checkout"); then
+	if got0=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "different-checkout" 0); then
 		bad "deploy manifest reader: accepted a manifest from a different checkout"
 	else
 		rc=$?
@@ -1549,11 +1589,18 @@ PY
 			bad "deploy manifest reader: stale checkout returned rc=$rc, expected 3"
 		fi
 	fi
-	if XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_invalidate "$root" &&
-		[[ ! -e "$manifest" ]]; then
-		ok "deploy manifest invalidation: removes the prior record before deployment"
+	if XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_invalidate "$root" 1 &&
+		[[ "$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "$after" 0)" == "$xpfd_sha0" ]] &&
+		! XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "$after" 1; then
+		ok "deploy manifest invalidation: clears the attempted node slot and preserves its peer"
 	else
-		bad "deploy manifest invalidation: prior record remains usable"
+		bad "deploy manifest invalidation: node 1 failure did not preserve only node 0's slot"
+	fi
+	if XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_invalidate "$root" all &&
+		[[ ! -e "$manifest" ]]; then
+		ok "deploy manifest invalidation: all-node deploy clears the prior record"
+	else
+		bad "deploy manifest invalidation: all-node invalidation left stale provenance"
 	fi
 	rm -rf "$fixture"
 }
@@ -1599,14 +1646,16 @@ CONTROL
 		bad "deb deploy manifest: extractor got $got, expected package payload $packaged_sha"
 	elif [[ "$got" == "$local_sha" ]]; then
 		bad "deb deploy manifest: package extractor incorrectly used local rebuild bytes"
-	elif ! XPF_DEPLOY_MANIFEST="$manifest" deploy_write_manifest "$root" "$deb"; then
+	elif ! XPF_DEPLOY_MANIFEST="$manifest" deploy_write_manifest "$root" "$deb" "" 0; then
 		bad "deb deploy manifest: writer refused package payload"
-	elif ! got=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root") || [[ "$got" != "$packaged_sha" ]]; then
+	elif ! got=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "" 0) || [[ "$got" != "$packaged_sha" ]]; then
 		bad "deb deploy manifest: recorded $got, expected package payload $packaged_sha"
 	elif ! python3 - "$manifest" "$(basename "$deb")" <<'PY'
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
-assert doc["mode"] == "deb" and doc["deb"] == sys.argv[2]
+assert doc["schema"] == 2 and set(doc["nodes"]) == {"0"}
+record = doc["nodes"]["0"]
+assert record["mode"] == "deb" and record["deb"] == sys.argv[2]
 PY
 	then
 		bad "deb deploy manifest: mode or package basename missing"
@@ -1619,11 +1668,11 @@ PY
 test_manifest_write_wired_after_cluster_deploy() {
 	local code invalidate first_deploy raw_call deb_call rebaseline
 	code=$(awk '/^cmd_deploy\(\)/,/^}/' "$SCRIPT_DIR/cluster-setup.sh")
-	invalidate=$(grep -n 'deploy_manifest_invalidate "$PROJECT_ROOT"' <<<"$code" | cut -d: -f1)
+	invalidate=$(grep -n 'deploy_manifest_invalidate "$PROJECT_ROOT" "$target"' <<<"$code" | cut -d: -f1)
 	first_deploy=$(grep -nE '^[[:space:]]*([01]|all)\)[[:space:]]*deploy_' <<<"$code" |
 		head -1 | cut -d: -f1)
-	raw_call=$(grep -n 'deploy_write_manifest "$PROJECT_ROOT" "" "$deploy_git_sha"' <<<"$code" | cut -d: -f1)
-	deb_call=$(grep -n 'deploy_write_manifest "$PROJECT_ROOT" "$attestation_deb" "$deploy_git_sha"' <<<"$code" | cut -d: -f1)
+	raw_call=$(grep -n 'deploy_write_manifest "$PROJECT_ROOT" "" "$deploy_git_sha" "$target"' <<<"$code" | cut -d: -f1)
+	deb_call=$(grep -n 'deploy_write_manifest "$PROJECT_ROOT" "$attestation_deb" "$deploy_git_sha" "$target"' <<<"$code" | cut -d: -f1)
 	rebaseline=$(grep -n '^[[:space:]]*xpf_cluster_rebaseline_build$' <<<"$code" | cut -d: -f1)
 	if [[ -z "$invalidate" || -z "$first_deploy" || -z "$raw_call" ||
 		-z "$deb_call" || -z "$rebaseline" ]] ||
@@ -1648,6 +1697,7 @@ test_verify_pushed_sha_mismatch_hardfails
 test_verify_pushed_sha_absent_hardfails
 test_deb_repush_uses_distinct_remote_slots
 test_deb_repush_wiring
+test_manifest_node_index_maps_configured_instances
 test_manifest_raw_records_verified_binary_hashes
 test_manifest_deb_hashes_package_payload
 test_manifest_write_wired_after_cluster_deploy

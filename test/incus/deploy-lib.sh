@@ -262,17 +262,16 @@ deploy_verify_running_xpf_userspace_dp() {
 #
 # So the deploy path records what it SHIPPED, and the gate compares the
 # running image against that record instead of against a fresh rebuild.
-# The manifest is local, git-ignored, bound to the checkout identity, and
-# invalidated before a new deploy starts. It records only a successful deploy
-# from THIS worktree. A gate on a node running anything else still
-# MISMATCHes — including after another lane's deploy — which is the safe
-# outcome. Missing, invalid, or stale provenance fails closed.
+# The manifest is local, git-ignored, and bound to the checkout identity.
+# A single-node deploy invalidates only its target slot before binary changes;
+# an all-node deploy invalidates the whole manifest. Successful writes replace
+# the affected slot(s) atomically and preserve a successfully deployed peer.
+# Missing, invalid, or stale provenance fails closed.
 #
-# Schema: schema=1, build_git_sha (HEAD + -dirty, ledger-excluded, cf.
-# harness_build_git_sha), version (git describe), build_time (UTC),
-# mode (deb|raw), deb (basename or null), binaries {xpfd, cli,
-# xpf-userspace-dp sha256, null when the artifact was not shipped}.
-#
+# Schema: schema=2, nodes {"0": <deploy record>, "1": <deploy record>}.
+# Each record carries build_git_sha (HEAD + -dirty, ledger-excluded, cf.
+# harness_build_git_sha), version, build_time, mode, deb, and binaries. Slots
+# are independently replaced so a rolling rebuild cannot erase its peer.
 # deploy_manifest_path [project_root]
 # Echo the manifest path. XPF_DEPLOY_MANIFEST overrides (selftests point it
 # at a fixture); otherwise <root>/dist-deb/xpf-deploy-manifest.json.
@@ -285,16 +284,71 @@ deploy_manifest_path() {
 	printf '%s/dist-deb/xpf-deploy-manifest.json\n' "$root"
 }
 
-# deploy_manifest_invalidate <project_root>
+# deploy_manifest_invalidate <project_root> [0|1|all]
 # A failed or partial deploy must not leave the previous successful artifact
-# available to a later gate as if it named the current deployment.
+# available to a later gate. A single-node attempt clears only that node's slot
+# so a successfully deployed peer remains attestable.
 
 deploy_manifest_invalidate() {
-	local manifest
+	local manifest scope="${2:-all}"
 	manifest=$(deploy_manifest_path "$1") || return 1
-	rm -f -- "$manifest" || return 1
-	[[ ! -e "$manifest" ]]
+	case "$scope" in
+	all)
+		rm -f -- "$manifest" || return 1
+		[[ ! -e "$manifest" ]]
+		return
+		;;
+	0|1) ;;
+	*) warn "deploy manifest: invalid node scope '$scope'"; return 1 ;;
+	esac
+	[[ -e "$manifest" ]] || return 0
+	MANIFEST_PATH="$manifest" MANIFEST_NODE="$scope" python3 - <<'PY'
+import json, os
+path = os.environ["MANIFEST_PATH"]
+try:
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+except (OSError, json.JSONDecodeError):
+    os.unlink(path)
+    raise SystemExit(0)
+if not isinstance(doc, dict) or doc.get("schema") != 2 or not isinstance(doc.get("nodes"), dict):
+    os.unlink(path)
+    raise SystemExit(0)
+doc["nodes"].pop(os.environ["MANIFEST_NODE"], None)
+if not doc["nodes"]:
+    os.unlink(path)
+    raise SystemExit(0)
+tmp = path + ".tmp." + str(os.getpid())
+try:
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, separators=(",", ":"), ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+PY
 }
+
+# deploy_manifest_node_index <node> [fw0_instance] [fw1_instance]
+# Map configured instances or conventional fw0/fw1 names (including remote
+# prefixes) to stable slots. An unfamiliar identifier is not guessed.
+deploy_manifest_node_index() {
+	local node="${1:-}" fw0="${2:-}" fw1="${3:-}" short
+	if [[ -n "$fw0" && "$node" == "$fw0" ]]; then
+		printf '0\n'
+	elif [[ -n "$fw1" && "$node" == "$fw1" ]]; then
+		printf '1\n'
+	else
+		short="${node##*:}"
+		if [[ "$short" =~ (fw|node)([01])$ ]]; then
+			printf '%s\n' "${BASH_REMATCH[2]}"
+		else
+			return 2
+		fi
+	fi
+}
+
 
 # deploy_build_git_sha [root]
 # Match harness_build_git_sha exactly: the ledger is excluded from the
@@ -329,7 +383,7 @@ deploy_manifest_sha_from_deb() {
 	printf '%s\n' "$sha"
 }
 
-# deploy_write_manifest <project_root> [deb_path] [build_git_sha]
+# deploy_write_manifest <project_root> [deb_path] [build_git_sha] <0|1|all>
 # Record the shas this deploy SHIPPED. With a .deb path (the default dogfood
 # path) the shas come from the staged members inside the .deb itself, so a
 # worktree rebuild between `make deb` and cut-over cannot record the wrong
@@ -338,9 +392,13 @@ deploy_manifest_sha_from_deb() {
 # before deployment so a checkout change during cut-over cannot relabel it.
 # A write failure is fatal to the deploy.
 deploy_write_manifest() {
-	local root="$1" deb="${2:-}" expected_git_sha="${3:-}"
+	local root="$1" deb="${2:-}" expected_git_sha="${3:-}" scope="${4:-}"
 	local manifest xpfd_sha="" cli_sha="" helper_sha=""
 	local build_git_sha version build_time mode deb_name=""
+	[[ "$scope" == 0 || "$scope" == 1 || "$scope" == all ]] || {
+		warn "deploy manifest: node scope must be 0, 1, or all"
+		return 1
+	}
 	manifest=$(deploy_manifest_path "$root")
 	if [[ -n "$deb" ]]; then
 		mode="deb"
@@ -383,13 +441,13 @@ deploy_write_manifest() {
 		MANIFEST_TIME="$build_time" MANIFEST_MODE="$mode" \
 		MANIFEST_DEB="$deb_name" MANIFEST_XPFD="$xpfd_sha" \
 		MANIFEST_CLI="$cli_sha" MANIFEST_HELPER="$helper_sha" \
+		MANIFEST_SCOPE="$scope" \
 		python3 - <<'PY'
 import json, os
 def opt(name):
     v = os.environ.get(name, "")
     return v if v else None
-doc = {
-    "schema": 1,
+entry = {
     "build_git_sha": os.environ["MANIFEST_GITSHA"],
     "version": os.environ["MANIFEST_VERSION"],
     "build_time": os.environ["MANIFEST_TIME"],
@@ -401,45 +459,67 @@ doc = {
         "xpf-userspace-dp": opt("MANIFEST_HELPER"),
     },
 }
-line = json.dumps(doc, separators=(",", ":"), ensure_ascii=False) + "\n"
+path = os.environ["MANIFEST_PATH"]
+scope = os.environ["MANIFEST_SCOPE"]
+nodes = {}
+try:
+    with open(path, encoding="utf-8") as f:
+        old = json.load(f)
+    if isinstance(old, dict) and old.get("schema") == 2 and isinstance(old.get("nodes"), dict):
+        nodes = old["nodes"]
+except (OSError, json.JSONDecodeError):
+    pass
+for node in ("0", "1") if scope == "all" else (scope,):
+    nodes[node] = entry
+doc = {"schema": 2, "nodes": nodes}
 with open(os.environ["MANIFEST_TMP"], "w", encoding="utf-8") as f:
-    f.write(line)
-os.replace(os.environ["MANIFEST_TMP"], os.environ["MANIFEST_PATH"])
+    json.dump(doc, f, separators=(",", ":"), ensure_ascii=False)
+    f.write("\n")
+os.replace(os.environ["MANIFEST_TMP"], path)
 PY
 	then
 		rm -f "$tmp"
 		warn "deploy manifest: failed to write $manifest"
 		return 1
 	fi
-	info "Deploy manifest recorded $manifest (mode=$mode xpfd=$xpfd_sha)."
+	info "Deploy manifest recorded $manifest (nodes=$scope mode=$mode xpfd=$xpfd_sha)."
 }
 
-# deploy_manifest_sha <binary> [project_root] [expected_build_git_sha]
-# Return the recorded SHA. rc=1 means no manifest; rc=2 means invalid; rc=3
-# means the record belongs to another checkout. Every nonzero status fails
-# closed for a cluster measurement.
+# deploy_manifest_sha <binary> <project_root> [expected_build_git_sha] <0|1>
+# Return the selected node's recorded SHA. rc=1 means no manifest or node slot;
+# rc=2 means invalid; rc=3 means the record belongs to another checkout.
+# Every nonzero status fails closed for a cluster measurement.
 deploy_manifest_sha() {
 	local bin="$1" root="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-	local expected_git_sha="${3:-}" manifest
+	local expected_git_sha="${3:-}" node="${4:-}" manifest
+	[[ "$node" == 0 || "$node" == 1 ]] || return 2
 	manifest=$(deploy_manifest_path "$root")
 	[[ -f "$manifest" ]] || return 1
 	MANIFEST_PATH="$manifest" MANIFEST_BIN="$bin" \
-		MANIFEST_EXPECTED_GITSHA="$expected_git_sha" python3 - <<'PY'
+		MANIFEST_NODE="$node" MANIFEST_EXPECTED_GITSHA="$expected_git_sha" python3 - <<'PY'
 import json, os, re
 try:
     with open(os.environ["MANIFEST_PATH"], encoding="utf-8") as f:
         doc = json.load(f)
 except (OSError, json.JSONDecodeError):
     raise SystemExit(2)
-if not isinstance(doc, dict) or doc.get("schema") != 1:
+if not isinstance(doc, dict) or doc.get("schema") != 2:
     raise SystemExit(2)
-git_sha = doc.get("build_git_sha")
+nodes = doc.get("nodes")
+if not isinstance(nodes, dict):
+    raise SystemExit(2)
+entry = nodes.get(os.environ["MANIFEST_NODE"])
+if entry is None:
+    raise SystemExit(1)
+if not isinstance(entry, dict):
+    raise SystemExit(2)
+git_sha = entry.get("build_git_sha")
 if not isinstance(git_sha, str) or not git_sha:
     raise SystemExit(2)
 expected = os.environ.get("MANIFEST_EXPECTED_GITSHA", "")
 if expected and git_sha != expected:
     raise SystemExit(3)
-binaries = doc.get("binaries")
+binaries = entry.get("binaries")
 if not isinstance(binaries, dict):
     raise SystemExit(2)
 sha = binaries.get(os.environ["MANIFEST_BIN"])

@@ -650,29 +650,28 @@ harness_adapt_wire_gate() {
 # failure deploy-lib.sh already dies on (#2176, "the node is running STALE
 # code"). A row is only a measurement OF a build if it can name that build.
 #
-# Three fields, because two of them are different KINDS of value and comparing
-# them directly would be meaningless:
+# Five fields, because these are different KINDS of value and comparing them
+# directly would be meaningless:
 #
-#   build_git_sha       provenance of the TREE (plus "-dirty" when the tree has
-#                       uncommitted changes); cluster manifests must match it
-#                       before their executable identity is accepted
-#   build_exe_sha256  sha256 of the deploy artifact recorded by cluster-deploy
-#                       (from the .deb payload or verified raw binary), not a
-#                       fresh rebuild: BUILD_TIME plus the dirty version stamp
-#                       make same-commit rebuilds differ. Missing, invalid,
-#                       or stale manifests do not fall back to local ./xpfd.
-#   running_exe_sha256  sha256 of the LIVE process image on the node, read back
-#                       through deploy_running_xpfd_sha256() -- the one
-#                       readback in the tree, extracted from
-#                       deploy_verify_running_xpfd so there is not a second one
-#                       free to disagree with it
+#   build_git_sha             provenance of the TREE (plus "-dirty" when the
+#                             tree has uncommitted changes); each slot must
+#                             match it before its executable identity counts
+#   build_exe_sha256           deploy artifact for the selected node
+#   build_exe_sha256_peer      deploy artifact for the peer; can differ from
+#                             the selected node after a rolling rebuild
+#   running_exe_sha256         LIVE process image on the selected node
+#   running_exe_sha256_peer    LIVE process image on the peer
 #
-# exe_check is the comparable, and it has FOUR values so that "we could not
-# check" is not spelled the same as "checked and fine":
+# Both build hashes come from manifest schema 2, never a gate-time rebuild:
+# BUILD_TIME and the dirty version stamp make same-commit rebuilds differ.
+# Missing, invalid, or stale node slots never fall back to local ./xpfd.
 #
-#   MATCH           build_exe_sha256 == running_exe_sha256
-#   MISMATCH        they differ -- the node is running some other build
-#   UNAVAILABLE     live readback or matching deploy provenance was unavailable
+# exe_check has FOUR values so that "we could not check" is not spelled the
+# same as "checked and fine":
+#
+#   MATCH           every readable node's running SHA matches its own slot
+#   MISMATCH        a readable node differs from its own recorded build
+#   UNAVAILABLE     a required readback or matching node slot was unavailable
 #   NOT-APPLICABLE  a hermetic gate; there is no deployed binary to check
 #
 # The emitter REFUSES a non-VOID verdict carrying MISMATCH or UNAVAILABLE, so
@@ -776,8 +775,9 @@ harness_exe_scope() {
 # ledger_compare.py's coverage, whereas a defaulted row is not.
 harness_result_emit() {
 	local gate="" env="" verdict="" void_reason="" headline="" direction=""
-	local metrics="" build_git_sha="" build_exe="" running_exe="" exe_check=""
-	local build_helper_exe="" running_helper_exe="" helper_exe_check=""
+	local metrics="" build_git_sha="" build_exe="" build_exe_peer=""
+	local running_exe="" exe_check="" build_helper_exe="" build_helper_exe_peer=""
+	local running_helper_exe="" helper_exe_check=""
 	local running_helper_exe_peer="" helper_exe_scope=""
 	local duration_s="" artifacts="" adapter="" ledger="" node="" ts=""
 	local node_peer="" running_exe_peer="" exe_scope="" measurement_scope=""
@@ -792,9 +792,11 @@ harness_result_emit() {
 		--metrics) metrics="$2"; shift 2 ;;
 		--build-git-sha) build_git_sha="$2"; shift 2 ;;
 		--build-exe-sha256) build_exe="$2"; shift 2 ;;
+		--build-exe-sha256-peer) build_exe_peer="$2"; shift 2 ;;
 		--running-exe-sha256) running_exe="$2"; shift 2 ;;
 		--exe-check) exe_check="$2"; shift 2 ;;
 		--build-helper-exe-sha256) build_helper_exe="$2"; shift 2 ;;
+		--build-helper-exe-sha256-peer) build_helper_exe_peer="$2"; shift 2 ;;
 		--running-helper-exe-sha256) running_helper_exe="$2"; shift 2 ;;
 		--running-helper-exe-sha256-peer) running_helper_exe_peer="$2"; shift 2 ;;
 		--helper-exe-check) helper_exe_check="$2"; shift 2 ;;
@@ -887,8 +889,11 @@ harness_result_emit() {
 		HR_SCHEMA="$HARNESS_RESULT_SCHEMA" HR_TS="$ts" HR_GATE="$gate" HR_ENV="$env" \
 			HR_VERDICT="$verdict" HR_VOID_REASON="$void_reason" HR_HEADLINE="$headline" \
 			HR_DIRECTION="$direction" HR_METRICS="$metrics" HR_GITSHA="$build_git_sha" \
-			HR_BUILD_EXE="$build_exe" HR_RUN_EXE="$running_exe" HR_EXE_CHECK="$exe_check" \
-			HR_BUILD_HELPER_EXE="$build_helper_exe" HR_RUN_HELPER_EXE="$running_helper_exe" \
+			HR_BUILD_EXE="$build_exe" HR_BUILD_EXE_PEER="$build_exe_peer" \
+			HR_RUN_EXE="$running_exe" HR_EXE_CHECK="$exe_check" \
+			HR_BUILD_HELPER_EXE="$build_helper_exe" \
+			HR_BUILD_HELPER_EXE_PEER="$build_helper_exe_peer" \
+			HR_RUN_HELPER_EXE="$running_helper_exe" \
 			HR_RUN_HELPER_EXE_PEER="$running_helper_exe_peer" \
 			HR_HELPER_EXE_CHECK="$helper_exe_check" HR_HELPER_EXE_SCOPE="$helper_exe_scope" \
 			HR_DURATION="$duration_s" HR_ARTIFACTS="$artifacts" HR_ADAPTER="$adapter" \
@@ -960,14 +965,15 @@ row = {
     "metrics": metrics,
     "build_git_sha": os.environ["HR_GITSHA"],
     "build_exe_sha256": os.environ.get("HR_BUILD_EXE", ""),
-    "running_exe_sha256": os.environ.get("HR_RUN_EXE", ""),
+    "build_exe_sha256_peer": opt("HR_BUILD_EXE_PEER"),
     "exe_check": os.environ["HR_EXE_CHECK"],
     # Optional userspace-helper provenance, required by the wire-routing
     # separation gate and additive for older rows.
     "build_helper_exe_sha256": opt("HR_BUILD_HELPER_EXE"),
+    "build_helper_exe_sha256_peer": opt("HR_BUILD_HELPER_EXE_PEER"),
     "running_helper_exe_sha256": opt("HR_RUN_HELPER_EXE"),
-    "helper_exe_check": opt("HR_HELPER_EXE_CHECK"),
     "running_helper_exe_sha256_peer": opt("HR_RUN_HELPER_EXE_PEER"),
+    "helper_exe_check": opt("HR_HELPER_EXE_CHECK"),
     "helper_exe_scope": opt("HR_HELPER_EXE_SCOPE"),
     "duration_s": num(duration) if duration else None,
     "artifacts": opt("HR_ARTIFACTS"),
@@ -978,6 +984,7 @@ row = {
     # which is exactly the state those rows were emitted in — a single-node
     # attestation that could not say so.
     "node_peer": opt("HR_NODE_PEER"),
+    "running_exe_sha256": os.environ.get("HR_RUN_EXE", ""),
     "running_exe_sha256_peer": opt("HR_RUN_EXE_PEER"),
     "exe_scope": opt("HR_EXE_SCOPE"),
     "measurement_scope": opt("HR_MEASUREMENT_SCOPE"),
@@ -1117,9 +1124,9 @@ harness_result_run() {
 	headline=$(cut -f3 <<<"$adapted")
 	direction=$(cut -f4 <<<"$adapted")
 	metrics=$(cut -f5 <<<"$adapted")
-	local build_git_sha build_exe_sha="" running_exe_sha exe_check
-	local build_helper_exe_sha="" running_helper_exe_sha=""
-	local peer_running_helper_exe_sha="" helper_exe_check="" helper_exe_scope=""
+	local build_git_sha build_exe_sha="" build_exe_peer_sha=""
+	local running_exe_sha="" exe_check
+	local build_helper_exe_sha="" build_helper_exe_peer_sha="" running_helper_exe_sha=""
 	# Initialised explicitly: the run wrapper executes under `set -u`, and a
 	# value-less `local` makes the first `[[ -z "$peer_node" ]]` an unbound-
 	# variable error rather than a false test (#9044).
@@ -1138,30 +1145,6 @@ harness_result_run() {
 			source "$HARNESS_RESULT_DIR/deploy-lib.sh" 2>/dev/null || true
 			_XPF_DEPLOY_LIB_LOADED=1
 		}
-		local manifest_sha="" manifest_rc=0
-		if ((build_exe_explicit)); then
-			[[ -f "$build_exe" ]] &&
-				build_exe_sha=$(sha256sum "$build_exe" | awk '{print $1}')
-		else
-			build_exe="$root/xpfd"
-			if declare -F deploy_manifest_sha >/dev/null; then
-				if manifest_sha=$(deploy_manifest_sha xpfd "$root" "$build_git_sha" 2>/dev/null); then
-					build_exe_sha="$manifest_sha"
-				else
-					manifest_rc=$?
-					case "$manifest_rc" in
-						1) _hr_warn "deploy attestation manifest is missing; xpfd identity is unavailable" ;;
-						3) _hr_warn "deploy attestation manifest belongs to a different checkout; xpfd identity is unavailable" ;;
-						*) _hr_warn "deploy attestation manifest is invalid; xpfd identity is unavailable" ;;
-					esac
-				fi
-			else
-				_hr_warn "deploy attestation manifest reader is unavailable; xpfd identity is unavailable"
-			fi
-		fi
-		# #9044: the PEER, resolved the same way. An HA gate fails over BY
-		# DEFINITION, so the node a single-node attestation does not cover is
-		# the node the test's outcome depends on.
 		if [[ -z "$peer_node" ]]; then
 			peer_node=$(
 				# shellcheck disable=SC1091
@@ -1170,72 +1153,103 @@ harness_result_run() {
 			) || peer_node=""
 		fi
 		if [[ -z "$node" ]]; then
-			# Resolve the node the same way every HA smoke does, rather than
-			# re-deriving it in each Makefile recipe. cluster-env.sh is a
-			# sourced library that reads $BPFRX_CLUSTER_ENV and exports FW0.
-			# Runs in a subshell so nothing it sets leaks into the gate we
-			# already ran.
 			node=$(
 				# shellcheck disable=SC1091
 				source "$HARNESS_RESULT_DIR/cluster-env.sh" >/dev/null 2>&1 &&
 					printf '%s' "${FW0:-}"
 			) || node=""
 		fi
+		local cluster_nodes="" cluster_fw0="" cluster_fw1=""
+		local -a cluster_name_lines=()
+		cluster_nodes=$(
+			# shellcheck disable=SC1091
+			source "$HARNESS_RESULT_DIR/cluster-env.sh" >/dev/null 2>&1 &&
+				printf '%s\n%s\n' "${FW0:-}" "${FW1:-}"
+		) || cluster_nodes=""
+		mapfile -t cluster_name_lines <<<"$cluster_nodes"
+		cluster_fw0="${cluster_name_lines[0]:-}"
+		cluster_fw1="${cluster_name_lines[1]:-}"
+		local manifest_node="" manifest_peer_node=""
+		manifest_node=$(deploy_manifest_node_index "$node" "$cluster_fw0" "$cluster_fw1" 2>/dev/null || true)
+		if [[ -n "$peer_node" && "$peer_node" != "$node" ]]; then
+			manifest_peer_node=$(deploy_manifest_node_index "$peer_node" "$cluster_fw0" "$cluster_fw1" 2>/dev/null || true)
+		fi
+		local manifest_sha="" manifest_peer_sha="" manifest_rc=0
+		if ((build_exe_explicit)); then
+			[[ -f "$build_exe" ]] &&
+				build_exe_sha=$(sha256sum "$build_exe" | awk '{print $1}')
+			build_exe_peer_sha="$build_exe_sha"
+		else
+			build_exe="$root/xpfd"
+			if declare -F deploy_manifest_sha >/dev/null; then
+				if [[ -n "$manifest_node" ]] &&
+					manifest_sha=$(deploy_manifest_sha xpfd "$root" "$build_git_sha" "$manifest_node" 2>/dev/null); then
+					build_exe_sha="$manifest_sha"
+				else
+					manifest_rc=$?
+					case "$manifest_rc" in
+						1) _hr_warn "deploy attestation manifest or node $manifest_node slot is missing; xpfd identity is unavailable" ;;
+						3) _hr_warn "deploy attestation manifest belongs to a different checkout; xpfd identity is unavailable" ;;
+						*) _hr_warn "deploy attestation manifest is invalid or node identity is unknown; xpfd identity is unavailable" ;;
+					esac
+				fi
+				if [[ -n "$manifest_peer_node" ]] &&
+					manifest_peer_sha=$(deploy_manifest_sha xpfd "$root" "$build_git_sha" "$manifest_peer_node" 2>/dev/null); then
+					build_exe_peer_sha="$manifest_peer_sha"
+				elif [[ -n "$manifest_peer_node" ]]; then
+					manifest_rc=$?
+					case "$manifest_rc" in
+						1) _hr_warn "deploy attestation manifest or node $manifest_peer_node slot is missing; peer xpfd identity is unavailable" ;;
+						3) _hr_warn "peer deploy attestation manifest belongs to a different checkout; xpfd identity is unavailable" ;;
+						*) _hr_warn "peer deploy attestation manifest is invalid; xpfd identity is unavailable" ;;
+					esac
+				else
+					_hr_warn "peer node identity is unknown; peer xpfd identity is unavailable"
+				fi
+			else
+				_hr_warn "deploy attestation manifest reader is unavailable; xpfd identity is unavailable"
+			fi
+		fi
+		# #9044: read back the selected node and its peer independently. A
+		# rolling deploy can produce different valid images; each must match
+		# its own deploy-time slot, not the other node's bits.
 		if [[ -n "$node" ]]; then
-			# The single readback in the tree, extracted from
-			# deploy_verify_running_xpfd so there is not a second one.
-			#
-			# It deliberately does NOT take the shared cluster lock: the gate
-			# has already finished and released it, and `systemctl show` +
-			# `sha256sum /proc/PID/exe` are read-only.
-			#
-			# It USED to read node 0 only, on the stated ground that "both
-			# nodes carry the same build after a `cluster-deploy`, so one
-			# readback is the attribution point for the run". That premise is
-			# not a property of the system -- it is a property of ONE way of
-			# invoking it. `Makefile:NODE ?= all` is a plain override and
-			# `cluster-setup.sh deploy [0|1|all]` accepts the scope, so
-			#
-			#     make cluster-deploy NODE=0 && make test-failover
-			#
-			# is two ordinary lines. And the failure is ASYMMETRIC: `NODE=1`
-			# fails safe (fw0 holds the old build, MISMATCH, the row is VOID),
-			# while `NODE=0` is the dangerous direction -- fw0 matches, fw1
-			# silently runs a different build, and the row records a clean
-			# MATCH for a gate that failed over onto the unattested node. An
-			# HA smoke fails over by definition, so that is the node the
-			# result depends on (#9044).
 			if declare -F deploy_running_xpfd_sha256 >/dev/null; then
 				running_exe_sha=$(deploy_running_xpfd_sha256 "$node" "${XPF_EXE_READBACK_TRIES:-3}" || true)
-				# #9044: and the peer, when there is one to read.
 				[[ -n "$peer_node" && "$peer_node" != "$node" ]] &&
 					peer_running_exe_sha=$(deploy_running_xpfd_sha256 "$peer_node" "${XPF_EXE_READBACK_TRIES:-3}" || true)
 			else
-				# Fails SAFE (exe_check becomes UNAVAILABLE -> the row is a
-				# VOID), but say so out loud: a silent degradation here would
-				# look identical to a node that is genuinely unreadable.
 				_hr_warn "deploy_running_xpfd_sha256 is not available (deploy-lib.sh did not load from $HARNESS_RESULT_DIR) — the running binary cannot be read back"
 			fi
 		fi
 	fi
 	if ((require_helper)); then
-		local helper_manifest_sha="" helper_manifest_rc=0
+		local helper_manifest_sha="" helper_manifest_peer_sha="" helper_manifest_rc=0
 		if ((build_helper_exe_explicit)); then
 			[[ -f "$build_helper_exe" ]] &&
 				build_helper_exe_sha=$(sha256sum "$build_helper_exe" | awk '{print $1}')
+			build_helper_exe_peer_sha="$build_helper_exe_sha"
 		else
 			build_helper_exe="$root/xpf-userspace-dp"
 			if [[ "$mode" == "cluster" ]]; then
 				if declare -F deploy_manifest_sha >/dev/null; then
-					if helper_manifest_sha=$(deploy_manifest_sha xpf-userspace-dp "$root" "$build_git_sha" 2>/dev/null); then
+					if [[ -n "$manifest_node" ]] &&
+						helper_manifest_sha=$(deploy_manifest_sha xpf-userspace-dp "$root" "$build_git_sha" "$manifest_node" 2>/dev/null); then
 						build_helper_exe_sha="$helper_manifest_sha"
 					else
 						helper_manifest_rc=$?
 						case "$helper_manifest_rc" in
-							1) _hr_warn "deploy attestation manifest is missing; helper identity is unavailable" ;;
-							3) _hr_warn "deploy attestation manifest belongs to a different checkout; helper identity is unavailable" ;;
-							*) _hr_warn "deploy attestation manifest has no valid xpf-userspace-dp identity" ;;
+							1) _hr_warn "deploy manifest or node $manifest_node slot is missing; helper identity is unavailable" ;;
+							3) _hr_warn "deploy manifest belongs to a different checkout; helper identity is unavailable" ;;
+							*) _hr_warn "deploy manifest has no valid xpf-userspace-dp identity for this node" ;;
 						esac
+					fi
+					if [[ -n "$manifest_peer_node" ]] &&
+						helper_manifest_peer_sha=$(deploy_manifest_sha xpf-userspace-dp "$root" "$build_git_sha" "$manifest_peer_node" 2>/dev/null); then
+						build_helper_exe_peer_sha="$helper_manifest_peer_sha"
+					elif [[ -n "$manifest_peer_node" ]]; then
+						helper_manifest_rc=$?
+						_hr_warn "deploy manifest has no valid xpf-userspace-dp identity for peer node $manifest_peer_node (rc=$helper_manifest_rc)"
 					fi
 				else
 					_hr_warn "deploy attestation manifest reader is unavailable; helper identity is unavailable"
@@ -1267,15 +1281,14 @@ harness_result_run() {
 			harness_exe_scope "$mode" "${peer_node:-}" \
 				"${peer_running_helper_exe_sha:-}"
 		)
-		# The wire gate depends on either HA node after failover, so a missing
-		# peer helper readback is not partial evidence: require both images.
+		# A readable peer must match its own slot for helper-dependent gates.
 		if [[ "$helper_exe_check" == "MATCH" && -n "$peer_node" &&
-			"$peer_node" != "$node" && -z "$peer_running_helper_exe_sha" ]]; then
-			helper_exe_check="UNAVAILABLE"
-		elif [[ "$helper_exe_check" == "MATCH" &&
-			-n "$peer_running_helper_exe_sha" &&
-			"$peer_running_helper_exe_sha" != "$build_helper_exe_sha" ]]; then
-			helper_exe_check="MISMATCH"
+			"$peer_node" != "$node" ]]; then
+			if [[ -z "$peer_running_helper_exe_sha" || -z "$build_helper_exe_peer_sha" ]]; then
+				helper_exe_check="UNAVAILABLE"
+			elif [[ "$peer_running_helper_exe_sha" != "$build_helper_exe_peer_sha" ]]; then
+				helper_exe_check="MISMATCH"
+			fi
 		fi
 	fi
 	exe_check=$(harness_exe_check "${build_exe_sha:-}" "${running_exe_sha:-}" "$mode")
@@ -1298,8 +1311,12 @@ harness_result_run() {
 	# as a PARTIAL scope instead, which is the fact ("I attested one of the two
 	# nodes this gate used") the row previously could not express at all.
 	if [[ "$exe_check" == "MATCH" && -n "${peer_running_exe_sha:-}" &&
-		"${peer_running_exe_sha}" != "${build_exe_sha:-}" ]]; then
-		exe_check="MISMATCH"
+		-n "$peer_node" && "$peer_node" != "$node" ]]; then
+		if [[ -z "$build_exe_peer_sha" ]]; then
+			exe_check="UNAVAILABLE"
+		elif [[ "$peer_running_exe_sha" != "$build_exe_peer_sha" ]]; then
+			exe_check="MISMATCH"
+		fi
 	fi
 
 	# A measurement of a binary we cannot name is a VOID *IN THE LEDGER*, not a
@@ -1347,8 +1364,10 @@ harness_result_run() {
 		--void-reason "$void_reason" --headline-metric "$headline" \
 		--headline-direction "$direction" --metrics "$metrics" \
 		--build-git-sha "$build_git_sha" --build-exe-sha256 "${build_exe_sha:-}" \
+		--build-exe-sha256-peer "${build_exe_peer_sha:-}" \
 		--running-exe-sha256 "${running_exe_sha:-}" --exe-check "$exe_check" \
 		--build-helper-exe-sha256 "${build_helper_exe_sha:-}" \
+		--build-helper-exe-sha256-peer "${build_helper_exe_peer_sha:-}" \
 		--running-helper-exe-sha256 "${running_helper_exe_sha:-}" \
 		--running-helper-exe-sha256-peer "${peer_running_helper_exe_sha:-}" \
 		--helper-exe-check "${helper_exe_check:-}" \

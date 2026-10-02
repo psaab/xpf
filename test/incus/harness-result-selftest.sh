@@ -1141,13 +1141,18 @@ manifest_helper_sha=$(sha256sum "$manifest_helper_file" | awk '{print $1}')
 printf 'helper rebuilt after deployment\n' >"$MANIFEST_ROOT/xpf-userspace-dp"
 write_manifest_fixture() {
 	python3 - "$WORK/deploy-manifest.json" "$manifest_root_sha" \
-		"$manifest_helper_sha" "$1" <<'PY'
+		"$manifest_helper_sha" "$1" "${2:-$manifest_root_sha}" \
+		"${3:-$manifest_helper_sha}" <<'PY'
 import json, sys
+def record(checkout, xpfd, helper):
+    return {"build_git_sha": checkout, "version": "fixture",
+            "build_time": "2026-10-01T00:00:00Z", "mode": "raw",
+            "deb": None, "binaries": {"xpfd": xpfd, "cli": None,
+                "xpf-userspace-dp": helper}}
 with open(sys.argv[1], "w", encoding="utf-8") as f:
-    json.dump({"schema": 1, "build_git_sha": sys.argv[4], "version": "fixture",
-               "build_time": "2026-10-01T00:00:00Z", "mode": "raw",
-               "deb": None, "binaries": {"xpfd": sys.argv[2], "cli": None,
-                   "xpf-userspace-dp": sys.argv[3]}}, f)
+    json.dump({"schema": 2, "nodes": {
+        "0": record(sys.argv[4], sys.argv[2], sys.argv[3]),
+        "1": record(sys.argv[4], sys.argv[5], sys.argv[6])}}, f)
     f.write("\n")
 PY
 }
@@ -1198,6 +1203,69 @@ if [[ "$(last_row_field verdict)" == "PASS" &&
 	ok "#11765: required helper attestation also uses the deploy manifest sha"
 else
 	bad "#11765: manifest helper match gave verdict=$(last_row_field verdict) helper_exe_check=$(last_row_field helper_exe_check)"
+fi
+
+# #11845: the two nodes may legitimately run binaries from different
+# BUILD_TIME-stamped builds after `cluster-deploy NODE=0`, then NODE=1.
+manifest_peer_root_sha=$(printf 'b%.0s' {1..64})
+manifest_peer_helper_sha=$(printf 'c%.0s' {1..64})
+write_manifest_fixture unknown "$manifest_peer_root_sha" "$manifest_peer_helper_sha"
+custom_cluster_env="$WORK/rolling-cluster.env"
+printf 'FW0=custom:prod-fw0-blue\nFW1=custom:prod-fw1-blue\n' >"$custom_cluster_env"
+incus() {
+	local arg node1=0 helper=0
+	for arg in "$@"; do
+		[[ "$arg" == *fw1* ]] && node1=1
+		[[ "$arg" == *'pidof xpf-userspace-dp'* ]] && helper=1
+	done
+	if ((helper)); then
+		if ((node1)); then echo "$manifest_peer_helper_sha  /proc/9876/exe"; else echo "$manifest_helper_sha  /proc/9876/exe"; fi
+	elif ((node1)); then
+		echo "$manifest_peer_root_sha  /proc/1234/exe"
+	else
+		echo "$manifest_root_sha  /proc/1234/exe"
+	fi
+}
+rm -rf "$LEDGER"
+(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+	BPFRX_CLUSTER_ENV="$custom_cluster_env" harness_result_run --ledger "$LEDGER" --cluster \
+	--require-helper-attestation --env testenv --gate manifest-rolling-match \
+	--adapter smoke-cells --node custom:prod-fw0-blue --node-peer custom:prod-fw1-blue \
+	-- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "PASS" &&
+	"$(last_row_field exe_check)" == "MATCH" &&
+	"$(last_row_field build_exe_sha256)" == "$manifest_root_sha" &&
+	"$(last_row_field build_exe_sha256_peer)" == "$manifest_peer_root_sha" &&
+	"$(last_row_field running_exe_sha256)" == "$manifest_root_sha" &&
+	"$(last_row_field running_exe_sha256_peer)" == "$manifest_peer_root_sha" &&
+	"$(last_row_field helper_exe_check)" == "MATCH" &&
+	"$(last_row_field build_helper_exe_sha256)" == "$manifest_helper_sha" &&
+	"$(last_row_field build_helper_exe_sha256_peer)" == "$manifest_peer_helper_sha" ]]; then
+	ok "#11845: rolling two-node manifests preserve distinct xpfd/helper builds and both attest MATCH"
+else
+	bad "#11845: rolling per-node attestation gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) helper=$(last_row_field helper_exe_check) fw0=$(last_row_field build_exe_sha256) fw1=$(last_row_field build_exe_sha256_peer)"
+fi
+
+# A readable peer without a valid per-node slot is still unattributable.
+python3 - "$WORK/deploy-manifest.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    doc = json.load(f)
+doc["nodes"].pop("1")
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(doc, f)
+    f.write("\n")
+PY
+rm -rf "$LEDGER"
+(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+	BPFRX_CLUSTER_ENV="$custom_cluster_env" harness_result_run --ledger "$LEDGER" --cluster \
+	--env testenv --gate manifest-peer-slot-missing --adapter smoke-cells \
+	--node custom:prod-fw0-blue --node-peer custom:prod-fw1-blue -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "VOID" &&
+	"$(last_row_field exe_check)" == "UNAVAILABLE" ]]; then
+	ok "#11845: a missing peer slot fails closed even when both process readbacks succeed"
+else
+	bad "#11845: missing peer slot gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check)"
 fi
 
 printf '{invalid json\n' >"$WORK/deploy-manifest.json"

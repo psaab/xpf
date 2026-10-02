@@ -1565,19 +1565,19 @@ d11_restore_verdict() {
     fi
     printf '%s %s' "$verdict" "$reason"
 }
-# t12_deployed_exe_sha <root> <checkout_sha>
-# Return the manifest artifact only when it belongs to this checkout. Missing,
-# malformed, or stale provenance is reported as unknown for the live gate.
+# t12_deployed_exe_sha <root> <checkout_sha> <node-index>
+# Return the selected node's manifest artifact only when it belongs to this
+# checkout. Missing, malformed, or stale provenance is unknown to the gate.
 t12_deployed_exe_sha() {
-    local root="$1" checkout_sha="$2" sha="" rc=0
-    if sha="$(deploy_manifest_sha xpfd "$root" "$checkout_sha" 2>/dev/null)"; then
+    local root="$1" checkout_sha="$2" node="$3" sha="" rc=0
+    if sha="$(deploy_manifest_sha xpfd "$root" "$checkout_sha" "$node" 2>/dev/null)"; then
         printf '%s\n' "$sha"
         return 0
     else
         rc=$?
     fi
     case "$rc" in
-        1) echo "T12_G2_ATTEST deploy manifest missing; executable identity is unavailable" >&2 ;;
+        1) echo "T12_G2_ATTEST deploy manifest or node slot missing; executable identity is unavailable" >&2 ;;
         3) echo "T12_G2_ATTEST deploy manifest belongs to a different checkout; executable identity is unavailable" >&2 ;;
         *) echo "T12_G2_ATTEST deploy manifest invalid; executable identity is unavailable" >&2 ;;
     esac
@@ -1605,23 +1605,30 @@ if [[ "$MODE" == selftest ]]; then
     mkdir -p "$manifest_root"
     printf 'deployed xpfd\n' >"$manifest_root/xpfd"
     manifest_sha="$(sha256sum "$manifest_root/xpfd" | awk '{print $1}')"
-    python3 - "$manifest_path" "$manifest_sha" <<'PY'
+    manifest_peer_sha="$(printf 'a%.0s' {1..64})"
+    python3 - "$manifest_path" "$manifest_sha" "$manifest_peer_sha" <<'PY'
 import json, sys
+record = lambda sha: {"build_git_sha": "fixture-checkout",
+                      "binaries": {"xpfd": sha}}
 with open(sys.argv[1], "w", encoding="utf-8") as f:
-    json.dump({"schema": 1, "build_git_sha": "fixture-checkout",
-               "binaries": {"xpfd": sys.argv[2]}}, f)
+    json.dump({"schema": 2, "nodes": {"0": record(sys.argv[2]),
+                                      "1": record(sys.argv[3])}}, f)
 PY
     selected_sha="$(XPF_DEPLOY_MANIFEST="$manifest_path" \
-        t12_deployed_exe_sha "$manifest_root" fixture-checkout 2>/dev/null)"
-    expect "T12 selects the deploy-manifest SHA for this checkout" \
+        t12_deployed_exe_sha "$manifest_root" fixture-checkout 0 2>/dev/null)"
+    expect "T12 selects node 0's deploy-manifest SHA for this checkout" \
         "$manifest_sha" "$selected_sha"
+    selected_peer_sha="$(XPF_DEPLOY_MANIFEST="$manifest_path" \
+        t12_deployed_exe_sha "$manifest_root" fixture-checkout 1 2>/dev/null)"
+    expect "T12 selects node 1's distinct per-node deploy-manifest SHA" \
+        "$manifest_peer_sha" "$selected_peer_sha"
     stale_sha="$(XPF_DEPLOY_MANIFEST="$manifest_path" \
-        t12_deployed_exe_sha "$manifest_root" newer-checkout 2>/dev/null)"
+        t12_deployed_exe_sha "$manifest_root" newer-checkout 0 2>/dev/null)"
     expect "T12 rejects a deploy manifest from a different checkout" \
         "unknown" "$stale_sha"
     rm -f "$manifest_path"
     missing_sha="$(XPF_DEPLOY_MANIFEST="$manifest_path" \
-        t12_deployed_exe_sha "$manifest_root" fixture-checkout 2>/dev/null)"
+        t12_deployed_exe_sha "$manifest_root" fixture-checkout 0 2>/dev/null)"
     expect "T12 has no local rebuild fallback when the manifest is missing" \
         "unknown" "$missing_sha"
     rm -rf "$manifest_fixture"
@@ -2305,7 +2312,7 @@ PY
         node-0 node-1 "$parser_dir/ledger0.json" "$parser_dir/ledger1.json")"
     expect "D11 final parser rejects same node twice" "0" "$sn_final_ok"
     expect "D11 final parser node check rejects same node" "0" "$sn_final_nodes"
-    if [[ "$fail" == 0 && "$pass" == 104 ]]; then
+    if [[ "$fail" == 0 && "$pass" == 105 ]]; then
         echo "t12-g2-9506 selftest: $pass passed, $fail failed"
         exit 0
     fi
@@ -2941,20 +2948,34 @@ normalize_config() {
 
 # Determine the source/build identity before any live verdict is emitted.
 GIT_SHA="$(harness_build_git_sha "$ROOT" || printf unknown)"
-LOCAL_SHA="$(t12_deployed_exe_sha "$ROOT" "$GIT_SHA")"
+LOCAL_SHA0="$(t12_deployed_exe_sha "$ROOT" "$GIT_SHA" 0)"
+LOCAL_SHA1="$(t12_deployed_exe_sha "$ROOT" "$GIT_SHA" 1)"
 REMOTE0_SHA="$(deploy_running_xpfd_sha256 "$NODE0" 3 2>/dev/null || true)"
 REMOTE1_SHA="$(deploy_running_xpfd_sha256 "$NODE1" 3 2>/dev/null || true)"
-if [[ -n "$LOCAL_SHA" && "$LOCAL_SHA" != unknown && "$REMOTE0_SHA" == "$LOCAL_SHA" && "$REMOTE1_SHA" == "$LOCAL_SHA" ]]; then
-    EXE_CHECK=MATCH
+if [[ "$LOCAL_SHA0" == unknown || -z "$REMOTE0_SHA" ]]; then
+    EXE_CHECK0=UNAVAILABLE
+elif [[ "$LOCAL_SHA0" == "$REMOTE0_SHA" ]]; then
+    EXE_CHECK0=MATCH
 else
-    if [[ -z "$REMOTE0_SHA" || -z "$REMOTE1_SHA" || "$LOCAL_SHA" == unknown ]]; then
-        EXE_CHECK=UNAVAILABLE
-    else
-        EXE_CHECK=MISMATCH
-    fi
+    EXE_CHECK0=MISMATCH
 fi
-printf 'T12_G2_ATTEST git_sha=%s local_exe_sha=%s fw0_exe_sha=%s fw1_exe_sha=%s exe_check=%s exe_scope=both archive=%s\n' \
-    "$GIT_SHA" "$LOCAL_SHA" "${REMOTE0_SHA:-unknown}" "${REMOTE1_SHA:-unknown}" "$EXE_CHECK" "$ARCHIVE_DIR"
+if [[ "$LOCAL_SHA1" == unknown || -z "$REMOTE1_SHA" ]]; then
+    EXE_CHECK1=UNAVAILABLE
+elif [[ "$LOCAL_SHA1" == "$REMOTE1_SHA" ]]; then
+    EXE_CHECK1=MATCH
+else
+    EXE_CHECK1=MISMATCH
+fi
+if [[ "$EXE_CHECK0" == MATCH && "$EXE_CHECK1" == MATCH ]]; then
+    EXE_CHECK=MATCH
+elif [[ "$EXE_CHECK0" == UNAVAILABLE || "$EXE_CHECK1" == UNAVAILABLE ]]; then
+    EXE_CHECK=UNAVAILABLE
+else
+    EXE_CHECK=MISMATCH
+fi
+printf 'T12_G2_ATTEST git_sha=%s fw0_manifest_sha=%s fw0_exe_sha=%s fw0_exe_check=%s fw1_manifest_sha=%s fw1_exe_sha=%s fw1_exe_check=%s exe_check=%s exe_scope=both archive=%s\n' \
+    "$GIT_SHA" "$LOCAL_SHA0" "${REMOTE0_SHA:-unknown}" "$EXE_CHECK0" \
+    "$LOCAL_SHA1" "${REMOTE1_SHA:-unknown}" "$EXE_CHECK1" "$EXE_CHECK" "$ARCHIVE_DIR"
 
 # Record complete pre/post configuration snapshots even when the cell refuses
 # before creating a fixture.  Restore is an independent acceptance predicate.
@@ -3342,7 +3363,8 @@ emit_cell() {
     case "$verdict" in PASS) CELL_PASS=$((CELL_PASS + 1));; FAIL) CELL_FAIL=$((CELL_FAIL + 1));; VOID) CELL_VOID=$((CELL_VOID + 1));; esac
     local emit_args=(
         --gate "$gate" --env "$ENV_NAME" --verdict "$verdict"
-        --build-git-sha "$GIT_SHA" --build-exe-sha256 "$LOCAL_SHA"
+        --build-git-sha "$GIT_SHA" --build-exe-sha256 "$LOCAL_SHA0"
+        --build-exe-sha256-peer "$LOCAL_SHA1"
         --running-exe-sha256 "${REMOTE0_SHA:-unknown}"
         --running-exe-sha256-peer "${REMOTE1_SHA:-unknown}"
         --exe-check "$EXE_CHECK" --exe-scope both --node "$NODE0" --node-peer "$NODE1"

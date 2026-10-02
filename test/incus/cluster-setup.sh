@@ -648,7 +648,7 @@ cmd_deploy() {
 			-- env XPF_CLUSTER_SKIP_BUILD=1 \
 			"${SCRIPT_DIR}/cluster-setup.sh" deploy "$target"
 	fi
-	deploy_manifest_invalidate "$PROJECT_ROOT" ||
+	deploy_manifest_invalidate "$PROJECT_ROOT" "$target" ||
 		die "cannot invalidate prior executable attestation manifest"
 	deploy_git_sha=$(deploy_build_git_sha "$PROJECT_ROOT") ||
 		die "cannot capture checkout identity before deploy"
@@ -680,18 +680,17 @@ cmd_deploy() {
 	fi
 
 	# Record the deployed image identity before the gate has a chance to build
-	# another xpfd in this worktree. The .deb branch reads hashes directly
-	# from the staged package bytes (the same artifact deploy_vm_deb installs);
-	# the raw branch hashes the binaries deploy_vm just pushed and verified.
+	# another xpfd in this worktree. Single-node deploys replace only that
+	# node's slot; an all-node deploy records the shared artifact in both.
 	if [[ "${XPF_DEPLOY_FAST:-}" = "1" ]]; then
-		deploy_write_manifest "$PROJECT_ROOT" "" "$deploy_git_sha" ||
+		deploy_write_manifest "$PROJECT_ROOT" "" "$deploy_git_sha" "$target" ||
 			die "deploy completed but its executable attestation manifest could not be written"
 	else
 		local attestation_deb
 		attestation_deb=$(ls -t "$PROJECT_ROOT"/dist-deb/xpf_*.deb 2>/dev/null | head -1 || true)
 		[[ -n "$attestation_deb" ]] ||
 			die "deploy completed but no xpf .deb is available to attest"
-		deploy_write_manifest "$PROJECT_ROOT" "$attestation_deb" "$deploy_git_sha" ||
+		deploy_write_manifest "$PROJECT_ROOT" "$attestation_deb" "$deploy_git_sha" "$target" ||
 			die "deploy completed but its executable attestation manifest could not be written"
 	fi
 
