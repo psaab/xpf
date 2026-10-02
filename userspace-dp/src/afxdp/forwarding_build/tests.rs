@@ -9987,6 +9987,63 @@ fn secure_tunnel_unit_ifindex_decides_route_disposition() {
     assert!(r0.disposition.is_slow_path_eligible());
     assert!(r42.disposition.is_slow_path_eligible());
 }
+/// #11464: lo0 addresses are local only when the host resolved a real device.
+/// The zero-ifindex row must not become a helper LocalDelivery target; a
+/// resolved lo0 (including a tunnel netdev) remains a genuine local address.
+#[test]
+fn lo0_address_local_delivery_requires_a_resolved_ifindex_11464() {
+    fn snapshot(ifindex: i32) -> ConfigSnapshot {
+        ConfigSnapshot {
+            interfaces: vec![InterfaceSnapshot {
+                name: "lo0.0".into(),
+                linux_name: "lo0".into(),
+                ifindex,
+                addresses: vec![crate::InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.255.0.1/32".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    let dst = Ipv4Addr::new(10, 255, 0, 1);
+    let unresolved = build_forwarding_state(&snapshot(0));
+    assert!(
+        !unresolved.local_v4.contains(&dst),
+        "a lo0 row without a Linux ifindex must not enter helper local_v4"
+    );
+    let not_local =
+        lookup_forwarding_resolution_v4(&unresolved, None, dst, "inet.0", 0, true, None);
+    assert_eq!(
+        not_local.disposition,
+        ForwardingDisposition::NoRoute,
+        "unresolved lo0 must not produce a false LocalDelivery"
+    );
+
+    let resolved = build_forwarding_state(&snapshot(83));
+    assert!(
+        resolved.local_v4.contains(&dst)
+            && resolved
+                .local_tables_v4
+                .get(&dst)
+                .is_some_and(|tables| tables.contains("inet.0")),
+        "a resolved lo0 address must enter the helper local-delivery table"
+    );
+    assert!(
+        resolved
+            .connected_v4
+            .iter()
+            .any(|entry| entry.host == dst && entry.ifindex == 83),
+        "a resolved lo0 address must retain its Linux interface owner"
+    );
+    let local = lookup_forwarding_resolution_v4(&resolved, None, dst, "inet.0", 0, true, None);
+    assert_eq!(local.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(local.local_ifindex, 83);
+}
+
 
 /// #9955: next-table rows are kernel ip rules, not recursive FIB routes.
 /// The source-table rule selects `blue`; the target lookup must perform only

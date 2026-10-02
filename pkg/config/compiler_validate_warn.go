@@ -108,6 +108,7 @@ func ToleratedTypedLeafWarnings(cfg *Config) []string {
 // compatibility/deprecation conditions.
 func ValidateConfig(cfg *Config) []string {
 	var warnings []string
+	warnings = append(warnings, lo0AddressWarnings(cfg)...)
 
 	// #7361: a `pool-utilization-alarm` on an address-only pool can never fire.
 	// Accept-with-advisory (#4316): the combination is valid and the alarm
