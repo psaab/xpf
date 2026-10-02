@@ -749,6 +749,11 @@ fn flowless_interface_snat_reply_tail_is_session_gated_10130() {
         true,
     );
     assert_eq!(dbg_first.nat_applied_snat, 1);
+    assert_eq!(
+        sessions.len(),
+        2,
+        "#10130: the forward SNAT flow and reverse companion are live"
+    );
 
     // The reply tail uses a fresh identification, so no reverse fragment
     // association exists. Its destination is the local public interface IP.
@@ -757,6 +762,8 @@ fn flowless_interface_snat_reply_tail_is_session_gated_10130() {
     let reply_tail = udp_reply_frag_frame_10130(0x0001, 0xcafe);
     let mut reply_meta = UserspaceDpMeta {
         ingress_ifindex: 12,
+        // Reply arrives on the tagged WAN unit; the shared meta helper is for unit 0.
+        ingress_vlan_id: 80,
         flow_src_port: 0,
         flow_dst_port: 0,
         flow_src_addr: [172, 16, 80, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -776,6 +783,10 @@ fn flowless_interface_snat_reply_tail_is_session_gated_10130() {
     assert_eq!(
         dbg_reply.forward, 0,
         "#10130: reordered interface-SNAT reply tail must not forward"
+    );
+    assert_eq!(
+        batch_reply.unknown_vlan_dropped, 0,
+        "#10130: the tagged WAN reply must pass VLAN validation before session gating"
     );
     assert_eq!(
         batch_reply.nat_frag_untranslated_dropped, 1,
