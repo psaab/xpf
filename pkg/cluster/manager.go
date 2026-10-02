@@ -446,6 +446,9 @@ type Manager struct {
 	// SIGNED with it. Nil when no rotation is in progress. Replaced, never
 	// mutated in place, so the RLock read stays race-free.
 	controlAuthKeyAlt []byte
+	// controlAuthKeyConfiguredAt records the keyed transition time used by
+	// fabric's bounded rollout grace. Zero means no accepted key is set.
+	controlAuthKeyConfiguredAt time.Time
 
 	// peerControlKeyID is the #6630 id of the accepted key that last verified
 	// a peer control frame — the running-system evidence that makes
@@ -902,6 +905,15 @@ func (m *Manager) ControlLinkAcceptedKeys() [][]byte {
 // be mutated, and must never be logged.
 func (m *Manager) ControlLinkAuthKey() []byte {
 	return m.controlLinkAuthKey()
+}
+
+// ControlLinkAuthKeyConfiguredAt reports the most recent transition from no
+// accepted control-link key to at least one accepted key. It is zero while
+// the accepted-key set is empty.
+func (m *Manager) ControlLinkAuthKeyConfiguredAt() time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.controlAuthKeyConfiguredAt
 }
 
 // Events returns the event channel for state change notifications.

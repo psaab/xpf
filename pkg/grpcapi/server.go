@@ -336,6 +336,13 @@ type Server struct {
 	// cluster.Manager.HeartbeatPeerAuthSeen(); a unit test wires it to drive the
 	// heartbeat-armed state without a live heartbeat receiver.
 	heartbeatAuthSeenFn func() bool
+	// fabricAuthNowFn is a test seam for the bounded rollout-grace clock.
+	// Production leaves it nil and fabricAuthNow uses time.Now.
+	fabricAuthNowFn func() time.Time
+	// fabricAuthGraceMu guards the configured-key unarmed rollout timer.
+	fabricAuthGraceMu         sync.Mutex
+	fabricAuthUnarmedSince    time.Time
+	fabricAuthUnarmedSinceSet bool
 	// fabricPeerAuthSeen is the sticky #4107 downgrade guard: set true once a
 	// valid PSK token has authenticated on the fabric listener. After that, a
 	// tokenless fabric RPC is rejected (a downgrade to cleartext once both

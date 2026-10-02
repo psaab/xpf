@@ -138,6 +138,10 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 	if peerSnapshotAlarm != "" {
 		n++
 	}
+	fabricAuthAlarm := s.fabricAuthUnarmedAlarm()
+	if fabricAuthAlarm != "" {
+		n++
+	}
 	if n == 0 {
 		if cfg == nil {
 			buf.WriteString("No active configuration loaded\n")
@@ -152,6 +156,9 @@ func (s *Server) showAlarms(buf *strings.Builder) {
 	}
 	if peerSnapshotAlarm != "" {
 		fmt.Fprintf(buf, "  CRITICAL: %s\n", peerSnapshotAlarm)
+	}
+	if fabricAuthAlarm != "" {
+		fmt.Fprintf(buf, "  %s\n", fabricAuthAlarm)
 	}
 	for _, w := range warnings {
 		fmt.Fprintf(buf, "  WARNING: %s\n", w)
