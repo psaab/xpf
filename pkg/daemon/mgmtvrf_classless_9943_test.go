@@ -32,6 +32,13 @@ func operatorRoute9943(t *testing.T, cidr string) netlink.Route {
 	return operatorRouteWithProtocol9943(t, cidr, unix.RTPROT_STATIC)
 }
 
+func operatorRouteWithPriority9943(t *testing.T, cidr string, priority int) netlink.Route {
+	t.Helper()
+	route := operatorRoute9943(t, cidr)
+	route.Priority = priority
+	return route
+}
+
 func classlessLease9943(routes ...string) *dhcp.Lease {
 	classless := make([]dhcp.LeaseRoute, 0, len(routes))
 	for _, route := range routes {
@@ -83,6 +90,83 @@ func TestMgmtVRFClasslessCoveredByStaticDefaultSuppressed_9943(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("all learned classless routes must be suppressed by static default: %v", got)
+	}
+}
+
+func TestMgmtVRFDefaultSuppressionHonorsOperatorPriority11424(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		priority  int
+		routeType int
+		wantDHCP  bool
+	}{
+		{name: "priority-5-suppresses", priority: 5, wantDHCP: false},
+		{name: "priority-200-suppresses", priority: 200, wantDHCP: false},
+		{name: "priority-250-keeps-DHCP", priority: 250, wantDHCP: true},
+		{name: "discard-priority-250-keeps-DHCP", priority: 250, routeType: unix.RTN_BLACKHOLE, wantDHCP: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			operatorDefault := operatorRouteWithPriority9943(t, "0.0.0.0/0", tc.priority)
+			operatorDefault.Type = tc.routeType
+			fake := &fakeMgmtProgrammer{v4: []netlink.Route{operatorDefault}, linkIdx: 7}
+			lease := &dhcp.Lease{
+				Interface: "fxp0",
+				Family:    dhcp.AFInet,
+				Gateway:   netip.MustParseAddr("192.0.2.1"),
+			}
+			var d Daemon
+			if err := d.applyMgmtVRFRoutesTo(fake, []*dhcp.Lease{lease}, map[string]bool{"fxp0": true}); err != nil {
+				t.Fatalf("applyMgmtVRFRoutesTo: %v", err)
+			}
+			got := replacedDestinations9943(fake.replaced)["0.0.0.0/0"] == 1
+			if got != tc.wantDHCP {
+				t.Fatalf("DHCP default installed = %v, want %v; replaced=%v", got, tc.wantDHCP, fake.replaced)
+			}
+			if tc.wantDHCP {
+				staticPresent, dhcpPresent := false, false
+				for _, route := range fake.v4 {
+					if mgmtRouteDstKey(route.Dst, netlink.FAMILY_V4) != "0.0.0.0/0" {
+						continue
+					}
+					staticPresent = staticPresent ||
+						(route.Protocol == unix.RTPROT_STATIC && route.Priority == tc.priority)
+					dhcpPresent = dhcpPresent || route.Protocol == unix.RTPROT_DHCP
+				}
+				if !staticPresent || !dhcpPresent {
+					t.Fatalf("high-priority static and DHCP defaults did not coexist: %+v", fake.v4)
+				}
+			}
+		})
+	}
+}
+
+func TestMgmtVRFClasslessSuppressionHonorsOperatorPriority11424(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		priority      int
+		wantInstalled bool
+	}{
+		{name: "priority-5-suppresses", priority: 5, wantInstalled: false},
+		{name: "priority-250-keeps-DHCP", priority: 250, wantInstalled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeMgmtProgrammer{
+				v4:      []netlink.Route{operatorRouteWithPriority9943(t, "10.0.0.0/8", tc.priority)},
+				linkIdx: 7,
+			}
+			lease := classlessLease9943("10.1.0.0/16")
+			t.Setenv("XPF_DHCP_TRUST_CLASSLESS_OVERRIDE", "")
+			if err := (&Daemon{}).applyMgmtVRFRoutesTo(
+				fake, []*dhcp.Lease{lease}, map[string]bool{"fxp0": true},
+			); err != nil {
+				t.Fatalf("applyMgmtVRFRoutesTo: %v", err)
+			}
+			got := replacedDestinations9943(fake.replaced)["10.1.0.0/16"] == 1
+			if got != tc.wantInstalled {
+				t.Fatalf("DHCP classless route installed = %v, want %v; replaced=%v",
+					got, tc.wantInstalled, fake.replaced)
+			}
+		})
 	}
 }
 

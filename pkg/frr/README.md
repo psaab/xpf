@@ -829,6 +829,13 @@ step. Both are required — neither sees the other's case:
   previously dropped the interface — an unintended asymmetry that left the
   kernel unable to pick the correct egress in multi-WAN / shared-gateway-IP
   deployments (default-route conflicts / blackholing).
+- **Static-default precedence (#11424).** The DHCP default's distance 200 is
+  compared with the effective distance of each rendered static next-hop
+  (qualified-next-hop preference overrides the route-level value). Only a
+  rendered static at distance <= 200 suppresses DHCP; a floating backup or
+  high-distance discard/reject renders alongside DHCP and leaves FRR to select
+  the preferred route. Empty non-discard routes still render nothing (#5519).
+
 - **DHCP classless-route precedence (#11426).** `renderDHCPDefaults` suppresses
   a lease prefix when a renderable configured static or an installed route in
   the same table contains it. `assembleFRRConfig` supplies live main/instance

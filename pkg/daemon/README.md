@@ -3070,6 +3070,10 @@ never lock an operator out of a remote box it manages.
   debt, including errors from management-only DHCP callbacks. After networkd
   rebinds the management interfaces, the full apply reconciles those routes
   again so any state lost during reconfigure is restored before completion.
+  Management DHCP default and classless suppression also checks the covering
+  operator route's kernel Priority (route metric): only values <= 200 suppress
+  a DHCP route. A high-metric static or discard route therefore cannot hide the
+  DHCP primary from the management table (#11424).
   The always-on `routingReconcileReassertLoop` retries only the owed domains
   every 30 s: generic routing debt re-runs policy and route-leak reconciles,
   while management-route debt re-runs `applyMgmtVRFRoutes` without rewriting

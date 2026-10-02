@@ -124,9 +124,9 @@ func TestDiscardRejectStaticDefaultSuppressesDHCPDefault_v6_5519(t *testing.T) {
 	}
 }
 
-// staticRouteRendersFIB is the shared predicate; pin its truth table so the
-// emit test in generateStaticRouteInTable and the suppression test in
-// renderDHCPDefaults cannot silently drift.
+// staticRouteRendersFIB is the route-existence predicate. The tests below pin
+// its truth table separately from effective default distance, including
+// qualified-next-hop overrides (#11424).
 func TestStaticRouteRendersFIB_5519(t *testing.T) {
 	cases := []struct {
 		name string
@@ -143,5 +143,80 @@ func TestStaticRouteRendersFIB_5519(t *testing.T) {
 		if got := staticRouteRendersFIB(tc.sr); got != tc.want {
 			t.Errorf("staticRouteRendersFIB(%s) = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// #11424: renderability is not enough to suppress DHCP defaults; the effective
+// static route distance must be no worse than the DHCP distance 200. The
+// qualified-next-hop cells make the check follow the distance actually emitted
+// per next-hop rather than only the route-level preference.
+func TestStaticDefaultPreferenceControlsDHCPSuppression11424(t *testing.T) {
+	families := []struct {
+		name, destination, staticNextHop, dhcpGateway, dhcpInterface, dhcpLine string
+		isIPv6                                                                 bool
+	}{
+		{"v4", "0.0.0.0/0", "192.0.2.254", "192.0.2.1", "", "ip route 0.0.0.0/0 192.0.2.1 200", false},
+		{"v6", "::/0", "2001:db8::2", "fe80::1", "ge-0-0-2", "ipv6 route ::/0 fe80::1 ge-0-0-2 200", true},
+	}
+	cases := []struct {
+		name                    string
+		preference              int
+		qualifiedPreference     int
+		includePrimary, discard bool
+		wantDHCP                bool
+	}{
+		{"static-preference-250", 250, 0, true, false, true},
+		{"static-preference-5", 5, 0, true, false, false},
+		{"qualified-next-hop-250", 5, 250, false, false, true},
+		{"primary-5-with-floating-backup-250", 5, 250, true, false, false},
+		{"discard-preference-250", 250, 0, false, true, true},
+	}
+	for _, family := range families {
+		t.Run(family.name, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					sr := &config.StaticRoute{
+						Destination: family.destination,
+						Preference:  tc.preference,
+						Discard:     tc.discard,
+					}
+					if tc.includePrimary {
+						sr.NextHops = append(sr.NextHops, config.NextHopEntry{Address: family.staticNextHop})
+					}
+					if tc.qualifiedPreference > 0 {
+						sr.NextHops = append(sr.NextHops, config.NextHopEntry{
+							Address:       family.staticNextHop,
+							Preference:    tc.qualifiedPreference,
+							HasPreference: true,
+						})
+					}
+					dr := DHCPRoute{
+						Gateway:   family.dhcpGateway,
+						Interface: family.dhcpInterface,
+						IsIPv6:    family.isIPv6,
+					}
+					fc := &FullConfig{DHCPRoutes: []DHCPRoute{dr}}
+					if family.isIPv6 {
+						fc.Inet6StaticRoutes = []*config.StaticRoute{sr}
+					} else {
+						fc.StaticRoutes = []*config.StaticRoute{sr}
+					}
+
+					dhcpRendered := renderDHCP5519(fc)
+					staticRendered := New().generateStaticRoute(sr, "", nil, nil, nil)
+					if staticRendered == "" {
+						t.Fatal("static default was not rendered")
+					}
+					gotDHCP := strings.Contains(dhcpRendered, family.dhcpLine)
+					if gotDHCP != tc.wantDHCP {
+						t.Fatalf("DHCP default rendered = %v, want %v; static=%q DHCP=%q",
+							gotDHCP, tc.wantDHCP, staticRendered, dhcpRendered)
+					}
+					if tc.wantDHCP && !strings.Contains(staticRendered, family.destination) {
+						t.Fatalf("pref-250 static default missing alongside DHCP default: %q", staticRendered)
+					}
+				})
+			}
+		})
 	}
 }
