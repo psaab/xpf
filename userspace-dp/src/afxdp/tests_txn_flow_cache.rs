@@ -2762,8 +2762,9 @@ fn txn_flow_cache_delneigh_resolves_live_ecmp_alternate_11375() {
     delneigh_body[12..14].copy_from_slice(&8_u16.to_ne_bytes());
     delneigh_body[14..16].copy_from_slice(&1_u16.to_ne_bytes());
     delneigh_body[16..20].copy_from_slice(&removed_ip.octets());
+    let monitored = FastSet::from_iter([12]);
     assert_eq!(
-        crate::afxdp::neighbor::parse_neighbor_msg(29, &delneigh_body, &neighbors),
+        crate::afxdp::neighbor::parse_neighbor_msg(29, &delneigh_body, &monitored, &neighbors,),
         crate::afxdp::neighbor::NeighborMsgEffect::Removed,
         "RTM_DELNEIGH must remove the cached ECMP member"
     );

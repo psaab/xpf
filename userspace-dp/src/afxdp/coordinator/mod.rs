@@ -1175,6 +1175,9 @@ impl Coordinator {
         if let Ok(mut manager_keys) = self.neighbors.manager_keys.lock() {
             manager_keys.clear();
         }
+        self.neighbors
+            .monitored_ifindexes
+            .store(Arc::new(FastSet::default()));
         // #1636: reset warmer rate-limit + telemetry so a re-bind starts
         // clean. The worker thread itself is torn down above; a fresh one
         // is spawned on the next bring-up.

@@ -48,6 +48,10 @@ pub(crate) struct NeighborManager {
     /// fence and never advances it.
     pub(crate) applied_manager_generation: Arc<AtomicU64>,
     pub(crate) manager_keys: Arc<Mutex<FastSet<(i32, IpAddr)>>>,
+    /// Configured interface ifindexes accepted by the kernel-neighbor monitor.
+    /// Replaced atomically with each committed snapshot so a long-lived
+    /// monitor never imports events for interfaces outside the active config.
+    pub(crate) monitored_ifindexes: Arc<ArcSwap<FastSet<i32>>>,
     /// Shared inbound XFRM-SA existence state.  It lives beside the
     /// neighbour monitor lifecycle so stop/reconcile joins the only writer
     /// before resetting worker-visible forwarding state.
@@ -141,6 +145,7 @@ impl NeighborManager {
             generation: Arc::new(AtomicU64::new(0)),
             applied_manager_generation: Arc::new(AtomicU64::new(0)),
             manager_keys: Arc::new(Mutex::new(FastSet::default())),
+            monitored_ifindexes: Arc::new(ArcSwap::from_pointee(FastSet::default())),
             ipsec_sa_monitor: super::super::forwarding::IpsecSaMonitor::new(),
             monitor_stop: None,
             monitor_join: None,
@@ -168,6 +173,13 @@ impl NeighborManager {
             resolver_stop: None,
             resolver_join: None,
         }
+    }
+    pub(super) fn set_monitored_ifindexes(&self, interfaces: &[InterfaceSnapshot]) {
+        let ifindexes = interfaces
+            .iter()
+            .filter_map(|interface| (interface.ifindex > 0).then_some(interface.ifindex))
+            .collect();
+        self.monitored_ifindexes.store(Arc::new(ifindexes));
     }
 
     /// #5165: signal the neighbor-monitor thread to stop and JOIN it, mirroring

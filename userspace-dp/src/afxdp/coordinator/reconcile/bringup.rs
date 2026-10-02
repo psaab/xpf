@@ -1220,6 +1220,7 @@ fn start_post_readiness_neighbor_services(coord: &mut Coordinator) {
         // resolver-counter block (same status wire path).
         let monitor_counters = coord.neighbors.resolver_counters.clone();
         let manager_keys = coord.neighbors.manager_keys.clone();
+        let monitored_ifindexes = coord.neighbors.monitored_ifindexes.clone();
         // #925-A: wrap aux thread in catch_unwind so a panic in the
         // netlink path doesn't kill the daemon. No respawn — see
         // spawn_supervised_aux doc for operator-visible degradation.
@@ -1239,6 +1240,7 @@ fn start_post_readiness_neighbor_services(coord: &mut Coordinator) {
                 neighbor_generation,
                 monitor_counters,
                 manager_keys,
+                monitored_ifindexes,
             )
         }) {
             Ok(join) => {

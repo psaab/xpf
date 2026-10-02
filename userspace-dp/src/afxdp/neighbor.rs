@@ -657,13 +657,14 @@ pub(super) enum NeighborMsgEffect {
     Removed,
 }
 
-/// Parse one kernel RTM_{NEW,DEL}NEIGH message. IPv4 upserts are the
-/// production ARP learn path because the XDP shim passes ARP to the kernel;
-/// differing MACs therefore use the same solicited-preference CAS as the
-/// XSK ARP arm. IPv6 monitor behavior is unchanged.
+/// Parse one kernel RTM_{NEW,DEL}NEIGH message for the configured interface
+/// keyspace. IPv4 upserts are the production ARP learn path because the XDP
+/// shim passes ARP to the kernel; differing MACs therefore use the same
+/// solicited-preference CAS as the XSK ARP arm.
 pub(super) fn parse_neighbor_msg(
     nlmsg_type: u16,
     body: &[u8],
+    monitored_ifindexes: &FastSet<i32>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
 ) -> NeighborMsgEffect {
     fn removal(removed: bool) -> NeighborMsgEffect {
@@ -678,6 +679,9 @@ pub(super) fn parse_neighbor_msg(
     }
     let family = body[0];
     let ifindex = i32::from_ne_bytes([body[4], body[5], body[6], body[7]]);
+    if !monitored_ifindexes.contains(&ifindex) {
+        return NeighborMsgEffect::None;
+    }
     let state = u16::from_ne_bytes([body[8], body[9]]);
     let mut attr_off = 12usize;
     let mut ip: Option<IpAddr> = None;
@@ -721,12 +725,18 @@ pub(super) fn parse_neighbor_msg(
             // Remove a prior row too: keeping its old MAC would preserve a
             // stale forwarding path after the kernel changes the NUD state.
             const NUD_INCOMPLETE: u16 = 0x01;
+            const NUD_DELAY: u16 = 0x08;
             const NUD_PROBE: u16 = 0x10;
             const NUD_FAILED: u16 = 0x20;
             const NUD_NOARP: u16 = 0x40;
             const NUD_PERMANENT: u16 = 0x80;
+            const USABLE_NUD: u16 =
+                NUD_REACHABLE | NUD_STALE | NUD_DELAY | NUD_PROBE | NUD_PERMANENT;
             if (state & (NUD_INCOMPLETE | NUD_FAILED | NUD_NOARP)) != 0 {
                 return removal(remove_dynamic_neighbor(dynamic_neighbors, ifindex, ip));
+            }
+            if state & USABLE_NUD == 0 {
+                return NeighborMsgEffect::None;
             }
             let Some(mac) = mac else {
                 return NeighborMsgEffect::None;
@@ -852,6 +862,7 @@ pub(super) fn process_dump_batch(
     n: usize,
     next_seq: u32,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    monitored_ifindexes: &FastSet<i32>,
 ) -> DumpBatchOutcome {
     let mut changed = false;
     let mut dump_done = false;
@@ -884,6 +895,7 @@ pub(super) fn process_dump_batch(
                 changed |= parse_neighbor_msg(
                     nlmsg_type,
                     &buf[offset + 16..offset + nlmsg_len],
+                    monitored_ifindexes,
                     dynamic_neighbors,
                 ) != NeighborMsgEffect::None;
             }
@@ -901,6 +913,7 @@ pub(super) fn process_dump_batch(
                 changed |= parse_neighbor_msg(
                     nlmsg_type,
                     &buf[offset + 16..offset + nlmsg_len],
+                    monitored_ifindexes,
                     dynamic_neighbors,
                 ) != NeighborMsgEffect::None;
             }
@@ -914,6 +927,7 @@ pub(super) fn process_dump_batch(
 pub(super) fn initial_neighbor_dump(
     fd: c_int,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    monitored_ifindexes: &Arc<ArcSwap<FastSet<i32>>>,
 ) -> io::Result<u64> {
     let mut next_seq = 1u32;
     let mut changed = false;
@@ -930,7 +944,8 @@ pub(super) fn initial_neighbor_dump(
                 }
                 continue;
             }
-            match process_dump_batch(&buf, n as usize, next_seq, dynamic_neighbors) {
+            let monitored = monitored_ifindexes.load();
+            match process_dump_batch(&buf, n as usize, next_seq, dynamic_neighbors, &monitored) {
                 DumpBatchOutcome::Error => {
                     return Err(io::Error::other("netlink neighbor dump failed"));
                 }
@@ -1090,6 +1105,7 @@ pub(super) fn neigh_monitor_thread(
     // netlink_redumps, netlink_redump_upserts).
     counters: Arc<super::neighbor_resolver::ResolverCounters>,
     manager_keys: Arc<Mutex<FastSet<(i32, IpAddr)>>>,
+    monitored_ifindexes: Arc<ArcSwap<FastSet<i32>>>,
 ) {
     // Create NETLINK_ROUTE socket and subscribe to neighbor events
     let fd = unsafe {
@@ -1150,7 +1166,7 @@ pub(super) fn neigh_monitor_thread(
     // incomplete") and the steady-state / ENOBUFS re-dump paths recover.
     let mut attempt = 0usize;
     loop {
-        let result = initial_neighbor_dump(fd, &dynamic_neighbors);
+        let result = initial_neighbor_dump(fd, &dynamic_neighbors, &monitored_ifindexes);
         if dump_establishes_baseline(&result) {
             neighbor_generation.store(1, Ordering::Relaxed);
             if attempt == 0 {
@@ -1202,6 +1218,7 @@ pub(super) fn neigh_monitor_thread(
         &neighbor_generation,
         &counters,
         &manager_keys,
+        &monitored_ifindexes,
     );
     unsafe { libc::close(fd) };
     eprintln!("neigh_monitor: stopped");
@@ -1235,6 +1252,7 @@ fn neigh_monitor_steady_state(
     neighbor_generation: &AtomicU64,
     counters: &super::neighbor_resolver::ResolverCounters,
     manager_keys: &Mutex<FastSet<(i32, IpAddr)>>,
+    monitored_ifindexes: &Arc<ArcSwap<FastSet<i32>>>,
 ) {
     let mut buf = vec![0u8; 8192];
     // #1771 §2.5: throttle state for the ENOBUFS-triggered upsert re-dump.
@@ -1356,6 +1374,7 @@ fn neigh_monitor_steady_state(
         // insert. `store(1)` on dump completion stays the startup
         // sentinel; here we always advance.
         neighbor_generation.fetch_add(1, Ordering::Release);
+        let monitored = monitored_ifindexes.load();
         let mut offset = 0usize;
         while offset + 16 <= n as usize {
             let nlmsg_len = u32::from_ne_bytes([
@@ -1382,6 +1401,7 @@ fn neigh_monitor_steady_state(
                 let effect = parse_neighbor_msg(
                     nlmsg_type,
                     &buf[offset + 16..offset + nlmsg_len],
+                    &monitored,
                     &dynamic_neighbors,
                 );
                 // Count only genuine re-adds from a re-dump reply: an
@@ -1591,6 +1611,7 @@ mod dump_batch_tests {
         let dump_mac = [0x02, 0, 0, 0, 0, 0x01];
         let mcast_ip = Ipv4Addr::new(10, 0, 0, 2);
         let mcast_mac = [0x02, 0, 0, 0, 0, 0x02];
+        let monitored = FastSet::from_iter([ifindex]);
 
         let mut buf = Vec::new();
         // Dump reply entry (carries the request seq).
@@ -1602,7 +1623,7 @@ mod dump_batch_tests {
         push_done(&mut buf, next_seq);
 
         let n = buf.len();
-        let outcome = process_dump_batch(&buf, n, next_seq, &dynamic);
+        let outcome = process_dump_batch(&buf, n, next_seq, &dynamic, &monitored);
 
         match outcome {
             DumpBatchOutcome::Parsed { changed, dump_done } => {
@@ -1636,6 +1657,7 @@ mod dump_batch_tests {
     fn dump_batch_completion_keys_off_request_seq() {
         let dynamic = Arc::new(ShardedNeighborMap::new());
         let next_seq = 2u32;
+        let monitored = FastSet::from_iter([3]);
 
         let mut buf = Vec::new();
         // An NLMSG_DONE for an UNRELATED seq must not complete this dump.
@@ -1651,7 +1673,7 @@ mod dump_batch_tests {
         push_done(&mut buf, next_seq);
 
         let n = buf.len();
-        let outcome = process_dump_batch(&buf, n, next_seq, &dynamic);
+        let outcome = process_dump_batch(&buf, n, next_seq, &dynamic, &monitored);
         assert_eq!(
             outcome,
             DumpBatchOutcome::Parsed {
@@ -2309,16 +2331,20 @@ mod monitor_lifecycle_tests_5165 {
         let counters = Arc::new(super::super::neighbor_resolver::ResolverCounters::default());
         let stop = Arc::new(AtomicBool::new(false));
         let manager_keys = Arc::new(Mutex::new(FastSet::default()));
+        let monitored_ifindexes = Arc::new(ArcSwap::from_pointee(FastSet::from_iter([101, 202])));
 
         let handle = {
-            let (m, g, c, s, k) = (
+            let (m, g, c, s, k, i) = (
                 map.clone(),
                 generation.clone(),
                 counters.clone(),
                 stop.clone(),
                 manager_keys.clone(),
+                monitored_ifindexes.clone(),
             );
-            std::thread::spawn(move || neigh_monitor_steady_state(read_fd, &s, &m, &g, &c, &k))
+            std::thread::spawn(move || {
+                neigh_monitor_steady_state(read_fd, &s, &m, &g, &c, &k, &i)
+            })
         };
 
         let if1 = 101;
@@ -2434,16 +2460,20 @@ mod monitor_lifecycle_tests_5165 {
         let counters = Arc::new(super::super::neighbor_resolver::ResolverCounters::default());
         let stop = Arc::new(AtomicBool::new(false));
         let manager_keys = Arc::new(Mutex::new(FastSet::default()));
+        let monitored_ifindexes = Arc::new(ArcSwap::from_pointee(FastSet::default()));
 
         let handle = {
-            let (m, g, c, s, k) = (
+            let (m, g, c, s, k, i) = (
                 map.clone(),
                 generation.clone(),
                 counters.clone(),
                 stop.clone(),
                 manager_keys.clone(),
+                monitored_ifindexes.clone(),
             );
-            std::thread::spawn(move || neigh_monitor_steady_state(read_fd, &s, &m, &g, &c, &k))
+            std::thread::spawn(move || {
+                neigh_monitor_steady_state(read_fd, &s, &m, &g, &c, &k, &i)
+            })
         };
         // Idle (no events); set stop and confirm the loop exits within a couple
         // of recv-timeout windows.
@@ -2484,6 +2514,7 @@ mod noarp_listener_10690_tests {
         const NUD_REACHABLE: u16 = 0x02;
         const NUD_NOARP: u16 = 0x40;
         let ip = Ipv4Addr::new(10, 0, 61, 255);
+        let monitored = FastSet::from_iter([7]);
         for state in [NUD_NOARP, NUD_NOARP | NUD_REACHABLE] {
             for had_prior_row in [false, true] {
                 let neighbors = Arc::new(ShardedNeighborMap::new());
@@ -2499,6 +2530,7 @@ mod noarp_listener_10690_tests {
                 let effect = parse_neighbor_msg(
                     28,
                     &newneigh_body(7, ip, [0xff; 6], state),
+                    &monitored,
                     &neighbors,
                 );
                 assert_eq!(
@@ -2528,6 +2560,7 @@ mod noarp_listener_10690_tests {
         const NUD_STALE: u16 = 0x04;
         const NUD_PROBE: u16 = 0x10;
         let ip = Ipv4Addr::new(10, 0, 61, 50);
+        let monitored = FastSet::from_iter([7]);
         let key = (7, IpAddr::V4(ip));
         let live_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01];
         let spoofed_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
@@ -2541,6 +2574,7 @@ mod noarp_listener_10690_tests {
             parse_neighbor_msg(
                 28,
                 &newneigh_body(7, ip, spoofed_mac, NUD_STALE),
+                &monitored,
                 &neighbors,
             ),
             NeighborMsgEffect::None,
@@ -2554,7 +2588,12 @@ mod noarp_listener_10690_tests {
         // neighbor. The probe notification itself cannot replace the MAC;
         // its subsequent reply can.
         assert_eq!(
-            parse_neighbor_msg(28, &newneigh_body(7, ip, live_mac, NUD_PROBE), &neighbors),
+            parse_neighbor_msg(
+                28,
+                &newneigh_body(7, ip, live_mac, NUD_PROBE),
+                &monitored,
+                &neighbors,
+            ),
             NeighborMsgEffect::None,
         );
         assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(live_mac));
@@ -2562,6 +2601,7 @@ mod noarp_listener_10690_tests {
             parse_neighbor_msg(
                 28,
                 &newneigh_body(7, ip, failover_mac, NUD_REACHABLE),
+                &monitored,
                 &neighbors,
             ),
             NeighborMsgEffect::Upserted,
@@ -2570,5 +2610,82 @@ mod noarp_listener_10690_tests {
         assert_eq!(neighbors.get(&key).map(|entry| entry.mac), Some(failover_mac));
         assert_eq!(neighbors.mac_change_epoch_for(&key), epoch + 1);
         assert_eq!(neighbors.arp_overwrite_refusals(), refusals + 1);
+    }
+}
+#[cfg(test)]
+mod monitored_neighbor_import_tests_11457 {
+    use super::*;
+
+    fn parse_state(neighbors: &Arc<ShardedNeighborMap>, ifindex: i32, ip: Ipv4Addr, state: u16) {
+        let message = build_newneigh_request(
+            ifindex,
+            IpAddr::V4(ip),
+            [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee],
+            state,
+        );
+        let monitored = FastSet::from_iter([2]);
+        parse_neighbor_msg(28, &message[16..], &monitored, neighbors);
+    }
+
+    #[test]
+    fn unmonitored_ifindex_reachable_leaves_map_unchanged_11457() {
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let existing_ip = Ipv4Addr::new(192, 0, 2, 1);
+        let existing_key = (1, IpAddr::V4(existing_ip));
+        let existing_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 1];
+        neighbors.insert_if_changed(existing_key, NeighborEntry { mac: existing_mac });
+        let rejected_ip = Ipv4Addr::new(192, 0, 2, 99);
+        parse_state(&neighbors, 99, rejected_ip, NUD_REACHABLE);
+        assert_eq!(
+            neighbors.get(&existing_key).map(|entry| entry.mac),
+            Some(existing_mac),
+            "unmonitored event must leave the existing map entry unchanged",
+        );
+        assert!(
+            neighbors.get(&(99, IpAddr::V4(rejected_ip))).is_none(),
+            "unmonitored ifindex must not be imported",
+        );
+    }
+
+    #[test]
+    fn monitored_ifindex_state_none_leaves_map_unchanged_11457() {
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let existing_ip = Ipv4Addr::new(192, 0, 2, 1);
+        let existing_key = (1, IpAddr::V4(existing_ip));
+        let existing_mac = [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 1];
+        neighbors.insert_if_changed(existing_key, NeighborEntry { mac: existing_mac });
+        let rejected_ip = Ipv4Addr::new(192, 0, 2, 2);
+        parse_state(&neighbors, 2, rejected_ip, 0);
+        assert_eq!(
+            neighbors.get(&existing_key).map(|entry| entry.mac),
+            Some(existing_mac),
+            "NUD_NONE must leave the existing map entry unchanged",
+        );
+        assert!(
+            neighbors.get(&(2, IpAddr::V4(rejected_ip))).is_none(),
+            "NUD_NONE must not be imported",
+        );
+    }
+
+    #[test]
+    fn monitored_ifindex_reachable_imports_11457() {
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let ip = Ipv4Addr::new(192, 0, 2, 2);
+        parse_state(&neighbors, 2, ip, NUD_REACHABLE);
+        assert_eq!(
+            neighbors.get(&(2, IpAddr::V4(ip))).map(|entry| entry.mac),
+            Some([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+        );
+    }
+
+    #[test]
+    fn monitored_ifindex_stale_imports_11457() {
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let ip = Ipv4Addr::new(192, 0, 2, 2);
+        parse_state(&neighbors, 2, ip, NUD_STALE);
+        assert_eq!(
+            neighbors.get(&(2, IpAddr::V4(ip))).map(|entry| entry.mac),
+            Some([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+        );
     }
 }
