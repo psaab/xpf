@@ -188,17 +188,17 @@ func TestKernelBandOrderAppliesInBothFamilies11319(t *testing.T) {
 }
 
 // TestClearSweepsLegacyBands11319 pins upgrade cleanup for the old next-table
-// range at 100-199 and PBR range at 31000-31999. The legacy next-table band
-// predates ingress scoping and is still cleared broadly; foreign rules (the
-// kernel's own 0/32766/32767) must survive.
+// range at 100-199 and PBR range at 31000-31999. Both pre-#9420 global and
+// #9420 ingress-scoped next-table generations remain deletable when their
+// destination/table shape identifies them; foreign rules must survive.
 func TestClearSweepsLegacyBands11319(t *testing.T) {
 	const legacyNextTable = 100
 	const legacyPBR = 31000
 
 	t.Run("next-table sweeps stale 100-199", func(t *testing.T) {
 		ops := newFakeRuleOps()
-		seedRule(ops, unix.AF_INET, legacyNextTable+5, 101)
-		seedRule(ops, unix.AF_INET6, legacyNextTable+5, 101)
+		seedCurrentLeakRule(ops, unix.AF_INET, legacyNextTable+5, 101, "10.100.0.0/24", "")
+		seedCurrentLeakRule(ops, unix.AF_INET6, legacyNextTable+5, 101, "2001:db8:100::/64", "ge-0-0-0")
 		seedRule(ops, unix.AF_INET, 0, 255)
 		seedRule(ops, unix.AF_INET, 32766, 254)
 		seedRule(ops, unix.AF_INET, 32767, 253)

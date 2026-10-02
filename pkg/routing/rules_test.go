@@ -1167,11 +1167,11 @@ func TestNextTableRibGroupClearDelNotFoundIdempotent(t *testing.T) {
 // the fake's backing store (bypassing RuleAdd accounting) so a clear() can
 // be exercised against pre-existing kernel rules.
 func seedRule(ops *fakeRuleOps, family, prio, table int) {
-	ops.rules[family] = append(ops.rules[family], netlink.Rule{
-		Family:   family,
-		Priority: prio,
-		Table:    table,
-	})
+	rule := netlink.NewRule()
+	rule.Family = family
+	rule.Priority = prio
+	rule.Table = table
+	ops.rules[family] = append(ops.rules[family], *rule)
 }
 
 // seedPBRRule inserts a PBR rule with the action encoded by its priority.
@@ -1194,9 +1194,13 @@ func seedCurrentLeakRule(ops *fakeRuleOps, family, priority, table int, destinat
 	if err != nil {
 		panic(err)
 	}
-	ops.rules[family] = append(ops.rules[family], netlink.Rule{
-		Family: family, Priority: priority, Table: table, Dst: dst, IifName: iif,
-	})
+	rule := netlink.NewRule()
+	rule.Family = family
+	rule.Priority = priority
+	rule.Table = table
+	rule.Dst = dst
+	rule.IifName = iif
+	ops.rules[family] = append(ops.rules[family], *rule)
 }
 
 // TestRulesClearListErrorSurfaced is the #2273 fail-on-revert guard. When
@@ -1243,8 +1247,8 @@ func TestRulesClearListErrorSurfaced(t *testing.T) {
 		},
 		{
 			name:      "rib-group",
-			inetPrio:  ribGroupRulePriority + 1,
-			inet6Prio: ribGroupRulePriority + 2,
+			inetPrio:  ribGroupLeakRulePriority + 1,
+			inet6Prio: ribGroupLeakRulePriority + 2,
 			run: func(ops *fakeRuleOps) error {
 				rg := &ribGroupManager{ops: ops}
 				// Empty rib-groups → early return after clear; no re-adds.

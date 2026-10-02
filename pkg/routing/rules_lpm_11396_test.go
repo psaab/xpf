@@ -168,16 +168,18 @@ func TestSharedLeakClearPreservesOtherRuleKind11396(t *testing.T) {
 					t.Fatal(err)
 				}
 				prefixLength, _ := dst.Mask.Size()
-				ops.rules[test.family] = append(ops.rules[test.family],
-					netlink.Rule{
-						Family: test.family, Dst: dst, Table: 501,
-						Priority: config.RouteLeakRulePriority(prefixLength, test.bits, config.RouteLeakRibGroup),
-					},
-					netlink.Rule{
-						Family: test.family, Dst: dst, Table: 502, IifName: testNextTableIifs[0],
-						Priority: config.RouteLeakRulePriority(prefixLength, test.bits, config.RouteLeakNextTable),
-					},
-				)
+				ribGroupRule := netlink.NewRule()
+				ribGroupRule.Family = test.family
+				ribGroupRule.Dst = dst
+				ribGroupRule.Table = 501
+				ribGroupRule.Priority = config.RouteLeakRulePriority(prefixLength, test.bits, config.RouteLeakRibGroup)
+				nextTableRule := netlink.NewRule()
+				nextTableRule.Family = test.family
+				nextTableRule.Dst = dst
+				nextTableRule.Table = 502
+				nextTableRule.IifName = testNextTableIifs[0]
+				nextTableRule.Priority = config.RouteLeakRulePriority(prefixLength, test.bits, config.RouteLeakNextTable)
+				ops.rules[test.family] = append(ops.rules[test.family], *ribGroupRule, *nextTableRule)
 			}
 
 			if manager == "next-table" {
