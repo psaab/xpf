@@ -63,7 +63,8 @@ func TestGRPCAdmissionSwapKeepsJournalAndEventStampClass11675(t *testing.T) {
 	if _, err := s.Set(setCtx, setReq); err != nil {
 		t.Fatalf("Set admitted before reclassification: %v", err)
 	}
-	if _, err := s.Commit(commitCtx, &pb.CommitRequest{}); err != nil {
+	const journalDetail = "admission-swap-11675"
+	if _, err := s.Commit(commitCtx, &pb.CommitRequest{Comment: journalDetail}); err != nil {
 		t.Fatalf("Commit admitted before reclassification: %v", err)
 	}
 
@@ -83,22 +84,24 @@ func TestGRPCAdmissionSwapKeepsJournalAndEventStampClass11675(t *testing.T) {
 		t.Fatalf("ListCommitHistory: %v", err)
 	}
 	var journalClass string
+	journalRows := 0
 	for _, entry := range entries {
-		if entry.Action != "commit" {
+		if entry.Action != "commit" || entry.Detail != journalDetail {
 			continue
 		}
+		journalRows++
 		for _, field := range strings.Split(entry.Principal, ";") {
 			if strings.HasPrefix(field, "class=") {
 				journalClass = strings.TrimPrefix(field, "class=")
 				break
 			}
 		}
-		if journalClass != "" {
-			break
-		}
+	}
+	if journalRows != 1 {
+		t.Fatalf("journal rows with detail %q = %d, want exactly 1", journalDetail, journalRows)
 	}
 	if journalClass == "" {
-		t.Fatalf("no class attribution found in commit journal entries: %+v", entries)
+		t.Fatalf("the commit journal row with detail %q has no class attribution", journalDetail)
 	}
 	if journalClass != stamp {
 		t.Fatalf("admitted journal class %q differs from event-options PlantClass stamp %q", journalClass, stamp)
