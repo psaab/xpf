@@ -41,7 +41,7 @@ func interfaceSNATEgressAddresses(cfg *Config) map[string]string {
 		return nil
 	}
 	zoneByIface := buildZoneInterfaceMapLocal(cfg)
-	riByIface := routingInstanceByInterface(cfg)
+	riByIface, noBareRIFallback := routingInstanceByInterface(cfg)
 	out := make(map[string]string)
 	record := func(host, label string) {
 		if host == "" {
@@ -83,7 +83,7 @@ func interfaceSNATEgressAddresses(cfg *Config) map[string]string {
 					continue
 				}
 				logical := fmt.Sprintf("%s.%d", ifName, un)
-				if !interfaceInEgressScope(rs, ifName, logical, zoneByIface, riByIface) {
+				if !interfaceInEgressScope(rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback) {
 					continue
 				}
 				for _, a := range unit.Addresses {
@@ -123,15 +123,16 @@ func ruleSetHasInterfaceModeSNAT(rs *NATRuleSet) bool {
 // each configured to-side scope must agree, and a scope that is not configured
 // does not constrain. When NO to-side scope is configured the rule-set is a
 // wildcard and every interface is a candidate.
-func interfaceInEgressScope(rs *NATRuleSet, ifName, logical string, zoneByIface, riByIface map[string]string) bool {
+func interfaceInEgressScope(rs *NATRuleSet, ifName, logical string, zoneByIface, riByIface map[string]string, noBareRIFallback map[string]struct{}) bool {
 	if rs.ToInterface != "" && rs.ToInterface != logical && rs.ToInterface != ifName {
 		return false
 	}
 	if rs.ToRoutingInstance != "" {
-		// Membership is recorded RI -> interfaces, and an entry may name either
-		// the logical unit or the bare physical interface, so try both.
 		ri, ok := riByIface[logical]
 		if !ok {
+			if _, blocked := noBareRIFallback[ifName]; blocked {
+				return false
+			}
 			ri, ok = riByIface[ifName]
 		}
 		if !ok || ri != rs.ToRoutingInstance {
@@ -164,17 +165,25 @@ func sortedInterfaceNames(cfg *Config) []string {
 }
 
 // routingInstanceByInterface indexes routing-instance membership the direction
-// the scope check needs it. The config records RI -> interfaces; the derivation
-// asks "which RI is this interface in", so invert it once rather than scanning
-// every instance per interface.
-//
-// An interface listed in two instances is a config error the routing validator
-// owns; here the FIRST instance in sorted order wins deterministically, so the
-// derivation cannot flip between runs while that error stands.
-func routingInstanceByInterface(cfg *Config) map[string]string {
-	if cfg == nil || len(cfg.RoutingInstances) == 0 {
-		return nil
+// the NAT scope check needs it. Tolerant membership quarantine is finalized
+// after ValidateConfig has emitted its diagnostics, so this must project the
+// authored memberships onto the same unambiguous ownership that the compiled
+// snapshot will receive.
+func routingInstanceByInterface(cfg *Config) (map[string]string, map[string]struct{}) {
+	if cfg == nil || (len(cfg.RoutingInstances) == 0 && len(cfg.QuarantinedRIMemberPrimaryClaims) == 0) {
+		return nil, nil
 	}
+	tunnelNames := cfg.TunnelNameMap()
+	quarantined := make(map[string]struct{}, len(cfg.QuarantinedRIMemberDeviceConflicts))
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		quarantined[conflict.LinuxName] = struct{}{}
+	}
+	// During compile-time validation the tolerant sanitizer has not yet run,
+	// so derive its contested-device set from the authored claims as well.
+	for _, conflict := range RoutingInstanceMemberDeviceConflicts(cfg, tunnelNames) {
+		quarantined[conflict.LinuxName] = struct{}{}
+	}
+
 	insts := make([]*RoutingInstanceConfig, 0, len(cfg.RoutingInstances))
 	insts = append(insts, cfg.RoutingInstances...)
 	sort.SliceStable(insts, func(i, j int) bool {
@@ -184,27 +193,70 @@ func routingInstanceByInterface(cfg *Config) map[string]string {
 		return insts[i].Name < insts[j].Name
 	})
 	out := make(map[string]string)
+	noBareFallback := make(map[string]struct{})
+	add := func(key, instance string) {
+		if key == "" {
+			return
+		}
+		// #9821: index canonical Literals so padded spellings hit the same
+		// key runtime binds.
+		key = cfg.SplitInterfaceUnitRef(key).Literal
+		if _, exists := out[key]; !exists {
+			out[key] = instance
+		}
+	}
 	for _, ri := range insts {
 		if ri == nil || ri.Name == "" {
 			continue
 		}
-		for _, ifName := range ri.Interfaces {
-			if ifName == "" {
+		for _, member := range ri.Interfaces {
+			if member == "" {
 				continue
 			}
-			// #9821: index the canonical Literal so padded spellings
-			// (`p.0.01`) hit the same key the runtime binds (`p.0.1`); bare
-			// members keep their spelling (Literal == member when bare).
-			key := cfg.SplitInterfaceUnitRef(ifName).Literal
-			if _, ok := out[key]; !ok {
-				out[key] = ri.Name
+			keys := RoutingInstanceMemberDeviceKeys(cfg, tunnelNames, member)
+			touchesQuarantine := false
+			for _, key := range keys {
+				if _, found := quarantined[key.LinuxName]; found {
+					touchesQuarantine = true
+					break
+				}
+			}
+			if !touchesQuarantine {
+				add(member, ri.Name)
+				continue
+			}
+			// A partially quarantined bare member is replaced by explicit
+			// fanout refs plus typed primary claims. Preserve only the same
+			// unambiguous keys here; never re-expand the original bare ref.
+			if len(keys) > 0 && !keys[0].Fanout {
+				baseKey := cfg.SplitInterfaceUnitRef(keys[0].InterfaceKey).Literal
+				noBareFallback[baseKey] = struct{}{}
+			}
+			for _, key := range keys {
+				if key.LinuxName == "" {
+					continue
+				}
+				if _, found := quarantined[key.LinuxName]; found {
+					continue
+				}
+				add(key.InterfaceKey, ri.Name)
 			}
 		}
 	}
-	if len(out) == 0 {
-		return nil
+	for _, claim := range cfg.QuarantinedRIMemberPrimaryClaims {
+		if claim.Instance == "" || claim.LinuxName == "" || claim.InterfaceKey == "" {
+			continue
+		}
+		if _, found := quarantined[claim.LinuxName]; found {
+			continue
+		}
+		add(claim.InterfaceKey, claim.Instance)
+		noBareFallback[cfg.SplitInterfaceUnitRef(claim.InterfaceKey).Literal] = struct{}{}
 	}
-	return out
+	if len(out) == 0 {
+		return nil, noBareFallback
+	}
+	return out, noBareFallback
 }
 
 // sortedAddrKeys returns m's keys in a deterministic order so the owner list —

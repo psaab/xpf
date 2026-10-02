@@ -217,11 +217,10 @@ func (v *vrfManager) MissTerminatorNeedsReconcile() bool {
 
 // BindInterfaceToVRF binds a network interface to a VRF device.
 //
-// This method takes NO lock — it is a pure netlink operation
-// (LinkByName + LinkSetMaster) and touches no vrfManager field. That
-// lock-free property is what makes it safe for the tunnel domain to
-// call while holding its own lock (see tunnel.go), with no lock
-// ordering cycle.
+// A VRF link is type-asserted before binding: reconcile's name-based
+// reclamation can be separated from this call by other netlink activity.
+// The type check and LinkSetMaster are separate syscalls, so out-of-band
+// replacement between them remains outside the daemon's applySem guarantee.
 func (v *vrfManager) BindInterfaceToVRF(ifaceName, instanceName string) error {
 	vrfName := "vrf-" + instanceName
 
@@ -233,7 +232,11 @@ func (v *vrfManager) BindInterfaceToVRF(ifaceName, instanceName string) error {
 	if err != nil {
 		return fmt.Errorf("VRF %s not found: %w", vrfName, err)
 	}
-	if err := v.ops.LinkSetMaster(iface, vrf); err != nil {
+	vrfLink, ok := vrf.(*netlink.Vrf)
+	if !ok || vrfLink == nil || vrfLink.Attrs() == nil {
+		return fmt.Errorf("VRF %s is not a VRF device", vrfName)
+	}
+	if err := v.ops.LinkSetMaster(iface, vrfLink); err != nil {
 		return fmt.Errorf("bind %s to VRF %s: %w", ifaceName, vrfName, err)
 	}
 	slog.Info("interface bound to VRF", "interface", ifaceName, "vrf", vrfName)

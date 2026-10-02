@@ -821,7 +821,11 @@ when the existing kernel link is genuinely incompatible:
   `collectAppliedTunnels` with the exact step-0a name normalization)
   vetoes unbinding when the config list-binds the tunnel. Unbind on
   config-wants-none is identity-gated (`unbindVRFClaimLocked`): only when
-  the current master IS the claimed RI's `vrf-` device; transient errors
+  the lookup confirms the current master is the claimed `*netlink.Vrf` with
+  the same ifindex; a same-name bridge cannot transfer or lapse a claim.
+  `BindInterfaceToVRF` also type-checks its readback before `LinkSetMaster`.
+  These netlink observations are not atomic against out-of-band writers;
+  applySem-serialized daemon paths are the guarantee. Transient errors
   retain the claim for retry. WireGuard `wgN` TUNs now use this SAME claim
   machinery (#5120): `applyWireguardTunLocked` routes through
   `reconcileVRFClaimLocked` so removing the `routing-instance` stanza from
