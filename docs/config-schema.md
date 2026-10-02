@@ -13670,13 +13670,15 @@ one-sided renderer "fix" reds.
 path (`CompileConfig` — hard-reject), downgraded to a `cfg.Warnings` entry on the
 tolerant load / peer-sync paths (`CompileConfigLenient` /
 `CompileConfigForNodeLenient`) so an already-persisted or peer-synced config
-carrying a contradictory term still BOOTS (#1960 fail-closed-on-load doctrine) —
-the last-wins `Action` drives the dataplane deterministically on that boot. The
-gate runs immediately after `validateFilterRoutingInstanceConflictStrict`.
+carrying a contradictory term still BOOTS (#1960 fail-closed-on-load doctrine).
+The tolerant compiler changes each conflicting term's `Action` to `discard`,
+so the last-wins action cannot install an accidental allow. The gate runs
+immediately after `validateFilterRoutingInstanceConflictStrict`.
 Regression coverage: `pkg/config/firewall_terminal_conflict_4375_test.go`
 (accept/reject, accept/discard, reject/discard conflicts + inet6 — fail-on-revert
 guards; `then count X log accept`, a single terminal, and duplicate-same-terminal
-accepted — anti-over-reject; lenient path does not hard-fail).
+accepted — anti-over-reject; both lenient entry points remain bootable and
+conflicting last-accept terms compile as `discard`).
 
 ### #3445 — lo0 input-filter `then` modifiers: nft-mirror support policy (commit warning)
 

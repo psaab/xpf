@@ -1940,6 +1940,46 @@ func failClosedUnknownFilterAction(term *FirewallFilterTerm) {
 	}
 }
 
+// filterHasConflictingTerminalActions reports whether the term contains more
+// than one distinct explicit terminal. The slice deliberately retains
+// duplicates, so identical repeated actions remain valid.
+func filterHasConflictingTerminalActions(actions []string) bool {
+	if len(actions) < 2 {
+		return false
+	}
+	first := actions[0]
+	for _, action := range actions[1:] {
+		if action != first {
+			return true
+		}
+	}
+	return false
+}
+
+// failClosedFilterTerminalConflicts makes a leniently compiled conflicting
+// term deny traffic rather than letting its last-written terminal become an
+// accidental accept. The strict gate still rejects the same authored conflict;
+// this is only the boot / peer-sync fallback.
+func failClosedFilterTerminalConflicts(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	poison := func(filters map[string]*FirewallFilter) {
+		for _, filter := range filters {
+			if filter == nil {
+				continue
+			}
+			for _, term := range filter.Terms {
+				if term != nil && filterHasConflictingTerminalActions(term.TerminalActions) {
+					term.Action = "discard"
+				}
+			}
+		}
+	}
+	poison(cfg.Firewall.FiltersInet)
+	poison(cfg.Firewall.FiltersInet6)
+}
+
 func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 	// Handle leaf form: "then discard;" or "then accept;" produces
 	// Keys=["then", "discard"] with IsLeaf=true and no children. A leaf can

@@ -245,15 +245,17 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// exclusive in Junos). Before this gate compileFilterThen wrote each keyword
 	// onto the single-valued term.Action (last-write-wins), so a term with `then
 	// accept` AND `then reject` silently compiled to whichever came last — the
-	// operator's intent was ambiguous. Lenient on load / peer-sync (warn so an
-	// already-persisted or peer-synced config still boots — #1960 no-brick; the
-	// last-wins Action drives the dataplane independently). Runs on the
-	// fully-compiled *Config so the typed term list (TerminalActions populated by
-	// compileFilterThen) is available.
+	// operator's intent was ambiguous. Lenient on load / peer-sync it warns
+	// instead of rejecting so persisted config still boots (#1960 no-brick),
+	// but the conflict poison replaces last-write-wins with discard so a
+	// conflicting accept cannot be installed as an allow.
+	// Runs on the fully-compiled *Config so the typed term list
+	// (TerminalActions populated by compileFilterThen) is available.
 	if err := validateFilterTerminalConflictStrict(cfg); err != nil {
 		if opts.lenientFilterTerminalConflict {
+			failClosedFilterTerminalConflicts(cfg)
 			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("firewall filter terminal-action conflict (downgraded to warning on tolerant path): %v", err))
+				fmt.Sprintf("firewall filter terminal-action conflict (downgraded to warning on tolerant path; conflicting terms discard): %v", err))
 		} else {
 			return err
 		}
