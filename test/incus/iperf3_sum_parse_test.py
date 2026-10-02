@@ -275,5 +275,113 @@ kill -0 "$pool_pid" 2>/dev/null || exit 16
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+
+class FailoverClientCompletionTests(unittest.TestCase):
+    @staticmethod
+    def install_mock_incus(tmp):
+        bin_dir = os.path.join(tmp, "bin")
+        os.makedirs(bin_dir)
+        incus = os.path.join(bin_dir, "incus")
+        with open(incus, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/usr/bin/env bash\n"
+                '[[ "$1" == exec && "$3" == -- ]] || exit 90\n'
+                "shift 3\n"
+                'exec "$@"\n'
+            )
+        os.chmod(incus, 0o755)
+        env = os.environ.copy()
+        env["PATH"] = bin_dir + os.pathsep + env["PATH"]
+        return env
+
+    def test_process_exit_before_summary_reproduces_old_false_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = os.path.join(tmp, "iperf.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("[  5] 118.00-119.00 sec 1.00 GBytes 8.00 Gbits/sec\n")
+
+            # The old phase-5 sequence stopped as soon as the tracked client
+            # exited and sampled once. The final control result arrives after
+            # that sample, reproducing both false FAILs without a cluster.
+            with open(log_path, encoding="utf-8") as f:
+                old_sample = f.read()
+            self.assertNotIn("iperf Done", old_sample)
+            self.assertFalse(
+                any(
+                    line.startswith("[SUM]") and "sender" in line
+                    for line in old_sample.splitlines()
+                )
+            )
+
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(
+                    "[SUM] 0.00-120.00 sec 259 GBytes 18.5 Gbits/sec 0 sender\n"
+                )
+            with open(log_path, encoding="utf-8") as f:
+                completed = f.read()
+            self.assertRegex(completed, r"\[SUM\].*sender")
+            self.assertNotIn("iperf Done", completed)
+
+    def test_wait_polls_for_done_or_sender_summary_before_sampling(self):
+        markers = (
+            "iperf Done.",
+            "[SUM] 0.00-120.00 sec 259 GBytes 18.5 Gbits/sec 0 sender",
+        )
+        for marker in markers:
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as tmp:
+                env = self.install_mock_incus(tmp)
+                log_path = os.path.join(tmp, "iperf.log")
+                with open(log_path, "w", encoding="utf-8") as f:
+                    f.write("[  5] 118.00-119.00 sec 1.00 GBytes 8.00 Gbits/sec\n")
+                writer = subprocess.Popen(
+                    [
+                        "bash",
+                        "-c",
+                        'sleep 0.1; printf "%s\\n" "$1" >>"$2"',
+                        "test",
+                        marker,
+                        log_path,
+                    ]
+                )
+                script = r'''
+source "$1"
+source "$2"
+CLUSTER_LAN_HOST=mock-lan
+failover_wait_main_iperf_result "$3" 3 || exit 31
+sampled=$(cat "$3")
+[[ "$sampled" == *"$4"* ]] || exit 32
+if [[ "$4" == *sender ]]; then
+    [[ "$sampled" != *"iperf Done"* ]] || exit 33
+    sum_line=$(grep '\[SUM\].*sender' <<<"$sampled" | tail -1)
+    verdict=$(iperf_throughput_verdict 5 "$sum_line")
+    [[ "$verdict" == PASS* ]] || { echo "$verdict" >&2; exit 34; }
+fi
+'''
+                try:
+                    result = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            script,
+                            "test",
+                            os.path.join(
+                                os.path.dirname(__file__), "failover-client-lib.sh"
+                            ),
+                            os.path.join(
+                                os.path.dirname(__file__), "iperf-throughput-lib.sh"
+                            ),
+                            log_path,
+                            marker,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        timeout=5,
+                    )
+                finally:
+                    writer.wait(timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
