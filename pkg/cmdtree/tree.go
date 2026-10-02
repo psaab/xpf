@@ -1651,9 +1651,16 @@ func LookupDesc(words []string, name string, configMode bool) string {
 	// Walk operational tree
 	current := tree
 	var currentNode *Node
+	parentTyped := false
 	for _, w := range words {
 		_, node, _, ok := resolveTreeWord(current, w)
 		if !ok {
+			if parentTyped {
+				// A typed leaf consumes exactly one value before the walk
+				// resumes among its parent's sibling options.
+				parentTyped = false
+				continue
+			}
 			// Dynamic value — skip but stay at same children level.
 			if currentNode != nil && currentNode.HasDynamic() {
 				continue
@@ -1669,7 +1676,11 @@ func LookupDesc(words []string, name string, configMode bool) string {
 			return ""
 		}
 		currentNode = node
+		parentTyped = node.IsTypedLeaf()
 		if node.Children == nil {
+			if parentTyped {
+				continue
+			}
 			return ""
 		}
 		current = node.Children

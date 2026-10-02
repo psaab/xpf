@@ -5,6 +5,8 @@ xpf (0.0.0) unstable; urgency=medium
 
   * Expose interface-level inet-precedence classifier bindings in CLI
     completion, matching the compiler's existing support (#11813).
+  * Preserve `?` help descriptions after typed option values in operational
+    command paths (#11832).
 
   * Keep family-less IPv6 BGP peers out of FRR's default IPv4-unicast AF and
     activate them under IPv6 unicast, whether or not they have policy (#11564).

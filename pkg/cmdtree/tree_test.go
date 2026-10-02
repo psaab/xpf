@@ -96,6 +96,19 @@ func TestLookupDesc_ConfigModeResolvesUniquePrefixWords(t *testing.T) {
 	}
 }
 
+// #11832: remote `?` help must keep walking after a value consumed by a typed
+// option, so subsequent options retain their descriptions.
+func TestLookupDesc_ContinuesAfterTypedLeafValue_11832(t *testing.T) {
+	got := LookupDesc(
+		[]string{"show", "security", "flow", "session", "destination-port", "443"},
+		"source-port",
+		false,
+	)
+	if got != "Filter by source port" {
+		t.Fatalf("LookupDesc after destination-port value = %q, want %q", got, "Filter by source port")
+	}
+}
+
 // #1319 PR 1 retired the cmdtree config-mode typed-leaf overlay
 // (ConfigClassOfServiceSchedulers) and the unit-test-only
 // CompleteFromTreeWithDesc(ConfigTopLevel, "set", ...) coverage that went
