@@ -571,6 +571,10 @@ func (s *Server) configCommitConfirmedHandler(w http.ResponseWriter, r *http.Req
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
+	if req.Minutes < 0 {
+		writeError(w, http.StatusBadRequest, "commit confirmed: timeout must be non-negative")
+		return
+	}
 	sessionID, ok := restConfigSessionID(w, r)
 	if !ok {
 		return

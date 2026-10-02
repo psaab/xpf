@@ -324,6 +324,10 @@ func (s *Server) CommitConfirmed(ctx context.Context, req *pb.CommitConfirmedReq
 	// commit, so an ordinary disconnect while this commit waits on the apply
 	// semaphore is enough.
 	sessionID := connSessionID(ctx)
+	if req.Minutes < 0 {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"commit confirmed: timeout must be non-negative")
+	}
 	authority, err := s.store.AuthorizeCommitAs(sessionID, journalPrincipalForContext(s, ctx, sessionID))
 	if err != nil {
 		return nil, configMutationStatus(err)

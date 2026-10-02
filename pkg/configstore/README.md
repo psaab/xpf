@@ -807,18 +807,19 @@ per-path:
   disconnected operator should treat an unanswered commit as
   ambiguous — same as Junos — and inspect `show configuration` after
   reconnecting.
-- **`commit confirmed <minutes>` is range-bounded (#4868).**
-  `CommitConfirmed` rejects a timeout above `MaxCommitConfirmedMinutes`
-  (65535, the Junos range) so `time.Duration(minutes)*time.Minute` cannot
-  overflow int64 nanoseconds into a wrapped/negative deadline that fires
-  an immediate or wrong auto-rollback after the candidate is already
-  promoted. The guard runs before `writeActive`/promote (no mutation on
-  reject) and the gRPC handler maps it to `InvalidArgument`. Both CLIs
-  parse the timeout with `ParseInt(_, 10, 32)` and enforce `[1, 65535]`
-  before the RPC, so a malformed/zero/negative/`MaxInt32+1`/`2^32+1`
-  timeout ERRORS instead of silently arming the 10-minute default or a
-  truncated value; an unknown `commit` modifier (e.g. the typo `commit
-  confimed`) and an out-of-int32 `rollback` index are likewise rejected
+- **`commit confirmed <minutes>` rejects negatives and is range-bounded (#4868/#11677).**
+  `CommitConfirmed` rejects negative values and values above
+  `MaxCommitConfirmedMinutes` (65535, the Junos range), so
+  `time.Duration(minutes)*time.Minute` cannot overflow int64 nanoseconds into
+  a wrapped/negative deadline that fires an immediate or wrong auto-rollback
+  after the candidate has already been promoted. The guard runs before
+  `writeActive`/promote (no mutation on reject); gRPC maps it to
+  `InvalidArgument` and REST returns `400 Bad Request`. Zero remains the
+  10-minute default at the store/API boundaries; the CLIs parse the timeout with
+  `ParseInt(_, 10, 32)` and enforce `[1, 65535]`; malformed, zero, negative, or
+  out-of-range values error rather than silently arming the 10-minute default or
+  being truncated. An unknown `commit` modifier (e.g. the typo
+  `commit confimed`) and an out-of-int32 `rollback` index are likewise rejected
   before any mutation rather than falling through to a permanent commit /
   rollback-0 candidate discard.
 - **`commit confirmed` survives a crash inside the window (#4577).**
