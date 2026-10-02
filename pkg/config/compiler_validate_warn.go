@@ -371,9 +371,10 @@ func ValidateConfig(cfg *Config) []string {
 				continue
 			}
 			if entry.Value != "" && len(entry.UnimplementedForms) > 0 {
-				// #9524: a prefix PLUS an unimplemented value form. The prefix
-				// used to be enforced alone with no warning on any channel;
-				// the entry now resolves to no usable address (UsableValue).
+				// #9524/#11508: a prefix PLUS a known unsupported or unknown
+				// future value form. The prefix used to be enforced alone with
+				// no warning on any channel; the entry now resolves to no usable
+				// address (UsableValue).
 				warnings = append(warnings, fmt.Sprintf(
 					"address-book %q: %s is not implemented, so this entry resolves to no usable address (its prefix %q alone would under-cover what it names)",
 					name, strings.Join(entry.UnimplementedForms, ", "), entry.Value))
@@ -381,14 +382,13 @@ func ValidateConfig(cfg *Config) []string {
 			}
 			if entry.Value == "" {
 				// An `address <name>` entry with no compiled prefix —
-				// either no prefix at all, or only an as-yet-uncompiled
-				// sub-stanza (dns-name/range-address/wildcard-address) —
-				// resolves to nothing: net.ParseCIDR("") errors at match
-				// time, so every policy referencing it denies (fail-closed,
-				// #2229). That is safe but silent, so surface the operator
-				// authoring error at commit. This is a WARNING, never a
-				// hard reject: an empty-prefix address never forwarded and
-				// rejecting it would brick existing configs.
+				// either no prefix at all, or only an unsupported/unrecognized
+				// value-form stanza (dns-name/range-address/wildcard-address or
+				// a future keyword) — resolves to nothing, so every policy
+				// referencing it denies (fail-closed, #2229). That is safe but
+				// silent, so surface the operator authoring error at commit. This
+				// is a WARNING, never a hard reject: an empty-prefix address
+				// never forwarded and rejecting it would brick existing configs.
 				warnings = append(warnings, fmt.Sprintf(
 					"address-book %q: no usable prefix configured; it will match nothing", name))
 				continue

@@ -6,14 +6,10 @@ import (
 	"strings"
 )
 
-// unimplementedAddressForms9524 are the Junos address value forms the compiler
-// does not implement (#9524). An address takes exactly one value form: a prefix,
-// or one of these.
-var unimplementedAddressForms9524 = map[string]bool{
-	"dns-name":         true,
-	"wildcard-address": true,
-	"range-address":    true,
-}
+// Address book entries resolve only through a parsed IP/CIDR prefix or the
+// separately modeled `description` attribute. The compiler records known
+// unsupported Junos forms (dns-name, wildcard-address, range-address) and
+// unknown future form keywords in UnimplementedForms (#11508).
 
 func appendUniqueForm9524(forms []string, form string) []string {
 	for _, f := range forms {
@@ -25,16 +21,15 @@ func appendUniqueForm9524(forms []string, form string) []string {
 }
 
 // validateAddressUnimplementedFormsStrict rejects an address-book entry that
-// configures a prefix AND an unimplemented value form (#9524).
+// configures a prefix AND an unsupported or unknown value form.
 //
-// Before #9524 such an entry compiled to the prefix alone on all four config
+// Before #9524 such an entry compiled to the prefix alone on all config
 // channels with no warning, so a `deny` naming the object silently under-covered
-// it by exactly the form the compiler dropped. The sole-value case (only a
-// dns-name, say) was already loud: Value "" is warned (#2229), strict-rejected
-// when referenced (#3149), and poisons the snapshot on the tolerant path
-// (#3261). A mixed entry is not valid Junos, so strict commit rejects it
-// outright, naming the entry, the prefix and the dropped form. A sole
-// unimplemented form stays as it was: it is valid Junos, merely unimplemented.
+// it by exactly the form the compiler dropped. The strict gate rejects this
+// mixed shape, while the tolerant path warns and Address.UsableValue returns
+// empty so both policy and NAT resolvers treat the entry as unresolvable.
+// A sole unsupported form remains unusable and is rejected when referenced,
+// preserving its existing behavior (#2229/#3149/#3261).
 //
 // It walks the global book and every zone-local book, and skips the synthetic
 // zone-local/ names the fold injects into the global book, so an error names
@@ -64,7 +59,7 @@ func validateAddressUnimplementedFormsStrict(cfg *Config) error {
 			return fmt.Errorf(
 				"security %saddress-book address %q configures the prefix %q and also %s: a Junos address "+
 					"takes exactly one value form, and %s is not implemented, so the prefix would be "+
-					"enforced alone and the %s silently dropped; keep one of them (#9524)",
+					"enforced alone and the %s silently dropped; keep one of them (#9524/#11508)",
 				scope, name, a.Value, strings.Join(a.UnimplementedForms, ", "), form, form)
 		}
 		return nil

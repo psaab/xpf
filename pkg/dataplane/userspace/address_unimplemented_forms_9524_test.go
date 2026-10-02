@@ -5,23 +5,26 @@ import (
 	"testing"
 )
 
-// #9524 — the tolerant wire. Channel: config.CompileConfigLenient. A policy that
-// references a mixed address must fail closed like the sole-value case (the
-// #3261 sentinel, whole snapshot refused), not enforce the prefix alone.
+// #9524/#11508 — the tolerant wire. Channel: config.CompileConfigLenient. A
+// policy that references a mixed address must fail closed like the sole-value
+// case (the #3261 sentinel, whole snapshot refused), not enforce the prefix
+// alone, including for an address form unknown to this compiler.
 
 func TestMixedAddressFailsClosedOnTheTolerantPath9524(t *testing.T) {
-	pol := func(src string) string {
-		return `zones { security-zone trust { address-book { address zmixed { 10.20.0.0/24; dns-name evil.example; } } } security-zone untrust; } policies { from-zone trust to-zone untrust { policy d1 { match { source-address ` + src + `; destination-address any; application any; } then { deny; } } } }`
+	pol := func(src, form string) string {
+		return `zones { security-zone trust { address-book { address zmixed { 10.20.0.0/24; ` + form + `; } } } security-zone untrust; } policies { from-zone trust to-zone untrust { policy d1 { match { source-address ` + src + `; destination-address any; application any; } then { deny; } } } }`
 	}
 	for _, tc := range []struct {
 		name     string
 		text     string
 		poisoned bool
 	}{
-		{"global mixed, referenced", `security { address-book { global { address mixed { 10.10.0.0/24; dns-name evil.example; } } } ` + pol("mixed") + ` }`, true},
-		{"zone-local mixed, referenced", `security { ` + pol("zmixed") + ` }`, true},
-		{"control: sole prefix", `security { address-book { global { address mixed 10.10.0.0/24; } } ` + pol("mixed") + ` }`, false},
-		{"control: mixed but unreferenced", `security { address-book { global { address mixed { 10.10.0.0/24; dns-name evil.example; } address web 10.30.0.0/24; } } ` + pol("web") + ` }`, false},
+		{"global mixed, referenced", `security { address-book { global { address mixed { 10.10.0.0/24; dns-name evil.example; } } } ` + pol("mixed", "dns-name evil.example") + ` }`, true},
+		{"zone-local mixed, referenced", `security { ` + pol("zmixed", "dns-name evil.example") + ` }`, true},
+		{"global future form, referenced", `security { address-book { global { address mixed { 10.10.0.0/24; future-address-form value; } } } ` + pol("mixed", "dns-name evil.example") + ` }`, true},
+		{"zone-local future form, referenced", `security { ` + pol("zmixed", "future-address-form value") + ` }`, true},
+		{"control: sole prefix", `security { address-book { global { address mixed 10.10.0.0/24; } } ` + pol("mixed", "dns-name evil.example") + ` }`, false},
+		{"control: mixed but unreferenced", `security { address-book { global { address mixed { 10.10.0.0/24; dns-name evil.example; } address web 10.30.0.0/24; } } ` + pol("web", "dns-name evil.example") + ` }`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := lenientHier9571(t, tc.text)

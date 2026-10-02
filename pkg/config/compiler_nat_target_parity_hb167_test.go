@@ -135,21 +135,28 @@ func TestStaticNATThenPrefixNameMixedAddressFailsClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		target  string
+		form    string
 		entries []string
 	}{
-		{name: "address", target: "INSIDEHOST"},
+		{name: "address", target: "INSIDEHOST", form: "dns-name evil.example"},
+		{name: "future address form", target: "INSIDEHOST", form: "future-address-form value"},
 		{
-			name:   "singleton address-set",
-			target: "INSIDESET",
-			entries: []string{
-				"set security address-book global address-set INSIDESET address INSIDEHOST",
-			},
+			name:    "singleton address-set",
+			target:  "INSIDESET",
+			form:    "dns-name evil.example",
+			entries: []string{"set security address-book global address-set INSIDESET address INSIDEHOST"},
+		},
+		{
+			name:    "singleton address-set future form",
+			target:  "INSIDESET",
+			form:    "future-address-form value",
+			entries: []string{"set security address-book global address-set INSIDESET address INSIDEHOST"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmds := append([]string{
 				"set security address-book global address INSIDEHOST 10.0.0.5/32",
-				"set security address-book global address INSIDEHOST dns-name evil.example",
+				"set security address-book global address INSIDEHOST " + tc.form,
 				"set security nat static rule-set S rule R1 match destination-address 203.0.113.5/32",
 				"set security nat static rule-set S rule R1 then static-nat prefix-name " + tc.target,
 			}, tc.entries...)

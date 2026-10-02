@@ -27,11 +27,11 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
-	// #9524: an address that configures a prefix AND an unimplemented value
-	// form (dns-name / wildcard-address / range-address). Strict on commit /
+	// #9524/#11508: an address that configures a prefix AND an unsupported or
+	// unknown value form (including future keywords). Strict on commit /
 	// commit-check. The tolerant load / peer-sync path warns (#1960 no-brick),
-	// and there Address.UsableValue makes a referencing policy fail closed like
-	// the sole-value case, instead of enforcing the prefix alone.
+	// and Address.UsableValue makes the entry fail closed in policy and NAT
+	// resolution instead of enforcing the prefix alone.
 	if err := validateAddressUnimplementedFormsStrict(cfg); err != nil {
 		if opts.lenientAddressUnimplementedForms {
 			cfg.Warnings = append(cfg.Warnings,

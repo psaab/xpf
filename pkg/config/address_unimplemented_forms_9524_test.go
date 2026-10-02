@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// #9524 — an address carrying a prefix AND an unimplemented value form.
-// Channels: CompileConfig (strict; what commit and configstore.CheckText run)
-// rejects it; CompileConfigLenient (boot load, HA sync, upgrade) warns and
-// keeps the entry, with UsableValue() making it resolve to no usable address.
+// #9524/#11508 — an address carrying a prefix AND an unsupported or unknown
+// future value form. Strict commit rejects it; tolerant load and peer-sync
+// warn, remain bootable, and keep UsableValue empty so policy/NAT cannot use
+// the otherwise-valid prefix alone.
 
 func hier9524(t *testing.T, text string) *ConfigTree {
 	t.Helper()
@@ -48,6 +48,9 @@ func TestMixedAddressValueFormRejectedAtCommit9524(t *testing.T) {
 		{"flat dns-name then prefix", flat(global+"dns-name evil.example", global+"10.10.0.0/24"), "dns-name", ""},
 		{"flat prefix + wildcard-address", flat(global+"10.10.0.0/24", global+"wildcard-address 10.0.0.1/255.0.255.255"), "wildcard-address", ""},
 		{"zone-local flat prefix + dns-name", flat(zl+"10.10.0.0/24", zl+"dns-name evil.example"), "dns-name", "zones security-zone trust "},
+		{"hier prefix + future form", h(`address mixed { 10.10.0.0/24; future-address-form value; }`), "future-address-form", ""},
+		{"flat prefix + future form", flat(global+"10.10.0.0/24", global+"future-address-form value"), "future-address-form", ""},
+		{"zone-local prefix + future form", flat(zl+"10.10.0.0/24", zl+"future-address-form value"), "future-address-form", "zones security-zone trust "},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			_, err := CompileConfig(r.tree(t))
@@ -79,6 +82,20 @@ func TestMixedAddressValueFormRejectedAtCommit9524(t *testing.T) {
 			}
 			if a.UsableValue() != "" {
 				t.Errorf("#9524: a mixed entry must resolve to no usable address, got %q", a.UsableValue())
+			}
+			syncCfg, syncErr := CompileConfigForNodeLenient(r.tree(t), 1)
+			if syncErr != nil {
+				t.Fatalf("peer-sync compile must remain bootable (#1960 no-brick): %v", syncErr)
+			}
+			var syncAddress *Address
+			if r.scope == "" {
+				syncAddress = syncCfg.Security.AddressBook.Addresses["mixed"]
+			} else {
+				syncAddress = syncCfg.Security.Zones["trust"].AddressBook.Addresses["mixed"]
+			}
+			if syncAddress == nil || syncAddress.UsableValue() != "" ||
+				!reflect.DeepEqual(syncAddress.UnimplementedForms, []string{r.form}) {
+				t.Errorf("peer-sync dropped or bypassed unknown-form taint: %+v", syncAddress)
 			}
 			validated := false
 			for _, w := range ValidateConfig(cfg) {
