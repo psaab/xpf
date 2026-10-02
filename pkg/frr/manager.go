@@ -570,6 +570,42 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		return m.Clear()
 	}
 
+	// #11399 render-side belt: tolerant load / HA-sync / rollback can still
+	// supply a cross-group BGP address duplicate that strict commit rejects.
+	// FRR stores one neighbor object per address, so the later group's
+	// remote-as, policy, or other peer settings would silently take effect.
+	// Reject it before any managed-section build or write; same-group
+	// fragments retain their renderer behavior.
+	checkBGPDuplicates := func(bgp *config.BGPConfig) error {
+		if bgp == nil {
+			return nil
+		}
+		firstByAddress := make(map[string]*config.BGPNeighbor, len(bgp.Neighbors))
+		for _, n := range bgp.Neighbors {
+			if n == nil || !validBGPNeighborAddress(n.Address) {
+				continue
+			}
+			first, exists := firstByAddress[n.Address]
+			if !exists {
+				firstByAddress[n.Address] = n
+				continue
+			}
+			if first.GroupName == n.GroupName {
+				continue
+			}
+			return fmt.Errorf("BGP neighbor %q is configured in multiple groups (%q and %q); FRR keeps one neighbor object per address", n.Address, first.GroupName, n.GroupName)
+		}
+		return nil
+	}
+	if err := checkBGPDuplicates(fc.BGP); err != nil {
+		return err
+	}
+	for _, inst := range fc.Instances {
+		if err := checkBGPDuplicates(inst.BGP); err != nil {
+			return fmt.Errorf("routing instance %q: %w", inst.Name, err)
+		}
+	}
+
 	// #5116 render-side belt: refuse to render a managed section in which a
 	// generated fail-closed redistribute alias (redistFailClosedRouteMap)
 	// collides with an operator-defined policy-statement of the same name. The
