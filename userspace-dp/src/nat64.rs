@@ -2674,7 +2674,12 @@ pub(crate) fn v6_to_v4_output_len(packet: &[u8]) -> Option<usize> {
     }
     if ipv6_is_non_first_fragment(packet) {
         let fragment = ipv6_fragment_header(packet)?;
-        if fragment.offset_units == 0 || !matches!(l4_protocol, PROTO_TCP | PROTO_UDP) {
+        // A non-first ICMPv6 fragment is opaque payload just like TCP/UDP;
+        // only its translated IPv4 header size matters here. This does not
+        // relax the separate fail-closed handling of ICMPv6 first fragments.
+        if fragment.offset_units == 0
+            || !matches!(l4_protocol, PROTO_TCP | PROTO_UDP | PROTO_ICMPV6)
+        {
             return None;
         }
         let total_len = 20usize.checked_add(l4_end - l4_offset)?;

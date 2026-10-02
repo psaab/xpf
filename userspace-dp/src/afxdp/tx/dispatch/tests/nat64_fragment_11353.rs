@@ -331,3 +331,38 @@ fn nat64_v6_nonfirst_fragment_fragments_for_ipv4_egress_mtu_11353() {
         "refragmented payload must preserve the translated non-first payload"
     );
 }
+#[test]
+fn nat64_icmpv6_nonfirst_fragment_does_not_take_generic_ptb_path_11720() {
+    let _rate_limit = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let frame = nat64_ipv6_nonfirst_fragment_frame(1280, PROTO_ICMPV6);
+    let forwarding = test_forwarding_with_egress_mtu(1200);
+    let mut decision = test_forwarding_decision_to_bound_ifindex(22);
+    decision.nat.nat64 = true;
+    decision.nat.rewrite_src = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)));
+    decision.nat.rewrite_dst = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 50)));
+    let mut request = test_live_forward_request_for_frame(frame.len(), decision);
+    request.meta.addr_family = libc::AF_INET6 as u8;
+    request.meta.protocol = PROTO_ICMPV6;
+    request.meta.l3_offset = 14;
+    request.meta.l4_offset = 62;
+    request.meta.pkt_len = frame.len() as u16;
+    request.meta.flow_src_addr.copy_from_slice(&frame[22..38]);
+    request.meta.flow_dst_addr.copy_from_slice(&frame[38..54]);
+
+    let ingress = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let (ptb, mtu_signalled) = compute_forwarded_egress_ptb(
+        &frame,
+        request.meta,
+        &request.decision,
+        &forwarding,
+        true,
+        false,
+        &ingress.identity(),
+        &recent_exceptions,
+    );
+    assert!(
+        !mtu_signalled && ptb.is_none(),
+        "the NAT64 Fragment Header means this ICMPv6 tail must skip generic IPv6 PTB signaling"
+    );
+}
