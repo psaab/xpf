@@ -3702,6 +3702,26 @@ fn translate_v6_to_v4_size_keys_df_at_1260_octets() {
 }
 
 #[test]
+fn nat64_v6_to_v4_output_len_accepts_nonfirst_icmpv6_fragment() {
+    let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst_v6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
+    let packet = make_ipv6_frag_icmpv6(src_v6, dst_v6, 3, true, 0x1234_5678);
+    assert_eq!(
+        v6_to_v4_output_len(&packet),
+        Some(28),
+        "non-first ICMPv6 payload becomes a 20-byte IPv4 header plus 8 opaque bytes"
+    );
+}
+#[test]
+fn nat64_v6_to_v4_output_len_rejects_nonfirst_unsupported_protocol() {
+    let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let dst_v6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
+    let mut packet = make_ipv6_frag_icmpv6(src_v6, dst_v6, 3, true, 0x1234_5678);
+    packet[40] = 50; // ESP is not a supported NAT64 fragment protocol.
+    assert_eq!(v6_to_v4_output_len(&packet), None);
+}
+
+#[test]
 fn nat64_v6_to_v4_output_len_matches_large_icmp_error_quote() {
     let src_v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
     let dst_v6: Ipv6Addr = "64:ff9b::c633:6432".parse().unwrap();
