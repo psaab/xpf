@@ -38,6 +38,22 @@ var ErrEBPFDataplaneRetired = errors.New(
 		"use 'set system dataplane-type userspace' " +
 		"(see #1373)")
 
+// duplicateBlockMergeWarning9023 gives the 9023 fold a truthful warning for
+// routing instances, whose former behavior emitted separate typed records
+// rather than replacing one AST block with another.
+func duplicateBlockMergeWarning9023(what string) string {
+	if what == "routing-instances" {
+		return "duplicate `routing-instances` containers were merged in source order (#9023)"
+	}
+	if strings.HasPrefix(what, "routing-instances ") {
+		name := strings.TrimPrefix(what, "routing-instances ")
+		return "duplicate routing-instance definition `" + name + "` was merged into one typed instance in source order (#11459/#9023)"
+	}
+	return "duplicate block `" + what + "` — the repeated statements were merged into the " +
+		"first occurrence (#9023); previously the later block replaced the earlier " +
+		"one and its configuration was discarded"
+}
+
 // CompileConfig converts a parsed ConfigTree AST into a typed Config struct.
 // It clones the tree before expansion so the original tree is not mutated.
 func CompileConfig(tree *ConfigTree) (*Config, error) {
@@ -328,14 +344,13 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// removes the duplicate and would therefore remove the diagnostic with it,
 	// swallowing exactly the information the gate was added to surface.
 	var dupMergeWarnings []string
-	// Issue 9023: repeated named BLOCKS, merged on BOTH paths. Unlike the
-	// policy fold below there is no duplicate-name gate here to preserve, so
-	// tolerant-only scoping would leave the operator-typed case losing data.
+	// Issue 9023: repeated named BLOCKS merge on BOTH paths. The
+	// routing-instances dynamic-name fold (#11459) runs before typed compilation
+	// so strict and tolerant paths produce one deterministic record per name;
+	// the policy fold below remains tolerant-only because strict commits reject
+	// duplicate policy names.
 	for _, what := range mergeDuplicateBlocks9023(tree) {
-		dupMergeWarnings = append(dupMergeWarnings,
-			"duplicate block `"+what+"` — the repeated statements were merged into the "+
-				"first occurrence (#9023); previously the later block replaced the earlier "+
-				"one and its configuration was discarded")
+		dupMergeWarnings = append(dupMergeWarnings, duplicateBlockMergeWarning9023(what))
 	}
 	// Keep the pre-fold tree for group conflict provenance. The main tolerant
 	// fold remains pre-expansion; the clone preserves source boundaries while
@@ -693,14 +708,13 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	// removes the duplicate and would therefore remove the diagnostic with it,
 	// swallowing exactly the information the gate was added to surface.
 	var dupMergeWarnings []string
-	// Issue 9023: repeated named BLOCKS, merged on BOTH paths. Unlike the
-	// policy fold below there is no duplicate-name gate here to preserve, so
-	// tolerant-only scoping would leave the operator-typed case losing data.
+	// Issue 9023: repeated named BLOCKS merge on BOTH paths. The
+	// routing-instances dynamic-name fold (#11459) runs before typed compilation
+	// so strict and tolerant paths produce one deterministic record per name;
+	// the policy fold below remains tolerant-only because strict commits reject
+	// duplicate policy names.
 	for _, what := range mergeDuplicateBlocks9023(tree) {
-		dupMergeWarnings = append(dupMergeWarnings,
-			"duplicate block `"+what+"` — the repeated statements were merged into the "+
-				"first occurrence (#9023); previously the later block replaced the earlier "+
-				"one and its configuration was discarded")
+		dupMergeWarnings = append(dupMergeWarnings, duplicateBlockMergeWarning9023(what))
 	}
 	// Keep the pre-fold tree for group conflict provenance. The main tolerant
 	// fold remains pre-expansion; the clone preserves source boundaries while
