@@ -3,15 +3,16 @@ package daemon
 import (
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/vishvananda/netlink"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 func tighteningScopeCfg(t *testing.T, wanServices []string, lanServices []string) *config.Config {
@@ -22,9 +23,103 @@ func tighteningScopeCfg(t *testing.T, wanServices []string, lanServices []string
 	return cfg
 }
 
-// kept10752 builds one address's evidence bucket for stash construction.
+// kept10752 builds tuple-preserving evidence for projection tests.
 func kept10752(custom uint64, customSamples []string, other uint64, otherSamples []string) keptAddrEvidence {
-	return keptAddrEvidence{custom: custom, customSamples: customSamples, other: other, otherSamples: otherSamples}
+	ev := keptAddrEvidence{
+		custom:        custom,
+		customSamples: append([]string(nil), customSamples...),
+		other:         other,
+		otherSamples:  append([]string(nil), otherSamples...),
+		byTuple:       map[keptFlowTuple10752]keptTupleEvidence10752{},
+	}
+	add := func(count uint64, samples []string, custom bool) {
+		var first keptFlowTuple10752
+		var haveFirst bool
+		var recorded uint64
+		for _, sample := range samples {
+			if recorded >= count {
+				break
+			}
+			tuple, ok := keptTupleFromSampleTest10752(sample)
+			if !ok {
+				continue
+			}
+			if !haveFirst {
+				first, haveFirst = tuple, true
+			}
+			tupleEv := ev.byTuple[tuple]
+			if custom {
+				tupleEv.custom++
+			} else {
+				tupleEv.other++
+			}
+			ev.byTuple[tuple] = tupleEv
+			recorded++
+		}
+		if haveFirst && recorded < count {
+			tupleEv := ev.byTuple[first]
+			if custom {
+				tupleEv.custom += count - recorded
+			} else {
+				tupleEv.other += count - recorded
+			}
+			ev.byTuple[first] = tupleEv
+		}
+	}
+	add(custom, customSamples, true)
+	add(other, otherSamples, false)
+	if len(ev.byTuple) == 0 {
+		ev.byTuple = nil
+	}
+	return ev
+}
+
+func keptTupleFromSampleTest10752(sample string) (keptFlowTuple10752, bool) {
+	space := strings.IndexByte(sample, ' ')
+	arrow := strings.Index(sample, "→")
+	if space <= 0 || arrow <= space {
+		return keptFlowTuple10752{}, false
+	}
+	protoName := sample[:space]
+	var protocol uint64
+	switch protoName {
+	case "tcp":
+		protocol = uint64(config.HostInboundProtoTCP)
+	case "udp":
+		protocol = uint64(config.HostInboundProtoUDP)
+	default:
+		var err error
+		protocol, err = strconv.ParseUint(protoName, 10, 8)
+		if err != nil {
+			return keptFlowTuple10752{}, false
+		}
+	}
+	parseEndpoint := func(endpoint string) (netip.Addr, uint16, bool) {
+		colon := strings.LastIndexByte(endpoint, ':')
+		if colon < 0 {
+			return netip.Addr{}, 0, false
+		}
+		addr, err := netip.ParseAddr(strings.Trim(endpoint[:colon], "[]"))
+		if err != nil {
+			return netip.Addr{}, 0, false
+		}
+		port, err := strconv.ParseUint(endpoint[colon+1:], 10, 16)
+		if err != nil {
+			return netip.Addr{}, 0, false
+		}
+		return addr.Unmap(), uint16(port), true
+	}
+	src, srcPort, ok := parseEndpoint(sample[space+1 : arrow])
+	if !ok {
+		return keptFlowTuple10752{}, false
+	}
+	dst, dstPort, ok := parseEndpoint(sample[arrow+len("→"):])
+	if !ok {
+		return keptFlowTuple10752{}, false
+	}
+	return keptFlowTuple10752{
+		src: src, dst: dst, protocol: uint8(protocol), srcPort: srcPort, dstPort: dstPort,
+	}, true
 }
 
 func TestHostInboundTightenedScopes10752(t *testing.T) {
@@ -792,39 +887,115 @@ func TestWithTighteningWarningsTokenOnlyCustomsAdvisory10752(t *testing.T) {
 	}
 }
 
-// TestHostInboundSweepCustomTokenPorts10752 pins the customs carve-out
-// universe: p:rip/p:ripng plus p:bfd Echo 3785 admit sweep-custom
-// tuples today. bgp (exempt), ospf (bare), traceroute (range), dns
-// (catalogued), ntp (exempt) are excluded by rule; bfd Control
-// (3784/4784) is excluded by the conformant-ephemeral call while Echo
-// 3785 stays; sap is excluded by the demonstrated-default call (no
-// supported fixed-9875 sender).
-func TestHostInboundSweepCustomTokenPorts10752(t *testing.T) {
-	m := hostInboundSweepCustomTokenPorts10752()
-	if got := m["p:rip"]; len(got) != 1 || got[0] != "17/520" {
-		t.Errorf(`p:rip ports = %v, want ["17/520"]`, got)
+// TestWithTighteningWarningsTupleIdentity11493 ensures class evidence is
+// attributed only when the old host-inbound state admitted that exact tuple.
+// Scope-level token/port unions otherwise mislabel unrelated kept flows.
+func TestWithTighteningWarningsTupleIdentity11493(t *testing.T) {
+	origRange := readEphemeralPortRange
+	readEphemeralPortRange = func() (uint16, uint16) { return 32768, 60999 }
+	defer func() { readEphemeralPortRange = origRange }()
+
+	cases := []struct {
+		name        string
+		oldProtocol string
+		class       string
+		protocol    uint8
+		port        uint16
+	}{
+		{
+			name:        "other tuple not admitted by removed ospf token",
+			oldProtocol: "ospf",
+			class:       "other",
+			protocol:    config.HostInboundProtoTCP,
+			port:        179,
+		},
+		{
+			name:        "custom tuple not admitted by removed rip token",
+			oldProtocol: "rip",
+			class:       "custom",
+			protocol:    config.HostInboundProtoTCP,
+			port:        2222,
+		},
 	}
-	if got := m["p:ripng"]; len(got) != 1 || got[0] != "17/521" {
-		t.Errorf(`p:ripng ports = %v, want ["17/521"]`, got)
-	}
-	if got := m["p:bfd"]; len(got) != 1 || got[0] != "17/3785" {
-		t.Errorf(`p:bfd ports = %v, want ["17/3785"] (Echo only, Control excluded)`, got)
-	}
-	for _, tok := range []string{"p:bgp", "p:ospf", "p:sap", "p:ldp", "p:msdp", "s:dns", "s:ntp", "s:ssh", "s:traceroute", "s:dhcp"} {
-		if got, ok := m[tok]; ok {
-			t.Errorf("token %s must not admit sweep-custom tuples, got %v", tok, got)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			oldCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+			oldCfg.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{tc.oldProtocol}
+			newCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
+			views := dpuserspace.BuildZoneHostInboundViews(newCfg)
+			unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(newCfg)
+			filter := buildHostInboundConntrackFlushFilter(views, unzonedV4, unzonedV6, nil)
+			if filter == nil {
+				t.Fatal("expected a filter for the enforcing configuration")
+			}
+			addr := netip.MustParseAddr("172.16.50.8")
+			if filter.MatchConntrackFlow(boxOrientedFlow(tc.protocol, addr.String(), tc.port)) {
+				t.Fatal("denied box-oriented tuple must be kept by the sweep")
+			}
+			evidence := filter.keptEvidenceReport()
+			addrEvidence, ok := evidence[addr]
+			if !ok || (tc.class == "custom" && (addrEvidence.custom != 1 || addrEvidence.other != 0)) ||
+				(tc.class == "other" && (addrEvidence.other != 1 || addrEvidence.custom != 0)) {
+				t.Fatalf("collector evidence = %+v, want one %s tuple", addrEvidence, tc.class)
+			}
+
+			d := &Daemon{}
+			d.recordKeptSuspicious10752(evidence)
+			resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
+			if resp == newCfg || len(resp.Warnings) != 1 ||
+				!strings.Contains(resp.Warnings[0], "observed no stranded flows") {
+				t.Fatalf("unadmitted tuple must yield only the transition advisory, got %v", resp.Warnings)
+			}
+			if strings.Contains(resp.Warnings[0], strconv.Itoa(int(tc.port))) ||
+				strings.Contains(resp.Warnings[0], "custom-port") ||
+				strings.Contains(resp.Warnings[0], "exempt/bare-protocol") {
+				t.Fatalf("advisory must not claim the unrelated tuple: %q", resp.Warnings[0])
+			}
+		})
 	}
 }
 
-// TestWithTighteningWarningsRipRemovalWarnsCustoms10752 is the rip
-// carve-out RED pin: p:rip removal is token-only, but the named token
-// DID admit sweep-custom-classified flows (fixed-sport UDP 520 below
-// the ephemeral floor), so a kept box:520 flow is genuinely stranded
-// and must emit the customs evidence line — not the advisory. The
-// collector leg pins the sweep classification; the projection leg
-// pins the line. The ospf-removal/unrelated-2222 negative control
-// stays advisory (see the token-only test above).
+// TestHostInboundScopeAdmitsTuple10752 pins the exact token→tuple comparison
+// used to attribute retained conntrack evidence to a transition.
+func TestHostInboundScopeAdmitsTuple10752(t *testing.T) {
+	addr := netip.MustParseAddr("172.16.50.8")
+	tests := []struct {
+		name      string
+		admission *config.HostInboundTraffic
+		protocol  uint8
+		port      uint16
+		src       netip.Addr
+		want      bool
+	}{
+		{name: "rip udp 520", admission: &config.HostInboundTraffic{Protocols: []string{"rip"}}, protocol: config.HostInboundProtoUDP, port: 520, src: addr, want: true},
+		{name: "rip rejects tcp 520", admission: &config.HostInboundTraffic{Protocols: []string{"rip"}}, protocol: config.HostInboundProtoTCP, port: 520, src: addr},
+		{name: "rip rejects unrelated udp port", admission: &config.HostInboundTraffic{Protocols: []string{"rip"}}, protocol: config.HostInboundProtoUDP, port: 2222, src: addr},
+		{name: "ospf raw protocol", admission: &config.HostInboundTraffic{Protocols: []string{"ospf"}}, protocol: 89, src: addr, want: true},
+		{name: "ospf does not admit tcp 179", admission: &config.HostInboundTraffic{Protocols: []string{"ospf"}}, protocol: config.HostInboundProtoTCP, port: 179, src: addr},
+		{name: "bgp tcp 179", admission: &config.HostInboundTraffic{Protocols: []string{"bgp"}}, protocol: config.HostInboundProtoTCP, port: 179, src: addr, want: true},
+		{name: "ident reset is not an admit", admission: &config.HostInboundTraffic{SystemServices: []string{"ident-reset"}}, protocol: config.HostInboundProtoTCP, port: 113, src: addr},
+		{name: "all is named service union", admission: &config.HostInboundTraffic{SystemServices: []string{"all"}}, protocol: config.HostInboundProtoTCP, port: 22, src: addr, want: true},
+		{name: "all is not packet wide", admission: &config.HostInboundTraffic{SystemServices: []string{"all"}}, protocol: config.HostInboundProtoTCP, port: 2222, src: addr},
+		{name: "any-service is packet wide", admission: &config.HostInboundTraffic{SystemServices: []string{"any-service"}}, protocol: 89, src: addr, want: true},
+		{name: "ripng is family gated", admission: &config.HostInboundTraffic{Protocols: []string{"ripng"}}, protocol: config.HostInboundProtoUDP, port: 521, src: addr},
+		{name: "ripng admits IPv6", admission: &config.HostInboundTraffic{Protocols: []string{"ripng"}}, protocol: config.HostInboundProtoUDP, port: 521, src: netip.MustParseAddr("2001:db8::1"), want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := hostInboundScopeTokens(tc.admission)
+			tuple := keptFlowTuple10752{src: tc.src, protocol: tc.protocol, srcPort: tc.port}
+			if got := hostInboundScopeAdmitsTuple10752(state, tuple); got != tc.want {
+				t.Fatalf("admission = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWithTighteningWarningsRipRemovalWarnsCustoms10752 pins tuple-level
+// attribution: rip removal strands the admitted UDP/520 flow, while an
+// unrelated TCP/2222 custom on the same box address must not inflate or
+// appear in the customs line. The collector, stash, and projection legs all
+// use the same evidence report.
 func TestWithTighteningWarningsRipRemovalWarnsCustoms10752(t *testing.T) {
 	cfg := hostInboundFlushTestConfig("snmp")
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
@@ -836,18 +1007,18 @@ func TestWithTighteningWarningsRipRemovalWarnsCustoms10752(t *testing.T) {
 	if filter.MatchConntrackFlow(boxOrientedFlow(config.HostInboundProtoUDP, "172.16.50.8", 520)) {
 		t.Fatal("denied box-oriented rip tuple must be kept (catalog miss), not flushed")
 	}
-	if got, _ := filter.keptSuspiciousReport(); got != 1 {
-		t.Fatalf("kept-suspicious count = %d, want 1 (box:520 UDP is sweep-custom)", got)
+	if filter.MatchConntrackFlow(boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 2222)) {
+		t.Fatal("unrelated custom tuple must be kept (catalog miss), not flushed")
+	}
+	if got, _ := filter.keptSuspiciousReport(); got != 2 {
+		t.Fatalf("kept-suspicious count = %d, want 2 (rip:520 plus unrelated TCP/2222)", got)
 	}
 
 	oldCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
 	oldCfg.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"rip"}
 	newCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
 	d := &Daemon{}
-	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
-		netip.MustParseAddr("172.16.50.8"): kept10752(1,
-			[]string{"udp 172.16.50.8:520→203.0.113.7:520"}, 0, nil),
-	})
+	d.recordKeptSuspicious10752(filter.keptEvidenceReport())
 	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
 	if resp == newCfg {
 		t.Fatal("rip removal with a kept 520 flow must warn, got identity")
@@ -858,8 +1029,8 @@ func TestWithTighteningWarningsRipRemovalWarnsCustoms10752(t *testing.T) {
 	line := resp.Warnings[0]
 	if !strings.Contains(line, "(zone:wan, zone:wan|iface:reth0.50)") ||
 		!strings.Contains(line, "leaves 1 box-oriented custom-port") ||
-		!strings.Contains(line, "172.16.50.8:520") {
-		t.Errorf("custom line must name the narrowed scopes with the 520 sample: %q", line)
+		!strings.Contains(line, "172.16.50.8:520") || strings.Contains(line, "2222") {
+		t.Errorf("custom line must name the narrowed scopes and only the admitted 520 tuple: %q", line)
 	}
 }
 
@@ -901,10 +1072,7 @@ func TestWithTighteningWarningsBfdEchoRemovalWarnsCustoms10752(t *testing.T) {
 	oldCfg.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"bfd"}
 	newCfg := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
 	d := &Daemon{}
-	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
-		netip.MustParseAddr("172.16.50.8"): kept10752(1,
-			[]string{"udp 172.16.50.8:3785→203.0.113.7:3785"}, 0, nil),
-	})
+	d.recordKeptSuspicious10752(filter.keptEvidenceReport())
 	resp := d.withTighteningWarningsForResponse10752(newCfg, oldCfg, newCfg)
 	if resp == newCfg {
 		t.Fatal("bfd removal with a kept echo flow must warn, got identity")
@@ -1323,9 +1491,14 @@ func TestApplyAndSyncCommittedWarnsBareRemoval10752(t *testing.T) {
 	readEphemeralPortRange = func() (uint16, uint16) { return 32768, 60999 }
 	readLocalTCPListenerPorts = func() map[uint16]bool { return map[uint16]bool{} }
 	stale := boxOrientedFlow(89, "172.16.50.8", 0)
+	unrelated := boxOrientedFlow(config.HostInboundProtoTCP, "172.16.50.8", 179)
 	conntrackDeleteFilters = func(family netlink.InetFamily, filters ...netlink.CustomConntrackFilter) (uint, error) {
+		if family != netlink.InetFamily(unix.AF_INET) {
+			return 0, nil
+		}
 		for _, f := range filters {
 			f.MatchConntrackFlow(stale)
+			f.MatchConntrackFlow(unrelated)
 		}
 		return 0, nil
 	}
@@ -1342,8 +1515,14 @@ func TestApplyAndSyncCommittedWarnsBareRemoval10752(t *testing.T) {
 	}
 	found, pointer := false, false
 	for _, w := range got.Warnings {
-		if strings.Contains(w, "zone:wan") && strings.Contains(w, "exempt/bare-protocol") {
-			found = true
+		if strings.Contains(w, "exempt/bare-protocol") {
+			if !strings.Contains(w, "leaves 1 exempt/bare-protocol") ||
+				!strings.Contains(w, "89 172.16.50.8:0") || strings.Contains(w, ":179→") {
+				t.Errorf("other-class line must include only OSPF's admitted raw-protocol tuple: %q", w)
+			}
+			if strings.Contains(w, "zone:wan") {
+				found = true
+			}
 		}
 		if strings.Contains(w, "cannot observe") {
 			pointer = true

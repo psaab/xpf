@@ -175,6 +175,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Scope stale host-input guards by ingress zone with trusted-reinject
     fallback, reassert verified TCP loose pickup disablement, and harden
     packet proof with HIGH exempt-UDP residual (#10752/#10764).
+  * Preserve exact conntrack tuples through host-inbound tightening warning
+    projection, attributing evidence only to policy transitions that removed
+    that tuple's admission (#11493).
   * Resolve routing-instance ownership by Linux device identity, reject
     alias/tunnel dual claims, and quarantine ambiguous memberships on tolerant
     loads with an apply alarm and alertable metric (#11060).
