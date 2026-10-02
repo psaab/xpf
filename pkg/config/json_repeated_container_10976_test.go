@@ -28,7 +28,7 @@ func TestFormatJSONRepeatedContainers_10976(t *testing.T) {
         }
     }
 }`,
-			want: `{"security":{"policies":{"from-zone":{"trust to-zone untrust":{"policy":{"p":{"match":{"source-address":"any","destination-address":"any","application":["junos-http","junos-https"]},"then":{"deny":true}}}}}}}}`,
+			want: `{"security":{"policies":{"from-zone":{"trust to-zone untrust":{"policy":[{"p":{"match":{"source-address":"any","destination-address":"any","application":["junos-http","junos-https"]},"then":{"deny":true}}}]}}}}}`,
 		},
 		{
 			name: "duplicate then blocks preserve all actions",
@@ -43,7 +43,7 @@ func TestFormatJSONRepeatedContainers_10976(t *testing.T) {
         }
     }
 }`,
-			want: `{"security":{"policies":{"from-zone":{"trust to-zone untrust":{"policy":{"p":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"deny":true,"count":true}}}}}}}}`,
+			want: `{"security":{"policies":{"from-zone":{"trust to-zone untrust":{"policy":[{"p":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"deny":true,"count":true}}}]}}}}}`,
 		},
 		{
 			name: "duplicate zone-pair contexts preserve both policies",
@@ -57,7 +57,7 @@ func TestFormatJSONRepeatedContainers_10976(t *testing.T) {
         }
     }
 }`,
-			want: `{"security":{"policies":{"from-zone":{"trust to-zone untrust":{"policy":{"allow":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"permit":true}},"block":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"deny":true}}}}}}}}`,
+			want: `{"security":{"policies":{"from-zone":{"trust to-zone untrust":{"policy":[{"block":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"deny":true}}},{"allow":{"match":{"source-address":"any","destination-address":"any","application":"any"},"then":{"permit":true}}}]}}}}}`,
 		},
 		{
 			name: "split security stanzas preserve zones and policies",

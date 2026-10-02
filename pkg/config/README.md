@@ -268,6 +268,15 @@ distinction).
   (`Node.KeyBracketed`) decides membership, so a packed body is never read as
   a member.
 
+## Display JSON
+
+`ConfigTree.FormatJSON` and `FormatPathJSON` emit security policy instances
+under `security policies from-zone ...` and `security policies global` as an
+array of single-name objects. The array preserves AST declaration order;
+repeated blocks for one policy name merge in place. This is an operator-facing
+display projection, not policy enforcement output, and compiled policy ordering
+is unchanged.
+
 ## Callers
 
 Almost everyone. The package has no internal dependencies.
