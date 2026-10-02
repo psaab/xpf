@@ -137,6 +137,9 @@ func (c *CLI) showDHCPRelay() error {
 			if g.RelayAgentOption {
 				overrides = append(overrides, "relay-agent-option (accepted-only)")
 			}
+			if g.TrustOption82 {
+				overrides = append(overrides, "trust-option-82")
+			}
 			if len(overrides) > 0 {
 				fmt.Printf("    Overrides: %s\n", strings.Join(overrides, ", "))
 			}

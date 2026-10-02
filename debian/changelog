@@ -15,6 +15,9 @@ xpf (0.0.0) unstable; urgency=medium
     restarts, and audit cold-boot feed snapshots against their remembered epoch
     (#11755).
 
+  * Include the configured trust-option-82 setting in the CLI DHCP relay
+    overrides summary (#11695).
+
   * Retain RIP, IS-IS, and IPv6 static routes when standalone CLI apply builds
     routing-instance FRR configuration, matching daemon rendering (#11393).
   * Mirror configured generate-route and FRR blackhole prefixes as discard
