@@ -300,54 +300,55 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 	}
 }
 
-// cleanFailedNeighbors deletes NUD_FAILED entries only on configured
-// interfaces and interfaces represented by the current neighbor snapshot, then
-// proactively probes those peers so kernel ARP/NDP state recovers quickly.
-//
-// When a host goes down, the kernel marks its ARP/NDP entry as FAILED and
-// retains it for ~60 seconds (gc_staletime). During that window, packets
-// XDP_PASS'd for NO_NEIGH resolution are silently dropped by the kernel
-// because it refuses to re-resolve a FAILED entry. Deleting the entry and
-// pinging ensures ARP/NDP is resolved before the next forwarded packet.
-func (d *Daemon) cleanFailedNeighbors() int {
+type snapshotNeighborIfindexSource interface {
+	ForEachSnapshotNeighbor(func(ifindex int, ip net.IP))
+}
+
+// monitoredNeighborIfindexes returns the allowlist of kernel link indexes
+// the failed-neighbor sweep may touch: configured interfaces resolved to
+// their live ifindexes, plus snapshot-supplied ifindexes. Snapshot entries
+// with non-positive ifindexes are ignored.
+func monitoredNeighborIfindexes(cfg *config.Config, snapshotNeighbors snapshotNeighborIfindexSource) map[int]struct{} {
+	allowed := userspace.MonitoredInterfaceLinkIndexes(cfg)
+	if snapshotNeighbors != nil {
+		snapshotNeighbors.ForEachSnapshotNeighbor(func(ifindex int, _ net.IP) {
+			if ifindex > 0 {
+				allowed[ifindex] = struct{}{}
+			}
+		})
+	}
+	return allowed
+}
+
+// failedNeighborCleanupOps carries the netlink/probe operations
+// cleanFailedNeighborsOnIfindexes needs. Production passes the real
+// netlink entry points plus probeFailedNeighbor; tests pass synthetics
+// so the sweep runs without touching the host neighbor table.
+type failedNeighborCleanupOps struct {
+	listNeigh   func(ifindex, family int) ([]netlink.Neigh, error)
+	linkByIndex func(ifindex int) (netlink.Link, error)
+	deleteNeigh func(*netlink.Neigh) error
+	probe       func(ip net.IP, iface string)
+}
+
+// cleanFailedNeighborsOnIfindexes deletes NUD_FAILED entries on exactly the
+// allowed ifindexes, then reprobes the cleaned peers so kernel ARP/NDP
+// state recovers before the next forwarded packet. Rows whose LinkIndex
+// does not match the listed ifindex are ignored. It returns the number of
+// deleted entries.
+func cleanFailedNeighborsOnIfindexes(allowed map[int]struct{}, ops failedNeighborCleanupOps) int {
+	if len(allowed) == 0 {
+		return 0
+	}
 	type probe struct {
 		ip    net.IP
 		iface string
 	}
 	var probes []probe
-	listNeighs := d.neighListFn
-	if listNeighs == nil {
-		listNeighs = netlink.NeighList
-	}
-	linkByIndex := d.linkByIndexFn
-	if linkByIndex == nil {
-		linkByIndex = netlink.LinkByIndex
-	}
-	deleteNeighbor := d.neighDelFn
-	if deleteNeighbor == nil {
-		deleteNeighbor = netlink.NeighDel
-	}
-	var cfg *config.Config
-	if d.store != nil {
-		cfg = d.store.ActiveConfig()
-	}
-	monitoredIfindexes := userspace.MonitoredInterfaceLinkIndexes(cfg)
-	if snapshotNeighbors, ok := d.dataplane().(interface {
-		ForEachSnapshotNeighbor(func(ifindex int, ip net.IP))
-	}); ok {
-		snapshotNeighbors.ForEachSnapshotNeighbor(func(ifindex int, _ net.IP) {
-			if ifindex > 0 {
-				monitoredIfindexes[ifindex] = struct{}{}
-			}
-		})
-	}
-	if len(monitoredIfindexes) == 0 {
-		return 0
-	}
 	cleaned := 0
-	for ifindex := range monitoredIfindexes {
+	for ifindex := range allowed {
 		for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
-			neighs, err := listNeighs(ifindex, family)
+			neighs, err := ops.listNeigh(ifindex, family)
 			if err != nil {
 				continue
 			}
@@ -357,8 +358,8 @@ func (d *Daemon) cleanFailedNeighbors() int {
 				}
 				if neighs[i].State&netlink.NUD_FAILED != 0 {
 					// Capture interface name for probing before delete.
-					link, linkErr := linkByIndex(neighs[i].LinkIndex)
-					if err := deleteNeighbor(&neighs[i]); err == nil {
+					link, linkErr := ops.linkByIndex(neighs[i].LinkIndex)
+					if err := ops.deleteNeigh(&neighs[i]); err == nil {
 						cleaned++
 						if linkErr == nil {
 							probes = append(probes, probe{
@@ -379,32 +380,62 @@ func (d *Daemon) cleanFailedNeighbors() int {
 	// IPv6 now sends an explicit NS instead of waiting for passive later
 	// traffic to trigger NDP.
 	for _, p := range probes {
-		if d.failedNeighborProbeFn != nil {
-			d.failedNeighborProbeFn(p.ip, p.iface)
-			continue
-		}
-		if p.ip.To4() != nil {
-			// Neighbor-table reprobe (not a VIP move): use the interface
-			// primary as the ARP sender, preserving the self-resolved
-			// sender SendARPProbe used before #2152.
-			sender, perr := cluster.PrimaryIPv4(p.iface)
-			if perr != nil {
-				slog.Debug("failed-neighbor reprobe: no IPv4 sender",
-					"iface", p.iface, "ip", p.ip, "err", perr)
-				continue
-			}
-			if err := cluster.SendARPProbe(p.iface, sender, p.ip); err != nil {
-				slog.Debug("failed-neighbor reprobe: IPv4 ARP probe failed",
-					"iface", p.iface, "ip", p.ip, "err", err)
-			}
-		} else {
-			if err := cluster.SendNDSolicitationFromInterface(p.iface, p.ip); err != nil {
-				slog.Debug("failed-neighbor reprobe: IPv6 NS failed",
-					"iface", p.iface, "ip", p.ip, "err", err)
-			}
-		}
+		ops.probe(p.ip, p.iface)
 	}
 	return cleaned
+}
+
+// probeFailedNeighbor solicits one cleaned peer: an ARP probe for IPv4,
+// an explicit Neighbor Solicitation for IPv6.
+func probeFailedNeighbor(ip net.IP, iface string) {
+	if ip.To4() != nil {
+		// Neighbor-table reprobe (not a VIP move): use the interface
+		// primary as the ARP sender, preserving the self-resolved
+		// sender SendARPProbe used before #2152.
+		sender, perr := cluster.PrimaryIPv4(iface)
+		if perr != nil {
+			slog.Debug("failed-neighbor reprobe: no IPv4 sender",
+				"iface", iface, "ip", ip, "err", perr)
+			return
+		}
+		if err := cluster.SendARPProbe(iface, sender, ip); err != nil {
+			slog.Debug("failed-neighbor reprobe: IPv4 ARP probe failed",
+				"iface", iface, "ip", ip, "err", err)
+		}
+		return
+	}
+	if err := cluster.SendNDSolicitationFromInterface(iface, ip); err != nil {
+		slog.Debug("failed-neighbor reprobe: IPv6 NS failed",
+			"iface", iface, "ip", ip, "err", err)
+	}
+}
+
+// cleanFailedNeighbors deletes NUD_FAILED entries only on configured
+// interfaces and interfaces represented by the current neighbor snapshot, then
+// proactively probes those peers so kernel ARP/NDP state recovers quickly.
+//
+// When a host goes down, the kernel marks its ARP/NDP entry as FAILED and
+// retains it for ~60 seconds (gc_staletime). During that window, packets
+// XDP_PASS'd for NO_NEIGH resolution are silently dropped by the kernel
+// because it refuses to re-resolve a FAILED entry. Deleting the entry and
+// pinging ensures ARP/NDP is resolved before the next forwarded packet.
+func (d *Daemon) cleanFailedNeighbors() int {
+	var cfg *config.Config
+	if d.store != nil {
+		cfg = d.store.ActiveConfig()
+	}
+	snapshotNeighbors, _ := d.dataplane().(snapshotNeighborIfindexSource)
+	allowed := monitoredNeighborIfindexes(cfg, snapshotNeighbors)
+	listNeighs := d.neighListFn
+	if listNeighs == nil {
+		listNeighs = netlink.NeighList
+	}
+	return cleanFailedNeighborsOnIfindexes(allowed, failedNeighborCleanupOps{
+		listNeigh:   listNeighs,
+		linkByIndex: netlink.LinkByIndex,
+		deleteNeigh: netlink.NeighDel,
+		probe:       probeFailedNeighbor,
+	})
 }
 
 // runPeriodicNeighborResolution manages periodic neighbor upkeep:
