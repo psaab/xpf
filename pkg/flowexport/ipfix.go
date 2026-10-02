@@ -771,8 +771,9 @@ type IPFIXExporter struct {
 
 	exportedFlows atomic.Uint64
 	exportedPkts  atomic.Uint64
-	// #2465: see Exporter.estimatedDurations — count of close flows whose
-	// StartTime fell back to the packet-count heuristic (no real creation ts).
+	// #2465/#11699: count of close flows with no creation timestamp. They are
+	// reported as zero-duration records at their close time, not heuristically
+	// backdated.
 	estimatedDurations atomic.Uint64
 	// #3744: see Exporter.routeMaskUnresolved — count of route-mask halves
 	// exported as an unresolved 0 (no FIB route / cold cache) rather than a
@@ -844,10 +845,10 @@ func (e *IPFIXExporter) Run(ctx context.Context) {
 
 // ExportSessionClose queues a flow record for IPFIX export.
 func (e *IPFIXExporter) ExportSessionClose(rec logging.EventRecord, evt SessionCloseData) {
-	// #2465: prefer the real session-creation timestamp for StartTime; fall
-	// back to the packet-count heuristic (and count it) only when absent.
-	startTime, usedEstimate := flowStartTime(rec, evt.Protocol)
-	if usedEstimate {
+	// #2465/#11699: a missing creation timestamp cannot establish flow age;
+	// use the close time and count that fallback for operator visibility.
+	startTime, missingCreated := flowStartTime(rec)
+	if missingCreated {
 		e.estimatedDurations.Add(1)
 	}
 	// #2526: resolve the post-NAT tuple with pre-NAT fallback so every
@@ -913,9 +914,9 @@ func (e *IPFIXExporter) Stats() (flows, packets uint64) {
 	return e.exportedFlows.Load(), e.exportedPkts.Load()
 }
 
-// EstimatedDurations returns the count of exported session-close flows whose
-// StartTime was derived from the packet-count heuristic (#2465) rather than a
-// real session-creation timestamp.
+// EstimatedDurations returns the count of exported close records missing a
+// creation timestamp. Those records use StartTime=EndTime rather than a
+// packet-count estimate.
 func (e *IPFIXExporter) EstimatedDurations() uint64 {
 	return e.estimatedDurations.Load()
 }
