@@ -615,6 +615,7 @@ pub(super) fn retry_pending_neigh(
                     forwarding,
                     &flow,
                     meta,
+                    super::poll_descriptor::policy_packet_icmp(source_frame, meta),
                     pkt.fabric_ingress_zone,
                     from_zone_id,
                     to_zone_id,

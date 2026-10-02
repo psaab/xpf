@@ -314,7 +314,8 @@ impl DnatTable {
     }
     /// Can a flowless packet match an L4-scoped DNAT translation?
     /// Protocol 255 is the non-first-fragment unknown sentinel; it is treated
-    /// as possible without recovering protocol or ports from bytes.
+    /// as possible without recovering protocol or ports from bytes. A readable
+    /// ICMP type/code can rule out a typed application term.
     pub(crate) fn flowless_l4_translation_possible(
         &self,
         protocol: u8,
@@ -323,6 +324,7 @@ impl DnatTable {
         zone: &str,
         ingress_ifname: &str,
         ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
     ) -> bool {
         self.flowless_l4_rule_possible(
             protocol,
@@ -331,6 +333,7 @@ impl DnatTable {
             zone,
             ingress_ifname,
             ingress_routing_instance,
+            packet_icmp,
             false,
         )
     }
@@ -345,6 +348,7 @@ impl DnatTable {
         zone: &str,
         ingress_ifname: &str,
         ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
     ) -> bool {
         self.flowless_l4_rule_possible(
             protocol,
@@ -353,6 +357,7 @@ impl DnatTable {
             zone,
             ingress_ifname,
             ingress_routing_instance,
+            packet_icmp,
             true,
         )
     }
@@ -366,6 +371,7 @@ impl DnatTable {
         zone: &str,
         ingress_ifname: &str,
         ingress_routing_instance: &str,
+        packet_icmp: Option<(u8, u8)>,
         include_off: bool,
     ) -> bool {
         let protocol_unknown = protocol == u8::MAX;
@@ -413,12 +419,27 @@ impl DnatTable {
             {
                 return false;
             }
-            entry.match_dst_ports.is_empty()
-                || entry_port == 0
-                || entry
-                    .match_dst_ports
-                    .iter()
-                    .any(|(low, high)| low <= high && *low <= entry_port && entry_port <= *high)
+            let icmp_possible = match (entry.match_icmp_type, packet_icmp) {
+                (None, _) => true,
+                (Some(want_type), Some((got_type, got_code))) => {
+                    got_type == want_type
+                        && entry.match_icmp_code.is_none_or(|want_code| want_code == got_code)
+                }
+                (Some(_), None) => {
+                    protocol_unknown
+                        || matches!(
+                            protocol,
+                            crate::ip_proto::PROTO_ICMP | crate::ip_proto::PROTO_ICMPV6
+                        )
+                }
+            };
+            icmp_possible
+                && (entry.match_dst_ports.is_empty()
+                    || entry_port == 0
+                    || entry
+                        .match_dst_ports
+                        .iter()
+                        .any(|(low, high)| low <= high && *low <= entry_port && entry_port <= *high))
         };
 
         self.entries.iter().any(|(key, entries)| {

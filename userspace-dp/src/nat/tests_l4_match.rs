@@ -1023,3 +1023,91 @@ fn dnat_destination_port_range_3449() {
         );
     }
 }
+
+#[test]
+fn echo_only_must_not_translate_error_11509() {
+    let source = "198.51.100.1".parse().unwrap();
+    let destination = "203.0.113.10".parse().unwrap();
+    let source_rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "echo-only".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["0.0.0.0/0".into()],
+        interface_mode: true,
+        match_applications: vec![NatAppTermWire {
+            protocol: PROTO_ICMP as u16,
+            icmp_type: Some(8),
+            ..NatAppTermWire::default()
+        }],
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    assert!(
+        !flowless_source_nat_rule_possible(
+            &source_rules,
+            &NatScopeCtx::default(),
+            "lan",
+            "wan",
+            source,
+            destination,
+            PROTO_ICMP,
+            Some((3, 1)),
+            false,
+        ),
+        "an echo-only SNAT term cannot translate a known ICMP error"
+    );
+
+    let destination_rules = dnat_table_with_l4("icmp", 0, vec![], Some(8), None);
+    assert!(
+        !destination_rules.flowless_l4_translation_possible(
+            PROTO_ICMP,
+            source,
+            destination,
+            "",
+            "",
+            "",
+            Some((3, 1)),
+        ),
+        "an echo-only DNAT term cannot translate a known ICMP error"
+    );
+}
+
+#[test]
+fn unknown_icmp_type_stays_possible_11509() {
+    let source = "198.51.100.1".parse().unwrap();
+    let destination = "203.0.113.10".parse().unwrap();
+    let source_rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
+        name: "echo-only".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["0.0.0.0/0".into()],
+        interface_mode: true,
+        match_applications: vec![NatAppTermWire {
+            protocol: PROTO_ICMP as u16,
+            icmp_type: Some(8),
+            ..NatAppTermWire::default()
+        }],
+        ..SourceNATRuleSnapshot::default()
+    }]);
+    assert!(flowless_source_nat_rule_possible(
+        &source_rules,
+        &NatScopeCtx::default(),
+        "lan",
+        "wan",
+        source,
+        destination,
+        u8::MAX,
+        None,
+        false,
+    ));
+
+    let destination_rules = dnat_table_with_l4("icmp", 0, vec![], Some(8), None);
+    assert!(destination_rules.flowless_l4_translation_possible(
+        u8::MAX,
+        source,
+        destination,
+        "",
+        "",
+        "",
+        None,
+    ));
+}

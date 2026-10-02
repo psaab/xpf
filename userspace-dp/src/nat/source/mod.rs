@@ -1089,10 +1089,9 @@ impl SourceNatRule {
         true
     }
 
-    /// Whether this L4-scoped source-NAT rule can match a non-first fragment
-    /// whose ports are absent. `Possible` protocol/port matches count as
-    /// translation intent; the sentinel-aware matcher handles native protocol
-    /// 255 without recovering the datagram's protocol.
+    /// Whether a flowless packet could match this rule with known protocol,
+    /// addresses, and (when readable) ICMP type/code. Missing ICMP type/code
+    /// leaves a typed term possible only when the packet's type is unknown.
     pub(crate) fn matches_scoped_l4_non_first_fragment(
         &self,
         scope: &NatScopeCtx<'_>,
@@ -1101,11 +1100,22 @@ impl SourceNatRule {
         src_ip: IpAddr,
         dst_ip: IpAddr,
         protocol: u8,
+        packet_icmp: Option<(u8, u8)>,
     ) -> bool {
         !self.off
             && (!self.match_dst_ports.is_empty() || !self.match_apps.is_empty())
             && self.matches(
-                scope, from_zone, to_zone, src_ip, dst_ip, false, protocol, 0, 0, true, None,
+                scope,
+                from_zone,
+                to_zone,
+                src_ip,
+                dst_ip,
+                false,
+                protocol,
+                0,
+                0,
+                true,
+                packet_icmp,
             ) != L4Match::NoMatch
     }
 
@@ -1336,8 +1346,9 @@ pub(crate) fn source_nat_tuple_translation_possible(
 }
 
 /// Does a flowless packet possibly match a translating source-NAT rule using
-/// its known scope, addresses, and protocol? Protocol 255 is the non-first
-/// fragment's unknown sentinel; it means possible, never a cue to inspect bytes.
+/// its known scope, addresses, protocol, and readable ICMP type/code? Protocol
+/// 255 is the non-first fragment's unknown sentinel; it means possible, never a
+/// cue to inspect packet bytes.
 pub(crate) fn flowless_source_nat_rule_possible(
     rules: &[SourceNatRule],
     scope: &NatScopeCtx<'_>,
@@ -1346,6 +1357,7 @@ pub(crate) fn flowless_source_nat_rule_possible(
     src_ip: IpAddr,
     dst_ip: IpAddr,
     protocol: u8,
+    packet_icmp: Option<(u8, u8)>,
     require_l4_selector: bool,
 ) -> bool {
     let protocol_unknown = protocol == u8::MAX;
@@ -1359,13 +1371,14 @@ pub(crate) fn flowless_source_nat_rule_possible(
         {
             return false;
         }
-        flowless_source_nat_l4_possible(rule, protocol, protocol_unknown)
+        flowless_source_nat_l4_possible(rule, protocol, packet_icmp, protocol_unknown)
     })
 }
 
 fn flowless_source_nat_l4_possible(
     rule: &SourceNatRule,
     protocol: u8,
+    packet_icmp: Option<(u8, u8)>,
     protocol_unknown: bool,
 ) -> bool {
     let carries_ports = protocol_unknown || crate::ip_proto::has_l4_ports(protocol);
@@ -1391,9 +1404,20 @@ fn flowless_source_nat_l4_possible(
         {
             return false;
         }
-        term.ports.is_empty()
-            || rule.match_dst_ports.is_empty()
-            || port_ranges_intersect(&term.ports, &rule.match_dst_ports)
+        let icmp_possible = match (term.icmp_type, term.icmp_code, packet_icmp) {
+            (None, None, _) => true,
+            (None, Some(_), _) => false,
+            (Some(want_type), want_code, Some((got_type, got_code))) => {
+                got_type == want_type && want_code.is_none_or(|want| want == got_code)
+            }
+            (Some(_), _, None) => {
+                protocol_unknown || matches!(protocol, PROTO_ICMP | PROTO_ICMPV6)
+            }
+        };
+        icmp_possible
+            && (term.ports.is_empty()
+                || rule.match_dst_ports.is_empty()
+                || port_ranges_intersect(&term.ports, &rule.match_dst_ports))
     })
 }
 
