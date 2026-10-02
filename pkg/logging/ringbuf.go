@@ -142,8 +142,8 @@ const (
 	eventTypeScreenDrop   = 4
 	eventTypeFilterLog    = 6
 
-	policyConfigGenerationMarker       = uint32(0x314E4547) // "GEN1" in little endian
-	policyConfigGenerationMarkerOffset = 140
+	policyConfigGenerationMarker          = uint32(0x314E4547) // "GEN1" in little endian
+	policyConfigGenerationMarkerOffset    = 140
 	rawEventSessionPolicyGenerationOffset = 160
 	rawEventSessionPolicyGenerationSize   = 168
 )

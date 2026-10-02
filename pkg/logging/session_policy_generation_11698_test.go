@@ -7,7 +7,6 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
-
 func sessionPolicyGenerationFrame(eventType uint8, policyID uint32, generation uint64) []byte {
 	frame := make([]byte, rawEventSessionPolicyGenerationSize)
 	frame[52] = eventType
