@@ -57,6 +57,95 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/wire-gate-lib.sh
 source "${SCRIPT_DIR}/wire-gate-lib.sh"
 
+# Compute (but do not print) the final gate result. The shared EXIT finalizer
+# prints this only after restore has completed. Restore-dirty behavior is
+# covered by the finalizer cells in --selftest.
+wire_policy_deny_prepare_final_verdict() {
+	local reason
+	case "${PROV_VERDICT:-}" in
+	PASS)
+		WIRE_GATE_FINAL_OUT="WIRE_GATE wire_policy_deny PASS reason=-- ${PROV_METRICS:-}"
+		WIRE_GATE_FINAL_RC=0
+		;;
+	FAIL)
+		WIRE_GATE_FINAL_OUT="WIRE_GATE wire_policy_deny FAIL reason=-- ${PROV_METRICS:-}"
+		WIRE_GATE_FINAL_RC=1
+		;;
+	VOID)
+		reason=$(awk '{print $4}' <<<"${PROV_LINE:-}" | sed 's/reason=//')
+		[[ -n "$reason" ]] || reason=harness-void
+		WIRE_GATE_FINAL_OUT="WIRE_GATE wire_policy_deny VOID reason=$reason ${PROV_METRICS:-}"
+		WIRE_GATE_FINAL_RC=2
+		;;
+	*)
+		WIRE_GATE_FINAL_OUT="WIRE_GATE wire_policy_deny VOID reason=harness-void ${PROV_METRICS:-}"
+		WIRE_GATE_FINAL_RC=2
+		;;
+	esac
+}
+
+wire_policy_deny_signal_abort() {
+	trap '' INT TERM
+	local metrics="${PROV_METRICS:-probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0}"
+	WIRE_GATE_FINAL_OUT="WIRE_GATE wire_policy_deny VOID reason=harness-void $metrics"
+	WIRE_GATE_FINAL_RC=2
+	exit 2
+}
+
+wire_policy_deny_arm_finalizer() {
+	WIRE_GATE_CLEANUP_FN=wire_policy_deny_cleanup
+	WIRE_GATE_RESTORE_OK_REF=RESTORE_CLEAN
+	WIRE_GATE_RESTORE_VOID='WIRE_GATE wire_policy_deny VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0'
+	WIRE_GATE_FINAL_OUT="$WIRE_GATE_RESTORE_VOID"
+	WIRE_GATE_FINAL_RC=2
+	trap wire_gate_finalize EXIT
+	trap wire_policy_deny_signal_abort INT TERM
+}
+wire_policy_deny_finalizer_selftest() {
+	local tmp mode out rc expected_out expected_rc
+	tmp="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-policy-deny-finalizer.XXXXXX")" || return 1
+	export WIRE_POLICY_DENY_FINALIZER_TEST_FILE="$tmp"
+	export -f wire_gate_finalize wire_policy_deny_arm_finalizer wire_policy_deny_signal_abort wire_policy_deny_prepare_final_verdict
+	for mode in restore-fail clean-fail; do
+		out="$(
+			WIRE_POLICY_DENY_FINALIZER_TEST_MODE="$mode" bash -c '
+				RESTORE_CLEAN=0
+				wire_policy_deny_cleanup() {
+					kill -INT "$BASHPID"
+					printf cleanup >>"$WIRE_POLICY_DENY_FINALIZER_TEST_FILE"
+					[[ "$WIRE_POLICY_DENY_FINALIZER_TEST_MODE" == clean-fail ]] && RESTORE_CLEAN=1
+				}
+				wire_policy_deny_arm_finalizer
+				PROV_VERDICT=FAIL
+				PROV_METRICS="probe_offered=1000 probe_leaked=1 control_offered=1000 control_observed=1000 cksum_bad=0"
+				wire_policy_deny_prepare_final_verdict
+				exit 1
+			' 2>/dev/null
+		)"
+		rc=$?
+		if [[ "$mode" == restore-fail ]]; then
+			expected_out="WIRE_GATE wire_policy_deny VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0"
+			expected_rc=2
+		else
+			expected_out="WIRE_GATE wire_policy_deny FAIL reason=-- probe_offered=1000 probe_leaked=1 control_offered=1000 control_observed=1000 cksum_bad=0"
+			expected_rc=1
+		fi
+		if [[ "$rc" != "$expected_rc" || "$out" != "$expected_out" ]]; then
+			rm -f "$tmp"
+			unset WIRE_POLICY_DENY_FINALIZER_TEST_FILE
+			return 1
+		fi
+	done
+	if [[ "$(<"$tmp")" != cleanupcleanup ]]; then
+		rm -f "$tmp"
+		unset WIRE_POLICY_DENY_FINALIZER_TEST_FILE
+		return 1
+	fi
+	rm -f "$tmp"
+	unset WIRE_POLICY_DENY_FINALIZER_TEST_FILE
+	return 0
+}
+
 if [[ "$MODE" == "selftest" ]]; then
 	# Hermetic matrix over the shared verdict core. Each row feeds one
 	# input shape and asserts the exact line + exit code.
@@ -78,6 +167,13 @@ if [[ "$MODE" == "selftest" ]]; then
 			fail=$((fail + 1))
 		fi
 	}
+	if wire_policy_deny_finalizer_selftest; then
+		echo "  PASS  forced restore failure demotes FAIL and shields restore from SIGINT"
+		pass=$((pass + 1))
+	else
+		echo "  FAIL  forced restore failure demotes FAIL and shields restore from SIGINT"
+		fail=$((fail + 1))
+	fi
 	cell "good transcript maps to PASS" PASS 0 -- 1000 0 1000 1000 0
 	cell "permit-all leak maps to FAIL" FAIL 1 -- 1000 41 1000 1000 0
 	cell "missing control maps to VOID capture-blind" VOID 2 -- 1000 0 1000 0 0
@@ -155,8 +251,7 @@ STEP_TIMEOUT="${STEP_TIMEOUT:-120}"
 # Provisional verdict bookkeeping (COMPUTE → restore → PRINT).
 PROV_VERDICT=""
 PROV_METRICS=""
-RESTORE_CLEAN=1
-
+RESTORE_CLEAN=0
 run_cli() { $SG "incus exec $NODE -- bash -lc 'cli'" 2>&1; }
 NODE="${NODE:-$FW0}"
 
@@ -329,15 +424,69 @@ if [[ -z "${WIRE_BROKEN_FIXTURE:-}" ]]; then
 	echo "fixture active: allow-all narrowed to $SET_NAME (probe has no permit rule)"
 fi
 
-# Restore is registered BEFORE measuring so any later failure still cleans
-# up. Trap kills remote generators (the §6 watchdog) and deletes the fixture
-# with a plain confirming commit, then the explicit step below verifies.
+# Restore is registered BEFORE measuring. The shared finalizer ignores
+# cancellation during cleanup, verifies the restore, then emits exactly one
+# verdict (or demotes any pending verdict to harness VOID).
+# Called by wire_policy_deny_cleanup; the callback is invoked by the EXIT finalizer.
+# shellcheck disable=SC2329
 do_restore() {
 	$SG "incus exec $SINK_EXEC -- pkill -f 'tcpdump.*$PROBE_PORT' 2>/dev/null" >/dev/null 2>&1 || true
 	printf 'configure\ndelete applications application-set %s\ndelete applications application %s\ndelete security policies from-zone %s to-zone %s policy allow-all match application\nset security policies from-zone %s to-zone %s policy allow-all match application any\ncommit\nexit\n' \
 		"$SET_NAME" "$APP_NAME" "$FROM_ZONE" "$TO_ZONE" "$FROM_ZONE" "$TO_ZONE" | run_cli >/dev/null 2>&1 || true
 }
-trap 'do_restore; rm -f "$BASELINE_SNAP"' EXIT
+# The EXIT finalizer invokes this through WIRE_GATE_CLEANUP_FN.
+# shellcheck disable=SC2329
+wire_policy_deny_cleanup() {
+	local NOW_LINES RE_CAPLOG RE_CAP_PID
+	echo "--- verified restore ---"
+	RESTORE_CLEAN=0
+	do_restore
+	sleep 3
+	RESTORE_CLEAN=1
+	NOW_LINES="$(policy_lines)"
+	if grep -q "$APP_NAME\|$SET_NAME" <<<"$NOW_LINES"; then
+		echo "RESTORE-DIRTY: fixture marker still present post-restore"
+		RESTORE_CLEAN=0
+	fi
+	if ! grep -q "policy allow-all match application any" <<<"$NOW_LINES"; then
+		echo "RESTORE-DIRTY: baseline match line not back"
+		RESTORE_CLEAN=0
+	fi
+	# Same-path dataplane proof: P must forward AGAIN post-restore (the narrow
+	# exclude is gone) and the control must still forward. A config diff alone
+	# cannot certify this (store-only divergence).
+	RE_CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-recap.XXXXXX")"
+	$SG "incus exec $SINK_EXEC -- timeout 60 tcpdump -i any -n udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$RE_CAPLOG" 2>&1 &
+	RE_CAP_PID=$!
+	sleep 3
+	if ! $SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --probe-port $PROBE_PORT --control-port $CONTROL_PORT --count 30 --rate 100" >/dev/null 2>&1; then
+		echo "RESTORE-DIRTY: post-restore re-probe failed to send"
+		kill "$RE_CAP_PID" 2>/dev/null || true
+		wait "$RE_CAP_PID" 2>/dev/null || true
+		rm -f "$RE_CAPLOG"
+		RESTORE_CLEAN=0
+	else
+		sleep 2
+		kill "$RE_CAP_PID" 2>/dev/null || true
+		wait "$RE_CAP_PID" 2>/dev/null || true
+		if ! grep -qE "\.${PROBE_PORT}:" "$RE_CAPLOG"; then
+			echo "RESTORE-DIRTY: probe does not forward post-restore (stale exclude?)"
+			RESTORE_CLEAN=0
+		fi
+		if ! grep -qE "\.${CONTROL_PORT}:" "$RE_CAPLOG"; then
+			echo "RESTORE-DIRTY: control does not forward post-restore"
+			RESTORE_CLEAN=0
+		fi
+		rm -f "$RE_CAPLOG"
+	fi
+	if [[ "$RESTORE_CLEAN" == "1" ]]; then
+		echo "restore verified: config diff clean + same-path forwarding back"
+	else
+		echo "STALE-FIXTURE NOTICE: restore failed — later runs will refuse until '$APP_NAME/$SET_NAME' is gone and P forwards"
+	fi
+	rm -f "$BASELINE_SNAP"
+}
+wire_policy_deny_arm_finalizer
 
 # ── Phase 2: shared capture window + bursts ──────────────────────────
 # Probe at the §2 drop floor (1000, zero must emerge); control with a
@@ -390,68 +539,6 @@ FAIL) echo "provisional: FAIL ($(grep -oE 'probe_leaked=[0-9]+' <<<"$PROV_METRIC
 *) echo "provisional: $PROV_VERDICT ($(awk '{print $4}' <<<"$PROV_LINE"))" ;;
 esac
 
-# ── Phase 4: verified restore (config AND same-path dataplane) ───────
-echo "--- verified restore ---"
-do_restore
-trap 'rm -f "$BASELINE_SNAP"' EXIT
-sleep 3
-RESTORE_CLEAN=1
-NOW_LINES="$(policy_lines)"
-if grep -q "$APP_NAME\|$SET_NAME" <<<"$NOW_LINES"; then
-	echo "RESTORE-DIRTY: fixture marker still present post-restore"
-	RESTORE_CLEAN=0
-fi
-if ! grep -q "policy allow-all match application any" <<<"$NOW_LINES"; then
-	echo "RESTORE-DIRTY: baseline match line not back"
-	RESTORE_CLEAN=0
-fi
-# Same-path dataplane proof: P must forward AGAIN post-restore (the narrow
-# exclude is gone) and the control must still forward. A config diff alone
-# cannot certify this (store-only divergence).
-RE_CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-recap.XXXXXX")"
-$SG "incus exec $SINK_EXEC -- timeout 60 tcpdump -i any -n udp and dst host $SINK and '(' dst port $PROBE_PORT or dst port $CONTROL_PORT ')'" >"$RE_CAPLOG" 2>&1 &
-RE_CAP_PID=$!
-sleep 3
-if ! $SG "incus exec $CLUSTER_LAN_HOST -- timeout $STEP_TIMEOUT python3 $REMOTE_PROBE --dst $SINK --probe-port $PROBE_PORT --control-port $CONTROL_PORT --count 30 --rate 100" >/dev/null 2>&1; then
-	echo "RESTORE-DIRTY: post-restore re-probe failed to send"
-	kill "$RE_CAP_PID" 2>/dev/null || true
-	wait "$RE_CAP_PID" 2>/dev/null || true
-	rm -f "$RE_CAPLOG"
-	RESTORE_CLEAN=0
-else
-sleep 2
-kill "$RE_CAP_PID" 2>/dev/null || true
-wait "$RE_CAP_PID" 2>/dev/null || true
-if ! grep -qE "\.${PROBE_PORT}:" "$RE_CAPLOG"; then
-	echo "RESTORE-DIRTY: probe does not forward post-restore (stale exclude?)"
-	RESTORE_CLEAN=0
-fi
-if ! grep -qE "\.${CONTROL_PORT}:" "$RE_CAPLOG"; then
-	echo "RESTORE-DIRTY: control does not forward post-restore"
-	RESTORE_CLEAN=0
-fi
-rm -f "$RE_CAPLOG"
-fi
-if [[ "$RESTORE_CLEAN" == "1" ]]; then
-	echo "restore verified: config diff clean + same-path forwarding back"
-else
-	echo "STALE-FIXTURE NOTICE: restore failed — later runs will refuse until '$APP_NAME/$SET_NAME' is gone and P forwards"
-fi
-
-# ── Phase 5: PRINT once, per the §5b(6) precedence table ──────────────
-if [[ "$PROV_VERDICT" == "PASS" && "$RESTORE_CLEAN" == "1" ]]; then
-	emit PASS -- "$PROV_METRICS"
-	echo "PASS: transit no-permit-rule drop holds on the wire"
-	exit 0
-elif [[ "$PROV_VERDICT" == "PASS" ]]; then
-	emit VOID env-void "$PROV_METRICS"
-	exit 2
-elif [[ "$PROV_VERDICT" == "FAIL" ]]; then
-	echo "FAIL: policy_leak (probe frames emerged peer-side)"
-	emit FAIL -- "$PROV_METRICS"
-	exit 1
-else
-	PROV_REASON=$(awk '{print $4}' <<<"$PROV_LINE" | sed 's/reason=//')
-	emit VOID "$PROV_REASON" "$PROV_METRICS"
-	exit 2
-fi
+# ── Phase 4: EXIT finalizer restores before emitting the buffered verdict ─
+wire_policy_deny_prepare_final_verdict
+exit "$WIRE_GATE_FINAL_RC"
