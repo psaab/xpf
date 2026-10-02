@@ -1448,9 +1448,17 @@ fn gre_vrf_snapshot_10653(transport_table: &str, ingress_instance: Option<(&str,
     snapshot.tunnel_endpoints[0].transport_table = transport_table.to_string();
     if let Some((instance, domain)) = ingress_instance {
         for iface in snapshot.interfaces.iter_mut() {
-            if iface.ifindex == 11 {
+            if iface.ifindex == 11 || iface.ifindex == 12 {
                 iface.routing_instance = instance.to_string();
                 iface.routing_domain = domain;
+            }
+        }
+        // #11567: a same-VRF control must still have a real resolvable
+        // underlay in that transport table, not only matching ingress
+        // metadata.
+        for route in &mut snapshot.routes {
+            if route.family == "inet" {
+                route.table = transport_table.to_string();
             }
         }
     }
@@ -1502,6 +1510,111 @@ fn gre_decap_default_vrf_transport_unaffected_10653() {
         try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_some(),
         "default-VRF transport with an unscoped ingress must still decap"
     );
+}
+
+const GRE_TRANSPORT_BINDING_KEY_11567: u32 = 0x1a2b_3c4d;
+
+fn gre_transport_binding_forwarding_11567(snapshot: &mut ConfigSnapshot) -> ForwardingState {
+    snapshot.tunnel_endpoints[0].key = GRE_TRANSPORT_BINDING_KEY_11567;
+    build_forwarding_state(snapshot)
+}
+
+/// #11567: a same-transport-VRF ingress in another zone may admit GRE at
+/// host-inbound, but it is not the configured transport egress path. Refuse
+/// the correctly addressed/keyed IPv4 outer there, then keep the exact
+/// transport egress as the positive control.
+#[test]
+fn gre_decap_non_transport_ingress_refused_v4_11567() {
+    let mut snapshot = gre_to_self_snapshot();
+    let forwarding = gre_transport_binding_forwarding_11567(&mut snapshot);
+    let inner = build_gre_inner_v4(PROTO_UDP, 8 + 4);
+    let frame = build_gre_checksum_present_outer_frame_v4(
+        0,
+        0x2000,
+        GRE_TRANSPORT_BINDING_KEY_11567,
+        0,
+        &inner,
+        false,
+    );
+    let mut meta = gre_to_self_outer_meta(0, frame.len());
+    meta.ingress_ifindex = 24; // lan zone, still the default transport VRF
+
+    assert_eq!(
+        forwarding.ifindex_to_routing_instance.get(&24).map(String::as_str),
+        forwarding.ifindex_to_routing_instance.get(&12).map(String::as_str),
+        "fixture must keep wrong ingress and transport egress in the same VRF"
+    );
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
+        "a same-VRF, GRE-admitted but non-transport ingress must not decap"
+    );
+}
+
+#[test]
+fn gre_decap_transport_ingress_decaps_v4_11567() {
+    let mut snapshot = gre_to_self_snapshot();
+    let forwarding = gre_transport_binding_forwarding_11567(&mut snapshot);
+    let inner = build_gre_inner_v4(PROTO_UDP, 8 + 4);
+    let frame = build_gre_checksum_present_outer_frame_v4(
+        0,
+        0x2000,
+        GRE_TRANSPORT_BINDING_KEY_11567,
+        0,
+        &inner,
+        false,
+    );
+    let mut meta = gre_to_self_outer_meta(0, frame.len());
+    meta.ingress_ifindex = 12; // resolved transport egress
+
+    let decapped = try_native_gre_decap_from_frame(&frame, meta, &forwarding)
+        .expect("a GRE outer arriving on its transport egress must still decap");
+    assert_eq!(decapped.meta.addr_family, libc::AF_INET as u8);
+}
+
+#[test]
+fn gre_decap_non_transport_ingress_refused_v6_11567() {
+    let mut snapshot = gre_to_self_snapshot_v6();
+    let forwarding = gre_transport_binding_forwarding_11567(&mut snapshot);
+    let inner = build_gre_inner_v4(PROTO_UDP, 8 + 4);
+    let frame = build_gre_checksum_present_outer_frame_v6(
+        0,
+        0x2000,
+        GRE_TRANSPORT_BINDING_KEY_11567,
+        0,
+        &inner,
+    );
+    let mut meta = gre_to_self_outer_meta_v6(0, frame.len());
+    meta.ingress_ifindex = 24; // lan zone, still the default transport VRF
+
+    assert_eq!(
+        forwarding.ifindex_to_routing_instance.get(&24).map(String::as_str),
+        forwarding.ifindex_to_routing_instance.get(&12).map(String::as_str),
+        "fixture must keep wrong ingress and transport egress in the same VRF"
+    );
+    assert!(
+        try_native_gre_decap_from_frame(&frame, meta, &forwarding).is_none(),
+        "a same-VRF, GRE-admitted but non-transport IPv6 ingress must not decap"
+    );
+}
+
+#[test]
+fn gre_decap_transport_ingress_decaps_v6_11567() {
+    let mut snapshot = gre_to_self_snapshot_v6();
+    let forwarding = gre_transport_binding_forwarding_11567(&mut snapshot);
+    let inner = build_gre_inner_v4(PROTO_UDP, 8 + 4);
+    let frame = build_gre_checksum_present_outer_frame_v6(
+        0,
+        0x2000,
+        GRE_TRANSPORT_BINDING_KEY_11567,
+        0,
+        &inner,
+    );
+    let mut meta = gre_to_self_outer_meta_v6(0, frame.len());
+    meta.ingress_ifindex = 12; // resolved transport egress
+
+    let decapped = try_native_gre_decap_from_frame(&frame, meta, &forwarding)
+        .expect("a GRE outer arriving on its transport egress must still decap");
+    assert_eq!(decapped.meta.addr_family, libc::AF_INET as u8);
 }
 
 /// #11054: the outer GRE packet must pass host-inbound on its actual ingress
