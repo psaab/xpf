@@ -147,6 +147,18 @@ func TestInactive_InlineMarkerBeforeBlockDeactivatesSubtree(t *testing.T) {
 	}
 
 	formatted := tree.Format()
+	wantFormat := "parent {\n" +
+		"    inactive: child name {\n" +
+		"        hidden value;\n" +
+		"    }\n" +
+		"    child other {\n" +
+		"        visible value;\n" +
+		"    }\n" +
+		"}\n"
+	if formatted != wantFormat {
+		t.Fatalf("Format output differs from inactive-block golden.\n got:\n%s\nwant:\n%s",
+			formatted, wantFormat)
+	}
 	reparsed := mustParse(t, formatted)
 	reparsedParent := reparsed.FindChild("parent")
 	roundTripInactive := false
