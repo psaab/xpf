@@ -22,7 +22,7 @@ fn test_emit_session_close_rt_flow_pairs_with_ha_delta() {
 
     // Mirror flush_session_deltas: the HA delta then the RT_FLOW frame.
     handle.push_delta(&delta, &zone_map);
-    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id);
+    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
 
     let frames: Vec<EventFrame> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     assert_eq!(
@@ -135,7 +135,7 @@ fn test_emit_session_close_rt_flow_carries_real_created_stamp() {
     delta.created_ns = now_mono.saturating_sub(60 * NS_PER_SEC);
     delta.last_seen_ns = now_mono;
 
-    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id);
+    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
     let frame = rx.try_recv().expect("RT_FLOW close frame");
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
 
@@ -172,7 +172,7 @@ fn test_emit_session_close_rt_flow_carries_app_id() {
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close);
-    handle.emit_session_close_rt_flow(&delta, 7, 42, delta.metadata.policy_id);
+    handle.emit_session_close_rt_flow(&delta, 7, 42, delta.metadata.policy_id, delta.policy_generation);
     let frame = rx.try_recv().expect("RT_FLOW close frame");
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     assert_eq!(
@@ -214,7 +214,7 @@ fn test_emit_session_close_rt_flow_carries_admitting_policy_id() {
     let mut delta = test_close_delta(crate::session::SessionDeltaKind::Close);
     // The session was admitted by policy ID 42.
     delta.metadata.policy_id = 42;
-    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id);
+    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
     let frame = rx.try_recv().expect("RT_FLOW close frame");
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     assert_eq!(
@@ -241,7 +241,7 @@ fn test_emit_session_close_rt_flow_zero_created_stays_zero() {
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close); // created_ns == 0
-    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id);
+    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
     let frame = rx.try_recv().expect("RT_FLOW close frame");
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     assert_eq!(u32::from_le_bytes(p[108..112].try_into().unwrap()), 0);
@@ -261,7 +261,7 @@ fn test_emit_session_close_rt_flow_ignores_open_delta() {
         },
     );
     let delta = test_close_delta(crate::session::SessionDeltaKind::Open);
-    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id);
+    handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
     assert!(
         rx.try_recv().is_err(),
         "Open delta must emit no RT_FLOW close frame"
@@ -293,7 +293,7 @@ fn test_emit_session_close_rt_flow_accounts_under_session_close_kind() {
     // Emit 4 closes; the per-kind budget admits 1, the rest are queue-full.
     // (`_rx` is never drained, so the budget is never released.)
     for _ in 0..4 {
-        handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id);
+        handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
     }
 
     let stats = handle.dataplane_event_stats();
@@ -332,7 +332,7 @@ fn test_emit_session_close_rt_flow_rate_limited_is_counted() {
     let delta = test_close_delta(crate::session::SessionDeltaKind::Close);
 
     for _ in 0..5 {
-        handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id);
+        handle.emit_session_close_rt_flow(&delta, 0, 0, delta.metadata.policy_id, delta.policy_generation);
     }
 
     let stats = handle.dataplane_event_stats();

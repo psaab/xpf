@@ -16,8 +16,8 @@ func TestPolicyDenyNameRequiresMatchingGeneration10978(t *testing.T) {
 	frame := rawPolicyDenyFrame(policyID)
 	binary.LittleEndian.PutUint64(frame[56:64], generationA)
 	binary.LittleEndian.PutUint32(
-		frame[policyDenyGenerationMarkerOff:policyDenyGenerationMarkerOff+4],
-		policyDenyGenerationMarker,
+		frame[policyConfigGenerationMarkerOffset:policyConfigGenerationMarkerOffset+4],
+		policyConfigGenerationMarker,
 	)
 
 	if got, ok := policyDenyConfigGeneration(frame); !ok || got != generationA {

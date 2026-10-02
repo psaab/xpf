@@ -97,6 +97,33 @@ pub(in crate::session) fn metadata() -> SessionMetadata {
     }
 }
 
+#[test]
+fn open_delta_keeps_policy_generation_paired_with_admission_id_11698() {
+    let mut table = SessionTable::new();
+    table.set_forwarding_revalidation_gen(41, 7);
+
+    let mut md = metadata();
+    md.policy_id = 77;
+    md.log_session_init = true;
+    assert!(table.install_with_protocol(
+        key_v4(),
+        decision(),
+        md,
+        1_000,
+        PROTO_TCP,
+        TCP_SYN,
+    ));
+
+    // A queued Open must keep the generation under which its frozen numeric
+    // policy ID was captured, even if the worker observes a newer generation
+    // before the event-stream consumer drains it.
+    table.set_forwarding_revalidation_gen(42, 8);
+    let deltas = table.drain_deltas(1);
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].metadata.policy_id, 77);
+    assert_eq!(deltas[0].policy_generation, 41);
+}
+
 // #5445: the per-packet established-session lookup must NOT clone the bound
 // `Arc<PolicyRuleCounter>`. Cloning `SessionMetadata` by value on every lookup
 // bumped the SHARED refcount (a `LOCK XADD`) on the packet-forwarding hot path
@@ -4571,6 +4598,7 @@ fn reference_update_session(
         key: key.clone(),
         decision,
         metadata,
+        policy_generation: 0,
         origin,
         fabric_redirect_sync: false,
         created_ns,
@@ -4593,6 +4621,7 @@ fn entries_equiv(a: &SessionTable, b: &SessionTable, key: &SessionKey) -> bool {
                 && ea.metadata == eb.metadata
                 && ea.origin == eb.origin
                 && ea.install_epoch == eb.install_epoch
+                && ea.policy_generation == eb.policy_generation
                 && ea.last_seen_ns == eb.last_seen_ns
                 && ea.expires_after_ns == eb.expires_after_ns
                 && ea.closing == eb.closing
@@ -8032,6 +8061,7 @@ fn open_delta(key: SessionKey) -> SessionDelta {
     key,
     decision: decision(),
     metadata: metadata(),
+    policy_generation: 0,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,

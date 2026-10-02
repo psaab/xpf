@@ -482,6 +482,7 @@ pub(in crate::afxdp) fn export_close_direct(
         key: tombstone.key.clone(),
         decision: tombstone.decision,
         metadata: tombstone.metadata.clone(),
+        policy_generation: 0,
         origin: tombstone.origin,
         fabric_redirect_sync: false,
         created_ns: 0,
@@ -946,6 +947,11 @@ pub(super) fn flush_session_deltas(
                         delta.metadata.policy_counter.as_ref(),
                         delta.metadata.policy_id,
                     );
+                    let policy_generation = if delta.metadata.policy_counter.is_some() {
+                        forwarding.config_generation
+                    } else {
+                        delta.policy_generation
+                    };
                     // #2615: thread the closing binding's ingress ifindex so the
                     // SESSION_CLOSE RT_FLOW record shows the admitting interface
                     // (`packet-incoming-interface`) instead of "N/A". `ident` is
@@ -957,6 +963,7 @@ pub(super) fn flush_session_deltas(
                         app_id,
                         ident.ifindex as u32,
                         reresolved_policy_id,
+                        policy_generation,
                     );
                 }
                 // #2508: a session admitted by a policy configured with

@@ -110,17 +110,17 @@ pub(crate) struct DataplaneEventPayload {
     pub(crate) timestamp_ns: u64,
 }
 
-pub(super) const POLICY_DENY_GENERATION_MARKER: u32 = u32::from_le_bytes(*b"GEN1");
+pub(super) const POLICY_CONFIG_GENERATION_MARKER: u32 = u32::from_le_bytes(*b"GEN1");
 
 impl EventFrame {
     /// #2460: Encode an RT_FLOW SESSION_CLOSE (type 14) frame.
     ///
     /// Unlike `encode_session_close` (the minimal type-2 HA session-sync
-    /// delta), this frame carries the canonical 144-byte `dataplane.Event`
-    /// payload — byte-identical to the layout written by
-    /// `encode_dataplane_event` and parsed by the Go
-    /// `logging.DecodeRawEventRecord` / `EventReader.logEvent`
-    /// (`pkg/logging/ringbuf.go`). With the event-type byte set to
+    /// delta), this frame carries the canonical `dataplane.Event` fields plus
+    /// additive RT_FLOW session extensions: stable session identity at
+    /// [152:160] and the #11698 policy-generation tail at [160:168]. The base
+    /// offsets are consumed by Go's `logging.DecodeRawEventRecord` /
+    /// `EventReader.logEvent` (`pkg/logging/ringbuf.go`). With the event-type byte set
     /// `RT_FLOW_EVENT_SESSION_CLOSE` (2), the Go side resolves it to a
     /// `Type == "SESSION_CLOSE"` `EventRecord`, which is exactly what the
     /// NetFlow v9 / IPFIX session-close exporters gate on
@@ -171,6 +171,11 @@ impl EventFrame {
     /// session synced from a pre-#3301 peer that omitted the policy_id wire
     /// field; #3301 now carries it on the session-sync wire, so a peer-promoted
     /// session synced from a current peer closes with the admitting policy).
+    ///
+    /// #11698: [140:144] carries the shared `GEN1` marker and [160:168] carries
+    /// the configuration generation paired with the RE-RESOLVED policy ID. The
+    /// Go reader refuses to resolve a marked policy ID through another generation's
+    /// name map while preserving the numeric ID.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn encode_session_close_rt_flow(
         seq: u64,
@@ -197,6 +202,9 @@ impl EventFrame {
         // (SESSION_OPEN delta + SessionSyncRequest), so a session synced from a
         // current peer closes with the admitting policy (see server/helpers.rs).
         policy_id: u32,
+        // Generation of the re-resolved policy ID, stamped beside that ID on
+        // the session frame for Go's policy-name attribution fence.
+        policy_generation: u64,
         owner_rg_id: i16,
         log_syslog: bool,
         created_unix_secs: u32,
@@ -319,8 +327,11 @@ impl EventFrame {
         // the SESSION_CLOSE frame uses this trailing slot because [44:48] holds
         // the #2853 created-subsec-nanos. The Go decoder reads [136:140] back as
         // PolicyID ONLY on a SESSION_CLOSE, so the close record names the
-        // admitting policy instead of policy 0. [140:144] stays reserved padding.
+        // admitting policy instead of policy 0. [140:144] carries the generation
+        // marker; [160:168] carries its paired config generation.
         buf[base + 136..base + 140].copy_from_slice(&policy_id.to_le_bytes());
+        buf[base + 140..base + 144]
+            .copy_from_slice(&POLICY_CONFIG_GENERATION_MARKER.to_le_bytes());
         // #2749: [144] src ToS byte, [145] accumulated TCP control bits,
         // [146] flow direction (reserved — 0; a real per-flow inbound/outbound
         // classification is a deferred follow-up), [147] reserved, [148:152]
@@ -336,17 +347,22 @@ impl EventFrame {
         // it (len >= 160), so a short legacy (152-byte) frame degrades to
         // SessionID 0 rather than misparsing.
         buf[base + 152..base + 160].copy_from_slice(&session_id.to_le_bytes());
+        // #11698: [160:168] the configuration generation paired with the
+        // re-resolved positional policy ID. The shared marker at [140:144]
+        // distinguishes this new payload from legacy session frames.
+        buf[base + SESSION_POLICY_GENERATION_OFFSET..base + SESSION_POLICY_GENERATION_OFFSET + 8]
+            .copy_from_slice(&policy_generation.to_le_bytes());
 
         write_header(
             &mut buf,
-            SECURITY_EVENT_PAYLOAD_SIZE as u32,
+            SESSION_RT_FLOW_PAYLOAD_SIZE as u32,
             MSG_SESSION_CLOSE_RT_FLOW,
             seq,
         );
 
         EventFrame {
             data: buf,
-            len: (FRAME_HEADER_SIZE + SECURITY_EVENT_PAYLOAD_SIZE) as u16,
+            len: (FRAME_HEADER_SIZE + SESSION_RT_FLOW_PAYLOAD_SIZE) as u16,
             seq,
         }
     }
@@ -377,8 +393,12 @@ impl EventFrame {
     /// frame (`pkg/logging/ringbuf.go` logEvent / DecodeRawEventRecord) and
     /// resolves a policy name from it. So this is a render-only fix: the
     /// RT_FLOW_SESSION_CREATE syslog record now names the admitting policy
-    /// instead of policy `0`. A 0 keeps the prior behavior (no admitting policy,
-    /// e.g. host-local/seed sessions never emit this producer-gated frame).
+    /// instead of policy `0`. A 0 keeps the prior behavior for sessions with
+    /// no admitting policy, e.g. host-local/seed sessions never emit this
+    /// producer-gated frame).
+    ///
+    /// #11698: the create frame carries the session's admission generation at
+    /// [160:168], paired with its frozen install-time policy ID at [44:48].
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn encode_session_create_rt_flow(
         seq: u64,
@@ -395,6 +415,8 @@ impl EventFrame {
         ingress_zone_id: u16,
         egress_zone_id: u16,
         policy_id: u32,
+        // Generation paired with `policy_id` at session admission.
+        policy_generation: u64,
         ingress_ifindex: u32,
         application_id: u16,
         // #4915: the dataplane's STABLE session id (the `SessionEntry.session_id`
@@ -461,17 +483,21 @@ impl EventFrame {
         // value the matching SESSION_CLOSE frame carries. The Go decoder reads it
         // only when the frame carries it (len >= 160).
         buf[base + 152..base + 160].copy_from_slice(&session_id.to_le_bytes());
+        buf[base + 140..base + 144]
+            .copy_from_slice(&POLICY_CONFIG_GENERATION_MARKER.to_le_bytes());
+        buf[base + SESSION_POLICY_GENERATION_OFFSET..base + SESSION_POLICY_GENERATION_OFFSET + 8]
+            .copy_from_slice(&policy_generation.to_le_bytes());
 
         write_header(
             &mut buf,
-            SECURITY_EVENT_PAYLOAD_SIZE as u32,
+            SESSION_RT_FLOW_PAYLOAD_SIZE as u32,
             MSG_SESSION_CREATE_RT_FLOW,
             seq,
         );
 
         EventFrame {
             data: buf,
-            len: (FRAME_HEADER_SIZE + SECURITY_EVENT_PAYLOAD_SIZE) as u16,
+            len: (FRAME_HEADER_SIZE + SESSION_RT_FLOW_PAYLOAD_SIZE) as u16,
             seq,
         }
     }
@@ -526,7 +552,7 @@ impl EventFrame {
             // these frames from older producers and eBPF records.
             buf[base + 56..base + 64].copy_from_slice(&event.config_generation.to_le_bytes());
             buf[base + 140..base + 144]
-                .copy_from_slice(&POLICY_DENY_GENERATION_MARKER.to_le_bytes());
+                .copy_from_slice(&POLICY_CONFIG_GENERATION_MARKER.to_le_bytes());
         } else {
             buf[base + 56..base + 60].copy_from_slice(&event.rule_id.to_le_bytes());
             buf[base + 60..base + 64].copy_from_slice(&event.term_id.to_le_bytes());

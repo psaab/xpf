@@ -42,9 +42,15 @@ impl EventFrame {
 
     #[allow(dead_code)]
     pub(crate) fn dataplane_event_payload(&self) -> Option<&[u8]> {
-        DataplaneEventKind::from_msg_type(self.data[4])?;
+        let event_kind = DataplaneEventKind::from_msg_type(self.data[4])?;
         let payload_len = u32::from_le_bytes(self.data[0..4].try_into().ok()?) as usize;
-        if payload_len != SECURITY_EVENT_PAYLOAD_SIZE {
+        let expected_len = match event_kind {
+            DataplaneEventKind::SessionClose | DataplaneEventKind::SessionCreate => {
+                SESSION_RT_FLOW_PAYLOAD_SIZE
+            }
+            _ => SECURITY_EVENT_PAYLOAD_SIZE,
+        };
+        if payload_len != expected_len {
             return None;
         }
         let end = FRAME_HEADER_SIZE + payload_len;

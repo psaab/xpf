@@ -309,11 +309,13 @@ impl SessionTable {
         } else {
             metadata.inactivity_timeout_ns.is_none()
         };
+        let policy_generation = self.forwarding_revalidation_gen.config_generation;
         let record = SessionRecord {
             key: key.clone(),
             entry: SessionEntry {
                 decision,
                 forwarding_generation: self.forwarding_revalidation_gen,
+                policy_generation,
                 metadata: metadata.clone(),
                 origin,
                 install_epoch: epoch,
@@ -440,6 +442,7 @@ impl SessionTable {
                 kind: SessionDeltaKind::Open,
                 key,
                 decision,
+                policy_generation,
                 metadata,
                 origin,
                 fabric_redirect_sync: false,
@@ -635,6 +638,7 @@ impl SessionTable {
             entry: SessionEntry {
                 decision,
                 forwarding_generation: ForwardingGenerationStamp::default(),
+                policy_generation: 0,
                 metadata: metadata.clone(),
                 origin,
                 install_epoch: epoch,
@@ -841,6 +845,10 @@ impl SessionTable {
         // (`encode_session_open`) and the JSON `SessionDeltaInfo`
         // (`rt_flow_session_id`, populated by `afxdp::session_delta_info`).
         let session_id = self.session_id_for(&key);
+        let policy_generation = self
+            .entry_by_key(&key)
+            .map(|entry| entry.policy_generation)
+            .unwrap_or(0);
         // #9412: the live entry's close class, so this re-export also restores a
         // close-state Update the incremental stream dropped.
         let tcp_close_class = self.close_class_wire_for(&key);
@@ -849,6 +857,7 @@ impl SessionTable {
         kind: SessionDeltaKind::Open,
         key,
         decision,
+        policy_generation,
         metadata,
         origin,
         fabric_redirect_sync,
@@ -933,6 +942,7 @@ impl SessionTable {
         key,
         decision,
         metadata,
+        policy_generation: 0,
         origin,
         fabric_redirect_sync: false,
         created_ns: 0,

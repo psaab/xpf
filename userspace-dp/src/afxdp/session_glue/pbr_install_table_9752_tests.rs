@@ -2373,6 +2373,7 @@ fn cancel_keys_test_delta(purge_retirement: bool) -> SessionDelta {
     key: pbr_key(),
     decision: stamped_decision(unusable_resolution()),
     metadata: pbr_metadata(),
+    policy_generation: 0,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,

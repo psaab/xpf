@@ -281,6 +281,7 @@ impl crate::afxdp::Coordinator {
                 key: entry.key.clone(),
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
+                policy_generation: 0,
                 origin: entry.origin,
                 fabric_redirect_sync: true,
                 // #2465: Open delta from the HA bulk export — the synced entry

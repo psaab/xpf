@@ -648,6 +648,10 @@ pub(crate) struct SessionDelta {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
+    /// Generation under which `metadata.policy_id` was resolved for an Open
+    /// delta. Close records instead stamp the generation of their re-resolved
+    /// current policy ID at the event-stream boundary.
+    pub(crate) policy_generation: u64,
     pub(crate) origin: SessionOrigin,
     pub(crate) fabric_redirect_sync: bool,
     pub(crate) provenance: ExportProvenance,

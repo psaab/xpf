@@ -5,7 +5,7 @@
 
 use std::net::IpAddr;
 
-use super::rt_flow::{DataplaneEventKind, DataplaneEventPayload, POLICY_DENY_GENERATION_MARKER};
+use super::rt_flow::{DataplaneEventKind, DataplaneEventPayload, POLICY_CONFIG_GENERATION_MARKER};
 use super::wire::*;
 
 #[allow(dead_code)]
@@ -28,7 +28,7 @@ pub(crate) fn decode_dataplane_event(
     }
     let policy_or_reason_id = u32::from_le_bytes(payload[44..48].try_into().ok()?);
     let policy_generation_stamped = event_kind == DataplaneEventKind::PolicyDeny
-        && u32::from_le_bytes(payload[140..144].try_into().ok()?) == POLICY_DENY_GENERATION_MARKER;
+        && u32::from_le_bytes(payload[140..144].try_into().ok()?) == POLICY_CONFIG_GENERATION_MARKER;
     let config_generation = if policy_generation_stamped {
         u64::from_le_bytes(payload[56..64].try_into().ok()?)
     } else {

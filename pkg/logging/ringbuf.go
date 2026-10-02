@@ -142,8 +142,10 @@ const (
 	eventTypeScreenDrop   = 4
 	eventTypeFilterLog    = 6
 
-	policyDenyGenerationMarker    = uint32(0x314E4547) // "GEN1" in little endian
-	policyDenyGenerationMarkerOff = 140
+	policyConfigGenerationMarker          = uint32(0x314E4547) // "GEN1" in little endian
+	policyConfigGenerationMarkerOffset    = 140
+	rawEventSessionPolicyGenerationOffset = 160
+	rawEventSessionPolicyGenerationSize   = 168
 )
 
 const (
@@ -155,11 +157,26 @@ func policyDenyConfigGeneration(data []byte) (uint64, bool) {
 	if len(data) < rawEventWireSize || data[52] != eventTypePolicyDeny {
 		return 0, false
 	}
-	marker := binary.LittleEndian.Uint32(data[policyDenyGenerationMarkerOff : policyDenyGenerationMarkerOff+4])
-	if marker != policyDenyGenerationMarker {
+	marker := binary.LittleEndian.Uint32(data[policyConfigGenerationMarkerOffset : policyConfigGenerationMarkerOffset+4])
+	if marker != policyConfigGenerationMarker {
 		return 0, false
 	}
 	return binary.LittleEndian.Uint64(data[56:64]), true
+}
+
+func policyNameConfigGeneration(data []byte) (uint64, bool) {
+	if generation, stamped := policyDenyConfigGeneration(data); stamped {
+		return generation, true
+	}
+	if len(data) < rawEventSessionPolicyGenerationSize ||
+		(data[52] != eventTypeSessionOpen && data[52] != eventTypeSessionClose) {
+		return 0, false
+	}
+	marker := binary.LittleEndian.Uint32(data[policyConfigGenerationMarkerOffset : policyConfigGenerationMarkerOffset+4])
+	if marker != policyConfigGenerationMarker {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(data[rawEventSessionPolicyGenerationOffset : rawEventSessionPolicyGenerationOffset+8]), true
 }
 
 const protoICMPv6 = 58
@@ -599,7 +616,8 @@ func (er *EventReader) logEvent(data []byte) {
 	evt.Protocol = data[53]
 	evt.Action = data[54]
 	evt.AddrFamily = data[55]
-	policyGeneration, policyDenyStamped := policyDenyConfigGeneration(data)
+	policyGeneration, policyNameStamped := policyNameConfigGeneration(data)
+	policyDenyStamped := evt.EventType == eventTypePolicyDeny && policyNameStamped
 
 	// Parse NAT fields (offsets 72..112) if data is long enough
 	if len(data) >= 112 {
@@ -741,7 +759,7 @@ func (er *EventReader) logEvent(data []byte) {
 	// policy ID from the trailing [136:140] slot, so the close record resolves
 	// the admitting policy name instead of policy 0.
 	if evt.EventType != eventTypeScreenDrop {
-		if policyDenyStamped {
+		if policyNameStamped {
 			rec.PolicyName = er.resolvePolicyNameAtGeneration(rec.PolicyID, policyGeneration)
 		} else {
 			rec.PolicyName = er.resolvePolicyName(rec.PolicyID)

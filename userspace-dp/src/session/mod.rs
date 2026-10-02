@@ -789,6 +789,10 @@ struct SessionEntry {
     /// Node-local stamp: the session resolution is reusable only within this
     /// config/FIB generation pair.
     forwarding_generation: ForwardingGenerationStamp,
+    /// Generation paired with `metadata.policy_id`. Admission stamps it, and
+    /// commit-time policy rebind advances it with the numeric ID; unrelated
+    /// forwarding revalidation never changes this association.
+    policy_generation: u64,
     metadata: SessionMetadata,
     origin: SessionOrigin,
     install_epoch: u64,
@@ -3012,6 +3016,7 @@ impl SessionTable {
             key: forward_key.clone(),
             decision: forward.decision,
             metadata: forward.metadata.clone(),
+            policy_generation: forward.policy_generation,
             origin: forward.origin,
             fabric_redirect_sync: false,
             created_ns: forward.created_ns,
@@ -3425,6 +3430,7 @@ impl SessionTable {
             // #9412: a promote re-announces the session, so it carries the close
             // class the entry already holds.
             let tcp_close_class = self.close_class_wire_for(key);
+            let policy_generation = self.entry_by_key(key).map(|e| e.policy_generation).unwrap_or(0);
             self.push_delta(SessionDelta {
                 provenance: crate::session::ExportProvenance::Incremental,
                 tcp_close_class,
@@ -3434,6 +3440,7 @@ impl SessionTable {
                 decision,
                 metadata,
                 origin,
+                policy_generation,
                 fabric_redirect_sync: false,
                 created_ns,
                 last_seen_ns: now_ns,
@@ -3481,8 +3488,10 @@ impl SessionTable {
         // A non-NAT flow has an identical reverse key. Mutate it once; a
         // second pass would swap the zones back and leave the pair unchanged.
         let mut rebound = false;
+        let policy_generation = self.forwarding_revalidation_gen.config_generation;
         if let Some(record) = self.entry_by_key_mut(key) {
             record.metadata.policy_id = policy_id;
+            record.policy_generation = policy_generation;
             record.metadata.policy_counter_idx = policy_counter_idx;
             record.metadata.policy_counter = Some(policy_counter.clone());
             record.metadata.ingress_zone = ingress_zone;
@@ -3492,6 +3501,7 @@ impl SessionTable {
         if companion_key != *key {
             if let Some(record) = self.entry_by_key_mut(&companion_key) {
                 record.metadata.policy_id = policy_id;
+                record.policy_generation = policy_generation;
                 record.metadata.policy_counter_idx = policy_counter_idx;
                 record.metadata.policy_counter = Some(policy_counter);
                 record.metadata.ingress_zone = egress_zone;

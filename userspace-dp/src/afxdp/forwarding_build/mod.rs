@@ -366,6 +366,7 @@ fn build_forwarding_state_with_policy_state_and_previous(
             return Err(err);
         }
     };
+    state.config_generation = snapshot.generation;
     // Runtime state, unlike configuration, survives every successful
     // forwarding rebuild.  In particular the XFRM-SA monitor owns this Arc;
     // replacing it here would make the first packet after every config apply
