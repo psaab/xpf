@@ -1656,7 +1656,7 @@ func TestBGPDualStackGroupActivatesByAddressVersion(t *testing.T) {
 		case trimmed == "exit-address-family":
 			af = ""
 		}
-		if !strings.HasSuffix(trimmed, " activate") {
+		if !strings.HasPrefix(trimmed, "neighbor ") || !strings.HasSuffix(trimmed, " activate") {
 			continue
 		}
 		switch {
@@ -5915,7 +5915,7 @@ func TestGenerateProtocols_IPv6NeighborPolicyActivatesUnderV6(t *testing.T) {
 	if v6Idx < 0 {
 		t.Fatalf("expected an ipv6 unicast address-family block; got:\n%s", got)
 	}
-	activate := "neighbor 2001:db8::1 activate"
+	activate := "\n  neighbor 2001:db8::1 activate\n"
 	aIdx := strings.Index(got, activate)
 	if aIdx < 0 {
 		t.Fatalf("IPv6 neighbor never activated; got:\n%s", got)

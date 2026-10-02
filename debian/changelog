@@ -1,5 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Keep family-less IPv6 BGP peers out of FRR's default IPv4-unicast AF and
+    activate them under IPv6 unicast, whether or not they have policy (#11564).
   * Attest HA gates against the verified deploy artifact and invalidate stale
     manifests before cut-over; fail closed on missing or mismatched checkout
     provenance, and version the executable field change under ledger schema 2
