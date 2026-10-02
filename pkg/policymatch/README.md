@@ -285,10 +285,10 @@ terminating:
 The entire transit block (tiers 1-4) is gated on BOTH query zones being
 DEFINED (#3355), mirroring the runtime's `from_id != 0 && to_id != 0` guard
 (`evaluate_policy_result_with_icmp`): an unconfigured zone name resolves to the
-reserved unknown id 0 and is ineligible for zone-pair, wildcard, or global
-policies, so a query naming an undefined zone falls through those policy tiers.
-`zoneKnown` mirrors the runtime UNCONDITIONALLY — a zone is known iff it is
-present in `Security.Zones`, with NO empty-Zones leniency. A committed config
+reserved unknown id 0 and is ineligible for transit zone-pair, wildcard, or
+global policies, so a query naming an undefined zone falls through those policy
+tiers. `zoneKnown` mirrors the runtime UNCONDITIONALLY — a zone is known iff it
+is present in `Security.Zones`, with NO empty-Zones leniency. A committed config
 always populates `Security.Zones`. The REST and gRPC surfaces additionally
 REJECT a missing from/to-zone (HTTP 400 / `InvalidArgument`) for parity with
 the CLI, which already requires both zones (#3355 H06).
@@ -321,16 +321,19 @@ and CLI surfaces expose the unzoned-egress cause rather than misreporting
 
 A `to-zone junos-host` query takes the separate **host gate** (#3285,
 `matchJunosHost` ↔ `evaluate_junos_host_policy`): exact `from-zone <ingress>
-to-zone junos-host`, then `from-zone any to-zone junos-host`, then a GLOBAL
-`policy match to-zone junos-host` (#3639 / #3611 Piece B) — most-specific-first,
-with **no** transit default fallback (and the transit `to-zone any` / `from-zone
-any to-zone any` wildcards are NOT pulled onto the host path; only a global
-explicitly scoped `to-zone junos-host` is). An unmatched host-bound flow returns
-`Result.HostInboundUnmatched` — no security *policy* governs it, never an
-inherited transit verdict. One exception since #6576: an unmatched host walk
-that SKIPPED an overlapping port-bearing DENY returns that deny instead (the
-fall-through is permit-like, so the fragment fails closed against it) — see the
-next paragraph.
+to-zone junos-host` for a defined ingress, then `from-zone any to-zone
+junos-host`, then a GLOBAL `policy match to-zone junos-host` (#3639 / #3611
+Piece B) — most-specific-first, with **no** transit default fallback (and the
+transit `to-zone any` / `from-zone any to-zone any` wildcards are NOT pulled
+onto the host path; only a global explicitly scoped to `to-zone junos-host`
+is). Unknown ingress (runtime zone id 0) skips only the exact-pair tier:
+from-any and global policies with an empty/`any` from-zone scope still apply
+(#10644), while explicit scopes naming another zone do not. An unmatched
+host-bound flow returns `Result.HostInboundUnmatched` — no security *policy*
+governs it, never an inherited transit verdict. One exception since #6576: an
+unmatched host walk that SKIPPED an overlapping port-bearing DENY returns that
+deny instead (the fall-through is permit-like, so the fragment fails closed
+against it) — see the next paragraph.
 
 **Non-first fragments on the host path (#6576).** The host gate applies the
 same #4569 fragment-associated deny the transit walk does — it learned this in
