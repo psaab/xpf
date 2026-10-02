@@ -5263,6 +5263,172 @@ fn static_bare_link_local_gateway_resolves_unique_interface_11322() {
     );
     assert_eq!(resolved.egress_ifindex, 101);
 }
+
+/// #11420: a qualified link-local gateway in a forwarding-instance table may
+/// use its unique default-instance interface, but only when the table marker
+/// and default routing-domain identity are both authorized.
+#[test]
+fn forwarding_instance_link_local_gateway_uses_authorized_default_interface_11420() {
+    let populated_wire = serde_json::to_value(ConfigSnapshot {
+        forwarding_tables: vec!["ISP-B.inet6.0".into()],
+        ..Default::default()
+    })
+    .expect("forwarding table marker serializes");
+    assert_eq!(
+        populated_wire["forwarding_tables"],
+        serde_json::json!(["ISP-B.inet6.0"])
+    );
+    let default_wire =
+        serde_json::to_value(ConfigSnapshot::default()).expect("default snapshot serializes");
+    assert!(
+        default_wire.get("forwarding_tables").is_none(),
+        "an empty marker must remain omitted from default snapshots"
+    );
+
+    let snapshot = |forwarding_tables: Vec<String>,
+                    table: &str,
+                    next_hop: &str,
+                    interface_instance: &str,
+                    routing_domain: u32,
+                    ifindex: i32| {
+        ConfigSnapshot {
+            interfaces: vec![InterfaceSnapshot {
+                name: "ge-0-0-1".into(),
+                ifindex,
+                routing_instance: interface_instance.into(),
+                routing_domain,
+                hardware_addr: "02:00:00:00:32:01".into(),
+                addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: "2001:db8:1::1/64".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            neighbors: vec![crate::NeighborSnapshot {
+                interface: "ge-0-0-1".into(),
+                ifindex,
+                family: "inet6".into(),
+                ip: "fe80::254".into(),
+                mac: "02:00:00:00:32:fe".into(),
+                state: "reachable".into(),
+                ..Default::default()
+            }],
+            routes: vec![crate::RouteSnapshot {
+                table: table.into(),
+                family: "inet6".into(),
+                destination: "2001:db8:beef::/48".into(),
+                next_hops: vec![next_hop.into()],
+                ..Default::default()
+            }],
+            forwarding_tables,
+            ..Default::default()
+        }
+    };
+
+    let state = build_forwarding_state(&snapshot(
+        vec!["ISP-B.inet6.0".into()],
+        "ISP-B.inet6.0",
+        "fe80::254@ge-0-0-1",
+        "",
+        0,
+        101,
+    ));
+    let route = state
+        .routes_v6
+        .get("ISP-B.inet6.0")
+        .expect("forwarding-instance table")
+        .iter()
+        .find(|route| route.prefix.contains("2001:db8:beef::5".parse().unwrap()))
+        .expect("static route");
+    assert_eq!(route.next_hops[0].ifindex, 101);
+    let resolved = lookup_forwarding_resolution_v6(
+        &state,
+        None,
+        "2001:db8:beef::5".parse().unwrap(),
+        "ISP-B.inet6.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "qualified unique default-instance link-local gateway must resolve"
+    );
+    assert_eq!(resolved.egress_ifindex, 101);
+
+    let unmarked = build_forwarding_state(&snapshot(
+        vec![],
+        "ISP-B.inet6.0",
+        "fe80::254@ge-0-0-1",
+        "",
+        0,
+        101,
+    ));
+    assert_eq!(
+        unmarked.routes_v6["ISP-B.inet6.0"][0].next_hops[0].ifindex,
+        0,
+        "without an FI marker, a default-interface scope must be refused"
+    );
+
+    let quarantined = build_forwarding_state(&snapshot(
+        vec!["ISP-B.inet6.0".into()],
+        "ISP-B.inet6.0",
+        "fe80::254@ge-0-0-1",
+        "",
+        crate::session::QUARANTINED_ROUTING_DOMAIN,
+        101,
+    ));
+    assert_eq!(
+        quarantined.routes_v6["ISP-B.inet6.0"][0].next_hops[0].ifindex,
+        0,
+        "a quarantined default-domain sentinel must not qualify as FI egress"
+    );
+
+    let non_link_local = build_forwarding_state(&snapshot(
+        vec!["ISP-B.inet6.0".into()],
+        "ISP-B.inet6.0",
+        "2001:db8::254@ge-0-0-1",
+        "",
+        0,
+        101,
+    ));
+    assert_eq!(
+        non_link_local.routes_v6["ISP-B.inet6.0"][0].next_hops[0].ifindex,
+        0,
+        "the cross-table exception must not authorize non-link-local gateways"
+    );
+
+    let wrong_table = build_forwarding_state(&snapshot(
+        vec!["ISP-B.inet6.0".into()],
+        "VRF-A.inet6.0",
+        "fe80::254@ge-0-0-1",
+        "",
+        0,
+        101,
+    ));
+    assert_eq!(
+        wrong_table.routes_v6["VRF-A.inet6.0"][0].next_hops[0].ifindex,
+        0,
+        "an FI marker must not authorize a default-interface egress in a foreign table"
+    );
+
+    let same_instance = build_forwarding_state(&snapshot(
+        vec![],
+        "ISP-B.inet6.0",
+        "fe80::254@ge-0-0-1",
+        "ISP-B",
+        100_001,
+        102,
+    ));
+    assert_eq!(
+        same_instance.routes_v6["ISP-B.inet6.0"][0].next_hops[0].ifindex,
+        102,
+        "same-table link-local qualification must not depend on the cross-table marker"
+    );
+}
+
 /// #4446 anti-regression: the common single-table (default-instance) case is
 /// unaffected — a bare-gateway static route still resolves its gateway to the
 /// sole connected interface. A legitimate cross-table reach is expressed as a

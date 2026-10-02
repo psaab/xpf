@@ -697,14 +697,7 @@ func qualifyForwardingInstanceNextHops(cfg *config.Config, interfaces []Interfac
 	if cfg == nil || len(interfaces) == 0 || len(routes) == 0 {
 		return
 	}
-	forwardingTables := make(map[string]string)
-	for _, ri := range cfg.RoutingInstances {
-		if ri == nil || ri.Name == "" || ri.InstanceType != "forwarding" {
-			continue
-		}
-		forwardingTables[ri.Name+".inet.0"] = ri.Name
-		forwardingTables[ri.Name+".inet6.0"] = ri.Name
-	}
+	forwardingTables, _ := forwardingInstanceRouteTables(cfg)
 	if len(forwardingTables) == 0 {
 		return
 	}
@@ -729,11 +722,87 @@ func qualifyForwardingInstanceNextHops(cfg *config.Config, interfaces []Interfac
 	}
 }
 
+// forwardingInstanceRouteTables is the canonical table allow-list shared by
+// route qualification and the snapshot marker the Rust FIB uses to authorize
+// those explicit default-instance egresses (#11420).
+func forwardingInstanceRouteTables(cfg *config.Config) (map[string]string, []string) {
+	byTable := make(map[string]string)
+	if cfg == nil {
+		return byTable, nil
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || ri.InstanceType != "forwarding" {
+			continue
+		}
+		byTable[ri.Name+".inet.0"] = ri.Name
+		byTable[ri.Name+".inet6.0"] = ri.Name
+	}
+	tables := make([]string, 0, len(byTable))
+	for table := range byTable {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	return byTable, tables
+}
+
 // forwardingGatewayInterface returns the deterministic interface to use for a
 // forwarding-instance bare gateway. Same-instance links win, then links in
 // the default instance. A gateway that only matches a different VRF remains
 // unresolved rather than crossing the VRF boundary.
 func forwardingGatewayInterface(riName, family string, gateway net.IP, interfaces []InterfaceSnapshot) string {
+	if family == "inet6" && gateway.To4() == nil && gateway.IsLinkLocalUnicast() {
+		// #11420: a link-local gateway cannot match a connected prefix:
+		// ConnectedNetworkPrefix deliberately rejects link-local networks.
+		// Scope it by the unique IPv6-capable interface, preferring a
+		// same-instance candidate to a default-instance candidate. Unlike
+		// global gateways, multiple links at the winning rank are ambiguous
+		// and must not be resolved by interface name or input order.
+		bestRank, bestName, candidates := 3, "", 0
+		for _, iface := range interfaces {
+			rank := 2
+			switch iface.RoutingInstance {
+			case riName:
+				rank = 0
+			case "":
+				if iface.RoutingDomain != 0 {
+					continue
+				}
+				rank = 1
+			default:
+				continue
+			}
+			if rank > bestRank {
+				continue
+			}
+			name := iface.Name
+			if name == "" {
+				name = iface.LinuxName
+			}
+			if name == "" {
+				continue
+			}
+			ipv6 := false
+			for _, addr := range iface.Addresses {
+				if config.IPv6LinkCandidate(addr.Address) {
+					ipv6 = true
+					break
+				}
+			}
+			if !ipv6 {
+				continue
+			}
+			if rank < bestRank {
+				bestRank, bestName, candidates = rank, name, 1
+			} else {
+				candidates++
+			}
+		}
+		if candidates == 1 {
+			return bestName
+		}
+		return ""
+	}
+
 	bestRank := 3
 	bestName := ""
 	for _, iface := range interfaces {

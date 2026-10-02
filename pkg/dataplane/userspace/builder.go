@@ -165,6 +165,7 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	mirrorConfigs, mirrorExclusions := buildMirrorConfigSnapshots(cfg, interfaces)
 	synCookieKey, synCookieKeyRing := buildSYNCookieKeys(cfg, synCookieNow())
 	bindlessSelectorRows := buildBindlessSelectorRows(cfg)
+	_, forwardingTables := forwardingInstanceRouteTables(cfg)
 	snap := &ConfigSnapshot{
 		Version:                      ProtocolVersion,
 		Generation:                   generation,
@@ -181,13 +182,14 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 		// worker's session-id namespace on the helper. Read from the compiled
 		// config's cluster stanza; absent/standalone leaves it 0, which is the
 		// pre-#6311 layout bit for bit.
-		NodeID:          clusterNodeID(cfg),
-		Zones:           buildZoneSnapshots(cfg),
-		Interfaces:      interfaces,
-		Fabrics:         buildFabricSnapshotsFrom(cfg, liveXfrm),
-		TunnelEndpoints: buildTunnelEndpointSnapshots(cfg, interfaces),
-		Neighbors:       buildNeighborSnapshots(cfg),
-		Routes:          routes,
+		NodeID:           clusterNodeID(cfg),
+		Zones:            buildZoneSnapshots(cfg),
+		Interfaces:       interfaces,
+		Fabrics:          buildFabricSnapshotsFrom(cfg, liveXfrm),
+		TunnelEndpoints:  buildTunnelEndpointSnapshots(cfg, interfaces),
+		Neighbors:        buildNeighborSnapshots(cfg),
+		ForwardingTables: forwardingTables,
+		Routes:           routes,
 		// #9054: the helper needs to know the FIB it just received is
 		// DELIBERATELY incomplete. See ConfigSnapshot.LearnedRouteImportCapped.
 		LearnedRouteImportCapped: learnedRoutesCapped,

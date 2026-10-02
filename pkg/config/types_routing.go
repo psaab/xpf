@@ -271,6 +271,22 @@ func ConnectedNetworkPrefix(cidr string) (prefix, family string, ok bool) {
 	return network.String(), family, true
 }
 
+// IPv6LinkCandidate reports whether cidr is a parseable IPv6 interface
+// address — any prefix length, link-local included. It answers only "does
+// this interface speak IPv6 on some link", unlike ConnectedNetworkPrefix,
+// which derives the leakable connected network and rejects link-local (a
+// link-local address carries no connected network to leak or to match a
+// gateway against). forwardingGatewayInterface (#11420) uses this to scope
+// a bare link-local gateway to the unique IPv6-capable interface; it must
+// never feed rib-group leaks or connected routes.
+func IPv6LinkCandidate(cidr string) bool {
+	ip, _, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	if err != nil || ip == nil {
+		return false
+	}
+	return ip.To4() == nil
+}
+
 // NextHopEntry defines a single next-hop for a static route.
 type NextHopEntry struct {
 	Address   string // IP address (e.g. "10.0.1.1" or "fe80::1")
