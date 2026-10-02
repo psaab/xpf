@@ -1380,6 +1380,16 @@ func (m *Manager) verifyBindingsMapLocked() bool {
 	}
 	return repaired > 0
 }
+
+// unresolvedLo0LocalAddressOwner mirrors the helper's interface-index gate for
+// Junos lo0 rows. Linux does not materialize ordinary lo0 config as a `lo0`
+// netdev, so an ifindex-0 lo0 address cannot be LocalDelivery and must not be
+// marked local by the shim. A real lo0/tunnel device keeps its addresses.
+func unresolvedLo0LocalAddressOwner(iface InterfaceSnapshot) bool {
+	return iface.Ifindex <= 0 &&
+		(iface.Name == "lo0" || strings.HasPrefix(iface.Name, "lo0.") || iface.LinuxName == "lo0")
+}
+
 func buildLocalAddressEntries(snapshot *ConfigSnapshot) []userspaceLocalAddressEntry {
 	if snapshot == nil {
 		return nil
@@ -1389,6 +1399,9 @@ func buildLocalAddressEntries(snapshot *ConfigSnapshot) []userspaceLocalAddressE
 	seenV6 := make(map[[16]byte]bool)
 	out := make([]userspaceLocalAddressEntry, 0)
 	for _, iface := range snapshot.Interfaces {
+		if unresolvedLo0LocalAddressOwner(iface) {
+			continue
+		}
 		for _, addr := range iface.Addresses {
 			ip, _, err := net.ParseCIDR(addr.Address)
 			if err != nil || ip == nil {

@@ -1102,6 +1102,13 @@ snapshot as enforced.
 > an anonymous map-update failure. `userspaceLocalAddressMapCapacity` is bound
 > to both `with_max_entries` declarations by
 > `TestLocalAddressMapCapacityMatchesTheShim9646`.
+>
+> **#11464.** Junos `lo0` configuration does not create a Linux `lo0` netdev
+> on hosts that expose only `lo`. `ValidateConfig` warns when ordinary lo0
+> units have addresses; if the snapshot has no resolved lo0 ifindex, the Go
+> shim omits those addresses from its local-address map so it agrees with the
+> helper's ifindex-0 row drop. A real lo0 or tunnel netdev with a positive
+> ifindex retains local delivery.
 
 > **#9337.** "Because the maps then match what the helper is enforcing" is
 > the precondition, and until #9337 the code did not check it. The retain
