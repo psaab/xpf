@@ -4651,19 +4651,20 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
 /// member was permanently excluded → every flow pinned to the gateway member
 /// → ECMP starved to width-1.
 ///
-/// The fix marks an up interface-only member LIVE (`ifindex > 0`) so it joins
-/// the live set; the MissingNeighbor cold path then resolves the destination
-/// lazily per flow (mirroring the single-member interface-only path). Here the
-/// gateway member (192.0.2.2 via ge-0/0/1, ifindex 11) is resolved and the
-/// interface-only member (via ge-0/0/2, ifindex 22) has NO destination
-/// neighbor. Sweeping distinct per-flow hashes must reach BOTH egress
-/// interfaces, and the interface-only member must forward as MissingNeighbor.
+/// The fix marks an interface-only member LIVE when its egress row exists and
+/// the link is not explicitly down; the MissingNeighbor cold path still
+/// resolves the destination lazily per flow (mirroring the single-member
+/// interface-only path). Here the gateway member (192.0.2.2 via ge-0/0/1,
+/// ifindex 11) is resolved and the interface-only member (via ge-0/0/2,
+/// ifindex 22) has NO destination neighbor. Sweeping distinct per-flow hashes
+/// must reach BOTH egress interfaces, and the interface-only member must
+/// forward as MissingNeighbor.
 ///
-/// FAIL-ON-REVERT: revert the `if nh.next_hop.is_none() { return nh.ifindex >
-/// 0 }` branch in the v4 selection closure and the interface-only member is
-/// dead again; with the gateway member live, selection collapses to ifindex 11
-/// only, so `egress_seen` never contains 22 (width 1) and the disposition
-/// probe stays None → both interface-only assertions go RED.
+/// FAIL-ON-REVERT: revert the egress-row/link-up check in the v4/v6 selection
+/// closures to `return nh.ifindex > 0` and the interface-only member will be
+/// treated as live only due to its positive index. This fixture's up link keeps
+/// the #5161 spread assertions green while the separate #11404 fixture catches
+/// the resulting down-leg regression.
 #[test]
 fn ecmp_interface_only_member_is_live_alongside_gateway() {
     let snapshot = crate::ConfigSnapshot {
@@ -4678,6 +4679,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
                 zone: "wan".to_string(),
                 linux_name: "ge-0-0-1".to_string(),
                 ifindex: 11,
+                link_up: Some(true),
                 hardware_addr: "02:00:00:00:00:11".to_string(),
                 addresses: vec![crate::InterfaceAddressSnapshot {
                     family: "inet".to_string(),
@@ -4691,6 +4693,7 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
                 zone: "wan".to_string(),
                 linux_name: "ge-0-0-2".to_string(),
                 ifindex: 22,
+                link_up: Some(true),
                 hardware_addr: "02:00:00:00:00:22".to_string(),
                 addresses: vec![crate::InterfaceAddressSnapshot {
                     family: "inet".to_string(),
@@ -4707,14 +4710,12 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
             next_hop_weights: vec![],
             // Member 0: explicit gateway via ge-0/0/1. Member 1: INTERFACE-ONLY
             // (empty IP part before '@') via ge-0/0/2 — `next_hop == None`.
-            next_hops: vec![
-                "192.0.2.2@ge-0/0/1".to_string(),
-                "@ge-0/0/2".to_string(),
-            ],
+            next_hops: vec!["192.0.2.2@ge-0/0/1".to_string(), "@ge-0/0/2".to_string()],
             discard: false,
             next_table: String::new(),
             preference: 5,
-            rule_priority: 0, mtu: 0,
+            rule_priority: 0,
+            mtu: 0,
         }],
         // ONLY the gateway member's neighbor is resolved. The interface-only
         // member's neighbor (the per-flow destination) is deliberately absent —
@@ -4738,7 +4739,11 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
     // string-format change silently turning this into a gateway member (which
     // would make the test pass trivially).
     let route = &state.routes_v4.get("inet.0").expect("table")[0];
-    assert_eq!(route.next_hops.len(), 2, "ECMP route must retain both members");
+    assert_eq!(
+        route.next_hops.len(),
+        2,
+        "ECMP route must retain both members"
+    );
     assert!(
         route.next_hops[1].next_hop.is_none() && route.next_hops[1].ifindex == 22,
         "member 1 must be an interface-only candidate (next_hop==None, ifindex 22)",
@@ -4784,6 +4789,161 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
         "interface-only member forwards via the MissingNeighbor cold path so its \
          destination resolves lazily per flow",
     );
+}
+/// #11404: a down interface-only member must not share hashes with a live
+/// gateway. The gateway is already resolved; only the per-flow destination
+/// neighbor on the interface-only leg is absent, as in the retained #5161 case.
+///
+/// FAIL-ON-REVERT: if interface-only liveness returns to `ifindex > 0` alone,
+/// the explicitly-down leg enters the live set and some flows select ifindex 22
+/// instead of the resolved gateway at 11.
+#[test]
+fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
+    // Decode the exact Go wire key so a serde-tag drift also makes the
+    // consumer-visible down-leg assertion below fail.
+    let down_link_state: crate::InterfaceSnapshot =
+        serde_json::from_str(r#"{"name":"ge-0/0/2","link_up":false}"#)
+            .expect("decode Go link-state field");
+    let snapshot = crate::ConfigSnapshot {
+        zones: vec![crate::ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            crate::InterfaceSnapshot {
+                name: "ge-0/0/1".to_string(),
+                zone: "wan".to_string(),
+                linux_name: "ge-0-0-1".to_string(),
+                ifindex: 11,
+                link_up: Some(true),
+                hardware_addr: "02:00:00:00:00:11".to_string(),
+                addresses: vec![
+                    crate::InterfaceAddressSnapshot {
+                        family: "inet".to_string(),
+                        address: "192.0.2.1/24".to_string(),
+                        scope: 0,
+                    },
+                    crate::InterfaceAddressSnapshot {
+                        family: "inet6".to_string(),
+                        address: "2001:db8:1::1/64".to_string(),
+                        scope: 0,
+                    },
+                ],
+                ..Default::default()
+            },
+            crate::InterfaceSnapshot {
+                name: "ge-0/0/2".to_string(),
+                zone: "wan".to_string(),
+                linux_name: "ge-0-0-2".to_string(),
+                ifindex: 22,
+                link_up: down_link_state.link_up,
+                hardware_addr: "02:00:00:00:00:22".to_string(),
+                addresses: vec![
+                    crate::InterfaceAddressSnapshot {
+                        family: "inet".to_string(),
+                        address: "192.0.3.1/24".to_string(),
+                        scope: 0,
+                    },
+                    crate::InterfaceAddressSnapshot {
+                        family: "inet6".to_string(),
+                        address: "2001:db8:2::1/64".to_string(),
+                        scope: 0,
+                    },
+                ],
+                ..Default::default()
+            },
+        ],
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "203.0.113.0/24".to_string(),
+                next_hop_weights: vec![],
+                next_hops: vec!["192.0.2.2@ge-0/0/1".to_string(), "@ge-0/0/2".to_string()],
+                discard: false,
+                next_table: String::new(),
+                preference: 5,
+                rule_priority: 0,
+                mtu: 0,
+            },
+            crate::RouteSnapshot {
+                table: "inet6.0".to_string(),
+                family: "inet6".to_string(),
+                destination: "2001:db8:3::/64".to_string(),
+                next_hop_weights: vec![],
+                next_hops: vec![
+                    "2001:db8:1::2@ge-0/0/1".to_string(),
+                    "@ge-0/0/2".to_string(),
+                ],
+                discard: false,
+                next_table: String::new(),
+                preference: 5,
+                rule_priority: 0,
+                mtu: 0,
+            },
+        ],
+        neighbors: vec![
+            crate::NeighborSnapshot {
+                interface: "ge-0-0-1".to_string(),
+                ifindex: 11,
+                family: "inet".to_string(),
+                ip: "192.0.2.2".to_string(),
+                mac: "00:11:22:33:44:55".to_string(),
+                state: "reachable".to_string(),
+                router: true,
+                link_local: false,
+            },
+            crate::NeighborSnapshot {
+                interface: "ge-0-0-1".to_string(),
+                ifindex: 11,
+                family: "inet6".to_string(),
+                ip: "2001:db8:1::2".to_string(),
+                mac: "00:11:22:33:44:55".to_string(),
+                state: "reachable".to_string(),
+                router: true,
+                link_local: false,
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    assert!(
+        state.egress_link_down.contains(&22),
+        "the fixture must carry the interface-only leg's explicit down state"
+    );
+
+    for hash in 0u64..64 {
+        let v4 = lookup_forwarding_resolution_v4(
+            &state,
+            None,
+            Ipv4Addr::new(203, 0, 113, 5),
+            "inet.0",
+            0,
+            true,
+            Some(hash),
+        );
+        assert_eq!(
+            (v4.disposition, v4.egress_ifindex),
+            (ForwardingDisposition::ForwardCandidate, 11),
+            "IPv4 hash {hash} must use the resolved gateway while the interface-only leg is down"
+        );
+
+        let v6 = lookup_forwarding_resolution_v6(
+            &state,
+            None,
+            "2001:db8:3::5".parse().expect("valid destination"),
+            "inet6.0",
+            0,
+            true,
+            Some(hash),
+        );
+        assert_eq!(
+            (v6.disposition, v6.egress_ifindex),
+            (ForwardingDisposition::ForwardCandidate, 11),
+            "IPv6 hash {hash} must use the resolved gateway while the interface-only leg is down"
+        );
+    }
 }
 
 /// #2923: a MIXED direct+tunnel ECMP group must select BOTH paths. The

@@ -226,7 +226,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v38 -> v39 (#11434): InterfaceSnapshot.native_vlan_id selects the VLAN unit
 // that receives VID-0 ingress; a v38 helper would use the parent / unit-0
 // identity and apply a different zone policy.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 39;
+// v39 -> v40 (#11404): InterfaceSnapshot.link_up carries the interface's
+// kernel link state for interface-only ECMP liveness. A v39 helper would
+// ignore that state and continue hashing flows onto a known-down leg.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 40;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

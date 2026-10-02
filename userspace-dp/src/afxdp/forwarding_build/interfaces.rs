@@ -485,6 +485,9 @@ pub(super) fn populate_interfaces(
         if iface.ifindex <= 0 {
             continue;
         }
+        if iface.link_up == Some(false) {
+            state.egress_link_down.insert(iface.ifindex);
+        }
         if iface.parent_ifindex > 0 && is_logical_unit_row(&iface.name, iface.is_unit) {
             // #10644: remember the trunk parent and, for an empty-zone unit
             // row, the child unit itself, for the post-walk unzoned-unit

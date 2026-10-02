@@ -370,7 +370,11 @@ const (
 	// v38 -> v39 (#11434): InterfaceSnapshot.NativeVLANID maps VID-0 ingress
 	// to the matching VLAN unit. A v38 helper ignores the field and can
 	// attribute an untagged packet to the parent / unit-0 zone instead.
-	ProtocolVersion = 39
+	// v39 -> v40 (#11404): InterfaceSnapshot.LinkUp carries the kernel link
+	// admin/oper state used to avoid interface-only ECMP through a known-down
+	// egress. A v39 helper ignores it and keeps the old liveness behavior, so
+	// exact equality fences that mixed pairing.
+	ProtocolVersion = 40
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1280,6 +1284,15 @@ type InterfaceSnapshot struct {
 	// an acceptable degradation. Exact equality refuses the pairing both
 	// ways (see the v21 note on ProtocolVersion).
 	IsUnit bool `json:"is_unit"`
+	// LinkUp is the kernel link admin/oper state of this row's egress netdev
+	// (#11404): false on a definite down (admin-down, OperDown,
+	// OperLowerLayerDown, OperNotPresent), true for any other resolved state.
+	// A logical-only parent-bound RETH VLAN unit has no kernel netdev of its
+	// own, so it reports its PARENT's state -- the netdev its egress actually
+	// leaves by. Nil/absent means legacy/unknown and the Rust helper
+	// preserves the existing up behavior; every row this builder emits
+	// carries a non-nil value.
+	LinkUp *bool `json:"link_up,omitempty"`
 }
 
 type FabricSnapshot struct {

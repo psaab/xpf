@@ -550,6 +550,16 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 	// alone would silently disable the egress decision for the entire snapshot.
 	out, idents = appendBindInterfaceOnlySecureTunnelRows(
 		cfg, out, idents, authored, zoneByInterface, ifaceRoutingInstance, quarantinedKeys, liveXfrm)
+	// Link state is carried for every generated row, including the
+	// bind-interface-only tunnel rows just appended above. A logical-only
+	// RETH VLAN has no kernel child and egresses on its parent netdev.
+	for i := range out {
+		linuxName := out[i].LinuxName
+		if out[i].LogicalOnly && out[i].ParentLinuxName != "" {
+			linuxName = out[i].ParentLinuxName
+		}
+		out[i].LinkUp = snapshotLinkUp(linuxName)
+	}
 	// #6722: decide each ifindex's EGRESS zone here, from the operator's authored
 	// bindings and this loop's own aliasing, and stamp the answer on every row.
 	stampEgressZones(cfg, out, idents, authored)
@@ -1385,16 +1395,25 @@ var buildLinkSnapshot = func(linuxName string) (ifindex int, mtu int, hardwareAd
 	return ifindex, mtu, hardwareAddr, addresses
 }
 
+// snapshotLinkUp carries the named egress netdev's kernel admin/oper state
+// across the snapshot wire. A non-nil pointer preserves definite down as
+// distinct from the legacy/unknown nil value (#11404).
+func snapshotLinkUp(linuxName string) *bool {
+	up := linuxLinkUp(linuxName)
+	return &up
+}
+
 // revalidateSnapshotIfindexes re-resolves every interface row's ifindex
-// (and parent ifindex) against the kernel just before publish (#11086).
-// Link churn between snapshot build and apply otherwise ships a row whose
-// stale ifindex stamps the WRONG netdev's zone on the helper (which keys
-// rows purely by ifindex). A row whose name resolves to a different ifindex
-// is refreshed in place; a row whose name is gone is dropped (a vanished
-// link carries no traffic, so dropping cannot fail open — and the warn
-// names it). Returns refreshed/dropped counts for the apply log.
-// Pure over buildLinkSnapshot (a package-var seam), so tests drive it
-// without kernel interfaces.
+// (and parent ifindex) against the kernel just before publish (#11086), and
+// refreshes its link state (#11404). Link churn between snapshot build and
+// apply otherwise ships a row whose stale ifindex stamps the WRONG netdev's
+// zone on the helper (which keys rows purely by ifindex). A row whose name
+// resolves to a different ifindex is refreshed in place; a row whose name is
+// gone is dropped (a vanished link carries no traffic, so dropping cannot fail
+// open — and the warn names it). Returns refreshed/dropped counts for the
+// apply log.
+// Kernel observations use the buildLinkSnapshot and linkByNameFn package-var
+// seams, so tests drive it without real kernel interfaces.
 func revalidateSnapshotIfindexes(snap *ConfigSnapshot) (refreshed, dropped int) {
 	if snap == nil {
 		return 0, 0
@@ -1405,21 +1424,35 @@ func revalidateSnapshotIfindexes(snap *ConfigSnapshot) (refreshed, dropped int) 
 			kept = append(kept, row)
 			continue
 		}
-		live, _, _, _ := buildLinkSnapshot(row.LinuxName)
+		resolveLinuxName := row.LinuxName
+		if row.LogicalOnly && row.ParentLinuxName != "" {
+			// The logical-only VLAN child intentionally does not exist. Its
+			// synthetic Ifindex describes an interface row; liveness and the
+			// ParentIfindex both belong to the actual parent egress netdev.
+			resolveLinuxName = row.ParentLinuxName
+		}
+		live, _, _, _ := buildLinkSnapshot(resolveLinuxName)
 		if live == 0 {
 			slog.Warn("snapshot row dropped: interface vanished after build",
-				"name", row.Name, "linux_name", row.LinuxName)
+				"name", row.Name, "linux_name", resolveLinuxName)
 			dropped++
 			continue
 		}
-		if live != row.Ifindex {
+		if row.LogicalOnly {
+			if live != row.ParentIfindex {
+				slog.Warn("snapshot row parent ifindex refreshed after link churn",
+					"name", row.Name, "stale_ifindex", row.ParentIfindex, "live_ifindex", live)
+				row.ParentIfindex = live
+				refreshed++
+			}
+		} else if live != row.Ifindex {
 			slog.Warn("snapshot row ifindex refreshed after link churn",
 				"name", row.Name, "linux_name", row.LinuxName,
 				"stale_ifindex", row.Ifindex, "live_ifindex", live)
 			row.Ifindex = live
 			refreshed++
 		}
-		if row.ParentLinuxName != "" {
+		if row.ParentLinuxName != "" && !row.LogicalOnly {
 			plive, _, _, _ := buildLinkSnapshot(row.ParentLinuxName)
 			if plive != 0 && plive != row.ParentIfindex {
 				slog.Warn("snapshot row parent ifindex refreshed after link churn",
@@ -1428,6 +1461,10 @@ func revalidateSnapshotIfindexes(snap *ConfigSnapshot) (refreshed, dropped int) 
 				refreshed++
 			}
 		}
+		// Re-sample state at the publish boundary so the status used for
+		// interface-only ECMP liveness cannot go stale after snapshot build.
+		linkUp := linuxLinkUp(resolveLinuxName)
+		row.LinkUp = &linkUp
 		kept = append(kept, row)
 	}
 	// Zero the tail so dropped rows do not linger past len.
