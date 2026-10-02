@@ -148,7 +148,11 @@ const preSecureTunnelProtocolVersion = 4
 // weights and continues equal-cost selection for unequal routes. #11411 moves
 // it to v38 so old helpers honor Linux RTAX_MTU on imported routes; #11434
 // moves it to v39 so VID-0 ingress selects the configured native VLAN unit.
-const secureTunnelSnapshotProtocolVersion = 39
+// #11404 moves it to v40 for InterfaceSnapshot.LinkUp kernel liveness; #11420
+// moves it to v41 for ConfigSnapshot.ForwardingTables FI link-local gateway
+// authorization. Nothing about secure_tunnel changed, so
+// MinProtocolSecureTunnelRefusal (7) is untouched again.
+const secureTunnelSnapshotProtocolVersion = 41
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state
