@@ -310,10 +310,6 @@ func TestExpectedLoadedConnsRefusesApplyTimeLocalAddresses9641(t *testing.T) {
 		{"IP-literal dynamic hostname", withHost(dhcpBoundConfig("wan0.0", "", "192.0.2.10/24", false), "203.0.113.9"), "192.0.2.10"},
 		{"VPN local-address over a runtime gateway", withVPNLocal(dhcpBoundConfig("wan0.0", "", "", true), "192.0.2.30"), "192.0.2.30"},
 	} {
-		_, rendered, err := (&Manager{}).renderConfig(&tc.cfg.Security.IPsec)
-		if err != nil || !rendered["tun"] {
-			t.Fatalf("%s: FIXTURE: tun must render, or validation has nothing to refuse (rendered %v, err %v)", tc.name, rendered, err)
-		}
 		got, err := ExpectedLoadedConns(tc.cfg)
 		if tc.wantLocal == "" {
 			if !errors.Is(err, ErrGenerationUnvalidatable) {

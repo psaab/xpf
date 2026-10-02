@@ -115,12 +115,13 @@ func (m *Manager) LoadedGeneration() (string, error) {
 // It works from the configuration alone (prepareConfigFromConfig), because a stored
 // generation's apply-time resolution cannot be replayed. When a rendered connection's
 // local address came from the kernel or from a DNS-derived family hint, the result is
-// ErrGenerationUnvalidatable. The candidate is rendered as a whole, the way Apply renders
-// it: a hard render error means that generation's production render failed, so charon
-// cannot have loaded any of it, and the error is returned. A VPN the renderer skips is
-// excluded. This deliberately differs from BuildSANameIndex, which keeps a render-error
-// VPN's names because for attribution an extra candidate only makes ownership stricter;
-// here the question is equality with what charon holds.
+// ErrGenerationUnvalidatable. The config-only projection mirrors render skips except that
+// an unresolved external-interface address remains a candidate: production may resolve it
+// from the live kernel, and if configuration alone cannot determine that address the
+// generation is unvalidatable. A hard render error is returned. This deliberately differs
+// from BuildSANameIndex, which keeps a render-error VPN's names because for attribution
+// an extra candidate only makes ownership stricter; here the question is equality with
+// what charon holds.
 func ExpectedLoadedConns(cfg *config.Config) (LoadedConns, error) {
 	if cfg == nil {
 		return LoadedConns{}, nil
@@ -136,7 +137,7 @@ func expectedLoadedConns(ipsecCfg *config.IPsecConfig, runtime map[string]bool) 
 	if ipsecCfg == nil {
 		return conns, nil
 	}
-	_, rendered, err := (&Manager{}).renderConfig(ipsecCfg)
+	_, rendered, err := (&Manager{}).renderConfigForConfigOnly(ipsecCfg)
 	if err != nil {
 		return nil, err
 	}

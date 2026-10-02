@@ -191,6 +191,9 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 				}
 			case "external-interface":
 				if v != "" {
+					// Preserve the authored reference for PrepareConfig and
+					// the render warning; a lookup miss must never collapse
+					// into an empty bind-all local_addrs value.
 					gw.ExternalIface = v
 				}
 			case "local-certificate":
@@ -483,6 +486,9 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 				}
 			case "external-interface":
 				if v != "" {
+					// Keep parity with the `security ike gateway` compiler
+					// above: runtime resolution and fail-closed rendering need
+					// the original interface spelling for diagnostics.
 					gw.ExternalIface = v
 				}
 			case "local-certificate":

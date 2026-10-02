@@ -582,14 +582,16 @@ func validateIPsecManualKeyStrict(cfg *Config) error {
 // v6 gateway still commits.
 //
 // A gateway whose LocalAddress is empty but derives from external-interface
-// is not checked here: the address is resolved from a live interface at
-// render time, not from operator text. Gateway and VPN names are sorted so
-// a multi-object config reports a deterministic first failure. On the
-// tolerant load / peer-sync paths the call site downgrades this to a
-// warning (opts.lenientIPsecEndpoints) so a config an older binary
-// persisted, or a peer synced, still boots (#1960 fail-closed-on-load
-// class). Commit / commit-check stay strict. Mirrors
-// validateIPsecGatewayReferencesStrict.
+// is not checked here: its address depends on a live interface and kernel
+// lookup, not operator endpoint text. PrepareConfig preserves an empty result
+// for that miss, and renderConfig fails closed by skipping the affected VPN
+// with a warning naming the interface; it never omits local_addrs and binds
+// every local address. Gateway and VPN names are sorted so a multi-object
+// config reports a deterministic first failure. On the tolerant load /
+// peer-sync paths the call site downgrades this endpoint gate to a warning
+// (opts.lenientIPsecEndpoints) so a config an older binary persisted, or a
+// peer synced, still boots (#1960 fail-closed-on-load class). Commit /
+// commit-check stay strict. Mirrors validateIPsecGatewayReferencesStrict.
 func validateIPsecEndpointsStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil

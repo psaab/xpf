@@ -36,8 +36,9 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // a `protocol ah` proposal with no ESP render path (#4298), a section-breaking
 // VPN name (#9495), an unresolved ipsec-policy chain (#9919 F-090), an unusable
 // ESP/PFS DH group (#9919 F-161), a non-empty bind-interface that resolves to
-// no XFRM if_id (#10681), or an explicit selector set with no renderable
-// children (#10884) — is NOT in
+// no XFRM if_id (#10681), an external-interface with no resolved local-address
+// (#11689), or an explicit selector set with no renderable children (#10884) —
+// is NOT in
 // the returned set even though renderConfig still returns success. Apply
 // diffs THIS rendered set (not the raw VPN map keys) so a previously-loaded
 // connection that dropped out of the render is treated as a removal and its
@@ -45,6 +46,21 @@ func (m *Manager) generateConfig(ipsecCfg *config.IPsecConfig) string {
 // single source of truth for "what is actually loaded", so the skip logic
 // here can never drift from the teardown diff in promoteConnNames.
 func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string]bool, error) {
+	return m.renderConfigWithExternalInterfaceFailClosed(ipsecCfg, true)
+}
+
+// renderConfigForConfigOnly is for projections that cannot consult live
+// interface addresses. It keeps the configured VPN candidate visible so
+// ExpectedLoadedConns can report runtime-dependent local addresses as
+// unvalidatable, while SA-name and selector-fence projections stay
+// conservative. Production config always uses renderConfig above.
+func (m *Manager) renderConfigForConfigOnly(ipsecCfg *config.IPsecConfig) (string, map[string]bool, error) {
+	return m.renderConfigWithExternalInterfaceFailClosed(ipsecCfg, false)
+}
+
+func (m *Manager) renderConfigWithExternalInterfaceFailClosed(
+	ipsecCfg *config.IPsecConfig, failClosedExternalInterface bool,
+) (string, map[string]bool, error) {
 	var b strings.Builder
 
 	b.WriteString("# xpf managed config - do not edit\n\n")
@@ -94,6 +110,12 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			slog.Warn("skipping IPsec VPN: ike gateway not renderable "+
 				"(undefined or addressless) — fix the gateway reference",
 				"vpn", name, "gateway", vpn.Gateway)
+			continue
+		}
+		if failClosedExternalInterface && gw != nil && gw.ExternalIface != "" && localAddr == "" {
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: external-interface has no resolvable local address; omitting local_addrs would bind all local addresses, including management interfaces — configure an address or fix the interface",
+				"vpn", name, "external_interface", gw.ExternalIface)
 			continue
 		}
 
@@ -586,13 +608,10 @@ func resolveRemoteAddr(ipsecCfg *config.IPsecConfig, vpn *config.IPsecVPN) (
 	return "", localAddr, nil, false
 }
 
-// RenderedVPNSet returns the names of VPNs renderConfig would emit into
-// connections{} — the authoritative loaded-connection set Apply diffs
-// against. The bindless-selector fence builder (#11083) gates its rows on
-// this set so a skipped/unrenderable VPN gets no fence rows (fencing a dead
-// VPN drops its selectors' cleartext for SAs that will never establish).
-// Sharing renderConfig itself (not a mirrored predicate) keeps the two from
-// drifting: any new render skip automatically removes the fence rows.
+// RenderedVPNSet returns the configured VPN names eligible for selector-fence
+// rows. It uses the config-only render projection: a local address that depends
+// on live external-interface resolution is unknown here, so the fence remains
+// conservative rather than disappearing before the runtime render decides.
 // Returns nil when the render errors; callers must treat nil as UNKNOWN and
 // keep the current fail-closed behavior (emit for shape-valid VPNs).
 func RenderedVPNSet(ipsecCfg *config.IPsecConfig) map[string]bool {
@@ -601,7 +620,7 @@ func RenderedVPNSet(ipsecCfg *config.IPsecConfig) map[string]bool {
 	}
 	// renderConfig uses no Manager state (pure over ipsecCfg); a zero
 	// Manager suffices.
-	_, rendered, err := (&Manager{}).renderConfig(ipsecCfg)
+	_, rendered, err := (&Manager{}).renderConfigForConfigOnly(ipsecCfg)
 	if err != nil {
 		return nil
 	}
@@ -816,10 +835,10 @@ type SANameIndex map[string][]string
 // broken VPN cannot empty the index, which a single whole-config render would.
 //
 // Building renders every VPN and repeats the render's skip warnings, so build once
-// per config, not per name. ipsecCfg is only read. A caller holding the active
-// config indexes its IPsec section rather than PrepareConfig's output, which can
-// block on DNS; PrepareConfig derives runtime local addresses, which neither SA
-// names nor the skip decisions read.
+// per config, not per name. ipsecCfg is only read. The active config is indexed
+// without PrepareConfig because that can block on DNS; the config-only render
+// projection retains external-interface candidates whose local bind is resolved
+// only at apply time.
 func BuildSANameIndex(ipsecCfg *config.IPsecConfig) SANameIndex {
 	if ipsecCfg == nil || len(ipsecCfg.VPNs) == 0 {
 		return nil
@@ -829,7 +848,7 @@ func BuildSANameIndex(ipsecCfg *config.IPsecConfig) SANameIndex {
 		vpn := ipsecCfg.VPNs[name]
 		one := *ipsecCfg
 		one.VPNs = map[string]*config.IPsecVPN{name: vpn}
-		if _, rendered, err := (&Manager{}).renderConfig(&one); err == nil && len(rendered) == 0 {
+		if _, rendered, err := (&Manager{}).renderConfigForConfigOnly(&one); err == nil && len(rendered) == 0 {
 			continue
 		}
 		idx.add(sanitizeSwanctlValue(name), name)
