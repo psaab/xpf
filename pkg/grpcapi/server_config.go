@@ -114,8 +114,21 @@ func (s *Server) GetConfigModeStatus(_ context.Context, _ *pb.GetConfigModeStatu
 	}, nil
 }
 
-func (s *Server) mutationPlantClass(ctx context.Context) (string, error) {
-	p := principalFromContext(ctx, s.activeConfig())
+// mutationPlantClass returns the login class the authorization interceptor
+// admitted for this RPC (#11675). It consumes the admitted snapshot
+// (authorizedPrincipalFromContext) — the same principal
+// journalPrincipalForContext records — and MUST NOT re-resolve against the
+// live active-config snapshot: a class redefinition or user reclass landing
+// between admission and handling would otherwise stamp the NEW class while
+// the journal records the ADMITTED one, and the deferred event-options
+// change-configuration would later execute under a class whose authority was
+// never evaluated. A direct handler call without an admission context has no
+// admitted class and is denied, mirroring pkg/api's mutationPlantClass.
+func (_ *Server) mutationPlantClass(ctx context.Context) (string, error) {
+	p, ok := authorizedPrincipalFromContext(ctx)
+	if !ok {
+		return "", errors.New("authorized mutation principal is unavailable")
+	}
 	if p.Superuser {
 		return config.EventPlantClassSuperuser, nil
 	}

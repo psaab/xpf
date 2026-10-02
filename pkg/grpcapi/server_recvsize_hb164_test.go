@@ -36,12 +36,15 @@ func TestGRPCLoadRejectsOversizedMessage(t *testing.T) {
 	s := &Server{store: store}
 	srv := grpc.NewServer(
 		grpc.MaxRecvMsgSize(maxRecvMsgSize),
-		grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-			ctx = context.WithValue(ctx, connPeerKey{}, &connPeer{
-				id: authz.PeerIdentity{UID: 0, OK: true, Local: true},
-			})
-			return handler(ctx, req)
-		}),
+		grpc.ChainUnaryInterceptor(
+			func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+				ctx = context.WithValue(ctx, connPeerKey{}, &connPeer{
+					id: authz.PeerIdentity{UID: 0, OK: true, Local: true},
+				})
+				return handler(ctx, req)
+			},
+			s.principalUnaryInterceptor,
+		),
 	)
 	pb.RegisterBpfrxServiceServer(srv, s)
 	go srv.Serve(lis)
