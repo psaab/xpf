@@ -22,7 +22,7 @@ bgp multipath	protocols/bgp,routing-instances/*/protocols/bgp
 bgp router-id	protocols/bgp,routing-instances/*/protocols/bgp
 classifiers dscp	class-of-service/classifiers,class-of-service/interfaces/classifiers,class-of-service/interfaces/unit/classifiers
 classifiers ieee-802.1	class-of-service/classifiers,class-of-service/interfaces/classifiers,class-of-service/interfaces/unit/classifiers
-classifiers inet-precedence	class-of-service/classifiers,class-of-service/interfaces/unit/classifiers
+classifiers inet-precedence	class-of-service/classifiers,class-of-service/interfaces/classifiers,class-of-service/interfaces/unit/classifiers
 damping half-life	protocols/bgp/damping,routing-instances/*/protocols/bgp/damping
 damping max-suppress	protocols/bgp/damping,routing-instances/*/protocols/bgp/damping
 damping reuse	protocols/bgp/damping,routing-instances/*/protocols/bgp/damping

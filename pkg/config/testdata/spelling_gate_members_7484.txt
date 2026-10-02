@@ -76,6 +76,7 @@ err (parent stanza does not compile)	class-of-service fairness rss-expectation i
 err (parent stanza does not compile)	class-of-service fairness rss-expectation interface <*> queue <*> max-worker-flow-share
 COMPARED	class-of-service interfaces <*> classifiers dscp
 COMPARED	class-of-service interfaces <*> classifiers ieee-802.1
+COMPARED	class-of-service interfaces <*> classifiers inet-precedence
 COMPARED	class-of-service interfaces <*> output-traffic-control-profile
 COMPARED	class-of-service interfaces <*> oversubscription-policy guarantee-rate
 flag (read, but value-less)	class-of-service interfaces <*> oversubscription-policy proportional

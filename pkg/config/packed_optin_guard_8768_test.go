@@ -672,13 +672,12 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 		// this guard requires a case for each, so an opt-in cannot ship
 		// exercised on only one.
 		//
-		// THE TWO LEVELS DO NOT HAVE THE SAME CHILDREN, which the reverse check
-		// caught after the first version gave them the same fixtures:
-		// `inet-precedence` is declared only under `classifiers` at the UNIT
-		// level; `exp` is declared by neither binding container here. A fixture
-		// for a leaf the container does not declare is silently unused, so
-		// writing one is a false claim of coverage -- the same error as
-		// registering a whole family when only some members qualify.
+		// The classifier schema children now match across both levels after
+		// #11813; rewrite-rules have the same two children at both levels.
+		// `exp` belongs to neither binding container. A fixture for a leaf the
+		// container does not declare is silently unused, so writing one is a
+		// false claim of coverage -- the same error as registering a whole
+		// family when only some members qualify.
 		//
 		// Every admitted leaf is an args:1 named reference, so each carries a
 		// second instance.
@@ -737,12 +736,14 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 			open:   "classifiers",
 			closer: " } }",
 			stmts: map[string]string{
-				"dscp":       "dscp ref1",
-				"ieee-802.1": "ieee-802.1 ref2",
+				"dscp":            "dscp ref1",
+				"ieee-802.1":      "ieee-802.1 ref2",
+				"inet-precedence": "inet-precedence ref3",
 			},
 			second: map[string]string{
-				"dscp":       "dscp alt1",
-				"ieee-802.1": "ieee-802.1 alt2",
+				"dscp":            "dscp alt1",
+				"ieee-802.1":      "ieee-802.1 alt2",
+				"inet-precedence": "inet-precedence alt3",
 			},
 			read: func(c *Config) string {
 				out := ""
@@ -1114,6 +1115,7 @@ func TestPackedOptInHoldsForEveryLeafPair8768(t *testing.T) {
 	// fails. Empty until a measurement puts something here.
 	sameLeafAdjudicated := map[string]string{
 		"class-of-service/interfaces/classifiers ieee-802.1+ieee-802.1":                "scalar binding: a repeated statement OVERWRITES, so both spellings yield one value",
+		"class-of-service/interfaces/classifiers inet-precedence+inet-precedence":      "scalar binding: a repeated statement OVERWRITES, so both spellings yield one value",
 		"class-of-service/interfaces/rewrite-rules dscp+dscp":                          "scalar binding: a repeated statement OVERWRITES, so both spellings yield one value",
 		"class-of-service/interfaces/rewrite-rules ieee-802.1+ieee-802.1":              "scalar binding: a repeated statement OVERWRITES, so both spellings yield one value",
 		"class-of-service/interfaces/unit/classifiers dscp+dscp":                       "scalar binding: a repeated statement OVERWRITES, so both spellings yield one value",
@@ -1181,6 +1183,7 @@ func TestPackedOptInHoldsForEveryLeafPair8768(t *testing.T) {
 		// Only the leaf-against-ITSELF case is degenerate.
 		"class-of-service/interfaces/classifiers dscp+dscp":                            "scalar binding: a repeated statement OVERWRITES, so one instance and two read alike",
 		"class-of-service/interfaces/classifiers ieee-802.1+ieee-802.1":                "scalar binding: a repeated statement OVERWRITES, so one instance and two read alike",
+		"class-of-service/interfaces/classifiers inet-precedence+inet-precedence":      "scalar binding: a repeated statement OVERWRITES, so one instance and two read alike",
 		"class-of-service/interfaces/rewrite-rules dscp+dscp":                          "scalar binding: a repeated statement OVERWRITES, so one instance and two read alike",
 		"class-of-service/interfaces/rewrite-rules ieee-802.1+ieee-802.1":              "scalar binding: a repeated statement OVERWRITES, so one instance and two read alike",
 		"class-of-service/interfaces/unit/classifiers dscp+dscp":                       "scalar binding: a repeated statement OVERWRITES, so one instance and two read alike",

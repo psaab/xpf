@@ -320,8 +320,9 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 		// reaches these four binding sites and not the top-level
 		// classifier/rewrite-rule DEFINITIONS, which are a different shape.
 		"classifiers": {desc: "Classifiers applied at the interface level (all units)", packedStatements: true, children: map[string]*schemaNode{
-			"dscp":       {desc: "DSCP classifier to apply", args: 1, placeholder: "<classifier-name>", children: nil},
-			"ieee-802.1": {desc: "IEEE 802.1p classifier to apply", args: 1, placeholder: "<classifier-name>", children: nil},
+			"dscp":            {desc: "DSCP classifier to apply", args: 1, placeholder: "<classifier-name>", children: nil},
+			"inet-precedence": {desc: "IP-precedence classifier to apply", args: 1, placeholder: "<classifier-name>", children: nil},
+			"ieee-802.1":      {desc: "IEEE 802.1p classifier to apply", args: 1, placeholder: "<classifier-name>", children: nil},
 		}},
 		// issue 8939: packedStatements so a run written on one line --
 		// `classifiers dscp c1 ieee-802.1 c2;` -- splits into siblings
