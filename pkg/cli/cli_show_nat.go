@@ -975,6 +975,7 @@ func (c *CLI) showNATDestinationPool(cfg *config.Config, poolName string) error 
 				if rule.Then.PoolName != name {
 					continue
 				}
+				fmt.Printf("  Referenced by: %s/%s (from %s)\n", rs.Name, rule.Name, rs.FromZone)
 				excludedReason := destNATRuleNotInstalled(cfg, rule)
 				if line := natNotInstalledLine(excludedReason, false); line != "" {
 					fmt.Println("  " + line)
