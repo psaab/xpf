@@ -122,6 +122,20 @@ func TestMgmtVRFDefaultSuppressionHonorsOperatorPriority11424(t *testing.T) {
 			if got != tc.wantDHCP {
 				t.Fatalf("DHCP default installed = %v, want %v; replaced=%v", got, tc.wantDHCP, fake.replaced)
 			}
+			if tc.wantDHCP {
+				staticPresent, dhcpPresent := false, false
+				for _, route := range fake.v4 {
+					if mgmtRouteDstKey(route.Dst, netlink.FAMILY_V4) != "0.0.0.0/0" {
+						continue
+					}
+					staticPresent = staticPresent ||
+						(route.Protocol == unix.RTPROT_STATIC && route.Priority == tc.priority)
+					dhcpPresent = dhcpPresent || route.Protocol == unix.RTPROT_DHCP
+				}
+				if !staticPresent || !dhcpPresent {
+					t.Fatalf("high-priority static and DHCP defaults did not coexist: %+v", fake.v4)
+				}
+			}
 		})
 	}
 }

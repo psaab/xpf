@@ -26,8 +26,8 @@ func (l fakeMgmtLink) Attrs() *netlink.LinkAttrs { return &netlink.LinkAttrs{Ind
 func (l fakeMgmtLink) Type() string              { return "dummy" }
 
 // fakeMgmtProgrammer implements mgmtRouteProgrammer: it holds the current kernel
-// routes, resolves a fixed link index, and either fails or applies a
-// RouteReplace (modelling the kernel's same-destination overwrite on success).
+// routes, resolves a fixed link index, and either fails or applies RouteReplace.
+// Routes with the same destination but different Priority (metric) coexist.
 type fakeMgmtProgrammer struct {
 	v4, v6     []netlink.Route
 	links      map[string]int
@@ -62,18 +62,31 @@ func routeFamily(r *netlink.Route) int {
 	return netlink.FAMILY_V4
 }
 
+func removeRouteByDstAndPriority(routes []netlink.Route, dst *net.IPNet, family int, priority int) []netlink.Route {
+	key := mgmtRouteDstKey(dst, family)
+	out := make([]netlink.Route, 0, len(routes))
+	for _, route := range routes {
+		if route.Priority == priority && mgmtRouteDstKey(route.Dst, family) == key {
+			continue
+		}
+		out = append(out, route)
+	}
+	return out
+}
+
 func (f *fakeMgmtProgrammer) RouteReplace(route *netlink.Route) error {
 	f.replaced = append(f.replaced, route)
 	if f.replaceErr != nil {
 		return f.replaceErr // kernel unchanged: the stale route survives
 	}
-	// Model the kernel: RouteReplace overwrites any same-destination entry.
+	// Linux route replacement matches the destination and metric; a route at a
+	// different Priority for the same prefix remains installed.
 	cp := *route
 	if routeFamily(route) == netlink.FAMILY_V6 {
-		f.v6 = removeRouteByDst(f.v6, route.Dst, netlink.FAMILY_V6)
+		f.v6 = removeRouteByDstAndPriority(f.v6, route.Dst, netlink.FAMILY_V6, route.Priority)
 		f.v6 = append(f.v6, cp)
 	} else {
-		f.v4 = removeRouteByDst(f.v4, route.Dst, netlink.FAMILY_V4)
+		f.v4 = removeRouteByDstAndPriority(f.v4, route.Dst, netlink.FAMILY_V4, route.Priority)
 		f.v4 = append(f.v4, cp)
 	}
 	return nil
@@ -107,10 +120,10 @@ func (f *fakeMgmtProgrammer) RouteListFiltered(family int, filter *netlink.Route
 func (f *fakeMgmtProgrammer) RouteDel(route *netlink.Route) error {
 	fam := route.Family
 	if fam == netlink.FAMILY_V6 {
-		f.v6 = removeRouteByDst(f.v6, route.Dst, netlink.FAMILY_V6)
+		f.v6 = removeRouteByDstAndPriority(f.v6, route.Dst, netlink.FAMILY_V6, route.Priority)
 	} else {
 		fam = netlink.FAMILY_V4
-		f.v4 = removeRouteByDst(f.v4, route.Dst, netlink.FAMILY_V4)
+		f.v4 = removeRouteByDstAndPriority(f.v4, route.Dst, netlink.FAMILY_V4, route.Priority)
 	}
 	f.deleted = append(f.deleted, mgmtRouteDstKey(route.Dst, fam))
 	return nil
