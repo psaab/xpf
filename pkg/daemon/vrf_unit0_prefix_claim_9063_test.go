@@ -89,7 +89,7 @@ func resolveInVRF9063(t *testing.T, vrfMember string) string {
 		"  unit 20 { vlan-id 20; family inet6 { address 2001:db8:bb::1/64; } }\n" +
 		" }\n}\n" +
 		"routing-instances { blue { instance-type vrf; interface " + vrfMember + ";\n" +
-		"  routing-options { rib inet6.0 { static { route 2001:db8:ff::/64 next-hop fe80::9; } } }\n" +
+		"  routing-options { rib blue.inet6.0 { static { route 2001:db8:ff::/64 next-hop fe80::9; } } }\n" +
 		"} }\n"
 	tree, perrs := config.NewParser(text).Parse()
 	if len(perrs) > 0 {
@@ -98,6 +98,29 @@ func resolveInVRF9063(t *testing.T, vrfMember string) string {
 	cfg, err := config.CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
+	}
+	// Keep the whole-device narrowness row non-vacuous: it must resolve against
+	// the intended route compiled into blue's IPv6 table, not pass because the
+	// compiler silently discarded the fixture route.
+	foundRoute := false
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name != "blue" {
+			continue
+		}
+		for _, route := range ri.Inet6StaticRoutes {
+			if route == nil || route.Destination != "2001:db8:ff::/64" {
+				continue
+			}
+			for _, nextHop := range route.NextHops {
+				if nextHop.Address == "fe80::9" {
+					foundRoute = true
+					break
+				}
+			}
+		}
+	}
+	if !foundRoute {
+		t.Fatal("compiled VRF blue is missing IPv6 static route 2001:db8:ff::/64 via fe80::9")
 	}
 	// The resolver keys VRF entries as "vrf-<name>", not "<name>"; take any
 	// non-default table rather than restating that spelling, so a rename of the
