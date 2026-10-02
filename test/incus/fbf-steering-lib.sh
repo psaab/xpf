@@ -141,6 +141,7 @@ _fbf_nexthop_graph_contains() {
 			if (id in groups) {
 				n = split(groups[id], members, "/")
 				for (i = 1; i <= n; i++) {
+					sub(/,.*$/, "", members[i])
 					if (reaches(members[i])) { delete visiting[id]; return 1 }
 				}
 			}
