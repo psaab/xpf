@@ -1220,11 +1220,12 @@ the NAT module applies it:
   tuple. Compatible in-process snapshot refreshes preserve it; helper restart
   does not. HA synchronization is supported: live leases are rebuilt from synced
   sessions (#7360/#8132), and idle leases are exported/imported explicitly
-  (#8121). Idle imports share the pool's `max_tracked_flows` lease-table cap
-  with local mints first-come-first-served: after one bounded expiry-GC
-  pressure pass, a still-full table refuses the import — and likewise refuses
-  local mints — so the cap bounds total table growth with shared fate for both
-  sides. Imported
+  (#8121).
+  Idle imports and synced-session mints share the pool's
+  `max_tracked_flows` lease-table cap with local mints first-come-first-served:
+  after one bounded expiry-GC pressure pass, a still-full table refuses a new
+  lease mint — and likewise refuses idle imports and local mints — so the cap
+  bounds total table growth with shared fate across all three paths. Imported
   leases also check live address-only and PAT owners across exact, target-host,
   and any-remote scopes.
   HA idle-lease batches carry a sender origin and durable clear generation.

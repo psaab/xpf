@@ -458,6 +458,84 @@ fn a_full_imported_table_refuses_local_mints_11475() {
     );
 }
 
+/// Synced-session persistent mints obey the same hard lease-table cap as
+/// imported idle leases. Fill the table with address-only idle entries so the
+/// PAT arm still has a free port; the live-flow cap is independently empty.
+#[test]
+fn synced_persistent_mints_refuse_a_full_lease_table_11495() {
+    let addrs = ["203.0.113.10".parse().unwrap()];
+    let pool_addrs = ipv4_pool(&addrs);
+    let allocator = PortAllocator::new(1, 20_000, 20_001);
+    let record = |src_ip: &str, src_port| IdleLeaseRecord {
+        protocol: TCP,
+        src_ip: src_ip.parse().unwrap(),
+        src_port,
+        routing_scope: 0,
+        remote: Some(("8.8.8.8".parse().unwrap(), 443)),
+        translated_ip: IpAddr::V4(addrs[0]),
+        translated_port: src_port,
+        address_only: true,
+        remaining_ns: TIMEOUT_NS,
+        timeout_ns: TIMEOUT_NS,
+    };
+    for (src_ip, src_port) in [("10.0.61.50", 40_000), ("10.0.61.51", 40_001)] {
+        assert_eq!(
+            allocator.import_idle_lease(&record(src_ip, src_port), &pool_addrs, TIMEOUT_NS, 1_000),
+            IdleLeaseImport::Installed
+        );
+    }
+    assert_eq!(allocator.snapshot().persistent_leases, 2);
+    assert_eq!(allocator.snapshot().live_flows, 0);
+
+    let pat_flow = flow("10.0.61.52", 40_002);
+    let pat_key = pat_flow.persistent_source_key(PersistentNatPermit::TargetHostPort);
+    let mut previous_snapshot = None;
+    assert!(
+        !allocator.reserve_flow_maybe_persistent(
+            pat_flow,
+            TranslatedTuple {
+                ip: IpAddr::V4(addrs[0]),
+                port: 20_000,
+            },
+            0,
+            false,
+            2_000,
+            NatHolder::Untracked,
+            Some((pat_key, TIMEOUT_NS)),
+            false,
+            &mut previous_snapshot,
+        ),
+        "a synced PAT mint must refuse rather than exceed the persistent lease cap"
+    );
+    assert_eq!(allocator.snapshot().persistent_leases, 2);
+    assert_eq!(allocator.snapshot().live_flows, 0);
+    assert!(
+        !allocator.holds_port(0, 20_000),
+        "a lease-cap refusal must return the otherwise-free PAT port"
+    );
+
+    let address_only_flow = flow("10.0.61.53", 40_003);
+    let address_only_key =
+        address_only_flow.persistent_source_key(PersistentNatPermit::TargetHostPort);
+    let mut previous_snapshot = None;
+    assert!(
+        allocator
+            .reserve_address_only_maybe_persistent(
+                address_only_flow,
+                IpAddr::V4(addrs[0]),
+                0,
+                2_000,
+                NatHolder::Untracked,
+                Some((address_only_key, TIMEOUT_NS)),
+                false,
+                &mut previous_snapshot,
+            )
+            .is_err(),
+        "a synced address-only mint must refuse rather than exceed the persistent lease cap"
+    );
+    assert_eq!(allocator.snapshot().persistent_leases, 2);
+    assert_eq!(allocator.snapshot().live_flows, 0);
+}
 /// The pressure pass reclaims an expired idle lease before deciding the import
 /// cannot fit; the newly admitted lease remains the only table entry.
 #[test]
