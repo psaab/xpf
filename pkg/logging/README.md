@@ -254,34 +254,33 @@ See `docs/feature-gaps.md`.
 
 ## Syslog stream-transport resilience (#2283)
 
-`SyslogClient.Send` / `SendBinary` are reached on the SHARED dataplane
-event hot-path (EventStream reader → `EventReader.ProcessRawEvent` →
-`logEvent` → `SyslogClient.Send`). The event reader runs that path
-inline, so a syslog client must never block or thrash on a bad target.
-Two bounds enforce that. **They now apply to UDP as well (#9025)** — this
-sentence used to read "UDP is connectionless and exempt", and that
-exemption was false. A connected-UDP `Write` can block indefinitely on a
-full socket send buffer (ENOBUFS / a congested or down egress path parks
-the goroutine in the netpoller until the buffer drains), which is what
-`pkg/flowexport/transport.go` already recorded (#4423 H07) while this
-module denied it. UDP is also the DEFAULT protocol, so the unbounded
-path was the common one, and the goroutine it parks carries HA session
-sync, the ISSU drain signal and full-resync as well as logging:
+`SyslogClient.Send` / `SendBinary` retain their synchronous contract for direct
+callers. The shared EventStream reader uses `SendFromEventReader` /
+`SendBinaryFromEventReader`, which hand each formatted record to a dedicated
+per-client writer goroutine. Firewall-event slog records emitted by that reader
+carry an internal context marker so `SyslogSlogHandler` uses the same queue;
+ordinary slog callers keep synchronous forwarding. Each queue is bounded to 128
+records; an enqueue never waits for the network, and overflow is counted by
+`DroppedWrites()`. Dropped EventReader records are intentionally not warned
+inline: `slog` can forward back through syslog and would put a blocking path on
+the reader again. The async writer preserves FIFO order within each client,
+while EventStream continues applying HA session deltas and telemetry
+independently of a stalled collector.
 
-- **Per-write deadline.** Every TCP/TLS `conn.Write` is preceded by
-  `SetWriteDeadline(now + writeTimeout)` (default
-  `defaultWriteTimeout`, 4s). A slow/hung/congested server surfaces as
-  `os.ErrDeadlineExceeded`; the message is dropped (counted, not
-  retried-in-place) and the reader continues. Without this a hung
-  server stalls the entire event reader indefinitely.
+**Write deadlines still apply to the writer and direct callers (#9025).** They
+apply to UDP too — a connected-UDP `Write` can block indefinitely on a full
+socket send buffer (ENOBUFS / congested or down egress), as
+`pkg/flowexport/transport.go` documents (#4423 H07). TCP/TLS writes use
+`SetWriteDeadline(now + writeTimeout)` (default 4s); the queue worker drops a
+timed-out record and continues. Direct synchronous `Send` callers also remain
+bounded by this deadline.
+
 - **Timeout drops without retry (#2287).** A write that fails with a
-  *timeout* (the deadline expired — `net.Error.Timeout()==true`) is
-  dropped and returned immediately. It is NOT reconnect+retried: the
-  deadline already bounded the attempt, and reconnecting would re-arm
-  another full `writeTimeout`, doubling the worst-case stall on the
-  event reader (~2× plus a dial). Only a *genuine connection error*
-  (broken pipe / ECONNRESET, non-timeout) triggers the reconnect+retry
-  path below.
+  *timeout* (`net.Error.Timeout()==true`) is dropped immediately, not
+  reconnect+retried: the deadline already bounded the attempt, and another
+  `writeTimeout` plus a dial would unnecessarily delay the writer. Only a
+  *genuine connection error* (broken pipe / ECONNRESET, non-timeout) triggers
+  the reconnect+retry path below.
 - **Partial-frame teardown (#3874).** A stream `conn.Write` can return
   `0 < n < len(b)` — some but not all of the framed record reached the
   wire — when the deadline expires (or the peer resets) mid-write. Both
@@ -634,12 +633,12 @@ sync, the ISSU drain signal and full-resync as well as logging:
   common no-client path (#2295) — only when a record is actually being
   forwarded to at least one client.
 
-Drops are observable via `DroppedWrites()` (write timeout or write
-error), `DroppedDials()` (post-write-failure reconnect dial failed),
-and `DroppedCooldown()` (reconnect suppressed by cooldown); the drop
-warning is rate-limited to ≤1/s so a flapping target cannot spam the
-log from the hot-path (CLAUDE.md logging rules). The warning's `reason`
-attribute is one of `write` / `dial` / `cooldown`.
+`DroppedWrites()` includes transport write failures and EventReader queue
+overflow/retirement. `DroppedDials()` counts post-write-failure reconnect dial
+failures; `DroppedCooldown()` counts reconnects suppressed by cooldown. Transport
+warnings are rate-limited to ≤1/s so a flapping target cannot spam the log
+(CLAUDE.md logging rules). Queue-overflow drops are counted without a reader-side
+warning because `slog` can synchronously forward to syslog.
 
 **#9165 — every transport counts a write failure, and the counters have
 a reader.** Two halves, both of which had to be true for the defect to be

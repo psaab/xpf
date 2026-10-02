@@ -861,7 +861,7 @@ func (er *EventReader) logEvent(data []byte) {
 		// this generic slog branch was the residual sink still emitting it.
 		// Carry the close reason instead, which is what the structured line
 		// surfaces.
-		slog.Info("firewall event",
+		eventReaderSlogInfo("firewall event",
 			"type", eventName,
 			"src", srcStr,
 			"dst", dstStr,
@@ -873,7 +873,7 @@ func (er *EventReader) logEvent(data []byte) {
 			"session_packets", rec.SessionPkts,
 			"session_bytes", rec.SessionBytes)
 	} else if evt.EventType == eventTypeScreenDrop {
-		slog.Info("firewall event",
+		eventReaderSlogInfo("firewall event",
 			"type", eventName,
 			"screen_check", rec.ScreenCheck,
 			"src", srcStr,
@@ -882,7 +882,7 @@ func (er *EventReader) logEvent(data []byte) {
 			"action", actionStr,
 			"ingress_zone", inZone)
 	} else {
-		slog.Info("firewall event",
+		eventReaderSlogInfo("firewall event",
 			"type", eventName,
 			"src", srcStr,
 			"dst", dstStr,
@@ -908,7 +908,8 @@ func (er *EventReader) logEvent(data []byte) {
 	if len(clients) > 0 {
 		severity := eventSeverity(evt.EventType, evt.Action)
 		catBit := eventCategory(evt.EventType)
-		// Cache formatted messages lazily per format type
+		// Formatting stays shared per event, but each client's queue owns the
+		// transport write; this reader must never wait on a remote collector.
 		var stdMsg, structMsg string
 		var binMsg []byte
 		for _, c := range clients {
@@ -919,9 +920,7 @@ func (er *EventReader) logEvent(data []byte) {
 				if binMsg == nil {
 					binMsg = formatBinaryRecord(&evt, &rec, severity, closeReasonCode)
 				}
-				if err := c.SendBinary(binMsg); err != nil {
-					slog.Debug("syslog binary send failed", "err", err)
-				}
+				_ = c.SendBinaryFromEventReader(binMsg)
 				continue
 			}
 			var msg string
@@ -936,9 +935,7 @@ func (er *EventReader) logEvent(data []byte) {
 				}
 				msg = stdMsg
 			}
-			if err := c.Send(severity, msg); err != nil {
-				slog.Debug("syslog send failed", "err", err)
-			}
+			_ = c.SendFromEventReader(severity, msg)
 		}
 	}
 
