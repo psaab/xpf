@@ -1433,6 +1433,15 @@ path warns (`lenientIPsecBindTSOverlap`) rather than newly bricking an
 already-persisted config (#1960). This is a static admission proof; it does not
 replace the lab check that each routed prefix is encrypted only on its own SA.
 
+**Static routes through XFRM must fit the remote selector union (#11422):**
+the typed gate checks global and routing-instance static routes whose
+next-hop interface names an IPsec bind device. The destination prefix must be
+fully covered by the union of rendered remote selectors across that VPN's
+children; adjacent selector prefixes can jointly cover one route. A route such
+as `10.3.0.0/24 via st0.0` with only `10.2.0.0/24` as the remote selector is
+rejected at strict commit because the XFRM output policy would drop it. The
+tolerant load / peer-sync path warns instead of preventing boot (#1960).
+
 The separate #2933 AST gate still rejects distinct bind-interface spellings
 such as `st0` and `st0.0` that derive the same if_id, since only one xfrmi
 device can carry that id. It runs over the group-expanded, inactive-pruned AST

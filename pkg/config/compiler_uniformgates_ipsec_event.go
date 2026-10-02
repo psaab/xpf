@@ -139,6 +139,19 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 			return err
 		}
 	}
+	// #11422: every configured static route through an IPsec bind-interface
+	// must fit within the rendered remote-selector union, or XFRM silently
+	// drops the routed traffic. Strict commits reject the mismatch; tolerant
+	// loads retain boot compatibility and surface a warning.
+	if err := validateIPsecRouteTrafficSelectorsStrict(cfg); err != nil {
+		if opts.lenientIPsecRouteTrafficSelectors {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("ipsec route outside rendered traffic-selector union (downgraded to warning "+
+					"on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 
 	// #9008 IKE/IPsec proposal `lifetime-seconds` value gate. The schema's
 	// ValidateIntegerMin(1) on both leaves is enforced only by SchemaValidate,

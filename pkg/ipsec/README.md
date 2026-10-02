@@ -268,6 +268,15 @@ all files stay in `package ipsec`, so the public API is unchanged.
 - Traffic selectors are auto-derived from the policy source / destination
   prefixes when not given explicitly. Mixing explicit and derived
   selectors is supported but the explicit set wins.
+- **Route-based explicit selector sides (#11422).** When an explicit traffic
+  selector leaves either `local-ip` or `remote-ip` empty, `effectiveTrafficSelectors`
+  emits the same dual-stack wildcard (`0.0.0.0/0,::/0`) used by the no-selector
+  route-based branch on that side. Omitting the setting would make strongSwan
+  install its dynamic endpoint `/32` policy, which does not match transit traffic
+  routed through the XFRM interface. Policy-based VPNs keep their explicit
+  selectors narrow; this default applies only when `bind-interface` creates an
+  XFRM interface. The #11422 config gate checks that static destinations routed
+  through the tunnel fit the rendered remote-selector union.
 - **One `local-ip` / `remote-ip` per traffic-selector (#5692).** Each named
   `traffic-selector` carries exactly ONE `local-ip` and ONE `remote-ip`
   prefix — express multiple prefixes as separate NAMED traffic-selectors
