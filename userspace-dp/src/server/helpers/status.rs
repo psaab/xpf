@@ -75,6 +75,12 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
     // established SESSIONS torn down by live zone policy, not dropped
     // packets, so it is exported separately from packet-drop totals.
     state.status.policy_revoked_sessions_total = state.afxdp.policy_revoked_sessions_total();
+    // #11503: preserve the direction-specific process-global policy denial
+    // causes alongside the policy-rule counter snapshot below.
+    state.status.unzoned_ingress_denied_total =
+        crate::policy::UNZONED_INGRESS_DENIED.load(Ordering::Relaxed);
+    state.status.unzoned_egress_denied_total =
+        crate::policy::UNZONED_EGRESS_DENIED.load(Ordering::Relaxed);
     // #1902: decap-refusal gate at pending_neigh admission (the
     // outer-frame/inner-meta pairing must never reach the in-place
     // retry TX path).

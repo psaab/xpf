@@ -316,6 +316,10 @@ type ProcessStatus struct {
 	// Counts revoked SESSIONS, not dropped packets; exported separately from
 	// packet-drop totals. Omit on older helpers for wire compatibility.
 	PolicyRevokedSessionsTotal uint64 `json:"policy_revoked_sessions_total,omitempty"`
+	// #11503: ingress and egress packets denied because their respective
+	// interfaces had no security zone. Separate totals preserve cause direction.
+	UnzonedIngressDeniedTotal uint64 `json:"unzoned_ingress_denied_total,omitempty"`
+	UnzonedEgressDeniedTotal  uint64 `json:"unzoned_egress_denied_total,omitempty"`
 	// #1902: GRE-decapped MissingNeighbor packets refused pending_neigh
 	// admission — buffering the outer UMEM frame with the post-decap
 	// inner meta would retry-TX a mis-rewritten outer packet once the

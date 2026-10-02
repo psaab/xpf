@@ -101,6 +101,18 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.CounterValue,
 		float64(status.PolicyRevokedSessionsTotal),
 	)
+	// #11503: process-global unzoned-policy cause counters are exported as
+	// direction-specific packet-denial totals.
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceUnzonedIngressDenied,
+		prometheus.CounterValue,
+		float64(status.UnzonedIngressDeniedTotal),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		c.userspaceUnzonedEgressDenied,
+		prometheus.CounterValue,
+		float64(status.UnzonedEgressDeniedTotal),
+	)
 	// #4800: the publish + replication legs of the new-flow-install
 	// contention surface. Emitted unconditionally and always as complete
 	// (denominator, contended) pairs — a missing series would be

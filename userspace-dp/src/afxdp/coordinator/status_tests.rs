@@ -670,6 +670,100 @@ fn refresh_status_publishes_policy_revoked_sessions_total_10021() {
          ProcessStatus (#10021)"
     );
 }
+
+/// #11503: exercise both counted unzoned-denial directions and the real
+/// refresh_status ProcessStatus/snapshot projection. The existing #9385 policy
+/// test pins that side-effect-free re-derivation counts neither direction.
+#[test]
+fn unzoned_policy_denial_counters_reach_status_and_policy_snapshot_11503() {
+    use std::sync::atomic::Ordering;
+
+    let ingress_counter = &crate::policy::UNZONED_INGRESS_DENIED;
+    let egress_counter = &crate::policy::UNZONED_EGRESS_DENIED;
+    let ingress_before = ingress_counter.load(Ordering::Relaxed);
+    let egress_before = egress_counter.load(Ordering::Relaxed);
+    let policy =
+        crate::policy::parse_policy_state("permit", &[], &rustc_hash::FxHashMap::default());
+    let src_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 61, 5));
+    let dst_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5));
+
+    for _ in 0..3 {
+        let result = crate::policy::evaluate_policy_result_l3_aware(
+            &policy,
+            0,
+            1,
+            src_ip,
+            dst_ip,
+            6,
+            40_000,
+            443,
+            None,
+            64,
+            true,
+        );
+        assert_eq!(result.action, crate::policy::PolicyAction::Deny);
+    }
+    for _ in 0..5 {
+        let result = crate::policy::evaluate_policy_result_l3_aware(
+            &policy,
+            1,
+            0,
+            src_ip,
+            dst_ip,
+            6,
+            40_000,
+            443,
+            None,
+            64,
+            true,
+        );
+        assert_eq!(result.action, crate::policy::PolicyAction::Deny);
+    }
+    let ingress_counted = ingress_counter.load(Ordering::Relaxed);
+    let egress_counted = egress_counter.load(Ordering::Relaxed);
+    assert_eq!(ingress_counted - ingress_before, 3);
+    assert_eq!(egress_counted - egress_before, 5);
+
+    let coordinator = Coordinator::new();
+    let mut state = crate::server::state::ServerState {
+        status: Default::default(),
+        snapshot: None,
+        afxdp: coordinator,
+        state_writer: Arc::new(crate::state_writer::StateWriter::new()),
+        quarantined_after_panic: false,
+    };
+    crate::server::helpers::status::refresh_status(&mut state);
+
+    assert_eq!(state.status.unzoned_ingress_denied_total, ingress_counted);
+    assert_eq!(state.status.unzoned_egress_denied_total, egress_counted);
+    let ingress_row = state
+        .status
+        .policy_rule_counters
+        .iter()
+        .find(|row| row.rule_id == crate::policy::UNZONED_INGRESS_DENIED_RULE_ID)
+        .expect("policy snapshot includes the unzoned-ingress cause");
+    let egress_row = state
+        .status
+        .policy_rule_counters
+        .iter()
+        .find(|row| row.rule_id == crate::policy::UNZONED_EGRESS_DENIED_RULE_ID)
+        .expect("policy snapshot includes the unzoned-egress cause");
+    assert_eq!((ingress_row.packets, ingress_row.bytes), (ingress_counted, 0));
+    assert_eq!((egress_row.packets, egress_row.bytes), (egress_counted, 0));
+    let json = serde_json::to_value(&state.status).expect("status serializes");
+    assert_eq!(json["unzoned_ingress_denied_total"], ingress_counted);
+    assert_eq!(json["unzoned_egress_denied_total"], egress_counted);
+    assert_eq!(
+        json["policy_rule_counters"]
+            .as_array()
+            .expect("policy counter snapshot is an array")
+            .iter()
+            .find(|row| row["rule_id"] == crate::policy::UNZONED_INGRESS_DENIED_RULE_ID)
+            .expect("ingress cause row serializes")["packets"],
+        ingress_counted
+    );
+}
+
 /// #10069: delegated slow-path status must cross the real server projection
 /// boundary. Seed the coordinator's retained status, run `refresh_status`, and
 /// inspect serialized `ProcessStatus` so the operator-facing field cannot

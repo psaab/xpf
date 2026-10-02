@@ -396,6 +396,8 @@ pub(crate) fn run() -> Result<(), String> {
             neg_neigh_fast_fail_total: 0,
             pending_neigh_duplicate_drops_total: 0,
             policy_revoked_sessions_total: 0,
+            unzoned_ingress_denied_total: 0,
+            unzoned_egress_denied_total: 0,
             pending_neigh_decap_drops_total: 0,
             source_nat_match_consulted_total: 0,
             source_nat_match_matched_total: 0,
