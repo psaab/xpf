@@ -522,10 +522,12 @@ func (s *Store) commitConfirmedLocked(minutes int, principal string) (*config.Co
 		return nil, fmt.Errorf("commit check failed: %w", err)
 	}
 
-	if minutes <= 0 {
+	if minutes < 0 {
+		return nil, fmt.Errorf("commit confirmed: timeout must be non-negative")
+	}
+	if minutes == 0 {
 		minutes = 10
 	}
-	// #4868: bound the confirm window. Without an upper bound a large value
 	// overflows `time.Duration(minutes)*time.Minute` (int64 nanoseconds) below,
 	// yielding a wrapped/negative deadline that fires an immediate or wrong
 	// auto-rollback AFTER the candidate has already been promoted. Reject
