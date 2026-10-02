@@ -50,6 +50,8 @@ check MAIN_ECMP_INLINE_LEAK FAIL "$GW" "default proto static
     nexthop via 172.16.50.1 dev ge-0-0-2.50 weight 1"
 NH4=$'id 103 group 101/102\nid 101 via 172.16.80.1 dev ge-0-0-2.80 scope link\nid 102 via 172.16.50.1 dev ge-0-0-2.50 scope link'
 check MAIN_ECMP_NHID_LEAK FAIL "$GW" "default nhid 103 proto static" "$NH4"
+NH4_WEIGHTED=$'id 103 group 101,5/102,11\nid 101 via 172.16.50.1 dev ge-0-0-2.80 scope link\nid 102 via 172.16.60.1 dev ge-0-0-2.50 scope link'
+check MAIN_ECMP_NHID_WEIGHTED_CLEAN PASS "$GW" "default nhid 103 proto static" "$NH4_WEIGHTED"
 check MAIN_PROBE_ERROR_STRING_V6 FAIL "$GW6" "ip -6 route show failed"
 NH6=$'id 203 group 201/202\nid 201 via 2001:559:8585:80::1 dev ge-0-0-2.80 scope link\nid 202 via 2001:559:8585:50::1 dev ge-0-0-2.50 scope link'
 check MAIN_ECMP_NHID_LEAK_V6 FAIL "$GW6" "default nhid 203 proto static" "$NH6"
