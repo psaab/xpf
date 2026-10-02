@@ -614,14 +614,14 @@ func (c *CLI) showNATSourceRuleSet(cfg *config.Config, rsName string) error {
 			srcMatch := natshow.RuleMatchSource(rule)
 			dstMatch := natshow.RuleMatchDestination(rule)
 			fmt.Printf("    Match: source %s destination %s\n", srcMatch, dstMatch)
-			// #7473
-			if line := natNotInstalledLine(sourceNATRuleNotInstalled(cfg, rule), true); line != "" {
+			excludedReason := sourceNATRuleNotInstalled(cfg, rule)
+			if line := natNotInstalledLine(excludedReason, true); line != "" {
 				fmt.Println("  " + line)
 			}
 			fmt.Printf("    Action: %s\n", action)
 
-			// Show hit counters if dataplane is loaded
-			if c.dp != nil && cr != nil {
+			// A refused rule owns no live translation counter.
+			if c.dp != nil && cr != nil && excludedReason == "" {
 				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeSource, rs.Name, rule.Name)
 				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
@@ -666,13 +666,12 @@ func (c *CLI) showNATSourceRuleAll(cfg *config.Config) error {
 			fmt.Printf("Rule-set: %-20s Rule: %-12s %s -> %s  Action: %s\n",
 				rs.Name, rule.Name, rs.FromZone, rs.ToZone, action)
 			fmt.Printf("  Match: source %s destination %s\n", srcMatch, dstMatch)
-			// #7473: without this the translation-hit 0 printed below reads as
-			// "no traffic matched" for a rule the builder never installed.
-			if line := natNotInstalledLine(sourceNATRuleNotInstalled(cfg, rule), true); line != "" {
+			excludedReason := sourceNATRuleNotInstalled(cfg, rule)
+			if line := natNotInstalledLine(excludedReason, true); line != "" {
 				fmt.Println(line)
 			}
 
-			if c.dp != nil && cr != nil {
+			if c.dp != nil && cr != nil && excludedReason == "" {
 				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeSource, rs.Name, rule.Name)
 				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
@@ -751,9 +750,9 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 		fmt.Printf("  From zone: %s, To zone: %s\n", rs.FromZone, rs.ToZone)
 		for _, rule := range rs.Rules {
 			fmt.Printf("  Rule: %s\n", rule.Name)
-			// #7473: annotate before the match/pool lines, so the operator sees
-			// the rule is not armed before reading what it claims to translate.
-			if line := natNotInstalledLine(destNATRuleNotInstalled(cfg, rule), false); line != "" {
+			// A refused rule owns no live translation counter.
+			excludedReason := destNATRuleNotInstalled(cfg, rule)
+			if line := natNotInstalledLine(excludedReason, false); line != "" {
 				fmt.Println("  " + line)
 			}
 			if rule.Match.DestinationAddress != "" {
@@ -766,8 +765,8 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 				fmt.Printf("    Then pool: %s\n", rule.Then.PoolName)
 			}
 
-			// Show hit counters if dataplane is loaded
-			if c.dp != nil && cr != nil {
+			// Show hit counters if dataplane is loaded and the rule was installed.
+			if c.dp != nil && cr != nil && excludedReason == "" {
 				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeDest, rs.Name, rule.Name)
 				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
@@ -840,11 +839,14 @@ func (c *CLI) showNATDestinationSummary(cfg *config.Config) error {
 				if rule.Then.PoolName == "" {
 					continue
 				}
-				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeDest, rs.Name, rule.Name)
-				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
-					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
-					if err == nil {
-						poolHits[rule.Then.PoolName] += int(cnt.Packets)
+				excludedReason := destNATRuleNotInstalled(cfg, rule)
+				if excludedReason == "" {
+					ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeDest, rs.Name, rule.Name)
+					if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
+						cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
+						if err == nil {
+							poolHits[rule.Then.PoolName] += int(cnt.Packets)
+						}
 					}
 				}
 			}
@@ -966,30 +968,18 @@ func (c *CLI) showNATDestinationPool(cfg *config.Config, poolName string) error 
 			fmt.Printf("  Port: %d\n", pool.Port)
 		}
 
-		// Show which rule-sets reference this pool
+		// Show referencing rules and sum hits only from installed rules.
+		var totalPkts, totalBytes uint64
 		for _, rs := range dnat.RuleSets {
 			for _, rule := range rs.Rules {
-				if rule.Then.PoolName == name {
-					fmt.Printf("  Referenced by: %s/%s (from %s)\n",
-						rs.Name, rule.Name, rs.FromZone)
-					// #7473: a referencing rule the builder excluded does not
-					// actually reach this pool; without the annotation the
-					// reference reads as a live translation path.
-					if line := natNotInstalledLine(destNATRuleNotInstalled(cfg, rule), false); line != "" {
-						fmt.Println("  " + line)
-					}
+				if rule.Then.PoolName != name {
+					continue
 				}
-			}
-		}
-
-		// Show hit counters from all rules referencing this pool
-		if c.dp != nil && cr != nil {
-			var totalPkts, totalBytes uint64
-			for _, rs := range dnat.RuleSets {
-				for _, rule := range rs.Rules {
-					if rule.Then.PoolName != name {
-						continue
-					}
+				excludedReason := destNATRuleNotInstalled(cfg, rule)
+				if line := natNotInstalledLine(excludedReason, false); line != "" {
+					fmt.Println("  " + line)
+				}
+				if c.dp != nil && cr != nil && excludedReason == "" {
 					ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeDest, rs.Name, rule.Name)
 					if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 						cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
@@ -1000,6 +990,8 @@ func (c *CLI) showNATDestinationPool(cfg *config.Config, poolName string) error 
 					}
 				}
 			}
+		}
+		if c.dp != nil && cr != nil {
 			fmt.Printf("  Total hits: %d packets  %d bytes\n", totalPkts, totalBytes)
 		}
 		fmt.Println()
@@ -1036,8 +1028,8 @@ func (c *CLI) showNATDestinationRuleSet(cfg *config.Config, rsName string) error
 			// destination rule rendered as 0.0.0.0/0 here too (#7363).
 			dstMatch := natshow.RuleMatchDestination(rule)
 			fmt.Printf("    Match destination-address: %s\n", dstMatch)
-			// #7473
-			if line := natNotInstalledLine(destNATRuleNotInstalled(cfg, rule), false); line != "" {
+			excludedReason := destNATRuleNotInstalled(cfg, rule)
+			if line := natNotInstalledLine(excludedReason, false); line != "" {
 				fmt.Println("  " + line)
 			}
 			if rule.Match.DestinationPort != 0 {
@@ -1049,8 +1041,8 @@ func (c *CLI) showNATDestinationRuleSet(cfg *config.Config, rsName string) error
 			}
 			fmt.Printf("    Action: %s\n", action)
 
-			// Show hit counters if dataplane is loaded
-			if c.dp != nil && cr != nil {
+			// A refused rule owns no live translation counter.
+			if c.dp != nil && cr != nil && excludedReason == "" {
 				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeDest, rs.Name, rule.Name)
 				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
@@ -1098,11 +1090,13 @@ func (c *CLI) showNATDestinationRuleAll(cfg *config.Config) error {
 				rs.Name, rule.Name, rs.FromZone, action)
 			fmt.Printf("  Match: destination %s\n", dstMatch)
 			// #7473: same archetype on the destination family.
-			if line := natNotInstalledLine(destNATRuleNotInstalled(cfg, rule), false); line != "" {
+			excludedReason := destNATRuleNotInstalled(cfg, rule)
+			if line := natNotInstalledLine(excludedReason, false); line != "" {
 				fmt.Println(line)
 			}
 
-			if c.dp != nil && cr != nil {
+			// A refused rule owns no live translation counter.
+			if c.dp != nil && cr != nil && excludedReason == "" {
 				ruleKey := dataplane.NATCounterKey(dataplane.NATCounterTypeDest, rs.Name, rule.Name)
 				if cid, ok := cr.NATCounterIDs[ruleKey]; ok {
 					cnt, err := c.dp.ReadNATRuleCounter(uint32(cid))
