@@ -229,6 +229,8 @@ fn run_ptb_dispatch_with_mtu_and_mirror(
     req.meta.l3_offset = 14;
     req.meta.l4_offset = 34;
     req.meta.pkt_len = frame.len() as u16;
+    // #11074/#11413: keep the transit guard on a valid unicast tuple so the
+    // dispatch reaches the egress-MTU decision under test.
     req.meta.flow_src_addr[..4].copy_from_slice(&frame[26..30]);
     req.meta.flow_dst_addr[..4].copy_from_slice(&frame[30..34]);
     req.meta.ingress_vlan_id = ingress_vlan_id;
@@ -752,8 +754,7 @@ fn ptb_unbuildable_without_same_ri_primary_counts_11437() {
     use crate::afxdp::icmp_ratelimit::global_bucket_test_lock;
 
     let _g = global_bucket_test_lock();
-    let before =
-        crate::afxdp::icmp_ptb::counters::PTB_UNBUILDABLE_TOTAL.load(Ordering::Relaxed);
+    let before = crate::afxdp::icmp_ptb::counters::PTB_UNBUILDABLE_TOTAL.load(Ordering::Relaxed);
     let mut forwarding = forwarding_for_ptb(1400);
     forwarding
         .egress
@@ -762,6 +763,11 @@ fn ptb_unbuildable_without_same_ri_primary_counts_11437() {
         .primary_v4 = None;
 
     let (bindings, _dbg, _counters, reasons) = run_ptb_dispatch_with_forwarding(forwarding);
+    assert_eq!(
+        crate::afxdp::icmp_ptb::counters::PTB_UNBUILDABLE_TOTAL.load(Ordering::Relaxed) - before,
+        1,
+        "one failed PTB construction must increment the dedicated counter"
+    );
     assert_eq!(
         bindings[0].tx_pipeline.pending_tx_local.len(),
         0,
@@ -778,13 +784,7 @@ fn ptb_unbuildable_without_same_ri_primary_counts_11437() {
         reasons.iter().any(|reason| reason == "egress_mtu_exceeded"),
         "the oversized original must still be dropped: {reasons:?}"
     );
-    assert_eq!(
-        crate::afxdp::icmp_ptb::counters::PTB_UNBUILDABLE_TOTAL.load(Ordering::Relaxed) - before,
-        1,
-        "one failed PTB construction must increment the dedicated counter"
-    );
 }
-
 
 /// #5567 PTB sibling: a BUILDABLE Packet-Too-Big is still rate-limited when the
 /// token is exhausted (rate-limiting preserved), and a buildable PTB under a
@@ -941,12 +941,8 @@ fn forwarding_for_ptb_with_unknown_tunnel(mtu: usize) -> ForwardingState {
 fn unknown_tunnel_kind_mtu_forwards_and_counts_9901() {
     let before =
         crate::afxdp::icmp_ptb::counters::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL.load(Ordering::Relaxed);
-    let (bindings, _dbg, _counters, reasons) = run_ptb_dispatch_full(
-        forwarding_for_ptb_with_unknown_tunnel(1400),
-        0,
-        true,
-        7,
-    );
+    let (bindings, _dbg, _counters, reasons) =
+        run_ptb_dispatch_full(forwarding_for_ptb_with_unknown_tunnel(1400), 0, true, 7);
     assert_eq!(
         crate::afxdp::icmp_ptb::counters::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL.load(Ordering::Relaxed)
             - before,
