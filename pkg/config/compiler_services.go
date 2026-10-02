@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -1588,6 +1589,16 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 		if err := compileDHCPRelay(relayNode, fo); err != nil {
 			return err
 		}
+		if err := validateDHCPRelayV4Config11693(fo.DHCPRelay); err != nil {
+			if opts.lenientDHCPRelayV4Config {
+				if warnings != nil {
+					*warnings = append(*warnings,
+						fmt.Sprintf("DHCPRelay v4 validation (downgraded to warning on tolerant path): %v", err))
+				}
+			} else {
+				return err
+			}
+		}
 	}
 
 	// #9553: compile the DHCPv6 family separately from the DHCPv4 relay. The
@@ -2087,6 +2098,61 @@ func compileDHCPRelay(node *Node, fo *ForwardingOptionsConfig) error {
 	}
 
 	fo.DHCPRelay = relay
+	return nil
+}
+
+// IsUsableDHCPRelayV4ServerIP reports whether ip can be used as a DHCPv4
+// relay's upstream unicast server. The strict validator and runtime share
+// this predicate so tolerant and peer-synced configurations get the same belt.
+func IsUsableDHCPRelayV4ServerIP(ip net.IP) bool {
+	return ip != nil && ip.To4() != nil && !ip.IsUnspecified() &&
+		!ip.IsMulticast() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()
+}
+
+// validateDHCPRelayV4Config11693 rejects DHCPv4 relay configurations whose
+// active server-group cannot send to a usable IPv4 unicast server.
+func validateDHCPRelayV4Config11693(relay *DHCPRelayConfig) error {
+	if relay == nil {
+		return nil
+	}
+
+	serverGroupNames := make([]string, 0, len(relay.ServerGroups))
+	for name := range relay.ServerGroups {
+		serverGroupNames = append(serverGroupNames, name)
+	}
+	sort.Strings(serverGroupNames)
+	for _, name := range serverGroupNames {
+		sg := relay.ServerGroups[name]
+		if sg == nil || len(sg.Servers) == 0 {
+			return fmt.Errorf("forwarding-options dhcp-relay server-group %q: at least one IPv4 server is required (#11693)", name)
+		}
+		for _, raw := range sg.Servers {
+			ip := net.ParseIP(raw)
+			if !IsUsableDHCPRelayV4ServerIP(ip) {
+				return fmt.Errorf("forwarding-options dhcp-relay server-group %q: %q is not a usable IPv4 unicast server address (#11693)", name, raw)
+			}
+		}
+	}
+
+	groupNames := make([]string, 0, len(relay.Groups))
+	for name := range relay.Groups {
+		groupNames = append(groupNames, name)
+	}
+	sort.Strings(groupNames)
+	for _, name := range groupNames {
+		group := relay.Groups[name]
+		if group == nil {
+			return fmt.Errorf("forwarding-options dhcp-relay group %q: group definition is empty (#11693)", name)
+		}
+		serverGroupName := group.ActiveServerGroup
+		if serverGroupName == "" {
+			return fmt.Errorf("forwarding-options dhcp-relay group %q: active-server-group is required (#11693)", name)
+		}
+		sg := relay.ServerGroups[serverGroupName]
+		if sg == nil || len(sg.Servers) == 0 {
+			return fmt.Errorf("forwarding-options dhcp-relay group %q: active server-group %q is undefined or empty (#11693)", name, serverGroupName)
+		}
+	}
 	return nil
 }
 

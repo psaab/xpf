@@ -873,9 +873,17 @@ func computeDesired(cfg *config.DHCPRelayConfig, resolveIfName func(string) stri
 	sort.Strings(groupNames)
 	for _, gname := range groupNames {
 		group := cfg.Groups[gname]
+		if group == nil {
+			slog.Warn("dhcp-relay: group is empty", "group", gname)
+			continue
+		}
 		sgName := group.ActiveServerGroup
+		if sgName == "" {
+			slog.Warn("dhcp-relay: active server group is empty", "group", group.Name)
+			continue
+		}
 		sg, ok := cfg.ServerGroups[sgName]
-		if !ok {
+		if !ok || sg == nil {
 			slog.Warn("dhcp-relay: server group not found",
 				"group", group.Name, "server_group", sgName)
 			continue
@@ -908,6 +916,11 @@ func computeDesired(cfg *config.DHCPRelayConfig, resolveIfName func(string) stri
 			// rather than blackholing relayed DISCOVERs (#5557).
 			if ip.To4() == nil {
 				slog.Warn("dhcp-relay: ignoring non-IPv4 server (DHCPv4 relay binds udp4)",
+					"group", group.Name, "server", s)
+				continue
+			}
+			if !config.IsUsableDHCPRelayV4ServerIP(ip) {
+				slog.Warn("dhcp-relay: ignoring unusable server IP",
 					"group", group.Name, "server", s)
 				continue
 			}
