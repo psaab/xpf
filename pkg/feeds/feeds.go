@@ -219,9 +219,13 @@ func checkFeedRedirect(req *http.Request, via []*http.Request) error {
 
 // Manager manages dynamic address feed servers and their periodic updates.
 type Manager struct {
-	mu     sync.RWMutex
-	feeds  map[string]*feedState // keyed by feed-name (or feed-server name for single-feed servers)
-	client *http.Client
+	mu    sync.RWMutex
+	feeds map[string]*feedState // keyed by feed-name (or feed-server name for single-feed servers)
+	// shrinkHistory retains each feed's acknowledged shrink epoch across
+	// same-manager removal/recreation. It is intentionally manager-lifetime
+	// state; it is not a durable config store.
+	shrinkHistory map[string]feedShrinkHistory
+	client        *http.Client
 
 	// privateFeedAllowlist is the explicit lab override for destinations that
 	// would otherwise be refused by the feed SSRF guard. It is global to this
@@ -250,6 +254,11 @@ type Manager struct {
 	now func() time.Time
 }
 
+type feedShrinkHistory struct {
+	highWaterCount int
+	highWaterHash  [32]byte
+}
+
 type feedState struct {
 	name string // feed-name or server name
 	url  string // fully resolved URL
@@ -259,13 +268,17 @@ type feedState struct {
 	// drop-after-N-seconds opt-in.
 	holdInterval time.Duration
 	shrinkGuard  shrinkGuardThresholds
+	// A feed's cumulative-shrink baseline is the largest installed set in the
+	// current epoch. It decays only when that exact shrink candidate is
+	// acknowledged. Manager history preserves it across same-name recreation.
+	shrinkHighWaterCount int
+	shrinkHighWaterHash  [32]byte
 
 	// The active refused candidate and one-shot acknowledgement are runtime
 	// status, not persisted across a producer replacement. The refusal counter,
 	// candidate sequence, and warning cadence survive same-name Apply swaps.
-	// The baseline hash pins the last-good snapshot the delta was reviewed
-	// against; IDs restart after recreate/restart, so the candidate tuple alone
-	// cannot distinguish the same candidate recurring under a different baseline.
+	// The baseline hash pins the installed snapshot reviewed against the delta;
+	// the candidate old count may be the epoch high-water count instead.
 	shrinkRefused           bool
 	shrinkRefusalCount      uint64
 	shrinkRefusalID         uint64
@@ -273,6 +286,7 @@ type feedState struct {
 	shrinkBaselineHash      [32]byte
 	shrinkCandidateOldCount int
 	shrinkCandidateNewCount int
+	shrinkCandidateReason   string
 	shrinkLastWarn          time.Time
 	shrinkAckPending        bool
 	shrinkAckRefusalID      uint64
@@ -341,7 +355,8 @@ type feedState struct {
 // identical refetch retries the apply on the normal refresh cadence (#5646).
 func New(onUpdate func() error) *Manager {
 	return &Manager{
-		feeds: make(map[string]*feedState),
+		feeds:         make(map[string]*feedState),
+		shrinkHistory: make(map[string]feedShrinkHistory),
 		client: &http.Client{
 			Timeout: httpClientTimeout,
 			// An explicit transport prevents HTTP(S)_PROXY and ALL_PROXY
@@ -753,6 +768,9 @@ func (m *Manager) Apply(ctx context.Context, daCfg *config.DynamicAddressConfig)
 		// last-good snapshot so there is no fail-open window (#5282).
 		if prev, ok := old[p.name]; ok {
 			carryForwardSnapshot(fs, prev)
+		} else if history, ok := m.shrinkHistory[p.name]; ok {
+			fs.shrinkHighWaterCount = history.highWaterCount
+			fs.shrinkHighWaterHash = history.highWaterHash
 		}
 		newFeeds[p.name] = fs
 		warnPlaintextFeed(p.name, p.url)
@@ -798,6 +816,8 @@ func carryForwardSnapshot(dst, src *feedState) {
 	dst.shrinkRefusalCount = src.shrinkRefusalCount
 	dst.shrinkRefusalID = src.shrinkRefusalID
 	dst.shrinkLastWarn = src.shrinkLastWarn
+	dst.shrinkHighWaterCount = src.shrinkHighWaterCount
+	dst.shrinkHighWaterHash = src.shrinkHighWaterHash
 	if !src.hasSnapshot || len(src.prefixes) == 0 {
 		return
 	}
@@ -1045,6 +1065,10 @@ func (m *Manager) AllFeeds() map[string]FeedInfo {
 			ackHash = fmt.Sprintf("%x", fs.shrinkAckCandidateHash)
 			ackBaselineHash = fmt.Sprintf("%x", fs.shrinkAckBaselineHash)
 		}
+		highWaterHash := ""
+		if fs.shrinkHighWaterCount > 0 {
+			highWaterHash = fmt.Sprintf("%x", fs.shrinkHighWaterHash)
+		}
 		shrinkPolicy := thresholdsForFeed(fs)
 		result[name] = FeedInfo{
 			URL:                         fs.url,
@@ -1069,6 +1093,9 @@ func (m *Manager) AllFeeds() map[string]FeedInfo {
 			ShrinkAckActor:              fs.shrinkAckActor,
 			ShrinkAckHash:               ackHash,
 			ShrinkAckBaselineHash:       ackBaselineHash,
+			ShrinkCandidateReason:       fs.shrinkCandidateReason,
+			ShrinkGuardHighWaterCount:   fs.shrinkHighWaterCount,
+			ShrinkGuardHighWaterHash:    highWaterHash,
 			ShrinkAckReason:             fs.shrinkAckReason,
 			ShrinkGuardMinOldCount:      shrinkPolicy.minOldCount,
 			ShrinkGuardMinRetainPercent: shrinkPolicy.minRetainPercent,
@@ -1114,13 +1141,18 @@ type FeedInfo struct {
 	// manager-lifetime per-feed counter. The candidate tuple is present only
 	// while a refusal remains current and binds the delta to the last-good
 	// baseline hash.
-	ShrinkRefused               bool
-	ShrinkRefusalCount          uint64
-	ShrinkRefusalID             uint64
-	ShrinkCandidateHash         string
-	ShrinkBaselineHash          string
+	ShrinkRefused       bool
+	ShrinkRefusalCount  uint64
+	ShrinkRefusalID     uint64
+	ShrinkCandidateHash string
+	ShrinkBaselineHash  string
+	// Candidate old count is the high-water count for cumulative shrink, or
+	// current count for content-overlap refusals.
 	ShrinkCandidateOldCount     int
 	ShrinkCandidateNewCount     int
+	ShrinkCandidateReason       string
+	ShrinkGuardHighWaterCount   int
+	ShrinkGuardHighWaterHash    string
 	ShrinkAckPending            bool
 	ShrinkAckActor              string
 	ShrinkAckHash               string
@@ -1611,8 +1643,41 @@ func clearShrinkCandidate(fs *feedState) {
 	fs.shrinkCandidateHash = [32]byte{}
 	fs.shrinkBaselineHash = [32]byte{}
 	fs.shrinkCandidateOldCount = 0
+	fs.shrinkCandidateReason = ""
 	fs.shrinkCandidateNewCount = 0
 	clearShrinkAck(fs)
+}
+func retainedPrefixCount(oldPrefixes, candidate []string) int {
+	oldIndex, candidateIndex, retained := 0, 0, 0
+	for oldIndex < len(oldPrefixes) && candidateIndex < len(candidate) {
+		switch {
+		case oldPrefixes[oldIndex] < candidate[candidateIndex]:
+			oldIndex++
+		case oldPrefixes[oldIndex] > candidate[candidateIndex]:
+			candidateIndex++
+		default:
+			retained++
+			oldIndex++
+			candidateIndex++
+		}
+	}
+	return retained
+}
+
+func contentChurnTripped(oldPrefixes, candidate []string, thresholds shrinkGuardThresholds) bool {
+	oldCount := len(oldPrefixes)
+	if !validShrinkGuardThresholds(thresholds) || oldCount < thresholds.minOldCount {
+		return false
+	}
+	return int64(retainedPrefixCount(oldPrefixes, candidate))*100 <
+		int64(oldCount)*int64(thresholds.minRetainPercent)
+}
+
+func (m *Manager) rememberShrinkHighWaterLocked(name string, count int, hash [32]byte) {
+	if m.shrinkHistory == nil {
+		m.shrinkHistory = make(map[string]feedShrinkHistory)
+	}
+	m.shrinkHistory[name] = feedShrinkHistory{highWaterCount: count, highWaterHash: hash}
 }
 
 func (fs *feedState) shrinkCandidateMatches(hash, baselineHash [32]byte, oldCount, newCount int) bool {
@@ -1671,12 +1736,12 @@ func thresholdsForFeed(fs *feedState) shrinkGuardThresholds {
 // content unpublished and the next identical refetch RE-FIRES onUpdate to retry
 // the apply. The retry fires on the normal refresh cadence (one publish attempt
 // per fetch), never a tight loop.
-// Drastic-shrink guard (#11059): a non-empty, non-whole-space fetch can still
-// be a SHRUNK stub (5 prefixes where 50k stood). installSnapshot refuses such
-// a fetch — retaining last-good, marking stale, alarming, publishing nothing —
-// unless the shrink was operator-acknowledged (AcknowledgeFeedShrink). Bootstrap
-// (no prior snapshot) is exempt; growth, equal counts, and small-feed churn
-// install normally.
+// The shrink guard compares counts with the per-feed epoch high-water baseline
+// and also checks retained exact-prefix overlap with the current last-good set.
+// Refusals retain the installed set, mark stale, alarm, and publish nothing
+// until the exact candidate is acknowledged. Bootstrap is installable; a
+// same-manager re-created feed with fewer prefixes or changed same-sized
+// content is installed with an audit warning instead of a silent bootstrap.
 func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	m.mu.Lock()
 	// Staleness suppress (#9916 F-133): Apply swaps the producer set without
@@ -1712,29 +1777,62 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	needsPublish := !fs.hasPublished || fs.publishedHash != res.hash
 	oldCount := len(fs.prefixes)
 	baselineHash := fs.hash
-	// Drastic-shrink guard (#11059). Acknowledgements match the refused
-	// candidate's sequence, content hash, baseline hash, and old/new counts.
+	if fs.hasSnapshot && fs.shrinkHighWaterCount == 0 {
+		fs.shrinkHighWaterCount = oldCount
+		fs.shrinkHighWaterHash = fs.hash
+	}
+	thresholds := thresholdsForFeed(fs)
+	highWaterCount := fs.shrinkHighWaterCount
+	if highWaterCount == 0 {
+		highWaterCount = oldCount
+	}
+	shrinkTripped := fs.hasSnapshot && fs.hash != res.hash &&
+		shrinkGuardTrippedWithThresholds(highWaterCount, len(res.prefixes), thresholds)
+	churnTripped := fs.hasSnapshot &&
+		contentChurnTripped(fs.prefixes, res.prefixes, thresholds)
+	bootstrapDiffersFromHighWater := !fs.hasSnapshot && fs.shrinkHighWaterCount > 0 &&
+		len(res.prefixes) <= fs.shrinkHighWaterCount &&
+		(len(res.prefixes) < fs.shrinkHighWaterCount || res.hash != fs.shrinkHighWaterHash)
+	rememberedHighWaterCount := fs.shrinkHighWaterCount
+	rememberedHighWaterHash := fs.shrinkHighWaterHash
+
+	// Refusals and their acknowledgements bind to the exact content/baseline
+	// tuple. For a cumulative shrink, old_count is the epoch high-water count;
+	// for content churn alone, it is the currently installed count.
 	guardBypass := false
 	guardActor := ""
 	guardReason := ""
 	var guardBaselineHash [32]byte
-	if fs.hasSnapshot && shrinkGuardTrippedWithThresholds(oldCount, len(res.prefixes), thresholdsForFeed(fs)) {
+	candidateOldCount := oldCount
+	var candidateReason string
+	if shrinkTripped {
+		candidateOldCount = highWaterCount
+		candidateReason = "cumulative high-water shrink"
+	}
+	if churnTripped {
+		if candidateReason != "" {
+			candidateReason += " and "
+		}
+		candidateReason += "retained content overlap below floor"
+	}
+	if fs.hasSnapshot && (shrinkTripped || churnTripped) {
 		newCount := len(res.prefixes)
-		if fs.shrinkAckMatches(res.hash, baselineHash, oldCount, newCount) {
+		if fs.shrinkAckMatches(res.hash, baselineHash, candidateOldCount, newCount) {
 			guardBypass = true
 			guardActor = fs.shrinkAckActor
 			guardReason = fs.shrinkAckReason
 			guardBaselineHash = fs.shrinkAckBaselineHash
 			clearShrinkAck(fs)
 		} else {
-			sameCandidate := fs.shrinkCandidateMatches(res.hash, baselineHash, oldCount, newCount)
+			sameCandidate := fs.shrinkCandidateMatches(res.hash, baselineHash, candidateOldCount, newCount)
 			if !sameCandidate {
 				fs.shrinkRefusalID++
 				fs.shrinkRefused = true
 				fs.shrinkCandidateHash = res.hash
 				fs.shrinkBaselineHash = baselineHash
-				fs.shrinkCandidateOldCount = oldCount
+				fs.shrinkCandidateOldCount = candidateOldCount
 				fs.shrinkCandidateNewCount = newCount
+				fs.shrinkCandidateReason = candidateReason
 				clearShrinkAck(fs)
 			}
 			fs.shrinkRefusalCount++
@@ -1745,26 +1843,39 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 			if warn {
 				fs.shrinkLastWarn = now
 			}
-			thresholds := thresholdsForFeed(fs)
-			ferr := fmt.Errorf(
-				"drastic shrink refused: candidate %d prefixes vs %d last-good; retain-percent floor %d%% and minimum drop %d; retaining last-good snapshot",
-				newCount, oldCount, thresholds.minRetainPercent, thresholds.minDrop)
+			var ferr error
+			if shrinkTripped {
+				ferr = fmt.Errorf(
+					"drastic shrink refused against epoch high-water baseline: candidate %d prefixes vs %d high-water (%d currently installed); retain-percent floor %d%% and minimum drop %d; retaining last-good snapshot",
+					newCount, highWaterCount, oldCount, thresholds.minRetainPercent, thresholds.minDrop)
+			} else {
+				ferr = fmt.Errorf(
+					"content overlap below floor: candidate %d prefixes retain less than %d%% of the %d currently installed prefixes; retaining last-good snapshot",
+					newCount, thresholds.minRetainPercent, oldCount)
+			}
 			failure := m.recordFailureLocked(fs, ferr)
 			refusalID := fs.shrinkRefusalID
 			refusalCount := fs.shrinkRefusalCount
+			refusalReason := fs.shrinkCandidateReason
 			candidateHash := fmt.Sprintf("%x", res.hash)
 			refusalBaselineHash := fmt.Sprintf("%x", baselineHash)
 			m.mu.Unlock()
+			logMessage := "dynamic-address: feed drastic shrink REFUSED — retaining last-good snapshot"
+			if churnTripped && !shrinkTripped {
+				logMessage = "dynamic-address: feed content-churn REFUSED — retaining last-good snapshot"
+			}
 			if warn {
-				slog.Warn("dynamic-address: feed drastic shrink REFUSED — retaining last-good snapshot",
+				slog.Warn(logMessage,
 					"name", fs.name, "refusal_id", refusalID, "candidate_hash", candidateHash,
 					"baseline_hash", refusalBaselineHash, "candidate_prefixes", newCount,
-					"previous_prefixes", oldCount, "refusal_count", refusalCount)
+					"previous_prefixes", oldCount, "guard_baseline_prefixes", candidateOldCount,
+					"guard_reason", refusalReason, "refusal_count", refusalCount)
 			} else {
-				slog.Debug("dynamic-address: feed drastic shrink still REFUSED — retaining last-good snapshot",
+				slog.Debug(strings.Replace(logMessage, " REFUSED", " still REFUSED", 1),
 					"name", fs.name, "refusal_id", refusalID, "candidate_hash", candidateHash,
 					"baseline_hash", refusalBaselineHash, "candidate_prefixes", newCount,
-					"previous_prefixes", oldCount, "refusal_count", refusalCount)
+					"previous_prefixes", oldCount, "guard_baseline_prefixes", candidateOldCount,
+					"guard_reason", refusalReason, "refusal_count", refusalCount)
 			}
 			m.finishFailure(fs, failure, false)
 			return
@@ -1781,10 +1892,22 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	fs.staleSince = time.Time{}
 	fs.invalidLines = res.invalidLines
 	fs.invalidSample = res.invalidSample
+	newCount := len(res.prefixes)
+	if guardBypass || newCount >= fs.shrinkHighWaterCount {
+		fs.shrinkHighWaterCount = newCount
+		fs.shrinkHighWaterHash = res.hash
+	}
+	m.rememberShrinkHighWaterLocked(fs.name, fs.shrinkHighWaterCount, fs.shrinkHighWaterHash)
 	// Any successful install re-baselines last-good and clears an outstanding
 	// refusal/acknowledgement. An ack can never apply to a later candidate.
 	clearShrinkCandidate(fs)
 	m.mu.Unlock()
+	if bootstrapDiffersFromHighWater {
+		slog.Warn("dynamic-address: bootstrap below or changed from remembered high-water — installing with audit warning",
+			"name", fs.name, "remembered_prefixes", rememberedHighWaterCount,
+			"remembered_hash", fmt.Sprintf("%x", rememberedHighWaterHash),
+			"candidate_prefixes", newCount, "candidate_hash", fmt.Sprintf("%x", res.hash))
+	}
 
 	slog.Info("dynamic-address: feed updated",
 		"name", fs.name, "prefixes", len(res.prefixes), "previous", oldCount,

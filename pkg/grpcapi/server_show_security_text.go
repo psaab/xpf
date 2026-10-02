@@ -1025,8 +1025,10 @@ func (s *Server) showDynamicAddress(cfg *config.Config, buf *strings.Builder) {
 			if minDrop < 1 || minDrop >= config.MaxDynamicAddressFeedPrefixes {
 				minDrop = config.DefaultDynamicAddressShrinkGuardMinDrop
 			}
-			fmt.Fprintf(buf, "  Shrink guard: old >= %d prefixes; refuse below %d%% retained with a drop of at least %d\n",
+			fmt.Fprintf(buf, "  Shrink guard: high-water >= %d prefixes; refuse candidates below %d%% of baseline with a drop of at least %d\n",
 				minOld, minRetain, minDrop)
+			fmt.Fprintf(buf, "  Content churn guard: installed >= %d prefixes; refuse below %d%% exact-prefix overlap\n",
+				minOld, minRetain)
 			for _, runtimeName := range runtimeNames {
 				fi, ok := runtimeFeeds[runtimeName]
 				if !ok {
@@ -1088,13 +1090,20 @@ func renderDynamicAddressFeedStatusText(buf *strings.Builder, indent string, fi 
 	if fi.ShrinkRefusalCount > 0 {
 		fmt.Fprintf(buf, "%sShrink refusals: %d\n", indent, fi.ShrinkRefusalCount)
 	}
+	if fi.ShrinkGuardHighWaterCount > 0 {
+		fmt.Fprintf(buf, "%sShrink high-water baseline: %d prefixes sha256=%s\n",
+			indent, fi.ShrinkGuardHighWaterCount, fi.ShrinkGuardHighWaterHash)
+	}
 	if fi.ShrinkRefused {
 		if fi.Hash != "" {
 			fmt.Fprintf(buf, "%sInstalled snapshot sha256=%s\n", indent, fi.Hash)
 		}
-		fmt.Fprintf(buf, "%sSHRINK-HELD: candidate %d/%d prefixes; refusal #%d; candidate_sha256=%s baseline_sha256=%s\n",
+		fmt.Fprintf(buf, "%sSHRINK-HELD: candidate %d prefixes vs guard baseline %d; refusal #%d; candidate_sha256=%s baseline_sha256=%s\n",
 			indent, fi.ShrinkCandidateNewCount, fi.ShrinkCandidateOldCount,
 			fi.ShrinkRefusalID, fi.ShrinkCandidateHash, fi.ShrinkBaselineHash)
+		if fi.ShrinkCandidateReason != "" {
+			fmt.Fprintf(buf, "%sGuard reason: %s\n", indent, fi.ShrinkCandidateReason)
+		}
 		if fi.ShrinkAckPending {
 			fmt.Fprintf(buf, "%sSHRINK-ACKED: exact candidate #%d awaiting next fetch\n", indent, fi.ShrinkRefusalID)
 			fmt.Fprintf(buf, "%s  Acked candidate_sha256=%s baseline_sha256=%s by %s; reason: %q\n",

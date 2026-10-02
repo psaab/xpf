@@ -70,11 +70,13 @@ func TestShowDynamicAddressReportsShrinkRefusal(t *testing.T) {
 					Prefixes: 100, Hash: "installedhash", ShrinkRefused: true, ShrinkRefusalCount: 3,
 					ShrinkRefusalID: 9, ShrinkCandidateHash: "candidatehash", ShrinkBaselineHash: "installedhash",
 					ShrinkCandidateOldCount: 100, ShrinkCandidateNewCount: 49,
-					ShrinkAckPending: true, ShrinkAckActor: "operator=alice",
-					ShrinkAckHash: "candidatehash", ShrinkAckBaselineHash: "installedhash",
+					ShrinkCandidateReason: "cumulative high-water shrink",
+					ShrinkAckHash:         "candidatehash", ShrinkAckBaselineHash: "installedhash",
 					ShrinkAckReason:        "provider confirmed",
 					ShrinkGuardMinOldCount: 32, ShrinkGuardMinRetainPercent: 50,
-					ShrinkGuardMinDrop: 16,
+					ShrinkGuardMinDrop:        16,
+					ShrinkGuardHighWaterCount: 100, ShrinkGuardHighWaterHash: "highwaterhash",
+					ShrinkAckPending: true, ShrinkAckActor: "operator=alice",
 				},
 			}
 		},
@@ -83,10 +85,12 @@ func TestShowDynamicAddressReportsShrinkRefusal(t *testing.T) {
 	s.showDynamicAddress(cfg, &buf)
 	out := buf.String()
 	for _, want := range []string{
-		"Shrink guard: old >= 32 prefixes; refuse below 50% retained with a drop of at least 16",
+		"Shrink guard: high-water >= 32 prefixes; refuse candidates below 50% of baseline with a drop of at least 16",
+		"Content churn guard: installed >= 32 prefixes; refuse below 50% exact-prefix overlap",
 		"Shrink refusals: 3",
-		"Installed snapshot sha256=installedhash",
-		"SHRINK-HELD: candidate 49/100 prefixes; refusal #9; candidate_sha256=candidatehash baseline_sha256=installedhash",
+		"Shrink high-water baseline: 100 prefixes sha256=highwaterhash",
+		"SHRINK-HELD: candidate 49 prefixes vs guard baseline 100; refusal #9; candidate_sha256=candidatehash baseline_sha256=installedhash",
+		"Guard reason: cumulative high-water shrink",
 		"SHRINK-ACKED: exact candidate #9 awaiting next fetch",
 		"Acked candidate_sha256=candidatehash baseline_sha256=installedhash by operator=alice; reason: \"provider confirmed\"",
 	} {
