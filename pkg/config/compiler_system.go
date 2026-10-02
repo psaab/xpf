@@ -2893,7 +2893,18 @@ func compileSchedulers(node *Node, cfg *Config) error {
 						if sched.Days == nil {
 							sched.Days = make(map[string]*SchedulerDayWindow)
 						}
-						w := win
+						w := SchedulerDayWindow{}
+						if previous := sched.Days[name]; previous != nil {
+							w = *previous
+						}
+						if win.StartTime != "" {
+							w.StartTime = win.StartTime
+						}
+						if win.StopTime != "" {
+							w.StopTime = win.StopTime
+						}
+						w.AllDay = w.AllDay || win.AllDay
+						w.Exclude = w.Exclude || win.Exclude
 						sched.Days[name] = &w
 					}
 				}
