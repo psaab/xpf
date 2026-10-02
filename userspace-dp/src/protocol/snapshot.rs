@@ -610,11 +610,11 @@ pub(crate) struct ConfigSnapshot {
     pub neighbors: Vec<NeighborSnapshot>,
     #[serde(default)]
     pub routes: Vec<RouteSnapshot>,
-    /// Canonical route tables backed by `instance-type forwarding`. This
-    /// marker authorizes only the explicit default-instance interface for an
-    /// IPv6 link-local gateway; ordinary foreign-VRF interfaces remain refused.
-    /// Additive and omitted when empty. Protocol v41 fences older helpers,
-    /// which refuse rather than silently ignore this route authority.
+    /// Canonical route tables backed by `instance-type forwarding`. In these
+    /// tables, qualified IPv4/IPv6 gateways may use an explicit default-instance
+    /// interface in routing domain zero; ordinary foreign-VRF interfaces remain
+    /// refused. Additive and omitted when empty. Protocol v41 fences older
+    /// helpers, which refuse rather than silently ignore this route authority.
     #[serde(rename = "forwarding_tables", default, skip_serializing_if = "Vec::is_empty")]
     pub forwarding_tables: Vec<String>,
     #[serde(default)]
