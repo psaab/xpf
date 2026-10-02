@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::ForwardingGenerationStamp;
 use std::sync::atomic::AtomicU64;
 use std::sync::{MutexGuard, TryLockError};
 
@@ -895,6 +896,7 @@ impl ResolvedSessionLookup {
             lookup: SessionLookup {
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
+                forwarding_generation: ForwardingGenerationStamp::default(),
             },
             shared_entry: Some(entry),
             origin,
@@ -1179,6 +1181,7 @@ pub(super) fn lookup_session_across_scopes_with_shared(
             let lookup = SessionLookup {
                 decision: matched.decision,
                 metadata: matched.metadata,
+                forwarding_generation: matched.forwarding_generation,
             };
             if is_fabric_wire_placeholder(
                 lookup.metadata.fabric_ingress,
@@ -1262,6 +1265,7 @@ pub(super) fn probe_session_across_scopes(
             let lookup = SessionLookup {
                 decision: matched.decision,
                 metadata: matched.metadata,
+                forwarding_generation: matched.forwarding_generation,
             };
             if is_fabric_wire_placeholder(
                 lookup.metadata.fabric_ingress,
@@ -1418,6 +1422,7 @@ pub(super) fn lookup_forward_nat_for_icmp_quote_at(
         key: entry.key,
         decision: entry.decision,
         metadata: entry.metadata,
+        forwarding_generation: ForwardingGenerationStamp::default(),
     });
     let shared_match = if let Some(shared) = shared_match {
         if !crate::session::is_quarantined_routing_domain(reply_key.routing_domain)
@@ -1510,6 +1515,7 @@ fn lookup_forward_nat_across_scopes_inner(
                 key: entry.key,
                 decision: entry.decision,
                 metadata: entry.metadata,
+                forwarding_generation: ForwardingGenerationStamp::default(),
             });
         }
         return Some(local);
@@ -1525,6 +1531,7 @@ fn lookup_forward_nat_across_scopes_inner(
         key: entry.key,
         decision: entry.decision,
         metadata: entry.metadata,
+        forwarding_generation: ForwardingGenerationStamp::default(),
     })
 }
 
@@ -1700,7 +1707,11 @@ pub(super) fn build_reverse_session_from_forward_match_in_table(
         install_table_domain: 0,
         install_table_check: 0,
     };
-    SessionLookup { decision, metadata }
+    SessionLookup {
+        decision,
+        metadata,
+        forwarding_generation: ForwardingGenerationStamp::default(),
+    }
 }
 
 pub(super) fn synthesized_synced_reverse_entry(
@@ -1772,6 +1783,7 @@ pub(super) fn synthesized_synced_reverse_entry_in_table(
             key: entry.key.clone(),
             decision: entry.decision,
             metadata: entry.metadata.clone(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
         },
         now_secs,
         0,

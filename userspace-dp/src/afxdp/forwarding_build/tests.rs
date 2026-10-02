@@ -9712,6 +9712,9 @@ fn next_table_target_uses_table_lpm_without_rule_restart_9955() {
         interfaces: vec![InterfaceSnapshot {
             name: "ge-0/0/12".into(),
             ifindex: 12,
+            // The forwarding route is in blue.inet.0; #11074 requires its
+            // explicit next-hop interface to belong to that same instance.
+            routing_instance: "blue".into(),
             ..Default::default()
         }],
         routes: vec![

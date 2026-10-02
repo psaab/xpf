@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::ForwardingGenerationStamp;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(in crate::afxdp) mod commands;
@@ -326,7 +327,9 @@ fn lookup_forwarding_resolution_for_session_with_cache(
             return super::table_unavailable_resolution();
         }
     };
-    if decision.resolution.disposition == ForwardingDisposition::LocalDelivery {
+    if allow_cached_fast_path
+        && decision.resolution.disposition == ForwardingDisposition::LocalDelivery
+    {
         return decision.resolution;
     }
     if decision.resolution.tunnel_endpoint_id != 0 {
@@ -2929,6 +2932,7 @@ fn materialize_shared_session_hit(
             SessionLookup {
                 decision: replica.decision,
                 metadata: replica.metadata,
+                forwarding_generation: ForwardingGenerationStamp::default(),
             },
             !materialized,
         );
@@ -3086,6 +3090,8 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             materialize_shared_session_hit(sessions, &mut hit, forwarding, now_ns, tcp_flags)
         };
         let resolved_key = hit.key.as_ref(&flow.forward_key);
+        let forwarding_stale =
+            sessions.forwarding_resolution_is_stale(resolved.forwarding_generation);
         let session_id = shared_session_id
             .filter(|session_id| *session_id != 0)
             .unwrap_or_else(|| sessions.session_id_for(resolved_key));
@@ -3114,6 +3120,13 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             } else {
                 refreshed
             }
+        } else if forwarding_stale {
+            lookup_forwarding_resolution_for_session_without_cache(
+                forwarding,
+                dynamic_neighbors,
+                flow,
+                decision,
+            )
         } else if hit_origin.is_peer_synced() {
             lookup_forwarding_resolution_for_synced_session(
                 forwarding,
@@ -3152,7 +3165,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
             flag_install_table_purge(worker_id);
         }
-        let metadata = if keep_transient || materialize_install_failed {
+        let mut metadata = if keep_transient || materialize_install_failed {
             resolved.metadata
         } else {
             maybe_promote_synced_session_with_conntrack(
@@ -3173,6 +3186,24 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 tcp_flags,
             )
         };
+        if forwarding_stale && !keep_transient && !materialize_install_failed {
+            let owner_rg_id = matches!(
+                decision.resolution.disposition,
+                ForwardingDisposition::ForwardCandidate
+                    | ForwardingDisposition::FabricRedirect
+                    | ForwardingDisposition::HAInactive
+                    | ForwardingDisposition::LocalDelivery
+            )
+            .then(|| owner_rg_for_resolution(forwarding, decision.resolution));
+            if let Some(owner_rg_id) = owner_rg_id {
+                metadata.owner_rg_id = owner_rg_id;
+            }
+            sessions.revalidate_forwarding_resolution(
+                resolved_key,
+                decision.resolution,
+                owner_rg_id,
+            );
+        }
         return Some(ResolvedFlowSessionDecision {
             key: resolved_key.clone(),
             session_id,

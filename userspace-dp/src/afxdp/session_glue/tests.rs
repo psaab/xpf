@@ -6,7 +6,9 @@
 // session_glue/mod.rs.
 
 use super::*;
-use crate::session::{PolicyRevalidationKind, PolicyRevalidationTarget};
+use crate::session::{
+    ForwardingGenerationStamp, PolicyRevalidationKind, PolicyRevalidationTarget,
+};
 use crate::afxdp::worker_queue::WORKER_COMMAND_DRAIN_BUDGET;
 
 // #7201: `apply_worker_commands` now drains a BOUNDED PREFIX
@@ -164,6 +166,36 @@ fn test_forwarding_state() -> ForwardingState {
             primary_v6: None,
         },
     );
+    forwarding
+}
+
+fn add_live_test_key_route(forwarding: &mut ForwardingState) {
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 8),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+}
+
+fn add_live_test_key_neighbor(neighbors: &ShardedNeighborMap) {
+    neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry {
+            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x77],
+        },
+    );
+}
+
+fn test_forwarding_state_with_local_destination(ip: Ipv4Addr) -> ForwardingState {
+    let mut forwarding = test_forwarding_state();
+    forwarding.local_v4.insert(ip);
+    forwarding
+        .local_tables_v4
+        .entry(ip)
+        .or_default()
+        .insert("inet.0".to_string());
     forwarding
 }
 
@@ -4169,8 +4201,26 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
         .lock()
         .expect("commands lock")
         .push_back(WorkerCommand::DemoteOwnerRGS { owner_rgs: vec![1] });
-    let forwarding = test_forwarding_state();
+    let mut forwarding = test_forwarding_state();
+    add_live_test_key_route(&mut forwarding);
     let dynamic_neighbors = dynamic_neighbors_for_test_resolution();
+    add_live_test_key_neighbor(&dynamic_neighbors);
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    assert_eq!(
+        lookup_forwarding_resolution_for_session_without_cache(
+            &forwarding,
+            &dynamic_neighbors,
+            &flow,
+            test_decision(),
+        )
+        .disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "precondition: the failback lookup has a live route and neighbor"
+    );
     let inactive_state = BTreeMap::from([(1, inactive_ha_runtime(0))]);
 
     apply_worker_commands(
@@ -4192,11 +4242,6 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let active_state = BTreeMap::from([(1, active_ha_runtime(1))]);
-    let flow = SessionFlow {
-        src_ip: key.src_ip,
-        dst_ip: key.dst_ip,
-        forward_key: key.clone(),
-    };
 
     let resolved = resolve_flow_session_decision(
         &mut sessions,
@@ -5822,15 +5867,35 @@ fn apply_worker_commands_demote_owner_rg_rewrites_resolution_to_fabric_redirect(
     ));
 
     let ha_state = BTreeMap::from([(1, inactive_ha_runtime(now_ns / 1_000_000_000))]);
+    let mut forwarding = test_forwarding_state_with_fabric();
+    add_live_test_key_route(&mut forwarding);
+    let dynamic_neighbors = dynamic_neighbors_for_test_resolution();
+    add_live_test_key_neighbor(&dynamic_neighbors);
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    assert_eq!(
+        lookup_forwarding_resolution_for_session_without_cache(
+            &forwarding,
+            &dynamic_neighbors,
+            &flow,
+            test_decision(),
+        )
+        .disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "precondition: demotion resolves a live route and neighbor"
+    );
     let results = apply_worker_commands(
         &commands,
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
         -1,
         -1,
-        &test_forwarding_state_with_fabric(),
+        &forwarding,
         &ha_state,
-        &dynamic_neighbors_for_test_resolution(),
+        &dynamic_neighbors,
         0,
         &mut VecDeque::new(),
     );
@@ -6747,6 +6812,7 @@ fn build_reverse_session_carries_inactivity_timeout_5153() {
             key: test_key(),
             decision: test_decision(),
             metadata,
+            forwarding_generation: ForwardingGenerationStamp::default(),
         },
         1,
         0,
@@ -6767,6 +6833,7 @@ fn build_reverse_session_carries_inactivity_timeout_5153() {
             key: test_key(),
             decision: test_decision(),
             metadata: test_metadata(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
         },
         1,
         0,
@@ -7037,6 +7104,7 @@ fn reverse_session_from_tunnel_forward_bypasses_unseeded_ha_during_startup_grace
                 policy_counter_idx: 0,
                 policy_counter: None,
             },
+            forwarding_generation: ForwardingGenerationStamp::default(),
         },
         100,
         110,
@@ -7373,6 +7441,7 @@ fn reverse_session_from_split_owner_fabric_redirect_uses_fabric_return_when_clie
                 policy_counter_idx: 0,
                 policy_counter: None,
             },
+            forwarding_generation: ForwardingGenerationStamp::default(),
         },
         1,
         0,
@@ -8698,6 +8767,7 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
         lookup: SessionLookup {
             decision: test_decision(),
             metadata: test_metadata(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
         },
         shared_entry: Some(SyncedSessionEntry {
             key: key.clone(),
@@ -9239,6 +9309,7 @@ fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() 
         lookup: SessionLookup {
             decision: test_decision(),
             metadata: test_metadata(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
         },
         shared_entry: Some(SyncedSessionEntry {
             key: key.clone(),
@@ -10877,9 +10948,17 @@ fn synced_local_delivery_decision_unowned_egress() -> SessionDecision {
 #[test]
 fn refresh_owner_rgs_standby_local_delivery_forces_live_redirect_4805() {
     let mut sessions = SessionTable::new();
-    let key = test_key();
+    let local_ip = Ipv4Addr::new(192, 0, 2, 10);
+    let mut key = test_key();
+    key.dst_ip = IpAddr::V4(local_ip);
     let now_ns = monotonic_nanos();
     let now_secs = now_ns / 1_000_000_000;
+    let forwarding = test_forwarding_state_with_local_destination(local_ip);
+    assert_eq!(
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(local_ip)).disposition,
+        ForwardingDisposition::LocalDelivery,
+        "precondition: 192.0.2.10 is modeled as an inet.0 local address"
+    );
     // Peer-synced forward LocalDelivery session owned by RG2 (standby here).
     assert!(sessions.install_with_protocol_with_origin(
         key.clone(),
@@ -10899,7 +10978,7 @@ fn refresh_owner_rgs_standby_local_delivery_forces_live_redirect_4805() {
     ]);
     let items = super::commands::collect_refresh_owner_rgs_items(
         &sessions,
-        &test_forwarding_state(),
+        &forwarding,
         &ha_state,
         &Arc::new(ShardedNeighborMap::new()),
         now_secs,
@@ -10937,9 +11016,17 @@ fn refresh_owner_rgs_standby_local_delivery_forces_live_redirect_4805() {
 #[test]
 fn refresh_owner_rgs_active_owner_local_delivery_publishes_kernel_local_4805() {
     let mut sessions = SessionTable::new();
-    let key = test_key();
+    let local_ip = Ipv4Addr::new(192, 0, 2, 10);
+    let mut key = test_key();
+    key.dst_ip = IpAddr::V4(local_ip);
     let now_ns = monotonic_nanos();
     let now_secs = now_ns / 1_000_000_000;
+    let forwarding = test_forwarding_state_with_local_destination(local_ip);
+    assert_eq!(
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(local_ip)).disposition,
+        ForwardingDisposition::LocalDelivery,
+        "precondition: 192.0.2.10 is modeled as an inet.0 local address"
+    );
     // Peer-synced forward LocalDelivery session owned by RG2, ACTIVE here.
     assert!(sessions.install_with_protocol_with_origin(
         key.clone(),
@@ -10957,7 +11044,7 @@ fn refresh_owner_rgs_active_owner_local_delivery_publishes_kernel_local_4805() {
     ]);
     let items = super::commands::collect_refresh_owner_rgs_items(
         &sessions,
-        &test_forwarding_state(),
+        &forwarding,
         &ha_state,
         &Arc::new(ShardedNeighborMap::new()),
         now_secs,
@@ -11555,8 +11642,26 @@ fn install_synced_forward_5152(table: &mut SessionTable, key: &SessionKey, now_n
 #[test]
 fn refresh_owner_rgs_skips_hainactive_hold_clock_5152() {
     let neighbors = dynamic_neighbors_for_test_resolution();
-    let forwarding = test_forwarding_state(); // NO fabric -> HAInactive survives
+    add_live_test_key_neighbor(&neighbors);
+    let mut forwarding = test_forwarding_state();
+    add_live_test_key_route(&mut forwarding); // live connected route, no fabric
     let key = test_key();
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    assert_eq!(
+        lookup_forwarding_resolution_for_session_without_cache(
+            &forwarding,
+            &neighbors,
+            &flow,
+            test_decision(),
+        )
+        .disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "precondition: Case B has a live route and neighbor for the session key"
+    );
     let then = 1_000_000_000u64;
     let armed_ns = then + 302_000_000_000; // past the 300s TCP established timeout
     let act_ns = armed_ns + 1_000_000;
@@ -11607,6 +11712,14 @@ fn refresh_owner_rgs_skips_hainactive_hold_clock_5152() {
         vec![1],
         act_ns,
         act_secs,
+    );
+    let (refreshed, _, _) = sessions_b
+        .entry_with_origin(&key)
+        .expect("activated owner session");
+    assert_eq!(
+        refreshed.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "the live owner activation refreshes to ForwardCandidate"
     );
     assert_eq!(
         sessions_b.first_held_ns_for(&key),
@@ -14664,6 +14777,7 @@ fn reverse_companion_stamps_zero_install_table_9752() {
             key,
             decision: forward_decision,
             metadata: forward_metadata,
+            forwarding_generation: ForwardingGenerationStamp::default(),
         },
         1_000_000_000,
         0,
@@ -16336,6 +16450,7 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
         lookup: SessionLookup {
             decision: test_decision(),
             metadata: test_metadata(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
         },
         shared_entry: Some(SyncedSessionEntry {
             key: key.clone(),
@@ -16375,8 +16490,8 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
 
 /// #11315: a session hit must not serve a stored neighbor MAC the live table
 /// contradicts. Gateway VRRP failover A -> B: the stored decision still carries
-/// A while the live dynamic neighbor is B. The lookup must re-resolve to B,
-/// not serve A (the #3048 blackhole the session fast path bypassed).
+/// A while the live dynamic neighbor is B. Removal advances the affected shard
+/// epoch (#5147); the first learn after absence does not.
 #[test]
 fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
     let mut forwarding = ForwardingState::default();
@@ -16464,7 +16579,11 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
     let epoch_after_remove = dynamic_neighbors
         .snapshot_shard_epochs()
         .epoch_for(&(ifindex, next_hop));
-    assert_eq!(epoch_after_remove, epoch_before_remove);
+    assert_eq!(
+        epoch_after_remove,
+        epoch_before_remove.wrapping_add(1),
+        "removing an existing neighbor invalidates its shard (#5147)"
+    );
     dynamic_neighbors.insert_if_changed((ifindex, next_hop), NeighborEntry { mac: mac_b });
     assert_eq!(
         dynamic_neighbors
@@ -16578,7 +16697,11 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
     let epoch_after_remove = dynamic_neighbors
         .snapshot_shard_epochs()
         .epoch_for(&(ifindex, next_hop));
-    assert_eq!(epoch_after_remove, epoch_before_remove);
+    assert_eq!(
+        epoch_after_remove,
+        epoch_before_remove.wrapping_add(1),
+        "removing an existing neighbor invalidates its shard (#5147, v6)"
+    );
     dynamic_neighbors.insert_if_changed((ifindex, next_hop), NeighborEntry { mac: mac_b });
     assert_eq!(
         dynamic_neighbors
@@ -16603,4 +16726,468 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
         cached_session_resolution(&forwarding, &dynamic_neighbors, stored.resolution).is_none(),
         "cached_session_resolution must reject a live-contradicted MAC (v6)"
     );
+}
+#[test]
+fn established_session_re_resolves_after_fib_generation_changes_11373() {
+    let mut snapshot = crate::afxdp::test_fixtures::forwarding_snapshot(true);
+    let original_forwarding = build_forwarding_state(&snapshot);
+    let key = SessionKey {
+        dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        ..test_key()
+    };
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let initial = lookup_forwarding_resolution(&original_forwarding, flow.dst_ip);
+    assert_eq!(initial.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(initial.next_hop, Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))));
+    let decision = SessionDecision {
+        resolution: initial,
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        key,
+        decision,
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let local_key = SessionKey {
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8)),
+        ..test_key()
+    };
+    let local_flow = SessionFlow {
+        src_ip: local_key.src_ip,
+        dst_ip: local_key.dst_ip,
+        forward_key: local_key.clone(),
+    };
+    assert!(sessions.install_with_protocol_with_origin(
+        local_key,
+        test_local_delivery_decision(),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000_001,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands = Vec::new();
+    let ha_state = BTreeMap::new();
+
+    // Simulate a published FIB generation in which the route is withdrawn but
+    // the old gateway and its live neighbor binding remain.
+    snapshot.routes.clear();
+    snapshot.interfaces[0].addresses.clear();
+    let withdrawn_forwarding = build_forwarding_state(&snapshot);
+    sessions.set_forwarding_revalidation_gen(1, 2);
+    assert!(withdrawn_forwarding
+        .neighbors
+        .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))));
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &withdrawn_forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        2_000_000,
+        2,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        12,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("established session hit");
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::NoRoute,
+        "withdrawn route must not retain the session's cached gateway resolution"
+    );
+    let local_resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &withdrawn_forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &local_flow,
+        2_000_001,
+        2,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        12,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("established local-delivery session hit");
+    assert_eq!(
+        local_resolved.decision.resolution.disposition,
+        ForwardingDisposition::NoRoute,
+        "withdrawn local address must not retain cached LocalDelivery"
+    );
+}
+#[test]
+fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
+    // Discard flip: 8.8.8.8/32 becomes a discard route while the old gateway
+    // neighbor stays live, so only the generation gate (not neighbor
+    // liveness) can move the session off its cached ForwardCandidate.
+    let mut snapshot = crate::afxdp::test_fixtures::forwarding_snapshot(true);
+    let original_forwarding = build_forwarding_state(&snapshot);
+    let key = SessionKey {
+        dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        ..test_key()
+    };
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let initial = lookup_forwarding_resolution(&original_forwarding, flow.dst_ip);
+    assert_eq!(initial.disposition, ForwardingDisposition::ForwardCandidate);
+    let decision = SessionDecision {
+        resolution: initial,
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        key,
+        decision,
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands = Vec::new();
+    let ha_state = BTreeMap::new();
+    snapshot.routes.push(crate::RouteSnapshot {
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "8.8.8.8/32".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec![],
+        discard: true,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let discard_forwarding = build_forwarding_state(&snapshot);
+    sessions.set_forwarding_revalidation_gen(1, 2);
+    assert!(discard_forwarding
+        .neighbors
+        .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))));
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &discard_forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        2_000_000,
+        2,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        12,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("established session hit");
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::DiscardRoute,
+        "discarded route must not retain the session's cached gateway resolution"
+    );
+
+    // Next-hop change: the default route re-points to a new gateway while
+    // the old gateway neighbor stays live. The session must follow the new
+    // next hop rather than serve the cached one.
+    let mut snapshot = crate::afxdp::test_fixtures::forwarding_snapshot(true);
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.50".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.50.2".to_string(),
+        mac: "00:11:22:33:44:66".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+    let original_forwarding = build_forwarding_state(&snapshot);
+    let key = SessionKey {
+        dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        ..test_key()
+    };
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let initial = lookup_forwarding_resolution(&original_forwarding, flow.dst_ip);
+    assert_eq!(initial.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(
+        initial.next_hop,
+        Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))
+    );
+    let decision = SessionDecision {
+        resolution: initial,
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        key,
+        decision,
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    snapshot.routes[0].next_hops = vec!["172.16.50.2@ge-0/0/0.50".to_string()];
+    let moved_forwarding = build_forwarding_state(&snapshot);
+    sessions.set_forwarding_revalidation_gen(1, 2);
+    assert!(moved_forwarding
+        .neighbors
+        .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))));
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &moved_forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        2_000_000,
+        2,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        12,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("established session hit");
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+    );
+    assert_eq!(
+        resolved.decision.resolution.next_hop,
+        Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 2))),
+        "changed route must serve the new gateway, not the cached one"
+    );
+}
+
+/// #11373: the HA owner-RG refresh must resolve against the current FIB before
+/// re-stamping the session. A cached old gateway remains neighbor-live, so a
+/// cache-enabled refresh would incorrectly preserve it after the route changes.
+#[test]
+fn refresh_owner_rgs_resolves_live_route_before_restamp_11373() {
+    let mut snapshot = super::super::test_fixtures::forwarding_snapshot_with_next_table(true);
+    let forwarding_before = build_forwarding_state(&snapshot);
+    let mut key = test_key();
+    key.dst_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let initial_resolution = lookup_forwarding_resolution(&forwarding_before, flow.dst_ip);
+    assert_eq!(
+        initial_resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "precondition: the old live route resolves through gateway A"
+    );
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        SessionDecision {
+            resolution: initial_resolution,
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        test_metadata(),
+        SessionOrigin::SyncImport,
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let _ = sessions.drain_deltas(8);
+
+    snapshot.routes[1].next_hops =
+        vec!["172.16.50.2@ge-0/0/0.50".to_string()];
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.50".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.50.2".to_string(),
+        mac: "00:11:22:33:44:66".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+    let forwarding_after = build_forwarding_state(&snapshot);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+
+    assert!(!super::commands::handle_refresh_owner_rgs(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &forwarding_after,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        vec![1],
+        2_000_000_000,
+        2,
+    ));
+    let (refreshed, _, _) = sessions
+        .entry_with_origin(&key)
+        .expect("HA refresh retains the forwarding session");
+    assert_eq!(
+        refreshed.resolution.next_hop,
+        Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 2))),
+        "HA refresh must stamp the uncached current route, not gateway A"
+    );
+    assert_eq!(
+        refreshed.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(refreshed.resolution.egress_ifindex, 12);
+    assert_eq!(
+        refreshed.resolution.neighbor_mac,
+        Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x66])
+    );
+}
+
+/// #11373: demotion re-resolution must bypass the cached old gateway too.
+#[test]
+fn demote_owner_rgs_resolves_live_route_before_restamp_11373() {
+    let mut snapshot = super::super::test_fixtures::forwarding_snapshot_with_next_table(true);
+    let forwarding_before = build_forwarding_state(&snapshot);
+    let mut key = test_key();
+    key.dst_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let initial = lookup_forwarding_resolution(&forwarding_before, key.dst_ip);
+    assert_eq!(
+        initial.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "precondition: gateway A is a live route"
+    );
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        SessionDecision {
+            resolution: initial,
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let _ = sessions.drain_deltas(8);
+
+    snapshot.routes[1].next_hops =
+        vec!["172.16.50.2@ge-0/0/0.50".to_string()];
+    snapshot.neighbors.push(crate::NeighborSnapshot {
+        interface: "ge-0-0-0.50".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.50.2".to_string(),
+        mac: "00:11:22:33:44:66".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+    let forwarding_after = build_forwarding_state(&snapshot);
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut cancelled_keys = Vec::new();
+    let mut cancelled_keys_seen = rustc_hash::FxHashSet::default();
+    assert!(!super::commands::handle_demote_owner_rgs(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding_after,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        vec![1],
+        2_000_000_000,
+        2,
+        &mut cancelled_keys,
+        &mut cancelled_keys_seen,
+    ));
+    let (demoted, _, origin) = sessions
+        .entry_with_origin(&key)
+        .expect("demotion retains the forwarding session");
+    assert_eq!(
+        demoted.resolution.next_hop,
+        Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 2))),
+        "demotion must stamp the uncached current route, not gateway A"
+    );
+    assert_eq!(
+        demoted.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(demoted.resolution.egress_ifindex, 12);
+    assert_eq!(
+        demoted.resolution.neighbor_mac,
+        Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x66])
+    );
+    assert_eq!(origin, SessionOrigin::SyncImport);
+    assert_eq!(cancelled_keys, vec![key]);
 }
