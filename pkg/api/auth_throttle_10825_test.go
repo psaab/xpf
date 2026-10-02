@@ -605,3 +605,82 @@ func TestBasicUsernameCannotCollideWithAPIKeyThrottleBucket10825(t *testing.T) {
 		t.Fatalf("malformed/name identities = (%q, %q), want distinct invalid and basic:unknown buckets", malformedIdentity, namedIdentity)
 	}
 }
+
+func TestRESTAuthGlobalBasicAccountBudgetAcrossSources11492(t *testing.T) {
+	h := authMiddleware(AuthConfig{
+		Users: map[string]string{
+			"operator": "correct-password",
+			"observer": "observer-password",
+		},
+	}, true, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for i := range authThrottleAccountFailures {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+		r.RemoteAddr = fmt.Sprintf("198.51.100.%d:43000", i+1)
+		r.SetBasicAuth("operator", "wrong-password")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("failure from source %d returned %d, want 401 before global account budget fills", i+1, w.Code)
+		}
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	r.RemoteAddr = "203.0.113.9:43000"
+	r.SetBasicAuth("operator", "correct-password")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("correct password from a new source returned %d, want 429 while the claimed Basic account is globally locked", w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("global account lockout omitted Retry-After")
+	}
+
+	r = httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	r.RemoteAddr = "203.0.113.9:43000"
+	r.SetBasicAuth("observer", "observer-password")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("global lockout for operator blocked another Basic account: status %d, want 204", w.Code)
+	}
+}
+
+func TestRESTAuthIPv6SourceBudgetAggregatesBy64Prefix11492(t *testing.T) {
+	h := authMiddleware(AuthConfig{Users: map[string]string{"operator": "correct-password"}}, true,
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+
+	for i := range authThrottleSourceFailures {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+		r.RemoteAddr = fmt.Sprintf("[2001:db8:1:2::%x]:43000", i+1)
+		r.SetBasicAuth(fmt.Sprintf("rotating-user-%d", i), "wrong-password")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("failure from IPv6 source %d returned %d, want 401 before /64 budget fills", i+1, w.Code)
+		}
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	r.RemoteAddr = "[2001:db8:1:2::ffff]:43000"
+	r.SetBasicAuth("operator", "correct-password")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("request from a fresh address in the same IPv6 /64 returned %d, want 429", w.Code)
+	}
+
+	r = httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	r.RemoteAddr = "[2001:db8:1:3::1]:43000"
+	r.SetBasicAuth("operator", "correct-password")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("request from a different IPv6 /64 returned %d, want 204", w.Code)
+	}
+}

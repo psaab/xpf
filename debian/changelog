@@ -3,6 +3,11 @@ xpf (0.0.0) unstable; urgency=medium
   * Persist HA persistent-NAT clear generations and peer replay floors so
     delayed idle-lease batches cannot restore mappings after an operator clear
     or daemon/helper restart; reclaim expired allocator clear fences (#11486).
+  * Throttle REST guesses across claimed Basic usernames and IPv6 /64 source
+    prefixes, and use bcrypt cost 12 for new API-auth verifiers (#11492).
+  * Apply shared PAM faillock on the supported non-appliance SSH stack while
+    preserving the appliance posture and administrator-owned PAM stacks
+    (#11492).
   * Reject zone references to absent logical units and keep flow-sampling
     restrictions fail-closed rather than widening exports (#11433).
   * Retain DHCPv6 router-advertisement gateways through RA silence, re-solicit

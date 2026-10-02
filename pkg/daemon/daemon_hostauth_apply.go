@@ -708,6 +708,21 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 	if cfg.System.Services != nil {
 		ssh = cfg.System.Services.SSH
 	}
+
+	// PAM account lockout supplements MaxAuthTries, which is only per
+	// connection. The appliance image has password authentication disabled and
+	// uses its own factory posture; non-appliance hosts get the shared
+	// pam_faillock state when their common-auth stack is the supported Debian
+	// baseline. Unknown host PAM stacks remain administrator-owned and are
+	// reported without changing them.
+	if err := applySSHPAMFaillock(); err != nil {
+		if errors.Is(err, errSSHPAMFaillockUnsupported) {
+			slog.Warn("SSH cross-connection password lockout not applied; host PAM stack is not the supported Debian baseline",
+				"err", err)
+		} else {
+			return fmt.Errorf("apply SSH cross-connection password lockout: %w", err)
+		}
+	}
 	content := buildSSHDConfig(ssh)
 
 	// Read the prior content once: needed both to skip no-op writes and to

@@ -239,9 +239,9 @@ func authMiddleware(cfg AuthConfig, metricsRequireAuth bool, next http.Handler) 
 	})
 }
 
-// throttledAuthCheck applies the #10825 per-source and per-source+account
-// budgets before invoking the credential verifier. An active lockout skips
-// verification entirely, which is important once Basic checks use bcrypt.
+// throttledAuthCheck applies the #10825 per-source/account and per-source
+// budgets plus #11492 global claimed-Basic and IPv6-/64 aggregation before
+// invoking the credential verifier. An active lockout skips bcrypt entirely.
 func throttledAuthCheck(throttle *authFailureTracker, cfg AuthConfig, metricsRequireAuth bool, r *http.Request) (authorized bool, retryAfter time.Duration) {
 	return throttledAuthCheckWithCheck(throttle, cfg, metricsRequireAuth, r, authCheckCredential)
 }

@@ -9,14 +9,13 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
-// TestMain points the reset handoff flag at a disposable directory for the
-// whole package run. Every commit/sync path consults the flag, and most
-// fixtures never set it: without this, tests would read the live
-// /etc/xpf/.reset-handoff (absent on CI, and unreadable-as-non-root where
-// /etc/xpf exists), failing closed for no reason related to the test.
-// Per-test overrides (isolateHandoffFlag) save/restore around this value;
-// no committing test in this package runs in parallel, so the shared path
-// cannot race.
+// TestMain points package-level external/stateful paths at disposable locations.
+// Every commit/apply path consults reset handoff and some run SSH reconciliation;
+// fixtures that do not install the SSH seam must never touch live /etc files.
+// An unreadable /etc/xpf/.reset-handoff fails closed, while the PAM policy also
+// needs an isolated marker and common-auth stack. Per-test overrides
+// save/restore these values. Committing tests in this package do not run in
+// parallel, so the shared paths cannot race.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "daemon-reset-handoff")
 	if err != nil {
@@ -27,6 +26,14 @@ func TestMain(m *testing.M) {
 	resetPersistentNatGenerationStatePath = func() string {
 		return filepath.Join(dir, "persistent-nat-lease-generation.json")
 	}
+	applianceMarkerFile = filepath.Join(dir, "appliance")
+	sshdPAMCommonAuthPath = filepath.Join(dir, "common-auth")
+	if err := os.WriteFile(sshdPAMCommonAuthPath, stockCommonAuth11492(), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon test PAM seam: %v\n", err)
+		os.RemoveAll(dir)
+		os.Exit(1)
+	}
+	sshdPAMModuleAvailable = func() bool { return true }
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

@@ -43,6 +43,12 @@ func stubSSHDCmds7609(t *testing.T) {
 	sshdValidateCmd = func() ([]byte, error) { return nil, nil }
 	sshdReloadCmd = func() ([]byte, error) { return nil, nil }
 	t.Cleanup(func() { sshdValidateCmd, sshdReloadCmd = origV, origR })
+	origMarker := applianceMarkerFile
+	applianceMarkerFile = filepath.Join(t.TempDir(), "appliance")
+	if err := os.WriteFile(applianceMarkerFile, []byte("appliance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { applianceMarkerFile = origMarker })
 }
 
 // TestRelocatingSSHDConfPathRelocatesItsDirectory7609 is the property: ONE var

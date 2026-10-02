@@ -15962,6 +15962,20 @@ MAC defaults even when the operator configured hardened algorithms.
   `TestApplySSHConfig_ValidationGateBlocksReload` /
   `...ValidationGateRemovesWhenNoPrior` / `...ValidationPassesThenReloads`).
 
+- **Cross-connection password lockout (#11492)** — on non-appliance installs,
+  `applySSHConfig` applies a Debian `pam_faillock` policy to the stock
+  `/etc/pam.d/common-auth` sequence: five failed attempts in 10 minutes lock
+  the account for 5 minutes. The state is shared across sshd connections (and
+  any other PAM service using `common-auth`), so OpenSSH's per-connection
+  `MaxAuthTries 3` is no longer the only bound. The appliance image is skipped:
+  it pins `PasswordAuthentication no` and is identified by `/etc/xpf/appliance`.
+  xpf does not enable password authentication; this protects it when a
+  non-appliance host already permits PAM-backed SSH passwords. Custom PAM
+  stacks are left untouched with a warning and must be configured by their
+  administrator. The cells in `pkg/daemon/ssh_faillock_11492_test.go` pin
+  rendering, non-appliance apply wiring, safe appliance exclusion, and
+  idempotent removal; live password-attempt verification remains a lab gate.
+
 ## Grouped system/SNMP inert knobs — accept-with-advisory (#4306 S-5)
 
 A cluster of `system`/`snmp` knobs commit clean but do nothing, several

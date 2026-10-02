@@ -133,6 +133,11 @@ func installSSHDSeam(t *testing.T, r *sshdSeamRecorder) {
 	origMkdir := sshdMkdirAll
 	origReload := sshdReloadCmd
 	origValidate := sshdValidateCmd
+	origMarker := applianceMarkerFile
+	applianceMarkerFile = filepath.Join(t.TempDir(), "appliance")
+	if err := os.WriteFile(applianceMarkerFile, []byte("appliance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	sshdConfPath = "/test/sshd_config.d/xpf.conf"
 	sshdReadFile = func(string) ([]byte, error) {
@@ -188,6 +193,7 @@ func installSSHDSeam(t *testing.T, r *sshdSeamRecorder) {
 		sshdRemoveFile = origRemove
 		sshdMkdirAll = origMkdir
 		sshdReloadCmd = origReload
+		applianceMarkerFile = origMarker
 		sshdValidateCmd = origValidate
 	})
 }
@@ -582,6 +588,12 @@ func TestSSHDFactoryRootLoginPrecedence10755(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
+			origMarker := applianceMarkerFile
+			applianceMarkerFile = filepath.Join(dir, "appliance")
+			if err := os.WriteFile(applianceMarkerFile, []byte("appliance\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { applianceMarkerFile = origMarker })
 			dropInDir := filepath.Join(dir, "sshd_config.d")
 			if err := os.MkdirAll(dropInDir, 0755); err != nil {
 				t.Fatal(err)
