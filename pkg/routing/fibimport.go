@@ -46,8 +46,9 @@ import (
 //
 // THE FIX. Import the kernel's learned routes so the helper FIB agrees with
 // the FIB the reinject would have consulted. The importer is deliberately
-// NARROW; every restriction below exists so that adding routes can never
-// turn a working forwarding path into a drop or a hijack.
+// NARROW: it imports exact kernel-selected unicast paths and the kernel's own
+// explicit blackhole prefixes, but never broadens a discard to a less-specific
+// match or adopts the HA inactive-RG sentinel owned by the helper.
 //
 // WHAT THIS DOES NOT DO. It does not close the hole, it BOUNDS it — and
 // #7437 has since narrowed that bound rather than removing it.
@@ -84,6 +85,11 @@ import (
 // unresolved (#11316). The value also mirrors FRR's DHCP default distance.
 const LearnedRouteImportPreference = 200
 
+// haInactiveBlackholePriority is the sentinel priority used for kernel
+// blackholes that enforce userspace HA ownership locally. Those routes must
+// remain owned by the helper's HA disposition, not be imported a second time.
+const haInactiveBlackholePriority = 4242
+
 // mgmtVRFTableID is the kernel routing table backing the management VRF
 // (config.ManagementVRFTableID, #9622), named here to hard-exclude the table
 // from the import.
@@ -103,9 +109,8 @@ const mgmtVRFTableID = config.ManagementVRFTableID
 // ruleListFn seam in pkg/dataplane/userspace routes.go.
 var learnedRouteListFn = netlink.RouteListFiltered
 
-// LearnedRoute is one kernel-FIB unicast route that the userspace dataplane
-// FIB does not derive from configuration.
-//
+// LearnedRoute is one kernel-FIB unicast or blackhole route that the userspace
+// dataplane FIB does not derive from configuration.
 // It is deliberately a flat value with no netlink types in it: the consumer
 // (pkg/dataplane/userspace buildRouteSnapshots) turns it into a
 // RouteSnapshot, and keeping netlink out of the boundary means the snapshot
@@ -123,8 +128,11 @@ type LearnedRoute struct {
 	// the consumer never has to special-case it. Getting this wrong would
 	// drop exactly the DHCP-learned default that motivates the import.
 	Destination string
-	// NextHops holds every gateway leg, in kernel order. Always non-empty:
-	// a route with no gateway is not imported (see importableRoute).
+	// Discard is true for an imported RTN_BLACKHOLE route. It carries no
+	// next-hops; the helper must drop traffic matching this prefix.
+	Discard bool
+	// NextHops holds every gateway leg of a unicast route, in kernel order.
+	// A discard route has no next-hops.
 	NextHops []string
 	// NextHopWeights parallels NextHops in kernel leg order (#11402). Each
 	// entry is the Linux multipath weight for that leg, uint32(Hops)+1 in
@@ -219,26 +227,16 @@ func ImportLearnedRoutes(tableIDs []int) ([]LearnedRoute, error) {
 // Every rejection below is a deliberate safety property, not a
 // simplification:
 //
-//   - NON-UNICAST IS NEVER IMPORTED. Only RTN_UNICAST is adopted, so the
-//     importer can only ever ADD A FORWARDING PATH — it can never install a
-//     discard/blackhole/unreachable route into the helper FIB and so can
-//     never convert a forwarding path into a drop. That is the property
-//     that makes this fix safe to ship for a bug whose bad outcome is a
-//     black-hole. It also excludes, by construction, the HA inactive-RG
-//     blackhole routes pkg/daemon installs as RTN_BLACKHOLE with the 4242
-//     priority sentinel — those encode an HA ownership decision the helper
-//     already makes for itself via its own HAInactive disposition, and
-//     adopting them would double-enforce it in the wrong layer. Dropping
-//     kernel discard routes costs nothing: a packet that would have matched
-//     one either matches a config route in the helper or takes NoRoute and
-//     is reinjected, and the kernel then applies the discard itself.
-//   - A GATEWAY-LESS ROUTE IS NEVER IMPORTED. A route with no next-hop
-//     gateway is directly connected, and connected prefixes already reach
-//     the helper FIB from the interface snapshot. Requiring a gateway loses
-//     no real learned route (BGP/OSPF/IS-IS/RIP routes and DHCP defaults
-//     all carry one) and keeps the importer clear of the Rust side's
-//     bare-gateway ifindex inference, where a wrongly-shaped connected
-//     route would resolve to the wrong egress.
+//   - Only RTN_UNICAST and RTN_BLACKHOLE are adopted. A blackhole is an
+//     explicit negative route needed to preserve kernel longest-prefix
+//     discard behavior, but the HA inactive-RG blackhole uses a 4242 priority
+//     sentinel and remains the helper's own HAInactive responsibility.
+//   - A UNICAST ROUTE NEEDS A GATEWAY. Gateway-less unicast routes are directly
+//     connected and already reach the FIB from the interface snapshot.
+//     Requiring a gateway keeps the importer clear of the Rust side's
+//     bare-gateway ifindex inference, where a wrongly-shaped connected route
+//     would resolve to the wrong egress. Blackhole routes carry no gateway and
+//     are handled separately.
 //   - AN ECMP ROUTE IS IMPORTED WHOLE OR NOT AT ALL. Kernel multipath legs
 //     live in RTA_MULTIPATH with route.Gw nil. Every leg with a gateway is
 //     collected; if a leg is present but carries no gateway the route is
@@ -253,7 +251,11 @@ func importableRoute(r netlink.Route, family, tableID int) (LearnedRoute, bool) 
 // #9512 scoping uses. ImportLearnedRoutes passes one cache for the whole dump,
 // so a table of routes sharing a handful of links costs a handful of lookups.
 func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(int) (string, bool)) (LearnedRoute, bool) {
-	if r.Type != unix.RTN_UNICAST {
+	blackhole := r.Type == unix.RTN_BLACKHOLE
+	if r.Type != unix.RTN_UNICAST && !blackhole {
+		return LearnedRoute{}, false
+	}
+	if blackhole && r.Priority == haInactiveBlackholePriority {
 		return LearnedRoute{}, false
 	}
 	if !learnedRouteProtocols[int(r.Protocol)] {
@@ -263,6 +265,23 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 	if !ok {
 		return LearnedRoute{}, false
 	}
+	mtu := r.MTU
+	if mtu < 0 {
+		slog.Warn("ignoring negative kernel route MTU in learned route import",
+			"table", tableID, "destination", dst, "mtu", mtu)
+		mtu = 0
+	}
+	if blackhole {
+		return LearnedRoute{
+			TableID:     tableID,
+			Family:      family,
+			Metric:      r.Priority,
+			Destination: dst,
+			Discard:     true,
+			Protocol:    rtProtoName(r.Protocol),
+			MTU:         mtu,
+		}, true
+	}
 	nextHops, nextHopWeights, ok, unscoped := learnedRouteNextHops(r, linkName)
 	if unscoped != nil {
 		warnUnscopedLearnedGatewayOnce(tableID, dst, unscoped, r)
@@ -270,12 +289,6 @@ func importableRouteScoped(r netlink.Route, family, tableID int, linkName func(i
 	}
 	if !ok || len(nextHops) == 0 {
 		return LearnedRoute{}, false
-	}
-	mtu := r.MTU
-	if mtu < 0 {
-		slog.Warn("ignoring negative kernel route MTU in learned route import",
-			"table", tableID, "destination", dst, "mtu", mtu)
-		mtu = 0
 	}
 	return LearnedRoute{
 		TableID:        tableID,
