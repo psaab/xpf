@@ -141,31 +141,45 @@ fields.
 Recording the checkout's HEAD alone is **not enough**. The checkout is
 routinely a different tree from what is running on the node — that is precisely
 the failure `deploy-lib.sh` already dies on (#2176, *"the node is running STALE
-code"*). Three fields, because two of them are different kinds of value:
+code"*). Five fields: the tree identity plus per-node build and live-image
+hashes are distinct provenance values:
 
 * `build_git_sha` — provenance of the checkout that deployed the measured
   artifact, with a `-dirty` suffix when it has uncommitted changes. The ledger
   file itself is excluded from the dirtiness test because it is emitter output.
   A cluster gate accepts a deploy manifest only when this identity matches the
   current checkout;
-* `build_exe_sha256` — SHA-256 from the deploy-time manifest, sourced from the
-  staged `.deb` payload or verified raw binary. It is not a gate-time rebuild:
-  `BUILD_TIME` and the dirty version stamp intentionally make rebuilt bytes
-  differ;
-* `running_exe_sha256` — SHA-256 of the **live process image** on the node.
+* `build_exe_sha256` — SHA-256 from the deploy-time manifest slot for the
+  selected node, sourced from the staged `.deb` payload or verified raw binary.
+  It is not a gate-time rebuild: `BUILD_TIME` and the dirty version stamp
+  intentionally make rebuilt bytes differ;
+* `build_exe_sha256_peer` — the peer's deploy-time artifact when its manifest
+  slot is valid. Missing or stale peer provenance fails closed even when the
+  peer image is unreadable; a valid slot with an unreadable image remains a
+  visibly partial `local-only` attestation. A rolling deploy can leave fw0
+  and fw1 with different binaries, so the peer is compared with its own slot,
+  never with `build_exe_sha256`;
+* `running_exe_sha256` / `running_exe_sha256_peer` — SHA-256 of each live
+  process image, read back from the corresponding node.
 
-Schema 2 records the deploy-artifact meaning of `build_exe_sha256`; historical
-schema-1 rows keep their original gate-time local-file meaning.
+Helper-dependent gates use the same node-specific rule and also record
+`build_helper_exe_sha256_peer`; different fw0/fw1 helper builds are valid only
+when each live helper matches its own slot.
 
-The deploy manifest lives at the ignored
-`dist-deb/xpf-deploy-manifest.json` path and records the xpfd, cli, and
-userspace-helper hashes for the last successful cluster deploy from that
-worktree. Deb deployments read hashes from the package's staged payload;
-raw deployments record the binaries pushed and verified on the node. The
-manifest is replaced atomically after successful deployment and invalidated
-before the next deploy attempt. A missing, invalid, or different-checkout
-manifest fails closed as `UNAVAILABLE`; cluster gates never fall back to a
-fresh local rebuild.
+Schema 2 records the deploy-artifact meaning of `build_exe_sha256`; the
+additive peer build field identifies the peer slot without changing historical
+schema-1 rows, whose field retains its gate-time local-file meaning.
+
+The ignored `dist-deb/xpf-deploy-manifest.json` uses manifest schema 2:
+`nodes` maps `"0"` and `"1"` to independent deploy records, each containing
+its own checkout identity, mode, build metadata, and xpfd/cli/helper hashes.
+Deb deployments hash the selected package's staged payload; raw deployments
+record the binaries pushed and verified on that node. `cluster-deploy NODE=0`
+or `NODE=1` atomically replaces only that slot, preserving its sibling;
+`NODE=all` invalidates the old manifest and records the shared artifact in
+both slots after the complete deploy. The gate reads the selected node and
+peer slots independently. A missing, invalid, or different-checkout slot fails
+closed as `UNAVAILABLE`; no gate falls back to a fresh local rebuild.
 
 The readback is not a new mechanism. `deploy_verify_running_xpfd` already did
 `sha256sum /proc/$PID/exe`; that inline block was **extracted** into
@@ -201,13 +215,14 @@ make cluster-deploy NODE=0
 make test-failover
 ```
 
-is two ordinary lines. The failure is **asymmetric**, and only one direction is
-dangerous:
+With the former single-slot manifest, either single-node deploy replaced the
+only recorded image. Since #9044 reads both live nodes, both rolling orders
+failed closed when the peer still ran the other build:
 
-| Deploy scope | fw0 | fw1 | Old row |
-|---|---|---|---|
-| `NODE=1` | old build | new build | `MISMATCH` → **VOID**. Fails safe. |
-| `NODE=0` | new build | old build | **clean `MATCH`** — for a gate that failed over onto the unattested node. |
+| Deploy scope | fw0 | fw1 | Single-slot result | Per-node result |
+|---|---|---|---|---|
+| `NODE=1` | old build | new build | `MISMATCH` → **VOID** | Each node matches its own slot. |
+| `NODE=0` | new build | old build | `MISMATCH` → **VOID** | Each node matches its own slot. |
 
 An HA smoke **fails over by definition**, so the node a single-node attestation
 skips is the node the result depends on. Both nodes are now read back:
@@ -218,13 +233,16 @@ skips is the node the result depends on. Both nodes are now read back:
   row previously **could not express at all**: "I attested one of the two nodes
   this gate used".
 
-A peer running a **different** build makes the row `MISMATCH` → VOID, by the
-same #2176 rule as a local mismatch. A peer that is **unreadable** does *not*:
+A peer whose running hash differs from **its own slot** makes the row
+`MISMATCH` → VOID, by the same #2176 rule as a local mismatch. The two node
+slots may differ after a rolling deploy and still both attest `MATCH`. A
+readable peer with a missing, invalid, or stale slot is `UNAVAILABLE` → VOID.
+A peer that could not be read does *not* void the row:
 `test-ha-crash`, `test-chained-crash` and `test-double-failover` force-stop a
 node and may legitimately leave it down when the gate ends, so voiding there
-would red exactly the gates whose job is to kill a node — the same mistake the
-exit-status rule below refuses to make. That case records `exe_scope=local-only`
-instead, which a reader can tell apart from a whole-cluster `MATCH`.
+would red exactly the gates whose job is to kill a node. That case records
+`exe_scope=local-only` instead, which a reader can tell apart from a
+whole-cluster `MATCH`.
 
 Peer-attestation and `measurement_scope` fields are **additive**:
 `REQUIRED_KEYS` is unchanged, so older rows still lint. A row without

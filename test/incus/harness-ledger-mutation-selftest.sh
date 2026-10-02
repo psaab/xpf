@@ -58,13 +58,16 @@ fi
 WORK=$(mktemp -d "${TMPDIR:-/var/tmp}/xpf-harness-mutation.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
-# deploy-lib.sh is staged alongside because harness-result.sh sources it from
-# its OWN directory for the running-exe readback. Without it the staged copy
+# deploy-lib.sh and cluster-env.sh are staged alongside because
+# harness-result.sh sources them from its OWN directory: deploy-lib.sh for the
+# running-exe readback, cluster-env.sh for the FW0/FW1 names that map node
+# instances to per-node manifest slots (#11845). Without them the staged copy
 # silently degrades every cluster cell to UNAVAILABLE and the positive control
 # reds -- which is the control doing its job, but the cause would be the
 # staging, not the code.
 cp "$SCRIPT_DIR/ledger_compare.py" "$SCRIPT_DIR/ledger_compare_test.py" \
-	"$SCRIPT_DIR/harness-result.sh" "$SCRIPT_DIR/deploy-lib.sh" "$WORK/" || {
+	"$SCRIPT_DIR/harness-result.sh" "$SCRIPT_DIR/deploy-lib.sh" \
+	"$SCRIPT_DIR/cluster-env.sh" "$WORK/" || {
 	echo "FATAL: cannot stage the files under mutation" >&2
 	exit 1
 }
