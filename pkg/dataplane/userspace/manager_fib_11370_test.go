@@ -110,6 +110,11 @@ func TestDumpFIBHelperBudgetRefusalReturnsErrorWithoutRows11767(t *testing.T) {
 			return
 		}
 		defer conn.Close()
+		var request ControlRequest
+		if err := json.NewDecoder(conn).Decode(&request); err != nil {
+			serverErr <- err
+			return
+		}
 		serverErr <- json.NewEncoder(conn).Encode(ControlResponse{
 			OK:    false,
 			Error: "fib_dump route rows exceed the control response budget",
@@ -151,6 +156,11 @@ func TestDumpFIBRejectsTruncatedResponseInsteadOfEmptySuccess11767(t *testing.T)
 			return
 		}
 		defer conn.Close()
+		var request ControlRequest
+		if err := json.NewDecoder(conn).Decode(&request); err != nil {
+			serverErr <- err
+			return
+		}
 		_, err = conn.Write([]byte(`{"ok":true,"fib_generation":9,"fib_routes":[]}`))
 		serverErr <- err
 	}()
