@@ -175,36 +175,37 @@ editing cmdtree.
   authenticated measurement, since only a key holder can produce one — so the
   rejection names the clock and the remedy, and `show chassis cluster status`
   carries the skew. A forged token or a genuine PSK mismatch reports no skew,
-  so an authentication fault is never mislabelled as a clock fault. Dual-accept (mirroring the heartbeat, `fabricAuthDecision`):
-  a node with no key configured accepts everything; once enforcement is
-  armed the peer must keep signing (a tokenless call is then a downgrade
-  attack and is rejected `Unauthenticated`); a tokenless call before
-  enforcement arms is allowed as a key-rollout grace. **Enforcement arms
-  off EITHER a prior valid fabric token OR the heartbeat authenticating
-  the peer** (`Manager.HeartbeatPeerAuthSeen`): the heartbeat flows
-  continuously (~200ms), so after a keyed node restarts the guard arms
-  within one interval instead of waiting for the next on-demand fabric RPC
-  — closing the post-restart window in which the fabric would otherwise
-  grace-accept tokenless `ClearSessions`/failover. In a rolling upgrade
-  the not-yet-keyed peer signs neither channel, so the grace still holds.
-  (Residual: a >30s wall-clock skew between nodes exceeds the ±1-window
-  token tolerance and fails cross-node fabric RPCs `Unauthenticated` until
-  corrected — an operational NTP fault, not a bug.) The
+  so an authentication fault is never mislabelled as a clock fault. Dual-accept
+  on a keyed fabric listener is deliberately tiered (#11487): during rollout,
+  tokenless grace applies only to read-only calls (`GetStatus`, session views,
+  safe `ShowText` and `MonitorInterface`). `ClearSessions` and the admitted
+  `SystemAction` verbs — cross-node failover and persistent-NAT clear — always
+  require a valid token, even before the downgrade guard arms. Once armed, the
+  guard rejects every tokenless call. **Enforcement arms off EITHER a prior
+  valid fabric token OR the heartbeat authenticating the peer**
+  (`Manager.HeartbeatPeerAuthSeen`): the heartbeat flows continuously (~200ms),
+  so after a keyed node restarts the guard arms within one interval instead of
+  waiting for the next on-demand fabric RPC. In a rolling upgrade the
+  not-yet-keyed peer signs neither channel, so the read-only grace still holds.
+  An unkeyed fabric listener is GetStatus-only (#10698). (Residual: a >30s
+  wall-clock skew between nodes exceeds the ±1-window token tolerance and fails
+  cross-node fabric RPCs `Unauthenticated` until corrected — an operational NTP
+  fault, not a bug.) The
   interceptors are installed on the fabric listener only; the loopback
   listener keeps the full service. The **same PSK** authenticates the
   heartbeat (#4326); it shares the `chassis cluster authentication-key`
   leaf and reuses the dual-accept posture. **The PSK is no longer optional
-  in practice (#6611):** because all three channels fail OPEN unkeyed, an
-  unkeyed cluster runs its entire control channel unauthenticated, and
-  every config this repository shipped used to be unkeyed — so the
-  enforcing branches were never exercised. `validateClusterAuthKeyStrict`
-  now hard-rejects an unkeyed `chassis cluster` on the STRICT compile
-  path and warns on the tolerant load / peer-sync path (#1960 no-brick:
-  an in-place-upgraded unkeyed cluster keeps its config DB, still boots,
-  and is keyed on its next commit), and every reference/test config sets
-  a key. Strict is every caller of `compileTreeStrict`, not just the
-  operator commit: `daemon.bootstrapFromFile` (the UNATTENDED first-boot
-  import, where a reject leaves the node with NO active config) and
+  in practice (#6611):** because the heartbeat and session-sync channels retain
+  unauthenticated compatibility when unkeyed while fabric serves only GetStatus,
+  an unkeyed cluster runs those control channels unauthenticated. Every config
+  this repository shipped used to be unkeyed, so the enforcing branches were
+  never exercised. `validateClusterAuthKeyStrict` now hard-rejects an unkeyed
+  `chassis cluster` on the STRICT compile path and warns on tolerant load /
+  peer-sync (#1960 no-brick: an in-place-upgraded unkeyed cluster keeps its
+  config DB, still boots, and is keyed on its next commit), and every
+  reference/test config sets a key. Strict is every caller of `compileTreeStrict`,
+  not just the operator commit: `daemon.bootstrapFromFile` (the UNATTENDED
+  first-boot import, where a reject leaves the node with NO active config) and
   `configstore.CheckText` (`xpfd check-config`, behind xpf-deploy and
   the day-0 loader) also refuse — so provisioning a NEW node fails
   closed, and the migration has a required order: key the running

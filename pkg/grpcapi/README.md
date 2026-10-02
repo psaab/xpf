@@ -65,8 +65,12 @@ every call.
 the network-exposed listener admits only `GetStatus` for its health probe.
 Session/recon RPCs, `ClearSessions`, `MonitorInterface` and cross-node failover
 are rejected as `Unauthenticated` until a PSK is committed. Missing a key is an
-indefinite configuration state, not a rollout grace; a configured key retains
-the existing peer-authentication rollout grace.
+indefinite configuration state, not a rollout grace.
+
+**Keyed fabric rollout grace (#11487).** A configured key retains dual-accept
+grace only for read-only peer RPCs. `ClearSessions` and the admitted
+`SystemAction` verbs (cross-node failover and persistent-NAT clear) require a
+valid token even before peer-auth enforcement is armed.
 
 ### Peer hop markers are a listener capability, not a header (#5883)
 
@@ -112,6 +116,8 @@ dialed.
 exception for the userspace helper's authoritative persistent-NAT clear
 (#10784). The receiving peer executes the clear without forwarding it again;
 no other `SystemAction` action is added to the fabric allowlist.
+`ClearSessions` and all admitted `SystemAction` verbs bypass rollout grace
+on keyed listeners and always require a valid PSK token (#11487).
 
 ### Fabric-listener supervision (#5047)
 

@@ -100,11 +100,10 @@ func TestFabricAuthUnary_TokenlessRejectedAfterPeerAuth(t *testing.T) {
 // TestFabricAuthUnary_HeartbeatArmsDowngradeGuard: the post-restart-window fix.
 // After a keyed node restarts, its fabric sticky flag is NOT armed (nothing has
 // dialed the fabric listener on-demand yet), but its heartbeat receiver
-// re-authenticates the peer within ~one interval. A tokenless fabric call must
-// be REJECTED as soon as the heartbeat has armed enforcement — even though the
-// fabric sticky flag is still false. RED on revert (arming only off the fabric
-// sticky flag): the tokenless call is grace-accepted, re-opening the window in
-// which any on-segment host can drive ClearSessions / cross-node failover.
+// re-authenticates the peer within ~one interval. A tokenless read-only fabric
+// call must be REJECTED as soon as the heartbeat has armed enforcement — even
+// though the fabric sticky flag is still false. RED on revert (arming only off
+// the fabric sticky flag): the read-only call is grace-accepted.
 func TestFabricAuthUnary_HeartbeatArmsDowngradeGuard(t *testing.T) {
 	s := keyedServer(fabricTestKey)
 	// Fabric sticky flag deliberately NOT armed (fresh after restart)...
@@ -115,7 +114,7 @@ func TestFabricAuthUnary_HeartbeatArmsDowngradeGuard(t *testing.T) {
 	s.heartbeatAuthSeenFn = func() bool { return true }
 
 	probe := &unaryCallProbe{}
-	info := &grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_ClearSessions_FullMethodName}
+	info := &grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_GetStatus_FullMethodName}
 	// No token metadata at all.
 	_, err := s.fabricAuthUnaryInterceptor(context.Background(), nil, info, probe.handler)
 	if status.Code(err) != codes.Unauthenticated {
@@ -126,21 +125,21 @@ func TestFabricAuthUnary_HeartbeatArmsDowngradeGuard(t *testing.T) {
 	}
 
 	// Sanity: with the heartbeat NOT yet armed (peer not signing — e.g. rolling
-	// upgrade / not-yet-keyed peer) the same tokenless call is grace-accepted,
-	// preserving dual-accept.
+	// upgrade / not-yet-keyed peer), a read-only call still gets rollout grace.
 	s.heartbeatAuthSeenFn = func() bool { return false }
+	info = &grpc.UnaryServerInfo{FullMethod: pb.BpfrxService_GetStatus_FullMethodName}
 	probe = &unaryCallProbe{}
 	if _, err := s.fabricAuthUnaryInterceptor(context.Background(), nil, info, probe.handler); err != nil {
-		t.Errorf("heartbeat-not-armed tokenless: expected grace allow, got %v", err)
+		t.Errorf("heartbeat-not-armed read-only call: expected grace allow, got %v", err)
 	}
 	if !probe.called {
-		t.Error("heartbeat-not-armed tokenless: grace was not applied")
+		t.Error("heartbeat-not-armed read-only call: grace was not applied")
 	}
 }
 
 // TestFabricAuthUnary_RollingUpgradeGrace: with a key configured but the peer not
-// yet keyed (never authenticated), a tokenless call is admitted so the
-// config-synced key can propagate without breaking cross-node proxy during the
+// yet keyed (never authenticated), a tokenless read-only call is admitted so
+// the config-synced key can propagate without breaking cross-node proxy during
 // rollout. Documents the dual-accept grace (mirrors heartbeatAuthDecision).
 func TestFabricAuthUnary_RollingUpgradeGrace(t *testing.T) {
 	s := keyedServer(fabricTestKey) // peerAuthSeen defaults false
