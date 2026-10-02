@@ -1893,27 +1893,37 @@ func TestRenderConfig_GatewayNameNeverLeaks(t *testing.T) {
 // `remote_addrs = %any`). Reverting the ResponderOnly handling makes both
 // assertions below fail.
 func TestGenerateConfig_ResponderOnlyGateway(t *testing.T) {
-	m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
-	cfg := &config.IPsecConfig{
-		Gateways: map[string]*config.IPsecGateway{
-			"dial-in": {
-				Name:          "dial-in",
-				ResponderOnly: true,
-				LocalAddress:  "203.0.113.5",
-			},
-		},
-		VPNs: map[string]*config.IPsecVPN{
-			"dyn": {
-				Gateway: "dial-in",
-				PSK:     "supersecret",
-			},
-		},
-		Proposals: map[string]*config.IPsecProposal{},
+	for _, establishTunnels := range []string{"immediately", "on-traffic"} {
+		t.Run(establishTunnels, func(t *testing.T) {
+			m := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
+			cfg := &config.IPsecConfig{
+				Gateways: map[string]*config.IPsecGateway{
+					"dial-in": {
+						Name:           "dial-in",
+						ResponderOnly:  true,
+						LocalAddress:   "203.0.113.5",
+						DPDEnable:      true,
+						DeadPeerDetect: "optimized",
+					},
+				},
+				VPNs: map[string]*config.IPsecVPN{
+					"dyn": {
+						Gateway:          "dial-in",
+						PSK:              "supersecret",
+						EstablishTunnels: establishTunnels,
+					},
+				},
+				Proposals: map[string]*config.IPsecProposal{},
+			}
+			got := m.generateConfig(cfg)
+			conn := parseSwanctlDoc(t, got).at(t, "connections", "dyn")
+			conn.requireSetting(t, "remote_addrs", "%any")
+			conn.requireSetting(t, "local_addrs", "203.0.113.5")
+			child := conn.at(t, "children", "dyn")
+			child.hasNoSetting(t, "start_action")
+			child.requireSetting(t, "dpd_action", "clear")
+		})
 	}
-	got := m.generateConfig(cfg)
-	conn := parseSwanctlDoc(t, got).at(t, "connections", "dyn")
-	conn.requireSetting(t, "remote_addrs", "%any")
-	conn.requireSetting(t, "local_addrs", "203.0.113.5")
 }
 
 // secretsOnly_6824 resolves the document's single secrets block, failing if the

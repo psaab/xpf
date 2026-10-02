@@ -463,11 +463,15 @@ func (m *Manager) renderConfig(ipsecCfg *config.IPsecConfig) (string, map[string
 			case "clear":
 				fmt.Fprintf(&b, "        copy_df = no\n")
 			}
-			switch vpn.EstablishTunnels {
-			case "immediately":
-				fmt.Fprintf(&b, "        start_action = start\n")
-			case "on-traffic":
-				fmt.Fprintf(&b, "        start_action = trap\n")
+			// A dynamic responder has no fixed remote endpoint; neither an
+			// explicit start nor a traffic-triggered trap may initiate.
+			if gw == nil || !gw.ResponderOnly {
+				switch vpn.EstablishTunnels {
+				case "immediately":
+					fmt.Fprintf(&b, "        start_action = start\n")
+				case "on-traffic":
+					fmt.Fprintf(&b, "        start_action = trap\n")
+				}
 			}
 			if dpd.Action != "" {
 				fmt.Fprintf(&b, "        dpd_action = %s\n", dpd.Action)
