@@ -2467,13 +2467,13 @@ impl PortAllocator {
     pub(super) fn try_claim_translated_port(&self, addr_index: usize, port: u16) -> Option<bool> {
         Some(self.shared.occupancy.get(addr_index)?.reserve(port))
     }
-    /// #11475: make room for an imported lease using the same bounded
-    /// persistent-table pressure sweep as local persistent-NAT mints.
+    /// #11475/#11495: make room for an imported lease or a synced-session
+    /// persistent mint using one bounded persistent-table pressure sweep.
     ///
     /// Called with `live` held after the caller has checked for an existing
-    /// source key. The table length is authoritative under this guard; an
-    /// import cannot race another insert past the cap.
-    pub(super) fn import_idle_lease_capacity_reached(
+    /// source key. The table length is authoritative under this guard; no
+    /// persistent insertion can race another past the cap.
+    pub(super) fn persistent_lease_capacity_reached(
         &self,
         live: &mut PortAllocatorLiveState,
         now_ns: u64,
@@ -4438,6 +4438,13 @@ impl PortAllocator {
         // rule). The synced decision is authoritative on the wire, but on a
         // healthy standby the owning RG is passive so no local flow should hold
         // the port; if one does, not stealing is the safe choice.
+        // A synced session may mint a fresh persistent lease only while the
+        // persistent table has room. Existing leases returned through the
+        // join path above and do not consume another entry.
+        if persistent.is_some() && self.persistent_lease_capacity_reached(&mut live, now_ns) {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         if !self.shared.occupancy[addr_index].reserve(translated.port) {
             return false;
         }
@@ -4683,6 +4690,16 @@ impl PortAllocator {
                 None => !live.persistent_nat_import_is_clear_fenced(key, now_ns),
             }
         });
+        // The persistent-table budget is independent of the live-flow budget:
+        // an address-only synced session may mint a lease only if a bounded
+        // pressure-GC pass leaves room for its new source key. Joining an
+        // existing lease below does not add a table entry.
+        if persistent.is_some_and(|(key, _)| !live.persistent_by_source.contains_key(&key))
+            && self.persistent_lease_capacity_reached(&mut live, now_ns)
+        {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
+        }
         let mut idle_lease_to_deindex: Option<(usize, u64)> = None;
         if let Some((persistent_key, _)) = persistent {
             if addr_index >= live.lease_expirations_by_addr.len() {

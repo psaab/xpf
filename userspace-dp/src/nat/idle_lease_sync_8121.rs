@@ -259,11 +259,10 @@ impl PortAllocator {
         {
             return IdleLeaseImport::SkippedExisting;
         }
-        // Imports and local mints share the persistent-table cap. Give one
-        // bounded pressure-GC pass a chance to reclaim expired idle leases; if
-        // still full, refuse this import. A full table refuses both sides:
-        // admission is first-come-first-served, not reserved by origin.
-        if self.import_idle_lease_capacity_reached(&mut live, now_ns) {
+        // Imports and synced-session mints share the persistent-table cap.
+        // Give one bounded pressure-GC pass a chance to reclaim expired idle
+        // leases; if still full, refuse this lease.
+        if self.persistent_lease_capacity_reached(&mut live, now_ns) {
             return IdleLeaseImport::SkippedCapacity;
         }
         let translated = TranslatedTuple {
