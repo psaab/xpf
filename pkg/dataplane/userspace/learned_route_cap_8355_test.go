@@ -146,6 +146,63 @@ func TestBGPOverCapPreservesOSPFRoutes10824(t *testing.T) {
 	}
 }
 
+// TestOverLimitIPv6GroupPreservesIPv4Group11441 proves family is part of the
+// learned-route quota identity. A v6 flood for the same table/protocol must
+// not merge with, and shed, the small healthy v4 group.
+func TestOverLimitIPv6GroupPreservesIPv4Group11441(t *testing.T) {
+	limit := maxLearnedRoutes()
+	if limit < 2 {
+		t.Fatalf("learned-route cap = %d, need at least two routes for the regression fixture", limit)
+	}
+	routes := make([]routing.LearnedRoute, 0, limit+4)
+	for range limit + 1 {
+		routes = append(routes, routing.LearnedRoute{
+			TableID:  254,
+			Family:   unix.AF_INET6,
+			Protocol: "ospf",
+		})
+	}
+	for range 3 {
+		routes = append(routes, routing.LearnedRoute{
+			TableID:  254,
+			Family:   unix.AF_INET,
+			Protocol: "ospf",
+		})
+	}
+
+	kept, capped := capLearnedRouteGroups(routes)
+	if !capped {
+		t.Fatal("over-limit IPv6 group did not mark the route set as capped")
+	}
+	if len(kept) != 3 {
+		t.Fatalf("kept %d routes, want all 3 IPv4 routes after shedding IPv6", len(kept))
+	}
+	for _, route := range kept {
+		if route.Family != unix.AF_INET || route.Protocol != "ospf" {
+			t.Errorf("unrelated route survived the cap: family=%d protocol=%q", route.Family, route.Protocol)
+		}
+	}
+}
+
+func TestLearnedRouteCapFamilyProtocolCounter11441(t *testing.T) {
+	before := LearnedRouteCapHitsByFamilyProtocol()
+	routes := make([]routing.LearnedRoute, maxLearnedRoutes()+1)
+	for i := range routes {
+		routes[i] = routing.LearnedRoute{
+			TableID:  254,
+			Family:   unix.AF_INET6,
+			Protocol: "ospf",
+		}
+	}
+	if _, capped := capLearnedRouteGroups(routes); !capped {
+		t.Fatal("over-limit IPv6 group did not cap")
+	}
+	after := LearnedRouteCapHitsByFamilyProtocol()
+	if got, want := after["inet6"]["ospf"], before["inet6"]["ospf"]+1; got != want {
+		t.Errorf("inet6/ospf shed count = %d, want %d", got, want)
+	}
+}
+
 // importWithSyntheticKernelTable drives the real snapshot builder against a
 // synthetic kernel table of n routes and returns the learned routes that made
 // it into the snapshot.

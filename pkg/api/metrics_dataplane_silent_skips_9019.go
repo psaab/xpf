@@ -14,6 +14,12 @@ var learnedRouteCapGroupShedsTotalDesc = prometheus.NewDesc(
 	[]string{"protocol"}, nil,
 )
 
+var learnedRouteCapGroupShedsByFamilyTotalDesc = prometheus.NewDesc(
+	"xpf_learned_route_cap_group_sheds_by_family_total",
+	"Total learned-route cap group sheds, by address family and kernel route protocol.",
+	[]string{"family", "protocol"}, nil,
+)
+
 // #9019: export the two userspace-dataplane counters that record work the box
 // DECLINED to do.
 //
@@ -58,9 +64,13 @@ var learnedRouteCapGroupShedsTotalDesc = prometheus.NewDesc(
 //     counted as policy denials and Permit results retaining ordinary
 //     delegation (#9522).
 //
-//   - learned_route_cap_group_sheds_total{protocol}: complete table/protocol
-//     route groups shed to stay within the publish budget (#10824). The fixed
-//     protocol set is emitted at zero; unknown observed protocols are included.
+//   - learned_route_cap_group_sheds_total{protocol}: complete table/family/
+//     protocol route groups shed to stay within the publish budget (#10824).
+//     This aggregate series is retained for existing consumers.
+//
+//   - learned_route_cap_group_sheds_by_family_total{family,protocol}: the same
+//     sheds split by address family ("inet" or "inet6"), so one family's flood
+//     can be distinguished from the other.
 //
 // ALWAYS EMITTED, INCLUDING AT ZERO, per the #3464 convention and for the
 // reason #8312 and #9042 both give: a counter that appears only once it fires
@@ -81,6 +91,7 @@ func (c *xpfCollector) describeDataplaneSilentSkips(ch chan<- *prometheus.Desc) 
 	ch <- c.bindingWedgeGiveupsTotal
 	ch <- c.learnedRouteCapHitsTotal
 	ch <- learnedRouteCapGroupShedsTotalDesc
+	ch <- learnedRouteCapGroupShedsByFamilyTotalDesc
 }
 
 func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
@@ -99,5 +110,22 @@ func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
 	for _, protocol := range protocols {
 		ch <- prometheus.MustNewConstMetric(learnedRouteCapGroupShedsTotalDesc,
 			prometheus.CounterValue, float64(protocolHits[protocol]), protocol)
+	}
+	familyHits := userspace.LearnedRouteCapHitsByFamilyProtocol()
+	families := make([]string, 0, len(familyHits))
+	for family := range familyHits {
+		families = append(families, family)
+	}
+	sort.Strings(families)
+	for _, family := range families {
+		protocols := make([]string, 0, len(familyHits[family]))
+		for protocol := range familyHits[family] {
+			protocols = append(protocols, protocol)
+		}
+		sort.Strings(protocols)
+		for _, protocol := range protocols {
+			ch <- prometheus.MustNewConstMetric(learnedRouteCapGroupShedsByFamilyTotalDesc,
+				prometheus.CounterValue, float64(familyHits[family][protocol]), family, protocol)
+		}
 	}
 }

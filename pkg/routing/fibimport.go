@@ -118,7 +118,9 @@ var learnedRouteListFn = netlink.RouteListFiltered
 type LearnedRoute struct {
 	// TableID is the kernel table the route was read from.
 	TableID int
-	// Family is netlink.FAMILY_V4 or netlink.FAMILY_V6.
+	// Family is netlink.FAMILY_V4 or netlink.FAMILY_V6 from the route dump.
+	// Keep it on the value so consumers can distinguish otherwise identical
+	// table/protocol groups from separate address-family dumps.
 	Family int
 	// Metric is the Linux route priority (RTA_PRIORITY). Lower metrics win
 	// within one learned prefix; snapshots keep the fixed import preference.

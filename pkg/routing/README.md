@@ -373,6 +373,7 @@ delegate to the owning domain. Exported types:
   default-instance ingress interface; all copies share its prefix-derived
   priority.
 
+
   The shared priority range is wide enough for IPv6 and does not determine
   admission order. It replaces the former independent sequential priority
   bands, whose source-kind ordering could let a broader leak beat a more
@@ -1195,14 +1196,15 @@ described above that was a deliberate, bounded trade against the #6664
 kernel-delegation bypass.
 
 **The window was not always narrow.** Above the ~65,000-route publish budget,
-#10824 sheds complete (kernel table, protocol) groups rather than declining the
-entire learned-route import. An oversized BGP group therefore cannot evict
-unrelated OSPF, IS-IS, or DHCP groups that fit the remaining budget. If
-over-limit groups remain, BGP groups are shed before other protocols; after
-that, the largest remaining groups are shed whole until the snapshot fits.
-Routes in a shed group resolve `NoRoute` until a later build imports them. This
-keeps the missing state bounded to named route groups rather than making every
-learned destination disappear.
+#10824 sheds complete (kernel table, address family, protocol) groups rather
+than declining the entire learned-route import (#11441). An oversized BGP
+group therefore cannot evict unrelated OSPF, IS-IS, or DHCP groups that fit
+the remaining budget, nor merge IPv4 and IPv6 groups for the same table and
+protocol. If over-limit groups remain, BGP groups are shed before other
+protocols; after that, the largest remaining groups are shed whole until the
+snapshot fits. Routes in a shed group resolve `NoRoute` until a later build
+imports them. This keeps the missing state bounded to named route groups
+rather than making every learned destination disappear.
 
 **#9522 owns the fail-closed disposition.** `buildRouteSnapshots` reports
 whether any complete group was shed, and the snapshot still carries
@@ -1210,7 +1212,11 @@ whether any complete group was shed, and the snapshot still carries
 frames exactly as uncapped ones. A deny is downgraded to `PolicyDenied` and
 dropped; only a policy `Permit` result keeps the ordinary slow-path
 delegation. `xpf_learned_route_import_capped` reports the live diagnostic
-state, `xpf_learned_route_cap_hits_total` counts capped builds, and
-`xpf_learned_route_cap_group_sheds_total{protocol=...}` reports group sheds
-per protocol via `LearnedRouteCapHitsByProtocol`. Snapshot protocol **27**
-refuses a v26 helper that would still restore the old delegation.
+state, `xpf_learned_route_cap_hits_total` counts capped builds,
+`xpf_learned_route_cap_group_sheds_total{protocol=...}` reports aggregate
+group sheds per protocol, and
+`xpf_learned_route_cap_group_sheds_by_family_total{family,protocol}` reports
+the same sheds with address family via `LearnedRouteCapHitsByFamilyProtocol`.
+Snapshot protocol **27** refuses a v26 helper that would still restore the old
+delegation.
+
