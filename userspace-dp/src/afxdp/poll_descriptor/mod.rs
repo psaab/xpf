@@ -554,6 +554,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 };
+                // #11669: drop embedded-v4 identities before native ingress
+                // guards can recycle the descriptor without reaching the
+                // mapped-v6 gate. Tunnel plaintext is checked again after
+                // decapsulation below.
+                if !is_injected
+                    && ipv6_frame_has_v4_mapped_or_compat(raw_frame, meta.addr_family)
+                {
+                    let wg_underlay = crate::afxdp::wg::decap::is_wg_underlay_frame(
+                        raw_frame,
+                        meta,
+                        worker_ctx.forwarding,
+                    );
+                    if !wg_underlay {
+                        telemetry.counters.touched = true;
+                        telemetry.counters.v4_mapped_ipv6_dropped += 1;
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
+                }
                 // #10313/#10656/#11297: reject unknown VLAN identities and
                 // VID 0 on a tagged-only ingress bind at the common boundary.
                 // This guard must also run when no 802.1Q tag is present:
@@ -665,28 +684,16 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     }
                 }
                 let packet_frame = owned_packet_frame.as_deref().unwrap_or(raw_frame);
-                // #10686: drop RFC 4291 IPv4-mapped and RFC 4038 deprecated
-                // IPv4-compatible IPv6 src/dst before flow parsing, policy,
-                // NAT, sessions, BPF, or logging can observe a false IPv6
-                // identity. Run AFTER GRE/WG decap so authenticated tunnel
-                // plaintext is adjudicated, not its WG underlay packet.
-                // Injected WG plaintext skips native link-layer ingress
-                // checks, but it must still pass this packet-identity gate
-                // before host-inbound or junos-host policy. The listen-port
-                // exemption below is limited to a native outer frame.
-                if ipv6_frame_has_v4_mapped_or_compat(packet_frame, meta.addr_family) {
-                    let wg_underlay = owned_packet_frame.is_none()
-                        && crate::afxdp::wg::decap::is_wg_underlay_frame(
-                            raw_frame,
-                            meta,
-                            worker_ctx.forwarding,
-                        );
-                    if !wg_underlay {
-                        telemetry.counters.touched = true;
-                        telemetry.counters.v4_mapped_ipv6_dropped += 1;
-                        binding.scratch.scratch_recycle.push(desc.addr);
-                        continue;
-                    }
+                // #10686: mapped/compatible native frames were checked before
+                // the tagged-ingress early return; this remaining path checks
+                // decapsulated frames and injected WG plaintext.
+                if (is_injected || owned_packet_frame.is_some())
+                    && ipv6_frame_has_v4_mapped_or_compat(packet_frame, meta.addr_family)
+                {
+                    telemetry.counters.touched = true;
+                    telemetry.counters.v4_mapped_ipv6_dropped += 1;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
                 }
                 // #946 Phase 1 stage 9: classify fabric ingress after tunnel
                 // decapsulation, but before stage 7+8 can learn a source
