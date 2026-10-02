@@ -41,13 +41,14 @@ func snmpEnabled(cfg *config.Config) bool {
 	return !isProcessDisabled(cfg, "snmpd")
 }
 
-// snmpConfigHash is a deterministic fingerprint of the live SNMP stanza used as
-// the reconcile idempotence gate: an unchanged stanza hashes equal, so a commit
-// that does not touch SNMP is a true no-op (no listener bounce, no in-place
-// swap). It hashes the RAW secret-bearing fields (community strings, v3
-// passwords) directly rather than the redacting MarshalJSON surface, so a
-// community rename or a password rotation is detected as a change. Maps are
-// walked in sorted-key order so the hash is stable across map iteration order.
+// snmpConfigHash is a deterministic fingerprint of the live SNMP stanza and
+// its management-VRF bind, used as the reconcile idempotence gate: unchanged
+// inputs hash equal, so a commit that changes neither is a true no-op (no
+// listener bounce, no in-place swap). It hashes the RAW secret-bearing fields
+// (community strings, v3 passwords) directly rather than the redacting
+// MarshalJSON surface, so a community rename or password rotation is detected.
+// Maps are walked in sorted-key order so the hash is stable across map
+// iteration order.
 func snmpConfigHash(cfg *config.Config) uint64 {
 	h := fnv.New64a()
 	if cfg == nil || cfg.System.SNMP == nil {
@@ -60,6 +61,9 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 		_, _ = h.Write(l[:])
 		_, _ = h.Write([]byte(str))
 	}
+	write("vrf-device")
+	write(snmpVRFDeviceForConfig(cfg))
+
 	write(s.Location)
 	write(s.Contact)
 	write(s.Description)
@@ -378,11 +382,14 @@ func deriveIfCounters(entry *snmp.IfData, stats *netlink.LinkStatistics) {
 //   - disabled -> enabled: create and start the agent listener (and the
 //     link-state trap monitor if trap groups are configured).
 //   - enabled  -> disabled: stop the listener and the monitor.
-//   - enabled  -> enabled (config changed): swap the live authorization /
-//     community / trap-target set in place via UpdateConfig (no listener
-//     bounce — the UDP socket and in-flight polls are preserved), and start
-//     the link-state monitor if trap groups appeared and it is not yet running.
-//   - enabled  -> enabled (unchanged): no-op (idempotence gate on snmpConfigHash).
+//   - enabled  -> enabled (SNMP stanza changed only): swap the live
+//     authorization / community / trap-target set in place via UpdateConfig
+//     (no listener bounce), and start the link-state monitor if trap groups
+//     appeared and it is not yet running.
+//   - enabled  -> enabled (management-VRF bind changed): restart the listener
+//     so the UDP socket and traps use the new routing context.
+//   - enabled  -> enabled (stanza and bind unchanged): no-op (idempotence gate
+//     on snmpConfigHash).
 //
 // It returns true when it changed the running subsystem. It runs BEFORE the
 // dataplane apply in applyConfigLocked, mirroring the pre-#3967 UpdateConfig
@@ -412,7 +419,7 @@ func (d *Daemon) reconcileSNMP(cfg *config.Config) bool {
 	}
 
 	h := snmpConfigHash(cfg)
-
+	vrfDevice := snmpVRFDeviceForConfig(cfg)
 	// Enable path, no agent running: start it. Gated on the boot handoff so
 	// the boot apply does not race the boot block into a double-start, and on
 	// daemonCtx so we have a lifetime to bind the goroutines to.
@@ -435,9 +442,25 @@ func (d *Daemon) reconcileSNMP(cfg *config.Config) bool {
 		return true
 	}
 
-	// Agent already running: idempotent no-op when the stanza is unchanged.
-	if d.snmpHashSet && h == d.snmpHash {
+	// Agent already running: idempotent no-op when the stanza and management
+	// VRF bind are unchanged.
+	if d.snmpHashSet && h == d.snmpHash && d.snmpVRFDevice == vrfDevice {
 		return false
+	}
+
+	// A changed management-VRF bind cannot be applied in place: the listener
+	// socket and trap senders are pinned to the device at agent start.
+	if d.snmpVRFDevice != vrfDevice {
+		d.teardownSNMPLocked()
+		d.snmpHash, d.snmpHashSet = 0, false
+		if err := d.startSNMPLocked(cfg); err != nil {
+			slog.Warn("SNMP agent restart for management-VRF change failed; next apply will retry",
+				"err", err)
+			return true
+		}
+		d.snmpHash, d.snmpHashSet = h, true
+		slog.Info("SNMP agent restarted after management-VRF bind changed")
+		return true
 	}
 
 	// Live in-place reconcile: swap authorization / community / trap targets
@@ -543,6 +566,7 @@ func (d *Daemon) startSNMPLocked(cfg *config.Config) error {
 	if len(cfg.System.SNMP.TrapGroups) > 0 {
 		d.startSNMPMonitorLocked()
 	}
+	d.snmpVRFDevice = vrfDevice
 	slog.Info("SNMP agent started",
 		"communities", len(cfg.System.SNMP.Communities),
 		"v3_users", len(cfg.System.SNMP.V3Users),
@@ -583,6 +607,7 @@ func (d *Daemon) teardownSNMPLocked() {
 	d.snmpCancel = nil
 	d.snmpWg = nil
 	d.snmpMonitorRunning = false
+	d.snmpVRFDevice = ""
 }
 
 // teardownSNMP stops the SNMP subsystem during daemon shutdown. The agent

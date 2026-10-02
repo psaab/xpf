@@ -400,6 +400,69 @@ func TestReconcileSNMPUnchangedIsNoOp(t *testing.T) {
 	}
 }
 
+func snmpEnabledConfigWithMgmtInterface11740(hasMgmt bool) *config.Config {
+	cfg := snmpEnabledConfig()
+	if hasMgmt {
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"fxp0": {Name: "fxp0"},
+		}
+	}
+	return cfg
+}
+
+func assertSNMPManagementVRFTransition11740(t *testing.T, fromMgmt, toMgmt bool) {
+	t.Helper()
+	rec := &snmpServeRecorder{}
+	d := newSNMPReconcileDaemon(t, rec.serve)
+	from := snmpEnabledConfigWithMgmtInterface11740(fromMgmt)
+	to := snmpEnabledConfigWithMgmtInterface11740(toMgmt)
+	if snmpVRFDeviceForConfig(from) == snmpVRFDeviceForConfig(to) {
+		t.Fatal("precondition: management-interface transition must change the SNMP VRF bind")
+	}
+
+	if err := d.applyConfigLocked(context.Background(), from); err != nil {
+		t.Fatalf("applyConfigLocked(initial): %v", err)
+	}
+	if got := rec.count(); got != 1 {
+		t.Fatalf("initial SNMP listener starts = %d, want 1", got)
+	}
+	first := d.snmpAgent
+
+	if err := d.applyConfigLocked(context.Background(), to); err != nil {
+		t.Fatalf("applyConfigLocked(management-interface transition): %v", err)
+	}
+	if got := rec.count(); got != 2 {
+		t.Fatalf("management-VRF transition did not restart/rebind the SNMP listener: starts = %d, want 2", got)
+	}
+	if d.snmpAgent == first {
+		t.Fatal("management-VRF transition kept the old SNMP agent bound to the previous routing context")
+	}
+	if got, want := d.snmpVRFDevice, snmpVRFDeviceForConfig(to); got != want {
+		t.Fatalf("SNMP listener VRF device = %q, want %q", got, want)
+	}
+	if snmpConfigHash(from) == snmpConfigHash(to) {
+		t.Fatal("SNMP reconcile hash did not include the changed management-VRF bind")
+	}
+
+	// A repeated apply in the new routing context remains an idempotent no-op.
+	second := d.snmpAgent
+	if err := d.applyConfigLocked(context.Background(), to); err != nil {
+		t.Fatalf("applyConfigLocked(unchanged target): %v", err)
+	}
+	if got := rec.count(); got != 2 || d.snmpAgent != second {
+		t.Fatalf("unchanged target restarted SNMP: starts = %d, same agent = %v; want 2 and true",
+			got, d.snmpAgent == second)
+	}
+}
+
+func TestReconcileSNMPLastMgmtAddedRebindsVRF11740(t *testing.T) {
+	assertSNMPManagementVRFTransition11740(t, false, true)
+}
+
+func TestReconcileSNMPLastMgmtRemovedRebindsVRF11740(t *testing.T) {
+	assertSNMPManagementVRFTransition11740(t, true, false)
+}
+
 // TestReconcileSNMPStartsMonitorOnTrapGroupAddedDay2 proves the trap-group half
 // of the defect: an agent already running WITHOUT trap groups must bring up the
 // link-state trap monitor when a commit adds a trap group — without bouncing

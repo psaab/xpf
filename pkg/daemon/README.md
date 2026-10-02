@@ -656,9 +656,10 @@ natural stopping point for the mechanical decomposition.
 `d.mgmt` (`management.go`) owns the HTTP/HTTPS management-listener lifecycle so a
 day-2 web-management commit actually replaces the live listener and the
 authentication snapshot instead of leaving the boot-time server enforcing the
-old bind/port/TLS/auth until a restart (a revoked credential stayed usable). It
-mirrors `reconcileSNMP`: `reconcileWebManagement` runs EARLY in
-`applyConfigLocked` — before the dataplane apply that can abort — so a committed
+old bind/port/TLS/auth until a restart (a revoked credential stayed usable).
+`reconcileSNMP` likewise runs early and restarts its listener when a day-2
+management-interface change moves the SNMP bind between main and `vrf-mgmt`.
+`reconcileWebManagement` runs EARLY in `applyConfigLocked` — before the dataplane
 credential revocation is enforced even on an apply that returns early
 (`store.Commit` has already promoted the config). Reconcile discipline:
 
