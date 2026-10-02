@@ -2094,6 +2094,15 @@ func (s *SessionSync) SetZoneOwnership(zoneRG ZoneRGMap, foldRG map[uint32]int, 
 	s.zoneRGMu.Unlock()
 }
 
+// ZoneOwnershipInstalled reports whether a non-nil zone map is wired. An
+// installed empty map is true; nil remains the #9655 unwired sentinel.
+func (s *SessionSync) ZoneOwnershipInstalled() bool {
+	s.zoneRGMu.RLock()
+	installed := s.zoneRGMap != nil
+	s.zoneRGMu.RUnlock()
+	return installed
+}
+
 // SetIngressFoldFn wires the #7095 cluster-stable ingress-interface resolver.
 // It advances the ownership generation as well: a bulk snapshot that captured
 // the previous resolver must not reconcile against it after this changes.
