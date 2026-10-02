@@ -148,8 +148,12 @@ pub(in crate::afxdp::session_glue) fn collect_refresh_owner_rgs_items(
             forward_key: key.clone(),
         };
         let resolution_target = resolution_target_for_session(&flow, decision);
-        let looked_up_resolution =
-            lookup_forwarding_resolution_for_session(forwarding, dynamic_neighbors, &flow, decision);
+        let looked_up_resolution = lookup_forwarding_resolution_for_session_without_cache(
+            forwarding,
+            dynamic_neighbors,
+            &flow,
+            decision,
+        );
         let looked_up_resolution = super::super::prefer_local_forward_candidate_for_fabric_ingress(
             forwarding,
             ha_state,

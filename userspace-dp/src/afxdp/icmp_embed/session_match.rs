@@ -162,6 +162,7 @@ fn lookup_embedded_session(
                 .map(|m| SessionLookup {
                     decision: m.decision,
                     metadata: m.metadata,
+                    forwarding_generation: m.forwarding_generation,
                 })
         })
 }

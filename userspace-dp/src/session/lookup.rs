@@ -164,6 +164,7 @@ impl SessionTable {
             SessionLookup {
                 decision: record.entry.decision,
                 metadata: record.entry.metadata.clone_without_policy_counter(),
+                forwarding_generation: record.entry.forwarding_generation,
             },
             record.entry.origin,
         ))
@@ -185,6 +186,7 @@ impl SessionTable {
             SessionLookup {
                 decision: record.entry.decision,
                 metadata: record.entry.metadata.clone_without_policy_counter(),
+                forwarding_generation: record.entry.forwarding_generation,
             },
             record.entry.origin,
         ))
@@ -388,6 +390,7 @@ impl SessionTable {
                         // this `SessionEntry`; hot-path consumers re-source it
                         // by borrow via `bound_policy_counter_for`.
                         metadata: entry.metadata.clone_without_policy_counter(),
+                        forwarding_generation: entry.forwarding_generation,
                     },
                     entry.origin,
                 ),
@@ -648,6 +651,7 @@ impl SessionTable {
             key: record.key.clone(),
             decision: record.entry.decision,
             metadata: record.entry.metadata.clone(),
+            forwarding_generation: record.entry.forwarding_generation,
         })
     }
 
@@ -729,6 +733,7 @@ impl SessionTable {
                 key: record.key.clone(),
                 decision: record.entry.decision,
                 metadata: record.entry.metadata.clone(),
+                forwarding_generation: record.entry.forwarding_generation,
             })
         } else {
             ForwardNatQuoteLookup::NoMatch
@@ -773,6 +778,7 @@ impl SessionTable {
             key: record.key.clone(),
             decision: record.entry.decision,
             metadata: record.entry.metadata.clone(),
+            forwarding_generation: record.entry.forwarding_generation,
         })
     }
 
@@ -841,6 +847,7 @@ impl SessionTable {
                 key: record.key.clone(),
                 decision: entry.decision,
                 metadata: entry.metadata.clone(),
+                forwarding_generation: entry.forwarding_generation,
             });
         }
         None
@@ -968,6 +975,7 @@ impl SessionTable {
                     key: record.key.clone(),
                     decision: entry.decision,
                     metadata: entry.metadata.clone(),
+                    forwarding_generation: entry.forwarding_generation,
                 },
                 entry.origin,
             ));
@@ -1139,6 +1147,7 @@ impl SessionTable {
         self.remove_entry(key, RemovalKind::Transfer).map(|entry| SessionLookup {
             decision: entry.decision,
             metadata: entry.metadata,
+            forwarding_generation: entry.forwarding_generation,
         })
     }
 

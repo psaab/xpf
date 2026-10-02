@@ -786,6 +786,9 @@ pub(crate) struct PolicyGateAnswer {
 #[derive(Clone, Debug)]
 struct SessionEntry {
     decision: SessionDecision,
+    /// Node-local stamp: the session resolution is reusable only within this
+    /// config/FIB generation pair.
+    forwarding_generation: ForwardingGenerationStamp,
     metadata: SessionMetadata,
     origin: SessionOrigin,
     install_epoch: u64,
@@ -1353,6 +1356,7 @@ pub(crate) struct SessionTable {
     /// also `FilterRevalidationStamp::UNVALIDATED`'s generation and is never
     /// live.
     filter_revalidation_gen: u64,
+    forwarding_revalidation_gen: ForwardingGenerationStamp,
     /// #8356: the live `config_generation` a zone-policy verdict is judged
     /// against, published once per poll pass from the SAME `ValidationState`
     /// the pass classifies packets with — so the stamp an entry carries and the
@@ -1651,6 +1655,7 @@ impl SessionTable {
             opening_overrides: FxHashMap::default(),
             // #7212: no poll pass has published a generation yet.
             filter_revalidation_gen: 0,
+            forwarding_revalidation_gen: ForwardingGenerationStamp::default(),
             policy_revalidation_gen: 0,
             policy_scheduler_expired: false,
             epoch_counter: 0,
@@ -1873,6 +1878,76 @@ impl SessionTable {
     /// revalidation compares against.
     pub(crate) fn filter_revalidation_gen(&self) -> u64 {
         self.filter_revalidation_gen
+    }
+    /// #11373: publish the exact config/FIB pair this worker resolves against.
+    /// The packet loop calls this from the same `ValidationState` it uses for
+    /// classification, before examining any descriptors in the pass.
+    pub(crate) fn set_forwarding_revalidation_gen(
+        &mut self,
+        config_generation: u64,
+        fib_generation: u32,
+    ) {
+        self.forwarding_revalidation_gen = ForwardingGenerationStamp {
+            config_generation,
+            fib_generation,
+            valid: true,
+        };
+    }
+
+    /// #11373: the lookup already returned the entry's stamp, so this check
+    /// adds no second session-table probe on the packet hit path.
+    pub(crate) fn forwarding_resolution_is_stale(
+        &self,
+        stamped: ForwardingGenerationStamp,
+    ) -> bool {
+        self.forwarding_revalidation_gen.valid
+            && (!stamped.valid || stamped != self.forwarding_revalidation_gen)
+    }
+
+    /// #11373: persist a fresh route resolution after a generation-triggered
+    /// re-resolve. Terminal lookups retain their previous owner attribution so
+    /// HA transition scans can still find the withdrawn session.
+    pub(crate) fn revalidate_forwarding_resolution(
+        &mut self,
+        key: &SessionKey,
+        resolution: ForwardingResolution,
+        owner_rg_id: Option<i32>,
+    ) -> bool {
+        let Some(record) = self.record_by_key(key) else {
+            return false;
+        };
+        let handle = self.key_to_handle.get(key).copied();
+        let old_owner_rg_id = record.entry.metadata.owner_rg_id;
+        let Some(handle) = handle else {
+            return false;
+        };
+        if record.key != *key {
+            return false;
+        }
+        if let Some(new_owner_rg_id) = owner_rg_id
+            && new_owner_rg_id != old_owner_rg_id
+        {
+            remove_owner_rg_index_entry(
+                &mut self.owner_rg_sessions,
+                old_owner_rg_id,
+                handle,
+            );
+            if new_owner_rg_id > 0 {
+                self.owner_rg_sessions
+                    .entry(new_owner_rg_id)
+                    .or_default()
+                    .insert(handle);
+            }
+        }
+        let Some(record) = self.entries.get_mut(handle as usize) else {
+            return false;
+        };
+        record.entry.decision.resolution = resolution;
+        record.entry.forwarding_generation = self.forwarding_revalidation_gen;
+        if let Some(new_owner_rg_id) = owner_rg_id {
+            record.entry.metadata.owner_rg_id = new_owner_rg_id;
+        }
+        true
     }
 
     /// #7212: resolve a WIRE tuple to the entry it names, and answer in ONE
@@ -3191,6 +3266,7 @@ impl SessionTable {
                 .get_mut(handle as usize)
                 .expect("handle validated above");
             record.entry.decision = decision;
+            record.entry.forwarding_generation = self.forwarding_revalidation_gen;
             record.entry.metadata = metadata.clone();
             record.entry.origin = origin;
             // #10507 A1 (Main-approved deviation from §4.5 unconditional —

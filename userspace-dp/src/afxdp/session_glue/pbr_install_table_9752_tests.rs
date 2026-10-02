@@ -18,7 +18,7 @@ use super::*;
 use crate::afxdp::worker_queue::{
     MAX_PENDING_WORKER_COMMANDS, WORKER_COMMAND_QUEUE_DROPS,
 };
-use crate::session::install_table_identity;
+use crate::session::{ForwardingGenerationStamp, install_table_identity};
 use crate::{
     ConfigSnapshot, InterfaceAddressSnapshot, InterfaceSnapshot, NeighborSnapshot, RouteSnapshot,
     ZoneSnapshot,
@@ -668,6 +668,7 @@ fn reverse_session_resolves_unstamped_in_default() {
         key: pbr_key(),
         decision: stamped_decision(unusable_resolution()),
         metadata: pbr_metadata(),
+        forwarding_generation: ForwardingGenerationStamp::default(),
     };
     let lookup = super::super::shared_ops::build_reverse_session_from_forward_match(
         &forwarding,

@@ -262,6 +262,7 @@ fn session_lookup_hits_after_install() {
         Some(SessionLookup {
             decision: decision(),
             metadata: metadata(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
         })
     );
     let deltas = table.drain_deltas(8);
@@ -1693,6 +1694,7 @@ fn tcp_fin_keeps_session_until_closing_timeout() {
         Some(SessionLookup {
             decision: decision(),
             metadata: metadata(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
         })
     );
     // #9412: the FIN moves the session to CLOSING, which is announced once so
@@ -2505,6 +2507,7 @@ fn synced_sessions_do_not_emit_deltas() {
         Some(SessionLookup {
             decision: decision(),
             metadata: synced_meta,
+            forwarding_generation: ForwardingGenerationStamp::default(),
         })
     );
     assert!(table.drain_deltas(8).is_empty());
@@ -2612,6 +2615,7 @@ fn promote_synced_forward_session_emits_open_delta() {
         Some(SessionLookup {
             decision: decision(),
             metadata: promoted.clone(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
         })
     );
     let deltas = table.drain_deltas(8);
@@ -2654,6 +2658,7 @@ fn promote_synced_reverse_session_stays_quiet() {
         Some(SessionLookup {
             decision: decision(),
             metadata: promoted,
+            forwarding_generation: ForwardingGenerationStamp::default(),
         })
     );
     assert!(table.drain_deltas(8).is_empty());
@@ -9597,25 +9602,26 @@ fn counters_with_replica_flag_separates_not_held_from_held_and_idle_7919() {
 }
 
 /// #11064: `NatDecision` carries a 4-byte aligned source-NAT ICMP
-/// `(type, code)` fingerprint (44 -> 48 bytes). This layout guard keeps
-/// `SessionDecision` `Copy` without surprises and pins the install-table
-/// identity after the expanded NAT decision.
+/// `(type, code)` fingerprint (44 -> 48 bytes). #11411 added selected-route
+/// and transport-route MTUs to `ForwardingResolution` (48 -> 56 bytes), so
+/// the complete `SessionDecision` is now 56 + 48 + 8 = 112 bytes. Keep it
+/// `Copy` and pin the two install-table identity offsets after that expansion.
 #[test]
 fn session_decision_typed_snat_layout_11064() {
     fn assert_copy<T: Copy>() {}
     assert_copy::<crate::session::SessionDecision>();
     assert_eq!(
         std::mem::size_of::<crate::session::SessionDecision>(),
-        104,
-        "SessionDecision = 48 (resolution) + 48 (nat) + 8 (table identity)"
+        112,
+        "SessionDecision = 56 (resolution, incl. route MTUs) + 48 (nat) + 8 (table identity)"
     );
     assert_eq!(
         core::mem::offset_of!(crate::session::SessionDecision, install_table_domain),
-        96
+        104
     );
     assert_eq!(
         core::mem::offset_of!(crate::session::SessionDecision, install_table_check),
-        100
+        108
     );
 }
 

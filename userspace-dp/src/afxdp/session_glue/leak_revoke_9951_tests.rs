@@ -19,7 +19,7 @@
 //! stamp the CLIENT RI's leak view, not MAIN.
 
 use super::*;
-use crate::session::install_table_identity;
+use crate::session::{ForwardingGenerationStamp, install_table_identity};
 use crate::test_zone_ids::TEST_WAN_ZONE_ID;
 use crate::{
     ConfigSnapshot, InterfaceAddressSnapshot, InterfaceSnapshot, NeighborSnapshot, RouteSnapshot,
@@ -133,6 +133,7 @@ fn reverse_worker_entry_fixture(
             key: forward_key,
             decision: noroute_decision(),
             metadata: leak_metadata(),
+            forwarding_generation: ForwardingGenerationStamp::default(),
         },
         1,
         0,
@@ -829,6 +830,7 @@ fn reverse_synthesis_stamps_and_revokes_leak_riding_session_9951() {
         key: forward_key.clone(),
         decision: noroute_decision(),
         metadata: leak_metadata(),
+        forwarding_generation: ForwardingGenerationStamp::default(),
     };
     let reverse_key = reverse_session_key(&forward_key, NatDecision::default());
     let reverse_flow = SessionFlow {
@@ -968,19 +970,26 @@ fn bringup_replay_preserves_nonzero_leak_stamp_9951() {
 
 const RI_BLUE_IFINDEX: i32 = 12;
 
-/// R-fixture: `blue` owns ge-0/0/0.50 (12) and reaches 8.8.8.0/24 ONLY
-/// through a leak owned by `blue.inet.0` into `red.inet.0`. MAIN holds an
-/// unrelated 9.9.9.0/24 leak for the independence control. Route indices are
-/// pinned by premise asserts: [0] blue leak, [1] red target, [2] MAIN leak,
-/// [3] MAIN-leak target.
+const RI_RED_IFINDEX: i32 = 13;
+
+/// R-fixture: blue owns ge-0/0/0.50 (12) and reaches 8.8.8.0/24 ONLY through
+/// its leak into red.inet.0. Red target routes use red's own egress, matching
+/// #11074's explicit route-table scoping (`forwarding_build/fib.rs:511-524`,
+/// pinned by `forwarding_build/tests.rs:5330-5335`); overlapping RI subnets
+/// are intentional. MAIN holds an unrelated 9.9.9.0/24 leak for the
+/// independence control. Route indices are pinned by premise asserts: [0] blue
+/// leak, [1] red target, [2] MAIN leak, [3] MAIN-leak target.
 fn ri_leak_snapshot() -> ConfigSnapshot {
     let (domain, _check) = install_table_identity("blue");
+    let (red_domain, _) = install_table_identity("red");
     ConfigSnapshot {
         zones: vec![ZoneSnapshot {
             name: "wan".to_string(),
             id: TEST_WAN_ZONE_ID,
             ..Default::default()
         }],
+        // The blue-owned member interface is retained as the RI ownership
+        // reference; every target route below uses its table's own egress.
         interfaces: vec![InterfaceSnapshot {
             name: "ge-0/0/0.50".to_string(),
             zone: "wan".to_string(),
@@ -995,7 +1004,26 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 scope: 0,
             }],
             ..Default::default()
-        }],
+            },
+            // The red target routes below resolve through their own
+            // routing-instance egress; overlapping connected subnets in
+            // separate RIs are intentional.
+            InterfaceSnapshot {
+                name: "ge-0/0/0.51".to_string(),
+                zone: "wan".to_string(),
+                routing_instance: "red".to_string(),
+                routing_domain: red_domain,
+                linux_name: "ge-0-0-0.51".to_string(),
+                ifindex: RI_RED_IFINDEX,
+                hardware_addr: "02:bf:72:00:51:08".to_string(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: "172.16.50.8/24".to_string(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+        ],
         routes: vec![
             RouteSnapshot {
                 table: "blue.inet.0".to_string(),
@@ -1013,7 +1041,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 family: "inet".to_string(),
                 destination: "8.8.8.0/24".to_string(),
                 next_hop_weights: vec![],
-                next_hops: vec!["172.16.50.1@ge-0/0/0.50".to_string()],
+                next_hops: vec!["172.16.50.1@ge-0/0/0.51".to_string()],
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
@@ -1035,7 +1063,7 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
                 family: "inet".to_string(),
                 destination: "9.9.9.0/24".to_string(),
                 next_hop_weights: vec![],
-                next_hops: vec!["172.16.50.1@ge-0/0/0.50".to_string()],
+                next_hops: vec!["172.16.50.1@ge-0/0/0.51".to_string()],
                 discard: false,
                 next_table: String::new(),
                 preference: 0,
@@ -1043,8 +1071,8 @@ fn ri_leak_snapshot() -> ConfigSnapshot {
             },
         ],
         neighbors: vec![NeighborSnapshot {
-            interface: "ge-0-0-0.50".to_string(),
-            ifindex: RI_BLUE_IFINDEX,
+            interface: "ge-0-0-0.51".to_string(),
+            ifindex: RI_RED_IFINDEX,
             family: "inet".to_string(),
             ip: "172.16.50.1".to_string(),
             mac: "00:11:22:33:44:55".to_string(),
@@ -1069,6 +1097,7 @@ fn ri_forward_match() -> (ForwardSessionMatch, SessionKey) {
         key: forward_key.clone(),
         decision: noroute_decision(),
         metadata: leak_metadata(),
+        forwarding_generation: ForwardingGenerationStamp::default(),
     };
     let reverse_key = reverse_session_key(&forward_key, NatDecision::default());
     (forward_match, reverse_key)
@@ -1155,8 +1184,8 @@ fn ri_reverse_synthesis_stamps_client_leak_and_revokes_on_removal_10312() {
         "premise broken: the RI reverse must ride the blue leak"
     );
     assert_eq!(
-        lookup.decision.resolution.egress_ifindex, RI_BLUE_IFINDEX,
-        "premise broken: the blue leak resolves via the member interface"
+        lookup.decision.resolution.egress_ifindex, RI_RED_IFINDEX,
+        "premise broken: the red target route resolves via its member interface"
     );
     assert_eq!(
         (
@@ -1257,8 +1286,8 @@ fn unrelated_main_leak_removal_leaves_ri_reverse_pinned_10312() {
         "CONTROL: removing an unrelated MAIN leak must leave the RI reverse pinned"
     );
     assert_eq!(
-        hit.egress_ifindex, RI_BLUE_IFINDEX,
-        "CONTROL: the pinned RI reverse must keep its member egress"
+        hit.egress_ifindex, RI_RED_IFINDEX,
+        "CONTROL: the pinned RI reverse must keep its target-table egress"
     );
 }
 

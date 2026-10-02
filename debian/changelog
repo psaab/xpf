@@ -9,6 +9,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Mirror configured generate-route and FRR blackhole prefixes as discard
     routes in the userspace FIB, preserving longest-prefix behavior while
     keeping the HA inactive-RG sentinel excluded (#11398).
+  * Re-resolve established-session forwarding decisions when config or FIB
+    generations change, so deleted and discarded routes cannot keep using
+    cached egresses while ECMP choices remain pinned within a generation
+    (#11373).
   * Persist HA persistent-NAT clear generations and peer replay floors so
     delayed idle-lease batches cannot restore mappings after an operator clear
     or daemon/helper restart; reclaim expired allocator clear fences (#11486).

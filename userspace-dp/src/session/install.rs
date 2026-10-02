@@ -313,6 +313,7 @@ impl SessionTable {
             key: key.clone(),
             entry: SessionEntry {
                 decision,
+                forwarding_generation: self.forwarding_revalidation_gen,
                 metadata: metadata.clone(),
                 origin,
                 install_epoch: epoch,
@@ -633,6 +634,7 @@ impl SessionTable {
             key: key.clone(),
             entry: SessionEntry {
                 decision,
+                forwarding_generation: ForwardingGenerationStamp::default(),
                 metadata: metadata.clone(),
                 origin,
                 install_epoch: epoch,

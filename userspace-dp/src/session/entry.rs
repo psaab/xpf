@@ -462,10 +462,21 @@ impl SessionMetadata {
 /// returned by the once-per-flow `find_forward_*_match` finders still carries
 /// the `Arc` — those feed reverse-companion install, an owner handoff, not the
 /// per-packet fast path.)
+/// The FIB/configuration generations under which a session's resolution was
+/// last derived. Node-local; never serialized with the session decision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ForwardingGenerationStamp {
+    pub(crate) config_generation: u64,
+    pub(crate) fib_generation: u32,
+    /// Peer-imported/shared lookups carry no local forwarding provenance.
+    pub(crate) valid: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionLookup {
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
+    pub(crate) forwarding_generation: ForwardingGenerationStamp,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -473,6 +484,7 @@ pub(crate) struct ForwardSessionMatch {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
+    pub(crate) forwarding_generation: ForwardingGenerationStamp,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -574,9 +574,14 @@ pub(super) fn forwarding_snapshot_with_next_table(include_neighbor: bool) -> Con
             id: TEST_WAN_ZONE_ID,
             ..Default::default()
         }],
+        // #9951: target routes live in blue.inet[6].0, so this egress is
+        // blue-owned. See the RI fixture's blue interface at
+        // session_glue/leak_revoke_9951_tests.rs:993-1006. The table-scoped
+        // contract is enforced at forwarding_build/fib.rs:511-524.
         interfaces: vec![InterfaceSnapshot {
             name: "ge-0/0/0.50".to_string(),
             zone: "wan".to_string(),
+            routing_instance: "blue".to_string(),
             linux_name: "ge-0-0-0.50".to_string(),
             ifindex: 12,
             hardware_addr: "02:bf:72:00:50:08".to_string(),
