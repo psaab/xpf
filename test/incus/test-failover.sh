@@ -381,9 +381,13 @@ pool_src_teardown() {
 	incus exec "$CLUSTER_LAN_HOST" -- \
 		ip addr del "${POOL_SRC}/24" dev "$POOL_LAN_IF" 2>/dev/null || true
 }
+failover_teardown() {
+	failover_stop_main_iperf /tmp/iperf3-failover.pid "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
+	pool_src_teardown
+}
 # The cluster is SHARED: the secondary address must not outlive this run
 # whatever happens, including a die() in the middle of a phase.
-trap pool_src_teardown EXIT
+trap failover_teardown EXIT
 
 if [[ "$POOL_NAT_SMOKE" != 1 ]]; then
 	POOL_LAN_IF=""
@@ -395,8 +399,8 @@ else
 		ip addr add "${POOL_SRC}/24" dev "$POOL_LAN_IF" 2>/dev/null || true
 fi
 
-# Kill any stale iperf3
-incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+# Stop a previously tracked main client from an interrupted prior run.
+failover_stop_main_iperf /tmp/iperf3-failover.pid "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 sleep 1
 
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
@@ -409,7 +413,7 @@ info "Starting iperf3 -P${IPERF_STREAMS} -i 1 -t${IPERF_DURATION} -p${IPERF_PORT
 # with increasing back-off to wait for the server to become available.
 iperf_started=false
 for attempt in 1 2 3; do
-	incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+	failover_stop_main_iperf /tmp/iperf3-failover.pid "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 	sleep 1
 	iperf_start_seconds=$SECONDS
 	failover_start_main_iperf "$IPERF_DURATION" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" \
@@ -433,7 +437,7 @@ for attempt in 1 2 3; do
 	# iperf3 is running but not enough sessions — streams may have timed out
 	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "unable to connect" /tmp/iperf3-failover.log 2>/dev/null; then
 		info "iperf3 stream connect failed on attempt $attempt — server busy, retrying"
-		incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+		failover_stop_main_iperf /tmp/iperf3-failover.pid "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 		sleep $((attempt * 10))
 		continue
 	fi
