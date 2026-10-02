@@ -907,10 +907,9 @@ func (m *Manager) ControlLinkAuthKey() []byte {
 	return m.controlLinkAuthKey()
 }
 
-// ControlLinkAuthKeyConfiguredAt reports when the manager first became keyed
-// with an accepted control-link key. It is zero while no accepted key is set.
-// This is runtime state, not persisted configuration: each daemon records the
-// transition made by UpdateConfig.
+// ControlLinkAuthKeyConfiguredAt reports the most recent transition from no
+// accepted control-link key to at least one accepted key. It is zero while
+// the accepted-key set is empty.
 func (m *Manager) ControlLinkAuthKeyConfiguredAt() time.Time {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
