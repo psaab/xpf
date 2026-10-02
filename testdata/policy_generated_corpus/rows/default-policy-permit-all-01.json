@@ -1,4 +1,7 @@
 {
+  "schema_version": 1,
+  "id": "default-policy-permit-all-01",
+  "source_case": "default-policy-permit-all",
   "config_set_lines": [
     "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
     "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
@@ -6,49 +9,56 @@
     "set security zones security-zone untrust interfaces ge-0/0/1.0",
     "set security policies default-policy permit-all"
   ],
-  "go_verdict": {
-    "action": "permit",
-    "default_used": true,
-    "matched": false,
-    "policy_id": 0,
-    "policy_name": ""
-  },
-  "id": "default-policy-permit-all-01",
   "query": {
+    "from_zone": "trust",
+    "to_zone": "untrust",
+    "src_ip": "10.0.1.5",
     "dst_ip": "10.0.2.5",
+    "protocol": "tcp",
+    "src_port": 1234,
     "dst_port": 80,
     "frag": false,
-    "from_zone": "trust",
-    "icmp_code": null,
-    "icmp_type": null,
     "l4_present": true,
-    "protocol": "tcp",
-    "src_ip": "10.0.1.5",
-    "src_port": 1234,
-    "to_zone": "untrust"
+    "icmp_type": null,
+    "icmp_code": null
+  },
+  "go_verdict": {
+    "action": "permit",
+    "matched": false,
+    "default_used": true,
+    "unsupported_tuple_family": false,
+    "policy_name": "",
+    "policy_id": 0
   },
   "rust_verdict": {
     "action": "permit",
-    "default_used": true,
     "matched": false,
-    "policy_id": 0,
-    "policy_name": ""
+    "default_used": true,
+    "unsupported_tuple_family": false,
+    "policy_name": "",
+    "policy_id": 0
   },
-  "schema_version": 1,
   "snapshot": {
     "default_policy": "permit",
+    "rules": [],
     "zones": [
       {
-        "host_inbound_configured": true,
+        "name": "trust",
         "id": 50675,
-        "name": "trust"
+        "host_inbound_configured": true,
+        "host_inbound_system_services": [],
+        "host_inbound_protocols": [],
+        "tcp_rst": false
       },
       {
-        "host_inbound_configured": true,
+        "name": "untrust",
         "id": 20665,
-        "name": "untrust"
+        "host_inbound_configured": true,
+        "host_inbound_system_services": [],
+        "host_inbound_protocols": [],
+        "tcp_rst": false
       }
-    ]
-  },
-  "source_case": "default-policy-permit-all"
+    ],
+    "address_books": []
+  }
 }

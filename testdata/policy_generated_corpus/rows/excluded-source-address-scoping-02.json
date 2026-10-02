@@ -1,4 +1,7 @@
 {
+  "schema_version": 1,
+  "id": "excluded-source-address-scoping-02",
+  "source_case": "excluded-source-address-scoping",
   "config_set_lines": [
     "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
     "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
@@ -12,66 +15,87 @@
     "set security policies from-zone trust to-zone untrust policy p-nonlab match application any",
     "set security policies from-zone trust to-zone untrust policy p-nonlab then permit"
   ],
-  "go_verdict": {
-    "action": "permit",
-    "default_used": false,
-    "matched": true,
-    "policy_id": 0,
-    "policy_name": "p-nonlab"
-  },
-  "id": "excluded-source-address-scoping-02",
   "query": {
+    "from_zone": "trust",
+    "to_zone": "untrust",
+    "src_ip": "10.0.1.101",
     "dst_ip": "10.0.2.5",
+    "protocol": "tcp",
+    "src_port": 1234,
     "dst_port": 80,
     "frag": false,
-    "from_zone": "trust",
-    "icmp_code": null,
-    "icmp_type": null,
     "l4_present": true,
-    "protocol": "tcp",
-    "src_ip": "10.0.1.101",
-    "src_port": 1234,
-    "to_zone": "untrust"
+    "icmp_type": null,
+    "icmp_code": null
+  },
+  "go_verdict": {
+    "action": "permit",
+    "matched": true,
+    "default_used": false,
+    "unsupported_tuple_family": false,
+    "policy_name": "p-nonlab",
+    "policy_id": 0
   },
   "rust_verdict": {
     "action": "permit",
-    "default_used": false,
     "matched": true,
-    "policy_id": 0,
-    "policy_name": "p-nonlab"
+    "default_used": false,
+    "unsupported_tuple_family": false,
+    "policy_name": "p-nonlab",
+    "policy_id": 0
   },
-  "schema_version": 1,
   "snapshot": {
     "default_policy": "deny",
     "rules": [
       {
-        "rule_id": "trust-\u003euntrust/p-nonlab",
+        "rule_id": "trust->untrust/p-nonlab",
+        "policy_id": 0,
         "name": "p-nonlab",
         "from_zone": "trust",
         "to_zone": "untrust",
+        "scheduler_name": "",
+        "inactive": false,
+        "source_addresses": [],
+        "destination_addresses": [],
         "source_book_ids": [
           3495241515
         ],
+        "destination_book_ids": [],
+        "source_literals": [],
         "destination_literals": [
           "any"
         ],
         "applications": [
           "any"
         ],
+        "application_terms": [],
         "action": "permit",
-        "source_address_excluded": true
+        "source_address_excluded": true,
+        "destination_address_excluded": false,
+        "log_session_init": false,
+        "log_session_close": false,
+        "match_from_zone": "",
+        "match_to_zone": "",
+        "match_from_zones": [],
+        "match_to_zones": []
       }
     ],
     "zones": [
       {
         "name": "trust",
         "id": 50675,
-        "host_inbound_configured": true
+        "host_inbound_configured": true,
+        "host_inbound_system_services": [],
+        "host_inbound_protocols": [],
+        "tcp_rst": false
       },
       {
         "name": "untrust",
         "id": 20665,
-        "host_inbound_configured": true
+        "host_inbound_configured": true,
+        "host_inbound_system_services": [],
+        "host_inbound_protocols": [],
+        "tcp_rst": false
       }
     ],
     "address_books": [
@@ -80,9 +104,9 @@
         "name": "a-lab",
         "prefixes_v4": [
           "10.0.1.100/32"
-        ]
+        ],
+        "prefixes_v6": []
       }
     ]
-  },
-  "source_case": "excluded-source-address-scoping"
+  }
 }

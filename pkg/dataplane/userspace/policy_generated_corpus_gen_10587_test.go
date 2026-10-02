@@ -20,9 +20,13 @@ import (
 const generatedSeedManifestPath10587 = "../../../testdata/policy_generated_corpus/seed_manifest.json"
 
 type generatedSnapshotRow10587 struct {
-	ID             string          `json:"id"`
-	ConfigSetLines []string        `json:"config_set_lines"`
-	Snapshot       json.RawMessage `json:"snapshot"`
+	ID             string   `json:"id"`
+	ConfigSetLines []string `json:"config_set_lines"`
+	Query          struct {
+		SchedulerActive map[string]bool     `json:"scheduler_active,omitempty"`
+		FeedOverlay     map[string][]string `json:"feed_overlay,omitempty"`
+	} `json:"query"`
+	Snapshot json.RawMessage `json:"snapshot"`
 }
 
 func generatedRowsDir10587() string {
@@ -75,8 +79,8 @@ func generatedSeedManifestIDs10587(t *testing.T) []string {
 	if err := json.Unmarshal(blob, &manifest); err != nil {
 		t.Fatalf("seed_manifest.json is invalid JSON: %v", err)
 	}
-	if manifest.SchemaVersion != 1 || len(manifest.IDs) != 48 {
-		t.Fatalf("seed_manifest.json has schema %d and %d IDs, want schema 1 and exactly 48",
+	if manifest.SchemaVersion != 1 || len(manifest.IDs) != 52 {
+		t.Fatalf("seed_manifest.json has schema %d and %d IDs, want schema 1 and exactly 52",
 			manifest.SchemaVersion, len(manifest.IDs))
 	}
 	return manifest.IDs
@@ -84,8 +88,8 @@ func generatedSeedManifestIDs10587(t *testing.T) []string {
 
 func assertGeneratedSnapshotCoverage10587(t *testing.T, rows []generatedSnapshotRow10587) {
 	t.Helper()
-	if len(rows) < 48 {
-		t.Fatalf("generated policy row contract collapsed to %d (want >=48)", len(rows))
+	if len(rows) < 52 {
+		t.Fatalf("generated policy row contract collapsed to %d (want >=52)", len(rows))
 	}
 	seen := make(map[string]bool, len(rows))
 	for _, row := range rows {
@@ -114,11 +118,11 @@ func buildGeneratedSnapshot10587(t *testing.T, row generatedSnapshotRow10587) po
 	if err != nil {
 		t.Fatalf("row %s: strict compile: %v", row.ID, err)
 	}
-	rules, err := buildPolicySnapshots(cfg)
+	rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, row.Query.SchedulerActive, row.Query.FeedOverlay)
 	if err != nil {
 		t.Fatalf("row %s: build policy snapshot: %v", row.ID, err)
 	}
-	books, _, err := buildAddressBookTable(cfg)
+	books, _, err := buildAddressBookTableWithFeeds(cfg, row.Query.FeedOverlay)
 	if err != nil {
 		t.Fatalf("row %s: build address-book snapshot: %v", row.ID, err)
 	}
@@ -133,8 +137,8 @@ func buildGeneratedSnapshot10587(t *testing.T, row generatedSnapshotRow10587) po
 func TestPolicyGeneratedGoSnapshotsAreFresh10587(t *testing.T) {
 	rows := generatedSnapshotRows10587(t)
 	assertGeneratedSnapshotCoverage10587(t, rows)
-	if os.Getenv("XPF_POLICY_ROWS_DIR") == "" && len(rows) != 48 {
-		t.Fatalf("committed generated policy row contract has %d rows, want exactly 48", len(rows))
+	if os.Getenv("XPF_POLICY_ROWS_DIR") == "" && len(rows) != 52 {
+		t.Fatalf("committed generated policy row contract has %d rows, want exactly 52", len(rows))
 	}
 	for _, row := range rows {
 		t.Run(row.ID, func(t *testing.T) {

@@ -1,57 +1,62 @@
 {
   "schema_version": 1,
-  "id": "named-policy-then-reject-02",
-  "source_case": "named-policy-then-reject",
+  "id": "active-permit-matches",
+  "source_case": "active-permit-matches",
   "config_set_lines": [
     "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
     "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
     "set security zones security-zone trust interfaces ge-0/0/0.0",
     "set security zones security-zone untrust interfaces ge-0/0/1.0",
-    "set security policies default-policy permit-all",
-    "set security policies from-zone trust to-zone untrust policy p-reject match source-address any",
-    "set security policies from-zone trust to-zone untrust policy p-reject match destination-address any",
-    "set security policies from-zone trust to-zone untrust policy p-reject match application any",
-    "set security policies from-zone trust to-zone untrust policy p-reject then reject"
+    "set security policies default-policy deny-all",
+    "set schedulers scheduler business-hours daily start-time 09:00:00 stop-time 17:00:00",
+    "set security policies from-zone trust to-zone untrust policy scheduled-permit match source-address any",
+    "set security policies from-zone trust to-zone untrust policy scheduled-permit match destination-address any",
+    "set security policies from-zone trust to-zone untrust policy scheduled-permit match application any",
+    "set security policies from-zone trust to-zone untrust policy scheduled-permit then permit",
+    "set security policies from-zone trust to-zone untrust policy scheduled-permit scheduler-name business-hours"
   ],
   "query": {
-    "from_zone": "untrust",
-    "to_zone": "trust",
-    "src_ip": "10.0.2.5",
-    "dst_ip": "10.0.1.5",
+    "from_zone": "trust",
+    "to_zone": "untrust",
+    "src_ip": "10.0.1.5",
+    "dst_ip": "10.0.2.5",
     "protocol": "tcp",
     "src_port": 1234,
     "dst_port": 80,
     "frag": false,
     "l4_present": true,
     "icmp_type": null,
-    "icmp_code": null
+    "icmp_code": null,
+    "scheduler_active": {
+      "business-hours": true
+    }
   },
   "go_verdict": {
     "action": "permit",
-    "matched": false,
-    "default_used": true,
+    "matched": true,
+    "default_used": false,
     "unsupported_tuple_family": false,
-    "policy_name": "",
+    "policy_name": "scheduled-permit",
     "policy_id": 0
   },
   "rust_verdict": {
     "action": "permit",
-    "matched": false,
-    "default_used": true,
+    "matched": true,
+    "default_used": false,
     "unsupported_tuple_family": false,
-    "policy_name": "",
+    "policy_name": "scheduled-permit",
     "policy_id": 0
   },
   "snapshot": {
-    "default_policy": "permit",
+    "default_policy": "deny",
     "rules": [
       {
-        "rule_id": "trust->untrust/p-reject",
+        "rule_id": "trust->untrust/scheduled-permit",
         "policy_id": 0,
-        "name": "p-reject",
+        "name": "scheduled-permit",
         "from_zone": "trust",
         "to_zone": "untrust",
-        "scheduler_name": "",
+        "scheduler_name": "business-hours",
         "inactive": false,
         "source_addresses": [],
         "destination_addresses": [],
@@ -67,7 +72,7 @@
           "any"
         ],
         "application_terms": [],
-        "action": "reject",
+        "action": "permit",
         "source_address_excluded": false,
         "destination_address_excluded": false,
         "log_session_init": false,

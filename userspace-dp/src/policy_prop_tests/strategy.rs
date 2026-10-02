@@ -96,6 +96,8 @@ pub(crate) fn query_strategy() -> impl Strategy<Value = GeneratedQuery> {
                 l4_present: l4_present && !frag,
                 icmp_type,
                 icmp_code,
+                scheduler_active: Default::default(),
+                feed_overlay: Default::default(),
             },
         )
 }
@@ -322,6 +324,8 @@ pub(crate) fn generated_config_strategy() -> impl Strategy<Value = GeneratedConf
                         l4_present: !frag,
                         icmp_type,
                         icmp_code,
+                        scheduler_active: Default::default(),
+                        feed_overlay: Default::default(),
                     },
                 }
             },

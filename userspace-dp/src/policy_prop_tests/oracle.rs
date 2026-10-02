@@ -58,6 +58,10 @@ pub(crate) struct GeneratedQuery {
     pub icmp_type: Option<u8>,
     #[serde(default)]
     pub icmp_code: Option<u8>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scheduler_active: BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub feed_overlay: BTreeMap<String, Vec<String>>,
 }
 
 fn default_l4_present() -> bool {
@@ -264,7 +268,43 @@ pub(crate) fn evaluate_row(row: &GeneratedRow) -> GeneratedVerdict {
     }
 }
 
+fn assert_snapshot_query_inputs(row: &GeneratedRow) {
+    let snapshot = row
+        .snapshot
+        .as_ref()
+        .unwrap_or_else(|| panic!("row {} has no production snapshot", row.id));
+    for rule in &snapshot.rules {
+        let expected_inactive = !rule.scheduler_name.is_empty()
+            && !row
+                .query
+                .scheduler_active
+                .get(&rule.scheduler_name)
+                .copied()
+                .unwrap_or(false);
+        assert_eq!(
+            rule.inactive, expected_inactive,
+            "row {} snapshot scheduler bit for {} disagrees with query scheduler_active",
+            row.id, rule.name
+        );
+    }
+    for (name, prefixes) in &row.query.feed_overlay {
+        let book = snapshot
+            .address_books
+            .iter()
+            .find(|book| book.name == *name)
+            .unwrap_or_else(|| panic!("row {} snapshot lacks feed book {name}", row.id));
+        for prefix in prefixes {
+            assert!(
+                book.prefixes_v4.iter().chain(&book.prefixes_v6).any(|p| p == prefix),
+                "row {} snapshot feed book {name} lacks query overlay prefix {prefix}",
+                row.id
+            );
+        }
+    }
+}
+
 pub(crate) fn assert_row_oracle(row: &GeneratedRow) {
+    assert_snapshot_query_inputs(row);
     let got = evaluate_row(row);
     assert_eq!(
         got, row.rust_verdict,

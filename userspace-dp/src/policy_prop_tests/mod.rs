@@ -6,7 +6,7 @@
 //! to a directory to emit Rust-computed rows for the Go consumer.
 //!
 //! Normal CI uses bounded property counts.  `PROPTEST_CASES=1000` is the
-//! supported deep soak: P2/P4/P7 each accept only 2 of 48 seed rows, so the
+//! supported deep soak: P2/P4/P7 each accept only 2 of 52 seed rows, so the
 //! default 65,536 local-reject budget reaches roughly 2,500 cases.  A
 //! 100,000-case run would exceed that reject budget unless proptest's config
 //! is deliberately raised.  Record the effective case count, generated row
@@ -38,14 +38,14 @@ fn cfg(cases: u32) -> ProptestConfig {
 fn assert_seed_rows_are_fresh(rows: &[GeneratedRow]) {
     assert_eq!(
         rows.len(),
-        48,
-        "generated policy seed contract changed (want exactly 48 rows)"
+        52,
+        "generated policy seed contract changed (want exactly 52 rows)"
     );
     let expected_ids = manifest_ids();
     assert_eq!(
         expected_ids.len(),
-        48,
-        "seed_manifest.json must contain exactly 48 IDs"
+        52,
+        "seed_manifest.json must contain exactly 52 IDs"
     );
     let actual_ids: Vec<_> = rows.iter().map(|row| row.id.clone()).collect();
     assert_eq!(

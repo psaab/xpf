@@ -1,4 +1,7 @@
 {
+  "schema_version": 1,
+  "id": "scoped-global-applies-only-in-scope-01",
+  "source_case": "scoped-global-applies-only-in-scope",
   "config_set_lines": [
     "set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
     "set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24",
@@ -13,43 +16,50 @@
     "set security policies global policy g-deny match application any",
     "set security policies global policy g-deny then deny"
   ],
-  "go_verdict": {
-    "action": "deny",
-    "default_used": false,
-    "matched": true,
-    "policy_id": 0,
-    "policy_name": "g-deny"
-  },
-  "id": "scoped-global-applies-only-in-scope-01",
   "query": {
+    "from_zone": "trust",
+    "to_zone": "untrust",
+    "src_ip": "10.0.1.5",
     "dst_ip": "10.0.2.5",
+    "protocol": "tcp",
+    "src_port": 1234,
     "dst_port": 80,
     "frag": false,
-    "from_zone": "trust",
-    "icmp_code": null,
-    "icmp_type": null,
     "l4_present": true,
-    "protocol": "tcp",
-    "src_ip": "10.0.1.5",
-    "src_port": 1234,
-    "to_zone": "untrust"
+    "icmp_type": null,
+    "icmp_code": null
+  },
+  "go_verdict": {
+    "action": "deny",
+    "matched": true,
+    "default_used": false,
+    "unsupported_tuple_family": false,
+    "policy_name": "g-deny",
+    "policy_id": 0
   },
   "rust_verdict": {
     "action": "deny",
-    "default_used": false,
     "matched": true,
-    "policy_id": 0,
-    "policy_name": "g-deny"
+    "default_used": false,
+    "unsupported_tuple_family": false,
+    "policy_name": "g-deny",
+    "policy_id": 0
   },
-  "schema_version": 1,
   "snapshot": {
     "default_policy": "permit",
     "rules": [
       {
-        "rule_id": "junos-global-\u003ejunos-global/g-deny",
+        "rule_id": "junos-global->junos-global/g-deny",
+        "policy_id": 0,
         "name": "g-deny",
         "from_zone": "junos-global",
         "to_zone": "junos-global",
+        "scheduler_name": "",
+        "inactive": false,
+        "source_addresses": [],
+        "destination_addresses": [],
+        "source_book_ids": [],
+        "destination_book_ids": [],
         "source_literals": [
           "any"
         ],
@@ -59,30 +69,46 @@
         "applications": [
           "any"
         ],
+        "application_terms": [],
         "action": "deny",
+        "source_address_excluded": false,
+        "destination_address_excluded": false,
+        "log_session_init": false,
+        "log_session_close": false,
         "match_from_zone": "trust",
+        "match_to_zone": "",
         "match_from_zones": [
           "trust"
-        ]
+        ],
+        "match_to_zones": []
       }
     ],
     "zones": [
       {
         "name": "dmz",
         "id": 56918,
-        "host_inbound_configured": true
+        "host_inbound_configured": true,
+        "host_inbound_system_services": [],
+        "host_inbound_protocols": [],
+        "tcp_rst": false
       },
       {
         "name": "trust",
         "id": 50675,
-        "host_inbound_configured": true
+        "host_inbound_configured": true,
+        "host_inbound_system_services": [],
+        "host_inbound_protocols": [],
+        "tcp_rst": false
       },
       {
         "name": "untrust",
         "id": 20665,
-        "host_inbound_configured": true
+        "host_inbound_configured": true,
+        "host_inbound_system_services": [],
+        "host_inbound_protocols": [],
+        "tcp_rst": false
       }
-    ]
-  },
-  "source_case": "scoped-global-applies-only-in-scope"
+    ],
+    "address_books": []
+  }
 }

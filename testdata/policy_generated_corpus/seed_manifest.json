@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "ids": [
+    "active-permit-matches",
     "boundary-port-0",
     "boundary-port-1",
     "boundary-port-65535",
@@ -14,6 +15,8 @@
     "exact-zone-pair-permit-02",
     "excluded-source-address-scoping-01",
     "excluded-source-address-scoping-02",
+    "feed-backed-match",
+    "feed-backed-miss",
     "first-match-port-1",
     "first-match-port-65535",
     "first-match-wins-within-a-pair-01",
@@ -23,6 +26,7 @@
     "icmp-type-zero-code-zero",
     "icmp-unknown-application-01",
     "icmp-unknown-application-02",
+    "inactive-permit-falls-to-deny",
     "junos-host-fragment-associated-deny-01",
     "junos-host-fragment-associated-deny-02",
     "junos-host-fragment-associated-deny-03",
