@@ -52,7 +52,8 @@ import (
 //   - Local key + valid token: accept, and record that the peer holds the key.
 //   - Local key + present-but-invalid token: reject (Unauthenticated).
 //   - Local key + no token + enforcement NOT armed: accept read-only fabric
-//     RPCs during rollout; state-changing RPCs still require a valid token.
+//     RPCs only during a five-minute rollout grace measured from the first
+//     observation of the configured key; after it expires, reject them too.
 //   - Local key + no token + enforcement armed: reject — a downgrade to
 //     tokenless once both nodes are keyed is an attack.
 //
@@ -130,6 +131,9 @@ const (
 	// ~2×window across a clock-skew boundary. Small enough to bound replay,
 	// large enough to tolerate NTP skew between cluster nodes.
 	fabricAuthWindowSeconds = 30
+	// fabricAuthUnarmedGrace bounds tokenless read-only access to the period in
+	// which a keyed peer is being rolled out but has not authenticated yet.
+	fabricAuthUnarmedGrace = 5 * time.Minute
 
 	// fabricAuthDomain is a domain-separation prefix so a fabric token can never
 	// be confused with (or substituted for) the heartbeat HMAC, which signs a
@@ -422,6 +426,61 @@ func (s *Server) heartbeatPeerAuthSeen() bool {
 	return false
 }
 
+func (s *Server) fabricAuthNow() time.Time {
+	if s.fabricAuthNowFn != nil {
+		return s.fabricAuthNowFn()
+	}
+	return time.Now()
+}
+
+// fabricAuthUnarmedGraceRemaining accounts for the rollout window. NewServer
+// anchors it at server startup when a key is already configured; a key
+// committed later starts on its first auth/alarm observation. The timer is
+// shared by unary and stream RPCs and the system-alarm display; it is reset
+// only when the key is removed or authentication succeeds.
+func (s *Server) fabricAuthUnarmedGraceRemaining(keyConfigured, armed bool) (time.Duration, bool) {
+	s.fabricAuthGraceMu.Lock()
+	defer s.fabricAuthGraceMu.Unlock()
+
+	if !keyConfigured || armed {
+		s.fabricAuthUnarmedSinceSet = false
+		s.fabricAuthUnarmedSince = time.Time{}
+		return 0, false
+	}
+
+	now := s.fabricAuthNow()
+	if !s.fabricAuthUnarmedSinceSet {
+		s.fabricAuthUnarmedSince = now
+		s.fabricAuthUnarmedSinceSet = true
+	}
+	elapsed := now.Sub(s.fabricAuthUnarmedSince)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	remaining := fabricAuthUnarmedGrace - elapsed
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining, true
+}
+
+// fabricAuthUnarmedAlarm exposes the downgrade-guard posture through `show
+// system alarms`, including escalation once the tokenless read-only rollout
+// grace has expired.
+func (s *Server) fabricAuthUnarmedAlarm() string {
+	keyConfigured := len(s.fabricAcceptedKeys()) > 0
+	armed := s.fabricPeerAuthSeen.Load() || s.heartbeatPeerAuthSeen()
+	remaining, unarmed := s.fabricAuthUnarmedGraceRemaining(keyConfigured, armed)
+	if !unarmed {
+		return ""
+	}
+	if remaining == 0 {
+		return "CRITICAL: fabric authentication remains unarmed; read-only rollout grace expired and tokenless RPCs are denied"
+	}
+	return "WARNING: fabric authentication is unarmed; tokenless read-only RPCs remain accepted during rollout grace (" +
+		remaining.Round(time.Second).String() + " remaining)"
+}
+
 // checkFabricAuth authenticates an empty-request or stream RPC by its metadata
 // token. Unary production calls use checkFabricAuthRequest to verify the actual
 // protobuf arguments.
@@ -475,17 +534,12 @@ func (s *Server) checkFabricAuthRequest(ctx context.Context, method string, req 
 		accept, reason = false, "cluster authentication-key not configured "+
 			"(only GetStatus is served until a PSK is committed)"
 	} else {
-		// The downgrade-guard is armed by EITHER a prior valid fabric token OR
-		// the heartbeat having authenticated the peer. The heartbeat path is
-		// what closes the post-restart window: after a keyed node restarts,
-		// nothing dials its fabric listener on-demand to arm the sticky flag,
-		// but its heartbeat receiver re-authenticates the peer within ~one
-		// interval and arms enforcement immediately. In a rolling upgrade where
-		// the peer is not yet keyed, it is not signing heartbeats either,
-		// so the read-only rollout grace still holds.
 		armed := s.fabricPeerAuthSeen.Load() || s.heartbeatPeerAuthSeen()
-		if !present && !armed && !fabricAuthGraceAllowed(method, req) {
+		remaining, unarmed := s.fabricAuthUnarmedGraceRemaining(keyConfigured, armed)
+		if !present && unarmed && !fabricAuthGraceAllowed(method, req) {
 			accept, reason = false, "missing auth token (rollout grace is read-only)"
+		} else if !present && unarmed && remaining == 0 {
+			accept, reason = false, "missing auth token (read-only rollout grace expired; peer authentication not armed)"
 		} else {
 			accept, reason = fabricAuthDecision(keyConfigured, present, tokenOK, armed)
 		}

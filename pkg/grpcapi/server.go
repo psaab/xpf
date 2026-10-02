@@ -336,6 +336,13 @@ type Server struct {
 	// cluster.Manager.HeartbeatPeerAuthSeen(); a unit test wires it to drive the
 	// heartbeat-armed state without a live heartbeat receiver.
 	heartbeatAuthSeenFn func() bool
+	// fabricAuthNowFn is a test seam for the bounded rollout-grace clock.
+	// Production leaves it nil and fabricAuthNow uses time.Now.
+	fabricAuthNowFn func() time.Time
+	// fabricAuthGraceMu guards the configured-key unarmed rollout timer.
+	fabricAuthGraceMu         sync.Mutex
+	fabricAuthUnarmedSince    time.Time
+	fabricAuthUnarmedSinceSet bool
 	// fabricPeerAuthSeen is the sticky #4107 downgrade guard: set true once a
 	// valid PSK token has authenticated on the fabric listener. After that, a
 	// tokenless fabric RPC is rejected (a downgrade to cleartext once both
@@ -402,7 +409,7 @@ func (s *Server) userspaceDataplaneControl() (userspaceControlProvider, error) {
 // caller's class does not hold. Cross-node access still uses the separately
 // authenticated fabric listener (RunFabricListener), not this one.
 func NewServer(addr string, cfg Config) *Server {
-	return &Server{
+	s := &Server{
 		store:                       cfg.Store,
 		dp:                          cfg.DP,
 		eventBuf:                    cfg.EventBuf,
@@ -449,6 +456,11 @@ func NewServer(addr string, cfg Config) *Server {
 		d11ArmFn:                    cfg.D11ArmFn,
 		d11LedgerFn:                 cfg.D11LedgerFn,
 	}
+	if len(s.fabricAcceptedKeys()) > 0 {
+		s.fabricAuthUnarmedSince = s.startTime
+		s.fabricAuthUnarmedSinceSet = true
+	}
+	return s
 }
 
 // grpcListenState tracks the primary gRPC listener lifecycle for the
