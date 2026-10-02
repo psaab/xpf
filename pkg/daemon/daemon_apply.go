@@ -208,7 +208,13 @@ func (d *Daemon) applyActiveConfigResult() error {
 	if cfg == nil {
 		return nil
 	}
-	return d.applyConfigLocked(context.Background(), cfg)
+	err := d.applyConfigLocked(context.Background(), cfg)
+	if err == nil {
+		// Stamp before releasing applySem so a competing promotion cannot
+		// inherit this successful apply result.
+		d.store.MarkActiveApplied()
+	}
+	return err
 }
 
 // applyConfigUnderSem is applyConfig's body. The caller MUST hold d.applySem.

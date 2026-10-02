@@ -595,9 +595,6 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 				// cheap "is there anything to apply yet" guard.
 				applyErr := d.applyActiveConfigResult()
 				d.noteConfigApplyResult(applyErr)
-				if applyErr == nil && d.store != nil {
-					d.store.MarkActiveApplied()
-				}
 				// #10421: applyActiveConfigResult is synchronous, but networkd
 				// may finish foreign-rule cleanup just after Apply returns. Keep a
 				// startup-tail reassert in addition to the apply-boundary invariant.
