@@ -1,0 +1,109 @@
+package config
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestCompileConfigMergesConflictingDuplicateRoutingInstances11459(t *testing.T) {
+	const text = `routing-instances {
+    A {
+        instance-type virtual-router;
+        routing-options {
+            static { route 10.0.1.0/24 next-hop 192.0.2.1; }
+        }
+    }
+    A {
+        instance-type forwarding;
+        routing-options {
+            static { route 10.0.2.0/24 next-hop 192.0.2.2; }
+        }
+    }
+}`
+	tree, parseErrors := NewParser(text).Parse()
+	if len(parseErrors) != 0 {
+		t.Fatalf("parse duplicate routing instances: %v", parseErrors[0])
+	}
+	assertMerged := func(label string, cfg *Config) {
+		t.Helper()
+		if len(cfg.RoutingInstances) != 1 || cfg.RoutingInstances[0].InstanceType != "forwarding" {
+			t.Fatalf("%s compile = %+v; want one instance with last-authored type forwarding",
+				label, cfg.RoutingInstances)
+		}
+		wantRoutes := map[string]bool{"10.0.1.0/24": true, "10.0.2.0/24": true}
+		for _, route := range cfg.RoutingInstances[0].StaticRoutes {
+			delete(wantRoutes, route.Destination)
+		}
+		if len(wantRoutes) != 0 {
+			t.Fatalf("%s compile lost RI static routes %v; merged routes=%+v",
+				label, wantRoutes, cfg.RoutingInstances[0].StaticRoutes)
+		}
+		for _, warning := range cfg.Warnings {
+			if strings.Contains(warning, "duplicate routing-instance definition") &&
+				strings.Contains(warning, "#11459") {
+				return
+			}
+		}
+		t.Fatalf("%s compile did not announce its deterministic RI merge: %v", label, cfg.Warnings)
+	}
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict CompileConfig: %v", err)
+	}
+	assertMerged("strict", cfg)
+	nodeCfg, err := CompileConfigForNode(tree, 0)
+	if err != nil {
+		t.Fatalf("strict node compile: %v", err)
+	}
+	assertMerged("strict node", nodeCfg)
+}
+
+func TestCompileConfigLenientMergesConflictingDuplicateRoutingInstances11459(t *testing.T) {
+	const text = `routing-instances {
+    A {
+        instance-type virtual-router;
+        routing-options {
+            static { route 10.0.1.0/24 next-hop 192.0.2.1; }
+        }
+    }
+}
+routing-instances {
+    A {
+        instance-type forwarding;
+        routing-options {
+            static { route 10.0.2.0/24 next-hop 192.0.2.2; }
+        }
+    }
+}`
+	tree, parseErrors := NewParser(text).Parse()
+	if len(parseErrors) != 0 {
+		t.Fatalf("parse duplicate routing instances: %v", parseErrors[0])
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	if len(cfg.RoutingInstances) != 1 || cfg.RoutingInstances[0].InstanceType != "forwarding" {
+		t.Fatalf("lenient compile = %+v; want one instance with last-authored type forwarding",
+			cfg.RoutingInstances)
+	}
+	wantRoutes := map[string]bool{"10.0.1.0/24": true, "10.0.2.0/24": true}
+	for _, route := range cfg.RoutingInstances[0].StaticRoutes {
+		delete(wantRoutes, route.Destination)
+	}
+	if len(wantRoutes) != 0 {
+		t.Fatalf("lenient merge lost RI static routes %v; merged routes=%+v",
+			wantRoutes, cfg.RoutingInstances[0].StaticRoutes)
+	}
+	foundWarning := false
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "duplicate routing-instance definition") &&
+			strings.Contains(warning, "#11459") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("lenient merge was not announced as a deterministic RI merge: %v", cfg.Warnings)
+	}
+}

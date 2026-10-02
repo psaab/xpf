@@ -37,9 +37,13 @@ package config
 // dupBlockMergeSites9023 is the (parent-container, repeated-keyword) list.
 // Explicit rather than a predicate, so a container joins by a reviewed decision
 // -- the same discipline compactNormalizeInScope settled on.
+//
+// The `*` keyword is reserved for routing-instances, whose immediate child key
+// is the operator-defined instance name rather than a fixed Junos keyword.
 var dupBlockMergeSites9023 = []struct{ parent, keyword string }{
 	{"snmp", "trap-group"},
 	{"sampling", "instance"},
+	{"routing-instances", "*"},
 
 	// Issue 9209. These four became visible when #9024 taught the #8436 census
 	// to build a NESTED fixture: each has only container children, so no
@@ -79,13 +83,29 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []string {
 		return nil
 	}
 	var merged []string
+	var rootsMerged bool
+	tree.Children, rootsMerged = mergeDuplicateRoutingInstanceContainers9023(tree.Children)
+	if rootsMerged {
+		merged = append(merged, "routing-instances")
+	}
 	var walk func(n *Node, depth int)
 	walk = func(n *Node, depth int) {
 		if n == nil || depth > 6 {
 			return
 		}
+		var containersMerged bool
+		n.Children, containersMerged = mergeDuplicateRoutingInstanceContainers9023(n.Children)
+		if containersMerged {
+			merged = append(merged, "routing-instances")
+		}
 		for _, site := range dupBlockMergeSites9023 {
 			if n.Name() != site.parent {
+				continue
+			}
+			if site.keyword == "*" {
+				for _, name := range mergeDuplicateRoutingInstances9023(n) {
+					merged = append(merged, site.parent+" "+name)
+				}
 				continue
 			}
 			names, _, _ := mergeInstancesUnder(n, site.keyword, askNone9571)
@@ -99,6 +119,75 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []string {
 	}
 	for _, root := range tree.Children {
 		walk(root, 0)
+	}
+	return merged
+}
+
+// mergeDuplicateRoutingInstanceContainers9023 folds sibling
+// `routing-instances` containers into the first container. Hierarchical input
+// preserves repeated top-level blocks as separate roots, while compileSections
+// dispatches each root independently; joining them here makes identical names
+// visible to the dynamic-instance fold below.
+func mergeDuplicateRoutingInstanceContainers9023(children []*Node) ([]*Node, bool) {
+	var first *Node
+	kept := make([]*Node, 0, len(children))
+	merged := false
+	for _, child := range children {
+		if child == nil || child.Name() != "routing-instances" || child.IsLeaf {
+			kept = append(kept, child)
+			continue
+		}
+		if first == nil {
+			first = child
+			kept = append(kept, child)
+			continue
+		}
+		first.Children = append(first.Children, child.Children...)
+		first.IsLeaf = false
+		merged = true
+	}
+	if !merged {
+		return children, false
+	}
+	return kept, true
+}
+
+// mergeDuplicateRoutingInstances9023 folds repeated dynamic instance-name
+// children of one routing-instances container, preserving both packed leaf
+// tails and braced bodies just like mergeInstancesUnder.
+func mergeDuplicateRoutingInstances9023(parent *Node) []string {
+	if parent == nil {
+		return nil
+	}
+	first := make(map[string]*Node)
+	kept := make([]*Node, 0, len(parent.Children))
+	var merged []string
+	for _, child := range parent.Children {
+		if child == nil || len(child.Keys) == 0 || isApplyStatementNode(child) ||
+			(child.IsLeaf && len(child.Keys) < 2) {
+			kept = append(kept, child)
+			continue
+		}
+		name := child.Keys[0]
+		prev, seen := first[name]
+		if !seen {
+			first[name] = child
+			kept = append(kept, child)
+			continue
+		}
+		if tail := child.Keys[1:]; len(tail) > 0 {
+			prev.Children = append(prev.Children, &Node{
+				Keys:   append([]string(nil), tail...),
+				IsLeaf: true,
+			})
+		}
+		prev.Children = append(prev.Children, child.Children...)
+		prev.IsLeaf = false
+		mergeSiblingContainers9209(prev, 0)
+		merged = append(merged, name)
+	}
+	if len(merged) > 0 {
+		parent.Children = kept
 	}
 	return merged
 }
