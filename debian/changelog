@@ -13,6 +13,9 @@ xpf (0.0.0) unstable; urgency=medium
     forward flow whose client source port is 53, 21, or 5060 is no longer
     mis-tagged DNS, FTP, or SIP in show output and HA session sync (#11672).
 
+  * Treat NAT rule-set names as single-value show command arguments and reject
+    trailing words before dispatch, so anchored command denials match execution
+    (#11770).
   * Scope WireGuard admits in cold-boot and coverage-gap host-input fences
     to addresses in zones serving each listen port (#11572).
   * Persist feed shrink-guard high-water counts and hashes across daemon
