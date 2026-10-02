@@ -1662,6 +1662,10 @@ unit policy:
   (with the partial-honour queue carrying its REMAINING quantum,
   not its full quantum, so total alloc per queue ≤ Q_i).
 
+  All exact-queue ordinals are tracked, including ordinals beyond 63, so
+  each class receives at most one progressing Phase-1 honor per epoch. A
+  zero-TX honor is refunded and may retry in that epoch, as described below.
+
   **Zero-TX honor refund (hb166 T-2):** the selector debits the
   Phase-1 budget and sets the honored-epoch bit at SELECTION, but the
   service wrapper REFUNDS both (adds the debit back, clears the bit) if

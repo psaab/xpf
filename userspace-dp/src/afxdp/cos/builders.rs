@@ -99,37 +99,13 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
         .collect();
     exact_queues_by_rate_ascending
         .sort_by_key(|&idx| config.queues[idx].transmit_rate_bytes);
-    // #1732: the GuaranteeRate waterfill honored-set bitset is a `u64`
-    // keyed by ordinal position in `exact_queues_by_rate_ascending`, so it
-    // tracks at most 64 exact guarantee-rate queues per interface. Beyond
-    // 64, ordinals ≥64 are conservatively untracked (the selector guards
-    // the shift with `ordinal < 64`), which means those queues are
-    // honor-eligible every selector call and may be over-served relative to
-    // the waterfill contract. This is far outside any realistic Junos CoS
-    // config (hardware queues are conventionally 0..7), but surface it to
-    // the operator via journald so the condition is observable rather than
-    // silent. Control-plane cold path: this runs when a per-worker
-    // per-interface runtime is built (first enqueue for that ifindex, and
-    // again on a runtime rebuild), so for an offending >64-queue config the
-    // line may repeat per worker/per rebuild rather than literally once
-    // globally — acceptable for a misconfiguration warning, and still off
-    // the per-packet hot path entirely.
-    if exact_queues_by_rate_ascending.len() > 64 {
-        eprintln!(
-            "xpf-userspace-dp: CoS interface has {} exact guarantee-rate \
-             queues (>64); waterfill honored-set tracking is capped at 64 — \
-             exact queues beyond the first 64 (by ascending rate) may be \
-             over-served",
-            exact_queues_by_rate_ascending.len()
-        );
-    }
     // #9365: the exact-demand mask (`ExactDemandQueueMask`) has one bit per
     // index into `queues`, sized for every u8 queue id. More queues than that
     // can only come from a tolerated config that breaks the strict
     // forwarding-class <-> queue bijection. Past it the mask saturates: exact
     // queues beyond the tracked range count as demanding whenever any exact
     // queue does, and a backlog on one of them reserves every exact queue's
-    // rate. Same cold path and repeat caveat as the warning above.
+    // rate. This warning is emitted only during runtime construction.
     if config.queues.len() > ExactDemandQueueMask::BITS {
         eprintln!(
             "xpf-userspace-dp: CoS interface has {} queues (>{}); exact-demand \
@@ -148,6 +124,9 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
     } else {
         0
     };
+    let waterfill_honored_epoch_bits =
+        vec![0; exact_queues_by_rate_ascending.len().div_ceil(u64::BITS as usize)];
+
     CoSInterfaceRuntime {
         shaping_rate_bytes: config.shaping_rate_bytes,
         burst_bytes: config.burst_bytes.max(COS_MIN_BURST_BYTES),
@@ -165,7 +144,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
         exact_queues_by_rate_ascending,
         waterfill_pass1_remaining_bytes: 0,
         waterfill_phase2_cursor: 0,
-        waterfill_honored_epoch_bits: 0,
+        waterfill_honored_epoch_bits,
         waterfill_epochs: 0,
         waterfill_phase1_budget_breaks: 0,
         // #1743: 0 forces the first selector call to take the budget-spent

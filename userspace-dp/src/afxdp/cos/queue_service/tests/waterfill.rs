@@ -288,13 +288,13 @@ fn waterfill_persistent_honored_set_distributes_phase1_across_queues() {
     // within the epoch (ordinal == queue_idx here). q2 (ordinal 2) is never
     // honored in Phase 1, so its bit stays clear.
     assert_eq!(
-        root.waterfill_honored_epoch_bits & 0b011,
+        root.waterfill_honored_epoch_bits[0] & 0b011,
         0b011,
         "BOTH ordinals 0 and 1 must be marked honored within the epoch \
          (each small queue took exactly one Phase-1 honor)"
     );
     assert_eq!(
-        root.waterfill_honored_epoch_bits & 0b100,
+        root.waterfill_honored_epoch_bits[0] & 0b100,
         0,
         "ordinal 2 (the Phase-2-served queue) must NOT be marked Phase-1-honored"
     );
@@ -315,8 +315,8 @@ fn waterfill_honored_set_clears_on_epoch_refill() {
     for _ in 0..3 {
         let _ = select_exact_cos_guarantee_queue_with_lease_telemetry(&mut root, &[], 1, &mut tel);
     }
-    assert_ne!(
-        root.waterfill_honored_epoch_bits, 0,
+    assert!(
+        !root.waterfill_honored_epoch_bits.is_empty(),
         "honored bits accumulate within an epoch"
     );
 
@@ -345,7 +345,7 @@ fn waterfill_honored_set_clears_on_epoch_refill() {
     );
     // Only q0's ordinal bit is set in the fresh epoch.
     assert_eq!(
-        root.waterfill_honored_epoch_bits, 0b001,
+        root.waterfill_honored_epoch_bits[0], 0b001,
         "fresh epoch: only the just-honored smallest queue (ordinal 0) is marked"
     );
 }
@@ -594,8 +594,8 @@ fn waterfill_pass1_refreshes_on_time_tick_clears_honored_bits() {
     for _ in 0..3 {
         let _ = select_exact_cos_guarantee_queue_with_lease_telemetry(&mut root, &[], 1, &mut tel);
     }
-    assert_ne!(
-        root.waterfill_honored_epoch_bits, 0,
+    assert!(
+        !root.waterfill_honored_epoch_bits.is_empty(),
         "honored bits accumulate within epoch 1"
     );
     let cursor_after_epoch1 = root.waterfill_phase2_cursor;
@@ -626,7 +626,7 @@ fn waterfill_pass1_refreshes_on_time_tick_clears_honored_bits() {
     // The honored bitset was cleared at the refresh, then the smallest queue
     // was re-honored on this same call — so only ordinal 0's bit is set now.
     assert_eq!(
-        root.waterfill_honored_epoch_bits, 0b001,
+        root.waterfill_honored_epoch_bits[0], 0b001,
         "timed refresh must clear honored bits, then Phase-1 re-honors q0"
     );
     assert_eq!(
@@ -826,7 +826,7 @@ fn waterfill_phase2_root_with_largest_honored() -> (CoSInterfaceRuntime, CoSQueu
         "precondition: with q0/q1 empty, Phase 1 must honor the LARGEST class"
     );
     assert_eq!(
-        root.waterfill_honored_epoch_bits & 0b100,
+        root.waterfill_honored_epoch_bits[0] & 0b100,
         0b100,
         "precondition: ordinal 2 is marked Phase-1-honored"
     );
@@ -1043,5 +1043,114 @@ fn waterfill_phase2_wrap_arms_epoch_boundary_and_resumes_6958() {
         !root.waterfill_epoch_wrap_pending,
         "the refill must consume epoch_wrap_pending; leaving it armed would clear the \
          honored bitset on every subsequent refill, not just at a genuine boundary"
+    );
+}
+
+/// #11680: >64 exact guarantee queues — every ordinal honored at most once
+/// per waterfill epoch.
+///
+/// The honored set was a `u64` keyed by ascending-vec ordinal with an
+/// `i < 64` shift guard, so ordinals ≥64 were never marked honored: Phase 1
+/// re-honored them on every selector call while ordinals <64 were honored
+/// once per epoch, skewing the guarantee distribution toward the small exact
+/// classes past ordinal 64.
+///
+/// Fixture: 65 exact queues at one below-min rate (every quantum clamps to
+/// the 1500-byte min) on a TRANSPARENT root (`shaping_rate_bytes == 0`), so
+/// the Phase-1 budget is exactly `quantum_sum × fraction = 65 × 1500 × 1.0`
+/// and one epoch honors every class exactly once with no Phase-2 break.
+/// Equal rates keep the builder's stable sort in queue_idx order, so
+/// ascending ordinal == queue_idx. The clock is FROZEN (`now_ns` constant)
+/// so the 200µs time tick can never clear the honored set mid-epoch — the
+/// only thing that may re-arm an ordinal is a genuine Phase-2 wrap.
+///
+/// What is pinned is OBSERVABLE, not plumbing: the first 65 selections cover
+/// all 65 queues exactly once (all Phase-1 admissions), and the 66th call —
+/// still the same epoch — wraps (`None`) instead of re-honoring ordinal 64.
+/// Pre-fix the 66th call returns `Some(ordinal 64)` and its
+/// `phase1_admissions` climbs to 2.
+#[test]
+fn waterfill_sixty_five_exact_queues_honor_each_ordinal_once_per_epoch() {
+    const NOW_NS: u64 = 1;
+    const N: usize = 65;
+    let slow_rate = 1_000_000 / 8; // 1 Mbps → quantum clamps to the 1500 floor
+    let queues: Vec<CoSQueueConfig> = (0..N as u8)
+        .map(|queue_id| CoSQueueConfig {
+            queue_id,
+            forwarding_class: format!("fc-{queue_id}").into(),
+            priority: 5,
+            transmit_rate_bytes: slow_rate,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: COS_MIN_BURST_BYTES,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        })
+        .collect();
+    let mut root = test_cos_runtime_with_queues(0, queues);
+    root.oversubscription_policy = CoSOversubscriptionPolicy::GuaranteeRate;
+    root.oversubscription_guarantee_fraction = 1.0;
+    assert_eq!(
+        root.exact_queues_by_rate_ascending.len(),
+        N,
+        "all 65 exact queues must land in the ascending vec"
+    );
+    root.tokens = 8 * 1024 * 1024;
+    for queue in &mut root.queues {
+        queue.hot.tokens = 1024 * 1024;
+        queue.hot.last_refill_ns = NOW_NS;
+        queue.hot.runnable = true;
+        for _ in 0..2 {
+            queue.hot.items.push_back(test_cos_item(1500));
+        }
+        queue.hot.queued_bytes = 2 * 1500;
+    }
+    root.nonempty_queues = N;
+    root.runnable_queues = N;
+
+    // One epoch honors every class exactly once, smallest-first.
+    let mut order = Vec::with_capacity(N);
+    for _ in 0..N {
+        let mut tel = CoSQueueLeaseAcquireTelemetry::default();
+        let s =
+            select_exact_cos_guarantee_queue_with_lease_telemetry(&mut root, &[], NOW_NS, &mut tel)
+                .expect("one epoch must honor all 65 exact queues");
+        order.push(s.queue_idx);
+    }
+    order.sort_unstable();
+    assert_eq!(
+        order,
+        (0..N).collect::<Vec<_>>(),
+        "the epoch's 65 selections must cover every queue exactly once"
+    );
+    for (queue_idx, queue) in root.queues.iter().enumerate() {
+        assert_eq!(
+            queue.telemetry.waterfill_counters.phase1_admissions, 1,
+            "queue {queue_idx} must be honored exactly once in Phase 1"
+        );
+        assert_eq!(
+            queue.telemetry.waterfill_counters.phase2_admissions, 0,
+            "queue {queue_idx} must take no Phase-2 residual in a full-budget epoch"
+        );
+    }
+
+    // The epoch is consumed but NOT wrapped: the 66th call (same frozen
+    // instant, no time tick) must run the Phase-2 wrap and return `None`.
+    // Pre-fix it re-honors ordinal 64 in Phase 1 — the never-marked ordinal
+    // the `u64` bitset could not name.
+    let mut tel = CoSQueueLeaseAcquireTelemetry::default();
+    assert!(
+        select_exact_cos_guarantee_queue_with_lease_telemetry(&mut root, &[], NOW_NS, &mut tel)
+            .is_none(),
+        "the 66th call must wrap the epoch (None), not re-honor ordinal 64 (#11680)"
+    );
+    assert_eq!(
+        root.queues[N - 1].telemetry.waterfill_counters.phase1_admissions, 1,
+        "ordinal 64 must stay honored exactly once — a second Phase-1 \
+         admission is the >64 re-honor skew (#11680)"
     );
 }
