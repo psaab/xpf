@@ -7,7 +7,7 @@
 //   - non-DF oversized IPv4 -> ForwardOversizeNoDf (forwarded, no PTB; #9328),
 //   - RFC suppression: non-first fragment + inbound ICMP error -> no PTB.
 
-use super::*;
+include!("icmp_ptb_primary_fallback_11437_tests.rs");
 
 const PTB_IFINDEX: i32 = 24;
 const EGRESS_SRC_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x00, 0x00, 0x01];
@@ -95,7 +95,7 @@ fn inbound_v6_udp(payload_len: usize) -> (Vec<u8>, UserspaceDpMeta) {
             .unwrap()
             .octets(),
     ); // dst
-       // UDP header.
+    // UDP header.
     frame.extend_from_slice(&49152u16.to_be_bytes());
     frame.extend_from_slice(&5201u16.to_be_bytes());
     frame.extend_from_slice(&((8 + payload_len) as u16).to_be_bytes());
@@ -910,22 +910,27 @@ fn tunnel_decision() -> SessionDecision {
 }
 
 fn nat64_decision(nat64: bool) -> SessionDecision {
-    SessionDecision { resolution: ForwardingResolution {
-        disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0,
-        egress_ifindex: TRANSPORT_IFINDEX,
-        tx_ifindex: TRANSPORT_IFINDEX,
-        tunnel_endpoint_id: 0,
-        next_hop: None,
-        neighbor_mac: Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x09]),
-        src_mac: Some(EGRESS_SRC_MAC),
-        tx_vlan_id: 0,
-        route_mtu: 0,
-        transport_route_mtu: 0,
-    }, nat: NatDecision {
-        nat64,
-        ..NatDecision::default()
-    }, install_table_domain: 0, install_table_check: 0 }
+    SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: TRANSPORT_IFINDEX,
+            tx_ifindex: TRANSPORT_IFINDEX,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: Some([0x02, 0x00, 0x00, 0x00, 0x00, 0x09]),
+            src_mac: Some(EGRESS_SRC_MAC),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            nat64,
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
 }
 
 /// Insert a minimal tunnel endpoint of the given `mode` / outer family /
@@ -1487,7 +1492,8 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0, mtu: 0,
+        rule_priority: 0,
+        mtu: 0,
     }];
 
     let state = build_forwarding_state(&snap);
@@ -1611,7 +1617,8 @@ fn wg_two_peer_asymmetric_snapshot() -> crate::ConfigSnapshot {
         discard: false,
         next_table: String::new(),
         preference: 0,
-        rule_priority: 0, mtu: 0,
+        rule_priority: 0,
+        mtu: 0,
     });
     {
         let ep = &mut snap.tunnel_endpoints[0];

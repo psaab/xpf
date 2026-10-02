@@ -31,22 +31,13 @@
 // RFC suppression gate (`icmp::reject_icmp_reply_suppressed`,
 // `is_non_first_fragment`) are reused verbatim.
 
-use std::sync::atomic::AtomicU64;
-
 use super::*;
 
 use super::icmp::reject_icmp_reply_suppressed;
 
-/// #9901 (F-074): forwarded frames whose egress-MTU decision ran with NO
-/// known MTU (`mtu == 0` — missing egress row / unknown tunnel kind) and so
-/// took the documented fail-open `Forward` arm. The decision is deliberate
-/// (never invent an MTU smaller than the link), but before this counter the
-/// fail-open was silent: nothing distinguished "fits" from "unknown". Bumped
-/// in `tx::dispatch::compute_forwarded_egress_ptb` when `mtu == 0` with a
-/// readable L3 (the unparseable-frame arm is excluded — it never consults an
-/// MTU). Read as a delta in tests; surfaced as
-/// `xpf_userspace_egress_mtu_unknown_forward_total`.
-pub(in crate::afxdp) static EGRESS_MTU_UNKNOWN_FORWARD_TOTAL: AtomicU64 = AtomicU64::new(0);
+/// Process-wide counters for egress-MTU decisions and PTB reply failures.
+#[path = "icmp_ptb_counters.rs"]
+pub(in crate::afxdp) mod counters;
 
 /// Outcome of the per-forward egress-MTU decision. The fast path (the
 /// forwarded L3 size fits the egress MTU) is `Forward` and adds a single
@@ -312,10 +303,7 @@ pub(in crate::afxdp) fn post_transform_inner_mtu(
     if tunnel_inner == 0 {
         return 0;
     }
-    crate::afxdp::forwarding::min_nonzero_mtu(
-        tunnel_inner,
-        decision.resolution.route_mtu as usize,
-    )
+    crate::afxdp::forwarding::min_nonzero_mtu(tunnel_inner, decision.resolution.route_mtu as usize)
 }
 
 /// The tunnel-only inner MTU: the physical underlay MTU less this tunnel
@@ -411,10 +399,7 @@ fn ip_declared_l3_len(packet: &[u8], addr_family: u8) -> Option<usize> {
 #[inline]
 fn ipv4_df_set(packet: &[u8]) -> bool {
     // Bytes 6..8 are flags+fragment-offset; DF is bit 14 (0x4000).
-    packet
-        .get(6)
-        .map(|&b| (b & 0x40) != 0)
-        .unwrap_or(false)
+    packet.get(6).map(|&b| (b & 0x40) != 0).unwrap_or(false)
 }
 
 /// RFC error-suppression gate shared by the PTB path. Mirrors the reject
@@ -505,10 +490,10 @@ pub(in crate::afxdp) fn ptb_reply_suppressed(
 
 /// Build a local-origin ICMPv4 Destination Unreachable (type 3, code 4 —
 /// Fragmentation Needed and DF Set), reflecting L2 back to the sender and
-/// sourcing the outer IP from the ingress interface primary v4. The
-/// next-hop MTU is written into the low 16 bits of the otherwise-unused
-/// word per RFC 1191. Quotes the inbound IP header plus the first 8 L4
-/// bytes (RFC 792).
+/// sourcing the outer IP from the ingress primary, or when absent from a
+/// loopback/other primary in the same routing instance. The next-hop MTU is
+/// written into the low 16 bits of the otherwise-unused word per RFC 1191.
+/// Quotes the inbound IP header plus the first 8 L4 bytes (RFC 792).
 pub(in crate::afxdp) fn build_frag_needed_v4(
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -518,7 +503,55 @@ pub(in crate::afxdp) fn build_frag_needed_v4(
 ) -> Option<Vec<u8>> {
     let egress = forwarding.egress.get(&ingress_ifindex)?;
     let (dst_mac, fallback_src_mac, ingress_tag) = ingress_reply_l2(frame)?;
-    let src_ip = egress.primary_v4?;
+    // Cross-interface fallbacks must be non-link-local because link-local scope
+    // is tied to its source interface; prefer lo0 within the same RI.
+    let src_ip = egress.primary_v4.or_else(|| {
+        let routing_instance = forwarding
+            .ifindex_to_routing_instance
+            .get(&ingress_ifindex)
+            .map(String::as_str)
+            .unwrap_or("");
+        let mut loopback_primary: Option<Ipv4Addr> = None;
+        let mut interface_primary: Option<Ipv4Addr> = None;
+        for connected in &forwarding.connected_v4 {
+            let connected_in_instance = if routing_instance.is_empty() {
+                connected.table == "inet.0"
+            } else {
+                connected.table.strip_suffix(".inet.0") == Some(routing_instance)
+            };
+            let connected_instance = forwarding
+                .ifindex_to_routing_instance
+                .get(&connected.ifindex)
+                .map(String::as_str)
+                .unwrap_or("");
+            if !connected_in_instance || connected_instance != routing_instance {
+                continue;
+            }
+            let name = forwarding
+                .ifindex_to_config_name
+                .get(&connected.ifindex)
+                .map(String::as_str)
+                .unwrap_or("");
+            let is_loopback = name == "lo0" || name.starts_with("lo0.");
+            let source = forwarding
+                .egress
+                .get(&connected.ifindex)
+                .and_then(|candidate| candidate.primary_v4)
+                .unwrap_or(connected.host);
+            if connected.ifindex != ingress_ifindex && source.is_link_local() {
+                continue;
+            }
+            let candidate = if is_loopback {
+                &mut loopback_primary
+            } else {
+                &mut interface_primary
+            };
+            if candidate.is_none() {
+                *candidate = Some(source);
+            }
+        }
+        loopback_primary.or(interface_primary)
+    })?;
     let src_mac = egress.src_mac;
     let l3 = match meta.l3_offset {
         14 | 18 => meta.l3_offset as usize,
@@ -577,11 +610,11 @@ pub(in crate::afxdp) fn build_frag_needed_v4(
 }
 
 /// Build a local-origin ICMPv6 Packet Too Big (type 2, code 0), reflecting
-/// L2 back to the sender and sourcing the outer IP from the ingress
-/// interface primary v6. The MTU is written into the 32-bit field that
-/// follows the checksum (RFC 4443 §3.2). Quotes as much of the inbound
-/// packet as fits under the IPv6 minimum MTU (1280) so the reply itself is
-/// never oversized.
+/// L2 back to the sender. Source selection prefers the ingress primary, then
+/// a loopback/other primary in the same routing instance. The MTU is stored in
+/// the 32-bit field after the checksum (RFC 4443 §3.2). The quote is capped
+/// so the error stays within the IPv6 minimum MTU (1280) and is never itself
+/// oversized.
 pub(in crate::afxdp) fn build_packet_too_big_v6(
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -591,7 +624,55 @@ pub(in crate::afxdp) fn build_packet_too_big_v6(
 ) -> Option<Vec<u8>> {
     let egress = forwarding.egress.get(&ingress_ifindex)?;
     let (dst_mac, fallback_src_mac, ingress_tag) = ingress_reply_l2(frame)?;
-    let src_ip = egress.primary_v6?;
+    // Cross-interface fallbacks must be non-link-local because link-local scope
+    // is tied to its source interface; prefer lo0 within the same RI.
+    let src_ip = egress.primary_v6.or_else(|| {
+        let routing_instance = forwarding
+            .ifindex_to_routing_instance
+            .get(&ingress_ifindex)
+            .map(String::as_str)
+            .unwrap_or("");
+        let mut loopback_primary: Option<Ipv6Addr> = None;
+        let mut interface_primary: Option<Ipv6Addr> = None;
+        for connected in &forwarding.connected_v6 {
+            let connected_in_instance = if routing_instance.is_empty() {
+                connected.table == "inet6.0"
+            } else {
+                connected.table.strip_suffix(".inet6.0") == Some(routing_instance)
+            };
+            let connected_instance = forwarding
+                .ifindex_to_routing_instance
+                .get(&connected.ifindex)
+                .map(String::as_str)
+                .unwrap_or("");
+            if !connected_in_instance || connected_instance != routing_instance {
+                continue;
+            }
+            let name = forwarding
+                .ifindex_to_config_name
+                .get(&connected.ifindex)
+                .map(String::as_str)
+                .unwrap_or("");
+            let is_loopback = name == "lo0" || name.starts_with("lo0.");
+            let source = forwarding
+                .egress
+                .get(&connected.ifindex)
+                .and_then(|candidate| candidate.primary_v6)
+                .unwrap_or(connected.host);
+            if connected.ifindex != ingress_ifindex && source.is_unicast_link_local() {
+                continue;
+            }
+            let candidate = if is_loopback {
+                &mut loopback_primary
+            } else {
+                &mut interface_primary
+            };
+            if candidate.is_none() {
+                *candidate = Some(source);
+            }
+        }
+        loopback_primary.or(interface_primary)
+    })?;
     let src_mac = egress.src_mac;
     let l3 = match meta.l3_offset {
         14 | 18 => meta.l3_offset as usize,

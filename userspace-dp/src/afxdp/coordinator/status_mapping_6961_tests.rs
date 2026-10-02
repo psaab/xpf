@@ -260,9 +260,12 @@ fn seeds_are_distinct_6961() {
 /// written down twice is two lists, and the two drifting apart is the defect.
 #[test]
 fn every_runtime_atomic_is_bound_or_knowingly_off_wire_6961() {
-    let bound: std::collections::BTreeSet<&str> =
-        for_each_shared_scalar!(shared_scalar_names).iter().copied().collect();
-    let off_wire: std::collections::BTreeSet<&str> = DELIBERATELY_OFF_WIRE.iter().copied().collect();
+    let bound: std::collections::BTreeSet<&str> = for_each_shared_scalar!(shared_scalar_names)
+        .iter()
+        .copied()
+        .collect();
+    let off_wire: std::collections::BTreeSet<&str> =
+        DELIBERATELY_OFF_WIRE.iter().copied().collect();
 
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp/worker_runtime.rs"),
@@ -425,13 +428,21 @@ fn worker_runtime_status_rows_are_not_transposed_across_workers_6961() {
     // Give the two workers DIFFERENT values on one field, so a transposition
     // is visible at all. Equal values across workers would make the rows
     // interchangeable and the assertion vacuous.
-    a.new_flow_installs.store(0xAAAA_1111, AtomicOrdering::Relaxed);
-    b.new_flow_installs.store(0xBBBB_2222, AtomicOrdering::Relaxed);
+    a.new_flow_installs
+        .store(0xAAAA_1111, AtomicOrdering::Relaxed);
+    b.new_flow_installs
+        .store(0xBBBB_2222, AtomicOrdering::Relaxed);
 
     let rows = coord.worker_runtime_snapshots();
     assert_eq!(rows.len(), 2);
-    let row_a = rows.iter().find(|r| r.worker_id == 11).expect("worker 11 row");
-    let row_b = rows.iter().find(|r| r.worker_id == 22).expect("worker 22 row");
+    let row_a = rows
+        .iter()
+        .find(|r| r.worker_id == 11)
+        .expect("worker 11 row");
+    let row_b = rows
+        .iter()
+        .find(|r| r.worker_id == 22)
+        .expect("worker 22 row");
     assert_eq!(
         row_a.new_flow_installs, 0xAAAA_1111,
         "worker 11's row carries worker 22's counters — the rows are transposed"
@@ -490,10 +501,14 @@ fn worker_runtime_status_binds_the_cold_path_scalars_6961() {
         (WRAPPER_NS_BASELINE, WRAPPER_UNDERFLOW),
         (SAMPLE_PHASE, WRAPPER_UNDERFLOW),
     ] {
-        assert_ne!(a, b, "cold-path seeds must be distinct or a swap is invisible");
+        assert_ne!(
+            a, b,
+            "cold-path seeds must be distinct or a swap is invisible"
+        );
     }
 
-    cold.sample_phase.store(SAMPLE_PHASE, AtomicOrdering::Relaxed);
+    cold.sample_phase
+        .store(SAMPLE_PHASE, AtomicOrdering::Relaxed);
     cold.ns_per_tsc_q32
         .store(NS_PER_TSC_Q32, AtomicOrdering::Relaxed);
     cold.wrapper_ns_baseline

@@ -211,7 +211,7 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
         // unparseable-frame fallthrough below never consults an MTU and is
         // excluded.
         if mtu == 0 {
-            crate::afxdp::icmp_ptb::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL
+            crate::afxdp::icmp_ptb::counters::EGRESS_MTU_UNKNOWN_FORWARD_TOTAL
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let egress_decision = if is_nat64 && meta.addr_family as i32 == libc::AF_INET6 {
@@ -369,6 +369,12 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
                     ),
                     _ => None,
                 };
+                // #11437: the oversized original is still dropped below when
+                // a reply cannot be built; count that separately from rate limits.
+                if built.is_none() {
+                    crate::afxdp::icmp_ptb::counters::PTB_UNBUILDABLE_TOTAL
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 // A buildable reply the token DENIES is rate-limited (dropped,
                 // token consumed + `PacketTooBig` counter bumped inside the
                 // gate). An UNBUILDABLE reply short-circuits the `&&`, so the
