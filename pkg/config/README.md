@@ -661,27 +661,29 @@ for the keyword set and its families. Name-before-literal is unchanged: a litera
 security policies detail` renders `any-ipv4(global): 0.0.0.0/0`, and the REST and
 gRPC inventories show the keyword the operator wrote instead of the CIDR.
 
-**An address takes one value form; a mixed entry is rejected (#9524):** a Junos
-`address` is a prefix OR a `dns-name` / `wildcard-address` / `range-address`, and
-xpf implements only the prefix. An entry carrying BOTH used to compile to the
-prefix alone on all four config channels with no warning, so a `deny` naming the
-object silently under-covered it by exactly the form that was dropped (measured:
-a host named by the object's `range-address` fell through the deny to a
-`permit-all` default). `mergeAddressNode` now records the form on
-`Address.UnimplementedForms`, in both parser shapes, and the zone-local fold
-carries it. `validateAddressUnimplementedFormsStrict` rejects the mixed entry at
-commit, naming the prefix and the dropped form; the tolerant load / peer-sync path
-warns (`lenientAddressUnimplementedForms`). `Address.UsableValue()` returns `""`
-for such an entry, and the resolvers that decide representability (userspace
-`nameRepresentability` and the junos-host deny projection) read it, so on the
-tolerant path a referencing policy fails closed exactly like the sole-value case
-(#2229, #3261): the `__unsupported_address__` sentinel then replaces the rule's
-addresses on both wire shapes, which is why the legacy expansion needs no change. A sole
-unimplemented form is valid Junos and is unchanged: warned, and strict-rejected
-only when referenced (#3149). `Value` is kept so show surfaces still render the
-configured prefix. Static-NAT `prefix-name` resolution also uses `UsableValue()`
-for direct entries and singleton-set members; a mixed entry therefore remains
-unresolvable on tolerant load instead of translating to the prefix alone.
+**An address takes one value form; a mixed entry is rejected (#9524/#11508):**
+the compiler enforces only parsed IP/CIDR prefixes; a Junos `dns-name` /
+`wildcard-address` / `range-address` or any unrecognized future value keyword
+cannot be enforced as a prefix. Before #9524 an entry carrying a prefix AND a
+known unsupported form compiled to the prefix alone on all four config channels
+with no warning, so a `deny` naming the object silently under-covered it
+(measured: a host named by the object's `range-address` fell through the deny
+to a `permit-all` default). `mergeAddressNode` records known unsupported forms
+and default-denies every non-prefix, non-description value token into
+`Address.UnimplementedForms`, in both parser shapes; the zone-local fold carries
+the taint.
+`validateAddressUnimplementedFormsStrict` rejects a mixed prefix/form entry at
+commit, naming the prefix and dropped form; tolerant load / peer-sync warns
+(`lenientAddressUnimplementedForms`). `Address.UsableValue()` returns `""` for
+every tainted entry, so unknown future forms cannot let NAT use a prefix policy
+rejected as unresolvable. The policy resolvers (`nameRepresentability` and the
+junos-host deny projection) produce the existing `__unsupported_address__`
+sentinel on tolerant load (#2229/#3261); static-NAT `prefix-name` resolution
+also treats the entry as unresolvable. A sole unsupported form remains
+unresolvable and is rejected only when referenced (#3149). `Value` stays
+available to show surfaces. Regression coverage:
+`address_unimplemented_forms_9524_test.go` covers mixed known forms and the
+unknown-form default-deny path.
 
 **Zone-local address books (#3061):** Junos supports both the global
 `security address-book global { ... }` and a per-zone book attached inline

@@ -438,17 +438,22 @@ func mergeAddressNode(addr *Address, node *Node) {
 		return
 	}
 
-	// #9524: a flat-set `address <name> dns-name <fqdn>` (or wildcard-address /
-	// range-address) lands the form keyword at Keys[2]. Record it: the compiler
-	// implements none of these, and dropping it silently is what let a mixed
-	// entry enforce its prefix alone.
-	if len(node.Keys) >= 3 && unimplementedAddressForms9524[node.Keys[2]] {
-		addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, node.Keys[2])
+	// An address value form is usable only when its token parses as a prefix.
+	// Known Junos forms such as dns-name / wildcard-address / range-address
+	// are unsupported, and future keywords must be tainted by default rather
+	// than letting another occurrence's prefix resolve this entry.
+	valueToken := ""
+	if len(node.Keys) >= 3 {
+		valueToken = node.Keys[2]
+	}
+	valueIsPrefix := valueToken != "" && looksLikeIPOrCIDR(valueToken)
+	if valueToken != "" && !valueIsPrefix {
+		addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, valueToken)
 	}
 
 	// Prefix-bearing leaf: Keys[2] is the prefix iff it parses as an IP/CIDR.
-	if len(node.Keys) >= 3 && looksLikeIPOrCIDR(node.Keys[2]) {
-		addr.Value = node.Keys[2]
+	if valueIsPrefix {
+		addr.Value = valueToken
 		// #3332: a named address takes exactly one prefix; anything after it
 		// (Keys[3:]) is operator garbage the compiler silently dropped.
 		if len(node.Keys) > 3 {
@@ -464,19 +469,15 @@ func mergeAddressNode(addr *Address, node *Node) {
 				addr.Description = d
 			}
 		default:
-			// #9524: an unimplemented value form in the hierarchical block is
-			// recorded rather than ignored, for the reason given above.
-			if unimplementedAddressForms9524[sub.Name()] {
-				addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, sub.Name())
-				continue
-			}
-			// A bare value leaf (the hierarchical block prefix) parses as a
-			// single token that is an IP/CIDR. Anything else is an unknown
-			// sub-stanza and is intentionally ignored (preserves the prior
-			// permissive behaviour; the warn validator flags a bad Value).
+			// A bare value leaf (the hierarchical block prefix) is usable only
+			// when it parses as an IP/CIDR. Every other sub-stanza is a known
+			// unsupported or future value form, so record it for default-deny
+			// resolution instead of silently ignoring it.
 			if len(sub.Keys) == 1 && looksLikeIPOrCIDR(sub.Keys[0]) {
 				addr.Value = sub.Keys[0]
+				continue
 			}
+			addr.UnimplementedForms = appendUniqueForm9524(addr.UnimplementedForms, sub.Name())
 		}
 	}
 }
