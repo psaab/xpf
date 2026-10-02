@@ -297,6 +297,31 @@ func TestIPsecSAsToReinitiateFiltersPeerSet9139(t *testing.T) {
 	}
 }
 
+// #11691: a physical external-interface member stores its reth in
+// RedundantParent; its own RedundancyGroup is zero. During a partial failover,
+// the node taking RG1 must re-initiate vpn-rg1 but must not create a duplicate
+// vpn-rg2 SA while the live peer still owns RG2.
+func TestIPsecSAsToReinitiateUsesMemberParentRG_11691(t *testing.T) {
+	store := twoRGIPsecStore(t)
+	cfg := store.ActiveConfig()
+	cfg.Security.IPsec.Gateways["gw-rg1"].ExternalIface = "ge-0/0/0.0"
+	cfg.Security.IPsec.Gateways["gw-rg2"].ExternalIface = "ge-0/0/1.0"
+
+	cm := cluster.NewManager(0, 1)
+	cm.UpdateConfig(cfg.Chassis.Cluster)
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+	cm.SetGroupStateForTesting(2, cluster.StateSecondary)
+	d := &Daemon{cluster: cm, store: store}
+	d.ipsecLoadedCfg.Store(cfg)
+
+	got := d.ipsecSAsToReinitiate([]string{"vpn-rg1", "vpn-rg2"})
+	if len(got) != 1 || got[0] != "vpn-rg1" {
+		t.Fatalf("#11691: member interfaces must inherit their parent reth's RG; "+
+			"taking RG1 must re-initiate vpn-rg1 only, not miss it or duplicate "+
+			"vpn-rg2 while the live peer owns RG2. got %v, want [vpn-rg1]", got)
+	}
+}
+
 // THE CALL SITE. applyRethServicesForRG is the per-RG VRRP MASTER edge and had
 // no IPsec leg at all — the reason an asymmetric failover re-initiated nothing.
 // This drives that edge and observes the swanctl calls through the #9139 seam.

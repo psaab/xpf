@@ -203,8 +203,8 @@ func (d *Daemon) cachedIPsecSANameIndex(cfg *config.Config) ipsec.SANameIndex {
 // connName is a name the PEER advertised, and the peer advertises SA names from
 // ipsec.ActiveConnectionNames: CHILD SA names, not VPN names. idx maps the name
 // back to the VPNs whose render produces it, and each VPN is walked vpn ->
-// gateway -> external-interface -> reth -> redundant-ether-options
-// redundancy-group (ipsecVPNRedundancyGroup).
+// gateway -> external-interface -> optional RedundantParent -> reth ->
+// RedundancyGroup (ipsecVPNRedundancyGroup).
 //
 // HISTORICAL, and wrong (#9511): this comment used to say "the swanctl connection
 // name IS the VPN name (pkg/ipsec/policy.go renders `  <sanitized vpn name> {`)".
@@ -247,8 +247,9 @@ func appendRedundancyGroup(rgs []int, rg int) []int {
 	return append(rgs, rg)
 }
 
-// ipsecVPNRedundancyGroup reports the redundancy group owning the reth that a
-// VPN's gateway external-interface names, or 0 when it resolves to no reth.
+// ipsecVPNRedundancyGroup reports the redundancy group owning the reth named
+// by a VPN gateway's external-interface. A physical reth member stores the
+// parent name in RedundantParent; its own RedundancyGroup is zero.
 func ipsecVPNRedundancyGroup(cfg *config.Config, vpn *config.IPsecVPN) int {
 	if vpn == nil || vpn.Gateway == "" {
 		return 0
@@ -264,6 +265,13 @@ func ipsecVPNRedundancyGroup(cfg *config.Config, vpn *config.IPsecVPN) int {
 	ifc := cfg.Interfaces.Interfaces[base]
 	if ifc == nil {
 		return 0
+	}
+	if ifc.RedundantParent != "" {
+		parent := cfg.Interfaces.Interfaces[ifc.RedundantParent]
+		if parent == nil {
+			return 0
+		}
+		return parent.RedundancyGroup
 	}
 	return ifc.RedundancyGroup
 }
