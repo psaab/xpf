@@ -148,10 +148,69 @@ fn run_ptb_dispatch_with_mtu(
     BatchCounters,
     Vec<String>,
 ) {
+    run_ptb_dispatch_with_mtu_and_mirror(
+        forwarding,
+        ingress_vlan_id,
+        df,
+        tunnel_endpoint_id,
+        l3_len,
+        route_mtu,
+        false,
+    )
+}
+
+fn run_ptb_dispatch_with_mirror(
+    forwarding: ForwardingState,
+    ingress_vlan_id: u16,
+    df: bool,
+    tunnel_endpoint_id: u16,
+    l3_len: usize,
+    route_mtu: u32,
+) -> (
+    Vec<BindingWorker>,
+    DebugPollCounters,
+    BatchCounters,
+    Vec<String>,
+) {
+    run_ptb_dispatch_with_mtu_and_mirror(
+        forwarding,
+        ingress_vlan_id,
+        df,
+        tunnel_endpoint_id,
+        l3_len,
+        route_mtu,
+        true,
+    )
+}
+
+fn run_ptb_dispatch_with_mtu_and_mirror(
+    mut forwarding: ForwardingState,
+    ingress_vlan_id: u16,
+    df: bool,
+    tunnel_endpoint_id: u16,
+    l3_len: usize,
+    route_mtu: u32,
+    analyzer_mirror: bool,
+) -> (
+    Vec<BindingWorker>,
+    DebugPollCounters,
+    BatchCounters,
+    Vec<String>,
+) {
     let mut bindings = vec![
         BindingWorker::new_for_mirror_test(0, 0, 11, 0),
         BindingWorker::new_for_mirror_test(1, 0, 22, 0),
     ];
+    if analyzer_mirror {
+        bindings.push(BindingWorker::new_for_mirror_test(2, 0, 33, 0));
+        forwarding.mirror_configs.insert(
+            11,
+            MirrorRuntimeConfig {
+                output_ifindex: 33,
+                rate: 0,
+            },
+        );
+    }
     // The fixture can vary packet and selected-route MTUs without changing its dispatch path.
     let frame = large_udp_v4_frame(l3_len, df);
     unsafe { bindings[0].umem.area().slice_mut_unchecked(0, frame.len()) }
@@ -170,6 +229,8 @@ fn run_ptb_dispatch_with_mtu(
     req.meta.l3_offset = 14;
     req.meta.l4_offset = 34;
     req.meta.pkt_len = frame.len() as u16;
+    req.meta.flow_src_addr[..4].copy_from_slice(&frame[26..30]);
+    req.meta.flow_dst_addr[..4].copy_from_slice(&frame[30..34]);
     req.meta.ingress_vlan_id = ingress_vlan_id;
     req.decision.resolution.tunnel_endpoint_id = tunnel_endpoint_id;
     req.decision.resolution.route_mtu = route_mtu;
@@ -1005,4 +1066,62 @@ fn tunnel_nodf_in_mtu_takes_no_ptb_arm_10705() {
             .any(|r| r == "egress_mtu_exceeded_forwarded_no_df"),
         "no oversize exception at all when the inner fits: {reasons:?}"
     );
+}
+
+#[test]
+fn mtu_signalled_forward_does_not_enqueue_mirror_clone_11432() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let (bindings, _dbg, _counters, _reasons) =
+        run_ptb_dispatch_with_mirror(forwarding_for_ptb(1400), 0, true, 0, 1600, 0);
+
+    assert_eq!(
+        bindings[1].tx_pipeline.pending_tx_local.len()
+            + bindings[1].tx_pipeline.pending_tx_prepared.len(),
+        0,
+        "MTU-signalled original must not be forwarded"
+    );
+    assert!(
+        bindings[2].tx_pipeline.pending_tx_prepared.is_empty(),
+        "an MTU-signalled packet must not produce an analyzer clone"
+    );
+    assert_eq!(bindings[0].live.mirrored_packets.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn successful_forward_commits_one_mirror_clone_11432() {
+    let frame = large_udp_v4_df_frame(1400);
+    let (bindings, dbg, _counters, reasons) =
+        run_ptb_dispatch_with_mirror(forwarding_for_ptb(1500), 0, true, 0, 1400, 0);
+
+    assert_eq!(
+        bindings[1].tx_pipeline.pending_tx_local.len()
+            + bindings[1].tx_pipeline.pending_tx_prepared.len(),
+        1,
+        "in-MTU original must be forwarded once; rx={} forward={} policy_deny={} no_egress_binding={} build_fail={} enqueue_ok={} reasons={reasons:?}",
+        dbg.rx,
+        dbg.forward,
+        dbg.policy_deny,
+        dbg.no_egress_binding,
+        dbg.build_fail,
+        dbg.enqueue_ok,
+    );
+    let mirrors = &bindings[2].tx_pipeline.pending_tx_prepared;
+    assert_eq!(
+        mirrors.len(),
+        1,
+        "one successfully forwarded packet yields one clone"
+    );
+    let mirror = mirrors.front().expect("mirror request");
+    assert!(mirror.mirror_clone);
+    assert_eq!(
+        bindings[2]
+            .umem
+            .area()
+            .slice(mirror.offset as usize, mirror.len as usize)
+            .expect("mirror frame"),
+        frame.as_slice(),
+        "the mirror clone keeps the original pre-rewrite packet"
+    );
+    assert_eq!(bindings[0].live.mirrored_packets.load(Ordering::Relaxed), 1);
+    assert!(!reasons.iter().any(|reason| reason == "egress_mtu_exceeded"));
 }

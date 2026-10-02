@@ -1,5 +1,87 @@
 use super::*;
 
+/// A mirror sample selected from the original frame but not yet committed to
+/// the analyzer queue. The sample counter is committed only after the primary
+/// forward is queued; bytes are copied only when that forward rewrites in place.
+pub(in crate::afxdp) struct StagedMirrorClone {
+    config: MirrorRuntimeConfig,
+    next_sample_counter: u64,
+    selected: bool,
+    frame: Option<Vec<u8>>,
+    frame_len: usize,
+    meta: ForwardPacketMeta,
+    flow_key: Option<SessionKey>,
+}
+
+pub(in crate::afxdp) fn stage_sampled_mirror_clone(
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+    ingress_vlan_id: u16,
+    sample_counter: u64,
+    frame: &[u8],
+    meta: ForwardPacketMeta,
+    flow_key: Option<&SessionKey>,
+) -> Option<StagedMirrorClone> {
+    let config = resolve_mirror_config(forwarding, ingress_ifindex, ingress_vlan_id)?;
+    let mut next_sample_counter = sample_counter;
+    let selected = mirror_sample_allows(config.rate, &mut next_sample_counter);
+    Some(StagedMirrorClone {
+        config,
+        next_sample_counter,
+        selected,
+        frame: None,
+        frame_len: frame.len(),
+        meta,
+        flow_key: if selected { flow_key.cloned() } else { None },
+    })
+}
+
+pub(in crate::afxdp) fn snapshot_staged_mirror_clone(staged: &mut StagedMirrorClone, frame: &[u8]) {
+    if staged.selected && frame.len() <= tx_frame_capacity() {
+        staged.frame = Some(frame.to_vec());
+    }
+}
+
+pub(in crate::afxdp) fn commit_staged_mirror_clone(
+    left: &mut [BindingWorker],
+    ingress_index: usize,
+    ingress_binding: &mut BindingWorker,
+    right: &mut [BindingWorker],
+    binding_lookup: &WorkerBindingLookup,
+    mirror_targets: &MirrorTargetMap,
+    forwarding: &ForwardingState,
+    ingress_queue_id: u32,
+    staged: StagedMirrorClone,
+    original_frame: &[u8],
+    now_ns: u64,
+) {
+    ingress_binding.mirror_sample_counter = staged.next_sample_counter;
+    if !staged.selected {
+        return;
+    }
+    let frame = staged.frame.as_deref().unwrap_or(original_frame);
+    let result = if frame.len() <= tx_frame_capacity() {
+        enqueue_mirror_clone(
+            left,
+            ingress_index,
+            ingress_binding,
+            right,
+            binding_lookup,
+            mirror_targets,
+            forwarding,
+            staged.config,
+            ingress_queue_id,
+            frame,
+            staged.meta,
+            staged.flow_key.as_ref(),
+            now_ns,
+        )
+    } else {
+        MirrorCloneResult::NoFrame
+    };
+    record_mirror_clone_result(&ingress_binding.live, result, staged.frame_len);
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn enqueue_mirror_clone(
     left: &mut [BindingWorker],
