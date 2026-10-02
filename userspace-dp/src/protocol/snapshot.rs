@@ -254,6 +254,11 @@ pub(crate) struct InterfaceSnapshot {
     /// `protocol_wire_v1` contract, while Go always emits the bool.
     #[serde(rename = "is_unit", default)]
     pub is_unit: Option<bool>,
+    /// #11404: explicit kernel administrative/operational link state. Missing
+    /// means a legacy sender or fixture did not report state, so forwarding
+    /// retains the historical assumption that the interface is usable.
+    #[serde(rename = "link_up", default, skip_serializing_if = "Option::is_none")]
+    pub link_up: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

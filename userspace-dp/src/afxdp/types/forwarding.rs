@@ -370,6 +370,9 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) packet_too_big_buckets:
         FastMap<u16, std::sync::Arc<crate::afxdp::icmp_ratelimit::ZoneLimiter>>,
     pub(in crate::afxdp) egress: FastMap<i32, EgressInterface>,
+    /// #11404: positive ifindexes whose snapshot rows explicitly report the
+    /// egress link down. Missing state remains compatible with legacy snapshots.
+    pub(in crate::afxdp) egress_link_down: FastSet<i32>,
     pub(in crate::afxdp) ingress_logical_ifindex: FastMap<(i32, u16), i32>,
     /// #11297/#11434: ifindexes where VID 0 is rejected: tagged-only physical
     /// bind targets and tagged VLAN children, plus native-VLAN parents without

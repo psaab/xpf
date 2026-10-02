@@ -1046,8 +1046,12 @@ fn select_v4_route<'a>(
                     }
                     // Interface-only members resolve the per-flow destination
                     // lazily; explicit gateways require an installed neighbor.
+                    // #11404: a known-down or missing egress row is not live,
+                    // but its destination neighbor remains lazy (#5161).
                     if nh.next_hop.is_none() {
-                        return nh.ifindex > 0;
+                        return nh.ifindex > 0
+                            && state.egress.contains_key(&nh.ifindex)
+                            && !state.egress_link_down.contains(&nh.ifindex);
                     }
                     let target = nh.next_hop.unwrap_or(ip);
                     nh.ifindex > 0
@@ -1149,8 +1153,14 @@ fn select_v6_route<'a>(
                             depth,
                         );
                     }
+                    // Interface-only members resolve the per-flow destination
+                    // lazily; explicit gateways require an installed neighbor.
+                    // #11404: a known-down or missing egress row is not live,
+                    // but its destination neighbor remains lazy (#5161).
                     if nh.next_hop.is_none() {
-                        return nh.ifindex > 0;
+                        return nh.ifindex > 0
+                            && state.egress.contains_key(&nh.ifindex)
+                            && !state.egress_link_down.contains(&nh.ifindex);
                     }
                     let target = nh.next_hop.unwrap_or(ip);
                     nh.ifindex > 0

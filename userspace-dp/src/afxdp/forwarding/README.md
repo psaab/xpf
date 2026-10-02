@@ -152,10 +152,11 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
   prefix, unknown at route-sweep time — so interface-only members are NOT
   warmed). Gating such a member on an already-present destination neighbor
   starved it out of the live set the moment any explicit member resolved,
-  collapsing ECMP to width-1; instead it is live whenever its interface is
-  up (`ifindex > 0`), and the MissingNeighbor cold path resolves each
-  destination lazily per flow (mirroring the single-member interface-only
-  path). Tunnel members use their own type-aware liveness (#2923).
+  collapsing ECMP to width-1; instead it is live when its egress row exists
+  and the reported link is not down. Legacy snapshots without link-state
+  metadata preserve the prior behavior. The MissingNeighbor cold path still
+  resolves each destination lazily per flow. Tunnel members use type-aware
+  liveness (#2923).
   **#2734: the spread key is per-FLOW.** The session resolution path
   (`lookup_forwarding_resolution_with_dynamic_for_flow`) hashes the forward
   5-tuple with `ecmp_hash_flow`, using a fixed, ECMP-specific domain seed
@@ -193,8 +194,9 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
   resolved, the FIB selects the backup (#11316); a resolved primary remains
   preferred, and equal-preference next-hops still form ECMP. If neither
   tier has a live gateway, the preferred drivable member still enters the
-  `MissingNeighbor` cold path to resolve ARP/NDP. Interface-only members
-  retain their existing live-on-up semantics (#5161), and tunnel members
+  `MissingNeighbor` cold path to resolve ARP/NDP. Interface-only members use
+  an egress-row and link-up gate when state is reported (#11404), while
+  preserving #5161's lazy destination-neighbor resolution; tunnel members
   keep type-aware liveness (#2923).
   - **Preference-aware kernel gap-fill (#11323).** If the best configured
   route is preference 200 or better, the importer omits a duplicate

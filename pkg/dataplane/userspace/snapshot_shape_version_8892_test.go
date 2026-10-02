@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "1414d61377ab73115cd59481e1701090ceb8aa137d7f52d0bf2917b4f8d7d2d7"
+	snapshotShapeGolden8892 = "f826f1c80a277a865385e63f1e0fa2a56a193b3fc0db7c3e703a53042ecbe7e4"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -415,7 +415,10 @@ const (
 	// v38 -> v39 BUMPED (#11434): InterfaceSnapshot.NativeVLANID selects the
 	// configured logical unit for VID-0 ingress; a v38 helper attributes those
 	// frames to the parent / unit-0 instead.
-	snapshotShapeVersion8892 = 39
+	// v39 -> v40 BUMPED (#11404): InterfaceSnapshot.LinkUp carries kernel
+	// admin/oper liveness for interface-only ECMP egress. A v39 helper ignores
+	// it, keeping the known-down path this field closes.
+	snapshotShapeVersion8892 = 40
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {
