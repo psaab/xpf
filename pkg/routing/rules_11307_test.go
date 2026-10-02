@@ -6,7 +6,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-func TestPBRBuildStatsCountsUnconstrainedSteer11307(t *testing.T) {
+func TestPBRBuildRulesAndStatsCountsUnconstrainedSteer11307(t *testing.T) {
 	filter := &config.FirewallFilter{
 		Name: "unconstrained-fbf",
 		Terms: []*config.FirewallFilterTerm{
@@ -15,16 +15,16 @@ func TestPBRBuildStatsCountsUnconstrainedSteer11307(t *testing.T) {
 	}
 	cfg := pbrTestConfig("inet", filter, []*config.RoutingInstanceConfig{{Name: "ATT", TableID: 101}}, nil)
 
-	installed, degraded := PBRBuildStats(cfg)
-	if installed != 0 {
-		t.Fatalf("installed = %d, want 0: unconstrained steering must stay fail-closed", installed)
+	rules, degraded := PBRBuildRulesAndStats(cfg)
+	if len(rules) != 0 {
+		t.Fatalf("desired rules = %d, want 0: unconstrained steering must stay fail-closed", len(rules))
 	}
 	if degraded != 1 {
 		t.Fatalf("degraded = %d, want 1 dropped unconstrained routing-instance term", degraded)
 	}
 }
 
-func TestPBRBuildStatsCountsUndefinedInstanceSteer11307(t *testing.T) {
+func TestPBRBuildRulesAndStatsCountsUndefinedInstanceSteer11307(t *testing.T) {
 	// Lenient loads preserve an undefined routing-instance reference in the
 	// filter term. The mirror has no target table and must count that drop.
 	filter := &config.FirewallFilter{
@@ -35,9 +35,9 @@ func TestPBRBuildStatsCountsUndefinedInstanceSteer11307(t *testing.T) {
 	}
 	cfg := pbrTestConfig("inet", filter, []*config.RoutingInstanceConfig{{Name: "ATT", TableID: 101}}, nil)
 
-	installed, degraded := PBRBuildStats(cfg)
-	if installed != 0 {
-		t.Fatalf("installed = %d, want 0 for undefined routing-instance", installed)
+	rules, degraded := PBRBuildRulesAndStats(cfg)
+	if len(rules) != 0 {
+		t.Fatalf("desired rules = %d, want 0 for undefined routing-instance", len(rules))
 	}
 	if degraded != 1 {
 		t.Fatalf("degraded = %d, want 1 dropped undefined-instance term", degraded)

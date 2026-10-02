@@ -438,16 +438,18 @@ How it lands (the `instance-type forwarding` divergence fix):
   before the PBR band (31000–31999), while the userspace helper still honors
   the FBF override. The recipe above uses a default-instance ingress interface,
   where both dataplane paths can apply the PBR rule.
-- **PBR build-health metrics (#4422, #7422)**: `xpf_pbr_rules_desired`
-  gauges the number of kernel `ip rule` FBF entries the active config
-  yields (the desired-install set), `xpf_pbr_rules_applied` counts the
-  FBF rules actually present in the kernel (read back by counting ip
-  rules in the PBR priority band), and `xpf_pbr_degraded_terms` gauges
-  the number of routing-instance filter terms DROPPED from the kernel
-  mirror by the fail-closed rule above. A sustained
-  `xpf_pbr_degraded_terms > 0` means the kernel slow path under-steers
-  vs the userspace fast path — an operator alerting hook for a config
-  whose FBF cannot be fully represented as `ip rule`s. There is
+- **PBR build-health metrics (#4422, #7422, #11440)**: `xpf_pbr_rules_desired`
+  gauges the number of kernel `ip rule` FBF entries the active config yields.
+  `xpf_pbr_rules_applied` counts even-priority rule entries in the PBR band;
+  it reports band occupancy only and does not prove that entries match the
+  config. `xpf_pbr_rules_mismatched` reports missing or structurally incorrect
+  desired lookup rules, plus unexpected or duplicate in-band entries, using
+  the netlink-visible table and match fields. `RuleList` cannot expose the
+  DSCP selector or rule action, so these are not checked. A sustained
+  `xpf_pbr_rules_mismatched > 0` signals readback divergence; a sustained
+  `xpf_pbr_degraded_terms > 0` means the kernel slow path under-steers vs the
+  userspace fast path — an operator alerting hook for a config whose FBF cannot
+  be fully represented as `ip rule`s.
   **`xpf_pbr_rules_installed` is a DEPRECATED ALIAS of
   `xpf_pbr_rules_desired`** and carries the identical value. It was named
   for an applied fact and derived from a desired one, so a rule the
@@ -459,20 +461,19 @@ How it lands (the `instance-type forwarding` divergence fix):
   consumer, and renaming outright fails to an alert that stops firing,
   which is invisible until it is needed. **Removal is not scheduled** —
   the trigger is that every alert expression and dashboard panel
-  selecting it has moved to one of the two replacements, and that
+  selecting it has moved to the replacements, and that
   compatibility surface needs a named owner.
 
-  `xpf_pbr_rules_applied` is **omitted entirely** when the netlink
-  readback fails, rather than published as 0: a fabricated zero against a
-  non-zero desired count looks exactly like a total install failure. A
-  missing series is a visible gap; a fabricated one is a false alarm.
-  A partial read (one address family failing) invalidates the whole
-  count for the same reason.
+  `xpf_pbr_rules_applied` and `xpf_pbr_rules_mismatched` are **omitted together**
+  when either address-family netlink readback fails, rather than publishing a
+  fabricated zero or partial result. A missing series is a visible gap; a
+  fabricated one is a false alarm. The mismatch value is sampled from the same
+  two-family read as band occupancy.
 
   There is deliberately no "widened" metric: the builder never widens an
-  unrepresentable match (fail-closed), so an over-steer is never
-  mirrored. Both gauges are config-derived and emitted even in a
-  config-only / degraded boot.
+  unrepresentable match (fail-closed), so an over-steer is never mirrored.
+  Desired/build-health gauges are config-derived and emitted even in a
+  config-only / degraded boot; applied and mismatched are kernel readbacks.
 - **Dataplane**: filter evaluation returns the term's
   routing-instance; the route lookup targets `ISP-B.inet.0` /
   `ISP-B.inet6.0`, where the snapshot builder files the instance's

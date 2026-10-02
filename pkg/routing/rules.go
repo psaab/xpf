@@ -1222,46 +1222,30 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	return rules, errors.Join(errs...)
 }
 
-// PBRBuildStats returns observability counts derived from BuildPBRRules for the
-// active config (#4422). It is a pure function of cfg (no netlink), safe to call
-// on the Prometheus scrape path — the same posture as the config-derived
-// host-inbound addressless collectors.
+// PBRBuildRulesAndStats returns the desired kernel FBF lookup rules and the
+// number of routing-instance filter terms dropped from the mirror for the
+// active config (#4422). It is a pure function of cfg (no netlink), safe to
+// call on the Prometheus scrape path.
 //
-//   - installed: the number of kernel `ip rule` FBF lookup entries the
-//     routing-instance filter terms yield (post-truncation to the
-//     maxPBRSteeringRules paired-rule cap). This is the desired-install count;
-//     ApplyPBRRules installs exactly this set (a later netlink failure there is
-//     a separate, logged concern).
-//   - degraded: the number of routing-instance filter terms DROPPED from the
-//     kernel FBF mirror (fail-closed under-steer to the main table) — an
-//     unrepresentable `except` set, an unknown DSCP name, a contradictory
-//     `routing-instance` + `discard`/`reject` term (#4534), a later term that
-//     may overlap a preceding terminator (#11325), an ip-rule-unrepresentable
-//     L4/per-packet predicate (#3730), an undefined routing-instance target or
-//     unconstrained routing-instance term (#11307), a loopback attachment
-//     carrying routing-instance terms (#9810 LEAD-O4, one per attachment, not
-//     per term), or the maxPBRSteeringRules overflow (#3430 M3, counted as one
-//     condition). A non-zero value means the kernel slow path under-steers vs
-//     the userspace fast path (which still enforces every term exactly).
-//
-// There is deliberately no "widened" count: BuildPBRRules REFUSES to widen an
-// unrepresentable match to an address-only over-steer (fail-closed drop), so an
-// over-steer is never mirrored — the "widened" audit state does not exist by
-// design.
-func PBRBuildStats(cfg *config.Config) (installed, degraded int) {
+// The rules are the desired-install set. ApplyPBRRules installs exactly this
+// set; a later netlink failure is separate from this config-derived result.
+// `degraded` counts dropped terms for unrepresentable predicates, unknown DSCP,
+// contradictory or overlapping terms, undefined/unconstrained routing-instance
+// targets, loopback attachments, or priority-window overflow. A non-zero value
+// means the kernel slow path under-steers vs the userspace fast path (which
+// still enforces every term exactly). There is deliberately no "widened" count:
+// BuildPBRRules refuses to widen an unrepresentable match.
+func PBRBuildRulesAndStats(cfg *config.Config) (rules []PBRRule, degraded int) {
 	rules, err := BuildPBRRules(cfg)
-	installed = len(rules)
-	if err != nil {
-		// BuildPBRRules returns errors.Join(errs...); its joinError exposes the
-		// per-term error slice via Unwrap() []error, so the count of degraded
-		// terms is exact. The single-error fallback is defensive only.
-		if u, ok := err.(interface{ Unwrap() []error }); ok {
-			degraded = len(u.Unwrap())
-		} else {
-			degraded = 1
-		}
+	if err == nil {
+		return rules, 0
 	}
-	return installed, degraded
+	// BuildPBRRules returns errors.Join(errs...); its joinError exposes the
+	// per-term error slice via Unwrap() []error, so the count is exact.
+	if u, ok := err.(interface{ Unwrap() []error }); ok {
+		return rules, len(u.Unwrap())
+	}
+	return rules, 1
 }
 
 // pbrAttachment binds a firewall filter to the Linux ingress interface it is

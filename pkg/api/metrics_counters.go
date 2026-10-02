@@ -168,33 +168,31 @@ func (c *xpfCollector) collectHostInboundICMPNDAccepts(ch chan<- prometheus.Metr
 	}
 }
 
-// collectPBRStatus emits the policy-based-routing (filter-based-forwarding)
-// build-health gauges xpf_pbr_rules_installed and xpf_pbr_degraded_terms (#4422).
-// routing.PBRBuildStats is a pure function of the active config (no netlink), so
-// this is a control-plane signal emitted BEFORE the dataplane gate, matching the
-// config-derived host-inbound addressless collectors. Both gauges are emitted
-// unconditionally (0 when there is no active config or no FBF term) so a
-// zero-degradation state is a present sample distinct from "collector absent" —
-// the alerting hook is xpf_pbr_degraded_terms > 0.
+// collectPBRStatus emits desired/build-health gauges and kernel readback gauges
+// for filter-based-forwarding (#4422, #7422, #11440). Desired rules and
+// degraded terms are config-derived and emitted BEFORE the dataplane gate;
+// structural comparison and band occupancy use one readback of both families.
+// All config-derived gauges are emitted unconditionally, including zeros.
 func (c *xpfCollector) collectPBRStatus(ch chan<- prometheus.Metric) {
 	var cfg *config.Config
 	if c.srv != nil && c.srv.store != nil {
 		cfg = c.srv.store.ActiveConfig()
 	}
-	installed, degraded := routing.PBRBuildStats(cfg)
-	// #7422 row 12: _installed and _desired are emitted from the SAME value, so
-	// the alias cannot drift. Deliberately not `float64(installed)` twice from
-	// two call sites — one call, one number, two names.
+	desiredRules, degraded := routing.PBRBuildRulesAndStats(cfg)
+	desired := len(desiredRules)
+	// #7422 row 12: _installed and _desired are aliases emitted from this
+	// single build result, not separate computations.
 	ch <- prometheus.MustNewConstMetric(c.pbrRulesInstalled,
-		prometheus.GaugeValue, float64(installed))
+		prometheus.GaugeValue, float64(desired))
 	ch <- prometheus.MustNewConstMetric(c.pbrRulesDesired,
-		prometheus.GaugeValue, float64(installed))
-	// The applied readback is OMITTED on failure rather than reported as 0 —
-	// see the descriptor. A missing series is a visible gap in a dashboard; a
-	// fabricated zero is an alert firing for a failure that did not happen.
-	if applied, ok := routing.PBRAppliedCountLive(); ok {
+		prometheus.GaugeValue, float64(desired))
+	// Band occupancy and the scoped structural mismatch are both omitted when
+	// either family readback fails. Never publish a partial or fabricated zero.
+	if applied, mismatched, ok := routing.PBRAppliedStatusLive(desiredRules); ok {
 		ch <- prometheus.MustNewConstMetric(c.pbrRulesApplied,
 			prometheus.GaugeValue, float64(applied))
+		ch <- prometheus.MustNewConstMetric(c.pbrRulesMismatched,
+			prometheus.GaugeValue, float64(mismatched))
 	}
 	ch <- prometheus.MustNewConstMetric(c.pbrDegradedTerms,
 		prometheus.GaugeValue, float64(degraded))

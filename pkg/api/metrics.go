@@ -77,6 +77,7 @@ type xpfCollector struct {
 	pbrRulesInstalled            *prometheus.Desc
 	pbrRulesDesired              *prometheus.Desc
 	pbrRulesApplied              *prometheus.Desc
+	pbrRulesMismatched           *prometheus.Desc
 	pbrDegradedTerms             *prometheus.Desc
 	tcEgressPacketsTotal         *prometheus.Desc
 	syncookieTotal               *prometheus.Desc
@@ -974,6 +975,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.pbrRulesInstalled
 	ch <- c.pbrRulesDesired
 	ch <- c.pbrRulesApplied
+	ch <- c.pbrRulesMismatched
 	ch <- c.pbrDegradedTerms
 	ch <- c.tcEgressPacketsTotal
 	ch <- c.syncookieTotal
@@ -1878,10 +1880,10 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 	// counts are DISTINCT from the userspace fast-path xpf_filter_hits_total.
 	c.collectLo0Counters(ch)
 
-	// #4422: policy-based-routing (filter-based-forwarding) build health. Derived
-	// from the active config (routing.PBRBuildStats, a pure function — no
-	// netlink), so it is a control-plane signal emitted BEFORE the dataplane gate:
-	// a degraded FBF mirror must stay visible in a config-only / degraded boot.
+	// #4422/#7422/#11440: PBR/FBF desired-rule, build-health, and kernel
+	// readback gauges. The desired set and degraded count are config-derived
+	// and emitted before the dataplane gate; netlink readback metrics are omitted
+	// together if either address family cannot be listed.
 	c.collectPBRStatus(ch)
 
 	// #6843 R1: per-zone traffic, emitted BEFORE the dataplane gate. The
