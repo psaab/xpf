@@ -308,7 +308,7 @@ type FenceSpec struct {
 	Views         []HostInboundZoneView
 	UnzonedV4     []string
 	UnzonedV6     []string
-	WGListenPorts []uint16 // stale-reply guard only; WG accepts use WGZonePorts.
+	WGListenPorts []uint16            // stale-reply guard only; WG accepts use WGZonePorts.
 	WGZonePorts   map[string][]uint16 // per-zone daddr-scoped WG accepts.
 	// UnleasedV4/V6, as in HostInboundSpec (fence stands pre-handoff).
 	UnleasedV4 []string
@@ -326,7 +326,7 @@ type GapFenceSpec struct {
 	Views         []HostInboundZoneView // WG accepts intersect these addresses with Uncovered.
 	UncoveredV4   []string
 	UncoveredV6   []string
-	WGListenPorts []uint16 // stale-reply guard only; WG accepts use WGZonePorts.
+	WGListenPorts []uint16            // stale-reply guard only; WG accepts use WGZonePorts.
 	WGZonePorts   map[string][]uint16 // per-zone daddr-scoped WG accepts.
 	// UnleasedV4/V6, as in HostInboundSpec (uniform backstop).
 	UnleasedV4 []string
