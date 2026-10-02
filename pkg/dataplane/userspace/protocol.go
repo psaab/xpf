@@ -619,6 +619,10 @@ type ControlResponse struct {
 	// PersistentNatLeaseCount reports the authoritative allocator population
 	// revoked by clear_persistent_nat_leases (#10784).
 	PersistentNatLeaseCount uint64 `json:"persistent_nat_lease_count,omitempty"`
+	// FIBGeneration and FIBRoutes are the helper's worker-visible forwarding
+	// tables, returned only by fib_dump (#11370).
+	FIBGeneration uint32         `json:"fib_generation,omitempty"`
+	FIBRoutes     []FibRouteWire `json:"fib_routes,omitempty"`
 }
 
 // QueueEpochSnapshot is one queue-number/epoch pair. It is a list rather than
@@ -626,6 +630,30 @@ type ControlResponse struct {
 type QueueEpochSnapshot struct {
 	Queue uint16 `json:"queue"`
 	Epoch uint64 `json:"epoch"`
+}
+
+// FibNextHopWire is one resolved next-hop leg from the helper FIB (#11370).
+type FibNextHopWire struct {
+	NextHop          string `json:"next_hop,omitempty"`
+	Ifindex          int32  `json:"ifindex"`
+	Interface        string `json:"interface,omitempty"`
+	TunnelEndpointID uint16 `json:"tunnel_endpoint_id"`
+	Weight           uint32 `json:"weight"`
+}
+
+// FibRouteWire is one installed route, connected prefix, or next-table rule
+// from the userspace helper's forwarding state (#11370).
+type FibRouteWire struct {
+	Table        string           `json:"table"`
+	Family       string           `json:"family"`
+	Destination  string           `json:"destination"`
+	Kind         string           `json:"kind"`
+	NextHops     []FibNextHopWire `json:"next_hops,omitempty"`
+	Discard      bool             `json:"discard"`
+	NextTable    string           `json:"next_table,omitempty"`
+	RulePriority uint32           `json:"rule_priority"`
+	Preference   int32            `json:"preference"`
+	MTU          uint32           `json:"mtu"`
 }
 
 // Rename operation. It is additive wire state; absent ancestry means the

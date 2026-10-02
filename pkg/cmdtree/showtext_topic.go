@@ -179,6 +179,7 @@ var showTextTopicCommand = map[string]string{
 	// is the same command with a destination in a value slot, so it resolves
 	// to the same argument-free path.
 	"route-all":       "show route",
+	"route-fib":       "show route fib",
 	"route-prefix:":   "show route",
 	"route-detail":    "show route detail",
 	"route-instance":  "show route instance",

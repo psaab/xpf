@@ -9,10 +9,10 @@ import (
 // pkg/dataplane/userspace/legacy_dataplane.go only verifies that
 // LegacyDataPlaneAdapter has the method shape of an inline
 // anonymous interface. It does NOT detect drift if the unexported
-// pkg/grpcapi interfaces (grpcRuntime, sessionCursorIterator,
-// userspaceStatusProvider, userspaceControlProvider) acquire a new
-// method that LegacyDataPlaneAdapter no longer satisfies — the
-// userspace package can't import grpcapi for that interface name.
+// interfaces (grpcRuntime, sessionCursorIterator, userspaceStatusProvider,
+// userspaceFIBProvider, userspaceControlProvider) acquire a new method that
+// LegacyDataPlaneAdapter no longer satisfies — the userspace package can't
+// import grpcapi for that interface name.
 //
 // pkg/grpcapi CAN import pkg/dataplane/userspace (the dependency
 // already exists via Config.DP's runtime type and the named
@@ -26,5 +26,6 @@ var (
 	_ grpcRuntime              = (*dpuserspace.LegacyDataPlaneAdapter)(nil)
 	_ sessionCursorIterator    = (*dpuserspace.LegacyDataPlaneAdapter)(nil)
 	_ userspaceStatusProvider  = (*dpuserspace.LegacyDataPlaneAdapter)(nil)
+	_ userspaceFIBProvider     = (*dpuserspace.LegacyDataPlaneAdapter)(nil)
 	_ userspaceControlProvider = (*dpuserspace.LegacyDataPlaneAdapter)(nil)
 )

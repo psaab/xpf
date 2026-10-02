@@ -414,6 +414,50 @@ pub(crate) struct ControlRequest {
     pub fabrics: Option<Vec<FabricSnapshot>>,
 }
 
+/// One resolved next-hop leg in a read-only helper FIB dump (#11370).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct FibNextHopWire {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub next_hop: String,
+    #[serde(default)]
+    pub ifindex: i32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub interface: String,
+    #[serde(default)]
+    pub tunnel_endpoint_id: u16,
+    #[serde(default)]
+    pub weight: u32,
+}
+
+/// One row from the userspace helper's installed forwarding tables (#11370).
+///
+/// `kind` distinguishes ordinary routes, connected prefixes, and the
+/// priority-ordered next-table rules that precede table-local LPM lookup.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct FibRouteWire {
+    #[serde(default)]
+    pub table: String,
+    #[serde(default)]
+    pub family: String,
+    #[serde(default)]
+    pub destination: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_hops: Vec<FibNextHopWire>,
+    #[serde(default)]
+    pub discard: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub next_table: String,
+    #[serde(default)]
+    pub rule_priority: u32,
+    #[serde(default)]
+    pub preference: i32,
+    #[serde(default)]
+    pub mtu: u32,
+}
+
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct SlowPathStatus {
     #[serde(default)]
@@ -920,6 +964,11 @@ pub(crate) struct ControlResponse {
     /// #10784: authoritative persistent-lease bindings revoked by clear.
     #[serde(rename = "persistent_nat_lease_count", default)]
     pub persistent_nat_lease_count: u64,
+    /// #11370: current helper-side fast-path FIB rows.
+    #[serde(rename = "fib_generation", default)]
+    pub fib_generation: u32,
+    #[serde(rename = "fib_routes", default, skip_serializing_if = "Vec::is_empty")]
+    pub fib_routes: Vec<FibRouteWire>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

@@ -421,6 +421,7 @@ var OperationalTree = map[string]*Node{
 				"longer":   {Desc: "More-specific (longer) prefixes"},
 				"orlonger": {Desc: "Equal or more-specific prefixes"},
 			}},
+			"fib":     {Desc: "Display the userspace helper's fast-path FIB"},
 			"terse":   {Desc: "Display terse output"},
 			"detail":  {Desc: "Display detailed output"},
 			"summary": {Desc: "Show routing table statistics"},

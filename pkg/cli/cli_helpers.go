@@ -194,6 +194,14 @@ func (c *CLI) userspaceDataplaneControl() (cliUserspaceControlProvider, error) {
 	return provider, nil
 }
 
+func (c *CLI) userspaceDataplaneFIB() (uint32, []dpuserspace.FibRouteWire, error) {
+	provider, ok := c.dpProbe().(cliUserspaceFIBProvider)
+	if !ok {
+		return 0, nil, fmt.Errorf("userspace helper FIB unavailable")
+	}
+	return provider.DumpFIB()
+}
+
 func fmtPref(p int) string {
 	if p == 0 {
 		return "-"

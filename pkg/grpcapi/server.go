@@ -373,6 +373,14 @@ func (s *Server) userspaceDataplaneStatus() (dpuserspace.ProcessStatus, error) {
 	return provider.Status()
 }
 
+func (s *Server) userspaceDataplaneFIB() (uint32, []dpuserspace.FibRouteWire, error) {
+	provider, ok := s.dpProbe().(userspaceFIBProvider)
+	if !ok {
+		return 0, nil, fmt.Errorf("userspace helper FIB unavailable")
+	}
+	return provider.DumpFIB()
+}
+
 func (s *Server) userspaceDataplaneControl() (userspaceControlProvider, error) {
 	provider, ok := s.dpProbe().(userspaceControlProvider)
 	if !ok {

@@ -17,11 +17,21 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/frr"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/termsafe"
 )
+
+func (s *Server) showRouteFIB(buf *strings.Builder) error {
+	generation, routes, err := s.userspaceDataplaneFIB()
+	if err != nil {
+		return fmt.Errorf("dump userspace helper FIB: %w", err)
+	}
+	buf.WriteString(dpuserspace.FormatFIBDump(generation, routes))
+	return nil
+}
 
 // showRouteAll renders the per-VRF route tables (main + each routing
 // instance) using `routing.FormatAllRoutes`.

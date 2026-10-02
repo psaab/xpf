@@ -153,6 +153,8 @@ pub(crate) fn handle_stream(
         policy_delete_outcomes: Vec::new(),
         policy_delete_complete: false,
         policy_delete_errors: Vec::new(),
+        fib_generation: 0,
+        fib_routes: Vec::new(),
         persistent_nat_lease_count: 0,
     };
     let mut persist_state = false;
@@ -294,6 +296,12 @@ pub(crate) fn handle_stream(
                 // control path and does not reintroduce the session-thread
                 // mutex wedge.
                 persist_state = true;
+            }
+
+            "fib_dump" => {
+                let (generation, routes) = guard.afxdp.dump_fib();
+                response.fib_generation = generation;
+                response.fib_routes = routes;
             }
             "apply_snapshot" => snapshot::apply(
                 &mut guard,
