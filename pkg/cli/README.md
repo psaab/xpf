@@ -156,6 +156,13 @@ next-hop details. This is a read-only helper query, not a reconstruction from
 the routing manager, kernel routes, or FRR. The local CLI and remote gRPC CLI
 share one renderer so they display the same helper snapshot.
 
+The helper refuses an over-budget snapshot explicitly rather than returning a
+partial route list. FIB response rows are bounded below the 64 MiB control
+response cap with framing/status headroom, and the handler checks the complete
+serialized response before sending it. A refusal is an error (`ok=false`) with
+no generation or routes; the Go client also treats a truncated control
+response as an error, never as a successful empty FIB.
+
 ## Callers
 
 `cmd/cli` (remote client), `cmd/xpfd` (when stdin is a TTY).

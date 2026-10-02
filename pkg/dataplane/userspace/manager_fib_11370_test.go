@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -90,5 +91,81 @@ func TestDumpFIBRequestsAndDecodesHelperSnapshot11370(t *testing.T) {
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatalf("write helper response: %v", err)
+	}
+}
+
+func TestDumpFIBHelperBudgetRefusalReturnsErrorWithoutRows11767(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "control.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen control socket: %v", err)
+	}
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		serverErr <- json.NewEncoder(conn).Encode(ControlResponse{
+			OK:    false,
+			Error: "fib_dump route rows exceed the control response budget",
+		})
+	}()
+
+	manager := New()
+	manager.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	manager.cfg.ControlSocket = socket
+	generation, routes, err := manager.DumpFIB()
+	if err == nil || !strings.Contains(err.Error(), "fib_dump route rows exceed") {
+		t.Fatalf("DumpFIB refusal error = %v, want the helper budget error", err)
+	}
+	if generation != 0 || len(routes) != 0 {
+		t.Fatalf("refused DumpFIB returned generation=%d routes=%d", generation, len(routes))
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("write helper refusal: %v", err)
+	}
+}
+
+func TestDumpFIBRejectsTruncatedResponseInsteadOfEmptySuccess11767(t *testing.T) {
+	oldCap := controlResponseCapBytes
+	controlResponseCapBytes = 32
+	t.Cleanup(func() { controlResponseCapBytes = oldCap })
+
+	socket := filepath.Join(t.TempDir(), "control.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen control socket: %v", err)
+	}
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		_, err = conn.Write([]byte(`{"ok":true,"fib_generation":9,"fib_routes":[]}`))
+		serverErr <- err
+	}()
+
+	manager := New()
+	manager.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	manager.cfg.ControlSocket = socket
+	generation, routes, err := manager.DumpFIB()
+	if err == nil || !strings.Contains(err.Error(), "control-response cap") {
+		t.Fatalf("truncated DumpFIB error = %v, want control-response-cap error", err)
+	}
+	if generation != 0 || len(routes) != 0 {
+		t.Fatalf("truncated DumpFIB returned generation=%d routes=%d", generation, len(routes))
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("write truncated helper response: %v", err)
 	}
 }

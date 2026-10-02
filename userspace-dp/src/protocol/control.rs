@@ -360,6 +360,12 @@ pub(crate) struct ZoneFloodCounterStatus {
 /// rejected at the read, so the two caps must move together. The Go side
 /// pins the relationship in `TestControlRequestCapLockstepWithRust`.
 pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum serialized control response body, matching Go's
+/// `MaxControlResponseBytes` in `pkg/dataplane/userspace/socket_trust_9003.go`.
+/// Keep this in lockstep with `MAX_CONTROL_REQUEST_BYTES`; fib_dump is capped
+/// before serialization so the Go bounded reader receives a complete refusal
+/// rather than a truncated JSON document.
+pub(crate) const MAX_CONTROL_RESPONSE_BYTES: usize = MAX_CONTROL_REQUEST_BYTES;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ControlRequest {

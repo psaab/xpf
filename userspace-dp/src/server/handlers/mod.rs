@@ -72,6 +72,75 @@ fn fabric_plan_changed(previous: &[crate::FabricSnapshot], next: &[crate::Fabric
     })
 }
 
+struct ResponseSizeCounter(usize);
+
+impl Write for ResponseSizeCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn enforce_fib_response_cap(
+    response: &mut ControlResponse,
+    byte_cap: usize,
+) -> Result<(), String> {
+    let mut counter = ResponseSizeCounter(0);
+    serde_json::to_writer(&mut counter, response)
+        .map_err(|error| format!("count fib_dump response: {error}"))?;
+    let response_bytes = counter.0.saturating_add(1); // trailing newline
+    if response_bytes >= byte_cap {
+        response.ok = false;
+        response.error = format!(
+            "fib_dump response is {response_bytes} bytes and reaches the \
+             {byte_cap}-byte control response cap; FIB routes were refused"
+        );
+        response.fib_generation = 0;
+        response.fib_routes.clear();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod fib_response_cap_tests {
+    use super::*;
+
+    #[test]
+    fn fib_response_at_control_cap_is_refused_without_partial_rows() {
+        let mut response = ControlResponse {
+            ok: true,
+            fib_generation: 9,
+            fib_routes: vec![FibRouteWire {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "203.0.113.0/24".into(),
+                kind: "route".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let exact_response_bytes = serde_json::to_vec(&response).expect("serialize fixture").len() + 1;
+        enforce_fib_response_cap(&mut response, exact_response_bytes)
+            .expect("count the complete response");
+
+        assert!(!response.ok, "a response reaching the cap must be refused");
+        assert_eq!(response.fib_generation, 0);
+        assert!(
+            response.fib_routes.is_empty(),
+            "a refused FIB dump must not retain a partial row list"
+        );
+        assert!(
+            response.error.contains("routes were refused"),
+            "the response must explain the refusal: {}",
+            response.error
+        );
+    }
+}
+
 pub(crate) fn handle_stream(
     stream: UnixStream,
     state_file: &str,
@@ -162,6 +231,7 @@ pub(crate) fn handle_stream(
     // is byte-identical, but reading it up front insulates the
     // dispatcher from future partial-move concerns on `request`.
     let suppress_status = request.suppress_status;
+    let is_fib_dump = request.request_type == "fib_dump";
     let neighbor_replace = request.neighbor_replace;
     // #7919: two-phase like the exports — the locked arm only KICKS the
     // broadcast; the bounded wait runs after the lock drops, so a stalled
@@ -298,11 +368,16 @@ pub(crate) fn handle_stream(
                 persist_state = true;
             }
 
-            "fib_dump" => {
-                let (generation, routes) = guard.afxdp.dump_fib();
-                response.fib_generation = generation;
-                response.fib_routes = routes;
-            }
+            "fib_dump" => match guard.afxdp.dump_fib() {
+                Ok((generation, routes)) => {
+                    response.fib_generation = generation;
+                    response.fib_routes = routes;
+                }
+                Err(error) => {
+                    response.ok = false;
+                    response.error = error;
+                }
+            },
             "apply_snapshot" => snapshot::apply(
                 &mut guard,
                 request.snapshot,
@@ -599,6 +674,9 @@ pub(crate) fn handle_stream(
     // the peer, then surface any persist error to the accept loop (logged) only
     // AFTER the response is on the wire. Delta order is preserved end-to-end:
     // the response carries the batch exactly as drained.
+    if is_fib_dump {
+        enforce_fib_response_cap(&mut response, MAX_CONTROL_RESPONSE_BYTES)?;
+    }
     let persist_result = if persist_state {
         write_state(state_file, &state)
     } else {
