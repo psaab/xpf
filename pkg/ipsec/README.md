@@ -686,6 +686,12 @@ all files stay in `package ipsec`, so the public API is unchanged.
   silently degraded to on-traffic. It is now
   `ValidateEnum([immediately, on-traffic, responder-only])` in
   `setSchema` — a typo fails closed at commit.
+- **Responder-only gateways never initiate (#11688).** With
+  `remote_addrs = %any`, neither `establish-tunnels immediately` nor
+  `establish-tunnels on-traffic` may create a child `start_action`: `start`
+  has no fixed peer to dial, and `trap` would initiate when traffic arrives.
+  DPD always renders `dpd_action = clear` for a responder-only gateway, so a
+  dead SA is cleared without restarting an outbound exchange.
 - **Two VPNs may not render the same SA name (#9624).** The renderer keeps
   child names unique only within one VPN (#5122). Across VPNs, two
   ordinary-looking configs collide:
