@@ -141,7 +141,8 @@ fields.
 Recording the checkout's HEAD alone is **not enough**. The checkout is
 routinely a different tree from what is running on the node — that is precisely
 the failure `deploy-lib.sh` already dies on (#2176, *"the node is running STALE
-code"*). Three fields, because two of them are different kinds of value:
+code"*). Five fields: the tree identity plus per-node build and live-image
+hashes are distinct provenance values:
 
 * `build_git_sha` — provenance of the checkout that deployed the measured
   artifact, with a `-dirty` suffix when it has uncommitted changes. The ledger
@@ -152,10 +153,12 @@ code"*). Three fields, because two of them are different kinds of value:
   selected node, sourced from the staged `.deb` payload or verified raw binary.
   It is not a gate-time rebuild: `BUILD_TIME` and the dirty version stamp
   intentionally make rebuilt bytes differ;
-* `build_exe_sha256_peer` — when the peer is readable, that node's own
-  deploy-time slot. A rolling deploy can leave fw0 and fw1 with different
-  binaries, so the peer is compared with its recorded artifact, never with
-  `build_exe_sha256`;
+* `build_exe_sha256_peer` — the peer's deploy-time artifact when its manifest
+  slot is valid. Missing or stale peer provenance fails closed even when the
+  peer image is unreadable; a valid slot with an unreadable image remains a
+  visibly partial `local-only` attestation. A rolling deploy can leave fw0
+  and fw1 with different binaries, so the peer is compared with its own slot,
+  never with `build_exe_sha256`;
 * `running_exe_sha256` / `running_exe_sha256_peer` — SHA-256 of each live
   process image, read back from the corresponding node.
 

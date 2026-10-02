@@ -1220,6 +1220,8 @@ incus() {
 	done
 	if ((helper)); then
 		if ((node1)); then echo "$manifest_peer_helper_sha  /proc/9876/exe"; else echo "$manifest_helper_sha  /proc/9876/exe"; fi
+	elif ((node1)) && [[ "${PEER_DOWN:-0}" == 1 ]]; then
+		return 1
 	elif ((node1)); then
 		echo "$manifest_peer_root_sha  /proc/1234/exe"
 	else
@@ -1246,6 +1248,21 @@ else
 	bad "#11845: rolling per-node attestation gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) helper=$(last_row_field helper_exe_check) fw0=$(last_row_field build_exe_sha256) fw1=$(last_row_field build_exe_sha256_peer)"
 fi
 
+rm -rf "$LEDGER"
+(PEER_DOWN=1 XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+	BPFRX_CLUSTER_ENV="$custom_cluster_env" harness_result_run --ledger "$LEDGER" --cluster \
+	--env testenv --gate manifest-peer-down-valid-slot --adapter smoke-cells \
+	--node custom:prod-fw0-blue --node-peer custom:prod-fw1-blue -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "PASS" &&
+	"$(last_row_field exe_check)" == "MATCH" &&
+	"$(last_row_field exe_scope)" == "local-only" &&
+	"$(last_row_field build_exe_sha256_peer)" == "$manifest_peer_root_sha" &&
+	"$(last_row_field running_exe_sha256_peer)" == "None" ]]; then
+	ok "#11845: unreadable peer with valid slot keeps PASS/local-only and preserves peer deploy provenance"
+else
+	bad "#11845: unreadable peer with valid slot gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) scope=$(last_row_field exe_scope)"
+fi
+
 # A readable peer without a valid per-node slot is still unattributable.
 python3 - "$WORK/deploy-manifest.json" <<'PY'
 import json, sys
@@ -1266,6 +1283,42 @@ if [[ "$(last_row_field verdict)" == "VOID" &&
 	ok "#11845: a missing peer slot fails closed even when both process readbacks succeed"
 else
 	bad "#11845: missing peer slot gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check)"
+fi
+
+rm -rf "$LEDGER"
+(PEER_DOWN=1 XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+	BPFRX_CLUSTER_ENV="$custom_cluster_env" harness_result_run --ledger "$LEDGER" --cluster \
+	--env testenv --gate manifest-peer-down-missing-slot --adapter smoke-cells \
+	--node custom:prod-fw0-blue --node-peer custom:prod-fw1-blue -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "VOID" &&
+	"$(last_row_field exe_check)" == "UNAVAILABLE" &&
+	"$(last_row_field exe_scope)" == "local-only" ]]; then
+	ok "#11845: unreadable peer without a manifest slot fails closed while retaining local-only scope"
+else
+	bad "#11845: unreadable peer without slot gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) scope=$(last_row_field exe_scope)"
+fi
+
+write_manifest_fixture unknown "$manifest_peer_root_sha" "$manifest_peer_helper_sha"
+python3 - "$WORK/deploy-manifest.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    doc = json.load(f)
+doc["nodes"]["1"]["build_git_sha"] = "stale-checkout"
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(doc, f)
+    f.write("\n")
+PY
+rm -rf "$LEDGER"
+(PEER_DOWN=1 XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+	BPFRX_CLUSTER_ENV="$custom_cluster_env" harness_result_run --ledger "$LEDGER" --cluster \
+	--env testenv --gate manifest-peer-down-stale-slot --adapter smoke-cells \
+	--node custom:prod-fw0-blue --node-peer custom:prod-fw1-blue -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field verdict)" == "VOID" &&
+	"$(last_row_field exe_check)" == "UNAVAILABLE" &&
+	"$(last_row_field exe_scope)" == "local-only" ]]; then
+	ok "#11845: unreadable peer with a stale-checkout slot fails closed and stays visibly local-only"
+else
+	bad "#11845: unreadable peer with stale slot gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) scope=$(last_row_field exe_scope)"
 fi
 
 printf '{invalid json\n' >"$WORK/deploy-manifest.json"

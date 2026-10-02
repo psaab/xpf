@@ -1145,20 +1145,6 @@ harness_result_run() {
 			source "$HARNESS_RESULT_DIR/deploy-lib.sh" 2>/dev/null || true
 			_XPF_DEPLOY_LIB_LOADED=1
 		}
-		if [[ -z "$peer_node" ]]; then
-			peer_node=$(
-				# shellcheck disable=SC1091
-				source "$HARNESS_RESULT_DIR/cluster-env.sh" >/dev/null 2>&1 &&
-					printf '%s' "${FW1:-}"
-			) || peer_node=""
-		fi
-		if [[ -z "$node" ]]; then
-			node=$(
-				# shellcheck disable=SC1091
-				source "$HARNESS_RESULT_DIR/cluster-env.sh" >/dev/null 2>&1 &&
-					printf '%s' "${FW0:-}"
-			) || node=""
-		fi
 		local cluster_nodes="" cluster_fw0="" cluster_fw1=""
 		local -a cluster_name_lines=()
 		cluster_nodes=$(
@@ -1169,6 +1155,12 @@ harness_result_run() {
 		mapfile -t cluster_name_lines <<<"$cluster_nodes"
 		cluster_fw0="${cluster_name_lines[0]:-}"
 		cluster_fw1="${cluster_name_lines[1]:-}"
+		if [[ -z "$peer_node" ]]; then
+			peer_node="$cluster_fw1"
+		fi
+		if [[ -z "$node" ]]; then
+			node="$cluster_fw0"
+		fi
 		local manifest_node="" manifest_peer_node=""
 		manifest_node=$(deploy_manifest_node_index "$node" "$cluster_fw0" "$cluster_fw1" 2>/dev/null || true)
 		if [[ -n "$peer_node" && "$peer_node" != "$node" ]]; then
@@ -1281,7 +1273,7 @@ harness_result_run() {
 			harness_exe_scope "$mode" "${peer_node:-}" \
 				"${peer_running_helper_exe_sha:-}"
 		)
-		# A readable peer must match its own slot for helper-dependent gates.
+		# Helper-dependent gates require a live peer and that peer's own slot.
 		if [[ "$helper_exe_check" == "MATCH" && -n "$peer_node" &&
 			"$peer_node" != "$node" ]]; then
 			if [[ -z "$peer_running_helper_exe_sha" || -z "$build_helper_exe_peer_sha" ]]; then
@@ -1302,19 +1294,18 @@ harness_result_run() {
 	# test, so the row is no more attributable than a local mismatch and
 	# becomes a VOID by the same #2176 rule.
 	#
-	# A peer that could not be read is NOT a void. `test-ha-crash`,
-	# `test-chained-crash` and `test-double-failover` force-stop a node and may
-	# legitimately leave it down when the gate ends, so treating an unreadable
-	# peer as UNAVAILABLE would VOID exactly the gates whose job is to kill a
-	# node -- a loop layer breaking the gates it measures, which is the same
-	# mistake the exit-status note above refuses to make. That case is recorded
-	# as a PARTIAL scope instead, which is the fact ("I attested one of the two
-	# nodes this gate used") the row previously could not express at all.
-	if [[ "$exe_check" == "MATCH" && -n "${peer_running_exe_sha:-}" &&
-		-n "$peer_node" && "$peer_node" != "$node" ]]; then
+	# A peer with a valid deploy slot but an unreadable image is NOT a void.
+	# `test-ha-crash`, `test-chained-crash` and `test-double-failover` may
+	# leave a forced-down node unreadable when the gate ends, so the row keeps
+	# the passing local attestation and records `local-only` scope. The peer
+	# slot itself is still required: missing or stale deploy provenance cannot
+	# identify the artifact that should be running, even when the image is down.
+	if [[ "$exe_check" == "MATCH" && -n "$peer_node" && "$peer_node" != "$node" ]]; then
 		if [[ -z "$build_exe_peer_sha" ]]; then
+			# A down peer still needs valid deploy provenance; only its live
+			# readback is partial for crash gates.
 			exe_check="UNAVAILABLE"
-		elif [[ "$peer_running_exe_sha" != "$build_exe_peer_sha" ]]; then
+		elif [[ -n "$peer_running_exe_sha" && "$peer_running_exe_sha" != "$build_exe_peer_sha" ]]; then
 			exe_check="MISMATCH"
 		fi
 	fi
