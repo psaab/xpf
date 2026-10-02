@@ -1418,8 +1418,9 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) unstamped_fabric_ingress_drops: u64,
     pub(crate) ambiguous_fabric_zone_drops: u64,
     pub(crate) route_miss_packets: u64,
-    /// #4743: martian-dst NoRoute drops snapshotted from BindingLiveState (a
-    /// sub-breakout of route_miss_packets).
+    /// #4743/#11413: martian-destination drops snapshotted from BindingLiveState.
+    /// Includes post-FIB transit rejections as well as martian NoRoute drops;
+    /// only the latter are also included in `route_miss_packets`.
     pub(crate) martian_dropped: u64,
     /// #4743: over-limit IPv6 ext-header fail-closed drops snapshotted from
     /// BindingLiveState.

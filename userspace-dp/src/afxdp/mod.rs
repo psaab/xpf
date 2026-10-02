@@ -720,6 +720,9 @@ mod tests_nat64_local_10685;
 #[path = "tests_martian_source_10689.rs"]
 mod tests_martian_source_10689;
 #[cfg(test)]
+#[path = "tests_martian_destination_11413.rs"]
+mod tests_martian_destination_11413;
+#[cfg(test)]
 #[path = "tests_gre_local_delivery.rs"]
 mod tests_gre_local_delivery;
 #[cfg(test)]
@@ -1048,8 +1051,9 @@ pub(in crate::afxdp) struct BatchCounters {
     // poll_descriptor and flushed into BindingLiveState below.
     host_inbound_denied_packets: u64,
     route_miss_packets: u64,
-    // #4743: NoRoute drops whose dst is a martian address — a sub-breakout of
-    // route_miss_packets, bumped alongside it in the NoRoute disposition arm.
+    // #4743/#11413: martian-destination drops, including NoRoute
+    // classifications and post-FIB transit rejections. The latter do not
+    // increment `route_miss_packets`.
     martian_dropped: u64,
     // #4743: fail-closed drops of an over-limit IPv6 extension-header chain
     // (still on an ext header after MAX_IPV6_EXT_HEADERS iterations). Bumped at
@@ -1107,6 +1111,15 @@ impl BatchCounters {
             self.screen_reason_drops[i] += 1;
         }
         crate::afxdp::flood_counters::record_zone_flood_drop(flood_slots, zone_id, reason);
+    }
+
+    /// #11413: record a post-FIB transit drop for a martian destination.
+    /// NoRoute martian destinations use the disposition recorder, which also
+    /// increments `route_miss_packets`.
+    #[inline]
+    pub(in crate::afxdp) fn record_martian_drop(&mut self) {
+        self.touched = true;
+        self.martian_dropped += 1;
     }
 
     #[inline]
@@ -1627,7 +1640,7 @@ impl BatchCounters {
                 .fetch_add(self.route_miss_packets, Ordering::Relaxed);
             self.route_miss_packets = 0;
         }
-        // #4743: martian-dst NoRoute sub-tally, batched like route_miss above.
+        // #4743/#11413: aggregate martian-destination drops.
         if self.martian_dropped != 0 {
             live.martian_dropped
                 .fetch_add(self.martian_dropped, Ordering::Relaxed);

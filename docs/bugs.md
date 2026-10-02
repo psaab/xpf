@@ -195,6 +195,23 @@
   sessions. `poll_descriptor/flow_cache_hit_tests.rs` verifies a consumed
   FlowCache hit is dropped before forwarding side effects.
 
+### Worker transit forwards special destination classes (#11413)
+- A WG/GRE-decapped or injected inner packet addressed to IPv4 multicast,
+  limited broadcast, loopback, reserved space, or IPv6 multicast could match a
+  `/0` route and an `application any` permit, then leave with a unicast
+  next-hop MAC.
+- **Fix:** Drop those destination classes for transit dispositions after
+  resolution and before policy, session installation, neighbor retry or TX.
+  Recheck consumed FlowCache hits and queued live transit frames at final TX.
+  LocalDelivery remains outside the gate. The existing `Martian drops` counter
+  now includes these post-FIB drops; unlike martian NoRoute drops, they do not
+  increment `route_miss_packets`.
+- **Regression tests:** `userspace-dp/src/afxdp/tests_martian_destination_11413.rs`
+  proves each class had a live default-route transit path, is dropped and
+  counted, covers a pre-existing session hit and flowless fragment, and keeps
+  IPv4/IPv6 unicast controls forwarding.
+
+
 
 ### NAT64 HA imports self-refuse under a dual SNAT reference (#10706)
 - A synced NAT64 decision was first booked in the source-NAT pool allocator,

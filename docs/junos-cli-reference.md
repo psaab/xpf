@@ -602,13 +602,14 @@ From zone: guest, To zone: lan
       counted per binding as `route_miss_packets` / `neighbor_miss_packets`
       and surfaced separately as the `Route misses:` line in helper status —
       never in `Packets dropped`.
-      - **Martian drops** (#4743): a no-route drop whose destination is a
-        martian address (IPv4 multicast/broadcast/unspecified/loopback, IPv6
-        multicast/unspecified/loopback) is also counted distinctly as
-        `martian_dropped` and shown as `Martian drops:`. It is a strict
-        sub-breakout of `route_miss_packets` (a martian destination misses the
-        FIB and drops as no-route), letting an operator correlate it with a
-        firewall-filter `accept` log.
+      - **Martian drops** (#4743/#11413): `martian_dropped` counts NoRoute
+        destinations classified as martian (IPv4 multicast/broadcast/
+        unspecified/loopback; IPv6 multicast/unspecified/loopback) and
+        post-FIB transit rejections (IPv4 multicast/broadcast/loopback/
+        reserved; IPv6 multicast). A transit rejection increments only
+        `martian_dropped`; a NoRoute martian also increments
+        `route_miss_packets`. This lets operators distinguish these drops
+        from ordinary route misses and correlate them with filter-`accept` logs.
     - **IPv6 extension-header fail-closed drops** (#4743): an IPv6 packet
       whose extension-header chain is still on an extension header after
       `MAX_IPV6_EXT_HEADERS` (8) iterations is dropped fail-closed and counted

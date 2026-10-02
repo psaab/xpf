@@ -200,16 +200,15 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 	)
 	c.userspaceMartianDropped = prometheus.NewDesc(
 		"xpf_userspace_martian_dropped_total",
-		"Packets dropped with a NoRoute disposition whose destination is a "+
-			"martian address (IPv4 multicast/broadcast/unspecified/loopback, "+
-			"IPv6 multicast/unspecified/loopback) — a firewall never forwards "+
-			"these and they have no legitimate route, so they miss the FIB and "+
-			"drop as NoRoute. A strict sub-breakout of the route-miss total "+
-			"(every martian drop also bumps route_miss_packets), summed across "+
-			"bindings, so an operator can tell a martian-dst drop apart from an "+
-			"ordinary route miss and correlate it with a firewall-filter accept "+
-			"log (#4743/#4768). Emitted unconditionally so 0 is a real "+
-			"\"no martian drops\" signal.",
+		"Packets dropped because their destination is a martian address: "+
+			"NoRoute destinations (IPv4 multicast/broadcast/unspecified/loopback, "+
+			"IPv6 multicast/unspecified/loopback) and post-FIB transit rejections "+
+			"(IPv4 multicast/limited broadcast/loopback/reserved, IPv6 multicast). "+
+			"Transit drops do not increment the route-miss total; a NoRoute martian "+
+			"also increments route_miss_packets. Summed across bindings, this "+
+			"distinguishes martian-destination drops from ordinary route misses and "+
+			"correlates them with firewall-filter accept logs (#4743/#4768/#11413). "+
+			"Emitted unconditionally so 0 is a real \"no martian drops\" signal.",
 		nil, nil,
 	)
 	c.userspaceIPv6ExtHeaderDropped = prometheus.NewDesc(

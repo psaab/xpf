@@ -80,14 +80,14 @@ type BindingStatus struct {
 	UMEMSliceDropped   uint64 `json:"umem_slice_dropped,omitempty"`
 	UnknownVLANDropped uint64 `json:"unknown_vlan_dropped,omitempty"`
 	DstMACDropped      uint64 `json:"dst_mac_dropped,omitempty"`
-	// #4743: NoRoute drops whose destination is a MARTIAN address (IPv4
-	// multicast/broadcast/unspecified/loopback, IPv6
-	// multicast/unspecified/loopback). A strict sub-breakout of RouteMissPackets
-	// (a martian dst misses the FIB and drops as NoRoute, so it bumps both),
-	// letting an operator tell a martian-dst drop apart from an ordinary route
-	// miss and correlate it with the filter-accept log. omitempty + the Rust
-	// serde `default` keep cross-version wire safety (an older helper omits it →
-	// 0). Summed across bindings and rendered as the "Martian drops" status row.
+	// #4743/#11413: destination-martian drops, including NoRoute
+	// classifications (IPv4 multicast/broadcast/unspecified/loopback, IPv6
+	// multicast/unspecified/loopback) and post-FIB transit rejections (IPv4
+	// multicast/limited broadcast/loopback/reserved, IPv6 multicast). NoRoute
+	// martians also increment RouteMissPackets; post-FIB transit drops do not.
+	// omitempty + Rust serde `default` keep cross-version wire safety (an older
+	// helper omits it → 0). Summed across bindings and rendered as the
+	// "Martian drops" status row.
 	MartianDropped uint64 `json:"martian_dropped,omitempty"`
 	// #4743: fail-closed drops of an IPv6 packet whose extension-header chain is
 	// still on an extension header after MAX_IPV6_EXT_HEADERS (8) iterations (an

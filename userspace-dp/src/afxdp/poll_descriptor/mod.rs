@@ -204,6 +204,19 @@ pub(in crate::afxdp) fn transit_source_class_drop(
 }
 
 #[inline]
+pub(in crate::afxdp) fn transit_destination_class_drop(
+    disposition: ForwardingDisposition,
+    destination: IpAddr,
+    translated_destination: Option<IpAddr>,
+) -> bool {
+    if !transit_source_class_disposition(disposition) {
+        return false;
+    }
+    crate::afxdp::frame::transit_dst_is_martian(destination)
+        || translated_destination.is_some_and(crate::afxdp::frame::transit_dst_is_martian)
+}
+
+#[inline]
 pub(super) fn stage11_raw_protocol_requires_drop(protocol: u8) -> bool {
     protocol == crate::ip_proto::PROTO_ESP || protocol == crate::ip_proto::PROTO_AH
 }
@@ -1614,6 +1627,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // final FIB result here (not the ingress interface's
                         // primary address helpers), so loopback/management
                         // addresses on another interface remain reachable.
+                        if transit_destination_class_drop(
+                            resolved.decision.resolution.disposition,
+                            flow.dst_ip,
+                            resolved.decision.nat.rewrite_dst,
+                        ) {
+                            telemetry.counters.record_martian_drop();
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         if is_injected
                             && resolved.decision.resolution.disposition
                                 != ForwardingDisposition::LocalDelivery
@@ -3577,6 +3599,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             from_zone_id,
                             ha_startup_grace_until_secs,
                         );
+                        // #11413: reject special destinations before transit
+                        // policy, session creation or neighbor side effects.
+                        if transit_destination_class_drop(
+                            decision.resolution.disposition,
+                            flow.dst_ip,
+                            decision.nat.rewrite_dst,
+                        ) {
+                            telemetry.counters.record_martian_drop();
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
                         // #10689: source-class rejection is transit-only and
                         // precedes policy/session installation. LocalDelivery
                         // remains exempt for DHCP, NDP and DAD packets; both
@@ -6320,6 +6353,25 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     } else {
                         base_resolution
                     };
+                    // #11413: classify the packet's original destination and
+                    // any post-DNAT target before injected-frame or policy gates.
+                    let flowless_destination =
+                        l3_ctx.as_ref().map(|flow| flow.dst_ip).or_else(|| {
+                            ForwardPacketMeta::from(meta)
+                                .l3_addrs_unfiltered()
+                                .map(|(_, destination)| destination)
+                        });
+                    if flowless_destination.is_some_and(|destination| {
+                        transit_destination_class_drop(
+                            final_resolution.disposition,
+                            destination,
+                            flowless_nat.rewrite_dst,
+                        )
+                    }) {
+                        telemetry.counters.record_martian_drop();
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
                     // #10597 G5: flowless injected records (non-first
                     // fragments, ICMP errors) fence on the same final
                     // resolution as the flow-backed arms. Placed before
@@ -6819,6 +6871,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     ) {
                         decision.resolution = redirect;
                     }
+                }
+                let transit_destination = flow.as_ref().map(|flow| flow.dst_ip).or_else(|| {
+                    ForwardPacketMeta::from(meta)
+                        .l3_addrs_unfiltered()
+                        .map(|(_, destination)| destination)
+                });
+                if transit_destination.is_some_and(|destination| {
+                    transit_destination_class_drop(
+                        decision.resolution.disposition,
+                        destination,
+                        decision.nat.rewrite_dst,
+                    )
+                }) {
+                    telemetry.counters.record_martian_drop();
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
                 }
                 // #10689: enforce the same source-class invariant for cached
                 // session hits and deferred dispositions after HA redirect

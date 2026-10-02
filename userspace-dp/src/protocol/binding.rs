@@ -452,13 +452,12 @@ pub(crate) struct BindingStatus {
     pub flowless_forward_bytes: u64,
     #[serde(rename = "route_miss_packets", default)]
     pub route_miss_packets: u64,
-    /// #4743: NoRoute drops whose destination is a MARTIAN address (IPv4
-    /// multicast/broadcast/unspecified/loopback, IPv6
-    /// multicast/unspecified/loopback). A strict sub-breakout of
-    /// `route_miss_packets` (a martian dst misses the FIB and drops as NoRoute,
-    /// so it bumps both), letting an operator tell a martian-dst drop apart from
-    /// an ordinary route miss. `default` keeps cross-version wire safety (an
-    /// older helper omits it and Go/Rust read 0). Surfaced as the `Martian
+    /// #4743/#11413: destination-martian drops include NoRoute classifications
+    /// (IPv4 multicast/broadcast/unspecified/loopback; IPv6 multicast/
+    /// unspecified/loopback) and post-FIB transit rejections (IPv4 multicast/
+    /// broadcast/loopback/reserved; IPv6 multicast). Only NoRoute drops also
+    /// count in `route_miss_packets`. `default` keeps cross-version wire safety
+    /// (an older helper omits it and Go/Rust read 0). Surfaced as the `Martian
     /// drops` status row.
     #[serde(rename = "martian_dropped", default)]
     pub martian_dropped: u64,
