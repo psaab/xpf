@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	napiSkipMetric9019          = "xpf_napi_probe_target_skips_total"
-	routeCapMetric9019          = "xpf_learned_route_cap_hits_total"
-	protocolRouteCapMetric10824 = "xpf_learned_route_cap_group_sheds_total"
+	napiSkipMetric9019                = "xpf_napi_probe_target_skips_total"
+	routeCapMetric9019                = "xpf_learned_route_cap_hits_total"
+	protocolRouteCapMetric10824       = "xpf_learned_route_cap_group_sheds_total"
+	familyProtocolRouteCapMetric11441 = "xpf_learned_route_cap_group_sheds_by_family_total"
 )
 
 // collectAll9019 drives the collector's REAL Collect, not emitDataplaneSilentSkips.
@@ -82,13 +83,23 @@ func TestDataplaneSilentSkipsAreDescribed9019(t *testing.T) {
 	go func() { c.Describe(ch); close(ch) }()
 	seen := map[string]bool{}
 	for d := range ch {
-		for _, name := range []string{napiSkipMetric9019, routeCapMetric9019, protocolRouteCapMetric10824} {
+		for _, name := range []string{
+			napiSkipMetric9019,
+			routeCapMetric9019,
+			protocolRouteCapMetric10824,
+			familyProtocolRouteCapMetric11441,
+		} {
 			if strings.Contains(d.String(), name) {
 				seen[name] = true
 			}
 		}
 	}
-	for _, name := range []string{napiSkipMetric9019, routeCapMetric9019, protocolRouteCapMetric10824} {
+	for _, name := range []string{
+		napiSkipMetric9019,
+		routeCapMetric9019,
+		protocolRouteCapMetric10824,
+		familyProtocolRouteCapMetric11441,
+	} {
 		if !seen[name] {
 			t.Errorf("%s is collected but not described", name)
 		}
@@ -125,6 +136,48 @@ func TestLearnedRouteCapGroupShedsScrapableByProtocol10824(t *testing.T) {
 		if !ok || value != float64(count) {
 			t.Errorf("%s{protocol=%q} = %v (present=%t), accessor says %d",
 				protocolRouteCapMetric10824, protocol, value, ok, count)
+		}
+	}
+}
+
+func TestLearnedRouteCapGroupShedsScrapableByFamilyProtocol11441(t *testing.T) {
+	c := newCollector(&Server{store: newDescriptorCoverageStore(t), startTime: time.Now()})
+	ch := make(chan prometheus.Metric, 512)
+	done := make(chan struct{})
+	got := make(map[string]float64)
+	go func() {
+		defer close(done)
+		for metric := range ch {
+			if !strings.Contains(metric.Desc().String(), familyProtocolRouteCapMetric11441) {
+				continue
+			}
+			var pbm dto.Metric
+			if err := metric.Write(&pbm); err != nil {
+				continue
+			}
+			var family, protocol string
+			for _, label := range pbm.GetLabel() {
+				switch label.GetName() {
+				case "family":
+					family = label.GetValue()
+				case "protocol":
+					protocol = label.GetValue()
+				}
+			}
+			got[family+"/"+protocol] = pbm.GetCounter().GetValue()
+		}
+	}()
+	c.Collect(ch)
+	close(ch)
+	<-done
+
+	for family, protocols := range userspace.LearnedRouteCapHitsByFamilyProtocol() {
+		for protocol, count := range protocols {
+			key := family + "/" + protocol
+			if value, ok := got[key]; !ok || value != float64(count) {
+				t.Errorf("%s{family=%q,protocol=%q} = %v (present=%t), accessor says %d",
+					familyProtocolRouteCapMetric11441, family, protocol, value, ok, count)
+			}
 		}
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/psaab/xpf/pkg/routing"
 )
 
@@ -85,7 +87,7 @@ var learnedRouteCapHits atomic.Uint64
 func LearnedRouteCapHits() uint64 { return learnedRouteCapHits.Load() }
 
 // learnedRouteCapProtocolHits records cap-triggered protocol/table groups.
-// Known protocols start at zero so the metric emits stable series.
+// Known protocols start at zero so the metric emits stable aggregate series.
 var learnedRouteCapProtocolHits = struct {
 	sync.Mutex
 	counts map[string]uint64
@@ -101,6 +103,30 @@ var learnedRouteCapProtocolHits = struct {
 	},
 }
 
+type learnedRouteCapFamilyProtocol struct {
+	family   string
+	protocol string
+}
+
+// learnedRouteCapFamilyProtocolHits records cap-triggered group sheds by
+// address family and kernel protocol. Known combinations start at zero.
+var learnedRouteCapFamilyProtocolHits = struct {
+	sync.Mutex
+	counts map[learnedRouteCapFamilyProtocol]uint64
+}{
+	counts: func() map[learnedRouteCapFamilyProtocol]uint64 {
+		counts := make(map[learnedRouteCapFamilyProtocol]uint64, 2*7)
+		for _, family := range []string{"inet", "inet6"} {
+			for _, protocol := range []string{
+				"bgp", "connected", "dhcp", "isis", "ospf", "rip", "static",
+			} {
+				counts[learnedRouteCapFamilyProtocol{family: family, protocol: protocol}] = 0
+			}
+		}
+		return counts
+	}(),
+}
+
 // LearnedRouteCapHitsByProtocol reports cap-triggered group sheds by the
 // kernel protocol name. The returned map is a snapshot and may be modified.
 func LearnedRouteCapHitsByProtocol() map[string]uint64 {
@@ -113,26 +139,62 @@ func LearnedRouteCapHitsByProtocol() map[string]uint64 {
 	return out
 }
 
-func noteLearnedRouteCapProtocolHit(protocol string) {
+// LearnedRouteCapHitsByFamilyProtocol reports cap-triggered group sheds by
+// address family ("inet" or "inet6") and kernel protocol. Both map levels are
+// snapshots and may be modified.
+func LearnedRouteCapHitsByFamilyProtocol() map[string]map[string]uint64 {
+	learnedRouteCapFamilyProtocolHits.Lock()
+	defer learnedRouteCapFamilyProtocolHits.Unlock()
+	out := map[string]map[string]uint64{
+		"inet":  {},
+		"inet6": {},
+	}
+	for key, count := range learnedRouteCapFamilyProtocolHits.counts {
+		if out[key.family] == nil {
+			out[key.family] = make(map[string]uint64)
+		}
+		out[key.family][key.protocol] = count
+	}
+	return out
+}
+
+func noteLearnedRouteCapProtocolHit(family int, protocol string) {
 	if protocol == "" {
 		protocol = "unknown"
 	}
+	familyName := learnedRouteFamilyName(family)
 	learnedRouteCapProtocolHits.Lock()
 	learnedRouteCapProtocolHits.counts[protocol]++
 	learnedRouteCapProtocolHits.Unlock()
+	key := learnedRouteCapFamilyProtocol{family: familyName, protocol: protocol}
+	learnedRouteCapFamilyProtocolHits.Lock()
+	learnedRouteCapFamilyProtocolHits.counts[key]++
+	learnedRouteCapFamilyProtocolHits.Unlock()
+}
+
+func learnedRouteFamilyName(family int) string {
+	switch family {
+	case unix.AF_INET:
+		return "inet"
+	case unix.AF_INET6:
+		return "inet6"
+	default:
+		return "unknown"
+	}
 }
 
 type learnedRouteQuotaKey struct {
 	tableID  int
+	family   int
 	protocol string
 }
 
-// capLearnedRouteGroups sheds whole (table, protocol) groups rather than
-// refusing every learned route when the combined kernel dump exceeds the
+// capLearnedRouteGroups sheds whole (table, family, protocol) groups rather
+// than refusing every learned route when the combined kernel dump exceeds the
 // publish budget. Oversized groups are shed first. BGP groups are then shed
 // before other protocols; remaining groups are shed largest-first until the
-// combined set fits. A BGP flood cannot remove unrelated routes, and no group
-// is partially imported.
+// combined set fits. A flood in one family cannot merge into the other
+// family's group, and no group is partially imported.
 func capLearnedRouteGroups(routes []routing.LearnedRoute) ([]routing.LearnedRoute, bool) {
 	limit := maxLearnedRoutes()
 	if limit <= 0 || len(routes) <= limit {
@@ -142,7 +204,7 @@ func capLearnedRouteGroups(routes []routing.LearnedRoute) ([]routing.LearnedRout
 	counts := make(map[learnedRouteQuotaKey]int)
 	keys := make([]learnedRouteQuotaKey, 0)
 	for _, route := range routes {
-		key := learnedRouteQuotaKey{tableID: route.TableID, protocol: route.Protocol}
+		key := learnedRouteQuotaKey{tableID: route.TableID, family: route.Family, protocol: route.Protocol}
 		if _, exists := counts[key]; !exists {
 			keys = append(keys, key)
 		}
@@ -164,6 +226,9 @@ func capLearnedRouteGroups(routes []routing.LearnedRoute) ([]routing.LearnedRout
 		}
 		if counts[keys[i]] != counts[keys[j]] {
 			return counts[keys[i]] > counts[keys[j]]
+		}
+		if keys[i].family != keys[j].family {
+			return keys[i].family < keys[j].family
 		}
 		if keys[i].protocol != keys[j].protocol {
 			return keys[i].protocol < keys[j].protocol
@@ -195,9 +260,11 @@ func capLearnedRouteGroups(routes []routing.LearnedRoute) ([]routing.LearnedRout
 		if protocol == "" {
 			protocol = "unknown"
 		}
-		noteLearnedRouteCapProtocolHit(protocol)
-		slog.Warn("learned-route protocol/table group shed to keep the snapshot within its publish budget",
+		noteLearnedRouteCapProtocolHit(key.family, protocol)
+		family := learnedRouteFamilyName(key.family)
+		slog.Warn("learned-route protocol/table/family group shed to keep the snapshot within its publish budget",
 			"table_id", key.tableID,
+			"family", family,
 			"protocol", protocol,
 			"learned_routes", counts[key],
 			"cap", limit,
@@ -206,7 +273,7 @@ func capLearnedRouteGroups(routes []routing.LearnedRoute) ([]routing.LearnedRout
 	}
 	kept := routes[:0]
 	for _, route := range routes {
-		key := learnedRouteQuotaKey{tableID: route.TableID, protocol: route.Protocol}
+		key := learnedRouteQuotaKey{tableID: route.TableID, family: route.Family, protocol: route.Protocol}
 		if _, shed := dropped[key]; !shed {
 			kept = append(kept, route)
 		}
@@ -215,32 +282,33 @@ func capLearnedRouteGroups(routes []routing.LearnedRoute) ([]routing.LearnedRout
 }
 
 // learnedRouteCapExceeded records a build that exceeded the combined
-// publish budget. capLearnedRouteGroups decides which complete protocol/table
-// groups to shed; this predicate records the build-level counter and diagnostic.
+// publish budget. capLearnedRouteGroups decides which complete
+// (table, family, protocol) groups to shed; this predicate records the
+// build-level counter and diagnostic.
 //
 // #9522 owns the disposition above the cap. Capped NoRoute frames are
 // adjudicated against the configured policy, and denied results are dropped as
 // PolicyDenied. The cap does not delegate NoRoute to the kernel.
 //
 // Whole-group shedding avoids selecting an arbitrary route prefix by emission
-// sort order. Each cap hit records the affected protocol separately, while
-// unrelated groups remain eligible for the helper FIB.
+// sort order. Each cap hit records the affected family and protocol separately,
+// while unrelated groups remain eligible for the helper FIB.
 func learnedRouteCapExceeded(count int) bool {
 	limit := maxLearnedRoutes()
 	if limit <= 0 || count <= limit {
 		return false
 	}
 	learnedRouteCapHits.Add(1)
-	slog.Warn("learned-route publish budget exceeded — complete protocol/table groups are being shed",
+	slog.Warn("learned-route publish budget exceeded — complete protocol/table/family groups are being shed",
 		"learned_routes", count,
 		"cap", limit,
 		"publish_budget", learnedRoutePublishBudget.String(),
 		"bytes_per_route", learnedRouteBytesEach,
-		"consequence", "only complete (table, protocol) groups are omitted; remaining groups stay imported. Missing-group NoRoute frames are ADJUDICATED and DROPPED as policy denials on a deny-default box; xpf_policy_denies_total counts them and xpf_learned_route_import_capped reports the capped state. On a helper older than snapshot protocol 27 the snapshot is REFUSED outright rather than applied (#9522)",
+		"consequence", "only complete (table, family, protocol) groups are omitted; remaining groups stay imported. Missing-group NoRoute frames are ADJUDICATED and DROPPED as policy denials on a deny-default box; xpf_policy_denies_total counts them and xpf_learned_route_import_capped reports the capped state. On a helper older than snapshot protocol 27 the snapshot is REFUSED outright rather than applied (#9522)",
 		"security_note", "the capped state does not delegate NoRoute to the kernel: the #7480 policy adjudication applies above and below the cap, and only a PolicyAction::Permit result keeps normal slow-path delegation",
-		"why_not_partial", "a whole (table, protocol) group is shed, never a prefix chosen by route sort order",
+		"why_not_partial", "a whole (table, family, protocol) group is shed, never a prefix chosen by route sort order",
 		"remedy", "reduce the imported table (filter what FRR installs into the kernel), or raise the publish budget if holding the control socket that long is acceptable",
-		"observability", "xpf_learned_route_cap_hits_total counts capped builds; xpf_learned_route_cap_group_sheds_total counts group sheds by protocol; LearnedRouteCapHitsByProtocol exposes those counts to Go callers; xpf_learned_route_import_capped reports the live capped state; xpf_policy_denies_total advances for denied capped NoRoute frames",
+		"observability", "xpf_learned_route_cap_hits_total counts capped builds; xpf_learned_route_cap_group_sheds_total counts group sheds by protocol; xpf_learned_route_cap_group_sheds_by_family_total reports group sheds by family and protocol; LearnedRouteCapHitsByFamilyProtocol exposes those counts to Go callers; xpf_learned_route_import_capped reports the live capped state; xpf_policy_denies_total advances for denied capped NoRoute frames",
 	)
 	return true
 }
