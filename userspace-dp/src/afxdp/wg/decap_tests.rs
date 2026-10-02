@@ -147,6 +147,17 @@ fn mapped_ipv6_wg_underlay_candidate_stays_outside_inner_ingress_gate_10686() {
         "the local WG listen-port datagram is underlay transport, not the \
          inner IPv6 packet to which the mapped-address ingress policy applies"
     );
+    let mut wrong_vr_snapshot = snapshot.clone();
+    wrong_vr_snapshot.tunnel_endpoints[0].transport_table = "blue.inet.0".to_string();
+    wrong_vr_snapshot.interfaces[0].routing_instance = "red".to_string();
+    wrong_vr_snapshot.interfaces[0].routing_domain = 8;
+    let wrong_vr_forwarding = build_forwarding_state(&wrong_vr_snapshot);
+    let mut wrong_vr_meta = meta;
+    wrong_vr_meta.ingress_ifindex = 12;
+    assert!(
+        !super::decap::is_wg_underlay_frame(&frame, wrong_vr_meta, &wrong_vr_forwarding),
+        "a local address and WG listen port from the wrong transport VR must not bypass inner ingress classification"
+    );
     frame[38..54].copy_from_slice(&"2001:db8::2".parse::<std::net::Ipv6Addr>().unwrap().octets());
     assert!(
         !super::decap::is_wg_underlay_frame(&frame, meta, &forwarding),
@@ -248,6 +259,7 @@ fn worker_decap_presents_inner_under_the_tunnel_zone_8274() {
         "the record must be attributed to the peer whose keys opened it"
     );
 
+
     // The roam report: the endpoint the worker observed is queued for the
     // control thread, which no longer sees these records on its socket.
     let engine = forwarding.wg_engines.get(&id).unwrap();
@@ -261,6 +273,85 @@ fn worker_decap_presents_inner_under_the_tunnel_zone_8274() {
     // Drained, not merely readable: a second take must be empty, or the control
     // thread would re-adopt the same roam on every pass.
     assert_eq!(engine.take_worker_observed_endpoint(&init_pub), None);
+}
+/// #11568: the same authenticated, roaming transport record is declined when
+/// outer ingress belongs to another VR, and the untouched record decaps on
+/// the endpoint's configured transport VR. The changed peer source address is
+/// intentional: endpoint roaming is allowed WITHIN the transport domain.
+#[test]
+fn worker_decap_refuses_wrong_transport_vr_but_keeps_roaming_within_transport_vr_11568() {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, init_pub, resp_pub) = established_pair(allowed.clone(), allowed);
+
+    let mut snapshot = wg_outer_mtu_snapshot();
+    snapshot.tunnel_endpoints[0].transport_table = "blue.inet.0".to_string();
+    snapshot.interfaces[0].routing_instance = "blue".to_string();
+    snapshot.interfaces[0].routing_domain = 7;
+    snapshot.routes[0].table = "blue.inet.0".to_string();
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "red0.0".to_string(),
+        zone: "wan".to_string(),
+        ifindex: 24,
+        routing_instance: "red".to_string(),
+        routing_domain: 8,
+        ..Default::default()
+    });
+    let mut forwarding = build_forwarding_state(&snapshot);
+    let id = *forwarding
+        .wg_engines
+        .keys()
+        .next()
+        .expect("the fixture configures a WireGuard tunnel");
+    forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
+    assert_eq!(
+        forwarding.ifindex_to_routing_instance.get(&12).map(String::as_str),
+        Some("blue"),
+        "fixture transport egress belongs to the endpoint's blue VR"
+    );
+    assert_eq!(
+        forwarding.ifindex_to_routing_instance.get(&24).map(String::as_str),
+        Some("red"),
+        "fixture alternate ingress belongs to a different red VR"
+    );
+
+    let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
+    let mut wire = vec![0u8; 2048];
+    let enc = init
+        .try_encap(&resp_pub, &inner, &mut wire)
+        .expect("initiator encap");
+    let frame = outer_frame_from(&wire[..enc.len], WG_PORT, ROAMED_OUTER, ROAMED_SPORT);
+    let mut wrong_vr_meta = outer_meta(frame.len());
+    wrong_vr_meta.ingress_ifindex = 24;
+    let scratch = WgWorkerScratch::new(4096);
+    assert!(
+        super::decap::try_wg_decap_from_frame(
+            &frame,
+            wrong_vr_meta,
+            &forwarding,
+            &scratch
+        )
+        .is_none(),
+        "an authenticated record arriving under the wrong VR must not decap"
+    );
+
+    // The wrong-VR attempt must be declined before AEAD/replay state changes:
+    // retry the exact same authenticated datagram on the correct transport VR.
+    let mut transport_vr_meta = outer_meta(frame.len());
+    transport_vr_meta.ingress_ifindex = 12;
+    let engine = std::sync::Arc::clone(&forwarding.wg_engines[&id]);
+    let decapped = super::decap::try_wg_decap_from_frame(
+        &frame,
+        transport_vr_meta,
+        &forwarding,
+        &scratch,
+    )
+    .expect("the same authenticated record must decap on its transport VR");
+    assert_eq!(&decapped.frame[14..], &inner[..]);
+    assert_eq!(
+        engine.take_worker_observed_endpoint(&init_pub),
+        Some(std::net::SocketAddr::from((ROAMED_OUTER, ROAMED_SPORT))),
+        "a peer may still roam to a new endpoint within its transport VR"
+    );
 }
 
 /// A HANDSHAKE record on the same 5-tuple is not the worker's.

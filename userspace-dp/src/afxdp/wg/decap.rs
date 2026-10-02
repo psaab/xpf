@@ -73,22 +73,38 @@ pub(in crate::afxdp) struct WgDecapPacket {
     pub(in crate::afxdp) peer_pubkey: [u8; 32],
 }
 
-/// The WireGuard tunnel endpoint listening on `dst_port`, with its live engine.
+/// The WireGuard tunnel endpoint listening on `dst_port` in the ingress
+/// interface's transport routing instance, with its live engine.
 ///
 /// Walks `wg_engines` rather than `tunnel_endpoints` deliberately: that map IS
 /// the WireGuard-only set, so the scan is over the number of WG tunnels (0, 1 or
 /// 2 in practice) instead of over every tunnel endpoint on the box. A GRE-mode
 /// row cannot appear in it, so no kind re-check is needed — but the mode is
 /// checked anyway, for the same defence-in-depth reason `match_tunnel_endpoint`
-/// re-checks `TunnelKind::Gre` against its own index.
+/// re-checks `TunnelKind::Gre` against its own index. #11568 additionally
+/// requires the outer ingress to be in the endpoint's transport routing
+/// instance before either decap or underlay exemption can claim the datagram.
 fn wg_endpoint_for_listen_port(
     forwarding: &ForwardingState,
     dst_port: u16,
+    meta: UserspaceDpMeta,
 ) -> Option<(&TunnelEndpoint, &std::sync::Arc<super::WgEngine>)> {
+    let ingress_ifindex = resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let ingress_instance = forwarding
+        .ifindex_to_routing_instance
+        .get(&ingress_ifindex)
+        .map(String::as_str)
+        .unwrap_or("");
     for (id, engine) in forwarding.wg_engines.iter() {
         let endpoint = forwarding.tunnel_endpoints.get(id)?;
         if endpoint.wg_listen_port == dst_port
             && tunnel_mode_kind(&endpoint.mode) == TunnelKind::WireGuard
+            && transport_instance_of_table(&endpoint.transport_table) == ingress_instance
         {
             return Some((endpoint, engine));
         }
@@ -132,7 +148,7 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
         return false;
     };
     let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
-    if wg_endpoint_for_listen_port(forwarding, dst_port).is_none() {
+    if wg_endpoint_for_listen_port(forwarding, dst_port, meta).is_none() {
         return false;
     }
     // This helper is reached only for a mapped/compatible IPv6 packet. Mirror
@@ -209,7 +225,7 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame(
         return None;
     }
 
-    let (endpoint, engine) = wg_endpoint_for_listen_port(forwarding, dst_port)?;
+    let (endpoint, engine) = wg_endpoint_for_listen_port(forwarding, dst_port, meta)?;
 
     let mut decap_buf = scratch.decap_out.borrow_mut();
     // #9018: `.ok()?` used to collapse EVERY error arm here, and two of them
