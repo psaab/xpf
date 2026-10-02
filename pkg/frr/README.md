@@ -925,6 +925,12 @@ step. Both are required — neither sees the other's case:
   `collectBGPRouteMapPolicies`/`bgpEffectiveChains` still iterate all
   neighbors — they emit no `neighbor <addr>` line, only route-map objects, so
   an unreferenced definition for a skipped neighbor is harmless valid config.)
+- **OSPFv3 stub/NSSA area types (#11401).** The `area-type { stub | nssa }`
+  and `no-summaries` leaves are preserved in `OSPFv3Area` through schema and
+  compilation, including elided, packed, braced, and routing-instance forms.
+  The renderer writes `area <id> stub|nssa [no-summary]` under `router ospf6`;
+  without that router-level line, OSPFv3 leaves an area at normal flooding
+  policy even though Junos declared a stub or NSSA.
 - **OSPF/OSPFv3 interface adjacency timers + DR priority (#4285).** The
   per-interface `hello-interval`, `dead-interval`, `retransmit-interval`, and
   `priority` leaves (schema + `OSPFInterface`/`OSPFv3Interface` structs +

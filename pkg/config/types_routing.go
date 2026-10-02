@@ -385,6 +385,8 @@ type OSPFv3Config struct {
 // OSPFv3Area defines an OSPFv3 area.
 type OSPFv3Area struct {
 	ID         string // "0.0.0.0" (backbone) or area number
+	AreaType   string // "stub", "nssa", "" (normal)
+	NoSummary  bool   // stub/nssa no-summary (totally stubby)
 	Interfaces []*OSPFv3Interface
 }
 

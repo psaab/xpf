@@ -406,6 +406,14 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					"multiplier":       {desc: "Multiplier", args: 1, valueType: ValueInteger, placeholder: "<multiplier>", validator: ValidateInteger(2, 255), children: nil},
 				}},
 			}},
+			"area-type": {desc: "Area type", children: map[string]*schemaNode{
+				"stub": {desc: "Stub area", children: map[string]*schemaNode{
+					"no-summaries": {desc: "No summaries", children: nil},
+				}},
+				"nssa": {desc: "NSSA area", children: map[string]*schemaNode{
+					"no-summaries": {desc: "No summaries", children: nil},
+				}},
+			}},
 		}},
 	}},
 	"bgp": {desc: "BGP configuration", children: map[string]*schemaNode{
