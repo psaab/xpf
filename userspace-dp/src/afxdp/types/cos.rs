@@ -679,28 +679,18 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     /// `exact_queues_by_rate_ascending` was honored in Phase 1 this epoch.
     /// Keyed by ASCENDING-VEC ORDINAL, NOT by `queue_idx` (the `queues`
     /// index): both phases iterate this same sorted vec, so ordinal `j`
-    /// unambiguously identifies one queue, and the bit range is bounded by
-    /// `exact_queues_by_rate_ascending.len()` (≤64) regardless of how high
-    /// the underlying `queue_idx` values run. The ordinal keying is the
-    /// fix for the latent defect in the prior function-local `queue_idx`-
-    /// keyed mask, which (a) reset to 0 every selector call so Phase 2 —
-    /// entered on a *later* call than the Phase-1 honors — saw an empty
-    /// mask and could not skip already-honored queues (the documented
-    /// "approximates" skew), and (b) was never read by Phase 1 at all, so
-    /// the smallest-rate queue was re-honored on every call and monopolised
-    /// the Phase-1 budget (skew toward the lowest-rate queue). This bitset
-    /// is now persisted across selector calls, read by BOTH phases (so each
-    /// queue is honored at most once per epoch, smallest-first, and Phase 2
-    /// serves the residual to the larger un-honored queues). #1743 r3: it is
-    /// CLEARED only on a genuine epoch boundary — the 200µs time tick OR a
-    /// Phase-2 WRAP (`waterfill_epoch_wrap_pending`) — NOT on every Phase-1
-    /// budget refill (`waterfill_epochs` still bumps on every refill, but a
-    /// bare mid-walk `pass1 == 0` refill must keep the bits so an exact-fit
-    /// honor does not re-honor the same queue forever). The set/skip
-    /// sites guard the shift with `ordinal < 64`, so a (malformed) config
-    /// with >64 exact queues leaves ordinals ≥64 conservatively untracked
-    /// rather than wrapping `1u64 << (≥64)`. Single-writer owner worker.
-    pub(in crate::afxdp) waterfill_honored_epoch_bits: u64,
+    /// unambiguously identifies one queue.
+    ///
+    /// The word vector is sized once when the interface runtime is built,
+    /// with one `u64` per 64 exact guarantee queues. This supports every
+    /// ordinal without per-selector allocation or a fixed queue-count cap.
+    /// The set is CLEARED only on a genuine epoch boundary — the 200µs time
+    /// tick OR a Phase-2 WRAP (`waterfill_epoch_wrap_pending`) — NOT on every
+    /// Phase-1 budget refill (`waterfill_epochs` still bumps on every refill,
+    /// but a bare mid-walk `pass1 == 0` refill must keep the bits so an
+    /// exact-fit honor does not re-honor the same queue forever).
+    /// Single-writer owner worker.
+    pub(in crate::afxdp) waterfill_honored_epoch_bits: Vec<u64>,
     /// #1628: completed waterfill epochs (Phase-1 budget refills) on this
     /// interface, THIS WORKER's view. Bumped at the lazy Phase-1 refill
     /// site. NOT a per-queue normalizer (the cross-worker SUM would be

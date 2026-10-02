@@ -127,9 +127,8 @@ struct Phase1HonorRefund {
     /// (the queue's stable `phase1_cost`), to add back on no-progress.
     cost_bytes: u64,
     /// Ascending-vec ordinal `i` whose bit was set in
-    /// `waterfill_honored_epoch_bits`. `>= 64` means the ordinal was out
-    /// of the u64 bitset range and no bit was set (nothing to clear).
-    bit_ordinal: u32,
+    /// `waterfill_honored_epoch_bits`; used to clear that honor on refund.
+    bit_ordinal: usize,
 }
 
 pub(in crate::afxdp) enum ExactCoSScratchBuild {
@@ -556,9 +555,9 @@ fn apply_phase1_waterfill_honor_refund(
     root.waterfill_pass1_remaining_bytes = root
         .waterfill_pass1_remaining_bytes
         .saturating_add(refund.cost_bytes);
-    if refund.bit_ordinal < 64 {
-        root.waterfill_honored_epoch_bits &= !(1u64 << refund.bit_ordinal);
-    }
+    let word = refund.bit_ordinal / u64::BITS as usize;
+    let bit = refund.bit_ordinal % u64::BITS as usize;
+    root.waterfill_honored_epoch_bits[word] &= !(1u64 << bit);
     if let Some(queue) = root.queues.get_mut(queue_idx) {
         let counters = &mut queue.telemetry.waterfill_counters;
         counters.phase1_admissions = counters.phase1_admissions.saturating_sub(1);
@@ -938,10 +937,10 @@ fn select_exact_cos_guarantee_queue_waterfill(
     // ordering hazard that keeps that block atomic.
     refill_waterfill_epoch(root, now_ns);
     let ascending_len = root.exact_queues_by_rate_ascending.len();
-    debug_assert!(
-        ascending_len <= 64,
-        "waterfill honored bitset is u64; >64 exact guarantee queues on one \
-         interface is unsupported (ordinal bit range overflow)"
+    debug_assert_eq!(
+        root.waterfill_honored_epoch_bits.len(),
+        ascending_len.div_ceil(u64::BITS as usize),
+        "waterfill honored bitset must cover every exact guarantee ordinal"
     );
     // Phase 1: ascending-rate walk (#4408 Increment 3b). `None` means
     // "budget exhausted or nothing eligible" — both of the original body's
@@ -1023,9 +1022,10 @@ fn waterfill_phase1_select(
         // #1732: at-most-once Phase-1 honor per epoch. Skip a queue already
         // honored this epoch (by ORDINAL `i`) so the ascending walk advances
         // to the next-smallest queue instead of re-honoring the smallest one
-        // every call. `i < 64` guards the shift (release strips the
-        // debug_assert; ordinals ≥64 are conservatively untracked).
-        if i < 64 && (root.waterfill_honored_epoch_bits & (1u64 << i)) != 0 {
+        // every call. The bitset is sized for every exact-queue ordinal.
+        let word = i / u64::BITS as usize;
+        let bit = i % u64::BITS as usize;
+        if (root.waterfill_honored_epoch_bits[word] & (1u64 << bit)) != 0 {
             continue;
         }
         let queue = &mut root.queues[queue_idx];
@@ -1163,11 +1163,10 @@ fn waterfill_phase1_select(
             .saturating_sub(phase1_cost);
         // #1732: mark this queue honored for the rest of the epoch by its
         // ASCENDING-VEC ORDINAL `i` (persists into later selector calls; both
-        // phases skip it). `i < 64` guards the shift; ordinals ≥64 are left
-        // untracked rather than wrapping `1u64 << (≥64)`.
-        if i < 64 {
-            root.waterfill_honored_epoch_bits |= 1u64 << i;
-        }
+        // phases skip it). The pre-sized word vector covers all ordinals.
+        let word = i / u64::BITS as usize;
+        let bit = i % u64::BITS as usize;
+        root.waterfill_honored_epoch_bits[word] |= 1u64 << bit;
         root.exact_guarantee_rr = (queue_idx + 1) % queue_count;
         // #1628 site 4: Phase-1 honor admission. `head` already dropped
         // (kind hoisted above), so this `&mut queue` write compiles.
@@ -1185,11 +1184,11 @@ fn waterfill_phase1_select(
             // hb166 T-2: carry the epoch honor just committed above
             // (budget debit at `:1104`, honored bit at `:1112`) so the
             // service wrapper can REFUND it if this queue transmits zero
-            // bytes. `cost_bytes` is always debited; the bit was set only
-            // when `i < 64`, so the refund clears it under the same guard.
+            // bytes. `cost_bytes` is always debited; the matching ordinal is
+            // captured so a zero-TX refund clears the same honor bit.
             phase1_honor: Some(Phase1HonorRefund {
                 cost_bytes: phase1_cost,
-                bit_ordinal: i as u32,
+                bit_ordinal: i,
             }),
         });
     }
@@ -1240,11 +1239,10 @@ fn waterfill_phase2_select(
         let pos_from_end = ascending_len - 1 - phase2_idx;
         let queue_idx = root.exact_queues_by_rate_ascending[pos_from_end];
         // Skip queues honored in Phase 1 this epoch (persistent bitset,
-        // keyed by ordinal). `pos_from_end < 64` guards the shift; ordinals
-        // ≥64 are conservatively untracked (same reason as Phase 1).
-        if pos_from_end < 64
-            && (root.waterfill_honored_epoch_bits & (1u64 << pos_from_end)) != 0
-        {
+        // keyed by ordinal). The word vector covers every exact ordinal.
+        let word = pos_from_end / u64::BITS as usize;
+        let bit = pos_from_end % u64::BITS as usize;
+        if (root.waterfill_honored_epoch_bits[word] & (1u64 << bit)) != 0 {
             phase2_idx = (phase2_idx + 1) % ascending_len;
             if phase2_idx == start_phase2 {
                 break;
@@ -1426,13 +1424,13 @@ fn refill_waterfill_epoch(root: &mut CoSInterfaceRuntime, now_ns: u64) {
         // a degenerate all-min-quantum livelock where q0 is honored, pass1
         // hits 0, the next call clears its bit, q0 is re-honored, and Phase 2
         // is never reached. With the bits intact, the already-honored small
-        // queue is skipped (the `i < 64` check below), so the walk advances
+        // queue is skipped, so the walk advances
         // to the next queue or breaks to Phase 2 — guaranteeing forward
         // progress. The budget is still refilled on a bare `exhausted` so
         // Phase 1 can resume against the un-honored queues.
         let epoch_boundary = time_refresh || root.waterfill_epoch_wrap_pending;
         if epoch_boundary {
-            root.waterfill_honored_epoch_bits = 0;
+            root.waterfill_honored_epoch_bits.fill(0);
         }
         root.waterfill_epoch_wrap_pending = false;
         // #1743 (Codex code-r2): the refill never resets the Phase-2 cursor.

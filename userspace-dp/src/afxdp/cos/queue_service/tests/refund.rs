@@ -323,7 +323,7 @@ fn waterfill_phase1_honor_refund_restores_budget_clears_bit_and_counts() {
 
     let budget_debited = root.waterfill_pass1_remaining_bytes;
     assert_ne!(
-        root.waterfill_honored_epoch_bits & 0b1,
+        root.waterfill_honored_epoch_bits[0] & 0b1,
         0,
         "selection set the ordinal-0 honored bit"
     );
@@ -345,7 +345,7 @@ fn waterfill_phase1_honor_refund_restores_budget_clears_bit_and_counts() {
         "refund adds the debited cost back to the Phase-1 budget"
     );
     assert_eq!(
-        root.waterfill_honored_epoch_bits & 0b1,
+        root.waterfill_honored_epoch_bits[0] & 0b1,
         0,
         "refund clears the honored bit so the class is re-selectable this epoch"
     );
@@ -406,7 +406,7 @@ fn service_exact_guarantee_zero_tx_refunds_phase1_honor() {
 
     let root = binding.cos.cos_interfaces.get(&42).expect("cos root");
     assert_eq!(
-        root.waterfill_honored_epoch_bits & 0b1,
+        root.waterfill_honored_epoch_bits[0] & 0b1,
         0,
         "zero-TX Phase-1 selection must REFUND the honored bit (T-2), not burn the epoch"
     );
