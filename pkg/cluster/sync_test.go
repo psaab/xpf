@@ -293,7 +293,7 @@ func TestDecodeSessionV4RoundTrip(t *testing.T) {
 		SrcIP:    [4]byte{192, 168, 1, 1},
 		DstIP:    [4]byte{10, 0, 0, 1},
 		SrcPort:  1024,
-		DstPort:  443,
+		DstPort:  21,
 		Protocol: 6,
 	}
 	val := dataplane.SessionValue{
@@ -317,7 +317,7 @@ func TestDecodeSessionV4RoundTrip(t *testing.T) {
 		ReverseKey: dataplane.SessionKey{
 			SrcIP:    [4]byte{10, 0, 0, 1},
 			DstIP:    [4]byte{192, 168, 1, 1},
-			SrcPort:  443,
+			SrcPort:  21,
 			DstPort:  1024,
 			Protocol: 6,
 		},
@@ -388,7 +388,7 @@ func TestDecodeSessionV6RoundTrip(t *testing.T) {
 		SrcIP:    [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
 		DstIP:    [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2},
 		SrcPort:  9090,
-		DstPort:  80,
+		DstPort:  5060,
 		Protocol: 6,
 	}
 	val := dataplane.SessionValueV6{

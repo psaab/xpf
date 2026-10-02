@@ -674,6 +674,30 @@ func parseDeleteV6Wire(payload []byte) (key dataplane.SessionKeyV6, gen uint64, 
 	return key, gen, forwardOnly, domain, expectedID, scoped, true
 }
 
+// keepSyncedALGTypeConsistent retains a transmitted tag only when its service
+// port is in the direction-appropriate slot. ALG disable state is not carried
+// in session sync, so a zero tag remains zero; an unknown future type is
+// preserved. This clears source-port-only tags from older peers on the standby.
+func keepSyncedALGTypeConsistent(protocol uint8, srcPort, dstPort uint16, isReverse, algType uint8) uint8 {
+	if algType == 0 || algType > 3 {
+		return algType
+	}
+	servicePort := dstPort
+	if isReverse != 0 {
+		servicePort = srcPort
+	}
+	switch {
+	case protocol == 17 && servicePort == 53 && algType == 3:
+		return algType
+	case protocol == 6 && servicePort == 21 && algType == 1:
+		return algType
+	case (protocol == 6 || protocol == 17) && servicePort == 5060 && algType == 2:
+		return algType
+	default:
+		return 0
+	}
+}
+
 // decodeSessionV4Payload decodes a v4 session from wire format. It returns the
 // decoded key, value, and an ok flag. The layout must match encodeSessionV4Payload.
 func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.SessionValue, bool) {
@@ -785,7 +809,12 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 		off += 4
 	}
 	if off+2 <= len(payload) {
-		val.ALGType = payload[off]
+		// #11672: older peers may tag a forward flow because its client source
+		// port is the ALG service port. Revalidate the byte against the session
+		// direction before installing it on this HA node.
+		val.ALGType = keepSyncedALGTypeConsistent(
+			key.Protocol, key.SrcPort, key.DstPort, val.IsReverse, payload[off],
+		)
 		off++
 		val.LogFlags = payload[off]
 		off += 3
@@ -981,7 +1010,10 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 		off += 4
 	}
 	if off+2 <= len(payload) {
-		val.ALGType = payload[off]
+		// #11672: v6 mirrors the v4 direction-aware ALG tag check.
+		val.ALGType = keepSyncedALGTypeConsistent(
+			key.Protocol, key.SrcPort, key.DstPort, val.IsReverse, payload[off],
+		)
 		off++
 		val.LogFlags = payload[off]
 		off += 3

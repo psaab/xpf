@@ -9,6 +9,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Use NAT64's translated destination when deriving the per-peer WireGuard
     underlay MTU for packet-too-big and fragmentation budgets (#11722).
 
+  * Tag conntrack ALG types from the direction-aware service port so a
+    forward flow whose client source port is 53, 21, or 5060 is no longer
+    mis-tagged DNS, FTP, or SIP in show output and HA session sync (#11672).
+
   * Scope WireGuard admits in cold-boot and coverage-gap host-input fences
     to addresses in zones serving each listen port (#11572).
   * Persist feed shrink-guard high-water counts and hashes across daemon
