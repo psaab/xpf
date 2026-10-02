@@ -26,9 +26,24 @@ import (
 const maxDynamicAddressShrinkAckReasonBytes = 512
 
 func (s *Server) proxyPeerSystemAction(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+	return s.proxyPeerSystemActionWithPersistentNatGeneration(ctx, req, "", 0)
+}
+
+func (s *Server) proxyPeerSystemActionWithPersistentNatGeneration(
+	ctx context.Context,
+	req *pb.SystemActionRequest,
+	origin string,
+	generation uint64,
+) (*pb.SystemActionResponse, error) {
 	peerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	peerCtx = metadata.AppendToOutgoingContext(peerCtx, "x-peer-forwarded", "1")
+	pairs := []string{"x-peer-forwarded", "1"}
+	if origin != "" {
+		pairs = append(pairs,
+			"x-peer-persistent-nat-origin", origin,
+			"x-peer-persistent-nat-generation", strconv.FormatUint(generation, 10))
+	}
+	peerCtx = metadata.AppendToOutgoingContext(peerCtx, pairs...)
 	if s.peerSystemActionFn != nil {
 		return s.peerSystemActionFn(peerCtx, req)
 	}
@@ -444,24 +459,60 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 		if table == nil {
 			return &pb.SystemActionResponse{Message: "Persistent NAT table not available"}, nil
 		}
+		peerOrigin, peerGeneration, hasPeerGeneration, metadataErr :=
+			persistentNatClearGenerationFromContext11486(ctx)
+		if metadataErr != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "persistent NAT clear generation: %v", metadataErr)
+		}
 		count := uint64(table.Len())
+		clearOrigin := ""
+		var clearGeneration uint64
+		generationCapable := false
 		if clearer, ok := backend.(interface {
-			ClearPersistentNATLeases() (uint64, error)
+			ClearPersistentNATLeasesWithGeneration(string, uint64) (uint64, string, uint64, error)
 		}); ok {
+			generationCapable = true
 			var err error
-			count, err = clearer.ClearPersistentNATLeases()
+			if hasPeerGeneration {
+				count, clearOrigin, clearGeneration, err =
+					clearer.ClearPersistentNATLeasesWithGeneration(peerOrigin, peerGeneration)
+			} else {
+				count, clearOrigin, clearGeneration, err =
+					clearer.ClearPersistentNATLeasesWithGeneration("", 0)
+			}
 			if err != nil {
 				return nil, status.Errorf(codes.Unavailable, "clear persistent NAT leases: %v", err)
 			}
 		} else {
-			// The non-userspace table is itself authoritative.
-			table.Clear()
+			if hasPeerGeneration {
+				return nil, status.Error(codes.Unavailable,
+					"dataplane cannot honor persistent NAT clear generations")
+			}
+			if clearer, ok := backend.(interface {
+				ClearPersistentNATLeases() (uint64, error)
+			}); ok {
+				var err error
+				count, err = clearer.ClearPersistentNATLeases()
+				if err != nil {
+					return nil, status.Errorf(codes.Unavailable, "clear persistent NAT leases: %v", err)
+				}
+			} else {
+				// The non-userspace table is itself authoritative.
+				table.Clear()
+			}
 		}
 		message := fmt.Sprintf("Cleared %d persistent NAT bindings", count)
 		// A peer clear is one hop only. The forwarded SystemAction lands here
-		// with the trusted marker and performs only its local authoritative clear.
+		// with the trusted marker and records the initiator's generation floor.
 		if !peerForwardedFromContext(ctx) && s.cluster != nil {
-			peerResp, err := s.proxyPeerSystemAction(ctx, req)
+			var peerResp *pb.SystemActionResponse
+			var err error
+			if generationCapable {
+				peerResp, err = s.proxyPeerSystemActionWithPersistentNatGeneration(
+					ctx, req, clearOrigin, clearGeneration)
+			} else {
+				peerResp, err = s.proxyPeerSystemAction(ctx, req)
+			}
 			if err != nil {
 				message += fmt.Sprintf("; WARNING: peer persistent NAT clear failed: %v", err)
 			} else if peerResp == nil {

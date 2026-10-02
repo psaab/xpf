@@ -83,7 +83,10 @@ func validateDisplayLeaseScopes(leases []DisplayLeaseWire) error {
 func (m *Manager) ExportIdleLeases() ([]IdleLeaseWire, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.exportIdleLeasesLocked()
+}
 
+func (m *Manager) exportIdleLeasesLocked() ([]IdleLeaseWire, error) {
 	if m.proc == nil {
 		return nil, errors.New("userspace dataplane helper not running")
 	}
@@ -103,17 +106,95 @@ func (m *Manager) ExportIdleLeases() ([]IdleLeaseWire, error) {
 	return resp.IdleLeases, nil
 }
 
-// ImportIdleLeases additively installs peer idle leases. Records absent from a
-// later batch do not remove local state, and a nil/empty batch is a no-op rather
-// than a round trip: on a healthy pair most pushes carry nothing, and spending
-// a socket turn to say so is the contention this file's header is about.
+// ExportPersistentNatLeaseBatch pairs the lease snapshot with the durable
+// sender origin/generation. Both are captured under m.mu so a clear cannot
+// stamp a pre-clear lease snapshot with its post-clear generation.
+func (m *Manager) ExportPersistentNatLeaseBatch() (PersistentNatLeaseBatch, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.loadPersistentNatLeaseGenerationLocked(); err != nil {
+		return PersistentNatLeaseBatch{}, err
+	}
+	if err := m.finishPendingPersistentNatClearLocked(); err != nil {
+		return PersistentNatLeaseBatch{}, err
+	}
+	leases, err := m.exportIdleLeasesLocked()
+	if err != nil {
+		return PersistentNatLeaseBatch{}, err
+	}
+	state := m.persistentNatLeaseGeneration
+	return PersistentNatLeaseBatch{
+		OriginID:   state.OriginID,
+		Generation: state.Generation,
+		Leases:     leases,
+	}, nil
+}
+
+// ImportPersistentNatLeaseBatch applies one peer-originated set. A newer
+// durable generation is a clear barrier: persist it before clearing local
+// allocator state, then import the new-generation records. Older delayed
+// batches are rejected indefinitely, including across daemon restarts.
+func (m *Manager) ImportPersistentNatLeaseBatch(batch PersistentNatLeaseBatch) error {
+	if !validPersistentNatLeaseOrigin11486(batch.OriginID) {
+		return errors.New("persistent-NAT lease batch has invalid origin identity")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.loadPersistentNatLeaseGenerationLocked(); err != nil {
+		return err
+	}
+	state := m.persistentNatLeaseGeneration
+	if batch.OriginID == state.OriginID {
+		return errors.New("refusing persistent-NAT lease batch from local origin")
+	}
+	if generation, ok := state.RemoteGenerations[batch.OriginID]; ok && batch.Generation < generation {
+		return nil
+	}
+	generation, known := state.RemoteGenerations[batch.OriginID]
+	if !known && batch.Generation == 0 {
+		state = clonePersistentNatLeaseGenerationState11486(state)
+		state.RemoteGenerations[batch.OriginID] = 0
+		if err := m.storePersistentNatLeaseGenerationLocked(state); err != nil {
+			return err
+		}
+	} else if !known || batch.Generation > generation {
+		state = clonePersistentNatLeaseGenerationState11486(state)
+		state.RemoteGenerations[batch.OriginID] = batch.Generation
+		state.PendingRemote[batch.OriginID] = true
+		if err := m.storePersistentNatLeaseGenerationLocked(state); err != nil {
+			return err
+		}
+	}
+	if err := m.finishPendingPersistentNatClearLocked(); err != nil {
+		return err
+	}
+	if len(batch.Leases) == 0 {
+		return nil
+	}
+	if err := m.ensurePersistentNatLeaseScopeProtocolLocked(); err != nil {
+		return err
+	}
+	_, err := m.requestDetailedLocked(ControlRequest{
+		Type:           "import_idle_leases",
+		SuppressStatus: true,
+		IdleLeases:     batch.Leases,
+	})
+	return err
+}
+
+// ImportIdleLeases imports leases at the local helper boundary. Cluster sync
+// callers must use ImportPersistentNatLeaseBatch so a missing generation can
+// never bypass the durable revocation watermark.
 func (m *Manager) ImportIdleLeases(leases []IdleLeaseWire) error {
 	if len(leases) == 0 {
 		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.importIdleLeasesLocked(leases)
+}
 
+func (m *Manager) importIdleLeasesLocked(leases []IdleLeaseWire) error {
 	if m.proc == nil {
 		return errors.New("userspace dataplane helper not running")
 	}
@@ -197,23 +278,112 @@ func displayLeasesFromResponse(resp ControlResponse, err error) ([]DisplayLeaseW
 	return resp.DisplayLeases, nil
 }
 
-// ClearPersistentNatLeases revokes every lease in the authoritative helper
-// allocator (#10784). Unlike the show-table refresh, this is an operator
-// mutation: absence of a running helper or an unsupported verb is an error, not
-// a successful mirror-only clear.
+// ClearPersistentNATLeases revokes every lease in the authoritative helper
+// allocator (#10784) and advances the durable outbound clear generation.
 func (m *Manager) ClearPersistentNATLeases() (uint64, error) {
+	count, _, _, err := m.ClearPersistentNATLeasesWithGeneration("", 0)
+	return count, err
+}
+
+// ClearPersistentNATLeasesWithGeneration applies a local clear and, when
+// supplied, records the peer's clear generation as a durable replay floor.
+// The pending marker is fsynced before the helper mutation; retries complete
+// that clear before any leases can be exported or imported.
+func (m *Manager) ClearPersistentNATLeasesWithGeneration(peerOrigin string, peerGeneration uint64) (uint64, string, uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	if m.proc == nil {
-		return 0, errors.New("userspace dataplane helper not running")
+		return 0, "", 0, errors.New("userspace dataplane helper not running")
 	}
+	if peerOrigin != "" && (!validPersistentNatLeaseOrigin11486(peerOrigin)) {
+		return 0, "", 0, errors.New("peer persistent-NAT clear has invalid origin identity")
+	}
+	if err := m.loadPersistentNatLeaseGenerationLocked(); err != nil {
+		return 0, "", 0, err
+	}
+	state := clonePersistentNatLeaseGenerationState11486(m.persistentNatLeaseGeneration)
+	if state.Generation == ^uint64(0) {
+		return 0, "", 0, errors.New("persistent-NAT clear generation exhausted")
+	}
+	state.Generation++
+	state.PendingLocalClear = true
+	if peerOrigin != "" {
+		if peerOrigin == state.OriginID {
+			return 0, "", 0, errors.New("peer persistent-NAT clear origin matches local origin")
+		}
+		old, seen := state.RemoteGenerations[peerOrigin]
+		if !seen && len(state.RemoteGenerations) >= maxPersistentNatGenerationPeers11486 {
+			return 0, "", 0, errors.New("persistent-NAT lease generation peer limit reached")
+		}
+		if !seen || peerGeneration > old {
+			state.RemoteGenerations[peerOrigin] = peerGeneration
+			state.PendingRemote[peerOrigin] = true
+		}
+	}
+	if err := m.storePersistentNatLeaseGenerationLocked(state); err != nil {
+		return 0, "", 0, err
+	}
+	count, err := m.clearPersistentNatLeasesLocked()
+	if err != nil {
+		return 0, "", 0, err
+	}
+	state = clonePersistentNatLeaseGenerationState11486(m.persistentNatLeaseGeneration)
+	state.PendingLocalClear = false
+	for origin := range state.PendingRemote {
+		state.PendingRemote[origin] = false
+	}
+	if err := m.storePersistentNatLeaseGenerationLocked(state); err != nil {
+		return count, state.OriginID, state.Generation, err
+	}
+	return count, state.OriginID, state.Generation, nil
+}
+
+func (m *Manager) clearPersistentNatLeaseGenerationPendingLocked(state persistentNatLeaseGenerationState) bool {
+	if state.PendingLocalClear {
+		return true
+	}
+	for _, pending := range state.PendingRemote {
+		if pending {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) finishPendingPersistentNatClearLocked() error {
+	state := m.persistentNatLeaseGeneration
+	if !m.clearPersistentNatLeaseGenerationPendingLocked(state) {
+		return nil
+	}
+	if m.proc == nil {
+		return errors.New("userspace dataplane helper not running")
+	}
+	if _, err := m.clearPersistentNatLeaseHelperLocked(); err != nil {
+		return err
+	}
+	state = clonePersistentNatLeaseGenerationState11486(m.persistentNatLeaseGeneration)
+	state.PendingLocalClear = false
+	for origin := range state.PendingRemote {
+		state.PendingRemote[origin] = false
+	}
+	return m.storePersistentNatLeaseGenerationLocked(state)
+}
+
+func (m *Manager) clearPersistentNatLeasesLocked() (uint64, error) {
+	resp, err := m.clearPersistentNatLeaseHelperLocked()
+	if err != nil {
+		return 0, err
+	}
+	return resp.PersistentNatLeaseCount, nil
+}
+
+func (m *Manager) clearPersistentNatLeaseHelperLocked() (ControlResponse, error) {
 	resp, err := m.requestDetailedLocked(ControlRequest{
 		Type:           "clear_persistent_nat_leases",
 		SuppressStatus: true,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("clear authoritative persistent NAT leases: %w", err)
+		return ControlResponse{}, fmt.Errorf("clear authoritative persistent NAT leases: %w", err)
 	}
-	return resp.PersistentNatLeaseCount, nil
+	return resp, nil
 }

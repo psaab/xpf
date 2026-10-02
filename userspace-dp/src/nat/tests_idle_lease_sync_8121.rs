@@ -394,8 +394,8 @@ fn a_full_imported_table_refuses_local_mints_11475() {
     let addrs = ["203.0.113.10".parse().unwrap()];
     let pool_addrs = ipv4_pool(&addrs);
     let allocator = PortAllocator::new(1, 20_000, 20_001);
-    let record = |src_ip: &str, src_port: u16, translated_port: u16, address_only: bool| {
-        IdleLeaseRecord {
+    let record =
+        |src_ip: &str, src_port: u16, translated_port: u16, address_only: bool| IdleLeaseRecord {
             protocol: TCP,
             src_ip: src_ip.parse().unwrap(),
             src_port,
@@ -406,8 +406,7 @@ fn a_full_imported_table_refuses_local_mints_11475() {
             address_only,
             remaining_ns: TIMEOUT_NS,
             timeout_ns: TIMEOUT_NS,
-        }
-    };
+        };
 
     for rec in [
         record("10.0.61.50", 40_000, 20_000, false),
@@ -686,12 +685,7 @@ fn a_pat_import_refuses_live_address_only_reverse_identity_11475() {
     );
     assert!(allocator.holds_port(0, translated.port));
 
-    assert!(allocator.release_flow(
-        address_only_owner,
-        translated,
-        2_500,
-        NatHolder::Untracked
-    ));
+    assert!(allocator.release_flow(address_only_owner, translated, 2_500, NatHolder::Untracked));
     rec.src_ip = "10.0.61.51".parse().unwrap();
     rec.remote = None;
     assert_eq!(
@@ -728,7 +722,11 @@ fn an_imported_idle_lease_is_not_echoed_10789_f4() {
     let translated = mint_persistent(&active, &addrs, client, 1_000);
     assert!(active.release_flow(client, translated, 2_000, NatHolder::Untracked));
     let sent = active.export_idle_leases(3_000);
-    assert_eq!(sent.len(), 1, "setup: A must advertise its local idle lease");
+    assert_eq!(
+        sent.len(),
+        1,
+        "setup: A must advertise its local idle lease"
+    );
 
     let standby = PortAllocator::new(1, 1024, 65535);
     assert_eq!(
@@ -772,7 +770,10 @@ fn an_imported_idle_lease_cannot_resurrect_a_retired_lease_10789_f4() {
         IdleLeaseImport::Installed
     );
     let peer_push = standby.export_idle_leases(11_000);
-    assert!(peer_push.is_empty(), "an imported lease must not be re-pushed");
+    assert!(
+        peer_push.is_empty(),
+        "an imported lease must not be re-pushed"
+    );
 
     // Retire L on A, as the production teardown does: remove its map/index
     // entries and release its claimed translated port before B advertises again.
@@ -793,7 +794,11 @@ fn an_imported_idle_lease_cannot_resurrect_a_retired_lease_10789_f4() {
         retired.translated.ip,
         retired.translated.port,
     );
-    assert_eq!(active.debug_occupied_count(), 0, "retirement releases A's port");
+    assert_eq!(
+        active.debug_occupied_count(),
+        0,
+        "retirement releases A's port"
+    );
 
     for rec in &peer_push {
         active.import_idle_lease(rec, &local_pool, TIMEOUT_NS, 12_000);
@@ -880,12 +885,7 @@ fn a_local_idle_adoption_promotes_only_on_release_10789_f4() {
         )
         .expect("local flow joins the imported address-only lease");
     assert_eq!(address_tuple.ip, address_rec.translated_ip);
-    assert!(address_only.release_flow(
-        address_flow,
-        address_tuple,
-        3_000,
-        NatHolder::Untracked
-    ));
+    assert!(address_only.release_flow(address_flow, address_tuple, 3_000, NatHolder::Untracked));
     let address_lease = address_only.debug_live().persistent_by_source
         [&address_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)];
     assert_eq!(address_lease.timeout_ns, TIMEOUT_NS);
@@ -913,13 +913,7 @@ fn a_synced_join_does_not_promote_an_imported_idle_lease_10789_f4() {
         dst_port: 443,
         ..pat_flow
     };
-    let pat_rec = idle_record_for(
-        pat_flow,
-        IpAddr::V4(addrs[0]),
-        2048,
-        false,
-        None,
-    );
+    let pat_rec = idle_record_for(pat_flow, IpAddr::V4(addrs[0]), 2048, false, None);
     let pat = PortAllocator::new(1, 1024, 65535);
     assert_eq!(
         pat.import_idle_lease(&pat_rec, &local_pool, TIMEOUT_NS, 1_000),
@@ -947,7 +941,13 @@ fn a_synced_join_does_not_promote_an_imported_idle_lease_10789_f4() {
     assert!(pat.release_flow(synced_pat_flow, pat_tuple, 3_000, NatHolder::Untracked));
     assert!(pat.export_idle_leases(4_000).is_empty());
     assert_eq!(pat.export_display_leases(4_000).len(), 1);
-    assert!(pat.debug_live().persistent_by_source.get(&pat_key).unwrap().imported);
+    assert!(
+        pat.debug_live()
+            .persistent_by_source
+            .get(&pat_key)
+            .unwrap()
+            .imported
+    );
 
     let address_flow = flow("10.0.61.51", 40001);
     let synced_address_flow = SourceNatFlowKey {
@@ -1075,7 +1075,10 @@ fn a_local_active_lease_join_promotes_on_completion_10789_f4() {
     assert!(!pat_lease.imported);
     assert_eq!(pat_lease.active_flows, 1, "the synced flow remains active");
     assert_eq!(pat_lease.timeout_ns, TIMEOUT_NS);
-    assert!(pat.export_idle_leases(4_500).is_empty(), "live leases are not exported");
+    assert!(
+        pat.export_idle_leases(4_500).is_empty(),
+        "live leases are not exported"
+    );
     assert!(pat.release_flow(synced_pat_flow, pat_tuple, 5_000, NatHolder::Untracked));
     assert_eq!(pat.export_idle_leases(5_001).len(), 1);
 
@@ -1157,7 +1160,10 @@ fn a_local_active_lease_join_promotes_on_completion_10789_f4() {
     ));
     let address_lease = address_only.debug_live().persistent_by_source[&address_key];
     assert!(!address_lease.imported);
-    assert_eq!(address_lease.active_flows, 1, "the synced flow remains active");
+    assert_eq!(
+        address_lease.active_flows, 1,
+        "the synced flow remains active"
+    );
     assert_eq!(address_lease.timeout_ns, TIMEOUT_NS);
     assert!(
         address_only.export_idle_leases(4_500).is_empty(),
@@ -1206,12 +1212,21 @@ const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
     // BORN ON THE ACTIVE. Reaches a standby by one of the two routes below,
     // depending on whether it still has live flows when the sync happens.
     ("allocate_translation_locked", "local PAT mint"),
-    ("reserve_address_only_persistent", "local address-only mint (#6041)"),
+    (
+        "reserve_address_only_persistent",
+        "local address-only mint (#6041)",
+    ),
     // REBUILT ON THE STANDBY from a synced SESSION — the population with live
     // flows. Two arms because the port-bearing and address-only reserves are
     // different functions, which is why they needed separate fixes.
-    ("reserve_flow_maybe_persistent", "#7360, from synced sessions"),
-    ("reserve_address_only_maybe_persistent", "#8132, from synced sessions"),
+    (
+        "reserve_flow_maybe_persistent",
+        "#7360, from synced sessions",
+    ),
+    (
+        "reserve_address_only_maybe_persistent",
+        "#8132, from synced sessions",
+    ),
     // INSTALLED ON THE STANDBY from an exported lease — the IDLE population,
     // which has no session to be rebuilt from and is exactly why #8121 exists.
     ("import_idle_lease", "#8121, from the idle-lease sync"),
@@ -1525,8 +1540,8 @@ fn rollback_preserves_imported_origin_and_timeout_for_both_modes_10789_f4() {
         )
         .expect("the local flow must tentatively adopt the imported PAT lease");
     assert_eq!(
-        pat.debug_live().persistent_by_source[&pat_flow
-            .persistent_source_key(PersistentNatPermit::TargetHostPort)]
+        pat.debug_live().persistent_by_source
+            [&pat_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)]
             .timeout_ns,
         imported_timeout_ns
     );
@@ -1550,12 +1565,7 @@ fn rollback_preserves_imported_origin_and_timeout_for_both_modes_10789_f4() {
     address_rec.timeout_ns = imported_timeout_ns;
     let address_only = PortAllocator::new(1, 1024, 65535);
     assert_eq!(
-        address_only.import_idle_lease(
-            &address_rec,
-            &local_pool,
-            local_timeout_ns,
-            1_000
-        ),
+        address_only.import_idle_lease(&address_rec, &local_pool, local_timeout_ns, 1_000),
         IdleLeaseImport::Installed
     );
     let address_tuple = address_only
@@ -1571,17 +1581,12 @@ fn rollback_preserves_imported_origin_and_timeout_for_both_modes_10789_f4() {
         )
         .expect("the local flow must tentatively adopt the imported address-only lease");
     assert_eq!(
-        address_only.debug_live().persistent_by_source[&address_flow
-            .persistent_source_key(PersistentNatPermit::TargetHostPort)]
+        address_only.debug_live().persistent_by_source
+            [&address_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)]
             .timeout_ns,
         imported_timeout_ns
     );
-    assert!(address_only.rollback_flow(
-        address_flow,
-        address_tuple,
-        3_000,
-        NatHolder::Untracked
-    ));
+    assert!(address_only.rollback_flow(address_flow, address_tuple, 3_000, NatHolder::Untracked));
     let address_lease = address_only.debug_live().persistent_by_source
         [&address_flow.persistent_source_key(PersistentNatPermit::TargetHostPort)];
     assert!(address_lease.imported);
@@ -1649,7 +1654,10 @@ fn assert_pat_rollback_with_concurrent_synced_flow(synced_completes_first: bool)
         false,
         &mut None,
     ));
-    assert_eq!(alloc.debug_live().persistent_by_source[&key].active_flows, 2);
+    assert_eq!(
+        alloc.debug_live().persistent_by_source[&key].active_flows,
+        2
+    );
     if synced_completes_first {
         assert!(alloc.release_flow(synced, peer_tuple, 4_000, NatHolder::Untracked));
         let between = alloc.debug_live().persistent_by_source[&key];
@@ -1660,7 +1668,10 @@ fn assert_pat_rollback_with_concurrent_synced_flow(synced_completes_first: bool)
     } else {
         assert!(alloc.rollback_flow(local, local_tuple, 4_000, NatHolder::Untracked));
         let between = alloc.debug_live().persistent_by_source[&key];
-        assert!(between.imported, "rollback with a peer flow active must preserve origin");
+        assert!(
+            between.imported,
+            "rollback with a peer flow active must preserve origin"
+        );
         assert_eq!(between.active_flows, 1);
         assert_eq!(between.timeout_ns, peer_timeout_ns);
         assert!(alloc.release_flow(synced, peer_tuple, 5_000, NatHolder::Untracked));
@@ -1734,18 +1745,27 @@ fn assert_address_only_rollback_with_concurrent_synced_flow(synced_completes_fir
         )
         .expect("synced flow joins imported address-only lease");
     assert_eq!(synced_tuple, peer_tuple);
-    assert_eq!(alloc.debug_live().persistent_by_source[&key].active_flows, 2);
+    assert_eq!(
+        alloc.debug_live().persistent_by_source[&key].active_flows,
+        2
+    );
     if synced_completes_first {
         assert!(alloc.release_flow(synced, synced_tuple, 4_000, NatHolder::Untracked));
         let between = alloc.debug_live().persistent_by_source[&key];
-        assert!(between.imported, "synced completion must not promote address-only");
+        assert!(
+            between.imported,
+            "synced completion must not promote address-only"
+        );
         assert_eq!(between.active_flows, 1);
         assert_eq!(between.timeout_ns, peer_timeout_ns);
         assert!(alloc.rollback_flow(local, local_tuple, 5_000, NatHolder::Untracked));
     } else {
         assert!(alloc.rollback_flow(local, local_tuple, 4_000, NatHolder::Untracked));
         let between = alloc.debug_live().persistent_by_source[&key];
-        assert!(between.imported, "rollback with a peer flow active must preserve origin");
+        assert!(
+            between.imported,
+            "rollback with a peer flow active must preserve origin"
+        );
         assert_eq!(between.active_flows, 1);
         assert_eq!(between.timeout_ns, peer_timeout_ns);
         assert!(alloc.release_flow(synced, synced_tuple, 5_000, NatHolder::Untracked));
@@ -1758,7 +1778,6 @@ fn assert_address_only_rollback_with_concurrent_synced_flow(synced_completes_fir
     assert!(alloc.export_idle_leases(5_001).is_empty());
     assert_eq!(alloc.export_display_leases(5_001).len(), 1);
 }
-
 
 struct TwoLocalLeaseFixture {
     allocator: PortAllocator,
@@ -1801,12 +1820,7 @@ fn two_local_lease_fixture(address_only: bool) -> TwoLocalLeaseFixture {
     record.timeout_ns = PEER_TIMEOUT_NS;
     let allocator = PortAllocator::new(addresses.len(), 1024, 65535);
     assert_eq!(
-        allocator.import_idle_lease(
-            &record,
-            &ipv4_pool(&addresses),
-            TIMEOUT_NS,
-            IMPORTED_AT_NS
-        ),
+        allocator.import_idle_lease(&record, &ipv4_pool(&addresses), TIMEOUT_NS, IMPORTED_AT_NS),
         IdleLeaseImport::Installed
     );
     TwoLocalLeaseFixture {
@@ -2003,6 +2017,34 @@ fn clearing_idle_leases_revokes_allocator_and_stale_ha_import_10784() {
     );
     assert_eq!(allocator.export_display_leases(4_000).len(), 1);
 }
+/// Snapshot refreshes reclaim expired per-key and global clear fences without
+/// needing a later clear to trigger pruning (#11486).
+#[test]
+fn lease_exports_prune_expired_clear_fences_11486() {
+    let addrs = pool();
+    let allocator = PortAllocator::new(1, 1024, 65535);
+    let client = flow("10.0.61.50", 40000);
+    let original = mint_persistent(&allocator, &addrs, client, 1_000);
+    assert!(allocator.release_flow(client, original, 2_000, NatHolder::Untracked));
+    let stale = allocator.export_idle_leases(3_000).remove(0);
+    let clear_ns = 3_000_u64;
+    assert_eq!(allocator.clear_persistent_leases(clear_ns), 1);
+    assert_eq!(
+        allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, clear_ns + 1),
+        IdleLeaseImport::SkippedExisting
+    );
+
+    let expires_at = clear_ns
+        .saturating_add(super::allocator::PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
+        .saturating_add(1);
+    assert!(allocator.export_idle_leases(expires_at).is_empty());
+    assert!(allocator.debug_live().revoked_persistent.is_empty());
+    assert_eq!(
+        allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, expires_at),
+        IdleLeaseImport::Installed,
+        "snapshot pruning should expire the short replay fence without a second clear"
+    );
+}
 
 /// A successful fresh same-key lease must not erase the original clear fence:
 /// if that replacement expires and GC removes it before T+60s, a delayed
@@ -2013,7 +2055,8 @@ fn clear_fence_survives_expired_same_key_replacement_10784() {
     let allocator = PortAllocator::new(1, 1024, 65535);
     let client = flow("10.0.61.50", 40000);
     let min_timeout_ns = super::allocator::MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS;
-    let original = mint_persistent_with_timeout(&allocator, &addrs, client, min_timeout_ns, 1_000_000_000);
+    let original =
+        mint_persistent_with_timeout(&allocator, &addrs, client, min_timeout_ns, 1_000_000_000);
     assert!(allocator.release_flow(client, original, 2_000_000_000, NatHolder::Untracked));
     let stale = allocator
         .export_idle_leases(2_500_000_000)
@@ -2062,12 +2105,7 @@ fn clear_fence_survives_expired_address_only_replacement_10784() {
             NatHolder::Untracked,
         )
         .expect("a fresh address-only lease must succeed");
-    assert!(allocator.release_flow(
-        client,
-        original,
-        2_000_000_000,
-        NatHolder::Untracked
-    ));
+    assert!(allocator.release_flow(client, original, 2_000_000_000, NatHolder::Untracked));
     let stale = allocator
         .export_idle_leases(2_500_000_000)
         .into_iter()
@@ -2089,12 +2127,7 @@ fn clear_fence_survives_expired_address_only_replacement_10784() {
             NatHolder::Untracked,
         )
         .expect("fresh local address-only replacement must succeed");
-    assert!(allocator.release_flow(
-        client,
-        replacement,
-        3_200_000_000,
-        NatHolder::Untracked
-    ));
+    assert!(allocator.release_flow(client, replacement, 3_200_000_000, NatHolder::Untracked));
     assert_eq!(allocator.debug_gc_expired_chunked(5_000_000_000, 8), 1);
 
     let live = allocator.debug_live();
@@ -2139,13 +2172,11 @@ fn expired_pat_replacement_is_not_reactivated_by_stale_synced_session_10784() {
             NatHolder::Untracked,
         )
         .expect("fresh same-key replacement must succeed");
-    assert_eq!(replacement, stale_tuple, "single-port pool fixes the stale tuple");
-    assert!(allocator.release_flow(
-        client,
-        replacement,
-        4_200_000_000,
-        NatHolder::Untracked
-    ));
+    assert_eq!(
+        replacement, stale_tuple,
+        "single-port pool fixes the stale tuple"
+    );
+    assert!(allocator.release_flow(client, replacement, 4_200_000_000, NatHolder::Untracked));
     let key = client.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
     let expiry = 5_200_000_000;
     {
@@ -2175,7 +2206,10 @@ fn expired_pat_replacement_is_not_reactivated_by_stale_synced_session_10784() {
     );
     let live = allocator.debug_live();
     let lease = live.persistent_by_source.get(&key).unwrap();
-    assert_eq!(lease.active_flows, 0, "stale sync must not reactivate the lease");
+    assert_eq!(
+        lease.active_flows, 0,
+        "stale sync must not reactivate the lease"
+    );
     assert_eq!(lease.expires_at_ns, expiry);
     assert!(live.lease_expirations.contains(&(expiry, key)));
     assert!(live.lease_expirations_by_addr[0].contains(&(expiry, key)));
@@ -2189,12 +2223,8 @@ fn expired_address_only_replacement_is_not_reactivated_by_stale_synced_session_1
     let addrs = [pool()[0]];
     let allocator = PortAllocator::new(1, 1024, 1024);
     let client = flow("10.0.61.50", 40000);
-    let original = mint_persistent_address_only_any_remote(
-        &allocator,
-        &addrs,
-        client,
-        1_000_000_000,
-    );
+    let original =
+        mint_persistent_address_only_any_remote(&allocator, &addrs, client, 1_000_000_000);
     let stale_flow = client;
     let stale_tuple = original;
     assert!(allocator.release_flow(client, original, 2_000_000_000, NatHolder::Untracked));
@@ -2214,12 +2244,7 @@ fn expired_address_only_replacement_is_not_reactivated_by_stale_synced_session_1
         )
         .expect("fresh same-key address-only replacement must succeed");
     assert_eq!(replacement, stale_tuple);
-    assert!(allocator.release_flow(
-        client,
-        replacement,
-        4_200_000_000,
-        NatHolder::Untracked
-    ));
+    assert!(allocator.release_flow(client, replacement, 4_200_000_000, NatHolder::Untracked));
     let key = client.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
     let expiry = 5_200_000_000;
     {
@@ -2249,7 +2274,10 @@ fn expired_address_only_replacement_is_not_reactivated_by_stale_synced_session_1
     );
     let live = allocator.debug_live();
     let lease = live.persistent_by_source.get(&key).unwrap();
-    assert_eq!(lease.active_flows, 0, "stale sync must not reactivate the lease");
+    assert_eq!(
+        lease.active_flows, 0,
+        "stale sync must not reactivate the lease"
+    );
     assert_eq!(lease.expires_at_ns, expiry);
     assert!(live.lease_expirations.contains(&(expiry, key)));
     assert!(live.lease_expirations_by_addr[0].contains(&(expiry, key)));
@@ -2278,12 +2306,7 @@ fn clear_fences_preclear_import_for_unknown_key_10784() {
     );
     assert!(receiver.debug_live().persistent_by_source.is_empty());
     assert_eq!(
-        receiver.import_idle_lease(
-            &stale,
-            &ipv4_pool(&addrs),
-            TIMEOUT_NS,
-            63_000_000_001,
-        ),
+        receiver.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, 63_000_000_001,),
         IdleLeaseImport::Installed,
         "the batch-wide barrier ends at the documented replay horizon"
     );
@@ -2359,12 +2382,7 @@ fn drained_clear_shell_overwrite_releases_pat_port_after_gc_budget_10784() {
         let decoy = flow(&src, 41000 + i as u16);
         let translated =
             mint_persistent_with_timeout(&allocator, &addrs, decoy, min_timeout_ns, 2_100_000_000);
-        assert!(allocator.release_flow(
-            decoy,
-            translated,
-            2_200_000_000,
-            NatHolder::Untracked
-        ));
+        assert!(allocator.release_flow(decoy, translated, 2_200_000_000, NatHolder::Untracked));
     }
     assert!(allocator.release_flow(client, original, 4_000_000_000, NatHolder::Untracked));
     let expired = allocator.debug_live();
@@ -2469,7 +2487,10 @@ fn cleared_idle_pat_key_cannot_be_recreated_by_synced_session_10784() {
     let mut synced_flow = client;
     synced_flow.dst_ip = "1.1.1.1".parse().unwrap();
     let key = synced_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
-    let addr_index = addrs.iter().position(|ip| IpAddr::V4(*ip) == original.ip).unwrap();
+    let addr_index = addrs
+        .iter()
+        .position(|ip| IpAddr::V4(*ip) == original.ip)
+        .unwrap();
     let mut previous_holders = None;
     assert!(allocator.reserve_flow_maybe_persistent(
         synced_flow,
@@ -2504,7 +2525,10 @@ fn cleared_idle_address_only_key_cannot_be_recreated_by_synced_session_10784() {
     let mut synced_flow = client;
     synced_flow.dst_ip = "1.1.1.1".parse().unwrap();
     let key = synced_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
-    let addr_index = addrs.iter().position(|ip| IpAddr::V4(*ip) == original.ip).unwrap();
+    let addr_index = addrs
+        .iter()
+        .position(|ip| IpAddr::V4(*ip) == original.ip)
+        .unwrap();
     let mut previous_holders = None;
     assert_eq!(
         allocator.reserve_address_only_maybe_persistent(
@@ -2538,7 +2562,10 @@ fn synced_session_can_join_active_cleared_shell_10784() {
     let mut synced_flow = client;
     synced_flow.dst_ip = "1.1.1.1".parse().unwrap();
     let key = synced_flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost);
-    let addr_index = addrs.iter().position(|ip| IpAddr::V4(*ip) == original.ip).unwrap();
+    let addr_index = addrs
+        .iter()
+        .position(|ip| IpAddr::V4(*ip) == original.ip)
+        .unwrap();
     let mut previous_holders = None;
     assert!(allocator.reserve_flow_maybe_persistent(
         synced_flow,
@@ -2587,12 +2614,7 @@ fn cleared_idle_key_expires_after_ha_replay_horizon_10784() {
 
     let after_horizon_ns = 60_000_003_001;
     assert_eq!(
-        allocator.import_idle_lease(
-            &stale,
-            &ipv4_pool(&addrs),
-            TIMEOUT_NS,
-            after_horizon_ns
-        ),
+        allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, after_horizon_ns),
         IdleLeaseImport::Installed,
         "after the documented replay horizon, the allocator stops retaining the tombstone"
     );

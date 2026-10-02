@@ -555,7 +555,7 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 		// produced helper state. Besides scoping the work, this keeps
 		// config-less fixtures off the production default path.
 		if rt != nil || cfg != nil {
-			if serr := sweepHelperStateVerified(dpuserspace.StateFilePathForConfig(cfg)); serr != nil {
+			if serr := sweepResetHelperStateVerified(dpuserspace.StateFilePathForConfig(cfg)); serr != nil {
 				verifyErr = errors.Join(verifyErr, serr)
 				markResetHandoffDirtyQuiet(configstore.ResetHandoffReasonHelper + ": helper state sweep failed: " + serr.Error())
 			}

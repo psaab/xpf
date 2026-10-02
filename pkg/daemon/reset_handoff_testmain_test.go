@@ -24,6 +24,9 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	configstore.ResetHandoffPath = filepath.Join(dir, ".reset-handoff")
+	resetPersistentNatGenerationStatePath = func() string {
+		return filepath.Join(dir, "persistent-nat-lease-generation.json")
+	}
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

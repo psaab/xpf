@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Persist HA persistent-NAT clear generations and peer replay floors so
+    delayed idle-lease batches cannot restore mappings after an operator clear
+    or daemon/helper restart; reclaim expired allocator clear fences (#11486).
   * Reject zone references to absent logical units and keep flow-sampling
     restrictions fail-closed rather than widening exports (#11433).
   * Retain DHCPv6 router-advertisement gateways through RA silence, re-solicit

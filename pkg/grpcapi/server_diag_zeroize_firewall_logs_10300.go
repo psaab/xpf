@@ -426,13 +426,11 @@ var performZeroizeWipeWithLogInventory = func(configDir, configBase, archiveDir 
 	if err := zeroizeConfigDir(configDir, configBase); err != nil {
 		errs = append(errs, err)
 	}
-	// Ungated wipes erase the helper state file themselves: no daemon
-	// post-verify follows, and the helper is not running in the offline
-	// contexts that take this path. Gated wipes skip this—the helper is
-	// live until the daemon stops it post-wipe—and the daemon sweep owns
-	// the path instead.
-	if !completion.pending && completion.helperPath != "" {
-		if err := zeroizeEraseHelperState(completion.helperPath); err != nil {
+	// Ungated wipes erase helper and manager-owned persistent runtime state
+	// themselves. Gated wipes wait for the daemon to stop writers and sweep
+	// both files post-stop.
+	if !completion.pending {
+		if err := zeroizeEraseResetState(completion.helperPath); err != nil {
 			errs = append(errs, err)
 		}
 	}

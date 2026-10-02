@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -38,8 +39,15 @@ import (
 // still work — they capture the current ruleListFn and restore it on cleanup,
 // which now restores to this stub rather than to netlink.RuleList.
 func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "userspace-nat-generation")
+	if err != nil {
+		panic(err)
+	}
+	persistentNatLeaseGenerationPath11486 = filepath.Join(dir, "generation.json")
 	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 // TestPackageIsHermeticWrtKernelIPRules_6675 binds the WIRING above, not the

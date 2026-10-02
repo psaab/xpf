@@ -147,6 +147,26 @@ func verifyHelperStateErased(path string) error {
 	return errors.Join(errs...)
 }
 
+var resetPersistentNatGenerationStatePath = dpuserspace.PersistentNatLeaseGenerationStatePath
+
+func verifyResetHelperStateErased(path string) error {
+	err := verifyHelperStateErased(path)
+	generationPath := resetPersistentNatGenerationStatePath()
+	if generationPath != "" && generationPath != path {
+		err = errors.Join(err, verifyHelperStateErased(generationPath))
+	}
+	return err
+}
+
+func sweepResetHelperStateVerified(path string) error {
+	err := sweepHelperStateVerified(path)
+	generationPath := resetPersistentNatGenerationStatePath()
+	if generationPath != "" && generationPath != path {
+		err = errors.Join(err, sweepHelperStateVerified(generationPath))
+	}
+	return err
+}
+
 // handoffRepairClasses maps a dirty reason to the residue classes it
 // records. Unknown or unprefixed reasons (stop failures, the pending
 // sentinel, pre-class flags) repair every class: a later failure
@@ -186,7 +206,7 @@ func repairHandoffTemps() error {
 // verifyAllResetResidue returns the per-class residue errors (nil per clean
 // class): helper state at helperFile, Kea leases, DDNS/IPsec temps.
 func verifyAllResetResidue(helperFile string) (helperErr, keaErr, tempsErr error) {
-	helperErr = verifyHelperStateErased(helperFile)
+	helperErr = verifyResetHelperStateErased(helperFile)
 	keaErr = verifyKeaLeasesErasedForReset()
 	tempsErr = verifyStateTempsErasedForReset()
 	return helperErr, keaErr, tempsErr
@@ -196,7 +216,7 @@ func verifyAllResetResidue(helperFile string) (helperErr, keaErr, tempsErr error
 // errors join the caller's verdict alongside the post-repair verification:
 // a repair can fail durability (sync) while the residue is already absent.
 func repairAllResetResidue(helperFile string) (helperErr, keaErr, tempsErr error) {
-	helperErr = sweepHelperStateVerified(helperFile)
+	helperErr = sweepResetHelperStateVerified(helperFile)
 	keaErr = repairHandoffKea()
 	tempsErr = repairHandoffTemps()
 	return helperErr, keaErr, tempsErr
@@ -310,7 +330,7 @@ func (d *Daemon) reconcileResetHandoffAtBoot() {
 	doHelper, doKea, doTemps := handoffRepairClasses(dirty)
 	var helperErr, keaErr, tempsErr error
 	if doHelper {
-		helperErr = sweepHelperStateVerified(helperFile)
+		helperErr = sweepResetHelperStateVerified(helperFile)
 	}
 	if doKea {
 		keaErr = repairHandoffKea()

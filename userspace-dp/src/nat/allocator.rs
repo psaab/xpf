@@ -95,17 +95,17 @@ use std::hash::Hasher;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 // #4800: both are now used unconditionally by `PortAllocator::lock_live`
 // (previously `MutexGuard` was test-only, for `debug_live`).
-use std::sync::{MutexGuard, TryLockError};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::sync::{MutexGuard, TryLockError};
 
 pub(super) const NS_PER_SEC: u64 = 1_000_000_000;
 // The lease sync stream re-primes every 30s and retires a silent connection
 // after its 10s read deadline. Keep clear tombstones across two full-set ticks
 // so an already in-flight pre-clear record cannot immediately restore a lease.
-const PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS: u64 = 60 * 1_000_000_000;
+pub(super) const PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS: u64 = 60 * 1_000_000_000;
 const ACTIVE_PERSISTENT_NAT_CLEAR_TOMBSTONE_NS: u64 = u64::MAX;
 
 pub(crate) const MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS: u64 = NS_PER_SEC;
@@ -510,7 +510,6 @@ struct ReverseIdentityHostKey {
     dst_ip: IpAddr,
 }
 
-
 /// #10190: the exact PAT reverse identity used by the same-allocator
 /// cross-domain guard. PAT allocations normally need only the per-address
 /// bitmap, but an address-only reservation keys the full reverse tuple
@@ -537,7 +536,6 @@ impl PatReverseKey {
         }
     }
 }
-
 
 /// #4559: IPv4 deterministic CGNAT (mode 1) block-allocation parameters,
 /// precomputed by the Go compiler and carried on the source-NAT rule. The
@@ -902,7 +900,6 @@ pub(crate) struct PersistentLeaseDebugState {
     pub(crate) imported: bool,
 }
 
-
 #[derive(Debug, Default)]
 pub(super) struct PortAllocatorLiveState {
     live_by_flow: FxHashMap<SourceNatFlowKey, LiveAllocation>,
@@ -914,8 +911,8 @@ pub(super) struct PortAllocatorLiveState {
     // used to keep revoked draining shells out of normal reuse/export.
     pub(super) revoked_persistent: BTreeMap<PersistentSourceKey, u64>,
     // Per-allocator barrier for pre-clear records whose key was not installed
-    // when clear ran. The wire carries no clear generation, so fence unknown
-    // keys for the same replay horizon as known keys.
+    // when clear ran. The Go cluster envelope carries durable generations;
+    // this short fence still protects generation-less direct helper imports.
     last_persistent_nat_clear_ns: Option<u64>,
     // #5269: address-only occupancy tokens — the translated reverse identity of a
     // `port no-translation` / port-less flow mapped to its owning FORWARD flow.
@@ -943,6 +940,17 @@ impl PortAllocatorLiveState {
         Self {
             lease_expirations_by_addr: vec![BTreeSet::new(); addr_count],
             ..Self::default()
+        }
+    }
+    /// Drop expired clear fences during the cold-path lease snapshot refresh.
+    /// This keeps the replay guard bounded even when no later clear occurs.
+    pub(super) fn prune_expired_persistent_nat_clear_fences(&mut self, now_ns: u64) {
+        self.revoked_persistent
+            .retain(|_, until_ns| *until_ns > now_ns);
+        if self.last_persistent_nat_clear_ns.is_some_and(|clear_ns| {
+            now_ns >= clear_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
+        }) {
+            self.last_persistent_nat_clear_ns = None;
         }
     }
     pub(super) fn persistent_nat_import_is_clear_fenced(
@@ -1186,16 +1194,11 @@ impl PortAllocatorLiveState {
     /// #10190: O(1) lookup for a PAT owner of the exact reverse wire
     /// identity an address-only flow would preserve. The destination endpoint
     /// remains part of the key, so another remote is admissible.
-    fn pat_owns_wire_identity(
-        &self,
-        flow: &SourceNatFlowKey,
-        translated: TranslatedTuple,
-    ) -> bool {
+    fn pat_owns_wire_identity(&self, flow: &SourceNatFlowKey, translated: TranslatedTuple) -> bool {
         self.pat_owners
             .contains_key(&PatReverseKey::for_flow(flow, translated))
     }
 }
-
 
 /// #7174 (M13): the FIFO recycle ring plus a per-offset "already queued" bitset,
 /// held together under ONE mutex so a port can hold AT MOST ONE token.
@@ -1849,7 +1852,6 @@ impl std::ops::DerefMut for CapturedLiveGuard<'_> {
     }
 }
 
-
 impl Default for PortAllocator {
     fn default() -> Self {
         Self {
@@ -1909,7 +1911,6 @@ pub(super) fn reset_port_allocator_build_count() {
 pub(super) fn port_allocator_build_count() -> usize {
     PORT_ALLOCATOR_BUILDS.with(|c| c.get())
 }
-
 
 /// #9536: the three outcomes of offering a flow an existing persistent lease on
 /// the PORT-BEARING path (`reuse_existing_lease_locked`).
@@ -2043,8 +2044,6 @@ impl PortAllocator {
             previous_snapshot,
         }
     }
-
-
 
     /// Revoke every persistent lease held by this allocator (#10784).
     ///
@@ -2486,7 +2485,6 @@ impl PortAllocator {
         live.persistent_by_source.len() >= self.shared.max_tracked_flows
     }
 
-
     /// Free a translated port's occupancy bit. `recycle` pushes the port onto
     /// the FIFO reuse ring (#3011); the deterministic path passes `false`.
     /// Returns true iff the bit was set.
@@ -2745,7 +2743,7 @@ impl PortAllocator {
         self.gc_expired_locked(&mut live, now_ns, ALLOCATION_GC_BUDGET);
 
         if let Some(slot) = live.live_by_flow.get_mut(&flow) {
-// #9145: record this worker as a HOLDER on the idempotent-reuse
+            // #9145: record this worker as a HOLDER on the idempotent-reuse
             // return. `reserve_flow_maybe_persistent` and
             // `reserve_address_only_maybe_persistent` already do it here
             // and say why (#6211 F2): this early return is where workers
@@ -3310,8 +3308,6 @@ impl PortAllocator {
         }
     }
 
-
-
     #[cfg(test)]
     pub(crate) fn debug_persistent_lease_for_flow(
         &self,
@@ -3337,12 +3333,13 @@ impl PortAllocator {
         })
     }
 
-
     /// Test-only: the worker-holder mask recorded for a live flow.
     #[cfg(test)]
     pub(crate) fn holder_mask_for_flow(&self, flow: &SourceNatFlowKey) -> Option<u128> {
         let live = self.lock_live();
-        live.live_by_flow.get(flow).map(|allocation| allocation.holders)
+        live.live_by_flow
+            .get(flow)
+            .map(|allocation| allocation.holders)
     }
 
     pub(super) fn release_flow(
@@ -3919,11 +3916,7 @@ impl PortAllocator {
     /// Carry only clear-replay fences into a replacement allocator. A renamed
     /// pool can have no live-flow reservations after clear removes idle leases,
     /// while stale HA records still need to be rejected.
-    pub(crate) fn carry_persistent_nat_clear_fences_from(
-        &self,
-        prev: &PortAllocator,
-        now_ns: u64,
-    ) {
+    pub(crate) fn carry_persistent_nat_clear_fences_from(&self, prev: &PortAllocator, now_ns: u64) {
         let fence_capacity = self.shared.max_tracked_flows;
         let (clear_fences, previous_clear_ns, overflow_fence_until_ns) = {
             let prev_live = prev.lock_live();
@@ -3946,9 +3939,8 @@ impl PortAllocator {
                 if fences.len() < fence_capacity {
                     fences.push((*key, until_ns));
                 } else {
-                    overflow_until_ns = Some(
-                        overflow_until_ns.map_or(until_ns, |old: u64| old.max(until_ns)),
-                    );
+                    overflow_until_ns =
+                        Some(overflow_until_ns.map_or(until_ns, |old: u64| old.max(until_ns)));
                 }
             }
             (
@@ -3961,8 +3953,7 @@ impl PortAllocator {
             now_ns < clear_ns.saturating_add(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
         });
         if let Some(until_ns) = overflow_fence_until_ns {
-            let widened_clear_ns =
-                until_ns.saturating_sub(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
+            let widened_clear_ns = until_ns.saturating_sub(PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS);
             clear_ns = Some(clear_ns.map_or(widened_clear_ns, |old| old.max(widened_clear_ns)));
         }
         {
@@ -3990,9 +3981,8 @@ impl PortAllocator {
                     retained += 1;
                     true
                 } else {
-                    overflow_until_ns = Some(
-                        overflow_until_ns.map_or(*until_ns, |old: u64| old.max(*until_ns)),
-                    );
+                    overflow_until_ns =
+                        Some(overflow_until_ns.map_or(*until_ns, |old: u64| old.max(*until_ns)));
                     false
                 }
             });
@@ -4561,7 +4551,6 @@ impl PortAllocator {
             false,
             &mut previous_holders,
         )
-
     }
 
     /// #8132: the ADDRESS-ONLY twin of [`reserve_flow_maybe_persistent`] — mint
@@ -5145,7 +5134,7 @@ impl PortAllocator {
         // Idempotent re-entry: a second packet of the same flow (racing session
         // install) reuses its first decision rather than re-keying.
         if let Some(slot) = live.live_by_flow.get_mut(&flow) {
-// #9145: record this worker as a HOLDER on the idempotent-reuse
+            // #9145: record this worker as a HOLDER on the idempotent-reuse
             // return. `reserve_flow_maybe_persistent` and
             // `reserve_address_only_maybe_persistent` already do it here
             // and say why (#6211 F2): this early return is where workers
@@ -5302,7 +5291,7 @@ impl PortAllocator {
         // Idempotent re-entry: a second packet of the same flow reuses its first
         // decision rather than re-keying / double-counting the lease refcount.
         if let Some(slot) = live.live_by_flow.get_mut(&flow) {
-// #9145: record this worker as a HOLDER on the idempotent-reuse
+            // #9145: record this worker as a HOLDER on the idempotent-reuse
             // return. `reserve_flow_maybe_persistent` and
             // `reserve_address_only_maybe_persistent` already do it here
             // and say why (#6211 F2): this early return is where workers
@@ -5355,8 +5344,7 @@ impl PortAllocator {
                         lease.address_only,
                     ));
                 }
-            } else if lease.address_only
-                && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
+            } else if lease.address_only && (lease.active_flows > 0 || lease.expires_at_ns > now_ns)
             {
                 reuse_addr = Some((lease.translated.ip, lease.addr_index));
             } else if !lease.address_only && lease.active_flows > 0 {
@@ -5470,7 +5458,7 @@ impl PortAllocator {
                 };
                 (!live.address_only_owners.contains_key(&rkey)
                     && !live.pat_owns_wire_identity(&flow, translated))
-                    .then_some((ip, idx, rkey))
+                .then_some((ip, idx, rkey))
             }
             None => {
                 let abs =
@@ -5490,7 +5478,7 @@ impl PortAllocator {
                         };
                         (!live.address_only_owners.contains_key(&rkey)
                             && !live.pat_owns_wire_identity(&flow, translated))
-                            .then_some((ip, family_offset + rel, rkey))
+                        .then_some((ip, family_offset + rel, rkey))
                     })
             }
         };

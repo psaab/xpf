@@ -63,6 +63,7 @@ func persistentNATBinding10784() *dataplane.PersistentNATBinding {
 func TestClearPersistentNATLeaseRoutesToHelperAndClearsMirror10784(t *testing.T) {
 	m := New()
 	m.proc = &exec.Cmd{}
+	m.persistentNatLeaseGenerationPath = filepath.Join(t.TempDir(), "nat-generation.json")
 	socket := filepath.Join(t.TempDir(), "control.sock")
 	m.cfg.ControlSocket = socket
 	helper := startPersistentNATClearHelper10784(t, socket, ControlResponse{
@@ -91,6 +92,7 @@ func TestClearPersistentNATLeaseRoutesToHelperAndClearsMirror10784(t *testing.T)
 func TestClearPersistentNATLeaseKeepsMirrorOnHelperFailure10784(t *testing.T) {
 	m := New()
 	m.proc = &exec.Cmd{}
+	m.persistentNatLeaseGenerationPath = filepath.Join(t.TempDir(), "nat-generation.json")
 	socket := filepath.Join(t.TempDir(), "control.sock")
 	m.cfg.ControlSocket = socket
 	helper := startPersistentNATClearHelper10784(t, socket, ControlResponse{

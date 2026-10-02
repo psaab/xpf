@@ -621,20 +621,28 @@ func (a *LegacyDataPlaneAdapter) ClearAllSessions() (int, int, error) {
 // helper owns lease reuse; only after its revoke is acknowledged do we clear
 // the persistent-NAT table consumed by SHOW.
 func (a *LegacyDataPlaneAdapter) ClearPersistentNATLeases() (uint64, error) {
+	count, _, _, err := a.ClearPersistentNATLeasesWithGeneration("", 0)
+	return count, err
+}
+
+// ClearPersistentNATLeasesWithGeneration carries a peer clear's durable
+// generation into the manager while retaining the helper-ack-before-mirror
+// ordering of ClearPersistentNATLeases.
+func (a *LegacyDataPlaneAdapter) ClearPersistentNATLeasesWithGeneration(peerOrigin string, peerGeneration uint64) (uint64, string, uint64, error) {
 	m, err := a.managerOrErr()
 	if err != nil {
-		return 0, err
+		return 0, "", 0, err
 	}
-	count, err := m.ClearPersistentNATLeases()
+	count, origin, generation, err := m.ClearPersistentNATLeasesWithGeneration(peerOrigin, peerGeneration)
 	if err != nil {
-		return count, err
+		return count, origin, generation, err
 	}
 	if a.DataPlane != nil {
 		if table := a.DataPlane.GetPersistentNAT(); table != nil {
 			table.Clear()
 		}
 	}
-	return count, nil
+	return count, origin, generation, nil
 }
 
 func (a *LegacyDataPlaneAdapter) SetDeferWorkers(v bool) {
