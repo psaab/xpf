@@ -341,7 +341,10 @@ impl super::Coordinator {
         } else {
             Vec::new()
         };
-        self.neighbors.set_monitored_ifindexes(&snapshot.interfaces);
+        self.neighbors.set_monitored_ifindexes(
+            &snapshot.interfaces,
+            new_forwarding.neighbors.keys().map(|(ifindex, _)| *ifindex),
+        );
         // #949: bulk-remove stale manager keys atomically vs readers, and
         // advance the affected shard epochs so cached flows re-resolve (#11375).
         self.neighbors
