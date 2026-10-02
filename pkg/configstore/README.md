@@ -174,8 +174,11 @@ inline archive-site-password warning in #651).
   the apply and, under the #1799 degrade-not-fail doctrine, do NOT roll it back
   on an apply failure — so a config can be the active tree yet never have
   converged on the dataplane. The daemon stamps the marker after a
-  fully-successful `applyConfigLocked` (boot, commit, config-sync); `ActiveApplied`
-  reports whether the CURRENT active text matches that last-applied digest.
+  fully-successful `applyConfigLocked` (boot, commit, config-sync); boot/feed
+  `applyActiveConfigResult` records success before releasing `applySem`, so a
+  competing promotion cannot inherit a different config's apply result.
+  `ActiveApplied` reports whether the CURRENT active text matches that
+  last-applied digest.
   `pkg/daemon` `handleConfigSync` ANDs its active-text convergence shortcut with
   `ActiveApplied()` so a promoted-but-unapplied synced config is not treated as
   converged (the HA config high-water then stays pinned until a retry lands).
