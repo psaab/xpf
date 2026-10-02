@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -16,6 +17,7 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	wasKeyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
 
 	seen := make(map[int]bool)
 	for _, rg := range cfg.RedundancyGroups {
@@ -174,6 +176,13 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 		m.controlAuthKeyAlt = []byte(k)
 	} else {
 		m.controlAuthKeyAlt = nil
+	}
+
+	keyConfigured := len(m.controlAuthKey) > 0 || len(m.controlAuthKeyAlt) > 0
+	if !wasKeyConfigured && keyConfigured {
+		m.controlAuthKeyConfiguredAt = time.Now()
+	} else if !keyConfigured {
+		m.controlAuthKeyConfiguredAt = time.Time{}
 	}
 
 	// Update peer fencing config.

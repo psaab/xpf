@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -54,6 +56,29 @@ func TestFabricAuth11676_ReadOnlyRolloutGraceExpires(t *testing.T) {
 	}
 	if probe.called {
 		t.Fatal("tokenless read-only call after grace expiry reached the handler")
+	}
+}
+
+func TestFabricAuth11676_DelayedFirstReadUsesKeyConfigTime(t *testing.T) {
+	manager := cluster.NewManager(0, 1)
+	manager.UpdateConfig(&config.ClusterConfig{ControlLinkAuthKey: config.Secret(fabricTestKey)})
+	configuredAt := manager.ControlLinkAuthKeyConfiguredAt()
+	if configuredAt.IsZero() {
+		t.Fatal("keyed cluster config did not publish its configuration time")
+	}
+
+	now := configuredAt.Add(fabricAuth11676RolloutGrace + time.Second)
+	s := &Server{
+		cluster:         manager,
+		fabricAuthNowFn: func() time.Time { return now },
+	}
+	probe, err := fabricAuth11676ReadOnlyCall(s)
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("first tokenless read after the configured grace: err=%v (%s), want Unauthenticated",
+			err, status.Code(err))
+	}
+	if probe.called {
+		t.Fatal("delayed first tokenless read reached the handler after key-configured grace expired")
 	}
 }
 

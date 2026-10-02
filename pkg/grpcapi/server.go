@@ -409,7 +409,7 @@ func (s *Server) userspaceDataplaneControl() (userspaceControlProvider, error) {
 // caller's class does not hold. Cross-node access still uses the separately
 // authenticated fabric listener (RunFabricListener), not this one.
 func NewServer(addr string, cfg Config) *Server {
-	s := &Server{
+	return &Server{
 		store:                       cfg.Store,
 		dp:                          cfg.DP,
 		eventBuf:                    cfg.EventBuf,
@@ -456,11 +456,6 @@ func NewServer(addr string, cfg Config) *Server {
 		d11ArmFn:                    cfg.D11ArmFn,
 		d11LedgerFn:                 cfg.D11LedgerFn,
 	}
-	if len(s.fabricAcceptedKeys()) > 0 {
-		s.fabricAuthUnarmedSince = s.startTime
-		s.fabricAuthUnarmedSinceSet = true
-	}
-	return s
 }
 
 // grpcListenState tracks the primary gRPC listener lifecycle for the

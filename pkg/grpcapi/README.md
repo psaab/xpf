@@ -68,13 +68,13 @@ are rejected as `Unauthenticated` until a PSK is committed. Missing a key is an
 indefinite configuration state, not a rollout grace.
 
 **Keyed fabric rollout grace (#11487, #11676).** A configured key retains
-tokenless access only for read-only peer RPCs during a five-minute grace from
-the first observation of the key while neither fabric nor heartbeat auth has
-armed enforcement. After expiry, tokenless read-only calls are rejected too.
-`show system alarms` reports the unarmed condition as a warning during grace
-and a critical alarm after expiry. `ClearSessions` and the admitted
-`SystemAction` verbs (cross-node failover and persistent-NAT clear) require a
-valid token even before peer-auth enforcement is armed.
+tokenless access only for read-only peer RPCs during a five-minute grace
+starting at the unkeyed-to-keyed config apply while neither fabric nor
+heartbeat auth has armed enforcement. After expiry, tokenless read-only calls
+are rejected too. `show system alarms` reports the unarmed condition as a
+warning during grace and a critical alarm after expiry. `ClearSessions` and the
+admitted `SystemAction` verbs (cross-node failover and persistent-NAT clear)
+require a valid token even before peer-auth enforcement is armed.
 
 ### Peer hop markers are a listener capability, not a header (#5883)
 

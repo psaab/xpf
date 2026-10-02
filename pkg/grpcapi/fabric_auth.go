@@ -52,8 +52,8 @@ import (
 //   - Local key + valid token: accept, and record that the peer holds the key.
 //   - Local key + present-but-invalid token: reject (Unauthenticated).
 //   - Local key + no token + enforcement NOT armed: accept read-only fabric
-//     RPCs only during a five-minute rollout grace measured from the first
-//     observation of the configured key; after it expires, reject them too.
+//     RPCs only during a five-minute rollout grace starting at the config
+//     apply that first installs an accepted key; after expiry, reject them.
 //   - Local key + no token + enforcement armed: reject — a downgrade to
 //     tokenless once both nodes are keyed is an attack.
 //
@@ -433,27 +433,37 @@ func (s *Server) fabricAuthNow() time.Time {
 	return time.Now()
 }
 
-// fabricAuthUnarmedGraceRemaining accounts for the rollout window. NewServer
-// anchors it at server startup when a key is already configured; a key
-// committed later starts on its first auth/alarm observation. The timer is
-// shared by unary and stream RPCs and the system-alarm display; it is reset
-// only when the key is removed or authentication succeeds.
+// fabricAuthUnarmedGraceRemaining accounts for the rollout window. A cluster
+// manager anchors it at the actual key-config transition; direct test seams
+// without a manager start on their first auth/alarm observation. Unary and
+// stream RPCs share the same timer.
 func (s *Server) fabricAuthUnarmedGraceRemaining(keyConfigured, armed bool) (time.Duration, bool) {
-	s.fabricAuthGraceMu.Lock()
-	defer s.fabricAuthGraceMu.Unlock()
-
 	if !keyConfigured || armed {
+		s.fabricAuthGraceMu.Lock()
 		s.fabricAuthUnarmedSinceSet = false
 		s.fabricAuthUnarmedSince = time.Time{}
+		s.fabricAuthGraceMu.Unlock()
 		return 0, false
 	}
 
-	now := s.fabricAuthNow()
-	if !s.fabricAuthUnarmedSinceSet {
-		s.fabricAuthUnarmedSince = now
-		s.fabricAuthUnarmedSinceSet = true
+	configuredAt := time.Time{}
+	if s.cluster != nil && s.fabricAuthKeyFn == nil {
+		configuredAt = s.cluster.ControlLinkAuthKeyConfiguredAt()
 	}
-	elapsed := now.Sub(s.fabricAuthUnarmedSince)
+	now := s.fabricAuthNow()
+
+	s.fabricAuthGraceMu.Lock()
+	defer s.fabricAuthGraceMu.Unlock()
+
+	since := configuredAt
+	if since.IsZero() {
+		if !s.fabricAuthUnarmedSinceSet {
+			s.fabricAuthUnarmedSince = now
+			s.fabricAuthUnarmedSinceSet = true
+		}
+		since = s.fabricAuthUnarmedSince
+	}
+	elapsed := now.Sub(since)
 	if elapsed < 0 {
 		elapsed = 0
 	}
