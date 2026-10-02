@@ -66,3 +66,41 @@ func TestWireGuardAcceptAbsentWithoutZonePorts11076(t *testing.T) {
 		}
 	}
 }
+
+// TestFenceWireGuardAdmitsStayZoneScoped11572 applies #11076's serving-zone
+// contract to the two temporary enforcement tables: the cold-boot fence and
+// the additive gap fence.
+func TestFenceWireGuardAdmitsStayZoneScoped11572(t *testing.T) {
+	views := wgScopedViews11076()
+	wgZonePorts := map[string][]uint16{"trust": {51820}}
+	unzonedV4 := []string{"10.0.99.1"}
+	unzonedV6 := []string{"2001:db8:99::1"}
+	uncoveredV4 := []string{"10.0.1.1", "10.0.2.1", "10.0.99.1"}
+	uncoveredV6 := []string{"2001:db8:1::1", "2001:db8:99::1"}
+
+	for name, payload := range map[string]string{
+		"cold-boot": buildHostInboundFencePayload(views, unzonedV4, unzonedV6, []uint16{51820}, wgZonePorts, nil, nil),
+		"gap":       buildHostInboundGapFencePayload(views, uncoveredV4, uncoveredV6, []uint16{51820}, wgZonePorts, nil, nil, nil, nil, nil),
+	} {
+		for _, want := range []string{
+			"ip daddr 10.0.1.1 udp dport 51820 accept",
+			"ip6 daddr 2001:db8:1::1 udp dport 51820 accept",
+		} {
+			if !strings.Contains(payload, want) {
+				t.Errorf("%s fence lacks serving-zone WG accept %q:\n%s", name, want, payload)
+			}
+		}
+		for _, deniedAddr := range []string{"10.0.2.1", unzonedV4[0], unzonedV6[0]} {
+			for _, line := range strings.Split(payload, "\n") {
+				if strings.Contains(line, deniedAddr) && strings.Contains(line, "udp dport 51820 accept") {
+					t.Errorf("%s fence admits WG port 51820 to non-serving address %s: %s", name, deniedAddr, line)
+				}
+			}
+		}
+		for _, line := range strings.Split(payload, "\n") {
+			if strings.Contains(line, "udp dport 51820 accept") && !strings.Contains(line, "daddr") {
+				t.Errorf("%s fence emitted a global WG port accept: %s", name, line)
+			}
+		}
+	}
+}

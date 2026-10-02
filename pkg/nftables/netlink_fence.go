@@ -1,25 +1,61 @@
 package nftables
 
 // netlink_fence.go builds the #5644 cold-boot fail-closed fence and the #5789
-// additive coverage-gap fence via netlink, mirroring buildHostInboundFencePayload
-// / buildHostInboundGapFencePayload / hostInboundFenceMandatoryAdmits in
-// pkg/daemon/daemon_nft.go (the parity ORACLE). Both fences are the real
-// host-inbound table with every per-service ACCEPT removed: the shared mandatory
-// admits (return/ND/PMTUD/ESP-AH/WG) followed by a catch-all DROP (no named
-// counter) for the fenced firewall-local addresses.
+// additive coverage-gap fence via netlink, mirroring the fence text oracles in
+// pkg/daemon/daemon_nft.go. Both fences are the real host-inbound table with
+// every per-service ACCEPT removed: scope-independent mandatory admits, then
+// per-zone WireGuard accepts, followed by catch-all DROPs (no named counters)
+// for their fenced firewall-local addresses.
 
 // hostInboundFenceMandatoryAdmitsNetlink mirrors hostInboundFenceMandatoryAdmits:
-// the fence chain's mandatory-admit rules — established/related, raw ESP/AH, IPv6
-// ND, v4/v6 PMTUD/error, and the configured WireGuard listen port(s). No named
-// counters (a fence is transient).
-func hostInboundFenceMandatoryAdmitsNetlink(p *nlPlan, wgListenPorts []uint16) {
+// the fence chain's scope-independent mandatory admits — established/related,
+// raw ESP/AH, IPv6 ND, and v4/v6 PMTUD/error. WireGuard admissions are emitted
+// separately with serving-zone destination scope. No named counters (a fence is
+// transient).
+func hostInboundFenceMandatoryAdmitsNetlink(p *nlPlan) {
 	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
 	p.rule().icmpType(famV6, []uint8{1, 2, 3, 4}).emit(verdictAccept()...)
 	p.rule().icmpType(famV6, []uint8{133, 134, 135, 136, 137}).emit(verdictAccept()...)
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).emit(verdictAccept()...)
-	if len(wgListenPorts) > 0 {
-		p.rule().l4Port(protoUDP, "dport", portsFromUint16(wgListenPorts), false).emit(verdictAccept()...)
+}
+
+// emitHostInboundFenceWGAdmitsNetlink scopes each fence's WG exception to the
+// addresses of zones that serve the configured listen port(s).
+func emitHostInboundFenceWGAdmitsNetlink(p *nlPlan, views []HostInboundZoneView, wgZonePorts map[string][]uint16) {
+	for _, v := range views {
+		ports := wgZonePorts[v.Zone]
+		emitHostInboundZoneWireGuardAcceptNetlink(p, famV4, v.V4Addrs, ports)
+		emitHostInboundZoneWireGuardAcceptNetlink(p, famV6, v.V6Addrs, ports)
+	}
+}
+
+// intersectFenceWGAddresses returns the zone addresses also covered by a gap
+// fence. Gap accepts must never extend beyond its uncovered destination set.
+func intersectFenceWGAddresses(zoneAddrs, uncovered []string) []string {
+	if len(zoneAddrs) == 0 || len(uncovered) == 0 {
+		return nil
+	}
+	var scoped []string
+	for _, addr := range zoneAddrs {
+		for _, missing := range uncovered {
+			if addr == missing {
+				scoped = append(scoped, addr)
+				break
+			}
+		}
+	}
+	return scoped
+}
+
+func emitHostInboundGapFenceWGAdmitsNetlink(p *nlPlan, spec GapFenceSpec) {
+	for _, v := range spec.Views {
+		ports := spec.WGZonePorts[v.Zone]
+		if len(ports) == 0 {
+			continue
+		}
+		emitHostInboundZoneWireGuardAcceptNetlink(p, famV4, intersectFenceWGAddresses(v.V4Addrs, spec.UncoveredV4), ports)
+		emitHostInboundZoneWireGuardAcceptNetlink(p, famV6, intersectFenceWGAddresses(v.V6Addrs, spec.UncoveredV6), ports)
 	}
 }
 
@@ -92,7 +128,8 @@ func buildLo0FenceNetlink(p *nlPlan, spec FenceSpec) {
 }
 
 func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
-	hostInboundFenceMandatoryAdmitsNetlink(p, spec.WGListenPorts)
+	hostInboundFenceMandatoryAdmitsNetlink(p)
+	emitHostInboundFenceWGAdmitsNetlink(p, spec.Views, spec.WGZonePorts)
 	// #10751 F8-A: admit the DHCP client's own replies before the
 	// destination drops (no-op for lo0 — see emitUnleasedDHCPAdmitsNetlink).
 	emitUnleasedDHCPAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6)
@@ -124,7 +161,8 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 		nil, spec.UncoveredV4, spec.UncoveredV6, spec.WGListenPorts, false,
 	))
-	hostInboundFenceMandatoryAdmitsNetlink(p, spec.WGListenPorts)
+	hostInboundFenceMandatoryAdmitsNetlink(p)
+	emitHostInboundGapFenceWGAdmitsNetlink(p, spec)
 	// #10751 F8-A: admit the DHCP client's own replies before the
 	// destination drops (see emitUnleasedDHCPAdmitsNetlink).
 	emitUnleasedDHCPAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6)

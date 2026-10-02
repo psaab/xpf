@@ -6,6 +6,9 @@ xpf (0.0.0) unstable; urgency=medium
     manifests before cut-over; fail closed on missing or mismatched checkout
     provenance, and version the executable field change under ledger schema 2
     (#11765).
+  * Scope WireGuard admits in cold-boot and coverage-gap host-input fences
+    to addresses in zones serving each listen port (#11572).
+
   * Retain RIP, IS-IS, and IPv6 static routes when standalone CLI apply builds
     routing-instance FRR configuration, matching daemon rendering (#11393).
   * Mirror configured generate-route and FRR blackhole prefixes as discard
