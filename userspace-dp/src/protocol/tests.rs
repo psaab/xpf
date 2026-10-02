@@ -457,6 +457,33 @@ fn process_status_ndp_na_refusal_counters_roundtrip() {
     assert_eq!(legacy.ndp_na_bad_source_refused_total, 0);
 }
 
+// #11503: the two unzoned-denial causes are distinct additive ProcessStatus
+// fields and decode to zero when reading a legacy payload.
+#[test]
+fn process_status_unzoned_policy_denial_counters_roundtrip_11503() {
+    let status = ProcessStatus {
+        unzoned_ingress_denied_total: 17,
+        unzoned_egress_denied_total: 29,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    assert_eq!(value["unzoned_ingress_denied_total"], 17);
+    assert_eq!(value["unzoned_egress_denied_total"], 29);
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.unzoned_ingress_denied_total, 17);
+    assert_eq!(back.unzoned_egress_denied_total, 29);
+
+    let legacy_value =
+        serde_json::to_value(ProcessStatus::default()).expect("serialize default ProcessStatus");
+    assert!(legacy_value.get("unzoned_ingress_denied_total").is_none());
+    assert!(legacy_value.get("unzoned_egress_denied_total").is_none());
+    let legacy: ProcessStatus =
+        serde_json::from_value(legacy_value).expect("legacy payload decodes");
+    assert_eq!(legacy.unzoned_ingress_denied_total, 0);
+    assert_eq!(legacy.unzoned_egress_denied_total, 0);
+}
+
 #[test]
 fn process_status_ambiguous_fabric_zone_count_roundtrip_11061() {
     let status = ProcessStatus {
@@ -2386,6 +2413,28 @@ fn wire_invariant_default_specimens() {
             linked_libelf_version: "10203-elf-sentinel".into(),
             linked_zlib_version: "10203-zlib-sentinel".into(),
             linked_zstd_version: "10203-zstd-sentinel".into(),
+            ..Default::default()
+        }),
+    );
+    // #11503: populated ProcessStatus sentinels keep the two direction-specific
+    // cause keys present in the shared Rust-to-Go wire fixture.
+    s.insert(
+        "process_status_unzoned_policy_denials".into(),
+        dump(&ProcessStatus {
+            unzoned_ingress_denied_total: 107,
+            unzoned_egress_denied_total: 211,
+            policy_rule_counters: vec![
+                crate::protocol::PolicyRuleCounterStatus {
+                    rule_id: crate::policy::UNZONED_INGRESS_DENIED_RULE_ID.into(),
+                    packets: 107,
+                    bytes: 0,
+                },
+                crate::protocol::PolicyRuleCounterStatus {
+                    rule_id: crate::policy::UNZONED_EGRESS_DENIED_RULE_ID.into(),
+                    packets: 211,
+                    bytes: 0,
+                },
+            ],
             ..Default::default()
         }),
     );

@@ -551,6 +551,9 @@ type xpfCollector struct {
 	// #10021: cumulative established-session revocations by live zone policy.
 	// This is a session-count signal, not a packet-drop component.
 	userspacePolicyRevokedSessions *prometheus.Desc
+	// #11503: unzoned transit denials kept separate by ingress/egress cause.
+	userspaceUnzonedIngressDenied *prometheus.Desc
+	userspaceUnzonedEgressDenied  *prometheus.Desc
 
 	// #2244: total failed dnat_table reverse-SNAT BPF-map publishes — the
 	// cause-side signal for dnat_table map-capacity pressure that silently
@@ -1205,6 +1208,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceNatReverseKeyCollisionsDistinctSrc
 	ch <- c.userspaceSessionPublishErrors
 	ch <- c.userspacePolicyRevokedSessions
+	ch <- c.userspaceUnzonedIngressDenied
+	ch <- c.userspaceUnzonedEgressDenied
 	ch <- c.userspaceDnatPublishErrors
 	ch <- c.userspaceSyncedImportCapDrops
 	ch <- c.userspaceNatReverseKeySharedDisplacements

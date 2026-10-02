@@ -1110,6 +1110,18 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
+		userspaceUnzonedIngressDenied: prometheus.NewDesc(
+			"xpf_userspace_unzoned_ingress_denied_total",
+			"unzoned ingress denials",
+			nil,
+			nil,
+		),
+		userspaceUnzonedEgressDenied: prometheus.NewDesc(
+			"xpf_userspace_unzoned_egress_denied_total",
+			"unzoned egress denials",
+			nil,
+			nil,
+		),
 		// #4800: publish + replication legs of the new-flow-install
 		// contention surface.
 		userspaceSharedSessionPublishes: prometheus.NewDesc(
@@ -1525,6 +1537,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// #10021: revoked-sessions total emitted unconditionally. Distinct
 		// from every sibling so a crossed wire fails the assertion below.
 		PolicyRevokedSessionsTotal: 18,
+		// #11503: separate ingress and egress causes have distinct values.
+		UnzonedIngressDeniedTotal: 31,
+		UnzonedEgressDeniedTotal:  47,
 		// #4800: publish + replication contention surface. Seven values,
 		// all distinct from one another and from every other field in this
 		// fixture, so a collector that crossed two of these wires (emitting
@@ -1766,13 +1781,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// PT/nibble mismatch refusals = 90 (asserted below).
 	// #10788-F1: strict mirror refusal plus republished/deleted/failed restore
 	// outcomes add four distinct lifetime counters, for 94 total; #11437's
-	// unbuildable-PTB counter adds one more, for 95.
+	// unbuildable-PTB counter adds one more, for 95; #11503 adds distinct
+	// unzoned ingress/egress cause counters, for 97.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 95 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 95 metrics, got %d", len(got))
+	if len(got) != 97 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 97 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -1813,6 +1829,9 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceSessionPublishErrors, nil, 6)
 	// #10021: revoked-sessions total emitted unconditionally.
 	assertCounterClose(t, got, c.userspacePolicyRevokedSessions, nil, 18)
+	// #11503: distinct cause series preserve their own status values.
+	assertCounterClose(t, got, c.userspaceUnzonedIngressDenied, nil, 31)
+	assertCounterClose(t, got, c.userspaceUnzonedEgressDenied, nil, 47)
 	// #4800: every leg of the new-flow-install contention surface reaches
 	// Prometheus carrying ITS OWN value. Both halves of each pair are
 	// asserted separately — a denominator that silently went missing (or

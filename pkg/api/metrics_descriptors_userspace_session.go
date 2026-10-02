@@ -331,6 +331,18 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"denied them. This counts sessions, not dropped packets (#10021).",
 		nil, nil,
 	)
+	c.userspaceUnzonedIngressDenied = prometheus.NewDesc(
+		"xpf_userspace_unzoned_ingress_denied_total",
+		"Cumulative transit packets denied because the ingress interface had no "+
+			"security zone. Separate from egress-cause denials (#11503).",
+		nil, nil,
+	)
+	c.userspaceUnzonedEgressDenied = prometheus.NewDesc(
+		"xpf_userspace_unzoned_egress_denied_total",
+		"Cumulative transit packets denied because the resolved egress interface "+
+			"had no security zone. Separate from ingress-cause denials (#11503).",
+		nil, nil,
+	)
 	c.userspaceDnatPublishErrors = prometheus.NewDesc(
 		"xpf_userspace_dnat_publish_errors_total",
 		"Failed dnat_table reverse-SNAT BPF-map publishes across "+

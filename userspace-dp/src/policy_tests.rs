@@ -58,6 +58,13 @@ fn policy_counter(state: &PolicyState, rule_id: &str) -> PolicyRuleCounterStatus
         .unwrap_or_else(|| panic!("missing policy counter for {rule_id}"))
 }
 
+fn is_reserved_policy_counter(counter: &PolicyRuleCounterStatus) -> bool {
+    let id = counter.rule_id.as_str();
+    id == DEFAULT_POLICY_COUNTER_RULE_ID
+        || id == UNZONED_INGRESS_DENIED_RULE_ID
+        || id == UNZONED_EGRESS_DENIED_RULE_ID
+}
+
 #[test]
 fn allow_all_matches_zone_pair() {
     let state = parse_policy_state(
@@ -394,13 +401,13 @@ fn hit_counter_attributes_permit_and_deny_but_not_default_deny() {
     );
     assert_eq!(deny_counter.bytes, 200);
 
-    // #3363: the default-deny flow must NOT have inflated either NAMED
-    // per-rule counter — only the explicit permit + deny hits attribute to
-    // those. The sum across the named rules is therefore exactly 2.
+    // #3363 / #11503: default-deny must NOT inflate a NAMED per-rule counter.
+    // The reserved default-policy and process-global cause rows are not named
+    // rules, so only the explicit permit + deny hits contribute to this sum.
     let named_per_rule_packets: u64 = state
         .counter_snapshots()
         .into_iter()
-        .filter(|c| c.rule_id != "default-policy")
+        .filter(|c| !is_reserved_policy_counter(c))
         .map(|c| c.packets)
         .sum();
     assert_eq!(
@@ -709,13 +716,12 @@ fn hit_counters_reset_after_rule_absent_then_readded() {
     let deleted =
         parse_policy_state_with_counters("deny", &[], &test_zone_name_to_id(), &[], &counter_store)
             .expect("test snapshot must not produce integrity error");
-    // #3363: counter_snapshots always carries the reserved default-policy
-    // row, so the only surviving counter after deleting every named rule is
-    // that reserved one — no NAMED rule counter remains.
+    // #3363 / #11503: default-policy and process-global cause rows are
+    // reserved snapshots, not named rules; no configured counter remains.
     let deleted_named: Vec<_> = deleted
         .counter_snapshots()
         .into_iter()
-        .filter(|c| c.rule_id != "default-policy")
+        .filter(|c| !is_reserved_policy_counter(c))
         .collect();
     assert!(deleted_named.is_empty());
 

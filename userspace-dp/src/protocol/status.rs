@@ -301,6 +301,23 @@ pub(crate) struct ProcessStatus {
     /// `Packets dropped` component. Additive/defaulted for older helpers.
     #[serde(rename = "policy_revoked_sessions_total", default)]
     pub policy_revoked_sessions_total: u64,
+    /// #11503: cumulative transit packets denied because the ingress interface
+    /// had no security zone. Kept separate from aggregate policy denies and
+    /// the egress twin.
+    #[serde(
+        rename = "unzoned_ingress_denied_total",
+        default,
+        skip_serializing_if = "crate::protocol::u64_is_zero"
+    )]
+    pub unzoned_ingress_denied_total: u64,
+    /// #11503: cumulative transit packets denied because the resolved egress
+    /// interface had no security zone.
+    #[serde(
+        rename = "unzoned_egress_denied_total",
+        default,
+        skip_serializing_if = "crate::protocol::u64_is_zero"
+    )]
+    pub unzoned_egress_denied_total: u64,
     /// #1902: GRE-decapped MissingNeighbor packets refused
     /// `pending_neigh` admission (buffering the outer UMEM frame with
     /// the post-decap inner meta would retry-TX a mis-rewritten outer

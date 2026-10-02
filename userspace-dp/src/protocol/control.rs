@@ -232,7 +232,9 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v40 -> v41 (#11420): ConfigSnapshot.forwarding_tables authorizes the exact
 // forwarding-instance table to use a default-domain interface for a qualified
 // IPv6 link-local gateway. A v40 helper cannot apply that table-scoped exception.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 41;
+// v41 -> v42 (#11503): ProcessStatus carries distinct ingress and egress
+// unzoned-policy-denial counters; old control planes cannot export these causes.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 42;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

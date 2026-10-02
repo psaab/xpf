@@ -421,7 +421,10 @@ const (
 	// v40 -> v41 BUMPED (#11420): ConfigSnapshot.ForwardingTables identifies
 	// FI tables so Rust can authorize a qualified IPv6 link-local gateway's
 	// default-domain egress without permitting ordinary foreign-VRF scope.
-	snapshotShapeVersion8892 = 41
+	// v41 -> v42 BUMPED (#11503): ProcessStatus adds two status-wire cause
+	// counters; this golden digest stays unchanged because ProcessStatus is
+	// outside the ConfigSnapshot shape walk.
+	snapshotShapeVersion8892 = 42
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

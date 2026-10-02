@@ -236,25 +236,22 @@ pub(crate) const UNATTRIBUTED_POLICY_ID: u32 = 0;
 /// disposition is a deny rather than a default.
 ///
 /// It is counted separately from `default_counter` so the deny does not inflate
-/// ordinary default-policy hit-counts. The direction-specific atomic is an
-/// in-process diagnostic only: it is not exported through `ProcessStatus`,
-/// Prometheus, or policy counter snapshots. In production the deny is visible
-/// as `policy=unattributed` in RT_FLOW and in aggregate
-/// `xpf_policy_denies_total`; exporting the cause counters is tracked in #11503.
+/// ordinary default-policy hit-counts. Each cause is exported through
+/// `ProcessStatus`, Prometheus, and a stable row in policy counter snapshots.
+/// The direction-specific atomics remain process-local, and
+/// `PolicyHitCount::Never` suppresses increments during side-effect-free
+/// session-policy re-derivation.
 pub(crate) static UNZONED_INGRESS_DENIED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
-///
-/// #11067: the EGRESS twin of `UNZONED_INGRESS_DENIED`. A transit flow whose
-/// egress interface is in no zone (to-zone id 0 on a RESOLVED egress) is
-/// denied rather than defaulted, for the same Junos-parity reason: an
-/// operator asking for permit-all is asking what to do with traffic that
-/// matched no policy, not asking to forward traffic that had no zone to be
-/// adjudicated in. It increments a separate in-process diagnostic atomic, not
-/// `default_counter`; the RT_FLOW denial is `unattributed`, with aggregate
-/// `xpf_policy_denies_total` visibility. Exporting the cause counters is
-/// tracked in #11503.
+/// #11067/#11503: the egress twin of `UNZONED_INGRESS_DENIED`; it is surfaced
+/// independently through status, metrics, and policy counter snapshots.
 pub(crate) static UNZONED_EGRESS_DENIED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+/// Stable policy-counter snapshot identities for the two process-global cause
+/// counters. They cannot collide with configured `from->to/name` rule ids.
+pub(crate) const UNZONED_INGRESS_DENIED_RULE_ID: &str = "unzoned-ingress-denied";
+pub(crate) const UNZONED_EGRESS_DENIED_RULE_ID: &str = "unzoned-egress-denied";
 
 /// #3363: stable rule identity under which the IMPLICIT default-policy hit
 /// counter is reported in [`PolicyState::counter_snapshots`] (and persisted in
@@ -1886,6 +1883,19 @@ impl PolicyState {
             self.default_counter
                 .snapshot(DEFAULT_POLICY_COUNTER_RULE_ID),
         );
+        // #11503: expose the process-global denial causes beside rule and
+        // default-policy hit counters; byte counts do not apply to these
+        // packet-only totals.
+        snapshots.push(PolicyRuleCounterStatus {
+            rule_id: UNZONED_INGRESS_DENIED_RULE_ID.to_string(),
+            packets: UNZONED_INGRESS_DENIED.load(Ordering::Relaxed),
+            bytes: 0,
+        });
+        snapshots.push(PolicyRuleCounterStatus {
+            rule_id: UNZONED_EGRESS_DENIED_RULE_ID.to_string(),
+            packets: UNZONED_EGRESS_DENIED.load(Ordering::Relaxed),
+            bytes: 0,
+        });
         snapshots
     }
 

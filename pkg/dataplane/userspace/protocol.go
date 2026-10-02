@@ -378,7 +378,9 @@ const (
 	// the default-domain interface for a qualified FI link-local gateway. A
 	// v40 helper cannot apply that table-scoped exception, so exact equality
 	// fences the mixed route contract.
-	ProtocolVersion = 41
+	// v41 -> v42 (#11503): ProcessStatus carries distinct ingress and egress
+	// unzoned-policy-denial counters for status and metrics consumers.
+	ProtocolVersion = 42
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
