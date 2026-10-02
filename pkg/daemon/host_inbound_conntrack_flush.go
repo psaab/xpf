@@ -134,19 +134,15 @@ type hostInboundConntrackFlushFilter struct {
 	ingressAllowsAll bool
 	ephemLo          uint16
 	ephemHi          uint16
-	// keptByAddr records box-oriented covered flows the sweep deliberately
-	// kept, keyed by box address with per-class counts and samples
-	// (keptAddrEvidence). The custom class looks like
-	// tightening-with-service-running staleness: TCP/UDP, owner-denied,
-	// outside the catalog and the client-role exempt sets, and either
+	// keptByAddr records covered flows the sweep deliberately kept, grouped
+	// first by box address for aggregate journal counts and then by exact
+	// conntrack tuple for transition-warning attribution. The custom class
+	// looks like tightening-with-service-running staleness: TCP/UDP,
+	// owner-denied, outside the catalog and client-role exempt sets, and either
 	// outside the ephemeral range or (TCP only) backed by a local LISTEN
-	// socket. The other class is the same shape for exempt
-	// control-plane/client ports and bare IP protocols (also
-	// owner-denied, never flushed, never guarded). Per-address keying (not
-	// global counts) lets commit projection attribute counts AND samples
-	// to the narrowed effective scopes whose OLD enforcement actually
-	// covered each address. MatchConntrackFlow may run on the sweeper's
-	// goroutine(s), hence the mutex.
+	// socket. The other class is exempt control-plane/client ports and bare
+	// IP protocols (also owner-denied, never flushed, never guarded).
+	// MatchConntrackFlow may run on the sweeper's goroutine(s), hence the mutex.
 	keptMu       sync.Mutex
 	keptByAddr   map[netip.Addr]*keptAddrEvidence
 	tcpListeners map[uint16]bool
@@ -280,10 +276,12 @@ func (f *hostInboundConntrackFlushFilter) noteKeptSuspicious(addr netip.Addr, fl
 	f.keptMu.Lock()
 	defer f.keptMu.Unlock()
 	ev := f.keptFor(addr.Unmap())
+	sample := keptFlowSample10752(flow)
 	ev.custom++
 	if len(ev.customSamples) < 5 {
-		ev.customSamples = append(ev.customSamples, keptFlowSample10752(flow))
+		ev.customSamples = append(ev.customSamples, sample)
 	}
+	recordKeptTupleEvidence10752(ev, flow, true)
 }
 
 // noteKeptOther records a box-oriented covered flow kept on an exempt
@@ -311,10 +309,12 @@ func (f *hostInboundConntrackFlushFilter) noteKeptOther(addr netip.Addr, flow *n
 	f.keptMu.Lock()
 	defer f.keptMu.Unlock()
 	ev := f.keptFor(addr.Unmap())
+	sample := keptFlowSample10752(flow)
 	ev.other++
 	if len(ev.otherSamples) < 3 {
-		ev.otherSamples = append(ev.otherSamples, keptFlowSample10752(flow))
+		ev.otherSamples = append(ev.otherSamples, sample)
 	}
+	recordKeptTupleEvidence10752(ev, flow, false)
 }
 
 // keptFor returns the per-address evidence bucket, creating it (and the map)
@@ -335,6 +335,35 @@ func keptFlowSample10752(flow *netlink.ConntrackFlow) string {
 	return fmt.Sprintf("%s %s:%d→%s:%d",
 		protoName10752(flow.Forward.Protocol), ipString10752(flow.Forward.SrcIP), flow.Forward.SrcPort,
 		ipString10752(flow.Forward.DstIP), flow.Forward.DstPort)
+}
+
+// recordKeptTupleEvidence10752 retains each observed conntrack tuple separately
+// so commit projection can compare that exact L4 identity with old/new policy.
+// Callers hold keptMu.
+func recordKeptTupleEvidence10752(ev *keptAddrEvidence, flow *netlink.ConntrackFlow, custom bool) {
+	if ev.byTuple == nil {
+		ev.byTuple = make(map[keptFlowTuple10752]keptTupleEvidence10752)
+	}
+	tuple := keptFlowTupleIdentity10752(flow)
+	tupleEv := ev.byTuple[tuple]
+	if custom {
+		tupleEv.custom++
+	} else {
+		tupleEv.other++
+	}
+	ev.byTuple[tuple] = tupleEv
+}
+
+func keptFlowTupleIdentity10752(flow *netlink.ConntrackFlow) keptFlowTuple10752 {
+	src, _ := netip.AddrFromSlice(flow.Forward.SrcIP)
+	dst, _ := netip.AddrFromSlice(flow.Forward.DstIP)
+	return keptFlowTuple10752{
+		src:      src.Unmap(),
+		dst:      dst.Unmap(),
+		protocol: flow.Forward.Protocol,
+		srcPort:  flow.Forward.SrcPort,
+		dstPort:  flow.Forward.DstPort,
+	}
 }
 
 // keptSuspiciousReport returns the recorded custom-keep count and sample
@@ -368,12 +397,7 @@ func (f *hostInboundConntrackFlushFilter) keptEvidenceReport() map[netip.Addr]ke
 	}
 	out := make(map[netip.Addr]keptAddrEvidence, len(f.keptByAddr))
 	for addr, ev := range f.keptByAddr {
-		out[addr] = keptAddrEvidence{
-			custom:        ev.custom,
-			customSamples: append([]string(nil), ev.customSamples...),
-			other:         ev.other,
-			otherSamples:  append([]string(nil), ev.otherSamples...),
-		}
+		out[addr] = cloneKeptAddrEvidence10752(*ev)
 	}
 	return out
 }

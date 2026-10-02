@@ -699,23 +699,17 @@ Properties:
   units-only model, so all-units-overridden plus zone-stanza
   narrowing stays silent for kept flows there — including
   exempt/bare, which have no journal backstop. When this
-  attempt's sweep observed stranded customs, exempt, or bare flows on an
-  address the OLD config covered in a narrowed effective scope, the
-  tightening commit carries evidence lines (customs, exempt/bare) naming
-  ONLY those scopes — zone:<name> or zone:<name>|iface:<unit> — with
-  counts and samples drawn ONLY from the intersecting addresses of that
-  class (scope lists cap at four names, remainder as (+N more)),
-  plus a silent-class pointer sentence. The customs line
-  additionally requires a full-admit loss or the loss of a token
-  admitting sweep-custom tuples (today p:rip/p:ripng plus p:bfd
-  Echo 3785 — fixed-sport UDP the sweep records as customs): other
-  narrowings (exempts, bare protocols, ranges, true customs) never
-  admitted customs, so customs observed there are
-  unchanged-authorization flows and yield the advisory instead.
-  Attribution is scope-plus-class granular, not per-tuple: an unrelated
-  true-custom flow coinciding with a rip removal on the same narrowed
-  scope shares the customs line and its sample reveals the actual tuple
-  (#11493).
+  attempt's sweep observed stranded customs, exempt, or bare flows, the
+  tightening commit carries evidence lines naming ONLY scopes whose OLD
+  effective policy admitted each exact retained tuple and whose transition
+  removed that admission. Counts and samples are drawn only from matching
+  tuples in those scopes (scope lists cap at four names, remainder as
+  (+N more)), plus a silent-class pointer sentence. Collector evidence keeps
+  the full conntrack tuple through the per-apply stash; projection checks its
+  protocol and box-side port against the old and new token matches. Thus a
+  TCP/179 flow cannot be attributed to removing `ospf`, and an unrelated
+  custom-port 2222 flow cannot be attributed to removing `rip` merely because
+  UDP/520 was admitted and removed on that same scope (#11493).
   Otherwise — zero kept flows, or evidence only outside every
   narrowed scope — the commit carries a transition-only advisory naming
   the narrowed scopes with honest zero-observed wording and a
@@ -889,13 +883,11 @@ shows sourcing the port. For those, stop/disable the outbound origination
 through commit (same disjunction as UDP/bare: stop it or keep the
 host-inbound), then delete + verify + re-verify after one app interval. The
 any-service breadth advisory names this consequence while the stanza is
-open; the tightening commit itself warns — evidence lines naming the
-narrowed effective scopes with intersecting stranded flows of that
-class (counts and samples from those scopes' addresses only; the
-customs line needs a full-admit loss or a lost sweep-custom token
-(rip/ripng/bfd-Echo), since other token-only narrowings never admitted
-customs), or a transition-only advisory naming the
-narrowed scopes when the sweep observed nothing stranded in them —
+open; the tightening commit itself warns with evidence lines naming only
+scopes whose OLD policy admitted the exact retained tuple and whose
+transition removed that admission (counts and samples come only from those
+tuples), or a transition-only advisory naming the narrowed scopes when the
+sweep observed nothing stranded in them —
 and the daemon warns in the journal on applies that keep
 denied non-catalog customs below the ephemeral floor (TCP also when
 listener-backed). Ephemeral egress and ranges are never observed as

@@ -29,39 +29,33 @@ import (
 //
 // Firing has two shapes. When this attempt's own conntrack sweep (stashed by
 // flushDeniedHostInboundConntrack, cleared per attempt) observed stranded
-// box-oriented flows on box addresses the OLD config's enforcement covered
-// in a narrowed effective scope, each warning line names ONLY the narrowed
-// scopes with intersecting evidence OF ITS CLASS — "zone:<name>" or
-// "zone:<name>|iface:<canonical-unit>" — with counts and samples drawn
-// ONLY from those scopes' addresses, plus a silent-class pointer sentence
-// (the sweep cannot observe in-range customs, ranges, post-sweep
-// reconnects, or sweep misses). When narrowed scopes exist but the sweep
-// observed nothing in them — zero kept flows, or evidence only on addresses
-// outside every narrowed scope — the commit carries a transition-only
-// advisory naming the narrowed scopes with honest zero-observed wording
-// and a manual-procedure pointer, so silent-class narrowings never pass
+// box-oriented flows on addresses the OLD config covered in a narrowed
+// effective scope, each warning line names only scopes that admitted the
+// exact tuple before the transition and deny it afterward. The collector,
+// per-attempt stash, and projection retain tuple identity, so counts and
+// samples exclude unrelated flows on the same address or scope. A silent-class
+// pointer accompanies observed evidence (the sweep cannot observe in-range
+// customs, ranges, post-sweep reconnects, or sweep misses). When narrowed
+// scopes exist but the sweep observed no stranded tuples in them, the commit
+// carries a transition-only advisory with honest zero-observed wording and a
+// manual-procedure pointer, so silent-class narrowings never pass
 // commit-silent. The advisory is suppressed only when the narrowed scopes'
 // zones own no address in either generation (zone-granular by design: an
-// addressless member in an addressed zone still warns, and DHCP members
-// may gain addresses at any time). The advisory lives in the commit
-// channel because only the commit funnel returns a response object: the
-// sweep (and the journal WARN it feeds) sees only the new state, so
-// per-apply journal context cannot express a transition.
+// addressless member in an addressed zone still warns, and DHCP members may
+// gain addresses at any time). The advisory lives in the commit channel
+// because only the commit funnel returns a response object: the sweep (and
+// journal WARN it feeds) sees only the new state, so per-apply journal context
+// cannot express a transition.
 //
-// A scope narrows two ways: it loses packet-wide full-admit (custom ports
-// lose their broadest admission), or it loses an unguarded-relevant token
-// (a service/protocol token contributing zero catalogued tuples, so its
-// removal changes no guard or flush behavior — exempts, bare protocols,
-// ranges, and the sweep-custom RIP tokens). Customs evidence fires on
-// full-admit loss or the loss of a sweep-custom-admitting token (rip,
-// ripng, bfd Echo 3785); other token-only narrowings never admitted
-// customs.
-// Narrowings that drop only catalogued tokens need no warning: flush+guard
-// enforce those. Effective override state comes from the CANONICAL resolver
+// A scope narrows when it loses packet-wide full-admit or an unguarded-relevant
+// token (a token contributing zero catalogued tuples, so its removal changes
+// no guard or flush behavior — exempts, bare protocols, and ranges). Narrowings
+// that drop only catalogued tokens need no warning: flush+guard enforce those.
+// Effective override state comes from the CANONICAL resolver
 // (config.ResolveInterfaceHostInbound: physical∪unit union, quarantine), and
 // the zone-level scope counts ONLY where no replacing override applies
-// (#6515): a zone-level token shadowed on every member interface is
-// effective nowhere, so its removal is not a transition.
+// (#6515): a zone-level token shadowed on every member interface is effective
+// nowhere, so its removal is not a transition.
 //
 // Projection mirrors the #9841 MTU discipline exactly: response-only shallow
 // copy owning fresh Warnings storage (the applied original is never
@@ -69,16 +63,31 @@ import (
 // (warnings participate in neither identity nor diff), and failed applies
 // project nothing.
 
+// keptFlowTuple10752 is the conntrack tuple whose identity must survive
+// collector, stash, and warning projection.
+type keptFlowTuple10752 struct {
+	src      netip.Addr
+	dst      netip.Addr
+	protocol uint8
+	srcPort  uint16
+	dstPort  uint16
+}
+
+// keptTupleEvidence10752 retains per-class counts for one tuple. Samples are
+// rendered from the tuple itself during projection.
+type keptTupleEvidence10752 struct {
+	custom uint64
+	other  uint64
+}
+
 // keptAddrEvidence is one box address's kept-flow evidence: per-class counts
-// with samples. The stash keys evidence by address (never aggregated) so
-// commit projection attributes counts AND samples to the narrowed effective
-// scopes whose OLD enforcement actually covered each address — a zone-B
-// residual can neither inflate a zone-A count nor appear as its sample.
+// and samples plus exact tuple identities for transition projection.
 type keptAddrEvidence struct {
 	custom        uint64
 	customSamples []string
 	other         uint64
 	otherSamples  []string
+	byTuple       map[keptFlowTuple10752]keptTupleEvidence10752
 }
 
 // keptSuspiciousApplyReport is one flush sweep's kept-flow evidence.
@@ -107,15 +116,26 @@ func (d *Daemon) recordKeptSuspicious10752(byAddr map[netip.Addr]keptAddrEvidenc
 	if len(byAddr) > 0 {
 		stash.byAddr = make(map[netip.Addr]keptAddrEvidence, len(byAddr))
 		for addr, ev := range byAddr {
-			stash.byAddr[addr] = keptAddrEvidence{
-				custom:        ev.custom,
-				customSamples: append([]string(nil), ev.customSamples...),
-				other:         ev.other,
-				otherSamples:  append([]string(nil), ev.otherSamples...),
-			}
+			stash.byAddr[addr] = cloneKeptAddrEvidence10752(ev)
 		}
 	}
 	d.keptSuspiciousStash = stash
+}
+
+func cloneKeptAddrEvidence10752(ev keptAddrEvidence) keptAddrEvidence {
+	out := keptAddrEvidence{
+		custom:        ev.custom,
+		customSamples: append([]string(nil), ev.customSamples...),
+		other:         ev.other,
+		otherSamples:  append([]string(nil), ev.otherSamples...),
+	}
+	if len(ev.byTuple) > 0 {
+		out.byTuple = make(map[keptFlowTuple10752]keptTupleEvidence10752, len(ev.byTuple))
+		for tuple, tupleEv := range ev.byTuple {
+			out.byTuple[tuple] = tupleEv
+		}
+	}
+	return out
 }
 
 // stashedKeptSuspicious10752 returns the current attempt's evidence, if any.
@@ -129,15 +149,14 @@ func (d *Daemon) stashedKeptSuspicious10752() map[netip.Addr]keptAddrEvidence {
 	return d.keptSuspiciousStash.byAddr
 }
 
-// hostInboundScopeState is one scope's effective admission: full-admit flag,
-// expanded token set (namespaced "s:<svc>"/"p:<proto>", "all" expanded,
-// full-admit tokens excluded since full carries them), plus the union of
-// sweep-custom (proto,port) tuples its tokens admit ("<proto>/<port>",
-// e.g. "17/520") for the customs evidence gate.
+// hostInboundScopeState is one scope's effective admission: full-admit flag
+// plus expanded, namespaced ("s:<svc>"/"p:<proto>") tokens and their
+// precomputed family-specific SSOT match tuples.
 type hostInboundScopeState struct {
-	full        bool
-	tokens      map[string]bool
-	customPorts map[string]bool
+	full       bool
+	tokens     map[string]bool
+	ipMatches  []config.L4Match
+	ip6Matches []config.L4Match
 }
 
 // hostInboundOverrideIndex10752 canonicalizes config.ResolveInterfaceHostInbound
@@ -265,7 +284,7 @@ func hostInboundScopeStates(cfg *config.Config) map[string]hostInboundScopeState
 }
 
 func hostInboundScopeTokens(hi *config.HostInboundTraffic) hostInboundScopeState {
-	state := hostInboundScopeState{tokens: map[string]bool{}, customPorts: map[string]bool{}}
+	state := hostInboundScopeState{tokens: map[string]bool{}}
 	if hi == nil {
 		return state
 	}
@@ -286,9 +305,19 @@ func hostInboundScopeTokens(hi *config.HostInboundTraffic) hostInboundScopeState
 	}
 	addTokens(hi.SystemServices, 's', config.HostInboundAllExpansionServices)
 	addTokens(hi.Protocols, 'p', config.HostInboundAllExpansionProtocols)
-	for tok := range state.tokens {
-		for _, pp := range hostInboundSweepCustomTokenPorts10752()[tok] {
-			state.customPorts[pp] = true
+	if state.full {
+		return state
+	}
+	for token := range state.tokens {
+		switch {
+		case strings.HasPrefix(token, "s:"):
+			name := strings.TrimPrefix(token, "s:")
+			state.ipMatches = append(state.ipMatches, config.HostInboundServiceMatch(name, "ip")...)
+			state.ip6Matches = append(state.ip6Matches, config.HostInboundServiceMatch(name, "ip6")...)
+		case strings.HasPrefix(token, "p:"):
+			name := strings.TrimPrefix(token, "p:")
+			state.ipMatches = append(state.ipMatches, config.HostInboundProtocolMatch(name, "ip")...)
+			state.ip6Matches = append(state.ip6Matches, config.HostInboundProtocolMatch(name, "ip6")...)
 		}
 	}
 	return state
@@ -358,124 +387,18 @@ var hostInboundUnguardedTokens10752 = sync.OnceValue(func() map[string]bool {
 	return out
 })
 
-// hostInboundSweepCustomTokenPorts10752 maps each named token to the
-// discrete TCP/UDP (proto,port) tuples the SWEEP classifies as custom:
-// non-catalog and non-exempt (via the same catalog sets and the same
-// HostInboundStaleReplyIsExempt the collector uses, so the set matches
-// sweep classification by construction), families unioned. Ranges are
-// excluded (range tuples are sweep-silent in-range or indistinguishable
-// ephemeral shapes); ICMP/bare protocols are not TCP/UDP. Two
-// behavioral refinements narrow the tuple rule to sweep-OBSERVABLE
-// box-side sports. p:bfd contributes Echo-shape 3785 only: conformant
-// Control sources ephemeral (RFC 5881 §4 mandates it; the packet
-// reshape pins ephemeral for 3784/4784), so 3784/4784 never appear as
-// observable box sports — but FRR echo-mode (operator-enabled,
-// non-default) sends fixed sport=dport=3785, which the sweep records.
-// p:sap is EXCLUDED although 9875 satisfies the tuple rule: no
-// supported deployed sender binds fixed 9875 (no in-tree announcer;
-// demonstrated defaults source ephemeral — PipeWire sport 0, FFmpeg
-// ephemeral unless localport forced; RFC 2974 constrains the
-// destination only). Membership today is p:rip/p:ripng (fixed-sport
-// UDP 520/521, routinely present at removal) plus p:bfd Echo 3785;
-// future discrete-port UDP-protocol tokens inherit membership
-// automatically. A scope losing one of these ports genuinely
-// de-admits a sweep-observable custom flow. Computed once; pure SSOT
-// plus the two documented behavioral refinements.
-var hostInboundSweepCustomTokenPorts10752 = sync.OnceValue(func() map[string][]string {
-	out := map[string][]string{}
-	// keep, when non-nil, restricts which tuples a token contributes
-	// (BFD Control-shape exclusion below); nil keeps every qualifying
-	// tuple.
-	consider := func(key string, matches func(family string) []config.L4Match, keep func(proto uint8, port uint16) bool) {
-		seen := map[string]bool{}
-		for _, family := range []string{"ip", "ip6"} {
-			catalog := xnft.HostInboundStaleReplyCatalog(family)
-			tcpSet := map[uint16]bool{}
-			for _, p := range catalog.TCP {
-				tcpSet[p] = true
-			}
-			udpSet := map[uint16]bool{}
-			for _, p := range catalog.UDP {
-				udpSet[p] = true
-			}
-			for _, m := range matches(family) {
-				var set map[uint16]bool
-				switch m.Proto {
-				case config.HostInboundProtoTCP:
-					set = tcpSet
-				case config.HostInboundProtoUDP:
-					set = udpSet
-				default:
-					continue
-				}
-				for _, r := range m.Ports {
-					if r.Lo != r.Hi {
-						continue
-					}
-					if set[r.Lo] || xnft.HostInboundStaleReplyIsExempt(m.Proto, r.Lo) {
-						continue
-					}
-					if keep != nil && !keep(m.Proto, r.Lo) {
-						continue
-					}
-					pp := fmt.Sprintf("%d/%d", m.Proto, r.Lo)
-					if !seen[pp] {
-						seen[pp] = true
-						out[key] = append(out[key], pp)
-					}
-				}
-			}
-		}
-	}
-	for tok := range config.KnownHostInboundSystemServices {
-		if tok == "all" || config.HostInboundFullAdmitService(tok) {
-			continue
-		}
-		consider("s:"+tok, func(family string) []config.L4Match {
-			return config.HostInboundServiceMatch(tok, family)
-		}, nil)
-	}
-	for tok := range config.KnownHostInboundProtocols {
-		if tok == "all" {
-			continue
-		}
-		if tok == "sap" {
-			// Behavioral exclusion (see header): no supported
-			// deployed sender binds fixed 9875; demonstrated
-			// defaults source ephemeral.
-			continue
-		}
-		keep := func(proto uint8, port uint16) bool { return true }
-		if tok == "bfd" {
-			// Control-shape exclusion (see header): conformant
-			// Control sources ephemeral (RFC 5881 §4), so only
-			// Echo-shape 3785 — fixed sport in FRR echo-mode —
-			// is sweep-observable.
-			keep = func(proto uint8, port uint16) bool {
-				return proto == config.HostInboundProtoUDP && port == 3785
-			}
-		}
-		consider("p:"+tok, func(family string) []config.L4Match {
-			return config.HostInboundProtocolMatch(tok, family)
-		}, keep)
-	}
-	return out
-})
+// hostInboundScopeTransition10752 retains the old and new admission states for
+// each narrowed scope so projection can test the exact observed tuple.
+type hostInboundScopeTransition10752 struct {
+	old hostInboundScopeState
+	new []hostInboundScopeState
+}
 
-// hostInboundTightenedScopes returns the sorted scope keys that narrowed from
-// old to new in a way that can strand unguarded flows: lost packet-wide
-// full-admit status (customs lose their only admission), or removed tokens
-// from the unguarded set (exempts/bare/ranges whose removal changes no guard
-// or flush behavior). Narrowings that drop only catalogued tokens need no
-// warning: flush+guard enforce those. Nil old (first commit) yields nil.
-// The second return flags scopes where customs evidence fires: full-admit
-// loss, or loss of a named token admitting sweep-custom tuples (today
-// p:rip/p:ripng plus p:bfd Echo 3785 — fixed-sport UDP the sweep
-// classifies custom). Other
-// token-only narrowings never admitted customs, so customs observed
-// there are unchanged-authorization flows and yield the advisory;
-// exempt/bare evidence strands on any tightening shape.
-func hostInboundTightenedScopes(oldCfg, newCfg *config.Config) ([]string, map[string]bool) {
+// hostInboundTightenedScopes returns sorted scope keys that narrowed from old
+// to new in a way that can strand unguarded flows, together with their
+// transition states for tuple-specific evidence attribution. Nil old (first
+// commit) yields no transitions.
+func hostInboundTightenedScopes(oldCfg, newCfg *config.Config) ([]string, map[string]hostInboundScopeTransition10752) {
 	if oldCfg == nil || newCfg == nil {
 		return nil, nil
 	}
@@ -486,78 +409,147 @@ func hostInboundTightenedScopes(oldCfg, newCfg *config.Config) ([]string, map[st
 	newStates := hostInboundScopeStates(newCfg)
 	unguarded := hostInboundUnguardedTokens10752()
 	var out []string
-	customFire := map[string]bool{}
-	mark := func(key string, old, neu hostInboundScopeState) {
-		if tight, custom := hostInboundScopeNarrowed10752(old, neu, unguarded); tight {
-			out = append(out, key)
-			if custom {
-				customFire[key] = true
+	transitions := map[string]hostInboundScopeTransition10752{}
+	mark := func(key string, old hostInboundScopeState, new []hostInboundScopeState) {
+		for _, next := range new {
+			if hostInboundScopeNarrowed10752(old, next, unguarded) {
+				out = append(out, key)
+				transitions[key] = hostInboundScopeTransition10752{old: old, new: new}
+				return
 			}
 		}
 	}
 	for key, old := range oldStates {
 		if neu, ok := newStates[key]; ok {
-			mark(key, old, neu)
+			mark(key, old, []hostInboundScopeState{neu})
 			continue
 		}
 		if zone, ok := hostInboundZoneScopeName10752(key); ok {
-			// Disappearing zone scope: compare against the
-			// replacement members' new effective admission
-			// rather than treating absence as denial — a zone
-			// shadowed by a full override loosened, it did not
-			// narrow. Any narrowed replacement fires once.
-			var fired, custom bool
-			for _, eff := range hostInboundZoneReplacementStates10752(oldCfg, newCfg, zone, newStates) {
-				if tight, cust := hostInboundScopeNarrowed10752(old, eff, unguarded); tight {
-					fired = true
-					if cust {
-						custom = true
-					}
-				}
-			}
-			if fired {
-				out = append(out, key)
-				if custom {
-					customFire[key] = true
-				}
-			}
+			// A disappearing zone scope is compared with each member's
+			// replacement state; a full override is a loosening, not a
+			// denial. Keep those states for tuple-specific projection.
+			mark(key, old, hostInboundZoneReplacementStates10752(oldCfg, newCfg, zone, newStates))
 			continue
 		}
-		// Disappearing interface scope (member removed or moved
-		// away): absence is denial.
-		mark(key, old, hostInboundScopeState{})
+		// A disappearing interface scope (member removed or moved away)
+		// is denied in the new generation.
+		mark(key, old, []hostInboundScopeState{{}})
 	}
 	sort.Strings(out)
-	return out, customFire
+	return out, transitions
 }
 
-// hostInboundScopeNarrowed10752 compares one scope's old vs new effective
-// state: tightened reports a genuine narrowing, custom reports whether
-// customs evidence fires there (full-admit loss or removed sweep-custom
-// ports). New full-admit covers everything (loosening); old full-admit
-// staying full is silence.
-func hostInboundScopeNarrowed10752(old, neu hostInboundScopeState, unguarded map[string]bool) (tightened, custom bool) {
-	if old.full && !neu.full {
-		return true, true
+// hostInboundScopeNarrowed10752 reports whether an old effective scope
+// removed an unguarded-relevant admission. Full-admit loss always narrows;
+// new full-admit is a loosening.
+func hostInboundScopeNarrowed10752(old, neu hostInboundScopeState, unguarded map[string]bool) bool {
+	if old.full {
+		return !neu.full
 	}
-	if old.full || neu.full {
-		return false, false
+	if neu.full {
+		return false
 	}
 	for tok := range old.tokens {
 		if unguarded[tok] && !neu.tokens[tok] {
-			tightened = true
-			break
+			return true
 		}
 	}
-	if !tightened {
-		return false, false
+	return false
+}
+
+// hostInboundScopeAdmitsTuple10752 evaluates one retained conntrack tuple
+// against the scope's precomputed SSOT matches, not a token/port union.
+func hostInboundScopeAdmitsTuple10752(state hostInboundScopeState, tuple keptFlowTuple10752) bool {
+	if state.full {
+		return true
 	}
-	for pp := range old.customPorts {
-		if !neu.customPorts[pp] {
-			return true, true
+	matches := state.ipMatches
+	if tuple.src.Is6() {
+		matches = state.ip6Matches
+	}
+	for _, match := range matches {
+		if match.Reject || match.Proto != tuple.protocol {
+			continue
+		}
+		if len(match.Ports) == 0 || portInRanges(tuple.srcPort, match.Ports) {
+			return true
 		}
 	}
-	return true, false
+	return false
+}
+
+func hostInboundScopeTransitionLosesTuple10752(transition hostInboundScopeTransition10752, tuple keptFlowTuple10752) bool {
+	if !hostInboundScopeAdmitsTuple10752(transition.old, tuple) {
+		return false
+	}
+	for _, next := range transition.new {
+		if !hostInboundScopeAdmitsTuple10752(next, tuple) {
+			return true
+		}
+	}
+	return len(transition.new) == 0
+}
+
+func hostInboundScopeTransitionLosesAddressTuple10752(
+	scope string,
+	addressScopes []string,
+	transitions map[string]hostInboundScopeTransition10752,
+	tuple keptFlowTuple10752,
+) bool {
+	if zone, ok := hostInboundZoneScopeName10752(scope); ok {
+		prefix := "zone:" + zone + "|iface:"
+		hasInterfaceScope := false
+		for _, candidate := range addressScopes {
+			if !strings.HasPrefix(candidate, prefix) {
+				continue
+			}
+			hasInterfaceScope = true
+			if transition, ok := transitions[candidate]; ok &&
+				hostInboundScopeTransitionLosesTuple10752(transition, tuple) {
+				return true
+			}
+		}
+		if hasInterfaceScope {
+			return false
+		}
+	}
+	transition, ok := transitions[scope]
+	return ok && hostInboundScopeTransitionLosesTuple10752(transition, tuple)
+}
+
+func sortedKeptTupleKeys10752(byTuple map[keptFlowTuple10752]keptTupleEvidence10752) []keptFlowTuple10752 {
+	tuples := make([]keptFlowTuple10752, 0, len(byTuple))
+	for tuple := range byTuple {
+		tuples = append(tuples, tuple)
+	}
+	sort.Slice(tuples, func(i, j int) bool {
+		a, b := tuples[i], tuples[j]
+		if a.src != b.src {
+			return a.src.Less(b.src)
+		}
+		if a.dst != b.dst {
+			return a.dst.Less(b.dst)
+		}
+		if a.protocol != b.protocol {
+			return a.protocol < b.protocol
+		}
+		if a.srcPort != b.srcPort {
+			return a.srcPort < b.srcPort
+		}
+		return a.dstPort < b.dstPort
+	})
+	return tuples
+}
+func keptFlowTupleSample10752(tuple keptFlowTuple10752) string {
+	src, dst := "?", "?"
+	if tuple.src.IsValid() {
+		src = tuple.src.String()
+	}
+	if tuple.dst.IsValid() {
+		dst = tuple.dst.String()
+	}
+	return fmt.Sprintf("%s %s:%d→%s:%d",
+		protoName10752(tuple.protocol), src, tuple.srcPort, dst, tuple.dstPort)
 }
 
 // hostInboundZoneScopeName10752 splits a "zone:<name>" scope key, reporting
@@ -757,29 +749,23 @@ const silentClasses10752 = "in-range customs (UDP, or TCP without a local LISTEN
 // sub-object (read-only post-commit) but owns its Warnings storage — the
 // applied original is never mutated.
 //
-// With stranded flows observed in narrowed scopes: at most three lines — the
-// customs line, the exempt/bare line (each present only when its class was
-// observed, naming only narrowed scopes with intersecting evidence OF THAT
-// CLASS, counts and samples drawn only from those scopes' addresses; the
-// customs line additionally requires a full-admit loss or the loss of a
-// named token admitting sweep-custom tuples, since other token-only
-// narrowings never admitted customs), plus the silent-class pointer
-// sentence. With narrowed scopes but zero intersecting evidence:
-// one transition-only advisory naming the narrowed scopes with honest
-// zero-observed wording, so silent-class narrowings never pass
-// commit-silent. The advisory is suppressed only when the narrowed scopes'
-// zones own no address in either generation (zone-granular by design).
+// With stranded tuples observed in narrowed scopes: at most three lines — the
+// customs line, the exempt/bare line (each present only when its class has
+// exact tuples admitted by the OLD effective policy and denied by the NEW one,
+// naming only scopes whose transition removed that tuple's admission, with
+// counts and samples drawn only from those tuples), plus the silent-class
+// pointer sentence. With narrowed scopes but zero matching tuples, one
+// transition-only advisory names the narrowed scopes with honest
+// zero-observed wording, so silent-class narrowings never pass commit-silent.
+// The advisory is suppressed only when the narrowed scopes' zones own no
+// address in either generation (zone-granular by design).
 func (d *Daemon) withTighteningWarningsForResponse10752(respCfg, oldActive, compiled *config.Config) *config.Config {
 	if respCfg == nil {
 		return respCfg
 	}
-	scopes, customFire := hostInboundTightenedScopes(oldActive, compiled)
+	scopes, transitions := hostInboundTightenedScopes(oldActive, compiled)
 	if len(scopes) == 0 {
 		return respCfg
-	}
-	tight := make(map[string]bool, len(scopes))
-	for _, scope := range scopes {
-		tight[scope] = true
 	}
 	evidence := d.stashedKeptSuspicious10752()
 	addrs := make([]netip.Addr, 0, len(evidence))
@@ -792,50 +778,38 @@ func (d *Daemon) withTighteningWarningsForResponse10752(respCfg, oldActive, comp
 	var customSamples []string
 	var other uint64
 	var otherSamples []string
-	// Named scopes are tracked separately per class: a scope with only
-	// custom evidence must not appear on the exempt/bare line, and vice
-	// versa. A scope with both classes' evidence appears on both lines.
-	// Customs additionally require the scope to have lost full-admit or a
-	// named token admitting sweep-custom tuples (rip/ripng/bfd-Echo): other
-	// token-only narrowings never admitted customs, so observed customs
-	// there are unchanged-authorization flows, not stranded ones, and
-	// the transition falls through to the advisory instead.
 	namedCustom := map[string]bool{}
 	namedOther := map[string]bool{}
 	for _, addr := range addrs {
 		ev := evidence[addr]
-		var hit, hitCustom []string
-		for _, scope := range attr[addr] {
-			if !tight[scope] {
+		for _, tuple := range sortedKeptTupleKeys10752(ev.byTuple) {
+			tupleEv := ev.byTuple[tuple]
+			if !tuple.src.IsValid() || tuple.src.Unmap() != addr.Unmap() {
 				continue
 			}
-			hit = append(hit, scope)
-			if customFire[scope] {
-				hitCustom = append(hitCustom, scope)
-			}
-		}
-		if ev.custom > 0 && len(hitCustom) > 0 {
-			custom += ev.custom
-			for _, s := range ev.customSamples {
-				if len(customSamples) >= 5 {
-					break
+			var hit []string
+			for _, scope := range attr[addr] {
+				if hostInboundScopeTransitionLosesAddressTuple10752(scope, attr[addr], transitions, tuple) {
+					hit = append(hit, scope)
 				}
-				customSamples = append(customSamples, s)
 			}
-			for _, scope := range hitCustom {
-				namedCustom[scope] = true
-			}
-		}
-		if ev.other > 0 && len(hit) > 0 {
-			other += ev.other
-			for _, s := range ev.otherSamples {
-				if len(otherSamples) >= 3 {
-					break
+			if tupleEv.custom > 0 && len(hit) > 0 {
+				custom += tupleEv.custom
+				if len(customSamples) < 5 {
+					customSamples = append(customSamples, keptFlowTupleSample10752(tuple))
 				}
-				otherSamples = append(otherSamples, s)
+				for _, scope := range hit {
+					namedCustom[scope] = true
+				}
 			}
-			for _, scope := range hit {
-				namedOther[scope] = true
+			if tupleEv.other > 0 && len(hit) > 0 {
+				other += tupleEv.other
+				if len(otherSamples) < 3 {
+					otherSamples = append(otherSamples, keptFlowTupleSample10752(tuple))
+				}
+				for _, scope := range hit {
+					namedOther[scope] = true
+				}
 			}
 		}
 	}
