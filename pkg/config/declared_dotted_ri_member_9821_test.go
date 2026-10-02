@@ -297,7 +297,7 @@ func TestVRFOverlapPBRTrioDeclaredDotted9821(t *testing.T) {
 }
 
 // TestRoutingInstanceByInterfaceLiteralKeys9821: the NAT scope index keys
-// canonical Literals so padded members hit the same key the runtime binds.
+// canonical Literals and omits a contested device rather than picking an owner.
 func TestRoutingInstanceByInterfaceLiteralKeys9821(t *testing.T) {
 	cfg := &Config{
 		Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
@@ -310,11 +310,9 @@ func TestRoutingInstanceByInterfaceLiteralKeys9821(t *testing.T) {
 			{Name: "RC", Interfaces: []string{"p.0.1"}},
 		},
 	}
-	got := routingInstanceByInterface(cfg)
-	// Padded declared-unit member keys the canonical unit (runtime binds it);
-	// first-in-sorted-order wins the normalized collision (RA < RC).
-	if got["p.0.1"] != "RA" {
-		t.Errorf(`riByIface["p.0.1"] = %q, want "RA"`, got["p.0.1"])
+	got, _ := routingInstanceByInterface(cfg)
+	if _, ok := got["p.0.1"]; ok {
+		t.Errorf("contested p.0.1 key has a NAT diagnostic owner: %q", got["p.0.1"])
 	}
 	if _, ok := got["p.0.01"]; ok {
 		t.Errorf("raw padded key p.0.01 still indexed: %q", got)

@@ -8,6 +8,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Apply shared PAM faillock on the supported non-appliance SSH stack while
     preserving the appliance posture and administrator-owned PAM stacks
     (#11492).
+  * Require a live VRF link type for tunnel bind, claim observation, and
+    claim-lapse unbind; derive NAT egress diagnostics from quarantine-safe
+    routing-instance ownership (#11494).
   * Reject zone references to absent logical units and keep flow-sampling
     restrictions fail-closed rather than widening exports (#11433).
   * Retain DHCPv6 router-advertisement gateways through RA silence, re-solicit

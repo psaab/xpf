@@ -1167,8 +1167,9 @@ func (t *tunnelManager) unbindVRFClaimLocked(name string, link netlink.Link) (re
 		// Transient lookup error: retain the claim, retry next apply.
 		return true
 	}
-	if vrf.Attrs().Index != master {
-		// Master is not the VRF we bound (someone else's bind).
+	masterVRF, ok := vrf.(*netlink.Vrf)
+	if !ok || masterVRF == nil || masterVRF.Attrs() == nil || masterVRF.Attrs().Index != master {
+		// A same-name non-VRF link is not the claimed master either.
 		delete(t.appliedRI, name)
 		return false
 	}
@@ -1202,7 +1203,8 @@ func (t *tunnelManager) observeListClaimLocked(tc *config.TunnelConfig, link net
 	if err != nil {
 		return // retain prior claim
 	}
-	if vrf.Attrs().Index == master {
+	masterVRF, ok := vrf.(*netlink.Vrf)
+	if ok && masterVRF != nil && masterVRF.Attrs() != nil && masterVRF.Attrs().Index == master {
 		t.appliedRI[tc.Name] = tc.RIListMember
 	}
 }
