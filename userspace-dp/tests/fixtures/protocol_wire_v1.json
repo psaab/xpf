@@ -374,9 +374,11 @@
     "session_sync": null,
     "snapshot": null,
     "suppress_status": false,
-    "type": ""
+    "type": "",
+    "version": 0
   },
   "control_response": {
+    "fib_generation": 0,
     "ok": false,
     "persistent_nat_lease_count": 0,
     "policy_delete_complete": false,
@@ -797,6 +799,7 @@
     "local_fabric_member": "",
     "mtu": 0,
     "name": "",
+    "native_vlan_id": 0,
     "parent_ifindex": 0,
     "parent_linux_name": "",
     "redundancy_group": 0,
