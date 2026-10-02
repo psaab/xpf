@@ -714,12 +714,13 @@ absent and the same config denies everything instead.
   config-mode method, a routing-status RPC with no `cmdtree` command, an unknown
   `ShowText` topic, or a prefix-form `SystemAction` verb.
 
-#### The two surfaces do not match the same string
+#### Dispatch surfaces do not match the same string
 
 The on-box gate matches the full canonicalized line, **argument values and the
 output pipe included**. The gRPC gate matches the canonical command **path**,
 because the remote `cli` parses the line client-side and only a typed RPC
-crosses the wire — `ping 10.0.0.1` arrives as `Ping{Host:"10.0.0.1"}`.
+crosses the wire — `ping 10.0.0.1` arrives as `Ping{Host:"10.0.0.1"}`. REST
+matches the argument-free canonical command assigned to each route.
 
 The canonicalized line holds only words the command tree models. Every value
 slot takes exactly one value, so a word appended after a value
@@ -737,27 +738,28 @@ matched as typed, so a deny on `display set` still sees it. A pipe verb the CLI
 does not implement is refused. The command WITHOUT its pipe is matched as well,
 so `^show version$` also denies `show version | match .`.
 
-So a deny written against a **path** (`request system reboot`) is enforced
-identically on both. A deny written against **argument text**
-(`show route table secret-vrf`) is enforced on the box and **not** over gRPC.
-A pattern that can never fire on the gRPC surface is reported for the class, so
-this is visible rather than inferred.
+So a deny written against a **path** (`request system reboot`) is enforced on
+both server surfaces that map the command. A deny written against **argument
+text** (`show route table secret-vrf`) is enforced on the box but may not match
+the argument-free canonical command evaluated by gRPC or REST. At commit, the
+advisory names registered surfaces on which the whole pattern cannot fire; this
+includes REST since #11678, so the gap is visible rather than inferred.
 
 The same holds for each alternative of a combined pattern (#9340). Take
-`^(show route table secret-vrf|request system reboot)$`. It is enforced on both
-surfaces for `request system reboot` and only on the box for
-`show route table secret-vrf`, and the commit output names that alternative.
-Before #9340 the enforceable half silenced the warning for the whole pattern.
-The alternatives come from the parsed pattern: alternations and optional groups,
-however they are spelled or anchored. So the report does not depend on how the
-rule was written. A pattern with more than 64 alternatives is not split and
-keeps the whole-pattern answer.
+`^(show route table secret-vrf|request system reboot)$`. The reboot alternative
+is enforceable on both server surfaces, while the argument-text alternative
+applies only on the box; the commit advisory names the surfaces where that
+alternative cannot fire. Before #9340 the enforceable half silenced the warning
+for the whole pattern. The alternatives come from the parsed pattern:
+alternations and optional groups, however they are spelled or anchored. So the
+report does not depend on how the rule was written. A pattern with more than 64
+alternatives is not split and keeps the whole-pattern answer.
 
 "Can fire" means the deny pattern is what refuses a command. A class with an
 `allow-commands` pattern also refuses every command outside its allow list.
 Before #9340, those refusals counted as the deny firing, so allow `^show` with
 deny `^show route table secret-vrf` reported nothing, although that deny decides
-nothing on the gRPC surface.
+nothing on either the gRPC or REST surface.
 
 #### The `*-regexps` family is NOT implemented (#7971)
 

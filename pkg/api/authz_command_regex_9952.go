@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"sync"
 
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/cmdtree"
@@ -155,6 +157,34 @@ var restRoutesNoCommand = map[string]string{
 	"GET /api/v1/routing/ospf":            "no argument-free operational twin in the operational tree",
 	"GET /api/v1/system/buffers":          "no argument-free operational twin in the operational tree",
 	"GET /api/v1/services/flow-exporters": "no operational twin: REST-only observability surface (#2464)",
+}
+
+// #11678: the commit-time deny advisory also needs the command set that the
+// REST route table can evaluate. REST's mappings are argument-free, so an
+// argument-scoped deny may be valid on the box yet never fire on this surface.
+const restSurfaceName9952 = "the REST surface"
+
+var allRESTCanonicalCommands9952 = sync.OnceValue(func() []string {
+	seen := make(map[string]bool)
+	for _, commands := range []map[string]string{
+		restRouteCommand,
+		cmdtree.ShowTextTopicCommands(),
+		authz.SystemActionVerbCommand,
+	} {
+		for _, command := range commands {
+			seen[command] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for command := range seen {
+		out = append(out, command)
+	}
+	sort.Strings(out)
+	return out
+})
+
+func init() {
+	config.RegisterCommandSurface(restSurfaceName9952, allRESTCanonicalCommands9952)
 }
 
 // restRequestCommand9952 resolves the canonical command for the two
