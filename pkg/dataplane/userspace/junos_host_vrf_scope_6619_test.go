@@ -141,12 +141,10 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 			wantWarn:   0,
 		},
 		{
-			// #6619, resolved-NONE. The zone's only ingress netdev is enslaved,
-			// so nothing can be scoped and the deny is unenforceable on the
-			// direct host-bound path. Before the fix this emitted a rule on
-			// `ge-0-0-1` — which LOCAL_IN never reports — and suppressed the
-			// warning.
-			name:       "VRF-enslaved, only interface — nothing scoped, warning fires",
+			// A VRF member's kernel iifname is the LOCAL_IN-visible master.
+			// The deny remains scoped and enforceable there, suppressing its
+			// former #4168 coverage warning.
+			name:       "VRF-enslaved, only interface — master scoped, warning suppressed",
 			zone:       "zoneA",
 			policyName: "denyA",
 			cmds: concat(vrfScopeBase,
@@ -156,16 +154,15 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 					"set routing-instances vrA interface ge-0/0/1.0",
 				},
 				vrfScopeDeny("zoneA", "denyA")),
-			wantScoped: nil,
-			wantRules:  false,
-			wantWarn:   1,
+			wantScoped: []string{"vrf-vrA"},
+			wantRules:  true,
+			wantWarn:   0,
 		},
 		{
-			// #6619 + member 8, resolved-SOME. Keep the rule for ge-0-0-2,
-			// but warn that VRF-enslaved ge-0-0-1 cannot be scoped. Strict
-			// commits reject zones spanning MAIN and vrA (#11061); configs
-			// committed before that gate can still arrive through tolerant load.
-			name:       "legacy mixed-routing zone — partial scope, rule AND warning",
+			// The VRF member is now covered by vrf-vrA and the ordinary
+			// interface by ge-0-0-2. Both ingress paths are scoped, so the
+			// legacy mixed-routing config keeps its rule without a gap warning.
+			name:       "legacy mixed-routing zone — both scopes emitted, warning suppressed",
 			zone:       "zoneA",
 			policyName: "denyA",
 			cmds: concat(vrfScopeBase,
@@ -177,17 +174,15 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 				},
 				vrfScopeDeny("zoneA", "denyA")),
 			compileLenient: true,
-			wantScoped:     []string{"ge-0-0-2"},
+			wantScoped:     []string{"ge-0-0-2", "vrf-vrA"},
 			wantRules:      true,
-			wantWarn:       1,
+			wantWarn:       0,
 		},
 		{
-			// The enslavement predicate keys on the NETDEV, not the config ref.
-			// A bare physical member enslaves the device that unit 0 also
-			// resolves to, so a zone holding `ge-0/0/1.0` is covered by a
-			// routing instance naming `ge-0/0/1`. Keying on the ref would miss
-			// this and leave the original defect intact for the commoner spelling.
-			name:       "routing instance names the bare physical — unit 0 shares that netdev",
+			// A bare RI member fans down to the configured tagged unit too.
+			// Since that sibling is unzoned, LOCAL_IN cannot distinguish it
+			// from the zoneA unit-0 member; the master must stay unscopable.
+			name:       "bare physical with unzoned VLAN sibling — master stays unscopable",
 			zone:       "zoneA",
 			policyName: "denyA",
 			cmds: concat(vrfScopeBase,
@@ -268,17 +263,28 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 			wantWarn:   0,
 		},
 		{
-			// A VLAN subunit is a distinct kernel device with its own master, so
-			// enslaving the PARENT does not enslave the subunit: ge-0-0-1.50 stays
-			// scopable and the rule is still emitted on it.
-			//
-			// The warning nonetheless fires, and that is correct rather than
-			// incidental. `junosHostZoneByInterface` back-fills the BARE physical
-			// to the zone of a subunit when no other zone claims it, so zoneB owns
-			// ge-0-0-1 as an OWN candidate here — and that candidate is enslaved.
-			// The zone really does have an ingress path the deny cannot cover, and
-			// the row asserts the pair: keep what is scopable, announce what is not.
-			name:       "parent enslaved, subunit is not — subunit stays scopable, gap announced",
+			// A VLAN subunit is a distinct kernel device with its own master,
+			// so an explicit unit-0 RI member enslaves the parent but not
+			// ge-0-0-1.50. Both the subunit and the parent master are covered.
+			name:       "explicit parent unit enslaved, subunit is not — both scopes stay enforceable",
+			zone:       "zoneB",
+			policyName: "denyB",
+			cmds: concat(vrfScopeBase,
+				[]string{
+					"set security zones security-zone zoneB interfaces ge-0/0/1.50",
+					"set routing-instances vrA instance-type virtual-router",
+					"set routing-instances vrA interface ge-0/0/1.0",
+				},
+				vrfScopeDeny("zoneB", "denyB")),
+			wantScoped: []string{"ge-0-0-1.50", "vrf-vrA"},
+			wantRules:  true,
+			wantWarn:   0,
+		},
+		{
+			// A bare routing-instance member fans down to every configured unit
+			// in the daemon binder. The subunit therefore shares the master scope
+			// even though the raw interface ref is not itself its device name.
+			name:       "bare parent member fans tagged subunit into master scope",
 			zone:       "zoneB",
 			policyName: "denyB",
 			cmds: concat(vrfScopeBase,
@@ -288,9 +294,9 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 					"set routing-instances vrA interface ge-0/0/1",
 				},
 				vrfScopeDeny("zoneB", "denyB")),
-			wantScoped: []string{"ge-0-0-1.50"},
+			wantScoped: []string{"vrf-vrA"},
 			wantRules:  true,
-			wantWarn:   1,
+			wantWarn:   0,
 		},
 	}
 
