@@ -139,16 +139,16 @@ func (c *xpfCollector) initAutomationDescriptors() {
 	)
 	c.feedShrinkRefusalsTotal = prometheus.NewDesc(
 		"xpf_feed_shrink_refusals_total",
-		"Per-feed count of non-empty dynamic-address snapshots refused by "+
-			"the drastic-shrink guard. Alert on increases to catch intermittent "+
+		"Per-feed count of non-empty dynamic-address snapshots refused by the "+
+			"shrink or content-churn guard. Alert on increases to catch intermittent "+
 			"refused candidates even after a later install clears the active alarm.",
 		[]string{"feed"}, nil,
 	)
 	c.feedShrinkRefused = prometheus.NewDesc(
 		"xpf_feed_shrink_refused",
-		"1 while a dynamic-address feed's current candidate is refused as a "+
-			"drastic shrink; 0 once a fresh install clears that refusal. Alert "+
-			"on this gauge to keep a persistent guard refusal visible.",
+		"1 while a dynamic-address feed's current candidate is refused by the "+
+			"shrink or content-churn guard; 0 once a fresh install clears that "+
+			"refusal. Alert on this gauge to keep a persistent guard refusal visible.",
 		[]string{"feed"}, nil,
 	)
 }

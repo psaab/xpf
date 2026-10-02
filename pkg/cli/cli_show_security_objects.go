@@ -320,8 +320,10 @@ func renderDynamicAddress(w io.Writer, cfg *config.Config, runtimeFeeds map[stri
 		if minDrop < 1 || minDrop >= config.MaxDynamicAddressFeedPrefixes {
 			minDrop = config.DefaultDynamicAddressShrinkGuardMinDrop
 		}
-		fmt.Fprintf(w, "    Shrink guard: old >= %d prefixes; refuse below %d%% retained with a drop of at least %d\n",
+		fmt.Fprintf(w, "    Shrink guard: high-water >= %d prefixes; refuse candidates below %d%% of baseline with a drop of at least %d\n",
 			minOld, minRetain, minDrop)
+		fmt.Fprintf(w, "    Content churn guard: installed >= %d prefixes; refuse below %d%% exact-prefix overlap\n",
+			minOld, minRetain)
 
 		for _, runtimeName := range runtimeNames {
 			fi, ok := runtimeFeeds[runtimeName]
@@ -493,13 +495,20 @@ func renderDynamicAddressFeedStatus(w io.Writer, indent string, fi feeds.FeedInf
 	if fi.ShrinkRefusalCount > 0 {
 		fmt.Fprintf(w, "%sShrink refusals: %d\n", indent, fi.ShrinkRefusalCount)
 	}
+	if fi.ShrinkGuardHighWaterCount > 0 {
+		fmt.Fprintf(w, "%sShrink high-water baseline: %d prefixes sha256=%s\n",
+			indent, fi.ShrinkGuardHighWaterCount, fi.ShrinkGuardHighWaterHash)
+	}
 	if fi.ShrinkRefused {
 		if fi.Hash != "" {
 			fmt.Fprintf(w, "%sInstalled snapshot sha256=%s\n", indent, fi.Hash)
 		}
-		fmt.Fprintf(w, "%sSHRINK-HELD: candidate %d/%d prefixes; refusal #%d; candidate_sha256=%s baseline_sha256=%s\n",
+		fmt.Fprintf(w, "%sSHRINK-HELD: candidate %d prefixes vs guard baseline %d; refusal #%d; candidate_sha256=%s baseline_sha256=%s\n",
 			indent, fi.ShrinkCandidateNewCount, fi.ShrinkCandidateOldCount,
 			fi.ShrinkRefusalID, fi.ShrinkCandidateHash, fi.ShrinkBaselineHash)
+		if fi.ShrinkCandidateReason != "" {
+			fmt.Fprintf(w, "%sGuard reason: %s\n", indent, fi.ShrinkCandidateReason)
+		}
 		if fi.ShrinkAckPending {
 			fmt.Fprintf(w, "%sSHRINK-ACKED: exact candidate #%d awaiting next fetch\n", indent, fi.ShrinkRefusalID)
 			fmt.Fprintf(w, "%s  Acked candidate_sha256=%s baseline_sha256=%s by %s; reason: %q\n",
