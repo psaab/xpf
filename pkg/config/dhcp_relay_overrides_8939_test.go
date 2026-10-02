@@ -20,6 +20,10 @@ func TestDHCPRelayOverridesPackedRun8939(t *testing.T) {
 	build := func(t *testing.T, lines ...string) *DHCPRelayGroup {
 		t.Helper()
 		tr := &ConfigTree{}
+		lines = append([]string{
+			"set forwarding-options dhcp-relay server-group sg 192.0.2.1",
+			"set forwarding-options dhcp-relay group G active-server-group sg",
+		}, lines...)
 		for _, l := range lines {
 			p, err := ParseSetCommand(l)
 			if err != nil {

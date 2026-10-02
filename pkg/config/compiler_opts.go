@@ -1442,6 +1442,9 @@ type compileOpts struct {
 	// supported scalar Interface-ID values; warned modifiers and descendants
 	// remain inert rather than becoming literal Option-18 bytes.
 	lenientDHCPRelayDHCPv6 bool
+	// lenientDHCPRelayV4Config downgrades invalid DHCPv4 server-group and
+	// active-server-group references to warnings on tolerant load / peer-sync.
+	lenientDHCPRelayV4Config bool
 	// lenientDHCPRelayChildTokens (#9552) downgrades
 	// validateDHCPRelayChildTokensAST from a hard compile error to a cfg.Warnings
 	// entry on the tolerant load / peer-sync paths, so a persisted or peer-synced
@@ -3122,6 +3125,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDHCPRelayDHCPv6:                 true,
 		lenientWireguardRoutingInstance:        true,
 		lenientDHCPRelayChildTokens:            true,
+		lenientDHCPRelayV4Config:               true,
 		lenientRoutingRuleWindows:              true,
 		lenientPolicyRouteMapSeq:               true,
 		lenientRouteDispositionConflict:        true,

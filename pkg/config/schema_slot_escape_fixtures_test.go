@@ -226,6 +226,8 @@ var slotEscRibGroup = []string{
 // escape comparison instead of skipping. Removed rather than annotated: an
 // entry here means "this gate has nothing to compare", which is no longer true.
 var slotEscapeUngated = map[string]string{
+	"forwarding-options dhcp-relay group <*> interface": "" +
+		"v4 relay interfaces are accepted as tokens; semantic v4 validation checks servers and active-group links, not interface spelling",
 	"snmp trap-group <*> categories": "" +
 		"trap categories are an open token set at commit; no domain check exists to escape",
 }
@@ -490,6 +492,15 @@ func slotEscapeRows() []slotEscapeRow {
 			[]string{"set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8::1/64 vrrp-group 1 priority 100"},
 			"set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8::1/64 vrrp-group 1 virtual-address", "2001:db8::254/64", "2001:db8::zzz/64"},
 
+		// -- DHCPv4 relay ---------------------------------------------------------
+		// #11693's semantic gate requires the group to resolve a configured
+		// server-group; provide one so this row tests only interface slot checks.
+		{"dhcpv4 relay interface name validator", "forwarding-options dhcp-relay group <*> interface",
+			[]string{
+				"set forwarding-options dhcp-relay server-group sg 192.0.2.1",
+				"set forwarding-options dhcp-relay group g1 active-server-group sg",
+			},
+			"set forwarding-options dhcp-relay group g1 interface", "ge-0/0/0.0", "bad*glob"},
 		// -- DHCPv6 relay ---------------------------------------------------------
 		// #9553 gives this multi-value leaf the same interface-name
 		// validator as the v4 path. Keep a complete relay prerequisite so

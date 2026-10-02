@@ -120,6 +120,8 @@ func TestZoneLevelDHCPIsRetainedForABothRolesInterface7490(t *testing.T) {
 		"set interfaces ge-0/0/5 unit 0 family inet dhcp",
 		"set security zones security-zone trust interfaces ge-0/0/5.0",
 		"set security zones security-zone trust host-inbound-traffic system-services dhcp",
+		"set forwarding-options dhcp-relay server-group sg 192.0.2.1",
+		"set forwarding-options dhcp-relay group r active-server-group sg",
 		"set forwarding-options dhcp-relay group r interface ge-0/0/5.0",
 	)
 	z := cfg.Security.Zones["trust"]

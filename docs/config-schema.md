@@ -7172,6 +7172,16 @@ compiler reads or accepts is declared. Since #9620 the compiler keeps no keyword
 list of its own: a brace-elided instance is split by these same declarations
 (see "Brace-elided routing instances"), so there is no second set to drift.
 
+## `forwarding-options dhcp-relay` — DHCPv4 server validation (#11693)
+
+Strict compilation requires every DHCPv4 relay group to name a defined,
+non-empty `active-server-group`. Each configured server-group must contain at
+least one usable IPv4 unicast server address; malformed, IPv6, unspecified,
+multicast, loopback, and link-local addresses are rejected. Tolerant load and
+peer-sync paths report the same semantic failures as `DHCPRelay` warnings, and
+the runtime independently excludes unusable addresses before building relay
+state. Valid server address strings are retained unchanged.
+
 ## `forwarding-options dhcp-relay dhcpv6` — supported RFC 8415 subset (#9553); historical refusal (#9411)
 
 The full-stanza refusal from #9411 is **historical and retired for the
