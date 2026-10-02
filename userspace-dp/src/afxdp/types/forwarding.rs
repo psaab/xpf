@@ -100,6 +100,14 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) local_tables_v6: FastMap<Ipv6Addr, FastSet<String>>,
     pub(in crate::afxdp) local_nat_any_table_v4: FastSet<Ipv4Addr>,
     pub(in crate::afxdp) local_nat_any_table_v6: FastSet<Ipv6Addr>,
+    /// #11439: per-NAT-external ownership metadata, keyed only for addresses
+    /// appended to `local_v*` by the late NAT-target build. `true` means every
+    /// configured translation for the external address targets one of our
+    /// configured interface addresses; `false` means at least one target is a
+    /// transit host. Proxy-ARP ownership alone must not claim a local XFRM
+    /// destination.
+    pub(in crate::afxdp) local_nat_to_self_v4: FastMap<Ipv4Addr, bool>,
+    pub(in crate::afxdp) local_nat_to_self_v6: FastMap<Ipv6Addr, bool>,
     /// #3182: EVERY configured interface address, decoupled from the
     /// NAT-aware `local_v*` exclusion. `local_v4`/`local_v6` drop the IP of
     /// any interface whose zone is an interface-mode-SNAT `to_zone`
@@ -953,6 +961,25 @@ impl ForwardingState {
         match ip {
             IpAddr::V4(v4) => self.configured_iface_v4.contains(&v4) || self.local_v4.contains(&v4),
             IpAddr::V6(v6) => self.configured_iface_v6.contains(&v6) || self.local_v6.contains(&v6),
+        }
+    }
+    /// Base address ownership for Stage 11: interface addresses remain local
+    /// (including interface-mode-SNAT/WAN exclusions), while NAT external
+    /// addresses are local only when their configured translations target
+    /// configured interface addresses. Because a DNAT rule can use an interface
+    /// address as a transit VIP, Stage 11 also probes the packet's actual DNAT
+    /// match and lets a matching transit translation override this base result.
+    #[inline]
+    pub(in crate::afxdp) fn owns_ipsec_local_destination(&self, ip: IpAddr) -> bool {
+        match ip {
+            IpAddr::V4(v4) => {
+                self.configured_iface_v4.contains(&v4)
+                    || self.local_nat_to_self_v4.get(&v4).copied().unwrap_or(false)
+            }
+            IpAddr::V6(v6) => {
+                self.configured_iface_v6.contains(&v6)
+                    || self.local_nat_to_self_v6.get(&v6).copied().unwrap_or(false)
+            }
         }
     }
 }

@@ -1342,25 +1342,23 @@ impl DnatTable {
         // IPs (and the block-expansion bound) can never drift between the two
         // views.
         let mut seen: FxHashMap<IpAddr, ()> = FxHashMap::default();
-        for (ip, _instance) in self.destination_ips_scoped() {
+        for (ip, _instance, _translated_ip) in self.destination_ips_scoped() {
             seen.entry(ip).or_insert(());
         }
         seen.into_keys()
     }
 
-    /// #3769: like [`destination_ips`], but pairs each destination IP with the
-    /// `from routing-instance` scope of the owning DNAT rule ("" = the default
-    /// instance / global). The forwarding-state builder converts the routing
-    /// instance to a canonical route table and records the attribution in
-    /// `local_tables_v*`, so the local-delivery shortcut is gated on the
-    /// resolving VRF rather than the global `local_v*` membership (the #3769
-    /// cross-VRF local-delivery leak). Not deduplicated — a destination IP can
-    /// legitimately be owned by DNAT rules in more than one routing-instance;
-    /// the builder inserts into a per-IP set of tables. The same
-    /// `MAX_LOCAL_PREFIX_HOSTS`-bounded prefix expansion as `destination_ips`
-    /// is applied so on-segment proxy-ARP/ND parity is preserved.
-    pub(crate) fn destination_ips_scoped(&self) -> Vec<(IpAddr, &str)> {
-        let mut out: Vec<(IpAddr, &str)> = Vec::new();
+    /// #3769/#11439: like [`destination_ips`], but pairs each destination IP
+    /// with the `from routing-instance` scope of its DNAT rule and translated
+    /// target. The forwarding-state builder records table attribution and
+    /// whether the target is a configured interface address, so proxy-ARP
+    /// ownership alone is not mistaken for a local XFRM destination. Not
+    /// deduplicated: an external IP may have multiple scoped translation
+    /// targets, and the builder treats it as nat-to-self only when all targets
+    /// are firewall-owned. The same bounded prefix expansion as
+    /// `destination_ips` preserves on-segment proxy-ARP/ND behavior.
+    pub(crate) fn destination_ips_scoped(&self) -> Vec<(IpAddr, &str, IpAddr)> {
+        let mut out: Vec<(IpAddr, &str, IpAddr)> = Vec::new();
         for (key, entries) in &self.entries {
             for entry in entries {
                 // #3844: a `then destination-nat off` exemption must NOT
@@ -1371,7 +1369,11 @@ impl DnatTable {
                 if entry.off {
                     continue;
                 }
-                out.push((key.dst_ip, entry.from_routing_instance.as_ref()));
+                out.push((
+                    key.dst_ip,
+                    entry.from_routing_instance.as_ref(),
+                    entry.value.new_dst_ip,
+                ));
             }
         }
         // #6025: exact-host `off` exemptions that can shadow a translate prefix.
@@ -1452,7 +1454,7 @@ impl DnatTable {
                     // below (host_count is u32::MAX / None), so only the base push
                     // needed this guard.
                     if !net.is_unspecified() && !shadowed(net) {
-                        out.push((net, instance));
+                        out.push((net, instance, slot.entry.value.new_dst_ip));
                     }
                 }
                 match (slot.v4, slot.v6) {
@@ -1463,7 +1465,7 @@ impl DnatTable {
                                 for host in net.hosts() {
                                     let ip = IpAddr::V4(host);
                                     if !shadowed(ip) {
-                                        out.push((ip, instance));
+                                        out.push((ip, instance, slot.entry.value.new_dst_ip));
                                     }
                                 }
                             }
@@ -1478,7 +1480,7 @@ impl DnatTable {
                                 for host in net.hosts() {
                                     let ip = IpAddr::V6(host);
                                     if !shadowed(ip) {
-                                        out.push((ip, instance));
+                                        out.push((ip, instance, slot.entry.value.new_dst_ip));
                                     }
                                 }
                             }

@@ -1382,7 +1382,11 @@ fn static_nat_block_registers_usable_hosts_for_proxy_arp_7219() {
     }
     // The scoped view must agree — the two were independent implementations
     // before this, which is exactly how one could be fixed and the other not.
-    let scoped: Vec<IpAddr> = table.external_ips_scoped().into_iter().map(|(ip, _)| ip).collect();
+    let scoped: Vec<IpAddr> = table
+        .external_ips_scoped()
+        .into_iter()
+        .map(|(ip, _, _)| ip)
+        .collect();
     for host in ["203.0.113.1", "203.0.113.254"] {
         let want: IpAddr = host.parse().unwrap();
         assert!(

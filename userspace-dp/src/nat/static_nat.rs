@@ -1022,33 +1022,29 @@ impl StaticNatTable {
     /// is precisely how one of them could have been fixed and the other not.
     pub(crate) fn external_ips(&self) -> impl Iterator<Item = IpAddr> {
         let mut seen: FxHashMap<IpAddr, ()> = FxHashMap::default();
-        for (ip, _instance) in self.external_ips_scoped() {
+        for (ip, _instance, _translated_ip) in self.external_ips_scoped() {
             seen.entry(ip).or_insert(());
         }
         seen.into_keys()
     }
 
-    /// #3769: like [`external_ips`], but pairs each external IP with the
-    /// `from routing-instance` scope of the owning rule ("" = the default
-    /// instance / global). The forwarding-state builder converts the routing
-    /// instance to a canonical route table and records the table attribution
-    /// in `local_tables_v*`, so the local-delivery shortcut is gated on the
-    /// resolving VRF instead of the global `local_v*` membership. A single
-    /// external IP may appear more than once (per port mapping AND per
-    /// split-horizon scope, #3605); every (IP, instance) pair is yielded and
-    /// the builder inserts into a per-IP set of tables.
-    ///
-    /// #7219: block rules contribute their usable hosts under the shared
-    /// `MAX_LOCAL_PREFIX_HOSTS` bound. A larger block still contributes only its
-    /// network base and relies on being ROUTED to the firewall rather than
-    /// proxy-ARP'd — the same trade `DnatTable` makes, and the reason the bound
-    /// exists at all is that an unbounded expansion of a /8 would be 16M entries
-    /// in a hot lookup set.
-    pub(crate) fn external_ips_scoped(&self) -> Vec<(IpAddr, &str)> {
+    /// #3769/#11439: like [`external_ips`], but pairs each external IP with its
+    /// `from routing-instance` scope and translated internal target. The
+    /// forwarding-state builder records table attribution and whether the
+    /// target is a configured interface address, so proxy-ARP ownership alone
+    /// is not mistaken for a local XFRM destination. An external may appear
+    /// more than once; the builder treats it as nat-to-self only when every
+    /// configured translation target is firewall-owned. Block rules contribute
+    /// the same bounded host expansion as their external-address view.
+    pub(crate) fn external_ips_scoped(&self) -> Vec<(IpAddr, &str, IpAddr)> {
         let mut out = Vec::new();
         for ((ip, _port), entries) in &self.dnat {
             for entry in entries {
-                out.push((*ip, entry.from_routing_instance.as_str()));
+                out.push((
+                    *ip,
+                    entry.from_routing_instance.as_str(),
+                    entry.internal_ip,
+                ));
             }
         }
         for block in &self.blocks {
@@ -1058,7 +1054,9 @@ impl StaticNatTable {
             // it is not an owned unicast VIP, and registering it perturbs
             // local-delivery classification (#5658, same guard as DNAT's).
             if !base.is_unspecified() {
-                out.push((base, instance));
+                if let Some(translated) = remap_addr(base, &block.external, &block.internal) {
+                    out.push((base, instance, translated));
+                }
             }
             match base {
                 IpAddr::V4(addr) => {
@@ -1067,7 +1065,12 @@ impl StaticNatTable {
                         && let Ok(net) = Ipv4Net::new(addr, block.external.len)
                     {
                         for host in net.hosts() {
-                            out.push((IpAddr::V4(host), instance));
+                            let external = IpAddr::V4(host);
+                            if let Some(translated) =
+                                remap_addr(external, &block.external, &block.internal)
+                            {
+                                out.push((external, instance, translated));
+                            }
                         }
                     }
                 }
@@ -1092,7 +1095,12 @@ impl StaticNatTable {
                         && let Ok(net) = Ipv6Net::new(addr, block.external.len)
                     {
                         for host in net.hosts() {
-                            out.push((IpAddr::V6(host), instance));
+                            let external = IpAddr::V6(host);
+                            if let Some(translated) =
+                                remap_addr(external, &block.external, &block.internal)
+                            {
+                                out.push((external, instance, translated));
+                            }
                         }
                     }
                 }

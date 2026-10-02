@@ -10399,3 +10399,118 @@ fn filtered_cookie_ack_cannot_reflect_rst_before_input_filter_11332() {
         "the normal input-filter evaluator must count the denied ACK",
     );
 }
+#[test]
+fn poll_descriptor_transit_dnat_ike_forwards_and_installs_session_11439() {
+    let client = Ipv4Addr::new(198, 51, 100, 20);
+    let vip = Ipv4Addr::new(203, 0, 113, 9);
+    let gateway = Ipv4Addr::new(10, 0, 61, 102);
+    let mut snapshot = nat_snapshot();
+    snapshot.destination_nat_rules = vec![DestinationNATRuleSnapshot {
+        name: "transit-ike".to_string(),
+        from_zone: "wan".to_string(),
+        destination_address: vip.to_string(),
+        destination_port: 500,
+        protocol: "udp".to_string(),
+        pool_address: gateway.to_string(),
+        pool_port: 500,
+        ..Default::default()
+    }];
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "allow-transit-ike".to_string(),
+        from_zone: "wan".to_string(),
+        to_zone: "lan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 24,
+        family: "inet".to_string(),
+        ip: gateway.to_string(),
+        mac: "00:aa:bb:cc:dd:ee".to_string(),
+        state: "reachable".to_string(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+
+    // Ethernet + IPv4 + UDP + a valid 28-byte IKEv2 header. IPv4 UDP checksum
+    // zero is valid; the IP and UDP declared lengths cover the complete frame.
+    let mut frame = vec![0u8; 14 + 20 + 8 + 28];
+    frame[..6].copy_from_slice(&TEST_WAN_MAC);
+    frame[6..12].copy_from_slice(&[0x02, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+    frame[14] = 0x45;
+    frame[16..18].copy_from_slice(&56u16.to_be_bytes());
+    frame[18..20].copy_from_slice(&0x4000u16.to_be_bytes());
+    frame[22] = 64;
+    frame[23] = PROTO_UDP;
+    frame[26..30].copy_from_slice(&client.octets());
+    frame[30..34].copy_from_slice(&vip.octets());
+    let ip_checksum = checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&ip_checksum.to_be_bytes());
+    frame[34..36].copy_from_slice(&40000u16.to_be_bytes());
+    frame[36..38].copy_from_slice(&500u16.to_be_bytes());
+    frame[38..40].copy_from_slice(&36u16.to_be_bytes());
+    frame[42..50].copy_from_slice(&0x1122_3344_5566_7788u64.to_be_bytes());
+    frame[50..58].copy_from_slice(&0u64.to_be_bytes());
+    frame[58..62].copy_from_slice(&[0x00, 0x20, 0x22, 0x08]);
+    frame[62..66].copy_from_slice(&0u32.to_be_bytes());
+    frame[66..70].copy_from_slice(&28u32.to_be_bytes());
+
+    let original_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        src_ip: IpAddr::V4(client),
+        dst_ip: IpAddr::V4(vip),
+        src_port: 40000,
+        dst_port: 500,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 12,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        flow_src_port: 40000,
+        flow_dst_port: 500,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    let (_, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &txn_ha_state(),
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(dbg.forward, 1, "transit IKE must take the forwarding path");
+    assert_eq!(dbg.policy_deny, 0, "the WAN-to-LAN transit policy permits it");
+    assert!(
+        sessions.lifetime_state_for(&original_key).is_some(),
+        "the original client-to-VIP flow must install a tracked session"
+    );
+    assert_eq!(binding.scratch.scratch_forwards.len(), 1);
+    let request = &binding.scratch.scratch_forwards[0];
+    assert_eq!(request.flow_key.as_ref(), Some(&original_key));
+    assert_eq!(request.target_ifindex, 24);
+    assert_eq!(request.decision.nat.rewrite_dst, Some(IpAddr::V4(gateway)));
+}
