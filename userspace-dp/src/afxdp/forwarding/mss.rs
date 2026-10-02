@@ -71,13 +71,16 @@ pub(in crate::afxdp) fn native_gre_tcp_mss(
     if decision.resolution.tunnel_endpoint_id == 0 {
         return 0;
     }
-    if forwarding.tcp_mss_gre_out > 0 {
-        return forwarding.tcp_mss_gre_out;
-    }
-    let mtu = native_gre_inner_mtu(forwarding, decision);
-    if mtu == 0 {
+    let inner_mtu = native_gre_inner_mtu(forwarding, decision);
+    if inner_mtu == 0 {
         return 0;
     }
+    // The tunnel resolution carries two independent route constraints:
+    // transport_route_mtu limits the encapsulated packet, while route_mtu
+    // limits the inner packet. Keep a missing overlay MTU (0) non-limiting,
+    // just as tcp_segmentation does, without turning an unknown inner budget
+    // into a route-derived budget.
+    let mtu = min_nonzero_mtu(inner_mtu, decision.resolution.route_mtu as usize);
     let ip_header_len = match addr_family as i32 {
         libc::AF_INET => 20usize,
         libc::AF_INET6 => 40usize,
@@ -86,6 +89,13 @@ pub(in crate::afxdp) fn native_gre_tcp_mss(
     let Some(max_mss) = mtu.checked_sub(ip_header_len + 20) else {
         return 0;
     };
+    if forwarding.tcp_mss_gre_out > 0 {
+        // The configured gre-out value is a ceiling, not permission to
+        // exceed either the outer- or overlay-derived inner budget.
+        return forwarding
+            .tcp_mss_gre_out
+            .min(u16::try_from(max_mss).unwrap_or(u16::MAX));
+    }
     u16::try_from(max_mss).unwrap_or_default()
 }
 
@@ -171,10 +181,11 @@ pub(in crate::afxdp) fn tunnel_tcp_mss(
         // outer family from the endpoint; inner family from the packet
         // being forwarded; outer MTU from the real egress interface.
         let outer_mtu = tunnel_outer_mtu(forwarding, decision, endpoint);
-        return crate::afxdp::wg::mss::wg_tcp_mss(
+        return crate::afxdp::wg::mss::wg_tcp_mss_with_route_mtu(
             endpoint.outer_family,
             addr_family as i32,
             outer_mtu,
+            decision.resolution.route_mtu as usize,
         );
     }
     native_gre_tcp_mss(forwarding, decision, addr_family)
