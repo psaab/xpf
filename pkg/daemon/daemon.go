@@ -1616,6 +1616,11 @@ type Daemon struct {
 	// fabric peer-MAC resolution can be driven against a synthetic
 	// neighbour table.
 	neighListFn func(int, int) ([]netlink.Neigh, error)
+	// Neighbor-cleanup netlink/probe seams keep the periodic sweep testable
+	// without deleting or soliciting entries in the host neighbor table.
+	linkByIndexFn         func(int) (netlink.Link, error)
+	neighDelFn            func(*netlink.Neigh) error
+	failedNeighborProbeFn func(net.IP, string)
 
 	// userspaceSessionIDs allocates synthetic session IDs for sessions
 	// learned from the userspace dataplane helper before they enter the

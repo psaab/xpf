@@ -11,6 +11,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/vishvananda/netlink"
 )
 
@@ -299,8 +300,9 @@ func (d *Daemon) resolveNeighborsInner(cfg *config.Config, waitForReplies bool) 
 	}
 }
 
-// cleanFailedNeighbors deletes NUD_FAILED neighbor entries on all interfaces
-// and proactively pings the IP to pre-populate ARP/NDP for fast recovery.
+// cleanFailedNeighbors deletes NUD_FAILED entries only on configured
+// interfaces and interfaces represented by the current neighbor snapshot, then
+// proactively probes those peers so kernel ARP/NDP state recovers quickly.
 //
 // When a host goes down, the kernel marks its ARP/NDP entry as FAILED and
 // retains it for ~60 seconds (gc_staletime). During that window, packets
@@ -313,23 +315,57 @@ func (d *Daemon) cleanFailedNeighbors() int {
 		iface string
 	}
 	var probes []probe
+	listNeighs := d.neighListFn
+	if listNeighs == nil {
+		listNeighs = netlink.NeighList
+	}
+	linkByIndex := d.linkByIndexFn
+	if linkByIndex == nil {
+		linkByIndex = netlink.LinkByIndex
+	}
+	deleteNeighbor := d.neighDelFn
+	if deleteNeighbor == nil {
+		deleteNeighbor = netlink.NeighDel
+	}
+	var cfg *config.Config
+	if d.store != nil {
+		cfg = d.store.ActiveConfig()
+	}
+	monitoredIfindexes := userspace.MonitoredInterfaceLinkIndexes(cfg)
+	if snapshotNeighbors, ok := d.dataplane().(interface {
+		ForEachSnapshotNeighbor(func(ifindex int, ip net.IP))
+	}); ok {
+		snapshotNeighbors.ForEachSnapshotNeighbor(func(ifindex int, _ net.IP) {
+			if ifindex > 0 {
+				monitoredIfindexes[ifindex] = struct{}{}
+			}
+		})
+	}
+	if len(monitoredIfindexes) == 0 {
+		return 0
+	}
 	cleaned := 0
-	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
-		neighs, err := netlink.NeighList(0, family)
-		if err != nil {
-			continue
-		}
-		for i := range neighs {
-			if neighs[i].State&netlink.NUD_FAILED != 0 {
-				// Capture interface name for probing before delete.
-				link, linkErr := netlink.LinkByIndex(neighs[i].LinkIndex)
-				if err := netlink.NeighDel(&neighs[i]); err == nil {
-					cleaned++
-					if linkErr == nil {
-						probes = append(probes, probe{
-							ip:    neighs[i].IP,
-							iface: link.Attrs().Name,
-						})
+	for ifindex := range monitoredIfindexes {
+		for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
+			neighs, err := listNeighs(ifindex, family)
+			if err != nil {
+				continue
+			}
+			for i := range neighs {
+				if neighs[i].LinkIndex != ifindex {
+					continue
+				}
+				if neighs[i].State&netlink.NUD_FAILED != 0 {
+					// Capture interface name for probing before delete.
+					link, linkErr := linkByIndex(neighs[i].LinkIndex)
+					if err := deleteNeighbor(&neighs[i]); err == nil {
+						cleaned++
+						if linkErr == nil {
+							probes = append(probes, probe{
+								ip:    neighs[i].IP,
+								iface: link.Attrs().Name,
+							})
+						}
 					}
 				}
 			}
@@ -343,6 +379,10 @@ func (d *Daemon) cleanFailedNeighbors() int {
 	// IPv6 now sends an explicit NS instead of waiting for passive later
 	// traffic to trigger NDP.
 	for _, p := range probes {
+		if d.failedNeighborProbeFn != nil {
+			d.failedNeighborProbeFn(p.ip, p.iface)
+			continue
+		}
 		if p.ip.To4() != nil {
 			// Neighbor-table reprobe (not a VIP move): use the interface
 			// primary as the ARP sender, preserving the self-resolved
