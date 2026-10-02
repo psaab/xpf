@@ -348,8 +348,8 @@ impl GreDecapCounters {
 /// Cold-path bookkeeping for the version refusal above.
 ///
 /// Only reached when the version field is non-zero, so it costs the
-/// RFC 2784/2890 fast path nothing. Allocation-free: one hash lookup in
-/// the existing `gre_decap_index` plus a relaxed increment.
+/// GRE tuple-index lookup and transport-route resolution plus a relaxed
+/// increment.
 ///
 /// The single condition is deliberate. An earlier shape early-returned on
 /// a missing `gre_decap_index` row and THEN ran the kind re-check, which
@@ -369,8 +369,14 @@ fn note_unsupported_gre_version(frame: &[u8], meta: UserspaceDpMeta, forwarding:
     // endpoint. Ordinary transit GRE/PPTP crossing the firewall reaches
     // this same `return None`, and counting it would make the metric a
     // traffic gauge instead of a fault signal. Mirror the kind, transport
-    // domain, and #11054 ingress host-inbound gates used by the decap matcher.
+    // domain, resolved-egress (#11567), and #11054 ingress host-inbound gates
+    // used by the decap matcher.
     let ingress_logical_ifindex = gre_ingress_logical_ifindex(forwarding, meta);
+    let ingress_zone_id = forwarding
+        .ifindex_to_zone_id
+        .get(&ingress_logical_ifindex)
+        .copied()
+        .unwrap_or(0);
     let ingress_routing_instance =
         gre_ingress_routing_instance(forwarding, ingress_logical_ifindex);
     let offered_to_gre_endpoint = forwarding
@@ -382,6 +388,12 @@ fn note_unsupported_gre_version(frame: &[u8], meta: UserspaceDpMeta, forwarding:
                     tunnel_mode_kind(&endpoint.mode) == TunnelKind::Gre
                         && transport_instance_of_table(&endpoint.transport_table)
                             == ingress_routing_instance
+                        && gre_transport_egress_matches(
+                            forwarding,
+                            endpoint,
+                            ingress_logical_ifindex,
+                            ingress_zone_id,
+                        )
                 })
             }) && gre_outer_host_inbound_admits(
                 forwarding,
@@ -399,8 +411,9 @@ fn note_unsupported_gre_version(frame: &[u8], meta: UserspaceDpMeta, forwarding:
 
 /// Only reached when the GRE Protocol Type disagrees with the inner version
 /// nibble. Count only a frame offered to a configured GRE endpoint with the
-/// matching key, transport domain, and ingress host-inbound admission;
-/// ordinary transit or host-inbound-denied GRE is not counted.
+/// matching key, transport domain, resolved transport egress and ingress
+/// host-inbound admission; ordinary transit or host-inbound-denied GRE is not
+/// counted.
 #[cold]
 #[inline(never)]
 fn note_gre_pt_nibble_mismatch(
@@ -775,6 +788,41 @@ fn gre_outer_host_inbound_admits(
     )
 }
 
+/// #11567: the candidate's RESOLVED transport egress must match the
+/// logical ingress by ifindex or unambiguous zone. Tuple, key, transport
+/// VRF (#10653), and ingress host-inbound admission (#11054) all still
+/// match on a second same-VRF GRE-admitted interface, so without this gate
+/// a correct tuple/key injected there is reattributed to the tunnel's zone
+/// before policy runs. The transport egress is the live FIB resolution of
+/// the endpoint's outer destination in its transport table
+/// (`resolve_tunnel_outer`, the same SSOT the encap path resolves); only a
+/// forwardable outer (route present, neighbor resolved or resolving) binds,
+/// so a withdrawn underlay route fails closed. Exact ifindex matching covers
+/// an unzoned egress; the zone alternative requires the nonzero, unambiguous
+/// egress zone. The latter covers a physical-parent ingress whose configured
+/// transport is a VLAN subinterface in the same zone.
+fn gre_transport_egress_matches(
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    ingress_logical_ifindex: i32,
+    ingress_zone_id: u16,
+) -> bool {
+    let Some(outer) = resolve_tunnel_outer(forwarding, None, endpoint.id, 0) else {
+        return false;
+    };
+    if !matches!(
+        outer.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    ) {
+        return false;
+    }
+    if ingress_logical_ifindex == outer.egress_ifindex {
+        return true;
+    }
+    let egress_zone_id = forwarding.egress_zone_id(outer.egress_ifindex);
+    egress_zone_id != 0 && egress_zone_id == ingress_zone_id
+}
+
 /// Match a received GRE (proto-47) outer tuple to a GRE-mode tunnel
 /// endpoint.
 ///
@@ -823,6 +871,10 @@ fn gre_outer_host_inbound_admits(
 /// received outer's logical ingress interface/zone. Otherwise a matching
 /// tuple, key, and VRF arriving on a denied ingress would be reattributed to
 /// the tunnel's zone before outer host-inbound ran.
+/// #11567: the candidate must also bind to the configured underlay's current
+/// resolved egress, by the same ifindex or by its nonzero, unambiguous zone.
+/// A tuple/key/VRF/host-inbound match on an unrelated underlay interface must
+/// not be reattributed as tunnel ingress.
 fn match_tunnel_endpoint<'a>(
     forwarding: &'a ForwardingState,
     outer_src: IpAddr,
@@ -833,6 +885,11 @@ fn match_tunnel_endpoint<'a>(
 ) -> Option<&'a TunnelEndpoint> {
     let outer_family = meta.addr_family as i32;
     let ingress_logical_ifindex = gre_ingress_logical_ifindex(forwarding, meta);
+    let ingress_zone_id = forwarding
+        .ifindex_to_zone_id
+        .get(&ingress_logical_ifindex)
+        .copied()
+        .unwrap_or(0);
     let ingress_routing_instance =
         gre_ingress_routing_instance(forwarding, ingress_logical_ifindex);
     let candidates = forwarding
@@ -860,6 +917,14 @@ fn match_tunnel_endpoint<'a>(
             key_present && endpoint.key == key
         };
         if key_ok {
+            if !gre_transport_egress_matches(
+                forwarding,
+                endpoint,
+                ingress_logical_ifindex,
+                ingress_zone_id,
+            ) {
+                continue;
+            }
             if gre_outer_host_inbound_admits(forwarding, ingress_logical_ifindex, outer_family) {
                 return Some(endpoint);
             }
