@@ -14,7 +14,7 @@ func TestGRPCMutationCarriesAuthenticatedPlantClass9984(t *testing.T) {
 	}
 	defer store.ExitConfigure()
 	s := &Server{store: store}
-	ctx := ctxWithPeerUID(authzUIDOperator)
+	ctx := ctxWithAuthorizedClass(ctxWithPeerUID(authzUIDOperator), "operator")
 	for _, input := range []string{
 		`event-options policy p events ping_test_failed`,
 		`event-options policy p then change-configuration commands "set system host-name grpc-stamped"`,

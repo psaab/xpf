@@ -354,6 +354,21 @@ func ctxWithPeerUID(uid uint32) context.Context {
 		id: authz.PeerIdentity{UID: uid, OK: true, Local: true},
 	})
 }
+func ctxWithAuthorizedPrincipal(ctx context.Context, principal authz.Principal) context.Context {
+	return context.WithValue(ctx, authorizedPrincipalKey{}, principal)
+}
+
+func ctxWithAuthorizedRoot(ctx context.Context) context.Context {
+	return ctxWithAuthorizedPrincipal(ctx, authz.Principal{
+		Source: authz.SourcePeerUID, UID: 0, Username: "root", Superuser: true,
+	})
+}
+
+func ctxWithAuthorizedClass(ctx context.Context, class string) context.Context {
+	return ctxWithAuthorizedPrincipal(ctx, authz.Principal{
+		Source: authz.SourcePeerUID, UID: authzUIDOperator, Username: "opuser", Class: class,
+	})
+}
 
 // TestRootIsAllowed_5278 pins the shipped pkg/authz contract: uid 0 authorizes
 // unconditionally, without consulting /etc/passwd or the config. Denying root

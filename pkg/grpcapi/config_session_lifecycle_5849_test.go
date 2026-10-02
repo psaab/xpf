@@ -25,9 +25,9 @@ import (
 // peer address.
 
 // newLifecycleTestServer spins a bufconn gRPC server mirroring the production
-// loopback config-lock lifecycle (a configLockStatsHandler stats.Handler, no
-// per-RPC interceptor). dial() opens a NEW client connection — a new connection
-// id — on each call.
+// loopback config-lock lifecycle (a configLockStatsHandler stats.Handler and
+// the production principal interceptor). dial() opens a NEW client connection
+// — a new connection id — on each call.
 func newLifecycleTestServer(t *testing.T) (*Server, func(t *testing.T) (pb.BpfrxServiceClient, *grpc.ClientConn)) {
 	t.Helper()
 	store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
@@ -45,6 +45,7 @@ func newLifecycleTestServer(t *testing.T) (*Server, func(t *testing.T) (pb.Bpfrx
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer(
 		grpc.MaxRecvMsgSize(maxRecvMsgSize),
+		grpc.ChainUnaryInterceptor(s.principalUnaryInterceptor),
 		grpc.StatsHandler(&peerAuthStatsHandler{s: s}),
 		grpc.StatsHandler(&configLockStatsHandler{s: s}),
 	)
