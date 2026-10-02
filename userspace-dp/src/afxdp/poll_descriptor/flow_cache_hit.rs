@@ -626,11 +626,13 @@ pub(super) fn stage_flow_cache_hit(
                                     );
                                     enqueue_admitted_mirror_clone_to_live(
                                         admission,
+                                        worker_ctx.forwarding,
                                         mirror_config,
                                         mirror_frame,
                                         meta.into(),
                                         Some(&flow_key),
                                         cos_queue_id,
+                                        now_ns,
                                     )
                                 } else {
                                     MirrorCloneResult::NoFrame

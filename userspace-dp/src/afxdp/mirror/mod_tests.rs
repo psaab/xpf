@@ -142,6 +142,7 @@ fn cross_binding_inject_preserves_full_frame() {
         &frame,
         test_meta(),
         None,
+        0,
     );
     assert_eq!(result, MirrorCloneResult::Enqueued);
     let target = &bindings[1];
@@ -199,6 +200,7 @@ fn cross_worker_live_enqueue_preserves_full_frame() {
         &frame,
         test_meta(),
         None,
+        0,
     );
 
     assert_eq!(result, MirrorCloneResult::Enqueued);
@@ -238,6 +240,7 @@ fn cross_binding_mirror_requires_exact_queue_when_output_is_multiqueue() {
         &[0x5a; 64],
         test_meta(),
         None,
+        0,
     );
 
     assert_eq!(result, MirrorCloneResult::NoBinding);
@@ -265,6 +268,7 @@ fn live_mirror_requires_exact_queue_when_output_is_multiqueue() {
 
     let result = enqueue_mirror_clone_to_live(
         &mirror_targets,
+        &ForwardingState::default(),
         MirrorRuntimeConfig {
             output_ifindex: 22,
             rate: 0,
@@ -275,6 +279,7 @@ fn live_mirror_requires_exact_queue_when_output_is_multiqueue() {
         test_meta(),
         None,
         None,
+        0,
     );
 
     assert_eq!(result, MirrorCloneResult::NoBinding);
@@ -307,6 +312,7 @@ fn live_mirror_queue_full_drops_before_enqueue() {
 
     let result = enqueue_mirror_clone_to_live(
         &mirror_targets,
+        &ForwardingState::default(),
         MirrorRuntimeConfig {
             output_ifindex: 22,
             rate: 0,
@@ -317,6 +323,7 @@ fn live_mirror_queue_full_drops_before_enqueue() {
         test_meta(),
         None,
         None,
+        0,
     );
 
     assert_eq!(result, MirrorCloneResult::QueueFullCrossWorker);
@@ -360,11 +367,13 @@ fn live_mirror_admission_reserves_slot_against_interleaving_producer() {
 
     let result = enqueue_admitted_mirror_clone_to_live(
         admission,
+        &ForwardingState::default(),
         config,
         vec![0x22; 64],
         test_meta(),
         None,
         None,
+        0,
     );
 
     assert_eq!(result, MirrorCloneResult::Enqueued);
@@ -402,6 +411,7 @@ fn live_mirror_queue_full_reserves_headroom_above_mirror_limit() {
 
     let result = enqueue_mirror_clone_to_live(
         &mirror_targets,
+        &ForwardingState::default(),
         MirrorRuntimeConfig {
             output_ifindex: 22,
             rate: 0,
@@ -412,8 +422,8 @@ fn live_mirror_queue_full_reserves_headroom_above_mirror_limit() {
         test_meta(),
         None,
         None,
+        0,
     );
-
     assert_eq!(result, MirrorCloneResult::QueueFullCrossWorker);
     let mut queued = VecDeque::new();
     unsafe { target_live.take_pending_tx_into(&mut queued) };
@@ -456,6 +466,7 @@ fn mirror_live_enqueue_uses_output_cos_default_queue_without_rewrite() {
         &[0xdd; 64],
         test_meta(),
         None,
+        0,
     );
 
     assert_eq!(result, MirrorCloneResult::Enqueued);
@@ -503,6 +514,7 @@ fn sampled_live_mirror_enqueue_records_flow_cache_surface() {
         &frame,
         test_meta(),
         None,
+        0,
     );
 
     assert_eq!(result, Some(MirrorCloneResult::Enqueued));
@@ -557,6 +569,7 @@ fn sampled_live_mirror_sampler_denial_does_not_enqueue() {
         &[0x44; 80],
         test_meta(),
         None,
+        0,
     );
 
     assert_eq!(result, None);
@@ -626,6 +639,7 @@ fn sampled_live_mirror_queue_full_advances_sampler_for_selected_6114() {
         &[0x44; 80],
         test_meta(),
         None,
+        0,
     );
 
     assert_eq!(result, Some(MirrorCloneResult::QueueFullCrossWorker));
@@ -719,6 +733,7 @@ fn flow_cache_nonsampled_does_not_reserve_full_queue_6114() {
         &[0x44; 80],
         test_meta(),
         None,
+        0,
     );
 
     assert_eq!(
@@ -779,6 +794,7 @@ fn sampled_live_mirror_missing_target_records_drop_counter() {
         &[0x44; 80],
         test_meta(),
         None,
+        0,
     );
 
     assert_eq!(result, Some(MirrorCloneResult::NoBinding));
@@ -835,6 +851,7 @@ fn mirror_output_logical_ifindex_resolves_parent_binding() {
         &frame,
         test_meta(),
         None,
+        0,
     );
     assert_eq!(result, MirrorCloneResult::Enqueued);
     let target = &bindings[1];
@@ -911,6 +928,7 @@ fn sampled_live_mirror_resolves_snapshot_logical_ingress_and_output() {
         &frame,
         test_meta(),
         None,
+        0,
     );
 
     assert_eq!(result, Some(MirrorCloneResult::Enqueued));
@@ -944,6 +962,7 @@ fn missing_destination_binding_drop_counter() {
         &[0xaa; 64],
         test_meta(),
         None,
+        0,
     );
     record_mirror_clone_result(&binding.live, result, 64);
     assert_eq!(result, MirrorCloneResult::NoBinding);
@@ -984,6 +1003,7 @@ fn out_of_frame_drops_increment_counter() {
         &[0xbb; 64],
         test_meta(),
         None,
+        0,
     );
     record_mirror_clone_result(&ingress.live, result, 64);
     assert_eq!(result, MirrorCloneResult::TxFrameReserve);
@@ -1088,6 +1108,7 @@ fn queue_full_drop_counter() {
         &[0xcc; 64],
         test_meta(),
         None,
+        0,
     );
     record_mirror_clone_result(&ingress.live, result, 64);
     assert_eq!(result, MirrorCloneResult::QueueFullSameWorker);
@@ -1187,6 +1208,7 @@ fn cross_worker_nonsampled_does_not_reserve_full_queue_5167() {
         &frame,
         test_meta(),
         None,
+        0,
     );
 
     assert_eq!(
@@ -1243,8 +1265,8 @@ fn cross_worker_sampled_reports_queue_full_5167() {
         &frame,
         test_meta(),
         None,
+        0,
     );
-
     assert_eq!(
         result,
         Some(MirrorCloneResult::QueueFullCrossWorker),
@@ -1278,8 +1300,8 @@ fn cross_worker_sampled_enqueues_clone_5167() {
         &frame,
         test_meta(),
         None,
+        0,
     );
-
     assert_eq!(result, Some(MirrorCloneResult::Enqueued));
     let mut queued = VecDeque::new();
     unsafe { target_live.take_pending_tx_into(&mut queued) };
@@ -1315,8 +1337,8 @@ fn cross_worker_nonsampled_no_clone_nonfull_5167() {
         &frame,
         test_meta(),
         None,
+        0,
     );
-
     assert_eq!(result, None);
     let mut queued = VecDeque::new();
     unsafe { target_live.take_pending_tx_into(&mut queued) };
@@ -1358,4 +1380,110 @@ fn live_flow_cache_callsite_tests_are_registered_6304() {
          narrowing the predicate so it never holds, leaves the LIVE mirror \
          call-site guards uncompiled and the suite passing vacuously"
     );
+}
+fn mirror_filter_forwarding() -> ForwardingState {
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            ifindex: 22,
+            filter_output_v4: "analyzer-deny".into(),
+            ..InterfaceSnapshot::default()
+        }],
+        filters: vec![crate::protocol::FirewallFilterSnapshot {
+            name: "analyzer-deny".into(),
+            family: "inet".into(),
+            terms: vec![crate::protocol::FirewallTermSnapshot {
+                name: "deny-analyzer".into(),
+                action: "discard".into(),
+                ..Default::default()
+            }],
+        }],
+        ..ConfigSnapshot::default()
+    };
+    build_forwarding_state(&snapshot)
+}
+
+#[test]
+fn mirror_clone_obeys_analyzer_output_filter_and_filter_removal_restores_it() {
+    let frame = crate::afxdp::tx::test_support::build_ipv4_test_packet(0);
+    let mut bindings = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+    ];
+    let lookup = WorkerBindingLookup::from_bindings(&bindings);
+    let mirror_targets = MirrorTargetMap::default();
+    let config = MirrorRuntimeConfig {
+        output_ifindex: 22,
+        rate: 0,
+    };
+    let mut forwarding = mirror_filter_forwarding();
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    let result = enqueue_mirror_clone(
+        left,
+        0,
+        ingress,
+        right,
+        &lookup,
+        &mirror_targets,
+        &forwarding,
+        config,
+        0,
+        &frame,
+        ForwardPacketMeta {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            l3_offset: 14,
+            l4_offset: 34,
+            pkt_len: frame.len() as u16,
+            ..ForwardPacketMeta::default()
+        },
+        Some(&crate::afxdp::tx::test_support::test_session_key(12345, 443)),
+        0,
+    );
+    assert_eq!(
+        result,
+        MirrorCloneResult::OutputFiltered,
+        "analyzer output discard must suppress the clone"
+    );
+    assert!(
+        bindings[1].tx_pipeline.pending_tx_prepared.is_empty(),
+        "analyzer output discard must suppress the clone"
+    );
+    assert_eq!(
+        bindings[0].live.mirrored_packets.load(Ordering::Relaxed),
+        0,
+        "a filtered clone is not a successful mirror"
+    );
+
+    forwarding.filter_state.iface_filter_out_v4_fast.clear();
+    let (left, rest) = bindings.split_at_mut(0);
+    let (ingress, right) = rest.split_first_mut().expect("ingress binding");
+    let result = enqueue_mirror_clone(
+        left,
+        0,
+        ingress,
+        right,
+        &lookup,
+        &mirror_targets,
+        &forwarding,
+        config,
+        0,
+        &frame,
+        ForwardPacketMeta {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            l3_offset: 14,
+            l4_offset: 34,
+            pkt_len: frame.len() as u16,
+            ..ForwardPacketMeta::default()
+        },
+        Some(&crate::afxdp::tx::test_support::test_session_key(12345, 443)),
+        0,
+    );
+    assert_eq!(
+        result,
+        MirrorCloneResult::Enqueued,
+        "removing the output filter restores mirror delivery"
+    );
+    assert_eq!(bindings[1].tx_pipeline.pending_tx_prepared.len(), 1);
 }
