@@ -163,5 +163,15 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #11400: appended after every established uniform gate so the OSPF area
+	// reuse diagnosis cannot displace an existing first-error slot.
+	if err := validateOSPFAreaInterfaceReuse11400(cfg); err != nil {
+		if opts.lenientOSPFAreaInterface11400 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("OSPF interface area membership (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	return nil
 }
