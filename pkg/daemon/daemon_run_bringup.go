@@ -593,11 +593,14 @@ func (d *Daemon) setupDataplaneAndInitialConfig() error {
 				// #6716: re-reads the active config under applySem rather than
 				// applying this pre-semaphore snapshot. The check above stays a
 				// cheap "is there anything to apply yet" guard.
-				d.applyActiveConfig()
-				// #10421: applyActiveConfig is synchronous, but networkd may
-				// finish foreign-rule cleanup just after Apply returns. Keep a
-				// startup-tail reassert in addition to the apply-boundary
-				// invariant, and latch failures into the #9693 retry owner.
+				applyErr := d.applyActiveConfigResult()
+				d.noteConfigApplyResult(applyErr)
+				if applyErr == nil && d.store != nil {
+					d.store.MarkActiveApplied()
+				}
+				// #10421: applyActiveConfigResult is synchronous, but networkd
+				// may finish foreign-rule cleanup just after Apply returns. Keep a
+				// startup-tail reassert in addition to the apply-boundary invariant.
 				if d.afterActiveConfigApplyForTest != nil {
 					d.afterActiveConfigApplyForTest()
 				}
