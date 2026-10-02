@@ -116,6 +116,11 @@ func TestShortClusterAuthKeyWarnsNotRejected_6611(t *testing.T) {
 	if !strings.Contains(found, "16 or more is advised") {
 		t.Fatalf("strength warning does not state the advised floor: %q", found)
 	}
+	if !strings.Contains(found, "duplicate-identity beacon") ||
+		!strings.Contains(found, "forge") {
+		t.Fatalf("short-key warning omits the beacon forgery risk: %q", found)
+	}
+
 	// The key itself must never be rendered.
 	if strings.Contains(found, "abc") {
 		t.Fatalf("strength warning leaked the key: %q", found)
@@ -396,6 +401,11 @@ func TestStrengthWarningNeverRendersTheKey_6611(t *testing.T) {
 			t.Errorf("key %q produced no strength warning; a published "+
 				"placeholder must always warn", key)
 			continue
+		}
+		joined := strings.Join(warnings, " ")
+		if !strings.Contains(joined, "duplicate-identity beacon") ||
+			!strings.Contains(joined, "forge") {
+			t.Errorf("key-strength warning for %q omits the beacon forgery surface: %v", key, warnings)
 		}
 		for _, w := range warnings {
 			if strings.Contains(w, key) {

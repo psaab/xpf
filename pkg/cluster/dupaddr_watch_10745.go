@@ -50,11 +50,13 @@ import (
 // when the control-link PSK is configured (the documented HA shape); an
 // unkeyed deployment has no way to authenticate a warning and keeps the
 // existing heartbeat behavior. IPv4 directed broadcast is used because the
-// shipped control link is IPv4; IPv6-only control links skip this detector.
-// Freshness is a ±30s wall-clock window, so the pair must hold wall-clock
-// within 30s (NTP/Chrony) or genuine duplicates are missed. Replay memory and
-// the sender ID are process-lifetime (manager cache), so only a full process
-// restart reopens a bounded capture-replay window — never a heartbeat restart.
+// shipped control link is IPv4; IPv6-only and /31-or-narrower control links
+// cannot use the detector and emit a rate-limited setup warning. Freshness is
+// a ±30s wall-clock window, so the pair must hold wall-clock within 30s
+// (NTP/Chrony) or genuine duplicates are missed. Replay memory and the sender
+// ID live on the manager: a watcher/heartbeat restart retains them, but a full
+// process restart reopens a bounded capture-replay window, called out in the
+// operator warning.
 
 const (
 	duplicateIdentityBeaconPort    = 4786
@@ -86,17 +88,38 @@ func duplicateIdentityBroadcastAddr(iface string, localIP net.IP) (*net.UDPAddr,
 		if err != nil || ip.To4() == nil || !ip.To4().Equal(local4) {
 			continue
 		}
-		prefix, bits := network.Mask.Size()
-		if bits != 32 || prefix >= 31 {
-			return nil, fmt.Errorf("control-link address %s/%d has no IPv4 broadcast", local4, prefix)
-		}
-		broadcast := make(net.IP, net.IPv4len)
-		for i := range broadcast {
-			broadcast[i] = ip.To4()[i] | ^network.Mask[i]
-		}
-		return &net.UDPAddr{IP: broadcast, Port: duplicateIdentityBeaconPort}, nil
+		return duplicateIdentityBroadcastForNetwork(local4, network)
 	}
 	return nil, fmt.Errorf("control-link address %s is not assigned to %s", local4, iface)
+}
+
+func duplicateIdentityBroadcastForNetwork(local4 net.IP, network *net.IPNet) (*net.UDPAddr, error) {
+	prefix, bits := network.Mask.Size()
+	ipv4 := local4.To4()
+	if ipv4 == nil || bits != 32 || prefix >= 31 {
+		return nil, fmt.Errorf("control-link address %s/%d has no IPv4 broadcast", local4, prefix)
+	}
+	broadcast := make(net.IP, net.IPv4len)
+	for i := range broadcast {
+		broadcast[i] = ipv4[i] | ^network.Mask[i]
+	}
+	return &net.UDPAddr{IP: broadcast, Port: duplicateIdentityBeaconPort}, nil
+}
+
+// duplicateIdentityReplayTTL retains a nonce until at least 30s after receipt,
+// or until 30s after a future-skewed stamp's last freshness instant. The
+// resulting deadline is formed from the receiver's local `now`, which has a
+// monotonic component in production, so a forward wall-clock step cannot reap a
+// nonce before its suppression interval ends. As with any finite in-memory
+// cache, a rollback after expiry can restore freshness: at the maximum +30s
+// future skew, the stamp is fresh at its 60s deadline and a 1s rollback just
+// after expiry makes it fresh again.
+func duplicateIdentityReplayTTL(stamp, now time.Time) time.Duration {
+	ttl := duplicateIdentityBeaconMaxAge
+	if stamp.After(now) {
+		ttl += stamp.Sub(now)
+	}
+	return ttl
 }
 
 // marshalDuplicateIdentityBeacon signs a short, fresh statement of the local
@@ -164,24 +187,24 @@ func verifyDuplicateIdentityBeacon(frame []byte, mgr *Manager, now time.Time) (c
 
 // duplicateIdentityReplayCap bounds the beacon nonce cache. Beacon sends are
 // capped at 10/s regardless of heartbeat cadence (see sendInterval), and an
-// entry lives at most 60s (30s window plus 30s future skew), so honest peer
-// traffic holds at most ~600 live entries; 4096 is ~7x headroom while a
-// PSK-holder flood cannot grow memory past the cap.
+// accepted timestamp remains fresh for at most 60s from receipt under maximum
+// future skew, so honest peer traffic holds at most ~600 live entries. At
+// capacity, live entries are never evicted: new beacons are suppressed until
+// an entry expires, preserving replay protection under a flood or clock skew.
 const duplicateIdentityReplayCap = 4096
 
-// duplicateIdentityReplayCache records observed beacon nonces with the
-// instant each entry stops suppressing replays.
+// duplicateIdentityReplayCache records observed beacon nonces with monotonic
+// suppression deadlines derived from the signed wall-clock timestamp.
 //
 // It lives on the MANAGER (process lifetime), not on the watcher — the #5086
 // precedent. A heartbeat restart replaces the watcher; a per-watcher cache
 // would forget every nonce, so a keyless L2 observer could replay a captured
 // still-fresh PEER beacon into the new tenure (valid MAC, still-foreign
 // instance, nonce uncached) and manufacture a false duplicate warning after
-// the peer is gone. (Own beacons need no cache entry: the sender ID is stable
-// per manager, so an old own instance never becomes foreign.) A tenure ID
-// inside the MAC cannot fix the peer case — the receiver cannot know the
-// peer's current tenure — but replay memory that survives watcher
-// replacement can: the replayed nonce is already recorded.
+// the peer is gone. A process restart necessarily recreates the in-memory
+// cache; that residual is named in the operator warning because a still-fresh
+// authenticated capture is indistinguishable from a live peer without durable
+// replay state.
 //
 // Lock order is cache mu THEN m.mu (handleBeacon records here before the
 // warning takes m.mu); no path takes them in the reverse order. The zero
@@ -189,25 +212,21 @@ const duplicateIdentityReplayCap = 4096
 // built as struct literals need no constructor change.
 type duplicateIdentityReplayCache struct {
 	mu      sync.Mutex
-	entries map[[16]byte]time.Time // nonce -> suppression deadline
+	entries map[[16]byte]time.Time // nonce -> monotonic suppression deadline
 }
 
-// checkAndRecord reports whether nonce was already recorded live, and records
-// it when it was not. deadline is the last instant the entry suppresses
-// replays, inclusive (BEACON-02: max(receipt, stamp)+MaxAge, so a
-// skewed-future beacon's nonce always outlives its timestamp's validity).
-// At capacity, expired entries go first and the single oldest survivor
-// (earliest deadline) is evicted only when nothing had expired — eviction
-// order is by age, never arbitrary, so a flood displaces the entries
-// closest to natural expiry first.
-func (c *duplicateIdentityReplayCache) checkAndRecord(nonce [16]byte, deadline time.Time, now time.Time) (replay bool) {
+// checkAndRecord reports whether nonce was already recorded live, and whether
+// capacity prevented recording a new nonce. deadline is the last instant the
+// entry suppresses replays, inclusive. Expired entries are reclaimed before
+// applying the cap, but a live entry is never evicted to admit a new nonce.
+func (c *duplicateIdentityReplayCache) checkAndRecord(nonce [16]byte, deadline, now time.Time) (replay, full bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
 		c.entries = make(map[[16]byte]time.Time)
 	}
 	if at, seen := c.entries[nonce]; seen && !now.After(at) {
-		return true
+		return true, false
 	}
 	if len(c.entries) >= duplicateIdentityReplayCap {
 		for seen, at := range c.entries {
@@ -216,26 +235,17 @@ func (c *duplicateIdentityReplayCache) checkAndRecord(nonce [16]byte, deadline t
 			}
 		}
 		if len(c.entries) >= duplicateIdentityReplayCap {
-			var oldest [16]byte
-			var oldestAt time.Time
-			first := true
-			for seen, at := range c.entries {
-				if first || at.Before(oldestAt) {
-					oldest, oldestAt, first = seen, at, false
-				}
-			}
-			delete(c.entries, oldest)
+			return false, true
 		}
 	}
 	c.entries[nonce] = deadline
-	return false
+	return false, false
 }
 
 // sweep drops entries whose suppression deadline has passed. The deadline
 // instant itself still suppresses (inclusive, matching freshness acceptance
-// at exactly +-30s); only strictly-later sweeps reap. Called by the
-// watcher's periodic sweep loop, so expiry never depends on further matching
-// traffic arriving.
+// at exactly ±30s); only strictly-later sweeps reap. Called by the watcher's
+// periodic sweep loop, so expiry never depends on further matching traffic.
 func (c *duplicateIdentityReplayCache) sweep(now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -265,7 +275,6 @@ type duplicateIdentityWatcher struct {
 	stopCh    chan struct{}
 	wg        sync.WaitGroup
 	instance  [16]byte
-	sendErr   sync.Once
 }
 
 func newDuplicateIdentityWatcher(mgr *Manager, iface string, listen, send *net.UDPConn, broadcast *net.UDPAddr, interval time.Duration, instance [16]byte) *duplicateIdentityWatcher {
@@ -280,10 +289,11 @@ func newDuplicateIdentityWatcher(mgr *Manager, iface string, listen, send *net.U
 
 // prepareDuplicateIdentityWatcher creates the keyed L2 identity detector's
 // sockets without starting goroutines. It runs before startHeartbeat acquires
-// m.mu for publication: the key lookup below takes m.mu.RLock, and doing it
-// inside that critical section would deadlock. Publication calls start only
-// after its lifecycle epoch is rechecked. Socket setup is best-effort: failure
-// to find an IPv4 broadcast or open a socket never prevents heartbeat startup.
+// m.mu: the key lookup below takes m.mu.RLock, and doing it inside that
+// critical section would deadlock. Publication calls start only after its
+// lifecycle epoch is rechecked. Socket setup is best-effort: failure to find
+// an IPv4 broadcast or open a socket never prevents heartbeat startup, but it
+// is operator-visible and rate-limited.
 func prepareDuplicateIdentityWatcher(mgr *Manager, iface, localAddr, vrfDevice string, interval time.Duration) *duplicateIdentityWatcher {
 	if mgr == nil || iface == "" {
 		return nil
@@ -295,35 +305,36 @@ func prepareDuplicateIdentityWatcher(mgr *Manager, iface, localAddr, vrfDevice s
 	}
 	broadcast, err := duplicateIdentityBroadcastAddr(iface, net.ParseIP(localAddr))
 	if err != nil {
-		slog.Debug("cluster: authenticated duplicate-identity watcher skipped",
-			"iface", iface, "err", err)
+		reason := "no usable IPv4 broadcast address"
+		if net.ParseIP(localAddr).To4() == nil {
+			reason = "IPv6-only or non-IPv4 control link; duplicate-identity beacon signal is not supported"
+		}
+		mgr.noteDuplicateIdentityBeaconUnavailable(iface, reason, err)
 		return nil
 	}
 	lc := vrfListenConfig(vrfDevice)
 	listenPacket, err := lc.ListenPacket(context.Background(), "udp4", net.JoinHostPort("", fmt.Sprint(duplicateIdentityBeaconPort)))
 	if err != nil {
-		slog.Debug("cluster: authenticated duplicate-identity listener unavailable",
-			"iface", iface, "err", err)
+		mgr.noteDuplicateIdentityBeaconUnavailable(iface, "IPv4 beacon listener unavailable", err)
 		return nil
 	}
 	listen, ok := listenPacket.(*net.UDPConn)
 	if !ok {
 		listenPacket.Close()
-		slog.Debug("cluster: authenticated duplicate-identity listener is not UDP", "iface", iface)
+		mgr.noteDuplicateIdentityBeaconUnavailable(iface, "beacon listener is not UDP", nil)
 		return nil
 	}
 	sendPacket, err := lc.ListenPacket(context.Background(), "udp4", net.JoinHostPort(localAddr, "0"))
 	if err != nil {
 		listen.Close()
-		slog.Debug("cluster: authenticated duplicate-identity sender unavailable",
-			"iface", iface, "err", err)
+		mgr.noteDuplicateIdentityBeaconUnavailable(iface, "IPv4 beacon sender unavailable", err)
 		return nil
 	}
 	send, ok := sendPacket.(*net.UDPConn)
 	if !ok {
 		listen.Close()
 		sendPacket.Close()
-		slog.Debug("cluster: authenticated duplicate-identity sender is not UDP", "iface", iface)
+		mgr.noteDuplicateIdentityBeaconUnavailable(iface, "beacon sender is not UDP", nil)
 		return nil
 	}
 	raw, err := send.SyscallConn()
@@ -339,8 +350,7 @@ func prepareDuplicateIdentityWatcher(mgr *Manager, iface, localAddr, vrfDevice s
 	if err != nil {
 		listen.Close()
 		send.Close()
-		slog.Debug("cluster: authenticated duplicate-identity broadcast unavailable",
-			"iface", iface, "err", err)
+		mgr.noteDuplicateIdentityBeaconUnavailable(iface, "IPv4 broadcast socket setup failed", err)
 		return nil
 	}
 	// The sender ID is the manager's stable per-process identity, not a fresh
@@ -441,10 +451,7 @@ func (w *duplicateIdentityWatcher) sendBeacon() {
 		_, err = w.send.WriteToUDP(frame, w.broadcast)
 	}
 	if err != nil {
-		w.sendErr.Do(func() {
-			slog.Debug("cluster: authenticated duplicate-identity beacon send failed",
-				"iface", w.iface, "err", err)
-		})
+		w.mgr.noteDuplicateIdentityBeaconSocketFailure(w.iface, "send", err)
 	}
 }
 
@@ -464,8 +471,9 @@ func (w *duplicateIdentityWatcher) readLoop() {
 
 // readStep performs one socket read and reports whether the loop stays alive.
 // The error policy is heartbeatReceiver.readLoop's, exactly: timeouts and
-// transient read errors continue (a transient failure must not silently kill
-// day-0 detection for the tenure), and only a closed stopCh ends the loop.
+// transient read errors are reported through the manager's 30s health-warning
+// budget and continue (a transient failure must not silently kill day-0
+// detection for the tenure), and only a closed stopCh ends the loop.
 // The stopCh pre-check is the sibling's loop-top select inlined: without it a
 // stopped watcher whose socket only ever times out would spin instead of
 // exiting. Split out so the continue-vs-return policy is unit-testable
@@ -488,8 +496,7 @@ func (w *duplicateIdentityWatcher) readStep(buf []byte) (int, bool) {
 	case <-w.stopCh:
 		return 0, false
 	default:
-		slog.Debug("cluster: authenticated duplicate-identity read error",
-			"iface", w.iface, "err", err)
+		w.mgr.noteDuplicateIdentityBeaconSocketFailure(w.iface, "read", err)
 		return 0, true
 	}
 }
@@ -503,24 +510,73 @@ func (w *duplicateIdentityWatcher) handleBeacon(frame []byte, now time.Time) {
 	if !ok || clusterID != w.mgr.ClusterID() || nodeID != w.mgr.NodeID() || instance == w.instance {
 		return
 	}
-	deadline := now
-	if stamp.After(deadline) {
-		deadline = stamp
+	deadline := now.Add(duplicateIdentityReplayTTL(stamp, now))
+	replay, full := w.mgr.beaconReplay.checkAndRecord(nonce, deadline, now)
+	if replay {
+		return
 	}
-	if w.mgr.beaconReplay.checkAndRecord(nonce, deadline.Add(duplicateIdentityBeaconMaxAge), now) {
+	if full {
+		w.mgr.noteBeaconReplayCacheFull(w.iface)
 		return
 	}
 	w.mgr.NoteDuplicateNodeIDBeacon(w.iface)
 }
 
+// noteDuplicateIdentityBeaconUnavailable keeps unsupported or failed
+// best-effort setup visible without allowing heartbeat restarts to flood logs.
+// It uses a separate budget from duplicate-node-id warnings.
+func (m *Manager) noteDuplicateIdentityBeaconUnavailable(iface, reason string, err error) {
+	m.noteBeaconHealthWarning(iface,
+		"cluster: authenticated duplicate-identity beacon unavailable; the duplicate-node-id signal is not armed",
+		reason, err)
+}
+
+// noteDuplicateIdentityBeaconSocketFailure reports runtime socket errors
+// through the shared rate-limited health-warning budget. Read errors remain
+// transient and do not stop the watcher.
+func (m *Manager) noteDuplicateIdentityBeaconSocketFailure(iface, operation string, err error) {
+	m.noteBeaconHealthWarning(iface,
+		"cluster: authenticated duplicate-identity beacon socket failure; the signal may be degraded",
+		operation, err)
+}
+
+// noteBeaconReplayCacheFull warns when bounded memory pressure suppresses new
+// beacons. Existing live nonces are never evicted, so a cache flood cannot
+// reopen their replay window.
+func (m *Manager) noteBeaconReplayCacheFull(iface string) {
+	m.noteBeaconHealthWarning(iface,
+		"cluster: authenticated duplicate-identity beacon replay cache is full; new beacons are suppressed until entries expire",
+		"", nil)
+}
+
+// noteBeaconHealthWarning shares a per-manager 30s budget among best-effort
+// beacon health warnings. It does not consume the duplicate-node-id budget.
+func (m *Manager) noteBeaconHealthWarning(iface, message, reason string, err error) {
+	m.mu.Lock()
+	now := time.Now()
+	if !m.lastBeaconHealthWarn.IsZero() && now.Sub(m.lastBeaconHealthWarn) < 30*time.Second {
+		m.mu.Unlock()
+		return
+	}
+	m.lastBeaconHealthWarn = now
+	m.mu.Unlock()
+	if err != nil {
+		slog.Warn(message, "iface", iface, "reason", reason, "err", err)
+		return
+	}
+	if reason != "" {
+		slog.Warn(message, "iface", iface, "reason", reason)
+		return
+	}
+	slog.Warn(message, "iface", iface)
+}
+
 // NoteDuplicateNodeIDBeacon records an authenticated broadcast beacon carrying
-// this node's own identity. In the shared `${node}` shape both chassis hold the
-// same local address and the unicast peer address is held by neither; signed
-// directed-broadcast beacons are the only live peer signal that can cross that
-// gap. Authentication is checked before this method is reached. The beacon is
-// not a heartbeat: the peer remains absent and each eligible RG can promote via
-// single-node election on both nodes, so the warning names that outcome. Takes
-// m.mu.
+// this node's own identity. The in-memory replay cache survives heartbeat
+// tenure replacement, but is lost on process restart: a captured still-fresh
+// frame can therefore produce the same warning as a live peer. Keep that
+// uncertainty and the recovery action explicit. The shared warning budget
+// limits this signal to one event per 30s.
 func (m *Manager) NoteDuplicateNodeIDBeacon(iface string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -530,11 +586,14 @@ func (m *Manager) NoteDuplicateNodeIDBeacon(iface string) {
 	slog.Error("cluster: duplicate node-id detected — received an authenticated "+
 		"control-link identity beacon carrying this node's own node-id; this is an "+
 		"INVALID cluster configuration (two chassis cannot share a node-id). The "+
-		"beacon is only a warning and does not refresh peer liveness or drive "+
+		"beacon is only a warning and does not prove current peer liveness or drive "+
 		"election, so each eligible RG can promote via single-node election once "+
 		"the startup peer-absent grace elapses; if both nodes are eligible, both "+
-		"claim PRIMARY with duplicate VIPs on the segment. Correct /etc/xpf/node-id "+
-		"on one node.",
+		"claim PRIMARY with duplicate VIPs on the segment. The nonce cache is "+
+		"process-scoped, so a still-fresh captured beacon may also trigger this "+
+		"warning after a process restart. If both chassis are present, correct "+
+		"/etc/xpf/node-id on one node. Verify the peer on the control link; if "+
+		"unexpected, rotate the control-link PSK on both nodes.",
 		"iface", iface, "node_id", m.nodeID)
 	if m.history != nil {
 		m.history.Record(EventRG, -1, "duplicate node-id: authenticated control-link beacon")

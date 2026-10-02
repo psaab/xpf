@@ -243,6 +243,10 @@ type Manager struct {
 	// 30s so a 5/s heartbeat stream cannot flood the log. Read/written under
 	// m.mu.
 	lastDupNodeIDWarn time.Time
+	// lastBeaconHealthWarn rate-limits best-effort beacon health warnings,
+	// including unavailable IPv4 broadcast and replay-cache saturation. Read/
+	// written under m.mu; distinct from the duplicate-identity warning budget.
+	lastBeaconHealthWarn time.Time
 
 	// Heartbeat goroutines (nil when not started).
 	hbSender   *heartbeatSender
