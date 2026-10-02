@@ -172,29 +172,52 @@ func (m *Manager) generateInterfaceSettings(fc *FullConfig) string {
 	return b.String()
 }
 
-// staticRouteRendersFIB reports whether generateStaticRouteInTable will emit
-// at least one FRR FIB line for sr. It is the single source of truth for
-// "does this static route install a route", shared by
-// generateStaticRouteInTable's zero-next-hop early return and by
-// renderDHCPDefaults' DHCP-default suppression (#5519) so the two can never
-// disagree. It mirrors generateStaticRouteInTable's emit structure exactly:
-//   - a next-table route is realized by an `ip rule` in the routing package,
-//     not FRR, so it renders no FRR FIB line here;
-//   - a route with `no-install` emits no line and does not count as installed;
-//   - a discard/reject route renders a negative (Null0/reject) route;
-//   - otherwise a route renders one line per next-hop, so it needs >= 1.
+// staticRouteRendersFIB reports whether generateStaticRouteInTable emits at
+// least one FRR FIB line for sr. It mirrors that renderer's emit structure:
+// next-table and no-install routes emit nothing; discard/reject routes emit a
+// negative route; other routes need at least one next-hop.
 //
 // A zero-next-hop, non-discard route (e.g. the last ECMP next-hop of a static
-// default was deleted, #3872) renders nothing. Before #5519, renderDHCPDefaults
-// treated ANY 0.0.0.0/0 static route as suppressing the DHCP-learned default,
-// so such a route rendered no FIB entry yet still masked the DHCP fallback —
-// leaving NO default route at all (WAN / management remote lockout). Deriving
-// suppression from renderability closes that gap.
+// default was deleted, #3872) renders nothing and must not suppress the
+// DHCP-learned fallback (#5519).
 func staticRouteRendersFIB(sr *config.StaticRoute) bool {
 	if sr.NoInstall || sr.NextTable != "" {
 		return false
 	}
 	return sr.Discard || sr.Reject || len(sr.NextHops) > 0
+}
+
+const dhcpRoutePreference = 200
+
+// staticRouteBeatsDHCP reports whether an emitted static route has an
+// effective distance no worse than the DHCP route. FRR's default distance is
+// 1 when the preference operand is omitted. Qualified next-hops override the
+// route-level preference, so any emitted next-hop at or below the DHCP
+// preference can suppress the DHCP route.
+func staticRouteBeatsDHCP(sr *config.StaticRoute) bool {
+	if !staticRouteRendersFIB(sr) {
+		return false
+	}
+	if sr.Discard || sr.Reject {
+		return effectiveStaticRouteDistance(sr.Preference) <= dhcpRoutePreference
+	}
+	for _, nh := range sr.NextHops {
+		preference := sr.Preference
+		if nh.HasPreference {
+			preference = nh.Preference
+		}
+		if effectiveStaticRouteDistance(preference) <= dhcpRoutePreference {
+			return true
+		}
+	}
+	return false
+}
+
+func effectiveStaticRouteDistance(preference int) int {
+	if preference <= 0 {
+		return 1
+	}
+	return preference
 }
 
 // dhcpClasslessCoveredByStatic reports the rendered static route that contains
@@ -588,15 +611,10 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 		return
 	}
 	trustClassless := os.Getenv(dhcpClasslessTrustOverrideEnv) == "1"
-	// Suppression is derived from the static default's ACTUAL renderability, not
-	// merely the presence of a 0.0.0.0/0 (or ::/0) stanza (#5519). A static
-	// default that renders NO FIB entry — a zero-next-hop, non-discard route
-	// left behind after the last ECMP next-hop was deleted (#3872) — must NOT
-	// suppress the DHCP-learned fallback: otherwise the config installs no
-	// default route at all (WAN / management remote lockout). Only a static
-	// default that actually renders a FIB entry (has next-hop(s) or is an
-	// explicit discard/reject) suppresses the DHCP default, matching the
-	// pre-#5519 behavior for those cases exactly.
+	// A static default suppresses DHCP only when it renders an FIB entry at an
+	// effective distance no worse than DHCP's 200. Qualified next-hops use
+	// their own preference; a floating backup above 200 must not mask the
+	// DHCP primary. #5519's empty-route guard remains part of this predicate.
 	// #8963: suppression is PER-VRF. The comparison read only the top-level
 	// static lists, so a static default INSIDE a routing instance neither
 	// suppressed nor was suppressed by the DHCP-learned one -- the instance
@@ -609,13 +627,13 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 	hasV4Default := map[string]bool{}
 	hasV6Default := map[string]bool{}
 	for _, sr := range fc.StaticRoutes {
-		if sr.Destination == "0.0.0.0/0" && staticRouteRendersFIB(sr) {
+		if sr.Destination == "0.0.0.0/0" && staticRouteBeatsDHCP(sr) {
 			hasV4Default[""] = true
 			break
 		}
 	}
 	for _, sr := range fc.Inet6StaticRoutes {
-		if sr.Destination == "::/0" && staticRouteRendersFIB(sr) {
+		if sr.Destination == "::/0" && staticRouteBeatsDHCP(sr) {
 			hasV6Default[""] = true
 			break
 		}
@@ -625,13 +643,13 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 			continue
 		}
 		for _, sr := range inst.StaticRoutes {
-			if sr.Destination == "0.0.0.0/0" && staticRouteRendersFIB(sr) {
+			if sr.Destination == "0.0.0.0/0" && staticRouteBeatsDHCP(sr) {
 				hasV4Default[inst.Name] = true
 				break
 			}
 		}
 		for _, sr := range inst.Inet6StaticRoutes {
-			if sr.Destination == "::/0" && staticRouteRendersFIB(sr) {
+			if sr.Destination == "::/0" && staticRouteBeatsDHCP(sr) {
 				hasV6Default[inst.Name] = true
 				break
 			}
@@ -645,10 +663,9 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 		dest := dr.Destination
 		isDefault := dest == "" || dest == "0.0.0.0/0"
 		if isDefault {
-			// A configured static default of the same family suppresses the
-			// DHCP-learned default (a static default wins). Renderability is
-			// deliberate: an empty non-discard static must not mask the only
-			// usable WAN fallback (#5519).
+			// Only a rendered static default at distance <= 200 suppresses
+			// DHCP; a floating backup or high-distance negative route leaves
+			// the DHCP primary available (#11424).
 			if dr.IsIPv6 {
 				dest = "::/0"
 				if hasV6Default[dr.VRF] {
@@ -748,17 +765,17 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 			if ifn, drop := dhcpRouteInterface(dr); drop {
 				// #9501: unusable interface operand on a link-local gateway; the route is dropped.
 			} else if ifn != "" {
-				fmt.Fprintf(b, "ipv6 route %s %s %s 200%s\n", dest, dr.Gateway, ifn, vrfPart)
+				fmt.Fprintf(b, "ipv6 route %s %s %s %d%s\n", dest, dr.Gateway, ifn, dhcpRoutePreference, vrfPart)
 			} else {
-				fmt.Fprintf(b, "ipv6 route %s %s 200%s\n", dest, dr.Gateway, vrfPart)
+				fmt.Fprintf(b, "ipv6 route %s %s %d%s\n", dest, dr.Gateway, dhcpRoutePreference, vrfPart)
 			}
 		} else {
 			if ifn, drop := dhcpRouteInterface(dr); drop {
 				// #9501: unusable interface operand on a link-local gateway; the route is dropped.
 			} else if ifn != "" {
-				fmt.Fprintf(b, "ip route %s %s %s 200%s\n", dest, dr.Gateway, ifn, vrfPart)
+				fmt.Fprintf(b, "ip route %s %s %s %d%s\n", dest, dr.Gateway, ifn, dhcpRoutePreference, vrfPart)
 			} else {
-				fmt.Fprintf(b, "ip route %s %s 200%s\n", dest, dr.Gateway, vrfPart)
+				fmt.Fprintf(b, "ip route %s %s %d%s\n", dest, dr.Gateway, dhcpRoutePreference, vrfPart)
 			}
 		}
 		wrote = true

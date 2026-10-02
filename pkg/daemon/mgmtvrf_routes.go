@@ -172,6 +172,11 @@ func mgmtRoutePrefix(route netlink.Route, family int) (netip.Prefix, bool) {
 	return netip.PrefixFrom(addr, ones).Masked(), true
 }
 
+const (
+	unlimitedRoutePriority = -1
+	dhcpRoutePriorityLimit = 200
+)
+
 // mgmtRouteCoveringPrefix returns the most-specific route that contains a
 // learned prefix. Only a route at least as broad as the learned prefix can
 // override it; a broader learned route does not override a more-specific route
@@ -181,10 +186,22 @@ func mgmtRouteCoveringPrefix(
 	routes []netlink.Route,
 	family int,
 ) (netip.Prefix, netlink.Route, bool) {
+	return mgmtRouteCoveringPrefixAtPriority(learned, routes, family, unlimitedRoutePriority)
+}
+
+func mgmtRouteCoveringPrefixAtPriority(
+	learned netip.Prefix,
+	routes []netlink.Route,
+	family int,
+	maxPriority int,
+) (netip.Prefix, netlink.Route, bool) {
 	var bestPrefix netip.Prefix
 	var bestRoute netlink.Route
 	found := false
 	for _, route := range routes {
+		if maxPriority >= 0 && route.Priority > maxPriority {
+			continue
+		}
 		prefix, ok := mgmtRoutePrefix(route, family)
 		if !ok || prefix.Bits() > learned.Bits() ||
 			prefix.Addr().BitLen() != learned.Addr().BitLen() ||
@@ -198,8 +215,13 @@ func mgmtRouteCoveringPrefix(
 	return bestPrefix, bestRoute, found
 }
 
+// mgmtRouteCoveredByOperator only lets an operator route at Priority <= 200
+// suppress a DHCP route. A higher-priority value loses to DHCP and must not
+// remove that fallback from the management table.
 func mgmtRouteCoveredByOperator(learned netip.Prefix, operators []netlink.Route, family int) string {
-	if prefix, _, ok := mgmtRouteCoveringPrefix(learned, operators, family); ok {
+	if prefix, _, ok := mgmtRouteCoveringPrefixAtPriority(
+		learned, operators, family, dhcpRoutePriorityLimit,
+	); ok {
 		return prefix.String()
 	}
 	return ""
