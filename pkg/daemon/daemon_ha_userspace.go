@@ -1,11 +1,76 @@
 package daemon
 
 import (
+	"context"
+	"log/slog"
 	"slices"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 )
+
+// installActiveSessionSyncZoneOwnership repairs a published session-sync object
+// when config sync skips apply. It shares applySem with config applies so a
+// concurrent commit cannot leave an older snapshot installed.
+func (d *Daemon) installActiveSessionSyncZoneOwnership(ss *cluster.SessionSync) {
+	if ss == nil || d.store == nil || ss.ZoneOwnershipInstalled() {
+		return
+	}
+	if d.applySem != nil {
+		if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+			slog.Warn("cluster: failed to serialize zone ownership install with config apply", "err", err)
+			return
+		}
+		defer d.applySem.Release(1)
+	}
+	if ss.ZoneOwnershipInstalled() {
+		return
+	}
+	_, cfg := d.activeAppliedZoneOwnershipSnapshot()
+	if cfg == nil {
+		return
+	}
+	ss.SetZoneOwnership(buildZoneRGMap(cfg, buildZoneIDs(cfg)), buildZoneFoldRGMap(cfg), buildIngressFoldFn(cfg))
+}
+
+// seedActiveSessionSyncZoneOwnership initializes a constructor-local object
+// before it is published, so the first connection cannot observe the nil-map
+// safety sentinel when an applied config already exists.
+func (d *Daemon) seedActiveSessionSyncZoneOwnership(ss *cluster.SessionSync) {
+	if ss == nil || ss.ZoneOwnershipInstalled() {
+		return
+	}
+	gen, cfg := d.activeAppliedZoneOwnershipSnapshot()
+	if cfg == nil {
+		return
+	}
+	zoneRG := buildZoneRGMap(cfg, buildZoneIDs(cfg))
+	foldRG := buildZoneFoldRGMap(cfg)
+	ingressFold := buildIngressFoldFn(cfg)
+	currentGen, currentCfg := d.store.ActiveSnapshot()
+	if gen != currentGen || cfg != currentCfg || !d.store.ActiveApplied() {
+		return
+	}
+	ss.SetZoneOwnership(zoneRG, foldRG, ingressFold)
+}
+
+// activeAppliedZoneOwnershipSnapshot captures only a stable active snapshot
+// that has completed apply. Constructor seeding deliberately avoids applySem:
+// stopClusterComms may join the constructor while its caller still owns it.
+func (d *Daemon) activeAppliedZoneOwnershipSnapshot() (uint64, *config.Config) {
+	if d.store == nil {
+		return 0, nil
+	}
+	gen, cfg := d.store.ActiveSnapshot()
+	if cfg == nil || !d.store.ActiveApplied() {
+		return 0, nil
+	}
+	currentGen, currentCfg := d.store.ActiveSnapshot()
+	if gen != currentGen || cfg != currentCfg || !d.store.ActiveApplied() {
+		return 0, nil
+	}
+	return gen, cfg
+}
 
 type userspaceXSKBindingController interface {
 	XSKBoundNotified() bool

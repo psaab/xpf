@@ -4491,6 +4491,11 @@ outside the monitor loop:
     when its contents change. Reconcile skips a bulk whose ownership snapshot
     generation is stale, because old answers could delete a session this node
     now owns.
+  - Before publishing a new session-sync object, the daemon seeds a stable
+    active-applied config's ownership snapshot. Exact-text and
+    credential-equivalent config-sync skips also repair a still-nil map from
+    the latest applied config, covering boot applies that precede session-sync
+    creation without weakening the nil-map safety guard.
   - When the bulk-start ownership snapshot is absent or its generation changes
     before reconcile, the receiver keeps sessions and withholds `BulkAck`,
     `bulkEverCompleted`, and `OnBulkSyncReceived`. The failover sync hold therefore
@@ -4511,8 +4516,9 @@ outside the monitor loop:
   applying the RG 0 fallback does not delete a node-local flow merely because
   its zone has no RETH-backed RG mapping.
 
-  Cells: `sync_zone_snapshot_rg0_9655_test.go`, `sync_zone_rg_11012_test.go`;
-  origin-gate controls: `session_origin_10227_test.go`.
+  Cells: `sync_zone_snapshot_rg0_9655_test.go`, `sync_zone_rg_11012_test.go`,
+  `sync_zone_map_restart_11760_test.go`; origin-gate controls:
+  `session_origin_10227_test.go`.
 
   **Accepted limitation, with its owner (#9626 item 3).** A cold prime carries
   only the redundancy groups this node is PRIMARY for when the bulk is built:

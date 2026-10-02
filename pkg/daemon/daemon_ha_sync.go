@@ -903,8 +903,10 @@ func (d *Daemon) handleConfigSyncWithAncestry(
 		if activeText == incomingText && d.store.ActiveApplied() {
 			slog.Info("cluster: skipping config sync apply (config already matches active and is applied)",
 				"size", len(configText))
-			// Already converged to this config — a nil return lets the
-			// high-water advance so a duplicate re-push is correctly skipped.
+			// A daemon restart can have applied this config before sessionSync
+			// existed; restore its ownership snapshot even though policy apply
+			// itself is already converged.
+			d.installActiveSessionSyncZoneOwnership(d.getSessionSync())
 			return nil
 		}
 		// #10825: an old (pre-migration) primary pushes api-auth credentials
@@ -927,9 +929,9 @@ func (d *Daemon) handleConfigSyncWithAncestry(
 					if config.ConfigTreesEquivalentForSync(activeTree, incomingTree) {
 						slog.Info("cluster: skipping config sync apply (config equivalent to applied active; credential verifiers match)",
 							"size", len(configText))
-						// Semantically converged — a nil return lets the
-						// high-water advance exactly as the text-equal
-						// shortcut above does.
+						// The credential-equivalent fast path also skips apply,
+						// so it must repair the same session ownership snapshot.
+						d.installActiveSessionSyncZoneOwnership(d.getSessionSync())
 						return nil
 					}
 				}
@@ -1037,10 +1039,9 @@ func (d *Daemon) beginClusterCommsEpoch(
 // dropping the publish — when a restart (stopClusterComms / a newer
 // startClusterComms) has advanced the generation since this constructor started,
 // so a late constructor from a superseded epoch never overwrites the newer
-// epoch's session/endpoints (the stale-overwrite failure) and never resurrects a
-// session that stop is tearing down (the nil-deref failure). The generation
-// check and the store happen under the same lock so they cannot interleave with
-// a concurrent stop.
+// epoch's session/endpoints or resurrects a session that stop is tearing down.
+// The generation check and store happen under the same lock so they cannot
+// interleave with a concurrent stop.
 func (d *Daemon) publishSessionSyncIfCurrent(gen uint64, ss *cluster.SessionSync) bool {
 	d.clusterCommsMu.Lock()
 	defer d.clusterCommsMu.Unlock()
@@ -1259,6 +1260,9 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			} else {
 				ss = cluster.NewSessionSync(syncLocal, syncPeer, nil)
 			}
+			// Seed from an already-applied config before the new object becomes
+			// observable to concurrent sync and apply paths.
+			d.seedActiveSessionSyncZoneOwnership(ss)
 			if !d.publishSessionSyncIfCurrent(commsGen, ss) {
 				// A restart superseded this epoch while we were resolving the
 				// sync address; abort before wiring cluster state or binding.
