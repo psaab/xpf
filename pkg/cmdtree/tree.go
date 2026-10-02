@@ -596,7 +596,7 @@ var OperationalTree = map[string]*Node{
 						"detail": {Desc: "Show detailed source NAT rules"},
 					}},
 					// #9064: takes a rule-set NAME.
-					"rule-set": {Desc: "Show source NAT rule sets", AcceptsArgs: true},
+					"rule-set": {Desc: "Show source NAT rule sets", ValueType: ValueIdentifier, ValueDesc: "Rule-set name"},
 					"deterministic-nat": {Desc: "Resolve deterministic CGNAT/NAPT64 mappings (applied generation)", Children: map[string]*Node{
 						"internal-host": {Desc: "Forward: map an internal subscriber to its translated IP + port block", Children: map[string]*Node{
 							"<address>": {Desc: "Internal subscriber IP (IPv4 mode 1, or IPv6 mode 2 NAPT64)", Children: map[string]*Node{
@@ -621,7 +621,7 @@ var OperationalTree = map[string]*Node{
 						"detail": {Desc: "Show detailed destination NAT rules"},
 					}},
 					// #9064: takes a rule-set NAME.
-					"rule-set": {Desc: "Show destination NAT rule sets", AcceptsArgs: true},
+					"rule-set": {Desc: "Show destination NAT rule sets", ValueType: ValueIdentifier, ValueDesc: "Rule-set name"},
 				}},
 				"static": {Desc: "Show static NAT", Children: map[string]*Node{
 					"rule": {Desc: "Show static NAT rules", Children: map[string]*Node{

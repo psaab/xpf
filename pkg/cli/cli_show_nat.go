@@ -82,7 +82,7 @@ func (c *CLI) showNATSource(cfg *config.Config, args []string) error {
 			}
 			return c.showNATSourceRuleAll(cfg)
 		case "rule-set":
-			if len(args) > 1 {
+			if len(args) == 2 {
 				return c.showNATSourceRuleSet(cfg, args[1])
 			}
 			return fmt.Errorf("usage: show security nat source rule-set <name>")
@@ -721,7 +721,7 @@ func (c *CLI) showNATDestination(cfg *config.Config, args []string) error {
 			}
 			return c.showNATDestinationRuleAll(cfg)
 		case "rule-set":
-			if len(args) > 1 {
+			if len(args) == 2 {
 				return c.showNATDestinationRuleSet(cfg, args[1])
 			}
 			return fmt.Errorf("usage: show security nat destination rule-set <name>")

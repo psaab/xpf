@@ -93,6 +93,9 @@ func Canonicalize(tree map[string]*Node, words []string) ([]string, Canonicalize
 			// #8304: AcceptsArgs is honoured HERE and not in the completion
 			// walkers above, which ask a different question — those decide what
 			// to OFFER, and a node with no completion source has nothing to add.
+			// #11770: this arm is deliberately unbounded for free-form arguments.
+			// A single-value argument must be modelled by a typed, dynamic, or
+			// placeholder node so later words are refused here.
 			if currentNode != nil && currentNode.AcceptsArgs {
 				continue
 			}
