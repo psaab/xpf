@@ -110,13 +110,13 @@ func ipsecTSAddressSetsCoverPrefix11422(
 	for {
 		var furthest netip.Addr
 		for _, child := range children {
-			for _, candidate := range child.remote.ranges {
-				if candidate.first.Is4() != cursor.Is4() ||
-					candidate.first.Compare(cursor) > 0 || candidate.last.Compare(cursor) < 0 {
+			for _, candidate := range child.Remote.Ranges {
+				if candidate.First.Is4() != cursor.Is4() ||
+					candidate.First.Compare(cursor) > 0 || candidate.Last.Compare(cursor) < 0 {
 					continue
 				}
-				if !furthest.IsValid() || candidate.last.Compare(furthest) > 0 {
-					furthest = candidate.last
+				if !furthest.IsValid() || candidate.Last.Compare(furthest) > 0 {
+					furthest = candidate.Last
 				}
 			}
 		}
