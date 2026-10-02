@@ -6,6 +6,9 @@ xpf (0.0.0) unstable; urgency=medium
     manifests before cut-over; fail closed on missing or mismatched checkout
     provenance, and version the executable field change under ledger schema 2
     (#11765).
+  * Use NAT64's translated destination when deriving the per-peer WireGuard
+    underlay MTU for packet-too-big and fragmentation budgets (#11722).
+
   * Scope WireGuard admits in cold-boot and coverage-gap host-input fences
     to addresses in zones serving each listen port (#11572).
 

@@ -180,13 +180,14 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb(
     let mut ptb_reply: Option<Vec<u8>> = None;
     let mut mtu_signalled = false;
     let egress_mtu = forwarded_egress_mtu(decision, forwarding);
-    // #2845: derive the inner destination so the WG PTB picks
-    // the SAME peer (and thus the SAME underlay MTU) the encap
-    // path will. `source_frame` IS the pre-encap inner packet
-    // and `meta.addr_family` its family. Only the WG arm
-    // of `post_transform_inner_mtu` consumes this; cheap enough
-    // to always derive.
-    let inner_dst = forwarded_inner_destination(source_frame, meta);
+    // WG's MTU lookup must use the destination in the transformed inner frame:
+    // NAT64 still has the original-family destination in `source_frame`.
+    let inner_dst = crate::afxdp::icmp_ptb::post_transform_inner_destination(
+        source_frame,
+        meta,
+        decision,
+        is_nat64,
+    );
     let mtu = if is_nat64 || uses_native_tunnel {
         post_transform_inner_mtu(
             decision,
@@ -1803,23 +1804,6 @@ fn forwarded_egress_mtu(decision: &SessionDecision, forwarding: &ForwardingState
 }
 
 #[inline(always)]
-fn forwarded_inner_destination(
-    source_frame: &[u8],
-    meta: ForwardPacketMeta,
-) -> Option<std::net::IpAddr> {
-    frame_l3_offset(source_frame)
-        .or_else(|| {
-            crate::afxdp::frame::nibble_trusted_stamp(
-                source_frame,
-                meta.l3_offset,
-                meta.addr_family,
-            )
-        })
-        .and_then(|l3| source_frame.get(l3..))
-        .and_then(|packet| crate::afxdp::gre::inner_dst_ip(packet, meta.addr_family))
-}
-
-#[inline(always)]
 fn nat64_v4_egress_mtu(
     source_frame: &[u8],
     meta: ForwardPacketMeta,
@@ -1832,10 +1816,16 @@ fn nat64_v4_egress_mtu(
         true,
         meta.addr_family,
         forwarded_egress_mtu(decision, forwarding),
-        forwarded_inner_destination(source_frame, meta),
+        crate::afxdp::icmp_ptb::post_transform_inner_destination(
+            source_frame,
+            meta,
+            decision,
+            true,
+        ),
     )
     .saturating_sub(20)
 }
+
 /// Whether a cache hit can skip the pending-forward dispatcher.
 ///
 /// The inline rewrite path is valid only when the plain egress MTU decision is

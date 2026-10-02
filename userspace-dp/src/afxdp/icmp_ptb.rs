@@ -186,6 +186,33 @@ pub(in crate::afxdp) fn clamp_next_hop_mtu(mtu: usize, addr_family: u8) -> u16 {
     mtu.max(floor).min(u16::MAX as usize) as u16
 }
 
+/// Destination key consumed by WireGuard's AllowedIPs peer lookup when
+/// calculating the transformed packet's underlay MTU. NAT64's source frame
+/// still carries the original-family destination, while the builder selects
+/// its WG peer from the translated inner frame; use the NAT decision's output
+/// destination instead.
+#[inline(always)]
+pub(super) fn post_transform_inner_destination(
+    source_frame: &[u8],
+    meta: ForwardPacketMeta,
+    decision: &SessionDecision,
+    is_nat64: bool,
+) -> Option<std::net::IpAddr> {
+    if is_nat64 {
+        return decision.nat.rewrite_dst;
+    }
+    frame_l3_offset(source_frame)
+        .or_else(|| {
+            crate::afxdp::frame::nibble_trusted_stamp(
+                source_frame,
+                meta.l3_offset,
+                meta.addr_family,
+            )
+        })
+        .and_then(|l3| source_frame.get(l3..))
+        .and_then(|packet| crate::afxdp::gre::inner_dst_ip(packet, meta.addr_family))
+}
+
 /// #2330: the inner-source post-transform MTU for a size-changing forward
 /// path (NAT64 / native GRE / WireGuard).
 ///
@@ -231,6 +258,7 @@ pub(in crate::afxdp) fn clamp_next_hop_mtu(mtu: usize, addr_family: u8) -> u16 {
 /// `egress_mtu` is the effective plain-forward MTU (minimum known interface
 /// and selected-route MTU); used only for the NAT64-only arm (tunnel arms
 /// resolve physical transport MTUs separately).
+
 pub(in crate::afxdp) fn post_transform_inner_mtu(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
