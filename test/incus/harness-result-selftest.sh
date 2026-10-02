@@ -1274,15 +1274,18 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 rm -rf "$LEDGER"
-(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
-	BPFRX_CLUSTER_ENV="$custom_cluster_env" harness_result_run --ledger "$LEDGER" --cluster \
-	--env testenv --gate manifest-peer-slot-missing --adapter smoke-cells \
-	--node custom:prod-fw0-blue --node-peer custom:prod-fw1-blue -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+manifest_peer_missing_warnings=$(
+	(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+		BPFRX_CLUSTER_ENV="$custom_cluster_env" harness_result_run --ledger "$LEDGER" --cluster \
+		--env testenv --gate manifest-peer-slot-missing --adapter smoke-cells \
+		--node custom:prod-fw0-blue --node-peer custom:prod-fw1-blue -- "$WORK/fake-gate.sh" >/dev/null) 2>&1
+)
 if [[ "$(last_row_field verdict)" == "VOID" &&
-	"$(last_row_field exe_check)" == "UNAVAILABLE" ]]; then
-	ok "#11845: a missing peer slot fails closed even when both process readbacks succeed"
+	"$(last_row_field exe_check)" == "UNAVAILABLE" &&
+	"$manifest_peer_missing_warnings" == *"deploy attestation manifest or node 1 slot is missing; peer xpfd identity is unavailable"* ]]; then
+	ok "#11858: rc=1 from the peer manifest lookup selects the missing-slot warning"
 else
-	bad "#11845: missing peer slot gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check)"
+	bad "#11858: missing peer slot gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) warnings=$manifest_peer_missing_warnings"
 fi
 
 rm -rf "$LEDGER"
@@ -1309,16 +1312,19 @@ with open(sys.argv[1], "w", encoding="utf-8") as f:
     f.write("\n")
 PY
 rm -rf "$LEDGER"
-(PEER_DOWN=1 XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
-	BPFRX_CLUSTER_ENV="$custom_cluster_env" harness_result_run --ledger "$LEDGER" --cluster \
-	--env testenv --gate manifest-peer-down-stale-slot --adapter smoke-cells \
-	--node custom:prod-fw0-blue --node-peer custom:prod-fw1-blue -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+manifest_peer_foreign_warnings=$(
+	(PEER_DOWN=1 XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+		BPFRX_CLUSTER_ENV="$custom_cluster_env" harness_result_run --ledger "$LEDGER" --cluster \
+		--env testenv --gate manifest-peer-down-stale-slot --adapter smoke-cells \
+		--node custom:prod-fw0-blue --node-peer custom:prod-fw1-blue -- "$WORK/fake-gate.sh" >/dev/null) 2>&1
+)
 if [[ "$(last_row_field verdict)" == "VOID" &&
 	"$(last_row_field exe_check)" == "UNAVAILABLE" &&
-	"$(last_row_field exe_scope)" == "local-only" ]]; then
-	ok "#11845: unreadable peer with a stale-checkout slot fails closed and stays visibly local-only"
+	"$(last_row_field exe_scope)" == "local-only" &&
+	"$manifest_peer_foreign_warnings" == *"peer deploy attestation manifest belongs to a different checkout; xpfd identity is unavailable"* ]]; then
+	ok "#11858: rc=3 from the peer manifest lookup selects the foreign-checkout warning"
 else
-	bad "#11845: unreadable peer with stale slot gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) scope=$(last_row_field exe_scope)"
+	bad "#11858: stale peer slot gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) scope=$(last_row_field exe_scope) warnings=$manifest_peer_foreign_warnings"
 fi
 
 printf '{invalid json\n' >"$WORK/deploy-manifest.json"

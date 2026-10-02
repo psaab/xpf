@@ -1185,16 +1185,19 @@ harness_result_run() {
 						*) _hr_warn "deploy attestation manifest is invalid or node identity is unknown; xpfd identity is unavailable" ;;
 					esac
 				fi
-				if [[ -n "$manifest_peer_node" ]] &&
-					manifest_peer_sha=$(deploy_manifest_sha xpfd "$root" "$build_git_sha" "$manifest_peer_node" 2>/dev/null); then
-					build_exe_peer_sha="$manifest_peer_sha"
-				elif [[ -n "$manifest_peer_node" ]]; then
-					manifest_rc=$?
-					case "$manifest_rc" in
-						1) _hr_warn "deploy attestation manifest or node $manifest_peer_node slot is missing; peer xpfd identity is unavailable" ;;
-						3) _hr_warn "peer deploy attestation manifest belongs to a different checkout; xpfd identity is unavailable" ;;
-						*) _hr_warn "peer deploy attestation manifest is invalid; xpfd identity is unavailable" ;;
-					esac
+				if [[ -n "$manifest_peer_node" ]]; then
+					manifest_rc=0
+					manifest_peer_sha=$(deploy_manifest_sha xpfd "$root" "$build_git_sha" "$manifest_peer_node" 2>/dev/null) ||
+						manifest_rc=$?
+					if ((manifest_rc == 0)); then
+						build_exe_peer_sha="$manifest_peer_sha"
+					else
+						case "$manifest_rc" in
+							1) _hr_warn "deploy attestation manifest or node $manifest_peer_node slot is missing; peer xpfd identity is unavailable" ;;
+							3) _hr_warn "peer deploy attestation manifest belongs to a different checkout; xpfd identity is unavailable" ;;
+							*) _hr_warn "peer deploy attestation manifest is invalid; xpfd identity is unavailable" ;;
+						esac
+					fi
 				else
 					_hr_warn "peer node identity is unknown; peer xpfd identity is unavailable"
 				fi
@@ -1236,12 +1239,15 @@ harness_result_run() {
 							*) _hr_warn "deploy manifest has no valid xpf-userspace-dp identity for this node" ;;
 						esac
 					fi
-					if [[ -n "$manifest_peer_node" ]] &&
-						helper_manifest_peer_sha=$(deploy_manifest_sha xpf-userspace-dp "$root" "$build_git_sha" "$manifest_peer_node" 2>/dev/null); then
-						build_helper_exe_peer_sha="$helper_manifest_peer_sha"
-					elif [[ -n "$manifest_peer_node" ]]; then
-						helper_manifest_rc=$?
-						_hr_warn "deploy manifest has no valid xpf-userspace-dp identity for peer node $manifest_peer_node (rc=$helper_manifest_rc)"
+					if [[ -n "$manifest_peer_node" ]]; then
+						helper_manifest_rc=0
+						helper_manifest_peer_sha=$(deploy_manifest_sha xpf-userspace-dp "$root" "$build_git_sha" "$manifest_peer_node" 2>/dev/null) ||
+							helper_manifest_rc=$?
+						if ((helper_manifest_rc == 0)); then
+							build_helper_exe_peer_sha="$helper_manifest_peer_sha"
+						else
+							_hr_warn "deploy manifest has no valid xpf-userspace-dp identity for peer node $manifest_peer_node (rc=$helper_manifest_rc)"
+						fi
 					fi
 				else
 					_hr_warn "deploy attestation manifest reader is unavailable; helper identity is unavailable"
