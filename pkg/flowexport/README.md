@@ -39,48 +39,26 @@ counts populate the standard IANA `octetDeltaCount`/`packetDeltaCount`; the
 reverse (server→client) counts are exported by IPFIX as the RFC 5103 biflow
 reverse IEs — see "#3746 — biflow reverse volume (IPFIX)" below.
 
-**#2465 — the exported flow StartTime is now the real session-creation
-time, not a packet-count guess.** Before #2465 the NetFlow v9 / IPFIX
-session-close exporters set the flow `StartTime` to
-`EndTime - estimateSessionDuration(packet_count)` — a heuristic
-(100ms·pkts for TCP, 50ms·pkts otherwise) that systematically mis-timed
-flows (long idle sessions exported as very short; high-rate bursts
-exported as long), degrading billing / audit / DDoS-reconstruction /
-duration analytics. The SESSION_CLOSE RT_FLOW frame now carries the
-session's real creation instant in the `created` wire field (offset 108,
+**#2465 — the exported flow StartTime uses the measured session-creation
+time when it is available.** The SESSION_CLOSE RT_FLOW frame carries the
+session's creation instant in the `created` wire field (offset 108,
 absolute Unix **seconds**, little-endian u32) and the close instant in
-`timestamp_ns` (offset 0, absolute Unix **nanoseconds**, little-endian
-u64). The dataplane stamps the creation instant once at session install
-(monotonic `CLOCK_MONOTONIC`), and the helper converts it to wall-clock
-at emit time. The Go decoder surfaces `created` as
-`logging.EventRecord.Created`; `flowStartTime` (manager.go) sets
-`StartTime = time.Unix(Created, 0)` directly when it is non-zero (clamped
-to the EndTime on clock skew). `estimateSessionDuration` is retained ONLY
-as the fallback when `Created == 0` — an old-format frame, or a
-synthesized close from a path that carried no creation instant (the
-explicit clear-session / NAT-remap delete glue and the HA tunnel-remap
-purge, which do not have the originating entry in hand). Each fallback
-bumps a per-exporter `EstimatedDurations()` counter so operators can see
-how often the heuristic is still in play. (Since #2501 the byte/packet
-**volume** counters are real too — the forward direction on the standard
-IANA counters and the reverse direction on the #3746 biflow reverse IEs.)
+`timestamp_ns` (offset 0, absolute Unix **nanoseconds**, little-endian u64).
+The dataplane stamps creation at session install and converts it to wall
+time at emit. The Go decoder surfaces it as `logging.EventRecord.Created`;
+`flowStartTime` sets `StartTime` from that value (plus the #2853 nanos)
+when non-zero, clamping clock skew to EndTime.
 
-**#4923 — the packet-count fallback can no longer overflow StartTime
-past EndTime.** `estimateSessionDuration` multiplies the uint64 packet
-count by a per-packet time (100ms TCP / 50ms otherwise); above ~92.2
-billion TCP packets (~184.5 billion non-TCP) that product overflowed
-signed `time.Duration` to a NEGATIVE value, and subtracting a negative
-duration from the record EndTime moved `StartTime` *after* EndTime —
-emitting first-switched after last-switched (NetFlow) / contradictory
-absolute milliseconds (IPFIX) that a collector may reject, exactly on
-the legacy / HA-recovery fallback paths. `estimateSessionDuration` now
-SATURATES at `maxEstimatedSessionAge` (366 days — a defensible session
-ceiling ~9e12 ns below the int64 nanosecond limit) so the estimate is
-always bounded and non-negative, and `flowStartTime` additionally clamps
-the fallback `StartTime` to the EndTime (mirroring the `Created` skew
-clamp) so `StartTime <= EndTime` holds no matter how the heuristic
-evolves. Only the pathological overflow regime changes; realistic packet
-counts keep the exact prior estimate.
+**#11699 — a missing creation time is not a measured start.** Synthesized
+closes (including clear-session, HA purge/promotion, and `tunnel_purge`) and
+old-format close frames may have `Created == 0`. Packet counts cannot recover
+the actual start, so NetFlow v9 and IPFIX report `StartTime = EndTime`
+(zero duration) rather than backdating a heuristic as fact. The
+`EstimatedDurations()` counter remains and counts these missing-`Created`
+records. Closes with a real `Created` timestamp keep their measured start
+and sub-second resolution. Since #2501 the byte/packet **volume** counters
+are real too — forward counts use the standard IANA counters and reverse
+counts use the #3746 IPFIX biflow reverse IEs.
 
 **#2853 — the flow StartTime keeps MILLISECOND resolution.** #2465's
 `created` field is integer Unix **seconds** (offset 108, u32), so every
@@ -96,8 +74,9 @@ decoder surfaces it as `logging.EventRecord.CreatedNanos` (and zeroes
 close-record policy-name resolution is unchanged); `flowStartTime`
 combines both as `time.Unix(Created, CreatedNanos)`. The exported
 `flowStartMilliseconds` (`StartTime.UnixMilli()`) and NetFlow
-`uptimeMs` now reflect the true sub-second start. The fallback path
-(`Created == 0`) is unchanged.
+`uptimeMs` reflect the true sub-second start when `Created` is present.
+When `Created == 0`, #11699 reports a zero-duration close-time record and
+increments the retained `EstimatedDurations()` counter.
 
 Values outside the wire contract are clamped to `999,999,999` ns before
 conversion to `time.Time`; `logging.InvalidCreatedNanos()` reports the
@@ -226,11 +205,12 @@ an ESP tunnel from a GRE flow — tunnel-traffic capacity/security analytics wer
 wrong. The fix sources the exported `protocolIdentifier` directly from
 `EventRecord.ProtocolNum` — the raw numeric IP protocol (0-255) the dataplane
 stamps on the close frame and `pkg/logging/ringbuf.go` decodes verbatim — in
-both `ExportSessionClose` builders. The daemon callbacks now also set
+both `ExportSessionClose` builders. The daemon callbacks also set
 `SessionCloseData.Protocol = rec.ProtocolNum` (removing the lossy
-`parseProtocol`), which additionally corrects the non-TCP `flowStartTime`
-duration heuristic. The rendered protocol NAME (`EventRecord.Protocol`) stays a
-display-only string for `show` output; only the exported numeric field changed.
+`parseProtocol`). Since #11699, `flowStartTime` no longer derives an age from
+the protocol or packet count when the creation stamp is absent. The rendered
+protocol NAME (`EventRecord.Protocol`) stays a display-only string for `show`
+output; the exported numeric field remains authoritative.
 Fail-on-revert is pinned by `protocol_num_test.go`
 (`TestNetflowProtocolIdentifierFromProtocolNum` /
 `TestIPFIXProtocolIdentifierFromProtocolNum`), which encode GRE/ESP/AH +

@@ -10,29 +10,31 @@ import (
 
 // EventRecord is a formatted event stored in the event buffer.
 type EventRecord struct {
-	Time            time.Time
-	Type            string // "SESSION_OPEN", "POLICY_DENY", etc.
-	SrcAddr         string // "10.0.1.5:443"
-	DstAddr         string
-	Protocol        string // "TCP", "UDP" (rendered name; numeric for unnamed)
-	ProtocolNum     uint8  // raw IP protocol number the record carries (#3382). The matcher compares this directly rather than re-parsing the rendered name: numeric comparison stays total for named, numeric-only, and any future render-only protocols (the ProtocolName↔ProtocolNumber round-trip is closed since #3393, but the raw number is the robust key regardless).
-	Action          string // "permit", "deny"
-	PolicyID        uint32
-	RuleID          uint32
-	TermID          uint32
-	Reason          string
-	OwnerRGID       int16
-	InZone          uint16
-	OutZone         uint16
-	ScreenCheck     string // for SCREEN_DROP
-	SessionPkts     uint64 // for SESSION_CLOSE (client→server)
-	SessionBytes    uint64
-	NATSrcAddr      string // "172.16.1.1:12345" (post-NAT source)
-	NATDstAddr      string // "10.0.2.1:80" (post-NAT destination)
-	InZoneName      string // resolved zone name
-	OutZoneName     string // resolved zone name
-	ElapsedTime     uint32 // seconds since session creation (for CLOSE)
-	Created         uint32 // #2465: absolute session-creation Unix seconds (for CLOSE); 0 = unknown (exporter falls back to the packet-count estimate)
+	Time         time.Time
+	Type         string // "SESSION_OPEN", "POLICY_DENY", etc.
+	SrcAddr      string // "10.0.1.5:443"
+	DstAddr      string
+	Protocol     string // "TCP", "UDP" (rendered name; numeric for unnamed)
+	ProtocolNum  uint8  // raw IP protocol number the record carries (#3382). The matcher compares this directly rather than re-parsing the rendered name: numeric comparison stays total for named, numeric-only, and any future render-only protocols (the ProtocolName↔ProtocolNumber round-trip is closed since #3393, but the raw number is the robust key regardless).
+	Action       string // "permit", "deny"
+	PolicyID     uint32
+	RuleID       uint32
+	TermID       uint32
+	Reason       string
+	OwnerRGID    int16
+	InZone       uint16
+	OutZone      uint16
+	ScreenCheck  string // for SCREEN_DROP
+	SessionPkts  uint64 // for SESSION_CLOSE (client→server)
+	SessionBytes uint64
+	NATSrcAddr   string // "172.16.1.1:12345" (post-NAT source)
+	NATDstAddr   string // "10.0.2.1:80" (post-NAT destination)
+	InZoneName   string // resolved zone name
+	OutZoneName  string // resolved zone name
+	ElapsedTime  uint32 // seconds since session creation (for CLOSE)
+	// #2465: absolute session-creation Unix seconds (for CLOSE). 0 is unknown
+	// and exporters preserve it as zero duration at the close time.
+	Created         uint32
 	CreatedNanos    uint32 // #2853: sub-second nanosecond remainder (0..=999_999_999) of the session-creation instant (SESSION_CLOSE only; rides the close-unused [44:48] wire slot). Combined with Created so the flow StartTime keeps millisecond resolution.
 	PolicyName      string // resolved policy name (e.g. "allow-everything")
 	RevSessionPkts  uint64 // packets from server (for SESSION_CLOSE)

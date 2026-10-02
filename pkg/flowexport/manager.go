@@ -987,20 +987,15 @@ type SessionCloseData struct {
 	Direction uint8
 }
 
-// flowStartTime resolves the flow record StartTime for a session-close event.
+// flowStartTime resolves a flow's reported StartTime from its creation stamp.
 //
-// #2465: when the close event carries a real session-creation timestamp
-// (rec.Created, absolute Unix seconds stamped by the dataplane at session
-// install), the StartTime is that exact instant — an accurate flow age for
-// billing / audit / DDoS reconstruction / duration analytics. Only when the
-// timestamp is absent (0 — an old-format frame or a synthesized close that
-// carried no creation instant, e.g. the explicit clear-session / HA-purge
-// paths) does it fall back to the legacy packet-count heuristic
-// (estimateSessionDuration), subtracting the estimate from the record EndTime.
-//
-// The bool return reports whether the heuristic fallback was used, so callers
-// can bump an "estimated-duration-used" counter for operator visibility.
-func flowStartTime(rec logging.EventRecord, proto uint8) (time.Time, bool) {
+// A valid `Created` value is the measured session-creation instant. When that
+// stamp is absent (including synthesized close records from clear-session,
+// HA purge/promotion, and tunnel purge), packet counts cannot recover the
+// actual start; report a zero-duration flow at its close time instead of
+// presenting a heuristic as measured data. The bool reports a missing stamp
+// so exporters can retain their EstimatedDurations counter.
+func flowStartTime(rec logging.EventRecord) (time.Time, bool) {
 	if rec.Created > 0 {
 		// #2853: combine the integer Unix second (rec.Created) with the
 		// sub-second nanosecond remainder (rec.CreatedNanos, carried on the
@@ -1021,16 +1016,7 @@ func flowStartTime(rec logging.EventRecord, proto uint8) (time.Time, bool) {
 		}
 		return created, false
 	}
-	// Packet-count fallback. estimateSessionDuration saturates (#4923) so the
-	// estimate is always bounded and non-negative, which keeps `start` at or
-	// before the EndTime. Clamp explicitly anyway — mirroring the rec.Created
-	// skew clamp above — so the StartTime <= EndTime invariant holds no matter
-	// how the heuristic evolves and the flow never reports a negative duration.
-	start := rec.Time.Add(-estimateSessionDuration(rec.SessionPkts, proto))
-	if start.After(rec.Time) {
-		return rec.Time, true
-	}
-	return start, true
+	return rec.Time, true
 }
 
 // resolvePostNAT returns the post-NAT tuple for a flow record, falling back
@@ -1073,36 +1059,6 @@ func resolvePostNAT(srcIP, dstIP net.IP, srcPort, dstPort uint16,
 // when the flow was not address-translated on that half.
 func natIPAbsent(ip net.IP) bool {
 	return ip == nil || ip.IsUnspecified()
-}
-
-// maxEstimatedSessionAge bounds the packet-count StartTime heuristic
-// (estimateSessionDuration). It is a defensible ceiling on a session age no
-// real flow exceeds, and — crucially (#4923) — it is ~9e12 below the int64
-// nanosecond ceiling, so multiplying the per-packet estimate can never wrap
-// time.Duration negative.
-const maxEstimatedSessionAge = 366 * 24 * time.Hour
-
-// estimateSessionDuration provides a rough duration estimate based on packet count.
-func estimateSessionDuration(pkts uint64, proto uint8) time.Duration {
-	if pkts == 0 {
-		return 0
-	}
-	// Use a heuristic: TCP sessions ~100ms per packet average,
-	// UDP/ICMP ~50ms per packet
-	perPkt := 50 * time.Millisecond
-	if proto == 6 { // TCP
-		perPkt = 100 * time.Millisecond
-	}
-	// #4923: saturate before the multiply overflows int64. A SessionPkts count
-	// beyond maxEstimatedSessionAge/perPkt (~92.2B TCP / ~184.5B non-TCP at the
-	// int64 ceiling, well above this cap) would wrap the signed time.Duration
-	// negative; the caller subtracts that from the record EndTime, moving
-	// StartTime *after* EndTime. Cap the coarse estimate so the result is
-	// always bounded, non-negative, and keeps StartTime <= EndTime.
-	if pkts >= uint64(maxEstimatedSessionAge/perPkt) {
-		return maxEstimatedSessionAge
-	}
-	return time.Duration(pkts) * perPkt
 }
 
 func collectorKey(c CollectorConfig) string {

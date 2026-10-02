@@ -1059,9 +1059,9 @@ func DecodeRawEventRecord(data []byte) (EventRecord, bool) {
 		RevSessionPkts:  evt.RevPackets,
 		RevSessionBytes: evt.RevBytes,
 		CloseReason:     closeReasonName(evt.CloseReason),
-		// #2465: carry the absolute session-creation Unix seconds so the
-		// NetFlow/IPFIX exporters can set a real flow StartTime instead of the
-		// packet-count heuristic. 0 = unknown (old frame / synthesized close).
+		// #2465: carry the absolute session-creation Unix seconds. A zero value
+		// is unknown (old frame / synthesized close); exporters preserve that
+		// uncertainty with a zero-duration record at the close time.
 		Created: evt.Created,
 	}
 	if evt.EventType == eventTypeSessionClose {

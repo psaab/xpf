@@ -1,7 +1,7 @@
 package flowexport
 
 import (
-	"math"
+	"encoding/binary"
 	"net"
 	"testing"
 	"time"
@@ -9,9 +9,8 @@ import (
 	"github.com/psaab/xpf/pkg/logging"
 )
 
-// #2465: flowStartTime must use the real session-creation timestamp
-// (rec.Created, absolute Unix seconds) as the flow StartTime, falling back to
-// the packet-count heuristic only when the timestamp is absent (0).
+// #2465: flowStartTime uses the real session-creation timestamp (rec.Created,
+// absolute Unix seconds) when it is present.
 func TestFlowStartTimeUsesRealCreated(t *testing.T) {
 	end := time.Unix(1_700_000_300, 0) // close time
 	created := uint32(1_700_000_000)   // 300s earlier
@@ -19,42 +18,35 @@ func TestFlowStartTimeUsesRealCreated(t *testing.T) {
 	rec := logging.EventRecord{
 		Time:        end,
 		Created:     created,
-		SessionPkts: 9, // a packet count the heuristic would mis-time
+		SessionPkts: 9,
 		Protocol:    "TCP",
 	}
 
-	start, usedEstimate := flowStartTime(rec, 6)
-	if usedEstimate {
-		t.Fatal("a real created timestamp must NOT use the estimate")
+	start, missingCreated := flowStartTime(rec)
+	if missingCreated {
+		t.Fatal("a real created timestamp must not be reported missing")
 	}
 	if !start.Equal(time.Unix(int64(created), 0)) {
 		t.Fatalf("StartTime = %v, want %v (the real created stamp)", start, time.Unix(int64(created), 0))
 	}
-	// The heuristic for 9 TCP packets would have been 900ms — far from the
-	// real 300s age. Prove the real path is not the estimate.
-	estimateStart := end.Add(-estimateSessionDuration(9, 6))
-	if start.Equal(estimateStart) {
-		t.Fatalf("StartTime must not equal the packet-count estimate %v", estimateStart)
-	}
 }
 
-// #2465 fallback: when the close event carries no creation timestamp (0), the
-// StartTime falls back to the packet-count heuristic and the bool reports it.
-func TestFlowStartTimeFallsBackToEstimate(t *testing.T) {
+// #11699: without a creation stamp, packet counts cannot establish flow age.
+// Export the close time (zero duration) and report the missing stamp.
+func TestFlowStartTimeWithoutCreationStampUsesEndTime(t *testing.T) {
 	end := time.Unix(1_700_000_300, 0)
 	rec := logging.EventRecord{
 		Time:        end,
-		Created:     0, // unknown
-		SessionPkts: 9,
+		Created:     0,
+		SessionPkts: ^uint64(0),
 		Protocol:    "TCP",
 	}
-	start, usedEstimate := flowStartTime(rec, 6)
-	if !usedEstimate {
-		t.Fatal("a zero created timestamp must use the estimate")
+	start, missingCreated := flowStartTime(rec)
+	if !missingCreated {
+		t.Fatal("a zero created timestamp must be reported missing")
 	}
-	want := end.Add(-estimateSessionDuration(9, 6))
-	if !start.Equal(want) {
-		t.Fatalf("StartTime = %v, want estimate %v", start, want)
+	if !start.Equal(end) {
+		t.Fatalf("StartTime = %v, want close time %v for a zero-duration record", start, end)
 	}
 }
 
@@ -66,20 +58,17 @@ func TestFlowStartTimeClampsFutureCreated(t *testing.T) {
 		Time:    end,
 		Created: 1_700_000_500, // 500s AFTER the close — impossible, clamp
 	}
-	start, usedEstimate := flowStartTime(rec, 6)
-	if usedEstimate {
-		t.Fatal("a non-zero (even if skewed) created must not use the estimate")
+	start, missingCreated := flowStartTime(rec)
+	if missingCreated {
+		t.Fatal("a non-zero created timestamp must not be reported missing")
 	}
 	if !start.Equal(end) {
 		t.Fatalf("StartTime = %v, want clamp to EndTime %v", start, end)
 	}
 }
 
-// #2465 fail-on-revert (NetFlow v9): a session-close event with a real created
-// timestamp must produce a flow record whose StartTime is that timestamp, NOT
-// the packet-count heuristic, and must NOT bump the estimated-duration counter.
-// Reverting ExportSessionClose to `rec.Time.Add(-estimateSessionDuration(...))`
-// makes the StartTime assertion fail.
+// #2465 fail-on-revert (NetFlow v9): a close with a real creation stamp keeps
+// its measured StartTime and does not bump the EstimatedDurations counter.
 func TestNetFlowExportSessionCloseUsesRealCreated(t *testing.T) {
 	e, err := NewExporter(&ExportConfig{})
 	if err != nil {
@@ -118,8 +107,8 @@ func TestNetFlowExportSessionCloseUsesRealCreated(t *testing.T) {
 	}
 }
 
-// #2465 (NetFlow v9 fallback): a close with no created timestamp uses the
-// estimate and bumps the estimated-duration counter.
+// #11699 (NetFlow v9): synthesized closes without Created are emitted with
+// StartTime=EndTime, while retaining the missing-timestamp counter.
 func TestNetFlowExportSessionCloseFallbackBumpsCounter(t *testing.T) {
 	e, err := NewExporter(&ExportConfig{})
 	if err != nil {
@@ -140,12 +129,14 @@ func TestNetFlowExportSessionCloseFallbackBumpsCounter(t *testing.T) {
 	if len(v4) != 1 {
 		t.Fatalf("expected 1 batched flow, got %d", len(v4))
 	}
-	want := end.Add(-estimateSessionDuration(4, 6))
-	if !v4[0].StartTime.Equal(want) {
-		t.Fatalf("StartTime = %v, want estimate %v", v4[0].StartTime, want)
+	if !v4[0].StartTime.Equal(end) {
+		t.Fatalf("StartTime = %v, want close time %v for zero duration", v4[0].StartTime, end)
+	}
+	if !v4[0].EndTime.Equal(end) {
+		t.Fatalf("EndTime = %v, want %v", v4[0].EndTime, end)
 	}
 	if got := e.EstimatedDurations(); got != 1 {
-		t.Fatalf("EstimatedDurations = %d, want 1 (fallback used)", got)
+		t.Fatalf("EstimatedDurations = %d, want 1 (missing Created)", got)
 	}
 }
 
@@ -199,10 +190,10 @@ func TestFlowStartTimeKeepsSubSecondResolution(t *testing.T) {
 		Created: sec, CreatedNanos: 700_000_000, // .700s
 	}
 
-	startEarly, estEarly := flowStartTime(recEarly, 17)
-	startLate, estLate := flowStartTime(recLate, 17)
-	if estEarly || estLate {
-		t.Fatal("a real created timestamp must NOT use the estimate")
+	startEarly, missingEarly := flowStartTime(recEarly)
+	startLate, missingLate := flowStartTime(recLate)
+	if missingEarly || missingLate {
+		t.Fatal("a real created timestamp must not be reported missing")
 	}
 	if startEarly.Equal(startLate) {
 		t.Fatalf("same-second flows must have DISTINCT sub-second StartTimes; both = %v (sub-second truncated?)", startEarly)
@@ -260,7 +251,8 @@ func TestIPFIXExportSessionCloseSubSecondStart(t *testing.T) {
 	}
 }
 
-// #2465 (IPFIX fallback): no created ts → estimate + counter bump.
+// #11699 (IPFIX): synthesized closes without Created are emitted with
+// StartTime=EndTime, while retaining the missing-timestamp counter.
 func TestIPFIXExportSessionCloseFallbackBumpsCounter(t *testing.T) {
 	e, err := NewIPFIXExporter(&ExportConfig{})
 	if err != nil {
@@ -271,70 +263,130 @@ func TestIPFIXExportSessionCloseFallbackBumpsCounter(t *testing.T) {
 	evt := SessionCloseData{SrcIP: net.ParseIP("10.0.1.102"), DstIP: net.ParseIP("172.16.80.200"), Protocol: 6}
 	e.ExportSessionClose(rec, evt)
 
+	v4, _ := e.batch.drain()
+	if len(v4) != 1 {
+		t.Fatalf("expected 1 batched flow, got %d", len(v4))
+	}
+	if !v4[0].StartTime.Equal(end) || !v4[0].EndTime.Equal(end) {
+		t.Fatalf("flow times = (%v, %v), want zero duration at %v", v4[0].StartTime, v4[0].EndTime, end)
+	}
 	if got := e.EstimatedDurations(); got != 1 {
-		t.Fatalf("EstimatedDurations = %d, want 1", got)
+		t.Fatalf("EstimatedDurations = %d, want 1 (missing Created)", got)
 	}
 }
 
-// #4923 fail-on-revert: estimateSessionDuration must saturate rather than
-// overflow. Above ~92.2B TCP packets (~184.5B non-TCP) the pkts*perPacket
-// multiply wraps signed time.Duration negative; the caller subtracts that from
-// the record EndTime and pushes StartTime *after* EndTime. The saturating cap
-// keeps the estimate bounded and non-negative for any packet count, including
-// math.MaxUint64. Reverting the cap makes the negative-duration assertions
-// fail (the multiply wraps to a negative time.Duration).
-func TestEstimateSessionDurationSaturates(t *testing.T) {
-	// Counts spanning the pre-cap regime and well past the int64 overflow
-	// boundary, for both TCP (100ms/pkt) and non-TCP (50ms/pkt).
-	pkts := []uint64{
-		1,
-		1_000,
-		100_000_000_000, // ~100B — past the ~92.2B TCP overflow boundary
-		200_000_000_000, // ~200B — past the ~184.5B non-TCP boundary
-		math.MaxInt64,
-		math.MaxUint64,
-	}
-	for _, proto := range []uint8{6 /* TCP */, 17 /* UDP */} {
-		for _, p := range pkts {
-			d := estimateSessionDuration(p, proto)
-			if d < 0 {
-				t.Fatalf("estimateSessionDuration(%d, %d) = %v, must be non-negative (overflow)", p, proto, d)
-			}
-			if d > maxEstimatedSessionAge {
-				t.Fatalf("estimateSessionDuration(%d, %d) = %v, exceeds cap %v", p, proto, d, maxEstimatedSessionAge)
-			}
-		}
-		// A count guaranteed past the cap threshold saturates exactly to the cap.
-		if got := estimateSessionDuration(math.MaxUint64, proto); got != maxEstimatedSessionAge {
-			t.Fatalf("estimateSessionDuration(MaxUint64, %d) = %v, want cap %v", proto, got, maxEstimatedSessionAge)
-		}
-	}
-}
+// #11699: synthesized closes with no Created stamp must encode a zero-duration
+// wire record for both address families and exporters, without changing counters.
+func TestSynthesizedCloseWireTimestampsPreserveCounters(t *testing.T) {
+	const packets uint64 = 0x0102030405060708
+	const octets uint64 = 0x8877665544332211
+	end := time.Unix(1_700_000_600, 123_000_000)
+	boot := end.Add(-time.Hour)
 
-// #4923 fail-on-revert: the packet-count StartTime fallback must never place
-// the flow start after its end, even for a pathological SessionPkts that would
-// overflow the duration heuristic. Exercises the Created==0 fallback path with
-// an extreme packet count for both exporters' underlying resolver.
-func TestFlowStartTimeFallbackNeverAfterEnd(t *testing.T) {
-	end := time.Unix(1_700_000_600, 0)
-	for _, proto := range []uint8{6 /* TCP */, 17 /* UDP */} {
-		for _, pkts := range []uint64{100_000_000_000, math.MaxUint64} {
-			rec := logging.EventRecord{
-				Time:        end,
-				Created:     0, // fallback path
-				SessionPkts: pkts,
+	// These offsets are from the encoded record after its 4-byte set header.
+	// IPFIX's 8-byte timestamps place EndTime four bytes after the v9 offset.
+	families := []struct {
+		name                       string
+		isIPv6                     bool
+		src, dst                   string
+		packetsOffset, bytesOffset int
+		startOffset, endOffset     int
+	}{
+		{
+			name: "IPv4", src: "10.0.1.102", dst: "172.16.80.200",
+			packetsOffset: 13, bytesOffset: 21, startOffset: 29, endOffset: 33,
+		},
+		{
+			name: "IPv6", isIPv6: true, src: "2001:db8::1", dst: "2001:db8::2",
+			packetsOffset: 37, bytesOffset: 45, startOffset: 53, endOffset: 57,
+		},
+	}
+	for _, family := range families {
+		family := family
+		for _, ipfix := range []bool{false, true} {
+			ipfix := ipfix
+			format := "NetFlow v9"
+			timeWidth := 4
+			if ipfix {
+				format = "IPFIX"
+				timeWidth = 8
 			}
-			start, usedEstimate := flowStartTime(rec, proto)
-			if !usedEstimate {
-				t.Fatalf("Created==0 must use the estimate (proto=%d pkts=%d)", proto, pkts)
-			}
-			if start.After(end) {
-				t.Fatalf("StartTime %v after EndTime %v (proto=%d pkts=%d) — overflow not guarded",
-					start, end, proto, pkts)
-			}
-			if d := end.Sub(start); d < 0 {
-				t.Fatalf("negative flow duration %v (proto=%d pkts=%d)", d, proto, pkts)
-			}
+			t.Run(format+"/"+family.name, func(t *testing.T) {
+				rec := logging.EventRecord{
+					Time:         end,
+					Type:         "SESSION_CLOSE",
+					SessionPkts:  packets,
+					SessionBytes: octets,
+					Protocol:     "TCP",
+					ProtocolNum:  6,
+				}
+				evt := SessionCloseData{
+					SrcIP:    net.ParseIP(family.src),
+					DstIP:    net.ParseIP(family.dst),
+					Protocol: 6,
+					IsIPv6:   family.isIPv6,
+				}
+
+				var records []FlowRecord
+				var wireSet []byte
+				var estimatedDurations uint64
+				if ipfix {
+					e, err := NewIPFIXExporter(&ExportConfig{})
+					if err != nil {
+						t.Fatalf("NewIPFIXExporter: %v", err)
+					}
+					e.ExportSessionClose(rec, evt)
+					v4, v6 := e.batch.drain()
+					records = v4
+					if family.isIPv6 {
+						records = v6
+					}
+					wireSet = encodeIPFIXDataSetDir(records, false)
+					estimatedDurations = e.EstimatedDurations()
+				} else {
+					e, err := NewExporter(&ExportConfig{})
+					if err != nil {
+						t.Fatalf("NewExporter: %v", err)
+					}
+					e.ExportSessionClose(rec, evt)
+					v4, v6 := e.batch.drain()
+					records = v4
+					if family.isIPv6 {
+						records = v6
+					}
+					wireSet = encodeDataFlowSet(records, boot, V9TemplateOptions{})
+					estimatedDurations = e.EstimatedDurations()
+				}
+				if len(records) != 1 {
+					t.Fatalf("expected 1 batched flow, got %d", len(records))
+				}
+				if estimatedDurations != 1 {
+					t.Fatalf("EstimatedDurations = %d, want 1", estimatedDurations)
+				}
+				wireRecord := wireSet[4:]
+				if got := binary.BigEndian.Uint64(wireRecord[family.packetsOffset : family.packetsOffset+8]); got != packets {
+					t.Fatalf("wire packet counter = %#x, want %#x", got, packets)
+				}
+				if got := binary.BigEndian.Uint64(wireRecord[family.bytesOffset : family.bytesOffset+8]); got != octets {
+					t.Fatalf("wire byte counter = %#x, want %#x", got, octets)
+				}
+				endOffset := family.endOffset
+				// IPFIX time fields are 8-byte Unix milliseconds; v9 uses 4-byte uptime.
+				if timeWidth == 8 {
+					endOffset += 4
+				}
+				var start, finish uint64
+				if timeWidth == 4 {
+					start = uint64(binary.BigEndian.Uint32(wireRecord[family.startOffset : family.startOffset+4]))
+					finish = uint64(binary.BigEndian.Uint32(wireRecord[endOffset : endOffset+4]))
+				} else {
+					start = binary.BigEndian.Uint64(wireRecord[family.startOffset : family.startOffset+8])
+					finish = binary.BigEndian.Uint64(wireRecord[endOffset : endOffset+8])
+				}
+				if start != finish {
+					t.Fatalf("wire start/end times = (%d, %d), want equal fields for a missing creation stamp", start, finish)
+				}
+			})
 		}
 	}
 }

@@ -560,12 +560,9 @@ type Exporter struct {
 	// Stats
 	exportedFlows atomic.Uint64
 	exportedPkts  atomic.Uint64
-	// #2465: count of session-close flows whose StartTime fell back to the
-	// packet-count heuristic because the close event carried no real
-	// session-creation timestamp (rec.Created == 0). A high value relative to
-	// exportedFlows means most flows are still being timed by the old guess —
-	// operator-visible signal that the dataplane is not stamping creation
-	// times (e.g. all closes arriving via the explicit-delete / HA-purge path).
+	// #2465/#11699: count close records without a creation timestamp. Such
+	// records are emitted with zero duration at close time rather than a
+	// packet-count estimate; this remains visible for synthesized closes.
 	estimatedDurations atomic.Uint64
 	// #3744: count of route-mask HALVES (src and/or dst) that did not resolve
 	// to a FIB route at export time — the mask was exported as an unresolved 0
@@ -641,11 +638,10 @@ func (e *Exporter) Run(ctx context.Context) {
 
 // ExportSessionClose converts a session-close event into a flow record and queues it.
 func (e *Exporter) ExportSessionClose(rec logging.EventRecord, evt SessionCloseData) {
-	// #2465: use the real session-creation timestamp for StartTime when the
-	// close event carries one; fall back to the packet-count heuristic only
-	// when it is absent (and count that for operator visibility).
-	startTime, usedEstimate := flowStartTime(rec, evt.Protocol)
-	if usedEstimate {
+	// #2465/#11699: a missing creation timestamp cannot establish flow age;
+	// use the close time and count that fallback for operator visibility.
+	startTime, missingCreated := flowStartTime(rec)
+	if missingCreated {
 		e.estimatedDurations.Add(1)
 	}
 	// #2526: resolve the post-NAT tuple with pre-NAT fallback so every
@@ -700,9 +696,9 @@ func (e *Exporter) ExportSessionClose(rec logging.EventRecord, evt SessionCloseD
 	e.batch.add(fr)
 }
 
-// EstimatedDurations returns the count of exported session-close flows whose
-// StartTime was derived from the packet-count heuristic (#2465) rather than a
-// real session-creation timestamp.
+// EstimatedDurations returns the count of exported close records missing a
+// creation timestamp. Those records use StartTime=EndTime rather than a
+// packet-count estimate.
 func (e *Exporter) EstimatedDurations() uint64 {
 	return e.estimatedDurations.Load()
 }

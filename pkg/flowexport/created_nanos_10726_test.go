@@ -18,9 +18,9 @@ func TestFlowStartTimeClampsUntrustedCreatedNanos10726(t *testing.T) {
 		CreatedNanos: 1_000_000_000,
 	}
 	before := logging.InvalidCreatedNanos()
-	got, estimated := flowStartTime(rec, 6)
-	if estimated {
-		t.Fatal("real Created timestamp must not use the packet estimate")
+	got, missingCreated := flowStartTime(rec)
+	if missingCreated {
+		t.Fatal("real Created timestamp must not be reported missing")
 	}
 	want := time.Unix(int64(created), 999_999_999)
 	if !got.Equal(want) {
