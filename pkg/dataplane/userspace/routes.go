@@ -1204,7 +1204,6 @@ func staticRouteHasOnlyUnresolvedBareGateways(
 	return hasBare && !hasDirect
 }
 
-
 func normalizeRouteSnapshotFamily(table, family, destination string) (string, string) {
 	isIPv6 := strings.Contains(destination, ":")
 	if isIPv6 {
