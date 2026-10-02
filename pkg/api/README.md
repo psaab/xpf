@@ -443,11 +443,13 @@ routing neighbours — a complete map of the firewall, to any local uid, includi
 one with no `system login user` entry at all. On a firewall that is
 reconnaissance.
 
-**Every route is `PermView`**, not a per-route tier. These are all `show`
-verbs, and Junos gates `show` on `view`; inventing finer tiers here would be a
-policy the CLI's own table does not have, and the two would drift. The finer
-question — whether a read should be REDACTED by class rather than denied — is a
-different contract and is left open.
+**Most routes are `PermView`; the policy simulator is `PermControl`.** Ordinary
+reads are `show`-equivalent, but `GET /api/v1/security/match` can query an
+arbitrary 5-tuple and return policy or host-inbound verdicts. It therefore uses
+the same control-tier class gate as gRPC `MatchPolicies` (#11077, #11674), so a
+read-only principal cannot use REST to perform policy reconnaissance. Whether
+reads should instead be REDACTED by class is a separate contract and remains
+open.
 
 **Why this is not a no-brick problem.** `PrincipalForUID` returns a **superuser**
 principal for uid 0 unconditionally, with no login model required, so root-run

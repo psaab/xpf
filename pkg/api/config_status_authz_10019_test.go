@@ -13,7 +13,8 @@ import (
 // cross-surface contract is PermView on both: this side was already correct,
 // and these pins are the guard against a future tightening that would take a
 // `show`-equivalent status read away from view-only consumers (and contradict
-// TestReadRoutesAreAllViewTier_6660's deliberate all-reads-PermView policy).
+// the PermView tier pinned for ordinary routes by
+// TestReadRoutesAreViewTierExceptMatchSimulator_6660).
 // The gRPC twin is pinned in
 // pkg/grpcapi/config_mode_status_authz_10019_test.go.
 
