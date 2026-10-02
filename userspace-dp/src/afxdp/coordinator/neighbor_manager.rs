@@ -48,9 +48,9 @@ pub(crate) struct NeighborManager {
     /// fence and never advances it.
     pub(crate) applied_manager_generation: Arc<AtomicU64>,
     pub(crate) manager_keys: Arc<Mutex<FastSet<(i32, IpAddr)>>>,
-    /// Configured interface ifindexes accepted by the kernel-neighbor monitor.
-    /// Replaced atomically with each committed snapshot so a long-lived
-    /// monitor never imports events for interfaces outside the active config.
+    /// Configured interface and publishable snapshot-neighbor ifindexes
+    /// accepted by the kernel-neighbor monitor. Replaced atomically with each
+    /// committed snapshot so a long-lived monitor honors the active keyspace.
     pub(crate) monitored_ifindexes: Arc<ArcSwap<FastSet<i32>>>,
     /// Shared inbound XFRM-SA existence state.  It lives beside the
     /// neighbour monitor lifecycle so stop/reconcile joins the only writer
@@ -174,11 +174,20 @@ impl NeighborManager {
             resolver_join: None,
         }
     }
-    pub(super) fn set_monitored_ifindexes(&self, interfaces: &[InterfaceSnapshot]) {
-        let ifindexes = interfaces
+    pub(super) fn set_monitored_ifindexes(
+        &self,
+        interfaces: &[InterfaceSnapshot],
+        snapshot_neighbor_ifindexes: impl IntoIterator<Item = i32>,
+    ) {
+        let mut ifindexes: FastSet<i32> = interfaces
             .iter()
             .filter_map(|interface| (interface.ifindex > 0).then_some(interface.ifindex))
             .collect();
+        ifindexes.extend(
+            snapshot_neighbor_ifindexes
+                .into_iter()
+                .filter(|ifindex| *ifindex > 0),
+        );
         self.monitored_ifindexes.store(Arc::new(ifindexes));
     }
 
@@ -412,5 +421,20 @@ mod warmer_join_tests_6314 {
         assert!(
             mgr.warm_stop.is_none() && mgr.warm_join.is_none() && mgr.warm_queue.is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod monitored_ifindex_tests_11457 {
+    use super::*;
+
+    #[test]
+    fn published_snapshot_neighbor_ifindexes_extend_monitor_allowlist_11457() {
+        let manager = NeighborManager::new();
+        manager.set_monitored_ifindexes(&[], [99, 0]);
+        let monitored = manager.monitored_ifindexes.load();
+        assert_eq!(monitored.len(), 1);
+        assert!(monitored.contains(&99));
+        assert!(!monitored.contains(&0));
     }
 }
