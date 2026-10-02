@@ -1038,6 +1038,84 @@ fn tunnel_tcp_mss_wireguard_uses_wg_overhead_not_gre() {
     );
 }
 
+#[test]
+fn tunnel_tcp_mss_gre_caps_derived_inner_budget_by_route_mtu_11687() {
+    let state = gre1881_state();
+    let mut decision = SessionDecision {
+        resolution: gre_encap_resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    decision.resolution.route_mtu = 1400;
+
+    assert_eq!(
+        tunnel_tcp_mss(&state, &decision, libc::AF_INET as u8),
+        1360,
+        "route_mtu=1400 must cap the 1456-byte GRE inner budget before \
+         subtracting the IPv4 and TCP headers"
+    );
+}
+
+#[test]
+fn tunnel_tcp_mss_gre_out_knob_is_capped_by_overlay_route_mtu_11687() {
+    let mut state = gre1881_state();
+    state.tcp_mss_gre_out = 1400;
+    let mut decision = SessionDecision {
+        resolution: gre_encap_resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    decision.resolution.route_mtu = 1400;
+
+    assert_eq!(
+        tunnel_tcp_mss(&state, &decision, libc::AF_INET as u8),
+        1360,
+        "the explicit gre-out MSS must not exceed the route-derived cap"
+    );
+}
+
+#[test]
+fn tunnel_tcp_mss_gre_route_mtu_zero_preserves_previous_value_11687() {
+    let state = gre1881_state();
+    let decision = SessionDecision {
+        resolution: gre_encap_resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    assert_eq!(
+        tunnel_tcp_mss(&state, &decision, libc::AF_INET as u8),
+        1416,
+        "route_mtu=0 must not replace the known tunnel inner budget"
+    );
+}
+
+#[test]
+fn tunnel_tcp_mss_wireguard_caps_inner_budget_by_route_mtu_11687() {
+    let mut state = gre1881_state();
+    state
+        .tunnel_endpoints
+        .get_mut(&1)
+        .expect("fixture endpoint")
+        .mode = "wireguard".to_string();
+    let mut decision = SessionDecision {
+        resolution: gre_encap_resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    decision.resolution.route_mtu = 1400;
+
+    assert_eq!(
+        tunnel_tcp_mss(&state, &decision, libc::AF_INET as u8),
+        1360,
+        "WireGuard MSS must use the min of its pad-aware inner MTU and \
+         the overlay route MTU"
+    );
+}
+
 // --- #2517 GRE MSS clamp survives a transient egress-map miss ---------
 
 #[test]

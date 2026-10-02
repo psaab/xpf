@@ -94,6 +94,36 @@ pub(crate) fn wg_tcp_mss(outer_family: i32, inner_family: i32, mtu: usize) -> u1
         .unwrap_or(0)
 }
 
+/// Clamp the outer-derived MSS by an independently selected overlay route MTU.
+/// A zero route MTU leaves the existing value untouched; a zero WG inner
+/// budget remains zero instead of being replaced by the route budget.
+pub(crate) fn wg_tcp_mss_with_route_mtu(
+    outer_family: i32,
+    inner_family: i32,
+    outer_mtu: usize,
+    route_mtu: usize,
+) -> u16 {
+    let mss = wg_tcp_mss(outer_family, inner_family, outer_mtu);
+    if route_mtu == 0 {
+        return mss;
+    }
+    let inner_mtu = wg_inner_mtu(outer_family, outer_mtu);
+    if inner_mtu == 0 {
+        return 0;
+    }
+    let capped_inner_mtu = inner_mtu.min(route_mtu);
+    let inner_ip_header = match inner_family {
+        x if x == libc::AF_INET => 20usize,
+        x if x == libc::AF_INET6 => 40usize,
+        _ => return 0,
+    };
+    let route_max_mss = capped_inner_mtu
+        .checked_sub(inner_ip_header + 20)
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(0);
+    mss.min(route_max_mss)
+}
+
 /// #2330: the pad-aware WireGuard INNER-IP MTU for the given outer-link MTU
 /// and outer IP family — the largest inner IP packet length whose encapped
 /// outer frame is guaranteed to fit `outer_mtu`, accounting for the
@@ -157,6 +187,30 @@ mod mss_tests {
         // 1500 - 80 (outer encap+WG) - 15 (worst-case padding)
         //      - 20 (inner IPv4) - 20 (TCP) = 1365.
         assert_eq!(wg_tcp_mss(libc::AF_INET6, libc::AF_INET, 1500), 1365);
+    }
+
+    #[test]
+    fn route_mtu_caps_the_pad_aware_wg_inner_budget_11687() {
+        assert_eq!(
+            wg_tcp_mss_with_route_mtu(libc::AF_INET6, libc::AF_INET, 1500, 1400),
+            1360
+        );
+    }
+
+    #[test]
+    fn zero_route_mtu_preserves_the_outer_derived_wg_mss_11687() {
+        assert_eq!(
+            wg_tcp_mss_with_route_mtu(libc::AF_INET6, libc::AF_INET, 1500, 0),
+            1365
+        );
+    }
+
+    #[test]
+    fn route_mtu_does_not_replace_a_zero_wg_inner_budget_11687() {
+        assert_eq!(
+            wg_tcp_mss_with_route_mtu(libc::AF_INET, libc::AF_INET, 50, 1400),
+            0
+        );
     }
 
     #[test]
