@@ -58,3 +58,30 @@ func TestDNATOffShadowCrossRuleSetWarns11352(t *testing.T) {
 		"set security nat destination rule-set rs2 rule r-translate then destination-nat pool p1",
 	}, "r-off")
 }
+
+func TestDNATOffShadowFeedExtendedAddressBookWarns11671(t *testing.T) {
+	lines := append(feedServerBinding("svc-vip"),
+		"set security address-book global address svc-vip 192.0.2.10/32",
+		"set security address-book global address-set static-service-vips address svc-vip",
+		"set security nat destination pool p1 address 192.168.1.10",
+		"set security nat destination rule-set rs1 from zone untrust",
+		"set security nat destination rule-set rs1 rule r-off match destination-address-name static-service-vips",
+		"set security nat destination rule-set rs1 rule r-off then destination-nat off",
+		"set security nat destination rule-set rs1 rule r-translate match destination-address 192.0.2.20/32",
+		"set security nat destination rule-set rs1 rule r-translate then destination-nat pool p1",
+	)
+	assertDNATOffShadow11352Warning(t, lines, "r-off")
+}
+
+func TestDNATOffShadowApplicationAnyWarns11671(t *testing.T) {
+	assertDNATOffShadow11352Warning(t, []string{
+		"set security nat destination pool p1 address 192.168.1.10",
+		"set security nat destination rule-set rs1 from zone untrust",
+		"set security nat destination rule-set rs1 rule r-off match destination-address 192.0.2.10/32",
+		"set security nat destination rule-set rs1 rule r-off match application any",
+		"set security nat destination rule-set rs1 rule r-off then destination-nat off",
+		"set security nat destination rule-set rs1 rule r-translate match destination-address 192.0.2.10/32",
+		"set security nat destination rule-set rs1 rule r-translate match application any",
+		"set security nat destination rule-set rs1 rule r-translate then destination-nat pool p1",
+	}, "r-off")
+}

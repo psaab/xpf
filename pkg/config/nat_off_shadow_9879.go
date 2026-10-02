@@ -33,11 +33,12 @@ import (
 //     installs nothing and cannot shadow or be shadowed.
 //
 // The potential advisory resolves static address-book entries and sets when
-// checking whether source/destination selectors overlap. Feed-backed names
-// remain unknown until the runtime overlay is available and are treated
-// conservatively. Rule-set overlap uses the Rust matcher’s ingress
-// zone/interface/routing-instance scopes; the advisory does not infer Junos
-// cross-rule-set admissibility or a definite winner.
+// checking whether source/destination selectors overlap. Feed-backed names,
+// including static names extended by feed bindings, remain unknown until the
+// runtime overlay is available and are treated conservatively. Application
+// constraints (including `any`) also stay on the advisory path. Rule-set overlap
+// uses the Rust matcher’s ingress zone/interface/routing-instance scopes; the
+// advisory does not infer Junos cross-rule-set admissibility or a definite winner.
 //
 // TRUE PROBE ORDER (review-hardened; an earlier revision compared tiers
 // pairwise and was wrong in both directions). The Rust lookup probes buckets
@@ -264,6 +265,11 @@ func dnatOffRuleAddressSet(cfg *Config, rule *NATRule, source bool) dnatOffAddre
 }
 
 func dnatOffAddAddressBookName(cfg *Config, set *dnatOffAddressSet, name string) {
+	if dnatOffNameHasFeedBinding(cfg, name) {
+		// The runtime overlay is unioned with any static address or set
+		// resolved below, so the name may cover additional addresses.
+		set.unknown = true
+	}
 	if cfg == nil || cfg.Security.AddressBook == nil {
 		set.unknown = true
 		return
@@ -285,6 +291,9 @@ func dnatOffAddAddressBookName(cfg *Config, set *dnatOffAddressSet, name string)
 		return
 	}
 	for _, member := range members {
+		if dnatOffNameHasFeedBinding(cfg, member) {
+			set.unknown = true
+		}
 		addr, ok := book.Addresses[member]
 		if !ok {
 			set.unknown = true
@@ -292,6 +301,14 @@ func dnatOffAddAddressBookName(cfg *Config, set *dnatOffAddressSet, name string)
 		}
 		dnatOffAddAddressValue(set, addr)
 	}
+}
+
+func dnatOffNameHasFeedBinding(cfg *Config, name string) bool {
+	if cfg == nil {
+		return false
+	}
+	_, ok := cfg.Security.DynamicAddress.AddressBindings[name]
+	return ok
 }
 
 func dnatOffAddAddressValue(set *dnatOffAddressSet, addr *Address) {
@@ -322,7 +339,7 @@ func dnatOffPotentialDimensions(offRS *NATRuleSet, off *NATRule, trRS *NATRuleSe
 
 func dnatOffHasApplication(rule *NATRule) bool {
 	for _, name := range rule.Match.ApplicationList() {
-		if name != "" && name != "any" {
+		if name != "" {
 			return true
 		}
 	}
