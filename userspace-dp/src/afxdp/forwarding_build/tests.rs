@@ -1622,6 +1622,122 @@ fn build_forwarding_state_keeps_parent_bound_vlan_units_distinct() {
 }
 
 #[test]
+fn build_forwarding_state_rejects_duplicate_parent_bound_ingress_key_11461() {
+    use crate::ZoneSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![
+            ZoneSnapshot {
+                name: "wan".into(),
+                id: 11,
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "dmz".into(),
+                id: 12,
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0.80".into(),
+                zone: "wan".into(),
+                ifindex: 20080,
+                parent_ifindex: 6,
+                vlan_id: 80,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0-0-1.80".into(),
+                zone: "dmz".into(),
+                ifindex: 30080,
+                parent_ifindex: 6,
+                vlan_id: 80,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let error = try_build_forwarding_state_with_policy_counters(
+        &snapshot,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect_err("different logical ifindexes on one parent/VID key must reject");
+    match error {
+        crate::policy::SnapshotIntegrityError::InterfaceDuplicateIngressKey {
+            bind_ifindex,
+            vlan_id,
+            first_ifindex,
+            second_ifindex,
+            first_interface,
+            second_interface,
+        } => {
+            assert_eq!(bind_ifindex, 6);
+            assert_eq!(vlan_id, 80);
+            assert_eq!(first_ifindex, 20080);
+            assert_eq!(second_ifindex, 30080);
+            assert_eq!(first_interface, "reth0.80");
+            assert_eq!(second_interface, "ge-0-0-1.80");
+        }
+        other => panic!("expected InterfaceDuplicateIngressKey, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_forwarding_state_builds_distinct_parent_bound_ingress_keys_11461() {
+    use crate::ZoneSnapshot;
+
+    let snapshot = ConfigSnapshot {
+        zones: vec![
+            ZoneSnapshot {
+                name: "wan".into(),
+                id: 11,
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "dmz".into(),
+                id: 12,
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0.80".into(),
+                zone: "wan".into(),
+                ifindex: 20080,
+                parent_ifindex: 6,
+                vlan_id: 80,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "reth0.81".into(),
+                zone: "dmz".into(),
+                ifindex: 20081,
+                parent_ifindex: 6,
+                vlan_id: 81,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let state = try_build_forwarding_state_with_policy_counters(
+        &snapshot,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("distinct parent/VID keys must build");
+    assert_eq!(state.ingress_logical_ifindex.get(&(6, 80)), Some(&20080));
+    assert_eq!(state.ingress_logical_ifindex.get(&(6, 81)), Some(&20081));
+    assert_eq!(state.ifindex_to_zone_id.get(&20080).copied(), Some(11));
+    assert_eq!(state.ifindex_to_zone_id.get(&20081).copied(), Some(12));
+}
+
+#[test]
 fn native_vlan_untagged_uses_native_unit_policy_11434() {
     use crate::{PolicyRuleSnapshot, ZoneSnapshot};
     use crate::afxdp::forwarding::{
@@ -1774,10 +1890,8 @@ fn native_vlan_without_matching_unit_rejects_vid_zero_11434() {
 }
 
 #[test]
-fn native_vlan_ambiguous_matching_units_reject_vid_zero_11434() {
-    use crate::afxdp::forwarding::unknown_ingress_vlan;
-
-    let state = build_forwarding_state(&ConfigSnapshot {
+fn native_vlan_ambiguous_matching_units_reject_duplicate_ingress_key_11434_11461() {
+    let snapshot = ConfigSnapshot {
         interfaces: vec![
             InterfaceSnapshot {
                 name: "ge-0-0-1".into(),
@@ -1811,15 +1925,21 @@ fn native_vlan_ambiguous_matching_units_reject_vid_zero_11434() {
             },
         ],
         ..Default::default()
-    });
-    assert!(
-        unknown_ingress_vlan(&state, 10, 0),
-        "a native VID shared by multiple units must remain rejected"
-    );
-    assert!(
-        !state.ingress_logical_ifindex.contains_key(&(10, 0)),
-        "ambiguous native units must not leave a last-writer-wins lookup"
-    );
+    };
+
+    assert!(matches!(
+        try_build_forwarding_state_with_policy_counters(
+            &snapshot,
+            &crate::policy::PolicyCounterStore::default(),
+        ),
+        Err(crate::policy::SnapshotIntegrityError::InterfaceDuplicateIngressKey {
+            bind_ifindex: 10,
+            vlan_id: 100,
+            first_ifindex: 100,
+            second_ifindex: 200,
+            ..
+        })
+    ));
 }
 
 // #3070: host-inbound-traffic enforcement. A configured zone admits only its
@@ -3028,6 +3148,7 @@ fn contested_row_10503(
     zone: &str,
     ifindex: i32,
     parent_ifindex: i32,
+    vlan_id: i32,
     is_unit: Option<bool>,
 ) -> InterfaceSnapshot {
     InterfaceSnapshot {
@@ -3036,6 +3157,7 @@ fn contested_row_10503(
         linux_name: linux_name.into(),
         ifindex,
         parent_ifindex,
+        vlan_id,
         is_unit,
         ..Default::default()
     }
@@ -3049,12 +3171,12 @@ fn contested_bind_excluded_parents_keep_no_sentinel_classifier_admit_10503() {
     let snapshot = ConfigSnapshot {
         zones: vec![any_service_zone_10503("wan", 7), any_service_zone_10503("lan", 8)],
         interfaces: vec![
-            contested_row_10503("fab0.80", "fab0", "wan", 102, 101, Some(true)),
-            contested_row_10503("fab0.50", "fab0", "lan", 103, 101, Some(true)),
-            contested_row_10503("em0.80", "em0", "wan", 202, 201, Some(true)),
-            contested_row_10503("em0.50", "em0", "lan", 203, 201, Some(true)),
-            contested_row_10503("lo0.80", "lo0", "wan", 302, 301, Some(true)),
-            contested_row_10503("lo0.50", "lo0", "lan", 303, 301, Some(true)),
+            contested_row_10503("fab0.80", "fab0", "wan", 102, 101, 80, Some(true)),
+            contested_row_10503("fab0.50", "fab0", "lan", 103, 101, 50, Some(true)),
+            contested_row_10503("em0.80", "em0", "wan", 202, 201, 80, Some(true)),
+            contested_row_10503("em0.50", "em0", "lan", 203, 201, 50, Some(true)),
+            contested_row_10503("lo0.80", "lo0", "wan", 302, 301, 80, Some(true)),
+            contested_row_10503("lo0.50", "lo0", "lan", 303, 301, 50, Some(true)),
         ],
         ..Default::default()
     };
@@ -3094,8 +3216,8 @@ fn contested_parent_override_preserves_effective_host_admit_10503() {
                 is_unit: Some(false),
                 ..Default::default()
             },
-            contested_row_10503("reth0.80", "reth0", "wan", 402, PARENT, Some(true)),
-            contested_row_10503("reth0.50", "reth0", "lan", 403, PARENT, Some(true)),
+            contested_row_10503("reth0.80", "reth0", "wan", 402, PARENT, 80, Some(true)),
+            contested_row_10503("reth0.50", "reth0", "lan", 403, PARENT, 50, Some(true)),
         ],
         ..Default::default()
     };
@@ -3131,8 +3253,8 @@ fn same_ifindex_contest_gets_host_inbound_deny_sentinel_10503() {
             // Structural is_unit=false makes these two rows the same-netdev
             // identities that reach the same-ifindex contest arm, rather than
             // the parent fan-UP arm.
-            contested_row_10503("st0.0", "st0", "wan", SHARED_IFINDEX, 0, Some(false)),
-            contested_row_10503("st0.1", "st0", "lan", SHARED_IFINDEX, 0, Some(false)),
+            contested_row_10503("st0.0", "st0", "wan", SHARED_IFINDEX, 0, 0, Some(false)),
+            contested_row_10503("st0.1", "st0", "lan", SHARED_IFINDEX, 0, 0, Some(false)),
         ],
         ..Default::default()
     };
@@ -10490,6 +10612,8 @@ fn forwarding_publish_population_is_pinned_7015() {
     // The half that DETECTS a third apply path. Pinned by content, not by
     // count: a stale entry cannot hide behind a coincidental total.
     let want: &[(&str, usize)] = &[
+        // Test-only retained-state mutation after publishing a FIB view; not an apply.
+        ("coordinator/fib_dump.rs", 1),
         // Teardown reset — not an apply, publishes nothing to commit.
         ("coordinator/mod.rs", 1),
         // Builder staging into the fds carrier — not an apply publish.

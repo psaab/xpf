@@ -542,6 +542,18 @@ pub(crate) enum SnapshotIntegrityError {
         interface: String,
         vlan_id: i32,
     },
+    /// #11461: two parent-bound logical units claim the same ingress
+    /// `(bind_ifindex, VID)` key with different logical ifindexes. The ingress
+    /// demux has only one value slot for that key; accepting both rows would
+    /// silently steer packets to whichever unit was visited last.
+    InterfaceDuplicateIngressKey {
+        bind_ifindex: i32,
+        vlan_id: u16,
+        first_ifindex: i32,
+        second_ifindex: i32,
+        first_interface: String,
+        second_interface: String,
+    },
     /// #2410: a tunnel-endpoint snapshot's `ttl` is outside the 0..=255 range
     /// representable in the outer IP TTL/hop-limit octet (`TunnelEndpoint.ttl`,
     /// a u8). The pre-fix code narrowed it with `endpoint.ttl.max(0) as u8`, so
@@ -1095,6 +1107,23 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "interface {:?} has vlan_id {} outside the 0..=65535 802.1Q range — refusing to narrow it with an unchecked cast that would wrap to a different VLAN (a different L2 domain)",
                 interface, vlan_id
+            ),
+            Self::InterfaceDuplicateIngressKey {
+                bind_ifindex,
+                vlan_id,
+                first_ifindex,
+                second_ifindex,
+                first_interface,
+                second_interface,
+            } => write!(
+                f,
+                "interfaces {:?} (ifindex {}) and {:?} (ifindex {}) share ingress key (bind_ifindex {}, VID {}) — refusing to install last-writer-wins logical ingress mapping",
+                first_interface,
+                first_ifindex,
+                second_interface,
+                second_ifindex,
+                bind_ifindex,
+                vlan_id
             ),
             Self::TunnelTtlOutOfRange { tunnel_id, ttl } => write!(
                 f,

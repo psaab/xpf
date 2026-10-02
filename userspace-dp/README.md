@@ -587,6 +587,14 @@ logging rules, not these specific hot-path constants.
   `(bind_ifindex, vlan_id)` row for every snapshot interface — including
   MAC-less ones, since the insert precedes the `src_mac` `continue`.
 
+  **Duplicate parent/VID identities fail closed (#11461).** Before adding a
+  parent-bound unit to this map, `populate_egress` checks whether another
+  parent-bound row already claimed the same `(bind_ifindex, vlan_id)` with a
+  different logical ifindex. Such a snapshot returns
+  `SnapshotIntegrityError::InterfaceDuplicateIngressKey` instead of routing
+  ingress to whichever unit happened to be visited last. A base-interface row
+  may still be replaced by its intended logical unit.
+
   Two sites read the PHYSICAL index on purpose and say so in place —
   `afxdp/icmp.rs` (the socket-bind port is the identity it needs) and
   `afxdp/tx/dispatch/mod.rs`. Anywhere else, physical is a defect. #9383

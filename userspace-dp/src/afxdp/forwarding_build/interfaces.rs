@@ -1382,6 +1382,7 @@ pub(super) fn populate_egress(
     // or the parent's zone.
     let mut native_vlan_by_parent = BTreeMap::<i32, u16>::new();
     let mut ambiguous_native_parents = BTreeSet::<i32>::new();
+    let mut parent_bound_ingress_owners = BTreeMap::<(i32, u16), (i32, &str)>::new();
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 || is_logical_unit_row(&iface.name, iface.is_unit) {
             continue;
@@ -1452,6 +1453,29 @@ pub(super) fn populate_egress(
         let mtu = super::validated::InterfaceMtu::try_from_snapshot(iface.mtu, &iface.name)?.get();
         let ingress_key = (bind_ifindex, vlan_id);
         if iface.parent_ifindex > 0 {
+            if let Some((first_ifindex, first_interface)) =
+                parent_bound_ingress_owners.get(&ingress_key)
+            {
+                if *first_ifindex != iface.ifindex {
+                    return Err(
+                        crate::policy::SnapshotIntegrityError::InterfaceDuplicateIngressKey {
+                            bind_ifindex,
+                            vlan_id,
+                            first_ifindex: *first_ifindex,
+                            second_ifindex: iface.ifindex,
+                            first_interface: (*first_interface).to_string(),
+                            second_interface: iface.name.clone(),
+                        },
+                    );
+                }
+            } else {
+                parent_bound_ingress_owners
+                    .insert(ingress_key, (iface.ifindex, iface.name.as_str()));
+            }
+            // Parent-bound units take precedence over a base-interface row,
+            // but two distinct logical ifindexes cannot share this key.
+            // Detect only parent-bound duplicates so the intentional
+            // base-row fallback remains intact.
             state
                 .ingress_logical_ifindex
                 .insert(ingress_key, iface.ifindex);
