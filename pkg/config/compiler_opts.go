@@ -14,10 +14,10 @@ type protocolScopeOpts struct {
 // compileOpts carries per-call compilation policy. It is threaded into
 // compileExpanded so the strict commit path and the tolerant
 // load/peer-sync path can share the identical compile + group-expansion
-// pipeline while differing on a single, narrow validator's severity.
+// pipeline while differing on narrow validator severities.
 type compileOpts struct {
-	// #8690 TEST SEAM, and the only one in this struct. When true, the
-	// brace-elided normalizer (compact_normalize_8662.go) is not run.
+	// #8690 TEST SEAM. When true, the brace-elided normalizer
+	// (compact_normalize_8662.go) is not run.
 	//
 	// It exists because the normalizer ERASES the evidence for its own safety
 	// rule. A site may only be normalized once its elided spelling compiles to
@@ -32,6 +32,10 @@ type compileOpts struct {
 	// admits a tail somebody reads is caught rather than reasoned about.
 	// Production never sets it.
 	skipCompactNormalize bool
+
+	// lenientUnknownTopLevelStanza lets tolerant compilation retain an operator-
+	// visible warning while ignoring a root stanza the compiler does not model.
+	lenientUnknownTopLevelStanza bool
 
 	// #1830 (e): the former lenientEqualFlowWorkerCap flag (#1733) is
 	// retired along with validateEqualFlowWorkerCapStrict — the
@@ -3010,6 +3014,7 @@ type compileOpts struct {
 func lenientCompileOpts() compileOpts {
 	return compileOpts{
 		sanitizeFreeTextControlChars:           true,
+		lenientUnknownTopLevelStanza:           true,
 		lenientVRRPTrackDuplicates:             true,
 		lenientVRRPAuthentication:              true,
 		lenientRenderUnsafeInterfaceNames:      true,

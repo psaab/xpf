@@ -834,8 +834,13 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	// commit rejects the stale value loudly.
 	schemaErr := s.schemaValidateExpandedTree(tree)
 	if schemaErr != nil {
-		slog.Warn("typed-leaf schema violation in tolerated config; continuing (a strict commit would reject this)",
-			"err", schemaErr, "issue", "#1319")
+		if config.IsUnknownTopLevelStanzaSchemaError(schemaErr) {
+			slog.Warn("unknown top-level stanza in tolerated config; continuing (a strict commit would reject this)",
+				"err", schemaErr, "issue", "#11576")
+		} else {
+			slog.Warn("typed-leaf schema violation in tolerated config; continuing (a strict commit would reject this)",
+				"err", schemaErr, "issue", "#1319")
+		}
 	}
 	var compiled *config.Config
 	var err error
@@ -844,15 +849,31 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	} else {
 		compiled, err = config.CompileConfigLenient(tree)
 	}
-	if err == nil && compiled != nil && config.IsTypedLeafSchemaError(schemaErr) {
-		// Keep the pre-compile typed-leaf error on the compiled object. The
-		// typed compiler may discard the offending token while preserving the
-		// tolerant no-brick behaviour, so ValidateConfig cannot reconstruct
-		// this violation. Wrap only Error(): schema validation owns redaction
-		// for secret leaves (#8441/#8434).
-		compiled.Warnings = append(compiled.Warnings, fmt.Sprintf(
-			"%s %s (strict commit would reject this; issue #10515)",
-			config.ToleratedTypedLeafWarningPrefix, schemaErr.Error()))
+	if err == nil && compiled != nil {
+		switch {
+		case config.IsTypedLeafSchemaError(schemaErr):
+			// Keep the pre-compile typed-leaf error on the compiled object. The
+			// typed compiler may discard the offending token while preserving
+			// tolerant no-brick behaviour. Schema validation owns redaction for
+			// secret leaves (#8441/#8434).
+			compiled.Warnings = append(compiled.Warnings, fmt.Sprintf(
+				"%s %s (strict commit would reject this; issue #10515)",
+				config.ToleratedTypedLeafWarningPrefix, schemaErr.Error()))
+		case config.IsUnknownTopLevelStanzaSchemaError(schemaErr):
+			// compileSections records the same warning for direct lenient callers;
+			// avoid duplicating it on Store.Load / Store.SyncApply.
+			warning := config.ToleratedUnknownTopLevelStanzaWarning(schemaErr)
+			found := false
+			for _, existing := range compiled.Warnings {
+				if existing == warning {
+					found = true
+					break
+				}
+			}
+			if !found {
+				compiled.Warnings = append(compiled.Warnings, warning)
+			}
+		}
 	}
 	// #4185 (review Finding 2): the lenient Load/SyncApply path must NOT
 	// hard-reject a node-id mismatch (that would blackout-boot the node or

@@ -206,6 +206,7 @@ func (c *CLI) showSecurityAlarms(args []string) error {
 	if cfg != nil {
 		warnings := config.ValidateConfig(cfg)
 		warnings = append(warnings, config.ToleratedTypedLeafWarnings(cfg)...)
+		warnings = append(warnings, config.ToleratedUnknownTopLevelStanzaWarnings(cfg)...)
 		for _, w := range warnings {
 			alarmCount++
 			if detail {
