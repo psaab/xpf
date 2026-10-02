@@ -16,35 +16,26 @@ import (
 	"github.com/psaab/xpf/pkg/termsafe"
 )
 
-// Resilience defaults for ALL transports. These bound the time the dataplane
-// event hot-path can spend inside a single Send and rate-limit reconnect
-// attempts so a down server cannot drive a fresh 5s-timeout dial on every
-// event.
+// Resilience defaults for synchronous syslog writes. They bound a direct
+// Send call and the dedicated per-client EventReader writer; EventReader itself
+// only performs a bounded, non-blocking queue handoff (#11697).
 //
-// #9025: this used to end "UDP is connectionless and never blocks on Write, so
-// these do not apply to it." THAT IS FALSE, and it was the proximate cause of
-// the omission — a false rationale re-justifies itself every time someone
-// checks it. This tree already refutes it verbatim, in
-// pkg/flowexport/transport.go (#4423 H07):
+// #9025: UDP is NOT exempt. A connected-UDP Write can block indefinitely on a
+// full socket send buffer (ENOBUFS / a congested or down egress path parks the
+// goroutine in the netpoller until the buffer drains). pkg/flowexport/transport.go
+// (#4423 H07) already documents the same kernel behavior.
 //
-//	A connected-UDP Write is normally instantaneous, but it CAN BLOCK
-//	INDEFINITELY on a full socket send buffer (ENOBUFS / a congested or down
-//	egress path parks the goroutine in the netpoller until the buffer drains).
-//
-// Two modules in one tree held opposite beliefs about the same syscall; one
-// armed a deadline and one did not. UDP is also the DEFAULT protocol here, so
-// the unbounded path was the common one.
-//
-// What blocks is the local socket send buffer, not the network, and the
-// goroutine it parks is the EventStream reader — which also carries HA session
-// sync (EventTypeSessionOpen/Update/Close), the ISSU drain signal
-// (EventTypeDrainComplete) and EventTypeFullResync. Stalling syslog stalls
-// those.
+// #9025 fixed unbounded writes; #11697 moves EventReader writes to bounded
+// queues so a slow collector cannot stall HA sync and telemetry. Deadlines and
+// reconnect cooldown still bound the writer goroutine and synchronous callers.
 const (
-	// defaultWriteTimeout caps how long a single conn.Write may block before
-	// it is treated as a write failure (message dropped, reconnect armed).
-	// Generous enough that a healthy server is never affected; short enough
-	// that a hung server cannot stall the event reader.
+	// syslogEventQueueDepth bounds per-client writes handed off by the shared
+	// EventStream reader. The reader must keep processing HA deltas even when a
+	// collector stops reading; a full queue drops rather than blocking.
+	syslogEventQueueDepth = 128
+	// defaultWriteTimeout caps one synchronous conn.Write before it is treated
+	// as a write failure (drop, with reconnect armed). EventReader writes run
+	// on their per-client worker, not the shared reader.
 	defaultWriteTimeout = 4 * time.Second
 	// defaultReconnectCooldown is the minimum interval between dial attempts
 	// after a dial failure. Within the window, a stream Send that needs a
@@ -143,10 +134,8 @@ type SyslogClient struct {
 	lastReconnectFailure time.Time
 	lastDropLog          time.Time // rate-limit for the drop warning (mu-guarded)
 
-	// droppedWrites counts messages dropped because the write itself failed:
-	// a write timeout (SetWriteDeadline expiry) or a write error
-	// (ECONNRESET/EPIPE) on the stream conn. It does NOT count reconnect dial
-	// failures — those are droppedDials (#2287).
+	// droppedWrites counts transport write failures. EventReader queue overflow
+	// and retirement drops are included by DroppedWrites() from eventWriter.
 	droppedWrites atomic.Uint64
 	// droppedDials counts messages dropped because the post-write-failure
 	// reconnect dial itself failed (the message could not be re-sent because
@@ -160,11 +149,151 @@ type SyslogClient struct {
 	nowFn  func() time.Time         // clock source (default time.Now)
 	dialFn func() (net.Conn, error) // dial override (default s.dial)
 
+	// eventWriter is created lazily only for EventReader fanout. Direct Send
+	// callers keep their synchronous contract.
+	eventWriterMu sync.Mutex
+	eventWriter   atomic.Pointer[syslogEventWriter]
+
 	// closed is set atomically by Close() before it closes the active socket.
 	// Send/SendBinary/Connect/reconnect check it both before and after any
 	// operation that can race Close. The separate connMu lets Close detach and
 	// close a socket without waiting for s.mu, which an in-flight Write holds.
 	closed atomic.Bool
+}
+
+type syslogEventWrite struct {
+	severity int
+	message  string
+	binary   []byte
+	isBinary bool
+}
+
+// syslogEventWriter moves network writes off EventReader.ProcessRawEvent while
+// retaining FIFO order for each client. Queue overflow is counted without
+// logging on the reader goroutine: slog can itself forward to syslog.
+type syslogEventWriter struct {
+	client  *SyslogClient
+	queue   chan syslogEventWrite
+	stopCh  chan struct{}
+	mu      sync.Mutex
+	dropped atomic.Uint64
+}
+
+func newSyslogEventWriter(client *SyslogClient) *syslogEventWriter {
+	w := &syslogEventWriter{
+		client: client,
+		queue:  make(chan syslogEventWrite, syslogEventQueueDepth),
+		stopCh: make(chan struct{}),
+	}
+	go w.run()
+	return w
+}
+
+func (w *syslogEventWriter) enqueue(item syslogEventWrite) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	select {
+	case <-w.stopCh:
+		w.dropped.Add(1)
+		return false
+	default:
+	}
+	select {
+	case w.queue <- item:
+		return true
+	default:
+		w.dropped.Add(1)
+		return false
+	}
+}
+
+func (w *syslogEventWriter) stop() {
+	w.mu.Lock()
+	select {
+	case <-w.stopCh:
+	default:
+		close(w.stopCh)
+	}
+	for {
+		select {
+		case <-w.queue:
+			w.dropped.Add(1)
+		default:
+			w.mu.Unlock()
+			return
+		}
+	}
+}
+
+func (w *syslogEventWriter) run() {
+	for {
+		select {
+		case item := <-w.queue:
+			if w.client.closed.Load() {
+				w.dropped.Add(1)
+				continue
+			}
+			if item.isBinary {
+				_ = w.client.SendBinary(item.binary)
+			} else {
+				_ = w.client.Send(item.severity, item.message)
+			}
+		case <-w.stopCh:
+			for {
+				select {
+				case <-w.queue:
+					w.dropped.Add(1)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+func (s *SyslogClient) eventWriterForReader() *syslogEventWriter {
+	if s.closed.Load() {
+		return nil
+	}
+	if writer := s.eventWriter.Load(); writer != nil {
+		return writer
+	}
+	s.eventWriterMu.Lock()
+	defer s.eventWriterMu.Unlock()
+	if s.closed.Load() {
+		return nil
+	}
+	if writer := s.eventWriter.Load(); writer != nil {
+		return writer
+	}
+	writer := newSyslogEventWriter(s)
+	s.eventWriter.Store(writer)
+	return writer
+}
+
+// SendFromEventReader queues a text message for this client and returns
+// immediately. False means the bounded per-client queue was full or retired;
+// DroppedWrites reports it. Direct Send calls retain their synchronous API.
+func (s *SyslogClient) SendFromEventReader(severity int, message string) bool {
+	writer := s.eventWriterForReader()
+	if writer == nil {
+		s.droppedWrites.Add(1)
+		return false
+	}
+	return writer.enqueue(syslogEventWrite{severity: severity, message: message})
+}
+
+// SendBinaryFromEventReader queues an immutable copy of a binary record for
+// this client and returns immediately. False means the record was counted as a
+// drop by DroppedWrites.
+func (s *SyslogClient) SendBinaryFromEventReader(data []byte) bool {
+	writer := s.eventWriterForReader()
+	if writer == nil {
+		s.droppedWrites.Add(1)
+		return false
+	}
+	copyData := append([]byte(nil), data...)
+	return writer.enqueue(syslogEventWrite{binary: copyData, isBinary: true})
 }
 
 // now returns the client's clock (overridable in tests).
@@ -760,11 +889,16 @@ func (r dropReason) String() string {
 	}
 }
 
-// DroppedWrites reports the count of messages dropped because the write itself
-// failed — a write timeout (SetWriteDeadline expiry) or a write error
-// (ECONNRESET/EPIPE). Reconnect dial failures are counted separately by
-// DroppedDials, not here (#2287). Observability only.
-func (s *SyslogClient) DroppedWrites() uint64 { return s.droppedWrites.Load() }
+// DroppedWrites reports the count of messages lost to transport write failures,
+// bounded EventReader queue overflow, or a retired EventReader queue. Reconnect
+// dial failures are counted separately by DroppedDials (#2287).
+func (s *SyslogClient) DroppedWrites() uint64 {
+	dropped := s.droppedWrites.Load()
+	if writer := s.eventWriter.Load(); writer != nil {
+		dropped += writer.dropped.Load()
+	}
+	return dropped
+}
 
 // DroppedDials reports the count of messages dropped because the
 // post-write-failure reconnect dial failed (observability).
@@ -1569,6 +1703,11 @@ func (s *SyslogClient) Close() error {
 	// take s.mu: an in-flight Send holds it across conn.Write, and Close must
 	// be able to interrupt that Write for a reconfigure commit.
 	s.closed.Store(true)
+	s.eventWriterMu.Lock()
+	if writer := s.eventWriter.Load(); writer != nil {
+		writer.stop()
+	}
+	s.eventWriterMu.Unlock()
 	conn := s.detachConn()
 	var err error
 	if conn != nil {

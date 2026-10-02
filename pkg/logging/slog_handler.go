@@ -8,6 +8,24 @@ import (
 	"sync"
 )
 
+type eventReaderSlogContextKey struct{}
+
+var eventReaderSlogContext = context.WithValue(context.Background(), eventReaderSlogContextKey{}, true)
+
+// eventReaderSlogInfo marks firewall event logs so their remote syslog copies
+// use the bounded writer instead of blocking the shared EventReader goroutine.
+func eventReaderSlogInfo(message string, args ...any) {
+	slog.Default().Log(eventReaderSlogContext, slog.LevelInfo, message, args...)
+}
+
+func isEventReaderSlogContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	eventReader, _ := ctx.Value(eventReaderSlogContextKey{}).(bool)
+	return eventReader
+}
+
 // SyslogSlogHandler is an slog.Handler that forwards log records to remote
 // syslog servers in addition to a wrapped base handler (typically stderr).
 //
@@ -173,11 +191,19 @@ func (h *SyslogSlogHandler) Handle(ctx context.Context, r slog.Record) error {
 		defer h.forwarding.Delete(gid)
 	}
 
-	// Forward to syslog clients.
+	// Forward to syslog clients. Firewall events use the per-client bounded
+	// writer because they originate on the shared EventReader goroutine; other
+	// slog callers retain the synchronous Send contract.
 	severity := slogLevelToSyslog(r.Level)
 	msg := formatRecord(r, h.attrs, h.groups)
+	eventReader := isEventReaderSlogContext(ctx)
 	for _, c := range clients {
-		if c.ShouldSend(severity) {
+		if !c.ShouldSend(severity) {
+			continue
+		}
+		if eventReader {
+			_ = c.SendFromEventReader(severity, msg)
+		} else {
 			c.Send(severity, msg)
 		}
 	}

@@ -772,6 +772,9 @@ func (es *EventStream) readLoop(ctx context.Context) {
 			onRawDataplaneEvent, onDataplaneEvent := es.dataplaneCallbacks()
 			prevSeq = seq
 			es.lastRecvSeq.Store(seq)
+			// This callback shares the reader with HA session deltas. EventReader
+			// hands remote syslog writes to bounded per-client queues so a slow
+			// collector cannot hold this sequence/ACK path open.
 			if !es.dispatchOrQueueDataplaneFrame(typ, seq, payload, rec, onRawDataplaneEvent, onDataplaneEvent) {
 				es.backoffCallbackNotReady(ctx)
 				return
