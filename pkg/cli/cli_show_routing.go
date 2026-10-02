@@ -8,6 +8,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/termsafe"
@@ -36,6 +37,10 @@ func (c *CLI) handleShowRoute(args []string) error {
 	if len(args) >= 1 && args[0] == "detail" {
 		return c.showRouteDetail()
 	}
+	if len(args) >= 1 && args[0] == "fib" {
+		return c.showHelperFIB()
+	}
+
 	// Treat first arg as prefix filter (e.g. "show route 10.0.1.0/24")
 	// Optional second arg is a modifier: exact, longer, orlonger
 	if len(args) >= 1 && (strings.Contains(args[0], "/") || strings.Contains(args[0], ".") || strings.Contains(args[0], ":")) {
@@ -96,6 +101,15 @@ func (c *CLI) showRoutes() error {
 	}
 
 	fmt.Print(routing.FormatAllRoutes(allTables))
+	return nil
+}
+
+func (c *CLI) showHelperFIB() error {
+	generation, routes, err := c.userspaceDataplaneFIB()
+	if err != nil {
+		return fmt.Errorf("dump userspace helper FIB: %w", err)
+	}
+	fmt.Print(dpuserspace.FormatFIBDump(generation, routes))
 	return nil
 }
 

@@ -369,6 +369,11 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 			return nil, err
 		}
 
+	case "route-fib":
+		if err := s.showRouteFIB(&buf); err != nil {
+			return nil, err
+		}
+
 	case "route-summary":
 		// #1043 Phase 9: case body extracted to server_show_routes_text.go
 		if err := s.showRouteSummary(cfg, &buf); err != nil {

@@ -8464,3 +8464,51 @@ fn scheduler_heartbeat_renews_lease_without_snapshot_status_or_persistence() {
     drop(guard);
     let _ = std::fs::remove_file(state_file);
 }
+
+#[test]
+fn fib_dump_is_a_read_only_control_verb_11370() {
+    let state = new_state(ProcessStatus::default());
+    {
+        let mut guard = state.lock().expect("state");
+        let snapshot = crate::ConfigSnapshot {
+            fib_generation: 9,
+            routes: vec![crate::RouteSnapshot {
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "203.0.113.0/24".to_string(),
+                discard: true,
+                preference: 17,
+                mtu: 1400,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        guard
+            .afxdp
+            .refresh_runtime_snapshot_disarmed(&snapshot)
+            .expect("install test snapshot");
+    }
+    let mut request = req("fib_dump");
+    request.suppress_status = true;
+
+    let response = run_request(state, request);
+    assert!(
+        response.ok,
+        "helper FIB dump must be a supported control verb: {}",
+        response.error
+    );
+    assert!(
+        response.status.is_none(),
+        "a FIB dump must not attach status"
+    );
+    assert_eq!(response.fib_generation, 9);
+    let route = response
+        .fib_routes
+        .iter()
+        .find(|route| route.table == "inet.0" && route.destination == "203.0.113.0/24")
+        .expect("FIB dump must serialize the installed helper route");
+    assert_eq!(route.family, "inet");
+    assert!(route.discard);
+    assert_eq!(route.preference, 17);
+    assert_eq!(route.mtu, 1400);
+}

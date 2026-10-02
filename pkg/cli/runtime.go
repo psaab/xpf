@@ -80,6 +80,13 @@ type cliUserspaceStatusProvider interface {
 	Status() (dpuserspace.ProcessStatus, error)
 }
 
+// cliUserspaceFIBProvider exposes the current worker-visible userspace FIB.
+// It stays separate from Status because it is an operator-triggered,
+// potentially large control-socket read rather than periodic telemetry.
+type cliUserspaceFIBProvider interface {
+	DumpFIB() (uint32, []dpuserspace.FibRouteWire, error)
+}
+
 // cliUserspaceCrashProvider is the #7250 helper-crash accessor.
 //
 // SEPARATE from cliUserspaceStatusProvider rather than folded into it: the

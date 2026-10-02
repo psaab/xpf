@@ -60,6 +60,11 @@ type userspaceStatusProvider interface {
 	Status() (dpuserspace.ProcessStatus, error)
 }
 
+// userspaceFIBProvider exposes the helper's live forwarding snapshot.
+type userspaceFIBProvider interface {
+	DumpFIB() (uint32, []dpuserspace.FibRouteWire, error)
+}
+
 // userspaceCrashProvider is the #7250 helper-crash accessor. Separate from
 // userspaceStatusProvider for the reason given on its pkg/cli twin: the crash
 // record is Manager state that survives the helper, ProcessStatus is the

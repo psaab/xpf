@@ -167,6 +167,9 @@ func (c *ctl) handleShow(args []string) error {
 		return nil
 
 	case "route":
+		if len(args) >= 2 && args[1] == "fib" {
+			return c.showCommand("show route fib")
+		}
 		if len(args) >= 2 && args[1] == "terse" {
 			return c.showCommand("show route terse")
 		}

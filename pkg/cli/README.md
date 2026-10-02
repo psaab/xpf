@@ -147,6 +147,15 @@ presenter's rendered output is byte-identical:
 - `show_services_lldp.go` — `showLLDP` and `showLLDPNeighbors`.
 - `show_services_mirror.go` — `showPortMirroring` (SPAN).
 
+## `show route fib` (#11370)
+
+`show route fib` reads the live fast-path forwarding snapshot from the
+userspace helper over its control socket. It reports the helper's FIB
+generation, installed routes, connected prefixes, next-table rules, and
+next-hop details. This is a read-only helper query, not a reconstruction from
+the routing manager, kernel routes, or FRR. The local CLI and remote gRPC CLI
+share one renderer so they display the same helper snapshot.
+
 ## Callers
 
 `cmd/cli` (remote client), `cmd/xpfd` (when stdin is a TTY).

@@ -1,4 +1,5 @@
 use super::*;
+mod fib_dump;
 mod bpf_maps;
 mod cos_leases;
 mod cos_state;

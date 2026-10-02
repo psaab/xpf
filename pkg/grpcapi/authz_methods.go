@@ -428,6 +428,7 @@ var showTextViewTopics = map[string]bool{
 	"policy-options":                           true,
 	"root-authentication":                      true,
 	"route-all":                                true,
+	"route-fib":                                true,
 	"route-detail":                             true,
 	"route-instance":                           true,
 	"route-map":                                true,
