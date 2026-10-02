@@ -125,11 +125,10 @@ func wgTunMTUForEndpoint(tc *config.TunnelConfig) int {
 // address auto-installs, removed by the kernel on AddrDel — and hence any
 // FRR direct→connected redistribution of it).
 //
-// Remaining boundaries (#1434 scope): (1) a WG tunnel removed while the
-// daemon was DOWN is not in wgConfigured on the next start, so it is not
-// pruned (restart-adoption limitation shared by the whole manager — it
-// only prunes what it tracked applying); (2) the wgN link and its live
-// Rust-attached peer/session are kept (not torn) by design.
+// On restart the same LinkList sweep handles the removal case too, pruning
+// non-link-local addresses without LinkDel'ing the persistent WG TUN.
+// Link-local addresses remain protected because an empty applied-address
+// set cannot distinguish configured fe80 addresses from kernel autoconf.
 //
 // VRF membership IS reconciled through the shared appliedRI claim
 // machinery (#5120): the reconcile below records an identity-gated claim

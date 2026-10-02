@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -164,15 +165,16 @@ func (t *tunnelManager) bumpLinkGenLocked(name string) {
 	t.linkGenForLocked(name).Add(1)
 }
 
-// Apply reconciles the kernel tunnel devices against the desired
-// config WITHOUT the historical clear-all + delete-and-recreate
-// (#1884): an untouched tunnel keeps its netdev (stable ifindex — no
-// FRR route churn, no userspace-dp TUN-reader death per commit, see
-// #1881), tunnels removed from config are deleted via a set-diff
-// against the previous desired set, and a device is recreated only
-// when the existing kernel link is genuinely incompatible. Keepalive
-// probes (legacy non-anchor branch only) are reconciled by identity
-// instead of being restarted every apply.
+// Apply reconciles the kernel tunnel devices against the desired config
+// WITHOUT the historical clear-all + delete-and-recreate (#1884): an
+// untouched tunnel keeps its netdev (stable ifindex — no FRR route churn,
+// no userspace-dp TUN-reader death per commit, see #1881), tunnels removed
+// from config are deleted via a set-diff against the previous desired set,
+// and a bounded LinkList sweep reaps untracked xpf tunnel orphans left by
+// a daemon restart (#11443). A device is recreated only when the existing
+// kernel link is genuinely incompatible. Keepalive probes (legacy
+// non-anchor branch only) are reconciled by identity instead of being
+// restarted every apply.
 func (t *tunnelManager) Apply(tunnels []*config.TunnelConfig) error {
 	// mu is held across the WHOLE netlink+exec reconcile deliberately (not
 	// just a small state-read section): the reconcile INTERLEAVES shared-map
@@ -213,6 +215,54 @@ func (t *tunnelManager) Apply(tunnels []*config.TunnelConfig) error {
 			wgDesired[tc.Name] = true
 		} else {
 			desired[tc.Name] = true
+		}
+	}
+	// #11443: tracked diffs cannot see links left behind when xpfd was
+	// down during a config removal. Re-scan only the xpf tunnel namespaces
+	// and recognized kernel link types; all other or wrongly-typed links
+	// remain untouched. Existing ownership state still drives the tracked
+	// retry paths below, so this pass handles only previously-untracked
+	// candidates.
+	if links, err := t.ops.LinkList(); err != nil {
+		slog.Warn("tunnel orphan reap: LinkList failed; retrying on next apply", "err", err)
+	} else {
+		for _, link := range links {
+			if link == nil || link.Attrs() == nil {
+				continue
+			}
+			name := link.Attrs().Name
+			if desired[name] || wgDesired[name] ||
+				t.ownedNames[name] || t.wgConfigured[name] {
+				continue
+			}
+			isWireGuardName := strings.HasPrefix(name, "wg")
+			isTunnelName := strings.HasPrefix(name, "gr-") || strings.HasPrefix(name, "ip-")
+			if !isWireGuardName && !isTunnelName {
+				continue
+			}
+			// A TUN cannot reveal whether its absent config used
+			// mode=wireguard or an AnchorOnly GRE/IPIP endpoint. Keep every
+			// persistent TUN (including gr-*/ip-* names) and prune addresses
+			// instead; this avoids killing a live Rust WG attachment after a
+			// restart while still removing connected routes from the FIB.
+			if tun, ok := link.(*netlink.Tuntap); ok {
+				if tun.Mode == netlink.TUNTAP_MODE_TUN {
+					t.pruneOrphanTUNLocked(link, name)
+				}
+				continue
+			}
+			switch link.(type) {
+			case *netlink.Gretun, *netlink.Iptun, *netlink.Ip6tnl:
+				if err := t.ops.LinkDel(link); err != nil && !isLinkNotFound(err) {
+					slog.Warn("tunnel orphan reap: LinkDel failed",
+						"name", name, "err", err)
+					errs = append(errs, fmt.Errorf("delete orphan tunnel %s: %w", name, err))
+					continue
+				}
+				delete(t.appliedAddrs, name)
+				delete(t.appliedRI, name)
+				slog.Info("tunnel orphan reaped", "name", name)
+			}
 		}
 	}
 
@@ -419,6 +469,21 @@ func (t *tunnelManager) Apply(tunnels []*config.TunnelConfig) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// pruneOrphanTUNLocked keeps an untracked persistent TUN but removes its
+// address-derived connected routes. On restart there is no safe way to
+// distinguish configured link-local addresses from kernel autoconf ones,
+// so pruneAppliedAddrsLocked retains that existing ownership gate.
+func (t *tunnelManager) pruneOrphanTUNLocked(link netlink.Link, name string) {
+	failed, retry := t.pruneAppliedAddrsLocked(link, name, t.appliedAddrs[name])
+	unbindRetry := t.unbindVRFClaimLocked(name, link)
+	if retry || unbindRetry {
+		t.appliedAddrs[name] = failed
+		return
+	}
+	delete(t.appliedAddrs, name)
+	delete(t.appliedRI, name)
 }
 
 // anchorReusable reports whether an existing link can serve as the

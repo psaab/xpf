@@ -132,8 +132,40 @@ func (x *xfrmManager) Apply(vpns map[string]*config.IPsecVPN) error {
 		}
 	}
 
+	// #11443: x.xfrmis is process-local, so a VPN removed while xpfd was
+	// down is absent from the tracked diff below. Scan only well-formed
+	// xfrmi names and actual Xfrmi links; never claim a same-name foreign
+	// link or a non-xfrmi "st*" interface.
+	if links, err := x.ops.LinkList(); err != nil {
+		slog.Warn("xfrmi orphan reap: LinkList failed; retrying on next apply", "err", err)
+	} else {
+		for _, link := range links {
+			if link == nil || link.Attrs() == nil {
+				continue
+			}
+			name := link.Attrs().Name
+			if ifName, ifID := config.XFRMIfNameAndID(name); ifID == 0 || ifName != name {
+				continue
+			}
+			if _, ok := link.(*netlink.Xfrmi); !ok {
+				continue
+			}
+			if _, tracked := x.xfrmis[name]; tracked {
+				continue // the tracked delete/retry below owns this name
+			}
+			if _, wanted := desired[name]; wanted {
+				continue
+			}
+			if err := x.ops.LinkDel(link); err != nil && !isLinkNotFound(err) {
+				slog.Warn("xfrmi orphan reap: LinkDel failed", "name", name, "err", err)
+				errs = append(errs, fmt.Errorf("delete orphan xfrmi %s: %w", name, err))
+				continue
+			}
+			slog.Info("xfrmi orphan reaped", "name", name)
+		}
+	}
+
 	// Delete xfrmis no longer desired, plus those whose if_id changed
-	// (they are recreated below from the desired set).
 	for name, trackedID := range x.xfrmis {
 		wantID, want := desired[name]
 		if want && wantID == trackedID {
