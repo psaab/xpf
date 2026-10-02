@@ -503,8 +503,8 @@ pub(in crate::afxdp) fn build_frag_needed_v4(
 ) -> Option<Vec<u8>> {
     let egress = forwarding.egress.get(&ingress_ifindex)?;
     let (dst_mac, fallback_src_mac, ingress_tag) = ingress_reply_l2(frame)?;
-    // The ingress primary wins. If it is absent, keep the fallback in the
-    // same routing instance and prefer lo0 plus non-link-local addresses.
+    // Cross-interface fallbacks must be non-link-local because link-local scope
+    // is tied to its source interface; prefer lo0 within the same RI.
     let src_ip = egress.primary_v4.or_else(|| {
         let routing_instance = forwarding
             .ifindex_to_routing_instance
@@ -513,8 +513,6 @@ pub(in crate::afxdp) fn build_frag_needed_v4(
             .unwrap_or("");
         let mut loopback_primary: Option<Ipv4Addr> = None;
         let mut interface_primary: Option<Ipv4Addr> = None;
-        let mut loopback_link_local: Option<Ipv4Addr> = None;
-        let mut interface_link_local: Option<Ipv4Addr> = None;
         for connected in &forwarding.connected_v4 {
             let connected_in_instance = if routing_instance.is_empty() {
                 connected.table == "inet.0"
@@ -540,20 +538,19 @@ pub(in crate::afxdp) fn build_frag_needed_v4(
                 .get(&connected.ifindex)
                 .and_then(|candidate| candidate.primary_v4)
                 .unwrap_or(connected.host);
-            let candidate = match (is_loopback, source.is_link_local()) {
-                (true, false) => &mut loopback_primary,
-                (false, false) => &mut interface_primary,
-                (true, true) => &mut loopback_link_local,
-                (false, true) => &mut interface_link_local,
+            if connected.ifindex != ingress_ifindex && source.is_link_local() {
+                continue;
+            }
+            let candidate = if is_loopback {
+                &mut loopback_primary
+            } else {
+                &mut interface_primary
             };
             if candidate.is_none() {
                 *candidate = Some(source);
             }
         }
-        loopback_primary
-            .or(interface_primary)
-            .or(loopback_link_local)
-            .or(interface_link_local)
+        loopback_primary.or(interface_primary)
     })?;
     let src_mac = egress.src_mac;
     let l3 = match meta.l3_offset {
@@ -627,8 +624,8 @@ pub(in crate::afxdp) fn build_packet_too_big_v6(
 ) -> Option<Vec<u8>> {
     let egress = forwarding.egress.get(&ingress_ifindex)?;
     let (dst_mac, fallback_src_mac, ingress_tag) = ingress_reply_l2(frame)?;
-    // The ingress primary wins. If it is absent, keep the fallback in the
-    // same routing instance and prefer lo0 plus non-link-local addresses.
+    // Cross-interface fallbacks must be non-link-local because link-local scope
+    // is tied to its source interface; prefer lo0 within the same RI.
     let src_ip = egress.primary_v6.or_else(|| {
         let routing_instance = forwarding
             .ifindex_to_routing_instance
@@ -637,8 +634,6 @@ pub(in crate::afxdp) fn build_packet_too_big_v6(
             .unwrap_or("");
         let mut loopback_primary: Option<Ipv6Addr> = None;
         let mut interface_primary: Option<Ipv6Addr> = None;
-        let mut loopback_link_local: Option<Ipv6Addr> = None;
-        let mut interface_link_local: Option<Ipv6Addr> = None;
         for connected in &forwarding.connected_v6 {
             let connected_in_instance = if routing_instance.is_empty() {
                 connected.table == "inet6.0"
@@ -664,20 +659,19 @@ pub(in crate::afxdp) fn build_packet_too_big_v6(
                 .get(&connected.ifindex)
                 .and_then(|candidate| candidate.primary_v6)
                 .unwrap_or(connected.host);
-            let candidate = match (is_loopback, source.is_unicast_link_local()) {
-                (true, false) => &mut loopback_primary,
-                (false, false) => &mut interface_primary,
-                (true, true) => &mut loopback_link_local,
-                (false, true) => &mut interface_link_local,
+            if connected.ifindex != ingress_ifindex && source.is_unicast_link_local() {
+                continue;
+            }
+            let candidate = if is_loopback {
+                &mut loopback_primary
+            } else {
+                &mut interface_primary
             };
             if candidate.is_none() {
                 *candidate = Some(source);
             }
         }
-        loopback_primary
-            .or(interface_primary)
-            .or(loopback_link_local)
-            .or(interface_link_local)
+        loopback_primary.or(interface_primary)
     })?;
     let src_mac = egress.src_mac;
     let l3 = match meta.l3_offset {

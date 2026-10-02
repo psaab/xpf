@@ -135,6 +135,7 @@ fn frag_needed_does_not_fall_back_to_another_routing_instance_11437() {
         "a foreign-RI address must not become the PTB source"
     );
 }
+
 #[test]
 fn packet_too_big_does_not_fall_back_to_another_routing_instance_11437() {
     let (frame, meta) = inbound_v6_udp(1300);
@@ -155,5 +156,83 @@ fn packet_too_big_does_not_fall_back_to_another_routing_instance_11437() {
     assert!(
         build_packet_too_big_v6(&frame, meta, PTB_IFINDEX, &forwarding, 1280).is_none(),
         "a foreign-RI IPv6 address must not become the PTB source"
+    );
+}
+
+#[test]
+fn frag_needed_rejects_cross_interface_link_local_fallback_11437() {
+    let (frame, meta) = inbound_v4_udp(1500, true);
+    let mut forwarding = forwarding_with_egress(1400);
+    forwarding.egress.get_mut(&PTB_IFINDEX).unwrap().primary_v4 = None;
+    for ifindex in [
+        PTB_IFINDEX,
+        LOOPBACK_IFINDEX_11437,
+        NON_LOOPBACK_IFINDEX_11437,
+    ] {
+        forwarding
+            .ifindex_to_routing_instance
+            .insert(ifindex, "blue".to_string());
+    }
+    forwarding
+        .ifindex_to_config_name
+        .insert(LOOPBACK_IFINDEX_11437, "lo0.0".to_string());
+    forwarding
+        .ifindex_to_config_name
+        .insert(NON_LOOPBACK_IFINDEX_11437, "reth0.0".to_string());
+    forwarding.connected_v4.extend([
+        connected_v4_11437(
+            LOOPBACK_IFINDEX_11437,
+            "blue.inet.0",
+            Ipv4Addr::new(169, 254, 1, 1),
+        ),
+        connected_v4_11437(
+            NON_LOOPBACK_IFINDEX_11437,
+            "blue.inet.0",
+            Ipv4Addr::new(169, 254, 1, 2),
+        ),
+    ]);
+
+    assert!(
+        build_frag_needed_v4(&frame, meta, PTB_IFINDEX, &forwarding, 1400).is_none(),
+        "link-local IPv4 primaries on other interfaces cannot source this PTB"
+    );
+}
+
+#[test]
+fn packet_too_big_rejects_cross_interface_link_local_fallback_11437() {
+    let (frame, meta) = inbound_v6_udp(1300);
+    let mut forwarding = forwarding_with_egress(1280);
+    forwarding.egress.get_mut(&PTB_IFINDEX).unwrap().primary_v6 = None;
+    for ifindex in [
+        PTB_IFINDEX,
+        LOOPBACK_IFINDEX_11437,
+        NON_LOOPBACK_IFINDEX_11437,
+    ] {
+        forwarding
+            .ifindex_to_routing_instance
+            .insert(ifindex, "blue".to_string());
+    }
+    forwarding
+        .ifindex_to_config_name
+        .insert(LOOPBACK_IFINDEX_11437, "lo0.0".to_string());
+    forwarding
+        .ifindex_to_config_name
+        .insert(NON_LOOPBACK_IFINDEX_11437, "reth0.0".to_string());
+    forwarding.connected_v6.extend([
+        connected_v6_11437(
+            LOOPBACK_IFINDEX_11437,
+            "blue.inet6.0",
+            "fe80::1".parse().expect("loopback link-local"),
+        ),
+        connected_v6_11437(
+            NON_LOOPBACK_IFINDEX_11437,
+            "blue.inet6.0",
+            "fe80::2".parse().expect("interface link-local"),
+        ),
+    ]);
+
+    assert!(
+        build_packet_too_big_v6(&frame, meta, PTB_IFINDEX, &forwarding, 1280).is_none(),
+        "link-local IPv6 primaries on other interfaces cannot source this PTB"
     );
 }
