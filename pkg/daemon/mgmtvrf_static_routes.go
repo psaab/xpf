@@ -234,13 +234,39 @@ func mgmtStaticRoutesDesired(
 	return desired
 }
 
+// mgmtStaticRouteConnectedInventory snapshots table 999 for FRR's static-route
+// exclusion. Config-only inference cannot see a DHCP address, but the static
+// reconciler resolves an implicit gateway from the live connected routes there.
+func mgmtStaticRouteConnectedInventory(mgmtSet map[string]bool) [2][]netlink.Route {
+	var current [2][]netlink.Route
+	if len(mgmtSet) == 0 {
+		return current
+	}
+	for i, family := range [...]int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
+		routes, err := netlink.RouteListFiltered(family, &netlink.Route{
+			Table: mgmtVRFTableID,
+		}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			slog.Warn("mgmt VRF static route connected-route inventory failed",
+				"family", family, "table", mgmtVRFTableID, "err", err)
+			continue
+		}
+		current[i] = routes
+	}
+	return current
+}
+
 // mgmtStaticRoutesForFRR keeps routes owned by the management VRF out of FRR's
 // default-table static route input. A configured management gateway is scoped
-// by its explicit interface or by a unique management-connected prefix.
+// by its explicit interface or by a unique management-connected prefix. A
+// gateway learned on a DHCP management interface is scoped by its live
+// table-999 connected route.
+
 func mgmtStaticRoutesForFRR(
 	cfg *config.Config,
 	mgmtSet map[string]bool,
 	inferredV6 map[string]string,
+	current [2][]netlink.Route,
 ) ([]*config.StaticRoute, []*config.StaticRoute) {
 	if cfg == nil {
 		return nil, nil
@@ -249,8 +275,8 @@ func mgmtStaticRoutesForFRR(
 		return cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes
 	}
 	exclusions := config.StaticRouteExclusions(cfg)
-	return filterMgmtStaticRoutesForFRR(cfg, cfg.RoutingOptions.StaticRoutes, mgmtSet, exclusions, inferredV6),
-		filterMgmtStaticRoutesForFRR(cfg, cfg.RoutingOptions.Inet6StaticRoutes, mgmtSet, exclusions, inferredV6)
+	return filterMgmtStaticRoutesForFRR(cfg, cfg.RoutingOptions.StaticRoutes, mgmtSet, exclusions, inferredV6, current),
+		filterMgmtStaticRoutesForFRR(cfg, cfg.RoutingOptions.Inet6StaticRoutes, mgmtSet, exclusions, inferredV6, current)
 }
 
 func filterMgmtStaticRoutesForFRR(
@@ -259,10 +285,11 @@ func filterMgmtStaticRoutesForFRR(
 	mgmtSet map[string]bool,
 	exclusions map[*config.StaticRoute]string,
 	inferredV6 map[string]string,
+	current [2][]netlink.Route,
 ) []*config.StaticRoute {
 	var filtered []*config.StaticRoute
 	for i, route := range routes {
-		if !mgmtStaticRouteIsManagementScoped(cfg, route, mgmtSet, exclusions, inferredV6) {
+		if !mgmtStaticRouteIsManagementScoped(cfg, route, mgmtSet, exclusions, inferredV6, current) {
 			if filtered != nil {
 				filtered = append(filtered, route)
 			}
@@ -285,6 +312,7 @@ func mgmtStaticRouteIsManagementScoped(
 	mgmtSet map[string]bool,
 	exclusions map[*config.StaticRoute]string,
 	inferredV6 map[string]string,
+	current [2][]netlink.Route,
 ) bool {
 	if route == nil || exclusions[route] != "" || route.NoInstall ||
 		route.NextTable != "" || route.Discard || route.Reject || len(route.NextHops) == 0 {
@@ -310,6 +338,12 @@ func mgmtStaticRouteIsManagementScoped(
 			return false
 		}
 		linkName, found := mgmtStaticConfigConnectedInterface(cfg, gateway, mgmtSet)
+		if !found {
+			if _, liveConnected := mgmtStaticConnectedLinkIndex(
+				gateway, current[mgmtStaticFamilyIndex(family)]); liveConnected {
+				continue
+			}
+		}
 		if !found && family == netlink.FAMILY_V6 {
 			linkName = cfg.ResolveKernelIfName(inferredV6[nextHop.Address])
 			found = config.IsManagementIfName(linkName) && mgmtSet[linkName]
