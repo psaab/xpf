@@ -64,6 +64,7 @@ fn delta_with_session_id(session_id: u64) -> SessionDelta {
         policy_counter_idx: 0,
         policy_counter: None,
     },
+    policy_generation: 0,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,

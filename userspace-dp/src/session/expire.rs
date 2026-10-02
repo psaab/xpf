@@ -393,6 +393,7 @@ impl SessionTable {
                             key: key.clone(),
                             decision,
                             metadata: metadata.clone(),
+                            policy_generation: removed.policy_generation,
                             origin: removed.origin,
                             fabric_redirect_sync: false,
                             // #2465: carry the real creation/last-seen

@@ -58,40 +58,33 @@ periodic ACK from the daemon.
   `MSG_SESSION_CREATE_RT_FLOW` (15).
   The telemetry frame payload is not a userspace-specific schema: it is
   the same `dataplane.Event` layout consumed by the Go ringbuf logger,
-  including AF values 2/10 and big-endian L4 ports. The payload is 160
-  bytes (`SECURITY_EVENT_PAYLOAD_SIZE`): #3056 grew it 136 -> 144 (the
-  trailing [136:140] u32 carries the admitting policy ID on the
-  SESSION_CLOSE frame, whose [44:48] policy_id slot is occupied by the
-  #2853 created-subsec-nanos and so cannot hold the policy ID the way
-  every other frame does; [140:144] is reserved padding), and #2749 grew
-  it again 144 -> 152 with an ADDITIVE class-of-service / interface block
-  at [144:152] on the SESSION_CLOSE RT_FLOW frame: [144] src ToS byte
-  (DSCP<<2), [145] cumulative TCP control bits, [146:148] reserved
-  (flowDirection, deferred), [148:152] egress ifindex (LITTLE-endian u32).
-  #4915 grew it once more 152 -> 160 with an ADDITIVE [152:160] u64
-  (LITTLE-endian) carrying the dataplane's STABLE session id on BOTH the
-  SESSION_CREATE and SESSION_CLOSE frames (`encode_session_create_rt_flow`
-  / `encode_session_close_rt_flow`, threaded from the session's
-  `SessionEntry.session_id` via the Open/Close `SessionDelta`), so a SIEM
-  can join a session's open and close records — the per-event ordinal the
-  Go side stamped before could never match across the two events, nor
-  disambiguate a reused 5-tuple. deny/screen/filter frames have no session
-  and leave [152:160] zero.
-  The growth is additive and rolling-upgrade-safe: the Go reader keeps its
-  minimum-frame acceptance at the legacy 144 bytes and decodes the
-  [144:152] block ONLY when the frame carries it (`len >= 152`) AND on a
-  SESSION_CLOSE, and the [152:160] session id ONLY when `len >= 160` AND on
-  a SESSION_CREATE/CLOSE, so a new daemon still accepts an old helper's
-  144/152-byte frames and an old daemon ignores the trailing bytes (#1961).
-  Every frame encoder emits 160 bytes; non-close frames leave [144:152]
-  zero and non-session frames leave [152:160] zero. NOTE (#4915 scope): a
-  peer-synced session gets a FRESH node-local id on import — cross-HA-node
-  id identity (the same id on both cluster nodes) is a documented follow-up
-  needing a session-sync wire change. `show security flow session` is now
-  UNIFIED (#5213): `publish_conntrack` stamps the conntrack-map `session_id`
-  from the same `SessionEntry.session_id`, so the live-session view shows the
-  SAME id these frames carry (the iteration-index fallback survives only for a
-  `val.SessionID == 0` row).
+  including AF values 2/10 and big-endian L4 ports. Security-event
+  payloads remain 160 bytes (`SECURITY_EVENT_PAYLOAD_SIZE`); the RT_FLOW
+  SESSION_CREATE/CLOSE payloads are 168 bytes. #3056 grew the common event
+  layout 136 -> 144 (the trailing [136:140] u32 carries the admitting policy
+  ID on SESSION_CLOSE, whose [44:48] slot is occupied by #2853's
+  created-subsec-nanos); #2749 added [144:152] close-only class-of-service /
+  interface fields (ToS, cumulative TCP control bits, reserved flowDirection,
+  egress ifindex), and #4915 added the stable session ID at [152:160].
+  #11698 adds a session-only generation tail at [160:168]: [140:144] carries
+  the `GEN1` marker and [160:168] carries the little-endian configuration
+  generation paired with the positional policy ID. SESSION_CREATE stamps the
+  generation at admission; SESSION_CLOSE stamps the generation of the policy
+  table used to re-resolve its ID. The Go reader resolves a marked frame only
+  against that generation and keeps the numeric ID while reporting a mismatch
+  as unattributed. Legacy session frames without the marker retain their
+  pre-fence current-map behavior.
+  The layout remains additive and rolling-upgrade-safe: Go keeps minimum
+  acceptance at 144 bytes, reads [144:152] only on an extended SESSION_CLOSE,
+  reads [152:160] only on session frames with at least 160 bytes, and reads
+  [160:168] only on marked session frames with at least 168 bytes. New Go
+  accepts older 144/152/160-byte frames; older Go ignores the appended
+  generation bytes. Deny/screen/filter frames remain 160 bytes and preserve
+  POLICY_DENY's existing generation stamp at [56:64] with the shared marker.
+  `show security flow session` is unified (#5213): `publish_conntrack` stamps
+  the conntrack-map `session_id` from the same `SessionEntry.session_id`, so the
+  live-session view shows the same ID these frames carry (the iteration-index
+  fallback survives only for a `val.SessionID == 0` row).
   Userspace telemetry may also populate the non-session metadata slots
   used by the Go adapter for action, rule ID, term ID, reason, owner RG,
   ingress ifindex, and application ID.
@@ -165,7 +158,7 @@ periodic ACK from the daemon.
   when the header is too short to read at all, the caller's
   `flowless_l3_addrs` still hands over the family-correct UNSPECIFIED pair,
   so a wholly unreadable frame degrades exactly as before.
-  `MSG_SESSION_CLOSE_RT_FLOW` (14) carries that same 152-byte payload
+  `MSG_SESSION_CLOSE_RT_FLOW` (14) carries the 168-byte session payload
   with the event-type byte set to RT_FLOW SESSION_CLOSE (2), plus the
   #3056 admitting policy ID in the trailing [136:140] slot and the #2749
   class-of-service / interface block at [144:152] (src ToS, cumulative TCP
@@ -226,7 +219,7 @@ periodic ACK from the daemon.
   flowexport consumer of session opens, so `MSG_SESSION_CREATE_RT_FLOW`
   (15) is producer-gated: it is emitted (via `emit_session_create_rt_flow`)
   ONLY when the admitting policy requested `then log session-init`, carries
-  the same 152-byte payload with the event-type byte set to SESSION_OPEN
+  the same 168-byte session payload with the event-type byte set to SESSION_OPEN
   (1, rendered as RT_FLOW_SESSION_CREATE on the Go side; the create frame
   leaves the #2749 [144:152] class-of-service block zero). The SESSION_CREATE
   frame carries the #3056 admitting policy ID in the usual [44:48] slot (it

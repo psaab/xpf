@@ -9660,6 +9660,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
     key: key.clone(),
     decision,
     metadata,
+    policy_generation: 0,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,
@@ -10029,6 +10030,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
     key: key.clone(),
     decision,
     metadata: metadata.clone(),
+    policy_generation: 41,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,
@@ -10052,6 +10054,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
     // event types), so app_id is read from the payload [132:134] slot directly,
     // exactly as the codec/Go side reads it.
     let stamped_app = |delta: SessionDelta, want_event_type: u8| -> u16 {
+        let want_policy_generation = delta.policy_generation;
         let (handle, rx) = crate::event_stream::test_worker_handle(
             8,
             // Unlimited (events_per_second == 0) — the proven RT_FLOW-emit test
@@ -10107,6 +10110,11 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
         assert_eq!(
             payload[52], want_event_type,
             "RT_FLOW frame must carry the expected session event type at [52]"
+        );
+        assert_eq!(
+            u64::from_le_bytes(payload[160..168].try_into().unwrap()),
+            want_policy_generation,
+            "RT_FLOW session frame must keep the generation paired with its policy ID"
         );
         u16::from_le_bytes([payload[132], payload[133]])
     };
@@ -10171,6 +10179,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         &store,
     )
     .expect("s2");
+    forwarding.config_generation = 42;
 
     // The closing session carries bee's bound handle and a STALE frozen
     // policy_id of 5 (its install-time value).
@@ -10182,6 +10191,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
     key: test_key(),
     decision: test_decision(),
     metadata,
+    policy_generation: 0,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,
@@ -10251,6 +10261,11 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         "SESSION_CLOSE RT_FLOW must carry bee's RE-RESOLVED current positional id \
          (6), not the frozen install-time id (5)"
     );
+    assert_eq!(
+        u64::from_le_bytes(payload[160..168].try_into().unwrap()),
+        42,
+        "SESSION_CLOSE must stamp the generation of the table used to re-resolve the policy ID"
+    );
 }
 
 /// #2874 FAIL-ON-REVERT: a correctness-critical HA session OPEN delta that
@@ -10293,6 +10308,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
     key: key.clone(),
     decision,
     metadata,
+    policy_generation: 0,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,
@@ -10374,6 +10390,7 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             key: key.clone(),
             decision,
             metadata,
+            policy_generation: 0,
             origin: SessionOrigin::ForwardFlow,
             fabric_redirect_sync: false,
             provenance,
@@ -10551,6 +10568,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
     key: key.clone(),
     decision,
     metadata,
+    policy_generation: 0,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,
@@ -10680,6 +10698,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
     key: key.clone(),
     decision,
     metadata,
+    policy_generation: 0,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,
@@ -10807,6 +10826,7 @@ fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
         key,
         decision,
         metadata,
+        policy_generation: 0,
         origin: SessionOrigin::ForwardFlow,
         fabric_redirect_sync: false,
         created_ns: 0,
@@ -13351,6 +13371,7 @@ fn delta_8593(key: &SessionKey, bulk_resync: bool) -> SessionDelta {
     key: key.clone(),
     decision: test_decision(),
     metadata: test_metadata(),
+    policy_generation: 0,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,
@@ -14546,6 +14567,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
     key: key.clone(),
     decision: test_decision(),
     metadata: metadata.clone(),
+    policy_generation: 0,
     origin: SessionOrigin::ForwardFlow,
     fabric_redirect_sync: false,
     created_ns: 0,

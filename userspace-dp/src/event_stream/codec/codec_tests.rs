@@ -230,7 +230,7 @@ fn assert_dataplane_event_round_trip(event: DataplaneEventPayload, msg_type: u8)
         );
         assert_eq!(
             u32::from_le_bytes(payload[140..144].try_into().unwrap()),
-            POLICY_DENY_GENERATION_MARKER
+            POLICY_CONFIG_GENERATION_MARKER
         );
     } else {
         assert_eq!(
@@ -333,6 +333,7 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
         TEST_TRUST_ZONE_ID,
         TEST_UNTRUST_ZONE_ID,
         88, // #3056: admitting policy id (rides [136:140] on a close)
+        41, // #11698: configuration generation paired with the policy ID
         1,
         false,                     // #2508: log_syslog gate
         1_700_000_000,             // #2465: created Unix seconds
@@ -355,11 +356,11 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
     // Payload length in the header must be the canonical payload size.
     assert_eq!(
         u32::from_le_bytes(frame.data[0..4].try_into().unwrap()),
-        SECURITY_EVENT_PAYLOAD_SIZE as u32
+        SESSION_RT_FLOW_PAYLOAD_SIZE as u32
     );
     assert_eq!(
         frame.len as usize,
-        FRAME_HEADER_SIZE + SECURITY_EVENT_PAYLOAD_SIZE
+        FRAME_HEADER_SIZE + SESSION_RT_FLOW_PAYLOAD_SIZE
     );
 
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
@@ -414,8 +415,8 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
     // drop these makes the NetFlow/IPFIX close record report 0 for srcTos /
     // tcpControlBits / egressInterface again (the #2613 regression #2749
     // fixes). The payload itself must be 160 bytes (#4915 grew it 152 -> 160).
-    assert_eq!(SECURITY_EVENT_PAYLOAD_SIZE, 160);
-    assert_eq!(p.len(), 160);
+    assert_eq!(SESSION_RT_FLOW_PAYLOAD_SIZE, 168);
+    assert_eq!(p.len(), SESSION_RT_FLOW_PAYLOAD_SIZE);
     assert_eq!(p[144], 0xB8); // src ToS
     assert_eq!(p[145], 0x13); // TCP control bits
     assert_eq!(u32::from_le_bytes(p[148..152].try_into().unwrap()), 9); // egress ifindex
@@ -453,6 +454,14 @@ fn test_encode_session_close_rt_flow_v4_wire_layout() {
     // encoder to leave [136:140] 0 makes the close record log policy 0 (the first
     // configured policy) and this assertion fails. The payload also grew 136->144
     // for this slot; SECURITY_EVENT_PAYLOAD_SIZE pins the length above.
+    assert_eq!(
+        u32::from_le_bytes(p[140..144].try_into().unwrap()),
+        POLICY_CONFIG_GENERATION_MARKER
+    );
+    assert_eq!(
+        u64::from_le_bytes(p[160..168].try_into().unwrap()),
+        41
+    );
     assert_eq!(u32::from_le_bytes(p[136..140].try_into().unwrap()), 88);
     // [136:140] must NOT collide with the #2853 created-subsec-nanos in [44:48].
     assert_eq!(
@@ -478,6 +487,7 @@ fn test_encode_session_close_rt_flow_v6() {
         TEST_TRUST_ZONE_ID,
         TEST_UNTRUST_ZONE_ID,
         0, // #3056: admitting policy id
+        0, // #11698: configuration generation paired with the policy ID
         0,
         false, // #2508: log_syslog gate
         0,     // #2465: created Unix seconds (unknown → fallback)
@@ -528,6 +538,7 @@ fn test_session_close_rt_flow_log_gate_byte() {
             TEST_TRUST_ZONE_ID,
             TEST_UNTRUST_ZONE_ID,
             0, // #3056: admitting policy id
+            0, // #11698: configuration generation paired with the policy ID
             0,
             log_syslog,
             0, // #2465: created Unix seconds
@@ -582,14 +593,15 @@ fn test_session_create_rt_flow_wire_layout() {
         TEST_TRUST_ZONE_ID,
         TEST_UNTRUST_ZONE_ID,
         42,                    // #3056: admitting policy id
+        41,                    // #11698: admitting policy generation
         77,                    // #2615: ingress ifindex
         9,                     // #2615: application id
         0x1122_3344_5566_7788, // #4915: stable session id (rides [152:160])
     );
     assert_eq!(frame.data[4], MSG_SESSION_CREATE_RT_FLOW);
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
-    assert_eq!(p.len(), SECURITY_EVENT_PAYLOAD_SIZE);
-    assert_eq!(SECURITY_EVENT_PAYLOAD_SIZE, 160);
+    assert_eq!(p.len(), SESSION_RT_FLOW_PAYLOAD_SIZE);
+    assert_eq!(SESSION_RT_FLOW_PAYLOAD_SIZE, 168);
     // event type = SESSION_OPEN (1) so the Go formatter emits SESSION_CREATE.
     assert_eq!(p[52], RT_FLOW_EVENT_SESSION_OPEN);
     assert_eq!(p[52], 1, "must equal the Go eventTypeSessionOpen value");
@@ -627,6 +639,14 @@ fn test_session_create_rt_flow_wire_layout() {
     assert_eq!(
         u64::from_le_bytes(p[152..160].try_into().unwrap()),
         0x1122_3344_5566_7788
+    );
+    assert_eq!(
+        u32::from_le_bytes(p[140..144].try_into().unwrap()),
+        POLICY_CONFIG_GENERATION_MARKER
+    );
+    assert_eq!(
+        u64::from_le_bytes(p[160..168].try_into().unwrap()),
+        41
     );
 }
 
@@ -1246,6 +1266,7 @@ fn test_close_flags() {
             policy_counter_idx: 0,
             policy_counter: None,
         },
+        policy_generation: 0,
         origin: crate::session::SessionOrigin::ForwardFlow,
         fabric_redirect_sync: true,
         created_ns: 0,

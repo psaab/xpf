@@ -37,10 +37,10 @@ pub(crate) const MSG_SCREEN_DROP: u8 = 12;
 pub(crate) const MSG_FILTER_LOG: u8 = 13;
 
 // #2460: RT_FLOW SESSION_CLOSE on the raw dataplane-event channel. This
-// frame carries the canonical 144-byte `dataplane.Event` payload (the same
-// shape the Go `logging.DecodeRawEventRecord` / `ProcessRawEvent` parser
-// consumes for the deny/screen/filter frames above) with the event-type
-// byte set to RT_FLOW SESSION_CLOSE (2). It is what drives the Go
+// frame carries the 168-byte RT_FLOW session payload, an additive extension of
+// the canonical security-event payload the Go parser consumes for other kinds.
+// It retains canonical field offsets and sets the SESSION_CLOSE (2)
+// event-type byte. It is what drives the Go
 // NetFlow/IPFIX session-close exporters in userspace mode. It is ADDITIVE
 // to — and entirely separate from — the minimal `MSG_SESSION_CLOSE` (type
 // 2) HA session-sync delta below; the two are emitted as a pair from one
@@ -48,7 +48,7 @@ pub(crate) const MSG_FILTER_LOG: u8 = 13;
 pub(crate) const MSG_SESSION_CLOSE_RT_FLOW: u8 = 14;
 
 // #2508: RT_FLOW SESSION_CREATE on the raw dataplane-event channel. Same
-// 144-byte payload shape as the close frame but with the event-type byte set
+// 168-byte payload shape as the close frame but with the event-type byte set
 // to RT_FLOW SESSION_CREATE (1). Emitted ONLY for sessions admitted by a
 // policy with `then log session-init`; there is no flowexport consumer of
 // session opens, so this frame is gated at the producer (the caller checks
@@ -72,24 +72,21 @@ pub(crate) const MSG_SESSION_CREATE_RT_FLOW: u8 = 15;
 // #3056: [136:140] carries the admitting policy ID on the SESSION_CLOSE
 // frame, whose [44:48] policy_id slot is occupied by the #2853
 // created-subsec-nanos remainder and so cannot hold the policy ID the way the
-// SESSION_CREATE / deny / screen / filter frames do. [140:144] stays reserved
-// padding. All frame encoders emit this length; non-close frames leave
-// [136:152] zero.
+// SESSION_CREATE / deny / screen / filter frames do. [140:144] carries the
+// shared generation marker on stamped events; POLICY_DENY keeps its existing
+// generation bytes at [56:64], while session frames use [160:168].
 //
-// #4915: 160 bytes (was 152). The trailing [152:160] u64 carries the
-// dataplane's STABLE session id (LE) on the SESSION_CREATE and SESSION_CLOSE
-// frames so a SIEM/operator can join a session's open and close records — the
-// per-event ordinal the Go side stamped before could never match across the
-// two events, nor disambiguate a reused 5-tuple. Only the two RT_FLOW session
-// frames populate this slot (`encode_session_create_rt_flow` /
-// `encode_session_close_rt_flow`); deny/screen/filter frames have no session
-// and leave it zero. The growth is ADDITIVE with the same discipline as the
-// #2749 [144:152] block: the Go side keeps its minimum-frame acceptance at the
-// legacy 144 bytes (`rawEventWireSize`) and reads [152:160] only when the frame
-// carries it (`len(data) >= 160`) AND only on a session frame, so both
-// rolling-upgrade directions stay safe (#1961 both-sides wire discipline).
+// #4915: [152:160] the dataplane's STABLE session id (LE) on SESSION_CREATE
+// and SESSION_CLOSE frames.
+//
+// #11698: session frames append the generation paired with the positional
+// policy ID at [160:168]. [140:144] contains the "GEN1" marker so old frames
+// remain distinguishable from newly stamped ones. Non-session security events
+// retain their 160-byte payload; only session frames use the [160:168] tail.
 #[allow(dead_code)]
 pub(crate) const SECURITY_EVENT_PAYLOAD_SIZE: usize = 160;
+pub(crate) const SESSION_POLICY_GENERATION_OFFSET: usize = 160;
+pub(crate) const SESSION_RT_FLOW_PAYLOAD_SIZE: usize = 168;
 
 pub(super) const RT_FLOW_AF_INET: u8 = 2;
 pub(super) const RT_FLOW_AF_INET6: u8 = 10;

@@ -441,6 +441,10 @@ pub(in crate::afxdp) struct ForwardingState {
     /// pre-#3527.
     pub(in crate::afxdp) session_opening_overrides: FastMap<u16, u64>,
     pub(in crate::afxdp) policy: PolicyState,
+    /// Configuration generation whose policy table is held by `policy`.
+    /// RT_FLOW closes re-resolve a rule ID against this table and stamp the
+    /// same generation on the resulting event frame.
+    pub(in crate::afxdp) config_generation: u64,
     /// Extensive policy-rematch metadata carried by the control plane for a
     /// zone/policy rename. Kept on the immutable forwarding generation so
     /// rotation can consume it before the next generation is published.

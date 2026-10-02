@@ -44,6 +44,7 @@ impl EventStreamWorkerHandle {
         app_id: u16,
         ingress_ifindex: u32,
         policy_id: u32,
+        policy_generation: u64,
     ) {
         if delta.kind != SessionDeltaKind::Close {
             return;
@@ -102,6 +103,7 @@ impl EventStreamWorkerHandle {
                     // reorder before the close no longer mis-attributes the
                     // record.
                     policy_id,
+                    policy_generation,
                     delta.metadata.owner_rg_id as i16,
                     // #2508: per-policy RT_FLOW SYSLOG gate byte. The frame is
                     // sent unconditionally (the Go NetFlow/IPFIX exporter
@@ -203,6 +205,7 @@ impl EventStreamWorkerHandle {
                     // install, so the SESSION_CREATE RT_FLOW record names the
                     // policy that admitted the flow instead of policy 0.
                     delta.metadata.policy_id,
+                    delta.policy_generation,
                     // #2615: ingress ifindex ([128:132]) + resolved AppID
                     // ([132:134]) so the SESSION_CREATE RT_FLOW record shows
                     // the admitting interface and application instead of
