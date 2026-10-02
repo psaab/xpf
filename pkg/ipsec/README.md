@@ -439,8 +439,9 @@ all files stay in `package ipsec`, so the public API is unchanged.
   - **Family-matched selection** (`resolveInterfaceAddress`): the local
     address is constrained to the hinted family. If the interface is
     single-stack in the OTHER family, selection falls back to
-    family-agnostic so a degraded config still emits a `local_addrs` line
-    instead of an empty one.
+    family-agnostic. If neither family yields an address, the render belt
+    skips the VPN with a warning naming its `external-interface` (#11689);
+    it never omits `local_addrs` and binds every local interface.
   - **Dual-stack peer:** when the hostname resolves to BOTH families, no
     explicit preference is configured, so the hint stays family-agnostic
     (0) and the interface's first usable address decides — strongSwan then

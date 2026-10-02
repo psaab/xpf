@@ -146,18 +146,19 @@ func interfaceRefIsDHCP(cfg *config.Config, ifaceRef string) bool {
 // vs the resolved peer (#2757): if the remote is/resolves to IPv6, the IPv6
 // local-address is chosen, and vice versa.
 //
-// When the constrained family yields no local-address on the interface (the
+// If the constrained family yields no local-address on the interface (the
 // interface is single-stack in the other family), we fall back to a
-// family-agnostic selection so a misconfiguration degrades to the legacy
-// behavior rather than emitting no local_addrs line at all.
+// family-agnostic selection. A complete miss still returns ""; renderConfig
+// treats that as an unresolved external-interface and skips the VPN rather
+// than omitting local_addrs and allowing a bind to every local interface.
 func resolveInterfaceAddress(cfg *config.Config, ifaceRef string, family int) string {
 	if addr := resolveInterfaceAddressFamily(cfg, ifaceRef, family); addr != "" {
 		return addr
 	}
 	if family != 0 {
 		// The remote family has no matching local-address on this
-		// interface — fall back to whatever the interface offers rather
-		// than rendering an empty local_addrs.
+		// interface — fall back to whatever the interface offers, then
+		// report an empty result if neither family has an address.
 		return resolveInterfaceAddressFamily(cfg, ifaceRef, 0)
 	}
 	return ""
