@@ -61,10 +61,9 @@ _HARNESS_RESULT_SH_LOADED=1
 
 HARNESS_RESULT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Row schema version. Bump when a field's MEANING changes; add a new field
-# rather than redefining one, because old rows stay in the ledger forever and a
-# redefinition silently changes what they said.
-HARNESS_RESULT_SCHEMA=1
+# Schema 2 changes build_exe_sha256 from a gate-time local build to the
+# verified deploy artifact. Historical schema-1 rows retain their old meaning.
+HARNESS_RESULT_SCHEMA=2
 
 # The adapter table. A source not listed here is REFUSED, never defaulted.
 HARNESS_ADAPTERS="ha-smoke smoke-cells newflow-ceiling mouse-latency selftest iperf-throughput wire-gate"
@@ -655,9 +654,13 @@ harness_adapt_wire_gate() {
 # them directly would be meaningless:
 #
 #   build_git_sha       provenance of the TREE (plus "-dirty" when the tree has
-#                       uncommitted changes -- a dirty tree's sha does not
-#                       identify a binary, and saying so is the point)
-#   build_exe_sha256    sha256 of the locally built xpfd from that tree
+#                       uncommitted changes); cluster manifests must match it
+#                       before their executable identity is accepted
+#   build_exe_sha256  sha256 of the deploy artifact recorded by cluster-deploy
+#                       (from the .deb payload or verified raw binary), not a
+#                       fresh rebuild: BUILD_TIME plus the dirty version stamp
+#                       make same-commit rebuilds differ. Missing, invalid,
+#                       or stale manifests do not fall back to local ./xpfd.
 #   running_exe_sha256  sha256 of the LIVE process image on the node, read back
 #                       through deploy_running_xpfd_sha256() -- the one
 #                       readback in the tree, extracted from
@@ -669,8 +672,7 @@ harness_adapt_wire_gate() {
 #
 #   MATCH           build_exe_sha256 == running_exe_sha256
 #   MISMATCH        they differ -- the node is running some other build
-#   UNAVAILABLE     the readback did not happen (no MainPID, no local binary,
-#                   incus unreachable)
+#   UNAVAILABLE     live readback or matching deploy provenance was unavailable
 #   NOT-APPLICABLE  a hermetic gate; there is no deployed binary to check
 #
 # The emitter REFUSES a non-VOID verdict carrying MISMATCH or UNAVAILABLE, so
@@ -1036,7 +1038,7 @@ PY
 # The ledger-coverage census reads the absence either way.
 harness_result_run() {
 	local gate="" adapter="" env="" mode="cluster" node="" build_exe="" build_helper_exe="" artifacts="" ledger=""
-	local require_helper=0
+	local require_helper=0 build_exe_explicit=0 build_helper_exe_explicit=0
 	local peer_node_arg=""
 	while (($#)); do
 		case "$1" in
@@ -1051,8 +1053,8 @@ harness_result_run() {
 		# is; the flag exists so a caller (and the self-test) can name it
 		# explicitly, the same reason --node exists.
 		--node-peer) peer_node_arg="$2"; shift 2 ;;
-		--build-exe) build_exe="$2"; shift 2 ;;
-		--build-helper-exe) build_helper_exe="$2"; shift 2 ;;
+		--build-exe) build_exe="$2"; build_exe_explicit=1; shift 2 ;;
+		--build-helper-exe) build_helper_exe="$2"; build_helper_exe_explicit=1; shift 2 ;;
 		--artifacts) artifacts="$2"; shift 2 ;;
 		--ledger) ledger="$2"; shift 2 ;;
 		--) shift; break ;;
@@ -1115,7 +1117,7 @@ harness_result_run() {
 	headline=$(cut -f3 <<<"$adapted")
 	direction=$(cut -f4 <<<"$adapted")
 	metrics=$(cut -f5 <<<"$adapted")
-	local build_git_sha build_exe_sha running_exe_sha exe_check
+	local build_git_sha build_exe_sha="" running_exe_sha exe_check
 	local build_helper_exe_sha="" running_helper_exe_sha=""
 	local peer_running_helper_exe_sha="" helper_exe_check="" helper_exe_scope=""
 	# Initialised explicitly: the run wrapper executes under `set -u`, and a
@@ -1124,8 +1126,39 @@ harness_result_run() {
 	local peer_node="$peer_node_arg" peer_running_exe_sha="" exe_scope=""
 	build_git_sha=$(harness_build_git_sha "$root" || echo "unknown")
 	if [[ "$mode" == "cluster" ]]; then
-		[[ -z "$build_exe" ]] && build_exe="$root/xpfd"
-		[[ -f "$build_exe" ]] && build_exe_sha=$(sha256sum "$build_exe" | awk '{print $1}')
+		# Source the shared deploy library before attestation so its deploy-time
+		# manifest (not a fresh, differently stamped rebuild) is authoritative.
+		# deploy-lib depends on these helpers; do not replace helpers a caller
+		# already supplied.
+		[[ -n "${_XPF_DEPLOY_LIB_LOADED:-}" ]] || {
+			declare -F info >/dev/null || info() { :; }
+			declare -F warn >/dev/null || warn() { printf 'harness-result: %s\n' "$*" >&2; }
+			declare -F die >/dev/null || die() { printf 'harness-result: %s\n' "$*" >&2; return 1; }
+			# shellcheck disable=SC1091
+			source "$HARNESS_RESULT_DIR/deploy-lib.sh" 2>/dev/null || true
+			_XPF_DEPLOY_LIB_LOADED=1
+		}
+		local manifest_sha="" manifest_rc=0
+		if ((build_exe_explicit)); then
+			[[ -f "$build_exe" ]] &&
+				build_exe_sha=$(sha256sum "$build_exe" | awk '{print $1}')
+		else
+			build_exe="$root/xpfd"
+			if declare -F deploy_manifest_sha >/dev/null; then
+				if manifest_sha=$(deploy_manifest_sha xpfd "$root" "$build_git_sha" 2>/dev/null); then
+					build_exe_sha="$manifest_sha"
+				else
+					manifest_rc=$?
+					case "$manifest_rc" in
+						1) _hr_warn "deploy attestation manifest is missing; xpfd identity is unavailable" ;;
+						3) _hr_warn "deploy attestation manifest belongs to a different checkout; xpfd identity is unavailable" ;;
+						*) _hr_warn "deploy attestation manifest is invalid; xpfd identity is unavailable" ;;
+					esac
+				fi
+			else
+				_hr_warn "deploy attestation manifest reader is unavailable; xpfd identity is unavailable"
+			fi
+		fi
 		# #9044: the PEER, resolved the same way. An HA gate fails over BY
 		# DEFINITION, so the node a single-node attestation does not cover is
 		# the node the test's outcome depends on.
@@ -1172,19 +1205,6 @@ harness_result_run() {
 			# MATCH for a gate that failed over onto the unattested node. An
 			# HA smoke fails over by definition, so that is the node the
 			# result depends on (#9044).
-			# shellcheck source=deploy-lib.sh
-			[[ -n "${_XPF_DEPLOY_LIB_LOADED:-}" ]] || {
-				# deploy-lib.sh documents that it depends on the SOURCING
-				# script defining info/warn/die. Supply them only when the
-				# caller has not -- clobbering a smoke's own die() would
-				# turn its fatal path into a return.
-				declare -F info >/dev/null || info() { :; }
-				declare -F warn >/dev/null || warn() { printf 'harness-result: %s\n' "$*" >&2; }
-				declare -F die >/dev/null || die() { printf 'harness-result: %s\n' "$*" >&2; return 1; }
-				# shellcheck disable=SC1091
-				source "$HARNESS_RESULT_DIR/deploy-lib.sh" 2>/dev/null || true
-				_XPF_DEPLOY_LIB_LOADED=1
-			}
 			if declare -F deploy_running_xpfd_sha256 >/dev/null; then
 				running_exe_sha=$(deploy_running_xpfd_sha256 "$node" "${XPF_EXE_READBACK_TRIES:-3}" || true)
 				# #9044: and the peer, when there is one to read.
@@ -1199,9 +1219,31 @@ harness_result_run() {
 		fi
 	fi
 	if ((require_helper)); then
-		[[ -z "$build_helper_exe" ]] && build_helper_exe="$root/xpf-userspace-dp"
-		[[ -f "$build_helper_exe" ]] &&
-			build_helper_exe_sha=$(sha256sum "$build_helper_exe" | awk '{print $1}')
+		local helper_manifest_sha="" helper_manifest_rc=0
+		if ((build_helper_exe_explicit)); then
+			[[ -f "$build_helper_exe" ]] &&
+				build_helper_exe_sha=$(sha256sum "$build_helper_exe" | awk '{print $1}')
+		else
+			build_helper_exe="$root/xpf-userspace-dp"
+			if [[ "$mode" == "cluster" ]]; then
+				if declare -F deploy_manifest_sha >/dev/null; then
+					if helper_manifest_sha=$(deploy_manifest_sha xpf-userspace-dp "$root" "$build_git_sha" 2>/dev/null); then
+						build_helper_exe_sha="$helper_manifest_sha"
+					else
+						helper_manifest_rc=$?
+						case "$helper_manifest_rc" in
+							1) _hr_warn "deploy attestation manifest is missing; helper identity is unavailable" ;;
+							3) _hr_warn "deploy attestation manifest belongs to a different checkout; helper identity is unavailable" ;;
+							*) _hr_warn "deploy attestation manifest has no valid xpf-userspace-dp identity" ;;
+						esac
+					fi
+				else
+					_hr_warn "deploy attestation manifest reader is unavailable; helper identity is unavailable"
+				fi
+			elif [[ -f "$build_helper_exe" ]]; then
+				build_helper_exe_sha=$(sha256sum "$build_helper_exe" | awk '{print $1}')
+			fi
+		fi
 		if [[ "$mode" == "cluster" && -n "$node" ]] &&
 			declare -F deploy_running_xpf_userspace_dp_sha256 >/dev/null; then
 			running_helper_exe_sha=$(

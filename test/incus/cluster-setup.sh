@@ -598,7 +598,7 @@ cmd_destroy() {
 # ── Deploy ───────────────────────────────────────────────────────────
 
 cmd_deploy() {
-	local target="${1:-all}"
+	local target="${1:-all}" deploy_git_sha=""
 
 	case "$target" in
 		0|1|all) ;;
@@ -648,6 +648,10 @@ cmd_deploy() {
 			-- env XPF_CLUSTER_SKIP_BUILD=1 \
 			"${SCRIPT_DIR}/cluster-setup.sh" deploy "$target"
 	fi
+	deploy_manifest_invalidate "$PROJECT_ROOT" ||
+		die "cannot invalidate prior executable attestation manifest"
+	deploy_git_sha=$(deploy_build_git_sha "$PROJECT_ROOT") ||
+		die "cannot capture checkout identity before deploy"
 
 	if [[ -n "${SRIOV_LAN_PARENT:-}" ]]; then
 		suppress_host_parent_ipv6_ra "$SRIOV_LAN_PARENT"
@@ -673,6 +677,22 @@ cmd_deploy() {
 			1)   deploy_vm_deb 1 ;;
 			all) deploy_rolling_deb ;;
 		esac
+	fi
+
+	# Record the deployed image identity before the gate has a chance to build
+	# another xpfd in this worktree. The .deb branch reads hashes directly
+	# from the staged package bytes (the same artifact deploy_vm_deb installs);
+	# the raw branch hashes the binaries deploy_vm just pushed and verified.
+	if [[ "${XPF_DEPLOY_FAST:-}" = "1" ]]; then
+		deploy_write_manifest "$PROJECT_ROOT" "" "$deploy_git_sha" ||
+			die "deploy completed but its executable attestation manifest could not be written"
+	else
+		local attestation_deb
+		attestation_deb=$(ls -t "$PROJECT_ROOT"/dist-deb/xpf_*.deb 2>/dev/null | head -1 || true)
+		[[ -n "$attestation_deb" ]] ||
+			die "deploy completed but no xpf .deb is available to attest"
+		deploy_write_manifest "$PROJECT_ROOT" "$attestation_deb" "$deploy_git_sha" ||
+			die "deploy completed but its executable attestation manifest could not be written"
 	fi
 
 	# This cell changed the build ON PURPOSE. Re-baseline so the cell's

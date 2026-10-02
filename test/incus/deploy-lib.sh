@@ -249,6 +249,205 @@ deploy_verify_running_xpf_userspace_dp() {
 	fi
 	info "Verified running xpf-userspace-dp on $rinst matches the pushed build ($local_sum)."
 }
+# ── Deploy attestation manifest (#11765) ─────────────────────────────
+# The gate used to hash the worktree's CURRENT ./xpfd and compare it with
+# the LIVE process image. Any rebuild between deploy and gate — even of the
+# same commit — differs, because two stamped LDFLAGS are never stable:
+# main.buildTime (Makefile date-now, second granularity) and main.version
+# (the -dirty flag a clean-tree rebuild does not reproduce). Every HA gate
+# therefore recorded VOID via exe_check=MISMATCH for a binary nobody
+# rebuilt wrong; the comparison attested build REPRODUCIBILITY, which the
+# toolchain cannot provide, instead of deployment IDENTITY, which the
+# deploy path knows exactly.
+#
+# So the deploy path records what it SHIPPED, and the gate compares the
+# running image against that record instead of against a fresh rebuild.
+# The manifest is local, git-ignored, bound to the checkout identity, and
+# invalidated before a new deploy starts. It records only a successful deploy
+# from THIS worktree. A gate on a node running anything else still
+# MISMATCHes — including after another lane's deploy — which is the safe
+# outcome. Missing, invalid, or stale provenance fails closed.
+#
+# Schema: schema=1, build_git_sha (HEAD + -dirty, ledger-excluded, cf.
+# harness_build_git_sha), version (git describe), build_time (UTC),
+# mode (deb|raw), deb (basename or null), binaries {xpfd, cli,
+# xpf-userspace-dp sha256, null when the artifact was not shipped}.
+#
+# deploy_manifest_path [project_root]
+# Echo the manifest path. XPF_DEPLOY_MANIFEST overrides (selftests point it
+# at a fixture); otherwise <root>/dist-deb/xpf-deploy-manifest.json.
+deploy_manifest_path() {
+	if [[ -n "${XPF_DEPLOY_MANIFEST:-}" ]]; then
+		printf '%s\n' "$XPF_DEPLOY_MANIFEST"
+		return 0
+	fi
+	local root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+	printf '%s/dist-deb/xpf-deploy-manifest.json\n' "$root"
+}
+
+# deploy_manifest_invalidate <project_root>
+# A failed or partial deploy must not leave the previous successful artifact
+# available to a later gate as if it named the current deployment.
+
+deploy_manifest_invalidate() {
+	local manifest
+	manifest=$(deploy_manifest_path "$1") || return 1
+	rm -f -- "$manifest" || return 1
+	[[ ! -e "$manifest" ]]
+}
+
+# deploy_build_git_sha [root]
+# Match harness_build_git_sha exactly: the ledger is excluded from the
+# dirtiness test because previous rows are outputs, not build inputs.
+deploy_build_git_sha() {
+	local root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+	local sha dirt
+	sha=$(git -C "$root" rev-parse HEAD 2>/dev/null) || return 1
+	dirt=$(git -C "$root" status --porcelain -uall 2>/dev/null |
+		grep -vE 'test/results/ledger\.(d/.*\.json|jsonl)$' || true)
+	if [[ -n "$dirt" ]]; then
+		printf '%s-dirty\n' "$sha"
+	else
+		printf '%s\n' "$sha"
+	fi
+}
+
+# deploy_manifest_sha_from_deb <deb> <binary>
+# Echo the sha256 of usr/local/share/xpf/staged/<binary> as packed in the
+# .deb (the exact bits deploy_install_deb pushes), or nothing (rc 1) when
+# the member is absent or unreadable. Never substitutes a worktree hash.
+deploy_manifest_sha_from_deb() {
+	local deb="$1" bin="$2" sha=""
+	[[ -f "$deb" ]] || return 1
+	if ! sha=$(set -o pipefail
+		dpkg-deb --fsys-tarfile "$deb" 2>/dev/null |
+			tar -xO "./usr/local/share/xpf/staged/$bin" 2>/dev/null |
+			sha256sum 2>/dev/null | awk '{print $1}'); then
+		return 1
+	fi
+	[[ "$sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+	printf '%s\n' "$sha"
+}
+
+# deploy_write_manifest <project_root> [deb_path] [build_git_sha]
+# Record the shas this deploy SHIPPED. With a .deb path (the default dogfood
+# path) the shas come from the staged members inside the .deb itself, so a
+# worktree rebuild between `make deb` and cut-over cannot record the wrong
+# bytes; without one (XPF_DEPLOY_FAST raw path) they come from the worktree
+# binaries the raw path just pushed and verified. build_git_sha is captured
+# before deployment so a checkout change during cut-over cannot relabel it.
+# A write failure is fatal to the deploy.
+deploy_write_manifest() {
+	local root="$1" deb="${2:-}" expected_git_sha="${3:-}"
+	local manifest xpfd_sha="" cli_sha="" helper_sha=""
+	local build_git_sha version build_time mode deb_name=""
+	manifest=$(deploy_manifest_path "$root")
+	if [[ -n "$deb" ]]; then
+		mode="deb"
+		deb_name=$(basename "$deb")
+		xpfd_sha=$(deploy_manifest_sha_from_deb "$deb" xpfd || true)
+		cli_sha=$(deploy_manifest_sha_from_deb "$deb" cli || true)
+		helper_sha=$(deploy_manifest_sha_from_deb "$deb" xpf-userspace-dp || true)
+		[[ -n "$xpfd_sha" ]] || {
+			warn "deploy manifest: cannot read staged xpfd from $deb"
+			return 1
+		}
+	else
+		mode="raw"
+		[[ -f "$root/xpfd" ]] && xpfd_sha=$(sha256sum "$root/xpfd" | awk '{print $1}')
+		[[ -f "$root/cli" ]] && cli_sha=$(sha256sum "$root/cli" | awk '{print $1}')
+		[[ -f "$root/xpf-userspace-dp" ]] &&
+			helper_sha=$(sha256sum "$root/xpf-userspace-dp" | awk '{print $1}')
+	fi
+	if [[ ! "$xpfd_sha" =~ ^[0-9a-f]{64}$ ]]; then
+		warn "deploy manifest: no xpfd sha available (mode=$mode)"
+		return 1
+	fi
+	build_git_sha="$expected_git_sha"
+	if [[ -z "$build_git_sha" ]]; then
+		build_git_sha=$(deploy_build_git_sha "$root" 2>/dev/null) || {
+			warn "deploy manifest: cannot determine build git identity for $root"
+			return 1
+		}
+	fi
+	version=$(git -C "$root" describe --tags --always --dirty 2>/dev/null || echo "dev")
+	build_time=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+	command -v python3 >/dev/null 2>&1 || {
+		warn "deploy manifest: python3 is not installed"
+		return 1
+	}
+	mkdir -p "$(dirname "$manifest")" || return 1
+	local tmp="$manifest.tmp.$$"
+	if ! MANIFEST_PATH="$manifest" MANIFEST_TMP="$tmp" \
+		MANIFEST_GITSHA="$build_git_sha" MANIFEST_VERSION="$version" \
+		MANIFEST_TIME="$build_time" MANIFEST_MODE="$mode" \
+		MANIFEST_DEB="$deb_name" MANIFEST_XPFD="$xpfd_sha" \
+		MANIFEST_CLI="$cli_sha" MANIFEST_HELPER="$helper_sha" \
+		python3 - <<'PY'
+import json, os
+def opt(name):
+    v = os.environ.get(name, "")
+    return v if v else None
+doc = {
+    "schema": 1,
+    "build_git_sha": os.environ["MANIFEST_GITSHA"],
+    "version": os.environ["MANIFEST_VERSION"],
+    "build_time": os.environ["MANIFEST_TIME"],
+    "mode": os.environ["MANIFEST_MODE"],
+    "deb": opt("MANIFEST_DEB"),
+    "binaries": {
+        "xpfd": os.environ["MANIFEST_XPFD"],
+        "cli": opt("MANIFEST_CLI"),
+        "xpf-userspace-dp": opt("MANIFEST_HELPER"),
+    },
+}
+line = json.dumps(doc, separators=(",", ":"), ensure_ascii=False) + "\n"
+with open(os.environ["MANIFEST_TMP"], "w", encoding="utf-8") as f:
+    f.write(line)
+os.replace(os.environ["MANIFEST_TMP"], os.environ["MANIFEST_PATH"])
+PY
+	then
+		rm -f "$tmp"
+		warn "deploy manifest: failed to write $manifest"
+		return 1
+	fi
+	info "Deploy manifest recorded $manifest (mode=$mode xpfd=$xpfd_sha)."
+}
+
+# deploy_manifest_sha <binary> [project_root] [expected_build_git_sha]
+# Return the recorded SHA. rc=1 means no manifest; rc=2 means invalid; rc=3
+# means the record belongs to another checkout. Every nonzero status fails
+# closed for a cluster measurement.
+deploy_manifest_sha() {
+	local bin="$1" root="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+	local expected_git_sha="${3:-}" manifest
+	manifest=$(deploy_manifest_path "$root")
+	[[ -f "$manifest" ]] || return 1
+	MANIFEST_PATH="$manifest" MANIFEST_BIN="$bin" \
+		MANIFEST_EXPECTED_GITSHA="$expected_git_sha" python3 - <<'PY'
+import json, os, re
+try:
+    with open(os.environ["MANIFEST_PATH"], encoding="utf-8") as f:
+        doc = json.load(f)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(2)
+if not isinstance(doc, dict) or doc.get("schema") != 1:
+    raise SystemExit(2)
+git_sha = doc.get("build_git_sha")
+if not isinstance(git_sha, str) or not git_sha:
+    raise SystemExit(2)
+expected = os.environ.get("MANIFEST_EXPECTED_GITSHA", "")
+if expected and git_sha != expected:
+    raise SystemExit(3)
+binaries = doc.get("binaries")
+if not isinstance(binaries, dict):
+    raise SystemExit(2)
+sha = binaries.get(os.environ["MANIFEST_BIN"])
+if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+    raise SystemExit(2)
+print(sha)
+PY
+}
 
 # ── Rolling-deploy node ordering (#4009) ─────────────────────────────
 # A rolling cluster deploy must restart the SECONDARY node first (traffic

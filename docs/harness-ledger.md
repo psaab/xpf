@@ -96,7 +96,7 @@ so a thirteenth gate added later cannot accumulate uncovered.
 ## What a row records
 
 ```json
-{"schema":1,"ts":"2026-09-02T18:04:11Z","gate":"test-failover",
+{"schema":2,"ts":"2026-09-02T18:04:11Z","gate":"test-failover",
  "env":"loss-userspace-cluster","verdict":"PASS","void_reason":"",
  "headline_metric":"throughput_gbps","headline_direction":"higher-better",
  "metrics":{"cells_passed":21,"cells_failed":0,"throughput_gbps":23.1},
@@ -143,14 +143,29 @@ routinely a different tree from what is running on the node — that is precisel
 the failure `deploy-lib.sh` already dies on (#2176, *"the node is running STALE
 code"*). Three fields, because two of them are different kinds of value:
 
-* `build_git_sha` — provenance of the *tree*, with a `-dirty` suffix when it
-  has uncommitted changes, because a dirty tree's sha does not identify a
-  binary and saying so is the point. The ledger file itself is excluded from
-  that test: it is the emitter's own output, so counting it would pin every row
-  to `-dirty` forever — including rows from a pristine checkout — and a flag
-  that is always on carries no information;
-* `build_exe_sha256` — sha256 of the locally built `xpfd` from that tree;
-* `running_exe_sha256` — sha256 of the **live process image** on the node.
+* `build_git_sha` — provenance of the checkout that deployed the measured
+  artifact, with a `-dirty` suffix when it has uncommitted changes. The ledger
+  file itself is excluded from the dirtiness test because it is emitter output.
+  A cluster gate accepts a deploy manifest only when this identity matches the
+  current checkout;
+* `build_exe_sha256` — SHA-256 from the deploy-time manifest, sourced from the
+  staged `.deb` payload or verified raw binary. It is not a gate-time rebuild:
+  `BUILD_TIME` and the dirty version stamp intentionally make rebuilt bytes
+  differ;
+* `running_exe_sha256` — SHA-256 of the **live process image** on the node.
+
+Schema 2 records the deploy-artifact meaning of `build_exe_sha256`; historical
+schema-1 rows keep their original gate-time local-file meaning.
+
+The deploy manifest lives at the ignored
+`dist-deb/xpf-deploy-manifest.json` path and records the xpfd, cli, and
+userspace-helper hashes for the last successful cluster deploy from that
+worktree. Deb deployments read hashes from the package's staged payload;
+raw deployments record the binaries pushed and verified on the node. The
+manifest is replaced atomically after successful deployment and invalidated
+before the next deploy attempt. A missing, invalid, or different-checkout
+manifest fails closed as `UNAVAILABLE`; cluster gates never fall back to a
+fresh local rebuild.
 
 The readback is not a new mechanism. `deploy_verify_running_xpfd` already did
 `sha256sum /proc/$PID/exe`; that inline block was **extracted** into

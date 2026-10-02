@@ -1495,6 +1495,146 @@ test_rejoin_site_uses_the_scoped_predicate() {
 	fi
 }
 
+test_manifest_raw_records_verified_binary_hashes() {
+	local fixture root manifest xpfd_sha helper_sha before after got_sha got_helper rc
+	fixture=$(mktemp -d)
+	root="$fixture/root"
+	mkdir -p "$root"
+	git -C "$root" init -q
+	git -C "$root" config user.email t@t
+	git -C "$root" config user.name t
+	printf 'tracked build source\n' >"$root/source"
+	git -C "$root" add source && git -C "$root" commit -qm init
+	printf 'raw xpfd artifact\n' >"$root/xpfd"
+	printf 'raw cli artifact\n' >"$root/cli"
+	printf 'raw helper artifact\n' >"$root/xpf-userspace-dp"
+	xpfd_sha=$(sha256sum "$root/xpfd" | awk '{print $1}')
+	helper_sha=$(sha256sum "$root/xpf-userspace-dp" | awk '{print $1}')
+	before=$(deploy_build_git_sha "$root")
+	mkdir -p "$root/test/results/ledger.d"
+	printf '{"run_id":"previous-row"}\n' >"$root/test/results/ledger.d/previous.json"
+	after=$(deploy_build_git_sha "$root")
+	manifest="$fixture/raw-manifest.json"
+	if [[ "$before" != "$after" ]]; then
+		bad "manifest git identity: an existing ledger row made the deploy look dirty"
+	elif ! XPF_DEPLOY_MANIFEST="$manifest" deploy_write_manifest "$root"; then
+		bad "raw deploy manifest: writer refused a verified xpfd artifact"
+	elif ! got_sha=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "$after") ||
+		[[ "$got_sha" != "$xpfd_sha" ]]; then
+		bad "raw deploy manifest: recorded xpfd sha $got_sha, expected $xpfd_sha"
+	elif ! got_helper=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpf-userspace-dp "$root" "$after") ||
+		[[ "$got_helper" != "$helper_sha" ]]; then
+		bad "raw deploy manifest: recorded helper sha $got_helper, expected $helper_sha"
+	elif ! python3 - "$manifest" "$after" "$xpfd_sha" "$helper_sha" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc["schema"] == 1 and doc["mode"] == "raw"
+assert doc["build_git_sha"] == sys.argv[2]
+assert doc["binaries"]["xpfd"] == sys.argv[3]
+assert doc["binaries"]["xpf-userspace-dp"] == sys.argv[4]
+assert doc["deb"] is None
+PY
+	then
+		bad "raw deploy manifest: metadata does not describe the shipped raw binaries"
+	else
+		ok "raw deploy manifest: atomic record carries shipped xpfd/helper shas and ignores ledger dirtiness"
+	fi
+	if got_sha=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root" "different-checkout"); then
+		bad "deploy manifest reader: accepted a manifest from a different checkout"
+	else
+		rc=$?
+		if ((rc == 3)); then
+			ok "deploy manifest reader: rejects a manifest from a different checkout"
+		else
+			bad "deploy manifest reader: stale checkout returned rc=$rc, expected 3"
+		fi
+	fi
+	if XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_invalidate "$root" &&
+		[[ ! -e "$manifest" ]]; then
+		ok "deploy manifest invalidation: removes the prior record before deployment"
+	else
+		bad "deploy manifest invalidation: prior record remains usable"
+	fi
+	rm -rf "$fixture"
+}
+
+test_manifest_deb_hashes_package_payload() {
+	local fixture root pkg deb manifest packaged_sha local_sha got
+	if ! command -v dpkg-deb >/dev/null 2>&1; then
+		echo "  (skipped deploy manifest .deb extraction: dpkg-deb unavailable)"
+		return
+	fi
+	fixture=$(mktemp -d)
+	root="$fixture/root"
+	pkg="$fixture/pkg"
+	deb="$fixture/xpf-fixture.deb"
+	manifest="$fixture/deb-manifest.json"
+	mkdir -p "$root" "$pkg/DEBIAN" "$pkg/usr/local/share/xpf/staged"
+	chmod 0755 "$pkg/DEBIAN"
+	git -C "$root" init -q
+	git -C "$root" config user.email t@t
+	git -C "$root" config user.name t
+	printf 'tracked build source\n' >"$root/source"
+	git -C "$root" add source && git -C "$root" commit -qm init
+	printf 'local rebuild, not the package\n' >"$root/xpfd"
+	printf 'packaged xpfd artifact\n' >"$pkg/usr/local/share/xpf/staged/xpfd"
+	printf 'packaged cli artifact\n' >"$pkg/usr/local/share/xpf/staged/cli"
+	printf 'packaged helper artifact\n' >"$pkg/usr/local/share/xpf/staged/xpf-userspace-dp"
+	cat >"$pkg/DEBIAN/control" <<'CONTROL'
+Package: xpf-fixture
+Version: 1.0
+Architecture: all
+Maintainer: test <test@example.com>
+Description: deploy manifest fixture
+CONTROL
+	if ! dpkg-deb --build "$pkg" "$deb" >/dev/null 2>&1; then
+		bad "deb deploy manifest: could not build package fixture"
+		rm -rf "$fixture"
+		return
+	fi
+	packaged_sha=$(sha256sum "$pkg/usr/local/share/xpf/staged/xpfd" | awk '{print $1}')
+	local_sha=$(sha256sum "$root/xpfd" | awk '{print $1}')
+	got=$(deploy_manifest_sha_from_deb "$deb" xpfd || true)
+	if [[ "$got" != "$packaged_sha" ]]; then
+		bad "deb deploy manifest: extractor got $got, expected package payload $packaged_sha"
+	elif [[ "$got" == "$local_sha" ]]; then
+		bad "deb deploy manifest: package extractor incorrectly used local rebuild bytes"
+	elif ! XPF_DEPLOY_MANIFEST="$manifest" deploy_write_manifest "$root" "$deb"; then
+		bad "deb deploy manifest: writer refused package payload"
+	elif ! got=$(XPF_DEPLOY_MANIFEST="$manifest" deploy_manifest_sha xpfd "$root") || [[ "$got" != "$packaged_sha" ]]; then
+		bad "deb deploy manifest: recorded $got, expected package payload $packaged_sha"
+	elif ! python3 - "$manifest" "$(basename "$deb")" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc["mode"] == "deb" and doc["deb"] == sys.argv[2]
+PY
+	then
+		bad "deb deploy manifest: mode or package basename missing"
+	else
+		ok "deb deploy manifest: attests payload bytes rather than a fresh local rebuild"
+	fi
+	rm -rf "$fixture"
+}
+
+test_manifest_write_wired_after_cluster_deploy() {
+	local code invalidate first_deploy raw_call deb_call rebaseline
+	code=$(awk '/^cmd_deploy\(\)/,/^}/' "$SCRIPT_DIR/cluster-setup.sh")
+	invalidate=$(grep -n 'deploy_manifest_invalidate "$PROJECT_ROOT"' <<<"$code" | cut -d: -f1)
+	first_deploy=$(grep -nE '^[[:space:]]*([01]|all)\)[[:space:]]*deploy_' <<<"$code" |
+		head -1 | cut -d: -f1)
+	raw_call=$(grep -n 'deploy_write_manifest "$PROJECT_ROOT" "" "$deploy_git_sha"' <<<"$code" | cut -d: -f1)
+	deb_call=$(grep -n 'deploy_write_manifest "$PROJECT_ROOT" "$attestation_deb" "$deploy_git_sha"' <<<"$code" | cut -d: -f1)
+	rebaseline=$(grep -n '^[[:space:]]*xpf_cluster_rebaseline_build$' <<<"$code" | cut -d: -f1)
+	if [[ -z "$invalidate" || -z "$first_deploy" || -z "$raw_call" ||
+		-z "$deb_call" || -z "$rebaseline" ]] ||
+		((invalidate >= first_deploy || first_deploy >= raw_call ||
+			raw_call >= rebaseline || deb_call >= rebaseline)); then
+		bad "cluster deploy wiring: invalidate before push and record both raw/.deb artifacts before re-baselining"
+	else
+		ok "cluster deploy wiring: invalidates before deploy and records raw/.deb artifact before re-baselining"
+	fi
+}
+
 # ── Run ───────────────────────────────────────────────────────────────
 test_rolling_secondary_node0_primary
 test_rolling_secondary_node0_secondary
@@ -1508,6 +1648,9 @@ test_verify_pushed_sha_mismatch_hardfails
 test_verify_pushed_sha_absent_hardfails
 test_deb_repush_uses_distinct_remote_slots
 test_deb_repush_wiring
+test_manifest_raw_records_verified_binary_hashes
+test_manifest_deb_hashes_package_payload
+test_manifest_write_wired_after_cluster_deploy
 test_reconcile_stale_pin_removes_managed
 test_reconcile_stale_pin_no_pin_noop
 test_reconcile_stale_pin_foreign_override_hardfails
