@@ -360,13 +360,15 @@ wire_matrix_verdict() {
 		printf 'WIRE_GATE wire_zone_matrix FAIL reason=-- %s\n' "$metrics"
 		return 1
 	fi
-	if ((short > 0 || blind > 0)); then
-		printf 'WIRE_GATE wire_zone_matrix VOID reason=%s %s\n' "$reason" "$metrics"
-		return 2
-	fi
+	# A positive checksum observation is corruption evidence even when a cell
+	# is thin or blind (#11580): it must fail before sampling VOIDs.
 	if ((10#$ck > 0)); then
 		printf 'WIRE_GATE wire_zone_matrix FAIL reason=-- %s\n' "$metrics"
 		return 1
+	fi
+	if ((short > 0 || blind > 0)); then
+		printf 'WIRE_GATE wire_zone_matrix VOID reason=%s %s\n' "$reason" "$metrics"
+		return 2
 	fi
 	printf 'WIRE_GATE wire_zone_matrix PASS reason=-- %s\n' "$metrics"
 	return 0

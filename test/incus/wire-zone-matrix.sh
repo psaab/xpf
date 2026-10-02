@@ -96,6 +96,14 @@ if [[ "$MODE" == selftest ]]; then
     check "permit control below observed floor is VOID" VOID 2 0 12 "${BAD[@]}"
     BAD=("${MATRIX[@]}"); BAD[55]=9999
     check "permit 64-byte under-sample is VOID" VOID 2 0 12 "${BAD[@]}"
+    BAD=("${MATRIX[@]}"); BAD[1]=999
+    check "checksum corruption fails before under-sampled VOID" FAIL 1 1 12 "${BAD[@]}"
+    out=$(wire_matrix_verdict 1 1 deny:trust-'>'untrust 1000 0 1000 0 1000 1000 1000 1000); rc=$?
+    if [[ "$rc" == 2 && "$out" == *"WIRE_GATE wire_zone_matrix VOID reason=harness-void"* ]]; then
+        echo "  PASS  malformed matrix remains harness VOID despite checksum corruption"; pass=$((pass + 1))
+    else
+        echo "  FAIL  malformed matrix remains harness VOID despite checksum corruption (got '$out' rc=$rc)"; fail=$((fail + 1))
+    fi
     BAD=("${MATRIX[@]}"); BAD[0]=deny:trust-'>'trust
     check "wrong pair identity is VOID" VOID 2 0 12 "${BAD[@]}"
     check "one-cell shortcut is VOID" VOID 2 0 1 deny:trust-'>'untrust 1000 0 1000 0 1000 1000 1000 1000
