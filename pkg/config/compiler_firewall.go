@@ -1940,10 +1940,11 @@ func failClosedUnknownFilterAction(term *FirewallFilterTerm) {
 	}
 }
 
-// filterHasConflictingTerminalActions reports whether the term contains more
+// FilterHasConflictingTerminalActions reports whether a term contains more
 // than one distinct explicit terminal. The slice deliberately retains
-// duplicates, so identical repeated actions remain valid.
-func filterHasConflictingTerminalActions(actions []string) bool {
+// duplicates, so identical repeated actions remain valid. Shared by the
+// strict gate and both dataplane renderers' tolerant-path refusal markers.
+func FilterHasConflictingTerminalActions(actions []string) bool {
 	if len(actions) < 2 {
 		return false
 	}
@@ -1970,7 +1971,11 @@ func failClosedFilterTerminalConflicts(cfg *Config) {
 				continue
 			}
 			for _, term := range filter.Terms {
-				if term != nil && filterHasConflictingTerminalActions(term.TerminalActions) {
+				if term != nil && FilterHasConflictingTerminalActions(term.TerminalActions) {
+					// Keep discard as the conservative compiled action for any
+					// consumer that cannot refuse a snapshot, but userspace and
+					// lo0 mirrors also carry the conflict as FromUnrepresentable
+					// and refuse this generation whole.
 					term.Action = "discard"
 				}
 			}

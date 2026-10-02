@@ -218,14 +218,15 @@ func unrepresentableFromLeaves(term *config.FirewallFilterTerm) []string {
 	return leaves
 }
 
-// nftRefuseUnrepresentableFrom is the #9875 refusal rule, CONSTANT by
-// design: no term-controlled text is interpolated into it. UnknownFrom
-// holds raw node names and the lexer permits embedded quotes, so a
-// refusal that quoted the leaf names would make rejection isolation
-// depend on diagnostic contents — a crafted name could break out of the
-// comment. The nft-invalid bareword rejects the atomic load and the prior
-// generation is retained however hostile the input; the offending leaves
-// are reported via slog at the emit site instead.
+// nftRefuseUnrepresentableFrom is the #9875/#11896 refusal rule, CONSTANT by
+// design: no term-controlled text is interpolated into it. UnknownFrom holds
+// raw node names and the lexer permits embedded quotes, so a refusal that
+// quoted leaf names would make rejection isolation depend on diagnostic
+// contents — a crafted name could break out of the comment. Conflicting
+// terminal actions also use this whole-plan refusal rather than installing
+// their conservative discard as a drop. The nft-invalid bareword rejects the
+// atomic load and prior generation is retained however hostile the input;
+// offending leaves/actions are reported via slog at the emit site instead.
 const nftRefuseUnrepresentableFrom = `comment "unrepresentable from" __xpf_refuse_unrepresentable_from__`
 
 func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixLists map[string]*config.PrefixList) []string {
@@ -247,6 +248,16 @@ func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixList
 	if leaves := unrepresentableFromLeaves(term); len(leaves) > 0 {
 		slog.Warn("lo0 kernel nftables mirror: refusing load over unrepresentable from leaves",
 			"term", term.Name, "leaves", strings.Join(leaves, ", "))
+		return []string{nftRefuseUnrepresentableFrom}
+	}
+	// #11896: a conflicting terminal action is not made safe by retaining
+	// the lenient compiler's conservative Action="discard". Installing that
+	// value would create a fresh drop, so refuse the whole nft transaction just
+	// like the userspace snapshot marker does. This preflight also precedes
+	// family/address elimination so the plan cannot install a partial filter.
+	if config.FilterHasConflictingTerminalActions(term.TerminalActions) {
+		slog.Warn("lo0 kernel nftables mirror: refusing load over conflicting terminal actions",
+			"term", term.Name)
 		return []string{nftRefuseUnrepresentableFrom}
 	}
 

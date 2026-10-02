@@ -13671,14 +13671,26 @@ path (`CompileConfig` — hard-reject), downgraded to a `cfg.Warnings` entry on 
 tolerant load / peer-sync paths (`CompileConfigLenient` /
 `CompileConfigForNodeLenient`) so an already-persisted or peer-synced config
 carrying a contradictory term still BOOTS (#1960 fail-closed-on-load doctrine).
-The tolerant compiler changes each conflicting term's `Action` to `discard`,
-so the last-wins action cannot install an accidental allow. The gate runs
-immediately after `validateFilterRoutingInstanceConflictStrict`.
-Regression coverage: `pkg/config/firewall_terminal_conflict_4375_test.go`
-(accept/reject, accept/discard, reject/discard conflicts + inet6 — fail-on-revert
-guards; `then count X log accept`, a single terminal, and duplicate-same-terminal
-accepted — anti-over-reject; both lenient entry points remain bootable and
-conflicting last-accept terms compile as `discard`).
+The tolerant compiler retains `discard` only as the safe-direction internal
+action, so a last-wins accept cannot leak through. The snapshot builder also
+sets the existing `FromUnrepresentable` marker for conflicting
+`TerminalActions`: following #11063a's lenient-poison pattern (`LenientContentDropped`
+→ unsupported sentinel → whole-snapshot refusal), the Rust integrity preflight
+rejects the candidate and keeps the previous good filter state. The lo0 mirror
+maps the same conflict to that marker; netlink refuses the whole plan and the
+text oracle emits its constant nft-invalid refusal rule, retaining the prior
+ruleset rather than installing the internal discard as a new drop. Peer-sync
+stays bootable and retryable: a rejected candidate does not replace last-good
+state or wedge later valid sync. No new wire key/version is required; v20's
+existing `FromUnrepresentable` contract already causes whole-snapshot refusal.
+Coverage: `pkg/config/firewall_terminal_conflict_4375_test.go` (strict
+accept/reject, accept/discard, reject/discard conflicts + inet6 — fail-on-revert;
+`then count X log accept`, a single terminal, and duplicate-same-terminal
+accepted — anti-over-reject) plus
+`pkg/dataplane/userspace/filters_terminal_conflict_11896_test.go` (lenient load
+and peer-sync marker, surviving match, warning, action, and non-conflict
+controls) and `pkg/daemon/lo0_terminal_conflict_11896_test.go` (text/netlink
+refusal parity and lenient reachability).
 
 ### #3445 — lo0 input-filter `then` modifiers: nft-mirror support policy (commit warning)
 

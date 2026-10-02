@@ -201,20 +201,20 @@ func buildFilterTermSnapshots(filterName string, filter *config.FirewallFilter, 
 		if len(term.UnknownAddresses) > 0 {
 			snap.AddressUnrepresentable = true
 		}
-		// #9875/#11334: a `from` predicate the dataplane does not enforce —
-		// either an entire unrecognized leaf (term.UnknownFrom, #3307) or the
-		// recognized-but-unsupported literal-address `except` construct
-		// (#11334) — or a value-bearing leaf written with NO operand
-		// (term.ValuelessFrom, #8480). The strict commit gates
-		// (validateFilterFromMatchStrict,
-		// validateFirewallFilterValuelessFromStrict) reject both classes; on
-		// the lenient / peer-sync path they reach here. The pre-#9875 builder
-		// emitted only the surviving match set — byte-identical to a term
-		// authored without the constraint — so an accept term over-permitted
-		// and a discard/reject term over-dropped with no signal past the boot
-		// warning. Mark the term so the Rust filter compiler fails the snapshot
-		// CLOSED rather than enforcing the widened match.
-		if len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0 {
+		// #9875/#11334/#11896: refuse the whole snapshot when a `from`
+		// predicate is unenforced — either an unrecognized leaf
+		// (term.UnknownFrom, #3307), the recognized-but-unsupported
+		// literal-address `except` construct (#11334), or a value-bearing leaf
+		// written with NO operand (term.ValuelessFrom, #8480) — OR the term has
+		// conflicting terminal actions (#11896; see TerminalActions). The
+		// strict commit gates reject each shape; on lenient load / peer-sync the
+		// marker makes the Rust filter compiler reject this candidate snapshot,
+		// so reconcile retains the previous good state. Action-agnostic whole-
+		// snapshot refusal is required here: changing a conflicting terminal to
+		// discard would install a new drop, while poisoning a discard/reject term
+		// to match-nothing would let its traffic fall through to implicit accept.
+		if len(term.UnknownFrom) > 0 || len(term.ValuelessFrom) > 0 ||
+			config.FilterHasConflictingTerminalActions(term.TerminalActions) {
 			snap.FromUnrepresentable = true
 		}
 		// #3406: a single direction carrying BOTH a positive port list and a

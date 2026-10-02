@@ -344,24 +344,18 @@ pub(crate) enum SnapshotIntegrityError {
         filter: String,
         term: String,
     },
-    /// #9875: a firewall-filter term carried the `from_unrepresentable` wire
-    /// marker — the term's `from` block carried a match leaf the dataplane
-    /// does NOT enforce (recorded on term.UnknownFrom, #3307) or a
-    /// value-bearing leaf written with NO operand (recorded on
-    /// term.ValuelessFrom, #8480). The pre-fix Go builder emitted only the
-    /// surviving match set — byte-identical to a term authored without the
-    /// leaf — so an accept term over-permitted and a discard/reject term
-    /// over-dropped with no signal past the boot warning. The Go commit gates
-    /// (`validateFilterFromMatchStrict`, #3307;
-    /// `validateFirewallFilterValuelessFromStrict`, #8480) are the primary
-    /// defense — a committed config never sets the marker — so this is the
-    /// helper-boundary backstop for a lenient / peer-synced / hand-built /
-    /// version-drifted snapshot, consistent with the #2505/#3367/#3406
-    /// fail-closed family. Rejecting the whole snapshot (the reconcile
-    /// preflight keeps the previous good filter state) is action-agnostic:
-    /// poisoning a discard/reject term to match-nothing would let its traffic
-    /// fall through to the implicit accept (fail-OPEN). `family` (inet /
-    /// inet6) is carried because filter names can be reused across families.
+    /// #9875/#11334/#11896: a firewall-filter term carried the
+    /// `from_unrepresentable` wire marker — an unenforced `from` constraint
+    /// (term.UnknownFrom, #3307/#11334, or term.ValuelessFrom, #8480) OR
+    /// conflicting terminal actions (#11896). The latter can otherwise turn a
+    /// last-wins conflict into a fresh discard drop after #11893's conservative
+    /// fallback. Strict commit gates are the primary defense; this is the
+    /// helper-boundary backstop for lenient / peer-synced / hand-built /
+    /// version-drifted snapshots. Rejecting the whole candidate snapshot keeps
+    /// prior-good filter state and is action-agnostic; term poisoning to match-
+    /// nothing could let discard/reject traffic fall through to implicit accept.
+    /// `family` (inet / inet6) is carried because filter names can be reused
+    /// across families.
     UnrepresentableFilterFrom {
         family: String,
         filter: String,
@@ -1043,7 +1037,7 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 term,
             } => write!(
                 f,
-                "firewall family {:?} filter {:?} term {:?} has a from match leaf the dataplane does not enforce — refusing to fail wide by dropping it (which would let an accept term over-permit and a discard/reject term over-drop)",
+                "firewall family {:?} filter {:?} term {:?} is marked unrepresentable (unenforced from constraint or conflicting terminal actions) — refusing the candidate snapshot",
                 family, filter, term
             ),
             Self::UnrepresentableFilterFlexMatch {
