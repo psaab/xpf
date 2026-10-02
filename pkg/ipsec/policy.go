@@ -723,14 +723,25 @@ func effectiveTrafficSelectors(connName string, vpn *config.IPsecVPN) []childSel
 		if ts.RemoteIP != "" {
 			remoteTS = ts.RemoteIP
 		}
-		// The explicit-selector branch also reaches the identity fallback for a
-		// side it leaves empty. Keep only selector-shaped values so a tolerant
-		// load cannot pass an FQDN/DN to charon as local_ts/remote_ts.
+		// Keep only selector-shaped values so a tolerant load cannot pass an
+		// FQDN/DN to charon as local_ts/remote_ts.
 		if (localTS != "" && !config.IsTrafficSelectorShape(localTS)) ||
 			(remoteTS != "" && !config.IsTrafficSelectorShape(remoteTS)) {
 			slog.Warn("omitting IPsec traffic-selector with an unrenderable local/remote selector",
 				"vpn", connName, "traffic_selector", name)
 			continue
+		}
+		// The explicit-selector branch reaches the same route-based empty-side
+		// case as the identity fallback above. Leaving either key out lets
+		// strongSwan install its dynamic endpoint /32 policy, which does not
+		// match transit packets routed through the XFRM interface.
+		if xfrmiIfID(vpn.BindInterface) > 0 {
+			if localTS == "" {
+				localTS = config.IPsecRouteBasedDefaultTrafficSelector
+			}
+			if remoteTS == "" {
+				remoteTS = config.IPsecRouteBasedDefaultTrafficSelector
+			}
 		}
 
 		children = append(children, childSelector{

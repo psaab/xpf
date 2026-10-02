@@ -168,6 +168,17 @@ func renderedIPsecSelectorPairs11380(vpn *IPsecVPN) []ipsecSelectorPair11380 {
 			// effectiveTrafficSelectors omits this malformed child.
 			continue
 		}
+		// Keep the shared-bind model aligned with effectiveTrafficSelectors:
+		// route-based explicit children default each omitted side to the
+		// same dual-stack wildcard that the renderer emits.
+		if _, ifID := XFRMIfNameAndID(vpn.BindInterface); ifID > 0 {
+			if local == "" {
+				local = IPsecRouteBasedDefaultTrafficSelector
+			}
+			if remote == "" {
+				remote = IPsecRouteBasedDefaultTrafficSelector
+			}
+		}
 		pairs = append(pairs, ipsecSelectorPair11380{
 			local:  parseIPsecTSAddressSet11380(local),
 			remote: parseIPsecTSAddressSet11380(remote),

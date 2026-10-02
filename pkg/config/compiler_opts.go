@@ -420,6 +420,11 @@ type compileOpts struct {
 	// load / peer-sync paths. Such a warning preserves boot compatibility but
 	// does not make overlapping SAs safely distinguishable.
 	lenientIPsecBindTSOverlap bool
+	// lenientIPsecRouteTrafficSelectors (#11422) downgrades the route-vs-rendered
+	// traffic-selector check from a hard commit error to a warning on tolerant
+	// load / peer-sync paths. Existing configurations still boot while exposing
+	// routes that XFRM selector policies will blackhole.
+	lenientIPsecRouteTrafficSelectors bool
 
 	// lenientIPsecProposalLifetime (#9008) downgrades the IKE/IPsec proposal
 	// `lifetime-seconds` value gate (validateIPsecProposalLifetimesStrict)
@@ -3044,6 +3049,7 @@ func lenientCompileOpts() compileOpts {
 		lenientIPsecEndpoints:                  true,
 		lenientIPsecSANameCollision:            true,
 		lenientIPsecBindTSOverlap:              true,
+		lenientIPsecRouteTrafficSelectors:      true,
 		lenientIPsecProposalLifetime:           true,
 		lenientIPsecDHGroup:                    true,
 		lenientIPsecTrafficSelectors:           true,
