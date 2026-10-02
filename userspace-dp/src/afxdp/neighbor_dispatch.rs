@@ -854,6 +854,7 @@ pub(super) fn retry_pending_neigh(
             source_frame,
             pkt.meta.into(),
             pkt.flow_key.as_ref(),
+            now_ns,
         ) {
             record_mirror_clone_result(&binding.live, result, source_frame.len());
         }

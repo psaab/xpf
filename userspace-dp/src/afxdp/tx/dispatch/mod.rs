@@ -977,6 +977,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             source_frame,
             request.meta,
             request.flow_key.as_ref(),
+            now_ns,
         ) {
             record_mirror_clone_result(&ingress_binding.live, result, source_frame.len());
         }

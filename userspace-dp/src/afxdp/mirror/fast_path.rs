@@ -14,6 +14,7 @@ pub(in crate::afxdp) fn enqueue_mirror_clone(
     frame: &[u8],
     meta: ForwardPacketMeta,
     flow_key: Option<&SessionKey>,
+    now_ns: u64,
 ) -> MirrorCloneResult {
     let mirror_tx_ifindex = resolve_tx_binding_ifindex(forwarding, config.output_ifindex);
     let target_binding_index = mirror_target_binding_index(
@@ -29,6 +30,7 @@ pub(in crate::afxdp) fn enqueue_mirror_clone(
     else {
         return enqueue_mirror_clone_to_live(
             mirror_targets,
+            forwarding,
             config,
             mirror_tx_ifindex,
             ingress_queue_id,
@@ -36,10 +38,20 @@ pub(in crate::afxdp) fn enqueue_mirror_clone(
             meta,
             flow_key,
             cos_queue_id,
+            now_ns,
         );
     };
 
-    enqueue_mirror_clone_to_binding(target_binding, config, frame, meta, flow_key, cos_queue_id)
+    enqueue_mirror_clone_to_binding(
+        target_binding,
+        forwarding,
+        config,
+        frame,
+        meta,
+        flow_key,
+        cos_queue_id,
+        now_ns,
+    )
 }
 
 pub(in crate::afxdp) fn enqueue_sampled_mirror_clone(
@@ -56,6 +68,7 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone(
     frame: &[u8],
     meta: ForwardPacketMeta,
     flow_key: Option<&SessionKey>,
+    now_ns: u64,
 ) -> Option<MirrorCloneResult> {
     let config = resolve_mirror_config(forwarding, ingress_ifindex, ingress_vlan_id)?;
     let mirror_tx_ifindex = resolve_tx_binding_ifindex(forwarding, config.output_ifindex);
@@ -82,11 +95,13 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone(
         };
         return Some(enqueue_mirror_clone_to_binding(
             target_binding,
+            forwarding,
             config,
             frame,
             meta,
             flow_key,
             cos_queue_id,
+            now_ns,
         ));
     } else {
         // #5167: run the worker-local sampler FIRST, mirroring the same-worker
@@ -113,23 +128,37 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone(
         };
         return Some(enqueue_admitted_mirror_clone_to_live(
             admission,
+            forwarding,
             config,
             frame.to_vec(),
             meta,
             flow_key,
             cos_queue_id,
+            now_ns,
         ));
     }
 }
 
 fn enqueue_mirror_clone_to_binding(
     target_binding: &mut BindingWorker,
+    forwarding: &ForwardingState,
     config: MirrorRuntimeConfig,
     frame: &[u8],
     meta: ForwardPacketMeta,
     flow_key: Option<&SessionKey>,
     cos_queue_id: Option<u8>,
+    now_ns: u64,
 ) -> MirrorCloneResult {
+    if mirror_output_filter_drops(
+        forwarding,
+        config.output_ifindex,
+        frame,
+        meta,
+        flow_key,
+        now_ns,
+    ) {
+        return MirrorCloneResult::OutputFiltered;
+    }
     if frame.len() > tx_frame_capacity() {
         return MirrorCloneResult::NoFrame;
     }
@@ -184,6 +213,7 @@ fn enqueue_mirror_clone_to_binding(
 #[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
     mirror_targets: &MirrorTargetMap,
+    forwarding: &ForwardingState,
     config: MirrorRuntimeConfig,
     mirror_tx_ifindex: i32,
     ingress_queue_id: u32,
@@ -191,7 +221,18 @@ pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
     meta: ForwardPacketMeta,
     flow_key: Option<&SessionKey>,
     cos_queue_id: Option<u8>,
+    now_ns: u64,
 ) -> MirrorCloneResult {
+    if mirror_output_filter_drops(
+        forwarding,
+        config.output_ifindex,
+        frame,
+        meta,
+        flow_key,
+        now_ns,
+    ) {
+        return MirrorCloneResult::OutputFiltered;
+    }
     let admission = match admit_mirror_clone_to_live(
         mirror_targets,
         mirror_tx_ifindex,
@@ -203,22 +244,36 @@ pub(in crate::afxdp) fn enqueue_mirror_clone_to_live(
     };
     enqueue_admitted_mirror_clone_to_live(
         admission,
+        forwarding,
         config,
         frame.to_vec(),
         meta,
         flow_key,
         cos_queue_id,
+        now_ns,
     )
 }
 
 pub(in crate::afxdp) fn enqueue_admitted_mirror_clone_to_live(
     admission: PendingTxAdmission,
+    forwarding: &ForwardingState,
     config: MirrorRuntimeConfig,
     frame: Vec<u8>,
     meta: ForwardPacketMeta,
     flow_key: Option<&SessionKey>,
     cos_queue_id: Option<u8>,
+    now_ns: u64,
 ) -> MirrorCloneResult {
+    if mirror_output_filter_drops(
+        forwarding,
+        config.output_ifindex,
+        &frame,
+        meta,
+        flow_key,
+        now_ns,
+    ) {
+        return MirrorCloneResult::OutputFiltered;
+    }
     if frame.len() > tx_frame_capacity() {
         return MirrorCloneResult::NoFrame;
     }
@@ -253,6 +308,7 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone_to_live(
     frame: &[u8],
     meta: ForwardPacketMeta,
     flow_key: Option<&SessionKey>,
+    now_ns: u64,
 ) -> Option<MirrorCloneResult> {
     let config = resolve_mirror_config(forwarding, ingress_ifindex, ingress_vlan_id)?;
     // #6114: sample BEFORE reserving the contended cross-worker clone queue
@@ -277,11 +333,13 @@ pub(in crate::afxdp) fn enqueue_sampled_mirror_clone_to_live(
     let cos_queue_id = mirror_cos_queue_id(forwarding, config.output_ifindex, meta, flow_key);
     let result = enqueue_admitted_mirror_clone_to_live(
         admission,
+        forwarding,
         config,
         frame.to_vec(),
         meta,
         flow_key,
         cos_queue_id,
+        now_ns,
     );
     record_mirror_clone_result(live, result, frame.len());
     Some(result)

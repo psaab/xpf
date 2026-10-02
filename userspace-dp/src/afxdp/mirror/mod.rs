@@ -17,8 +17,8 @@ pub(in crate::afxdp) use fast_path::{
     enqueue_mirror_clone, enqueue_mirror_clone_to_live, enqueue_sampled_mirror_clone_to_live,
 };
 pub(in crate::afxdp) use resolver::{
-    admit_mirror_clone_to_live, mirror_cos_queue_id, record_mirror_clone_result,
-    sample_then_admit_mirror_clone, MirrorSampleAdmission,
+    admit_mirror_clone_to_live, mirror_cos_queue_id, mirror_output_filter_drops,
+    record_mirror_clone_result, sample_then_admit_mirror_clone, MirrorSampleAdmission,
 };
 // Sibling-only helper (mirror-module-internal). A plain (private) `use` keeps
 // it out of the wider `crate::afxdp` surface while still letting the fast
@@ -33,6 +33,7 @@ const MIRROR_PENDING_LIMIT: usize = TX_BATCH_SIZE;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) enum MirrorCloneResult {
     Enqueued,
+    OutputFiltered,
     NoBinding,
     NoFrame,
     TxFrameReserve,

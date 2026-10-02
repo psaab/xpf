@@ -111,6 +111,86 @@ pub(in crate::afxdp) fn mirror_cos_queue_id(
     resolve_cached_cos_tx_queue_id(forwarding, output_ifindex, meta.into(), flow_key)
 }
 
+
+/// Evaluate the output filter on the analyzer unit for the exact mirror-copy
+/// tuple. Unlike the original forwarded frame, this clone has no rewrite
+/// decision: its filter tuple is the frame being copied, so use the available
+/// flow key (the original packet tuple) or the flowless L3 tuple and derive all
+/// per-packet match inputs from the clone bytes.
+#[inline]
+pub(in crate::afxdp) fn mirror_output_filter_drops(
+    forwarding: &ForwardingState,
+    output_ifindex: i32,
+    frame: &[u8],
+    meta: ForwardPacketMeta,
+    flow_key: Option<&SessionKey>,
+    now_ns: u64,
+) -> bool {
+    let Some((is_v6, src_ip, dst_ip, protocol, src_port, dst_port)) = flow_key
+        .map(|key| {
+            (
+                key.addr_family as i32 == libc::AF_INET6,
+                key.src_ip,
+                key.dst_ip,
+                key.protocol,
+                key.src_port,
+                key.dst_port,
+            )
+        })
+        .or_else(|| match meta.addr_family as i32 {
+            libc::AF_INET => meta.l3_addrs_unfiltered().map(|(src, dst)| {
+                (
+                    false,
+                    src,
+                    dst,
+                    meta.protocol,
+                    meta.flow_src_port,
+                    meta.flow_dst_port,
+                )
+            }),
+            libc::AF_INET6 => meta.l3_addrs_unfiltered().map(|(src, dst)| {
+                (
+                    true,
+                    src,
+                    dst,
+                    meta.protocol,
+                    meta.flow_src_port,
+                    meta.flow_dst_port,
+                )
+            }),
+            _ => None,
+        })
+    else {
+        return false;
+    };
+    let Some(output_filter) = crate::filter::interface_output_filter_needing_tx_eval(
+        &forwarding.filter_state,
+        output_ifindex,
+        is_v6,
+    ) else {
+        return false;
+    };
+
+    let mut extra = crate::afxdp::frame::term_match_extra_from_frame(frame, meta);
+    if flow_key.is_none() {
+        // A flowless mirror has no authoritative transport tuple. Do not let
+        // zero-substituted ports match a port-constrained output term.
+        extra.ports_unknown = true;
+    }
+    let result = crate::filter::evaluate_filter_ref_tx_selection_runtime_counted(
+        output_filter,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        meta.dscp,
+        extra,
+        meta.pkt_len as u64,
+        now_ns,
+    );
+    result.policer_drop || result.action != crate::filter::FilterAction::Accept
+}
 #[inline]
 pub(in crate::afxdp) fn record_mirror_clone_result(
     live: &BindingLiveState,
@@ -142,6 +222,10 @@ pub(in crate::afxdp) fn record_mirror_clone_result(
             live.mirror_drops_queue_full.fetch_add(1, Ordering::Relaxed);
             live.mirror_drops_queue_full_cross_worker
                 .fetch_add(1, Ordering::Relaxed);
+        }
+        MirrorCloneResult::OutputFiltered => {
+            // Policy-denied analyzer copies are not congestion or resource
+            // failures; keep the lossy-pressure counters semantically precise.
         }
     }
 }
