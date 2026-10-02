@@ -14,6 +14,8 @@ xpf (0.0.0) unstable; urgency=medium
     manifests before cut-over; fail closed on missing or mismatched checkout
     provenance, and version the executable field change under ledger schema 2
     (#11765).
+  * Treat inline `inactive:` before a block as deactivating the entire subtree,
+    so inactive configuration cannot remain active at compile time (#11776).
   * Use NAT64's translated destination when deriving the per-peer WireGuard
     underlay MTU for packet-too-big and fragmentation budgets (#11722).
 

@@ -97,6 +97,69 @@ func TestInactive_ParserBlockMarkerLifted(t *testing.T) {
 	}
 }
 
+func TestInactive_InlineMarkerBeforeBlockDeactivatesSubtree(t *testing.T) {
+	tree := mustParse(t, `parent {
+    child name inactive: {
+        hidden value;
+    }
+    child other {
+        visible value;
+    }
+}`)
+	parent := tree.FindChild("parent")
+	if parent == nil {
+		t.Fatal("parent block not found")
+	}
+	var inactive, active *Node
+	for _, n := range parent.Children {
+		switch n.KeyPath() {
+		case "child name":
+			inactive = n
+		case "child other":
+			active = n
+		}
+	}
+	if inactive == nil || active == nil {
+		t.Fatalf("parsed block children = %v, want inactive and active child blocks", parent.Children)
+	}
+	if !reflect.DeepEqual(inactive.Keys, []string{"child", "name"}) {
+		t.Fatalf("inactive marker changed block identity: keys=%v", inactive.Keys)
+	}
+	if !inactive.Inactive {
+		t.Fatal("inline inactive: before '{' left its block active")
+	}
+	if inactive.FindChild("hidden") == nil {
+		t.Fatal("inactive block's children were not parsed for display")
+	}
+
+	stripped := tree.WithoutInactive()
+	strippedParent := stripped.FindChild("parent")
+	for _, n := range strippedParent.Children {
+		if n.KeyPath() == "child name" {
+			t.Fatal("WithoutInactive retained the inline-inactive block")
+		}
+	}
+	if got := strippedParent.FindChild("child"); got == nil || got.KeyPath() != "child other" {
+		t.Fatalf("WithoutInactive active child = %v, want child other", got)
+	}
+	if !inactive.Inactive {
+		t.Fatal("WithoutInactive mutated the original inactive block")
+	}
+
+	formatted := tree.Format()
+	reparsed := mustParse(t, formatted)
+	reparsedParent := reparsed.FindChild("parent")
+	roundTripInactive := false
+	for _, n := range reparsedParent.Children {
+		if n.KeyPath() == "child name" {
+			roundTripInactive = n.Inactive
+		}
+	}
+	if !roundTripInactive {
+		t.Fatalf("Format round-trip lost inactive block state:\n%s", formatted)
+	}
+}
+
 func TestInactive_LoneMarkerIsParseError(t *testing.T) {
 	for _, src := range []string{
 		"system {\n inactive: ;\n}",
