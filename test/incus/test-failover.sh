@@ -44,6 +44,8 @@ source "${SCRIPT_DIR}/iperf-throughput-lib.sh"
 source "${SCRIPT_DIR}/failover-client-lib.sh"
 # shellcheck source=test/incus/failover-clock-lib.sh
 source "${SCRIPT_DIR}/failover-clock-lib.sh"
+# shellcheck source=test/incus/failover-journal-lib.sh
+source "${SCRIPT_DIR}/failover-journal-lib.sh"
 
 IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 # #6934: the IPv6 transit target. cluster-env.sh has exported IPERF_TARGET6 all
@@ -256,11 +258,26 @@ rg_ownership_diagnosis() {
 				p && /^Redundancy group: / { p = 0 }
 				p { print "      " $0 }' || true
 	done
-	printf '    [%s] election / transfer / promotion-hold journal tail:\n' "$FW0"
-	incus exec "$FW0" -- journalctl -u xpfd -n 5000 --no-pager 2>/dev/null |
-		grep -E "readiness gate|transfer out|transfer-out|manual failover|promotion hold|primary transition|degraded" |
-		tail -10 | sed 's/^/      /' || true
+	printf '    [%s] election / transfer / promotion-hold journal since test start:\n' "$FW0"
+	if [[ -n "$FAILOVER_JOURNAL_CURSOR" ]]; then
+		failover_journal_after_cursor "$FW0" "$FAILOVER_JOURNAL_CURSOR" 2>/dev/null |
+			grep -E "readiness gate|transfer out|transfer-out|manual failover|promotion hold|primary transition|degraded" |
+			tail -10 | sed 's/^/      /' || true
+	else
+		printf '      unavailable: no test-start journal cursor; unscoped history omitted\n'
+	fi
 }
+
+# #11873: pin the current fw0 journal position before preflight/test activity.
+# Read from this cursor only if failback diagnosis is needed, so deploy-time
+# sync-hold/timeout transients cannot be blamed on this run. Cursors, unlike
+# --since timestamps, remain sound across the crash reboot's clock skew.
+FAILOVER_JOURNAL_CURSOR=""
+if FAILOVER_JOURNAL_CURSOR=$(failover_capture_journal_cursor "$FW0"); then
+	info "Captured fw0 journal cursor for the failover test window"
+else
+	info "Could not capture fw0 journal cursor; out-of-window journal will be omitted"
+fi
 
 # ── Preflight ────────────────────────────────────────────────────────
 
