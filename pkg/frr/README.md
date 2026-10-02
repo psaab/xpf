@@ -1326,17 +1326,15 @@ step. Both are required — neither sees the other's case:
   IPv6 neighbor. IS-IS lists both families, so nothing is filtered under
   `router isis`, but the plain `redistribute <proto>` form is not IS-IS
   grammar at all (#9666).
-- **A policied family-less IPv6 BGP neighbor activates under ipv6 unicast,
-  not ipv4 (#2941).** The "default-activate a family-less policied neighbor
-  under ipv4 unicast" fall-through (#2473/#2490) is correct ONLY for an IPv4
-  peer address. An IPv6 peer (address contains `:`) with a global/per-neighbor
-  policy but no explicit `family inet6` also satisfies `!FamilyInet6`, so the
-  pre-#2941 code routed it into the ipv4 set and emitted `neighbor <v6>
-  activate` under `address-family ipv4 unicast` — FRR cannot resolve an IPv4
-  next-hop over an IPv6 session (no RFC 8950 extended-next-hop), so the
-  session drops prefixes. The ipv4 fall-through is now gated on the peer
-  address family, and a family-less-but-policied IPv6 peer is routed into the
-  ipv6 set so it activates (with its `route-map out`/`in`) under ipv6 unicast.
+- **Family-less IPv6 BGP neighbors are IPv6-only (#2941, #11564).** The
+  default-activate fall-through for global/per-neighbor policies correctly
+  places an IPv6 peer in `address-family ipv6 unicast` (#2941), and the same
+  address-family classification applies when the peer has no policy (#11564).
+  FRR's default IPv4-unicast activation would otherwise claim a family-less
+  IPv6 peer even though no explicit IPv4 activation was rendered. Such peers
+  are therefore explicitly disabled under IPv4 unicast and activated under
+  IPv6 unicast. The fail-on-revert render and FRR config-load cell is
+  `TestFamilylessIPv6NeighborWithoutPolicyIsV6Only11564`.
 
 - **BGP neighbor control attributes are address-family scoped (#11460).**
   `route-reflector-client`, `allowas-in`, and `remove-private-AS` belong in

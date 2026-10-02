@@ -590,16 +590,14 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			}
 		}
 
-		// Address-family blocks for neighbors with family declarations.
-		// When a global default export exists it must reach EVERY peer,
-		// including neighbors with no explicit `family` (FRR default-
-		// activates those under ipv4 unicast), so route them into the
-		// ipv4 set in that case.
+		// Address-family blocks are rendered for declared families and peers
+		// whose address determines their family. A global default export still
+		// reaches family-less IPv4 peers, which FRR default-activates under
+		// ipv4 unicast unless the renderer places them there explicitly.
 		var inet4Neighbors, inet4DisabledNeighbors, inet6Neighbors []*config.BGPNeighbor
-		// FRR's default auto-activates IPv4 peers. A neighbor pinned to only
-		// inet6 must be explicitly disabled in ipv4 unicast; otherwise it has
-		// an IPv4 session with no IPv4 route-map despite its intended inet6
-		// filters.
+		// FRR auto-activates neighbors under IPv4 unicast by default. A peer
+		// intended only for IPv6 (explicit inet6 or a family-less IPv6 address)
+		// must be explicitly disabled here, or FRR claims the IPv4 AF too.
 		// Classify only renderable (declared) neighbors (#5518). A remote-as-0
 		// neighbor excluded from the declaration loop above must NOT be
 		// activated here — vtysh rejects `neighbor <ip> activate` for an
@@ -624,7 +622,13 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			// the neighbor never participates in ipv6 unicast. Gate the
 			// ipv4 fall-through on the peer address family, and route an
 			// IPv6-address family-less-but-policied neighbor into the ipv6
-			// set instead so it activates under ipv6 unicast (#2941).
+			// set instead so it activates under ipv6 unicast (#2941). The
+			// same address-family classification applies with NO policy at
+			// all (#11564): a family-less IPv6 peer with neither a global
+			// default nor its own export/import otherwise lands in NEITHER
+			// set. Because FRR default-activates IPv4 peers, keep a family-
+			// less IPv6 peer explicitly disabled in IPv4 and activate it
+			// only under IPv6.
 			isIPv6Peer := strings.Contains(n.Address, ":")
 			policyDefault := len(globalExportChain) > 0 || len(globalImportChain) > 0 || hasOwnPolicy
 			hasAFNeighborAttributes := n.RouteReflectorClient || n.AllowASIn > 0 || n.RemovePrivateAS
@@ -635,10 +639,10 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			if (n.FamilyInet || ((policyDefault || hasAFNeighborAttributes) && !n.FamilyInet6)) && !isIPv6Peer {
 				inet4Neighbors = append(inet4Neighbors, n)
 			}
-			if !isIPv6Peer && n.FamilyInet6 && !n.FamilyInet {
+			if !n.FamilyInet && (n.FamilyInet6 || isIPv6Peer) {
 				inet4DisabledNeighbors = append(inet4DisabledNeighbors, n)
 			}
-			if n.FamilyInet6 || (policyDefault && !n.FamilyInet && isIPv6Peer) {
+			if n.FamilyInet6 || (!n.FamilyInet && isIPv6Peer) {
 				inet6Neighbors = append(inet6Neighbors, n)
 			}
 		}
