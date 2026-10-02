@@ -937,21 +937,30 @@ fn build_fallible_forwarding_state(
     // against any ingress routing-instance, and `from zone`/`from interface`
     // rules leave it empty); attributing it to `inet.0` only would over-isolate
     // an external IP whose zone lives in a non-default VRF, so it goes into the
-    // table-agnostic `local_nat_any_table_v*` set instead. The scoped IPs are
-    // collected into an owned buffer first so the immutable borrow of the NAT
-    // tables ends before the mutable `state.local_*` inserts.
-    let mut nat_local_targets: Vec<(std::net::IpAddr, String)> = Vec::new();
-    for (ip, instance) in state.static_nat.external_ips_scoped() {
-        nat_local_targets.push((ip, instance.to_string()));
+    // table-agnostic `local_nat_any_table_v*` set instead. The scoped IPs and
+    // translation targets are collected into an owned buffer first so the
+    // immutable borrow of the NAT tables ends before mutable state inserts.
+    let mut nat_local_targets: Vec<(std::net::IpAddr, String, std::net::IpAddr)> = Vec::new();
+    for (ip, instance, translated_ip) in state.static_nat.external_ips_scoped() {
+        nat_local_targets.push((ip, instance.to_string(), translated_ip));
     }
-    for (ip, instance) in state.dnat_table.destination_ips_scoped() {
-        nat_local_targets.push((ip, instance.to_string()));
+    for (ip, instance, translated_ip) in state.dnat_table.destination_ips_scoped() {
+        nat_local_targets.push((ip, instance.to_string(), translated_ip));
     }
-    for (ip, instance) in nat_local_targets {
+    for (ip, instance, translated_ip) in nat_local_targets {
         let wildcard = instance.is_empty();
         let (table_v4, table_v6) = interfaces::connected_route_tables(&instance);
+        let to_self = match translated_ip {
+            std::net::IpAddr::V4(v4) => state.configured_iface_v4.contains(&v4),
+            std::net::IpAddr::V6(v6) => state.configured_iface_v6.contains(&v6),
+        };
         match ip {
             std::net::IpAddr::V4(v4) => {
+                state
+                    .local_nat_to_self_v4
+                    .entry(v4)
+                    .and_modify(|all_to_self| *all_to_self &= to_self)
+                    .or_insert(to_self);
                 state.local_v4.insert(v4);
                 if wildcard {
                     state.local_nat_any_table_v4.insert(v4);
@@ -964,6 +973,11 @@ fn build_fallible_forwarding_state(
                 }
             }
             std::net::IpAddr::V6(v6) => {
+                state
+                    .local_nat_to_self_v6
+                    .entry(v6)
+                    .and_modify(|all_to_self| *all_to_self &= to_self)
+                    .or_insert(to_self);
                 state.local_v6.insert(v6);
                 if wildcard {
                     state.local_nat_any_table_v6.insert(v6);

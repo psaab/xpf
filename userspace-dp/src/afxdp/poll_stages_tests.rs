@@ -3835,12 +3835,26 @@ fn run_stage11(
     frame: &[u8],
     meta: UserspaceDpMeta,
 ) -> IpsecPassthroughOutcome {
+    run_stage11_on_ifindex(forwarding, flow, frame, meta, 24)
+}
+
+fn run_stage11_on_ifindex(
+    forwarding: &ForwardingState,
+    flow: &SessionFlow,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    ingress_ifindex: u32,
+) -> IpsecPassthroughOutcome {
     let ident = BindingIdentity {
         slot: 0,
         queue_id: 0,
         worker_id: 0,
-        interface: Arc::<str>::from("reth1.0"),
-        ifindex: 24,
+        interface: Arc::<str>::from(if ingress_ifindex == 25 {
+            "ge-0-0-2"
+        } else {
+            "reth1.0"
+        }),
+        ifindex: ingress_ifindex as i32,
     };
     let live = BindingLiveState::new();
     let binding_lookup = WorkerBindingLookup::default();
@@ -3904,9 +3918,9 @@ fn run_stage11(
 /// (proto 50) and IPv6 ESP packet must each return `NotClaimed` so it falls
 /// through to normal transit forwarding + policy.
 ///
-/// Fail-on-revert: drop the `owns_configured_ip(flow.dst_ip)` predicate in
-/// `stage_ipsec_passthrough_check` and every assertion below flips to
-/// `Passthrough` — the transit-policy bypass returns.
+/// Fail-on-revert: dropping the `owns_ipsec_local_destination(flow.dst_ip)`
+/// predicate in `stage_ipsec_passthrough_check` makes every assertion below
+/// return `Passthrough` — the transit-policy bypass returns.
 #[test]
 fn stage_ipsec_passthrough_rejects_remote_transit_dst_5620() {
     let forwarding = build_forwarding_state(&super::super::test_fixtures::nat_snapshot());
@@ -3951,23 +3965,25 @@ fn stage_ipsec_passthrough_rejects_remote_transit_dst_5620() {
     }
 }
 
-/// #5620 over-reject guard + DNAT-to-self preservation: Stage 11 MUST still
-/// claim legitimate LOCAL-destined IPsec after the local-destination predicate
-/// is added. This pins the CRITICAL preservation cases the fix must not break
+/// #5620 over-reject guard + NAT-to-self preservation: Stage 11 MUST still
+/// claim legitimate LOCAL-destined IPsec after the nat-to-self distinction is
+/// added. This pins the CRITICAL preservation cases the fix must not break
 /// (breaking VPN termination is worse than the transit bypass):
 ///
-///   - ESP to the lan interface IP (`10.0.61.1`, in `local_v*`)          → Passthrough
+///   - ESP to the lan interface IP (`10.0.61.1`, a configured interface IP) → Passthrough
 ///   - ESP to the WAN/SNAT interface IP (`172.16.80.8`) — EXCLUDED from
-///     `local_v*` by the interface-mode-SNAT `nat_translated_local_exclusions`
-///     but present in `configured_iface_v*`, so `owns_configured_ip` still
-///     recognises it (the most common VPN termination address)             → Passthrough
-///   - ESP to a DNAT-to-self external (`203.0.113.9`, appended to `local_v*`
-///     by the DNAT rule's destination address) — proves the RAW pre-NAT dst
-///     check does NOT wrongly reject NAT-to-self                            → Passthrough
+///     `local_v*` by interface-mode-SNAT `nat_translated_local_exclusions` but
+///     present in `configured_iface_v*` → Passthrough
+///   - ESP to a DNAT-to-self external (`203.0.113.9`) — its target is a
+///     configured interface address, so its nat-to-self metadata keeps the
+///     raw pre-NAT destination local → Passthrough
+///   - ESP to a static-NAT transit VIP (`203.0.113.11`) — proxy-owned in
+///     `local_v*`, but translated to another host → `NotClaimed`
+///   - ESP to static-NAT-to-self (`203.0.113.12`) — translated to a configured
+///     interface address → Passthrough
 ///
 /// A never-configured remote address (`203.0.113.200`) is the control: it is
-/// in neither set → `NotClaimed`, proving the DNAT append (not a blanket
-/// accept) is what claims `203.0.113.9`.
+/// in neither `configured_iface_v*` nor the nat-to-self map → `NotClaimed`.
 ///
 /// Fail-on-revert: this test guards AGAINST over-reject; it stays GREEN with
 /// the fix and would break if the predicate rejected a firewall-owned dst.
@@ -3975,8 +3991,8 @@ fn stage_ipsec_passthrough_rejects_remote_transit_dst_5620() {
 fn stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620() {
     let mut snap = super::super::test_fixtures::nat_snapshot();
     // DNAT a public external (UDP/500 IKE) to the firewall itself — NAT-to-self.
-    // The rule's `destination_address` is appended to `local_v4`, so the raw
-    // pre-NAT dst check in Stage 11 recognises it as firewall-local.
+    // Its nat-to-self metadata, not proxy-ARP ownership alone, keeps the raw
+    // pre-NAT destination eligible for local XFRM delivery.
     snap.destination_nat_rules = vec![crate::DestinationNATRuleSnapshot {
         name: "ike-dnat-to-self".to_string(),
         from_zone: "wan".to_string(),
@@ -3987,16 +4003,37 @@ fn stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620() {
         pool_port: 500,
         ..Default::default()
     }];
+    snap.static_nat_rules = vec![
+        crate::StaticNATRuleSnapshot {
+            name: "static-nat-to-transit".to_string(),
+            external_ip: "203.0.113.11".to_string(),
+            internal_ip: "10.0.61.102".to_string(),
+            ..Default::default()
+        },
+        crate::StaticNATRuleSnapshot {
+            name: "static-nat-to-self".to_string(),
+            external_ip: "203.0.113.12".to_string(),
+            internal_ip: "10.0.61.1".to_string(),
+            ..Default::default()
+        },
+    ];
     let forwarding = build_forwarding_state(&snap);
-    // Precondition: the DNAT external is a firewall-local address; the control
-    // remote address is not.
+    // Proxy-ARP ownership is not enough: only the external whose translation
+    // target is a configured firewall interface address is local to XFRM.
     assert!(
-        forwarding
-            .owns_configured_ip(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)))
+        forwarding.owns_configured_ip(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 11))),
+        "the transit static-NAT VIP remains proxy-owned"
     );
     assert!(
-        !forwarding
-            .owns_configured_ip(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 200)))
+        !forwarding.owns_ipsec_local_destination(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 11))),
+        "the transit static-NAT target is not firewall-owned"
+    );
+    assert!(
+        forwarding.owns_ipsec_local_destination(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 12))),
+        "static NAT to a firewall interface remains local to XFRM"
+    );
+    assert!(
+        !forwarding.owns_ipsec_local_destination(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 200)))
     );
 
     let frame = tcp_v4_frame(
@@ -4010,7 +4047,7 @@ fn stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620() {
     );
 
     // (dst, expect_passthrough, label)
-    let cases: [(IpAddr, bool, &str); 4] = [
+    let cases: [(IpAddr, bool, &str); 6] = [
         (
             IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
             true,
@@ -4024,7 +4061,17 @@ fn stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620() {
         (
             IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
             true,
-            "DNAT-to-self external (local_v4 via DNAT append)",
+            "DNAT-to-self external (nat-to-self metadata)",
+        ),
+        (
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 11)),
+            false,
+            "static-NAT transit VIP (proxy-owned, not firewall-owned)",
+        ),
+        (
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 12)),
+            true,
+            "static-NAT-to-self VIP",
         ),
         (
             IpAddr::V4(Ipv4Addr::new(203, 0, 113, 200)),
@@ -4053,6 +4100,139 @@ fn stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620() {
             );
         }
     }
+}
+
+/// #11439: a transit DNAT rule may use the WAN interface address itself as its
+/// external VIP. UDP/500 to the matching VIP must continue to transit, but an
+/// unrelated ESP packet to the same interface address remains local.
+#[test]
+fn stage_ipsec_transit_dnat_on_interface_ip_overrides_only_matching_flow_11439() {
+    let mut snapshot = super::super::tests_support::inbound_dnat_snapshot(
+        super::super::tests_support::wan_to_lan_permit("any", "allow-dnat-ike"),
+    );
+    let rule = &mut snapshot.destination_nat_rules[0];
+    rule.destination_port = 500;
+    rule.protocol = "udp".to_string();
+    rule.pool_port = 500;
+    let forwarding = build_forwarding_state(&snapshot);
+    let vip = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+    let ike_frame = ike_v4_frame(false, true);
+    let ike_flow = ipsec_flow_to(libc::AF_INET, PROTO_UDP, 500, vip);
+    assert!(
+        matches!(
+            run_stage11_on_ifindex(
+                &forwarding,
+                &ike_flow,
+                &ike_frame,
+                ike_v4_meta(&ike_frame, 12),
+                12,
+            ),
+            IpsecPassthroughOutcome::NotClaimed
+        ),
+        "a matching transit DNAT to the WAN interface IP must override its \
+         ordinary interface-local membership"
+    );
+
+    let esp_flow = ipsec_flow_to(libc::AF_INET, PROTO_ESP, 0, vip);
+    let mut esp_meta = ike_v4_meta(&ike_frame, 12);
+    esp_meta.protocol = PROTO_ESP;
+    assert!(
+        matches!(
+            run_stage11_on_ifindex(&forwarding, &esp_flow, &ike_frame, esp_meta, 12),
+            IpsecPassthroughOutcome::Passthrough
+        ),
+        "a different IPsec protocol with no matching DNAT rule remains local"
+    );
+}
+
+/// #11439 RED-on-revert: Stage 11 must not claim a transit DNAT IKE VIP merely
+/// because proxy-ARP owns the external address. It must return `NotClaimed`
+/// before the local IKE host-inbound gate, allowing the packet to reach DNAT,
+/// forwarding, and transit policy.
+#[test]
+fn stage_ipsec_passthrough_does_not_claim_transit_dnat_ike_11439() {
+    let mut snapshot = ike_gate_snapshot();
+    snapshot.destination_nat_rules = vec![crate::DestinationNATRuleSnapshot {
+        name: "transit-ike".to_string(),
+        from_zone: "permit-zone".to_string(),
+        destination_address: "203.0.113.9".to_string(),
+        destination_port: 500,
+        protocol: "udp".to_string(),
+        pool_address: "10.0.99.1".to_string(),
+        pool_port: 500,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let frame = ike_v4_frame(false, true);
+    let flow = ipsec_flow_to(
+        libc::AF_INET,
+        PROTO_UDP,
+        500,
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
+    );
+    let outcome = run_stage11_on_ifindex(
+        &forwarding,
+        &flow,
+        &frame,
+        ike_v4_meta(&frame, 25),
+        25,
+    );
+    assert!(
+        matches!(outcome, IpsecPassthroughOutcome::NotClaimed),
+        "transit DNAT IKE must continue through normal NAT/forwarding and \
+         transit policy, not be reinjected into local XFRM"
+    );
+}
+
+/// #11439 preservation: a DNAT-to-self IKE VIP remains local to XFRM, but the
+/// existing host-inbound `ike` gate still denies it on an unpermitted zone.
+#[test]
+fn stage_ipsec_passthrough_dnat_to_self_ike_keeps_host_inbound_gate_11439() {
+    let mut snapshot = ike_gate_snapshot();
+    snapshot.destination_nat_rules = vec![crate::DestinationNATRuleSnapshot {
+        name: "local-ike".to_string(),
+        from_zone: "permit-zone".to_string(),
+        destination_address: "203.0.113.10".to_string(),
+        destination_port: 500,
+        protocol: "udp".to_string(),
+        pool_address: "10.0.61.1".to_string(),
+        pool_port: 500,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let frame = ike_v4_frame(false, true);
+    let flow = ipsec_flow_to(
+        libc::AF_INET,
+        PROTO_UDP,
+        500,
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+    );
+    assert!(
+        matches!(
+            run_stage11_on_ifindex(
+                &forwarding,
+                &flow,
+                &frame,
+                ike_v4_meta(&frame, 25),
+                25,
+            ),
+            IpsecPassthroughOutcome::Passthrough
+        ),
+        "DNAT-to-self IKE on a zone permitting ike remains local"
+    );
+    assert!(
+        matches!(
+            run_stage11_on_ifindex(
+                &forwarding,
+                &flow,
+                &frame,
+                ike_v4_meta(&frame, 24),
+                24,
+            ),
+            IpsecPassthroughOutcome::Denied { .. }
+        ),
+        "DNAT-to-self IKE on a zone omitting ike remains denied by host-inbound"
+    );
 }
 
 /// #8298 REACHABILITY: a teardrop fragment declaring `IHL = 0` reaches the LIVE

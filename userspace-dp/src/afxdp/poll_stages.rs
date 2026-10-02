@@ -1364,21 +1364,18 @@ fn ike_host_inbound_deny_zone(
 /// still enforced on the PRIMARY path by the kernel nftables host-inbound chain
 /// (`pkg/daemon/daemon_nft.go`).
 ///
-/// #5620: the kernel-XFRM passthrough short-circuit is claimed ONLY when the
-/// packet's (post-GRE-decap, on-the-wire) destination is an address the
-/// firewall itself answers for (`forwarding.owns_configured_ip` — configured
-/// interface IPs incl. the SNAT/WAN IP and any VIP, plus the static-NAT/DNAT
-/// externals appended to `local_v*`). Stage 11 runs BEFORE NAT resolution, so
-/// `flow.dst_ip` is the RAW destination; because the NAT externals are already
-/// members of the local set, the raw-dst check still recognises the legitimate
-/// SECONDARY-path cases — DNAT/static-NAT-to-self IKE (the external is a
-/// firewall-owned address) and native-GRE-inner local IPsec (the decapped
-/// inner destination is a firewall interface address). A remote / transit ESP,
-/// AH or IKE destination is owned by nobody here → `NotClaimed`, so the packet
-/// is NOT reinjected to the local XFRM stack and instead continues to normal
-/// transit forwarding + zone-policy evaluation. Without this predicate any
-/// ESP/AH/IKE packet — including one transiting to a remote host — bypassed
-/// transit policy.
+/// #5620/#11439: claim the kernel-XFRM passthrough short-circuit ONLY when
+/// the raw destination resolves to the firewall itself. Stage 11 runs BEFORE
+/// NAT resolution, so `flow.dst_ip` is the on-the-wire destination. The
+/// `owns_ipsec_local_destination` predicate accepts configured interface IPs
+/// (including SNAT/WAN addresses) and NAT externals only when every configured
+/// translation for that external targets a configured interface address.
+/// `local_v*` still includes transit NAT externals for proxy-ARP/ND ownership,
+/// but those externals are not local XFRM destinations: they return
+/// `NotClaimed` and continue to DNAT, forwarding, policy, and session handling.
+/// GRE-inner-local traffic remains covered because decapsulation makes its raw
+/// destination the firewall interface address. The host-inbound gate below
+/// therefore applies only to genuinely local IKE, including DNAT-to-self.
 ///
 /// Non-IPsec packets fall through unchanged (`NotClaimed`).
 #[inline]
@@ -1399,27 +1396,20 @@ pub(super) fn stage_ipsec_passthrough_check(
     if !is_ipsec_traffic(meta.protocol, dst_port) {
         return IpsecPassthroughOutcome::NotClaimed;
     }
-    // #5620: claim the kernel-XFRM passthrough short-circuit ONLY for
-    // IPsec whose destination is a firewall-local address. Stage 11 runs
-    // BEFORE NAT resolution (only GRE decap precedes it), so `flow.dst_ip`
-    // is the RAW on-the-wire destination — but `owns_configured_ip` already
-    // includes the static-NAT/DNAT externals appended to `local_v*`, so this
-    // still claims DNAT/static-NAT-to-self IKE and native-GRE-inner local
-    // IPsec (whose decapped inner dst is a firewall interface address). A
-    // remote / transit ESP/AH/IKE destination is owned by nobody here →
-    // `NotClaimed`, so the packet is NOT reinjected to the local stack and
-    // instead continues to transit forwarding + zone-policy evaluation. This
-    // gate runs BEFORE the #4323 host-inbound admission block, which only
-    // makes sense for genuinely host-inbound (local-destined) IKE.
-    //
-    // Caveat: a DNAT external that maps to ANOTHER host (transit-DNAT IPsec,
-    // e.g. IKE VIP -> internal gateway) is ALSO in `local_v*` (proxy-ARP/ND
-    // ownership), so this raw-dst check still claims it as local passthrough
-    // rather than DNAT-forwarding it onward. That exotic case is UNCHANGED by
-    // #5620 — pre-#5620 Stage 11 claimed ALL IPsec, so it was already
-    // reinjected locally; #5620 only fixes the transit-to-REMOTE bypass and
-    // leaves the transit-DNAT-to-another-host behavior bit-identical.
-    if !worker_ctx.forwarding.owns_configured_ip(flow.dst_ip) {
+    // #5620/#11439: claim only packets whose raw destination is locally
+    // delivered after the NAT ownership distinction. `local_v*` also contains
+    // transit NAT externals for proxy-ARP/ND. A matching transit DNAT must also
+    // override configured-interface locality (for example UDP/500 to the WAN
+    // address), while unrelated IPsec traffic to that same address remains
+    // local. A NAT-to-self translation remains subject to the #4323 host gate.
+    if !worker_ctx.forwarding.owns_ipsec_local_destination(flow.dst_ip)
+        || ipsec_destination_matches_transit_dnat(
+            &worker_ctx.forwarding,
+            flow,
+            meta,
+            ingress_zone_override,
+        )
+    {
         return IpsecPassthroughOutcome::NotClaimed;
     }
     match crate::afxdp::forwarding::classify_ipsec_admission(
@@ -1467,6 +1457,58 @@ pub(super) fn stage_ipsec_passthrough_check(
         }
     }
     IpsecPassthroughOutcome::Passthrough
+}
+
+/// A DNAT rule can use a configured interface address as its external VIP. In
+/// that case the broad interface-local set cannot decide whether a particular
+/// IPsec packet is local: test the actual (protocol, source/destination port,
+/// ingress scope) match and let a transit translation override interface
+/// locality. This check is read-only; the normal NAT stage still owns the hit
+/// counter and translation.
+fn ipsec_destination_matches_transit_dnat(
+    forwarding: &crate::afxdp::ForwardingState,
+    flow: &SessionFlow,
+    meta: UserspaceDpMeta,
+    ingress_zone_override: Option<u16>,
+) -> bool {
+    let ingress_ifindex = meta.ingress_ifindex as i32;
+    let ingress_zone_id = ingress_zone_override
+        .or_else(|| forwarding.ifindex_to_zone_id.get(&ingress_ifindex).copied())
+        .unwrap_or(0);
+    let ingress_zone = forwarding
+        .zone_id_to_name
+        .get(&ingress_zone_id)
+        .map(String::as_str)
+        .unwrap_or("");
+    let ingress_ifname = forwarding
+        .ifindex_to_config_name
+        .get(&ingress_ifindex)
+        .map(String::as_str)
+        .unwrap_or("");
+    let ingress_routing_instance = forwarding
+        .ifindex_to_routing_instance
+        .get(&ingress_ifindex)
+        .map(String::as_str)
+        .unwrap_or("");
+
+    let Some((decision, _)) = forwarding.dnat_table.lookup_with_counter_scoped(
+        meta.protocol,
+        flow.src_ip,
+        flow.dst_ip,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        ingress_zone,
+        ingress_ifname,
+        ingress_routing_instance,
+        None,
+    ) else {
+        return false;
+    };
+    match decision.rewrite_dst {
+        Some(std::net::IpAddr::V4(target)) => !forwarding.configured_iface_v4.contains(&target),
+        Some(std::net::IpAddr::V6(target)) => !forwarding.configured_iface_v6.contains(&target),
+        None => false,
+    }
 }
 
 /// Reinject an IPsec packet only after the caller has completed every

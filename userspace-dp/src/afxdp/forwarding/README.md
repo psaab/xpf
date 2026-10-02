@@ -1157,35 +1157,41 @@ gap (a forged non-zero Responder SPI can no longer mint "established"
 the way kernel conntrack NEW/ESTABLISHED cannot be faked on the primary
 path).
 
-### #5620: the passthrough claim is scoped to a firewall-local destination
+### #5620/#11439: the passthrough claim requires a firewall-local destination
 
-Stage 11 claims the kernel-XFRM passthrough short-circuit ONLY when the
-packet's destination is an address the firewall itself answers for
-(`ForwardingState::owns_configured_ip(flow.dst_ip)` — the configured
-interface IPs incl. the SNAT/WAN IP and VIPs, PLUS the static-NAT/DNAT
-externals appended to `local_v*`). Before #5620 the stage claimed ANY
-ESP-in-UDP/IKE packet the shim steered to the helper regardless of
-destination, so a TRANSIT UDP/500 or UDP/4500 packet routed to a remote host
-was reinjected to the local XFRM stack and SKIPPED transit zone-policy
-enforcement (codex-review-181 M03; raw outer ESP was never affected because
-the shim shunts it to the kernel, and raw ESP/AH are flowless to Stage 11).
+Stage 11 claims the kernel-XFRM passthrough short-circuit only when the raw
+destination is a configured interface address or a NAT external whose
+translations all target configured interface addresses
+(`ForwardingState::owns_ipsec_local_destination`). Static-NAT/DNAT externals
+remain in `local_v*` for proxy-ARP/ND, but transit translations are not thereby
+made local XFRM destinations. Transit IKE returns `NotClaimed` before the
+host-inbound gate and continues to NAT, forwarding, zone policy, and session
+installation. This prevents the former transit bypass, where UDP/500 or
+UDP/4500 to a remote host was reinjected to the local XFRM stack.
 
-Stage 11 runs BEFORE NAT resolution (only native-GRE decap precedes it),
-so `flow.dst_ip` is the RAW on-the-wire destination. Gating on the raw
-dst is nonetheless correct for the DNAT/static-NAT-to-self cases: the NAT
-externals are already members of `local_v*` (appended in
-`forwarding_build`), so `owns_configured_ip` recognises a DNAT-to-self
-external without needing the post-NAT address. GRE-inner-local UDP-4500 is
-likewise covered — the decapped inner destination is a firewall interface
-address. GRE-inner raw ESP/AH remains flowless and `NotClaimed`. A
-remote/transit destination is owned by nobody here, so the packet returns
-`NotClaimed` and continues to normal transit forwarding + zone policy. The
-predicate runs BEFORE the #4323 host-inbound admission block, which only
-makes sense for genuinely host-inbound (local-destined) IKE. Regression-
-guarded by `stage_ipsec_passthrough_rejects_remote_transit_dst_5620`
-(remote dst → NotClaimed) and
-`stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620`
-(local / WAN-IP / DNAT-to-self dst → Passthrough).
+Stage 11 runs before NAT resolution (only native-GRE decapsulation precedes
+it), so `flow.dst_ip` is the raw on-the-wire destination. NAT-to-self remains
+eligible: its external address is recognized through translation-target
+metadata, then the existing #4323 host-inbound IKE gate still applies.
+GRE-inner-local UDP-4500 is likewise covered because decapsulation makes the
+inner destination a firewall interface address.
+
+A DNAT rule may use the WAN interface address itself as its external VIP. In
+that case Stage 11 probes the actual protocol/port and ingress-scope DNAT
+match: a matching transit DNAT overrides interface locality, while unrelated
+IPsec traffic (for example ESP, for which a UDP/500 rule does not match) to
+that same WAN address remains local. The probe is read-only; normal NAT owns
+the hit counter and translation. Raw outer ESP/AH are still shunted by XDP and
+remain outside the Stage-11 flow path.
+
+Regression coverage includes
+`stage_ipsec_passthrough_rejects_remote_transit_dst_5620`,
+`stage_ipsec_passthrough_claims_local_and_nat_to_self_dst_5620`,
+`stage_ipsec_passthrough_does_not_claim_transit_dnat_ike_11439`,
+`stage_ipsec_passthrough_dnat_to_self_ike_keeps_host_inbound_gate_11439`,
+`stage_ipsec_transit_dnat_on_interface_ip_overrides_only_matching_flow_11439`,
+and the live-poll
+`poll_descriptor_transit_dnat_ike_forwards_and_installs_session_11439`.
 
 **Zone resolution.** The gate resolves the LOGICAL ingress ifindex +
 from-zone exactly as the local-delivery resolver does
