@@ -64,12 +64,12 @@ wire_num() {
 #   1. numeric validity — malformed input cannot establish an observation;
 #   2. leak — any emerged probe frame is a positive FAIL, even below the
 #      offered floor or without a usable control;
-#   3. offered floors — required to interpret a no-leak result; a thin sample
-#      is VOID, but never erases an observed leak;
-#   4. capture-blind — no leak and no control proves only that capture saw
+#   3. checksum — an observed corrupt packet is a positive FAIL and cannot be
+#      hidden by a thin or capture-blind control sample;
+#   4. offered floors — required to interpret a no-leak/no-corruption result;
+#      a thin sample is VOID, but never erases observed evidence;
+#   5. capture-blind — no leak and no control proves only that capture saw
 #      nothing, never that the policy held;
-#   5. checksum — a rewrite with a broken checksum is FAIL (§2.4), not a pass
-#      with loss;
 #   6. PASS.
 wire_deny_verdict() {
 	local po="${1:-}" pl="${2:-}" co="${3:-}" cb="${4:-}" ck="${5:-}"
@@ -82,6 +82,10 @@ wire_deny_verdict() {
 		printf 'WIRE_GATE wire_policy_deny FAIL reason=-- %s\n' "$metrics"
 		return 1
 	fi
+	if ((10#$ck > 0)); then
+		printf 'WIRE_GATE wire_policy_deny FAIL reason=-- %s\n' "$metrics"
+		return 1
+	fi
 	if ((10#$po < WIRE_DROP_FLOOR)) || ((10#$co < WIRE_DROP_FLOOR)); then
 		printf 'WIRE_GATE wire_policy_deny VOID reason=under-sampled %s\n' "$metrics"
 		return 2
@@ -89,10 +93,6 @@ wire_deny_verdict() {
 	if ((10#$cb < WIRE_DROP_FLOOR)); then
 		printf 'WIRE_GATE wire_policy_deny VOID reason=capture-blind %s\n' "$metrics"
 		return 2
-	fi
-	if ((10#$ck > 0)); then
-		printf 'WIRE_GATE wire_policy_deny FAIL reason=-- %s\n' "$metrics"
-		return 1
 	fi
 	printf 'WIRE_GATE wire_policy_deny PASS reason=-- %s\n' "$metrics"
 	return 0
